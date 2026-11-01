@@ -245,9 +245,84 @@ describe('bounds and degradation', () => {
         { stack: 'slow', update: null, rollback: null, unavailableReason: 'summary_truncated' },
       ]);
       expect(summary.truncated).toBe(true);
+      // Each verdict names its own bound, so the log says which side the
+      // deadline stopped instead of leaving the row's code to explain both.
       expect(warned).toHaveBeenCalledWith(
-        'Readiness summary: deadline reached for stack slow:',
-        expect.stringContaining('Timeout: readiness summary for slow'),
+        'Readiness summary: update deadline reached for stack slow:',
+        expect.stringContaining('Timeout: readiness update for slow'),
+      );
+      expect(warned).toHaveBeenCalledWith(
+        'Readiness summary: rollback deadline reached for stack slow:',
+        expect.stringContaining('Timeout: readiness rollback for slow'),
+      );
+    });
+  });
+
+  it('keeps a completed rollback verdict when the update verdict reaches the deadline', async () => {
+    listStacks.mockResolvedValue(['slow']);
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+    computeUpdate.mockReturnValue(new Promise(() => {}));
+    computeRollback.mockResolvedValue(rollbackReport('slow', gatingReady()));
+
+    await withFakeTimers(async () => {
+      const pending = buildStackReadinessSummary(NODE);
+      await vi.advanceTimersByTimeAsync(0);
+      await vi.advanceTimersByTimeAsync(6_001);
+
+      const summary = await pending;
+
+      // The rollback side settled before the deadline. A timeout applied to
+      // both sides together would discard it with the update side, which is
+      // the evidence loss the separate bounds exist to prevent.
+      expect(summary.stacks[0].update).toBeNull();
+      expect(summary.stacks[0].rollback).toMatchObject({ overall: 'ready' });
+      expect(summary.stacks[0].unavailableReason).toBeNull();
+      expect(summary.truncated).toBe(false);
+    });
+  });
+
+  it('keeps a completed update verdict when the rollback verdict reaches the deadline', async () => {
+    listStacks.mockResolvedValue(['slow']);
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+    computeUpdate.mockResolvedValue(updateReport('slow', 'ready', [signal('preflight', 'ok', 'Compose Doctor passed')]));
+    computeRollback.mockReturnValue(new Promise(() => {}));
+
+    await withFakeTimers(async () => {
+      const pending = buildStackReadinessSummary(NODE);
+      await vi.advanceTimersByTimeAsync(0);
+      await vi.advanceTimersByTimeAsync(6_001);
+
+      const summary = await pending;
+
+      expect(summary.stacks[0].update).toMatchObject({ verdict: 'ready' });
+      expect(summary.stacks[0].rollback).toBeNull();
+      expect(summary.stacks[0].unavailableReason).toBeNull();
+      expect(summary.truncated).toBe(false);
+    });
+  });
+
+  it('keeps the deadline as the reason when one side times out and the other fails', async () => {
+    listStacks.mockResolvedValue(['slow']);
+    const warned = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const errored = vi.spyOn(console, 'error').mockImplementation(() => {});
+    computeUpdate.mockReturnValue(new Promise(() => {}));
+    computeRollback.mockRejectedValue(new Error('docker socket closed'));
+
+    await withFakeTimers(async () => {
+      const pending = buildStackReadinessSummary(NODE);
+      await vi.advanceTimersByTimeAsync(0);
+      await vi.advanceTimersByTimeAsync(6_001);
+
+      const summary = await pending;
+
+      // Neither verdict exists; the row still reports the deadline as the
+      // reason, because more time could have produced one of them.
+      expect(summary.stacks[0].unavailableReason).toBe('summary_truncated');
+      expect(summary.truncated).toBe(true);
+      expect(warned).toHaveBeenCalledTimes(1);
+      expect(errored).toHaveBeenCalledWith(
+        'Readiness summary: rollback verdict failed for stack slow:',
+        'docker socket closed',
       );
     });
   });

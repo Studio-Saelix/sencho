@@ -8,6 +8,7 @@ import {
   type DockerEndpointProvider,
 } from '../services/DockerEndpointProvider';
 import { getRuntimeContainerIdCandidates, matchesContainerId, workingDirMatchesStack } from './selfStackGuard';
+import { normalizeComposeVersion } from './composeVersionSkew';
 import { getErrorMessage } from '../utils/errors';
 import type { DockerEndpointRefusal } from './dockerEndpointError';
 
@@ -113,7 +114,7 @@ function isEngineDriven(mutation: EndpointMutation): boolean {
   return mutation.kind === 'stop' || mutation.kind === 'restart' || (mutation.kind === 'service' && mutation.engineOnly === true);
 }
 
-type ListedContainer = {
+export type ListedContainer = {
   Id?: string;
   Names?: string[];
   Labels?: Record<string, string>;
@@ -342,9 +343,13 @@ function refusalFor(
           + 'and this operation would stop or recreate it. Correct the label and recreate the service from the host (docker compose up -d) while Sencho is idle.',
       };
     case 'provider': {
-      const shared = provider?.project != null && provider.project === selfProject;
+      // Only the detected provider itself can be replaced by the in-app action;
+      // another container that merely carries the label needs a host recreate.
+      const protectedIsProvider = provider !== null
+        && (service === provider.service || bareName(service) === bareName(provider.containerName));
+      const shared = protectedIsProvider && provider?.project != null && provider.project === selfProject;
       const how = shared
-        ? 'It is in the same Compose project as Sencho: recreate it from the host (docker compose up -d) while Sencho is idle.'
+        ? 'It is in the same Compose project as Sencho: if this node offers Recreate Docker endpoint, use it to replace only that container while Sencho keeps running; otherwise recreate it from the host (docker compose up -d) while Sencho is idle.'
         : 'Recreate it from the host (docker compose up -d) while Sencho is idle.';
       return {
         reason: 'provider',
@@ -477,9 +482,11 @@ function stoppedContainerRefusal(
 
 /**
  * Every container on the node (running or stopped), and the ones that belong to
- * the stack, matched by project name or working directory.
+ * the stack, matched by project name or working directory. Exported so the
+ * Compose version notice and the Compose Doctor note judge the same containers
+ * the guard judges.
  */
-async function listNodeContainers(nodeId: number, stackName: string): Promise<{ all: ListedContainer[]; stack: ListedContainer[] }> {
+export async function listNodeContainers(nodeId: number, stackName: string): Promise<{ all: ListedContainer[]; stack: ListedContainer[] }> {
   const composeDir = NodeRegistry.getInstance().getComposeDir(nodeId);
   const all = await DockerController.getInstance(nodeId).getDocker().listContainers({ all: true }) as ListedContainer[];
   const stack = all.filter(container => {
@@ -613,11 +620,6 @@ async function ownRecreate(
   if (!running) return 'version';
   if (existing.some(container => normalizeComposeVersion(container.Labels?.['com.docker.compose.version']) !== running)) return 'version';
   return 'no';
-}
-
-/** The `v` prefix `docker compose version --short` may print is not part of the container label. */
-function normalizeComposeVersion(version: string | null | undefined): string {
-  return (version ?? '').trim().replace(/^v/, '');
 }
 
 /**

@@ -1,8 +1,11 @@
 import { useCallback, useEffect, useState } from 'react';
-import { latestWhatsNewEntryId } from '@/whats-new/entries';
+import { useBuildInfo } from '@/hooks/useBuildInfo';
+import { isNewerStableVersion, stableReleaseVersion } from '@/lib/releaseHighlights';
 
 const ENABLED_KEY = 'sencho.whatsNew.enabled';
-const LAST_SEEN_KEY = 'sencho.whatsNew.lastSeenId';
+const LAST_SEEN_KEY = 'sencho.whatsNew.lastSeenVersion';
+// Watermark of the retired hand-written feed; removed when the new one is stamped.
+const LEGACY_LAST_SEEN_KEY = 'sencho.whatsNew.lastSeenId';
 const CHANGE_EVENT = 'sencho:whats-new-changed';
 
 function readEnabled(): boolean {
@@ -14,7 +17,7 @@ function readEnabled(): boolean {
   }
 }
 
-function readLastSeenId(): string | null {
+function readLastSeenVersion(): string | null {
   try {
     return localStorage.getItem(LAST_SEEN_KEY);
   } catch {
@@ -35,36 +38,22 @@ function writeSetting(key: string, value: string) {
 export interface UseWhatsNewPreferenceResult {
   enabled: boolean;
   setEnabled: (next: boolean) => void;
+  /** The stable release this instance runs, or null for dev/preview builds, prerelease versions, and while build info loads. */
+  version: string | null;
   hasUnseen: boolean;
   markSeen: () => void;
 }
 
 export function useWhatsNewPreference(): UseWhatsNewPreferenceResult {
+  const { buildInfo } = useBuildInfo();
+  const version = stableReleaseVersion(buildInfo);
   const [enabled, setEnabledState] = useState(readEnabled);
-  // The watermark is stamped unconditionally the first time this hook ever
-  // runs, even when entries.json is currently empty (using '' as the seed).
-  // This is deliberate: if we only stamped when latestWhatsNewEntryId was
-  // non-null, an install that first loads while entries are empty would
-  // never get a watermark written, so `stored === null` would still be true
-  // once a later release adds its first real entry, indistinguishable from
-  // a genuinely fresh install, silently swallowing the very first "unseen"
-  // signal. Stamping '' up front means any later real id no longer equals
-  // the stored watermark, so hasUnseen correctly flips to true for existing
-  // installs while a truly fresh install (no key at all) still catches up
-  // silently. Strict Mode may invoke this initializer twice; the write is
-  // idempotent.
-  const [lastSeenId, setLastSeenIdState] = useState<string | null>(() => {
-    const stored = readLastSeenId();
-    if (stored !== null) return stored;
-    const seed = latestWhatsNewEntryId ?? '';
-    writeSetting(LAST_SEEN_KEY, seed);
-    return seed;
-  });
+  const [lastSeenVersion, setLastSeenVersionState] = useState<string | null>(readLastSeenVersion);
 
   useEffect(() => {
     const handler = () => {
       setEnabledState(readEnabled());
-      setLastSeenIdState(readLastSeenId());
+      setLastSeenVersionState(readLastSeenVersion());
     };
     window.addEventListener(CHANGE_EVENT, handler);
     window.addEventListener('storage', handler);
@@ -74,18 +63,37 @@ export function useWhatsNewPreference(): UseWhatsNewPreferenceResult {
     };
   }, []);
 
+  // A browser that has never recorded a version is a fresh install, or an
+  // existing one meeting this watermark for the first time. Stamp it silently
+  // with the running version so only a later upgrade lights the dot.
+  useEffect(() => {
+    if (version !== null && readLastSeenVersion() === null) {
+      writeSetting(LAST_SEEN_KEY, version);
+      try {
+        localStorage.removeItem(LEGACY_LAST_SEEN_KEY);
+      } catch {
+        // Nothing to clean up when storage is unavailable.
+      }
+    }
+  }, [version]);
+
   const setEnabled = useCallback((next: boolean) => {
     writeSetting(ENABLED_KEY, next ? '1' : '0');
     setEnabledState(next);
   }, []);
 
+  // The watermark only moves forward, so running an older release (a rollback)
+  // does not lower it and make the next upgrade look unseen twice.
   const markSeen = useCallback(() => {
-    if (latestWhatsNewEntryId === null) return;
-    writeSetting(LAST_SEEN_KEY, latestWhatsNewEntryId);
-    setLastSeenIdState(latestWhatsNewEntryId);
-  }, []);
+    if (version === null) return;
+    const stored = readLastSeenVersion();
+    if (stored !== null && !isNewerStableVersion(version, stored)) return;
+    writeSetting(LAST_SEEN_KEY, version);
+    setLastSeenVersionState(version);
+  }, [version]);
 
-  const hasUnseen = latestWhatsNewEntryId !== null && lastSeenId !== latestWhatsNewEntryId;
+  // Only an upgrade lights the dot; running an older release than the one last seen does not.
+  const hasUnseen = version !== null && lastSeenVersion !== null && isNewerStableVersion(version, lastSeenVersion);
 
-  return { enabled, setEnabled, hasUnseen, markSeen };
+  return { enabled, setEnabled, version, hasUnseen, markSeen };
 }

@@ -31,7 +31,7 @@ It covers one stack on the node you are signed in to. How generations are captur
     Your pipeline publishes build 42 under the same `stable` tag. Open `docs-site` and select **Update**. The readiness check lists what the update will do, and **Pending update** reads **Pending: a same-tag image refresh.** The check can show **Review required** for items such as a node disk warning; they are advisory, and **Update now** proceeds. Select **Update now**.
 
     <Frame caption="The update readiness check. Sencho captures the recovery generation when the update starts.">
-      <img src="/images/tutorials/restore-a-stack-from-its-rollback-point/update-readiness.png" alt="The Ready to update dialog for docs-site with a Review required banner and rows for Compose Doctor, Drift, Current containers, Healthcheck coverage, Pending update, Local build services, Rollback backup, Node disk, and Fleet snapshot, and Cancel and Update now buttons." />
+      <img src="/images/tutorials/restore-a-stack-from-its-rollback-point/update-readiness.png" alt="The Ready to update dialog for docs-site with a Review required banner and its signal rows above the Cancel and Update now buttons." />
     </Frame>
 
     Sencho recreates the container from the new image, and the stack header shows the health gate's observation window counting down.

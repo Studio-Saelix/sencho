@@ -285,14 +285,14 @@ The **Files** and **Edit compose** buttons sit to the right of the tab row.
 Each row maps one compose concept to the value it resolves to right now:
 
 - **Services**: Cyan pills, one per key under `services:`.
-- **Ports**: `{host} → {container}/{proto}` per service, host port highlighted.
+- **Ports**: `{host} → {container}/{proto}` per service, host port highlighted. When the host port comes from a variable such as `${WEB_PORT:-8080}`, the row shows the port Compose resolves from the stack's environment, with the variable name beside it. If the stack's Compose model cannot be rendered, the row shows the variable expression as written.
 - **Volumes**: `{host-path} → {container-path}` per mount.
 - **Restart**: The effective restart policy.
 - **Env file**: Filename plus a count of defined variables. If the compose file references a `${VAR}` that the env file does not define and has no `:-default`, the missing name is called out inline.
 - **Network**: Derived network name and driver (default `{stack}_default · bridge`).
 - **Source**: `git · {host}/{repo}#{branch}` when Git Source is configured, else `local`. The whole row is clickable and opens the Git Source dialog. A pulsing dot appears when upstream has moved ahead of the working copy.
 
-A footer under the rows links the first published port. When that service has a `sencho.service.url` label, the link opens that address. Otherwise it opens the generated host and port. A refresh that fails keeps the last address. When the list has never loaded, the footer uses the generated host and port.
+A footer under the rows links the first published port. When that service has a `sencho.service.url` label, the link opens that address. Otherwise it opens the generated host and port. A port that comes from a variable links once Compose resolves it. A refresh that fails keeps the last address. When the list has never loaded, the footer uses the generated host and port.
 
 If an image update is available, or the stack declares one or more services with a local `build:` section, an inline banner appears below the rows.
 
@@ -372,6 +372,18 @@ Select a stack and click **Start** (or **Restart** when it's already running) in
 For deploy progress, error surfacing, atomic backups, and rollback, see [Atomic Deployments](/features/atomic-deployments).
 
 If a deploy policy is configured, Sencho checks it before the deploy runs. When a policy is violated, a dialog lists the triggered rules and blocks the deploy. Admin users see a **Deploy anyway** button to override the block. See [Deploy Enforcement](/features/deploy-enforcement) for configuring policies.
+
+### Containers created by another Compose version
+
+Docker Compose decides whether a container is out of date by comparing the configuration and image it computes with the values recorded in the container when it was created. Those recorded values are not identical between Compose versions: a version can normalize a bind mount or record an image digest differently from the one that created the container. When that happens, the first deploy or update from this node **can recreate containers whose Compose file did not change**, and later deploys from the same node leave them running again.
+
+Sencho cannot make another Compose version's computation match its own, so it explains the one-time recreate instead:
+
+- **Compose Doctor** adds a note, *Created by another Docker Compose version*, naming the affected services and the versions involved. The note never affects All Clear.
+- The **update readiness** dialog shows a **Compose version** row in warning state, so the verdict becomes *ready with warnings* at most.
+- The **deploy output** carries a line naming the affected services before Compose starts recreating them.
+
+The lasting fix is to deploy a stack from one place. A stack that holds Sencho or the Docker socket proxy Sencho uses is a special case: Sencho refuses a deploy or update that would recreate those containers, and the same refusal names the host-side recreate that clears the version label. See [Updating the proxy](/operations/self-hosting#updating-the-proxy).
 
 ## Controlling a running stack
 

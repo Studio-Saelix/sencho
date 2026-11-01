@@ -70,7 +70,7 @@ function ctx(model: EffectiveModel, over: Partial<PreflightContext> = {}): Prefl
     sourceReadable: true, nodePorts: [], existingNetworkNames: new Set(), existingVolumeNames: new Set(),
     existingContainers: [], nodeStateAvailable: true, bindChecks: [],
     stackIntent: null, serviceIntents: {}, accessUrlPorts: new Set(), hasAccessUrls: false,
-    exposureAvailable: true, isSelfStack: false, meshManaged: false, healthchecks: {},
+    exposureAvailable: true, isSelfStack: false, meshManaged: false, healthchecks: {}, composeVersionSkew: null,
     ...over,
   };
 }

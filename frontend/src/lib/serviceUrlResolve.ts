@@ -1,5 +1,7 @@
 import { buildServiceUrl, type ServiceUrlOptions } from './serviceUrl';
 import { serviceUrlFromLabelValue } from './serviceUrlLabel';
+import { interpolatedVariableNames } from './anatomy';
+import type { PortRow } from './anatomyMarkdown';
 
 export interface AnatomyPortRef {
   /** Published host port, `''` when the saved file omits one, or `'0'` for explicit automatic allocation. */
@@ -7,6 +9,17 @@ export interface AnatomyPortRef {
   proto: string;
   /** Container port. An auto host plus this target is a dynamically published port. */
   container?: string;
+}
+
+/**
+ * A port row from the raw compose text, with the host port resolved from the
+ * rendered Compose model when a variable sets it.
+ */
+export interface DisplayPortRow extends PortRow {
+  /** Variable names in the compose host segment, in first-appearance order. Absent for a literal host. */
+  hostVariables?: string[];
+  /** Set to true only when `host` is the value Compose rendered; absent when `host` is the expression as written. */
+  hostResolved?: boolean;
 }
 
 export type ServiceUrlStatus = 'loading' | 'ready' | 'unavailable' | 'unsupported';
@@ -127,6 +140,51 @@ export function tcpOwners(ports: Record<string, AnatomyPortRef[]>, publicPort: n
     if (owns) owners.push(service);
   }
   return owners;
+}
+
+/** A single browser-openable host port, or null for a range, `'0'`, or an empty host. */
+function renderedHostPort(row: AnatomyPortRef): string | null {
+  const host = row.host.trim();
+  if (!/^\d+$/.test(host)) return null;
+  const port = Number(host);
+  return port >= 1 && port <= 65535 ? host : null;
+}
+
+/**
+ * Resolve a host port that a variable sets from the rendered Compose model, and
+ * leave every other row exactly as the raw parser read it. A row resolves only
+ * when the model is usable, names the same service, and has exactly one row with
+ * the same container target and protocol carrying a single published host port.
+ * Anything ambiguous (no match, several matches, a range, a variable on the
+ * container side, a dynamic host) keeps the expression as written, so the panel
+ * never guesses a port. Literal rows are untouched, so a stack without variables
+ * renders as before. A `refreshFailed` entry is still the last ready model, the
+ * same rule the footer link follows.
+ */
+export function resolveInterpolatedHostPorts(
+  raw: Record<string, PortRow[]>,
+  entry: ServiceUrlEntry | null | undefined,
+): Record<string, DisplayPortRow[]> {
+  const display = createServiceKeyMap<DisplayPortRow[]>();
+  const model = entry && entry.status === 'ready' && entry.renderable ? entry : null;
+  for (const [service, rows] of Object.entries(raw)) {
+    display[service] = rows.map((row): DisplayPortRow => {
+      const hostVariables = interpolatedVariableNames(row.host);
+      if (hostVariables.length === 0) return row;
+      const unresolved: DisplayPortRow = { ...row, hostVariables };
+      if (!model || !row.published) return unresolved;
+      if (interpolatedVariableNames(row.container).length > 0) return unresolved;
+      const rendered = serviceKeyGet(model.ports, service) ?? [];
+      const candidates = rendered.filter(candidate =>
+        (candidate.proto || 'tcp').toLowerCase() === row.proto.toLowerCase()
+        && candidate.container === row.container);
+      if (candidates.length !== 1) return unresolved;
+      const host = renderedHostPort(candidates[0]);
+      if (host === null) return unresolved;
+      return { ...row, host, hostVariables, hostResolved: true };
+    });
+  }
+  return display;
 }
 
 /**

@@ -33,6 +33,8 @@ The top of the tab shows a read-only summary derived live from the stack's Compo
 
 **Multi-file Compose stacks:** when a stack has a Git source with multiple Compose files, Sencho merges them (equivalent to `docker compose config`) before reading facts. Services, ports, and volumes shown in the Generated Facts reflect the merged result, not any individual file.
 
+A port set through a variable, such as `${WEB_PORT:-8080}`, shows the resolved port when Compose can render the stack, the same value the Anatomy tab shows.
+
 Environment and label values are never read or shown: only variable names and counts appear, exactly as in the Anatomy tab. The one exception is a value interpolated into a structural field such as `${DB_PORT}` in a port declaration, which Compose resolves before the facts are read. Keep secrets in `environment:` or `env_file:` rather than interpolating them into structural fields. See [Environment and Secrets Guardrails](/features/environment-guardrails).
 
 ## Operator notes
@@ -64,7 +66,7 @@ Documentation should describe reality, so Sencho watches the one place it most o
 The check is deterministic and advisory. It reads the ports in your Access URLs and compares them against the published ports in the generated facts above, the same ports the Anatomy tab shows. It never edits your notes or your Compose file, and it never guesses:
 
 - A URL with no explicit port, or on the scheme default (`:80` for `http`, `:443` for `https`), is left alone. Those usually reach the stack through a reverse proxy rather than a published port.
-- When a stack publishes a port through a variable such as `${PLEX_PORT}:32400`, Sencho does not know the resolved value from the Compose source, so the check stays quiet rather than risk a false warning.
+- When a stack publishes a port through a variable such as `${PLEX_PORT}:32400`, the check compares the port Compose resolves. When the stack cannot be rendered the value is unknown, so the check stays quiet rather than risk a false warning.
 - A bare single-label host with a port (such as `plex:32400`) is also left alone, since it cannot be distinguished from a plain note. Write it as a full URL (`http://plex:32400`) to have its port checked.
 
 Fix either side (the access URL or the stack's ports) and the warning clears on its own.

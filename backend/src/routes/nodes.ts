@@ -31,8 +31,17 @@ import { projectCommittedRevisions } from '../helpers/gitopsResponse';
 import { assertSafeOutboundUrl, safeRemoteFetch, UnsafeOutboundTargetError } from '../utils/outboundTarget';
 import { isNativeTlsEnabled, loadNativeTlsMaterial, rewriteHttpUrlToHttps } from '../helpers/nativeTls';
 import { buildPilotEnrollmentCompose } from '../helpers/pilotEnrollmentCompose';
+import { isArchiveStorableName } from '../services/cloudBackupArchive';
 
 const NODE_SCOPE_MESSAGE = 'API tokens cannot manage nodes.';
+/**
+ * Node names become directory segments in the snapshot archive a node's files
+ * are stored under, so a name the tar format cannot store would make every
+ * backup that captures this node unreadable. Refuse it where it is entered;
+ * the producer also refuses such a name so rows created before this check
+ * (or written by a sidecar tool) cannot publish such an archive.
+ */
+const NODE_NAME_STORAGE_MESSAGE = 'Node name must be valid Unicode text without NUL characters';
 const REMOTE_META_CACHE_TTL = 3 * 60 * 1000;
 const DEFAULT_COMPOSE_DIR = '/app/compose';
 const DEFAULT_PILOT_COMPOSE_DIR = '/opt/docker/sencho';
@@ -221,6 +230,9 @@ nodesRouter.post('/', enrollmentLimiter, async (req: Request, res: Response) => 
     if (!name || typeof name !== 'string' || name.trim() === '') {
       return res.status(400).json({ error: 'Node name is required' });
     }
+    if (!isArchiveStorableName(name)) {
+      return res.status(400).json({ error: NODE_NAME_STORAGE_MESSAGE });
+    }
     if (!type || !['local', 'remote'].includes(type)) {
       return res.status(400).json({ error: 'Node type must be "local" or "remote"' });
     }
@@ -354,6 +366,9 @@ nodesRouter.put('/:id', async (req: Request, res: Response) => {
     const nameChanged = updates.name !== undefined && updates.name !== existingNode.name;
     if (nameChanged && (typeof updates.name !== 'string' || updates.name.trim() === '')) {
       return res.status(400).json({ error: 'Node name is required' });
+    }
+    if (nameChanged && typeof updates.name === 'string' && !isArchiveStorableName(updates.name)) {
+      return res.status(400).json({ error: NODE_NAME_STORAGE_MESSAGE });
     }
     // Best-effort pre-check; the catch below remaps a racing UNIQUE violation
     // to the same 409.

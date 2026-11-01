@@ -11,6 +11,7 @@ import {
   tunnelExposureByService,
   type TunnelConnector,
 } from '../network/tunnelDetection';
+import { describeComposeVersionSkew } from '../../helpers/composeVersionSkew';
 
 /** Higher number = more severe. Used to derive a run's overall status. */
 export const SEVERITY_RANK: Record<PreflightSeverity, number> = { info: 0, warning: 1, high: 2, blocker: 3 };
@@ -23,6 +24,7 @@ export const PREFLIGHT_NOTE_RULE_IDS: ReadonlySet<string> = new Set([
   'healthcheck-inherited',
   'docker-socket-proxy-client',
   'tunnel-exposure',
+  'compose-version-mismatch',
 ]);
 
 export function isPreflightNoteFinding(ruleId: string): boolean {
@@ -781,6 +783,33 @@ const nodeStateUnavailable: PreflightRule = {
   },
 };
 
+const composeVersionMismatch: PreflightRule = {
+  id: 'compose-version-mismatch',
+  run(ctx) {
+    // No node snapshot means no container set to judge, and an unreadable
+    // running version means the comparison cannot be made at all.
+    if (!ctx.nodeStateAvailable) return [];
+    const skew = ctx.composeVersionSkew;
+    if (!skew || skew.services.length === 0) return [];
+    const single = skew.services.length === 1;
+    return [{
+      ruleId: 'compose-version-mismatch',
+      severity: 'info',
+      title: 'Created by another Docker Compose version',
+      message: `${describeComposeVersionSkew(skew)}. This node deploys with Docker Compose ${skew.runningVersion}, `
+        + `which can record a container's configuration or image differently, so the next deploy or update can recreate `
+        + `${single ? 'it' : 'them'} even if nothing in the file changed. After that, deploys from this node leave `
+        + `${single ? 'that container' : 'those containers'} running, unless another Compose version deploys the stack again.`,
+      remediation: 'Deploy this stack from one place. Sencho refuses a deploy that would recreate a protected container: '
+        + 'its own, the Docker socket proxy it uses, or a dependency of theirs. A deploy goes through only when Sencho '
+        + 'can verify it would leave those containers unchanged; an update of a stack that holds one is always refused, '
+        + 'because a pull can replace it. '
+        + `If a deploy would recreate one, recreate ${single ? 'the affected container' : 'the affected containers'} once from the `
+        + `host with Docker Compose ${skew.runningVersion} while Sencho is idle.`,
+    }];
+  },
+};
+
 const externalNetworkMissing: PreflightRule = {
   id: 'external-network-missing',
   run(ctx) {
@@ -1243,6 +1272,7 @@ export const PREFLIGHT_RULES: PreflightRule[] = [
   healthcheckInconsistent,
   deploySwarmOnly,
   nodeStateUnavailable,
+  composeVersionMismatch,
   externalNetworkMissing,
   externalVolumeMissing,
   newNetwork,

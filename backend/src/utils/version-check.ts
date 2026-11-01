@@ -160,8 +160,10 @@ export interface SenchoRelease {
   html_url: string;
 }
 
-async function fetchReleaseDetails(): Promise<SenchoRelease> {
-  const res = await fetch('https://api.github.com/repos/studio-saelix/sencho/releases/latest', {
+/** Latest release when `version` is omitted, otherwise that exact tag. */
+async function fetchReleaseDetails(version?: string): Promise<SenchoRelease> {
+  const path = version === undefined ? 'latest' : `tags/v${version}`;
+  const res = await fetch(`https://api.github.com/repos/studio-saelix/sencho/releases/${path}`, {
     headers: { Accept: 'application/vnd.github+json', 'User-Agent': 'Sencho' },
     signal: AbortSignal.timeout(10000),
   });
@@ -185,9 +187,38 @@ export async function getLatestRelease(forceRefresh = false): Promise<SenchoRele
     return await CacheService.getInstance().getOrFetch<SenchoRelease>(
       LATEST_RELEASE_CACHE_KEY,
       LATEST_VERSION_CACHE_TTL,
-      fetchReleaseDetails,
+      () => fetchReleaseDetails(),
     );
   } catch {
+    return null;
+  }
+}
+
+const RELEASE_BY_VERSION_CACHE_TTL = 5 * 60 * 1000; // 5 minutes
+
+/**
+ * Release notes for one published version. A release body is edited for a short
+ * while after publish (credits, highlights), so the cache is short rather than
+ * long-lived. Only a canonical semver string is accepted ("v1.2.3" or padding
+ * would address a different cache key and tag than the one meant). Returns null
+ * for a non-canonical version or a failed lookup; failures are not cached. When
+ * an expired entry's refresh fails, the stale entry is served instead (not after
+ * `forceRefresh`, which drops the entry first).
+ */
+export async function getReleaseByVersion(version: string, forceRefresh = false): Promise<SenchoRelease | null> {
+  if (semver.valid(version) !== version) return null;
+  const cacheKey = `release:${version}`;
+  if (forceRefresh) {
+    CacheService.getInstance().invalidate(cacheKey);
+  }
+  try {
+    return await CacheService.getInstance().getOrFetch<SenchoRelease>(
+      cacheKey,
+      RELEASE_BY_VERSION_CACHE_TTL,
+      () => fetchReleaseDetails(version),
+    );
+  } catch (err) {
+    console.warn('[VersionCheck] Release lookup failed:', sanitizeForLog(err instanceof Error ? err.message : String(err)));
     return null;
   }
 }

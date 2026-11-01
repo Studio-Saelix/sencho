@@ -45,6 +45,8 @@ Every finding is graded so you can triage at a glance. The tab groups findings u
 | **Warning** | A reliability or reproducibility concern, such as a moving `latest` tag or a missing restart policy. |
 | **Info** | Something to be aware of, such as a network or volume that will be created on first deploy. |
 
+A few findings are **notes** (shown with Info severity): an inherited healthcheck, Docker API access routed through a socket proxy, or containers created by another Docker Compose version. A note explains context rather than a problem, so it never affects All Clear, the severity summary, or update readiness, and it cannot be acknowledged.
+
 ## Run status
 
 The summary card at the top of the Doctor tab reflects the overall outcome of the last run:
@@ -73,7 +75,7 @@ A small colored dot appears on the **Doctor** tab label when the last run's acti
 
 ## What it checks
 
-All 42 rules are listed below, organized by topic.
+All 43 rules are listed below, organized by topic.
 
 ### Model rendering
 
@@ -149,6 +151,7 @@ The rules in this category (except "Node-state checks skipped" itself) read live
 | Rule | Severity | What it detects |
 |------|----------|----------------|
 | Node-state checks skipped | Info | The Docker daemon could not be reached; node-state rules did not run and this result is partial. |
+| Created by another Docker Compose version | Note | A container in this stack records a different `com.docker.compose.version` than the Compose that runs on this node, so the next deploy or update can recreate it even when nothing in the file changed. Names the affected services and both versions. |
 | External network not found | Blocker | A network declared `external: true` does not exist on this node. Deploy is blocked until the network exists. For safe default bridge networks, Doctor may offer a create remediation; advanced drivers and custom options stay manual. |
 | External volume not found | Blocker | A volume declared `external: true` does not exist on this node. The deploy will fail. |
 | New network will be created | Info | A non-external network that does not yet exist on this node will be created on first deploy. |
@@ -210,7 +213,7 @@ The networking-relevant rules on this page (host mode, exposure intent, port con
 
 ## Node-state checks and graceful degradation
 
-Six of the 42 rules require live Docker state to run: five are in the Node state category (external networks and volumes, new-resource notices, and container_name collision) and one is "Host port is already in use" in Port conflicts. All six are skipped when the Docker daemon is unreachable. Healthcheck inheritance checks also read Docker when Compose does not declare a healthcheck; those degrade to an Info finding when the daemon or image is unavailable.
+Seven of the 43 rules need live Docker state to run: five are in the Node state category (external networks and volumes, new-resource notices, and container_name collision), one is "Host port is already in use" in Port conflicts, and one is the Compose version note. All seven are skipped when the Docker daemon is unreachable. Healthcheck inheritance checks also read Docker when Compose does not declare a healthcheck; those degrade to an Info finding when the daemon or image is unavailable.
 
 When the daemon is unreachable:
 

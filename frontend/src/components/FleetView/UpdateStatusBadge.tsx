@@ -14,12 +14,12 @@ interface UpdateStatusBadgeProps {
 export function UpdateStatusBadge({ status, error, onRetry, onDismiss, operationKind }: UpdateStatusBadgeProps) {
     const isReapply = operationKind === 'reapply_configuration';
     if (status === 'updating') return (
-        <Badge className="text-[10px] px-1.5 py-0 h-4 bg-brand/15 text-brand border-brand/30 shrink-0">
+        <Badge size="compact" className="bg-brand/15 text-brand border-brand/30">
             <Loader2 className="w-2.5 h-2.5 mr-0.5 animate-spin" /> {isReapply ? 'Reapplying' : 'Updating'}
         </Badge>
     );
     if (status === 'completed') return (
-        <Badge className="text-[10px] px-1.5 py-0 h-4 bg-success-muted text-success border-success/30 shrink-0">
+        <Badge size="compact" className="bg-success-muted text-success border-success/30">
             <Check className="w-2.5 h-2.5 mr-0.5" /> {isReapply ? 'Reapplied' : 'Updated'}
         </Badge>
     );
@@ -28,7 +28,7 @@ export function UpdateStatusBadge({ status, error, onRetry, onDismiss, operation
         return (
             <CursorProvider>
                 <CursorContainer className="flex items-center gap-1">
-                    <Badge variant="destructive" className="text-[10px] px-1.5 py-0 h-4 shrink-0">{label}</Badge>
+                    <Badge variant="destructive" size="compact">{label}</Badge>
                     {onRetry && (
                         <button
                             onClick={(e) => { e.stopPropagation(); onRetry(); }}

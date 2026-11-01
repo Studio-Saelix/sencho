@@ -319,3 +319,32 @@ describe('NodeCard', () => {
     expect(screen.queryByText('Pilot')).not.toBeInTheDocument();
   });
 });
+
+describe('NodeCard host usage unknown', () => {
+  function unknownNode(): FleetNode {
+    return {
+      ...onlineNode(),
+      systemStats: {
+        cpu: { usage: null, cores: 2 },
+        memory: { total: 4 * 1024 ** 3, used: null, free: null, usagePercent: null },
+        disk: { total: 100, used: 30, free: 70, usagePercent: '30.0' },
+      },
+    };
+  }
+
+  it('renders unknown CPU and memory as placeholders with the docs link', () => {
+    const { container } = render(<NodeCard {...baseProps(unknownNode())} />);
+    // Capacity is still shown; usage is not invented.
+    expect(screen.getAllByText('--')).toHaveLength(2);
+    expect(screen.getAllByText('Show usage…')).toHaveLength(2);
+    // Only the disk bar is drawn: no threshold tone for an unknown dimension.
+    expect(container.querySelectorAll('.h-1\\.5')).toHaveLength(1);
+    expect(screen.queryByText('20.0%')).not.toBeInTheDocument();
+    expect(screen.queryByText('40.0%')).not.toBeInTheDocument();
+  });
+
+  it('still reports the disk bar, which is measured locally', () => {
+    render(<NodeCard {...baseProps(unknownNode())} />);
+    expect(screen.getByText('30 Bytes / 100 Bytes')).toBeInTheDocument();
+  });
+});

@@ -128,6 +128,16 @@ beforeEach(() => {
   mockFsSize.mockResolvedValue([{ fs: '/dev/sda1', mount: '/', size: 1000, used: 500, available: 500, use: 50 }]);
 });
 
+// The host sample asks `docker info` for capacity. This suite mocks the kernel
+// view, so the daemon answer has to agree with it or every request would take
+// the nested-host path and report unknown usage.
+beforeAll(async () => {
+  const { NodeRegistry } = await import('../services/NodeRegistry');
+  vi.spyOn(NodeRegistry.prototype, 'getDocker').mockReturnValue({
+    info: () => Promise.resolve({ NCPU: 2, MemTotal: 1000 }),
+  } as unknown as ReturnType<typeof NodeRegistry.prototype.getDocker>);
+});
+
 // ── /api/stats ─────────────────────────────────────────────────────────
 
 describe('GET /api/stats caching', () => {

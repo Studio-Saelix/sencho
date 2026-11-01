@@ -1,9 +1,12 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
-import { applyFleetSnapshotFiles, selectFleetSnapshotApplyFiles, type FleetSnapshotApplyFile } from '../helpers/applyFleetSnapshotFiles';
+import { applyFleetSnapshotFiles, fleetSnapshotApplyConflictCode, selectFleetSnapshotApplyFiles, type FleetSnapshotApplyFile } from '../helpers/applyFleetSnapshotFiles';
+import { DatabaseService } from '../services/DatabaseService';
 import { StackOpLockService } from '../services/StackOpLockService';
 
 const mocks = vi.hoisted(() => ({
   hasComposeFile: vi.fn(),
+  ensureStackDir: vi.fn(),
+  deleteStack: vi.fn(),
   saveStackContent: vi.fn(),
   saveEnvContent: vi.fn(),
   getBaseDir: vi.fn(() => '/tmp/compose'),
@@ -16,6 +19,8 @@ vi.mock('../services/FileSystemService', () => ({
     getInstance: () => ({
       getBaseDir: mocks.getBaseDir,
       hasComposeFile: mocks.hasComposeFile,
+      ensureStackDir: mocks.ensureStackDir,
+      deleteStack: mocks.deleteStack,
       saveStackContent: mocks.saveStackContent,
       saveEnvContent: mocks.saveEnvContent,
     }),
@@ -57,6 +62,8 @@ describe('applyFleetSnapshotFiles', () => {
   beforeEach(() => {
     StackOpLockService.resetForTests();
     mocks.hasComposeFile.mockReset().mockResolvedValue(true);
+    mocks.ensureStackDir.mockReset().mockResolvedValue(true);
+    mocks.deleteStack.mockReset().mockResolvedValue(undefined);
     mocks.saveStackContent.mockReset().mockResolvedValue(undefined);
     mocks.saveEnvContent.mockReset().mockResolvedValue(undefined);
     mocks.captureCurrentBackup.mockReset().mockResolvedValue({ id: 'gen-pre' });
@@ -84,6 +91,7 @@ describe('applyFleetSnapshotFiles', () => {
 
     expect(result.capturedGenerationId).toBe('gen-pre');
     expect(order).toEqual(['capture', 'compose', 'env']);
+    expect(mocks.ensureStackDir).not.toHaveBeenCalled();
     expect(mocks.invalidateNodeCaches).toHaveBeenCalledWith(1);
     expect(mocks.captureCurrentBackup).toHaveBeenCalledWith({
       nodeId: 1,
@@ -99,8 +107,116 @@ describe('applyFleetSnapshotFiles', () => {
 
     expect(result.capturedGenerationId).toBeNull();
     expect(mocks.captureCurrentBackup).not.toHaveBeenCalled();
+    expect(mocks.ensureStackDir).toHaveBeenCalledWith('fresh');
     expect(mocks.saveStackContent).toHaveBeenCalledWith('fresh', FILES[0].content);
     expect(mocks.saveEnvContent).toHaveBeenCalledWith('fresh', FILES[1].content);
+  });
+
+  it('creates the missing stack directory before the first snapshot file is written', async () => {
+    const order: string[] = [];
+    mocks.hasComposeFile.mockResolvedValue(false);
+    mocks.ensureStackDir.mockImplementation(async () => {
+      order.push('mkdir');
+      return true;
+    });
+    mocks.saveStackContent.mockImplementation(async () => {
+      order.push('compose');
+    });
+    mocks.saveEnvContent.mockImplementation(async () => {
+      order.push('env');
+    });
+
+    const result = await applyWeb({ stackName: 'restored-on-fresh-instance' });
+
+    expect(result.capturedGenerationId).toBeNull();
+    expect(order).toEqual(['mkdir', 'compose', 'env']);
+  });
+
+  it('refuses an absent stack whose snapshot has no compose.yaml, before creating a directory', async () => {
+    mocks.hasComposeFile.mockResolvedValue(false);
+
+    await expect(applyWeb({ stackName: 'env-only', files: [FILES[1]] }))
+      .rejects.toMatchObject({ code: 'snapshot_compose_missing' });
+
+    expect(mocks.ensureStackDir).not.toHaveBeenCalled();
+    expect(mocks.saveEnvContent).not.toHaveBeenCalled();
+    expect(mocks.saveStackContent).not.toHaveBeenCalled();
+    expect(mocks.invalidateNodeCaches).not.toHaveBeenCalled();
+  });
+
+  it('refuses a compose-less existing directory the same way and leaves it alone', async () => {
+    mocks.hasComposeFile.mockResolvedValue(false);
+
+    await expect(applyWeb({ stackName: 'leftover', files: [FILES[1]] }))
+      .rejects.toMatchObject({ code: 'snapshot_compose_missing' });
+
+    expect(mocks.ensureStackDir).not.toHaveBeenCalled();
+    expect(mocks.saveEnvContent).not.toHaveBeenCalled();
+    expect(mocks.deleteStack).not.toHaveBeenCalled();
+  });
+
+  it('still restores an existing stack from an env-only snapshot', async () => {
+    const result = await applyWeb({ files: [FILES[1]] });
+
+    expect(result.capturedGenerationId).toBe('gen-pre');
+    expect(mocks.saveEnvContent).toHaveBeenCalledWith('web', FILES[1].content);
+    expect(mocks.deleteStack).not.toHaveBeenCalled();
+  });
+
+  it('removes the directory it created when a later file write fails', async () => {
+    mocks.hasComposeFile.mockResolvedValue(false);
+    mocks.saveEnvContent.mockRejectedValue(new Error('disk full'));
+
+    await expect(applyWeb({ stackName: 'half-written' })).rejects.toThrow('disk full');
+
+    expect(mocks.deleteStack).toHaveBeenCalledWith('half-written');
+    expect(mocks.invalidateNodeCaches).toHaveBeenCalledWith(1);
+  });
+
+  it('removes the created directory when the compose write itself fails', async () => {
+    mocks.hasComposeFile.mockResolvedValue(false);
+    mocks.saveStackContent.mockRejectedValue(new Error('read-only'));
+
+    await expect(applyWeb({ stackName: 'never-written' })).rejects.toThrow('read-only');
+
+    expect(mocks.deleteStack).toHaveBeenCalledWith('never-written');
+  });
+
+  it('keeps a directory it did not create when a write fails', async () => {
+    mocks.hasComposeFile.mockResolvedValue(false);
+    mocks.ensureStackDir.mockResolvedValue(false);
+    mocks.saveStackContent.mockRejectedValue(new Error('read-only'));
+
+    await expect(applyWeb({ stackName: 'preexisting-dir' })).rejects.toThrow('read-only');
+
+    expect(mocks.deleteStack).not.toHaveBeenCalled();
+  });
+
+  it('reports the write failure even when removing the created directory also fails', async () => {
+    mocks.hasComposeFile.mockResolvedValue(false);
+    mocks.saveStackContent.mockRejectedValue(new Error('read-only'));
+    mocks.deleteStack.mockRejectedValue(new Error('cannot remove'));
+    const logged = vi.spyOn(console, 'error').mockImplementation(() => {});
+
+    await expect(applyWeb({ stackName: 'cleanup-fails' })).rejects.toThrow('read-only');
+
+    expect(logged).toHaveBeenCalled();
+    logged.mockRestore();
+  });
+
+  it('reports a pending deletion before the missing-compose refusal and creates nothing', async () => {
+    mocks.hasComposeFile.mockResolvedValue(false);
+    const intent = vi.spyOn(DatabaseService.getInstance(), 'hasBlockingDeletionIntent').mockReturnValue(true);
+
+    try {
+      await expect(applyWeb({ stackName: 'deleting', files: [FILES[1]] }))
+        .rejects.toMatchObject({ code: 'stack_deletion_in_progress' });
+    } finally {
+      intent.mockRestore();
+    }
+
+    expect(mocks.ensureStackDir).not.toHaveBeenCalled();
+    expect(mocks.deleteStack).not.toHaveBeenCalled();
   });
 
   it('aborts without writing when capture fails', async () => {
@@ -155,5 +271,25 @@ describe('applyFleetSnapshotFiles', () => {
       { filename: 'compose.yaml', content: 'a' },
       { filename: '.env', content: 'b' },
     ]);
+  });
+
+  it('reports a missing compose file as a restore conflict', () => {
+    expect(fleetSnapshotApplyConflictCode(
+      Object.assign(new Error('no compose'), { code: 'snapshot_compose_missing' }),
+    )).toBe('snapshot_compose_missing');
+  });
+
+  it('reports a deletion in progress as a restore conflict', () => {
+    expect(fleetSnapshotApplyConflictCode(
+      Object.assign(new Error('deletion in progress'), { code: 'stack_deletion_in_progress' }),
+    )).toBe('stack_deletion_in_progress');
+  });
+
+  it('refuses restore when a deletion intent exists even if compose is still on disk', async () => {
+    vi.spyOn(DatabaseService.getInstance(), 'hasBlockingDeletionIntent').mockReturnValue(true);
+    await expect(applyWeb()).rejects.toMatchObject({ code: 'stack_deletion_in_progress' });
+    expect(mocks.captureCurrentBackup).not.toHaveBeenCalled();
+    expect(mocks.saveStackContent).not.toHaveBeenCalled();
+    expect(mocks.ensureStackDir).not.toHaveBeenCalled();
   });
 });

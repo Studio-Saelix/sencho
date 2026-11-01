@@ -1,12 +1,28 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { renderHook, act } from '@testing-library/react';
 
-vi.mock('@/whats-new/entries', () => ({ latestWhatsNewEntryId: 'entry-b' }));
+const mockBuildInfo = vi.fn();
+vi.mock('@/hooks/useBuildInfo', () => ({
+  useBuildInfo: () => mockBuildInfo(),
+}));
 
 import { useWhatsNewPreference } from '../useWhatsNewPreference';
 
+const LAST_SEEN = 'sencho.whatsNew.lastSeenVersion';
+
+function givenBuild(version: string | null, channel: 'stable' | 'dev' = 'stable') {
+  mockBuildInfo.mockReturnValue({
+    buildInfo: version === null ? null : { version, channel, imageChannel: 'community', imageRef: null, imageId: null, revision: null, restricted: false },
+    status: 'ready',
+    retry: vi.fn(),
+  });
+}
+
 describe('useWhatsNewPreference', () => {
-  beforeEach(() => localStorage.clear());
+  beforeEach(() => {
+    localStorage.clear();
+    givenBuild('0.98.1');
+  });
   afterEach(() => localStorage.clear());
 
   it('defaults enabled to true when never set', () => {
@@ -27,35 +43,61 @@ describe('useWhatsNewPreference', () => {
     expect(localStorage.getItem('sencho.whatsNew.enabled')).toBe('0');
   });
 
-  it('a fresh install (no stored watermark) silently catches up, so hasUnseen starts false', () => {
+  it('exposes the running stable version', () => {
     const { result } = renderHook(() => useWhatsNewPreference());
-    expect(localStorage.getItem('sencho.whatsNew.lastSeenId')).toBe('entry-b');
+    expect(result.current.version).toBe('0.98.1');
+  });
+
+  it('a fresh install (no stored version) silently catches up, so hasUnseen stays false', () => {
+    const { result } = renderHook(() => useWhatsNewPreference());
+    expect(localStorage.getItem(LAST_SEEN)).toBe('0.98.1');
     expect(result.current.hasUnseen).toBe(false);
   });
 
-  it('a release that shipped with zero entries stamps a "" watermark, so the next release\'s first real entry is detected as unseen for an existing install', () => {
-    // Simulates: release N had entries.json === [], the hook already ran once
-    // on this install and (per the fixed initializer) stamped '' as the
-    // watermark. Release N+1 now adds the first real entry. The install is
-    // NOT fresh (a key already exists), so it must not silently catch up.
-    localStorage.setItem('sencho.whatsNew.lastSeenId', '');
+  it('a stored version behind the running one reports hasUnseen true', () => {
+    localStorage.setItem(LAST_SEEN, '0.98.0');
     const { result } = renderHook(() => useWhatsNewPreference());
     expect(result.current.hasUnseen).toBe(true);
   });
 
-  it('an existing watermark behind the latest entry reports hasUnseen true', () => {
-    localStorage.setItem('sencho.whatsNew.lastSeenId', 'entry-a');
+  it('running an older release than the one last seen does not light the dot', () => {
+    localStorage.setItem(LAST_SEEN, '0.99.0');
     const { result } = renderHook(() => useWhatsNewPreference());
-    expect(result.current.hasUnseen).toBe(true);
+    expect(result.current.hasUnseen).toBe(false);
   });
 
-  it('markSeen clears hasUnseen and persists the watermark', () => {
-    localStorage.setItem('sencho.whatsNew.lastSeenId', 'entry-a');
+  it('removes the retired hand-written feed watermark when it stamps the new one', () => {
+    localStorage.setItem('sencho.whatsNew.lastSeenId', 'v0-98-0-old-entry');
+    renderHook(() => useWhatsNewPreference());
+    expect(localStorage.getItem('sencho.whatsNew.lastSeenId')).toBeNull();
+    expect(localStorage.getItem(LAST_SEEN)).toBe('0.98.1');
+  });
+
+  it('markSeen never lowers the watermark (a rollback keeps the higher version)', () => {
+    localStorage.setItem(LAST_SEEN, '0.99.0');
     const { result } = renderHook(() => useWhatsNewPreference());
-    expect(result.current.hasUnseen).toBe(true);
+    act(() => result.current.markSeen());
+    expect(localStorage.getItem(LAST_SEEN)).toBe('0.99.0');
+  });
+
+  it('markSeen clears hasUnseen and stores the running version', () => {
+    localStorage.setItem(LAST_SEEN, '0.98.0');
+    const { result } = renderHook(() => useWhatsNewPreference());
     act(() => result.current.markSeen());
     expect(result.current.hasUnseen).toBe(false);
-    expect(localStorage.getItem('sencho.whatsNew.lastSeenId')).toBe('entry-b');
+    expect(localStorage.getItem(LAST_SEEN)).toBe('0.98.1');
+  });
+
+  it('never stamps or flags anything for a dev build or while build info is loading', () => {
+    givenBuild('0.98.1', 'dev');
+    const dev = renderHook(() => useWhatsNewPreference());
+    expect(dev.result.current.version).toBeNull();
+    expect(dev.result.current.hasUnseen).toBe(false);
+    act(() => dev.result.current.markSeen());
+    givenBuild(null);
+    const loading = renderHook(() => useWhatsNewPreference());
+    expect(loading.result.current.version).toBeNull();
+    expect(localStorage.getItem(LAST_SEEN)).toBeNull();
   });
 
   it('a second hook instance picks up a change made by the first (window event sync)', () => {

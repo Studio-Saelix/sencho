@@ -9,10 +9,10 @@ interface PinnedUpdateBadgeProps {
 
 export function PinnedUpdateBadge({
     reason,
-    className = 'text-[10px] px-1.5 py-0 h-4 bg-muted text-muted-foreground border-card-border/40 shrink-0',
+    className = 'bg-muted text-muted-foreground border-card-border/40',
 }: PinnedUpdateBadgeProps) {
     return (
-        <Badge className={className} title={reason ?? PINNED_UPDATE_BLOCKED_FALLBACK}>
+        <Badge size="compact" className={className} title={reason ?? PINNED_UPDATE_BLOCKED_FALLBACK}>
             <Ban className="w-2.5 h-2.5 mr-0.5" strokeWidth={1.5} /> Pinned
         </Badge>
     );

@@ -2,7 +2,7 @@
  * CloudBackupService: off-site replication for fleet snapshots.
  *
  * Two providers share the same S3-compatible code path:
- *   - 'sencho' : managed Sencho Cloud Backup. Credentials provisioned by
+ *   - 'sencho' : managed Sencho Snapshot Vault. Credentials provisioned by
  *                sencho.io/api/cloud-backup/provision and stored in system_state.
  *   - 'custom' : bring-your-own-bucket. Credentials user-configured in global_settings.
  *
@@ -12,8 +12,6 @@
  */
 
 import { Readable } from 'stream';
-import * as zlib from 'zlib';
-import * as tar from 'tar-stream';
 import axios from 'axios';
 import { DatabaseService } from './DatabaseService';
 import { CryptoService } from './CryptoService';
@@ -24,6 +22,28 @@ import {
 } from '../helpers/snapshotFileDecrypt';
 import { getErrorMessage } from '../utils/errors';
 import { isDebugEnabled } from '../utils/debug';
+import {
+    ArchiveFormatError,
+    assertArchiveFitsLimits,
+    assertArchiveObjectSize,
+    decryptArchive,
+    encryptArchive,
+    isEncryptedArchive,
+    MAX_ARCHIVE_OBJECT_BYTES,
+    openSnapshotArchive,
+    packSnapshotArchive,
+    type ArchiveEntryPlan,
+} from './cloudBackupArchive';
+
+// Bounds on requests to the S3 endpoint, all shorter than the panel's own
+// 60 s deadline so the operator sees the endpoint's failure, not a generic
+// timeout. connectionMs and socketMs (inactivity, so a large archive that keeps
+// moving is not cut off) cover the connect and the wait for response headers;
+// the SDK arms no socket timer once headers have arrived. operationMs therefore
+// bounds a whole small request (Test, listings, delete), and bodyIdleMs bounds
+// a gap in an archive download. Tests shrink these to prove a silent endpoint
+// fails fast.
+export const S3_TIMEOUTS = { connectionMs: 10_000, socketMs: 30_000, operationMs: 45_000, bodyIdleMs: 30_000 };
 
 // Cloud backup is opt-in (paid feature) and the AWS SDK v3 client pulls
 // in dozens of @smithy/* and @aws-sdk/middleware-* packages, so installs
@@ -74,6 +94,15 @@ export interface CloudSnapshotEntry {
     sizeBytes: number;
     lastModified: string | null;
     snapshotId: number | null;
+    encrypted: boolean;
+}
+
+/** The object key is not under this instance's snapshot prefix. */
+export class SnapshotKeyError extends Error {
+    constructor(message: string) {
+        super(message);
+        this.name = 'SnapshotKeyError';
+    }
 }
 
 export interface ProvisionResult {
@@ -92,6 +121,8 @@ export interface UploadStatusEntry {
 const SENCHO_CLOUD_BACKUP_API_DEFAULT = 'https://sencho.io';
 const PROVIDER_KEY = 'cloud_backup_provider';
 const SUCCESS_STATUS_TTL_MS = 5 * 60 * 1000;
+/** Recovery listing pages, 1,000 objects each. The response says when it stopped early. */
+const RECOVERY_LIST_PAGE_LIMIT = 10;
 
 export class CloudBackupService {
     private static instance: CloudBackupService;
@@ -132,6 +163,10 @@ export class CloudBackupService {
     public isAutoUploadOn(): boolean {
         const cfg = this.getResolvedConfig();
         return cfg?.autoUpload === true;
+    }
+
+    public archivesAreEncrypted(): boolean {
+        return DatabaseService.getInstance().getGlobalSettings().cloud_backup_encrypt_archives === '1';
     }
 
     public getResolvedConfig(): ResolvedCloudConfig | null {
@@ -181,7 +216,7 @@ export class CloudBackupService {
         };
     }
 
-    // ─── Sencho Cloud Backup lifecycle ─────────────────────────────────────────
+    // ─── Sencho Snapshot Vault lifecycle ───────────────────────────────────────
 
     public async provisionSenchoCloudBackup(): Promise<ProvisionResult> {
         const db = DatabaseService.getInstance();
@@ -190,7 +225,7 @@ export class CloudBackupService {
         if (!licenseKey) return { success: false, error: 'No license key found. Activate an Admiral license first.' };
 
         if (LicenseService.getInstance().getTier() !== 'paid') {
-            return { success: false, error: 'Recovery Vault requires the Admiral tier.' };
+            return { success: false, error: 'Sencho Snapshot Vault requires the Admiral tier.' };
         }
 
         const apiBase = process.env.SENCHO_CLOUD_BACKUP_API || SENCHO_CLOUD_BACKUP_API_DEFAULT;
@@ -216,13 +251,13 @@ export class CloudBackupService {
             return { success: true, quotaBytes: data.quota_bytes };
         } catch (err) {
             const responseError = (err as { response?: { data?: { error?: string } } }).response?.data?.error;
-            return { success: false, error: responseError || getErrorMessage(err, 'Failed to provision Recovery Vault.') };
+            return { success: false, error: responseError || getErrorMessage(err, 'Failed to provision Sencho Snapshot Vault.') };
         }
     }
 
     public async refreshSenchoCloudBackupCredentials(): Promise<void> {
         const result = await this.provisionSenchoCloudBackup();
-        if (!result.success) throw new Error(result.error || 'Failed to refresh Recovery Vault credentials.');
+        if (!result.success) throw new Error(result.error || 'Failed to refresh Sencho Snapshot Vault credentials.');
     }
 
     public async getSenchoCloudBackupUsage(): Promise<{ used_bytes: number; quota_bytes: number; object_count: number }> {
@@ -241,8 +276,10 @@ export class CloudBackupService {
         const cfg = this.getResolvedConfig();
         if (!cfg) return { success: false, error: 'No cloud backup configuration is active.' };
         try {
-            const { client, sdk } = await this.buildS3Client(cfg);
-            await client.send(new sdk.HeadBucketCommand({ Bucket: cfg.bucket }));
+            // One attempt: the SDK retries a timeout up to three times by
+            // default, and a Test that fails should report after one.
+            const { client, sdk } = await this.buildS3Client(cfg, 1);
+            await this.runBounded(signal => client.send(new sdk.HeadBucketCommand({ Bucket: cfg.bucket }), { abortSignal: signal }));
             return { success: true };
         } catch (err) {
             return { success: false, error: getErrorMessage(err, 'Connection test failed.') };
@@ -257,7 +294,7 @@ export class CloudBackupService {
         if (!snapshot) throw new Error(`Snapshot ${snapshotId} not found.`);
         const files = db.getSnapshotFiles(snapshotId);
         const documentation = db.getSnapshotDocumentation(snapshotId);
-        const objectKey = this.buildObjectKey(cfg, snapshot.id, snapshot.description, snapshot.created_at);
+        let objectKey = this.buildObjectKey(cfg, snapshot.id, snapshot.description, snapshot.created_at, false);
 
         const availableFiles = files.filter(isAvailableSnapshotFile);
         if (availableFiles.length !== files.length) {
@@ -269,32 +306,128 @@ export class CloudBackupService {
         this.setStatus(snapshotId, { status: 'uploading', objectKey, updatedAt: Date.now() });
         try {
             const archive = await this.buildArchive(snapshot, availableFiles, documentation);
+            const protectedBody = await this.protectArchive(archive);
+            objectKey = this.buildObjectKey(cfg, snapshot.id, snapshot.description, snapshot.created_at, protectedBody.encrypted);
+            this.setStatus(snapshotId, { status: 'uploading', objectKey, updatedAt: Date.now() });
             const { client, sdk } = await this.buildS3Client(cfg);
             await client.send(new sdk.PutObjectCommand({
                 Bucket: cfg.bucket,
                 Key: objectKey,
-                Body: archive,
-                ContentType: 'application/gzip',
+                Body: protectedBody.body,
+                ContentType: protectedBody.encrypted ? 'application/octet-stream' : 'application/gzip',
             }));
             this.setStatus(snapshotId, { status: 'success', objectKey, updatedAt: Date.now() });
             if (isDebugEnabled()) {
-                console.log(`[CloudBackup:debug] Uploaded snapshot ${snapshotId} (${archive.byteLength} bytes) to ${cfg.bucket}/${objectKey}`);
+                console.log(`[CloudBackup:debug] Uploaded snapshot ${snapshotId} (${protectedBody.body.byteLength} bytes) to ${cfg.bucket}/${objectKey}`);
             }
         } catch (err) {
-            const message = getErrorMessage(err, 'Cloud upload failed.');
+            const message = getErrorMessage(s3TimeoutError(err) ?? err, 'Cloud upload failed.');
             this.setStatus(snapshotId, { status: 'failed', objectKey, error: message, updatedAt: Date.now() });
             throw new Error(message);
         }
     }
 
-    public async downloadSnapshot(objectKey: string): Promise<Buffer> {
+    public async downloadSnapshot(objectKey: string, passphraseOverride: string | null = null): Promise<Buffer> {
+        this.assertSnapshotObjectKey(objectKey);
+        const raw = await this.fetchObject(objectKey);
+        if (!isEncryptedArchive(raw)) return raw;
+        const passphrase = passphraseOverride || this.storedArchivePassphrase();
+        if (!passphrase) {
+            throw new ArchiveFormatError('PASSPHRASE_REQUIRED', 'A passphrase is required to read this archive');
+        }
+        return decryptArchive(raw, passphrase);
+    }
+
+    public async importSnapshot(objectKey: string, passphraseOverride: string | null = null): Promise<number> {
+        this.assertSnapshotObjectKey(objectKey);
+        const raw = await this.fetchObject(objectKey);
+        const passphrase = isEncryptedArchive(raw)
+            ? (passphraseOverride || this.storedArchivePassphrase())
+            : null;
+        const parsed = await openSnapshotArchive(raw, passphrase);
+        return DatabaseService.getInstance().importSnapshotArchive(parsed);
+    }
+
+    /**
+     * Disaster recovery from a different installation. A fresh instance has a
+     * new instance id and key, so its own prefix cannot reach the old
+     * archives. This path may read any instance's snapshot object inside the
+     * configured bucket prefix, but only a sealed archive with the matching
+     * passphrase is accepted, and it never deletes or returns raw bytes.
+     */
+    public async importRecoveryArchive(objectKey: string, passphrase: string): Promise<number> {
+        this.assertRecoveryObjectKey(objectKey);
+        if (!passphrase) {
+            throw new ArchiveFormatError('PASSPHRASE_REQUIRED', 'A passphrase is required to recover this archive');
+        }
+        const raw = await this.fetchObject(objectKey);
+        if (!isEncryptedArchive(raw)) {
+            throw new ArchiveFormatError(
+                'BAD_ARCHIVE',
+                'Only an encrypted archive can be recovered on another instance. Import a plaintext archive from this instance\'s own snapshots instead.',
+            );
+        }
+        const parsed = await openSnapshotArchive(raw, passphrase);
+        return DatabaseService.getInstance().importSnapshotArchive(parsed);
+    }
+
+    /**
+     * Archives in this bucket that belong to other instances, so a fresh
+     * installation can find what it is recovering. Read-only: recovery still
+     * needs the passphrase, and delete/download stay confined to this
+     * instance's prefix. The listing follows continuation tokens up to a
+     * bounded number of pages and reports when it stopped early, so an
+     * incomplete list is never presented as complete.
+     */
+    public async listRecoveryArchives(): Promise<{ entries: CloudSnapshotEntry[]; truncated: boolean }> {
         const cfg = this.getResolvedConfig();
-        if (!cfg) throw new Error('Cloud backup is not configured.');
+        if (!cfg) return { entries: [], truncated: false };
         const { client, sdk } = await this.buildS3Client(cfg);
-        const result = await client.send(new sdk.GetObjectCommand({ Bucket: cfg.bucket, Key: objectKey }));
-        const body = result.Body as Readable | undefined;
-        if (!body) throw new Error('Empty response body.');
-        return await streamToBuffer(body);
+        const { objects, truncated } = await this.runBounded(async signal => {
+            const objects: Array<{ Key?: string; Size?: number; LastModified?: Date }> = [];
+            let continuationToken: string | undefined;
+            let truncated = false;
+            for (let page = 0; page < RECOVERY_LIST_PAGE_LIMIT; page += 1) {
+                const result = await client.send(new sdk.ListObjectsV2Command({
+                    Bucket: cfg.bucket,
+                    Prefix: `${cfg.pathPrefix}instances/`,
+                    MaxKeys: 1000,
+                    ...(continuationToken ? { ContinuationToken: continuationToken } : {}),
+                }), { abortSignal: signal });
+                objects.push(...(result.Contents || []));
+                if (!result.IsTruncated) break;
+                if (!result.NextContinuationToken) {
+                    // A provider that truncates without a token cannot be followed;
+                    // report the list as incomplete rather than as complete.
+                    truncated = true;
+                    break;
+                }
+                continuationToken = result.NextContinuationToken;
+                truncated = page === RECOVERY_LIST_PAGE_LIMIT - 1;
+            }
+            return { objects, truncated };
+        });
+        const current = this.getInstanceId();
+        const entries: CloudSnapshotEntry[] = [];
+        for (const object of objects) {
+            const key = object.Key;
+            if (!key) continue;
+            const parsed = this.parseRecoveryKey(key, cfg.pathPrefix);
+            if (!parsed || parsed.instanceId === current) continue;
+            const basename = key.split('/').pop() || key;
+            const idMatch = basename.match(/^(\d+)_/);
+            entries.push({
+                objectKey: key,
+                sizeBytes: object.Size ?? 0,
+                lastModified: object.LastModified ? object.LastModified.toISOString() : null,
+                snapshotId: idMatch ? parseInt(idMatch[1], 10) : null,
+                encrypted: key.endsWith('.tar.gz.senc'),
+            });
+        }
+        return {
+            entries: entries.sort((a, b) => (b.lastModified || '').localeCompare(a.lastModified || '')),
+            truncated,
+        };
     }
 
     public async listCloudSnapshots(): Promise<CloudSnapshotEntry[]> {
@@ -302,11 +435,11 @@ export class CloudBackupService {
         if (!cfg) return [];
         const { client, sdk } = await this.buildS3Client(cfg);
         const prefix = `${cfg.pathPrefix}instances/${this.getInstanceId()}/snapshots/`;
-        const result = await client.send(new sdk.ListObjectsV2Command({
+        const result = await this.runBounded(signal => client.send(new sdk.ListObjectsV2Command({
             Bucket: cfg.bucket,
             Prefix: prefix,
             MaxKeys: 1000,
-        }));
+        }), { abortSignal: signal }));
         const objects = result.Contents || [];
         return objects
             .filter(o => !!o.Key)
@@ -319,16 +452,48 @@ export class CloudBackupService {
                     sizeBytes: o.Size ?? 0,
                     lastModified: o.LastModified ? o.LastModified.toISOString() : null,
                     snapshotId: idMatch ? parseInt(idMatch[1], 10) : null,
+                    encrypted: key.endsWith('.tar.gz.senc'),
                 };
             })
             .sort((a, b) => (b.lastModified || '').localeCompare(a.lastModified || ''));
     }
 
     public async deleteCloudSnapshot(objectKey: string): Promise<void> {
+        this.assertSnapshotObjectKey(objectKey);
         const cfg = this.getResolvedConfig();
         if (!cfg) throw new Error('Cloud backup is not configured.');
         const { client, sdk } = await this.buildS3Client(cfg);
-        await client.send(new sdk.DeleteObjectCommand({ Bucket: cfg.bucket, Key: objectKey }));
+        await this.runBounded(signal => client.send(new sdk.DeleteObjectCommand({ Bucket: cfg.bucket, Key: objectKey }), { abortSignal: signal }));
+    }
+
+    public assertSnapshotObjectKey(objectKey: string): void {
+        const cfg = this.getResolvedConfig();
+        if (!cfg) throw new Error('Cloud backup is not configured.');
+        const prefix = `${cfg.pathPrefix}instances/${this.getInstanceId()}/snapshots/`;
+        if (!objectKey.startsWith(prefix)) {
+            throw new SnapshotKeyError('Object key is outside this instance snapshot prefix');
+        }
+    }
+
+    /** Recovery may read any instance's archive inside the configured bucket prefix. */
+    public assertRecoveryObjectKey(objectKey: string): void {
+        const cfg = this.getResolvedConfig();
+        if (!cfg) throw new Error('Cloud backup is not configured.');
+        if (!this.parseRecoveryKey(objectKey, cfg.pathPrefix)) {
+            throw new SnapshotKeyError('Object key is not a snapshot archive in this bucket');
+        }
+    }
+
+    /** `<prefix>instances/<instance>/snapshots/<file>`, or null. */
+    private parseRecoveryKey(objectKey: string, pathPrefix: string): { instanceId: string; basename: string } | null {
+        if (objectKey.includes('\\') || objectKey.includes('..')) return null;
+        const prefix = `${pathPrefix}instances/`;
+        if (!objectKey.startsWith(prefix)) return null;
+        const parts = objectKey.slice(prefix.length).split('/');
+        if (parts.length !== 3 || parts[1] !== 'snapshots') return null;
+        const [instanceId, , basename] = parts;
+        if (!instanceId || instanceId === '.' || !basename) return null;
+        return { instanceId, basename };
     }
 
     // ─── Status tracking ───────────────────────────────────────────────────────
@@ -352,33 +517,109 @@ export class CloudBackupService {
 
     // ─── Internals ─────────────────────────────────────────────────────────────
 
-    private async buildS3Client(cfg: ResolvedCloudConfig): Promise<{ client: S3Client; sdk: S3Sdk }> {
+    private async buildS3Client(cfg: ResolvedCloudConfig, maxAttempts?: number): Promise<{ client: S3Client; sdk: S3Sdk }> {
         const sdk = await loadS3Sdk();
         const client = new sdk.S3Client({
             endpoint: cfg.endpoint,
             region: cfg.region,
             credentials: { accessKeyId: cfg.accessKey, secretAccessKey: cfg.secretKey },
             forcePathStyle: true,
+            // Without these an endpoint that accepts the connection and never
+            // answers holds the request open indefinitely, and the Snapshot
+            // Vault panel keeps its destination controls disabled meanwhile.
+            requestHandler: { connectionTimeout: S3_TIMEOUTS.connectionMs, socketTimeout: S3_TIMEOUTS.socketMs },
+            ...(maxAttempts !== undefined ? { maxAttempts } : {}),
         });
         return { client, sdk };
     }
 
-    private getInstanceId(): string {
-        return DatabaseService.getInstance().getSystemState('instance_id') || 'unknown';
+    /**
+     * Runs one S3 request (or a short sequence of them) under a single
+     * deadline that also covers the response body, which the SDK's socket
+     * timeout does not once headers have arrived. A timeout of any kind is
+     * rethrown with a message that names the endpoint, not the SDK.
+     */
+    private async runBounded<T>(run: (signal: AbortSignal) => Promise<T>): Promise<T> {
+        const signal = AbortSignal.timeout(S3_TIMEOUTS.operationMs);
+        try {
+            return await run(signal);
+        } catch (err) {
+            throw s3TimeoutError(err, signal) ?? err;
+        }
     }
 
-    private buildObjectKey(cfg: ResolvedCloudConfig, snapshotId: number, description: string, createdAt: number): string {
+    private getInstanceId(): string {
+        return DatabaseService.getInstance().getInstanceId();
+    }
+
+    private buildObjectKey(cfg: ResolvedCloudConfig, snapshotId: number, description: string, createdAt: number, encrypted: boolean): string {
         const ts = new Date(createdAt).toISOString().replace(/[:.]/g, '-');
         const slug = description.slice(0, 40).replace(/[^a-z0-9]+/gi, '-').replace(/^-+|-+$/g, '').toLowerCase() || 'snapshot';
-        return `${cfg.pathPrefix}instances/${this.getInstanceId()}/snapshots/${snapshotId}_${ts}_${slug}.tar.gz`;
+        const ext = encrypted ? '.tar.gz.senc' : '.tar.gz';
+        return `${cfg.pathPrefix}instances/${this.getInstanceId()}/snapshots/${snapshotId}_${ts}_${slug}${ext}`;
+    }
+
+    private storedArchivePassphrase(): string | null {
+        const raw = DatabaseService.getInstance().getGlobalSettings().cloud_backup_archive_passphrase;
+        if (!raw) return null;
+        try {
+            return CryptoService.getInstance().decrypt(raw) || null;
+        } catch (err) {
+            console.error('[CloudBackup] Stored archive passphrase could not be decrypted:', err);
+            return null;
+        }
+    }
+
+    private async protectArchive(gzip: Buffer): Promise<{ body: Buffer; encrypted: boolean }> {
+        if (!this.archivesAreEncrypted()) return { body: gzip, encrypted: false };
+        const passphrase = this.storedArchivePassphrase();
+        if (!passphrase) throw new Error('Archive encryption is on, but no passphrase is saved');
+        const body = await encryptArchive(gzip, passphrase);
+        // The provider stores the envelope, not the plaintext gzip, so the
+        // object limit is measured on the sealed bytes.
+        assertArchiveObjectSize(body.byteLength);
+        return { body, encrypted: true };
+    }
+
+    private async fetchObject(objectKey: string): Promise<Buffer> {
+        const cfg = this.getResolvedConfig();
+        if (!cfg) throw new Error('Cloud backup is not configured.');
+        const { client, sdk } = await this.buildS3Client(cfg);
+        const result = await client.send(new sdk.GetObjectCommand({ Bucket: cfg.bucket, Key: objectKey }))
+            .catch((err: unknown) => { throw s3TimeoutError(err) ?? err; });
+        const body = result.Body as Readable | undefined;
+        if (!body) throw new Error('Empty response body.');
+        if (typeof result.ContentLength === 'number' && result.ContentLength > MAX_ARCHIVE_OBJECT_BYTES) {
+            body.on('error', () => undefined);
+            body.destroy();
+            throw new ArchiveFormatError('TOO_LARGE', 'Archive is larger than the import limit');
+        }
+        return streamToBuffer(body, MAX_ARCHIVE_OBJECT_BYTES, S3_TIMEOUTS.bodyIdleMs);
     }
 
     private async buildArchive(
-        snapshot: { id: number; description: string; created_by: string; node_count: number; stack_count: number; skipped_nodes: string; created_at: number },
+        snapshot: {
+            id: number;
+            description: string;
+            created_by: string;
+            node_count: number;
+            stack_count: number;
+            skipped_nodes: string;
+            skipped_stacks: string;
+            created_at: number;
+            source_instance_id: string | null;
+            origin: 'local' | 'imported';
+            warnings_known: number;
+        },
         files: AvailableSnapshotFile[],
         documentation = '',
     ): Promise<Buffer> {
-        const pack = tar.pack();
+        // A re-uploaded imported snapshot keeps the identity of the instance
+        // that captured it; claiming this instance would let the next import
+        // treat the source installation's node ids as local ones.
+        const sourceInstanceId = snapshot.origin === 'imported'
+            ? snapshot.source_instance_id
+            : this.getInstanceId();
         const metadata = {
             id: snapshot.id,
             description: snapshot.description,
@@ -387,49 +628,97 @@ export class CloudBackupService {
             node_count: snapshot.node_count,
             stack_count: snapshot.stack_count,
             skipped_nodes: safeParseJson(snapshot.skipped_nodes, []),
+            // Partial-capture warnings travel with the archive so an import
+            // never turns a known-partial snapshot into a complete-looking one.
+            // A snapshot whose archive could not record them stays silent, so
+            // the next import keeps the same uncertainty.
+            ...(snapshot.warnings_known === 0
+                ? {}
+                : { skipped_stacks: safeParseJson(snapshot.skipped_stacks, []) }),
             has_documentation: documentation !== '',
-            instance_id: this.getInstanceId(),
+            instance_id: sourceInstanceId,
             // Version 2 adds the optional documentation.json entry; readers of
             // version 1 archives simply will not find that file.
             archive_version: 2,
         };
-        pack.entry({ name: 'metadata.json' }, JSON.stringify(metadata, null, 2));
+        const metadataJson = JSON.stringify(metadata, null, 2);
+        // Refuse before packing when the importer's limits would reject the
+        // result: a successful upload must always be recoverable.
+        assertArchiveFitsLimits({
+            metadataBytes: Buffer.byteLength(metadataJson),
+            documentationBytes: Buffer.byteLength(documentation),
+            fileBytes: files.map(file => Buffer.byteLength(file.content)),
+        });
 
+        // Entry order is part of the format the importer walks. Packing and the
+        // post-pack size checks live with the limits in cloudBackupArchive so
+        // the producer and the reader cannot drift apart.
+        const entries: ArchiveEntryPlan[] = [{ name: 'metadata.json', content: metadataJson }];
         // Captured Stack Dossier metadata travels with the archive when present.
         if (documentation !== '') {
-            pack.entry({ name: 'documentation.json' }, documentation);
+            entries.push({ name: 'documentation.json', content: documentation });
         }
-
         for (const file of files) {
             const safeNodeName = sanitizePathSegment(file.node_name);
             const safeStackName = sanitizePathSegment(file.stack_name);
             const safeFilename = sanitizePathSegment(file.filename);
-            const entryPath = `nodes/${file.node_id}_${safeNodeName}/${safeStackName}/${safeFilename}`;
-            pack.entry({ name: entryPath }, file.content);
+            entries.push({
+                name: `nodes/${file.node_id}_${safeNodeName}/${safeStackName}/${safeFilename}`,
+                content: file.content,
+            });
         }
-        pack.finalize();
-
-        const gzip = zlib.createGzip();
-        const chunks: Buffer[] = [];
-        return await new Promise<Buffer>((resolve, reject) => {
-            gzip.on('data', (chunk: Buffer) => chunks.push(chunk));
-            gzip.on('end', () => resolve(Buffer.concat(chunks)));
-            gzip.on('error', reject);
-            pack.on('error', reject);
-            pack.pipe(gzip);
-        });
+        return packSnapshotArchive(entries);
     }
 }
 
 // ─── Helpers ───────────────────────────────────────────────────────────────────
 
-function streamToBuffer(stream: Readable): Promise<Buffer> {
+function streamToBuffer(stream: Readable, maxBytes: number, idleMs: number): Promise<Buffer> {
     return new Promise<Buffer>((resolve, reject) => {
         const chunks: Buffer[] = [];
-        stream.on('data', (chunk: Buffer) => chunks.push(chunk));
-        stream.on('end', () => resolve(Buffer.concat(chunks)));
-        stream.on('error', reject);
+        let total = 0;
+        // The SDK arms no inactivity timer once headers have arrived, so a
+        // body that stalls mid-archive is cut here.
+        let idle: ReturnType<typeof setTimeout> | undefined;
+        const armIdle = () => {
+            clearTimeout(idle);
+            idle = setTimeout(() => {
+                stream.destroy();
+                reject(new Error(`The storage endpoint stopped sending data for ${Math.round(idleMs / 1000)} seconds.`));
+            }, idleMs);
+        };
+        armIdle();
+        stream.on('data', (chunk: Buffer | string) => {
+            armIdle();
+            const buf = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+            total += buf.length;
+            if (total > maxBytes) {
+                clearTimeout(idle);
+                stream.destroy();
+                reject(new ArchiveFormatError('TOO_LARGE', 'Archive is larger than the import limit'));
+                return;
+            }
+            chunks.push(buf);
+        });
+        stream.on('end', () => { clearTimeout(idle); resolve(Buffer.concat(chunks)); });
+        stream.on('error', err => { clearTimeout(idle); reject(err); });
     });
+}
+
+/**
+ * The SDK's timeout and abort errors name the library ("the request socket
+ * timed out after 30000 ms of inactivity (configured by client
+ * requestHandler)"). Returns an error an operator can act on, or null when
+ * the failure is not a timeout.
+ */
+function s3TimeoutError(err: unknown, signal?: AbortSignal): Error | null {
+    if (signal?.aborted) {
+        return new Error(`The storage endpoint did not answer within ${Math.round(S3_TIMEOUTS.operationMs / 1000)} seconds.`, { cause: err });
+    }
+    if (err instanceof Error && err.name === 'TimeoutError') {
+        return new Error('The storage endpoint stopped answering. Check that it is reachable from this host.', { cause: err });
+    }
+    return null;
 }
 
 function sanitizePathSegment(input: string): string {

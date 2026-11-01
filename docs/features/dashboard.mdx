@@ -49,6 +49,8 @@ The gauge bars (and the corresponding numeric values) pick up amber at 80% and r
 
 While the dashboard is loading the CPU tile reads `--` and the caption shows `collecting metrics…`; bars and sparklines render once the first sample arrives.
 
+When Sencho runs inside an LXC or another nested container, host capacity comes from Docker, which reports the container's own cores and memory. Usage needs one read-only mount to be readable; without it the CPU and memory tiles show `--` with `usage unknown` and a **Show usage…** link instead of a number from the outer machine. The health verdict keeps its level and names the unknown dimension in its reasons line. See [Docker hosts inside an LXC or another container](/getting-started/configuration#docker-hosts-inside-an-lxc-or-another-container).
+
 <Note>
   **ZFS hosts:** the memory tile and host RAM alerts are ZFS ARC-aware. Reclaimable ARC cache is treated as available memory rather than used, so a large ARC does not inflate the gauge or trigger false low-memory alerts. When ARC stats are readable and the reclaimable amount is nonzero, the memory tile also shows how much raw memory is currently in use and how much of it the ARC can give back on demand. See [ZFS ARC-aware host memory](/getting-started/configuration#zfs-arc-aware-host-memory) for how to expose ARC stats to a Docker install.
 
@@ -181,7 +183,7 @@ Every setting names its **scope**, because switching the active node changes som
 | | **SSO**: the active provider (`OIDC`, `Google`, `GitHub`, `Okta`, `LDAP`) or `Off` | Instance | Settings · SSO |
 | | **Trivy**: whether a scanner is installed on this node | Node | Security · Scanner |
 | | **Scan policies**: enabled vulnerability scan policies | Instance | Security · Policies |
-| Recovery & alerts | **Backups**: `Recovery Vault`, `Custom S3` (with `(auto)` when auto-upload is on), or `Off` | Instance | Settings · Cloud Backup |
+| Recovery & alerts | **Backups**: `Custom S3` (with `(auto)` when auto-upload is on, and `(encrypted)` when archive encryption is on), or `Off` | Instance | Settings · Snapshot Vault |
 | | **Host thresholds**: `CPU x% · RAM y% · Disk z%`, or `Off` | Node | Settings · Host Alerts |
 | | **Crash detection**: global container-crash notifications | Node | Settings · Container Alerts |
 
@@ -210,6 +212,8 @@ The masthead's state word and reasons line both come from a single rule against 
 | **Critical** | At least one of CPU, RAM, or disk is at or above 90%, OR at least one container is in the `exited` state AND at least one unread error alert is present at the same time. |
 
 Every signal that contributes to a non-Healthy state appears in the reasons line, separated by middle dots (`·`), so you can read the cause directly without hovering anything.
+
+An unknown host CPU or memory reading is not treated as zero: it never raises or lowers the state, and when the dashboard is otherwise Healthy its reasons line names it (`CPU and memory usage unknown`) instead of `All systems nominal`, so a host whose usage cannot be measured stays visible.
 
 ## Refresh cadence
 

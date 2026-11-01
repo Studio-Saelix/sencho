@@ -16,7 +16,7 @@ Open the Settings Hub by clicking the **Profile** icon in the top bar and select
 |-------|----------------|
 | **Personal** | Account, Appearance |
 | **Access** | Admiral Account, Users, SSO, API Tokens |
-| **Infrastructure** | Nodes, Stacks, GitOps, Fleet, Registries, Recovery Vault, App Store |
+| **Infrastructure** | Nodes, Stacks, GitOps, Fleet, Registries, Snapshot Vault, App Store |
 | **Monitoring** | Host Alerts, Container Alerts, Docker & Storage |
 | **Notifications** | Channels, Notification Routing, Mute Rules |
 | **Automation** | Image update checks, Webhooks |
@@ -26,7 +26,7 @@ Open the Settings Hub by clicking the **Profile** icon in the top bar and select
 
 Vulnerability scanning has no Settings section: scanner setup, scan policies, suppressions, and acknowledgements live on the dedicated [Security page](/features/security).
 
-Sections that require a higher license tier or the admin role are limited to operators who meet that requirement (Users, SSO, API Tokens, Fleet, Registries, Recovery Vault, Notification Routing are admin-only).
+Sections that require a higher license tier or the admin role are limited to operators who meet that requirement (Users, SSO, API Tokens, Fleet, Registries, Snapshot Vault, Notification Routing are admin-only).
 
 ### Page chrome
 
@@ -37,7 +37,7 @@ Every section renders inside the same masthead-and-sidebar layout. The masthead 
 | **SCOPE** `operator` / `account` / `browser` / `global` | Setting applies to your account (`operator`), to your saved interface preferences, synced across your devices (`account`, for Appearance), to this browser only (`browser`, for browser-local workflow toggles), or to the whole instance (`global`, every other non-node group) |
 | **NODE** `<node name>` | Setting is per-node and is currently being edited against this node |
 | **EDITED** `<count>` pending / `saved` | The current section has unsaved changes |
-| Section-specific stats | Each section can publish its own pills: `2FA on`/`off` and `BACKUP <n> left` (Account); `PLAN`, `DURATION`, `TRIAL <n>d left`, `RENEWS`, `STATUS` (Admiral Account); `OPERATORS` (Users); `PROVIDERS`, `ENABLED` (SSO); `CHANNELS` (Channels); `ROUTES`, `ENABLED` (Notification Routing); `WEBHOOKS` and `ENABLED` (Webhooks); `LABELS` (Labels); `PROVIDER`, `USED` (Recovery Vault); `DEV MODE` (Developer Diagnostics) |
+| Section-specific stats | Each section can publish its own pills: `2FA on`/`off` and `BACKUP <n> left` (Account); `PLAN`, `DURATION`, `TRIAL <n>d left`, `RENEWS`, `STATUS` (Admiral Account); `OPERATORS` (Users); `PROVIDERS`, `ENABLED` (SSO); `CHANNELS` (Channels); `ROUTES`, `ENABLED` (Notification Routing); `WEBHOOKS` and `ENABLED` (Webhooks); `LABELS` (Labels); `PROVIDER`, `SNAPSHOTS` (Snapshot Vault); `DEV MODE` (Developer Diagnostics) |
 
 ### Quick search
 
@@ -179,7 +179,6 @@ Activate, view, or deactivate the license for this Sencho control plane, and see
 | Element | Description |
 |---------|-------------|
 | **Sencho Admiral** | The active license on this control plane, with a tier badge. Community instances see an upgrade prompt here instead. |
-| **Recovery Vault** | Whether the current subscription includes Recovery Vault entitlement. |
 | **Hardened Build** | Switches this control plane between the Community image channel and the Admiral Hardened Build channel. Review entitlement and registry access before switching; see [Plans](/features/licensing#feature-breakdown) for what Hardened Build changes. |
 | **Current image** | The image reference this control plane is currently running, so you can confirm which channel took effect after a switch. A hardened image is shown as `Restricted` to non-administrators. |
 | **Channel** | The running image channel this control plane is on: Community, Hardened, or Unknown. Reflects the running build, not the configured target. |
@@ -370,18 +369,14 @@ See [Private Registries](/features/private-registries) for the full walkthrough.
 
 ---
 
-## Recovery Vault
-
-<Note>
-  Custom S3-compatible storage is available on every tier. Recovery Vault is an Admiral feature.
-</Note>
+## Snapshot Vault
 
 **Scope:** Global, admin-only
 
-Mirror fleet snapshots to Recovery Vault or any S3-compatible storage so a control-plane loss does not take the recovery history with it. The masthead publishes a **PROVIDER** pill (`sencho` / `s3` / `disabled`) and a **USED** pill showing storage consumption; the object count appears inline in the Storage used row.
+Mirror fleet snapshots to any S3-compatible storage so a control-plane loss does not take the snapshot history with it. The masthead publishes a **PROVIDER** pill (`custom` / `disabled`) and, once snapshots exist, a **SNAPSHOTS** pill with their count.
 
 <Frame>
-  <img src="/images/settings/settings-cloud-backup.png" alt="Recovery Vault section with Recovery Vault mode selected" />
+  <img src="/images/settings/settings-cloud-backup.png" alt="Snapshot Vault section with Custom S3 (BYOB) mode selected" />
 </Frame>
 
 ### Storage modes
@@ -389,10 +384,11 @@ Mirror fleet snapshots to Recovery Vault or any S3-compatible storage so a contr
 | Mode | When to pick it |
 |------|-----------------|
 | **Disabled** | Snapshots stay on the control plane's local disk only. Default for fresh installs. |
-| **Recovery Vault (included)** | Replicate snapshots to managed storage that ships with the Admiral subscription. On first selection, click **Activate** to provision the 500 MB allowance. Auto-upload is always on for this mode. The **Test** and **Reprovision** buttons appear on the activated card if you need to verify connectivity or replace the credentials. |
-| **Custom S3 (BYOB)** | Point Sencho at your own S3-compatible bucket (AWS S3, Cloudflare R2, MinIO, Backblaze B2). Required fields: **Endpoint URL**, **Region**, **Bucket**, **Path Prefix** (default `sencho/`), **Access Key ID**, **Secret Access Key**. The secret access key is masked after save. Use **Test connection** to verify credentials, then toggle **Auto-upload** to start replicating snapshots. |
+| **Custom S3 (BYOB)** | Point Sencho at your own S3-compatible bucket (AWS S3, Cloudflare R2, MinIO, Backblaze B2). Required fields: **Endpoint URL**, **Region**, **Bucket**, **Path Prefix** (default `sencho/`), **Access Key ID**, **Secret Access Key**. The secret access key is masked after save. Click **Save**, then use **Test** to verify credentials; **Test** and the Cloud Snapshots list act on the saved configuration. Then toggle **Auto-upload** to start replicating snapshots. |
 
-The **Cloud Snapshots** list at the bottom of the section is an inventory of objects currently in the configured destination. Each row exposes a **Download** icon and a **Delete** icon.
+The **Cloud Snapshots** list at the bottom of the section is an inventory of objects currently in the configured destination. Each row exposes **Import**, **Download**, and **Delete**. Import creates a new local snapshot and does not change live stack files. **Recover archive** lists archives that belong to other instances in the same bucket; only a sealed archive can be recovered, using its passphrase, and it creates a local snapshot with that instance's node identities, which you map to destinations in the snapshot detail view before restoring.
+
+**Encrypt archives** sits on the active destination card and is off by default. Save a passphrase of at least 12 characters before uploads are sealed. The provider then stores ciphertext. A lost passphrase cannot be recovered. Turning encryption off does not unseal archives already uploaded, and a replacement passphrase applies only to later uploads. Download and import use the saved passphrase, and ask for a different one in an overlay when the saved one is missing or does not open the archive. Saving the toggle or the passphrase writes only those encryption settings; unsaved destination and credential edits stay unsaved.
 
 See [Fleet Snapshots & Backups](/features/fleet-backups) for restore workflows.
 

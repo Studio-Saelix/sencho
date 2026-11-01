@@ -163,3 +163,274 @@ describe('MobileFleet dev-build capability', () => {
     vi.unstubAllGlobals();
   });
 });
+
+describe('MobileFleet node identity', () => {
+  const edge = (overrides: Partial<FleetNode> = {}) =>
+    makeNode({ id: 2, name: 'Edge', type: 'remote', ...overrides });
+
+  it('pins Local, Proxy and Pilot with the same labels as the desktop card', async () => {
+    setupFetch(
+      [makeNode(), edge({ mode: 'proxy' }), edge({ id: 3, name: 'Tunnel', mode: 'pilot_agent' })],
+      [],
+    );
+    render(<MobileFleet headerActions={null} onInspectNode={vi.fn()} onInspectStack={vi.fn()} />);
+
+    expect(await screen.findByText('★ Local')).toBeInTheDocument();
+    expect(screen.getByText('Proxy')).toBeInTheDocument();
+    expect(screen.getByText('Pilot')).toBeInTheDocument();
+  });
+
+  it('shows no state word on a healthy node and no separate you-are-here chip', async () => {
+    setupFetch([makeNode(), edge()], []);
+    render(<MobileFleet headerActions={null} onInspectNode={vi.fn()} onInspectStack={vi.fn()} />);
+
+    await screen.findByText('★ Local');
+    expect(screen.queryByText(/^online$/i)).not.toBeInTheDocument();
+    expect(screen.queryByText(/you are here/i)).not.toBeInTheDocument();
+  });
+
+  it('prefers the registry connection mode over the fleet payload', async () => {
+    useNodesMock.mockReturnValue({
+      nodes: [{ id: 2, name: 'Edge', type: 'remote', mode: 'proxy' }],
+      activeNode: null,
+      hasCapability: vi.fn(() => false),
+    });
+    setupFetch([edge({ mode: 'pilot_agent' })], []);
+    render(<MobileFleet headerActions={null} onInspectNode={vi.fn()} onInspectStack={vi.fn()} />);
+
+    expect(await screen.findByText('Proxy')).toBeInTheDocument();
+    expect(screen.queryByText('Pilot')).not.toBeInTheDocument();
+  });
+
+  it('says offline and cordoned together for an offline cordoned node, keeping its pin', async () => {
+    setupFetch([edge({ mode: 'pilot_agent', status: 'offline', cordoned: true })], []);
+    render(<MobileFleet headerActions={null} onInspectNode={vi.fn()} onInspectStack={vi.fn()} />);
+
+    expect(await screen.findByText('offline · cordoned')).toHaveClass('text-destructive');
+    expect(screen.getByText('Pilot')).toBeInTheDocument();
+  });
+
+  it('names the connection, not local or remote, in the node detail meta line', async () => {
+    // The detail screen mounts NodeDetailsSheet, which reads nodeMeta from the node context.
+    useNodesMock.mockReturnValue({ nodes: [], activeNode: null, nodeMeta: new Map(), hasCapability: vi.fn(() => false) });
+    setupFetch([edge({ mode: 'pilot_agent' })], []);
+    render(<MobileFleet headerActions={null} onInspectNode={vi.fn()} onInspectStack={vi.fn()} />);
+
+    fireEvent.click(await screen.findByRole('button', { name: /Edge/ }));
+    expect(await screen.findByText(/^pilot · 1 stacks/)).toBeInTheDocument();
+  });
+
+  it('prefers the registry connection mode in the node detail meta line', async () => {
+    useNodesMock.mockReturnValue({
+      nodes: [{ id: 2, name: 'Edge', type: 'remote', mode: 'proxy' }],
+      activeNode: null,
+      nodeMeta: new Map(),
+      hasCapability: vi.fn(() => false),
+    });
+    setupFetch([edge({ mode: 'pilot_agent' })], []);
+    render(<MobileFleet headerActions={null} onInspectNode={vi.fn()} onInspectStack={vi.fn()} />);
+
+    fireEvent.click(await screen.findByRole('button', { name: /Edge/ }));
+    expect(await screen.findByText(/^proxy · 1 stacks/)).toBeInTheDocument();
+  });
+
+  it('marks an online node over the threshold critical, and a cordoned healthy node cordoned', async () => {
+    const hot = { cpu: { usage: '97.0', cores: 4 } };
+    setupFetch(
+      [
+        makeNode({ systemStats: { ...makeNode().systemStats!, ...hot } }),
+        edge({ mode: 'proxy', cordoned: true }),
+      ],
+      [],
+    );
+    render(<MobileFleet headerActions={null} onInspectNode={vi.fn()} onInspectStack={vi.fn()} />);
+
+    expect(await screen.findByText('critical')).toHaveClass('text-warning');
+    expect(screen.getByText('cordoned')).toHaveClass('text-warning');
+    expect(screen.queryByText(/offline/)).not.toBeInTheDocument();
+    // Only the cordoned node is online and not critical, so only its dot announces Online.
+    expect(screen.getAllByRole('img', { name: 'Online' })).toHaveLength(1);
+  });
+
+  it('gives a healthy node dot an accessible status, since it carries no state word', async () => {
+    setupFetch([edge({ mode: 'proxy' })], []);
+    render(<MobileFleet headerActions={null} onInspectNode={vi.fn()} onInspectStack={vi.fn()} />);
+
+    expect(await screen.findByRole('img', { name: 'Online' })).toBeInTheDocument();
+  });
+
+  it('gives no accessible online status to an offline node', async () => {
+    setupFetch([edge({ mode: 'proxy', status: 'offline' })], []);
+    render(<MobileFleet headerActions={null} onInspectNode={vi.fn()} onInspectStack={vi.fn()} />);
+
+    await screen.findByText('offline');
+    expect(screen.queryByRole('img', { name: 'Online' })).not.toBeInTheDocument();
+  });
+});
+
+describe('MobileFleet crowded node row', () => {
+  const hot = { cpu: { usage: '97.0', cores: 4 } };
+
+  // The row wraps its metadata instead of shrinking a name that would
+  // otherwise fit, whatever adds width: the pin, an exception word, the active
+  // or integration chip, or a name that already fills the card. jsdom has no
+  // layout, so the contract is
+  // asserted on the classes that decide it: the dot and the name share one
+  // non-wrapping unit, and the name shrinks (min-w-0, truncate) only when that
+  // unit alone is wider than the row, so it can never push the dot off the
+  // line. The qualifier block is the only part that wraps.
+  const cases: Array<{
+    label: string;
+    name: string;
+    pin: string;
+    node: Partial<FleetNode>;
+    active?: boolean;
+    devImage?: boolean;
+  }> = [
+    {
+      label: 'the Local pin',
+      name: 'sencho-test-01',
+      pin: '★ Local',
+      node: { type: 'local' },
+    },
+    {
+      label: 'the Proxy pin',
+      name: 'sencho-test-01',
+      pin: 'Proxy',
+      node: { type: 'remote', mode: 'proxy' },
+    },
+    {
+      label: 'the Pilot pin and two exception words',
+      name: 'sencho-test-01',
+      pin: 'Pilot',
+      node: { type: 'remote', mode: 'pilot_agent', status: 'offline', cordoned: true },
+    },
+    {
+      label: 'a critical cordoned node',
+      name: 'sencho-test-01',
+      pin: 'Proxy',
+      node: { type: 'remote', mode: 'proxy', cordoned: true, systemStats: { ...makeNode().systemStats!, ...hot } },
+    },
+    {
+      label: 'the active and integration chips',
+      name: 'sencho-test-01',
+      pin: 'Proxy',
+      node: { type: 'remote', mode: 'proxy' },
+      active: true,
+      devImage: true,
+    },
+    {
+      label: 'a name that fills the card',
+      name: 'sencho-test-01-primary-eu-west',
+      pin: 'Pilot',
+      node: { type: 'remote', mode: 'pilot_agent', status: 'offline', cordoned: true },
+    },
+    {
+      // The only case that may ellipsize: the name alone is wider than the
+      // row, so the identity unit shrinks it and truncate supplies the ellipsis.
+      label: 'a name wider than the card',
+      name: 'sencho-test-01-primary-europe-west-availability-zone-one',
+      pin: 'Pilot',
+      node: { type: 'remote', mode: 'pilot_agent', status: 'offline', cordoned: true },
+    },
+  ];
+
+  it.each(cases)('keeps the name legible with $label', async ({ name, pin, node, active, devImage }) => {
+    const fleetNode = makeNode({ id: 2, name, type: 'remote', ...node });
+    if (active) {
+      useNodesMock.mockReturnValue({
+        nodes: [{ id: 2, name, type: 'remote', mode: 'proxy' }],
+        activeNode: { id: 2, name },
+        hasCapability: vi.fn(() => false),
+      });
+    }
+    setupFetch([fleetNode], devImage ? [makeUpdateStatus({ nodeId: 2, isDevImage: true })] : []);
+
+    render(<MobileFleet headerActions={null} onInspectNode={vi.fn()} onInspectStack={vi.fn()} />);
+
+    const nodeName = await screen.findByText(name);
+    expect(nodeName).toHaveClass('min-w-0', 'truncate');
+    expect(nodeName).not.toHaveClass('shrink-0', 'max-w-full', 'grow', 'flex-1', 'min-w-24');
+    // The dot and the name are one non-wrapping unit: a name as wide as the
+    // row shrinks and ellipsizes inside that unit instead of pushing the dot
+    // onto a line above it.
+    const identity = nodeName.parentElement!;
+    expect(identity).toHaveClass('flex', 'min-w-0', 'items-center');
+    expect(identity).not.toHaveClass('flex-wrap');
+    expect(identity).toContainElement(nodeName);
+    // The status dot precedes the name inside the unit that cannot wrap.
+    const dot = identity.firstElementChild!;
+    expect(dot).not.toBe(nodeName);
+    expect(dot.compareDocumentPosition(nodeName) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(identity.parentElement).toHaveClass('flex-wrap');
+    // The pin and every qualifier wrap as one block below the name, so a
+    // crowded row never strands the pin on a line of its own.
+    const meta = identity.nextElementSibling;
+    expect(meta).toHaveClass('flex-wrap', 'min-w-0');
+    expect(meta).toContainElement(screen.getByText(pin));
+  });
+});
+
+// A node inside an LXC with no cgroup mount reports capacity with null usage.
+// It must read `--`, and it must be left out of the fleet aggregates rather
+// than counted as an idle node.
+describe('MobileFleet host usage unknown', () => {
+  const known = makeNode({
+    id: 1,
+    name: 'Known',
+    type: 'remote',
+    systemStats: {
+      cpu: { usage: '30.0', cores: 4 },
+      memory: { total: 100, used: 25, free: 75, usagePercent: '25.0' },
+      disk: { total: 100, used: 10, free: 90, usagePercent: '10.0' },
+    },
+  });
+  const nested = makeNode({
+    id: 2,
+    name: 'Nested',
+    type: 'remote',
+    systemStats: {
+      cpu: { usage: null, cores: 2 },
+      memory: { total: 400, used: null, free: null, usagePercent: null },
+      disk: null,
+    },
+  });
+
+  /** The masthead band's own cell value for `cpu` / `mem` (first in the DOM). */
+  function mastheadValue(label: 'cpu' | 'mem'): string {
+    const cells = screen.getAllByText(label);
+    return cells[0].parentElement?.parentElement?.textContent ?? '';
+  }
+
+  it('shows placeholders for the unknown node and excludes it from the aggregates', async () => {
+    setupFetch([known, nested], [
+      makeUpdateStatus({ nodeId: 1, name: 'Known', type: 'remote' }),
+      makeUpdateStatus({ nodeId: 2, name: 'Nested', type: 'remote' }),
+    ]);
+    render(<MobileFleet headerActions={null} onInspectNode={vi.fn()} onInspectStack={vi.fn()} />);
+
+    await screen.findByText('Nested');
+    expect(screen.getAllByText('--')).toHaveLength(2);
+    // Known-only averages: CPU 30%, memory 25 / 100. Counting the unknown node
+    // as 0% would give 15% and 5%.
+    expect(mastheadValue('cpu')).toContain('30%');
+    expect(mastheadValue('mem')).toContain('25%');
+  });
+
+  it('marks the unknown dimensions in the node detail without a zero bar', async () => {
+    // The detail screen mounts NodeDetailsSheet, which reads nodeMeta from the node context.
+    useNodesMock.mockReturnValue({ nodes: [], activeNode: null, nodeMeta: new Map(), hasCapability: vi.fn(() => false) });
+    setupFetch([known, nested], [
+      makeUpdateStatus({ nodeId: 1, name: 'Known', type: 'remote' }),
+      makeUpdateStatus({ nodeId: 2, name: 'Nested', type: 'remote' }),
+    ]);
+    render(<MobileFleet headerActions={null} onInspectNode={vi.fn()} onInspectStack={vi.fn()} />);
+
+    fireEvent.click(await screen.findByRole('button', { name: /Nested/ }));
+    expect(await screen.findByText('resources')).toBeInTheDocument();
+    // CPU has no measurable value; memory keeps its known total.
+    expect(screen.getByText('--')).toBeInTheDocument();
+    expect(screen.getByText('400 Bytes total')).toBeInTheDocument();
+    expect(screen.getAllByText('Show usage…')).toHaveLength(2);
+  });
+});

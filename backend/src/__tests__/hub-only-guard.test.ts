@@ -90,6 +90,16 @@ describe('hubOnlyGuard', () => {
     expect(res.body?.error).toMatch(/hub-only/i);
   });
 
+  it('rejects /api/cloud-backup/config when nodeId targets a remote node', async () => {
+    const res = await request(app)
+      .get('/api/cloud-backup/config')
+      .set('Authorization', authHeader)
+      .set('x-node-id', String(remoteNodeId));
+
+    expect(res.status).toBe(403);
+    expect(res.body?.code).toBe('HUB_ONLY_ENDPOINT');
+  });
+
   it('rejects /api/audit-log with 403 when nodeId targets a remote node', async () => {
     const res = await request(app)
       .get('/api/audit-log/')

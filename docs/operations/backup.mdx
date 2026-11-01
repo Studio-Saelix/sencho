@@ -19,7 +19,7 @@ Default path: `/app/data` inside the container, mapped to wherever you mounted i
 
 Contains:
 - `sencho.db` - SQLite database with all settings, users, nodes, alerts, metrics history, and notification config
-- `encryption.key` - Key used to encrypt sensitive values stored in the database: registry credentials, node tokens for remote nodes, Git source credentials, [Fleet Secrets](/features/fleet-secrets) bundles, SSO and MFA secrets, Recovery Vault credentials, and the contents of every [Fleet Snapshot](/features/fleet-backups)
+- `encryption.key` - Key used to encrypt sensitive values stored in the database: registry credentials, node tokens for remote nodes, Git source credentials, [Fleet Secrets](/features/fleet-secrets) bundles, SSO and MFA secrets, Snapshot Vault credentials, and the contents of every [Fleet Snapshot](/features/fleet-backups)
 
 <Warning>
   Both files are required for a full restore. If you restore `sencho.db` without the matching `encryption.key`, every encrypted value in the database becomes permanently unreadable: registry credentials, remote node tokens, Git source and Fleet Secrets bundles, SSO/MFA configuration, and the compose file contents inside any existing fleet snapshot. There is no way to recover this data without the original key; you would need to re-enter each credential, re-enroll remote nodes, and re-capture any snapshots you rely on.

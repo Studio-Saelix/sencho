@@ -6,7 +6,7 @@
  * the registry aligned with the documented rule set.
  */
 import { describe, it, expect } from 'vitest';
-import { runRules, RULE_IDS } from '../services/preflight/rules';
+import { runRules, RULE_IDS, isPreflightNoteFinding } from '../services/preflight/rules';
 import type { EffService, EffectiveModel } from '../services/preflight/effectiveModel';
 import type { PreflightContext, PreflightFinding } from '../services/preflight/types';
 
@@ -43,6 +43,7 @@ function ctx(over: Partial<PreflightContext> = {}): PreflightContext {
     isSelfStack: false,
     meshManaged: false,
     healthchecks: {},
+    composeVersionSkew: null,
     ...over,
   };
 }
@@ -967,6 +968,69 @@ describe('self-managed-stack', () => {
   });
 });
 
+describe('compose-version-mismatch', () => {
+  const skew = {
+    runningVersion: '5.6.0',
+    services: [
+      { service: 'app', createdBy: ['2.38.1'] },
+      { service: 'proxy', createdBy: ['2.38.1'] },
+    ],
+  };
+
+  it('emits one informational note naming every affected service and both versions', () => {
+    const f = ids(runRules(ctx({ composeVersionSkew: skew })), 'compose-version-mismatch');
+    expect(f).toHaveLength(1);
+    expect(f[0].severity).toBe('info');
+    expect(f[0].title).toBe('Created by another Docker Compose version');
+    expect(f[0].message).toContain('app and proxy were created by Docker Compose 2.38.1');
+    expect(f[0].message).toContain('This node deploys with Docker Compose 5.6.0');
+    expect(f[0].message).toContain('can recreate them even if nothing in the file changed');
+    expect(f[0].remediation).toContain('Deploy this stack from one place');
+    expect(f[0].remediation).toContain('Docker Compose 5.6.0');
+  });
+
+  it('uses the singular for a single affected service', () => {
+    const f = ids(runRules(ctx({ composeVersionSkew: { runningVersion: '5.6.0', services: [{ service: 'proxy', createdBy: ['2.38.1'] }] } })), 'compose-version-mismatch');
+    expect(f[0].message).toContain('proxy was created by Docker Compose 2.38.1');
+    expect(f[0].message).toContain('can recreate it even if nothing in the file changed');
+    expect(f[0].remediation).toContain('recreate the affected container once');
+  });
+
+  it('qualifies the refusal by whether a protected container would be recreated', () => {
+    // An unrelated service mismatches while the protected proxy is unchanged,
+    // so this deploy is permitted; the remediation must not claim a refusal
+    // merely because the stack holds Sencho or its proxy.
+    const f = ids(runRules(ctx({ composeVersionSkew: { runningVersion: '5.6.0', services: [{ service: 'web', createdBy: ['2.38.1'] }] } })), 'compose-version-mismatch');
+    expect(f).toHaveLength(1);
+    expect(f[0].remediation).toContain('Sencho refuses a deploy that would recreate a protected container');
+    expect(f[0].remediation).toContain('only when Sencho can verify it would leave those containers unchanged');
+    expect(f[0].remediation).toContain('an update of a stack that holds one is always refused');
+    expect(f[0].remediation).toContain('recreate the affected container once');
+    expect(f[0].remediation).not.toContain('If it holds Sencho');
+  });
+
+  it('says a container that records no version', () => {
+    const f = ids(runRules(ctx({ composeVersionSkew: { runningVersion: '5.6.0', services: [{ service: 'web', createdBy: [null] }] } })), 'compose-version-mismatch');
+    expect(f[0].message).toContain('web records no Compose version');
+  });
+
+  it('stays silent when the running Compose version could not be read', () => {
+    expect(ids(runRules(ctx({ composeVersionSkew: null })), 'compose-version-mismatch')).toHaveLength(0);
+  });
+
+  it('stays silent when every container matches the running version', () => {
+    expect(ids(runRules(ctx({ composeVersionSkew: { runningVersion: '5.6.0', services: [] } })), 'compose-version-mismatch')).toHaveLength(0);
+  });
+
+  it('stays silent when the node state is unavailable', () => {
+    expect(ids(runRules(ctx({ composeVersionSkew: skew, nodeStateAvailable: false })), 'compose-version-mismatch')).toHaveLength(0);
+  });
+
+  it('is registered as an informational note, so it cannot affect All Clear', () => {
+    expect(isPreflightNoteFinding('compose-version-mismatch')).toBe(true);
+  });
+});
+
 describe('rule registry completeness', () => {
   // The canonical rule set. Adding or removing a rule must update this list,
   // which forces a deliberate pass over the docs and the frontend severity map.
@@ -980,7 +1044,7 @@ describe('rule registry completeness', () => {
     'uid-gid-risk', 'image-latest', 'no-restart-policy', 'no-healthcheck',
     'healthcheck-disabled', 'healthcheck-inherited', 'healthcheck-unverifiable', 'healthcheck-inconsistent',
     'deploy-swarm-only',
-    'node-state-unavailable',
+    'node-state-unavailable', 'compose-version-mismatch',
     'external-network-missing', 'external-volume-missing', 'new-network', 'new-volume', 'anonymous-volume',
     'container-name-internal-dup', 'container-name-collision',
     'exposure-internal-published', 'exposure-internal-tunneled', 'sensitive-service-broad-exposure',

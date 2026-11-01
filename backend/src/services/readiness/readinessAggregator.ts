@@ -1599,7 +1599,7 @@ async function buildNodeRow(node: Node, request: FleetReadinessRequest): Promise
   publish('workloads', () => workloadsResult(node, evidenceRead));
   publish('updates', () => tierTwoResult(node, 'updates', summaryRead, null, notDeployed));
   publish('recovery', () => tierTwoResult(
-    node, 'recovery', summaryRead, DatabaseService.getInstance().getSnapshots(1)[0] ?? null, notDeployed,
+    node, 'recovery', summaryRead, DatabaseService.getInstance().getLatestLocalSnapshot(), notDeployed,
   ));
   publish('security', () => securityResult(node, evidenceRead));
 

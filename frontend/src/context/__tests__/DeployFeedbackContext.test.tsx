@@ -12,6 +12,7 @@ vi.mock('@/lib/api', async (importOriginal) => {
   return { ...actual, apiFetch: vi.fn() };
 });
 import { apiFetch } from '@/lib/api';
+import { SENCHO_OPEN_STACK_EVENT } from '@/lib/events';
 
 // Mock serviceUpdate (apiFetch is already mocked above) and toast-store.
 vi.mock('@/lib/serviceUpdate', async (importOriginal) => {
@@ -1302,6 +1303,37 @@ describe('an overlapping operation never cancels an earlier Restore offer', () =
       read = recoveries([failed('api', 'rec-api')]);
       await tick();
       expectRestoreToast('api');
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('hands a refused Restore to the editor with its node and stack', async () => {
+    vi.useFakeTimers();
+    try {
+      mockGates();
+      vi.mocked(fetchStackRecoveries).mockResolvedValue(recoveries([failed('db', 'rec-db')]));
+      const refusal = { message: 'Service "socket-proxy" carries the Docker connection Sencho is using.', reason: 'provider' as const, service: 'socket-proxy' };
+      vi.mocked(requestServiceRestore).mockResolvedValue({
+        ok: false, mode: 'update', error: 'Restore refused.', endpointRefusal: refusal,
+      });
+      const { result } = renderSession();
+      const opened = vi.fn();
+      window.addEventListener(SENCHO_OPEN_STACK_EVENT, opened);
+
+      await runSession(result, { stackName: 'web', serviceName: 'api', nodeId: 4 }, { ok: true, healthGateId: 'gate-api', recoveryId: 'rec-api' });
+      await act(async () => { restoreActionFor('db')(); await vi.advanceTimersByTimeAsync(1); });
+
+      const refusalToast = restoreToasts().find(([msg]) => msg === 'Restore refused.');
+      expect(refusalToast?.[1].action).toMatchObject({ label: 'Open stack editor' });
+      refusalToast![1].action!.onClick();
+      expect((opened.mock.calls[0][0] as CustomEvent).detail).toEqual({
+        nodeId: 4,
+        stackName: 'web',
+        destination: 'editor',
+        endpointRefusal: refusal,
+      });
+      window.removeEventListener(SENCHO_OPEN_STACK_EVENT, opened);
     } finally {
       vi.useRealTimers();
     }

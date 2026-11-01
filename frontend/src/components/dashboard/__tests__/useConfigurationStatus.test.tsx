@@ -57,7 +57,7 @@ beforeEach(() => {
       scanPolicies: { total: 0, enabled: 0, locked: false },
     },
     thresholds: { cpuLimit: 90, ramLimit: 90, diskLimit: 90, dockerJanitorGb: 5, globalCrash: false, hostAlertsEnabled: true },
-    backup: { provider: 'disabled', autoUpload: false, locked: false },
+    backup: { provider: 'disabled', autoUpload: false, encryptArchives: false, locked: false },
   })));
   useNodesMock.mockReset();
   useNodesMock.mockReturnValue({
@@ -68,6 +68,32 @@ beforeEach(() => {
 
 afterEach(() => {
   vi.useRealTimers();
+});
+
+describe('useConfigurationStatus backup field', () => {
+  it('treats a missing encryptArchives flag from an older node as off', async () => {
+    apiFetchMock.mockImplementation(() => Promise.resolve(okJson({
+      tier: 'community',
+      notifications: { agents: {}, alertRules: 0, routingRules: { count: 0, enabledCount: 0, locked: true } },
+      automation: {
+        autoHeal: { total: 0, enabled: 0 },
+        autoUpdate: { enabled: 0, total: 0 },
+        scheduledTasks: { total: 0, enabled: 0, locked: true },
+        webhooks: { total: 0, enabled: 0, locked: true },
+      },
+      security: {
+        mfaEnabled: null,
+        ssoEnabled: false,
+        ssoProvider: null,
+        scanPolicies: { total: 0, enabled: 0, locked: false },
+      },
+      thresholds: { cpuLimit: 90, ramLimit: 90, diskLimit: 90, dockerJanitorGb: 5, globalCrash: false, hostAlertsEnabled: true },
+      backup: { provider: 'sencho', autoUpload: false, locked: false },
+    })));
+    const { result } = renderHook(() => useConfigurationStatus());
+    await act(async () => { await Promise.resolve(); await Promise.resolve(); });
+    expect(result.current.status?.backup.encryptArchives).toBe(false);
+  });
 });
 
 describe('useConfigurationStatus state-invalidate handling', () => {

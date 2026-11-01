@@ -41,12 +41,13 @@ export interface ConfigurationStatus {
   backup: {
     provider: 'disabled' | 'sencho' | 'custom';
     autoUpload: boolean;
+    encryptArchives: boolean;
     locked: boolean;
   };
 }
 
-/** Wire payload may omit `apprise` from older remotes. */
-type WireConfigurationStatus = Omit<ConfigurationStatus, 'notifications'> & {
+/** Wire payload may omit newer fields from an older remote node. */
+type WireConfigurationStatus = Omit<ConfigurationStatus, 'notifications' | 'backup'> & {
   notifications: Omit<ConfigurationStatus['notifications'], 'agents'> & {
     agents: {
       discord: AgentStatus;
@@ -56,11 +57,18 @@ type WireConfigurationStatus = Omit<ConfigurationStatus, 'notifications'> & {
       ntfy?: AgentStatus;
     };
   };
+  backup: Omit<ConfigurationStatus['backup'], 'encryptArchives'> & {
+    encryptArchives?: boolean;
+  };
 };
 
 function normalizeConfigurationStatus(raw: WireConfigurationStatus): ConfigurationStatus {
   return {
     ...raw,
+    backup: {
+      ...raw.backup,
+      encryptArchives: raw.backup.encryptArchives === true,
+    },
     notifications: {
       ...raw.notifications,
       agents: normalizeConfigurationAgents(raw.notifications.agents),

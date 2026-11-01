@@ -244,12 +244,17 @@ export function adjustForBalloon(hostMem: HostMemory, ballooned: number): HostMe
   };
 }
 
-/** Wire shape of host memory as served by /api/system/stats and fleet overviews. */
+/**
+ * Wire shape of host memory as served by /api/system/stats and fleet overviews.
+ * `used`, `free` and `usagePercent` are null only when the usage cannot be
+ * measured without leaking the outer machine's numbers (a nested container
+ * with no trusted cgroup source); `total` is always the Docker host's memory.
+ */
 export interface MemoryWire {
   total: number;
-  used: number;
-  free: number;
-  usagePercent: string;
+  used: number | null;
+  free: number | null;
+  usagePercent: string | null;
   arcReclaimable?: number;
   ballooned?: number;
   effectiveTotal?: number;
@@ -282,6 +287,16 @@ export function memoryToWire(hostMem: HostMemory): MemoryWire {
         }
       : {}),
   };
+}
+
+/**
+ * Wire shape for a host whose memory total is known but whose usage is not:
+ * a nested container with no trusted cgroup source. `used`, `free` and
+ * `usagePercent` are null and no ARC/balloon fields are present, because those
+ * adjustments describe the outer machine.
+ */
+export function memoryUnknownWire(total: number): MemoryWire {
+  return { total, used: null, free: null, usagePercent: null };
 }
 
 /** Fetch host memory, reclaimable ARC, and ballooned memory concurrently. */

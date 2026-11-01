@@ -238,7 +238,7 @@
               "tutorials/use-private-registry-images-across-the-fleet",
               "tutorials/set-up-fleet-secrets",
               "tutorials/set-up-fleet-federation",
-              "tutorials/configure-recovery-vault-backups"
+              "tutorials/configure-snapshot-vault-backups"
             ]
           },
           {

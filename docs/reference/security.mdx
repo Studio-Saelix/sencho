@@ -158,7 +158,7 @@ API tokens provide scoped, long-lived access for CI/CD pipelines and automation 
 | **Deploy Only** | Everything in Read Only, plus deploy, down, restart, stop, start, and update |
 | **Full Admin** | All API operations |
 
-Regardless of scope, tokens are universally blocked from sensitive operations: password and MFA management, user administration, SSO configuration, node management, license management, token management, registry credentials, console access, Recovery Vault, and image channel management.
+Regardless of scope, tokens are universally blocked from sensitive operations: password and MFA management, user administration, SSO configuration, node management, license management, token management, registry credentials, console access, Snapshot Vault, and image channel management.
 
 Tokens are cryptographically hashed before storage; the raw value is shown exactly once at creation. Each token tracks its last-used timestamp for auditing. You can configure expiry at 30, 60, 90, or 365 days, or leave it open-ended. A maximum of 25 active tokens are allowed per user.
 
@@ -226,7 +226,7 @@ Sencho encrypts all sensitive values with AES-256-GCM before writing them to the
 - Remote node API tokens
 - Registry credentials (private image registries)
 - Fleet Secrets bundle payloads (env-var key/value pairs)
-- Recovery Vault credentials (S3-compatible secret key)
+- Snapshot Vault credentials (S3-compatible secret key)
 
 A single 32-byte data key seals all of the above. The key is generated automatically on first startup and stored in a dedicated file with 0600 permissions (owner-only read/write). If the file permissions are found to be too permissive at startup, Sencho corrects them automatically.
 

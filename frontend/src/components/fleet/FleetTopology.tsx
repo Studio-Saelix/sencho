@@ -13,7 +13,7 @@ import {
     type NodeTypes,
 } from '@xyflow/react';
 import '@xyflow/react/dist/style.css';
-import { Server, Zap, Network, Layers, Move, Ban, Clock, Activity } from 'lucide-react';
+import { Server, Network, Layers, Move, Ban, Clock, Activity } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import {
     layoutFleetGraph,
@@ -23,6 +23,7 @@ import {
     type SavedPositions,
 } from '@/lib/fleet-topology-layout';
 import { NodeLabelPill } from '@/components/blueprints/NodeLabelPill';
+import { NodeConnectionPin } from '@/components/FleetView/NodeConnectionPin';
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip';
 
 interface FleetTopologyProps {
@@ -96,6 +97,8 @@ function FleetNodeCard({ data, selected }: { data: FleetNodeData; selected?: boo
         && node.nodeMode === 'pilot_agent'
         && typeof node.pilotLastSeen === 'number'
         && Date.now() - node.pilotLastSeen > PILOT_STALE_MS;
+    // Exception-only status: a healthy node shows only its dot.
+    const statusWord = isOffline ? 'Offline' : node.critical ? 'Critical' : null;
     const showLatency = !isLocal && !isOffline && typeof node.latencyMs === 'number';
 
     return (
@@ -129,10 +132,17 @@ function FleetNodeCard({ data, selected }: { data: FleetNodeData; selected?: boo
             )}
 
             <div className="flex items-center gap-2 px-3 py-1.5 border-b border-card-border">
-                <span aria-hidden="true" className={cn('h-2 w-2 rounded-full shrink-0', dotClass(node))} />
-                <span className="font-mono text-[9px] uppercase tracking-[0.22em] text-muted-foreground">
-                    {isOffline ? 'Offline' : node.critical ? 'Critical' : 'Online'}
-                </span>
+                <span
+                    role={statusWord ? undefined : 'img'}
+                    aria-label={statusWord ? undefined : 'Online'}
+                    aria-hidden={statusWord ? true : undefined}
+                    className={cn('h-2 w-2 rounded-full shrink-0', dotClass(node))}
+                />
+                {statusWord && (
+                    <span className="font-mono text-[9px] uppercase tracking-[0.22em] text-muted-foreground">
+                        {statusWord}
+                    </span>
+                )}
                 <span className="ml-auto flex items-center gap-1.5">
                     {pilotStale && (
                         <TooltipProvider>
@@ -148,15 +158,7 @@ function FleetNodeCard({ data, selected }: { data: FleetNodeData; selected?: boo
                             </Tooltip>
                         </TooltipProvider>
                     )}
-                    {node.critical && !isOffline ? (
-                        <Zap className="h-3 w-3 text-warning" strokeWidth={2} aria-label="Critical" />
-                    ) : null}
-                    <span className={cn(
-                        'font-mono text-[9px] uppercase tracking-[0.22em]',
-                        isLocal ? 'text-brand' : 'text-muted-foreground',
-                    )}>
-                        {isLocal ? 'Local' : 'Remote'}
-                    </span>
+                    <NodeConnectionPin type={node.type} mode={node.nodeMode} />
                 </span>
             </div>
 

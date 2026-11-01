@@ -26,11 +26,13 @@ import { useNodes, type Node } from '@/context/NodeContext';
 import { NodeCordonModal } from './NodeCordonModal';
 import { UpdateStatusBadge } from './UpdateStatusBadge';
 import { PinnedUpdateBadge } from './PinnedUpdateBadge';
+import { NodeConnectionPin } from './NodeConnectionPin';
 import { StackSection } from './NodeCardStackList';
 import { openGitOpsWorkplace } from '@/components/gitops/portfolio/portfolioNavigation';
 import type { Label as StackLabel } from '../label-types';
 import type { FleetNode, NodeUpdateStatus } from './types';
-import { getNodeCpu, getNodeMem, getNodeMemUsed, getNodeMemTotal, getNodeDisk, isCritical } from './nodeUtils';
+import { getNodeCpuUsage, getNodeMemUsage, getNodeMemUsed, getNodeMemTotal, getNodeDisk, isCritical } from './nodeUtils';
+import { ShowUsageLink } from '@/components/ui/show-usage-link';
 
 // --- Types ---
 
@@ -96,11 +98,10 @@ export function NodeCard({ node, onNavigate, gitopsAttention, labelMap, updateSt
 
     const isOnline = node.status === 'online';
     const isLocal = node.type === 'local';
-    const isPilot = (registryNode?.mode ?? node.mode) === 'pilot_agent';
     const formattedVersion = formatVersion(updateStatus?.version);
     const formattedLatest = formatVersion(updateStatus?.latestVersion);
-    const cpuPercent = getNodeCpu(node);
-    const memPercent = getNodeMem(node);
+    const cpuPercent = getNodeCpuUsage(node);
+    const memPercent = getNodeMemUsage(node);
     const memUsed = getNodeMemUsed(node);
     const memTotal = getNodeMemTotal(node);
     const diskPercent = getNodeDisk(node);
@@ -136,18 +137,7 @@ export function NodeCard({ node, onNavigate, gitopsAttention, labelMap, updateSt
         <div className={`rounded-xl border border-card-border border-t-card-border-top bg-card text-card-foreground shadow-card-bevel transition-colors hover:border-t-card-border-hover ${localRailClasses} ${isOnline ? '' : 'opacity-60'}`}>
             {/* Card Header */}
             <div className="relative p-4 pb-3">
-                {isLocal ? (
-                    <span className="absolute top-3 right-9 font-mono text-[9px] uppercase tracking-[0.22em] text-brand">
-                        ★ Local
-                    </span>
-                ) : (
-                    <span
-                        className="absolute top-3 right-9 font-mono text-[9px] uppercase tracking-[0.22em] text-muted-foreground"
-                        title={isPilot ? 'Pilot agent: this node connects out to the control instance over a tunnel' : 'Proxy: the control instance reaches this node over its API'}
-                    >
-                        {isPilot ? 'Pilot' : 'Proxy'}
-                    </span>
-                )}
+                <NodeConnectionPin type={node.type} mode={registryNode?.mode ?? node.mode} className="absolute top-3 right-9" />
                 <div className="absolute top-2 right-2">
                     <DropdownMenu>
                         <DropdownMenuTrigger asChild>
@@ -201,12 +191,12 @@ export function NodeCard({ node, onNavigate, gitopsAttention, labelMap, updateSt
                             <h3 className="text-sm font-medium truncate">{node.name}</h3>
                             <div className="flex items-center gap-1.5 mt-0.5 flex-wrap">
                                 {!isOnline && (
-                                    <Badge variant="secondary" className="text-[10px] px-1.5 py-0 h-4 shrink-0">
+                                    <Badge variant="secondary" size="compact">
                                         <WifiOff className="w-2.5 h-2.5 mr-0.5" /> Offline
                                     </Badge>
                                 )}
                                 {formattedVersion && (
-                                    <Badge variant="outline" className="text-[10px] px-1.5 py-0 h-4 font-mono tabular-nums shrink-0">
+                                    <Badge variant="outline" size="compact" className="font-mono tabular-nums">
                                         {formattedVersion}
                                     </Badge>
                                 )}
@@ -219,7 +209,7 @@ export function NodeCard({ node, onNavigate, gitopsAttention, labelMap, updateSt
                                     />
                                 )}
                                 {isOnline && updateStatus?.updateAvailable && !updateStatus.updateStatus && !updateStatus?.skipActive && !(updateStatus?.updateBlocked && updateStatus?.imageChannel !== 'hardened') && (
-                                    <Badge className="text-[10px] px-1.5 py-0 h-4 bg-warning/15 text-warning border-warning/30 shrink-0">
+                                    <Badge size="compact" className="bg-warning/15 text-warning border-warning/30">
                                         Update available
                                     </Badge>
                                 )}
@@ -227,24 +217,25 @@ export function NodeCard({ node, onNavigate, gitopsAttention, labelMap, updateSt
                                     <PinnedUpdateBadge reason={updateStatus.updateBlockedReason} />
                                 )}
                                 {updateStatus?.skipActive && (
-                                    <Badge className="text-[10px] px-1.5 py-0 h-4 bg-muted text-muted-foreground border-card-border/40 shrink-0">
+                                    <Badge size="compact" className="bg-muted text-muted-foreground border-card-border/40">
                                         Skipped
                                     </Badge>
                                 )}
                                 {updateStatus?.isDevImage && (
-                                    <Badge className="text-[10px] px-1.5 py-0 h-4 bg-warning/15 text-warning border-warning/30 shrink-0">
+                                    <Badge size="compact" className="bg-warning/15 text-warning border-warning/30">
                                         <FlaskConical className="w-2.5 h-2.5 mr-0.5" strokeWidth={1.5} /> Integration image
                                     </Badge>
                                 )}
                                 {isOnline && isCritical(node) && (
-                                    <Badge variant="destructive" className="text-[10px] px-1.5 py-0 h-4 shrink-0">
+                                    <Badge variant="destructive" size="compact">
                                         <AlertTriangle className="w-2.5 h-2.5 mr-0.5" /> Critical
                                     </Badge>
                                 )}
                                 {node.cordoned && (
                                     <Badge
                                         variant="outline"
-                                        className="text-[10px] px-1.5 py-0 h-4 shrink-0 bg-warning/15 text-warning border-warning/30"
+                                        size="compact"
+                                        className="bg-warning/15 text-warning border-warning/30"
                                         title={node.cordoned_reason ?? 'Unschedulable: new blueprint deployments skip this node'}
                                     >
                                         <Ban className="w-2.5 h-2.5 mr-0.5" /> Cordoned
@@ -254,8 +245,8 @@ export function NodeCard({ node, onNavigate, gitopsAttention, labelMap, updateSt
                                     <button
                                         type="button"
                                         className={cn(
-                                            badgeVariants({ variant: 'outline' }),
-                                            'text-[10px] px-1.5 py-0 h-4 shrink-0 cursor-pointer bg-warning/10 text-warning border-warning/30 hover:bg-warning/20',
+                                            badgeVariants({ variant: 'outline', size: 'compact' }),
+                                            'cursor-pointer bg-warning/10 text-warning border-warning/30 hover:bg-warning/20',
                                         )}
                                         onClick={(event) => { event.stopPropagation(); openGitOpsWorkplace({ nodeId: node.id, attention: true }); }}
                                         title="Open the GitOps applications needing attention on this node"
@@ -294,18 +285,30 @@ export function NodeCard({ node, onNavigate, gitopsAttention, labelMap, updateSt
                                 <span className="flex items-center gap-1 text-muted-foreground">
                                     <Cpu className="w-3 h-3" /> CPU
                                 </span>
-                                <span className="font-medium">{node.systemStats.cpu.usage}%</span>
+                                <span className="font-medium">{node.systemStats.cpu.usage !== null ? `${node.systemStats.cpu.usage}%` : '--'}</span>
                             </div>
-                            <UsageBar percent={cpuPercent} color={cpuPercent > 80 ? 'bg-destructive/80' : cpuPercent > 60 ? 'bg-warning' : 'bg-success'} />
+                            {cpuPercent !== null ? (
+                                <UsageBar percent={cpuPercent} color={cpuPercent > 80 ? 'bg-destructive/80' : cpuPercent > 60 ? 'bg-warning' : 'bg-success'} />
+                            ) : (
+                                <div className="mt-1"><ShowUsageLink /></div>
+                            )}
                         </div>
                         <div>
                             <div className="flex items-center justify-between text-xs mb-1">
                                 <span className="flex items-center gap-1 text-muted-foreground">
                                     <MemoryStick className="w-3 h-3" /> RAM
                                 </span>
-                                <span className="font-medium">{formatBytes(memUsed, 1)} / {formatBytes(memTotal, 1)}</span>
+                                <span className="font-medium">
+                                    {memUsed !== null && memTotal !== null
+                                        ? `${formatBytes(memUsed, 1)} / ${formatBytes(memTotal, 1)}`
+                                        : '--'}
+                                </span>
                             </div>
-                            <UsageBar percent={memPercent} color={memPercent > 80 ? 'bg-destructive/80' : memPercent > 60 ? 'bg-warning' : 'bg-brand/60'} />
+                            {memPercent !== null ? (
+                                <UsageBar percent={memPercent} color={memPercent > 80 ? 'bg-destructive/80' : memPercent > 60 ? 'bg-warning' : 'bg-brand/60'} />
+                            ) : (
+                                <div className="mt-1"><ShowUsageLink /></div>
+                            )}
                         </div>
                         {node.systemStats.disk && (
                             <div>

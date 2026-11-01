@@ -1,6 +1,7 @@
 import type { EffectiveModel } from './effectiveModel';
 import type { ExposureIntent } from '../network/types';
 import type { LiteralDollarWarning } from '../../helpers/unsetEnvClassification';
+import type { ComposeVersionSkew } from '../../helpers/composeVersionSkew';
 
 /** Graded severity of a single preflight finding. */
 export type PreflightSeverity = 'blocker' | 'high' | 'warning' | 'info';
@@ -167,4 +168,10 @@ export interface PreflightContext {
    * Empty when the model is null. Structural facts only; never Test command text.
    */
   healthchecks: Record<string, ServiceHealthcheckEvidence>;
+  /**
+   * Containers created by a different Compose version than this node deploys
+   * with, or null when the running version could not be read (the rules skip
+   * the check rather than claim a match).
+   */
+  composeVersionSkew: ComposeVersionSkew | null;
 }

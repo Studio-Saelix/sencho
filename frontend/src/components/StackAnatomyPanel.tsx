@@ -19,7 +19,7 @@ import { parseAnatomy, parseEnvKeys, formatGitSource, imageName, primaryPublishe
 import { SOURCE_STATE_LOOKUP } from '@/lib/gitopsState';
 import type { GitOpsSourceStatus } from '@/types/gitops';
 import { buildServiceUrl } from '@/lib/serviceUrl';
-import { resolvePublishedPortClick, tcpOwners } from '@/lib/serviceUrlResolve';
+import { resolvePublishedPortClick, tcpOwners, resolveInterpolatedHostPorts, type DisplayPortRow } from '@/lib/serviceUrlResolve';
 import { StackActivityTimeline } from './stack/StackActivityTimeline';
 import StackDossierPanel from './stack/StackDossierPanel';
 import DriftPanel from './stack/DriftPanel';
@@ -131,6 +131,17 @@ export default function StackAnatomyPanel({
   serviceUrlEntry,
 }: StackAnatomyPanelProps) {
   const anatomy = useMemo(() => parseAnatomy(content), [content]);
+  // A host port set through a variable (`${WEB_PORT:-8080}:80`) resolves from
+  // Compose's rendered model, the same shared effective-anatomy read the footer
+  // and Networking tab already use, which applies the stack's saved env. The
+  // ports row, the footer, and (outside multi-file Git stacks, where it reads the
+  // merged model instead) the Dossier all read this one value, so they agree.
+  // While a variable's default is being edited and not yet saved, the row keeps
+  // the last saved resolution; literal ports keep following the buffer.
+  const displayPorts = useMemo<Record<string, DisplayPortRow[]>>(
+    () => (anatomy ? resolveInterpolatedHostPorts(anatomy.ports, serviceUrlEntry) : {}),
+    [anatomy, serviceUrlEntry],
+  );
   const envKeys = useMemo(() => parseEnvKeys(envContent), [envContent]);
   const missingVars = useMemo(() => {
     if (!anatomy) return [];
@@ -329,8 +340,8 @@ export default function StackAnatomyPanel({
   // slow /git-source response for a previously selected stack cannot render or be exported here.
   const activeGitSource = gitSource?.stack === stackName ? gitSource.info : null;
   const primaryHostPort = useMemo(
-    () => (anatomy ? primaryPublishedHostPort(anatomy.ports) : null),
-    [anatomy],
+    () => primaryPublishedHostPort(displayPorts),
+    [displayPorts],
   );
   const primaryServiceUrl = useMemo(
     () => (primaryHostPort !== null ? buildServiceUrl({ node: activeNode, publicPort: primaryHostPort }) : null),
@@ -381,7 +392,9 @@ export default function StackAnatomyPanel({
     return {
       stackName,
       services: structural.services,
-      ports: structural.ports,
+      // The Dossier's ports table must show the same ports the Anatomy tab does,
+      // so the non-multi-file branch reads the same resolved rows.
+      ports: activeEffective ? structural.ports : displayPorts,
       volumes: structural.volumes,
       restart: structural.restart,
       envFile: firstEnvFile,
@@ -390,7 +403,7 @@ export default function StackAnatomyPanel({
       networkName: structural.networks.length > 0 ? structural.networks[0] : `${stackName}_default`,
       gitSource: activeGitSource ? formatGitSource(activeGitSource) : null,
     };
-  }, [effectiveAnatomy, serviceUrlEntry, gitSource, anatomy, stackName, firstEnvFile, envVarCount, missingVars, activeGitSource]);
+  }, [effectiveAnatomy, serviceUrlEntry, gitSource, anatomy, displayPorts, stackName, firstEnvFile, envVarCount, missingVars, activeGitSource]);
 
   const bump = updatePreview?.summary.semver_bump ?? 'none';
   const hasUpdate = Boolean(updatePreview?.summary.has_update);
@@ -546,19 +559,32 @@ export default function StackAnatomyPanel({
               )}
             </Row>
             <Row label="ports">
-              {Object.keys(anatomy.ports).length === 0 ? (
+              {Object.keys(displayPorts).length === 0 ? (
                 <span className="text-stat-subtitle">none</span>
               ) : (
                 <div className="flex flex-col gap-0.5 font-mono text-xs">
-                  {Object.entries(anatomy.ports).flatMap(([svc, rows]) =>
+                  {Object.entries(displayPorts).flatMap(([svc, rows]) =>
                     rows.map((r, i) => (
-                      <div key={`${svc}-${i}`} className="flex items-center gap-1.5">
+                      <div key={`${svc}-${i}`} className={cn('flex items-center gap-1.5', r.hostVariables && 'min-w-0')}>
                         {anatomy.services.length > 1 && (
-                          <span className="text-stat-subtitle">{svc}</span>
+                          <span className={cn('text-stat-subtitle', r.hostVariables && 'shrink-0')}>{svc}</span>
                         )}
-                        <span className="font-semibold text-foreground">{r.host}</span>
+                        <span
+                          className={cn('font-semibold text-foreground', r.hostVariables && !r.hostResolved && 'truncate')}
+                          title={r.hostVariables && !r.hostResolved ? r.host : undefined}
+                        >
+                          {r.host}
+                        </span>
                         <span className="text-stat-subtitle">→</span>
                         <span>{r.container}/{r.proto}</span>
+                        {r.hostResolved && r.hostVariables && (
+                          <span
+                            className="shrink-0 text-[10px] text-stat-subtitle"
+                            title={`Set by ${r.hostVariables.join(', ')}`}
+                          >
+                            {r.hostVariables.map(v => '${' + v + '}').join(' ')}
+                          </span>
+                        )}
                       </div>
                     )),
                   )}
@@ -723,7 +749,7 @@ export default function StackAnatomyPanel({
       {anatomy && anatomy.services.length > 0 && (
         <div className="border-t border-muted px-3 py-2 flex items-center justify-between">
           <span className="font-mono text-[10px] uppercase tracking-wide text-stat-subtitle">
-            {Object.keys(anatomy.ports).length > 0 ? 'exposed' : 'no ports'}
+            {Object.keys(displayPorts).length > 0 ? 'exposed' : 'no ports'}
           </span>
           {primaryHostPort !== null && (
             sharedPortClick ? (

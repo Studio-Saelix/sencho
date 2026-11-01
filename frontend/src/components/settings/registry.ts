@@ -169,9 +169,9 @@ export const SETTINGS_ITEMS: readonly SettingsItemMeta[] = [
     {
         id: 'cloud-backup',
         group: 'infrastructure',
-        label: 'Recovery Vault',
-        description: 'Mirror fleet snapshots to Recovery Vault or any S3-compatible storage.',
-        keywords: ['recovery', 'vault', 'cloud', 'backup', 'snapshot', 's3', 'r2', 'minio', 'storage', 'offsite'],
+        label: 'Snapshot Vault',
+        description: 'Mirror fleet snapshots to any S3-compatible storage.',
+        keywords: ['vault', 'cloud', 'backup', 'snapshot', 's3', 'r2', 'minio', 'storage', 'offsite'],
         tier: null,
         scope: 'global',
         adminOnly: true,

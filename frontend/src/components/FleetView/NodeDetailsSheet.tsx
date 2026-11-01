@@ -9,6 +9,8 @@ import { formatVersion } from '@/lib/version';
 import { formatTimeAgo } from '@/lib/relativeTime';
 import { formatBytes } from '@/lib/utils';
 import { PinnedUpdateBadge } from './PinnedUpdateBadge';
+import { ShowUsageLink } from '@/components/ui/show-usage-link';
+import { parseHostUsage } from '@/lib/hostUsage';
 import { NodeCordonModal } from './NodeCordonModal';
 import type { FleetNode, NodeUpdateStatus } from './types';
 
@@ -96,8 +98,11 @@ export function NodeDetailsSheet({
     const isPilot = registryNode?.mode === 'pilot_agent';
     const connectionModeLabel = isLocal ? 'Local' : isPilot ? 'Pilot Agent' : 'API Proxy';
     const versionLabel = formatVersion(updateStatus?.version ?? meta?.version ?? null);
-    const cpuPercent = node.systemStats ? parseFloat(node.systemStats.cpu.usage) : 0;
-    const memPercent = node.systemStats ? parseFloat(node.systemStats.memory.usagePercent) : 0;
+    // Null usage (a nested container with no cgroup mount) is unknown, not 0%.
+    const cpuPercent = parseHostUsage(node.systemStats?.cpu.usage);
+    const memPercent = parseHostUsage(node.systemStats?.memory.usagePercent);
+    const memUsed = node.systemStats?.memory.used ?? null;
+    const memTotal = node.systemStats?.memory.total ?? null;
     const diskPercent = node.systemStats?.disk ? parseFloat(node.systemStats.disk.usagePercent) : 0;
     const hasNetworkingSignal = Boolean(
         networkingSignal && (networkingSignal.exposed || networkingSignal.unknown || networkingSignal.drift),
@@ -212,18 +217,30 @@ export function NodeDetailsSheet({
                                 <span className="flex items-center gap-1 text-muted-foreground">
                                     <Cpu className="w-3 h-3" /> CPU · {node.systemStats.cpu.cores} cores
                                 </span>
-                                <span className="font-medium">{node.systemStats.cpu.usage}%</span>
+                                <span className="font-medium">{node.systemStats.cpu.usage !== null ? `${node.systemStats.cpu.usage}%` : '--'}</span>
                             </div>
-                            <UsageBar percent={cpuPercent} color={cpuPercent > 80 ? 'bg-destructive/80' : cpuPercent > 60 ? 'bg-warning' : 'bg-success'} />
+                            {cpuPercent !== null ? (
+                                <UsageBar percent={cpuPercent} color={cpuPercent > 80 ? 'bg-destructive/80' : cpuPercent > 60 ? 'bg-warning' : 'bg-success'} />
+                            ) : (
+                                <div className="mt-1"><ShowUsageLink /></div>
+                            )}
                         </div>
                         <div>
                             <div className="flex items-center justify-between text-xs mb-1">
                                 <span className="flex items-center gap-1 text-muted-foreground">
                                     <MemoryStick className="w-3 h-3" /> Memory
                                 </span>
-                                <span className="font-medium">{formatBytes(node.systemStats.memory.used, 1)} / {formatBytes(node.systemStats.memory.total, 1)}</span>
+                                <span className="font-medium">
+                                    {memUsed !== null && memTotal !== null
+                                        ? `${formatBytes(memUsed, 1)} / ${formatBytes(memTotal, 1)}`
+                                        : memTotal !== null ? `${formatBytes(memTotal, 1)} total` : '--'}
+                                </span>
                             </div>
-                            <UsageBar percent={memPercent} color={memPercent > 80 ? 'bg-destructive/80' : memPercent > 60 ? 'bg-warning' : 'bg-brand/60'} />
+                            {memPercent !== null ? (
+                                <UsageBar percent={memPercent} color={memPercent > 80 ? 'bg-destructive/80' : memPercent > 60 ? 'bg-warning' : 'bg-brand/60'} />
+                            ) : (
+                                <div className="mt-1"><ShowUsageLink /></div>
+                            )}
                         </div>
                         {node.systemStats.disk && (
                             <div>
@@ -292,7 +309,7 @@ export function NodeDetailsSheet({
                             {!updateStatus || !updateStatus.online ? (
                                 <Badge variant="outline" className="text-[10px] px-1.5 py-0 h-5 text-muted-foreground">Unknown</Badge>
                             ) : updateStatus.updateBlocked ? (
-                                <PinnedUpdateBadge reason={updateStatus.updateBlockedReason} className="text-[10px] px-1.5 py-0 h-5" />
+                                <PinnedUpdateBadge reason={updateStatus.updateBlockedReason} className="h-5" />
                             ) : updateStatus.updateAvailable ? (
                                 <Badge className="text-[10px] px-1.5 py-0 h-5 bg-warning/15 text-warning border-warning/30">Update available</Badge>
                             ) : (
