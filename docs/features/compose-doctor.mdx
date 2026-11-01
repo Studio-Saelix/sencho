@@ -170,7 +170,7 @@ These rules activate when the stack publishes at least one host port or runs a t
 | Tunnel connector | Note | A Cloudflare Tunnel, Tailscale, or WireGuard connector runs in the stack. The finding names the provider, its scope (public edge or private overlay), the services it reaches, and what Sencho cannot verify. It is a note: it does not change the stack's result. |
 | Stack publishes ports without an exposure intent | Warning | The stack publishes host ports, or a tunnel connector reaches one of its services, but no exposure intent has been set in the Networking tab. When an unclassified service is reachable only through a tunnel, the finding reads **Stack is reachable without an exposure intent**. |
 | Published port not in documented access URLs | Warning | A host port is not referenced by any access URL recorded in the Stack Dossier; the documentation may be stale. |
-| Has reverse-proxy labels but no documented URL | Warning | A service carries Traefik, Caddy, or similar reverse-proxy labels but has no documented access URL, no `sencho.service.url` label, and no reverse-proxy intent. |
+| Has reverse-proxy labels but no documented URL | Warning | A service carries Traefik, Caddy, or similar reverse-proxy labels but has no documented access URL, no `io.sencho.url` label, and no reverse-proxy intent. |
 
 ### Self-protection
 

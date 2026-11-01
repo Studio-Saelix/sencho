@@ -122,7 +122,7 @@ export interface EffService {
   /** Tailscale forwarding flags (`--advertise-routes`, `--advertise-exit-node`, or `unresolved`) named by `TS_EXTRA_ARGS`; no other part of the value is kept. */
   tailscaleFlags?: TailscaleForwardFlag[];
   /**
-   * True when `sencho.service.url` is a validated http(s) URL. The URL string
+   * True when `io.sencho.url` is a validated http(s) URL. The URL string
    * itself stays off this model; anatomy is the reader that returns it.
    */
   hasServiceUrl?: boolean;

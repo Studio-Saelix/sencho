@@ -22,6 +22,18 @@ import { buildServiceUrl } from './serviceUrl';
 import { serviceUrlFromLabelValue } from './serviceUrlLabel';
 import { parse, parseDocument } from 'yaml';
 
+/**
+ * Parse an answer from a current node: one that reports its URL map also reports the
+ * io.sencho.* resolution (here, a stack with no labels). Answers without a URL map
+ * stay as they are, so the older-node cases keep their meaning.
+ */
+function parseCurrent(nodeId: number | null, stackName: string, ok: boolean, body: unknown): ServiceUrlEntry {
+  const current = ok && body && typeof body === 'object' && 'serviceUrls' in body && !('senchoLabels' in body)
+    ? { ...body, senchoLabels: { renderable: true, services: {}, entries: [] } }
+    : body;
+  return parseServiceUrlResponse(nodeId, stackName, ok, current);
+}
+
 const ready: ServiceUrlEntry = {
   status: 'ready',
   nodeId: 1,
@@ -294,7 +306,7 @@ describe('resolvePublishedPortClick', () => {
   });
 
   it('keeps a remote generated link when anatomy has no service URL field', () => {
-    const entry = parseServiceUrlResponse(2, 'web', true, { renderable: true, ports: { web: [{ host: '8080', proto: 'tcp' }] } });
+    const entry = parseCurrent(2, 'web', true, { renderable: true, ports: { web: [{ host: '8080', proto: 'tcp' }] } });
     expect(entry.status).toBe('unsupported');
     const click = resolvePublishedPortClick({
       entry,
@@ -356,7 +368,7 @@ describe('resolvePublishedPortClick', () => {
   it('audit F02: a published zero opens the named service URL at its assigned port', () => {
     // The rendered anatomy for `ports: ["0:80"]` keeps the Compose wire value
     // `published: "0"`; Docker then assigns the host port (here 49152).
-    const entry = parseServiceUrlResponse(1, 'web', true, {
+    const entry = parseCurrent(1, 'web', true, {
       renderable: true,
       services: ['web', 'api'],
       serviceUrls: { web: 'https://app.example.com', api: 'https://api.example.com' },
@@ -797,7 +809,7 @@ describe('resolveOpenAppTarget', () => {
 
 describe('parseServiceUrlResponse', () => {
   it('drops a URL the allowlist rejects', () => {
-    const entry = parseServiceUrlResponse(1, 'web', true, {
+    const entry = parseCurrent(1, 'web', true, {
       serviceUrls: { web: 'javascript:alert(1)', api: 'https://api.example.com' },
       renderable: true,
       ports: {},
@@ -807,7 +819,7 @@ describe('parseServiceUrlResponse', () => {
   });
 
   it('keeps dossier facts when an older node omits service URLs', () => {
-    const entry = parseServiceUrlResponse(2, 'web', true, {
+    const entry = parseCurrent(2, 'web', true, {
       renderable: true,
       services: ['web', 'api'],
       ports: { web: [{ host: '8080', proto: 'tcp' }] },
@@ -827,7 +839,7 @@ describe('patchServiceUrlLabel', () => {
     expect(patched.ok).toBe(true);
     if (!patched.ok) return;
     expect(patched.yaml).toContain('traefik.enable');
-    expect(patched.yaml).toContain('sencho.service.url');
+    expect(patched.yaml).toContain('io.sencho.url');
     expect(patched.yaml).toContain('https://app.example.com/a$$b');
   });
 
@@ -835,7 +847,7 @@ describe('patchServiceUrlLabel', () => {
     const source = 'services:\n  web:\n    labels:\n      - traefik.enable=true\n';
     const patched = patchServiceUrlLabel(source, 'web', 'https://app.example.com');
     expect(patched.ok).toBe(true);
-    if (patched.ok) expect(patched.yaml).toContain('sencho.service.url=https://app.example.com');
+    if (patched.ok) expect(patched.yaml).toContain('io.sencho.url=https://app.example.com');
     expect(patchServiceUrlLabel(source, 'api', 'https://app.example.com')).toEqual({ ok: false, reason: 'missing-service' });
   });
 
@@ -849,7 +861,7 @@ describe('patchServiceUrlLabel', () => {
       '  web:',
       '    image: nginx',
       '    labels:',
-      '      - sencho.service.url=https://old.example.com',
+      '      - io.sencho.url=https://old.example.com',
       '      - "${URL_LABEL}=https://winning.example.com"',
       '',
     ].join('\n');
@@ -870,7 +882,7 @@ describe('patchServiceUrlLabel', () => {
     const escaped = 'services:\n  web:\n    labels:\n      - "$${URL_LABEL}=https://x.example.com"\n';
     const patched = patchServiceUrlLabel(escaped, 'web', 'https://app.example.com');
     expect(patched.ok).toBe(true);
-    if (patched.ok) expect(patched.yaml).toContain('sencho.service.url=https://app.example.com');
+    if (patched.ok) expect(patched.yaml).toContain('io.sencho.url=https://app.example.com');
   });
 
   it('keeps labels inherited through a merge, and leaves the sibling alone', () => {
@@ -895,9 +907,9 @@ describe('patchServiceUrlLabel', () => {
       services: { web: { labels: Record<string, string> }; api: { labels: Record<string, string> } };
     };
     expect(merged.services.web.labels['traefik.enable']).toBe('true');
-    expect(merged.services.web.labels['sencho.service.url']).toBe('https://app.example.com');
-    expect(merged.services.api.labels['sencho.service.url']).toBeUndefined();
-    expect(added.yaml.split('services:')[0]).not.toContain('sencho.service.url');
+    expect(merged.services.web.labels['io.sencho.url']).toBe('https://app.example.com');
+    expect(merged.services.api.labels['io.sencho.url']).toBeUndefined();
+    expect(added.yaml.split('services:')[0]).not.toContain('io.sencho.url');
 
     const cleared = patchServiceUrlLabel(added.yaml, 'web', null);
     expect(cleared.ok).toBe(true);
@@ -906,8 +918,8 @@ describe('patchServiceUrlLabel', () => {
       services: { web: { labels: Record<string, string> }; api: { labels: Record<string, string> } };
     };
     expect(afterClear.services.web.labels['traefik.enable']).toBe('true');
-    expect(afterClear.services.web.labels['sencho.service.url']).toBeUndefined();
-    expect(afterClear.services.api.labels['sencho.service.url']).toBeUndefined();
+    expect(afterClear.services.web.labels['io.sencho.url']).toBeUndefined();
+    expect(afterClear.services.api.labels['io.sencho.url']).toBeUndefined();
   });
 
   it('copies an aliased label map onto the edited service only', () => {
@@ -929,7 +941,7 @@ describe('patchServiceUrlLabel', () => {
     };
     expect(merged.services.web.labels).toMatchObject({
       'traefik.enable': 'true',
-      'sencho.service.url': 'https://app.example.com',
+      'io.sencho.url': 'https://app.example.com',
     });
     expect(merged.services.api.labels).toEqual({ 'traefik.enable': 'true' });
   });
@@ -952,7 +964,7 @@ describe('patchServiceUrlLabel', () => {
     const merged = parse(added.yaml, { merge: true }) as {
       services: { web: { labels: Record<string, string> }; api: { labels: Record<string, string> } };
     };
-    expect(merged.services.web.labels).toEqual({ keep: 'yes', 'sencho.service.url': 'https://new.example.com' });
+    expect(merged.services.web.labels).toEqual({ keep: 'yes', 'io.sencho.url': 'https://new.example.com' });
     expect(merged.services.api.labels).toEqual({ keep: 'yes' });
 
     const cleared = patchServiceUrlLabel(added.yaml, 'web', null);
@@ -979,7 +991,7 @@ describe('patchServiceUrlLabel', () => {
     const merged = parse(patched.yaml, { merge: true }) as {
       services: { web: { labels: string[] }; api: { labels: string[] } };
     };
-    expect(merged.services.web.labels).toEqual(['keep=yes', 'sencho.service.url=https://new.example.com']);
+    expect(merged.services.web.labels).toEqual(['keep=yes', 'io.sencho.url=https://new.example.com']);
     expect(merged.services.api.labels).toEqual(['keep=yes']);
   });
 
@@ -987,12 +999,12 @@ describe('patchServiceUrlLabel', () => {
     const source = [
       'x-labels: &labels',
       '  keep: "yes"',
-      '  sencho.service.url: https://default.example.com',
+      '  io.sencho.url: https://default.example.com',
       'services:',
       '  web:',
       '    labels:',
       '      <<: *labels',
-      '      sencho.service.url: https://web.example.com',
+      '      io.sencho.url: https://web.example.com',
       '  api:',
       '    labels: *labels',
       '',
@@ -1003,9 +1015,9 @@ describe('patchServiceUrlLabel', () => {
     const merged = parse(cleared.yaml, { merge: true }) as {
       services: { web: { labels: Record<string, string> }; api: { labels: Record<string, string> } };
     };
-    expect(merged.services.web.labels['sencho.service.url']).toBeUndefined();
+    expect(merged.services.web.labels['io.sencho.url']).toBeUndefined();
     expect(merged.services.web.labels.keep).toBe('yes');
-    expect(merged.services.api.labels['sencho.service.url']).toBe('https://default.example.com');
+    expect(merged.services.api.labels['io.sencho.url']).toBe('https://default.example.com');
     const click = resolvePublishedPortClick({
       entry: {
         ...ready,
@@ -1037,16 +1049,16 @@ describe('patchServiceUrlLabel', () => {
     const merged = parse(added.yaml, { merge: true }) as {
       services: { web: { labels: Record<string, string> }; api: { labels: Record<string, string> } };
     };
-    expect(merged.services.web.labels['sencho.service.url']).toBe('https://new.example.com');
+    expect(merged.services.web.labels['io.sencho.url']).toBe('https://new.example.com');
     expect(merged.services.api.labels).toEqual({ keep: 'yes' });
     expect(added.yaml).toContain('x-service: &svc');
-    expect(added.yaml.split('x-service:')[1]?.split('services:')[0]).not.toContain('sencho.service.url');
+    expect(added.yaml.split('x-service:')[1]?.split('services:')[0]).not.toContain('io.sencho.url');
 
     const cleared = patchServiceUrlLabel(added.yaml, 'web', null);
     expect(cleared.ok).toBe(true);
     if (!cleared.ok) return;
     const afterClear = parse(cleared.yaml, { merge: true }) as typeof merged;
-    expect(afterClear.services.web.labels['sencho.service.url']).toBeUndefined();
+    expect(afterClear.services.web.labels['io.sencho.url']).toBeUndefined();
     expect(afterClear.services.web.labels.keep).toBe('yes');
     expect(afterClear.services.api.labels).toEqual({ keep: 'yes' });
   });
@@ -1067,7 +1079,7 @@ describe('patchServiceUrlLabel', () => {
     const merged = parse(patched.yaml, { merge: true }) as {
       services: { web: { labels: Record<string, string> }; api: { labels: Record<string, string> } };
     };
-    expect(merged.services.web.labels['sencho.service.url']).toBe('https://new.example.com');
+    expect(merged.services.web.labels['io.sencho.url']).toBe('https://new.example.com');
     expect(merged.services.api.labels).toEqual({ keep: 'yes' });
   });
 
@@ -1094,9 +1106,9 @@ describe('patchServiceUrlLabel', () => {
     expect('KEEP' in merged.services.web.labels).toBe(true);
     expect(merged.services.web.labels.KEEP ?? '').toBe('');
     expect(merged.services.web.labels['keep-string']).toBe('yes');
-    expect(merged.services.web.labels['sencho.service.url']).toBe('https://app.example.com');
+    expect(merged.services.web.labels['io.sencho.url']).toBe('https://app.example.com');
     expect(merged.services.api.labels.KEEP ?? '').toBe('');
-    expect(merged.services.api.labels['sencho.service.url']).toBeUndefined();
+    expect(merged.services.api.labels['io.sencho.url']).toBeUndefined();
 
     const cleared = patchServiceUrlLabel(added.yaml, 'web', null);
     expect(cleared.ok).toBe(true);
@@ -1104,7 +1116,7 @@ describe('patchServiceUrlLabel', () => {
     const afterClear = parse(cleared.yaml, { merge: true }) as typeof merged;
     expect('KEEP' in afterClear.services.web.labels).toBe(true);
     expect(afterClear.services.web.labels.KEEP ?? '').toBe('');
-    expect(afterClear.services.web.labels['sencho.service.url']).toBeUndefined();
+    expect(afterClear.services.web.labels['io.sencho.url']).toBeUndefined();
   });
 
   it('keeps an empty label when a merged URL is cleared', () => {
@@ -1112,13 +1124,13 @@ describe('patchServiceUrlLabel', () => {
       'x-labels: &labels',
       '  KEEP:',
       '  keep-string: "yes"',
-      '  sencho.service.url: https://default.example.com',
+      '  io.sencho.url: https://default.example.com',
       'services:',
       '  web:',
       '    image: nginx',
       '    labels:',
       '      <<: *labels',
-      '      sencho.service.url: https://old.example.com',
+      '      io.sencho.url: https://old.example.com',
       '  api:',
       '    image: nginx',
       '    labels: *labels',
@@ -1133,16 +1145,16 @@ describe('patchServiceUrlLabel', () => {
     expect('KEEP' in merged.services.web.labels).toBe(true);
     expect(merged.services.web.labels.KEEP ?? '').toBe('');
     expect(merged.services.web.labels['keep-string']).toBe('yes');
-    expect(merged.services.web.labels['sencho.service.url']).toBeUndefined();
+    expect(merged.services.web.labels['io.sencho.url']).toBeUndefined();
     expect(merged.services.api.labels.KEEP ?? '').toBe('');
-    expect(merged.services.api.labels['sencho.service.url']).toBe('https://default.example.com');
+    expect(merged.services.api.labels['io.sencho.url']).toBe('https://default.example.com');
   });
 
   it('audit F1: clearing a merged URL keeps unrelated comments and tokens', () => {
     const source = [
       'x-labels: &base',
       '  keep: yes',
-      '  sencho.service.url: https://old.example.com',
+      '  io.sencho.url: https://old.example.com',
       'services:',
       '  web:',
       '    image: nginx',
@@ -1163,7 +1175,7 @@ describe('patchServiceUrlLabel', () => {
     expect(cleared.yaml).toBe([
       'x-labels: &base',
       '  keep: yes',
-      '  sencho.service.url: https://old.example.com',
+      '  io.sencho.url: https://old.example.com',
       'services:',
       '  web:',
       '    image: nginx',
@@ -1180,7 +1192,7 @@ describe('patchServiceUrlLabel', () => {
       services: { web: { labels: Record<string, string> }; api: { labels: Record<string, string> } };
     };
     expect(merged.services.web.labels).toEqual({ keep: 'yes', KEEP2: 'value' });
-    expect(merged.services.api.labels['sencho.service.url']).toBe('https://old.example.com');
+    expect(merged.services.api.labels['io.sencho.url']).toBe('https://old.example.com');
   });
 
   it('audit F1: refuses to clear when a comment sits on the merge key line', () => {
@@ -1189,7 +1201,7 @@ describe('patchServiceUrlLabel', () => {
     const source = [
       'x-labels: &base',
       '  keep: yes',
-      '  sencho.service.url: https://old.example.com',
+      '  io.sencho.url: https://old.example.com',
       'services:',
       '  web:',
       '    labels:',
@@ -1202,7 +1214,7 @@ describe('patchServiceUrlLabel', () => {
 
   it('audit F1: clears a flow merged URL without respelling unrelated tokens', () => {
     const source = [
-      'x-labels: &base { keep: 0440, sencho.service.url: https://old.example.com }',
+      'x-labels: &base { keep: 0440, io.sencho.url: https://old.example.com }',
       'services:',
       '  web: { image: nginx, labels: { <<: *base, KEEP2: value } }',
       '',
@@ -1211,7 +1223,7 @@ describe('patchServiceUrlLabel', () => {
     expect(cleared.ok).toBe(true);
     if (!cleared.ok) return;
     expect(cleared.yaml).toBe([
-      'x-labels: &base { keep: 0440, sencho.service.url: https://old.example.com }',
+      'x-labels: &base { keep: 0440, io.sencho.url: https://old.example.com }',
       'services:',
       '  web: { image: nginx, labels: { KEEP2: value, keep: 0440 } }',
       '',
@@ -1222,7 +1234,7 @@ describe('patchServiceUrlLabel', () => {
     const source = [
       'x-a: &a',
       '  first: 1',
-      '  sencho.service.url: https://a.example.com',
+      '  io.sencho.url: https://a.example.com',
       'x-b: &b',
       '  first: 2',
       '  second: 3',
@@ -1253,7 +1265,7 @@ describe('patchServiceUrlLabel', () => {
       '  web:',
       '    labels:',
       '      <<: *list',
-      '      sencho.service.url: https://old.example.com',
+      '      io.sencho.url: https://old.example.com',
       '',
     ].join('\n');
     const seqCleared = patchServiceUrlLabel(viaSeq, 'web', null);
@@ -1267,7 +1279,7 @@ describe('patchServiceUrlLabel', () => {
     const source = [
       'x-base: &base',
       '  keep: yes',
-      '  sencho.service.url: https://base.example.com',
+      '  io.sencho.url: https://base.example.com',
       'x-mid: &mid',
       '  <<: *base',
       '  extra: hold',
@@ -1284,7 +1296,7 @@ describe('patchServiceUrlLabel', () => {
     expect(cleared.yaml).toBe([
       'x-base: &base',
       '  keep: yes',
-      '  sencho.service.url: https://base.example.com',
+      '  io.sencho.url: https://base.example.com',
       'x-mid: &mid',
       '  <<: *base',
       '  extra: hold',
@@ -1308,7 +1320,7 @@ describe('patchServiceUrlLabel', () => {
       '    image: nginx',
       '    labels:',
       '      <<: *base',
-      '      sencho.service.url: &address https://old.example.com',
+      '      io.sencho.url: &address https://old.example.com',
       '  api:',
       '    image: nginx',
       '    environment:',
@@ -1330,7 +1342,7 @@ describe('patchServiceUrlLabel', () => {
 
   it('audit F1: materializes a flow merged map into block labels', () => {
     const source = [
-      'x-labels: &base { keep: 0440, sencho.service.url: https://old.example.com }',
+      'x-labels: &base { keep: 0440, io.sencho.url: https://old.example.com }',
       'services:',
       '  web:',
       '    labels:',
@@ -1342,7 +1354,7 @@ describe('patchServiceUrlLabel', () => {
     expect(cleared.ok).toBe(true);
     if (!cleared.ok) return;
     expect(cleared.yaml).toBe([
-      'x-labels: &base { keep: 0440, sencho.service.url: https://old.example.com }',
+      'x-labels: &base { keep: 0440, io.sencho.url: https://old.example.com }',
       'services:',
       '  web:',
       '    labels:',
@@ -1356,7 +1368,7 @@ describe('patchServiceUrlLabel', () => {
     const source = [
       'x-labels: &base',
       '  keep: yes',
-      '  sencho.service.url: https://old.example.com',
+      '  io.sencho.url: https://old.example.com',
       'services:',
       '  web:',
       '    labels:',
@@ -1371,7 +1383,7 @@ describe('patchServiceUrlLabel', () => {
     expect(cleared.yaml).toBe([
       'x-labels: &base',
       '  keep: yes',
-      '  sencho.service.url: https://old.example.com',
+      '  io.sencho.url: https://old.example.com',
       'services:',
       '  web:',
       '    labels:',
@@ -1389,14 +1401,14 @@ describe('patchServiceUrlLabel', () => {
       'services:',
       '  web:',
       '    labels:',
-      '      <<: { keep: yes, sencho.service.url: https://old.example.com }',
+      '      <<: { keep: yes, io.sencho.url: https://old.example.com }',
       '',
     ].join('\n');
     expect(patchServiceUrlLabel(inline, 'web', null)).toEqual({ ok: false, reason: 'unsupported' });
     const anchored = [
       'x-labels: &base',
       '  keep: &token yes',
-      '  sencho.service.url: https://old.example.com',
+      '  io.sencho.url: https://old.example.com',
       'services:',
       '  web:',
       '    labels:',
@@ -1407,7 +1419,7 @@ describe('patchServiceUrlLabel', () => {
     const tagged = [
       'x-labels: &base',
       '  keep: !!str 1',
-      '  sencho.service.url: https://old.example.com',
+      '  io.sencho.url: https://old.example.com',
       'services:',
       '  web:',
       '    labels:',
@@ -1420,7 +1432,7 @@ describe('patchServiceUrlLabel', () => {
       'x-labels: &base',
       '  keep:',
       '    nested: 1',
-      '  sencho.service.url: https://old.example.com',
+      '  io.sencho.url: https://old.example.com',
       'services:',
       '  web: { labels: { <<: *base, KEEP2: value } }',
       '',
@@ -1431,7 +1443,7 @@ describe('patchServiceUrlLabel', () => {
   it('audit F1: clears a merged URL when the merge supplies nothing else', () => {
     const source = [
       'x-base: &base',
-      '  sencho.service.url: https://old.example.com',
+      '  io.sencho.url: https://old.example.com',
       'services:',
       '  web:',
       '    image: nginx',
@@ -1446,7 +1458,7 @@ describe('patchServiceUrlLabel', () => {
     if (!cleared.ok) return;
     expect(cleared.yaml).toBe([
       'x-base: &base',
-      '  sencho.service.url: https://old.example.com',
+      '  io.sencho.url: https://old.example.com',
       'services:',
       '  web:',
       '    image: nginx',
@@ -1464,9 +1476,9 @@ describe('patchServiceUrlLabel', () => {
     // address for every other consumer.
     const source = [
       'x-m: &m',
-      '  sencho.service.url: &u "https://m.example.com"',
+      '  io.sencho.url: &u "https://m.example.com"',
       'x-lbl: &lbl',
-      '  sencho.service.url: "https://shared.example.com"',
+      '  io.sencho.url: "https://shared.example.com"',
       'services:',
       '  ra:',
       '    image: nginx',
@@ -1485,7 +1497,7 @@ describe('patchServiceUrlLabel', () => {
     expect(anchored.ok).toBe(true);
     if (!anchored.ok) return;
     expect(parseDocument(anchored.yaml).errors).toEqual([]);
-    expect(anchored.yaml).toContain('sencho.service.url: &u "https://m.example.com"');
+    expect(anchored.yaml).toContain('io.sencho.url: &u "https://m.example.com"');
     let merged = parse(anchored.yaml, { merge: true }) as {
       services: Record<string, { labels?: unknown }>;
     };
@@ -1496,11 +1508,11 @@ describe('patchServiceUrlLabel', () => {
     if (!shared.ok) return;
     merged = parse(shared.yaml, { merge: true }) as typeof merged;
     expect(merged.services.rc.labels).toBeUndefined();
-    expect((merged.services.rb.labels as Record<string, string>)['sencho.service.url'])
+    expect((merged.services.rb.labels as Record<string, string>)['io.sencho.url'])
       .toBe('https://shared.example.com');
 
     // A flow labels map narrows in place instead, and still renders.
-    const flow = 'x-m: &m { sencho.service.url: "https://m.example.com" }\nservices:\n  ra: { image: nginx, labels: { <<: *m } }\n';
+    const flow = 'x-m: &m { io.sencho.url: "https://m.example.com" }\nservices:\n  ra: { image: nginx, labels: { <<: *m } }\n';
     const flowCleared = patchServiceUrlLabel(flow, 'ra', null);
     expect(flowCleared.ok).toBe(true);
     if (!flowCleared.ok) return;
@@ -1511,7 +1523,7 @@ describe('patchServiceUrlLabel', () => {
   it('audit F9: keeps a comment that closes the emptied labels block as an empty value', () => {
     const inside = [
       'x-m: &m',
-      '  sencho.service.url: "https://m.example.com"',
+      '  io.sencho.url: "https://m.example.com"',
       'services:',
       '  ra:',
       '    image: nginx',
@@ -1527,7 +1539,7 @@ describe('patchServiceUrlLabel', () => {
     if (!cleared.ok) return;
     expect(cleared.yaml).toBe([
       'x-m: &m',
-      '  sencho.service.url: "https://m.example.com"',
+      '  io.sencho.url: "https://m.example.com"',
       'services:',
       '  ra:',
       '    image: nginx',
@@ -1541,7 +1553,7 @@ describe('patchServiceUrlLabel', () => {
 
     const below = [
       'x-m: &m',
-      '  sencho.service.url: "https://m.example.com"',
+      '  io.sencho.url: "https://m.example.com"',
       'services:',
       '  ra:',
       '    image: nginx',
@@ -1556,7 +1568,7 @@ describe('patchServiceUrlLabel', () => {
     if (!kept.ok) return;
     expect(kept.yaml).toBe([
       'x-m: &m',
-      '  sencho.service.url: "https://m.example.com"',
+      '  io.sencho.url: "https://m.example.com"',
       'services:',
       '  ra:',
       '    image: nginx',
@@ -1574,15 +1586,15 @@ describe('patchServiceUrlLabel', () => {
     // Compose rejects `labels:` with no value (`must be a mapping`), so every
     // layout the clear supports has to leave the key gone or an explicit `{}`/`[]`.
     const fixtures = [
-      'services:\n  web:\n    image: nginx\n    labels:\n      sencho.service.url: "https://web.example.com"\n  api:\n    image: nginx\n',
-      'services:\n  web:\n    image: nginx\n    labels:\n      sencho.service.url: "https://web.example.com" # served\n  api:\n    image: nginx\n',
-      'services:\n  web:\n    image: nginx\n    labels:\n      sencho.service.url: "https://web.example.com"\n      # note\n  api:\n    image: nginx\n',
-      'services:\n  web:\n    image: nginx\n    labels:\n      - sencho.service.url=https://web.example.com\n  api:\n    image: nginx\n',
-      'services:\n  web:\n    image: nginx\n    labels: { sencho.service.url: "https://web.example.com" }\n  api:\n    image: nginx\n',
-      'x-m: &m\n  sencho.service.url: &u "https://m.example.com"\nservices:\n  web:\n    image: nginx\n    labels:\n      <<: *m\n  api:\n    image: nginx\n',
-      'x-m: &m\n  sencho.service.url: "https://m.example.com"\nservices:\n  web:\n    image: nginx\n    labels:\n      # note\n      <<: *m\n  api:\n    image: nginx\n',
-      'x-m: &m { sencho.service.url: "https://m.example.com" }\nservices:\n  web: { image: nginx, labels: { <<: *m } }\n  api:\n    image: nginx\n',
-      'x-m: &m\r\n  sencho.service.url: "https://m.example.com"\r\nservices:\r\n  web:\r\n    image: nginx\r\n    labels:\r\n      <<: *m\r\n  api:\r\n    image: nginx\r\n',
+      'services:\n  web:\n    image: nginx\n    labels:\n      io.sencho.url: "https://web.example.com"\n  api:\n    image: nginx\n',
+      'services:\n  web:\n    image: nginx\n    labels:\n      io.sencho.url: "https://web.example.com" # served\n  api:\n    image: nginx\n',
+      'services:\n  web:\n    image: nginx\n    labels:\n      io.sencho.url: "https://web.example.com"\n      # note\n  api:\n    image: nginx\n',
+      'services:\n  web:\n    image: nginx\n    labels:\n      - io.sencho.url=https://web.example.com\n  api:\n    image: nginx\n',
+      'services:\n  web:\n    image: nginx\n    labels: { io.sencho.url: "https://web.example.com" }\n  api:\n    image: nginx\n',
+      'x-m: &m\n  io.sencho.url: &u "https://m.example.com"\nservices:\n  web:\n    image: nginx\n    labels:\n      <<: *m\n  api:\n    image: nginx\n',
+      'x-m: &m\n  io.sencho.url: "https://m.example.com"\nservices:\n  web:\n    image: nginx\n    labels:\n      # note\n      <<: *m\n  api:\n    image: nginx\n',
+      'x-m: &m { io.sencho.url: "https://m.example.com" }\nservices:\n  web: { image: nginx, labels: { <<: *m } }\n  api:\n    image: nginx\n',
+      'x-m: &m\r\n  io.sencho.url: "https://m.example.com"\r\nservices:\r\n  web:\r\n    image: nginx\r\n    labels:\r\n      <<: *m\r\n  api:\r\n    image: nginx\r\n',
     ];
     for (const source of fixtures) {
       const cleared = patchServiceUrlLabel(source, 'web', null);
@@ -1600,14 +1612,14 @@ describe('patchServiceUrlLabel', () => {
   it('audit F9: refuses a merged clear that would drop a comment between the entries', () => {
     const source = [
       'x-m: &m',
-      '  sencho.service.url: "https://m.example.com"',
+      '  io.sencho.url: "https://m.example.com"',
       'services:',
       '  ra:',
       '    image: nginx',
       '    labels:',
       '      <<: *m # the merge itself',
       '      # between the merge and the value',
-      '      sencho.service.url: "https://own.example.com"',
+      '      io.sencho.url: "https://own.example.com"',
       '',
     ].join('\n');
     expect(patchServiceUrlLabel(source, 'ra', null)).toEqual({ ok: false, reason: 'unsupported' });
@@ -1622,7 +1634,7 @@ describe('patchServiceUrlLabel', () => {
       '  web:',
       '    image: nginx',
       '    labels:',
-      '      sencho.service.url: "https://web.example.com" # served by the rewrite',
+      '      io.sencho.url: "https://web.example.com" # served by the rewrite',
       '  api:',
       '    image: redis',
       '',
@@ -1646,7 +1658,7 @@ describe('patchServiceUrlLabel', () => {
       '  web:',
       '    image: nginx',
       '    labels:',
-      '      - sencho.service.url=https://web.example.com # served by the rewrite',
+      '      - io.sencho.url=https://web.example.com # served by the rewrite',
       '  api:',
       '    image: redis',
       '',
@@ -1672,7 +1684,7 @@ describe('patchServiceUrlLabel', () => {
       '  web:',
       '    image: nginx',
       '    labels:',
-      '      sencho.service.url: "https://web.example.com"',
+      '      io.sencho.url: "https://web.example.com"',
       '      # still worth knowing',
       '  api:',
       '    image: redis',
@@ -1702,7 +1714,7 @@ describe('patchServiceUrlLabel', () => {
       '  web:',
       '    labels:',
       '      <<: *base',
-      '      sencho.service.url: https://web.example.com',
+      '      io.sencho.url: https://web.example.com',
       '',
     ].join('\n');
     const cleared = patchServiceUrlLabel(source, 'web', null);
@@ -1742,17 +1754,17 @@ describe('patchServiceUrlLabel', () => {
         api: { labels: Record<string, string>; environment: Record<string, string> };
       };
     };
-    expect(merged.services.web.labels['sencho.service.url']).toBe('https://app.example.com');
+    expect(merged.services.web.labels['io.sencho.url']).toBe('https://app.example.com');
     expect(merged.services.web.labels.keep).toBe('yes');
     expect(merged.services.api.environment.FOO).toBe('bar');
-    expect(merged.services.api.labels['sencho.service.url']).toBeUndefined();
+    expect(merged.services.api.labels['io.sencho.url']).toBeUndefined();
     expect(merged.services.api.labels.keep).toBe('yes');
 
     const cleared = patchServiceUrlLabel(added.yaml, 'web', null);
     expect(cleared.ok).toBe(true);
     if (!cleared.ok) return;
     const afterClear = parse(cleared.yaml, { merge: true }) as typeof merged;
-    expect(afterClear.services.web.labels['sencho.service.url']).toBeUndefined();
+    expect(afterClear.services.web.labels['io.sencho.url']).toBeUndefined();
     expect(afterClear.services.web.labels.keep).toBe('yes');
     expect(afterClear.services.api.environment.FOO).toBe('bar');
     expect(afterClear.services.api.labels.keep).toBe('yes');
@@ -1764,7 +1776,7 @@ describe('patchServiceUrlLabel', () => {
       '  web:',
       '    image: nginx',
       '    labels:',
-      '      sencho.service.url: &address https://old.example.com',
+      '      io.sencho.url: &address https://old.example.com',
       '  api:',
       '    image: nginx',
       '    environment:',
@@ -1777,13 +1789,13 @@ describe('patchServiceUrlLabel', () => {
     const mapMerged = parse(mapSet.yaml, { merge: true }) as {
       services: { web: { labels: Record<string, string> }; api: { environment: Record<string, string> } };
     };
-    expect(mapMerged.services.web.labels['sencho.service.url']).toBe('https://new.example.com');
+    expect(mapMerged.services.web.labels['io.sencho.url']).toBe('https://new.example.com');
     expect(mapMerged.services.api.environment.APP_URL).toBe('https://old.example.com');
     const mapClear = patchServiceUrlLabel(mapSource, 'web', null);
     expect(mapClear.ok).toBe(true);
     if (!mapClear.ok) return;
     const mapCleared = parse(mapClear.yaml, { merge: true }) as typeof mapMerged;
-    expect(mapCleared.services.web.labels?.['sencho.service.url']).toBeUndefined();
+    expect(mapCleared.services.web.labels?.['io.sencho.url']).toBeUndefined();
     expect(mapCleared.services.api.environment.APP_URL).toBe('https://old.example.com');
 
     const listSource = [
@@ -1791,7 +1803,7 @@ describe('patchServiceUrlLabel', () => {
       '  web:',
       '    image: nginx',
       '    labels:',
-      '      - &address sencho.service.url=https://old.example.com',
+      '      - &address io.sencho.url=https://old.example.com',
       '  api:',
       '    image: nginx',
       '    labels:',
@@ -1804,16 +1816,16 @@ describe('patchServiceUrlLabel', () => {
     const listMerged = parse(listSet.yaml, { merge: true }) as {
       services: { web: { labels: string[] }; api: { labels: string[] } };
     };
-    expect(listMerged.services.web.labels).toEqual(['sencho.service.url=https://new.example.com']);
-    expect(listMerged.services.api.labels).toEqual(['sencho.service.url=https://old.example.com']);
+    expect(listMerged.services.web.labels).toEqual(['io.sencho.url=https://new.example.com']);
+    expect(listMerged.services.api.labels).toEqual(['io.sencho.url=https://old.example.com']);
     const listClear = patchServiceUrlLabel(listSource, 'web', null);
     expect(listClear.ok).toBe(true);
     if (!listClear.ok) return;
     const listCleared = parse(listClear.yaml, { merge: true }) as typeof listMerged;
     expect(listCleared.services.web.labels).toBeUndefined();
-    expect(listCleared.services.api.labels).toEqual(['sencho.service.url=https://old.example.com']);
+    expect(listCleared.services.api.labels).toEqual(['io.sencho.url=https://old.example.com']);
     expect(listClear.yaml).not.toContain('*address');
-    expect(listClear.yaml).toContain('sencho.service.url=https://old.example.com');
+    expect(listClear.yaml).toContain('io.sencho.url=https://old.example.com');
   });
 
   it('replaces every repeated URL list entry', () => {
@@ -1822,9 +1834,9 @@ describe('patchServiceUrlLabel', () => {
       '  web:',
       '    image: nginx',
       '    labels:',
-      '      - sencho.service.url=https://first.example.com',
+      '      - io.sencho.url=https://first.example.com',
       '      - keep=yes',
-      '      - sencho.service.url=https://last.example.com',
+      '      - io.sencho.url=https://last.example.com',
       '',
     ].join('\n');
     const set = patchServiceUrlLabel(source, 'web', 'https://new.example.com');
@@ -1832,7 +1844,7 @@ describe('patchServiceUrlLabel', () => {
     if (!set.ok) return;
     const merged = parse(set.yaml, { merge: true }) as { services: { web: { labels: string[] } } };
     expect(merged.services.web.labels).toEqual([
-      'sencho.service.url=https://new.example.com',
+      'io.sencho.url=https://new.example.com',
       'keep=yes',
     ]);
     const cleared = patchServiceUrlLabel(source, 'web', null);
@@ -1850,35 +1862,35 @@ describe('patchServiceUrlLabel', () => {
       '  web:',
       '    image: nginx',
       '    labels:',
-      '      - sencho.service.url=https://old.example.com',
-      '      - sencho.service.url',
+      '      - io.sencho.url=https://old.example.com',
+      '      - io.sencho.url',
       '',
     ].join('\n');
     const set = patchServiceUrlLabel(source, 'web', 'https://new.example.com');
     expect(set.ok).toBe(true);
     if (!set.ok) return;
     const afterSet = parse(set.yaml, { merge: true }) as { services: { web: { labels: string[] } } };
-    expect(afterSet.services.web.labels).toEqual(['sencho.service.url=https://new.example.com']);
+    expect(afterSet.services.web.labels).toEqual(['io.sencho.url=https://new.example.com']);
 
     const cleared = patchServiceUrlLabel(source, 'web', null);
     expect(cleared.ok).toBe(true);
     if (!cleared.ok) return;
-    expect(cleared.yaml).not.toContain('sencho.service.url');
+    expect(cleared.yaml).not.toContain('io.sencho.url');
   });
 
   it('clears a lone bare URL list item', () => {
-    const source = 'services:\n  web:\n    image: nginx\n    labels:\n      - sencho.service.url\n';
+    const source = 'services:\n  web:\n    image: nginx\n    labels:\n      - io.sencho.url\n';
     const cleared = patchServiceUrlLabel(source, 'web', null);
     expect(cleared.ok).toBe(true);
     if (!cleared.ok) return;
-    expect(cleared.yaml).not.toContain('sencho.service.url');
+    expect(cleared.yaml).not.toContain('io.sencho.url');
     const merged = parse(cleared.yaml, { merge: true }) as { services: { web: { labels?: string[] } } };
     expect(merged.services.web.labels ?? []).toEqual([]);
   });
 
   it('clears a list alias without changing other consumers', () => {
     const source = [
-      'x-url: &url sencho.service.url=https://old.example.com',
+      'x-url: &url io.sencho.url=https://old.example.com',
       'services:',
       '  web:',
       '    image: nginx',
@@ -1897,17 +1909,17 @@ describe('patchServiceUrlLabel', () => {
       services: { web: { labels?: string[] }; api: { labels: string[] } };
     };
     expect(merged.services.web.labels ?? []).toEqual([]);
-    expect(merged.services.api.labels).toEqual(['sencho.service.url=https://old.example.com']);
+    expect(merged.services.api.labels).toEqual(['io.sencho.url=https://old.example.com']);
 
     const mixed = [
-      'x-url: &url sencho.service.url=https://old.example.com',
+      'x-url: &url io.sencho.url=https://old.example.com',
       'services:',
       '  web:',
       '    image: nginx',
       '    labels:',
       '      - *url',
       '      - keep=yes',
-      '      - sencho.service.url=https://last.example.com',
+      '      - io.sencho.url=https://last.example.com',
       '  api:',
       '    image: nginx',
       '    labels:',
@@ -1921,10 +1933,10 @@ describe('patchServiceUrlLabel', () => {
       services: { web: { labels: string[] }; api: { labels: string[] } };
     };
     expect(afterSet.services.web.labels).toEqual([
-      'sencho.service.url=https://new.example.com',
+      'io.sencho.url=https://new.example.com',
       'keep=yes',
     ]);
-    expect(afterSet.services.api.labels).toEqual(['sencho.service.url=https://old.example.com']);
+    expect(afterSet.services.api.labels).toEqual(['io.sencho.url=https://old.example.com']);
   });
 
   it('keeps keys inherited by a flow label map', () => {
@@ -1947,7 +1959,7 @@ describe('patchServiceUrlLabel', () => {
     expect(merged.services.web.labels.keep).toBe('yes');
     expect(merged.services.web.labels.extra).toBe('hold');
     expect(merged.services.web.labels.other).toBe('x');
-    expect(merged.services.web.labels['sencho.service.url']).toBe('https://app.example.com');
+    expect(merged.services.web.labels['io.sencho.url']).toBe('https://app.example.com');
   });
 
   it('adds a label inside a flow-style service', () => {
@@ -1959,7 +1971,7 @@ describe('patchServiceUrlLabel', () => {
       services: { web: { image: string; labels: Record<string, string> }; api: { image: string } };
     };
     expect(merged.services.web.image).toBe('nginx');
-    expect(merged.services.web.labels['sencho.service.url']).toBe('https://app.example.com');
+    expect(merged.services.web.labels['io.sencho.url']).toBe('https://app.example.com');
     expect(merged.services.api.image).toBe('redis');
     expect(patched.yaml).not.toMatch(/^labels:/m);
   });
@@ -1969,7 +1981,7 @@ describe('patchServiceUrlLabel', () => {
       'x-common: &common',
       '  labels:',
       '    keep: "yes"',
-      '    sencho.service.url: https://default.example.com',
+      '    io.sencho.url: https://default.example.com',
       'services:',
       '  web:',
       '    <<: *common',
@@ -1985,9 +1997,9 @@ describe('patchServiceUrlLabel', () => {
     const merged = parse(cleared.yaml, { merge: true }) as {
       services: { web: { labels: Record<string, string> }; api: { labels: Record<string, string> } };
     };
-    expect(merged.services.web.labels['sencho.service.url']).toBeUndefined();
+    expect(merged.services.web.labels['io.sencho.url']).toBeUndefined();
     expect(merged.services.web.labels.keep).toBe('yes');
-    expect(merged.services.api.labels['sencho.service.url']).toBe('https://default.example.com');
+    expect(merged.services.api.labels['io.sencho.url']).toBe('https://default.example.com');
   });
 
   it('keeps an octal mode when a whole-service alias is copied', () => {
@@ -2041,7 +2053,7 @@ describe('patchServiceUrlLabel', () => {
     const patched = patchServiceUrlLabel(source, 'web', 'https://app.example.com');
     expect(patched.ok).toBe(true);
     if (!patched.ok) return;
-    const inserted = '            sencho.service.url: "https://app.example.com"\r\n';
+    const inserted = '            io.sencho.url: "https://app.example.com"\r\n';
     expect(patched.yaml.includes(inserted)).toBe(true);
     expect(patched.yaml.replace(inserted, '')).toBe(source);
   });
@@ -2049,7 +2061,7 @@ describe('patchServiceUrlLabel', () => {
   it('parses and resolves with no URL and no ownership metadata for the open file', () => {
     // The ownership decision now comes from the backend's `serviceUrlEdit`; the
     // editor no longer infers it from the label value or its absence.
-    const entry = parseServiceUrlResponse(1, 'web', true, {
+    const entry = parseCurrent(1, 'web', true, {
       renderable: true,
       serviceUrls: {},
       serviceUrlEdit: { web: 'other' },
@@ -2078,7 +2090,7 @@ describe('patchServiceUrlLabel', () => {
     const cleared = patchServiceUrlLabel(added.yaml, '__proto__', null);
     expect(cleared.ok).toBe(true);
     if (!cleared.ok) return;
-    expect(cleared.yaml).not.toContain('sencho.service.url');
+    expect(cleared.yaml).not.toContain('io.sencho.url');
     // A reserved name that is not a service in the file stays a refusal, and
     // clearing a label that is not there is the documented no-op.
     expect(patchServiceUrlLabel(source, 'toString', 'https://x.example.com'))
@@ -2092,7 +2104,7 @@ describe('service URL maps are safe for every legal service name', () => {
 
   function parseWith(serviceUrlsJson: string, portsJson: string): ServiceUrlEntry {
     // JSON.parse, like the /effective-anatomy response, keeps `__proto__` as an own key.
-    return parseServiceUrlResponse(1, 'web', true, JSON.parse(
+    return parseCurrent(1, 'web', true, JSON.parse(
       `{"renderable":true,"services":[],"serviceUrls":${serviceUrlsJson},"serviceUrlEdit":{},"ports":${portsJson}}`,
     ) as unknown);
   }
@@ -2119,14 +2131,14 @@ describe('service URL maps are safe for every legal service name', () => {
   });
 
   it('exposes null-prototype lookups so nothing inherited can masquerade as a URL', () => {
-    const entry = parseServiceUrlResponse(1, 'web', true, { renderable: true, serviceUrls: {}, serviceUrlEdit: {}, ports: {} });
+    const entry = parseCurrent(1, 'web', true, { renderable: true, serviceUrls: {}, serviceUrlEdit: {}, ports: {} });
     expect(serviceKeyGet(entry.serviceUrls, 'constructor')).toBeUndefined();
     expect(serviceKeyGet(entry.ports, 'toString')).toBeUndefined();
     expect(serviceKeyGet(entry.serviceUrlEdit, 'hasOwnProperty')).toBeUndefined();
   });
 
   it('reads one service state through an own-property lookup', () => {
-    const entry = parseServiceUrlResponse(1, 'web', true, {
+    const entry = parseCurrent(1, 'web', true, {
       renderable: true,
       serviceUrls: {},
       serviceUrlEdit: JSON.parse('{"constructor":"other","__proto__":"unknown"}') as Record<string, string>,
@@ -2141,7 +2153,7 @@ describe('service URL maps are safe for every legal service name', () => {
   });
 
   it('reads the clear state through an own-property lookup too', () => {
-    const entry = parseServiceUrlResponse(1, 'web', true, {
+    const entry = parseCurrent(1, 'web', true, {
       renderable: true,
       serviceUrls: {},
       serviceUrlEdit: {},
@@ -2157,7 +2169,7 @@ describe('service URL maps are safe for every legal service name', () => {
 
 describe('service URL editability metadata', () => {
   it('locks only the services a later compose file shadows, with a reason', () => {
-    const entry = parseServiceUrlResponse(1, 'web', true, {
+    const entry = parseCurrent(1, 'web', true, {
       renderable: true,
       serviceUrls: {},
       serviceUrlEdit: { web: 'other', api: 'unknown', db: 'root' },
@@ -2175,7 +2187,7 @@ describe('service URL editability metadata', () => {
   });
 
   it('audit F01: refuses the save and the clear the interpolated-key metadata marks unknown', () => {
-    const entry = parseServiceUrlResponse(1, 'web', true, {
+    const entry = parseCurrent(1, 'web', true, {
       renderable: true,
       serviceUrls: { web: 'https://later.example.com' },
       serviceUrlEdit: { web: 'unknown' },
@@ -2192,7 +2204,7 @@ describe('service URL editability metadata', () => {
   });
 
   it('ignores unknown states and non-object payloads from an older or broken node', () => {
-    const entry = parseServiceUrlResponse(1, 'web', true, {
+    const entry = parseCurrent(1, 'web', true, {
       renderable: true,
       serviceUrls: {},
       serviceUrlEdit: { web: 'somewhere-else', api: 42 },
@@ -2206,7 +2218,7 @@ describe('service URL editability metadata', () => {
 
 describe('service URL clear authority', () => {
   it('refuses the clear only when another contribution would survive it', () => {
-    const entry = parseServiceUrlResponse(1, 'web', true, {
+    const entry = parseCurrent(1, 'web', true, {
       renderable: true,
       serviceUrls: {},
       serviceUrlEdit: { web: 'root', api: 'root', db: 'other' },
@@ -2228,7 +2240,7 @@ describe('service URL clear authority', () => {
 
   it('treats a response without clear states as unverifiable for clearing', () => {
     // A node that predates the clear authority still reports set editability.
-    const entry = parseServiceUrlResponse(1, 'web', true, {
+    const entry = parseCurrent(1, 'web', true, {
       renderable: true,
       serviceUrls: { web: 'https://app.example.com' },
       serviceUrlEdit: { web: 'root' },
@@ -2241,7 +2253,7 @@ describe('service URL clear authority', () => {
   });
 
   it('picks the guard for the requested operation', () => {
-    const entry = parseServiceUrlResponse(1, 'web', true, {
+    const entry = parseCurrent(1, 'web', true, {
       renderable: true,
       serviceUrls: { web: 'https://app.example.com' },
       serviceUrlEdit: { web: 'root' },
@@ -2253,7 +2265,7 @@ describe('service URL clear authority', () => {
     expect(serviceUrlSaveBlockedMessage(entry, 'web', null))
       .toBe('This URL is also set in another compose file, so clearing it here cannot take effect.');
 
-    const shadowed = parseServiceUrlResponse(1, 'web', true, {
+    const shadowed = parseCurrent(1, 'web', true, {
       renderable: true,
       serviceUrls: {},
       serviceUrlEdit: { web: 'other' },
@@ -2274,12 +2286,12 @@ describe('patchServiceUrlLabel refuses a clear an inherited label would survive'
       '  base:',
       '    image: nginx',
       '    labels:',
-      '      sencho.service.url: https://base.example.com',
+      '      io.sencho.url: https://base.example.com',
       '  web:',
       '    extends:',
       '      service: base',
       '    labels:',
-      '      sencho.service.url: https://web.example.com',
+      '      io.sencho.url: https://web.example.com',
       '',
     ].join('\n');
     expect(patchServiceUrlLabel(source, 'web', null)).toEqual({ ok: false, reason: 'unsupported' });
@@ -2296,7 +2308,7 @@ describe('patchServiceUrlLabel refuses a clear an inherited label would survive'
       '    label_file:',
       '      - url.labels',
       '    labels:',
-      '      sencho.service.url: https://web.example.com',
+      '      io.sencho.url: https://web.example.com',
       '',
     ].join('\n');
     expect(patchServiceUrlLabel(source, 'web', null)).toEqual({ ok: false, reason: 'unsupported' });
@@ -2312,7 +2324,7 @@ describe('patchServiceUrlLabel refuses a clear an inherited label would survive'
       '  web:',
       '    image: nginx',
       '    labels:',
-      '      sencho.service.url: https://web.example.com',
+      '      io.sencho.url: https://web.example.com',
       '',
     ].join('\n');
     expect(patchServiceUrlLabel(source, 'web', null)).toEqual({ ok: false, reason: 'unsupported' });
@@ -2324,7 +2336,7 @@ describe('patchServiceUrlLabel refuses a clear an inherited label would survive'
     const source = [
       'x-labels: &labels',
       '  keep: "yes"',
-      '  sencho.service.url: https://default.example.com',
+      '  io.sencho.url: https://default.example.com',
       'services:',
       '  web:',
       '    image: nginx',
@@ -2337,7 +2349,7 @@ describe('patchServiceUrlLabel refuses a clear an inherited label would survive'
     const merged = parse(cleared.yaml, { merge: true }) as {
       services: { web: { labels: Record<string, string> } };
     };
-    expect(merged.services.web.labels['sencho.service.url']).toBeUndefined();
+    expect(merged.services.web.labels['io.sencho.url']).toBeUndefined();
     expect(merged.services.web.labels.keep).toBe('yes');
   });
 });
@@ -2353,139 +2365,139 @@ describe('patchServiceUrlLabel on flow, anchored, and edge layouts', () => {
 
   it('adds a label inside a flow services map without leaving flow syntax', () => {
     expect(patchTo('services: { web: { image: nginx }, api: { image: redis } }\n', 'web', URL))
-      .toBe('services: { web: { image: nginx, labels: { sencho.service.url: "https://app.example.com" } }, api: { image: redis } }\n');
+      .toBe('services: { web: { image: nginx, labels: { io.sencho.url: "https://app.example.com" } }, api: { image: redis } }\n');
   });
 
   it('adds to flow labels inside a flow service', () => {
     expect(patchTo('services:\n  web: { image: nginx, labels: { keep: "1" } }\n', 'web', URL))
-      .toBe('services:\n  web: { image: nginx, labels: { keep: "1", sencho.service.url: "https://app.example.com" } }\n');
+      .toBe('services:\n  web: { image: nginx, labels: { keep: "1", io.sencho.url: "https://app.example.com" } }\n');
   });
 
   it('keeps octal and numeric tokens in a flow service as written', () => {
     const source = 'services:\n  web: { image: nginx, secrets: [{ source: s, mode: 0440 }], environment: { UMASK: 022 } }\n';
     expect(patchTo(source, 'web', URL)).toBe(
-      'services:\n  web: { image: nginx, secrets: [{ source: s, mode: 0440 }], environment: { UMASK: 022 }, labels: { sencho.service.url: "https://app.example.com" } }\n',
+      'services:\n  web: { image: nginx, secrets: [{ source: s, mode: 0440 }], environment: { UMASK: 022 }, labels: { io.sencho.url: "https://app.example.com" } }\n',
     );
   });
 
   it('removes a flow label with its comma and keeps the other tokens', () => {
-    expect(patchTo('services:\n  web: { labels: { a: "1", sencho.service.url: "https://old", b: 0440 } }\n', 'web', null))
+    expect(patchTo('services:\n  web: { labels: { a: "1", io.sencho.url: "https://old", b: 0440 } }\n', 'web', null))
       .toBe('services:\n  web: { labels: { a: "1", b: 0440 } }\n');
   });
 
   it('copies a flow service anchor to its consumer without the defining key', () => {
     const source = 'services:\n  web: &svc { image: nginx, user: 0440 }\n  api: *svc\n';
     expect(patchTo(source, 'web', URL)).toBe(
-      'services:\n  web: &svc { image: nginx, user: 0440, labels: { sencho.service.url: "https://app.example.com" } }\n  api: { image: nginx, user: 0440 }\n',
+      'services:\n  web: &svc { image: nginx, user: 0440, labels: { io.sencho.url: "https://app.example.com" } }\n  api: { image: nginx, user: 0440 }\n',
     );
     expect(patchTo(source, 'api', URL)).toBe(
-      'services:\n  web: &svc { image: nginx, user: 0440 }\n  api: { image: nginx, user: 0440, labels: { sencho.service.url: "https://app.example.com" } }\n',
+      'services:\n  web: &svc { image: nginx, user: 0440 }\n  api: { image: nginx, user: 0440, labels: { io.sencho.url: "https://app.example.com" } }\n',
     );
   });
 
   it('copies a shared flow label anchor to the other service instead of nesting it', () => {
     const source = 'services:\n  web:\n    labels: &l { keep: 0440 }\n  api:\n    labels: *l\n';
     expect(patchTo(source, 'web', URL)).toBe(
-      'services:\n  web:\n    labels: &l { keep: 0440, sencho.service.url: "https://app.example.com" }\n  api:\n    labels: { keep: 0440 }\n',
+      'services:\n  web:\n    labels: &l { keep: 0440, io.sencho.url: "https://app.example.com" }\n  api:\n    labels: { keep: 0440 }\n',
     );
     expect(patchTo(source, 'api', URL)).toBe(
-      'services:\n  web:\n    labels: &l { keep: 0440 }\n  api:\n    labels:\n      keep: 0440\n      sencho.service.url: "https://app.example.com"\n',
+      'services:\n  web:\n    labels: &l { keep: 0440 }\n  api:\n    labels:\n      keep: 0440\n      io.sencho.url: "https://app.example.com"\n',
     );
   });
 
   it('starts a new line when the last label has no final newline', () => {
     const map = 'services:\n  web:\n    labels:\n      keep: yes';
-    expect(patchTo(map, 'web', URL)).toBe(`${map}\n      sencho.service.url: "https://app.example.com"`);
+    expect(patchTo(map, 'web', URL)).toBe(`${map}\n      io.sencho.url: "https://app.example.com"`);
     const list = 'services:\n  web:\n    labels:\n      - keep=yes # note';
-    expect(patchTo(list, 'web', URL)).toBe(`${list}\n      - sencho.service.url=https://app.example.com`);
+    expect(patchTo(list, 'web', URL)).toBe(`${list}\n      - io.sencho.url=https://app.example.com`);
     const crlf = 'services:\r\n  web:\r\n    labels:\r\n      keep: yes';
-    expect(patchTo(crlf, 'web', URL)).toBe(`${crlf}\r\n      sencho.service.url: "https://app.example.com"`);
+    expect(patchTo(crlf, 'web', URL)).toBe(`${crlf}\r\n      io.sencho.url: "https://app.example.com"`);
   });
 
   it('sets an empty or null URL label with its separator and keeps the neighbors', () => {
-    const empty = 'services:\n  web:\n    labels:\n      sencho.service.url:\n      keep: yes\n';
-    expect(patchTo(empty, 'web', URL)).toBe('services:\n  web:\n    labels:\n      sencho.service.url: "https://app.example.com"\n      keep: yes\n');
+    const empty = 'services:\n  web:\n    labels:\n      io.sencho.url:\n      keep: yes\n';
+    expect(patchTo(empty, 'web', URL)).toBe('services:\n  web:\n    labels:\n      io.sencho.url: "https://app.example.com"\n      keep: yes\n');
     expect(patchTo(empty, 'web', null)).toBe('services:\n  web:\n    labels:\n      keep: yes\n');
-    const commented = 'services:\n  web:\n    labels:\n      sencho.service.url: # set later\n      keep: yes\n';
-    expect(patchTo(commented, 'web', URL)).toBe('services:\n  web:\n    labels:\n      sencho.service.url: "https://app.example.com" # set later\n      keep: yes\n');
-    const tilde = 'services:\n  web:\n    labels:\n      sencho.service.url: ~\n      keep: yes\n';
-    expect(patchTo(tilde, 'web', URL)).toBe('services:\n  web:\n    labels:\n      sencho.service.url: "https://app.example.com"\n      keep: yes\n');
+    const commented = 'services:\n  web:\n    labels:\n      io.sencho.url: # set later\n      keep: yes\n';
+    expect(patchTo(commented, 'web', URL)).toBe('services:\n  web:\n    labels:\n      io.sencho.url: "https://app.example.com" # set later\n      keep: yes\n');
+    const tilde = 'services:\n  web:\n    labels:\n      io.sencho.url: ~\n      keep: yes\n';
+    expect(patchTo(tilde, 'web', URL)).toBe('services:\n  web:\n    labels:\n      io.sencho.url: "https://app.example.com"\n      keep: yes\n');
   });
 
   it('fills a `labels:` key that has no value yet', () => {
     expect(patchTo('services:\n  web:\n    labels:\n    image: nginx\n', 'web', URL))
-      .toBe('services:\n  web:\n    labels:\n      sencho.service.url: "https://app.example.com"\n    image: nginx\n');
+      .toBe('services:\n  web:\n    labels:\n      io.sencho.url: "https://app.example.com"\n    image: nginx\n');
   });
 
   it('quotes a flow list entry and replaces or clears repeated entries', () => {
     expect(patchTo('services:\n  web: { labels: [ "a=1", b=2 ] }\n', 'web', 'https://app.example.com/x,y'))
-      .toBe('services:\n  web: { labels: [ "a=1", b=2, "sencho.service.url=https://app.example.com/x,y" ] }\n');
-    expect(patchTo('services:\n  web: { labels: [ sencho.service.url=https://o, keep=1, sencho.service.url=https://p ] }\n', 'web', URL))
-      .toBe('services:\n  web: { labels: [ "sencho.service.url=https://app.example.com", keep=1 ] }\n');
-    expect(patchTo('services:\n  web:\n    labels: [sencho.service.url=https://o, sencho.service.url=https://p, keep=1]\n', 'web', null))
+      .toBe('services:\n  web: { labels: [ "a=1", b=2, "io.sencho.url=https://app.example.com/x,y" ] }\n');
+    expect(patchTo('services:\n  web: { labels: [ io.sencho.url=https://o, keep=1, io.sencho.url=https://p ] }\n', 'web', URL))
+      .toBe('services:\n  web: { labels: [ "io.sencho.url=https://app.example.com", keep=1 ] }\n');
+    expect(patchTo('services:\n  web:\n    labels: [io.sencho.url=https://o, io.sencho.url=https://p, keep=1]\n', 'web', null))
       .toBe('services:\n  web:\n    labels: [keep=1]\n');
   });
 
   it('keeps a numeric inherited label token when the labels are copied', () => {
     const source = 'x-b: &b\n  labels:\n    port: 0440\nservices:\n  web:\n    <<: *b\n    image: nginx\n';
     expect(patchTo(source, 'web', URL)).toBe(
-      'x-b: &b\n  labels:\n    port: 0440\nservices:\n  web:\n    labels:\n      port: 0440\n      sencho.service.url: "https://app.example.com"\n    <<: *b\n    image: nginx\n',
+      'x-b: &b\n  labels:\n    port: 0440\nservices:\n  web:\n    labels:\n      port: 0440\n      io.sencho.url: "https://app.example.com"\n    <<: *b\n    image: nginx\n',
     );
   });
 
   it('appends before commented-out labels that close the block', () => {
     expect(patchTo('services:\n  web:\n    labels:\n      a: b\n      # traefik.enable: true\n  api:\n    image: x\n', 'web', URL))
-      .toBe('services:\n  web:\n    labels:\n      a: b\n      sencho.service.url: "https://app.example.com"\n      # traefik.enable: true\n  api:\n    image: x\n');
+      .toBe('services:\n  web:\n    labels:\n      a: b\n      io.sencho.url: "https://app.example.com"\n      # traefik.enable: true\n  api:\n    image: x\n');
     expect(patchTo('services:\n  web:\n    labels:\n      - a=b\n      # - traefik.enable=true\n    image: x\n', 'web', URL))
-      .toBe('services:\n  web:\n    labels:\n      - a=b\n      - sencho.service.url=https://app.example.com\n      # - traefik.enable=true\n    image: x\n');
+      .toBe('services:\n  web:\n    labels:\n      - a=b\n      - io.sencho.url=https://app.example.com\n      # - traefik.enable=true\n    image: x\n');
     expect(patchTo('services:\r\n  web:\r\n    labels:\r\n      a: b\r\n      # old: 1\r\n    image: x\r\n', 'web', URL))
-      .toBe('services:\r\n  web:\r\n    labels:\r\n      a: b\r\n      sencho.service.url: "https://app.example.com"\r\n      # old: 1\r\n    image: x\r\n');
+      .toBe('services:\r\n  web:\r\n    labels:\r\n      a: b\r\n      io.sencho.url: "https://app.example.com"\r\n      # old: 1\r\n    image: x\r\n');
   });
 
   it('appends at the end of the file with or without a comment on the last label', () => {
     expect(patchTo('services:\n  web:\n    labels:\n      keep: yes # n', 'web', URL))
-      .toBe('services:\n  web:\n    labels:\n      keep: yes # n\n      sencho.service.url: "https://app.example.com"');
+      .toBe('services:\n  web:\n    labels:\n      keep: yes # n\n      io.sencho.url: "https://app.example.com"');
     expect(patchTo('services:\n  web:\n    labels:\n      - keep=yes', 'web', URL))
-      .toBe('services:\n  web:\n    labels:\n      - keep=yes\n      - sencho.service.url=https://app.example.com');
+      .toBe('services:\n  web:\n    labels:\n      - keep=yes\n      - io.sencho.url=https://app.example.com');
     expect(patchTo('services:\r\n  web:\r\n    labels:\r\n      - keep=yes # n\r\n', 'web', URL))
-      .toBe('services:\r\n  web:\r\n    labels:\r\n      - keep=yes # n\r\n      - sencho.service.url=https://app.example.com\r\n');
+      .toBe('services:\r\n  web:\r\n    labels:\r\n      - keep=yes # n\r\n      - io.sencho.url=https://app.example.com\r\n');
   });
 
   it('keeps a comment on an empty `labels:` key', () => {
     expect(patchTo('services:\n  web:\n    image: y\n    labels: # none yet\n', 'web', URL))
-      .toBe('services:\n  web:\n    image: y\n    labels: # none yet\n      sencho.service.url: "https://app.example.com"\n');
+      .toBe('services:\n  web:\n    image: y\n    labels: # none yet\n      io.sencho.url: "https://app.example.com"\n');
   });
 
   it('clears an empty, null, or commented URL label and keeps the next label in place', () => {
-    expect(patchTo('services:\n  web:\n    labels:\n      sencho.service.url: # later\n      keep: yes\n', 'web', null))
+    expect(patchTo('services:\n  web:\n    labels:\n      io.sencho.url: # later\n      keep: yes\n', 'web', null))
       .toBe('services:\n  web:\n    labels:\n      keep: yes\n');
-    expect(patchTo('services:\n  web:\n    labels:\n      sencho.service.url: ~\n      keep: yes\n', 'web', null))
+    expect(patchTo('services:\n  web:\n    labels:\n      io.sencho.url: ~\n      keep: yes\n', 'web', null))
       .toBe('services:\n  web:\n    labels:\n      keep: yes\n');
-    expect(patchTo('services:\n  web:\n    labels:\n      sencho.service.url: null\n      keep: yes\n', 'web', URL))
-      .toBe('services:\n  web:\n    labels:\n      sencho.service.url: "https://app.example.com"\n      keep: yes\n');
+    expect(patchTo('services:\n  web:\n    labels:\n      io.sencho.url: null\n      keep: yes\n', 'web', URL))
+      .toBe('services:\n  web:\n    labels:\n      io.sencho.url: "https://app.example.com"\n      keep: yes\n');
   });
 
   it('removes the labels key when the only label is cleared', () => {
-    expect(patchTo('services:\n  web:\n    labels:\n      sencho.service.url: x\n    image: y\n', 'web', null))
+    expect(patchTo('services:\n  web:\n    labels:\n      io.sencho.url: x\n    image: y\n', 'web', null))
       .toBe('services:\n  web:\n    image: y\n');
-    expect(patchTo('services:\r\n  web:\r\n    labels:\r\n      sencho.service.url: x\r\n    image: y\r\n', 'web', null))
+    expect(patchTo('services:\r\n  web:\r\n    labels:\r\n      io.sencho.url: x\r\n    image: y\r\n', 'web', null))
       .toBe('services:\r\n  web:\r\n    image: y\r\n');
-    expect(patchTo('services:\n  web:\n    labels:\n      sencho.service.url: "https://app.example.com/#/dashboard"\n    image: y\n', 'web', null))
+    expect(patchTo('services:\n  web:\n    labels:\n      io.sencho.url: "https://app.example.com/#/dashboard"\n    image: y\n', 'web', null))
       .toBe('services:\n  web:\n    image: y\n');
   });
 
   it('removes the labels key when the only list entry is cleared', () => {
-    expect(patchTo('services:\n  web:\n    labels:\n      - sencho.service.url=http://x\n    image: y\n', 'web', null))
+    expect(patchTo('services:\n  web:\n    labels:\n      - io.sencho.url=http://x\n    image: y\n', 'web', null))
       .toBe('services:\n  web:\n    image: y\n');
-    expect(patchTo('services:\r\n  web:\r\n    labels:\r\n      - sencho.service.url=http://x\r\n    image: y\r\n', 'web', null))
+    expect(patchTo('services:\r\n  web:\r\n    labels:\r\n      - io.sencho.url=http://x\r\n    image: y\r\n', 'web', null))
       .toBe('services:\r\n  web:\r\n    image: y\r\n');
-    expect(patchTo('services:\n  web:\n    labels:\n      - "sencho.service.url=https://app.example.com/#/dashboard"\n    image: y\n', 'web', null))
+    expect(patchTo('services:\n  web:\n    labels:\n      - "io.sencho.url=https://app.example.com/#/dashboard"\n    image: y\n', 'web', null))
       .toBe('services:\n  web:\n    image: y\n');
-    expect(patchTo('services:\n  web:\n    labels: [ sencho.service.url=http://x ]\n    image: y\n', 'web', null))
+    expect(patchTo('services:\n  web:\n    labels: [ io.sencho.url=http://x ]\n    image: y\n', 'web', null))
       .toBe('services:\n  web:\n    image: y\n');
-    expect(patchTo('services:\n  web: { image: y, labels: [ sencho.service.url=http://x ] }\n', 'web', null))
+    expect(patchTo('services:\n  web: { image: y, labels: [ io.sencho.url=http://x ] }\n', 'web', null))
       .toBe('services:\n  web: { image: y }\n');
-    expect(patchTo('services:\n  web:\n    labels:\n      - sencho.service.url=http://a\n      - sencho.service.url=http://b\n    image: y\n', 'web', null))
+    expect(patchTo('services:\n  web:\n    labels:\n      - io.sencho.url=http://a\n      - io.sencho.url=http://b\n    image: y\n', 'web', null))
       .toBe('services:\n  web:\n    image: y\n');
   });
 
@@ -2503,11 +2515,11 @@ describe('patchServiceUrlLabel on flow, anchored, and edge layouts', () => {
   });
 
   it('never writes the emptied labels into a comment that ends in a colon', () => {
-    expect(patchTo('services:\n  web:\n    labels:\n      # see:\n      sencho.service.url: "http://x"\n    image: x\n', 'web', null))
+    expect(patchTo('services:\n  web:\n    labels:\n      # see:\n      io.sencho.url: "http://x"\n    image: x\n', 'web', null))
       .toBe('services:\n  web:\n    labels:\n      # see:\n      {}\n    image: x\n');
-    expect(patchTo('services:\n  web:\n    labels: # note:\n      sencho.service.url: "http://x"\n', 'web', null))
+    expect(patchTo('services:\n  web:\n    labels: # note:\n      io.sencho.url: "http://x"\n', 'web', null))
       .toBe('services:\n  web:\n    labels: # note:\n      {}\n');
-    expect(patchTo('services:\n  web:\n    labels:\n      # urls:\n      - sencho.service.url=http://x\n', 'web', null))
+    expect(patchTo('services:\n  web:\n    labels:\n      # urls:\n      - io.sencho.url=http://x\n', 'web', null))
       .toBe('services:\n  web:\n    labels:\n      # urls:\n      []\n');
   });
 
@@ -2517,46 +2529,46 @@ describe('patchServiceUrlLabel on flow, anchored, and edge layouts', () => {
   });
 
   it('replaces a URL inside flow labels of a flow service', () => {
-    expect(patchTo('services:\n  web: { image: nginx, labels: { sencho.service.url: "https://old", keep: 0440 } }\n', 'web', URL))
-      .toBe('services:\n  web: { image: nginx, labels: { sencho.service.url: "https://app.example.com", keep: 0440 } }\n');
+    expect(patchTo('services:\n  web: { image: nginx, labels: { io.sencho.url: "https://old", keep: 0440 } }\n', 'web', URL))
+      .toBe('services:\n  web: { image: nginx, labels: { io.sencho.url: "https://app.example.com", keep: 0440 } }\n');
   });
 
   it('copies a flow extension anchor onto the edited service only', () => {
     expect(patchTo('x-svc: &svc { image: nginx, user: 0440 }\nservices:\n  web: *svc\n  api: *svc\n', 'web', URL))
-      .toBe('x-svc: &svc { image: nginx, user: 0440 }\nservices:\n  web: { image: nginx, user: 0440, labels: { sencho.service.url: "https://app.example.com" } }\n  api: *svc\n');
+      .toBe('x-svc: &svc { image: nginx, user: 0440 }\nservices:\n  web: { image: nginx, user: 0440, labels: { io.sencho.url: "https://app.example.com" } }\n  api: *svc\n');
   });
 
   it('keeps nested and repeated anchor consumers on their own values', () => {
     expect(patchTo('services:\n  web: &svc { image: nginx, labels: &l { a: 0440 } }\n  api: *svc\n  worker: { image: x, labels: *l }\n', 'web', URL))
-      .toBe('services:\n  web: &svc { image: nginx, labels: &l { a: 0440, sencho.service.url: "https://app.example.com" } }\n  api: { image: nginx, labels: &l { a: 0440 } }\n  worker: { image: x, labels: { a: 0440 } }\n');
+      .toBe('services:\n  web: &svc { image: nginx, labels: &l { a: 0440, io.sencho.url: "https://app.example.com" } }\n  api: { image: nginx, labels: &l { a: 0440 } }\n  worker: { image: x, labels: { a: 0440 } }\n');
     expect(patchTo('services:\n  web: &svc { image: nginx }\n  api: *svc\n  worker: *svc\n', 'api', URL))
-      .toBe('services:\n  web: &svc { image: nginx }\n  api: { image: nginx, labels: { sencho.service.url: "https://app.example.com" } }\n  worker: *svc\n');
+      .toBe('services:\n  web: &svc { image: nginx }\n  api: { image: nginx, labels: { io.sencho.url: "https://app.example.com" } }\n  worker: *svc\n');
   });
 
   it('keeps a comment before a removed first flow item', () => {
-    expect(patchTo('services:\n  web:\n    labels: [  # important!\n      sencho.service.url=old, a=b ]\n', 'web', null))
+    expect(patchTo('services:\n  web:\n    labels: [  # important!\n      io.sencho.url=old, a=b ]\n', 'web', null))
       .toBe('services:\n  web:\n    labels: [  # important!\n      a=b ]\n');
   });
 
   it('removes an anchor or tag with the first flow item it belongs to', () => {
-    expect(patchTo('services:\n  web:\n    labels: [ &u sencho.service.url=x, a=b ]\n', 'web', null))
+    expect(patchTo('services:\n  web:\n    labels: [ &u io.sencho.url=x, a=b ]\n', 'web', null))
       .toBe('services:\n  web:\n    labels: [ a=b ]\n');
-    expect(patchTo('services:\n  web:\n    labels: [ !<tag:yaml.org,2002:str> sencho.service.url=x, a=b ]\n', 'web', null))
+    expect(patchTo('services:\n  web:\n    labels: [ !<tag:yaml.org,2002:str> io.sencho.url=x, a=b ]\n', 'web', null))
       .toBe('services:\n  web:\n    labels: [ a=b ]\n');
   });
 
   it('allows a standard YAML tag elsewhere in the file', () => {
     expect(patchTo('services:\n  web:\n    image: !!str nginx\n    labels:\n      a: b\n', 'web', URL))
-      .toBe('services:\n  web:\n    image: !!str nginx\n    labels:\n      a: b\n      sencho.service.url: "https://app.example.com"\n');
+      .toBe('services:\n  web:\n    image: !!str nginx\n    labels:\n      a: b\n      io.sencho.url: "https://app.example.com"\n');
   });
 
   it('refuses edits it cannot make without losing a comment or a custom tag', () => {
-    expect(patchServiceUrlLabel('services:\n  web:\n    labels: [ # c\n      sencho.service.url=x ]\n', 'web', null))
+    expect(patchServiceUrlLabel('services:\n  web:\n    labels: [ # c\n      io.sencho.url=x ]\n', 'web', null))
       .toEqual({ ok: false, reason: 'unsupported' });
-    const flowComment = 'services:\n  web:\n    labels: [\n      a=1, # keep me\n      sencho.service.url=http://x\n    ]\n';
+    const flowComment = 'services:\n  web:\n    labels: [\n      a=1, # keep me\n      io.sencho.url=http://x\n    ]\n';
     expect(patchServiceUrlLabel(flowComment, 'web', null)).toEqual({ ok: false, reason: 'unsupported' });
     expect(patchServiceUrlLabel('services:\n  web:\n    labels: !reset []\n', 'web', URL)).toEqual({ ok: false, reason: 'unsupported' });
-    const overridden = 'services:\n  web:\n    labels: &l !override { a: b, sencho.service.url: "http://x" }\n  api:\n    labels: *l\n';
+    const overridden = 'services:\n  web:\n    labels: &l !override { a: b, io.sencho.url: "http://x" }\n  api:\n    labels: *l\n';
     expect(patchServiceUrlLabel(overridden, 'web', URL)).toEqual({ ok: false, reason: 'unsupported' });
   });
 
@@ -2567,7 +2579,7 @@ describe('patchServiceUrlLabel on flow, anchored, and edge layouts', () => {
   it('refuses a layout it cannot edit without changing another service', () => {
     const blockIntoFlow = 'services:\n  web:\n    image: nginx\n    labels: &l\n      keep: "1"\n  api: { image: redis, labels: *l }\n';
     expect(patchServiceUrlLabel(blockIntoFlow, 'web', URL)).toEqual({ ok: false, reason: 'unsupported' });
-    const multiline = 'services:\n  web:\n    labels:\n      sencho.service.url: &u |\n        https://o\n  api:\n    labels:\n      x: *u\n';
+    const multiline = 'services:\n  web:\n    labels:\n      io.sencho.url: &u |\n        https://o\n  api:\n    labels:\n      x: *u\n';
     expect(patchServiceUrlLabel(multiline, 'web', URL)).toEqual({ ok: false, reason: 'unsupported' });
   });
 });

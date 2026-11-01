@@ -12,6 +12,16 @@ vi.mock('@/context/AuthContext', () => ({
   useAuth: () => ({ isAdmin: true }),
 }));
 
+let senchoLabelsSupported = true;
+// `null` models a node info fetch that failed or has not resolved: no version, no capabilities.
+let nodeMeta: { version: string | null } | null = { version: '0.99.0' };
+vi.mock('@/context/NodeContext', () => ({
+  useNodes: () => ({
+    activeNodeMeta: nodeMeta,
+    hasCapability: (cap: string) => cap !== 'sencho-labels-v1' || senchoLabelsSupported,
+  }),
+}));
+
 import { apiFetch } from '@/lib/api';
 
 const mockInventory = {
@@ -42,6 +52,7 @@ const mockInventory = {
 
 describe('ComposeLabelsPanel', () => {
   beforeEach(() => {
+    senchoLabelsSupported = true;
     vi.mocked(apiFetch).mockResolvedValue({
       ok: true,
       json: async () => mockInventory,
@@ -55,6 +66,51 @@ describe('ComposeLabelsPanel', () => {
     expect(screen.getAllByText('traefik.enable')).toHaveLength(2);
     expect(screen.getByTestId('mismatch-only-container')).toBeInTheDocument();
     expect(screen.getByTestId('mismatch-both')).toBeInTheDocument();
+  });
+
+  it('keeps the node\'s Active on a deployed protective label and Inert on a deployed presentation label', async () => {
+    vi.mocked(apiFetch).mockResolvedValue({
+      ok: true,
+      json: async () => ({
+        stackName: 'demo', renderable: true, partial: false, generatedAt: Date.now(),
+        services: [{
+          service: 'proxy',
+          declaredLabels: [{ key: 'io.sencho.infrastructure', value: 'true', source: 'compose' as const, behavior: { state: 'active' } }],
+          replicas: [{
+            id: 'c1', name: 'demo-proxy-1', state: 'running',
+            runtimeLabels: [
+              { key: 'io.sencho.infrastructure', value: 'true', source: 'runtime' as const, behavior: { state: 'active', reason: 'Read from the deployed container.' } },
+              { key: 'io.sencho.url', value: 'https://x.example.com', source: 'runtime' as const, behavior: { state: 'active', reason: 'A remote claim.' } },
+            ],
+            onlyInCompose: [], onlyOnContainer: ['io.sencho.url'], inBoth: ['io.sencho.infrastructure'],
+          }],
+        }],
+      }),
+    } as Response);
+    render(<ComposeLabelsPanel stackName="demo" />);
+    const badges = await screen.findAllByTestId('label-behavior');
+    const states = badges.map(badge => badge.dataset.state);
+    // The declared copy and the honored deployed copy are Active; the presentation label cannot become Active from a container.
+    expect(states.filter(state => state === 'active')).toHaveLength(2);
+    expect(states).toContain('inert');
+  });
+
+  it('ignores a node claim on a key Sencho stamps on its own containers', async () => {
+    vi.mocked(apiFetch).mockResolvedValue({
+      ok: true,
+      json: async () => ({
+        stackName: 'demo', renderable: true, partial: false, generatedAt: Date.now(),
+        services: [{
+          service: 'web',
+          declaredLabels: [{ key: 'io.sencho.mesh', value: 'true', source: 'compose' as const, behavior: { state: 'active', reason: 'Set by the mesh.' } }],
+          replicas: [],
+        }],
+      }),
+    } as Response);
+    render(<ComposeLabelsPanel stackName="demo" />);
+    const badge = await screen.findByTestId('label-behavior');
+    expect(badge).toHaveTextContent('Ignored');
+    expect(await screen.findByText('Reserved for containers Sencho creates; it has no effect in a Compose file.')).toBeInTheDocument();
   });
 
   it('renders a value-changed badge when a label value drifted', async () => {
@@ -152,6 +208,16 @@ describe('ComposeLabelsPanel', () => {
     await user.click(screen.getByRole('button', { name: /Filters/ }));
     await user.click(screen.getByRole('button', { name: 'Compose File' }));
     expect(screen.queryByTestId('mismatch-changed')).toBeNull();
+  });
+
+  it('shows a load error, not an empty inventory, when the body cannot be read', async () => {
+    vi.mocked(apiFetch).mockResolvedValue({
+      ok: true,
+      json: async () => ({ stackName: 'demo', services: 'not-an-array' }),
+    } as unknown as Response);
+    render(<ComposeLabelsPanel stackName="demo" />);
+    expect(await screen.findByText('Could not load Compose labels for this stack.')).toBeInTheDocument();
+    expect(screen.queryByText('No Compose or runtime labels found for this stack.')).toBeNull();
   });
 
   it('a source facet hides that source; turning off Compose File hides declared labels', async () => {
@@ -300,5 +366,148 @@ describe('ComposeLabelsPanel', () => {
     expect((await screen.findByTestId('compose-label-search') as HTMLInputElement).value).toBe('');
     expect(await screen.findByText('web.owner')).toBeInTheDocument();
     expect(screen.getByText('db.owner')).toBeInTheDocument();
+  });
+});
+
+describe('ComposeLabelsPanel io.sencho.* status', () => {
+  const senchoInventory = {
+    stackName: 'demo',
+    renderable: true,
+    generatedAt: Date.now(),
+    services: [
+      {
+        service: 'web',
+        declaredLabels: [
+          { key: 'io.sencho.url', value: 'https://app.example.com', source: 'compose' as const, behavior: { state: 'active' as const, summary: 'Application link for the service.' } },
+          { key: 'io.sencho.order', value: 'soon', source: 'compose' as const, behavior: { state: 'invalid' as const, reason: 'Use a whole number such as 10.' } },
+          { key: 'io.sencho.future', value: '1', source: 'compose' as const, behavior: { state: 'unsupported' as const, reason: 'Sencho does not recognize this label.' } },
+        ],
+        replicas: [
+          {
+            id: 'c1',
+            name: 'demo-web-1',
+            state: 'running',
+            runtimeLabels: [
+              { key: 'io.sencho.hidden', value: 'true', source: 'runtime' as const, behavior: { state: 'inert' as const, reason: 'Present only on the running container, so Sencho does not act on it. Declare it in the Compose file instead.' } },
+            ],
+            onlyInCompose: ['io.sencho.order', 'io.sencho.future'],
+            onlyOnContainer: ['io.sencho.hidden'],
+            inBoth: ['io.sencho.url'],
+          },
+        ],
+      },
+    ],
+  };
+
+  beforeEach(() => {
+    senchoLabelsSupported = true;
+    nodeMeta = { version: '0.99.0' };
+    vi.mocked(apiFetch).mockResolvedValue({ ok: true, json: async () => senchoInventory } as Response);
+  });
+
+  it('distinguishes active, ignored, unsupported, and inert Sencho labels', async () => {
+    const user = userEvent.setup();
+    render(<ComposeLabelsPanel stackName="demo" />);
+    await screen.findByText('io.sencho.url');
+    const states = screen.getAllByTestId('label-behavior').map(el => [el.getAttribute('data-state'), el.textContent]);
+    expect(states).toEqual([
+      ['active', 'Active'],
+      ['invalid', 'Ignored'],
+      ['unsupported', 'Unsupported'],
+      ['inert', 'Inert'],
+    ]);
+    expect(screen.getByText('Use a whole number such as 10.')).toBeInTheDocument();
+    expect(screen.getByText('Sencho does not recognize this label.')).toBeInTheDocument();
+    // An inert label stays quiet inline and explains itself on click, which also works from the keyboard and a touch screen.
+    expect(screen.queryByTestId('label-behavior-reason')).toBeNull();
+    await user.click(screen.getByRole('button', { name: /Inert: why/ }));
+    expect(await screen.findByTestId('label-behavior-reason')).toHaveTextContent('Declare it in the Compose file');
+    expect(screen.queryByTestId('sencho-labels-unsupported')).toBeNull();
+  });
+
+  it('never shows an unreadable or unearned status from a node as Active', async () => {
+    vi.mocked(apiFetch).mockResolvedValue({
+      ok: true,
+      json: async () => ({
+        ...senchoInventory,
+        services: [{
+          ...senchoInventory.services[0],
+          declaredLabels: [
+            { key: 'io.sencho.url', value: 'v', source: 'compose', behavior: { state: 'trusted' } },
+            { key: 'io.sencho.order', value: 'v', source: 'compose', behavior: { state: 'invalid', reason: { nested: true } } },
+          ],
+          replicas: [{
+            ...senchoInventory.services[0].replicas[0],
+            runtimeLabels: [{ key: 'io.sencho.hidden', value: 'true', source: 'runtime', behavior: { state: 'active' } }],
+          }],
+        }],
+      }),
+    } as Response);
+    render(<ComposeLabelsPanel stackName="demo" />);
+    await screen.findByText('io.sencho.url');
+    expect(screen.getAllByTestId('label-behavior').map(el => el.getAttribute('data-state'))).toEqual(['unsupported', 'unsupported', 'inert']);
+    expect(screen.getAllByText(/cannot read/).length).toBeGreaterThan(0);
+  });
+
+  it('marks an io.sencho.* label from a node that reports no status, and leaves other labels alone', async () => {
+    vi.mocked(apiFetch).mockResolvedValue({
+      ok: true,
+      json: async () => ({
+        ...senchoInventory,
+        services: [{
+          ...senchoInventory.services[0],
+          declaredLabels: [
+            { key: 'io.sencho.url', value: 'https://app.example.com', source: 'compose' },
+            { key: 'traefik.enable', value: 'true', source: 'compose' },
+          ],
+          replicas: [],
+        }],
+      }),
+    } as Response);
+    render(<ComposeLabelsPanel stackName="demo" />);
+    await screen.findByText('io.sencho.url');
+    expect(screen.getAllByTestId('label-behavior-not-reported')).toHaveLength(1);
+    expect(screen.queryByTestId('label-behavior')).toBeNull();
+  });
+
+  it('says so when the node does not apply io.sencho.* labels', async () => {
+    senchoLabelsSupported = false;
+    vi.mocked(apiFetch).mockResolvedValue({
+      ok: true,
+      json: async () => ({
+        ...senchoInventory,
+        services: [{
+          ...senchoInventory.services[0],
+          declaredLabels: [{ key: 'io.sencho.url', value: 'https://app.example.com', source: 'compose' as const }],
+          replicas: [],
+        }],
+      }),
+    } as Response);
+    render(<ComposeLabelsPanel stackName="demo" />);
+    expect(await screen.findByTestId('sencho-labels-unsupported')).toHaveTextContent('does not apply io.sencho.* labels');
+    expect(screen.queryByTestId('label-behavior')).toBeNull();
+  });
+
+  it('does not tell the operator to update a current node whose info fetch failed', async () => {
+    senchoLabelsSupported = false;
+    nodeMeta = { version: null };
+    vi.mocked(apiFetch).mockResolvedValue({
+      ok: true,
+      json: async () => ({
+        ...senchoInventory,
+        services: [{ ...senchoInventory.services[0], declaredLabels: [{ key: 'io.sencho.url', value: 'v', source: 'compose' as const }], replicas: [] }],
+      }),
+    } as Response);
+    render(<ComposeLabelsPanel stackName="demo" />);
+    await screen.findByText('io.sencho.url');
+    expect(screen.queryByTestId('sencho-labels-unsupported')).toBeNull();
+  });
+
+  it('does not warn about an old node when the stack declares no Sencho labels', async () => {
+    senchoLabelsSupported = false;
+    vi.mocked(apiFetch).mockResolvedValue({ ok: true, json: async () => mockInventory } as Response);
+    render(<ComposeLabelsPanel stackName="demo" />);
+    await screen.findByText('web');
+    expect(screen.queryByTestId('sencho-labels-unsupported')).toBeNull();
   });
 });

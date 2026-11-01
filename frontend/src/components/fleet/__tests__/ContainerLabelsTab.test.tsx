@@ -165,3 +165,65 @@ describe('ContainerLabelsTab', () => {
     expect(screen.getByText(/could not be inspected on Local/)).toBeInTheDocument();
   });
 });
+
+describe('ContainerLabelsTab io.sencho.* status', () => {
+  const inert = { state: 'inert' as const, reason: 'Present only on the running container, so Sencho does not act on it. Declare it in the Compose file instead.' };
+  const senchoFleet = {
+    ...mockFleet,
+    nodes: [{
+      ...mockFleet.nodes[0],
+      inventory: {
+        ...mockFleet.nodes[0].inventory,
+        containers: [{
+          id: 'c1', name: 'web-1', stack: 'demo', service: 'web', state: 'running',
+          labels: [
+            { key: 'io.sencho.url', value: 'https://runtime.example.com', source: 'runtime' as const, behavior: inert },
+            { key: 'traefik.enable', value: 'true', source: 'runtime' as const },
+          ],
+        }],
+      },
+    }],
+    aggregatedByLabel: [{
+      key: 'io.sencho.url', value: 'https://runtime.example.com', source: 'runtime' as const, behavior: inert,
+      containers: [{ id: 'c1', name: 'web-1', stack: 'demo', service: 'web', nodeId: 1, nodeName: 'Local' }],
+    }],
+  };
+
+  it('marks an io.sencho.* label inert in the by-label view', async () => {
+    const user = userEvent.setup();
+    vi.mocked(apiFetch).mockResolvedValue({ ok: true, json: async () => senchoFleet } as Response);
+    render(<ContainerLabelsTab onNavigateToNode={vi.fn()} />);
+    await user.click(await screen.findByText('By label'));
+    const badge = await screen.findByTestId('label-behavior');
+    expect(badge).toHaveAttribute('data-state', 'inert');
+    await user.click(badge);
+    expect(await screen.findByTestId('label-behavior-reason')).toHaveTextContent('Declare it in the Compose file');
+  });
+
+  it('says a node reports no status for an io.sencho.* label it sent without one', async () => {
+    const user = userEvent.setup();
+    const olderNode = {
+      ...senchoFleet,
+      aggregatedByLabel: [
+        { key: 'io.sencho.url', value: 'https://runtime.example.com', source: 'runtime' as const, containers: senchoFleet.aggregatedByLabel[0].containers },
+        { key: 'traefik.enable', value: 'true', source: 'runtime' as const, containers: senchoFleet.aggregatedByLabel[0].containers },
+      ],
+    };
+    vi.mocked(apiFetch).mockResolvedValue({ ok: true, json: async () => olderNode } as Response);
+    render(<ContainerLabelsTab onNavigateToNode={vi.fn()} />);
+    await user.click(await screen.findByText('By label'));
+    expect(await screen.findAllByTestId('label-behavior-not-reported')).toHaveLength(1);
+    expect(screen.queryByTestId('label-behavior')).toBeNull();
+  });
+
+  it('marks it inert in the by-container view and leaves other labels unmarked', async () => {
+    const user = userEvent.setup();
+    vi.mocked(apiFetch).mockResolvedValue({ ok: true, json: async () => senchoFleet } as Response);
+    render(<ContainerLabelsTab onNavigateToNode={vi.fn()} />);
+    const row = (await screen.findByText('web-1')).closest('tr');
+    await user.click(row!.querySelector('button')!);
+    const badges = await screen.findAllByTestId('label-behavior');
+    expect(badges).toHaveLength(1);
+    expect(badges[0].textContent).toBe('Inert');
+  });
+});
