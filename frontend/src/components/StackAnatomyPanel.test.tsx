@@ -555,6 +555,106 @@ describe('StackAnatomyPanel exposed footer', () => {
   });
 });
 
+describe('StackAnatomyPanel variable host port', () => {
+  const VAR_COMPOSE = 'services:\n  web:\n    image: x\n    ports:\n      - "${WEB_PORT:-8080}:80"\n';
+
+  const varEntry = (
+    over: Partial<import('@/lib/serviceUrlResolve').ServiceUrlEntry> = {},
+  ): import('@/lib/serviceUrlResolve').ServiceUrlEntry => ({
+    status: 'ready',
+    nodeId: 1,
+    stackName: 'web',
+    renderable: true,
+    serviceUrls: {},
+    serviceUrlEdit: {},
+    serviceUrlClear: {},
+    ports: { web: [{ host: '8080', container: '80', proto: 'tcp' }] },
+    ...over,
+  });
+
+  function renderVar(entry: import('@/lib/serviceUrlResolve').ServiceUrlEntry | null) {
+    return render(
+      <StackAnatomyPanel
+        stackName="web"
+        content={VAR_COMPOSE}
+        envContent=""
+        selectedEnvFile=".env"
+        gitSourcePending={null}
+        onEditCompose={vi.fn()}
+        onOpenGitSource={vi.fn()}
+        onApplyUpdate={vi.fn()}
+        canEdit
+        applying={false}
+        serviceUrlEntry={entry}
+      />,
+    );
+  }
+
+  it('renders a literal-port stack exactly as before', async () => {
+    render(
+      <StackAnatomyPanel
+        stackName="web"
+        content={'services:\n  web:\n    image: x\n    ports:\n      - "8989:8989"\n'}
+        envContent=""
+        selectedEnvFile=".env"
+        gitSourcePending={null}
+        onEditCompose={vi.fn()}
+        onOpenGitSource={vi.fn()}
+        onApplyUpdate={vi.fn()}
+        canEdit
+        applying={false}
+        serviceUrlEntry={varEntry()}
+      />,
+    );
+    const host = await screen.findByText('8989');
+    expect(host).toHaveAttribute('class', 'font-semibold text-foreground');
+    expect(host).not.toHaveAttribute('title');
+  });
+
+  it('shows the port Compose resolves, with the variable name beside it', async () => {
+    renderVar(varEntry());
+    expect(await screen.findByText('8080')).toBeInTheDocument();
+    expect(screen.getByText('${WEB_PORT}')).toBeInTheDocument();
+    expect(screen.getByText('${WEB_PORT}')).toHaveAttribute('title', 'Set by WEB_PORT');
+    expect(screen.queryByText('-8080}')).toBeNull();
+  });
+
+  it('links the footer at the resolved port through the shared handler', async () => {
+    renderVar(varEntry());
+    const link = await screen.findByRole('link', { name: /:8080/ });
+    expect(link).toHaveAttribute('href', 'http://localhost:8080');
+  });
+
+  it('shows the expression as written while the rendered model is loading or unavailable', async () => {
+    for (const over of [
+      { status: 'loading' as const, ports: {} },
+      { status: 'unavailable' as const, ports: {}, renderable: false },
+    ]) {
+      const { unmount } = renderVar(varEntry(over));
+      const host = await screen.findByText('${WEB_PORT:-8080}');
+      expect(host).toHaveAttribute('title', '${WEB_PORT:-8080}');
+      expect(screen.queryByText('${WEB_PORT}')).toBeNull();
+      expect(screen.queryByRole('link', { name: /:\d+/ })).toBeNull();
+      unmount();
+    }
+  });
+
+  it('shows the expression when the entry is absent', async () => {
+    renderVar(null);
+    expect(await screen.findByText('${WEB_PORT:-8080}')).toBeInTheDocument();
+    expect(screen.queryByRole('link', { name: /:\d+/ })).toBeNull();
+  });
+
+  it('resolves the Dossier ports table the same way as the Anatomy row', async () => {
+    renderVar(varEntry());
+    await userEvent.click(await screen.findByRole('tab', { name: 'Dossier' }));
+    await screen.findByTestId('dossier-panel');
+    // The generated-facts ports line lists the resolved port, not the expression.
+    expect(await screen.findByText('· :8080')).toBeInTheDocument();
+    expect(screen.queryByText('· ${WEB_PORT:-8080}')).toBeNull();
+  });
+});
+
 describe('StackAnatomyPanel effective dossier (multi-file Git)', () => {
   const ROOT_NO_PORTS = 'services:\n  web:\n    image: nginx:1.25\n';
 
