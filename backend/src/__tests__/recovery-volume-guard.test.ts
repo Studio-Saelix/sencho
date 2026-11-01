@@ -91,7 +91,8 @@ describe('DELETE /api/stacks/:name?pruneVolumes=true', () => {
     // The endpoint guard is not what is under test; the Compose run is observed instead.
     vi.spyOn(ComposeService.prototype, 'evaluateDockerEndpoint').mockResolvedValue(null);
     dockerSpawn = vi.fn().mockResolvedValue(undefined);
-    vi.spyOn(ComposeService.prototype as unknown as { execute: () => Promise<void> }, 'execute').mockImplementation(dockerSpawn);
+    vi.spyOn(ComposeService.prototype as unknown as { execute: () => Promise<void> }, 'execute')
+      .mockImplementation(dockerSpawn as unknown as () => Promise<void>);
   });
 
   afterEach(() => {
