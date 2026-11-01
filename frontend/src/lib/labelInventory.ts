@@ -3,7 +3,6 @@ import {
   MANAGED_LABEL_DECLARED_REASON,
   MANAGED_LABEL_DEPLOYED_REASON,
   MANAGED_LABEL_KEYS,
-  UNHONORED_BEHAVIOR_REASON,
   type SenchoLabelState,
 } from './senchoLabels';
 
@@ -122,6 +121,16 @@ export function isSenchoLabelKey(key: string): boolean {
 }
 
 /**
+ * The reason for a copy the client does not honor, mirroring the backend's inert
+ * reasons so both layers say the same thing about the same copy.
+ */
+function unhonoredInertReason(source: LabelSource): string {
+  if (source === 'image') return 'Set by the image, so Sencho does not act on it. Declare it in the Compose file instead.';
+  if (source === 'runtime') return 'Present only on the running container, so Sencho does not act on it. Declare it in the Compose file instead.';
+  return 'Its origin is unknown, so Sencho does not act on it.';
+}
+
+/**
  * Rebuild a node's `behavior` field by field before it reaches the screen. Absent
  * stays absent (an older node), and a label outside the namespace never carries
  * one. Anything unreadable becomes `unsupported` with a fixed reason. Only the
@@ -150,7 +159,7 @@ export function readLabelBehavior(source: LabelSource, key: string, raw: unknown
       : { state: 'inert', reason: MANAGED_LABEL_DEPLOYED_REASON };
   }
   const honored = source === 'compose' || DEPLOYED_TRUSTED_LABEL_KEYS.includes(key);
-  if (!honored && state !== 'inert') return { state: 'inert', reason: UNHONORED_BEHAVIOR_REASON };
+  if (!honored && state !== 'inert') return { state: 'inert', reason: unhonoredInertReason(source) };
   return {
     state: honored ? state : 'inert',
     ...(reason ? { reason } : {}),
