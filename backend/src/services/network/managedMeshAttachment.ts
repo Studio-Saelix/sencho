@@ -22,7 +22,7 @@ async function hasPilotMeshOverride(nodeId: number, stackName: string): Promise<
   } catch (error) {
     if (error instanceof Error && 'code' in error && error.code === 'ENOENT') return false;
     console.warn(
-      '[NetworkDrift] Could not verify Pilot Mesh override for %s:',
+      '[Mesh] Could not verify Pilot Mesh override for %s:',
       sanitizeForLog(stackName),
       sanitizeForLog(getErrorMessage(error, 'unknown')),
     );
@@ -30,25 +30,33 @@ async function hasPilotMeshOverride(nodeId: number, stackName: string): Promise<
   }
 }
 
-export async function resolveManagedMeshAttachment(
-  nodeId: number,
-  stackName: string,
-): Promise<ManagedNetworkAttachmentPredicate> {
-  let stackManaged = false;
+/** Whether the stack is opted into Sencho Mesh, through the database or a
+ *  Pilot Mesh override. A failed database read is logged and falls through to
+ *  the Pilot override check; a failed override check counts as not opted in. */
+export async function isStackMeshManaged(nodeId: number, stackName: string): Promise<boolean> {
   try {
-    stackManaged = DatabaseService.getInstance().isMeshStackEnabled(nodeId, stackName);
+    if (DatabaseService.getInstance().isMeshStackEnabled(nodeId, stackName)) return true;
   } catch (error) {
     console.warn(
-      '[NetworkDrift] Could not verify Mesh opt-in state for %s:',
+      '[Mesh] Could not verify Mesh opt-in state for %s:',
       sanitizeForLog(stackName),
       sanitizeForLog(getErrorMessage(error, 'unknown')),
     );
   }
-  if (!stackManaged) stackManaged = await hasPilotMeshOverride(nodeId, stackName);
+  return hasPilotMeshOverride(nodeId, stackName);
+}
+
+/** `stackManaged` skips the opt-in read when the caller already made it. */
+export async function resolveManagedMeshAttachment(
+  nodeId: number,
+  stackName: string,
+  stackManaged?: boolean,
+): Promise<ManagedNetworkAttachmentPredicate> {
+  const managed = stackManaged ?? await isStackMeshManaged(nodeId, stackName);
   const selfIdentity = SelfIdentityService.getInstance();
 
   return (container, networkName) => networkName === SENCHO_MESH_NETWORK && (
-    stackManaged
+    managed
     || selfIdentity.isOwnContainer(container.id)
     || selfIdentity.isOwnContainer(container.name)
   );

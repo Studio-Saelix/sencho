@@ -34,8 +34,8 @@ function reset(): void {
   raw.prepare('DELETE FROM stack_exposure_intent').run();
 }
 
-function seedScan(ref: string, now = Date.now()): void {
-  db().createVulnerabilityScan({
+function seedScan(ref: string, now = Date.now()): number {
+  return db().createVulnerabilityScan({
     node_id: 1, image_ref: ref, image_digest: `sha256:${ref}`, scanned_at: now,
     total_vulnerabilities: 0, critical_count: 0, high_count: 0, medium_count: 0, low_count: 0,
     unknown_count: 0, fixable_count: 0, secret_count: 0, misconfig_count: 0, scanners_used: 'vuln',
@@ -140,6 +140,69 @@ describe('GET /api/security/image-summaries', () => {
     const res = await request(app).get('/api/security/image-summaries').set('Cookie', adminCookie);
     expect(res.status).toBe(200);
     expect(res.body['ok:1']).toMatchObject({ image_ref: 'ok:1', publicly_exposed: null });
+  });
+
+  it('settles a cached tunnel reach with unverified routing against the stack intent', async () => {
+    const now = Date.now();
+    for (const ref of ['tun:1', 'tun-ns:1', 'tun-cf-ns:1']) seedScan(ref, now);
+    const tunnel = (path: string, provider: 'cloudflared' | 'tailscale' = 'cloudflared') => ({
+      connector: provider,
+      provider,
+      scope: provider === 'cloudflared' ? 'public-edge' : 'private-overlay',
+      path,
+    });
+    db().upsertStackExposure(1, 'web', JSON.stringify({
+      stack: 'web',
+      computedAt: now,
+      services: [
+        { service: 'app', image: 'tun:1', publiclyExposed: true, reason: 'tunnel', bindings: [], tunnel: tunnel('shared-network') },
+        { service: 'admin', image: 'tun-ns:1', publiclyExposed: true, reason: 'tunnel', bindings: [], tunnel: tunnel('shared-namespace', 'tailscale') },
+        { service: 'cf-admin', image: 'tun-cf-ns:1', publiclyExposed: true, reason: 'tunnel', bindings: [], tunnel: tunnel('shared-namespace') },
+      ],
+    }), now);
+
+    const unset = await request(app).get('/api/security/image-summaries').set('Cookie', adminCookie);
+    expect(unset.body['tun:1']).toMatchObject({ publicly_exposed: true });
+
+    db().setStackExposureIntent(1, 'web', '', 'internal', 'admin');
+    const internal = await request(app).get('/api/security/image-summaries').set('Cookie', adminCookie);
+    expect(internal.status).toBe(200);
+    expect(internal.body['tun:1']).toMatchObject({ publicly_exposed: false });
+    // A Tailscale namespace reach is certain; a cloudflared one only proves
+    // local reachability, so the operator's internal intent settles it.
+    expect(internal.body['tun-ns:1']).toMatchObject({ publicly_exposed: true });
+    expect(internal.body['tun-cf-ns:1']).toMatchObject({ publicly_exposed: false });
+  });
+
+  it('settles the scan sheet badge the same way', async () => {
+    const now = Date.now();
+    const scanId = seedScan('tun:1', now);
+    db().upsertStackExposure(1, 'web', JSON.stringify({
+      stack: 'web',
+      computedAt: now,
+      services: [{
+        service: 'app', image: 'tun:1', publiclyExposed: true, reason: 'tunnel', bindings: [],
+        tunnel: { connector: 'cloudflared', provider: 'cloudflared', scope: 'public-edge', path: 'shared-network' },
+      }],
+    }), now);
+    const before = await request(app).get(`/api/security/scans/${scanId}`).set('Cookie', adminCookie);
+    expect(before.body.publicly_exposed).toBe(true);
+    db().setStackExposureIntent(1, 'web', '', 'internal', 'admin');
+    const after = await request(app).get(`/api/security/scans/${scanId}`).set('Cookie', adminCookie);
+    expect(after.status).toBe(200);
+    expect(after.body.publicly_exposed).toBe(false);
+  });
+
+  it('skips a cached descriptor with no services list instead of failing', async () => {
+    const now = Date.now();
+    seedScan('pub:1', now);
+    db().upsertStackExposure(1, 'odd', JSON.stringify({ stack: 'odd' }), now);
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const res = await request(app).get('/api/security/image-summaries').set('Cookie', adminCookie);
+    expect(res.status).toBe(200);
+    expect(res.body['pub:1']).toMatchObject({ publicly_exposed: null });
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining('[Security] Skipped 1 unreadable cached exposure descriptor'));
+    warn.mockRestore();
   });
 
   it('requires authentication', async () => {

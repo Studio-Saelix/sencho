@@ -35,6 +35,7 @@ function stubFacts(overrides: Partial<StackNetworkFacts> = {}): StackNetworkFact
     services: [{ name: 'web', networks: [], publishedPorts: [], extraHosts: [] }],
     drift: { runtimeOnlyAttachments: [], declaredButUnused: [], missingFromRuntime: [], foreignNetworkAttachments: [] },
     missingExternalNetworks: [],
+    tunnels: [],
     ...overrides,
   };
 }

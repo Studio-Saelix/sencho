@@ -64,6 +64,19 @@ describe('StackNetworkingPanel', () => {
     expect(screen.getByText(/runtime matches compose/i)).toBeInTheDocument(); // no-drift success card
   });
 
+  it('labels a port Docker assigns as auto-assigned instead of port 0', async () => {
+    mockApi(facts({
+      services: [{
+        name: 'vpn', networks: [], extraHosts: [],
+        publishedPorts: [{ hostIp: '', startPort: 0, endPort: 0, protocol: 'udp', dynamic: true, allInterfaces: true, loopbackOnly: false }],
+      }],
+    }));
+    render(<StackNetworkingPanel stackName="web" canEdit doctorEnabled />);
+    expect(await screen.findByText('auto-assigned/udp')).toBeInTheDocument();
+    expect(screen.getByText('all interfaces')).toBeInTheDocument();
+    expect(screen.queryByText('0/udp')).not.toBeInTheDocument();
+  });
+
   it('marks a host-network service as host-exposed', async () => {
     mockApi(facts({
       services: [{ name: 'app', networks: [], publishedPorts: [], networkMode: 'host', extraHosts: [] }],
@@ -72,6 +85,38 @@ describe('StackNetworkingPanel', () => {
     await screen.findByText('web_backend');
     expect(screen.getByText('host-exposed')).toBeInTheDocument();
     expect(screen.getByText('all container ports')).toBeInTheDocument();
+  });
+
+  it('names the tunnel connector and the tunnel that reaches each service', async () => {
+    const tunnelCf = { connector: 'cloudflared', provider: 'cloudflared', scope: 'public-edge', path: 'shared-network' };
+    const tunnelTs = { connector: 'tailscale', provider: 'tailscale', scope: 'private-overlay', path: 'shared-namespace' };
+    mockApi(facts({
+      services: [
+        { name: 'cloudflared', networks: [], publishedPorts: [], extraHosts: [] },
+        { name: 'tailscale', networks: [], publishedPorts: [], extraHosts: [] },
+        { name: 'app', networks: [], publishedPorts: [], extraHosts: [], tunnel: tunnelCf },
+        { name: 'admin', networks: [], publishedPorts: [], networkMode: 'service:tailscale', extraHosts: [], tunnel: tunnelTs },
+      ],
+      tunnels: [
+        { service: 'cloudflared', provider: 'cloudflared', scope: 'public-edge', attachment: 'networks', signals: ['image'], localConfig: false, serveConfig: false, meshAttached: false, externalNetworks: [], reaches: [{ service: 'app', path: 'shared-network', networks: ['default'] }] },
+        { service: 'tailscale', provider: 'tailscale', scope: 'private-overlay', attachment: 'networks', signals: ['image'], localConfig: false, serveConfig: false, meshAttached: false, externalNetworks: [], reaches: [{ service: 'admin', path: 'shared-namespace', networks: [] }] },
+      ],
+    }));
+    render(<StackNetworkingPanel stackName="web" canEdit doctorEnabled />);
+    await screen.findByText('web_backend');
+    expect(screen.getByText('Cloudflare Tunnel connector · public edge')).toBeInTheDocument();
+    expect(screen.getByText('Tailscale connector · private overlay')).toBeInTheDocument();
+    expect(screen.getByText('via Cloudflare Tunnel (cloudflared) · public edge')).toBeInTheDocument();
+    expect(screen.getByText('via Tailscale (tailscale) · private overlay')).toBeInTheDocument();
+    // Only the shared-network reach is unverified; the namespace reach is certain.
+    expect(screen.getAllByText('routing unverified')).toHaveLength(1);
+  });
+
+  it('renders facts from a node that predates tunnel detection', async () => {
+    mockApi(facts());
+    render(<StackNetworkingPanel stackName="web" canEdit doctorEnabled />);
+    await screen.findByText('web_backend');
+    expect(screen.queryByText(/connector ·/)).not.toBeInTheDocument();
   });
 
   it('saves a stack-level exposure intent on click', async () => {

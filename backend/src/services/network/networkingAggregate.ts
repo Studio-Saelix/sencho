@@ -102,7 +102,7 @@ async function computeNodeNetworkingAggregate(
   return aggregate;
 }
 
-function buildOverview(
+export function buildOverview(
   nodeId: number,
   stacks: string[],
   snapshot: DependencySnapshot | null,
@@ -126,11 +126,14 @@ function buildOverview(
       intents.filter((intent) => intent.service !== '').map((intent) => [intent.service, intent.intent]),
     );
 
+    // A service reached through a tunnel connector is exposed even with no
+    // published port, and needs an exposure intent like a publishing one.
     const publishes = (service: (typeof facts.services)[number]): boolean =>
-      service.publishedPorts.length > 0 || isHostNetwork(service.networkMode);
+      service.publishedPorts.length > 0 || isHostNetwork(service.networkMode) || service.tunnel !== undefined;
 
     if (facts.services.some((service) =>
-      isHostNetwork(service.networkMode) || service.publishedPorts.some((port) => !isLoopback(port.hostIp)),
+      isHostNetwork(service.networkMode) || service.tunnel !== undefined
+      || service.publishedPorts.some((port) => !isLoopback(port.hostIp)),
     )) {
       exposedStackCount += 1;
     }

@@ -1,6 +1,7 @@
 /**
  * The environment-file reader Compose uses for a project's interpolation
- * environment, restricted to what layer selection needs.
+ * environment, and for the `env_file` values a service's container receives
+ * (`ComposeEnvFiles.assigned`, `format: raw` included).
  *
  * Compose does not read these files with a dotenv(1) parser. A quoted value may
  * span lines, a double-quoted value expands backslash escapes and then `${VAR}`
@@ -20,6 +21,8 @@
  * unknown rather than a guessed layer set.
  *
  * Mirrors compose-go dotenv/parser.go, dotenv/env.go, and template/template.go.
+ * The raw reader has no upstream file to mirror: it follows what `docker compose
+ * config` renders for a `format: raw` file.
  */
 
 /** Resolves a name: a string when set (possibly empty), undefined when unset. */
@@ -103,6 +106,13 @@ function trimRightUnicodeSpace(text: string): string {
   // Every White_Space code point is in the basic plane, so a code unit is a rune.
   while (end > 0 && isUnicodeSpace(text[end - 1])) end--;
   return text.slice(0, end);
+}
+
+/** Trim the whitespace Go trims from the start of a line. */
+function trimLeftUnicodeSpace(text: string): string {
+  let start = 0;
+  while (start < text.length && isUnicodeSpace(text[start])) start++;
+  return text.slice(start);
 }
 
 function isNameStart(char: string): boolean {
@@ -337,7 +347,15 @@ function parseEnvFileText(
       if (NAME_LETTER_OR_NUMBER.test(char)) continue;
       throw new ComposeEnvFileError(`unexpected character ${JSON.stringify(char)} in a variable name`);
     }
-    if (keyEnd === -1) return;
+    if (keyEnd === -1) {
+      // Compose treats a file that ends right after a name as an inherited
+      // assignment (a bare `NAME`, or `export NAME`, with no line break).
+      const key = trimRightUnicodeSpace(statement);
+      if (key === '' || key.includes(' ')) throw new ComposeEnvFileError('a variable name cannot contain a space');
+      const inheritedValue = lookup(key);
+      if (inheritedValue !== undefined) assign(key, inheritedValue);
+      return;
+    }
 
     const key = trimRightUnicodeSpace(statement.slice(0, keyEnd));
     if (key.includes(' ')) throw new ComposeEnvFileError('a variable name cannot contain a space');
@@ -427,8 +445,29 @@ export class ComposeEnvFiles {
     return fromProcess !== undefined ? fromProcess : this.values.get(name);
   }
 
-  /** Read one file's text, adding its assignments. Throws on unreadable syntax. */
-  read(content: string): void {
+  /** The value assigned by the files read so far, ignoring the base lookup.
+   *  Use this for a container env_file value, where the project environment is
+   *  interpolation input and an env_file assignment overrides it. */
+  assigned(name: string): string | undefined {
+    return this.values.get(name);
+  }
+
+  /** The names the files read so far assigned, in file order. A name that only
+   *  inherits (`NAME` on its own line) is included when the base lookup or an
+   *  earlier file answers it, and left out otherwise, as Compose leaves it out
+   *  of the container's environment. */
+  assignedNames(): string[] {
+    return [...this.values.keys()];
+  }
+
+  /** Read one file's text, adding its assignments. Throws on unreadable syntax.
+   *  `raw` is Compose's `format: raw`: each line is `NAME=value` with the value
+   *  kept literally, quotes, `$` and `#` included. */
+  read(content: string, options: { raw?: boolean } = {}): void {
+    if (options.raw) {
+      this.readRaw(content);
+      return;
+    }
     // Compose reads a file's bytes and drops a leading BOM before parsing it
     // (`bytes.TrimPrefix(data, utf8BOM)`), which is what an editor-saved file
     // starts with. Only the first character is considered, so a BOM elsewhere
@@ -437,5 +476,32 @@ export class ComposeEnvFiles {
     parseEnvFileText(text, (name) => this.lookup(name), (name, value) => {
       this.values.set(name, value);
     });
+  }
+
+  private readRaw(content: string): void {
+    // Compose's raw reader skips blank lines and lines whose first non-space
+    // character is `#`, rejects a name that holds a space or a tab, and lets a
+    // line with no `=` inherit the name's value. "Space" at the start of a line
+    // is Go's unicode.IsSpace, so a leading U+0085 (NEL), which JavaScript's
+    // `trimStart` leaves in place, is trimmed. It drops a BOM at the start of
+    // the file, as it does for a dotenv file; a BOM later in the file is kept as
+    // an ordinary character, and one in a name (` \ufeffSP=1` names `\ufeffSP`).
+    // Such a file is refused rather than read, so a name carrying a BOM is never
+    // guessed at.
+    const text = content.startsWith(UTF8_BOM) ? content.slice(1) : content;
+    if (text.includes(UTF8_BOM)) throw new ComposeEnvFileError('a raw env file has a byte order mark past its start');
+    for (const line of text.split('\n')) {
+      const entry = trimLeftUnicodeSpace(line.endsWith('\r') ? line.slice(0, -1) : line);
+      if (entry === '' || entry.startsWith(COMMENT)) continue;
+      const eq = entry.indexOf('=');
+      const name = eq === -1 ? entry : entry.slice(0, eq);
+      if (name === '' || /[ \t]/.test(name)) throw new ComposeEnvFileError('a raw variable name is empty or contains a space or tab');
+      if (eq !== -1) {
+        this.values.set(name, entry.slice(eq + 1));
+        continue;
+      }
+      const inherited = this.lookup(name);
+      if (inherited !== undefined) this.values.set(name, inherited);
+    }
   }
 }

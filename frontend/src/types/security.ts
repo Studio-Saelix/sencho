@@ -1,5 +1,9 @@
 import type { DismissPolicy } from '@/types/findingDismissal';
 import type { SecurityTab } from '@/lib/events';
+import type { ServiceTunnelExposure } from '@/types/networking';
+
+/** Why a service counts as network exposed. Mirrors the backend `ExposureReason`. */
+export type ExposureReason = 'published-port' | 'host-network' | 'tunnel';
 
 export type VulnSeverity = 'CRITICAL' | 'HIGH' | 'MEDIUM' | 'LOW' | 'UNKNOWN';
 export type VulnScanStatus = 'in_progress' | 'completed' | 'failed';
@@ -189,7 +193,8 @@ export interface CveSuppression {
 export interface ImageExposureContext {
   stackName: string;
   serviceName: string;
-  exposureReason: 'published-port' | 'host-network' | null;
+  exposureReason: ExposureReason | null;
+  tunnel?: ServiceTunnelExposure;
   exposureIntent?: 'internal' | 'same-node' | 'lan' | 'reverse-proxy' | 'public' | 'temporary' | 'unknown';
   intentStatus: 'set' | 'unset' | 'unavailable';
   intentConflict?: boolean;
@@ -314,7 +319,8 @@ export interface PostureTarget {
   imageRef: string;
   stackName?: string;
   serviceName?: string;
-  exposureReason?: 'published-port' | 'host-network' | null;
+  exposureReason?: ExposureReason | null;
+  tunnel?: ServiceTunnelExposure;
   exposureIntent?: 'internal' | 'same-node' | 'lan' | 'reverse-proxy' | 'public' | 'temporary' | 'unknown';
   intentStatus?: 'set' | 'unset' | 'unavailable';
   intentConflict?: boolean;

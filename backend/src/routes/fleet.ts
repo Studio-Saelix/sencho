@@ -1070,10 +1070,13 @@ interface FleetNetworkingSummaryNode {
 function isNodeNetworkingSummary(v: unknown): v is NodeNetworkingSummary {
   if (!v || typeof v !== 'object') return false;
   const o = v as Record<string, unknown>;
-  return (['exposed', 'unknownExposure', 'networkDrift'] as const).every(k => {
-    const b = o[k] as { count?: unknown; stacks?: unknown } | undefined;
-    return !!b && typeof b.count === 'number' && Array.isArray(b.stacks);
-  });
+  const bucket = (b: unknown): boolean => {
+    if (!b || typeof b !== 'object') return false;
+    const value = b as { count?: unknown; stacks?: unknown };
+    return typeof value.count === 'number' && Array.isArray(value.stacks);
+  };
+  if (!(['exposed', 'unknownExposure', 'networkDrift'] as const).every(k => bucket(o[k]))) return false;
+  return o.unreadable === undefined || bucket(o.unreadable);
 }
 
 /**
@@ -1082,7 +1085,8 @@ function isNodeNetworkingSummary(v: unknown): v is NodeNetworkingSummary {
  * hub's summary in-process and reaches each remote through its node-local
  * /api/networking/summary route. A remote on an older version (no route) returns
  * 404 and degrades to a skip, so one unreachable or unsupported node never fails
- * the filter for the rest.
+ * the filter for the rest. A remote that has the route but predates the
+ * `unreadable` bucket is accepted without it, and reports no unreadable stacks.
  */
 fleetRouter.get('/networking-summary', authMiddleware, async (req: Request, res: Response): Promise<void> => {
   if (!requirePermission(req, res, 'node:read')) return;

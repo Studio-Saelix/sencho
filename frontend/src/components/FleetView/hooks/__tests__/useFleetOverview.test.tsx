@@ -49,9 +49,9 @@ beforeEach(() => {
     if (path === '/fleet/overview') return Promise.resolve(okJson(NODES));
     if (path === '/fleet/networking-summary') return Promise.resolve(okJson({
       nodes: [
-        // Alpha (1) is exposed only; Bravo (2) has a summary but is unknown + drift, not exposed.
+        // Alpha (1) is exposed only; Bravo (2) has an unreadable stack and drift, not exposure.
         { nodeId: 1, summary: { exposed: { count: 1, stacks: ['web'] }, unknownExposure: { count: 0, stacks: [] }, networkDrift: { count: 0, stacks: [] } } },
-        { nodeId: 2, summary: { exposed: { count: 0, stacks: [] }, unknownExposure: { count: 1, stacks: ['db'] }, networkDrift: { count: 1, stacks: ['db'] } } },
+        { nodeId: 2, summary: { exposed: { count: 0, stacks: [] }, unknownExposure: { count: 0, stacks: [] }, networkDrift: { count: 1, stacks: ['db'] }, unreadable: { count: 1, stacks: ['db'] } } },
       ],
     }));
     if (path === '/node-labels') return Promise.resolve(okJson({}));

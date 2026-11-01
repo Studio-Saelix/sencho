@@ -8,7 +8,8 @@
  */
 import { getExposureContext } from './network/exposureContext';
 import type { ExposureIntent } from './network/types';
-import type { StackExposure } from './preflight/exposure';
+import type { ExposureReason, StackExposure } from './preflight/exposure';
+import { isCertainTunnelPath, type ServiceTunnelExposure } from './network/tunnelDetection';
 import type { PostureTarget } from './securityPosture';
 
 /** Max contexts returned per image on /image-summaries (display list only). */
@@ -25,7 +26,8 @@ const CONFLICT: ReadonlySet<ExposureIntent> = new Set(['internal', 'same-node'])
 export interface ImageExposureContext {
   stackName: string;
   serviceName: string;
-  exposureReason: 'published-port' | 'host-network' | null;
+  exposureReason: ExposureReason | null;
+  tunnel?: ServiceTunnelExposure;
   exposureIntent?: ExposureIntent;
   intentStatus: 'set' | 'unset' | 'unavailable';
   intentConflict?: boolean;
@@ -64,7 +66,67 @@ function effectiveIntent(
   stackIntent: ExposureIntent | null,
   serviceIntents: Record<string, ExposureIntent>,
 ): ExposureIntent | null {
-  return serviceIntents[service] ?? stackIntent ?? null;
+  return Object.prototype.hasOwnProperty.call(serviceIntents, service)
+    ? serviceIntents[service]
+    : stackIntent ?? null;
+}
+
+/**
+ * Settle unverified tunnel exposure against the operator's intent. A service
+ * exposed only by a tunnel whose routing Sencho cannot see (a Cloudflare
+ * namespace, a shared network, or the host network) and classified internal or
+ * same-node is taken at the operator's word and not counted as exposed; Compose
+ * Doctor still asks them to confirm the routing. A certain reach (a shared
+ * network namespace behind a Tailscale or WireGuard connector) stays exposed
+ * and conflicts with that intent. Security reads cached descriptors
+ * through `readSettledExposures`, so the exposed-image map and the exposure
+ * targets agree.
+ */
+export function settleTunnelExposure(
+  nodeId: number,
+  exposures: StackExposure[],
+  getContext: typeof getExposureContext = getExposureContext,
+): StackExposure[] {
+  return exposures.map((exp) => {
+    const unverified = exp.services.filter((svc) =>
+      svc.reason === 'tunnel' && svc.tunnel !== undefined && !isCertainTunnelPath(svc.tunnel));
+    if (unverified.length === 0) return exp;
+    const ctx = getContext(nodeId, exp.stack);
+    if (!ctx.available) return exp;
+    const settled = new Set(unverified
+      .filter((svc) => {
+        const intent = effectiveIntent(svc.service, ctx.stackIntent, ctx.serviceIntents);
+        return intent !== null && CONFLICT.has(intent);
+      })
+      .map((svc) => svc.service));
+    if (settled.size === 0) return exp;
+    return {
+      ...exp,
+      services: exp.services.map((svc) => (settled.has(svc.service) ? { ...svc, publiclyExposed: false } : svc)),
+    };
+  });
+}
+
+/** Parse cached `stack_exposures` rows (skipping, with a warning, any that is
+ *  not JSON or has no services list) and settle their tunnel exposure. The one
+ *  way Security reads cached descriptors. */
+export function readSettledExposures(
+  nodeId: number,
+  rows: ReadonlyArray<{ descriptor: string }>,
+  getContext: typeof getExposureContext = getExposureContext,
+): StackExposure[] {
+  const parsed = rows.map((r) => {
+    try {
+      const value: unknown = JSON.parse(r.descriptor);
+      return value && typeof value === 'object' && Array.isArray((value as { services?: unknown }).services) ? value as StackExposure : null;
+    } catch {
+      return null;
+    }
+  }).filter((e): e is StackExposure => e !== null);
+  if (parsed.length < rows.length) {
+    console.warn(`[Security] Skipped ${rows.length - parsed.length} unreadable cached exposure descriptor(s) on node ${nodeId}; those stacks show exposure as unknown until their next deploy or update.`);
+  }
+  return settleTunnelExposure(nodeId, parsed, getContext);
 }
 
 function rowKey(imageRef: string, stackName: string, serviceName: string): string {
@@ -207,6 +269,8 @@ export function buildImageExposureContextRows(
         exposureReason: svc.reason,
         intentStatus: 'unavailable',
       };
+      // Name the tunnel only when it is why the service counts as exposed.
+      if (svc.reason === 'tunnel' && svc.tunnel) row.tunnel = svc.tunnel;
 
       if (ctx.available) {
         const intent = effectiveIntent(svc.service, ctx.stackIntent, ctx.serviceIntents);
@@ -256,6 +320,7 @@ export function toPostureTarget(row: ImageExposureContextRow): PostureTarget {
     exposureReason: row.exposureReason,
     intentStatus: row.intentStatus,
   };
+  if (row.tunnel) target.tunnel = row.tunnel;
   if (row.exposureIntent) target.exposureIntent = row.exposureIntent;
   if (row.intentConflict) target.intentConflict = true;
   return target;
@@ -280,6 +345,7 @@ function contextsFromTargets(targets: PostureTarget[] | undefined): ImageExposur
       stackName: t.stackName,
       serviceName: t.serviceName,
       exposureReason: t.exposureReason ?? null,
+      ...(t.tunnel ? { tunnel: t.tunnel } : {}),
       exposureIntent: t.exposureIntent,
       intentStatus: t.intentStatus,
       intentConflict: t.intentConflict,
