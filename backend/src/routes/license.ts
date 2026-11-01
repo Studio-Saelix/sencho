@@ -9,6 +9,12 @@ import type { SelfUpdatePreflight } from '../services/SelfUpdateService';
 import { classifyImageChannel } from '../helpers/imageChannel';
 import { ImageOperationService } from '../services/ImageOperationService';
 import { imageChannelRouter } from './imageChannel';
+import {
+  ENDPOINT_PROVIDER_UNAVAILABLE_CODE,
+  HARDENED_ENDPOINT_PROVIDER_REASON,
+  parseEndpointProviderChoice,
+  respondClaimRefused,
+} from '../helpers/endpointProviderRequest';
 
 const LICENSE_SCOPE_MESSAGE = 'API tokens cannot manage licenses.';
 
@@ -130,9 +136,16 @@ systemUpdateRouter.post('/update', async (req: Request, res: Response): Promise<
   }
   const targetVersion = parseRequestedTargetVersion(req, res);
   if (targetVersion === null) return; // invalid supplied value; 400 already sent
+  const endpointProvider = parseEndpointProviderChoice(req, res, { allowOnly: false });
+  if (endpointProvider === null) return;
+  const replaceEndpointProvider = endpointProvider.replace;
   const pin = await selfUpdate.getPinInfo({ fresh: true });
   const channel = pin ? classifyImageChannel(pin.composeImageRef) : 'unknown';
   const machineCredential = req.user?.userId === 0 || !!req.apiTokenScope;
+  if (channel === 'hardened' && replaceEndpointProvider) {
+    res.status(409).json({ error: HARDENED_ENDPOINT_PROVIDER_REASON, code: ENDPOINT_PROVIDER_UNAVAILABLE_CODE });
+    return;
+  }
   if (channel === 'hardened') {
     if (machineCredential) {
       res.status(403).json({
@@ -162,11 +175,8 @@ systemUpdateRouter.post('/update', async (req: Request, res: Response): Promise<
   // Fail fast on a pin we cannot repin (digest/unknown) so the caller gets a
   // 409 instead of a 202 that would later fail after the reconnect overlay.
   if (!respondSelfUpdatePreflight(res, await selfUpdate.canSelfUpdateTarget(targetVersion))) return;
-  const claim = await ImageOperationService.getInstance().claimCommunityUpdate({ targetVersion });
-  if (!claim.ok) {
-    res.status(409).json({ error: 'An image operation is already in progress.', code: claim.failureCode });
-    return;
-  }
+  const claim = await ImageOperationService.getInstance().claimCommunityUpdate({ targetVersion, replaceEndpointProvider });
+  if (respondClaimRefused(res, claim)) return;
   res.status(202).json({ message: 'Update initiated. The server will restart shortly.' });
   // Schedule unconditionally: client abort can fire only `close` without `finish`,
   // which would otherwise leave the claimed operation stuck in pending_pull.
@@ -184,15 +194,33 @@ systemUpdateRouter.post('/reapply-compose', async (req: Request, res: Response):
     res.status(503).json({ error: 'Compose reapply unavailable. Sencho must be deployed via Docker Compose.' });
     return;
   }
-  const claim = await ImageOperationService.getInstance().claimComposeReapply();
-  if (!claim.ok) {
-    res.status(409).json({ error: 'An image operation is already in progress.', code: claim.failureCode });
-    return;
-  }
-  res.status(202).json({ message: 'Compose reapply initiated. The server will restart shortly.' });
+  const endpointProvider = parseEndpointProviderChoice(req, res);
+  if (endpointProvider === null) return;
+  const claim = await ImageOperationService.getInstance().claimComposeReapply(endpointProvider);
+  if (respondClaimRefused(res, claim)) return;
+  res.status(202).json({
+    message: endpointProvider.only
+      ? 'Recreating the Docker endpoint. Sencho keeps running and reconnects through the new container.'
+      : 'Compose reapply initiated. The server will restart shortly.',
+  });
   setTimeout(() => {
     ImageOperationService.getInstance().executeClaimedComposeReapply().catch(error => {
       console.error('[ImageOperation] Unexpected compose reapply failure:', error);
     });
   }, 500);
+});
+
+/**
+ * Whether this node's Update and Reapply can also recreate the container
+ * carrying its Docker API. The hub reads it through the node proxy before it
+ * offers the option; same permission as the update itself.
+ */
+systemUpdateRouter.get('/endpoint-provider', async (req: Request, res: Response): Promise<void> => {
+  if (!requirePermission(req, res, 'system:license')) return;
+  try {
+    res.json(await SelfUpdateService.getInstance().getEndpointProviderOption());
+  } catch (error) {
+    console.error('[SelfUpdate] Docker endpoint option failed:', error);
+    res.status(500).json({ error: 'Could not determine the Docker endpoint of this node.' });
+  }
 });

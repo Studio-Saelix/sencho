@@ -368,6 +368,42 @@ describe('EditorView image pull affordance', () => {
     );
     expect(screen.getByRole('button', { name: /save & deploy/i })).toBeEnabled();
   });
+
+  it('disables Recreate Docker endpoint while the editor has unsaved changes', async () => {
+    const onRecreate = vi.fn();
+    render(
+      <EditorView
+        {...makeProps({
+          editingCompose: true,
+          activeTab: 'compose',
+          actionsReady: true,
+          onRecreateDockerEndpoint: onRecreate,
+          hasUnsavedChanges: () => true,
+        })}
+      />,
+    );
+    await openSaveMenu();
+    const item = await screen.findByText('Recreate Docker endpoint');
+    expect(item).toHaveAttribute('aria-disabled', 'true');
+  });
+
+  it('offers Recreate Docker endpoint when the saved file is current', async () => {
+    const onRecreate = vi.fn();
+    render(
+      <EditorView
+        {...makeProps({
+          editingCompose: true,
+          activeTab: 'compose',
+          actionsReady: true,
+          onRecreateDockerEndpoint: onRecreate,
+          hasUnsavedChanges: () => false,
+        })}
+      />,
+    );
+    await openSaveMenu();
+    await userEvent.click(await screen.findByText('Recreate Docker endpoint'));
+    expect(onRecreate).toHaveBeenCalledTimes(1);
+  });
 });
 
 function containerStub(id: string, name: string): EditorViewProps['containers'][number] {

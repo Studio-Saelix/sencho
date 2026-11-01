@@ -10,6 +10,7 @@ import {
     Maximize2,
     Minimize2,
     Download,
+    PlugZap,
 } from 'lucide-react';
 import { Button } from '../ui/button';
 import { Card, CardContent, CardHeader } from '../ui/card';
@@ -226,6 +227,8 @@ export interface EditorViewProps {
     actionsReady?: boolean;
     /** Admin + node reapply eligibility + self-stack: show Save & Reapply instead of Save & Deploy. */
     canSaveAndReapply?: boolean;
+    /** Present when this stack's Docker endpoint can be recreated on its own (self stack, admin, provider found). */
+    onRecreateDockerEndpoint?: () => void;
 
     // Recovery surface for a failed/stalled operation on this stack (undefined
     // when the last op succeeded or none has run). onRefreshState re-syncs
@@ -327,6 +330,7 @@ export function EditorView(props: EditorViewProps) {
         isSelfStack,
         actionsReady,
         canSaveAndReapply = false,
+        onRecreateDockerEndpoint,
         recoveryResult,
         onRefreshState,
         onDismissRecovery,
@@ -713,6 +717,18 @@ export function EditorView(props: EditorViewProps) {
                                                         >
                                                             <Download className="w-4 h-4 mr-2" strokeWidth={1.5} />
                                                             Save &amp; Pull Images
+                                                        </DropdownMenuItem>
+                                                    )}
+                                                    {onRecreateDockerEndpoint && (
+                                                        <DropdownMenuItem
+                                                            onClick={onRecreateDockerEndpoint}
+                                                            disabled={lifecycleBusy || !actionsReady || hasUnsavedChanges()}
+                                                            title={hasUnsavedChanges()
+                                                                ? 'Save your changes first. To apply them with the endpoint, use Save & Reapply and choose the endpoint-only scope.'
+                                                                : 'Recreates the saved Docker endpoint configuration without saving the editor.'}
+                                                        >
+                                                            <PlugZap className="w-4 h-4 mr-2" strokeWidth={1.5} />
+                                                            Recreate Docker endpoint
                                                         </DropdownMenuItem>
                                                     )}
                                                     <DropdownMenuItem onClick={discardChanges} className="text-destructive/80 focus:text-destructive">

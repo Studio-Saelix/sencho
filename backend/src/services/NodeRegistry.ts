@@ -71,6 +71,19 @@ export class NodeRegistry extends EventEmitter {
     }
 
     /**
+     * Forget a cached Docker client so the next request dials the daemon again.
+     * Used after the container carrying the Docker API was recreated: a pooled
+     * connection to the previous one is dead.
+     */
+    public resetDockerConnection(nodeId?: number): void {
+        if (nodeId === undefined) {
+            this.connections.clear();
+            return;
+        }
+        this.connections.delete(nodeId);
+    }
+
+    /**
      * Get the Docker client for the default node.
      * Backward-compatible path for local-node code.
      */

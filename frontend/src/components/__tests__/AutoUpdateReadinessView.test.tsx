@@ -44,6 +44,7 @@ vi.mock('@/context/NodeContext', () => ({
 }));
 
 import { apiFetch, fetchForNode } from '@/lib/api';
+import { SENCHO_OPEN_STACK_EVENT } from '@/lib/events';
 import { requestServiceUpdate } from '@/lib/serviceUpdate';
 import { toast } from '@/components/ui/toast-store';
 import AutoUpdateReadinessView, {
@@ -681,6 +682,54 @@ describe('AutoUpdateReadinessView desktop Apply now', () => {
     await waitFor(() => {
       expect(mockedFetchForNode.mock.calls.filter((c) => String(c[0]).includes('/update-preview')).length).toBeGreaterThanOrEqual(2);
     });
+  });
+
+  it('hands a refused service Apply to the editor with its node and stack', async () => {
+    mockNodeMeta.set(1, {
+      version: '1.0.0',
+      capabilities: ['service-scoped-update'],
+      fetchedAt: Date.now(),
+    });
+    const preview = {
+      stack_name: 'nextcloud',
+      images: [
+        { service: 'app', image: 'nextcloud:27', current_tag: '27', next_tag: '27', has_update: true, digest_update: true, tag_update: false, semver_bump: 'patch', check_status: 'ok' },
+        { service: 'redis', image: 'redis:7', current_tag: '7', next_tag: '7', has_update: false, digest_update: false, tag_update: false, semver_bump: 'none', check_status: 'ok' },
+      ],
+      summary: { has_update: true, primary_image: 'nextcloud', current_tag: '27', next_tag: '27', semver_bump: 'patch', update_kind: 'digest', blocked: false, blocked_reason: null, check_status: 'ok' },
+      rollback_target: null,
+      changelog: null,
+    };
+    mockedFetch.mockImplementation((url: string) => {
+      if (url === '/image-updates/fleet') return Promise.resolve({ ok: true, json: async () => ({ '1': { nextcloud: true } }) });
+      if (url.startsWith('/scheduled-tasks')) return Promise.resolve({ ok: true, json: async () => [] });
+      return Promise.resolve({ ok: true, json: async () => ({}) });
+    });
+    mockedFetchForNode.mockResolvedValue({ ok: true, json: async () => preview });
+    const refusal = { message: 'Service "socket-proxy" carries the Docker connection Sencho is using.', reason: 'provider' as const, service: 'socket-proxy' };
+    vi.mocked(requestServiceUpdate).mockResolvedValue({
+      ok: false,
+      mode: 'update',
+      error: refusal.message,
+      endpointRefusal: refusal,
+    });
+
+    localStorage.setItem('sencho-readiness-view', 'cards');
+    render(<AutoUpdateReadinessView />);
+    const serviceApply = await screen.findByRole('button', { name: /^Apply$/i });
+    const opened = vi.fn();
+    window.addEventListener(SENCHO_OPEN_STACK_EVENT, opened);
+    await act(async () => { fireEvent.click(serviceApply); });
+    await waitFor(() => expect(toast.error).toHaveBeenCalledWith(refusal.message, expect.anything()));
+    const options = vi.mocked(toast.error).mock.calls.find(call => call[0] === refusal.message)?.[1];
+    options?.action?.onClick();
+    expect((opened.mock.calls[0][0] as CustomEvent).detail).toEqual({
+      nodeId: 1,
+      stackName: 'nextcloud',
+      destination: 'editor',
+      endpointRefusal: refusal,
+    });
+    window.removeEventListener(SENCHO_OPEN_STACK_EVENT, opened);
   });
 
   const basePreview = {

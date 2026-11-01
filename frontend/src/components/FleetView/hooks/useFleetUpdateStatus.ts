@@ -4,6 +4,8 @@ import { toast } from '@/components/ui/toast-store';
 import { isValidVersion } from '@/lib/version';
 import { PINNED_UPDATE_BLOCKED_FALLBACK, type NodeUpdateStatus } from '../types';
 import { useComposeReapplyAction } from './useComposeReapplyAction';
+import { fetchEndpointProviderOption } from './useEndpointProviderOption';
+import type { UpdateConfirmChoice } from '../LocalUpdateConfirmDialog';
 
 /** POST body for an update trigger: forward the target release when it is a
  *  valid version so the receiving node can repin a semver pin to it; omit
@@ -16,11 +18,13 @@ import { useComposeReapplyAction } from './useComposeReapplyAction';
  *  a semver-classified pin), so this is a copy-accuracy fix, not a safety
  *  fix: without it, the button label and confirm-dialog would claim a
  *  stable version number the update isn't installing. */
-function updateRequestInit(status: NodeUpdateStatus | undefined): RequestInit & { localOnly: true } {
+function updateRequestInit(status: NodeUpdateStatus | undefined, replaceEndpointProvider = false): RequestInit & { localOnly: true } {
     const base = { method: 'POST', localOnly: true } as const;
-    return !status?.isDevImage && isValidVersion(status?.latestVersion)
-        ? { ...base, body: JSON.stringify({ targetVersion: status!.latestVersion }) }
-        : base;
+    const body = {
+        ...(!status?.isDevImage && isValidVersion(status?.latestVersion) ? { targetVersion: status!.latestVersion } : {}),
+        ...(replaceEndpointProvider ? { replaceEndpointProvider: true } : {}),
+    };
+    return Object.keys(body).length > 0 ? { ...base, body: JSON.stringify(body) } : base;
 }
 
 function parseUpdateError(err: Record<string, unknown>, fallback: string): string {
@@ -159,6 +163,13 @@ export function useFleetUpdateStatus() {
             setLocalUpdateConfirm(nodeId);
             return;
         }
+        // A remote update stays one click unless the node has a Docker endpoint
+        // it could recreate with it; then the confirm offers that choice.
+        const endpoint = await fetchEndpointProviderOption(nodeId);
+        if (endpoint?.state === 'available') {
+            setLocalUpdateConfirm(nodeId);
+            return;
+        }
 
         await postRemoteAction(
             nodeId,
@@ -169,21 +180,33 @@ export function useFleetUpdateStatus() {
         );
     }, [postRemoteAction]);
 
-    const confirmLocalUpdate = useCallback(async () => {
+    /** Confirms the update dialog: the local node restarts in place, a remote node is dispatched. */
+    const confirmLocalUpdate = useCallback(async (choice?: UpdateConfirmChoice) => {
         const nodeId = localUpdateConfirm;
         setLocalUpdateConfirm(null);
         if (!nodeId) return;
         const status = updateStatusesRef.current.find(s => s.nodeId === nodeId);
         if (toastIfUpdateBlocked(status)) return;
+        const init = updateRequestInit(status, choice?.replaceEndpointProvider === true);
 
+        if (status?.type === 'remote') {
+            await postRemoteAction(
+                nodeId,
+                `/fleet/nodes/${nodeId}/update`,
+                init,
+                `Update initiated on ${status.name}.`,
+                'Failed to trigger update.',
+            );
+            return;
+        }
         await startLocalRestart(
             nodeId,
             `/fleet/nodes/${nodeId}/update`,
-            updateRequestInit(status),
+            init,
             'update',
             'Failed to trigger local update.',
         );
-    }, [localUpdateConfirm, startLocalRestart]);
+    }, [localUpdateConfirm, startLocalRestart, postRemoteAction]);
 
     const triggerNodeReapply = useCallback((nodeId: number) => {
         const status = updateStatusesRef.current.find(s => s.nodeId === nodeId);
