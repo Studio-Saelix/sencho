@@ -27,6 +27,8 @@ let metaErrorNodeId: number;
 let metaMalformedServer: http.Server;
 let metaMalformedNodeId: number;
 let pilotNodeId: number;
+let rejectingServer: http.Server;
+let rejectingNodeId: number;
 
 const capPaths: string[] = [];
 const noCapPaths: string[] = [];
@@ -108,6 +110,23 @@ beforeAll(async () => {
   pilotNodeId = db.addNode({
     name: 'obs-pilot-remote', type: 'remote', mode: 'pilot_agent', compose_dir: '/tmp', is_default: false,
   });
+  // A remote whose /api/meta is public (answers 200 whatever the bearer) but whose
+  // authenticated routes reject the stored token, as a node does after its token
+  // was regenerated.
+  rejectingServer = http.createServer((req, res) => {
+    if (req.url?.startsWith('/api/meta')) {
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ version: '0.99.0', capabilities: ['cross-node-rbac', 'agent-observation-v1'] }));
+    } else {
+      res.writeHead(401, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: 'Invalid or expired token' }));
+    }
+  });
+  const rejectingPort = await listen(rejectingServer);
+  rejectingNodeId = db.addNode({
+    name: 'obs-rejecting-remote', type: 'remote', mode: 'proxy', compose_dir: '/tmp',
+    is_default: false, api_url: `http://127.0.0.1:${rejectingPort}`, api_token: 'stale-token',
+  });
   noCapNodeId = db.addNode({
     name: 'obs-nocap-remote', type: 'remote', mode: 'proxy', compose_dir: '/tmp',
     is_default: false, api_url: `http://127.0.0.1:${noCapPort}`, api_token: 'nocap-token',
@@ -119,6 +138,7 @@ afterAll(async () => {
   await new Promise<void>((resolve) => noCapServer.close(() => resolve()));
   await new Promise<void>((resolve) => metaErrorServer.close(() => resolve()));
   await new Promise<void>((resolve) => metaMalformedServer.close(() => resolve()));
+  await new Promise<void>((resolve) => rejectingServer.close(() => resolve()));
   cleanupTestDb(tmpDir);
 });
 
@@ -186,6 +206,38 @@ describe('remote capability gate', () => {
       .set('x-node-id', String(nodeId()));
     expect(res.status).toBe(503);
     expect(res.body.code).toBe('node_unreachable');
+  });
+
+  it.each([
+    ['/api/stacks/web/observation/status'],
+    ['/api/stacks/web/observation/readiness'],
+    ['/api/stacks/platform/observation'],
+    ['/api/stacks/platform/observation/'],
+  ])('passes the node\'s own 401 through, uncoded, when it rejects the stored token: %s', async (path) => {
+    // The capability check cannot see a rejected credential (/api/meta is public),
+    // so this is the one "connection settings" failure that is not node_unreachable.
+    // The docs and OpenAPI say so; this pins the behavior they describe.
+    for (const bearer of [adminBearer, viewerBearer]) {
+      const res = await request(app)
+        .get(path)
+        .set('Authorization', `Bearer ${bearer}`)
+        .set('x-node-id', String(rejectingNodeId));
+
+      expect(res.status).toBe(401);
+      expect(res.body.error).toBe('Invalid or expired token');
+      expect(res.body.code).toBeUndefined();
+    }
+  });
+
+  it('keeps the 503 text to what the check can know: online and reachable, not "settings are valid"', async () => {
+    const res = await request(app)
+      .get('/api/stacks/web/observation/status')
+      .set('Authorization', `Bearer ${adminBearer}`)
+      .set('x-node-id', String(downNodeId));
+
+    expect(res.status).toBe(503);
+    expect(res.body.error).toMatch(/online and reachable at its API URL/);
+    expect(res.body.error).not.toMatch(/settings are valid|credential|token/i);
   });
 
   it('answers 503 for a Pilot node with no tunnel, without ever claiming it is too old', async () => {
