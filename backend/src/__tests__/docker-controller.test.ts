@@ -2041,8 +2041,9 @@ describe('DockerController - inspectContainerLabelsAndImage', () => {
 describe('DockerController - listContainersForLabelInventory', () => {
   it('builds a large inventory from the container list without inspecting every container', async () => {
     // At 458 containers the old path issued one inspect per container, which
-    // pushed the hub's own label read into the tab's client timeout. The list
-    // response already carries the same labels and image ID.
+    // left the hub's own label read cut at its 18 s local deadline inside the
+    // tab's 20 s client timeout. The list response already carries the same
+    // labels and image ID.
     mockDocker.listContainers.mockResolvedValue(Array.from({ length: 458 }, (_, i) => ({
       Id: `container-${i}`,
       Names: [`/container-${i}`],
@@ -2080,6 +2081,35 @@ describe('DockerController - listContainersForLabelInventory', () => {
 
     expect(mockDocker.getContainer).toHaveBeenCalledWith('c1');
     expect(rows[0]).toMatchObject({ labels: { 'traefik.enable': 'true' }, imageId: 'sha256:inspected', inspectFailed: false });
+  });
+
+  it('inspects for the image digest when the list has labels but no image ID', async () => {
+    // A tag in `Image` is not an image ID: `inspectImageLabels` would resolve
+    // whatever the tag points at now, not the digest the container runs.
+    mockDocker.listContainers.mockResolvedValue([
+      { Id: 'c1', Names: ['/c1'], State: 'running', Labels: { 'traefik.enable': 'true' }, Image: 'nginx:latest' },
+    ]);
+    mockDocker.getContainer.mockReturnValue({
+      inspect: vi.fn().mockResolvedValue({ Config: { Labels: { 'traefik.enable': 'true' } }, Image: 'sha256:digest' }),
+    });
+    const dc = DockerController.getInstance(1);
+
+    const rows = await dc.listContainersForLabelInventory();
+
+    expect(mockDocker.getContainer).toHaveBeenCalledWith('c1');
+    expect(rows[0]).toMatchObject({ imageId: 'sha256:digest', inspectFailed: false });
+  });
+
+  it('treats a null label map as an empty map, not a reason to inspect', async () => {
+    mockDocker.listContainers.mockResolvedValue([
+      { Id: 'c1', Names: ['/c1'], State: 'running', Labels: null, ImageID: 'sha256:image' },
+    ]);
+    const dc = DockerController.getInstance(1);
+
+    const rows = await dc.listContainersForLabelInventory();
+
+    expect(rows[0]).toMatchObject({ labels: {}, imageId: 'sha256:image', inspectFailed: false });
+    expect(mockDocker.getContainer).not.toHaveBeenCalled();
   });
 });
 

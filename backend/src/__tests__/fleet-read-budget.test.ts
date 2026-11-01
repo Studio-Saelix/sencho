@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import {
   FLEET_READ_BUDGET_MS,
   FleetReadTimeoutError,
@@ -86,18 +86,33 @@ describe('local fleet read budget', () => {
   });
 
   it('counts a slow ping against the same deadline instead of adding a second one', async () => {
-    const started = Date.now();
-    const error = await withinLocalFleetReadBudget(
-      'container labels',
-      () => new Promise<void>((resolve) => setTimeout(resolve, 80)),
-      () => new Promise<string>(() => {}),
-      { livenessBudgetMs: 100, deadlineMs: 120 },
-    ).catch((err: unknown) => err);
-    const elapsed = Date.now() - started;
+    // Fake timers make the boundary exact: the ping finishes at 80 ms, the
+    // build would finish at 130 ms, and the 120 ms deadline must fire first.
+    // A deadline restarted after the ping would let the build resolve at
+    // 130 ms instead, which the sentinel catches without wall-clock waits.
+    vi.useFakeTimers();
+    try {
+      const outcome: { result: { value: string } | { error: unknown } | null } = { result: null };
+      const read = withinLocalFleetReadBudget(
+        'container labels',
+        () => new Promise<void>((resolve) => setTimeout(resolve, 80)),
+        () => new Promise<string>((resolve) => setTimeout(() => resolve('late'), 50)),
+        { livenessBudgetMs: 100, deadlineMs: 120 },
+      ).then(
+        (value) => { outcome.result = { value }; },
+        (error: unknown) => { outcome.result = { error }; },
+      );
 
-    expect(error).toBeInstanceOf(FleetReadTimeoutError);
-    expect((error as FleetReadTimeoutError).budgetMs).toBe(120);
-    // 120 ms from the start, not 80 ms of ping plus a fresh 120 ms build.
-    expect(elapsed).toBeLessThan(200);
+      await vi.advanceTimersByTimeAsync(80);
+      await vi.advanceTimersByTimeAsync(40);
+
+      expect(outcome.result).not.toBeNull();
+      const error = (outcome.result as { error?: unknown }).error;
+      expect(error).toBeInstanceOf(FleetReadTimeoutError);
+      expect((error as FleetReadTimeoutError).budgetMs).toBe(120);
+      await read;
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });

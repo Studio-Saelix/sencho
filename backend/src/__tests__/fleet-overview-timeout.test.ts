@@ -425,6 +425,23 @@ describe('node-data fan-outs share the fleet-read budget', () => {
     expect(elapsedMs).toBeLessThan(READ_BUDGET_CEILING_MS);
   }, 30_000);
 
+  it('keeps a connected Pilot on the flat budget when its tunnel hangs', async () => {
+    stubLocalDocker();
+    const pilotId = addPilotNode('hung-pilot-map');
+    mockTargets({ [pilotId]: { apiUrl: PROXY_BASE, apiToken: 'test-token', trustedLoopback: false } });
+    mockFetch((_url, init) => hungUntilAbort(init));
+
+    const started = Date.now();
+    const res = await request(app).get(`/api/fleet/dependency-map?nodeId=${pilotId}`).set('Authorization', authHeader);
+    const elapsedMs = Date.now() - started;
+
+    expect(res.status).toBe(200);
+    expect((res.body.nodeErrors as { nodeId: number; error: string }[])[0])
+      .toMatchObject({ nodeId: pilotId, error: 'Timed out after 5s' });
+    expect(elapsedMs).toBeGreaterThan(READ_BUDGET_FLOOR_MS);
+    expect(elapsedMs).toBeLessThan(READ_BUDGET_CEILING_MS);
+  }, 30_000);
+
   describe('hub-local reads use the local deadline', () => {
     /**
      * The hub's own graph and summary build from a Docker snapshot that grows
@@ -469,6 +486,42 @@ describe('node-data fan-outs share the fleet-read budget', () => {
       expect(row.summary).not.toBeNull();
       expect(elapsedMs).toBeGreaterThan(5_000);
       expect(elapsedMs).toBeLessThan(18_000);
+    }, 30_000);
+
+    it('cuts a wedged local daemon at the 5 s liveness check before building the graph', async () => {
+      const getDependencySnapshot = vi.fn();
+      vi.spyOn(DockerController, 'getInstance').mockReturnValue({
+        ping: vi.fn(() => new Promise<never>(() => {})),
+        getDependencySnapshot,
+      } as unknown as DockerController);
+
+      const started = Date.now();
+      const res = await request(app).get('/api/fleet/dependency-map?nodeId=1').set('Authorization', authHeader);
+      const elapsedMs = Date.now() - started;
+
+      expect(res.status).toBe(200);
+      expect((res.body.nodeErrors as { nodeId: number; error: string }[])[0])
+        .toMatchObject({ nodeId: 1, error: 'Timed out after 5s' });
+      expect(getDependencySnapshot).not.toHaveBeenCalled();
+      expect(elapsedMs).toBeGreaterThan(4_000);
+      expect(elapsedMs).toBeLessThan(12_000);
+    }, 30_000);
+
+    it('cuts a local graph that outlives the local deadline at 18 s', async () => {
+      vi.spyOn(DockerController, 'getInstance').mockReturnValue({
+        ping: vi.fn().mockResolvedValue(undefined),
+        getDependencySnapshot: vi.fn(() => new Promise<never>(() => {})),
+      } as unknown as DockerController);
+
+      const started = Date.now();
+      const res = await request(app).get('/api/fleet/dependency-map?nodeId=1').set('Authorization', authHeader);
+      const elapsedMs = Date.now() - started;
+
+      expect(res.status).toBe(200);
+      expect((res.body.nodeErrors as { nodeId: number; error: string }[])[0])
+        .toMatchObject({ nodeId: 1, error: 'Timed out after 18s' });
+      expect(elapsedMs).toBeGreaterThan(17_000);
+      expect(elapsedMs).toBeLessThan(26_000);
     }, 30_000);
   });
 
@@ -654,6 +707,23 @@ describe('node-data fan-outs share the fleet-read budget', () => {
       const requested = fetchSpy.mock.calls.map((call: unknown[]) => String(call[0]));
       expect(requested.length).toBeGreaterThan(0);
       expect(requested.every((u: string) => originOf(u) === HEALTHY_BASE)).toBe(true);
+    });
+
+    it('serves a retry from the hub build the first request already ran', async () => {
+      const list = vi.fn().mockResolvedValue([]);
+      vi.spyOn(DockerController, 'getInstance').mockReturnValue({
+        ping: vi.fn().mockResolvedValue(undefined),
+        listContainersForLabelInventory: list,
+        inspectImageLabels: vi.fn(),
+      } as unknown as DockerController);
+
+      const first = await getLabels('?nodeId=1');
+      const second = await getLabels('?nodeId=1');
+
+      expect(first.status).toBe(200);
+      expect(second.status).toBe(200);
+      expect(list).toHaveBeenCalledTimes(1);
+      expect((second.body.nodes as { status: string }[])[0].status).toBe('ok');
     });
 
     it('bounds the hub\'s own read by the time Docker takes to answer it', async () => {

@@ -234,6 +234,19 @@ describe('networking summary', () => {
     expect(local.summary.networkDrift).toBeDefined();
   });
 
+  it('keeps the hub\'s declared signals when its Docker snapshot fails', async () => {
+    vi.spyOn(DockerController, 'getInstance').mockReturnValue({
+      getDependencySnapshot: vi.fn().mockRejectedValue(new Error('docker down')),
+    } as unknown as DockerController);
+
+    const res = await request(app).get('/api/fleet/networking-summary?nodeId=1').set('Authorization', authHeader);
+
+    expect(res.status).toBe(200);
+    const local = (res.body.nodes as { nodeId: number; status: string; summary: { exposed: { stacks: string[] } } | null }[])[0];
+    expect(local.status).toBe('ok');
+    expect(local.summary?.exposed.stacks).toContain(STACK);
+  });
+
   it('degrades a remote that errors to a node-error while keeping the hub', async () => {
     const db = DatabaseService.getInstance();
     const remoteId = db.addNode({ name: 'remote-degrade', type: 'remote', compose_dir: '/app/compose', is_default: false, api_url: 'http://remote.invalid', api_token: 't' });

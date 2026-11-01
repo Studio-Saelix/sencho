@@ -88,7 +88,13 @@ import {
 } from '../helpers/fleetPrune';
 import { runLocalLabelStop, isLabelLocalStopResponse, type StackStopResult } from '../helpers/fleetLabelStop';
 import { collectFleetLabelSummaries } from '../helpers/fleetLabelSummary';
-import { describeFleetReadFailure, fleetReadSignal, withinLocalFleetReadBudget } from '../helpers/fleetReadBudget';
+import {
+  LOCAL_FLEET_READ_DEADLINE_MS,
+  describeFleetReadFailure,
+  fleetReadSignal,
+  withinFleetReadBudget,
+  withinLocalFleetReadBudget,
+} from '../helpers/fleetReadBudget';
 import { readLocalLabelInventory } from '../helpers/localLabelInventory';
 import { runLocalLabelAssign, validateLabelTemplate, validateRemoteAssignResults, failAllAssign, type AssignNodeResult } from '../helpers/fleetLabelAssign';
 import { MAX_ASSIGNMENTS } from '../helpers/constants';
@@ -1107,11 +1113,13 @@ fleetRouter.get('/networking-summary', authMiddleware, async (req: Request, res:
         if (node.type === 'local') {
           // The hub's own snapshot scales with its stack and container count,
           // so it runs under the local deadline; remotes stay on the flat
-          // transport budget below.
-          const summary = await withinLocalFleetReadBudget(
+          // transport budget below. No daemon ping gates this read: the
+          // summary deliberately keeps its declared signals when Docker fails,
+          // so a down daemon must not turn a partial answer into a node error.
+          const summary = await withinFleetReadBudget(
+            computeNodeNetworkingSummary(node.id),
             'networking summary',
-            () => DockerController.getInstance(node.id).ping(),
-            () => computeNodeNetworkingSummary(node.id),
+            LOCAL_FLEET_READ_DEADLINE_MS,
           );
           return { nodeId: node.id, nodeName: node.name, status: 'ok', summary, error: null };
         }

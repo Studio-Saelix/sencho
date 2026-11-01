@@ -19,8 +19,8 @@ import { getErrorMessage } from '../utils/errors';
  * 8 s the map and networking summary carried and the 30 s the Docker Labels
  * inventory carried. The hub's own reads also cap their cheap daemon check
  * with it, but the whole read runs under
- * {@link LOCAL_FLEET_READ_DEADLINE_MS}, because those reads do work per
- * container rather than one round trip.
+ * {@link LOCAL_FLEET_READ_DEADLINE_MS}, because those reads do host-sized
+ * work rather than one round trip.
  *
  * Two neighbouring reads keep their own budgets on purpose, because they are a
  * different contract: the Overview card probe stays at 3 s (it reads three small
@@ -34,28 +34,34 @@ import { getErrorMessage } from '../utils/errors';
 export const FLEET_READ_BUDGET_MS = 5_000;
 
 /**
- * Deadline for an interactive Fleet read the hub builds on its own host,
- * measured from the start of the read.
+ * How long an interactive Fleet read the hub builds on its own host may hold
+ * the caller, measured from the start of the read.
  *
- * A local read is different from a remote: the hub lists and inspects every
- * container, stack and network on the host, so its cost grows with the node,
+ * A local read is different from a remote: the hub lists the host's containers,
+ * networks and volumes and reads its stacks, so its cost grows with the node,
  * and a host with a few hundred containers needs several seconds even when
  * Docker answers every call. The listing cannot be used to size that budget,
  * because it is the slow part and would have to run under the flat transport
  * budget first. A fixed deadline is independent of the read: it sits inside the
  * 20 s per-node client timeout the Docker Labels tab and the Map use
  * (`LABELS_NODE_TIMEOUT_MS`, `MAP_NODE_TIMEOUT_MS`), with room for the
- * transfer, so a large hub is not cut off before it can build its answer.
+ * transfer, so a large hub is not cut off before it can build its answer. The
+ * networking summary has no per-node client timeout; this deadline bounds it on
+ * its own.
  *
- * The deadline covers the whole read, and the 5 s daemon check is a maximum
- * inside it rather than an allowance added on top: the ping normally answers in
- * milliseconds, so the build gets almost the full deadline. A build allowed only
- * a fixed slice after a ping that can itself cost 5 s is what left a 458-
- * container hub timing out in the real tab.
+ * The deadline bounds the caller's wait, not the work. The local builders
+ * cannot be cancelled, so a build that outlives the deadline finishes on its
+ * own; the label inventory shares that build with a Retry instead of starting
+ * the listing again. The daemon check is a maximum inside the deadline rather
+ * than an allowance added on top: the ping normally answers in milliseconds,
+ * so the build gets almost the full deadline. A build allowed only a fixed
+ * slice after a ping that can itself cost 5 s is what left a 458-container hub
+ * timing out in the real tab.
  *
  * It applies to the hub's own label inventory, dependency graph and networking
- * summary. Remote and Pilot reads keep {@link FLEET_READ_BUDGET_MS}: they are
- * one round trip, not host-sized work.
+ * summary. The hub waits {@link FLEET_READ_BUDGET_MS} for a remote or Pilot
+ * read even though that node does the same host-sized work; the remote's own
+ * build is not bounded by this constant.
  */
 export const LOCAL_FLEET_READ_DEADLINE_MS = 18_000;
 
@@ -63,14 +69,14 @@ export const LOCAL_FLEET_READ_DEADLINE_MS = 18_000;
 export interface LocalFleetReadBudget {
   /** Budget for the cheap daemon check; a wedged socket costs this and no more. */
   livenessBudgetMs: number;
-  /** Deadline for the whole read, measured from its start. */
+  /** How long the caller waits for the whole read, measured from its start. */
   deadlineMs: number;
 }
 
-export const LOCAL_FLEET_READ_BUDGET: LocalFleetReadBudget = {
+export const LOCAL_FLEET_READ_BUDGET: Readonly<LocalFleetReadBudget> = Object.freeze({
   livenessBudgetMs: FLEET_READ_BUDGET_MS,
   deadlineMs: LOCAL_FLEET_READ_DEADLINE_MS,
-};
+});
 
 /** A read that outlived the fleet-read budget, so a caller can tell it from a transport failure. */
 export class FleetReadTimeoutError extends Error {
@@ -138,7 +144,8 @@ export async function withinFleetReadBudget<T>(
  * The check proves Docker answers at all before the expensive build starts; a
  * socket that never answers costs one transport budget instead of the whole
  * local deadline. Both stages share the deadline, measured from the start, so a
- * slow build is not given a second allowance after a slow check.
+ * slow build is not given a second allowance after a slow check. The deadline
+ * bounds the caller's wait: work that cannot be cancelled may finish after it.
  *
  * `ping` and `work` are thunks so a caller that joins an already-running build
  * still gets its own deadline around that shared work.
@@ -151,7 +158,9 @@ export async function withinLocalFleetReadBudget<T>(
 ): Promise<T> {
   return withinFleetReadBudget(
     (async () => {
-      await withinFleetReadBudget(ping(), label, budget.livenessBudgetMs);
+      // The check can never own more time than the whole read; a caller that
+      // inverts the two numbers still gets the outer deadline's answer.
+      await withinFleetReadBudget(ping(), label, Math.min(budget.livenessBudgetMs, budget.deadlineMs));
       return work();
     })(),
     label,

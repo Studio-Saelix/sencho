@@ -2181,11 +2181,12 @@ class DockerController {
    * membership with the same multi-fallback strategy as bulk status. Captures the
    * image ref so label provenance can distinguish image-inherited labels.
    *
-   * `/containers/json` already returns each container's labels and image ID, so
-   * the inventory is built from that one listing. Inspecting every container
-   * added a Docker round trip per container (hundreds on a large hub) without
-   * changing a value; inspect remains only as a fallback for an older API that
-   * omits the fields.
+   * `/containers/json` already returns each container row's labels and image
+   * ID, so those rows are built from the one listing. Inspecting every
+   * container added a Docker round trip per container (hundreds on a large
+   * hub) without changing a value; inspect remains only as a fallback when an
+   * older API omits the label field or the image ID. Image-level labels are
+   * still read per unique image by the caller.
    */
   public async listContainersForLabelInventory(): Promise<LabelInventoryRow[]> {
     const knownStacks = await FileSystemService.getInstance(this.nodeId).getStacks();
@@ -2194,7 +2195,6 @@ class DockerController {
       Names?: string[];
       State?: string;
       Labels?: Record<string, string> | null;
-      Image?: string;
       ImageID?: string;
     }>;
     const projectToStack = await DockerController.resolveProjectNameMap(knownStacks);
@@ -2227,8 +2227,9 @@ class DockerController {
           continue;
         }
         // The listing carries the same label map and image ID as an inspect.
-        // Use it unless an older API omitted the label field entirely.
-        if (c.Labels !== undefined) {
+        // Use it unless an older API omitted the label field or the image ID.
+        // A present but null label map means "no labels", not "unavailable".
+        if (c.Labels !== undefined && c.ImageID) {
           results[i] = {
             id,
             name,
@@ -2236,7 +2237,7 @@ class DockerController {
             stack,
             service,
             labels: c.Labels ?? {},
-            imageId: c.ImageID || c.Image || '',
+            imageId: c.ImageID,
             inspectFailed: false,
           };
           continue;
@@ -2251,7 +2252,7 @@ class DockerController {
         } catch (err) {
           console.error('[DockerController] Container inspect failed for %s:', sanitizeForLog(id), err);
           labels = c.Labels ?? {};
-          imageId = c.ImageID || c.Image || '';
+          imageId = c.ImageID ?? '';
           inspectFailed = true;
         }
         results[i] = { id, name, state, stack, service, labels, imageId, inspectFailed };

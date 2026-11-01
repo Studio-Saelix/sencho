@@ -11,6 +11,7 @@ import {
   type LocalFleetReadBudget,
 } from './fleetReadBudget';
 
+/** Compatibility name for the local Fleet budget this read uses. */
 export type LocalLabelInventoryBudget = LocalFleetReadBudget;
 
 /**
@@ -18,18 +19,21 @@ export type LocalLabelInventoryBudget = LocalFleetReadBudget;
  *
  * A tab load that reaches the deadline still leaves its build running in this
  * process. Keeping that finished inventory briefly lets Retry answer from it
- * instead of paying for the same listing again. Labels are static until a
- * container is recreated, so a few seconds of reuse cannot show a value the
- * host no longer has.
+ * instead of paying for the same listing again. A still-existing container's
+ * labels cannot change, but membership and state can lag by up to this window,
+ * so a container removed or recreated just before a Refresh may still appear
+ * until the share expires.
  */
 export const LOCAL_LABEL_INVENTORY_SHARE_TTL_MS = 10_000;
 
 /**
- * How long one build may stay in the share map while it never settles. A
- * Docker call that hangs forever must not poison every later read: after this
- * point a new reader starts a fresh build instead of joining the old one.
+ * How long a never-settling build is still joinable. A Docker call that hangs
+ * forever must not poison every later read: once a build is older than this, a
+ * new reader starts a fresh build instead of joining the old one. The check
+ * runs on the next read; there is no background timer.
  */
-const MAX_SHARED_BUILD_AGE_MS = LOCAL_FLEET_READ_DEADLINE_MS + 10_000;
+export const LOCAL_LABEL_INVENTORY_MAX_BUILD_AGE_MS =
+  LOCAL_FLEET_READ_DEADLINE_MS + LOCAL_LABEL_INVENTORY_SHARE_TTL_MS;
 
 class SharedLabelBuild {
   public settledAt: number | null = null;
@@ -62,8 +66,7 @@ function shareKey(nodeId: number, options: LabelInventoryOptions): string {
  *
  * The build runs outside the caller's deadline so a reader that times out does
  * not cancel the work: the next request, which is usually the tab's Retry,
- * joins the same build and gets its result for the cost of waiting only the
- * remainder.
+ * pings as usual and then waits only for the remainder of the shared build.
  */
 function readSharedLabelBuild(nodeId: number, options: LabelInventoryOptions): Promise<NodeLabelInventory> {
   const key = shareKey(nodeId, options);
@@ -72,7 +75,7 @@ function readSharedLabelBuild(nodeId: number, options: LabelInventoryOptions): P
   if (existing) {
     const age = now - existing.ageFrom;
     const stillFresh = existing.settledAt === null
-      ? age < MAX_SHARED_BUILD_AGE_MS
+      ? age < LOCAL_LABEL_INVENTORY_MAX_BUILD_AGE_MS
       : age < LOCAL_LABEL_INVENTORY_SHARE_TTL_MS;
     if (stillFresh) return existing.promise;
     sharedBuilds.delete(key);
@@ -103,9 +106,10 @@ export function _resetLocalLabelInventoryShareForTests(): void {
  * The two stages share one deadline rather than each getting a fixed
  * allowance: the ping normally answers in milliseconds, so the build gets
  * almost the whole deadline. A socket that never answers the ping still
- * costs one transport budget, and one that wedges mid-build is held to the
- * deadline, while a healthy large hub is not cut off before it has said how
- * many containers it holds.
+ * costs one transport budget, and one that wedges mid-build is cut off for
+ * the caller at the deadline while the build stays available to a Retry. A
+ * healthy large hub is not cut off before it has said how many containers it
+ * holds.
  *
  * `budget` is a seam for tests; callers use the Fleet budget and the deadline.
  */
