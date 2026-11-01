@@ -229,6 +229,33 @@ describe('the Docker socket proxy', () => {
     const separate = await run({ kind: 'stop' }, probes(), 'infra');
     expect(separate?.message).toContain('from the host');
     expect(separate?.message).not.toContain('Reapply');
+    expect(separate?.message).not.toContain('Recreate Docker endpoint');
+  });
+
+  it('names the in-app replacement when the proxy is in Sencho\'s own project', async () => {
+    const refusal = await run({ kind: 'restart' });
+
+    expect(refusal).toMatchObject({ reason: 'provider', service: 'socket-proxy' });
+    expect(refusal?.message).toContain('same Compose project as Sencho');
+    expect(refusal?.message).toContain('if this node offers');
+    expect(refusal?.message).toContain('Recreate Docker endpoint');
+    expect(refusal?.message).toContain('docker compose up -d');
+    // The old host-only sentence must be gone, not merely followed by the new one.
+    expect(refusal?.message).not.toContain('same Compose project as Sencho: recreate it from the host');
+  });
+
+  it('keeps host advice for another labeled container, which the endpoint replacement would not change', async () => {
+    mockListContainers.mockResolvedValue([
+      senchoContainer,
+      proxyContainer,
+      container(WEB_ID, 'web', { labels: { [INFRASTRUCTURE_LABEL]: 'true' } }),
+    ]);
+
+    const refusal = await run({ kind: 'service', service: 'web', restart: true });
+
+    expect(refusal).toMatchObject({ reason: 'provider', service: 'web' });
+    expect(refusal?.message).toContain('from the host');
+    expect(refusal?.message).not.toContain('Recreate Docker endpoint');
   });
 
   it('lets a service-scoped operation on another service through', async () => {
@@ -244,6 +271,18 @@ describe('the Docker socket proxy', () => {
 
     expect(await run({ kind: 'up' }, p)).toBeNull();
     expect(p.configHash).toHaveBeenCalledWith('socket-proxy');
+  });
+
+  it('lets an unchanged proxy through while an unrelated sibling was created by another version', async () => {
+    // The deploy recreates only `web`; the protected proxy's version and
+    // configuration match, so nothing protected would be recreated. The
+    // Doctor remediation for this same set must not claim a refusal.
+    mockListContainers.mockResolvedValue([
+      proxyContainer,
+      container(WEB_ID, 'web', { composeVersion: '5.1.3' }),
+    ]);
+
+    expect(await run({ kind: 'up' }, probes())).toBeNull();
   });
 
   it('refuses a deploy that would recreate the proxy (the config hash moved)', async () => {
@@ -1200,6 +1239,26 @@ describe('evaluateDockerEndpointContainer', () => {
     });
 
     expect(await evaluate(PROXY_ID, 'stop')).toMatchObject({ reason: 'provider' });
+  });
+
+  it('names the in-app replacement when the provider has no service label and is matched by container name', async () => {
+    mockResolveProvider.mockResolvedValue({
+      state: 'resolved',
+      provider: { containerId: PROXY_ID, containerName: 'sencho-socket-proxy-1', project: 'sencho', service: null, workingDir: null, socketBindSource: null },
+    });
+    const labels = specs[PROXY_ID].labels!;
+    const serviceLabel = labels['com.docker.compose.service']!;
+    delete labels['com.docker.compose.service'];
+    specs[PROXY_ID].Name = '/sencho-socket-proxy-1';
+    try {
+      const refusal = await evaluate(PROXY_ID, 'stop');
+
+      expect(refusal).toMatchObject({ reason: 'provider', service: 'sencho-socket-proxy-1' });
+      expect(refusal?.message).toContain('Recreate Docker endpoint');
+    } finally {
+      labels['com.docker.compose.service'] = serviceLabel;
+      specs[PROXY_ID].Name = '/socket-proxy';
+    }
   });
 
   it('refuses a container that carries the infrastructure label', async () => {

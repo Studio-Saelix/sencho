@@ -25,9 +25,11 @@ function stub() {
       rendered: JSON.stringify({ name: STACK, services: { web: { image: 'nginx:latest', ports: [{ target: 80, published: '8080', protocol: 'tcp' }] } }, networks: {}, volumes: {} }),
       stderr: '', code: 0, timedOut: false,
     }),
+    composeVersion: vi.fn().mockResolvedValue('5.6.0'),
   } as unknown as ComposeService);
   vi.spyOn(DockerController, 'getInstance').mockReturnValue({
     getDependencySnapshot: vi.fn().mockResolvedValue({ containers: [], networks: [], volumes: [] }),
+    getDocker: vi.fn(() => ({ listContainers: vi.fn().mockResolvedValue([]) })),
   } as unknown as DockerController);
 }
 

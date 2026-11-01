@@ -61,6 +61,24 @@ describe('useStackUpdate', () => {
     window.removeEventListener(SENCHO_OPEN_STACK_EVENT, opened);
   });
 
+  it('carries the Docker endpoint refusal into the editor handoff', async () => {
+    const error = vi.spyOn(toast, 'error');
+    const refusal = { message: 'socket-proxy carries the Docker connection', reason: 'provider' as const, service: 'socket-proxy' };
+    vi.mocked(postStackUpdate).mockResolvedValue({ kind: 'docker-endpoint', refusal });
+    const opened = vi.fn();
+    window.addEventListener(SENCHO_OPEN_STACK_EVENT, opened);
+    expect(await update()).toEqual({ ok: false });
+    const options = error.mock.calls[0][1];
+    options?.action?.onClick();
+    expect((opened.mock.calls[0][0] as CustomEvent).detail).toEqual({
+      nodeId: 2,
+      stackName: 'web',
+      destination: 'editor',
+      endpointRefusal: refusal,
+    });
+    window.removeEventListener(SENCHO_OPEN_STACK_EVENT, opened);
+  });
+
   it('tells the operator when a failed update was rolled back and what to do next', async () => {
     const error = vi.spyOn(toast, 'error');
     vi.mocked(postStackUpdate).mockResolvedValue({

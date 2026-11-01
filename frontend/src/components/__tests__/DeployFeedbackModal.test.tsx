@@ -13,8 +13,10 @@ vi.mock('@/lib/serviceUpdate', async (importOriginal) => {
   };
 });
 import { apiFetch } from '@/lib/api';
+import { SENCHO_OPEN_STACK_EVENT } from '@/lib/events';
 import { DEPLOY_FEEDBACK_STYLE_KEY } from '@/hooks/use-deploy-feedback-style';
 import { requestServiceRestore } from '@/lib/serviceUpdate';
+import { toast } from '@/components/ui/toast-store';
 
 // Lets a test simulate a mid-stream drop (onReady then onError) so the panel
 // reaches 'streaming' with progressUnavailable set.
@@ -264,6 +266,42 @@ describe('DeployFeedbackModal health gate', () => {
       serviceName: 'api',
       recoveryId: 'rec-1',
     }));
+  });
+
+  it('hands a refused Restore from the gate banner to the editor with its node and stack', async () => {
+    driverNodeId = 1;
+    driverServiceName = 'api';
+    const refusal = { message: 'Service "socket-proxy" carries the Docker connection Sencho is using.', reason: 'provider' as const, service: 'socket-proxy' };
+    vi.mocked(requestServiceRestore).mockResolvedValue({
+      ok: false, mode: 'update', error: 'Restore refused.', endpointRefusal: refusal,
+    });
+    routeGateApi([{
+      id: 'gate-1', status: 'failed', reason: 'service api reported unhealthy',
+      serviceName: 'api', targetScope: 'service', failureSource: 'primary',
+    }]);
+    const error = vi.spyOn(toast, 'error');
+    const opened = vi.fn();
+    window.addEventListener(SENCHO_OPEN_STACK_EVENT, opened);
+    await renderStreaming();
+    await act(async () => { await vi.advanceTimersByTimeAsync(60); });
+    await act(async () => {
+      resolveRun?.({ ok: true, healthGateId: 'gate-1', recoveryId: 'rec-1' });
+      await runOuter;
+    });
+    await act(async () => { await vi.advanceTimersByTimeAsync(100); });
+    await act(async () => { screen.getByTestId('service-restore-from-gate').click(); });
+    await act(async () => { await vi.advanceTimersByTimeAsync(60); });
+    await act(async () => { await Promise.resolve(); await Promise.resolve(); });
+    const options = error.mock.calls.find(call => call[0] === 'Restore refused.')?.[1];
+    expect(options?.action).toMatchObject({ label: 'Open stack editor' });
+    options?.action?.onClick();
+    expect((opened.mock.calls[0][0] as CustomEvent).detail).toEqual({
+      nodeId: 1,
+      stackName: 'web',
+      destination: 'editor',
+      endpointRefusal: refusal,
+    });
+    window.removeEventListener(SENCHO_OPEN_STACK_EVENT, opened);
   });
 
   it('offers Restore for a collateral failure, with the sibling named', async () => {

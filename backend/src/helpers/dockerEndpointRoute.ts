@@ -22,7 +22,7 @@ export async function refuseIfDockerEndpoint(
   try {
     const refusal = await ComposeService.getInstance(req.nodeId).evaluateDockerEndpoint(stackName, mutation);
     if (!refusal) return false;
-    res.status(409).json({ error: refusal.message, code: DOCKER_ENDPOINT_PROTECTED_CODE, reason: refusal.reason });
+    res.status(409).json({ error: refusal.message, code: DOCKER_ENDPOINT_PROTECTED_CODE, reason: refusal.reason, service: refusal.service });
     return true;
   } catch (error) {
     console.error('[DockerEndpointGuard] Check failed; refusing the request:', error);
@@ -45,6 +45,9 @@ export function sendIfDockerEndpointProtected(res: Response, error: unknown): bo
       error: error.message,
       code: DOCKER_ENDPOINT_PROTECTED_CODE,
       reason: error.reason,
+      // Which service the guard protected, so the UI can offer the replacement
+      // path only when it is the endpoint provider itself.
+      service: error.service,
       ...(error.failureClass ? { failureClass: error.failureClass } : {}),
     });
   }

@@ -40,6 +40,12 @@ export interface SenchoOpenStackDetail {
   nodeId: number;
   stackName: string;
   destination?: 'stack' | 'editor' | 'anatomy-networking' | 'doctor' | 'dossier' | 'drift' | 'git';
+  /**
+   * The Docker endpoint guard's refusal that prompted this navigation. The
+   * editor opens the same safe-replacement preview for the node and stack in
+   * this event once that stack has loaded; it never retargets another one.
+   */
+  endpointRefusal?: import('./stackUpdate').DockerEndpointRefusal;
 }
 
 /** Open the Create Stack dialog from elsewhere in the app (e.g. the GitOps workplace's "Connect a stack to Git"). */

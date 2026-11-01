@@ -148,6 +148,12 @@ jobs:
           digest=$(docker image inspect --format '{{.Id}}' localhost/sencho-recovery-helper:integration)
           echo "SENCHO_RECOVERY_HELPER_IMAGE=$digest" >> "$GITHUB_ENV"
 
+      # The whole-node journey layers this checkout's compiled dist onto the
+      # published Sencho image, so the Docker integration job needs a build.
+      - name: Build backend
+        working-directory: ./backend
+        run: npm run build
+
       - name: Docker integration tests (dedicated Vitest config)
         working-directory: ./backend
         run: npm run test:docker-integration
@@ -430,6 +436,7 @@ jobs:
         run: |
           node --check scripts/credit-changelog-contributors.mjs
           node --check scripts/release-notes-from-changelog.mjs
+          node --check scripts/release-highlights.mjs
           node --check scripts/audit-with-vex.mjs
           node --check scripts/check-pr-title.mjs
           node --check scripts/check-version-transition.mjs
@@ -438,6 +445,7 @@ jobs:
         run: |
           node --test scripts/credit-changelog-contributors.test.mjs
           node --test scripts/release-notes-from-changelog.test.mjs
+          node --test scripts/release-highlights.test.mjs
           node --test scripts/audit-with-vex.test.mjs
           node --test scripts/check-pr-title.test.mjs
           node --test scripts/check-version-transition.test.mjs

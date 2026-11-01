@@ -3,6 +3,12 @@ import DockerController from './DockerController';
 import { DatabaseService } from './DatabaseService';
 import { FileSystemService } from './FileSystemService';
 import { ComposeDoctorService } from './ComposeDoctorService';
+import { ComposeService } from './ComposeService';
+import {
+  composeVersionContainerFromLabels,
+  findComposeVersionSkew,
+} from '../helpers/composeVersionSkew';
+import { listNodeContainers, type ListedContainer } from '../helpers/dockerEndpointGuard';
 import { UpdatePreviewService, isMovingTag, filterPreviewForService, buildDetectionDisabledPreview } from './UpdatePreviewService';
 import { ImageUpdateService } from './ImageUpdateService';
 import { buildEffectiveServiceModel, type EffectiveServiceModelResult } from './effectiveServiceModel';
@@ -17,6 +23,7 @@ import {
   backupSlotSignal,
   buildRollbackItems,
   buildServicesSignal,
+  composeVersionSignal,
   containersSignal,
   describeRollbackManagedInputs,
   storedComposeCoverage,
@@ -33,14 +40,61 @@ import {
   type Errored,
   type ServiceMembership,
 } from './updateGuard/readiness';
-import type { ContainerProbe, RollbackReadinessReport, UpdateReadinessReport } from './updateGuard/types';
+import type { ContainerProbe, ReadinessSignal, RollbackReadinessReport, UpdateReadinessReport } from './updateGuard/types';
 
 // Bound on the network-and-socket-backed inputs (container probe, update
-// preview, disk stats) so a hung registry or Docker socket cannot stall the
-// report past the dialog's own fetch timeout; the remaining inputs are local
-// DB/file reads. A timed-out input degrades to its 'unknown' signal instead
-// of failing the report.
+// preview, disk stats, and the Compose version probe) so a hung registry,
+// Docker socket, or Compose binary cannot stall the report past the dialog's
+// own fetch timeout; the remaining inputs are local DB/file reads. Every bound
+// starts together, so the slowest one sets the report's ceiling. A timed-out
+// input degrades to its 'unknown' signal instead of failing the report.
 const INPUT_TIMEOUT_MS = 3_000;
+
+/**
+ * Headroom kept between the optional Compose version probe's own timeout and a
+ * caller-supplied deadline. The probe's wait has to end early enough for the
+ * report to be assembled before the caller stops waiting for it.
+ */
+const OPTIONAL_PROBE_DEADLINE_MARGIN_MS = 250;
+
+/** Optional ceilings for `computeUpdateReadiness`; lets a batched caller share its deadline. */
+export interface UpdateReadinessOptions {
+  /**
+   * Epoch-ms instant by which the caller stops waiting for this report. Only
+   * the optional Compose version probe is shortened to fit: required inputs
+   * keep their own bound and the caller's outer timeout still decides whether
+   * they were available. Omitted for the direct route, which uses the dialog
+   * budget. A non-finite value is treated as an expired deadline. No effect
+   * when `serviceName` is set, because service-scoped readiness omits the
+   * version signal.
+   */
+  deadlineEpochMs?: number;
+  /**
+   * When false, the optional Compose version probe is not started and no
+   * version signal is added. A batched caller defers it so its required
+   * evidence is collected before any optional wait can compete for the pass,
+   * then adds the signal with `composeVersionSignalFor`.
+   */
+  includeComposeVersion?: boolean;
+  /**
+   * Receives the full-stack container probes this report was built from, so a
+   * caller that deferred the version probe can add its signal without a second
+   * Docker read. Called for a full-stack computation only.
+   */
+  captureContainerProbes?: (containers: ContainerProbe[] | Errored) => void;
+}
+
+/**
+ * The optional Compose version probe's own ceiling for a caller-supplied
+ * deadline. It keeps the probe inside the deadline with room for the report to
+ * be assembled, and treats a deadline the arithmetic cannot produce as
+ * expired rather than falling back to the full input budget.
+ */
+function optionalProbeBudget(deadlineEpochMs: number | undefined): number {
+  if (deadlineEpochMs === undefined) return INPUT_TIMEOUT_MS;
+  if (!Number.isFinite(deadlineEpochMs)) return 0;
+  return Math.min(INPUT_TIMEOUT_MS, deadlineEpochMs - Date.now() - OPTIONAL_PROBE_DEADLINE_MARGIN_MS);
+}
 
 /**
  * Thrown by `computeUpdateReadiness` when a `serviceName` is given for a
@@ -72,20 +126,38 @@ export class UpdateGuardService {
   }
 
   /**
-   * Probe the stack's containers via the compose project label, normalized for
-   * the pure scoring functions. Throws on Docker errors; callers map that to
-   * the 'error' sentinel. When `serviceName` is given, narrows to that
-   * service's containers before inspecting (labeled containers, per §6).
+   * Probe the stack's containers, matched by Compose project label or working
+   * directory exactly as the endpoint guard and Compose Doctor match them, and
+   * normalized for the pure scoring functions. Throws on Docker errors; callers
+   * map that to the 'error' sentinel. When `serviceName` is given, narrows to
+   * that service's containers before inspecting (labeled containers, per §6).
    */
   async probeContainers(nodeId: number, stackName: string, serviceName?: string): Promise<ContainerProbe[]> {
     const docker = DockerController.getInstance(nodeId).getDocker();
-    const listed = await docker.listContainers({
-      all: true,
-      filters: { label: [`com.docker.compose.project=${stackName}`] },
-    });
-    const scoped = serviceName ? filterContainersByComposeService(listed, serviceName) : listed;
+    // The project label alone misses a stack whose Compose project name differs
+    // from its directory (a top-level `name:` key or another override). The
+    // shared lookup adds working-directory identity, so readiness judges the
+    // same containers as the guard, Compose Doctor, and the deploy notice. A
+    // container with no id cannot be inspected and is no evidence either way.
+    const { stack } = await listNodeContainers(nodeId, stackName);
+    // Scope before validating ids. A selected-service probe answers for that
+    // service alone, so an unrelated sibling whose list response omitted its id
+    // must not turn the selected service's healthy state into unknown. The
+    // full-stack update and rollback probes pass no serviceName and still fail
+    // closed on any uninspectable container; the sibling probe also validates
+    // the whole set, and its failure stays advisory-only.
+    const scoped = serviceName ? filterContainersByComposeService(stack, serviceName) : stack;
+    // Docker supplies an id for every listed container. One without it cannot
+    // be inspected, so fail closed rather than judge a partial set and call the
+    // remaining containers a matching version.
+    const candidates = scoped.filter((info): info is ListedContainer & { Id: string } => typeof info.Id === 'string' && info.Id !== '');
+    if (candidates.length !== scoped.length) {
+      throw new Error(serviceName
+        ? `A container for service "${serviceName}" in stack "${stackName}" has no id, so its state and Compose labels cannot be read.`
+        : `A container in stack "${stackName}" has no id, so its state and Compose labels cannot be read.`);
+    }
     const probes = await Promise.all(
-      scoped.map(async (info): Promise<ContainerProbe | null> => {
+      candidates.map(async (info): Promise<ContainerProbe | null> => {
         const name = info.Names?.[0]?.replace(/^\//, '') ?? info.Id.slice(0, 12);
         let inspect: Awaited<ReturnType<ReturnType<typeof docker.getContainer>['inspect']>>;
         try {
@@ -99,6 +171,7 @@ export class UpdateGuardService {
         const mounts = (inspect.Mounts ?? []).map(m =>
           m.Type === 'volume' ? `volume ${m.Name ?? 'unnamed'}` : `${m.Type} ${m.Source ?? ''}`.trim(),
         );
+        const compose = composeVersionContainerFromLabels(info.Labels);
         return {
           name,
           state: inspect.State?.Status ?? info.State ?? 'unknown',
@@ -107,6 +180,9 @@ export class UpdateGuardService {
           hasHealthcheck: isDockerHealthcheckActive(inspect.Config?.Healthcheck?.Test),
           restartPolicy: inspect.HostConfig?.RestartPolicy?.Name || null,
           mounts,
+          service: compose.service,
+          composeVersion: compose.composeVersion,
+          oneOff: compose.oneOff,
         };
       }),
     );
@@ -121,7 +197,12 @@ export class UpdateGuardService {
    * the added `service` signal; a single-service stack throws instead of
    * scoping (the caller/route maps that to a 400).
    */
-  async computeUpdateReadiness(nodeId: number, stackName: string, serviceName?: string): Promise<UpdateReadinessReport> {
+  async computeUpdateReadiness(
+    nodeId: number,
+    stackName: string,
+    serviceName?: string,
+    options: UpdateReadinessOptions = {},
+  ): Promise<UpdateReadinessReport> {
     const db = DatabaseService.getInstance();
     const now = Date.now();
 
@@ -130,6 +211,39 @@ export class UpdateGuardService {
       model = await buildEffectiveServiceModel(nodeId, stackName);
       if (model.renderable && model.services.length <= 1) {
         throw new SingleServiceUpdateReadinessError();
+      }
+    }
+
+    // Start the Compose version probe alongside the other inputs, not after
+    // them. The readiness dialog aborts its fetch after four seconds, so a
+    // five-second probe appended to a three-second input budget would discard
+    // every other signal; the shared input budget keeps the whole computation
+    // inside that deadline with transport margin. A timed-out probe degrades to
+    // the informational unknown signal below and leaves the rest of the report.
+    //
+    // A batched caller can defer this probe instead of waiting for it here.
+    // That is what keeps the optional wait from competing with the required
+    // inputs of later stacks: the caller collects every required verdict
+    // first, then adds the signal from whatever pass time remains. A caller
+    // that supplies a deadline still shrinks an inline probe to the room left;
+    // when none remains the probe is skipped and reported as the informational
+    // unknown.
+    const includeComposeVersion = options.includeComposeVersion !== false;
+    const versionProbeBudget = includeComposeVersion ? optionalProbeBudget(options.deadlineEpochMs) : 0;
+    let composeVersionProbe: Promise<string | null | Errored> | null = null;
+    if (!serviceName && includeComposeVersion) {
+      if (versionProbeBudget > 0) {
+        composeVersionProbe = this.collect('compose version', stackName, () =>
+          withTimeout(ComposeService.getInstance(nodeId).composeVersion(), versionProbeBudget, 'readiness compose version'));
+      } else {
+        // The skip is deliberate, not a read failure, so say so in the log. The
+        // report still carries the informational unknown row when the container
+        // probe succeeded (the row is skipped with the rest when it did not).
+        console.warn(
+          '[UpdateGuard] compose version probe skipped for %s: the readiness deadline leaves no usable time for it',
+          sanitizeForLog(stackName),
+        );
+        composeVersionProbe = Promise.resolve<Errored>('error');
       }
     }
 
@@ -157,6 +271,10 @@ export class UpdateGuardService {
       this.collect('disk', stackName, () => this.readDiskUsage()),
     ]);
 
+    // Hand the probes to a caller that deferred the optional version signal,
+    // so it can add that signal later without a second Docker read.
+    if (!serviceName) options.captureContainerProbes?.(containers);
+
     const settings = db.getGlobalSettings();
     const limitPercent = parseInt(settings['host_disk_limit'] ?? '90', 10) || 90;
 
@@ -172,6 +290,15 @@ export class UpdateGuardService {
     ];
     if (serviceName) {
       signals.push(serviceSignal(this.resolveServiceMembership(model, serviceName)));
+    } else if (includeComposeVersion && containers !== 'error' && composeVersionProbe) {
+      // Stack-scope only: a service-scoped update force-recreates the selected
+      // service and leaves the others alone, so the version of its siblings is
+      // not this verdict's business. When the container probe failed, its own
+      // signal already says the state could not be read.
+      const runningVersion = await composeVersionProbe;
+      signals.push(composeVersionSignal(runningVersion === 'error'
+        ? 'error'
+        : findComposeVersionSkew(containers, runningVersion)));
     }
 
     const advisories = serviceName
@@ -189,6 +316,36 @@ export class UpdateGuardService {
       serviceName: serviceName ?? null,
       advisories,
     };
+  }
+
+  /**
+   * The optional Compose-version signal for containers an earlier full-stack
+   * report probed. A batched caller runs this after its required evidence is
+   * collected, so a hung probe can delay only this enrichment and never a
+   * verdict it explains. `deadlineEpochMs` bounds the version read; a
+   * non-finite or elapsed deadline yields the informational unknown.
+   */
+  async composeVersionSignalFor(
+    nodeId: number,
+    stackName: string,
+    containers: ContainerProbe[],
+    options: UpdateReadinessOptions = {},
+  ): Promise<ReadinessSignal> {
+    const budget = optionalProbeBudget(options.deadlineEpochMs);
+    if (budget > 0) {
+      const runningVersion = await this.collect('compose version', stackName, () =>
+        withTimeout(ComposeService.getInstance(nodeId).composeVersion(), budget, 'readiness compose version'));
+      return composeVersionSignal(runningVersion === 'error'
+        ? 'error'
+        : findComposeVersionSkew(containers, runningVersion));
+    }
+    // The skip is deliberate, not a read failure, so say so in the log, exactly
+    // as the inline path does when a deadline leaves no room.
+    console.warn(
+      '[UpdateGuard] compose version probe skipped for %s: the readiness deadline leaves no usable time for it',
+      sanitizeForLog(stackName),
+    );
+    return composeVersionSignal('error');
   }
 
   /** Model-membership facts for the selected service; 'error' when the model failed to render. */

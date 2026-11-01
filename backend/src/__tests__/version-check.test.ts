@@ -17,6 +17,7 @@ import {
   fetchLatestSenchoVersion,
   fetchLatestSenchoVersionInfo,
   getLatestVersion,
+  getReleaseByVersion,
   isSenchoVersionPublished,
 } from '../utils/version-check';
 
@@ -145,5 +146,90 @@ describe('getLatestVersion cache', () => {
     mockGetRemoteDigestResult.mockResolvedValue({ ok: true, digest: 'sha256:abc' });
 
     await expect(fetchLatestSenchoVersion()).resolves.toBe('0.94.0');
+  });
+});
+
+describe('getReleaseByVersion', () => {
+  beforeEach(() => {
+    mockFetch.mockReset();
+    CacheService.getInstance().flush();
+  });
+
+  afterEach(() => {
+    CacheService.getInstance().flush();
+  });
+
+  function tagRelease(version: string, body: string) {
+    return {
+      ok: true,
+      json: async () => ({ tag_name: `v${version}`, body, html_url: `https://example.test/v${version}` }),
+    };
+  }
+
+  it('fetches the release for that tag and serves repeat reads from the cache', async () => {
+    mockFetch.mockResolvedValueOnce(tagRelease('0.98.1', '### Highlights\n\nShort overview.'));
+
+    const first = await getReleaseByVersion('0.98.1');
+    const second = await getReleaseByVersion('0.98.1');
+
+    expect(first?.body).toContain('Short overview.');
+    expect(second).toEqual(first);
+    expect(mockFetch).toHaveBeenCalledTimes(1);
+    expect(String(mockFetch.mock.calls[0][0])).toMatch(/\/releases\/tags\/v0\.98\.1$/);
+  });
+
+  it('refetches on forceRefresh', async () => {
+    mockFetch
+      .mockResolvedValueOnce(tagRelease('0.98.1', 'old'))
+      .mockResolvedValueOnce(tagRelease('0.98.1', 'new'));
+
+    await getReleaseByVersion('0.98.1');
+    const fresh = await getReleaseByVersion('0.98.1', true);
+
+    expect(fresh?.body).toBe('new');
+    expect(mockFetch).toHaveBeenCalledTimes(2);
+  });
+
+  it('returns null without calling GitHub for a non-canonical version', async () => {
+    for (const version of ['../latest', 'v0.98.1', '=0.98.1', ' 0.98.1', '0.98.1 ', 'latest']) {
+      await expect(getReleaseByVersion(version)).resolves.toBeNull();
+    }
+    expect(mockFetch).not.toHaveBeenCalled();
+  });
+
+  it('keeps one cache entry per version', async () => {
+    mockFetch
+      .mockResolvedValueOnce(tagRelease('0.98.1', 'one'))
+      .mockResolvedValueOnce(tagRelease('0.98.0', 'zero'));
+
+    await expect(getReleaseByVersion('0.98.1')).resolves.toMatchObject({ body: 'one' });
+    await expect(getReleaseByVersion('0.98.0')).resolves.toMatchObject({ body: 'zero' });
+    expect(mockFetch).toHaveBeenCalledTimes(2);
+  });
+
+  it('refetches after the short TTL so a body edited after publish is picked up', async () => {
+    vi.useFakeTimers();
+    try {
+      mockFetch
+        .mockResolvedValueOnce(tagRelease('0.98.1', 'before highlights'))
+        .mockResolvedValueOnce(tagRelease('0.98.1', 'after highlights'));
+
+      await getReleaseByVersion('0.98.1');
+      vi.advanceTimersByTime(4 * 60 * 1000);
+      await expect(getReleaseByVersion('0.98.1')).resolves.toMatchObject({ body: 'before highlights' });
+      vi.advanceTimersByTime(2 * 60 * 1000);
+      await expect(getReleaseByVersion('0.98.1')).resolves.toMatchObject({ body: 'after highlights' });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('returns null and does not cache a failed lookup', async () => {
+    mockFetch
+      .mockResolvedValueOnce({ ok: false, status: 404 })
+      .mockResolvedValueOnce(tagRelease('0.98.1', 'recovered'));
+
+    await expect(getReleaseByVersion('0.98.1')).resolves.toBeNull();
+    await expect(getReleaseByVersion('0.98.1')).resolves.toMatchObject({ body: 'recovered' });
   });
 });

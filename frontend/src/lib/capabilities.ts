@@ -27,6 +27,8 @@ export const CAPABILITIES = [
   'users',
   'registries',
   'self-update',
+  'endpoint-provider-replace',
+  'endpoint-provider-only',
   'vulnerability-scanning',
   'compose-doctor',
   'update-guard',

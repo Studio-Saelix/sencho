@@ -124,6 +124,17 @@ describe('computeDocDrift', () => {
     expect(flagged('http://host:32400', [{ host: '${PLEX_PORT}', container: '32400', proto: 'tcp' }])).toEqual([]);
   });
 
+  it('stays quiet for a port behind a variable with a default', () => {
+    // `${WEB_PORT:-8080}` is an expression until Compose renders the stack, so
+    // the default is not taken as the published port.
+    expect(flagged('http://host:8080', [{ host: '${WEB_PORT:-8080}', container: '80', proto: 'tcp' }])).toEqual([]);
+  });
+
+  it('checks a port a variable resolved to, once Compose rendered the stack', () => {
+    expect(flagged('http://host:8080', [tcp('8080')])).toEqual([]);
+    expect(flagged('http://host:9000', [tcp('8080')])).toEqual([9000]);
+  });
+
   it('suppresses the whole stack when a variable port is mixed with fixed ports', () => {
     // One indeterminate (variable) port makes the published set unknowable, so
     // even a port that is clearly unpublished stays unflagged. Pins the global

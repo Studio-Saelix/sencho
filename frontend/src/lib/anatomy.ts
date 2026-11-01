@@ -32,13 +32,63 @@ export interface Anatomy {
 // Capture group 1 is the variable name, group 2 (optional) is the modifier form.
 const INTERPOLATION_REGEX = /(?<!\$)\$\{([A-Za-z_][A-Za-z0-9_]*)(?:(:?[-?])[^}]*)?\}/g;
 
+/** Variable names referenced in `text`, in first-appearance order, without duplicates. */
+export function interpolatedVariableNames(text: string): string[] {
+  const names: string[] = [];
+  for (const m of text.matchAll(INTERPOLATION_REGEX)) {
+    if (!names.includes(m[1])) names.push(m[1]);
+  }
+  return names;
+}
+
+/**
+ * Split a Compose short-form spec on `:` only where the colon separates the
+ * mapping's segments. A colon inside `${...}` (including a nested
+ * `${A:-${B:-1}}` default) belongs to the expression, and a leading bracketed
+ * IPv6 literal (`[::1]`) is one whole host segment. Without this,
+ * `${WEB_PORT:-8080}:80` reads as the three-part bind form and the host port
+ * comes out as the tail of the expression (`-8080}`).
+ */
+function splitComposeSpec(spec: string): string[] {
+  const parts: string[] = [];
+  let current = '';
+  let braceDepth = 0;
+  let i = 0;
+  if (spec.startsWith('[')) {
+    const close = spec.indexOf(']');
+    if (close !== -1) {
+      current = spec.slice(0, close + 1);
+      i = close + 1;
+    }
+  }
+  for (; i < spec.length; i += 1) {
+    const ch = spec[i];
+    if (ch === '$' && spec[i + 1] === '{') {
+      braceDepth += 1;
+      current += '${';
+      i += 1;
+      continue;
+    }
+    if (ch === '}' && braceDepth > 0) {
+      braceDepth -= 1;
+    } else if (ch === ':' && braceDepth === 0) {
+      parts.push(current);
+      current = '';
+      continue;
+    }
+    current += ch;
+  }
+  parts.push(current);
+  return parts;
+}
+
 function parsePortMapping(raw: unknown): PortRow | null {
   if (typeof raw === 'string') {
     const s = raw.replace(/^"|"$/g, '');
     const protoMatch = s.match(/\/(tcp|udp)$/i);
     const proto = protoMatch ? protoMatch[1].toLowerCase() : 'tcp';
     const body = proto ? s.replace(/\/(tcp|udp)$/i, '') : s;
-    const parts = body.split(':');
+    const parts = splitComposeSpec(body);
     if (parts.length === 2) return { host: parts[0], container: parts[1], proto, published: true };
     if (parts.length === 3) return { host: parts[1], container: parts[2], proto, published: true };
     return { host: body, container: body, proto, published: false };
@@ -55,7 +105,7 @@ function parsePortMapping(raw: unknown): PortRow | null {
 
 function parseVolumeMapping(raw: unknown): VolumeRow | null {
   if (typeof raw === 'string') {
-    const parts = raw.split(':');
+    const parts = splitComposeSpec(raw);
     if (parts.length >= 2) return { host: parts[0], container: parts[1] };
     return null;
   }

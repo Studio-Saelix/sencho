@@ -1,5 +1,13 @@
 import { describe, it, expect } from 'vitest';
-import { assembleAnatomyInput, parseAnatomy, parseEnvKeys, formatGitSource, imageName, primaryPublishedHostPort } from './anatomy';
+import {
+  assembleAnatomyInput,
+  interpolatedVariableNames,
+  parseAnatomy,
+  parseEnvKeys,
+  formatGitSource,
+  imageName,
+  primaryPublishedHostPort,
+} from './anatomy';
 
 const COMPOSE = `services:
   plex:
@@ -95,6 +103,116 @@ describe('parseAnatomy', () => {
   });
 });
 
+describe('interpolation-aware short-form parsing', () => {
+  const portsOf = (...specs: string[]) => parseAnatomy([
+    'services:',
+    '  app:',
+    '    image: x',
+    '    ports:',
+    ...specs.map(s => `      - "${s}"`),
+    '',
+  ].join('\n'))!.ports.app;
+
+  const volumesOf = (...specs: string[]) => parseAnatomy([
+    'services:',
+    '  app:',
+    '    image: x',
+    '    volumes:',
+    ...specs.map(s => `      - "${s}"`),
+    '',
+  ].join('\n'))!.volumes.app;
+
+  it('keeps a defaulted variable host whole instead of reading the bind-IP form', () => {
+    expect(portsOf('${WEB_PORT:-8080}:80')).toEqual([
+      { host: '${WEB_PORT:-8080}', container: '80', proto: 'tcp', published: true },
+    ]);
+  });
+
+  it('never yields a fragment of the expression as the host port', () => {
+    const rows = portsOf('${WEB_PORT:-8080}:80');
+    expect(rows.map(r => r.host)).not.toContain('-8080}');
+    expect(rows[0].host).toBe('${WEB_PORT:-8080}');
+  });
+
+  it('keeps the protocol suffix beside a variable host', () => {
+    expect(portsOf('${DNS_PORT:-5353}:53/udp')).toEqual([
+      { host: '${DNS_PORT:-5353}', container: '53', proto: 'udp', published: true },
+    ]);
+  });
+
+  it('reads the variable as the host in the bind-IP form', () => {
+    expect(portsOf('127.0.0.1:${P:-8080}:80')).toEqual([
+      { host: '${P:-8080}', container: '80', proto: 'tcp', published: true },
+    ]);
+  });
+
+  it('reads a literal host port when the bind address is a variable', () => {
+    expect(portsOf('${BIND:-0.0.0.0}:8080:80')).toEqual([
+      { host: '8080', container: '80', proto: 'tcp', published: true },
+    ]);
+  });
+
+  it('handles a nested default expression', () => {
+    expect(portsOf('${A:-${B:-8080}}:80')).toEqual([
+      { host: '${A:-${B:-8080}}', container: '80', proto: 'tcp', published: true },
+    ]);
+  });
+
+  it('handles a variable with no default', () => {
+    expect(portsOf('${WEB_PORT}:80')).toEqual([
+      { host: '${WEB_PORT}', container: '80', proto: 'tcp', published: true },
+    ]);
+  });
+
+  it('parses a bracketed IPv6 bind address', () => {
+    expect(portsOf('[::1]:8080:80')).toEqual([
+      { host: '8080', container: '80', proto: 'tcp', published: true },
+    ]);
+  });
+
+  it('keeps a whole variable in the long published form', () => {
+    const a = parseAnatomy(
+      'services:\n  app:\n    image: x\n    ports:\n      - target: 80\n        published: "${WEB_PORT:-8080}"\n',
+    )!;
+    expect(a.ports.app).toEqual([
+      { host: '${WEB_PORT:-8080}', container: '80', proto: 'tcp', published: true },
+    ]);
+  });
+
+  it('keeps a whole variable in a volume host path, with and without a mode', () => {
+    expect(volumesOf('${DATA_DIR:-./data}:/data')).toEqual([
+      { host: '${DATA_DIR:-./data}', container: '/data' },
+    ]);
+    expect(volumesOf('${DATA_DIR:-./data}:/data:ro')).toEqual([
+      { host: '${DATA_DIR:-./data}', container: '/data' },
+    ]);
+  });
+
+  it('leaves literal short forms exactly as before', () => {
+    expect(portsOf('8080:80', '127.0.0.1:8080:80', '80')).toEqual([
+      { host: '8080', container: '80', proto: 'tcp', published: true },
+      { host: '8080', container: '80', proto: 'tcp', published: true },
+      { host: '80', container: '80', proto: 'tcp', published: false },
+    ]);
+    expect(volumesOf('./data:/data:ro')).toEqual([{ host: './data', container: '/data' }]);
+  });
+});
+
+describe('interpolatedVariableNames', () => {
+  it('lists the referenced names in order, without duplicates', () => {
+    expect(interpolatedVariableNames('${A:-1}:${B}')).toEqual(['A', 'B']);
+    expect(interpolatedVariableNames('${A}:${A}')).toEqual(['A']);
+    // The shared interpolation pattern reads the outer name of a nested default;
+    // the inner fallback is a value, and the host port is the outer variable's.
+    expect(interpolatedVariableNames('${A:-${B:-1}}')).toEqual(['A']);
+  });
+
+  it('returns nothing for a literal value or an escaped reference', () => {
+    expect(interpolatedVariableNames('8080')).toEqual([]);
+    expect(interpolatedVariableNames('$${ESCAPED}')).toEqual([]);
+  });
+});
+
 describe('imageName', () => {
   it('strips a plain image tag', () => {
     expect(imageName('nginx:1.25')).toBe('nginx');
@@ -131,6 +249,8 @@ describe('primaryPublishedHostPort', () => {
 
   it('returns null for an unresolved variable port', () => {
     expect(primaryPublishedHostPort(portsFrom('      - "${PORT}:80"\n'))).toBeNull();
+    expect(primaryPublishedHostPort(portsFrom('      - "${PORT:-8080}:80"\n'))).toBeNull();
+    expect(primaryPublishedHostPort(portsFrom('      - "[::1]:8080:80"\n'))).toBe(8080);
   });
 
   it('returns null for a port range', () => {

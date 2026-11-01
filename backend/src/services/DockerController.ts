@@ -376,6 +376,11 @@ class DockerController {
     return this.docker;
   }
 
+  /** Drop the cached client for this node so the next lookup opens a new connection. */
+  public resetDockerConnection(): void {
+    NodeRegistry.getInstance().resetDockerConnection(this.nodeId);
+  }
+
   private validateApiData<T>(data: any): T {
     // If the daemon port points to a web server (like Sencho UI), Dockerode receives HTML
     if (typeof data === 'string') {

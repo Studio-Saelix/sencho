@@ -1,6 +1,7 @@
 import type { PreflightStatus } from '../preflight/types';
 import type { UpdatePreviewImage, UpdatePreviewSummary } from '../UpdatePreviewService';
 import type { ResolvedRollbackInventory, RollbackGenerationManifest } from '../../types/rollbackGeneration';
+import { describeComposeVersionSkew, type ComposeVersionSkew } from '../../helpers/composeVersionSkew';
 import type {
   ContainerProbe,
   ReadinessSignal,
@@ -298,6 +299,39 @@ export function diskSignal(
     return { ...base, status: 'warning', affectsVerdict: true, detail: `Disk usage is at ${use}%, close to the ${input.limitPercent}% alert threshold.` };
   }
   return { ...base, status: 'ok', affectsVerdict: true, detail: `Disk usage is at ${use}%.` };
+}
+
+/**
+ * Containers created by another `docker compose` version than this update runs.
+ * A mismatch is a warning, not a block: the update still succeeds, but it can
+ * recreate containers whose configuration did not change. An unreadable version
+ * is an informational unknown, so it never drags the whole verdict to `unknown`.
+ */
+export function composeVersionSignal(input: ComposeVersionSkew | null | Errored): ReadinessSignal {
+  const base = { id: 'compose_version' as const, title: 'Compose version' };
+  if (input === 'error' || input === null) {
+    return {
+      ...base,
+      status: 'unknown',
+      affectsVerdict: false,
+      detail: 'The Docker Compose version could not be read, so Sencho cannot tell whether containers created by another version will be recreated.',
+    };
+  }
+  if (input.services.length === 0) {
+    return {
+      ...base,
+      status: 'ok',
+      affectsVerdict: true,
+      detail: `No container in this stack was created by another Docker Compose version; this update runs Docker Compose ${input.runningVersion}.`,
+    };
+  }
+  const them = input.services.length === 1 ? 'it' : 'them';
+  return {
+    ...base,
+    status: 'warning',
+    affectsVerdict: true,
+    detail: `${describeComposeVersionSkew(input)}. This update runs Docker Compose ${input.runningVersion} and can recreate ${them} even where nothing changed.`,
+  };
 }
 
 /**

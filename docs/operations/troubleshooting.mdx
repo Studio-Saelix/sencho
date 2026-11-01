@@ -450,7 +450,7 @@ docker compose pull && docker compose up -d
 env file /path/to/env/globals.env not found: stat /path/to/env/globals.env: no such file or directory
 ```
 
-**Cause:** When Sencho updates itself, it spawns a temporary helper container that runs `docker compose up -d --force-recreate` to recreate the main container. The helper needs access to every file referenced by your `docker-compose.yml`, including `env_file` entries, `configs`, and `secrets`. If any of those files live outside the compose working directory (e.g. in a shared config folder), the helper cannot reach them unless those paths are also mounted in the main Sencho container.
+**Cause:** When Sencho updates itself, it spawns a temporary helper container that runs `docker compose up -d --no-deps --force-recreate` to recreate the main container. The helper needs access to every file referenced by your `docker-compose.yml`, including `env_file` entries, `configs`, and `secrets`. If any of those files live outside the compose working directory (e.g. in a shared config folder), the helper cannot reach them unless those paths are also mounted in the main Sencho container.
 
 **Fix:** Mount any directory that your compose file references into the Sencho container, using the **same path** on both the host side and the container side (the 1:1 path rule). Sencho automatically forwards all of its own bind mounts to the helper container during a self-update.
 

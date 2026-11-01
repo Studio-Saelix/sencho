@@ -4,7 +4,7 @@
  * (a caller watching recoveries over time must not read a blip as "gone").
  */
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { fetchStackRecoveries } from '../serviceUpdate';
+import { fetchStackRecoveries, requestServiceRestore, requestServiceUpdate } from '../serviceUpdate';
 
 vi.mock('@/lib/api', async (importOriginal) => {
   const actual = await importOriginal<typeof import('@/lib/api')>();
@@ -122,5 +122,33 @@ describe('fetchStackRecoveries', () => {
     mockedApiFetch.mockRejectedValue(new Error('ECONNREFUSED'));
     const result = await fetchStackRecoveries({ nodeId: null, stackName: 'web' });
     expect(result).toEqual({ ok: false, error: 'ECONNREFUSED' });
+  });
+});
+
+describe('service update and restore refusals', () => {
+  const body = {
+    error: 'Service "socket-proxy" carries the Docker connection Sencho is using.',
+    code: 'docker_endpoint_protected',
+    reason: 'provider',
+    service: 'socket-proxy',
+  };
+
+  it('returns the Docker endpoint refusal for a service update', async () => {
+    mockedApiFetch.mockResolvedValue(new Response(JSON.stringify(body), { status: 409 }));
+    const result = await requestServiceUpdate({ nodeId: 1, stackName: 'web', serviceName: 'socket-proxy' });
+    expect(result).toMatchObject({
+      ok: false,
+      endpointRefusal: {
+        message: 'Service "socket-proxy" carries the Docker connection Sencho is using.',
+        reason: 'provider',
+        service: 'socket-proxy',
+      },
+    });
+  });
+
+  it('returns the Docker endpoint refusal for a service restore', async () => {
+    mockedApiFetch.mockResolvedValue(new Response(JSON.stringify(body), { status: 409 }));
+    const result = await requestServiceRestore({ nodeId: 1, stackName: 'web', serviceName: 'socket-proxy', recoveryId: 'rec-1' });
+    expect(result).toMatchObject({ ok: false, endpointRefusal: { reason: 'provider', service: 'socket-proxy' } });
   });
 });
