@@ -189,6 +189,20 @@ describe('fetchStackStatusesShared', () => {
     expect(recovered.ok).toBe(true);
   });
 
+  it('classifies a thrown proxied 401 as a rejected node credential', async () => {
+    // apiFetch throws before the caller sees a 401. Replacing it with a bare
+    // HTTP failure loses the one thing the page can act on: the stored node
+    // token, not the operator's session.
+    const response = jsonResponse({ error: 'Unauthorized' }, { status: 401, proxied: true });
+    apiFetchSpy.mockRejectedValueOnce(Object.assign(new Error('Unauthorized'), { response }));
+
+    const failed = await fetchStackStatusesShared(1);
+    expect(failed.ok).toBe(false);
+    expect(failed.failure).toBe('node-credential');
+    expect(failed.status).toBe(401);
+    expect(failed.proxied).toBe(true);
+  });
+
   it('settles JSON decode failures for both waiters and clears the slot', async () => {
     const bad = new Response('not-json', {
       status: 200,

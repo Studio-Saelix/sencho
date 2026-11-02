@@ -12,7 +12,7 @@ import { describe, it, expect } from 'vitest';
 import { cleanup, render, screen } from '@testing-library/react';
 import { HealthStatusBar } from '../HealthStatusBar';
 import type { Stats } from '../types';
-import type { UnreadableNodeFailure } from '@/lib/remoteReadFailure';
+import type { RemoteReadFailure } from '@/lib/remoteReadFailure';
 
 const EMPTY_STATS: Stats = { active: 0, managed: 0, unmanaged: 0, exited: 0, total: 0 };
 
@@ -20,7 +20,7 @@ function renderBar(
   metricsStale: boolean,
   metricsUnreadable = false,
   metricsPending = false,
-  unreadableCause: UnreadableNodeFailure | null = null,
+  unreadableCause: RemoteReadFailure | null = null,
 ) {
   return render(
     <HealthStatusBar
@@ -78,6 +78,24 @@ describe('HealthStatusBar unavailable state', () => {
     cleanup();
     renderBar(true, true, false, 'unreachable');
     expect(screen.getByText('This node is not answering.')).toBeInTheDocument();
+  });
+
+  it('names an unverified permission model and a rejected node credential', () => {
+    renderBar(false, true, false, 'unverified');
+    expect(screen.getByText('Unknown')).toBeInTheDocument();
+    expect(screen.getByText(/permission model could not be verified/i)).toBeInTheDocument();
+    expect(screen.queryByText('Healthy')).toBeNull();
+    cleanup();
+    renderBar(false, true, false, 'node-credential');
+    expect(screen.getByText(/stored credential for "edge-1" was rejected/i)).toBeInTheDocument();
+    expect(screen.queryByText(/not answering/i)).toBeNull();
+  });
+
+  it('does not report a health level for an HTTP answer from the node', () => {
+    renderBar(false, true, false, 'http');
+    expect(screen.getByText('Unknown')).toBeInTheDocument();
+    expect(screen.getByText(/answered with an error/i)).toBeInTheDocument();
+    expect(screen.queryByText('Healthy')).toBeNull();
   });
 
   it('keeps the derived level and the stale chip for stale meters with a local cause', () => {

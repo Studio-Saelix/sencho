@@ -17,6 +17,7 @@ import {
 } from '../services/license-headers';
 import { DatabaseService } from '../services/DatabaseService';
 import { classifyStackApiPath } from '../helpers/stackRouteAuth';
+import { REMOTE_READ_FAILURE_HEADER } from '../proxy/interactiveRemoteRead';
 
 let tmpDir: string;
 let app: import('express').Express;
@@ -27,9 +28,12 @@ let nodeAdminBearer: string;
 let grantedServer: http.Server;
 let ungrantedServer: http.Server;
 let noEvidenceServer: http.Server;
+let slowEvidenceServer: http.Server;
 let grantedNodeId: number;
 let ungrantedNodeId: number;
 let noEvidenceNodeId: number;
+let slowEvidenceNodeId: number;
+let slowMetaCalls = 0;
 
 interface CapturedHop {
   method: string;
@@ -83,6 +87,29 @@ function noEvidenceRemote(): http.Server {
   });
 }
 
+/**
+ * The RBAC probe (first `/api/meta`) answers with the capability, then the
+ * follow-up scoped-evidence probe is accepted and never answered. The probe
+ * times out: that is not proof the node lacks the capability.
+ */
+function slowEvidenceRemote(): http.Server {
+  return http.createServer((req, res) => {
+    if (req.url?.startsWith('/api/meta')) {
+      slowMetaCalls += 1;
+      if (slowMetaCalls === 1) {
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({
+          version: '0.93.0',
+          capabilities: ['cross-node-rbac'],
+        }));
+      }
+      return;
+    }
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ ok: true }));
+  });
+}
+
 async function listen(server: http.Server): Promise<number> {
   await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
   return (server.address() as import('net').AddressInfo).port;
@@ -127,9 +154,11 @@ beforeAll(async () => {
   grantedServer = evidenceRemote();
   ungrantedServer = evidenceRemote();
   noEvidenceServer = noEvidenceRemote();
+  slowEvidenceServer = slowEvidenceRemote();
   const grantedPort = await listen(grantedServer);
   const ungrantedPort = await listen(ungrantedServer);
   const noEvidencePort = await listen(noEvidenceServer);
+  const slowEvidencePort = await listen(slowEvidenceServer);
 
   grantedNodeId = db.addNode({
     name: 'evidence-granted-remote',
@@ -158,12 +187,22 @@ beforeAll(async () => {
     api_url: `http://127.0.0.1:${noEvidencePort}`,
     api_token: 'noev-token',
   });
+  slowEvidenceNodeId = db.addNode({
+    name: 'evidence-slow-remote',
+    type: 'remote',
+    mode: 'proxy',
+    compose_dir: '/tmp',
+    is_default: false,
+    api_url: `http://127.0.0.1:${slowEvidencePort}`,
+    api_token: 'slow-token',
+  });
 });
 
 afterAll(async () => {
   await new Promise<void>((resolve) => grantedServer.close(() => resolve()));
   await new Promise<void>((resolve) => ungrantedServer.close(() => resolve()));
   await new Promise<void>((resolve) => noEvidenceServer.close(() => resolve()));
+  await new Promise<void>((resolve) => slowEvidenceServer.close(() => resolve()));
   cleanupTestDb(tmpDir);
 });
 
@@ -173,6 +212,7 @@ beforeEach(async () => {
   vi.spyOn(LicenseService.getInstance(), 'getTier').mockReturnValue('paid');
   grantedHops.length = 0;
   ungrantedHops.length = 0;
+  slowMetaCalls = 0;
 });
 
 function grantScopedStackEdit(userId: number, nodeId: number, stackName: string): void {
@@ -244,10 +284,29 @@ describe('remote proxy alerts scoped-evidence gate', () => {
       .send({ stack_name: 'web', metric: 'cpu_percent', operator: '>', threshold: 90, duration_mins: 5, cooldown_mins: 5 });
 
     expect(res.status).toBe(403);
+    expect(res.headers[REMOTE_READ_FAILURE_HEADER]).toBe('upgrade-required');
     expect(res.body.error).toContain('does not support scoped stack authorization');
 
     clearAssignments(deployerId);
   });
+
+  it('does not demand an upgrade when the scoped-evidence probe cannot run', async () => {
+    grantScopedStackEdit(deployerId, slowEvidenceNodeId, 'web');
+
+    const res = await request(app)
+      .post('/api/alerts')
+      .set('Authorization', `Bearer ${deployerBearer}`)
+      .set('x-node-id', String(slowEvidenceNodeId))
+      .send({ stack_name: 'web', metric: 'cpu_percent', operator: '>', threshold: 90, duration_mins: 5, cooldown_mins: 5 });
+
+    // The follow-up probe timed out, so the node's version is unknown. Calling
+    // that "upgrade it" would send the operator to fix the wrong thing.
+    expect(res.status).toBe(504);
+    expect(res.headers[REMOTE_READ_FAILURE_HEADER]).toBe('timeout');
+    expect(res.body.error).not.toMatch(/upgrade/i);
+
+    clearAssignments(deployerId);
+  }, 20_000);
 
   it('passes through without evidence for node-admin (global stack:edit)', async () => {
     const res = await request(app)

@@ -45,6 +45,7 @@ export type OverviewLoadError =
   | 'unauthorized'
   | 'node-credential'
   | 'unverified'
+  | 'upgrade-required'
   | 'not-configured'
   | 'pilot-disconnected'
   | 'refused'
@@ -111,6 +112,10 @@ const UNAVAILABLE_COPY: Record<Exclude<OverviewLoadError, 'unsupported'>, {
   unverified: {
     title: 'Permissions could not be verified',
     body: "This node's permission model could not be verified. Try again once the node is healthy.",
+  },
+  'upgrade-required': {
+    title: 'This node needs an upgrade',
+    body: 'This node does not enforce per-user permissions. Upgrade it before non-admin users can read the overview here.',
   },
   'pilot-disconnected': {
     title: 'The Pilot tunnel is disconnected',

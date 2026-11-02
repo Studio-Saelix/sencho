@@ -274,6 +274,19 @@ describe('probeRemoteMeta raw-kind classification', () => {
     vi.spyOn(axios, 'get').mockRejectedValue({ code: 'ECONNREFUSED' });
     vi.spyOn(console, 'warn').mockImplementation(() => {});
     const result = await probeRemoteCapability(NODE_ID, CAP);
-    expect(result).toEqual({ kind: 'unreachable', detail: 'transport_failure' });
+    expect(result).toEqual({ kind: 'unreachable', detail: 'transport_failure', transport: 'refused' });
+  });
+
+  it('keeps a probe timeout distinguishable from a refused connection', async () => {
+    const reg = NodeRegistry.getInstance();
+    vi.spyOn(reg, 'getProxyTarget').mockReturnValue(TARGET);
+    const axios = (await import('axios')).default;
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+    vi.spyOn(axios, 'get').mockRejectedValue({ code: 'ECONNABORTED' });
+    const timedOut = await probeRemoteCapability(NODE_ID, CAP);
+    expect(timedOut).toEqual({ kind: 'unreachable', detail: 'transport_failure', transport: 'timeout' });
+    vi.spyOn(axios, 'get').mockRejectedValue({ code: 'ECONNREFUSED' });
+    const refused = await probeRemoteCapability(NODE_ID, CAP);
+    expect(refused).toEqual({ kind: 'unreachable', detail: 'transport_failure', transport: 'refused' });
   });
 });

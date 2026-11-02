@@ -5,6 +5,7 @@ import { fetchStackStatusesShared } from '@/lib/stackStatusesFetch';
 import {
   classifyRemoteReadError,
   classifyRemoteReadFailure,
+  isNamedReadFailure,
   isUnreadableNode,
   remoteReadFailureMessage,
   type RemoteReadFailure,
@@ -133,7 +134,13 @@ export function useDashboardData(): DashboardData {
   // reads as "Unknown"; the latter keeps the derived level. The cause travels
   // with the state so the headline can name a disconnected Pilot or an
   // unconfigured node instead of calling every cause "not answering".
-  const [unreadableCause, setUnreadableCause] = useState<UnreadableNodeFailure | null>(null);
+  //
+  // The cause is broader than "unreadable": a metrics read that settled with no
+  // sample at all cannot produce a health level either, so its own cause (an
+  // unverified permission model, a rejected node credential, an HTTP answer)
+  // belongs here too. Healthy is reserved for a read that actually returned
+  // stats.
+  const [unreadableCause, setUnreadableCause] = useState<RemoteReadFailure | null>(null);
   // The read the headline depends on may be queued behind other node reads in
   // the browser's six-connection limit. Until one of the metrics endpoints has
   // settled there is no reading to report, so the headline must not claim the
@@ -183,6 +190,12 @@ export function useDashboardData(): DashboardData {
     stats: null,
     sys: null,
   });
+  // Whether each live-metrics endpoint has ever returned a sample for the
+  // current node. A failure before the first sample is an absent reading, not a
+  // stale one: deriving a level from the zero default would report a pass for a
+  // read that never happened. A failure after a sample keeps the last reading
+  // and only marks the numbers stale.
+  const metricsSampleRef = useRef({ stats: false, sys: false });
   // A bounded read that is not one of the two metrics endpoints (the shared
   // stack-statuses read) can prove the same thing: the node did not answer.
   // Feeding it into the headline lets the first failed read name the outage
@@ -194,7 +207,14 @@ export function useDashboardData(): DashboardData {
 
   const publishNodeHealth = useCallback(() => {
     const counts = failureCountsRef.current;
-    const cause = firstUnreadableCause(
+    // The headline has no reading when either metrics endpoint failed without
+    // ever producing a sample. Any cause counts here, not only the unreadable
+    // subset: zeros are not a health verdict for a read that never landed.
+    const samples = metricsSampleRef.current;
+    const noSampleCause =
+      (lastFailureRef.current.stats !== null && !samples.stats ? lastFailureRef.current.stats : null)
+      ?? (lastFailureRef.current.sys !== null && !samples.sys ? lastFailureRef.current.sys : null);
+    const unreadable = firstUnreadableCause(
       nodeReadFailureRef.current,
       lastFailureRef.current.stats,
       lastFailureRef.current.sys,
@@ -202,9 +222,9 @@ export function useDashboardData(): DashboardData {
     setMetricsStale(
       counts.stats >= METRICS_STALE_THRESHOLD
       || counts.sys >= METRICS_STALE_THRESHOLD
-      || cause !== null,
+      || unreadable !== null,
     );
-    setUnreadableCause(cause);
+    setUnreadableCause(unreadable ?? noSampleCause);
   }, []);
 
   const recordNodeReadFailure = useCallback((failure: RemoteReadFailure) => {
@@ -245,6 +265,7 @@ export function useDashboardData(): DashboardData {
     if (outcome.ok) {
       counts[endpoint] = 0;
       lastFailureRef.current[endpoint] = null;
+      metricsSampleRef.current[endpoint] = true;
       metricsAnsweredRef.current = true;
       // A metrics answer proves the node is reachable, so a deadline from the
       // stack-statuses read was about that route, not a silent node.
@@ -269,6 +290,7 @@ export function useDashboardData(): DashboardData {
     setMetricsSettled(false);
     nodeReadFailureRef.current = null;
     metricsAnsweredRef.current = false;
+    metricsSampleRef.current = { stats: false, sys: false };
     failureCountsRef.current.stats = 0;
     lastFailureRef.current.stats = null;
     setMetricsStale(failureCountsRef.current.sys >= METRICS_STALE_THRESHOLD);
@@ -416,7 +438,7 @@ export function useDashboardData(): DashboardData {
         // limit. Let it name the outage now instead of leaving the headline on
         // a healthy default until the metrics answer.
         if (result.failure !== undefined) recordNodeReadFailure(result.failure);
-        const failureMsg = result.failure !== undefined && isUnreadableNode(result.failure)
+        const failureMsg = result.failure !== undefined && isNamedReadFailure(result.failure)
           ? remoteReadFailureMessage(result.failure, { nodeName: nodeNameRef.current, status: result.status })
           : `Could not load stack health (${result.status}).`;
         commitStackStatusesFailure(

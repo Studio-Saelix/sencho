@@ -492,6 +492,14 @@ describe('OverviewTab unavailable states', () => {
     expect(screen.queryByText(/unreachable/i)).toBeNull();
   });
 
+  it('asks for a node upgrade instead of the operator’s access', () => {
+    renderUnavailable('upgrade-required');
+    expect(screen.getByText(/this node needs an upgrade/i)).toBeInTheDocument();
+    expect(screen.getByText(/does not enforce per-user permissions/i)).toBeInTheDocument();
+    expect(screen.queryByText(/your account cannot read/i)).toBeNull();
+    expect(screen.queryByText(/ask an administrator/i)).toBeNull();
+  });
+
   it('names a disconnected Pilot, an unconfigured target, and a refused address', () => {
     renderUnavailable('pilot-disconnected');
     expect(screen.getByText(/Pilot tunnel is disconnected/i)).toBeInTheDocument();

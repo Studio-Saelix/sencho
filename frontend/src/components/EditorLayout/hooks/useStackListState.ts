@@ -2,7 +2,7 @@ import { useState, useEffect, useRef, useMemo, useCallback } from 'react';
 import { apiFetch } from '@/lib/api';
 import { REMOTE_IMAGE_INSPECT_V1_CAPABILITY } from '@/lib/capabilities';
 import { fetchStackStatusesShared } from '@/lib/stackStatusesFetch';
-import { classifyRemoteReadFailure, isUnreadableNode, remoteReadFailureMessage } from '@/lib/remoteReadFailure';
+import { classifyRemoteReadError, classifyRemoteReadFailure, isNamedReadFailure, remoteReadFailureMessage } from '@/lib/remoteReadFailure';
 import {
   newAttemptId,
   abortAttempt,
@@ -502,12 +502,13 @@ export function useStackListState() {
       endSpan(headersSpan, { proxied, detail: { status: res.status } });
       if (stale()) { abortAttempt(attemptId); return []; }
       if (!res.ok) {
-        // A node the hub cannot read (a missed deadline, an unreachable host, a
-        // disconnected Pilot, no configured target, a refused address) names
-        // that, so the sidebar's retry state says why instead of printing a
-        // status code the operator cannot act on.
+        // A named cause (a missed deadline, an unreachable host, a disconnected
+        // Pilot, no configured target, a refused address, an unverified
+        // permission model, a rejected node credential, or an access denial)
+        // names itself, so the sidebar's retry state says why instead of
+        // printing a status code the operator cannot act on.
         const readFailure = classifyRemoteReadFailure(res);
-        if (isUnreadableNode(readFailure)) {
+        if (isNamedReadFailure(readFailure)) {
           return applyStacksFailure(remoteReadFailureMessage(readFailure, {
             nodeName: activeNode?.name,
             status: res.status,
@@ -606,7 +607,11 @@ export function useStackListState() {
         return failHydration(statusOutcome.error.message);
       }
       const statusReadFailure = statusOutcome.failure;
-      if (isUnreadableNode(statusReadFailure)) {
+      if (
+        statusReadFailure !== undefined
+        && statusReadFailure !== 'auth-abort'
+        && isNamedReadFailure(statusReadFailure)
+      ) {
         return failHydration(remoteReadFailureMessage(statusReadFailure, {
           nodeName: activeNode?.name,
           status: statusOutcome.status,
@@ -695,7 +700,13 @@ export function useStackListState() {
       if (bodySpan !== null) endSpan(bodySpan, { outcome: 'error' });
       if (stale()) { abortAttempt(attemptId); return []; }
       console.error('Failed to refresh stacks:', error);
-      const message = error instanceof Error ? error.message : 'Failed to load stacks';
+      // apiFetch throws a 401 before the caller sees the response, attaching it
+      // to the error. Classify that response so a rejected node credential (or a
+      // real access denial) names itself, like the returned-answer paths do.
+      const readFailure = classifyRemoteReadError(error);
+      const message = isNamedReadFailure(readFailure)
+        ? remoteReadFailureMessage(readFailure, { nodeName: activeNode?.name })
+        : error instanceof Error ? error.message : 'Failed to load stacks';
       // The list committed but hydrating its statuses threw: keep the confirmed
       // list visible with error evidence, rather than erasing it. A list that
       // never loaded takes the existing failure path.

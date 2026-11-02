@@ -62,6 +62,17 @@ describe('classifyRemoteReadFailure', () => {
     expect(classifyRemoteReadFailure(marked('refused', 502))).toBe('refused');
   });
 
+  it('keeps an upgrade demand apart from an access denial', () => {
+    const upgrade = new Response(JSON.stringify({ error: 'Upgrade it.' }), {
+      status: 403,
+      headers: { [REMOTE_READ_FAILURE_HEADER]: 'upgrade-required' },
+    });
+    expect(classifyRemoteReadFailure(upgrade)).toBe('upgrade-required');
+    // A real permission denial still carries no marker and is the operator's
+    // grants, not the node's version.
+    expect(classifyRemoteReadFailure(status(403))).toBe('unauthorized');
+  });
+
   it('treats a 401 forwarded by the proxy as a rejected node credential, not the session', () => {
     const proxied = new Response(JSON.stringify({ error: 'unauthorized' }), {
       status: 401,
@@ -125,6 +136,13 @@ describe('remoteReadFailureMessage', () => {
     expect(message).not.toMatch(/did not answer|unreachable/i);
   });
 
+  it('asks for an upgrade, not access, when the node does not enforce permissions', () => {
+    const message = remoteReadFailureMessage('upgrade-required', { nodeName: 'edge-1' });
+    expect(message).toMatch(/upgrade/i);
+    expect(message).toMatch(/does not enforce per-user permissions/i);
+    expect(message).not.toMatch(/do not have access/i);
+  });
+
   it('falls back to a neutral subject when the node is unnamed', () => {
     expect(remoteReadFailureMessage('timeout')).toContain('This node');
   });
@@ -178,5 +196,11 @@ describe('unreadableNodeHeadline', () => {
     expect(unreadableNodeHeadline('not-configured', 'edge-1')).toMatch(/no API URL or token configured/i);
     expect(unreadableNodeHeadline('refused', 'edge-1')).toMatch(/refused "edge-1"'s address/i);
     expect(unreadableNodeHeadline('pilot-disconnected', 'edge-1')).not.toMatch(/not answering/i);
+  });
+
+  it('gives an unverified model and a rejected credential their own headline', () => {
+    expect(unreadableNodeHeadline('unverified', 'edge-1')).toMatch(/permission model could not be verified/i);
+    expect(unreadableNodeHeadline('node-credential', 'edge-1')).toMatch(/stored credential/i);
+    expect(unreadableNodeHeadline('unverified', 'edge-1')).not.toMatch(/not answering/i);
   });
 });

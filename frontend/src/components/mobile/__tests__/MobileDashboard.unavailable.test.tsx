@@ -117,6 +117,27 @@ describe('MobileDashboard unavailable state', () => {
     expect(screen.queryByText('This node is not answering.')).toBeNull();
   });
 
+  it('names an unverified permission model on the phone instead of Healthy', () => {
+    dataState.metricsUnreadable = true;
+    dataState.unreadableCause = 'unverified';
+    renderDashboard();
+
+    expect(screen.getByText('Unknown')).toBeInTheDocument();
+    expect(screen.getByText(/permission model could not be verified/i)).toBeInTheDocument();
+    expect(screen.queryByText('Healthy')).toBeNull();
+    expect(screen.queryByText('This node is not answering.')).toBeNull();
+  });
+
+  it('names a rejected node credential on the phone instead of Healthy', () => {
+    dataState.metricsUnreadable = true;
+    dataState.unreadableCause = 'node-credential';
+    renderDashboard();
+
+    expect(screen.getByText('Unknown')).toBeInTheDocument();
+    expect(screen.getByText(/stored credential for "Local" was rejected/i)).toBeInTheDocument();
+    expect(screen.queryByText('Healthy')).toBeNull();
+  });
+
   it('does not claim a health level before the first metrics read settles', () => {
     dataState.metricsSettled = false;
     renderDashboard();

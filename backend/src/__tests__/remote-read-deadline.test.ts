@@ -42,6 +42,7 @@ describe('interactive remote read deadline', () => {
   let authHeader: string;
   let viewerBearer: string;
   let remoteNodeId: number;
+  let refusedNodeId: number;
   let pilotNodeId: number;
   let unconfiguredNodeId: number;
   let stub: http.Server;
@@ -72,6 +73,17 @@ describe('interactive remote read deadline', () => {
       compose_dir: '/tmp',
       is_default: false,
       api_url: stubUrl,
+      api_token: 'read-deadline-test-token',
+    });
+    // Nothing listens on port 1, so the permission probe gets ECONNREFUSED: the
+    // node is genuinely unreachable, unlike the stub that accepts and hangs.
+    refusedNodeId = DatabaseService.getInstance().addNode({
+      name: 'refused-remote',
+      type: 'remote',
+      mode: 'proxy',
+      compose_dir: '/tmp',
+      is_default: false,
+      api_url: 'http://127.0.0.1:1',
       api_token: 'read-deadline-test-token',
     });
     pilotNodeId = DatabaseService.getInstance().addNode({
@@ -224,6 +236,7 @@ describe('interactive remote read deadline', () => {
 
     it('answers a black-holed read with an explicit timeout inside the deadline', async () => {
       responder = null;
+      const socketsBefore = stubSockets.size;
       const startedAt = Date.now();
 
       const res = await request(app)
@@ -241,10 +254,14 @@ describe('interactive remote read deadline', () => {
       // timeout the test harness happens to impose.
       expect(elapsed).toBeGreaterThanOrEqual(INTERACTIVE_REMOTE_READ_TIMEOUT_MS - 250);
       expect(elapsed).toBeLessThan(INTERACTIVE_REMOTE_READ_TIMEOUT_MS + 4_000);
+      // The gateway must also drop the upstream socket it gave up on, not leave
+      // the remote connection open after the page has its answer.
+      await expect.poll(() => stubSockets.size, { timeout: 3_000 }).toBeLessThanOrEqual(socketsBefore);
     }, 20_000);
 
     it('bounds a GitOps identity read, which hydrates the Git sources page', async () => {
       responder = null;
+      const socketsBefore = stubSockets.size;
       const startedAt = Date.now();
 
       const res = await request(app)
@@ -255,6 +272,7 @@ describe('interactive remote read deadline', () => {
       expect(res.status).toBe(504);
       expect(res.headers[REMOTE_READ_TIMEOUT_HEADER]).toBe('1');
       expect(Date.now() - startedAt).toBeLessThan(INTERACTIVE_REMOTE_READ_TIMEOUT_MS + 4_000);
+      await expect.poll(() => stubSockets.size, { timeout: 3_000 }).toBeLessThanOrEqual(socketsBefore);
     }, 20_000);
 
     it('returns the whole body when the remote answers its headers at once and finishes after the deadline', async () => {
@@ -294,6 +312,32 @@ describe('interactive remote read deadline', () => {
       expect(res.body).toEqual([]);
       expect(res.headers[REMOTE_READ_TIMEOUT_HEADER]).toBeUndefined();
     }, 20_000);
+
+    it('answers a stalled identity body with a timeout instead of dropping the connection', async () => {
+      // The identity hop buffers the body, so it has written no client headers
+      // when the body goes idle. It can still answer honestly: a dropped
+      // connection would be classified as a generic transport error.
+      responder = (_req, res) => {
+        res.statusCode = 200;
+        res.setHeader('content-type', 'application/json');
+        res.flushHeaders();
+      };
+      const socketsBefore = stubSockets.size;
+      const startedAt = Date.now();
+
+      const res = await request(app)
+        .get('/api/git-sources')
+        .set('Authorization', authHeader)
+        .set('x-node-id', String(remoteNodeId));
+
+      const elapsed = Date.now() - startedAt;
+      expect(res.status).toBe(504);
+      expect(res.headers[REMOTE_READ_TIMEOUT_HEADER]).toBe('1');
+      expect(res.body.code).toBe('remote_read_timeout');
+      expect(elapsed).toBeGreaterThanOrEqual(REMOTE_READ_BODY_IDLE_TIMEOUT_MS - 500);
+      expect(elapsed).toBeLessThan(REMOTE_READ_BODY_IDLE_TIMEOUT_MS + 4_000);
+      await expect.poll(() => stubSockets.size, { timeout: 3_000 }).toBeLessThanOrEqual(socketsBefore);
+    }, 25_000);
 
     it('releases the deadline at the headers of an attachment and lets its body finish', async () => {
       // `/api/stacks` is an ordinary read with no path exemption, so this
@@ -363,7 +407,26 @@ describe('interactive remote read deadline', () => {
       expect(res.headers[REMOTE_READ_TIMEOUT_HEADER]).toBeUndefined();
     }, 20_000);
 
-    it('reports a silent node as unavailable to a non-admin, not as an old node', async () => {
+    it('keeps a known-slow read on its 30-second budget instead of the 5-second one', async () => {
+      // A black-holed slow route must stay silent past the interactive budget
+      // and be called a timeout only near its own. Pointing SLOW_READS at the
+      // 5 s budget would fail here.
+      responder = null;
+      const startedAt = Date.now();
+
+      const res = await request(app)
+        .get('/api/system/docker-df')
+        .set('Authorization', authHeader)
+        .set('x-node-id', String(remoteNodeId));
+
+      const elapsed = Date.now() - startedAt;
+      expect(res.status).toBe(504);
+      expect(res.headers[REMOTE_READ_TIMEOUT_HEADER]).toBe('1');
+      expect(elapsed).toBeGreaterThanOrEqual(SLOW_REMOTE_READ_TIMEOUT_MS - 1_000);
+      expect(elapsed).toBeLessThan(SLOW_REMOTE_READ_TIMEOUT_MS + 5_000);
+    }, 45_000);
+
+    it('reports a silent node as a timeout to a non-admin, not as an old node', async () => {
       responder = null;
 
       const res = await request(app)
@@ -371,10 +434,25 @@ describe('interactive remote read deadline', () => {
         .set('Authorization', viewerBearer)
         .set('x-node-id', String(remoteNodeId));
 
-      // The capability probe could not run, which proves nothing about the
-      // remote's version: answering "upgrade it" would send an operator to fix
-      // the wrong thing.
+      // The capability probe timed out, which proves nothing about the
+      // remote's version and is the same missed deadline an admin read gets:
+      // answering "upgrade it" would send an operator to fix the wrong thing.
+      expect(res.status).toBe(504);
+      expect(res.headers[REMOTE_READ_FAILURE_HEADER]).toBe('timeout');
+      expect(res.body.code).toBe('remote_read_timeout');
+      expect(res.body.error).not.toMatch(/upgrade|permission|running on that host/i);
+    }, 20_000);
+
+    it('keeps a refused connection on unreachable for a non-admin', async () => {
+      // Nothing listens on the target, so the probe gets ECONNREFUSED. That is
+      // genuinely unreachable, unlike a connection that was accepted and hung.
+      const res = await request(app)
+        .get('/api/stacks')
+        .set('Authorization', viewerBearer)
+        .set('x-node-id', String(refusedNodeId));
+
       expect(res.status).toBe(503);
+      expect(res.headers[REMOTE_READ_FAILURE_HEADER]).toBe('unreachable');
       expect(res.body.code).toBe('remote_unreachable');
       expect(res.body.error).not.toMatch(/upgrade/i);
     }, 20_000);
@@ -392,6 +470,9 @@ describe('interactive remote read deadline', () => {
         .set('x-node-id', String(remoteNodeId));
 
       expect(res.status).toBe(403);
+      // Marked apart from an access denial so the UI asks for an upgrade
+      // instead of telling the operator to request permissions.
+      expect(res.headers[REMOTE_READ_FAILURE_HEADER]).toBe('upgrade-required');
       expect(res.body.error).toMatch(/does not enforce per-user permissions/i);
     }, 20_000);
 

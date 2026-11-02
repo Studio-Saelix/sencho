@@ -1,4 +1,4 @@
-import type { UnreadableNodeFailure } from '@/lib/remoteReadFailure';
+import type { RemoteReadFailure } from '@/lib/remoteReadFailure';
 
 export interface Stats {
   active: number;
@@ -132,13 +132,15 @@ export interface DashboardData {
   historyEndAt: number | null;
   /** True after several consecutive `/stats` or `/system/stats` polls have failed, or on the first read that shows the hub has no readable path to the selected node; surfaces a "metrics paused" indicator. */
   metricsStale: boolean;
-  /** True when a read stopped at a state where the hub has no readable path to
-   *  the node (a bounded timeout, an unreachable node, a disconnected Pilot, a
-   *  node with no target configured, or a refused address). */
+  /** True when a metrics read stopped without a usable sample, so no health
+   *  level can be derived: a bounded timeout, an unreachable node, a
+   *  disconnected Pilot, a node with no target configured, a refused address,
+   *  an unverified permission model, a rejected node credential, or an HTTP
+   *  answer. */
   metricsUnreadable: boolean;
   /** The cause behind `metricsUnreadable`, so the headline names it. Null when
-   *  the node is readable. */
-  unreadableCause: UnreadableNodeFailure | null;
+   *  a metrics read has produced a sample. */
+  unreadableCause: RemoteReadFailure | null;
   /** True once one of the two metrics reads has settled for the active node. */
   metricsSettled: boolean;
 }

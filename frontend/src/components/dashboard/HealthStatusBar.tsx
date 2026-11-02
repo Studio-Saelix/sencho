@@ -4,7 +4,7 @@ import { MastheadRail } from '@/components/ui/MastheadRail';
 import type { Stats, SystemStats, NotificationItem, HealthLevel } from './types';
 import { deriveHealth } from './deriveHealth';
 import { countVisibleUnread } from '@/lib/notificationVisibility';
-import { unreadableNodeHeadline, type UnreadableNodeFailure } from '@/lib/remoteReadFailure';
+import { unreadableNodeHeadline, type RemoteReadFailure } from '@/lib/remoteReadFailure';
 import { parseHostUsage } from '@/lib/hostUsage';
 
 interface HealthStatusBarProps {
@@ -17,12 +17,13 @@ interface HealthStatusBarProps {
   /** True when the metrics reads are not answering: several consecutive failures,
    *  or the first read that shows the hub has no readable path to the selected node. */
   metricsStale?: boolean;
-  /** True when a read stopped at a state where the hub has no readable path to
-   *  the node, as opposed to stale meters. */
+  /** True when a metrics read settled without a sample, as opposed to stale
+   *  meters. */
   metricsUnreadable?: boolean;
-  /** Why the node is unreadable, so the bar names a disconnected Pilot or an
-   *  unconfigured node instead of calling every cause "not answering". */
-  unreadableCause?: UnreadableNodeFailure | null;
+  /** Why no health can be derived, so the bar names a disconnected Pilot, an
+   *  unverified permission model, or an unconfigured node instead of calling
+   *  every cause "not answering". */
+  unreadableCause?: RemoteReadFailure | null;
   /** True until the first metrics read for the active node settles. The headline
    *  must not claim the default (healthy) level while that read is still queued. */
   metricsPending?: boolean;

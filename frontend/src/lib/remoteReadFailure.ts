@@ -21,6 +21,7 @@ export type RemoteReadFailure =
   | 'unauthorized'
   | 'node-credential'
   | 'unverified'
+  | 'upgrade-required'
   | 'not-configured'
   | 'pilot-disconnected'
   | 'refused'
@@ -48,6 +49,7 @@ const MARKED_FAILURES: ReadonlySet<string> = new Set<RemoteReadFailure>([
   'unauthorized',
   'node-credential',
   'unverified',
+  'upgrade-required',
   'not-configured',
   'pilot-disconnected',
   'refused',
@@ -195,6 +197,8 @@ export function remoteReadFailureMessage(
       return `The stored credential for ${target} was rejected. Update the node's API token in Settings → Nodes.`;
     case 'unverified':
       return `${subject}'s permission model could not be verified. Try again shortly.`;
+    case 'upgrade-required':
+      return `${subject} is running a version that does not enforce per-user permissions. Upgrade it before non-admin users can act on it.`;
     case 'not-configured':
       return `${subject} has no API URL or token configured. Update it in Settings → Nodes.`;
     case 'pilot-disconnected':

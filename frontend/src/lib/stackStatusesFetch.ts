@@ -71,7 +71,33 @@ async function requestStackStatuses(
   nodeId: number | null,
   signal: AbortSignal,
 ): Promise<StackStatusesFetchResult> {
-  const res = await apiFetch('/stacks/statuses', { nodeId, signal });
+  let res: Response;
+  try {
+    res = await apiFetch('/stacks/statuses', { nodeId, signal });
+  } catch (error) {
+    // apiFetch throws before the caller sees a 401, attaching the response to
+    // the error. Keep that cause instead of replacing it with a bare HTTP
+    // failure: a rejected node credential is not an unexplained status.
+    const response = (error as { response?: unknown } | null | undefined)?.response;
+    if (!(response instanceof Response)) {
+      return {
+        ok: false,
+        status: 0,
+        proxied: false,
+        body: null,
+        coalesced: false,
+        failure: 'http',
+      };
+    }
+    return {
+      ok: false,
+      status: response.status,
+      proxied: response.headers.get('x-sencho-proxy') === '1',
+      body: null,
+      coalesced: false,
+      failure: classifyRemoteReadFailure(response) ?? 'http',
+    };
+  }
   const proxied = res.headers.get('x-sencho-proxy') === '1';
   let body: unknown = null;
   if (res.ok) {

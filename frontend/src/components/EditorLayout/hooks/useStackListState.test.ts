@@ -67,6 +67,52 @@ describe('useStackListState.refreshStacks failure classification', () => {
     expect(result.current.files).toEqual([]);
   });
 
+  it('names an unverified permission model instead of a bare status', async () => {
+    apiFetchMock.mockImplementation((endpoint: string) => {
+      if (endpoint === '/stacks') {
+        return Promise.resolve(new Response(
+          JSON.stringify({ code: 'remote_unverified' }),
+          { status: 503, headers: { 'x-sencho-read-failure': 'unverified' } },
+        ));
+      }
+      return Promise.resolve(notFound());
+    });
+
+    const { result } = renderHook(() => useStackListState());
+    await act(async () => {
+      await result.current.refreshStacks();
+    });
+
+    expect(result.current.stacksLoadStatus).toBe('error');
+    expect(result.current.stacksLoadError).toMatch(/permission model could not be verified/i);
+    expect(result.current.stacksLoadError).not.toMatch(/Could not load stacks \(503\)/);
+  });
+
+  it('names a rejected node credential when apiFetch throws a proxied 401', async () => {
+    // apiFetch throws before the caller sees the response. The catch must
+    // classify the attached response, or a deep link says "Unauthorized" for
+    // the hub's stored node token.
+    const response = new Response('Unauthorized', {
+      status: 401,
+      headers: { 'x-sencho-proxy': '1' },
+    });
+    apiFetchMock.mockImplementation((endpoint: string) => {
+      if (endpoint === '/stacks') {
+        return Promise.reject(Object.assign(new Error('Unauthorized'), { response }));
+      }
+      return Promise.resolve(notFound());
+    });
+
+    const { result } = renderHook(() => useStackListState());
+    await act(async () => {
+      await result.current.refreshStacks();
+    });
+
+    expect(result.current.stacksLoadStatus).toBe('error');
+    expect(result.current.stacksLoadError).toMatch(/stored credential/i);
+    expect(result.current.stacksLoadError).not.toBe('Unauthorized');
+  });
+
   it('surfaces a recoverable error on a background failure after the list was already confirmed empty', async () => {
     apiFetchMock.mockImplementation((endpoint: string) => {
       if (endpoint === '/stacks') return Promise.resolve(okJson([]));

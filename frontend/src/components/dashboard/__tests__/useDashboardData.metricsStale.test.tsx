@@ -121,7 +121,10 @@ describe('useDashboardData metricsStale threshold', () => {
     expect(result.current.metricsStale).toBe(false);
     await tickStats();
     expect(result.current.metricsStale).toBe(true);
-    expect(result.current.metricsUnreadable).toBe(false);
+    // /stats has never returned a sample, so there is no level to derive even
+    // before the stale threshold trips.
+    expect(result.current.metricsUnreadable).toBe(true);
+    expect(result.current.unreadableCause).toBe('http');
 
     // The first successful /stats poll resets the counter; with the
     // /system/stats endpoint still below threshold, the indicator clears.
@@ -279,13 +282,101 @@ describe('useDashboardData metricsStale threshold', () => {
     expect(result.current.metricsUnreadable).toBe(false);
   });
 
-  it('does not treat an ordinary HTTP failure as an unavailable node', async () => {
+  it('does not derive a health level from a failed read that never produced a sample', async () => {
+    // A 500 on /stats leaves the counters at their zero default. Zeros are not
+    // a reading, so the headline must not report Healthy from them.
     setEndpointOutcome('/stats', false);
     const { result } = renderHook(() => useDashboardData());
     await act(async () => { await Promise.resolve(); await Promise.resolve(); });
 
-    expect(result.current.metricsStale).toBe(false);
+    expect(result.current.metricsUnreadable).toBe(true);
+    expect(result.current.unreadableCause).toBe('http');
+  });
+
+  it('keeps the derived level when a later poll fails after a real sample', async () => {
+    // Once /stats has answered, a subsequent HTTP failure is stale meters, not
+    // an absent reading: the page keeps the last known level plus the chip.
+    setEndpointOutcome('/stats', true);
+    const { result } = renderHook(() => useDashboardData());
+    await act(async () => { await Promise.resolve(); await Promise.resolve(); });
     expect(result.current.metricsUnreadable).toBe(false);
+
+    setEndpointOutcome('/stats', false);
+    await tickStats();
+    expect(result.current.metricsUnreadable).toBe(false);
+    expect(result.current.metricsStale).toBe(false);
+  });
+
+  it('reports an unverified permission model instead of Healthy', async () => {
+    // Both metrics reads answer 503 with the gateway's marker. A node whose
+    // permission model cannot be verified has produced no sample; the headline
+    // must name that cause, not derive Healthy from zeros.
+    apiFetchMock.mockImplementation((requested: string) => {
+      if (requested === '/stats' || requested === '/system/stats') {
+        return Promise.resolve(new Response(
+          JSON.stringify({ code: 'remote_unverified' }),
+          { status: 503, headers: { 'x-sencho-read-failure': 'unverified' } },
+        ));
+      }
+      if (requested === '/stacks/statuses') return Promise.resolve(new Response(
+        JSON.stringify({ code: 'remote_unverified' }),
+        { status: 503, headers: { 'x-sencho-read-failure': 'unverified' } },
+      ));
+      if (requested === '/metrics/historical') return Promise.resolve(okJson([]));
+      return Promise.resolve(okJson(null));
+    });
+
+    const { result } = renderHook(() => useDashboardData());
+    await act(async () => { await Promise.resolve(); await Promise.resolve(); });
+
+    expect(result.current.metricsUnreadable).toBe(true);
+    expect(result.current.unreadableCause).toBe('unverified');
+    expect(result.current.metricsSettled).toBe(true);
+  });
+
+  it('reports a rejected node credential from a thrown proxied 401', async () => {
+    const unauthorized = () => Object.assign(new Error('Unauthorized'), {
+      response: new Response(JSON.stringify({ error: 'Unauthorized' }), {
+        status: 401,
+        headers: { 'x-sencho-proxy': '1' },
+      }),
+    });
+    apiFetchMock.mockImplementation((requested: string) => {
+      if (requested === '/stats' || requested === '/system/stats' || requested === '/stacks/statuses') {
+        return Promise.reject(unauthorized());
+      }
+      if (requested === '/metrics/historical') return Promise.resolve(okJson([]));
+      return Promise.resolve(okJson(null));
+    });
+
+    const { result } = renderHook(() => useDashboardData());
+    await act(async () => { await Promise.resolve(); await Promise.resolve(); });
+
+    expect(result.current.metricsUnreadable).toBe(true);
+    expect(result.current.unreadableCause).toBe('node-credential');
+  });
+
+  it('does not call a proxied 503 a healthy node', async () => {
+    apiFetchMock.mockImplementation((requested: string) => {
+      if (requested === '/stats' || requested === '/system/stats') {
+        return Promise.resolve(new Response(
+          JSON.stringify({ error: 'busy' }),
+          { status: 503, headers: { 'x-sencho-proxy': '1' } },
+        ));
+      }
+      if (requested === '/stacks/statuses') return Promise.resolve(new Response(
+        JSON.stringify({ error: 'busy' }),
+        { status: 503, headers: { 'x-sencho-proxy': '1' } },
+      ));
+      if (requested === '/metrics/historical') return Promise.resolve(okJson([]));
+      return Promise.resolve(okJson(null));
+    });
+
+    const { result } = renderHook(() => useDashboardData());
+    await act(async () => { await Promise.resolve(); await Promise.resolve(); });
+
+    expect(result.current.metricsUnreadable).toBe(true);
+    expect(result.current.unreadableCause).toBe('http');
   });
 
   it('reads the node as unreadable from the first failed read while the metrics are still queued', async () => {

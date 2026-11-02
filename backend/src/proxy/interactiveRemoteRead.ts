@@ -8,12 +8,13 @@
  * loading state with no error to show.
  *
  * Five seconds is the point where an operator stops trusting a loading page. It
- * sits under the client-side backstop the stack list and dashboard already
- * carry (eight seconds), so the gateway's answer is normally the one the page
- * sees. The budget bounds the time to the remote's response headers, not the
- * whole transfer: once the headers land the deadline is released and a separate
- * idle-stall bound takes over, so a healthy remote that is slow to finish a body
- * is never cut off.
+ * sits under the eight-second backstop the stack-statuses coalescer carries
+ * (`STACK_STATUSES_OWNER_TIMEOUT_MS`), so the gateway's answer is normally the
+ * one the stack list sees. The metrics reads have no client-side abort: they
+ * wait for the gateway. The budget bounds the time to the remote's response
+ * headers, not the whole transfer: once the headers land the deadline is
+ * released and a separate idle-stall bound takes over, so a healthy remote that
+ * is slow to finish a body is never cut off.
  *
  * Routes the codebase already knows are slow to answer (a df over a large image
  * store, a volume-browser helper-image pull, a full resources inventory) get a
@@ -136,9 +137,10 @@ export function remoteReadTimeoutMs(method: string, path: string): number | null
 }
 
 /**
- * True when the remote's own response says it is a stream or a download. Used to
- * release the deadline at the first byte, so a read that turned out to be a
- * stream or a file body is never cut short.
+ * True when the remote's own response headers say it is a stream or a download.
+ * Used to release the deadline as soon as those headers arrive, so a read that
+ * turned out to be a stream or a file body is never cut short. The decision is
+ * made from the headers alone; no body byte is required.
  */
 export function isStreamingOrDownloadResponse(headers: {
   'content-type'?: string | string[];

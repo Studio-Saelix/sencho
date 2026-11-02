@@ -34,7 +34,8 @@ import {
 } from '../services/license-headers';
 import { LicenseService } from '../services/LicenseService';
 import { isProxyExemptPath } from '../helpers/proxyExemptPaths';
-import { remoteAdvertisesCapability, probeRemoteCapability } from '../helpers/remoteCapabilities';
+import { probeRemoteCapability } from '../helpers/remoteCapabilities';
+import type { RemoteCapabilityProbe } from '../helpers/remoteCapabilities';
 import { hubImageUpdateJsonParser } from '../middleware/jsonParser';
 import {
   CROSS_NODE_RBAC_CAPABILITY,
@@ -202,8 +203,18 @@ function armInteractiveReadDeadline(
  * The remote answered. Release the time-to-headers budget for every response,
  * then bound only a body that stalls mid-flight. Streams and downloads keep
  * their own lifetime from the first byte.
+ *
+ * `onBodyIdle` is for a hop that buffers the body before writing anything to the
+ * client (the GitOps identity hop). Its response headers are not on the wire, so
+ * a stall can still be answered honestly; the callback writes that terminal and
+ * settles the hop before the upstream socket is dropped.
  */
-function noteInteractiveReadHeaders(req: Request, res: Response, proxyRes: IncomingMessage): void {
+function noteInteractiveReadHeaders(
+  req: Request,
+  res: Response,
+  proxyRes: IncomingMessage,
+  onBodyIdle?: () => void,
+): void {
   const deadline = interactiveReadDeadlines.get(req);
   if (!deadline || deadline.fired) return;
   if (deadline.headerTimer) {
@@ -229,12 +240,17 @@ function noteInteractiveReadHeaders(req: Request, res: Response, proxyRes: Incom
       deadline.fired = true;
       stopBodyWatch();
       proxyRes.off('data', onBodyData);
-      // The body stopped moving after it started: end the transfer instead of
-      // holding both sockets open forever. There is no honest status left to
-      // send after the headers, so the response is destroyed and the log names
-      // the bound that ended it.
+      // The body stopped moving after it started. The identity hop buffers the
+      // whole body before writing anything, so it can still answer with the
+      // gateway's timeout through `onBodyIdle`. The streaming hop has already
+      // handed headers (and possibly part of the body) to the client, so the
+      // only honest end left there is to destroy the in-progress response.
       finalizeProxyTiming(req, 'timeout');
-      res.destroy();
+      if (onBodyIdle) {
+        onBodyIdle();
+      } else {
+        res.destroy();
+      }
       proxyRequests.get(req)?.destroy();
     }, REMOTE_READ_BODY_IDLE_TIMEOUT_MS);
   };
@@ -578,7 +594,6 @@ export function createRemoteProxyMiddleware(): RequestHandler {
         // The same header-time release as the streaming hop: this hop buffers
         // the body, so its 30 s proxyTimeout is the idle stall bound, not a
         // reason to keep the read deadline armed after the remote answered.
-        noteInteractiveReadHeaders(req, res, proxyRes);
         proxyRes.headers['x-sencho-proxy'] = '1';
         const timing = proxyTimings.get(req);
         if (timing) {
@@ -586,7 +601,7 @@ export function createRemoteProxyMiddleware(): RequestHandler {
           timing.ttfbMs = Date.now() - timing.startedAt;
         }
         const nodeId = hubNodeIdFor(req);
-        handleIdentityResponse(proxyRes, res, {
+        const identityResponse = handleIdentityResponse(proxyRes, res, {
           transform: (payload) => {
             // Without an id there is nothing to rewrite the remote's numbering
             // to, and passing its ids through unchanged is the exact defect
@@ -612,6 +627,11 @@ export function createRemoteProxyMiddleware(): RequestHandler {
             finalizeProxyTiming(req, isIdentityFailure(kind) ? 'error' : 'ok');
           },
         });
+        // This hop buffers the whole body before writing anything, so a stall
+        // after the upstream headers can still be answered with a real timeout
+        // status. The streaming hop has already forwarded its headers and keeps
+        // the destroy-only end.
+        noteInteractiveReadHeaders(req, res, proxyRes, () => identityResponse.timeout());
       },
     },
   });
@@ -692,16 +712,24 @@ export function createRemoteProxyMiddleware(): RequestHandler {
       }
 
       if (isStackDownWithRemoveVolumes(req)) {
-        const supported = await remoteAdvertisesCapability(req.nodeId, STACK_DOWN_REMOVE_VOLUMES_CAPABILITY);
-        if (!supported) {
+        const capability = await probeRemoteCapability(req.nodeId, STACK_DOWN_REMOVE_VOLUMES_CAPABILITY);
+        if (capability.kind === 'unreachable') {
+          sendProbeUnavailable(res, node.name, capability);
+          return;
+        }
+        if (capability.kind === 'unsupported') {
           res.status(400).json({ error: 'Volume removal is not supported on this node' });
           return;
         }
       }
 
       if (isUnacknowledgedStackDelete(req)) {
-        const supported = await remoteAdvertisesCapability(req.nodeId, STACK_DELETE_PRUNE_VOLUMES_CAPABILITY);
-        if (!supported) {
+        const capability = await probeRemoteCapability(req.nodeId, STACK_DELETE_PRUNE_VOLUMES_CAPABILITY);
+        if (capability.kind === 'unreachable') {
+          sendProbeUnavailable(res, node.name, capability);
+          return;
+        }
+        if (capability.kind === 'unsupported') {
           res.status(400).json({
             error: 'This node cannot guarantee volumes are preserved on delete. Upgrade it before deleting this stack.',
             code: 'capability_unavailable',
@@ -711,8 +739,12 @@ export function createRemoteProxyMiddleware(): RequestHandler {
       }
 
       if (isServiceScopedUpdateRoute(req)) {
-        const supported = await remoteAdvertisesCapability(req.nodeId, SERVICE_SCOPED_UPDATE_CAPABILITY);
-        if (!supported) {
+        const capability = await probeRemoteCapability(req.nodeId, SERVICE_SCOPED_UPDATE_CAPABILITY);
+        if (capability.kind === 'unreachable') {
+          sendProbeUnavailable(res, node.name, capability);
+          return;
+        }
+        if (capability.kind === 'unsupported') {
           res.status(400).json({ error: 'Service-scoped updates are not supported on this node', code: 'capability_unavailable' });
           return;
         }
@@ -769,22 +801,14 @@ export function createRemoteProxyMiddleware(): RequestHandler {
       if (req.user?.role !== 'admin') {
         const rbac = await probeRemoteCapability(req.nodeId, CROSS_NODE_RBAC_CAPABILITY);
         if (rbac.kind === 'unreachable') {
-          // Only a transport failure establishes silence. An HTTP error or a
-          // malformed body means the node answered, and "did not answer" would
-          // send the operator to the wrong fix.
-          const silent = rbac.detail === 'transport_failure';
-          res.setHeader(REMOTE_READ_FAILURE_HEADER, silent ? 'unreachable' : 'unverified');
-          res.status(503).json({
-            error: rbacUnavailableMessage(node.name, rbac.detail),
-            code: silent ? 'remote_unreachable' : 'remote_unverified',
-            retryable: true,
-          });
+          sendProbeUnavailable(res, node.name, rbac);
           return;
         }
         if (rbac.kind === 'unsupported') {
-          res.status(403).json({
-            error: `Remote node "${node.name}" is running a version that does not enforce per-user permissions. Upgrade it before non-admin users can act on it.`,
-          });
+          refuseUpgradeRequired(
+            res,
+            `Remote node "${node.name}" is running a version that does not enforce per-user permissions. Upgrade it before non-admin users can act on it.`,
+          );
           return;
         }
       }
@@ -810,14 +834,19 @@ export function createRemoteProxyMiddleware(): RequestHandler {
           globalRole === 'admin'
           || (globalRole != null && (ROLE_PERMISSIONS[globalRole]?.includes(classified.action) ?? false));
         if (!globalGrantsPrimary) {
-          const evidenceSupported = await remoteAdvertisesCapability(
+          const evidence = await probeRemoteCapability(
             req.nodeId,
             SCOPED_STACK_AUTH_EVIDENCE_CAPABILITY,
           );
-          if (!evidenceSupported) {
-            res.status(403).json({
-              error: `Remote node "${node.name}" does not support scoped stack authorization. Upgrade it before scoped users can act on it.`,
-            });
+          if (evidence.kind === 'unreachable') {
+            sendProbeUnavailable(res, node.name, evidence);
+            return;
+          }
+          if (evidence.kind === 'unsupported') {
+            refuseUpgradeRequired(
+              res,
+              `Remote node "${node.name}" does not support scoped stack authorization. Upgrade it before scoped users can act on it.`,
+            );
             return;
           }
           if (!req.user) {
@@ -864,8 +893,12 @@ export function createRemoteProxyMiddleware(): RequestHandler {
           throw err;
         }
         if (alertCreateHasScopedService(req.rawBody)) {
-          const supported = await remoteAdvertisesCapability(req.nodeId, SERVICE_SCOPED_STACK_ALERT_CAPABILITY);
-          if (!supported) {
+          const capability = await probeRemoteCapability(req.nodeId, SERVICE_SCOPED_STACK_ALERT_CAPABILITY);
+          if (capability.kind === 'unreachable') {
+            sendProbeUnavailable(res, node.name, capability);
+            return;
+          }
+          if (capability.kind === 'unsupported') {
             res.status(400).json({
               error: 'Service-scoped alert rules are not supported on this node',
               code: 'capability_unavailable',
@@ -1211,6 +1244,48 @@ export function createRemoteProxyMiddleware(): RequestHandler {
 }
 
 /**
+ * Write the answer for a capability probe that could not run. A timeout on the
+ * permission probe is the same missed deadline an admin read gets, so it keeps
+ * the gateway's timeout marker instead of claiming the host is down. Every other
+ * transport failure is the node being unreachable; an HTTP error or a malformed
+ * body means the node answered, so only its permission model is unverified.
+ *
+ * Callers return immediately after this writes a response.
+ */
+function sendProbeUnavailable(
+  res: Response,
+  nodeName: string,
+  probe: Extract<RemoteCapabilityProbe, { kind: 'unreachable' }>,
+): void {
+  if (probe.detail === 'transport_failure' && probe.transport === 'timeout') {
+    res.setHeader(REMOTE_READ_FAILURE_HEADER, 'timeout');
+    res.status(504).json(remoteReadTimeoutBody(nodeName));
+    return;
+  }
+  // Only a transport failure establishes silence. An HTTP error or a malformed
+  // body means the node answered, and "did not answer" would send the operator
+  // to the wrong fix.
+  const silent = probe.detail === 'transport_failure';
+  res.setHeader(REMOTE_READ_FAILURE_HEADER, silent ? 'unreachable' : 'unverified');
+  res.status(503).json({
+    error: rbacUnavailableMessage(nodeName, probe.detail),
+    code: silent ? 'remote_unreachable' : 'remote_unverified',
+    retryable: true,
+  });
+}
+
+/**
+ * Refuse an action because the node answered without the capability it needs.
+ * Marked apart from `unauthorized`: a 403 from this gate is the node needing an
+ * upgrade, while a real `PERMISSION_DENIED` 403 is the operator's own grants.
+ * The frontend renders the two differently.
+ */
+function refuseUpgradeRequired(res: Response, message: string): void {
+  res.setHeader(REMOTE_READ_FAILURE_HEADER, 'upgrade-required');
+  res.status(403).json({ error: message });
+}
+
+/**
  * Name the mixed-version RBAC refusal by what the probe actually observed. An
  * HTTP error or a malformed body is not silence: saying the node "did not
  * answer" would send the operator to check a node that answered.
@@ -1453,14 +1528,19 @@ async function remoteSupportsScopedStackEdit(
   res: Response,
   node: { name: string },
 ): Promise<boolean> {
-  const evidenceSupported = await remoteAdvertisesCapability(
+  const evidence = await probeRemoteCapability(
     req.nodeId,
     SCOPED_STACK_AUTH_EVIDENCE_CAPABILITY,
   );
-  if (!evidenceSupported) {
-    res.status(403).json({
-      error: `Remote node "${node.name}" does not support scoped stack authorization. Upgrade it before scoped users can act on it.`,
-    });
+  if (evidence.kind === 'unreachable') {
+    sendProbeUnavailable(res, node.name, evidence);
+    return false;
+  }
+  if (evidence.kind === 'unsupported') {
+    refuseUpgradeRequired(
+      res,
+      `Remote node "${node.name}" does not support scoped stack authorization. Upgrade it before scoped users can act on it.`,
+    );
     return false;
   }
   return true;

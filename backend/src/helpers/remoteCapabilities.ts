@@ -1,5 +1,9 @@
 import { NodeRegistry } from '../services/NodeRegistry';
-import { CROSS_NODE_RBAC_CAPABILITY, type RemoteMetaProbe } from '../services/CapabilityRegistry';
+import {
+  CROSS_NODE_RBAC_CAPABILITY,
+  type RemoteMetaProbe,
+  type RemoteMetaTransportFailure,
+} from '../services/CapabilityRegistry';
 import { getErrorMessage } from '../utils/errors';
 import { sanitizeForLog } from '../utils/safeLog';
 
@@ -55,7 +59,17 @@ export async function remoteSupportsCrossNodeRbac(nodeId: number): Promise<boole
 export type RemoteCapabilityProbe =
   | { kind: 'supported' }
   | { kind: 'unsupported' }
-  | { kind: 'unreachable'; detail: Exclude<RemoteMetaProbe['kind'], 'ok'> };
+  | {
+    kind: 'unreachable';
+    detail: Exclude<RemoteMetaProbe['kind'], 'ok'>;
+    /**
+     * The transport-level cause when `detail` is `transport_failure`. Kept so a
+     * caller can tell a probe that timed out from one the host refused: both
+     * are "unreachable" for a capability check, but only the timeout is the
+     * read allergy this gateway calls a missed deadline.
+     */
+    transport?: RemoteMetaTransportFailure;
+  };
 
 /**
  * In-flight tri-state probes, shared per node+capability so a page that fires
@@ -75,7 +89,9 @@ async function runProbe(
   try {
     const probe = await NodeRegistry.getInstance().probeRemoteMeta(nodeId, abortSignal);
     if (probe.kind !== 'ok') {
-      return { kind: 'unreachable', detail: probe.kind };
+      return probe.kind === 'transport_failure'
+        ? { kind: 'unreachable', detail: probe.kind, transport: probe.detail }
+        : { kind: 'unreachable', detail: probe.kind };
     }
     return probe.meta.capabilities.includes(capability)
       ? { kind: 'supported' }
