@@ -218,7 +218,7 @@ describe('useFleetContainerLabels', () => {
       expect(result.current.data?.nodeErrors).toEqual({});
     });
 
-    it('asks only once more when the build is still not ready, then reports the cut', async () => {
+    it('caps the second ask at one when the answer is cut again, then reports the cut', async () => {
       apiFetchMock.mockImplementation(async (path: string) => {
         const nodeId = nodeIdOf(path);
         return nodeId === 1 ? keptBuildCut(1) : json(piece(nodeId));
@@ -238,6 +238,16 @@ describe('useFleetContainerLabels', () => {
       expect(apiFetchMock.mock.calls.filter(c => nodeIdOf(String(c[0])) === 2)).toHaveLength(1);
     });
 
+    it('does not ask again when the header rides an answer that has an inventory', async () => {
+      const usable = json(piece(1));
+      usable.headers.set('X-Sencho-Build-Kept', '1');
+      answerBy({ 1: () => usable, 2: () => json(piece(2)), 3: () => json(piece(3)) });
+      const { result } = renderHook(() => useFleetContainerLabels(NODES, false));
+
+      await waitFor(() => expect(result.current.loading).toBe(false));
+      expect(apiFetchMock.mock.calls.filter(c => nodeIdOf(String(c[0])) === 1)).toHaveLength(1);
+    });
+
     it('asks again with the same reveal mode', async () => {
       let asks = 0;
       apiFetchMock.mockImplementation(async (path: string) => {
@@ -254,7 +264,20 @@ describe('useFleetContainerLabels', () => {
       ]);
     });
 
-    it('stops asking when the tab unmounts between the two asks', async () => {
+    it('does not ask a second time when the tab unmounts while the first answer is still being read', async () => {
+      let releaseBody: () => void = () => {};
+      const slow = keptBuildCut(1);
+      const body = new Promise<unknown>((res) => { releaseBody = () => res(hubNodeError(1, 'Timed out after 25s')); });
+      slow.json = () => body;
+      apiFetchMock.mockImplementation(() => Promise.resolve(slow));
+      const { unmount } = renderHook(() => useFleetContainerLabels([NODES[0]], false));
+      await waitFor(() => expect(apiFetchMock).toHaveBeenCalledTimes(1));
+      unmount();
+      await act(async () => { releaseBody(); await body; });
+      expect(apiFetchMock).toHaveBeenCalledTimes(1);
+    });
+
+    it('stops the second ask when the tab unmounts while it is pending', async () => {
       let asks = 0;
       apiFetchMock.mockImplementation((_path: string, init: { signal: AbortSignal }) => {
         asks += 1;

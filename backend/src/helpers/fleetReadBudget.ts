@@ -54,8 +54,10 @@ export const FLEET_READ_BUDGET_MS = 5_000;
  * 25 s is sized from a measured hub: 461 containers on one vCPU build the map
  * in 5 to 9 s alone, and 15 to 17.5 s while a browser has the dashboard open,
  * so an 18 s deadline cut a share of loads. The deadline leaves that worst case
- * about 40% headroom; a build that still outlives it is kept for the retry
- * (see `LocalFleetBuildShare` in `localFleetBuildShare.ts`).
+ * about 40% headroom; a build that still outlives it is kept for the retry,
+ * and the Labels and Map tabs make that retry themselves once
+ * ({@link FLEET_BUILD_KEPT_HEADER}; see `LocalFleetBuildShare` in
+ * `localFleetBuildShare.ts`).
  *
  * The deadline bounds the caller's wait, not the work. The local builders
  * cannot be cancelled, so a build that outlives the deadline finishes on its
@@ -105,9 +107,11 @@ export class FleetReadTimeoutError extends Error {
 }
 
 /**
- * Response header a per-node Fleet read sets when the hub's own read was cut at
- * its deadline with the build kept. The tab asks once more on seeing it, which
- * joins that build, so a large hub's slow cold read is not reported as failed.
+ * Response header a Fleet read sets when the hub's own read was cut at its
+ * deadline with the build kept. A tab that asked for one node (`?nodeId=`) asks
+ * once more on seeing it, which joins that build, so a large hub's slow cold
+ * read is not reported as failed. Only the labels and dependency-map reads set
+ * it; the networking summary does not.
  */
 export const FLEET_BUILD_KEPT_HEADER = 'X-Sencho-Build-Kept';
 

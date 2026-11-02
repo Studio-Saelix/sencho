@@ -4,7 +4,9 @@ import {
   FleetReadTimeoutError,
   LOCAL_FLEET_READ_DEADLINE_MS,
   describeFleetReadFailure,
+  FLEET_BUILD_KEPT_HEADER,
   fleetReadSignal,
+  flagKeptBuilds,
   withinFleetReadBudget,
   withinLocalFleetReadBudget,
 } from '../helpers/fleetReadBudget';
@@ -36,6 +38,42 @@ describe('fleet read budget', () => {
     expect(describeFleetReadFailure(new DOMException('aborted', 'TimeoutError'))).toBe('Timed out after 5s');
     expect(describeFleetReadFailure(new Error('connect ECONNREFUSED'))).toBe('connect ECONNREFUSED');
     expect(describeFleetReadFailure('boom')).toBe('Failed to reach node');
+  });
+});
+
+describe('flagKeptBuilds', () => {
+  const kept = (): FleetReadTimeoutError => {
+    const error = new FleetReadTimeoutError(LOCAL_FLEET_READ_DEADLINE_MS, 'labels');
+    error.buildKept = true;
+    return error;
+  };
+  const flagged = (results: PromiseSettledResult<unknown>[]): Record<string, string> => {
+    const headers: Record<string, string> = {};
+    flagKeptBuilds({ setHeader: (name, value) => { headers[name] = value; } }, results);
+    return headers;
+  };
+  const rejected = (reason: unknown): PromiseSettledResult<unknown> => ({ status: 'rejected', reason });
+
+  it('flags a response when any node was cut with its build kept, whatever the others did', () => {
+    expect(flagged([
+      { status: 'fulfilled', value: 'ok' },
+      rejected(new FleetReadTimeoutError(FLEET_READ_BUDGET_MS, 'remote')),
+      rejected(kept()),
+    ])).toEqual({ [FLEET_BUILD_KEPT_HEADER]: '1' });
+  });
+
+  it('leaves a response alone when no cut kept a build', () => {
+    expect(flagged([
+      { status: 'fulfilled', value: 'ok' },
+      rejected(new FleetReadTimeoutError(FLEET_READ_BUDGET_MS, 'remote')),
+      rejected(new DOMException('aborted', 'TimeoutError')),
+      rejected(new Error('connect ECONNREFUSED')),
+    ])).toEqual({});
+  });
+
+  it('does not flag a kept mark that is not on a budget error', () => {
+    const lookalike = Object.assign(new Error('boom'), { buildKept: true });
+    expect(flagged([rejected(lookalike)])).toEqual({});
   });
 });
 

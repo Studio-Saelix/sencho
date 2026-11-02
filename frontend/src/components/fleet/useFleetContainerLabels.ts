@@ -266,7 +266,7 @@ export function useFleetContainerLabels(nodes: readonly LabelsNodeRef[], reveal:
           console.error('Failed to load Docker labels for node', node.id, err);
           failure = describeFailure(err);
         }
-        if (piece !== null || !buildKept) break;
+        if (piece !== null || !buildKept || controller.signal.aborted) break;
       }
       if (generation !== generationRef.current || controller.signal.aborted) return;
       inFlightRef.current.delete(node.id);

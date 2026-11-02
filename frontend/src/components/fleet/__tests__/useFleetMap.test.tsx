@@ -181,7 +181,7 @@ describe('useFleetMap', () => {
       expect(result.current.data?.nodes.map(n => n.nodeId)).toEqual([1, 2, 3]);
     });
 
-    it('asks only once more when the build is still not ready, then reports the cut', async () => {
+    it('caps the second ask at one when the answer is cut again, then reports the cut', async () => {
       answerBy({ 1: () => keptBuildCut(1), 2: () => json(piece(2)), 3: () => json(piece(3)) });
       const { result } = renderHook(() => useFleetMap(true, NODES));
 
@@ -197,6 +197,29 @@ describe('useFleetMap', () => {
 
       await waitFor(() => expect(result.current.loading).toBe(false));
       expect(apiFetchMock.mock.calls.filter(c => nodeIdOf(String(c[0])) === 2)).toHaveLength(1);
+    });
+
+    it('does not ask again when the header rides an answer with no error for that node', async () => {
+      const usable = json(piece(1));
+      usable.headers.set('X-Sencho-Build-Kept', '1');
+      answerBy({ 1: () => usable, 2: () => json(piece(2)), 3: () => json(piece(3)) });
+      const { result } = renderHook(() => useFleetMap(true, NODES));
+
+      await waitFor(() => expect(result.current.loading).toBe(false));
+      expect(apiFetchMock.mock.calls.filter(c => nodeIdOf(String(c[0])) === 1)).toHaveLength(1);
+    });
+
+    it('does not ask a second time when the tab unmounts while the first answer is still being read', async () => {
+      let releaseBody: () => void = () => {};
+      const slow = keptBuildCut(1);
+      const body = new Promise<unknown>((res) => { releaseBody = () => res(piece(1, { nodes: [], nodeErrors: [{ nodeId: 1, nodeName: 'node1', error: 'Timed out after 25s' }] })); });
+      slow.json = () => body;
+      apiFetchMock.mockImplementation(() => Promise.resolve(slow));
+      const { unmount } = renderHook(() => useFleetMap(true, [NODES[0]]));
+      await waitFor(() => expect(apiFetchMock).toHaveBeenCalledTimes(1));
+      unmount();
+      await act(async () => { releaseBody(); await body; });
+      expect(apiFetchMock).toHaveBeenCalledTimes(1);
     });
 
     it('keeps the node pending between the two asks', async () => {

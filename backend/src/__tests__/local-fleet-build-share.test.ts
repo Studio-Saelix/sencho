@@ -213,4 +213,19 @@ describe('LocalFleetBuildShare kept-build mark', () => {
     expect(error).toBeInstanceOf(FleetReadTimeoutError);
     expect((error as FleetReadTimeoutError).buildKept).toBe(false);
   });
+
+  it('does not mark a deadline whose build was replaced under the same key', async () => {
+    const stale = heldBuild('stale');
+    const fresh = heldBuild('fresh');
+    const first = share.read('k', stale.start, deadlineAt(LOCAL_FLEET_BUILD_MAX_AGE_MS + 5_000)).catch((err: unknown) => err);
+    // The first build ages out of the share, and a newer reader starts its own.
+    await vi.advanceTimersByTimeAsync(LOCAL_FLEET_BUILD_MAX_AGE_MS + 1);
+    void share.read('k', fresh.start, unbounded);
+    expect(fresh.calls()).toBe(1);
+    await vi.advanceTimersByTimeAsync(5_000);
+
+    const error = await first;
+    expect(error).toBeInstanceOf(FleetReadTimeoutError);
+    expect((error as FleetReadTimeoutError).buildKept).toBe(false);
+  });
 });

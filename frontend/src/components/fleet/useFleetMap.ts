@@ -158,7 +158,7 @@ export function useFleetMap(active: boolean, nodes: readonly MapNodeRef[]): Flee
         }
         // The cut read is the piece that carries this node's own error.
         const cut = piece?.nodeErrors.some(e => e.nodeId === node.id) ?? false;
-        if (!(buildKept && cut)) break;
+        if (!(buildKept && cut) || controller.signal.aborted) break;
       }
       if (generation !== generationRef.current || controller.signal.aborted) return;
       inFlightRef.current.delete(node.id);
