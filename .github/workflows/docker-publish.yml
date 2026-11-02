@@ -159,10 +159,11 @@ jobs:
           platforms: linux/amd64,linux/arm64
           # Digest only: `name-canonical` is what lets the tag step below refer to
           # this exact manifest list after the main image has passed its gates.
+          # Both registries carry the digest: the main image pins the Docker Hub
+          # reference and the tag step tags and signs both. One quoted `name=`
+          # value lists both, because a repeated `name=` key keeps only the last.
           outputs: >-
-            type=image,
-            name=saelix/sencho-recovery-helper
-            name=ghcr.io/studio-saelix/sencho-recovery-helper,
+            type=image,"name=saelix/sencho-recovery-helper,ghcr.io/studio-saelix/sencho-recovery-helper",
             push-by-digest=true,name-canonical=true,push=true
           cache-from: type=gha,scope=recovery-helper
           cache-to: type=gha,scope=recovery-helper,mode=max
