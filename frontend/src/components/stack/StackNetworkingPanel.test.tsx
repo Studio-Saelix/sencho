@@ -340,7 +340,7 @@ describe('StackNetworkingPanel: detected exposure', () => {
         { kind: 'tunnel', scope: 'private-overlay', provider: 'tailscale', connector: 'ts', path: 'shared-network', certain: false },
         { kind: 'host-port', scope: 'host-published', bind: 'all-interfaces', hostIp: '0.0.0.0', startPort: 8080, endPort: 8080, protocol: 'tcp', via: 'app' },
       ],
-      incomplete: ['runtime-ports-differ'],
+      incomplete: ['runtime-ports-missing', 'runtime-ports-extra'],
       externalNetworks: ['shared'],
       runtimeChecked: false,
       answer: 'public edge (unverified) + private overlay (unverified) + host-published · partly undetermined',
@@ -350,8 +350,9 @@ describe('StackNetworkingPanel: detected exposure', () => {
     await screen.findByText(/detected: public edge \(unverified\)/);
     expect(screen.getByText('via Cloudflare Tunnel (cf) · public edge')).toBeInTheDocument();
     expect(screen.getByText('via Tailscale (ts) · private overlay')).toBeInTheDocument();
-    const proof = screen.getByText(/a running container publishes ports/);
-    expect(proof.textContent).toContain('a running container publishes ports the Compose file does not');
+    const proof = screen.getByText(/^partly undetermined: /);
+    expect(proof.textContent).toContain('a running container publishes a port the Compose file does not');
+    expect(proof.textContent).toContain('the Compose file declares a port the running container does not publish');
     expect(proof.textContent).toContain('the host path comes from "app"');
     expect(proof.textContent).toContain('a connector in another stack on "shared" could reach it');
     expect(proof.textContent).toContain('runtime not checked');

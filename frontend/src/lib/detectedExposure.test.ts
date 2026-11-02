@@ -123,9 +123,13 @@ describe('proofLine', () => {
     expect(line).toBe('could not be determined: it shares a network namespace with a container outside this stack.');
   });
 
-  it('marks a known path as only partly determined, with the reason', () => {
-    expect(proofLine(detected({ paths: [broadPort], incomplete: ['runtime-ports-differ'] })))
-      .toBe('partly undetermined: a running container publishes ports the Compose file does not.');
+  it('names the direction of a runtime port difference, in both directions', () => {
+    expect(proofLine(detected({ paths: [broadPort], incomplete: ['runtime-ports-missing'] })))
+      .toBe('partly undetermined: the Compose file declares a port the running container does not publish.');
+    expect(proofLine(detected({ paths: [broadPort], incomplete: ['runtime-ports-extra'] })))
+      .toBe('partly undetermined: a running container publishes a port the Compose file does not.');
+    expect(proofLine(detected({ paths: [broadPort], incomplete: ['runtime-ports-missing', 'runtime-ports-extra'] })))
+      .toBe('partly undetermined: the Compose file declares a port the running container does not publish; a running container publishes a port the Compose file does not.');
   });
 
   it('names the namespace root, the external networks and the unchecked runtime', () => {

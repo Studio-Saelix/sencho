@@ -25,7 +25,8 @@ const REASON_TEXT: Record<UndeterminedReason, string> = {
   'foreign-namespace': 'it shares a network namespace with a container outside this stack',
   'hidden-connector': 'a tunnel connector runs in another container\'s namespace, so its reach is unknown',
   'runtime-attachment': 'a running container is attached to a network this stack does not declare',
-  'runtime-ports-differ': 'a running container publishes ports the Compose file does not',
+  'runtime-ports-extra': 'a running container publishes a port the Compose file does not',
+  'runtime-ports-missing': 'the Compose file declares a port the running container does not publish',
 };
 
 export interface ExposureChip {

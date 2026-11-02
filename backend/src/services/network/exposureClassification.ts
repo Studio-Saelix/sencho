@@ -56,12 +56,16 @@ export type DetectedPath =
   | ({ kind: 'host-port'; scope: 'host-loopback'; bind: 'loopback' } & DetectedPortFacts)
   | { kind: 'host-network'; scope: 'host-published'; via?: string };
 
-/** Why the detected reach could not be fully established. */
+/** Why the detected reach could not be fully established. The two runtime-port
+ *  reasons name their direction, because a container may publish a port the file
+ *  does not and the file may declare a port the container does not (the common
+ *  edited-not-redeployed case). */
 export type UndeterminedReason =
   | 'foreign-namespace'
   | 'hidden-connector'
   | 'runtime-attachment'
-  | 'runtime-ports-differ';
+  | 'runtime-ports-extra'
+  | 'runtime-ports-missing';
 
 /** What a declared intent contradicts, or nearly contradicts. */
 export type ConflictReason =
@@ -166,10 +170,32 @@ function isForeignNamespace(service: EffService | undefined): boolean {
   return CONTAINER_MODE.test(service?.networkMode ?? '');
 }
 
-/** Host-port paths for the ports of a namespace owner. */
+/** Merge contiguous host ports with the same bind, address and protocol into one
+ *  path, so the evidence describes the range instead of one entry per port.
+ *  `docker compose config` expands `40000-65000:40000-65000` into one entry per
+ *  port; without this the detected payload grows with the range. */
+function mergePortFacts(facts: DetectedPortFacts[]): DetectedPortFacts[] {
+  if (facts.some(fact => fact.dynamic)) return facts.map(fact => ({ ...fact }));
+  const sorted = [...facts].sort((a, b) => a.startPort - b.startPort || a.endPort - b.endPort);
+  const merged: DetectedPortFacts[] = [];
+  for (const fact of sorted) {
+    const last = merged[merged.length - 1];
+    if (last && fact.startPort <= last.endPort + 1) {
+      if (fact.endPort > last.endPort) last.endPort = fact.endPort;
+      continue;
+    }
+    merged.push({ ...fact });
+  }
+  return merged;
+}
+
+/** Host-port paths for the ports of a namespace owner, one per contiguous range. */
 function hostPortPaths(owner: EffService | undefined, via: string | undefined): DetectedPath[] {
   if (!owner) return [];
-  return owner.ports.map((port: EffPortSpec): DetectedPath => {
+  // Keyed by the facts a path distinguishes; insertion order keeps the group
+  // order the file declared.
+  const grouped = new Map<string, DetectedPortFacts[]>();
+  for (const port of owner.ports) {
     const facts: DetectedPortFacts = {
       hostIp: port.hostIp,
       startPort: port.startPort,
@@ -178,12 +204,23 @@ function hostPortPaths(owner: EffService | undefined, via: string | undefined): 
       ...(port.dynamic ? { dynamic: true as const } : {}),
       ...(via ? { via } : {}),
     };
-    switch (bindClass(port.hostIp)) {
-      case 'all': return { kind: 'host-port', scope: 'host-published', bind: 'all-interfaces', ...facts };
-      case 'loopback': return { kind: 'host-port', scope: 'host-loopback', bind: 'loopback', ...facts };
-      default: return { kind: 'host-port', scope: 'host-published', bind: 'address', ...facts };
+    const key = [bindClass(port.hostIp), port.hostIp, port.protocol, port.dynamic ? 'dynamic' : 'fixed'].join('\u0000');
+    const list = grouped.get(key);
+    if (list) list.push(facts);
+    else grouped.set(key, [facts]);
+  }
+  const paths: DetectedPath[] = [];
+  for (const [key, facts] of grouped) {
+    const [cls] = key.split('\u0000');
+    for (const factsForRange of mergePortFacts(facts)) {
+      switch (cls) {
+        case 'all': paths.push({ kind: 'host-port', scope: 'host-published', bind: 'all-interfaces', ...factsForRange }); break;
+        case 'loopback': paths.push({ kind: 'host-port', scope: 'host-loopback', bind: 'loopback', ...factsForRange }); break;
+        default: paths.push({ kind: 'host-port', scope: 'host-published', bind: 'address', ...factsForRange });
+      }
     }
-  });
+  }
+  return paths;
 }
 
 function hostNetworkPath(via: string | undefined): DetectedPath {
@@ -220,22 +257,31 @@ function declaredPortKeys(ports: readonly EffPortSpec[]): {
 }
 
 /**
- * Whether the running containers of one service publish ports the Compose file
- * does not: the file was edited and not redeployed. An auto-assigned port is
- * compared by bind class and protocol only, since Docker picked the number, and
- * per container, because a scaled service gets one assignment per replica.
- * Docker reports one mapping on both `0.0.0.0` and `::`, so a repeated key
- * inside one container is the same binding.
+ * Which direction the running containers of one service differ from the Compose
+ * file: a container may publish a port the file does not (extra), or the file may
+ * declare a port no running container publishes (missing, the common
+ * edited-not-redeployed case). Both can hold at once, for example when a port
+ * changes bind class. An auto-assigned port is compared by bind class and
+ * protocol only, since Docker picked the number, and per container, because a
+ * scaled service gets one assignment per replica. Docker reports one mapping on
+ * both `0.0.0.0` and `::`, so a repeated key inside one container is the same
+ * binding.
  */
-function runningPortsDiffer(declared: readonly EffPortSpec[], running: readonly DependencyContainer[]): boolean {
+function runningPortDifferences(
+  declared: readonly EffPortSpec[],
+  running: readonly DependencyContainer[],
+): { extra: boolean; missing: boolean } {
   const started = running.filter(container => RUNNING_STATES.has(container.state));
+  const none = { extra: false, missing: false };
   // Nothing running means nothing to compare: a stopped service is not drift.
-  if (started.length === 0) return false;
+  if (started.length === 0) return none;
   const keys = declaredPortKeys(declared);
   // A range this large is not enumerable here; say nothing rather than report a
   // difference that may not exist.
-  if (keys.truncated) return false;
+  if (keys.truncated) return none;
   const fixedSeen = new Set<string>();
+  let extra = false;
+  let missing = false;
   for (const container of started) {
     const seen = new Set<string>();
     const remainingDynamic = new Map(keys.dynamic);
@@ -255,14 +301,14 @@ function runningPortsDiffer(declared: readonly EffPortSpec[], running: readonly 
         remainingDynamic.set(dynamicKey, left - 1);
         continue;
       }
-      return true;
+      extra = true;
     }
     // A running replica that publishes fewer auto-assigned ports than the file
-    // declares is a difference too.
-    if ([...remainingDynamic.values()].some(count => count > 0)) return true;
+    // declares is a missing port too.
+    if ([...remainingDynamic.values()].some(count => count > 0)) missing = true;
   }
-  for (const key of keys.fixed) if (!fixedSeen.has(key)) return true;
-  return false;
+  for (const key of keys.fixed) if (!fixedSeen.has(key)) missing = true;
+  return { extra, missing };
 }
 
 /** Service names whose running containers sit on a network Compose does not
@@ -476,7 +522,10 @@ export function classifyStackExposure(input: ClassifyStackExposureInput): Map<st
     const comparesPorts = via === undefined && !isForeignNamespace(service) && !isHostNetwork(owner?.networkMode);
     if (runtime && comparesPorts) {
       const containers = runtime.containersByService.get(service.name) ?? [];
-      if (runningPortsDiffer(service.ports, containers)) reasons.push('runtime-ports-differ');
+      const differences = runningPortDifferences(service.ports, containers);
+      // Missing first: a file edited and not redeployed is the common case.
+      if (differences.missing) reasons.push('runtime-ports-missing');
+      if (differences.extra) reasons.push('runtime-ports-extra');
     }
     if (hiddenConnector && paths.length === 0) reasons.push('hidden-connector');
 

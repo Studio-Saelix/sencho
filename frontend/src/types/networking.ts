@@ -60,7 +60,12 @@ export type DetectedPath =
   | ({ kind: 'host-port'; scope: 'host-loopback'; bind: 'loopback' } & DetectedPortFacts)
   | { kind: 'host-network'; scope: 'host-published'; via?: string };
 
-export type UndeterminedReason = 'foreign-namespace' | 'hidden-connector' | 'runtime-attachment' | 'runtime-ports-differ';
+export type UndeterminedReason =
+  | 'foreign-namespace'
+  | 'hidden-connector'
+  | 'runtime-attachment'
+  | 'runtime-ports-extra'
+  | 'runtime-ports-missing';
 
 export type ConflictReason = 'host-port' | 'loopback-port' | 'host-network' | 'tunnel' | 'broad-bind' | 'shared-namespace';
 
