@@ -9,7 +9,6 @@ import { describe, it, expect, beforeAll, beforeEach, afterAll, afterEach, vi } 
 import request from 'supertest';
 import { setupTestDb, cleanupTestDb, loginAsTestAdmin } from './helpers/setupTestDb';
 import { SELF_STACK_PROTECTED_CODE } from '../helpers/selfStackGuard';
-import { allowEveryUpdatePolicy } from './__helpers__/allowingUpdatePolicy';
 
 const {
   mockDeployStack,

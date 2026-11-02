@@ -20,7 +20,6 @@ import {
   TEST_JWT_SECRET,
 } from './helpers/setupTestDb';
 import { ROLE_PERMISSIONS, type PermissionAction } from '../middleware/permissions';
-import { allowEveryUpdatePolicy } from './__helpers__/allowingUpdatePolicy';
 
 const { mockPullStackImages, mockGetContainersByStack } = vi.hoisted(() => ({
   mockPullStackImages: vi.fn(),

@@ -4,7 +4,6 @@
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import type { ScheduledTask } from '../services/DatabaseService';
-import { allowEveryUpdatePolicy } from './__helpers__/allowingUpdatePolicy';
 
 // ── Hoisted mocks ──────────────────────────────────────────────────────
 

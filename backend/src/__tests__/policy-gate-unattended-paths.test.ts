@@ -61,7 +61,6 @@ import { describePolicyBlock } from '../helpers/policyGate';
 import { SchedulerService } from '../services/SchedulerService';
 import { applyAutomaticStackUpdate } from '../services/automaticStackUpdate';
 import { decideEvidenceGate } from '../services/securityEvidence';
-import { allowEveryUpdatePolicy } from './__helpers__/allowingUpdatePolicy';
 
 const evidenceDecision = decideEvidenceGate(
   [{ source: 'vulnerability_scan', state: 'failed', target: 'nginx:1.27', collectedAt: null }],

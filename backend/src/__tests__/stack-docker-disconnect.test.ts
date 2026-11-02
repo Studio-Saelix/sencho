@@ -14,7 +14,6 @@ import { describe, it, expect, beforeAll, afterAll, beforeEach, vi } from 'vites
 import request from 'supertest';
 import { setupTestDb, cleanupTestDb, loginAsTestAdmin } from './helpers/setupTestDb';
 import { isDockerUnavailableError } from '../routes/stacks';
-import { allowEveryUpdatePolicy } from './__helpers__/allowingUpdatePolicy';
 
 const {
   mockDeployStack,

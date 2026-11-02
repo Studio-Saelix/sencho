@@ -11,7 +11,6 @@
 import { describe, it, expect, beforeAll, afterAll, beforeEach, vi } from 'vitest';
 import request from 'supertest';
 import { setupTestDb, cleanupTestDb, loginAsTestAdmin } from './helpers/setupTestDb';
-import { allowEveryUpdatePolicy } from './__helpers__/allowingUpdatePolicy';
 
 const {
   mockUpdateStack,

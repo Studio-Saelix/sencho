@@ -14,7 +14,6 @@ import { setupTestDb, cleanupTestDb, loginAsTestAdmin, TEST_JWT_SECRET } from '.
 import { ComposeRollbackError } from '../services/ComposeService';
 import * as policyGate from '../helpers/policyGate';
 import type { StackUpdateRecoveryGenerationRow } from '../services/DatabaseService';
-import { allowEveryUpdatePolicy } from './__helpers__/allowingUpdatePolicy';
 
 // ── Hoisted mocks (must come before importing the app) ──────────────────────
 
