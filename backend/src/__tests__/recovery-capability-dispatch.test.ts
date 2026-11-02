@@ -52,9 +52,12 @@ beforeAll(async () => {
 
 afterAll(() => cleanupTestDb(tmpDir));
 
-beforeEach(() => {
+beforeEach(async () => {
   mockRead.mockReset();
   capability.resetBackupEnginesForTests();
+  // The hub caches a node's support for 30 s, so each case starts cold.
+  const { resetRemoteRecoverySupportCacheForTests } = await import('../services/recovery/remoteSupport');
+  resetRemoteRecoverySupportCacheForTests();
   vi.restoreAllMocks();
 });
 
@@ -67,13 +70,13 @@ const descriptor = (state = 'unavailable', reason = 'engine_not_installed', cont
 });
 
 describe('advertising', () => {
-  it('does not advertise volume protection from any build without an engine', async () => {
+  it('advertises volume protection, because this build ships the engine', async () => {
     const { CAPABILITIES, getActiveCapabilities } = await import('../services/CapabilityRegistry');
-    expect(CAPABILITIES as readonly string[]).not.toContain('volume-protection-v1');
-    expect(getActiveCapabilities()).not.toContain('volume-protection-v1');
+    expect(CAPABILITIES as readonly string[]).toContain('volume-protection-v1');
+    expect(getActiveCapabilities()).toContain('volume-protection-v1');
     const meta = await request(app).get('/api/meta');
     expect(meta.status).toBe(200);
-    expect((meta.body.capabilities as string[]).some((c) => c.startsWith('volume-protection'))).toBe(false);
+    expect((meta.body.capabilities as string[])).toContain('volume-protection-v1');
   });
 
   it('reports this node as unavailable, not as update required, when it has no engine', () => {
@@ -188,21 +191,43 @@ describe('readRecoveryNodeStatus', () => {
       });
 
       it('rejects and logs an answer that belongs to another dispatch, or that lost the operation id', async () => {
+        const { resetRemoteRecoverySupportCacheForTests } = await import('../services/recovery/remoteSupport');
         const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
         mockRead.mockResolvedValue({ kind: 'ok', data: { ...descriptor('available', 'engine_registered'), operationId: '00000000-0000-4000-8000-000000000000' } });
         expect(await dispatcher.readRecoveryNodeStatus(getId())).toMatchObject({
           transport, errorClass: 'internal', volumeProtection: { state: 'unknown', reason: 'descriptor_mismatch' },
         });
+        resetRemoteRecoverySupportCacheForTests();
         mockRead.mockResolvedValue({ kind: 'ok', data: descriptor('available', 'engine_registered') });
         expect((await dispatcher.readRecoveryNodeStatus(getId())).volumeProtection).toMatchObject({ state: 'unknown', reason: 'descriptor_mismatch' });
         expect(warn).toHaveBeenCalledTimes(2);
       });
 
       it('reports a node that refused or failed the read with its own class', async () => {
+        const { resetRemoteRecoverySupportCacheForTests } = await import('../services/recovery/remoteSupport');
         mockRead.mockResolvedValue({ kind: 'http', status: 401 });
         expect(await dispatcher.readRecoveryNodeStatus(getId())).toMatchObject({ transport, errorClass: 'node_refused' });
+        resetRemoteRecoverySupportCacheForTests();
         mockRead.mockResolvedValue({ kind: 'http', status: 500 });
         expect(await dispatcher.readRecoveryNodeStatus(getId())).toMatchObject({ transport, errorClass: 'node_error' });
+      });
+
+      it('reads a node with no engine as an older build, the same way the preflight will', async () => {
+        mockRead.mockImplementation(echoing(descriptor('unavailable', 'engine_not_installed')));
+        expect(await dispatcher.readRecoveryNodeStatus(getId())).toMatchObject({
+          transport, errorClass: 'update_required',
+          volumeProtection: { state: 'update_required', reason: 'node_contract_older' },
+        });
+      });
+
+      it('caches the answer for 30 s, so a poll does not read the descriptor every time', async () => {
+        const { resolveRemoteRecoverySupport } = await import('../services/recovery/remoteSupport');
+        mockRead.mockImplementation(echoing(descriptor('available', 'engine_registered')));
+        await resolveRemoteRecoverySupport(getId());
+        await resolveRemoteRecoverySupport(getId());
+        expect(mockRead).toHaveBeenCalledTimes(1);
+        await resolveRemoteRecoverySupport(getId(), () => Date.now() + 31_000);
+        expect(mockRead).toHaveBeenCalledTimes(2);
       });
 
       it('reports an old node as update required', async () => {
@@ -270,5 +295,79 @@ describe('GET /api/recovery/node', () => {
   it('is what the hub\'s resolver reads as this node\'s answer', async () => {
     const res = await request(app).get('/api/recovery/node').set('Authorization', authHeader);
     expect(capability.resolveRemoteVolumeProtection({ kind: 'ok', data: res.body })).toMatchObject({ state: 'unavailable', reason: 'engine_not_installed' });
+  });
+});
+
+describe('the hop to a node that is not there', () => {
+  // The preflight answers a node the hub already knows is down. These are the
+  // refusals that come before it (no tunnel, no target) and the ones inside the
+  // hub's 30-second view of a node that just went away: all of them are the same
+  // condition and carry the same recovery error shape.
+  it('answers a Pilot node with no tunnel in the recovery error shape', async () => {
+    const res = await request(app)
+      .get('/api/recovery/storage')
+      .set('Authorization', authHeader)
+      .set('x-node-id', String(pilotNodeId));
+    expect(res.status).toBe(503);
+    expect(res.body).toMatchObject({ errorClass: 'transport_unreachable', code: 'TRANSPORT_UNREACHABLE' });
+    expect(res.body.error).toMatch(/Pilot tunnel/);
+  });
+
+  it('answers a Pilot node with no tunnel the same way for a write', async () => {
+    const res = await request(app)
+      .post('/api/recovery/storage/points')
+      .set('Authorization', authHeader)
+      .set('x-node-id', String(pilotNodeId))
+      .send({ volumeName: 'data_volume', idempotencyKey: 'k1' });
+    expect(res.status).toBe(503);
+    expect(res.body).toMatchObject({ errorClass: 'transport_unreachable', code: 'TRANSPORT_UNREACHABLE' });
+  });
+
+  const upToDate = () => mockRead.mockImplementation(echoing(descriptor('available', 'engine_registered')));
+  const expectTransportRefusal = async (nodeId: number) => {
+    const res = await request(app)
+      .get('/api/recovery/storage')
+      .set('Authorization', authHeader)
+      .set('x-node-id', String(nodeId));
+    expect(res.status).toBe(503);
+    expect(res.body).toMatchObject({ errorClass: 'transport_unreachable', code: 'TRANSPORT_UNREACHABLE' });
+    return res;
+  };
+
+  it('answers a direct-proxy node whose target the hub will not call', async () => {
+    // Loopback is not a target the hub calls (outside the end-to-end allowance).
+    const id = DatabaseService.getInstance().addNode({ name: 'recovery-blocked-proxy', type: 'remote', api_url: 'http://127.0.0.1:9', api_token: 't', compose_dir: '/srv', is_default: false });
+    upToDate();
+    await expectTransportRefusal(id);
+  });
+
+  it('answers a direct-proxy node that refuses the connection, inside the hub\'s view of it', async () => {
+    const previous = process.env.SENCHO_E2E_ALLOW_LOOPBACK_OUTBOUND;
+    process.env.SENCHO_E2E_ALLOW_LOOPBACK_OUTBOUND = 'true';
+    try {
+      const id = DatabaseService.getInstance().addNode({ name: 'recovery-dead-proxy', type: 'remote', api_url: 'http://127.0.0.1:9', api_token: 't', compose_dir: '/srv', is_default: false });
+      upToDate();
+      const res = await expectTransportRefusal(id);
+      expect(res.body.error).toMatch(/could not be reached/);
+    } finally {
+      if (previous === undefined) delete process.env.SENCHO_E2E_ALLOW_LOOPBACK_OUTBOUND;
+      else process.env.SENCHO_E2E_ALLOW_LOOPBACK_OUTBOUND = previous;
+    }
+  });
+
+  it('answers a direct-proxy node with no API URL or token', async () => {
+    const id = DatabaseService.getInstance().addNode({ name: 'recovery-no-target', type: 'remote', api_url: '', api_token: '', compose_dir: '/srv', is_default: false });
+    upToDate();
+    const res = await expectTransportRefusal(id);
+    expect(res.body.error).toMatch(/no API URL or token/);
+  });
+
+  it('leaves a request that is not a recovery request in the generic shape', async () => {
+    const res = await request(app)
+      .get('/api/stacks')
+      .set('Authorization', authHeader)
+      .set('x-node-id', String(pilotNodeId));
+    expect(res.status).toBe(503);
+    expect(res.body.errorClass).toBeUndefined();
   });
 });

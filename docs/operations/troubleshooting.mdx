@@ -586,6 +586,86 @@ If a triggered update never resolves once the underlying cause above is fixed, c
 
 ---
 
+## Recovery reports engine_starting
+
+**Symptom:** A capture, verify, restore, or repository request answers `503` with `"errorClass": "capability_unavailable"` and `"reason": "engine_starting"`.
+
+**Cause:** Recovery work is closed until startup finishes. The node settles operations a previous process left open, clears restic locks, reconciles restore intents, and reads the repository's health before it admits new work.
+
+**Fix:** Wait a few seconds and retry. If the reason persists, read the container log for `[Recovery] Boot sequence failed` and fix what that line names. Recovery stays closed, truthfully, while startup is unfinished; it never reports success from an incomplete boot.
+
+---
+
+## Volume protection says helper_unavailable
+
+**Symptom:** `GET /api/recovery/node` reports `"state": "unavailable"` with `"reason": "helper_unavailable"`, or a capture or restore fails with `capability_unavailable` while the helper cannot start.
+
+**Cause:** Sencho starts recovery work only from the helper image pinned in its own image. The reason is one of: `SENCHO_RECOVERY_HELPER_IMAGE` is empty, it holds a tag instead of a digest, or the image it names is not present locally.
+
+**Fix:** Set `SENCHO_RECOVERY_HELPER_IMAGE` to a digest reference (`name@sha256:...`) or, on an air-gapped host after `docker load`, to the image id (`sha256:...`). A tag is refused on purpose, because a tag can be repointed after the pairing was sealed. Confirm the image exists with `docker image inspect <reference>`. See [The helper image](/operations/volume-recovery-points#the-helper-image).
+
+---
+
+## Volume protection says repository_not_initialized
+
+**Symptom:** `GET /api/recovery/node` reports `"reason": "repository_not_initialized"`, or a capture answers `503` with `"errorClass": "capability_unavailable"` and `"reason": "repository_not_initialized"`. `GET /api/recovery/repository` reports `"health": "unavailable"` and either `"initialized": false` or, when the repository volume was emptied, `"initialized": true`. A node with an emptied volume reports this after a provision, capture, or check has opened the volume and found it empty; the routine status refresh does not open the volume, so within a minute the node can read `available` again until the next operation fails.
+
+**Cause:** Either the node has no active recovery repository yet (`"initialized": false`), because recovery points are stored in a repository that is provisioned explicitly, not created on first use; or the node has a repository on record but its volume no longer holds one (`"initialized": true`), for example after the volume's contents were deleted.
+
+**Fix:** With `"initialized": false`, provision it with `POST /api/recovery/repository` and poll the returned operation. With `"initialized": true`, a plain provision opens the volume, finds it empty, and ends `failed` with `repository_unavailable`; send the request with `"replace": true` to create a new repository. The points that were in the emptied volume cannot be read. See [The recovery repository](/operations/volume-recovery-points#the-recovery-repository).
+
+---
+
+## Volume protection says repository_unavailable
+
+**Symptom:** The node reports `"reason": "repository_unavailable"`, or an action fails with `repository_unavailable`. A restore of a point in a repository that was replaced answers `repository_unavailable` with `"reason": "repository_replaced"`; that repository is intact but no longer active.
+
+**Cause:** The active repository volume is missing or cannot be opened. The most common causes are a volume removed by a prune, a Docker data root that changed, and a repository whose files are damaged. A volume that still exists but whose contents were deleted is reported as `repository_not_initialized` after an operation opens it; see the entry above.
+
+**Fix:** Check that the repository volume still exists with `docker volume ls` (its name starts with `sencho-recovery-`). Restoring the volume from a host backup is the only way back to its points. If it is gone, provision a replacement repository with `"replace": true` and take new points; the old points cannot be read. A plain provision does not repair this: it ends `failed` with `repository_unavailable`.
+
+---
+
+## Volume protection says repository_key_unavailable
+
+**Symptom:** The node reports `"reason": "repository_key_unavailable"`, or a capture, verify, or restore fails with that class.
+
+**Cause:** The repository password is stored encrypted with the instance key in `DATA_DIR`, and Sencho cannot read it. That happens when `encryption.key` was replaced, when `sencho.db` and `encryption.key` come from different backups, or when the repository rejects the stored password.
+
+**Fix:** Restore the matching pair of `sencho.db` and `encryption.key` from the same backup. If the key is genuinely lost, the existing points cannot be opened; provision a replacement repository and take new points. See [Backup & Restore](/operations/backup).
+
+---
+
+## Recovery fails with a Docker socket proxy in place
+
+**Symptom:** Captures and restores fail with `capability_unavailable`, or repository provisioning fails, on a host where Sencho reaches Docker through a socket proxy.
+
+**Cause:** A socket proxy forwards only the Engine API groups it allows. Recovery starts a helper container for every action and creates volumes for the repository and for restore targets, so a proxy that permits reads but refuses container or volume creation blocks it.
+
+**Fix:** Allow container creation and volume creation for the Sencho container. See [Docker socket proxy](/operations/self-hosting#docker-socket-proxy) for the API groups each profile allows. A refusal here is reported as a failed action, never as a successful one; a node whose image is present can keep its last status while its actions fail, so trust the error class on the action you ran.
+
+---
+
+## Recovery fails with lock_stale and needs a reviewed release
+
+**Symptom:** A capture, verify, restore, or repository replacement answers `409` with `"code": "LOCK_STALE"` and a message that an interrupted operation still holds the storage. A live owner instead answers `409` with `code: "LOCK_HELD"`.
+
+**Cause:** Recovery work takes a repository lock, which covers the whole node (one capture, verification, restore, or repository replacement runs at a time), and a captured volume also takes a storage lock. A `LOCK_HELD` answer means another operation is running on this node; wait for it and send the same request again with the same idempotency key, because a refused request is not recorded. When the Sencho process stops mid-operation, startup marks the operation `completion_unknown` and marks its locks stale. Startup releases the repository lock of interrupted work itself once no helper of the previous process remains: an interrupted provisioning, and an interrupted capture, verification, or restore when restic's own locks were also cleared. The storage lock of the volume that was being captured, and any repository lock left because a helper could not be removed or restic could not be unlocked, stay until someone releases them.
+
+**Fix:** Review the interrupted operation with `GET /api/recovery/operations/{id}`, inspect the storage and any target volume it left behind, then release the lock with `POST /api/recovery/locks/release` (`scope: "storage"` with the storage key, or `scope: "repository"` with the repository id). A live lock cannot be released this way, by design. See [Release a stale lock](/operations/volume-recovery-points#release-a-stale-lock).
+
+---
+
+## A remote node answers UPDATE_REQUIRED
+
+**Symptom:** A recovery request for a remote node answers `409` with `"code": "UPDATE_REQUIRED"` and `"errorClass": "update_required"`, or the node's volume protection reads `update_required`.
+
+**Cause:** The control instance and the remote node do not speak the same recovery contract version. The usual cause is a remote node on a different Sencho version, including one that predates the recovery API and answers `404` for the status route.
+
+**Fix:** Update the Sencho instance on that node so both ends run the same release line, then re-read `/api/recovery/node` on that node. Until the versions match, that node's volumes cannot be captured or restored from the control instance.
+
+---
+
 ## Checking the health endpoint
 
 Sencho exposes a health endpoint for monitoring and container health checks:

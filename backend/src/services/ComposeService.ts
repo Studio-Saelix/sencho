@@ -20,6 +20,12 @@ import { resolveRegistryAuthAtSeam } from '../helpers/registryDeliverySeam';
 import { DriftLedgerService } from './DriftLedgerService';
 import SelfIdentityService from './SelfIdentityService';
 import { parseEffectiveModel, type EffectiveModel } from './preflight/effectiveModel';
+import {
+  RecoveryVolumeProtectedError,
+  recoveryVolumeNamesIn,
+  recoveryVolumeRefusalMessage,
+  recoveryVolumeUnverifiedMessage,
+} from '../helpers/recoveryVolumeGuard';
 import { deriveStackExposure } from './preflight/exposure';
 
 import { isDebugEnabled } from '../utils/debug';
@@ -361,6 +367,49 @@ export class ComposeService {
       });
     }
     if (refusal) throw new DockerEndpointProtectedError(refusal);
+  }
+
+  /**
+   * Refuse a `down --volumes` of a stack that declares a recovery repository
+   * volume. Compose removes every non-external volume a stack declares, so the
+   * repository would go with it; see `RecoveryVolumeProtectedError`. An external
+   * declaration is refused too, which is stricter than Compose needs and fails
+   * safe. Runs on the node that owns the volume, so a hub request relayed over the
+   * node proxy or a Pilot tunnel reaches the same check.
+   *
+   * Any render that does not produce a model refuses, a non-zero exit included:
+   * `down` loads the project with fewer checks than `config` (it does not resolve
+   * service `env_file:` entries or enforce required interpolation), so a project
+   * `config` rejects can still be one `down --volumes` removes volumes from. Removing what cannot be seen is not a pass.
+   * Callers that must still tear such a stack down do it without removing volumes.
+   */
+  private async assertNoRecoveryVolumeRemoval(stackName: string): Promise<void> {
+    let declared: string[] | null = null;
+    try {
+      const result = await this.renderConfig(stackName);
+      if (result.rendered !== null) {
+        const parsed: unknown = JSON.parse(result.rendered);
+        // The model parser tolerates anything and returns an empty model, which
+        // would read as "declares nothing"; only an object is a model.
+        if (parsed !== null && typeof parsed === 'object' && !Array.isArray(parsed)) {
+          declared = Object.values(parseEffectiveModel(parsed, stackName).volumes).map((volume) => volume.name);
+        } else {
+          console.warn('[ComposeService] The render of %s was not a model, so its volumes cannot be checked for the recovery repository.', sanitizeForLog(stackName));
+        }
+      } else {
+        console.warn(
+          '[ComposeService] The render of %s gave no model for the recovery repository check (timed out: %s, exit: %s): %s',
+          sanitizeForLog(stackName), result.timedOut, String(result.code), sanitizeForLog(renderErrorLine(result.stderr)),
+        );
+      }
+    } catch (error) {
+      console.warn('[ComposeService] Could not read the volumes of %s for the recovery repository check:', sanitizeForLog(stackName), sanitizeForLog(getErrorMessage(error, 'unknown')));
+    }
+    if (declared === null) throw new RecoveryVolumeProtectedError(recoveryVolumeUnverifiedMessage());
+    const self = SelfIdentityService.getInstance();
+    if (recoveryVolumeNamesIn(declared, (name) => self.isRecoveryVolume(name)).length > 0) {
+      throw new RecoveryVolumeProtectedError(recoveryVolumeRefusalMessage());
+    }
   }
 
   /** The local image id behind `imageRef`, unknown when it cannot be inspected (Compose would then pull). */
@@ -1067,6 +1116,7 @@ export class ComposeService {
   /** Interactive compose down (Take down UI / POST /down). Plain `down` by default. */
   async runDown(stackName: string, options?: { removeVolumes?: boolean }, ws?: WebSocket): Promise<void> {
     await this.assertDockerEndpointSafe(stackName, { kind: 'stop' });
+    if (options?.removeVolumes) await this.assertNoRecoveryVolumeRemoval(stackName);
     const stackDir = path.join(this.baseDir, stackName);
     const args = options?.removeVolumes ? ['down', '--volumes'] : ['down'];
     const composeArgs = await this.authoredComposeArgs(stackName, args);
@@ -2993,6 +3043,7 @@ export class ComposeService {
   public async downStack(stackName: string, options?: { removeVolumes?: boolean }): Promise<void> {
     // Outside the try: the catch below swallows teardown failures, and a refusal must not be one.
     await this.assertDockerEndpointSafe(stackName, { kind: 'stop' });
+    if (options?.removeVolumes) await this.assertNoRecoveryVolumeRemoval(stackName);
     const stackPath = path.join(this.baseDir, stackName);
     try {
       const args = options?.removeVolumes

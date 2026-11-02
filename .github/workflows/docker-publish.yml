@@ -115,6 +115,58 @@ jobs:
       # Scanning only amd64 is a defensible proxy for the multi-arch release:
       # distro package CVEs are arch-agnostic at the manifest level, and
       # arch-specific container-relevant CVEs are extraordinarily rare.
+      # --- Recovery helper image -------------------------------------------
+      # The helper is built from the same commit, scanned, smoke tested, and
+      # pushed BY DIGEST ONLY before the main image. The main build bakes that
+      # digest in as `SENCHO_RECOVERY_HELPER_IMAGE`, so a Sencho image can only
+      # ever run the helper built beside it. No tag exists until the main image
+      # has passed its own gates: a release that fails a gate leaves no helper
+      # tag behind, and a tag could be repointed later where a digest cannot.
+      - name: Build recovery helper for scan (amd64, loaded)
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7
+        with:
+          context: docker/recovery-helper
+          push: false
+          load: true
+          platforms: linux/amd64
+          tags: localhost/sencho-recovery-helper:release-scan
+          cache-from: type=gha,scope=recovery-helper
+          cache-to: type=gha,scope=recovery-helper,mode=max
+
+      - name: Scan recovery helper for vulnerabilities (Trivy)
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          image-ref: localhost/sencho-recovery-helper:release-scan
+          exit-code: '1'
+          severity: 'CRITICAL,HIGH'
+          format: 'table'
+          trivy-config: trivy-recovery-helper.yaml
+
+      - name: Smoke test recovery helper
+        # The image is `FROM scratch`: the only thing to prove is that restic and
+        # the identity probe both exec, and that a probe reports a root.
+        run: |
+          set -euo pipefail
+          docker run --rm --network none localhost/sencho-recovery-helper:release-scan version
+          docker run --rm --network none --entrypoint /sencho-recovery-probe \
+            localhost/sencho-recovery-helper:release-scan / | grep -q '"ino"'
+
+      - name: Push recovery helper by digest
+        id: helper
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7
+        with:
+          context: docker/recovery-helper
+          platforms: linux/amd64,linux/arm64
+          # Digest only: `name-canonical` is what lets the tag step below refer to
+          # this exact manifest list after the main image has passed its gates.
+          outputs: >-
+            type=image,
+            name=saelix/sencho-recovery-helper
+            name=ghcr.io/studio-saelix/sencho-recovery-helper,
+            push-by-digest=true,name-canonical=true,push=true
+          cache-from: type=gha,scope=recovery-helper
+          cache-to: type=gha,scope=recovery-helper,mode=max
+
       - name: Build release image for pre-publish scan (amd64, loaded)
         uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7
         with:
@@ -125,7 +177,8 @@ jobs:
           tags: localhost/sencho:release-scan
           cache-from: type=registry,ref=saelix/sencho:buildcache
           build-args: |
-            APK_CACHE_BUST=${{ steps.apk-bust.outputs.date }}
+            APK_CACHE_BUST=${ steps.apk-bust.outputs.date }
+            SENCHO_RECOVERY_HELPER_IMAGE=saelix/sencho-recovery-helper@${ steps.helper.outputs.digest }
 
       - name: Re-scan release image for vulnerabilities (Trivy)
         # Gates the release on the same HIGH/CRITICAL policy as the PR scan.
@@ -185,11 +238,50 @@ jobs:
           cache-from: type=registry,ref=saelix/sencho:buildcache
           cache-to: type=registry,ref=saelix/sencho:buildcache,mode=max
           build-args: |
-            APK_CACHE_BUST=${{ steps.apk-bust.outputs.date }}
+            APK_CACHE_BUST=${ steps.apk-bust.outputs.date }
+            SENCHO_RECOVERY_HELPER_IMAGE=saelix/sencho-recovery-helper@${ steps.helper.outputs.digest }
           # SBOM + provenance attestations are embedded as OCI referrers on the
           # published image. Inspect with: docker buildx imagetools inspect <img>
           sbom: true
           provenance: mode=max
+
+      - name: Assert the built image pins a recovery helper digest
+        # An empty pin would ship an image whose volume protection silently never
+        # works: the Dockerfile's ENV default is empty, so this proves the build
+        # arg reached the final stage.
+        run: |
+          set -euo pipefail
+          baked=$(docker run --rm --entrypoint sh localhost/sencho:release-scan \
+            -c 'printf %s "$SENCHO_RECOVERY_HELPER_IMAGE"')
+          case "$baked" in
+            *@sha256:*) echo "pinned helper: $baked" ;;
+            *) echo "FAILED: baked helper reference is not a digest: '$baked'"; exit 1 ;;
+          esac
+
+      - name: Tag and sign the release recovery helper
+        # The helper digest was pushed before the main build; it earns its tags
+        # only now that the main image has been scanned, smoke tested and pushed.
+        env:
+          HELPER_DIGEST: ${{ steps.helper.outputs.digest }}
+          TAGS: ${{ steps.meta.outputs.tags }}
+        run: |
+          set -euo pipefail
+          [ -n "$HELPER_DIGEST" ] || { echo "FAILED: no helper digest"; exit 1; }
+          while IFS= read -r tag; do
+            [ -n "$tag" ] || continue
+            helper_tag=$(printf '%s' "$tag" \
+              | sed -e 's#^saelix/sencho:#saelix/sencho-recovery-helper:#' \
+                    -e 's#^ghcr.io/studio-saelix/sencho:#ghcr.io/studio-saelix/sencho-recovery-helper:#')
+            [ "$helper_tag" != "$tag" ] || { echo "FAILED: unexpected tag $tag"; exit 1; }
+            docker buildx imagetools create -t "$helper_tag" "saelix/sencho-recovery-helper@${HELPER_DIGEST}"
+          done <<< "$TAGS"
+          if [ -z "${TAGS// }" ]; then
+            echo "No tags to sign (a workflow_dispatch run on a non-tag ref)."
+            exit 0
+          fi
+          cosign sign --yes \
+            "saelix/sencho-recovery-helper@${HELPER_DIGEST}" \
+            "ghcr.io/studio-saelix/sencho-recovery-helper@${HELPER_DIGEST}"
 
       - name: Sign published image with cosign (keyless)
         # Signs every tag produced by metadata-action using the ambient GitHub

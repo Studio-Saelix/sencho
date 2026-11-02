@@ -78,6 +78,10 @@ export const CAPABILITIES = [
   'fleet-readiness-v1',
   'blueprint-digest-pins-v1',
   'health-gate-observation-v1',
+  // Advertised only by a build whose recovery engine can create and restore
+  // volume points. A node without it is an older build, and the hub reads that
+  // as `update_required` rather than as "this feature does not exist".
+  'volume-protection-v1',
   'host-usage-unknown-v1',
   'agent-observation-v1',
 ] as const;

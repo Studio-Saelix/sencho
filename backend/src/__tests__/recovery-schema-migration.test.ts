@@ -19,6 +19,7 @@ import {
 const RECOVERY_TABLES = [
   'recovery_locks', 'recovery_operations', 'recovery_point_verifications', 'recovery_point_holds',
   'recovery_points', 'recovery_repositories', 'recovery_storage_dependents', 'recovery_storage_identities',
+  'recovery_restore_intents', 'recovery_repository_checks',
 ];
 
 let tmpDir: string;
@@ -99,6 +100,28 @@ describe('applyRecoverySchema', () => {
     db.close();
   });
 
+  it('upgrades a v1 database in place: adds the request digest and the new tables', () => {
+    const db = freshDb();
+    applyRecoverySchema(db);
+    // Recreate the schema as v1 left it: no digest column, no v2 tables.
+    db.exec('DROP TABLE recovery_restore_intents');
+    db.exec('DROP TABLE recovery_repository_checks');
+    db.exec('ALTER TABLE recovery_operations DROP COLUMN request_digest');
+    db.prepare('INSERT OR REPLACE INTO system_state (key, value) VALUES (?, ?)').run(RECOVERY_SCHEMA_STATE_KEY, '1');
+    db.prepare(`INSERT INTO recovery_operations
+      (id, idempotency_key, kind, actor, transport, state, process_epoch, created_at, updated_at)
+      VALUES ('op-old', 'key-old', 'create_point', 'admin', 'local', 'succeeded', 'epoch', 1, 1)`).run();
+
+    expect(applyRecoverySchema(db)).toEqual({ kind: 'current', version: RECOVERY_SCHEMA_VERSION });
+    const columns = (db.prepare('PRAGMA table_info(recovery_operations)').all() as Array<{ name: string }>).map((c) => c.name);
+    expect(columns).toContain('request_digest');
+    // The row written by the earlier build survives the migration.
+    expect(db.prepare("SELECT id, request_digest FROM recovery_operations WHERE id = 'op-old'").get())
+      .toEqual({ id: 'op-old', request_digest: null });
+    // And the migration is repeatable.
+    expect(applyRecoverySchema(db).kind).toBe('current');
+  });
+
   it('is applied by DatabaseService at boot', async () => {
     const { DatabaseService } = await import('../services/DatabaseService');
     expect(DatabaseService.getInstance().getRecoverySchemaOutcome()).toEqual({ kind: 'current', version: RECOVERY_SCHEMA_VERSION });
@@ -175,6 +198,39 @@ describe('database-enforced point invariants', () => {
     insertPoint(db);
     db.prepare("INSERT INTO recovery_point_verifications (id, point_id, method, result, verified_at) VALUES ('v1', 'p1', 'engine_check_metadata', 'verified', 1)").run();
     expect(() => db.prepare("UPDATE recovery_point_verifications SET result = 'mismatch'").run()).toThrow(/append-only/);
+  });
+
+  it('serializes restores into one target volume at a time', () => {
+    const db = seeded();
+    db.prepare(`INSERT INTO recovery_operations (id, idempotency_key, kind, actor, transport, state, process_epoch, created_at, updated_at)
+      VALUES ('op1', 'k1', 'restore', 'admin', 'local', 'running', 'e', 1, 1)`).run();
+    db.prepare(`INSERT INTO recovery_operations (id, idempotency_key, kind, actor, transport, state, process_epoch, created_at, updated_at)
+      VALUES ('op2', 'k2', 'restore', 'admin', 'local', 'running', 'e', 1, 1)`).run();
+    insertPoint(db, { id: 'p1', status: 'succeeded', snapshot_id: 's', capture_json: '{}', completed_at: 2 });
+    insertPoint(db, { id: 'p2', status: 'succeeded', snapshot_id: 's', capture_json: '{}', completed_at: 2 });
+    const insertIntent = (id: string, operationId: string, pointId: string, phase: string) =>
+      db.prepare(`INSERT INTO recovery_restore_intents
+        (id, operation_id, point_id, target_mode, target_volume, phase, actor, process_epoch, created_at, updated_at)
+        VALUES (?, ?, ?, 'new_volume', 'target', ?, 'admin', 'e', 1, 1)`).run(id, operationId, pointId, phase);
+
+    insertIntent('i1', 'op1', 'p1', 'staging');
+    expect(() => insertIntent('i2', 'op2', 'p2', 'recorded')).toThrow(/UNIQUE/);
+    // Once the first is settled, the name is free again.
+    db.prepare("UPDATE recovery_restore_intents SET phase = 'rolled_back' WHERE id = 'i1'").run();
+    expect(() => insertIntent('i2', 'op2', 'p2', 'recorded')).not.toThrow();
+  });
+
+  it('refuses an unknown restore phase or mode', () => {
+    const db = seeded();
+    db.prepare(`INSERT INTO recovery_operations (id, idempotency_key, kind, actor, transport, state, process_epoch, created_at, updated_at)
+      VALUES ('op1', 'k1', 'restore', 'admin', 'local', 'running', 'e', 1, 1)`).run();
+    insertPoint(db, { id: 'p1', status: 'succeeded', snapshot_id: 's', capture_json: '{}', completed_at: 2 });
+    expect(() => db.prepare(`INSERT INTO recovery_restore_intents
+      (id, operation_id, point_id, target_mode, target_volume, phase, actor, process_epoch, created_at, updated_at)
+      VALUES ('i1', 'op1', 'p1', 'new_volume', 'target', 'invented', 'admin', 'e', 1, 1)`).run()).toThrow(/CHECK/);
+    expect(() => db.prepare(`INSERT INTO recovery_restore_intents
+      (id, operation_id, point_id, target_mode, target_volume, phase, actor, process_epoch, created_at, updated_at)
+      VALUES ('i2', 'op1', 'p1', 'new_path', NULL, 'recorded', 'admin', 'e', 1, 1)`).run()).not.toThrow();
   });
 
   it('refuses a repository secret that is not encrypted', () => {

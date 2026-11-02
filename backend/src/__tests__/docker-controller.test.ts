@@ -817,14 +817,16 @@ describe('DockerController - pruneSystem', () => {
     });
   });
 
-  it('prunes volumes with all true filter', async () => {
+  it('prunes volumes with all true filter, never the recovery repository', async () => {
     mockDocker.pruneVolumes.mockResolvedValue({ SpaceReclaimed: 4096 });
 
     const dc = DockerController.getInstance(1);
     await dc.pruneSystem('volumes');
 
+    // The excluded label is what protects Sencho's own recovery repository, which
+    // no container mounts and so would otherwise read as an unused volume.
     expect(mockDocker.pruneVolumes).toHaveBeenCalledWith({
-      filters: { all: ['true'] },
+      filters: { all: ['true'], 'label!': ['dev.sencho.recovery.repository'] },
     });
   });
 });
