@@ -114,9 +114,11 @@ export function HealthStatusBar({
     () => deriveHealth(stats, systemStats, notifications),
     [stats, systemStats, notifications],
   );
-  // "Unknown" is reserved for a node the hub cannot read. Stale meters with a
-  // known local cause (the Docker socket, the metrics service) keep the derived
-  // level and the stale chip, so the copy does not blame the network for them.
+  // "Unknown" is shown when no health level can be derived: a node the hub
+  // cannot read, or a metrics read that settled without a sample. Stale meters
+  // with a known local cause (the Docker socket, the metrics service) keep the
+  // derived level and the stale chip, so the copy does not blame the network
+  // for them.
   const config = metricsUnreadable ? unavailableHealth : metricsPending ? pendingHealth : healthConfig[level];
   const now = useTicker(SYNC_LABEL_TICK_MS);
   const unreadAlerts = countVisibleUnread(notifications);

@@ -484,8 +484,8 @@ export function writeTerminal(
   // nothing downstream may retain it: a stored page keyed to no validator is
   // exactly how a stale authorized view survives its own permission change.
   res.setHeader('cache-control', 'no-store');
-  // The idle stall is the gateway's read deadline, so mark it the same way the
-  // streaming hop does: the frontend classifies from this header, not the status.
+  // The idle stall is the gateway's read deadline, marked the same way as the
+  // streaming hop. The frontend reads this header together with the 504 status.
   if (kind === 'timeout') res.setHeader(REMOTE_READ_TIMEOUT_HEADER, '1');
 
   if (disposition.respond === 'generated') {

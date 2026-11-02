@@ -138,8 +138,8 @@ export function useDashboardData(): DashboardData {
   // The cause is broader than "unreadable": a metrics read that settled with no
   // sample at all cannot produce a health level either, so its own cause (an
   // unverified permission model, a rejected node credential, an HTTP answer)
-  // belongs here too. Healthy is reserved for a read that actually returned
-  // stats.
+  // belongs here too. A failure with no sample of its own never supplies a
+  // level; the headline stays Unknown until that read returns one.
   const [unreadableCause, setUnreadableCause] = useState<RemoteReadFailure | null>(null);
   // The read the headline depends on may be queued behind other node reads in
   // the browser's six-connection limit. Until one of the metrics endpoints has

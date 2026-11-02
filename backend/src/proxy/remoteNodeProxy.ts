@@ -202,7 +202,7 @@ function armInteractiveReadDeadline(
 /**
  * The remote answered. Release the time-to-headers budget for every response,
  * then bound only a body that stalls mid-flight. Streams and downloads keep
- * their own lifetime from the first byte.
+ * their own lifetime from their response headers.
  *
  * `onBodyIdle` is for a hop that buffers the body before writing anything to the
  * client (the GitOps identity hop). Its response headers are not on the wire, so
@@ -430,7 +430,8 @@ export function createRemoteProxyMiddleware(): RequestHandler {
     proxyRes: (proxyRes, req, res) => {
       // The remote answered: release the time-to-headers budget for every
       // response, then keep only the body-idle bound. A stream or download is
-      // released entirely from the first byte and keeps its own lifetime.
+      // released entirely when its headers identify it and keeps its own
+      // lifetime.
       noteInteractiveReadHeaders(req, res, proxyRes);
       // Mark every response forwarded from a remote node with a sentinel
       // header. The frontend (apiFetch / fetchForNode) checks this before
