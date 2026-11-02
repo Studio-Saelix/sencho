@@ -29,11 +29,14 @@ let grantedServer: http.Server;
 let ungrantedServer: http.Server;
 let noEvidenceServer: http.Server;
 let slowEvidenceServer: http.Server;
+let failingEvidenceServer: http.Server;
 let grantedNodeId: number;
 let ungrantedNodeId: number;
 let noEvidenceNodeId: number;
 let slowEvidenceNodeId: number;
+let failingEvidenceNodeId: number;
 let slowMetaCalls = 0;
+let failingMetaCalls = 0;
 
 interface CapturedHop {
   method: string;
@@ -110,6 +113,28 @@ function slowEvidenceRemote(): http.Server {
   });
 }
 
+/** The RBAC probe answers, then the scoped-evidence probe gets an HTTP error. */
+function failingEvidenceRemote(): http.Server {
+  return http.createServer((req, res) => {
+    if (req.url?.startsWith('/api/meta')) {
+      failingMetaCalls += 1;
+      if (failingMetaCalls === 1) {
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({
+          version: '0.93.0',
+          capabilities: ['cross-node-rbac'],
+        }));
+        return;
+      }
+      res.writeHead(502, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: 'bad gateway' }));
+      return;
+    }
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ ok: true }));
+  });
+}
+
 async function listen(server: http.Server): Promise<number> {
   await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
   return (server.address() as import('net').AddressInfo).port;
@@ -155,10 +180,12 @@ beforeAll(async () => {
   ungrantedServer = evidenceRemote();
   noEvidenceServer = noEvidenceRemote();
   slowEvidenceServer = slowEvidenceRemote();
+  failingEvidenceServer = failingEvidenceRemote();
   const grantedPort = await listen(grantedServer);
   const ungrantedPort = await listen(ungrantedServer);
   const noEvidencePort = await listen(noEvidenceServer);
   const slowEvidencePort = await listen(slowEvidenceServer);
+  const failingEvidencePort = await listen(failingEvidenceServer);
 
   grantedNodeId = db.addNode({
     name: 'evidence-granted-remote',
@@ -196,6 +223,15 @@ beforeAll(async () => {
     api_url: `http://127.0.0.1:${slowEvidencePort}`,
     api_token: 'slow-token',
   });
+  failingEvidenceNodeId = db.addNode({
+    name: 'evidence-failing-remote',
+    type: 'remote',
+    mode: 'proxy',
+    compose_dir: '/tmp',
+    is_default: false,
+    api_url: `http://127.0.0.1:${failingEvidencePort}`,
+    api_token: 'failing-token',
+  });
 });
 
 afterAll(async () => {
@@ -203,6 +239,7 @@ afterAll(async () => {
   await new Promise<void>((resolve) => ungrantedServer.close(() => resolve()));
   await new Promise<void>((resolve) => noEvidenceServer.close(() => resolve()));
   await new Promise<void>((resolve) => slowEvidenceServer.close(() => resolve()));
+  await new Promise<void>((resolve) => failingEvidenceServer.close(() => resolve()));
   cleanupTestDb(tmpDir);
 });
 
@@ -213,6 +250,7 @@ beforeEach(async () => {
   grantedHops.length = 0;
   ungrantedHops.length = 0;
   slowMetaCalls = 0;
+  failingMetaCalls = 0;
 });
 
 function grantScopedStackEdit(userId: number, nodeId: number, stackName: string): void {
@@ -307,6 +345,26 @@ describe('remote proxy alerts scoped-evidence gate', () => {
 
     clearAssignments(deployerId);
   }, 20_000);
+
+  it('names the capability that could not be verified, not the permission model', async () => {
+    grantScopedStackEdit(deployerId, failingEvidenceNodeId, 'web');
+
+    const res = await request(app)
+      .post('/api/alerts')
+      .set('Authorization', `Bearer ${deployerBearer}`)
+      .set('x-node-id', String(failingEvidenceNodeId))
+      .send({ stack_name: 'web', metric: 'cpu_percent', operator: '>', threshold: 90, duration_mins: 5, cooldown_mins: 5 });
+
+    // The RBAC probe answered; only the scoped-evidence probe failed. The copy
+    // must name that capability instead of blaming the permission model.
+    expect(res.status).toBe(503);
+    expect(res.headers[REMOTE_READ_FAILURE_HEADER]).toBe('unverified');
+    expect(res.body.error).toMatch(/scoped stack authorization/i);
+    expect(res.body.error).not.toMatch(/permission model/i);
+    expect(res.body.error).not.toMatch(/upgrade/i);
+
+    clearAssignments(deployerId);
+  });
 
   it('passes through without evidence for node-admin (global stack:edit)', async () => {
     const res = await request(app)

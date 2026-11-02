@@ -714,7 +714,7 @@ export function createRemoteProxyMiddleware(): RequestHandler {
       if (isStackDownWithRemoveVolumes(req)) {
         const capability = await probeRemoteCapability(req.nodeId, STACK_DOWN_REMOVE_VOLUMES_CAPABILITY);
         if (capability.kind === 'unreachable') {
-          sendProbeUnavailable(res, node.name, capability);
+          sendProbeUnavailable(res, node.name, capability, 'its support for removing volumes');
           return;
         }
         if (capability.kind === 'unsupported') {
@@ -726,7 +726,7 @@ export function createRemoteProxyMiddleware(): RequestHandler {
       if (isUnacknowledgedStackDelete(req)) {
         const capability = await probeRemoteCapability(req.nodeId, STACK_DELETE_PRUNE_VOLUMES_CAPABILITY);
         if (capability.kind === 'unreachable') {
-          sendProbeUnavailable(res, node.name, capability);
+          sendProbeUnavailable(res, node.name, capability, 'its ability to preserve volumes on delete');
           return;
         }
         if (capability.kind === 'unsupported') {
@@ -741,7 +741,7 @@ export function createRemoteProxyMiddleware(): RequestHandler {
       if (isServiceScopedUpdateRoute(req)) {
         const capability = await probeRemoteCapability(req.nodeId, SERVICE_SCOPED_UPDATE_CAPABILITY);
         if (capability.kind === 'unreachable') {
-          sendProbeUnavailable(res, node.name, capability);
+          sendProbeUnavailable(res, node.name, capability, 'its support for service-scoped updates');
           return;
         }
         if (capability.kind === 'unsupported') {
@@ -839,7 +839,7 @@ export function createRemoteProxyMiddleware(): RequestHandler {
             SCOPED_STACK_AUTH_EVIDENCE_CAPABILITY,
           );
           if (evidence.kind === 'unreachable') {
-            sendProbeUnavailable(res, node.name, evidence);
+            sendProbeUnavailable(res, node.name, evidence, 'its support for scoped stack authorization');
             return;
           }
           if (evidence.kind === 'unsupported') {
@@ -895,7 +895,7 @@ export function createRemoteProxyMiddleware(): RequestHandler {
         if (alertCreateHasScopedService(req.rawBody)) {
           const capability = await probeRemoteCapability(req.nodeId, SERVICE_SCOPED_STACK_ALERT_CAPABILITY);
           if (capability.kind === 'unreachable') {
-            sendProbeUnavailable(res, node.name, capability);
+            sendProbeUnavailable(res, node.name, capability, 'its support for service-scoped alert rules');
             return;
           }
           if (capability.kind === 'unsupported') {
@@ -1248,7 +1248,10 @@ export function createRemoteProxyMiddleware(): RequestHandler {
  * permission probe is the same missed deadline an admin read gets, so it keeps
  * the gateway's timeout marker instead of claiming the host is down. Every other
  * transport failure is the node being unreachable; an HTTP error or a malformed
- * body means the node answered, so only its permission model is unverified.
+ * body means the node answered, so only the requested capability is unverified.
+ *
+ * `subject` names what could not be verified, as a noun phrase that follows "so".
+ * It defaults to the permission model, the RBAC and scoped-evidence gates.
  *
  * Callers return immediately after this writes a response.
  */
@@ -1256,6 +1259,7 @@ function sendProbeUnavailable(
   res: Response,
   nodeName: string,
   probe: Extract<RemoteCapabilityProbe, { kind: 'unreachable' }>,
+  subject = 'its permission model',
 ): void {
   if (probe.detail === 'transport_failure' && probe.transport === 'timeout') {
     res.setHeader(REMOTE_READ_FAILURE_HEADER, 'timeout');
@@ -1268,7 +1272,7 @@ function sendProbeUnavailable(
   const silent = probe.detail === 'transport_failure';
   res.setHeader(REMOTE_READ_FAILURE_HEADER, silent ? 'unreachable' : 'unverified');
   res.status(503).json({
-    error: rbacUnavailableMessage(nodeName, probe.detail),
+    error: probeUnavailableMessage(nodeName, probe.detail, subject),
     code: silent ? 'remote_unreachable' : 'remote_unverified',
     retryable: true,
   });
@@ -1286,23 +1290,24 @@ function refuseUpgradeRequired(res: Response, message: string): void {
 }
 
 /**
- * Name the mixed-version RBAC refusal by what the probe actually observed. An
- * HTTP error or a malformed body is not silence: saying the node "did not
- * answer" would send the operator to check a node that answered.
+ * Name the capability refusal by what the probe actually observed. An HTTP
+ * error or a malformed body is not silence: saying the node "did not answer"
+ * would send the operator to check a node that answered.
  */
-function rbacUnavailableMessage(
+function probeUnavailableMessage(
   nodeName: string,
   detail: 'no_target' | 'transport_failure' | 'http_failure' | 'malformed',
+  subject = 'its permission model',
 ): string {
   switch (detail) {
     case 'http_failure':
-      return `Remote node "${nodeName}" answered with an error, so its permission model could not be verified. Try again once the node is healthy.`;
+      return `Remote node "${nodeName}" answered with an error, so ${subject} could not be verified. Try again once the node is healthy.`;
     case 'malformed':
-      return `Remote node "${nodeName}" answered with a response this instance could not read, so its permission model could not be verified. Try again once the node is healthy.`;
+      return `Remote node "${nodeName}" answered with a response this instance could not read, so ${subject} could not be verified. Try again once the node is healthy.`;
     case 'no_target':
-      return `Remote node "${nodeName}" has no reachable API target, so its permission model could not be verified. Check the node in Settings → Nodes.`;
+      return `Remote node "${nodeName}" has no reachable API target, so ${subject} could not be verified. Check the node in Settings → Nodes.`;
     case 'transport_failure':
-      return `Remote node "${nodeName}" did not answer, so its permission model could not be verified. Try again when the node is reachable.`;
+      return `Remote node "${nodeName}" did not answer, so ${subject} could not be verified. Try again when the node is reachable.`;
   }
 }
 
@@ -1533,7 +1538,7 @@ async function remoteSupportsScopedStackEdit(
     SCOPED_STACK_AUTH_EVIDENCE_CAPABILITY,
   );
   if (evidence.kind === 'unreachable') {
-    sendProbeUnavailable(res, node.name, evidence);
+    sendProbeUnavailable(res, node.name, evidence, 'its support for scoped stack authorization');
     return false;
   }
   if (evidence.kind === 'unsupported') {
