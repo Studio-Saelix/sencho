@@ -205,19 +205,20 @@ export default function StackDossierPanel({ stackName, anatomy, canEdit }: Stack
   }, [stackName, nodeId, reloadKey]);
 
   // Fetched only when the user exports, so opening the panel costs nothing.
-  // Fail-soft: if it is unavailable the export simply omits the section.
-  const loadNetworkingSummary = async (): Promise<NetworkExposureSummary | null> => {
+  // A read that fails is reported in the export, never left out as if the stack
+  // had nothing to document.
+  const loadNetworkingSummary = async (): Promise<NetworkExposureSummary> => {
     try {
       const [factsRes, exposureRes] = await Promise.all([
         apiFetch(`/stacks/${stackName}/networking`),
         apiFetch(`/stacks/${stackName}/exposure`),
       ]);
       const facts = factsRes.ok ? await factsRes.json() : null;
-      const intents = exposureRes.ok ? (await exposureRes.json()).intents ?? [] : [];
+      const intents = exposureRes.ok ? (await exposureRes.json()).intents ?? [] : null;
       return buildNetworkExposureSummary(facts, intents);
     } catch (err) {
       console.warn(`[Dossier] networking summary load failed for "${stackName}":`, err);
-      return null;
+      return buildNetworkExposureSummary(null, []);
     }
   };
 

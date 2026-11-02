@@ -7,6 +7,8 @@ interface ExposureIntentPickerProps {
   inherited?: ExposureIntent | null;
   canEdit: boolean;
   disabled?: boolean;
+  /** Shown after the clear pill when nothing is declared, for example `auto (detected)`. */
+  autoLabel?: string;
   onChange: (intent: ExposureIntent | null) => void;
 }
 
@@ -16,7 +18,7 @@ interface ExposureIntentPickerProps {
  * "inherit" on a per-service row, where the service then falls back to the stack
  * intent. Disabled and read-only when the user cannot edit the stack.
  */
-export function ExposureIntentPicker({ value, inherited, canEdit, disabled = false, onChange }: ExposureIntentPickerProps) {
+export function ExposureIntentPicker({ value, inherited, canEdit, disabled = false, autoLabel, onChange }: ExposureIntentPickerProps) {
   const locked = !canEdit || disabled;
   const pill = (active: boolean) => cn(
     'rounded px-1.5 py-0.5 font-mono text-[10px] uppercase tracking-wide border transition-colors max-md:min-h-11 max-md:px-2.5',
@@ -36,6 +38,9 @@ export function ExposureIntentPicker({ value, inherited, canEdit, disabled = fal
       </button>
       {value === null && inherited && (
         <span className="font-mono text-[10px] text-stat-subtitle">→ {inherited}</span>
+      )}
+      {value === null && !inherited && autoLabel && (
+        <span className="font-mono text-[10px] text-stat-subtitle">→ {autoLabel}</span>
       )}
     </div>
   );

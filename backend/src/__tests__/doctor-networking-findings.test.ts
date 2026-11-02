@@ -237,6 +237,26 @@ describe('applyDoctorNetworkingFindings', () => {
       expect(acked.id).toBe(open.id);
       expect(acked.id).toBe('sensitive-service-broad-exposure|stack1|db||sensitive-service-broad-exposure');
     });
+
+    it('keeps an internal loopback publication a Doctor-only high card, open or acknowledged', () => {
+      // The live engine deliberately leaves this to Doctor, so the card never
+      // gains a live source, and an acknowledgement lists it as dismissed.
+      for (const acknowledged of [false, true]) {
+        reportWith([{
+          ruleId: 'exposure-internal-published',
+          severity: 'high',
+          title: '"db" is classified internal but publishes a host port',
+          message: 'Service "db" is classified as internal exposure, but it publishes 127.0.0.1:5432/tcp to the host.',
+          service: 'db',
+          ...(acknowledged ? { acknowledged: true, acknowledgementId: 4 } : {}),
+        }]);
+        const [card] = run();
+        expect(card.sources).toEqual(['doctor']);
+        expect(card.severity).toBe('high');
+        expect(card.dismissPolicy).toBe('none');
+        expect(card.acknowledged).toBe(acknowledged ? true : undefined);
+      }
+    });
   });
 
   it('discards a stale finding when the referenced service no longer exists', () => {

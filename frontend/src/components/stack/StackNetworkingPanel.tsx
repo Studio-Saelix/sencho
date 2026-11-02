@@ -1,4 +1,4 @@
-import { useEffect, useState, useCallback } from 'react';
+import { useEffect, useRef, useState, useCallback } from 'react';
 import { Network, Globe, Lock, ShieldQuestion, RefreshCw, ArrowRight, Plus } from 'lucide-react';
 import { apiFetch } from '@/lib/api';
 import { cn } from '@/lib/utils';
@@ -8,8 +8,11 @@ import { CreateNetworkDialog } from '@/components/resources/CreateNetworkDialog'
 import { SENCHO_NAVIGATE_EVENT, type SenchoNavigateDetail } from '@/components/NodeManager';
 import { ExposureIntentPicker } from '@/components/networking/ExposureIntentPicker';
 import { asIntents, saveExposureIntent, type IntentEntry } from '@/hooks/useExposureIntent';
+import { conflictChip, proofLine } from '@/lib/detectedExposure';
 import { isRoutingUnverified, tunnelProviderLabel, tunnelScopeLabel } from '@/lib/tunnelExposure';
-import type { ExposureIntent, ServiceTunnelExposure, TunnelConnector } from '@/types/networking';
+import type {
+  DetectedPath, DetectedServiceExposure, ExposureIntent, ServiceTunnelExposure, TunnelConnector,
+} from '@/types/networking';
 
 // Mirrors the backend networking payload shapes (the frontend never imports
 // backend).
@@ -23,6 +26,8 @@ interface NetworkFactService {
   networkMode?: string;
   extraHosts: string[];
   tunnel?: ServiceTunnelExposure;
+  /** Absent from nodes that predate detected exposure. */
+  detected?: DetectedServiceExposure;
 }
 interface NetworkDriftFacts {
   runtimeOnlyAttachments: { container: string; service: string | null; network: string }[];
@@ -72,11 +77,32 @@ function BindingBadge({ port }: { port: NetworkFactPort }) {
 }
 
 const CHIP_CLASS = 'rounded border px-1 py-0.5 font-mono text-[10px]';
+const CHIP_TONE: Record<'conflict' | 'possible' | 'note', string> = {
+  conflict: 'border-warning/40 bg-warning/[0.08] text-warning',
+  possible: 'border-warning/30 bg-warning/[0.05] text-warning/90',
+  note: 'border-muted bg-card/40 text-stat-subtitle',
+};
 
-/** Tunnel facts for one service: the connector it runs, or the tunnel that reaches it.
+/** Every tunnel path that reaches a service. A node that predates detected
+ *  exposure only reports its strongest one. */
+type DetectedTunnelPath = Extract<DetectedPath, { kind: 'tunnel' }>;
+
+function isTunnelPath(path: DetectedPath): path is DetectedTunnelPath {
+  return path.kind === 'tunnel';
+}
+
+function tunnelPathsOf(service: NetworkFactService): ServiceTunnelExposure[] {
+  const detected = service.detected;
+  if (!detected) return service.tunnel ? [service.tunnel] : [];
+  const paths: DetectedPath[] = detected.paths;
+  return paths.filter(isTunnelPath)
+    .map(path => ({ connector: path.connector, provider: path.provider, scope: path.scope, path: path.path }));
+}
+
+/** Tunnel facts for one service: the connector it runs, or every tunnel that reaches it.
  *  A public edge reads as a warning; a private overlay stays neutral. */
-function TunnelBadges({ connector, tunnel }: { connector?: TunnelConnector; tunnel?: ServiceTunnelExposure }) {
-  if (!connector && !tunnel) return null;
+function TunnelBadges({ connector, tunnels }: { connector?: TunnelConnector; tunnels: ServiceTunnelExposure[] }) {
+  if (!connector && tunnels.length === 0) return null;
   return (
     <div className="flex flex-wrap items-center gap-2">
       {connector && (
@@ -84,8 +110,8 @@ function TunnelBadges({ connector, tunnel }: { connector?: TunnelConnector; tunn
           {tunnelProviderLabel(connector.provider)} connector · {tunnelScopeLabel(connector.scope)}
         </span>
       )}
-      {tunnel && (
-        <>
+      {tunnels.map(tunnel => (
+        <span key={`${tunnel.connector}:${tunnel.path}`} className="flex flex-wrap items-center gap-2">
           <span className={cn(CHIP_CLASS, tunnel.scope === 'public-edge'
             ? 'border-warning/40 bg-warning/[0.08] text-warning'
             : 'border-muted bg-card/40 text-foreground/80')}
@@ -95,8 +121,8 @@ function TunnelBadges({ connector, tunnel }: { connector?: TunnelConnector; tunn
           {isRoutingUnverified(tunnel) && (
             <span className={cn(CHIP_CLASS, 'border-muted bg-card/40 text-stat-subtitle')}>routing unverified</span>
           )}
-        </>
-      )}
+        </span>
+      ))}
     </div>
   );
 }
@@ -110,13 +136,28 @@ export default function StackNetworkingPanel({ stackName, canEdit, doctorEnabled
   const nodeId = activeNode?.id;
   const [facts, setFacts] = useState<StackNetworkFacts | null>(null);
   const [intents, setIntents] = useState<IntentEntry[]>([]);
+  const [intentsUnavailable, setIntentsUnavailable] = useState(false);
   const [loadError, setLoadError] = useState(false);
   const [refreshing, setRefreshing] = useState(false);
   const [reloadKey, setReloadKey] = useState(0);
   const [showCreateNetwork, setShowCreateNetwork] = useState(false);
 
+  // Which stack on which node the panel is showing. A load or a write that
+  // resolves after a switch belongs to the previous view and is dropped; a
+  // refresh of the same view keeps its result.
+  const viewKey = `${nodeId ?? ''}::${stackName}`;
+  const viewKeyRef = useRef(viewKey);
+  useEffect(() => {
+    viewKeyRef.current = viewKey;
+    setFacts(null);
+    setIntents([]);
+    setIntentsUnavailable(false);
+    setLoadError(false);
+  }, [viewKey]);
+
   useEffect(() => {
     let cancelled = false;
+    const requestedKey = viewKey;
     const run = async () => {
       setLoadError(false);
       setRefreshing(true);
@@ -125,7 +166,7 @@ export default function StackNetworkingPanel({ stackName, canEdit, doctorEnabled
           apiFetch(`/stacks/${stackName}/networking`),
           apiFetch(`/stacks/${stackName}/exposure`),
         ]);
-        if (cancelled) return;
+        if (cancelled || viewKeyRef.current !== requestedKey) return;
         if (!factsRes.ok) {
           setLoadError(true);
           toast.error('Failed to load the networking view.');
@@ -133,12 +174,22 @@ export default function StackNetworkingPanel({ stackName, canEdit, doctorEnabled
         }
         setFacts((await factsRes.json()) as StackNetworkFacts);
         // The exposure overlay is secondary: a bad exposure body must not tear
-        // down a working facts view, so its parse is tolerated on its own.
+        // down a working facts view, so its parse is tolerated on its own. An
+        // unreadable intent list is said out loud, never shown as "unset".
         if (exposureRes.ok) {
-          try { setIntents(asIntents(await exposureRes.json()) ?? []); } catch { /* keep intents unset */ }
+          try {
+            setIntents(asIntents(await exposureRes.json()) ?? []);
+            setIntentsUnavailable(false);
+          } catch {
+            setIntents([]);
+            setIntentsUnavailable(true);
+          }
+        } else {
+          setIntents([]);
+          setIntentsUnavailable(true);
         }
       } catch {
-        if (!cancelled) {
+        if (!cancelled && viewKeyRef.current === requestedKey) {
           setLoadError(true);
           toast.error('Failed to load the networking view.');
         }
@@ -148,15 +199,19 @@ export default function StackNetworkingPanel({ stackName, canEdit, doctorEnabled
     };
     void run();
     return () => { cancelled = true; };
-  }, [stackName, nodeId, reloadKey]);
+  }, [stackName, nodeId, reloadKey, viewKey]);
 
   const stackIntent = intents.find(i => i.service === '')?.intent ?? null;
   const intentFor = (service: string): ExposureIntent | null => intents.find(i => i.service === service)?.intent ?? null;
 
   const saveIntent = useCallback(async (service: string, intent: ExposureIntent | null) => {
+    const requestedKey = `${nodeId ?? ''}::${stackName}`;
     const next = await saveExposureIntent(stackName, service, intent);
-    if (next !== null) setIntents(next);
-  }, [stackName]);
+    if (next !== null && viewKeyRef.current === requestedKey) {
+      setIntents(next);
+      setIntentsUnavailable(false);
+    }
+  }, [stackName, nodeId]);
 
   if (loadError) {
     return (
@@ -211,17 +266,48 @@ export default function StackNetworkingPanel({ stackName, canEdit, doctorEnabled
       {/* Exposure intent */}
       <section className="flex flex-col gap-2">
         <div className={LABEL_CLASS}>exposure intent</div>
+        {intentsUnavailable && (
+          <div className="font-mono text-[10px] text-warning/90">exposure intent could not be read; refresh to retry</div>
+        )}
         <div className={cn(CARD_CLASS, 'border-muted bg-card/40 flex flex-col gap-2')}>
           <div className="flex flex-col gap-1">
             <span className="font-mono text-[11px] text-foreground/80">stack</span>
-            <ExposureIntentPicker value={stackIntent} canEdit={canEdit} onChange={intent => saveIntent('', intent)} />
+            <ExposureIntentPicker
+              value={stackIntent}
+              canEdit={canEdit}
+              autoLabel={!intentsUnavailable && facts.services.some(s => s.detected) ? 'auto (detected)' : undefined}
+              onChange={intent => saveIntent('', intent)}
+            />
           </div>
-          {facts.services.map(svc => (
-            <div key={svc.name} className="flex flex-col gap-1 border-t border-muted pt-2">
-              <span className="font-mono text-[11px] text-foreground/80">{svc.name}</span>
-              <ExposureIntentPicker value={intentFor(svc.name)} inherited={stackIntent} canEdit={canEdit} onChange={intent => saveIntent(svc.name, intent)} />
-            </div>
-          ))}
+          {facts.services.map(svc => {
+            const detected = svc.detected;
+            const effectiveIntent = intentFor(svc.name) ?? stackIntent;
+            const chip = !intentsUnavailable && detected && effectiveIntent ? conflictChip(detected, effectiveIntent) : null;
+            const offerAdoption = !intentsUnavailable && effectiveIntent === null && canEdit && detected?.suggestedIntent === 'same-node';
+            return (
+              <div key={svc.name} data-testid={`service-intent-${svc.name}`} className="flex flex-col gap-1 border-t border-muted pt-2">
+                <span className="font-mono text-[11px] text-foreground/80">{svc.name}</span>
+                <div className="flex flex-wrap items-center gap-2">
+                  <span className="font-mono text-[10px] text-stat-subtitle">
+                    {detected ? `detected: ${detected.answer}` : 'detected exposure is not reported by this node'}
+                  </span>
+                  {chip && <span className={cn(CHIP_CLASS, CHIP_TONE[chip.level])}>{chip.text}</span>}
+                  {offerAdoption && (
+                    <button type="button" onClick={() => saveIntent(svc.name, 'same-node')} className={ACTION_CLASS}>
+                      <ArrowRight className="h-3 w-3" strokeWidth={1.5} /> use same-node
+                    </button>
+                  )}
+                </div>
+                <ExposureIntentPicker
+                  value={intentFor(svc.name)}
+                  inherited={stackIntent}
+                  autoLabel={!intentsUnavailable && detected ? 'auto (detected)' : undefined}
+                  canEdit={canEdit}
+                  onChange={intent => saveIntent(svc.name, intent)}
+                />
+              </div>
+            );
+          })}
         </div>
       </section>
 
@@ -246,8 +332,10 @@ export default function StackNetworkingPanel({ stackName, canEdit, doctorEnabled
       <section className="flex flex-col gap-2">
         <div className={LABEL_CLASS}>services</div>
         <div className="flex flex-col gap-2">
-          {facts.services.map(svc => (
-            <div key={svc.name} className={cn(CARD_CLASS, 'border-muted bg-card/40 flex flex-col gap-1.5')}>
+          {facts.services.map(svc => {
+            const proof = svc.detected ? proofLine(svc.detected) : null;
+            return (
+              <div key={svc.name} className={cn(CARD_CLASS, 'border-muted bg-card/40 flex flex-col gap-1.5')}>
               <div className="flex items-center gap-2">
                 <span className="font-mono text-[12px] text-foreground/90">{svc.name}</span>
                 {svc.networkMode && <span className="rounded border border-warning/40 bg-warning/[0.08] px-1 py-0.5 font-mono text-[10px] text-warning">network_mode: {svc.networkMode}</span>}
@@ -261,7 +349,7 @@ export default function StackNetworkingPanel({ stackName, canEdit, doctorEnabled
                   ))}
                 </div>
               )}
-              <TunnelBadges connector={facts.tunnels?.find(c => c.service === svc.name)} tunnel={svc.tunnel} />
+              <TunnelBadges connector={facts.tunnels?.find(c => c.service === svc.name)} tunnels={tunnelPathsOf(svc)} />
               {svc.networkMode === 'host' && (
                 // Host networking publishes every container port on the host, so
                 // the service is host-exposed even with no published-port rows.
@@ -283,8 +371,12 @@ export default function StackNetworkingPanel({ stackName, canEdit, doctorEnabled
               {svc.extraHosts.length > 0 && (
                 <div className="font-mono text-[10px] text-stat-subtitle">extra_hosts: {svc.extraHosts.join(', ')}</div>
               )}
+              {proof && (
+                <div className="font-mono text-[10px] leading-relaxed text-stat-subtitle/80">{proof}</div>
+              )}
             </div>
-          ))}
+            );
+          })}
         </div>
       </section>
 

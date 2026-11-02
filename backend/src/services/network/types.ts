@@ -53,6 +53,9 @@ export interface NetworkFactService {
   extraHosts: string[];
   /** The strongest tunnel path reaching this service, when a connector in the stack reaches it. */
   tunnel?: import('./tunnelDetection').ServiceTunnelExposure;
+  /** How this service appears reachable: every evidence path, the intent
+   *  conflicts, and the one unambiguous adoption. Absent from older nodes. */
+  detected?: import('./exposureClassification').DetectedServiceExposure;
 }
 
 /** Runtime-vs-Compose disagreements, computed only when the runtime is available. */

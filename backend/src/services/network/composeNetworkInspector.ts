@@ -11,7 +11,7 @@
  * already readable at the same `stack:read` scope via the stack's files
  * (documented caveat, see docs/features/environment-guardrails).
  */
-import DockerController, { type DependencySnapshot } from '../DockerController';
+import DockerController, { type DependencyContainer, type DependencySnapshot } from '../DockerController';
 import { ComposeService } from '../ComposeService';
 import { FileSystemService } from '../FileSystemService';
 import { parseEffectiveModel, type EffectiveModel } from '../preflight/effectiveModel';
@@ -25,6 +25,7 @@ import type {
 import { classifyMissingExternalNetworks, type MissingExternalNetwork } from './missingExternalNetworks';
 import { isStackMeshManaged, resolveManagedMeshAttachment } from './managedMeshAttachment';
 import { detectTunnels, tunnelExposureByService } from './tunnelDetection';
+import { classifyStackExposure, type ExposureRuntimeLookup } from './exposureClassification';
 import type { ManagedNetworkAttachmentPredicate } from './normalize';
 
 import { getErrorMessage } from '../../utils/errors';
@@ -34,6 +35,28 @@ const MAX_RENDER_ERROR = 600;
 const EMPTY_DRIFT: NetworkDriftFacts = {
   runtimeOnlyAttachments: [], declaredButUnused: [], missingFromRuntime: [], foreignNetworkAttachments: [],
 };
+
+/**
+ * The container-to-service lookup the classifier reads: which running
+ * containers belong to a service, and which service a container belongs to (for
+ * a foreign network attachment, which arrives without one). Only this stack's
+ * containers are indexed.
+ */
+function runtimeLookupOf(snapshot: DependencySnapshot, stackName: string): ExposureRuntimeLookup {
+  const containersByService = new Map<string, DependencyContainer[]>();
+  const serviceByContainer = new Map<string, string>();
+  for (const container of snapshot.containers) {
+    if (container.stack !== stackName || !container.service) continue;
+    const list = containersByService.get(container.service);
+    if (list) list.push(container);
+    else containersByService.set(container.service, [container]);
+    serviceByContainer.set(container.name, container.service);
+  }
+  return {
+    containersByService,
+    serviceOfContainer: (name: string) => serviceByContainer.get(name) ?? null,
+  };
+}
 
 /**
  * Pure assembler: turns a rendered model plus an optional runtime snapshot into
@@ -75,6 +98,15 @@ export function assembleStackNetworkFacts(
 
   const tunnels = detectTunnels(model, { meshManaged });
   const tunnelByService = tunnelExposureByService(tunnels);
+  const drift = snapshot
+    ? compareStackNetworks(fromEffectiveModel(model), snapshot, stackName, managedNetworkAttachment)
+    : EMPTY_DRIFT;
+  const detected = classifyStackExposure({
+    model,
+    connectors: tunnels,
+    drift,
+    runtime: snapshot ? runtimeLookupOf(snapshot, stackName) : null,
+  });
   const services: NetworkFactService[] = model.services.map(s => ({
     name: s.name,
     networks: s.networks.map(n => ({ key: n.key, aliases: n.aliases })),
@@ -90,11 +122,9 @@ export function assembleStackNetworkFacts(
     networkMode: s.networkMode,
     extraHosts: s.extraHosts,
     ...(tunnelByService.get(s.name) ? { tunnel: tunnelByService.get(s.name) } : {}),
+    ...(detected.get(s.name) ? { detected: detected.get(s.name) } : {}),
   }));
 
-  const drift = snapshot
-    ? compareStackNetworks(fromEffectiveModel(model), snapshot, stackName, managedNetworkAttachment)
-    : EMPTY_DRIFT;
   const missingExternalNetworks: MissingExternalNetwork[] = snapshot
     ? classifyMissingExternalNetworks(
       model,
