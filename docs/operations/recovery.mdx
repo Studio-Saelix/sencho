@@ -12,6 +12,8 @@ Everything Sencho knows lives in two directories:
 
 Your compose files on disk are always the source of truth. Sencho reads them; it does not hide your stacks inside a database. That means most recovery is file-level: if Sencho itself is unhealthy, your running containers keep running, and a fresh Sencho pointed at the same two directories comes back with everything intact.
 
+Configuration recovery and application data are separate. The paths above, [Fleet Snapshots](/features/fleet-backups), and rollback generations restore compose files. They do not restore the contents of a volume, and a [volume recovery point](/operations/volume-recovery-points) does not bring back a compose edit. Neither one restores the other, so a complete plan covers both.
+
 <Note>
   The single most valuable thing you can do before relying on Sencho is to back up those two directories. See [Backup & Restore](/operations/backup) for a copy-and-restore routine and a one-line nightly cron. Do this before you start testing in earnest.
 </Note>

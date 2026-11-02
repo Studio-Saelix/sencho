@@ -106,6 +106,7 @@ import {
 } from '../helpers/selfStackGuard';
 import { refuseIfDockerEndpoint, sendIfDockerEndpointProtected } from '../helpers/dockerEndpointRoute';
 import { DOCKER_ENDPOINT_PROTECTED_CODE, isDockerEndpointProtectedError } from '../helpers/dockerEndpointGuard';
+import { RECOVERY_VOLUME_PROTECTED_CODE, sendIfRecoveryVolumeProtected } from '../helpers/recoveryVolumeGuard';
 import { getActiveCapabilities, STACK_DOWN_REMOVE_VOLUMES_CAPABILITY, SERVICE_SCOPED_UPDATE_CAPABILITY } from '../services/CapabilityRegistry';
 import { ServiceUpdateRecoveryService } from '../services/ServiceUpdateRecoveryService';
 import { classifyStackApiPath } from '../helpers/stackRouteAuth';
@@ -1434,6 +1435,10 @@ stacksRouter.delete('/:stackName', async (req: Request, res: Response) => {
       res.status(409).json({ error: result.error, code: DOCKER_ENDPOINT_PROTECTED_CODE });
       return;
     }
+    if (result.code === 'recovery_volume_protected') {
+      res.status(423).json({ error: result.error, code: RECOVERY_VOLUME_PROTECTED_CODE });
+      return;
+    }
     if (result.code === 'fs_failed') {
       res.status(500).json({
         error: `${result.error}. Stack containers may have been stopped but on-disk files remain. Retry the delete or clean the files manually.`,
@@ -2378,6 +2383,7 @@ stacksRouter.post('/:stackName/down', async (req: Request, res: Response) => {
   } catch (error: unknown) {
     console.error('[Stacks] Down failed: %s', sanitizeForLog(stackName), error);
     if (sendIfDockerEndpointProtected(res, error)) return;
+    if (sendIfRecoveryVolumeProtected(res, error)) return;
     notifyActionFailure('down', stackName, error, req.user?.username ?? 'system');
     if (!res.headersSent) {
       if (isDockerUnavailableError(error)) {

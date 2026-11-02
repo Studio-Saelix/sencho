@@ -1,0 +1,11 @@
+{
+  "@context": "https://openvex.dev/ns/v0.2.0",
+  "@id": "https://github.com/studio-saelix/sencho/security/vex/sencho-recovery-helper.openvex.json",
+  "author": "Studio Saelix",
+  "role": "Vendor",
+  "timestamp": "2026-10-31T00:00:00Z",
+  "last_updated": "2026-10-31T00:00:00Z",
+  "version": 1,
+  "tooling": "The recovery helper image (docker/recovery-helper) is scanned with the same HIGH/CRITICAL policy as the Sencho image. Its dependency floors are carried in the helper Dockerfile, so a finding is normally fixed rather than suppressed, and the image currently ships with no HIGH or CRITICAL finding.",
+  "statements": []
+}

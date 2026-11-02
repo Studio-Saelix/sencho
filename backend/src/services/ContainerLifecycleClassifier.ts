@@ -27,6 +27,12 @@ export interface ContainerLifecycleState {
     lastKillAt?: number;
     /** True when an `oom` event has been observed and the matching `die` has not yet arrived. */
     oomPending?: boolean;
+    /**
+     * True for a container Sencho started itself for one bounded job (a recovery
+     * helper). Its exit is the job's result, never a workload crash: every helper
+     * failure is reported by the operation that owns it.
+     */
+    helperContainer?: boolean;
 }
 
 export interface DieEventInput {
@@ -49,6 +55,10 @@ export function classifyDie(
     input: DieEventInput,
     state: ContainerLifecycleState,
 ): Classification {
+    // A helper Sencho started is not a workload. Its exit code belongs to the
+    // operation that ran it, which reports it; a crash alert here would page an
+    // operator every time a capture was cancelled.
+    if (state.helperContainer) return 'intentional';
     if (state.oomPending) return 'oom';
 
     if (typeof state.lastKillAt === 'number') {

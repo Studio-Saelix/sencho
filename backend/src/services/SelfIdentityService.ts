@@ -75,6 +75,14 @@ class SelfIdentityService {
   private networkIds = new Set<string>();
   private networkNames = new Set<string>();
   private volumeNames = new Set<string>();
+  /**
+   * Infrastructure Sencho created for itself rather than mounted into its own
+   * container: the recovery repository volume and the recovery helper image.
+   * Registered at boot and on provisioning, so every existing guard that asks
+   * `isOwnVolume` / `isOwnImage` covers them without a per-route patch.
+   */
+  private recoveryVolumeNames = new Set<string>();
+  private recoveryImageIds = new Set<string>();
   private initialized = false;
   private initializePromise: Promise<void> | null = null;
   private enrichmentPromise: Promise<void> | null = null;
@@ -320,8 +328,12 @@ class SelfIdentityService {
 
   /** True when the given image reference (full or short hex ID, optionally `sha256:`-prefixed) matches Sencho's own image. */
   isOwnImage(idOrTag: string): boolean {
-    if (!idOrTag || !this.imageIdHex) return false;
+    if (!idOrTag) return false;
     const target = SelfIdentityService.stripSha(idOrTag);
+    for (const recoveryId of this.recoveryImageIds) {
+      if (SelfIdentityService.matchesId(recoveryId, target)) return true;
+    }
+    if (!this.imageIdHex) return false;
     return SelfIdentityService.matchesId(this.imageIdHex, target);
   }
 
@@ -343,7 +355,42 @@ class SelfIdentityService {
   /** True when the given volume name matches a named volume mounted into Sencho. Bind mounts are excluded by design. */
   isOwnVolume(name: string): boolean {
     if (!name) return false;
-    return this.volumeNames.has(name);
+    return this.volumeNames.has(name) || this.recoveryVolumeNames.has(name);
+  }
+
+  /**
+   * Record a volume Sencho created for its own recovery infrastructure. It is
+   * Sencho's own from then on: no prune plan, managed sweep, itemized removal or
+   * fleet action may delete it.
+   */
+  registerRecoveryVolume(name: string): void {
+    if (typeof name === 'string' && name !== '') this.recoveryVolumeNames.add(name);
+  }
+
+  /** Record the recovery helper image, so no image prune path removes it. */
+  registerRecoveryImage(idOrTag: string): void {
+    const value = typeof idOrTag === 'string' ? SelfIdentityService.stripSha(idOrTag) : '';
+    if (value !== '') this.recoveryImageIds.add(value);
+  }
+
+  /** True for the recovery repository volume, as opposed to a volume mounted into Sencho. */
+  isRecoveryVolume(name: string): boolean {
+    return Boolean(name) && this.recoveryVolumeNames.has(name);
+  }
+
+  /** True for the recovery helper image, as opposed to Sencho's own image. */
+  isRecoveryImage(idOrTag: string): boolean {
+    if (!idOrTag) return false;
+    const target = SelfIdentityService.stripSha(idOrTag);
+    for (const recoveryId of this.recoveryImageIds) {
+      if (SelfIdentityService.matchesId(recoveryId, target)) return true;
+    }
+    return false;
+  }
+
+  /** Test helper: every recovery volume name registered so far. */
+  getRecoveryVolumeNames(): string[] {
+    return [...this.recoveryVolumeNames];
   }
 
   /**
@@ -413,6 +460,8 @@ class SelfIdentityService {
     this.networkIds.clear();
     this.networkNames.clear();
     this.volumeNames.clear();
+    this.recoveryVolumeNames.clear();
+    this.recoveryImageIds.clear();
     this.initialized = false;
     this.initializePromise = null;
     this.enrichmentPromise = null;
