@@ -5,6 +5,8 @@
  */
 import { describe, it, expect, beforeEach, afterEach, beforeAll, afterAll, vi } from 'vitest';
 import request from 'supertest';
+import express from 'express';
+import cookieParser from 'cookie-parser';
 import bcrypt from 'bcrypt';
 import jwt from 'jsonwebtoken';
 import fs from 'fs';
@@ -16,6 +18,7 @@ let app: import('express').Express;
 let DatabaseService: typeof import('../services/DatabaseService').DatabaseService;
 let adminCookie: string;
 let viewerCookie: string;
+let remoteNodeId: number;
 
 /** Sign a JWT for an already-seeded user, using their live token_version. */
 function userToken(username: string): string {
@@ -65,6 +68,13 @@ beforeAll(async () => {
 
   const nodeAdminHash = await bcrypt.hash('nodeadminpass', 1);
   DatabaseService.getInstance().addUser({ username: 'iu-node-admin', password_hash: nodeAdminHash, role: 'node-admin' });
+
+  // A remote target for the coordinator branch: the route consults the node's
+  // type before it hands the request to the remote coordinator.
+  remoteNodeId = DatabaseService.getInstance().addNode({
+    name: 'iu-remote-exec', type: 'remote', mode: 'proxy', compose_dir: '/unused',
+    is_default: false, api_url: 'http://127.0.0.1:1', api_token: 'fixture-token',
+  });
 });
 
 afterAll(() => cleanupTestDb(tmpDir));
@@ -943,6 +953,55 @@ describe('POST /api/auto-update/execute', () => {
       updateSpy.mockRestore();
       recheckSpy.mockRestore();
       clearSpy.mockRestore();
+    }
+  });
+});
+
+describe('POST /api/auto-update/execute against a remote target', () => {
+  /** Mount the auto-update router with a fixed remote node context, away from the remote proxy. */
+  async function remoteApp(): Promise<import('express').Express> {
+    const { autoUpdateRouter } = await import('../routes/imageUpdates');
+    const app = express();
+    app.use(express.json());
+    app.use(cookieParser());
+    app.use((req, _res, next) => { req.nodeId = remoteNodeId; next(); });
+    app.use('/api/auto-update', autoUpdateRouter);
+    return app;
+  }
+
+  it('answers a node-level remote failure as an error, never a success-shaped 200', async () => {
+    const { AutoUpdateRemoteCoordinator } = await import('../services/AutoUpdateRemoteCoordinator');
+    const executeSpy = vi.spyOn(AutoUpdateRemoteCoordinator.prototype, 'execute').mockResolvedValue({
+      handled: true, failed: true,
+      result: 'Stack "web" failed: node "iu-remote-exec" did not answer, so the update could not be checked against io.sencho.update.',
+    });
+    try {
+      const res = await request(await remoteApp())
+        .post('/api/auto-update/execute')
+        .set('Cookie', adminCookie)
+        .send({ target: 'web' });
+      expect(res.status).toBe(503);
+      expect(res.body.error).toContain('did not answer');
+      expect(res.body.result).toBeUndefined();
+    } finally {
+      executeSpy.mockRestore();
+    }
+  });
+
+  it('still answers a handled remote outcome with the success shape', async () => {
+    const { AutoUpdateRemoteCoordinator } = await import('../services/AutoUpdateRemoteCoordinator');
+    const executeSpy = vi.spyOn(AutoUpdateRemoteCoordinator.prototype, 'execute').mockResolvedValue({
+      handled: true, result: 'Stack "web": skipped by update policy (web: manual).',
+    });
+    try {
+      const res = await request(await remoteApp())
+        .post('/api/auto-update/execute')
+        .set('Cookie', adminCookie)
+        .send({ target: 'web' });
+      expect(res.status).toBe(200);
+      expect(res.body.result).toContain('skipped by update policy');
+    } finally {
+      executeSpy.mockRestore();
     }
   });
 });

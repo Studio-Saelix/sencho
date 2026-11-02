@@ -81,6 +81,30 @@ describe('remote automatic update coordinator', () => {
     expect(mocks.fetch).not.toHaveBeenCalled();
   });
 
+  it('fails a node that advertises the label policy but not the checked update contract, naming the real gap', async () => {
+    mocks.meta.mockResolvedValue({ kind: 'ok', meta: { capabilities: ['sencho-label-policy-v1', 'remote-image-inspect-v1'] } });
+    const result = await new AutoUpdateRemoteCoordinator().execute(input());
+    expect(result).toEqual({
+      handled: true,
+      failed: true,
+      result: 'Stack "web" failed: node "node-b" advertises the label policy but not the checked remote-update contract; update Sencho on that node.',
+    });
+    expect(mocks.authorize).not.toHaveBeenCalled();
+    expect(mocks.fetch).not.toHaveBeenCalled();
+  });
+
+  it('fails a wildcard run once at the node when the checked update contract is missing', async () => {
+    mocks.meta.mockResolvedValue({ kind: 'ok', meta: { capabilities: ['sencho-label-policy-v1'] } });
+    const result = await new AutoUpdateRemoteCoordinator().execute({ ...input(), selection: { target: '*' } });
+    expect(result).toEqual({
+      handled: true,
+      failed: true,
+      result: 'Node "node-b" failed: it advertises the label policy but not the checked remote-update contract; update Sencho on that node.',
+    });
+    expect(mocks.roster).not.toHaveBeenCalled();
+    expect(mocks.fetch).not.toHaveBeenCalled();
+  });
+
   it('reports an unreachable node as unreachable, without falling back to a legacy mutation', async () => {
     mocks.meta.mockResolvedValue({ kind: 'transport_failure' });
     const result = await new AutoUpdateRemoteCoordinator().execute(input());

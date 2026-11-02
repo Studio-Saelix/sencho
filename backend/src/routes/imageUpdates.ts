@@ -711,6 +711,13 @@ autoUpdateRouter.post('/execute', authMiddleware, async (req: Request, res: Resp
           res.status(503).json({ error: 'Remote automatic update capability changed. Retry the request.' });
           return;
         }
+        // A node-level failure (unreachable, or unable to evaluate the label)
+        // is an error, not a success-shaped 200: the operator "run automatic
+        // update now" action must never look like it ran.
+        if (result.failed) {
+          res.status(503).json({ error: result.result });
+          return;
+        }
         res.json({ result: result.result });
       } catch (error) {
         if (error !== denied) throw error;

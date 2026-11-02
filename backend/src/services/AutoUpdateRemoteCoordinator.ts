@@ -84,7 +84,7 @@ export class AutoUpdateRemoteCoordinator {
     // than handed to a legacy endpoint that could mutate images without ever
     // evaluating io.sencho.update.
     if (meta.kind !== 'ok') {
-      return { handled: true, failed: true, result: this.uansweredLines(input, nodeName) };
+      return { handled: true, failed: true, result: this.unansweredLines(input, nodeName) };
     }
     // An unattended update on a node that cannot evaluate io.sencho.update is a
     // failure with a stated reason, never a green skip: the hub cannot know
@@ -92,9 +92,13 @@ export class AutoUpdateRemoteCoordinator {
     if (!meta.meta.capabilities.includes(SENCHO_LABEL_POLICY_CAPABILITY)) {
       return { handled: true, failed: true, result: this.unsupportedLines(input, nodeName) };
     }
+    // A node that advertises the label policy but not the older checked-update
+    // contracts cannot be trusted with an unattended update either: it is a
+    // node-level failure, not a per-stack skip, and its reason must say what
+    // is actually missing rather than claim it does not read the label.
     if (!meta.meta.capabilities.includes('remote-image-inspect-v1')
       || !meta.meta.capabilities.includes('remote-auto-update-checked-v1')) {
-      return { handled: true, result: this.unsupportedLines(input, nodeName) };
+      return { handled: true, failed: true, result: this.incompleteContractLines(input, nodeName) };
     }
     const selected = 'targets' in input.selection ? input.selection.targets
       : input.selection.target === '*' ? await input.scanner.getRemoteRoster(input.nodeId, AbortSignal.timeout(90_000))
@@ -121,7 +125,7 @@ export class AutoUpdateRemoteCoordinator {
   }
 
   /** The failure lines for a node that answered nothing: unreachable, never "too old". */
-  private uansweredLines(input: RemoteAutoUpdateInput, nodeName: string): string {
+  private unansweredLines(input: RemoteAutoUpdateInput, nodeName: string): string {
     const stacks = 'targets' in input.selection
       ? input.selection.targets
       : input.selection.target === '*' ? [null] : [input.selection.target];
@@ -138,6 +142,24 @@ export class AutoUpdateRemoteCoordinator {
       ? input.selection.targets
       : input.selection.target === '*' ? [null] : [input.selection.target];
     return stacks.map(stack => unsupportedNodeMessage(nodeName, stack)).join('\n');
+  }
+
+  /**
+   * The failure lines for a node that advertises the label policy but not the
+   * checked remote-update contracts. It reads the label, so "does not evaluate
+   * io.sencho.update" would be false; the update still cannot be confirmed, so
+   * it fails the run like any other node-level capability failure.
+   */
+  private incompleteContractLines(input: RemoteAutoUpdateInput, nodeName: string): string {
+    const stacks = 'targets' in input.selection
+      ? input.selection.targets
+      : input.selection.target === '*' ? [null] : [input.selection.target];
+    const reason = `node "${nodeName}" advertises the label policy but not the checked remote-update contract; update Sencho on that node.`;
+    return stacks
+      .map(stack => stack === null
+        ? `Node "${nodeName}" failed: it advertises the label policy but not the checked remote-update contract; update Sencho on that node.`
+        : `Stack "${stack}" failed: ${reason}`)
+      .join('\n');
   }
 
   private async executeStack(input: RemoteAutoUpdateInput, stack: string): Promise<string> {
