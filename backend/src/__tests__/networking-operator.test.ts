@@ -192,7 +192,7 @@ describe('evaluateNetworkDeleteGuard', () => {
       volumes: [],
     };
     const guard = evaluateNetworkDeleteGuard('n1', snapshot, [
-      { stack: STACK, renderable: false, renderError: 'x', runtime: 'available', networks: [], services: [], drift: { runtimeOnlyAttachments: [], declaredButUnused: [], missingFromRuntime: [], foreignNetworkAttachments: [] }, missingExternalNetworks: [] },
+      { stack: STACK, renderable: false, renderError: 'x', runtime: 'available', networks: [], services: [], drift: { runtimeOnlyAttachments: [], declaredButUnused: [], missingFromRuntime: [], foreignNetworkAttachments: [] }, missingExternalNetworks: [], tunnels: [] },
     ]);
     expect(guard.blocked).toBe(true);
     expect(guard.code).toBe('stack-declaration-unknown');
@@ -205,7 +205,7 @@ describe('evaluateNetworkDeleteGuard', () => {
       volumes: [],
     };
     const guard = evaluateNetworkDeleteGuard('n1', snapshot, [
-      { stack: STACK, renderable: false, renderError: 'compose file invalid', runtime: 'available', networks: [{ key: 'shared_ext', name: 'shared_ext', external: true, internal: false, createdByStack: false }], services: [], drift: { runtimeOnlyAttachments: [], declaredButUnused: [], missingFromRuntime: [], foreignNetworkAttachments: [] }, missingExternalNetworks: [] },
+      { stack: STACK, renderable: false, renderError: 'compose file invalid', runtime: 'available', networks: [{ key: 'shared_ext', name: 'shared_ext', external: true, internal: false, createdByStack: false }], services: [], drift: { runtimeOnlyAttachments: [], declaredButUnused: [], missingFromRuntime: [], foreignNetworkAttachments: [] }, missingExternalNetworks: [], tunnels: [] },
     ]);
     expect(guard.blocked).toBe(true);
     expect(guard.code).toBe('stack-declaration-unknown');
@@ -250,7 +250,7 @@ describe('evaluateNetworkDeleteGuard', () => {
       { stack: STACK, renderable: true, renderError: null, runtime: 'available',
         networks: [{ key: 'app_net', name: 'app_net', external: false, internal: false, createdByStack: true }],
         services: [], drift: { runtimeOnlyAttachments: [], declaredButUnused: [], missingFromRuntime: [], foreignNetworkAttachments: [] },
-        missingExternalNetworks: [] },
+        missingExternalNetworks: [], tunnels: [] },
     ]);
     expect(guard.code).toBe('stack-declared');
   });

@@ -41,6 +41,7 @@ function ctx(over: Partial<PreflightContext> = {}): PreflightContext {
     stackIntent: null, serviceIntents: {}, accessUrlPorts: new Set(), hasAccessUrls: false,
     exposureAvailable: true,
     isSelfStack: false,
+    meshManaged: false,
     healthchecks: {},
     composeVersionSkew: null,
     ...over,
@@ -1046,7 +1047,8 @@ describe('rule registry completeness', () => {
     'node-state-unavailable', 'compose-version-mismatch',
     'external-network-missing', 'external-volume-missing', 'new-network', 'new-volume', 'anonymous-volume',
     'container-name-internal-dup', 'container-name-collision',
-    'exposure-internal-published', 'sensitive-service-broad-exposure', 'exposure-unclassified',
+    'exposure-internal-published', 'exposure-internal-tunneled', 'sensitive-service-broad-exposure',
+    'tunnel-exposure', 'exposure-unclassified',
     'exposure-port-vs-dossier', 'reverse-proxy-undocumented', 'effective-model-expanded', 'self-managed-stack',
   ];
   it('the registry contains exactly the expected rules', () => {

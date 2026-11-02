@@ -5,7 +5,7 @@ describe('commitServiceUrlWrite', () => {
   it('leaves the editor buffer alone when the save is refused', async () => {
     const apply = vi.fn();
     const result = await commitServiceUrlWrite(
-      'services:\n  web:\n    labels:\n      sencho.service.url: "https://abandoned.example"\n',
+      'services:\n  web:\n    labels:\n      io.sencho.url: "https://abandoned.example"\n',
       async () => ({ ok: false as const, conflict: true, code: 'compose_source_changed' }),
       apply,
     );

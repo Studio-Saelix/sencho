@@ -21,17 +21,17 @@ describe('serviceUrlFromLabelValue', () => {
 describe('serviceUrlFromLabels', () => {
   it('reads the allowlisted key from a map or a list and ignores other values', () => {
     expect(serviceUrlFromLabels({
-      'sencho.service.url': 'https://app.example.com',
+      'io.sencho.url': 'https://app.example.com',
       'traefik.http.routers.web.rule': 'Host(`secret.example.com`)',
     })).toBe('https://app.example.com');
     expect(serviceUrlFromLabels([
       'traefik.enable=true',
-      'sencho.service.url=https://app.example.com/path',
+      'io.sencho.url=https://app.example.com/path',
     ])).toBe('https://app.example.com/path');
   });
 
   it('omits an invalid allowlisted value', () => {
-    expect(serviceUrlFromLabels({ 'sencho.service.url': 'not a url' })).toBeNull();
-    expect(serviceUrlFromLabels(['sencho.service.url'])).toBeNull();
+    expect(serviceUrlFromLabels({ 'io.sencho.url': 'not a url' })).toBeNull();
+    expect(serviceUrlFromLabels(['io.sencho.url'])).toBeNull();
   });
 });

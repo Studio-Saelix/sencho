@@ -414,6 +414,42 @@ describe('node-data fan-outs share the per-remote read budget', () => {
     expect(elapsedMs).toBeLessThan(READ_BUDGET_CEILING_MS);
   }, 20_000);
 
+  describe('GET /api/fleet/networking-summary remote payloads', () => {
+    const bucket = (stacks: string[]) => ({ count: stacks.length, stacks });
+    const base = { exposed: bucket(['web']), unknownExposure: bucket([]), networkDrift: bucket([]) };
+
+    async function remoteRow(payload: unknown) {
+      stubLocalDocker();
+      const nodeId = addProxyNode(`summary-${Math.random().toString(36).slice(2, 8)}`, PROXY_BASE);
+      mockTargets({ [nodeId]: { apiUrl: PROXY_BASE, apiToken: 'test-token', trustedLoopback: false } });
+      mockFetch(() => jsonResponse(payload));
+      vi.spyOn(console, 'error').mockImplementation(() => {});
+      const res = await request(app).get('/api/fleet/networking-summary').set('Authorization', authHeader);
+      expect(res.status).toBe(200);
+      return (res.body.nodes as { nodeId: number; status: string; summary: unknown; error: string | null }[]).find(n => n.nodeId === nodeId);
+    }
+
+    it('passes a remote summary with an unreadable bucket through', async () => {
+      const row = await remoteRow({ ...base, unreadable: bucket(['db']) });
+      expect(row?.status).toBe('ok');
+      expect(row?.summary).toMatchObject({ unreadable: { count: 1, stacks: ['db'] } });
+    });
+
+    it('accepts the summary of a remote that predates the unreadable bucket', async () => {
+      const row = await remoteRow(base);
+      expect(row?.status).toBe('ok');
+      expect(row?.summary).not.toHaveProperty('unreadable');
+    });
+
+    it('rejects a remote summary whose unreadable bucket is malformed', async () => {
+      for (const bad of [null, { count: 'one', stacks: [] }, { count: 1 }, 'db']) {
+        const row = await remoteRow({ ...base, unreadable: bad });
+        expect(row?.status).toBe('error');
+        expect(row?.error).toBe('Remote returned an unexpected summary payload');
+      }
+    });
+  });
+
   describe('GET /api/fleet/dependency-map?nodeId=', () => {
     const graph = { nodes: [{ id: 'host', kind: 'host', label: 'x', stack: null, state: null, flags: [] }], edges: [], flags: [], parseErrors: [] };
 

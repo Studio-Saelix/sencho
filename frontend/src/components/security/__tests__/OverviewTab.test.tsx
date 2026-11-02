@@ -106,7 +106,9 @@ function Harness({ data, onNavigate, onInspect, reload }: {
       overview={data}
       loadError={null}
       trend={[]}
+      trendState="ready"
       exploitIntel={[]}
+      exploitIntelState="ready"
       exploitTruncated={false}
       onNavigate={onNavigate}
       onInspect={onInspect}

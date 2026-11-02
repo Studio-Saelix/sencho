@@ -33,6 +33,7 @@ import {
   SERVICE_SCOPED_UPDATE_CAPABILITY,
   SERVICE_SCOPED_STACK_ALERT_CAPABILITY,
   SCOPED_STACK_AUTH_EVIDENCE_CAPABILITY,
+  AGENT_OBSERVATION_CAPABILITY,
   HOST_USAGE_UNKNOWN_HEADER,
   HOST_USAGE_UNKNOWN_HEADER_VALUE,
 } from '../services/CapabilityRegistry';
@@ -566,6 +567,30 @@ export function createRemoteProxyMiddleware(): RequestHandler {
             error: preflight.message,
             errorClass: preflight.errorClass,
             code: preflight.code,
+          });
+          return;
+        }
+      }
+
+      // Agent observation needs the node's own projection routes. A remote
+      // without the capability answers `capability_unavailable` here, BEFORE the
+      // mixed-version RBAC gate: an old node would otherwise answer the new
+      // paths with the RBAC gate's codless 403, which reads as "this user may
+      // not" instead of "upgrade this node". The probe is tri-state so a node
+      // that merely did not answer is reported as down, not as too old.
+      if (isAgentObservationRoute(req.method, req.path)) {
+        const capability = await probeRemoteCapability(req.nodeId, AGENT_OBSERVATION_CAPABILITY);
+        if (capability.kind === 'unsupported') {
+          res.status(400).json({
+            error: `Remote node "${node.name}" does not support AI agent observation. Upgrade it before connecting an AI client to it.`,
+            code: 'capability_unavailable',
+          });
+          return;
+        }
+        if (capability.kind !== 'supported') {
+          res.status(503).json({
+            error: `Remote node "${node.name}" did not give a usable answer, so its observation data cannot be read right now. Check that the node is online and reachable, then try again.`,
+            code: 'node_unreachable',
           });
           return;
         }
@@ -1136,6 +1161,22 @@ function isServiceScopedUpdateRoute(req: Request): boolean {
     return /^\/stacks\/[^/]+\/services\/[^/]+\/(?:update|restore)$/.test(req.path);
   }
   return false;
+}
+
+/**
+ * The per-node agent observation projections (path is post-/api strip).
+ *
+ * Trailing slashes are normalized first: Express matches them, so the remote
+ * must be gated on the same set the local routers accept. The fleet observation
+ * routes are not listed because `/api/fleet/` never reaches this proxy.
+ */
+function isAgentObservationRoute(method: string, path: string): boolean {
+  const upper = method.toUpperCase();
+  if (upper !== 'GET' && upper !== 'HEAD') return false;
+  // Express matches routes case-insensitively, so the gate must too.
+  const normalized = (path.split('?')[0] ?? path).replace(/\/+$/, '').toLowerCase();
+  return normalized === '/stacks/platform/observation'
+    || /^\/stacks\/[^/]+\/observation\/(?:status|readiness)$/.test(normalized);
 }
 
 /** POST /alerts (path is post-/api strip). */

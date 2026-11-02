@@ -14,8 +14,8 @@ import {
 } from './securityPosture';
 import { classifyImageRemediation, type RemediationFindingInput } from './securityImageRemediation';
 import { ImageUpdateService } from './ImageUpdateService';
-import { buildExposedImageMap, type StackExposure } from './preflight/exposure';
-import { buildSecurityExposureTargets } from './securityExposureTargets';
+import { buildExposedImageMap } from './preflight/exposure';
+import { buildSecurityExposureTargets, readSettledExposures } from './securityExposureTargets';
 import {
   classifyExposedImages,
   collectKevDrivers,
@@ -227,11 +227,8 @@ export function buildSecurityOverview(nodeId: number): SecurityOverviewResponse 
     // Network-exposed image classification from cached Compose descriptors.
     // Intentional exposure is risk context, never an independent Action-needed
     // blocker. Package fixed_version alone cannot manufacture exposed blockers.
-    const exposures = db.getStackExposures(nodeId);
-    const parsedExposures: StackExposure[] = exposures.map((r) => {
-      try { return JSON.parse(r.descriptor) as StackExposure; } catch { return null; }
-    }).filter((e): e is StackExposure => e !== null);
-    const exposedMap = buildExposedImageMap(parsedExposures);
+    const settledExposures = readSettledExposures(nodeId, db.getStackExposures(nodeId));
+    const exposedMap = buildExposedImageMap(settledExposures);
 
     const unsuppressedByImage = new Map<string, Array<{ vulnerability_id: string }>>();
     const exposedImageRefs = new Set<string>();
@@ -247,7 +244,7 @@ export function buildSecurityOverview(nodeId: number): SecurityOverviewResponse 
 
     const allExposedTargets = buildSecurityExposureTargets({
       nodeId: nodeId,
-      exposures: parsedExposures,
+      exposures: settledExposures,
       qualifyingImageRefs: exposedImageRefs,
     });
     const targetsByImage = new Map<string, PostureTarget[]>();

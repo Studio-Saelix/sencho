@@ -7,6 +7,7 @@ import type {
 } from './DockerController';
 import { FileSystemService } from './FileSystemService';
 import { parseComposeDependencies } from '../helpers/composeDependencyParse';
+import { fixedPorts } from '../helpers/composePortSpec';
 import type { DeclaredCompose } from '../helpers/composeDependencyParse';
 
 export type DepNodeKind = 'host' | 'stack' | 'service' | 'network' | 'volume' | 'port';
@@ -363,8 +364,8 @@ export function assembleGraph(input: AssembleInput): LocalDependencyGraph {
       const sid = serviceId(stack, svc.name);
       addNode({ id: sid, kind: 'service', label: svc.name, nodeId, nodeName, stack, managedStatus: 'managed', state: 'absent', flags: [] });
       addEdge({ id: `e:${stackId(stack)}-${sid}`, source: stackId(stack), target: sid, kind: 'stack-service' });
-      // Declared ports still count as conflict claimants.
-      for (const p of svc.ports) portClaims.push({ stack, service: svc.name, hostIp: p.hostIp, publishedPort: p.publishedPort, protocol: p.protocol });
+      // Declared ports with a known number still count as conflict claimants.
+      for (const p of fixedPorts(svc.ports)) portClaims.push({ stack, service: svc.name, hostIp: p.hostIp, publishedPort: p.publishedPort, protocol: p.protocol });
     }
 
     // depends-on edges (declared).

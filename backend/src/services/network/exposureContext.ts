@@ -26,7 +26,7 @@ export function getExposureContext(nodeId: number, stackName: string): ExposureC
     const db = DatabaseService.getInstance();
     const rows = db.getStackExposureIntents(nodeId, stackName);
     const stackIntent = rows.find((r) => r.service === '')?.intent ?? null;
-    const serviceIntents: Record<string, ExposureIntent> = {};
+    const serviceIntents = Object.create(null) as Record<string, ExposureIntent>;
     for (const r of rows) if (r.service !== '') serviceIntents[r.service] = r.intent;
 
     const accessUrls = db.getStackDossier(nodeId, stackName)?.access_urls ?? '';

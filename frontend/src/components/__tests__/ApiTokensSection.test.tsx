@@ -7,6 +7,7 @@
  */
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { render, screen, waitFor, fireEvent } from '@testing-library/react';
+import userEvent from '@testing-library/user-event';
 
 vi.mock('@/lib/api', () => ({
   apiFetch: vi.fn(),
@@ -104,5 +105,54 @@ describe('ApiTokensSection load behavior', () => {
 
     expect(await screen.findByText('No API tokens yet')).toBeInTheDocument();
     expect(screen.queryByText("Couldn't load API tokens")).toBeNull();
+  });
+
+  it('offers Observe Only with a required expiry and sends a 90-day one', async () => {
+    mockedFetch.mockImplementation(async (_url: string, init?: { method?: string }) => {
+      if (init?.method === 'POST') {
+        return { ok: true, json: async () => ({ id: 7, token: 'sen_sk_generated' }) };
+      }
+      return { ok: true, json: async () => [] };
+    });
+
+    render(<ApiTokensSection />);
+    fireEvent.click(screen.getByRole('button', { name: /Create token/ }));
+
+    const [scopeCombobox, expiryCombobox] = screen.getAllByRole('combobox');
+    await userEvent.click(scopeCombobox);
+    await userEvent.click(await screen.findByRole('button', { name: /Observe Only/ }));
+
+    // The scope cannot fall back to "no expiration", and the default expiry is
+    // already chosen so a create click cannot send null.
+    expect(expiryCombobox).toHaveTextContent('90 days');
+    await userEvent.click(expiryCombobox);
+    expect(screen.queryByRole('button', { name: 'No expiration' })).toBeNull();
+    await userEvent.click(await screen.findByRole('button', { name: '60 days' }));
+    await userEvent.keyboard('{Escape}');
+
+    fireEvent.change(screen.getByPlaceholderText('CI deploy pipeline'), { target: { value: 'claude-desktop' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Create' }));
+
+    await waitFor(() => {
+      const post = mockedFetch.mock.calls.find(([, init]) => (init as { method?: string } | undefined)?.method === 'POST');
+      expect(post).toBeDefined();
+      expect(JSON.parse((post![1] as { body: string }).body)).toEqual({
+        name: 'claude-desktop',
+        scope: 'observe-only',
+        expires_in: 60,
+      });
+    });
+  });
+
+  it('labels an Observe Only row with its own badge', async () => {
+    mockedFetch.mockResolvedValue({
+      ok: true,
+      json: async () => [tokenRow({ id: 9, name: 'agent', scope: 'observe-only', expires_at: Date.now() + 86_400_000 })],
+    });
+
+    render(<ApiTokensSection />);
+
+    expect(await screen.findByText('agent')).toBeInTheDocument();
+    expect(screen.getByText('Observe Only')).toBeInTheDocument();
   });
 });

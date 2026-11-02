@@ -519,7 +519,7 @@ export function NetworkingView({ headerActions }: NetworkingViewProps) {
             <CardContent className="p-4">
               <p className="font-mono text-[10px] uppercase tracking-[0.18em] text-stat-subtitle">Exposure without intent</p>
               {unclassifiedExposureNetworks.length === 0 ? (
-                <p className="mt-2 text-sm text-stat-subtitle">Every publishing service has a classified intent.</p>
+                <p className="mt-2 text-sm text-stat-subtitle">Every exposed service has a classified intent.</p>
               ) : (
                 <ul className="mt-2 space-y-1 text-sm">
                   {unclassifiedExposureNetworks.slice(0, 5).map((n) => (

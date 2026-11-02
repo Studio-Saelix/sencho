@@ -30,9 +30,13 @@ export interface NetworkFactNetwork {
 export interface NetworkFactPort {
   /** '' / '0.0.0.0' / '::' means all interfaces. */
   hostIp: string;
+  /** First host port, or 0 when `dynamic`. */
   startPort: number;
+  /** Last host port, or 0 when `dynamic`. */
   endPort: number;
   protocol: string;
+  /** Docker assigns the host port at start, so no number is known. Older nodes never send it. */
+  dynamic?: true;
   /** Bound on every interface (broad exposure). */
   allInterfaces: boolean;
   /** Bound only to loopback (127.0.0.1 / ::1). */
@@ -47,6 +51,8 @@ export interface NetworkFactService {
   publishedPorts: NetworkFactPort[];
   networkMode?: string;
   extraHosts: string[];
+  /** The strongest tunnel path reaching this service, when a connector in the stack reaches it. */
+  tunnel?: import('./tunnelDetection').ServiceTunnelExposure;
 }
 
 /** Runtime-vs-Compose disagreements, computed only when the runtime is available. */
@@ -68,7 +74,7 @@ export type NetworkRuntimeState = 'available' | 'unavailable';
  * Kept a flat DTO (the frontend mirrors it) rather than a discriminated union;
  * the pairing invariants are enforced by the single producer
  * (`assembleStackNetworkFacts`), not by the type: when `renderable` is false,
- * `renderError` is set and `networks`/`services`/`drift` are empty; when
+ * `renderError` is set and `networks`/`services`/`drift`/`tunnels` are empty; when
  * `runtime` is `'unavailable'`, `drift` is empty (never computed against an
  * absent snapshot).
  */
@@ -88,4 +94,9 @@ export interface StackNetworkFacts {
    * unavailable or the model is not renderable (use `runtime` / `renderable`).
    */
   missingExternalNetworks: import('./missingExternalNetworks').MissingExternalNetwork[];
+  /**
+   * Tunnel and private-overlay connectors (Cloudflare Tunnel, Tailscale,
+   * WireGuard) and the services each one reaches. Empty when not renderable.
+   */
+  tunnels: import('./tunnelDetection').TunnelConnector[];
 }

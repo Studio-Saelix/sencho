@@ -35,6 +35,7 @@ export const CAPABILITIES = [
   'compose-networking',
   'env-inventory',
   'container-label-inventory',
+  'sencho-labels-v1',
   'project-env-files',
   'compose-storage',
   'cross-node-rbac',
@@ -58,6 +59,7 @@ export const CAPABILITIES = [
   // both sides so a gate can be expressed at all.
   'volume-protection-v1',
   'host-usage-unknown-v1',
+  'agent-observation-v1',
 ] as const;
 
 export type Capability = (typeof CAPABILITIES)[number];

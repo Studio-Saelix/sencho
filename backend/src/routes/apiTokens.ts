@@ -1,6 +1,6 @@
 import { Router, type Request, type Response } from 'express';
 import crypto from 'crypto';
-import { DatabaseService, type ApiTokenScope } from '../services/DatabaseService';
+import { API_TOKEN_SCOPES, DatabaseService, type ApiTokenScope } from '../services/DatabaseService';
 import { authMiddleware } from '../middleware/auth';
 import { requirePermission } from '../middleware/permissions';
 import { rejectApiTokenScope } from '../middleware/apiTokenScope';
@@ -27,7 +27,7 @@ apiTokensRouter.post('/', authMiddleware, async (req: Request, res: Response): P
       res.status(400).json({ error: 'Token name must be 100 characters or fewer.' });
       return;
     }
-    const validScopes = ['read-only', 'deploy-only', 'full-admin'];
+    const validScopes: readonly string[] = API_TOKEN_SCOPES;
     if (!scope || !validScopes.includes(scope)) {
       res.status(400).json({ error: `Scope must be one of: ${validScopes.join(', ')}` });
       return;
@@ -35,6 +35,13 @@ apiTokensRouter.post('/', authMiddleware, async (req: Request, res: Response): P
     const validExpiry = [30, 60, 90, 365];
     if (expires_in !== undefined && expires_in !== null && !validExpiry.includes(expires_in)) {
       res.status(400).json({ error: `expires_in must be one of: ${validExpiry.join(', ')} (days), or null for no expiry.` });
+      return;
+    }
+    // An agent credential is the one scope handed to software no human watches,
+    // so it must expire. A non-expiring observer token would outlive its reason
+    // to exist with nothing but revocation to stop it.
+    if (scope === 'observe-only' && (expires_in === undefined || expires_in === null)) {
+      res.status(400).json({ error: `An Observe Only token must expire; expires_in must be one of: ${validExpiry.join(', ')} (days).` });
       return;
     }
     const expiresAt = typeof expires_in === 'number' ? Date.now() + expires_in * 24 * 60 * 60 * 1000 : null;

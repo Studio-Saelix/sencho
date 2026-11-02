@@ -29,7 +29,7 @@ Every self-hosted instance includes the full security stack. Some advanced gover
 </Card>
 
 <Card title="API tokens" icon="key" href="/features/api-tokens">
-  Scoped tokens for CI/CD with three permission levels, hashed storage, and configurable expiry.
+  Scoped tokens for CI/CD with four permission levels, hashed storage, and configurable expiry.
 </Card>
 
 <Card title="Role-based access control" icon="users" href="/features/rbac">
@@ -150,17 +150,18 @@ During the MFA challenge, a separate short-lived session (5-minute window) restr
 
 ## API tokens
 
-API tokens provide scoped, long-lived access for CI/CD pipelines and automation scripts. Three permission levels control what a token can do:
+API tokens provide scoped, long-lived access for CI/CD pipelines and automation scripts. Four permission levels control what a token can do:
 
 | Scope | Allowed operations |
 |-------|--------------------|
+| **Observe Only** | Exactly five read-only observation endpoints, for MCP clients and other AI observers |
 | **Read Only** | GET requests only |
 | **Deploy Only** | Everything in Read Only, plus deploy, down, restart, stop, start, and update |
 | **Full Admin** | All API operations |
 
 Regardless of scope, tokens are universally blocked from sensitive operations: password and MFA management, user administration, SSO configuration, node management, license management, token management, registry credentials, console access, Snapshot Vault, and image channel management.
 
-Tokens are cryptographically hashed before storage; the raw value is shown exactly once at creation. Each token tracks its last-used timestamp for auditing. You can configure expiry at 30, 60, 90, or 365 days, or leave it open-ended. A maximum of 25 active tokens are allowed per user.
+Tokens are cryptographically hashed before storage; the raw value is shown exactly once at creation. Each token tracks its last-used timestamp for auditing. You can configure expiry at 30, 60, 90, or 365 days, or leave it open-ended; an Observe Only token must have an expiry. A maximum of 25 active tokens are allowed per user.
 
 <Frame>
   <img src="/images/api-tokens/api-tokens-populated.png" alt="API tokens management showing active tokens with scope badges" />

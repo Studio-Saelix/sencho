@@ -29,7 +29,7 @@ function writeStack(stack: string, files: Record<string, string>): void {
   for (const [name, content] of Object.entries(files)) fs.writeFileSync(path.join(dir, name), content);
 }
 
-function stubRender(serviceLabels: Record<string, Record<string, string>> | null): void {
+function stubRender(serviceLabels: Record<string, Record<string, string> | string[]> | null): void {
   const rendered = serviceLabels === null
     ? null
     : JSON.stringify({
@@ -406,6 +406,195 @@ describe('buildStackLabelInventory', () => {
   });
 });
 
+describe('io.sencho.* behavior annotations', () => {
+  it('reports the protective infrastructure label for the file and for each deployed copy', async () => {
+    writeStack('sl0', { 'compose.yaml': 'services:\n  proxy:\n    image: nginx\n' });
+    stubRender({ proxy: { 'io.sencho.infrastructure': 'true' }, bad: { 'io.sencho.infrastructure': 'yes' } });
+    stubDockerList([
+      {
+        id: 'c1', name: 'sl0-proxy-1', state: 'running', stack: 'sl0', service: 'proxy', imageId: 'img1',
+        labels: { 'io.sencho.infrastructure': 'true' },
+      },
+      {
+        id: 'c2', name: 'sl0-old-1', state: 'running', stack: 'sl0', service: 'old', imageId: 'img1',
+        labels: { 'io.sencho.infrastructure': 'maybe' },
+      },
+    ]);
+    const inv = await buildStackLabelInventory(nodeId, 'sl0');
+    const declared = (service: string) => Object.fromEntries(
+      (inv.services.find(s => s.service === service)?.declaredLabels ?? []).map(l => [l.key, l.behavior]),
+    );
+    expect(declared('proxy')['io.sencho.infrastructure']).toMatchObject({ state: 'active' });
+    expect(declared('bad')['io.sencho.infrastructure']).toMatchObject({
+      state: 'invalid',
+      reason: expect.stringContaining('The only accepted value is true'),
+    });
+    // A service the file no longer holds, whose container still carries the label: honored, never inert.
+    const oldCopy = inv.services.find(s => s.service === 'old')?.replicas[0].runtimeLabels
+      .find(l => l.key === 'io.sencho.infrastructure')?.behavior;
+    expect(oldCopy).toMatchObject({ state: 'invalid', reason: expect.stringContaining('protected anyway') });
+  });
+
+  it('marks declared labels active or invalid and image or runtime copies inert', async () => {
+    writeStack('sl1', { 'compose.yaml': 'services:\n  web:\n    image: nginx\n' });
+    stubRender({
+      web: {
+        'io.sencho.url': 'https://app.example.com',
+        'io.sencho.order': 'first',
+        'io.sencho.future': 'x',
+      },
+    });
+    stubDockerList([
+      {
+        id: 'c1', name: 'sl1-web-1', state: 'running', stack: 'sl1', service: 'web', imageId: 'img1',
+        labels: {
+          'io.sencho.url': 'https://app.example.com',
+          'io.sencho.hidden': 'true',
+          'io.sencho.image-only': 'y',
+        },
+      },
+    ], { images: { img1: { 'io.sencho.image-only': 'y' } } });
+    const inv = await buildStackLabelInventory(nodeId, 'sl1');
+    const web = inv.services.find(s => s.service === 'web');
+    const declared = Object.fromEntries((web?.declaredLabels ?? []).map(l => [l.key, l.behavior]));
+    expect(declared['io.sencho.url']).toMatchObject({ state: 'active' });
+    expect(declared['io.sencho.order']).toMatchObject({ state: 'invalid', reason: 'Use a whole number such as 10.' });
+    expect(declared['io.sencho.future']).toMatchObject({ state: 'unsupported' });
+    const runtime = Object.fromEntries((web?.replicas[0].runtimeLabels ?? []).map(l => [l.key, l]));
+    // The runtime copy equal to the declaration is that declaration.
+    expect(runtime['io.sencho.url'].behavior?.state).toBe('active');
+    // Present only at runtime, or only in the image: visible but inert.
+    expect(runtime['io.sencho.hidden'].behavior?.state).toBe('inert');
+    expect(runtime['io.sencho.image-only'].behavior?.state).toBe('inert');
+  });
+
+  it('keeps every io.sencho.* label inert when the model did not render', async () => {
+    writeStack('sl2', { 'compose.yaml': 'services:\n  web:\n    image: nginx\n' });
+    stubRender(null);
+    stubDockerList([
+      {
+        id: 'c1', name: 'sl2-web-1', state: 'running', stack: 'sl2', service: 'web', imageId: 'img1',
+        labels: { 'io.sencho.url': 'https://runtime.example.com', 'other.label': '1' },
+      },
+    ]);
+    const inv = await buildStackLabelInventory(nodeId, 'sl2');
+    const labels = inv.services.find(s => s.service === 'web')?.replicas[0].runtimeLabels ?? [];
+    expect(labels.find(l => l.key === 'io.sencho.url')?.behavior).toMatchObject({ state: 'inert' });
+    expect(labels.find(l => l.key === 'other.label')?.behavior).toBeUndefined();
+  });
+
+  it('reads list-syntax labels, a bare key, and the last duplicate the same way the audit does', async () => {
+    writeStack('sl3', { 'compose.yaml': 'services:\n  web:\n    image: nginx\n' });
+    stubRender({ web: ['io.sencho.url=https://a.example.com', 'io.sencho.url=https://b.example.com', 'io.sencho.hidden', 'plain=1'] });
+    stubDockerList([]);
+    const inv = await buildStackLabelInventory(nodeId, 'sl3');
+    const declared = Object.fromEntries((inv.services.find(s => s.service === 'web')?.declaredLabels ?? []).map(l => [l.key, l]));
+    expect(declared['io.sencho.url'].value).toBe('https://b.example.com');
+    expect(declared['io.sencho.url'].behavior?.state).toBe('active');
+    // A bare list item is an empty value: declared, but not a boolean.
+    expect(declared['io.sencho.hidden'].value).toBe('');
+    expect(declared['io.sencho.hidden'].behavior?.state).toBe('invalid');
+    expect(declared['plain'].behavior).toBeUndefined();
+  });
+
+  it('judges each replica of a service on its own value against the one declaration', async () => {
+    writeStack('sl4', { 'compose.yaml': 'services:\n  web:\n    image: nginx\n' });
+    stubRender({ web: { 'io.sencho.hidden': 'true' } });
+    stubDockerList([
+      { id: 'r1', name: 'sl4-web-1', state: 'running', stack: 'sl4', service: 'web', imageId: 'img1', labels: { 'io.sencho.hidden': 'true' } },
+      { id: 'r2', name: 'sl4-web-2', state: 'running', stack: 'sl4', service: 'web', imageId: 'img1', labels: { 'io.sencho.hidden': 'false' } },
+    ]);
+    const inv = await buildStackLabelInventory(nodeId, 'sl4');
+    const replicas = inv.services.find(s => s.service === 'web')?.replicas ?? [];
+    const behaviors = replicas.map(r => r.runtimeLabels.find(l => l.key === 'io.sencho.hidden')?.behavior);
+    expect(behaviors[0]?.state).toBe('active');
+    expect(behaviors[1]?.state).toBe('inert');
+    // The declared key exists, so the stale copy is told to recreate, not to declare it.
+    expect(behaviors[1]?.reason).toContain('recreate the container');
+  });
+
+  it('treats a rendered $$ and the container\'s single $ as the same declaration', async () => {
+    writeStack('sl5', { 'compose.yaml': 'services:\n  web:\n    image: nginx\n' });
+    stubRender({ web: { 'io.sencho.url': 'https://a.example.com/?x=$$y', 'other.label': 'a$$b' } });
+    stubDockerList([
+      { id: 'c1', name: 'sl5-web-1', state: 'running', stack: 'sl5', service: 'web', imageId: 'img1', labels: { 'io.sencho.url': 'https://a.example.com/?x=$y', 'other.label': 'a$b' } },
+    ]);
+    const inv = await buildStackLabelInventory(nodeId, 'sl5');
+    const runtime = Object.fromEntries((inv.services.find(s => s.service === 'web')?.replicas[0].runtimeLabels ?? []).map(l => [l.key, l]));
+    expect(runtime['io.sencho.url'].source).toBe('compose');
+    expect(runtime['io.sencho.url'].behavior?.state).toBe('active');
+    expect(runtime['other.label'].source).toBe('compose');
+    // Reconciliation compares the value the container carries, not the rendered $$.
+    const replica = inv.services.find(s => s.service === 'web')?.replicas[0];
+    expect(replica?.inBoth).toEqual(['io.sencho.url', 'other.label']);
+    expect(replica?.changed).toEqual([]);
+  });
+
+  it('still reports a container value that differs from the rendered one as changed, including a literal $$', async () => {
+    writeStack('sl5b', { 'compose.yaml': 'services:\n  web:\n    image: nginx\n' });
+    stubRender({ web: { 'stale.label': 'a$$b', 'other.label': 'a$$b', 'same.label': 'plain' } });
+    stubDockerList([
+      { id: 'c1', name: 'sl5b-web-1', state: 'running', stack: 'sl5b', service: 'web', imageId: 'img1', labels: { 'stale.label': 'a$$b', 'other.label': 'a$c', 'same.label': 'plain' } },
+    ]);
+    const inv = await buildStackLabelInventory(nodeId, 'sl5b');
+    const replica = inv.services.find(s => s.service === 'web')?.replicas[0];
+    // A container that carries `$$` itself does not match a rendered `$$`, which stands for a single `$`.
+    expect(replica?.inBoth).toEqual(['same.label']);
+    expect(replica?.changed).toEqual(['other.label', 'stale.label']);
+  });
+
+  it('names an unrenderable stack as the reason for every io.sencho.* label and never activates one', async () => {
+    writeStack('sl6', { 'compose.yaml': 'services:\n  web:\n    image: nginx\n' });
+    stubRender({ web: { 'io.sencho.url': 'https://a.example.com' } });
+    vi.spyOn(ComposeService, 'getInstance').mockReturnValue({
+      renderConfig: vi.fn().mockResolvedValue({ rendered: 'not json', stderr: '', code: 0, timedOut: false }),
+    } as unknown as ComposeService);
+    stubDockerList([
+      { id: 'c1', name: 'sl6-web-1', state: 'running', stack: 'sl6', service: 'web', imageId: 'img1', labels: { 'io.sencho.url': 'https://a.example.com' } },
+    ]);
+    const inv = await buildStackLabelInventory(nodeId, 'sl6');
+    const labels = inv.services.find(s => s.service === 'web')?.replicas[0].runtimeLabels ?? [];
+    expect(labels.find(l => l.key === 'io.sencho.url')?.behavior).toMatchObject({ state: 'inert', reason: expect.stringContaining('could not be rendered') });
+  });
+
+  it('keeps a node-wide presentation label inert and marks a Sencho-set key as Sencho\'s own', async () => {
+    stubDockerList([
+      {
+        id: 'c1', name: 'a-1', state: 'running', stack: 'a', service: 'web', imageId: 'img1',
+        labels: { 'io.sencho.url': 'https://runtime.example.com', 'io.sencho.mesh': 'true', 'plain': '1' },
+      },
+    ]);
+    const inv = await buildNodeLabelInventory(nodeId);
+    const labels = inv.containers[0].labels;
+    expect(labels.find(l => l.key === 'io.sencho.url')?.behavior?.state).toBe('inert');
+    expect(labels.find(l => l.key === 'io.sencho.mesh')?.behavior).toMatchObject({ state: 'inert', reason: expect.stringContaining('Set by Sencho') });
+    expect(labels.find(l => l.key === 'plain')?.behavior).toBeUndefined();
+    expect(inv.byLabel.find(r => r.key === 'io.sencho.url')?.behavior?.state).toBe('inert');
+    // The node-wide view has no Compose model, so its reason points at the stack view instead of claiming the label is undeclared.
+    expect(labels.find(l => l.key === 'io.sencho.url')?.behavior?.reason).toContain('Compose Labels view');
+  });
+
+  it('reports the protective infrastructure label from deployed containers as the guard reads it', async () => {
+    stubDockerList([
+      {
+        id: 'c1', name: 'a-1', state: 'running', stack: 'a', service: 'proxy', imageId: 'img1',
+        labels: { 'io.sencho.infrastructure': 'true' },
+      },
+      {
+        id: 'c2', name: 'a-2', state: 'running', stack: 'a', service: 'other', imageId: 'img1',
+        labels: { 'io.sencho.infrastructure': 'maybe' },
+      },
+    ]);
+    const inv = await buildNodeLabelInventory(nodeId);
+    const behaviorOf = (containerIndex: number) => inv.containers[containerIndex].labels
+      .find(l => l.key === 'io.sencho.infrastructure')?.behavior;
+    expect(behaviorOf(0)).toMatchObject({ state: 'active', reason: expect.stringContaining('protects that container') });
+    expect(behaviorOf(1)).toMatchObject({ state: 'invalid', reason: expect.stringContaining('The only accepted value is true') });
+    const row = inv.byLabel.filter(r => r.key === 'io.sencho.infrastructure');
+    expect(row.map(r => r.behavior?.state).sort()).toEqual(['active', 'invalid']);
+  });
+});
+
 describe('GET /api/system/container-labels', () => {
   it('requires authentication', async () => {
     const res = await request(app).get('/api/system/container-labels');
@@ -570,5 +759,139 @@ describe('GET /api/fleet/container-labels', () => {
     } finally {
       db.deleteNode(remoteId);
     }
+  });
+  describe('remote io.sencho.* behavior', () => {
+    const containers = [{ id: 'c', name: 'n', stack: 's', service: 'web' }];
+    const row = (extra: Record<string, unknown>) => ({ key: 'io.sencho.url', value: 'https://x.example.com', source: 'runtime', containers, ...extra });
+    const respondWith = (inventories: Record<string, unknown>) => {
+      vi.spyOn(globalThis, 'fetch').mockImplementation(async (input: Parameters<typeof fetch>[0]) => {
+        const host = new URL(typeof input === 'string' ? input : input instanceof URL ? input.href : input.url).hostname;
+        return new Response(JSON.stringify(inventories[host]), { status: 200, headers: { 'content-type': 'application/json' } });
+      });
+    };
+    const payload = (nodeId: number, byLabel: unknown[], labelContainers: unknown[] = []) =>
+      ({ nodeId, containers: labelContainers, partial: false, generatedAt: 0, byLabel });
+    const addRemote = (name: string, host: string) => {
+      const db = DatabaseService.getInstance();
+      const id = db.addNode({ name, type: 'remote', compose_dir: '/app/compose', is_default: false, api_url: `http://${host}`, api_token: 't' });
+      return id;
+    };
+    const fetchFleet = () => request(app).get('/api/fleet/container-labels').set('Cookie', authCookie);
+    const rowsOf = (body: { aggregatedByLabel: Array<{ key: string; value: string; behavior?: { state: string; reason?: string } }> }) => body.aggregatedByLabel;
+
+    it('keeps a remote row\'s behavior and accepts an older node that sends none', async () => {
+      stubDockerList([]);
+      const remoteId = addRemote('remote-beh', 'new.invalid');
+      vi.spyOn(NodeRegistry.getInstance(), 'getProxyTarget').mockImplementation((id: number) => id === remoteId ? { apiUrl: 'http://new.invalid', apiToken: 't', trustedLoopback: false } : null);
+      try {
+        respondWith({ 'new.invalid': payload(remoteId, [
+          row({ behavior: { state: 'inert', reason: 'Present only on the running container.' } }),
+          { key: 'plain', value: '1', source: 'runtime', containers },
+        ]) });
+        const res = await fetchFleet();
+        expect(res.body.nodeErrors[remoteId]).toBeUndefined();
+        expect(rowsOf(res.body).find(r => r.key === 'io.sencho.url')?.behavior?.state).toBe('inert');
+        expect(rowsOf(res.body).find(r => r.key === 'plain')?.behavior).toBeUndefined();
+      } finally {
+        DatabaseService.getInstance().deleteNode(remoteId);
+      }
+    });
+
+    it('sanitizes the same way through a Pilot loopback target', async () => {
+      stubDockerList([]);
+      const remoteId = addRemote('remote-pilot', 'pilot.invalid');
+      // A Pilot node is reached through a trusted loopback tunnel target, not a direct proxy.
+      vi.spyOn(NodeRegistry.getInstance(), 'getProxyTarget').mockImplementation((id: number) => id === remoteId ? {
+        apiUrl: 'http://pilot.invalid:1853', apiToken: '', trustedLoopback: true,
+      } : null);
+      try {
+        respondWith({ 'pilot.invalid': payload(remoteId, [
+          row({ behavior: { state: 'active', reason: 'x'.repeat(5000) } }),
+          {
+            key: 'io.sencho.infrastructure', value: 'true', source: 'runtime', containers,
+            behavior: { state: 'active', reason: 'Read from the deployed container, so it protects it.' },
+          },
+        ]) });
+        const res = await fetchFleet();
+        expect(res.body.nodeErrors[remoteId]).toBeUndefined();
+        const url = rowsOf(res.body).find(r => r.key === 'io.sencho.url');
+        expect(url?.behavior?.state).toBe('inert');
+        // The remote's oversized claim text is replaced, not merely truncated.
+        expect(url?.behavior?.reason).toContain('Present only on the running container');
+        expect(rowsOf(res.body).find(r => r.key === 'io.sencho.infrastructure')?.behavior).toMatchObject({ state: 'active' });
+      } finally {
+        DatabaseService.getInstance().deleteNode(remoteId);
+      }
+    });
+
+    it.each([
+      ['an unknown state', { state: 'trusted' }],
+      ['a string', 'active'],
+      ['a non-string reason', { state: 'inert', reason: 123 }],
+    ])('degrades %s to an unsupported row and keeps the node\'s whole inventory', async (_label, behavior) => {
+      stubDockerList([]);
+      const remoteId = addRemote('remote-bad', 'bad.invalid');
+      vi.spyOn(NodeRegistry.getInstance(), 'getProxyTarget').mockImplementation((id: number) => id === remoteId ? { apiUrl: 'http://bad.invalid', apiToken: 't', trustedLoopback: false } : null);
+      try {
+        respondWith({ 'bad.invalid': payload(remoteId, [
+          row({ behavior }),
+          { key: 'plain', value: '1', source: 'runtime', containers },
+        ], [{ id: 'c', name: 'n', stack: 's', service: 'web', state: 'running', labels: [{ key: 'io.sencho.url', value: 'v', source: 'runtime', behavior }] }]) });
+        const res = await fetchFleet();
+        expect(res.body.nodeErrors[remoteId]).toBeUndefined();
+        expect(rowsOf(res.body).find(r => r.key === 'io.sencho.url')?.behavior).toMatchObject({ state: 'unsupported' });
+        expect(rowsOf(res.body).find(r => r.key === 'plain')).toBeDefined();
+        const node = (res.body.nodes as Array<{ nodeId: number; inventory: { containers: Array<{ labels: Array<{ behavior?: { state: string } }> }> } }>).find(n => n.nodeId === remoteId);
+        expect(node?.inventory.containers[0].labels[0].behavior?.state).toBe('unsupported');
+      } finally {
+        DatabaseService.getInstance().deleteNode(remoteId);
+      }
+    });
+
+    it('drops a remote\'s active claim on a runtime-only label and replaces its text with the hub\'s own reason', async () => {
+      stubDockerList([]);
+      const remoteId = addRemote('remote-claim', 'claim.invalid');
+      vi.spyOn(NodeRegistry.getInstance(), 'getProxyTarget').mockImplementation((id: number) => id === remoteId ? { apiUrl: 'http://claim.invalid', apiToken: 't', trustedLoopback: false } : null);
+      try {
+        respondWith({ 'claim.invalid': payload(remoteId, [
+          row({ behavior: { state: 'active', reason: 'y'.repeat(5000), extra: { nested: true } } }),
+        ]) });
+        const res = await fetchFleet();
+        const behavior = rowsOf(res.body).find(r => r.key === 'io.sencho.url')?.behavior;
+        expect(behavior?.state).toBe('inert');
+        // The node's claim is dropped, so its text cannot describe a state the audit does not show.
+        expect(behavior?.reason).toContain('Present only on the running container');
+        expect(behavior?.reason?.length).toBeLessThan(240);
+        expect(JSON.stringify(behavior)).not.toContain('nested');
+        expect(JSON.stringify(behavior)).not.toContain('yyyy');
+      } finally {
+        DatabaseService.getInstance().deleteNode(remoteId);
+      }
+    });
+
+    it('shows the same status whichever node reports a row first when versions differ', async () => {
+      stubDockerList([]);
+      const oldId = addRemote('remote-old', 'old.invalid');
+      const newId = addRemote('remote-new', 'new2.invalid');
+      vi.spyOn(NodeRegistry.getInstance(), 'getProxyTarget').mockImplementation((id: number) =>
+        id === oldId ? { apiUrl: 'http://old.invalid', apiToken: 't', trustedLoopback: false }
+          : id === newId ? { apiUrl: 'http://new2.invalid', apiToken: 't', trustedLoopback: false } : null);
+      try {
+        respondWith({
+          'old.invalid': payload(oldId, [row({})]),
+          'new2.invalid': payload(newId, [row({ behavior: { state: 'inert', reason: 'Present only on the running container.' } })]),
+        });
+        const first = await fetchFleet();
+        // Reverse the node order so the newer node is merged first.
+        const realGetNodes = DatabaseService.getInstance().getNodes.bind(DatabaseService.getInstance());
+        vi.spyOn(DatabaseService.getInstance(), 'getNodes').mockImplementation(() => [...realGetNodes()].reverse());
+        const second = await fetchFleet();
+        expect(rowsOf(first.body).find(r => r.key === 'io.sencho.url')?.behavior?.state).toBe('inert');
+        expect(rowsOf(second.body).find(r => r.key === 'io.sencho.url')?.behavior?.state).toBe('inert');
+      } finally {
+        DatabaseService.getInstance().deleteNode(oldId);
+        DatabaseService.getInstance().deleteNode(newId);
+      }
+    });
   });
 });

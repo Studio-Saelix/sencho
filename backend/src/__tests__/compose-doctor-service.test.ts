@@ -212,6 +212,27 @@ describe('runPreflight', () => {
     expect(report.status).toBe('pass');
   });
 
+  it('carries the stack\'s Mesh opt-in into the tunnel connector note', async () => {
+    const model = {
+      name: STACK,
+      services: {
+        cloudflared: { image: 'cloudflare/cloudflared:2024.10.0', networks: { default: null } },
+        app: { image: 'example/app:1.0', networks: { default: null } },
+      },
+      networks: { default: { name: `${STACK}_default` } },
+      volumes: {},
+    };
+    const noteFor = async (meshEnabled: boolean) => {
+      stubDocker(model);
+      vi.spyOn(db(), 'isMeshStackEnabled').mockReturnValue(meshEnabled);
+      const report = await doctor().runPreflight(nodeId, STACK, 'tester');
+      vi.restoreAllMocks();
+      return report.findings.find(f => f.ruleId === 'tunnel-exposure')?.message ?? '';
+    };
+    expect(await noteFor(true)).toContain('It is also on the Sencho Mesh network');
+    expect(await noteFor(false)).not.toContain('Sencho Mesh');
+  });
+
   it('classifies a safe socket proxy as info instead of a high socket mount', async () => {
     stubDocker({
       name: STACK,

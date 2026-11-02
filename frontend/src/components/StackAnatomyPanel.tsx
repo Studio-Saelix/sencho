@@ -19,7 +19,8 @@ import { parseAnatomy, parseEnvKeys, formatGitSource, imageName, primaryPublishe
 import { SOURCE_STATE_LOOKUP } from '@/lib/gitopsState';
 import type { GitOpsSourceStatus } from '@/types/gitops';
 import { buildServiceUrl } from '@/lib/serviceUrl';
-import { resolvePublishedPortClick, tcpOwners, resolveInterpolatedHostPorts, type DisplayPortRow } from '@/lib/serviceUrlResolve';
+import { presentServices } from '@/lib/senchoLabels';
+import { resolvePublishedPortClick, senchoLabelsOf, tcpOwners, resolveInterpolatedHostPorts, type DisplayPortRow } from '@/lib/serviceUrlResolve';
 import { StackActivityTimeline } from './stack/StackActivityTimeline';
 import StackDossierPanel from './stack/StackDossierPanel';
 import DriftPanel from './stack/DriftPanel';
@@ -176,6 +177,19 @@ export default function StackAnatomyPanel({
   const preflightFp = useMemo(() => preflightFingerprint(preflightFindings), [preflightFindings]);
   const { dismissed: doctorDismissed } = useStackDismiss('doctor', stackName, activeNode?.id, preflightFp);
   const [activeTab, setActiveTab] = useState('anatomy');
+  // Hidden helpers collapse out of the Anatomy chips too, behind one toggle that
+  // reveals them in place, matching the stack's container list. That reveal is
+  // per selection: this panel stays mounted when the operator opens another
+  // stack or node, while the container list remounts per stack (its Show state
+  // dies with it), so the reveal collapses when either part of the selection
+  // changes. Adjusting during render means the next stack never paints revealed.
+  const revealIdentity = `${activeNode?.id ?? 'local'}:${stackName}`;
+  const [showHiddenServices, setShowHiddenServices] = useState(false);
+  const [revealIdentitySeen, setRevealIdentitySeen] = useState(revealIdentity);
+  if (revealIdentitySeen !== revealIdentity) {
+    setRevealIdentitySeen(revealIdentity);
+    setShowHiddenServices(false);
+  }
 
   useEffect(() => {
     if (requestedTab === 'networking' && networkingEnabled) setActiveTab('networking');
@@ -407,6 +421,12 @@ export default function StackAnatomyPanel({
 
   const bump = updatePreview?.summary.semver_bump ?? 'none';
   const hasUpdate = Boolean(updatePreview?.summary.has_update);
+  const servicePresentation = presentServices(anatomy?.services ?? [], senchoLabelsOf(serviceUrlEntry));
+  const hiddenServiceNames = servicePresentation.order.filter(s => servicePresentation.hidden.has(s));
+  const visibleServiceNames = showHiddenServices
+    ? servicePresentation.order
+    : servicePresentation.order.filter(s => !servicePresentation.hidden.has(s));
+
   const hasBuildServices = Boolean(updatePreview?.summary.has_build_services);
   const rebuildAvailable = Boolean(updatePreview?.summary.rebuild_available);
   const verificationError = updatePreview?.summary.verification_error ?? null;
@@ -550,11 +570,30 @@ export default function StackAnatomyPanel({
                 <span className="text-stat-subtitle">none defined</span>
               ) : (
                 <div className="flex flex-wrap gap-1">
-                  {anatomy.services.map(s => (
-                    <span key={s} className="rounded-md bg-brand/15 px-1.5 py-0.5 font-mono text-xs text-brand">
+                  {visibleServiceNames.map(s => (
+                    <span
+                      key={s}
+                      className={cn(
+                        'rounded-md bg-brand/15 px-1.5 py-0.5 font-mono text-xs text-brand',
+                        servicePresentation.hidden.has(s) && 'opacity-60',
+                      )}
+                      title={servicePresentation.hidden.has(s) ? 'Hidden from default lists by io.sencho.hidden' : undefined}
+                    >
                       {s}
                     </span>
                   ))}
+                  {hiddenServiceNames.length > 0 && (
+                    <button
+                      type="button"
+                      data-testid="anatomy-hidden-services-toggle"
+                      aria-pressed={showHiddenServices}
+                      onClick={() => setShowHiddenServices(prev => !prev)}
+                      title={showHiddenServices ? 'Hide services marked io.sencho.hidden' : 'Show services hidden by io.sencho.hidden'}
+                      className="rounded-md border border-hairline px-1.5 py-0.5 font-mono text-xs text-stat-subtitle transition-colors hover:text-foreground"
+                    >
+                      {showHiddenServices ? 'hide hidden' : `${hiddenServiceNames.length} hidden`}
+                    </button>
+                  )}
                 </div>
               )}
             </Row>

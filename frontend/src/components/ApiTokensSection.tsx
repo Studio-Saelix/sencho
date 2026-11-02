@@ -29,13 +29,22 @@ const SCOPE_LABELS: Record<string, string> = {
     'read-only': 'Read Only',
     'deploy-only': 'Deploy Only',
     'full-admin': 'Full Admin',
+    'observe-only': 'Observe Only',
 };
 
 const SCOPE_BADGE_VARIANT: Record<string, 'default' | 'secondary' | 'destructive'> = {
     'read-only': 'default',
     'deploy-only': 'secondary',
     'full-admin': 'destructive',
+    'observe-only': 'default',
 };
+
+/**
+ * Scopes whose token must expire. Observe Only is handed to an AI client, so it
+ * carries a required expiry; every other scope keeps the optional one.
+ */
+const SCOPE_REQUIRES_EXPIRY = new Set(['observe-only']);
+const OBSERVE_ONLY_DEFAULT_EXPIRY_DAYS = 90;
 
 function formatDate(ts: number): string {
     return new Date(ts).toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: 'numeric' });
@@ -65,6 +74,16 @@ export function ApiTokensSection() {
     const [formName, setFormName] = useState('');
     const [formScope, setFormScope] = useState('read-only');
     const [formExpiry, setFormExpiry] = useState<number | null>(null);
+    const expiryRequired = SCOPE_REQUIRES_EXPIRY.has(formScope);
+
+    const handleScopeChange = (scope: string) => {
+        setFormScope(scope);
+        // A required-expiry scope cannot fall back to "no expiration"; choosing
+        // it also sets the default so a create click cannot send null.
+        if (SCOPE_REQUIRES_EXPIRY.has(scope)) {
+            setFormExpiry(current => current ?? OBSERVE_ONLY_DEFAULT_EXPIRY_DAYS);
+        }
+    };
 
     const fetchTokens = async () => {
         try {
@@ -177,11 +196,18 @@ export function ApiTokensSection() {
                                     { value: 'read-only', label: 'Read Only - GET requests only' },
                                     { value: 'deploy-only', label: 'Deploy Only - read + deploy actions' },
                                     { value: 'full-admin', label: 'Full Admin - unrestricted access' },
+                                    { value: 'observe-only', label: 'Observe Only - read-only AI observation endpoints' },
                                 ]}
                                 value={formScope}
-                                onValueChange={setFormScope}
+                                onValueChange={handleScopeChange}
                                 placeholder="Select scope..."
                             />
+                            {expiryRequired && (
+                                <p className="text-xs text-muted-foreground">
+                                    An Observe Only token must expire. It can reach only the five read-only observation
+                                    endpoints, so it is safe to give an AI client.
+                                </p>
+                            )}
                         </div>
                         <div className="space-y-2">
                             <Label>Expiration</Label>
@@ -191,7 +217,7 @@ export function ApiTokensSection() {
                                     { value: '60', label: '60 days' },
                                     { value: '90', label: '90 days' },
                                     { value: '365', label: '1 year' },
-                                    { value: 'never', label: 'No expiration' },
+                                    ...(expiryRequired ? [] : [{ value: 'never', label: 'No expiration' }]),
                                 ]}
                                 value={formExpiry === null ? 'never' : String(formExpiry)}
                                 onValueChange={v => setFormExpiry(v === 'never' ? null : Number(v))}

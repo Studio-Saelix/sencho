@@ -163,6 +163,27 @@ describe('PreflightPanel', () => {
     expect(screen.queryByTestId('preflight-ack-btn-healthcheck-inherited-web')).not.toBeInTheDocument();
   });
 
+  it('renders a tunnel connector finding as a Note without acknowledgement and keeps All Clear', async () => {
+    vi.mocked(apiFetch).mockResolvedValue(jsonRes(report({
+      status: 'pass',
+      activeStatus: 'pass',
+      activeCount: 0,
+      findings: [{
+        ruleId: 'tunnel-exposure',
+        severity: 'info',
+        title: 'Cloudflare Tunnel connector "cloudflared" (public edge)',
+        message: 'Service "cloudflared" runs a Cloudflare Tunnel connector (public edge).',
+        service: 'cloudflared',
+      }],
+    })));
+    render(<PreflightPanel stackName="web" canEdit />);
+    const status = await screen.findByTestId('preflight-status');
+    expect(status).toHaveAttribute('data-status', 'pass');
+    expect(status).toHaveTextContent(/all clear/i);
+    expect(screen.getByTestId('preflight-notes-section')).toHaveTextContent(/Cloudflare Tunnel connector/);
+    expect(screen.queryByTestId('preflight-ack-btn-tunnel-exposure-cloudflared')).not.toBeInTheDocument();
+  });
+
   it('renders socket-proxy client findings as Notes without acknowledgement', async () => {
     vi.mocked(apiFetch).mockResolvedValue(jsonRes(report({
       status: 'pass',

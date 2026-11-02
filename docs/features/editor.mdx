@@ -218,7 +218,7 @@ Right-click copies the selected text, or pastes from the clipboard when nothing 
 
 - **Admin role required.** The button is rendered only for admin users.
 - **Container must be running.** The button is disabled for stopped containers, and the backend rejects exec attempts against non-running containers.
-- **API token scope.** API tokens with the `read-only` or `deploy-only` scope cannot open exec sessions. Only `full-admin` tokens are accepted.
+- **API token scope.** API tokens with the `observe-only`, `read-only`, or `deploy-only` scope cannot open exec sessions. Only `full-admin` tokens are accepted.
 
 ### Shell selection
 

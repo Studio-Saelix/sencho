@@ -6,19 +6,36 @@
  * finite whitelist of Docker socket-proxy API flags, whether the rendered
  * value is exactly `1` (stored as enabled flag names only). `command`,
  * `entrypoint`, and `DOCKER_HOST` are read for `tcp://` endpoint host names
- * only. Render errors are handled by the caller, not here.
+ * only, `command`/`entrypoint` for a fixed set of cloudflared subcommands, and
+ * `TS_EXTRA_ARGS` for two Tailscale forwarding flag names.
+ * `cap_add` names and `devices` host paths are kept. Render errors are handled
+ * by the caller, not here.
  */
 
+import { containerPortRange, isDynamicHostPort, isFixedHostPort, splitShortPortSpec } from '../../helpers/composePortSpec';
 import { classifyComposeHealthcheck } from '../../helpers/healthcheckPresence';
 import { serviceUrlFromLabels } from '../../helpers/serviceUrlLabel';
+import { cloudflaredCommandHints, tailscaleForwardFlags, type TailscaleForwardFlag } from '../network/tunnelDetection';
 
 /** A host-published port range declared by a service (start==end for one port). */
 export interface EffPortSpec {
+  /** First host port, or 0 when `dynamic`. */
   startPort: number;
+  /** Last host port, or 0 when `dynamic`. */
   endPort: number;
   /** '' / '0.0.0.0' / '::' means all interfaces. */
   hostIp: string;
   protocol: string;
+  /** Docker assigns the host port at start (container-only entry, empty or `0`
+   *  host port), so no number is known. The container is still published and
+   *  exposure counts it; conflict and documented-port checks skip the unknown
+   *  host number (`fixedPorts` in composePortSpec and `portsOf` in rules).
+   *  Drift matches it to the runtime container port by the target below. */
+  dynamic?: true;
+  /** Container port range this publication targets, for a `dynamic` entry.
+   *  Drift matches the running container's `privatePort` against it. */
+  targetStartPort?: number;
+  targetEndPort?: number;
 }
 
 export interface EffBind {
@@ -74,6 +91,8 @@ export interface EffService {
   user?: string;
   /** Environment KEY names only. Values are never extracted. */
   envKeys: string[];
+  /** The `envKeys` Compose rendered as `null`, which it leaves out of the container's environment. */
+  unsetEnvKeys?: string[];
   /**
    * Names of recognized Docker socket-proxy API flags whose rendered value is
    * exactly `1` (after trim). Matches the upstream images, which grant a group
@@ -94,8 +113,16 @@ export interface EffService {
   extraHosts: string[];
   /** Label KEY names only. Values are never extracted (a label value can carry a secret). */
   labelKeys: string[];
+  /** `cap_add` capability names. Absent on older hand-built test fixtures. */
+  capAdd?: string[];
+  /** Host-side device paths from `devices` (e.g. `/dev/net/tun`). Absent on older hand-built test fixtures. */
+  devices?: string[];
+  /** cloudflared subcommands (`tunnel`, `proxy-dns`, `access`) named by `command`/`entrypoint`; no other token is kept. */
+  commandHints?: string[];
+  /** Tailscale forwarding flags (`--advertise-routes`, `--advertise-exit-node`, or `unresolved`) named by `TS_EXTRA_ARGS`; no other part of the value is kept. */
+  tailscaleFlags?: TailscaleForwardFlag[];
   /**
-   * True when `sencho.service.url` is a validated http(s) URL. The URL string
+   * True when `io.sencho.url` is a validated http(s) URL. The URL string
    * itself stays off this model; anatomy is the reader that returns it.
    */
   hasServiceUrl?: boolean;
@@ -153,8 +180,9 @@ function str(v: unknown): string | undefined {
   return undefined;
 }
 
-/** Parse a `start[-end]` published-port string into a clamped range, or null if invalid. */
+/** Parse a `start[-end]` published-port string into a range, or null if invalid. */
 function parsePortRange(raw: string): { startPort: number; endPort: number } | null {
+  if (!isFixedHostPort(raw)) return null;
   const [a, b] = raw.split('-');
   const start = parseInt(a, 10);
   if (!Number.isFinite(start) || start <= 0) return null;
@@ -162,28 +190,41 @@ function parsePortRange(raw: string): { startPort: number; endPort: number } | n
   return { startPort: start, endPort: Number.isFinite(end) && end >= start ? end : start };
 }
 
-/** Parse one rendered `ports:` entry (long object form, with a short-string fallback). */
+/**
+ * Parse one rendered `ports:` entry (long object form, with a short-string
+ * fallback). An entry with no host port, or host port 0, is published on a port
+ * Docker assigns, so it is kept as `dynamic` rather than dropped.
+ */
 function parsePortSpec(entry: unknown): EffPortSpec | null {
   if (entry && typeof entry === 'object') {
     const o = entry as Record<string, unknown>;
+    const target = containerPortRange(str(o.target));
+    if (!target) return null;
+    const hostIp = str(o.host_ip) ?? '';
+    const protocol = str(o.protocol) ?? 'tcp';
     const publishedRaw = str(o.published);
-    if (publishedRaw === undefined || publishedRaw === '') return null; // container-only
-    const range = parsePortRange(publishedRaw);
-    if (!range) return null;
-    return { ...range, hostIp: str(o.host_ip) ?? '', protocol: str(o.protocol) ?? 'tcp' };
+    if (isDynamicHostPort(publishedRaw)) {
+      return {
+        startPort: 0, endPort: 0, hostIp, protocol, dynamic: true,
+        targetStartPort: target.start, targetEndPort: target.end,
+      };
+    }
+    const range = parsePortRange(publishedRaw as string);
+    return range ? { ...range, hostIp, protocol } : null;
   }
   const short = str(entry);
   if (short === undefined) return null;
-  const [spec, proto] = short.split('/');
-  const parts = spec.split(':');
-  let hostIp = '';
-  let hostPart: string | undefined;
-  if (parts.length >= 3) { hostIp = parts[0]; hostPart = parts[1]; }
-  else if (parts.length === 2) { hostPart = parts[0]; }
-  else return null; // container-only EXPOSE
-  const range = parsePortRange(hostPart ?? '');
-  if (!range) return null;
-  return { ...range, hostIp, protocol: proto || 'tcp' };
+  const spec = splitShortPortSpec(short);
+  const target = spec ? containerPortRange(spec.container) : null;
+  if (!spec || !target) return null;
+  if (isDynamicHostPort(spec.hostPart)) {
+    return {
+      startPort: 0, endPort: 0, hostIp: spec.hostIp, protocol: spec.protocol, dynamic: true,
+      targetStartPort: target.start, targetEndPort: target.end,
+    };
+  }
+  const range = parsePortRange(spec.hostPart);
+  return range ? { ...range, hostIp: spec.hostIp, protocol: spec.protocol } : null;
 }
 
 /** Split a service `volumes:` list into bind mounts and named-volume sources. */
@@ -307,8 +348,17 @@ function envKeysOf(env: unknown): string[] {
       .map(s => s.split('=')[0])
       .filter(Boolean);
   }
-  if (env && typeof env === 'object') return Object.keys(env as Record<string, unknown>);
+  if (env && typeof env === 'object') {
+    return Object.keys(env as Record<string, unknown>);
+  }
   return [];
+}
+
+/** Map-form KEYs rendered as `null`: a variable Compose could not resolve and
+ *  leaves out of the container's environment. A list entry is always a value. */
+function unsetEnvKeysOf(env: unknown): string[] {
+  if (!env || typeof env !== 'object' || Array.isArray(env)) return [];
+  return Object.entries(env as Record<string, unknown>).filter(([, value]) => value === null).map(([key]) => key);
 }
 
 /**
@@ -397,6 +447,22 @@ function labelKeysOf(labels: unknown): string[] {
   return [];
 }
 
+/** A list of plain strings; anything else contributes nothing. */
+function stringList(value: unknown): string[] {
+  return Array.isArray(value) ? value.map(v => str(v)).filter((s): s is string => s !== undefined) : [];
+}
+
+/** Host-side device paths from `devices` (short `host[:container[:perms]]` or long `{ source }` form). */
+function deviceHostPaths(devices: unknown): string[] {
+  if (!Array.isArray(devices)) return [];
+  const out: string[] = [];
+  for (const d of devices) {
+    const source = d && typeof d === 'object' ? str((d as Record<string, unknown>).source) : str(d)?.split(':')[0];
+    if (source) out.push(source);
+  }
+  return out;
+}
+
 /** Service network membership (list or map form), keyed by network key, with aliases. */
 function parseServiceNetworks(networks: unknown): EffServiceNetwork[] {
   if (Array.isArray(networks)) {
@@ -471,7 +537,7 @@ function parseResourceEntry(key: string, entry: unknown): EffResource {
 }
 
 function parseResources(value: unknown): Record<string, EffResource> {
-  const out: Record<string, EffResource> = {};
+  const out = Object.create(null) as Record<string, EffResource>;
   if (value && typeof value === 'object' && !Array.isArray(value)) {
     for (const [key, entry] of Object.entries(value as Record<string, unknown>)) {
       out[key] = parseResourceEntry(key, entry);
@@ -514,11 +580,18 @@ export function parseEffectiveModel(parsed: unknown, fallbackProjectName: string
       containerName: str(svc.container_name),
       user: str(svc.user),
       envKeys: envKeysOf(svc.environment),
+      unsetEnvKeys: unsetEnvKeysOf(svc.environment),
       enabledProxyApiFlags: enabledProxyApiFlagsOf(svc.environment),
       dockerEndpointHosts: dockerEndpointHostsOf(svc.command, svc.entrypoint, svc.environment),
       networks: parseServiceNetworks(svc.networks),
       extraHosts: parseExtraHosts(svc.extra_hosts),
       labelKeys: labelKeysOf(svc.labels),
+      capAdd: stringList(svc.cap_add),
+      devices: deviceHostPaths(svc.devices),
+      commandHints: cloudflaredCommandHints(svc.command, svc.entrypoint),
+      // Rendered output has resolved every variable it could: a null
+      // `TS_EXTRA_ARGS` is unset, so the empty lookup is the whole environment.
+      tailscaleFlags: tailscaleForwardFlags(svc.environment, () => undefined),
       hasServiceUrl: serviceUrlFromLabels(svc.labels) !== null,
     });
   }

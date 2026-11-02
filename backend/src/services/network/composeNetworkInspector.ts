@@ -23,7 +23,8 @@ import type {
   NetworkDriftFacts, NetworkFactNetwork, NetworkFactService, NetworkRuntimeState, StackNetworkFacts,
 } from './types';
 import { classifyMissingExternalNetworks, type MissingExternalNetwork } from './missingExternalNetworks';
-import { resolveManagedMeshAttachment } from './managedMeshAttachment';
+import { isStackMeshManaged, resolveManagedMeshAttachment } from './managedMeshAttachment';
+import { detectTunnels, tunnelExposureByService } from './tunnelDetection';
 import type { ManagedNetworkAttachmentPredicate } from './normalize';
 
 import { getErrorMessage } from '../../utils/errors';
@@ -46,6 +47,7 @@ export function assembleStackNetworkFacts(
   renderError: string | null,
   snapshot: DependencySnapshot | null,
   managedNetworkAttachment?: ManagedNetworkAttachmentPredicate,
+  meshManaged = false,
 ): StackNetworkFacts {
   const runtime: NetworkRuntimeState = snapshot ? 'available' : 'unavailable';
 
@@ -59,6 +61,7 @@ export function assembleStackNetworkFacts(
       services: [],
       drift: EMPTY_DRIFT,
       missingExternalNetworks: [],
+      tunnels: [],
     };
   }
 
@@ -70,6 +73,8 @@ export function assembleStackNetworkFacts(
     createdByStack: !res.external && key !== 'default',
   }));
 
+  const tunnels = detectTunnels(model, { meshManaged });
+  const tunnelByService = tunnelExposureByService(tunnels);
   const services: NetworkFactService[] = model.services.map(s => ({
     name: s.name,
     networks: s.networks.map(n => ({ key: n.key, aliases: n.aliases })),
@@ -78,11 +83,13 @@ export function assembleStackNetworkFacts(
       startPort: p.startPort,
       endPort: p.endPort,
       protocol: p.protocol,
+      ...(p.dynamic ? { dynamic: true as const } : {}),
       allInterfaces: isAllInterfaces(p.hostIp),
       loopbackOnly: isLoopback(p.hostIp),
     })),
     networkMode: s.networkMode,
     extraHosts: s.extraHosts,
+    ...(tunnelByService.get(s.name) ? { tunnel: tunnelByService.get(s.name) } : {}),
   }));
 
   const drift = snapshot
@@ -104,6 +111,7 @@ export function assembleStackNetworkFacts(
     services,
     drift,
     missingExternalNetworks,
+    tunnels,
   };
 }
 
@@ -152,8 +160,9 @@ export async function buildStackNetworkFacts(
     }
   }
 
+  const meshManaged = model ? await isStackMeshManaged(nodeId, stackName) : false;
   const managedNetworkAttachment = snapshot && model
-    ? await resolveManagedMeshAttachment(nodeId, stackName)
+    ? await resolveManagedMeshAttachment(nodeId, stackName, meshManaged)
     : undefined;
-  return assembleStackNetworkFacts(stackName, model, renderError, snapshot, managedNetworkAttachment);
+  return assembleStackNetworkFacts(stackName, model, renderError, snapshot, managedNetworkAttachment, meshManaged);
 }

@@ -9,6 +9,7 @@ import { SegmentedControl } from '@/components/ui/segmented-control';
 import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover';
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table';
 import { Badge } from '@/components/ui/badge';
+import { LabelBehaviorStatus } from '@/components/stack/LabelBehaviorBadge';
 import { useAuth } from '@/context/AuthContext';
 import {
   LABEL_DISAMBIGUATION_COPY,
@@ -286,7 +287,12 @@ export function ContainerLabelsTab({ onNavigateToNode }: ContainerLabelsTabProps
                                   <TableCell>
                                     <LabelValueCell label={label} onReveal={isAdmin && !revealSecrets ? handleReveal : undefined} />
                                   </TableCell>
-                                  <TableCell className="text-[10px] text-stat-subtitle">{SOURCE_LABELS[label.source]}</TableCell>
+                                  <TableCell className="text-[10px] text-stat-subtitle">
+                                    <span className="inline-flex flex-wrap items-center gap-1.5">
+                                      {SOURCE_LABELS[label.source]}
+                                      <LabelBehaviorStatus label={label} />
+                                    </span>
+                                  </TableCell>
                                 </TableRow>
                               ))}
                               {c.labels.length === 0 && (
@@ -352,6 +358,7 @@ function LabelGroupCard({
         <span className="text-muted-foreground">=</span>
         <LabelValueCell label={{ key: row.key, value: row.value, source: row.source, redacted: row.redacted }} onReveal={onReveal} />
         <Badge variant="outline" className="text-[10px]">{SOURCE_LABELS[row.source]}</Badge>
+        <LabelBehaviorStatus label={row} />
       </div>
       <ul className="space-y-1">
         {row.containers.map((c) => (

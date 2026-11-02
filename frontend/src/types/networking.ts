@@ -4,6 +4,42 @@ import type { DismissPolicy } from '@/types/findingDismissal';
 export const EXPOSURE_INTENTS = ['internal', 'same-node', 'lan', 'reverse-proxy', 'public', 'temporary', 'unknown'] as const;
 export type ExposureIntent = (typeof EXPOSURE_INTENTS)[number];
 
+/** Tunnel and private-overlay exposure. Mirrors the backend `tunnelDetection` types. */
+export type TunnelProvider = 'cloudflared' | 'tailscale' | 'wireguard';
+export type TunnelScope = 'public-edge' | 'private-overlay';
+export type TunnelPath = 'shared-namespace' | 'shared-network' | 'host-network';
+export type TunnelAttachment = 'networks' | 'host' | 'other';
+
+export interface TunnelReach {
+  service: string;
+  path: TunnelPath;
+  /** Network keys shared with the connector. Docker's default bridge appears as
+   *  `docker default bridge`, which no stack network key can equal. Empty unless
+   *  the path is `shared-network`. */
+  networks: string[];
+}
+
+export interface TunnelConnector {
+  service: string;
+  provider: TunnelProvider;
+  scope: TunnelScope;
+  attachment: TunnelAttachment;
+  signals: string[];
+  localConfig: boolean;
+  serveConfig: boolean;
+  meshAttached: boolean;
+  externalNetworks: string[];
+  reaches: TunnelReach[];
+}
+
+/** The strongest tunnel path to one service. */
+export interface ServiceTunnelExposure {
+  connector: string;
+  provider: TunnelProvider;
+  scope: TunnelScope;
+  path: TunnelPath;
+}
+
 export type NetworkingOwnership = 'system' | 'sencho-managed' | 'compose-managed' | 'unmanaged';
 export type NetworkingFindingSeverity = 'critical' | 'high' | 'medium' | 'info';
 
@@ -24,6 +60,7 @@ export type NetworkingFindingKind =
   | 'advanced-driver-caveat'
   | 'runtime-unavailable'
   | 'exposure-intent-mismatch'
+  | 'tunnel-exposure'
   | 'port-conflict-node'
   | 'port-conflict-internal'
   | 'sensitive-service-broad-exposure'

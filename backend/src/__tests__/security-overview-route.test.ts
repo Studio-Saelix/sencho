@@ -639,6 +639,43 @@ describe('GET /api/security/overview', () => {
     });
   });
 
+  it('settles cached tunnel exposure against the intent: unverified routing is taken at its word, a certain namespace conflicts', async () => {
+    const now = Date.now();
+    for (const ref of ['tun-net:1', 'tun-ns:1']) {
+      const scanId = db().createVulnerabilityScan({
+        node_id: 1, image_ref: ref, image_digest: `sha256:${ref}`, scanned_at: now,
+        total_vulnerabilities: 1, critical_count: 1, high_count: 0, medium_count: 0, low_count: 0,
+        unknown_count: 0, fixable_count: 1, secret_count: 0, misconfig_count: 0, scanners_used: 'vuln',
+        highest_severity: 'CRITICAL', os_info: null, trivy_version: null, scan_duration_ms: null,
+        triggered_by: 'manual', status: 'completed', error: null, stack_context: null,
+      });
+      db().insertVulnerabilityDetails(scanId, [{
+        vulnerability_id: `CVE-2024-${ref}`, pkg_name: 'x', installed_version: '1', fixed_version: '2',
+        severity: 'CRITICAL', title: null, description: null, primary_url: null,
+      }]);
+    }
+    const tunnel = (path: string) => ({ connector: 'cloudflared', provider: 'cloudflared', scope: 'public-edge', path });
+    db().upsertStackExposure(1, 'web', JSON.stringify({
+      stack: 'web',
+      computedAt: now,
+      services: [
+        { service: 'app', image: 'tun-net:1', publiclyExposed: true, reason: 'tunnel', bindings: [], tunnel: tunnel('shared-network') },
+        { service: 'admin', image: 'tun-ns:1', publiclyExposed: true, reason: 'tunnel', bindings: [], tunnel: { connector: 'tailscale', provider: 'tailscale', scope: 'private-overlay', path: 'shared-namespace' } },
+      ],
+    }), now);
+    db().setStackExposureIntent(1, 'web', '', 'internal', 'admin');
+
+    const res = await request(app).get('/api/security/overview').set('Cookie', adminCookie);
+    expect(res.status).toBe(200);
+    const blocker = (res.body.postureReasons as Array<{
+      kind: string;
+      severity: string;
+      targets?: Array<{ imageRef: string; intentConflict?: boolean }>;
+    }>).find((r) => r.kind === 'public_exposure' && r.severity === 'blocker');
+    expect(blocker?.targets?.map((t) => t.imageRef)).toEqual(['tun-ns:1']);
+    expect(blocker?.targets?.[0]).toMatchObject({ intentConflict: true });
+  });
+
   it('actionable excludes publiclyExposed-only intentional images', async () => {
     const now = Date.now();
     const scanId = db().createVulnerabilityScan({

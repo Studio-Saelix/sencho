@@ -160,11 +160,144 @@ function orderStacks(
 }
 
 /** One stack's required evidence, before the optional version signal is added. */
-interface StackReadinessEvidence {
+export interface StackReadinessEvidence {
   stack: string;
   update: UpdateReadinessReport | null;
   rollback: RollbackReadinessReport | null;
   unavailableReason: ReadinessReasonCode | null;
+}
+
+/**
+ * The canonical update and rollback verdicts for ONE stack, bounded by an
+ * absolute deadline.
+ *
+ * Extracted from the summary pass so the observation route asks the same
+ * question the summary asks, with the same `UpdateGuardService` calls, instead
+ * of reimplementing readiness and drifting from it. The project separation is
+ * kept separate (`toStackReadinessRow`) because the summary attaches one more
+ * signal to `update` before projecting.
+ *
+ * Each verdict is bounded independently: a shared timeout would discard a
+ * rollback verdict that already completed because the update side was still
+ * working when the deadline arrived.
+ */
+export interface ComputeStackReadinessOptions {
+  /**
+   * Hand the container probes to a caller that will run the optional
+   * Compose-version phase later, as the summary pass does for its whole node.
+   */
+  captureContainerProbes?: (probes: ContainerProbe[] | 'error') => void;
+  /**
+   * Run the optional Compose-version phase for this stack before returning, so
+   * the verdict is the one the summary pass publishes. The summary leaves this
+   * off because it batches that phase after every stack's required evidence is
+   * in hand; a single-stack caller wants the same answer the matrix shows.
+   */
+  includeComposeVersion?: boolean;
+}
+
+export async function computeStackReadinessEvidence(
+  nodeId: number,
+  stack: string,
+  deadline: number,
+  options: ComputeStackReadinessOptions = {},
+): Promise<StackReadinessEvidence> {
+  const remaining = deadline - Date.now();
+  if (remaining <= 0) return { stack, update: null, rollback: null, unavailableReason: 'summary_truncated' };
+  const guard = UpdateGuardService.getInstance();
+  const safeStack = sanitizeForLog(stack);
+  let probes: ContainerProbe[] | 'error' | null = null;
+  const [update, rollback] = await Promise.allSettled([
+    withTimeout(
+      guard.computeUpdateReadiness(nodeId, stack, undefined, {
+        includeComposeVersion: false,
+        captureContainerProbes: (captured) => {
+          probes = captured;
+          options.captureContainerProbes?.(captured);
+        },
+      }),
+      remaining,
+      `readiness update for ${stack}`,
+    ),
+    withTimeout(guard.computeRollbackReadiness(nodeId, stack), remaining, `readiness rollback for ${stack}`),
+  ]);
+  if (
+    options.includeComposeVersion
+    && update.status === 'fulfilled'
+    && probes !== null
+    && probes !== 'error'
+    && deadline - Date.now() > 0
+  ) {
+    // Bounded by the same deadline as the required verdicts. A probe that
+    // cannot answer yields its own unknown signal, never a discarded verdict.
+    const signal = await guard.composeVersionSignalFor(nodeId, stack, probes, { deadlineEpochMs: deadline });
+    update.value.signals.push(signal);
+    update.value.verdict = aggregateVerdict(update.value.signals);
+  }
+  // Name the side and the reason: the row's code is the only other trace and
+  // it does not say which verdict broke or whether the deadline did it.
+  for (const [side, outcome] of [['update', update], ['rollback', rollback]] as const) {
+    if (outcome.status !== 'rejected') continue;
+    if (outcome.reason instanceof TimeoutError) {
+      console.warn(
+        `Readiness summary: ${side} deadline reached for stack ${safeStack}:`,
+        sanitizeForLog(outcome.reason.message),
+      );
+    } else {
+      console.error(
+        `Readiness summary: ${side} verdict failed for stack ${safeStack}:`,
+        sanitizeForLog(getErrorMessage(outcome.reason, 'unknown')),
+      );
+    }
+  }
+  // One slot surviving is a partial row, not an unavailable one, so the reason
+  // code is reserved for the case where neither verdict exists. A deadline is
+  // the reason only when it is what stopped a side from producing anything.
+  const deadlineStoppedEvidence = [update, rollback].some(
+    outcome => outcome.status === 'rejected' && outcome.reason instanceof TimeoutError,
+  );
+  return {
+    stack,
+    update: update.status === 'fulfilled' ? update.value : null,
+    rollback: rollback.status === 'fulfilled' ? rollback.value : null,
+    unavailableReason: update.status === 'rejected' && rollback.status === 'rejected'
+      ? (deadlineStoppedEvidence ? 'summary_truncated' : 'domain_error')
+      : null,
+  };
+}
+
+/**
+ * Project one evidence row into the served row shape.
+ *
+ * `topReason` is kept for the fleet matrix, which renders prose; the
+ * observation projection takes only the ids from this row.
+ */
+export function toStackReadinessRow(row: StackReadinessEvidence, hasUpdate: boolean): StackReadinessRow {
+  const topSignal = row.update ? strongestUpdateSignal(row.update.signals) : null;
+  const updateRow = row.update
+    ? {
+        verdict: row.update.verdict,
+        topReason: redactedDetail(topSignal?.detail),
+        topReasonId: topSignal?.id ?? null,
+        hasUpdate,
+        computedAt: row.update.computedAt,
+      }
+    : null;
+  const topItem = row.rollback ? strongestRollbackItem(row.rollback.items) : null;
+  const rollbackRow = row.rollback
+    ? {
+        overall: row.rollback.overall,
+        topReason: redactedDetail(topItem?.detail),
+        topReasonId: topItem?.id ?? null,
+        computedAt: row.rollback.computedAt,
+      }
+    : null;
+  return {
+    stack: row.stack,
+    update: updateRow,
+    rollback: rollbackRow,
+    unavailableReason: row.unavailableReason,
+  };
 }
 
 /**
@@ -200,57 +333,11 @@ async function computeStackReadinessSummary(nodeId: number): Promise<StackReadin
   // enrichment so it does not read Docker twice for the same stack.
   const containerProbes = new Map<string, ContainerProbe[] | 'error'>();
 
-  const evidence = await mapWithConcurrency(selected, CONCURRENCY, async (stack): Promise<StackReadinessEvidence> => {
-    const remaining = deadline - Date.now();
-    if (remaining <= 0) return { stack, update: null, rollback: null, unavailableReason: 'summary_truncated' };
-    const safeStack = sanitizeForLog(stack);
-    // Bound each verdict separately. A shared timeout would discard a rollback
-    // verdict that already completed because the update side was still working
-    // when the deadline arrived, which is the evidence loss this pass exists to
-    // avoid.
-    const [update, rollback] = await Promise.allSettled([
-      withTimeout(
-        guard.computeUpdateReadiness(nodeId, stack, undefined, {
-          includeComposeVersion: false,
-          captureContainerProbes: probes => containerProbes.set(stack, probes),
-        }),
-        remaining,
-        `readiness update for ${stack}`,
-      ),
-      withTimeout(guard.computeRollbackReadiness(nodeId, stack), remaining, `readiness rollback for ${stack}`),
-    ]);
-    // Name the side and the reason: the row's code is the only other trace and
-    // it does not say which verdict broke or whether the deadline did it.
-    for (const [side, outcome] of [['update', update], ['rollback', rollback]] as const) {
-      if (outcome.status !== 'rejected') continue;
-      if (outcome.reason instanceof TimeoutError) {
-        console.warn(
-          `Readiness summary: ${side} deadline reached for stack ${safeStack}:`,
-          sanitizeForLog(outcome.reason.message),
-        );
-      } else {
-        console.error(
-          `Readiness summary: ${side} verdict failed for stack ${safeStack}:`,
-          sanitizeForLog(getErrorMessage(outcome.reason, 'unknown')),
-        );
-      }
-    }
-    // One slot surviving is a partial row, not an unavailable one, so the
-    // reason code is reserved for the case where neither verdict exists. A
-    // deadline is the reason only when it is what stopped a side from
-    // producing anything.
-    const deadlineStoppedEvidence = [update, rollback].some(
-      outcome => outcome.status === 'rejected' && outcome.reason instanceof TimeoutError,
-    );
-    return {
-      stack,
-      update: update.status === 'fulfilled' ? update.value : null,
-      rollback: rollback.status === 'fulfilled' ? rollback.value : null,
-      unavailableReason: update.status === 'rejected' && rollback.status === 'rejected'
-        ? (deadlineStoppedEvidence ? 'summary_truncated' : 'domain_error')
-        : null,
-    };
-  });
+  const evidence = await mapWithConcurrency(selected, CONCURRENCY, (stack): Promise<StackReadinessEvidence> =>
+    computeStackReadinessEvidence(nodeId, stack, deadline, {
+      captureContainerProbes: probes => containerProbes.set(stack, probes),
+    }),
+  );
 
   // Add the optional version evidence only from the time the required pass
   // left. A stack whose update verdict is missing has nothing to attach it to,
@@ -265,33 +352,9 @@ async function computeStackReadinessSummary(nodeId: number): Promise<StackReadin
     row.update.verdict = aggregateVerdict(row.update.signals);
   });
 
-  const stacks = evidence.map((row): StackReadinessRow => {
-    const topSignal = row.update ? strongestUpdateSignal(row.update.signals) : null;
-    const updateRow = row.update
-      ? {
-          verdict: row.update.verdict,
-          topReason: redactedDetail(topSignal?.detail),
-          topReasonId: topSignal?.id ?? null,
-          hasUpdate: updateDetail[row.stack]?.hasUpdate === true,
-          computedAt: row.update.computedAt,
-        }
-      : null;
-    const topItem = row.rollback ? strongestRollbackItem(row.rollback.items) : null;
-    const rollbackRow = row.rollback
-      ? {
-          overall: row.rollback.overall,
-          topReason: redactedDetail(topItem?.detail),
-          topReasonId: topItem?.id ?? null,
-          computedAt: row.rollback.computedAt,
-        }
-      : null;
-    return {
-      stack: row.stack,
-      update: updateRow,
-      rollback: rollbackRow,
-      unavailableReason: row.unavailableReason,
-    };
-  });
+  const stacks = evidence.map((row): StackReadinessRow =>
+    toStackReadinessRow(row, updateDetail[row.stack]?.hasUpdate === true),
+  );
 
   return {
     generatedAt: Date.now(),

@@ -2,7 +2,7 @@ import type http from 'http';
 import type { IncomingMessage } from 'http';
 import type { WebSocketServer } from 'ws';
 import jwt from 'jsonwebtoken';
-import { DatabaseService, type UserRole } from '../services/DatabaseService';
+import { DatabaseService, type ApiTokenScope, type UserRole } from '../services/DatabaseService';
 import { LicenseService } from '../services/LicenseService';
 import { NodeRegistry } from '../services/NodeRegistry';
 import { COOKIE_NAME, MFA_PENDING_SCOPE } from '../helpers/constants';
@@ -267,10 +267,27 @@ export function attachUpgrade(
         }
       }
 
-      // Gate WebSocket paths by API token scope
+      // Gate WebSocket paths by API token scope. An allowlist, not a denylist:
+      // a scope this build does not recognize must not fall through to the
+      // local exec handler, which accepts any decoded `api_token` principal.
       if (wsApiTokenScope) {
-        if (wsApiTokenScope === 'read-only' || wsApiTokenScope === 'deploy-only') {
-          if (!isLogsPath(pathname) && !isNotificationsPath(pathname)) return rejectWith(403, 'Forbidden', 'scope');
+        const scope = wsApiTokenScope as ApiTokenScope;
+        switch (scope) {
+          case 'full-admin':
+            break;
+          case 'read-only':
+          case 'deploy-only':
+            if (!isLogsPath(pathname) && !isNotificationsPath(pathname)) return rejectWith(403, 'Forbidden', 'scope');
+            break;
+          case 'observe-only':
+            // Observation is HTTP-only: no stream carries a projection, so the
+            // scope has no WebSocket surface at all.
+            return rejectWith(403, 'Forbidden', 'scope');
+          default: {
+            const unknownScope: never = scope;
+            void unknownScope;
+            return rejectWith(403, 'Forbidden', 'scope');
+          }
         }
       }
 
@@ -279,8 +296,8 @@ export function attachUpgrade(
       // node_proxy JWT (the token enrolled nodes carry) or a full-admin
       // api_token. Session cookies fall through to a 403 here because their
       // decoded scope is undefined (isProxyToken=false, wsApiTokenScope=null).
-      // Restricted api_token scopes (read-only, deploy-only) are blocked
-      // earlier by the scope gate above before this branch is reached.
+      // Every api_token scope except full-admin is blocked earlier by the scope
+      // gate above before this branch is reached.
       // Mesh is a Community capability: neither the receiver's license nor
       // a forwarded x-sencho-tier header affects this upgrade.
       if (pathname === '/api/mesh/proxy-tunnel') {
