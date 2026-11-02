@@ -6,12 +6,11 @@
 import { describe, it, expect, beforeEach, afterEach, beforeAll, afterAll, vi } from 'vitest';
 import request from 'supertest';
 import express from 'express';
-import cookieParser from 'cookie-parser';
 import bcrypt from 'bcrypt';
 import jwt from 'jsonwebtoken';
 import fs from 'fs';
 import path from 'path';
-import { setupTestDb, cleanupTestDb, loginAsTestAdmin, TEST_JWT_SECRET } from './helpers/setupTestDb';
+import { setupTestDb, cleanupTestDb, loginAsTestAdmin, TEST_JWT_SECRET, TEST_USERNAME } from './helpers/setupTestDb';
 
 let tmpDir: string;
 let app: import('express').Express;
@@ -963,8 +962,9 @@ describe('POST /api/auto-update/execute against a remote target', () => {
     const { autoUpdateRouter } = await import('../routes/imageUpdates');
     const app = express();
     app.use(express.json());
-    app.use(cookieParser());
-    app.use((req, _res, next) => { req.nodeId = remoteNodeId; next(); });
+    // Bearer auth only, so the test app needs no cookie middleware; the empty
+    // cookie bag keeps the shared auth middleware's cookie read defined.
+    app.use((req, _res, next) => { req.cookies = {}; req.nodeId = remoteNodeId; next(); });
     app.use('/api/auto-update', autoUpdateRouter);
     return app;
   }
@@ -978,7 +978,7 @@ describe('POST /api/auto-update/execute against a remote target', () => {
     try {
       const res = await request(await remoteApp())
         .post('/api/auto-update/execute')
-        .set('Cookie', adminCookie)
+        .set('Authorization', `Bearer ${userToken(TEST_USERNAME)}`)
         .send({ target: 'web' });
       expect(res.status).toBe(503);
       expect(res.body.error).toContain('did not answer');
@@ -996,7 +996,7 @@ describe('POST /api/auto-update/execute against a remote target', () => {
     try {
       const res = await request(await remoteApp())
         .post('/api/auto-update/execute')
-        .set('Cookie', adminCookie)
+        .set('Authorization', `Bearer ${userToken(TEST_USERNAME)}`)
         .send({ target: 'web' });
       expect(res.status).toBe(200);
       expect(res.body.result).toContain('skipped by update policy');
