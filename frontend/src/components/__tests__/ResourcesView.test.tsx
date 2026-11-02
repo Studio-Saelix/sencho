@@ -1740,6 +1740,11 @@ describe('ResourcesView', () => {
 
     await user.click(screen.getByRole('tab', { name: /rollback/i }));
     expect((await screen.findByText('Could not load rollback generations.')).closest('table')).toBeNull();
+
+    // The External tab already renders its failure outside a table; the phone
+    // rule must hold there too.
+    await user.click(screen.getByRole('tab', { name: /external/i }));
+    expect((await screen.findByText('Could not load external containers.')).closest('table')).toBeNull();
   });
 
   it('aborts the previous node’s disk-usage read on a node switch', async () => {
