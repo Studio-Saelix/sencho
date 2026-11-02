@@ -593,11 +593,12 @@ export function createRemoteProxyMiddleware(): RequestHandler {
       ...sharedOn,
       proxyRes: (proxyRes, req, res) => {
         // The same header-time release as the streaming hop. This hop buffers
-        // the body before writing anything, so a stall after the headers is
-        // ended by the 15 s interactive body-idle callback below, which writes
-        // the 504 terminal before dropping the upstream socket. The 30 s
-        // proxyTimeout is only the backstop for a body that keeps sending
-        // bytes without ever finishing.
+        // the body before writing anything, so on an armed read a stall after
+        // the headers is ended by the 15 s interactive body-idle callback
+        // below, which answers 504 with the gateway's timeout instead of
+        // dropping the connection unclassified. The 30 s proxyTimeout is the
+        // socket-inactivity backstop, and the 1 MiB identity body cap ends an
+        // endless trickle.
         proxyRes.headers['x-sencho-proxy'] = '1';
         const timing = proxyTimings.get(req);
         if (timing) {
@@ -1205,9 +1206,11 @@ export function createRemoteProxyMiddleware(): RequestHandler {
         beginProxyTiming(req, res);
         // A Git sources or drift page is hydration like any other, so a GET
         // that answers a page is on the interactive clock here too; the drift
-        // re-check is a POST and stays off it. Once the headers land, the 15 s
-        // body-idle callback writes the 504 answer, and the identity hop's 30 s
-        // proxyTimeout is the backstop for a body that keeps sending bytes.
+        // re-check is a POST and stays off it. On an armed GET, once the
+        // headers land the 15 s body-idle callback answers 504 with the
+        // gateway's timeout. The identity hop's 30 s proxyTimeout is the
+        // socket-inactivity backstop, and the 1 MiB body cap ends an endless
+        // trickle.
         const identityBudgetMs = remainingReadBudgetMs();
         if (identityBudgetMs !== null) {
           armInteractiveReadDeadline(req, res, node.name, identityBudgetMs);

@@ -515,6 +515,10 @@ export function useStackListState() {
           const bodyText = readFailure === 'unverified' || readFailure === 'upgrade-required'
             ? await res.text().catch(() => null)
             : null;
+          // Reading the body is a new await after the supersession check
+          // above; a newer refresh must still win, as it does after every
+          // other await in this function.
+          if (stale()) { abortAttempt(attemptId); return []; }
           return applyStacksFailure(remoteReadFailureMessage(readFailure, {
             nodeName: activeNode?.name,
             status: res.status,
@@ -726,12 +730,6 @@ export function useStackListState() {
       if (listSucceeded) {
         if (!background) {
           markMilestone('list_hydrated', { attemptId, outcome: 'error', proxied });
-          // The list itself loaded, but its statuses did not: the operator
-          // still gets one foreground signal, and a cause apiFetch threw with
-          // keeps its own sentence instead of the connection line.
-          toast.error(isNamedReadFailure(readFailure)
-            ? message
-            : 'Could not refresh stack statuses. Check the node connection and try again.');
         }
         recordHydrationError(currentFingerprintRef.current);
         return latestFileList;

@@ -567,6 +567,9 @@ describe('remote proxy inline probe refusals', () => {
     expect(res.status).toBe(504);
     expect(res.headers[REMOTE_READ_FAILURE_HEADER]).toBe('timeout');
     expect(res.body.error).not.toMatch(/upgrade/i);
+    // One RBAC probe answered, the second (scoped-evidence) probe hung. That
+    // pins the timeout to the evidence gate rather than some other probe.
+    expect(slowMetaCalls).toBe(2);
 
     clearAssignments(deployerId);
   }, 20_000);

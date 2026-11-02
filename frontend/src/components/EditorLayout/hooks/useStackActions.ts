@@ -1072,6 +1072,13 @@ export function useStackActions(options: UseStackActionsOptions) {
     // otherwise the node this tab captured. Captured once here so no request in
     // the chain can follow a node another tab made active mid-load.
     const opNodeId = options?.nodeId !== undefined ? options.nodeId : (activeNode?.id ?? null);
+    // Name the node this load is pinned to, not whichever node is active by
+    // the time the failure renders. loadFileOnNode sets the active node and
+    // calls straight into this closure, so `activeNode` can still be the
+    // previous one.
+    const opNode = opNodeId === null
+      ? activeNode
+      : nodes.find((node) => node.id === opNodeId) ?? activeNode;
     try {
       headersSpan = beginSpan('fetch_headers', { attemptId });
       const res = await apiFetch(`/stacks/${filename}`, { signal, nodeId: opNodeId });
@@ -1094,7 +1101,7 @@ export function useStackActions(options: UseStackActionsOptions) {
         const readFailure = classifyRemoteReadFailure(res);
         if (isNamedReadFailure(readFailure) && readFailure !== 'unsupported') {
           throw new StackOpenError(remoteReadFailureMessage(readFailure, {
-            nodeName: activeNode?.name,
+            nodeName: opNode?.name,
             status: res.status,
             body: text,
           }));
@@ -1158,9 +1165,9 @@ export function useStackActions(options: UseStackActionsOptions) {
       const thrownFailure = thrownResponse instanceof Response
         ? classifyRemoteReadFailure(thrownResponse)
         : null;
-      const namedFailure = isNamedReadFailure(thrownFailure)
+      const namedFailure = isNamedReadFailure(thrownFailure) && thrownFailure !== 'unsupported'
         ? remoteReadFailureMessage(thrownFailure, {
-          nodeName: activeNode?.name,
+          nodeName: opNode?.name,
           status: thrownResponse instanceof Response ? thrownResponse.status : undefined,
         })
         : undefined;

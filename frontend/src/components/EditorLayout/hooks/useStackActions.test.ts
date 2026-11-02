@@ -160,6 +160,7 @@ function setup(over: {
   hasGuidedExternalNetworkPreflight?: boolean;
   canEditStack?: (stackNameOrFilename: string) => boolean;
   activeNode?: Parameters<typeof useStackActions>[0]['activeNode'];
+  nodes?: Parameters<typeof useStackActions>[0]['nodes'];
   setActiveNode?: Parameters<typeof useStackActions>[0]['setActiveNode'];
   onDeletedOpenStack?: () => void;
   removeNotificationsForStack?: (nodeId: number, stackName: string) => void;
@@ -196,7 +197,7 @@ function setup(over: {
       overlayState,
       activeNode: activeNodeHolder.current,
       setActiveNode,
-      nodes: [],
+      nodes: over.nodes ?? [],
       runWithLog,
       getLastDeployOutputLine: over.getLastDeployOutputLine ?? (() => undefined),
       hasUpdateGuard: over.hasUpdateGuard ?? false,
@@ -468,6 +469,22 @@ describe('useStackActions.saveFile', () => {
     expect(loaded.ok).toBe(false);
     expect(loaded.error).toMatch(/do not have access/i);
     expect(vi.mocked(toast.error).mock.calls.some(([message]) => String(message).includes('connection'))).toBe(false);
+  });
+
+  it('names the node the load targeted, not the previously active node', async () => {
+    const target = { id: 9, name: 'edge-1', type: 'remote' } as Parameters<typeof useStackActions>[0]['nodes'][number];
+    vi.mocked(apiFetch).mockRejectedValue(Object.assign(new Error('Unauthorized'), {
+      response: new Response('Unauthorized', {
+        status: 401,
+        headers: { 'x-sencho-proxy': '1' },
+      }),
+    }));
+    const { result } = setup({ activeNode: DEFAULT_ACTIVE_NODE, nodes: [target] });
+    await act(async () => {
+      await result.current.loadFileOnNode(target, 'linked.yml', { skipUnsavedCheck: true });
+    });
+    expect(toast.error).toHaveBeenCalledWith(expect.stringMatching(/edge-1/));
+    expect(vi.mocked(toast.error).mock.calls.some(([message]) => /"Local"/.test(String(message)))).toBe(false);
   });
 
   it('shows the gateway sentence for a scoped-evidence upgrade refusal', async () => {

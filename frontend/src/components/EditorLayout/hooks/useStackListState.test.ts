@@ -162,15 +162,34 @@ describe('useStackListState.refreshStacks failure classification', () => {
     expect(vi.mocked(toast.error).mock.calls.some(([message]) => String(message).includes('connection'))).toBe(false);
   });
 
-  it('names a thrown proxied 401 in the status-refresh toast after the list loaded', async () => {
-    const response = new Response('Unauthorized', {
-      status: 401,
-      headers: { 'x-sencho-proxy': '1' },
-    });
+  it('stays silent on a background status-refresh failure', async () => {
     apiFetchMock.mockImplementation((endpoint: string) => {
       if (endpoint === '/stacks') return Promise.resolve(okJson(['web.yml']));
       if (endpoint === '/stacks/statuses') {
-        return Promise.reject(Object.assign(new Error('Unauthorized'), { response }));
+        return Promise.resolve(new Response('Unauthorized', {
+          status: 401,
+          headers: { 'x-sencho-proxy': '1' },
+        }));
+      }
+      return Promise.resolve(notFound());
+    });
+
+    const { result } = renderHook(() => useStackListState());
+    await act(async () => {
+      await result.current.refreshStacks(true);
+    });
+
+    // Dashboard polls self-heal; a toast on every poll would become a storm.
+    expect(toast.error).not.toHaveBeenCalled();
+  });
+
+  it('shows the capability sentence from a list refusal body', async () => {
+    apiFetchMock.mockImplementation((endpoint: string) => {
+      if (endpoint === '/stacks') {
+        return Promise.resolve(new Response(
+          JSON.stringify({ error: 'Remote node "Local" does not support scoped stack authorization. Upgrade it before scoped users can act on it.' }),
+          { status: 403, headers: { 'x-sencho-read-failure': 'upgrade-required' } },
+        ));
       }
       return Promise.resolve(notFound());
     });
@@ -180,8 +199,8 @@ describe('useStackListState.refreshStacks failure classification', () => {
       await result.current.refreshStacks();
     });
 
-    expect(toast.error).toHaveBeenCalledWith(expect.stringMatching(/stored credential/i));
-    expect(vi.mocked(toast.error).mock.calls.some(([message]) => String(message).includes('connection'))).toBe(false);
+    expect(result.current.stacksLoadError).toMatch(/scoped stack authorization/i);
+    expect(result.current.stacksLoadError).not.toMatch(/per-user permissions/i);
   });
 
   it('surfaces a recoverable error on a background failure after the list was already confirmed empty', async () => {

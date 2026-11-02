@@ -171,15 +171,13 @@ export function remoteReadFailureOf(error: unknown): RemoteReadFailure {
   return error instanceof RemoteReadHttpError ? error.failure : classifyRemoteReadError(error);
 }
 
-/** Longest gateway sentence rendered as-is; a longer body is not trusted copy. */
-const MAX_GATEWAY_ERROR_LENGTH = 400;
-
 /**
  * The gateway's own sentence for a capability refusal, when the body carries
  * one. `unverified` and `upgrade-required` cover several capabilities (the RBAC
  * probe, scoped stack authorization, volume removal), so a fixed sentence would
- * name the wrong one. An empty, oversized, non-string, or unparseable body keeps
- * the cause's default copy.
+ * name the wrong one. An empty, non-string, or unparseable body keeps the
+ * cause's default copy; a long one is kept whole because the capability it
+ * names sits after the node name and must not be truncated away.
  */
 function capabilityRefusalMessage(body: string | null | undefined): string | null {
   if (!body) return null;
@@ -191,8 +189,7 @@ function capabilityRefusalMessage(body: string | null | undefined): string | nul
   }
   if (typeof error !== 'string') return null;
   const message = error.trim();
-  if (message.length === 0 || message.length > MAX_GATEWAY_ERROR_LENGTH) return null;
-  return message;
+  return message.length > 0 ? message : null;
 }
 
 /**

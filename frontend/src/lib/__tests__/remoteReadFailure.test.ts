@@ -168,6 +168,18 @@ describe('remoteReadFailureMessage', () => {
       .toMatch(/does not enforce per-user permissions/i);
     expect(remoteReadFailureMessage('unverified', { body: JSON.stringify({ error: '   ' }) }))
       .toMatch(/permission model could not be verified/i);
+    expect(remoteReadFailureMessage('unverified', { body: JSON.stringify({ error: 42 }) }))
+      .toMatch(/permission model could not be verified/i);
+  });
+
+  it('keeps a long capability sentence whole rather than falling back', () => {
+    const longName = 'edge-' + '9'.repeat(300);
+    const body = JSON.stringify({
+      error: `Remote node "${longName}" answered with an error, so its support for scoped stack authorization could not be verified. Try again once the node is healthy.`,
+    });
+    const message = remoteReadFailureMessage('unverified', { nodeName: longName, body });
+    expect(message).toMatch(/scoped stack authorization/i);
+    expect(message).not.toMatch(/permission model/i);
   });
 
   it('falls back to a neutral subject when the node is unnamed', () => {
