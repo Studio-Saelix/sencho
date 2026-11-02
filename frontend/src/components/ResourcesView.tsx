@@ -342,9 +342,12 @@ export default function ResourcesView({ headerActions }: ResourcesViewProps = {}
 
     // Loading ownership follows data ownership. The inventory tables, the
     // external-container list, rollback generations, and scan summaries each
-    // hydrate from their own request, so a slow or failed read in one region
-    // cannot hold, or fail, the others. Disk usage keeps its own loader below
-    // because its figures are deliberately dropped when a read fails.
+    // hydrate from their own request, so a slow read in one region cannot hold
+    // the others and an ordinary failure stays in its own region. The one
+    // exception is a failure that proves the node unreadable, which the tables
+    // and the usage card name while the slow inventory read is still pending
+    // (see siblingUnreadable). Disk usage keeps its own loader below because its
+    // figures are deliberately dropped when a read fails.
     const nodeScope = activeNode?.id;
 
     // One warning covers a failed background refresh, whichever region failed:
@@ -785,7 +788,9 @@ export default function ResourcesView({ headerActions }: ResourcesViewProps = {}
      * already has rows is left alone.
      */
     const retryPage = () => {
-        if (inventoryRegion.data === null) void inventoryRegion.refresh();
+        // A slow inventory read that is still pending is healthy as far as the
+        // page knows: refreshing it would abort it and restart its budget.
+        if (inventoryRegion.data === null && inventoryRegion.status === 'failed') void inventoryRegion.refresh();
         for (const region of siblingRegions) {
             if (region.data === null && region.status === 'failed') void region.refresh();
         }

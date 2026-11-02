@@ -15,7 +15,7 @@
  *    admin-only.
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { render, screen, waitFor, within } from '@testing-library/react';
+import { act, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 
 vi.mock('@/lib/api', () => ({ apiFetch: vi.fn() }));
@@ -1554,6 +1554,69 @@ describe('ResourcesView', () => {
 
     expect(await screen.findByText('Could not load images.')).toBeInTheDocument();
     expect(screen.getAllByText(/Pilot tunnel to this node is disconnected/i).length).toBeGreaterThan(0);
+  });
+
+  it('does not name the node when a sibling read fails with an ordinary error', async () => {
+    // Only a failure that proves the hub has no readable path to the node may
+    // fail the tables and the usage card while the slow inventory is pending.
+    mockedFetch.mockImplementation((url: string) => {
+      if (url === '/system/resources' || url === '/system/docker-df') return new Promise<Response>(() => {});
+      if (url === '/system/orphans') {
+        return Promise.resolve(jsonResponse({ error: 'boom' }, { ok: false, status: 500 }));
+      }
+      return Promise.resolve(jsonResponse({}));
+    });
+
+    render(<ResourcesView />);
+
+    await waitFor(() => expect(mockedFetch).toHaveBeenCalledWith('/system/orphans', expect.anything()));
+    await act(async () => { await Promise.resolve(); });
+    expect(screen.queryByText('Could not load images.')).toBeNull();
+    expect(screen.queryByText('Disk usage unknown')).toBeNull();
+  });
+
+  it('retries a sibling failure without aborting the slow inventory read that is still pending', async () => {
+    const resourcesSignals: AbortSignal[] = [];
+    let releaseResources: ((r: Response) => void) | undefined;
+    let orphansCalls = 0;
+    let usageCalls = 0;
+    mockedFetch.mockImplementation((url: string, opts?: RequestInit) => {
+      if (url === '/system/resources') {
+        if (opts?.signal) resourcesSignals.push(opts.signal);
+        return new Promise<Response>((resolve) => { releaseResources = resolve; });
+      }
+      if (url === '/system/docker-df') {
+        usageCalls += 1;
+        return new Promise<Response>(() => {});
+      }
+      if (url === '/system/orphans') {
+        orphansCalls += 1;
+        return Promise.resolve(orphansCalls === 1
+          ? ({
+            ok: false,
+            status: 504,
+            headers: new Headers({ 'x-sencho-read-timeout': '1' }),
+            json: async () => ({ code: 'remote_read_timeout' }),
+          } as unknown as Response)
+          : jsonResponse({}));
+      }
+      return Promise.resolve(jsonResponse({}));
+    });
+
+    const user = userEvent.setup();
+    render(<ResourcesView />);
+    expect(await screen.findByText('Could not load images.')).toBeInTheDocument();
+
+    await user.click(screen.getAllByRole('button', { name: 'Retry' })[0]);
+
+    await waitFor(() => expect(orphansCalls).toBe(2));
+    await waitFor(() => expect(usageCalls).toBe(2));
+    // The pending inventory read was never restarted.
+    expect(resourcesSignals).toHaveLength(1);
+    expect(resourcesSignals[0].aborted).toBe(false);
+
+    releaseResources!(jsonResponse({ images: [image('slow:but-ok')], volumes: [], networks: [] }));
+    expect(await screen.findByText('slow:but-ok')).toBeInTheDocument();
   });
 
   it('aborts the previous node’s inventory reads on a node switch and ignores their results', async () => {
