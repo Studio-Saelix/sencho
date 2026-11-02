@@ -534,18 +534,17 @@ export function recordUpdatePolicyDecision(
     + `Triggered by ${TRIGGER_LABEL[result.trigger]}${actor ? ` from ${actor}` : ''}`
     + `${requested.length > 0 ? `; requested services: ${requested.join(', ')}` : ''}.`;
 
+  // One sanitized line with the same fields the activity row carries, and no
+  // raw object: a structured dump is what a log scanner has to reason about.
   console.log(
-    '[UpdatePolicy] %s %s',
+    '[UpdatePolicy] %s for %s on node %s (%s, %s) triggered by %s; ineligible: %s',
     sanitizeForLog(result.decision),
-    sanitizeForLog(JSON.stringify({
-      stack: result.stack,
-      nodeId,
-      trigger: result.trigger,
-      actor,
-      target: result.target,
-      ineligible: ineligible.map(s => ({ service: s.service, policy: s.policy })),
-      evaluation: result.evaluation,
-    })),
+    sanitizeForLog(result.stack),
+    sanitizeForLog(nodeId),
+    sanitizeForLog(result.evaluation),
+    sanitizeForLog(result.target.scope === 'service' ? `service ${result.target.serviceName}` : 'stack'),
+    sanitizeForLog(actor ?? 'unknown'),
+    sanitizeForLog(detail),
   );
 
   const reasonKey = crypto.createHash('sha1').update(result.reason ?? '').digest('hex').slice(0, 12);
