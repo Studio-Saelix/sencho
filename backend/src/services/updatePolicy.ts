@@ -249,8 +249,14 @@ const POLICY_READ_TIMEOUT_MS = 10_000;
  * remote target is unrenderable rather than wrongly allowed.
  */
 function isLocalNode(nodeId: number): boolean {
-  const node = NodeRegistry.getInstance().getNode(nodeId);
-  return node === undefined || node.type === 'local';
+  try {
+    const node = NodeRegistry.getInstance().getNode(nodeId);
+    return node === undefined || node.type === 'local';
+  } catch {
+    // A registry that cannot answer must not turn a local evaluation into a
+    // refusal; the render below still fails closed on its own.
+    return true;
+  }
 }
 
 /**

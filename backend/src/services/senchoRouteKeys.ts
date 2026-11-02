@@ -62,8 +62,14 @@ async function renderServiceKeys(nodeId: number, stackName: string): Promise<Ser
  * than matching a local stack that happens to share the name.
  */
 function isLocalNode(nodeId: number): boolean {
-  const node = NodeRegistry.getInstance().getNode(nodeId);
-  return node === undefined || node.type === 'local';
+  try {
+    const node = NodeRegistry.getInstance().getNode(nodeId);
+    return node === undefined || node.type === 'local';
+  } catch {
+    // Unknown is treated as local: the render fails closed on its own, and a
+    // registry that cannot answer must not silently drop every key.
+    return true;
+  }
 }
 
 /** The last answer this process resolved for a stack, expired or not. */

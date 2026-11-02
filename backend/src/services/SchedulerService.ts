@@ -13,6 +13,7 @@ import {
     resolveUpdatePolicy,
     type UpdatePolicyResult,
 } from './updatePolicy';
+import { SENCHO_UPDATE_LABEL } from '../helpers/senchoLabels';
 import { StackOpLockService, stackOpSkipMessage as skipMessage } from './StackOpLockService';
 import { FileSystemService } from './FileSystemService';
 import { StackUpdateRecoveryService } from './StackUpdateRecoveryService';
@@ -1079,7 +1080,7 @@ export class SchedulerService {
             return coordinated.result;
         }
         // The coordinator handles every probe outcome, so this is defensive.
-        throw this.remoteProxyFailureMessage(nodeId, 'the node did not confirm it evaluates io.sencho.update');
+        throw this.remoteProxyFailureMessage(nodeId, `the node did not confirm it evaluates ${SENCHO_UPDATE_LABEL}`);
     }
 
     /** Proxy an automatic update for an explicit stack list on a remote node (label selector). */
@@ -1089,7 +1090,7 @@ export class SchedulerService {
             scanner: RemoteImageUpdateService.getInstance(),
         });
         if (coordinated.handled) return coordinated.result;
-        throw this.remoteProxyFailureMessage(nodeId, 'the node did not confirm it evaluates io.sencho.update');
+        throw this.remoteProxyFailureMessage(nodeId, `the node did not confirm it evaluates ${SENCHO_UPDATE_LABEL}`);
     }
 
 
