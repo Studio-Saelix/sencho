@@ -580,6 +580,43 @@ describe('AutoUpdateReadinessView desktop Apply now', () => {
     expect(screen.getByText(/0 of 1 ready to apply automatically/)).toBeInTheDocument();
   });
 
+  it('does not present a next run on the card for a stack the schedule will skip', async () => {
+    mockedFetch.mockImplementation((url: string) => {
+      if (url === '/image-updates/fleet') {
+        return Promise.resolve({ ok: true, json: async () => ({ '1': { nextcloud: true } }) });
+      }
+      if (url.startsWith('/scheduled-tasks')) {
+        return Promise.resolve({
+          ok: true,
+          json: async () => [{
+            id: 1, enabled: true, action: 'update', target_type: 'stack', target_id: 'nextcloud',
+            node_id: 1, next_run_at: Date.now() + 60 * 60_000,
+          }],
+        });
+      }
+      if (url === '/image-updates/detail') {
+        return Promise.resolve({
+          ok: true,
+          json: async () => ({
+            nextcloud: {
+              checkStatus: 'ok',
+              unattendedPolicy: { decision: 'skip', ineligible: [{ service: 'db', policy: 'manual' }] },
+            },
+          }),
+        });
+      }
+      return Promise.resolve({ ok: true, json: async () => ({}) });
+    });
+    mockedFetchForNode.mockResolvedValue({ ok: true, json: async () => card().preview });
+
+    render(<AutoUpdateReadinessView />);
+    await screen.findByTestId('readiness-table');
+    fireEvent.click(screen.getByRole('radio', { name: 'Cards' }));
+
+    expect(await screen.findByText('Skipped by update policy')).toBeInTheDocument();
+    expect(screen.queryByText(/Scheduled ·/)).toBeNull();
+  });
+
   it('applies a single service and refreshes the authoritative update preview', async () => {
     mockNodeMeta.set(1, {
       version: '1.0.0',

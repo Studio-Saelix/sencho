@@ -1073,10 +1073,11 @@ export class SchedulerService {
             scanner: RemoteImageUpdateService.getInstance(),
         });
         if (coordinated.handled) {
-            // One named stack that could not be updated is a failed run, not a
-            // green run with a sad line. A wildcard run keeps its per-stack
-            // lines, and a label run counts them through its own failure check.
-            if (coordinated.failed && target !== '*') throw new Error(coordinated.result);
+            // `failed` marks a node-level failure (no answer, or too old to
+            // evaluate the label), not a per-stack outcome. It fails the run for
+            // every target shape, including a fleet-wide one: a run that updates
+            // nothing must never be recorded green.
+            if (coordinated.failed) throw new Error(coordinated.result);
             return coordinated.result;
         }
         // The coordinator handles every probe outcome, so this is defensive.
@@ -1089,6 +1090,9 @@ export class SchedulerService {
             nodeId, selection: { targets }, caller: { kind: 'scheduled', authorizeAll },
             scanner: RemoteImageUpdateService.getInstance(),
         });
+        // A node-level failure is never a per-stack skip line: it fails the label
+        // run even when the selector matched no stack on that node.
+        if (coordinated.handled && coordinated.failed) throw new Error(coordinated.result);
         if (coordinated.handled) return coordinated.result;
         throw this.remoteProxyFailureMessage(nodeId, `the node did not confirm it evaluates ${SENCHO_UPDATE_LABEL}`);
     }

@@ -80,3 +80,25 @@ it('persists failure evidence when remote facts are unrenderable', async () => {
     expect(db.getConfirmedStackUpdateStatus(0)['broken']).toBe(false);
     expect(db.getStackUpdateWriteGeneration(0, 'broken')).toBe(generation);
 });
+
+it('keeps a recorded policy when a remote observation cannot evaluate it', async () => {
+    const scanner = ImageUpdateService.getInstance();
+    const db = DatabaseService.getInstance();
+    // A remote row cannot be evaluated on this node, so the commit must not
+    // overwrite the decision the node itself recorded.
+    db.upsertStackUpdateStatus(0, 'remote-policy', false, 1000, 'ok', null, [], 0, {
+        decision: 'skip', ineligible: [{ service: 'web', policy: 'manual' }],
+    });
+    const facts: ImageUpdateStackFacts = {
+        name: 'remote-policy', observationRevision: 1, observationToken: 'fixture',
+        model: { renderable: true },
+        services: [{ name: 'app', declaredImage: 'nginx:latest', runtimeImages: [], hasBuild: false }],
+        images: [],
+    };
+    const generation = scanner.reserveStackWriteGeneration(0, 'remote-policy');
+    const result = await scanner.commitRemoteObservation(
+        0, facts, new Map([['nginx:latest', { hasUpdate: false, checkStatus: 'ok' }]]), generation,
+    );
+    expect(result.outcome).toBe('cleared');
+    expect(db.getStackUpdateDetail(0)['remote-policy'].unattendedPolicy).toMatchObject({ decision: 'skip' });
+});

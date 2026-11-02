@@ -303,6 +303,15 @@ function VersionDiff({ current, next }: { current: string | null; next: string |
 }
 
 /**
+ * True when the recorded unattended decision keeps a covering schedule from
+ * touching this stack. Every surface that would otherwise present a next-run
+ * time (table, card footer, phone card) asks this first.
+ */
+function isPolicySkipped(unattendedPolicy?: StackUnattendedPolicy | null): boolean {
+  return unattendedPolicy?.decision === 'skip';
+}
+
+/**
  * The auto-update pill. A policy skip is the more specific fact: the stack has
  * a covering schedule, but the label keeps unattended refreshes out of it. No
  * schedule still reads as Off, and a node with no recorded policy adds no note.
@@ -316,7 +325,7 @@ export function AutoPill({
   unattendedPolicy?: StackUnattendedPolicy | null;
   compact?: boolean;
 }) {
-  const skipped = unattendedPolicy?.decision === 'skip';
+  const skipped = isPolicySkipped(unattendedPolicy);
   if (!skipped && autoUpdateEnabled) return null;
   const ineligible = (unattendedPolicy?.ineligible ?? []).map(s => `${s.service} (${s.policy})`).join(', ');
   return (
@@ -488,7 +497,12 @@ function StackReadinessCard({
 
               <div className="mt-auto flex items-center justify-between gap-3 pt-1">
                 <div className="flex items-center gap-1.5 font-mono text-[11px] text-stat-subtitle">
-                  {nextRun ? (
+                  {isPolicySkipped(unattendedPolicy) ? (
+                    <>
+                      <CircleSlash className="h-3.5 w-3.5" strokeWidth={1.5} aria-hidden="true" />
+                      <span data-testid="readiness-schedule">Skipped by update policy</span>
+                    </>
+                  ) : nextRun ? (
                     <>
                       <CalendarClock className="h-3.5 w-3.5" strokeWidth={1.5} aria-hidden="true" />
                       <span>Scheduled · <span className="text-stat-value">{formatClock(nextRun)}</span></span>
@@ -740,17 +754,19 @@ function ReadinessTableRow({
   let schedule: ReactNode = null;
   if (loading) {
     // Nothing to show until the registry check settles.
+  } else if (isPolicySkipped(unattendedPolicy) || !autoUpdateEnabled) {
+    // The label keeps this stack out of the schedule, so a next-run time would
+    // claim an update that will not happen. The pill is the whole truth.
+    schedule = (
+      <span className="whitespace-nowrap">
+        <AutoPill autoUpdateEnabled={autoUpdateEnabled} unattendedPolicy={unattendedPolicy} />
+      </span>
+    );
   } else if (hasDetail && nextRun) {
     schedule = (
       <span className="tabular-nums">
         <span className="text-stat-value">{formatClock(nextRun)}</span>
         <span className="text-stat-subtitle/70"> · {formatRelative(nextRun)}</span>
-      </span>
-    );
-  } else if (unattendedPolicy?.decision === 'skip' || !autoUpdateEnabled) {
-    schedule = (
-      <span className="whitespace-nowrap">
-        <AutoPill autoUpdateEnabled={autoUpdateEnabled} unattendedPolicy={unattendedPolicy} />
       </span>
     );
   } else if (hasDetail) {
@@ -1051,7 +1067,9 @@ export function MobileReadinessCard({
             )}
             <div className="flex items-center justify-between gap-[10px] pt-0.5">
               <span className={`font-mono text-[11px] ${blocked || reviewRequired ? 'text-destructive' : 'text-stat-subtitle'}`}>
-                {nextRun ? <>{formatClock(nextRun)} · {formatRelative(nextRun)}</> : (blocked || reviewRequired ? 'Held for review' : 'No schedule')}
+                {isPolicySkipped(unattendedPolicy)
+                  ? 'Skipped by update policy'
+                  : nextRun ? <>{formatClock(nextRun)} · {formatRelative(nextRun)}</> : (blocked || reviewRequired ? 'Held for review' : 'No schedule')}
               </span>
               <Button
                 size="sm"

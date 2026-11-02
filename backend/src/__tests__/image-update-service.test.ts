@@ -16,6 +16,7 @@ const {
   mockGetStacks, mockGetStackContent, mockGetEnvContent, mockEnvExists,
   mockGetAllContainers, mockGetGlobalSettings, mockInspect,
   mockBuildEffectiveServiceModel,
+  mockResolveUpdatePolicyPair,
 } = vi.hoisted(() => ({
   mockGetAuthForRegistry: vi.fn().mockResolvedValue(null),
   mockGetStackUpdateStatus: vi.fn().mockReturnValue({}),
@@ -43,6 +44,9 @@ const {
   // (falls back to the legacy whole-stack tally) unless a test overrides this,
   // matching how no real Compose model exists in this unit-test environment.
   mockBuildEffectiveServiceModel: vi.fn().mockResolvedValue({ renderable: false, code: 'effective_model_render_failed', error: 'no model in test' }),
+  // A status write records the unattended decision when it can read it; null
+  // means "this check could not", which the DB preserves.
+  mockResolveUpdatePolicyPair: vi.fn().mockResolvedValue(null),
 }));
 
 vi.mock('../services/RegistryService', () => ({
@@ -77,6 +81,13 @@ vi.mock('../services/DatabaseService', () => ({
 vi.mock('../services/effectiveServiceModel', () => ({
   buildEffectiveServiceModel: mockBuildEffectiveServiceModel,
 }));
+
+// The real evaluator stays in place; only the render-backed pair lookup is
+// stubbed, because this file has no Compose model to render.
+vi.mock('../services/updatePolicy', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../services/updatePolicy')>();
+  return { ...actual, resolveUpdatePolicyPair: mockResolveUpdatePolicyPair };
+});
 
 vi.mock('../services/NotificationService', () => ({
   NotificationService: {
@@ -1667,6 +1678,39 @@ services:
         { service: 'worker', image: 'worker:latest', hasUpdate: false, checkStatus: 'ok', lastError: null },
       ],
       expect.any(Number),
+      undefined,
+    );
+  });
+
+  it('records the unattended policy a node-wide check observed', async () => {
+    mockGetStacks.mockResolvedValue(['stackA']);
+    mockGetStackContent.mockResolvedValue(TWO_SERVICE_COMPOSE);
+    mockGetStackUpdateStatus.mockReturnValue({});
+    mockBuildEffectiveServiceModel.mockResolvedValueOnce({
+      renderable: true,
+      services: [specFor('web', 'web:latest'), specFor('worker', 'worker:latest')],
+    });
+    mockResolveUpdatePolicyPair.mockResolvedValueOnce({
+      manual: { decision: 'block' },
+      unattended: {
+        decision: 'skip',
+        evaluation: 'evaluated',
+        services: [
+          { service: 'web', policy: 'manual', eligible: false, reason: 'set to manual' },
+          { service: 'worker', policy: 'default', eligible: true },
+        ],
+      },
+    });
+    const service = ImageUpdateService.getInstance();
+    stubCheckImagePerRef(service, ['web:latest']);
+
+    await (service as any).checkNode(1, fakeDb());
+
+    expect(mockUpsertStackUpdateStatus).toHaveBeenCalledWith(
+      1, 'stackA', true, expect.any(Number), 'ok', null,
+      expect.any(Array),
+      expect.any(Number),
+      { decision: 'skip', ineligible: [{ service: 'web', policy: 'manual' }] },
     );
   });
 
@@ -1753,9 +1797,9 @@ services:
       1, 'stackA', false, expect.any(Number), 'ok', null,
       expect.any(Array),
       expect.any(Number),
-      // The check records the unattended policy it observed; this suite stubs
-      // Compose, so no policy could be read and none is recorded.
-      null,
+      // This suite stubs Compose, so the policy cannot be read: the write omits
+      // it and the row keeps whatever the last evaluating check recorded.
+      undefined,
     );
     const upsertsAfterRecheck = mockUpsertStackUpdateStatus.mock.calls.length;
     expect(mockDispatchAlert).not.toHaveBeenCalled();
@@ -1812,7 +1856,7 @@ services:
           { service: 'worker', image: 'worker:latest', hasUpdate: false, checkStatus: 'ok', lastError: null },
         ],
         expect.any(Number),
-        null,
+        undefined,
       );
     });
 
@@ -1964,7 +2008,7 @@ services:
         1, 'stackA', false, expect.any(Number), 'ok', null,
         expect.any(Array),
         expect.any(Number),
-        null,
+        undefined,
       );
     });
 

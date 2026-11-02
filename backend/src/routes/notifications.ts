@@ -22,7 +22,8 @@ import {
   storedAppriseToWriteConfig,
 } from '../helpers/notificationChannels';
 import { parseStackPatternsInput } from '../helpers/stackPattern';
-import { parseRouteKey } from '../helpers/senchoLabels';import {
+import { parseRouteKey } from '../helpers/senchoLabels';
+import {
   parseNotificationSchedule,
   type NotificationSchedule,
 } from '../helpers/notificationSchedule';

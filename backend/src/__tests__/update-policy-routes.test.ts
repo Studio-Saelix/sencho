@@ -170,7 +170,9 @@ describe('POST /stacks/:name/update', () => {
 
     expect(res.status).toBe(200);
     expect(res.body.status).toBe('skipped');
-    expect(res.body.message).toContain('io.sencho.update');
+    // The same sentence a local pull records, so a webhook's remote pull and a
+    // local one read identically in Recent executions.
+    expect(res.body.message).toBe('skipped by update policy (web: manual)');
     expect(mockUpdateStack).not.toHaveBeenCalled();
   });
 

@@ -361,7 +361,7 @@ describe('the update-policy activity row', () => {
 });
 
 describe('the recorded unattended policy', () => {
-  it('is cleared when a later check cannot evaluate it, and when a check fails', async () => {
+  it('survives a check that could not evaluate it, and is cleared by an explicit clear or a failed check', async () => {
     const { DatabaseService } = await import('../services/DatabaseService');
     const db = DatabaseService.getInstance();
     const nodeId = db.getDefaultNode()!.id!;
@@ -372,7 +372,13 @@ describe('the recorded unattended policy', () => {
     });
     expect(db.getStackUpdateDetail(nodeId)[stack].unattendedPolicy).toMatchObject({ decision: 'skip' });
 
-    // A check that could not read the policy writes nothing to show.
+    // A node-wide check that could not read the policy omits it: the last
+    // decision a check that could read it recorded stays, so the Auto pill does
+    // not lose a skip on a normal refresh.
+    db.upsertStackUpdateStatus(nodeId, stack, false, Date.now(), 'ok', null, [], 0);
+    expect(db.getStackUpdateDetail(nodeId)[stack].unattendedPolicy).toMatchObject({ decision: 'skip' });
+
+    // An explicit null still clears it.
     db.upsertStackUpdateStatus(nodeId, stack, false, Date.now(), 'ok', null, [], 0, null);
     expect(db.getStackUpdateDetail(nodeId)[stack].unattendedPolicy).toBeUndefined();
 

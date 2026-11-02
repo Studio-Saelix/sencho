@@ -114,7 +114,7 @@ function ineligibleReason(policy: UpdatePolicyValue): string | undefined {
     case 'disabled':
       return 'set to disabled';
     case 'invalid':
-      return 'the value is not recognized';
+      return 'not a recognized value';
     default:
       return undefined;
   }
@@ -494,7 +494,8 @@ export function unsupportedNodeMessage(nodeName: string, stackName: string | nul
     : `Stack "${stackName}" failed: ${reason}`;
 }
 
-const DECISION_MESSAGE: Record<'block' | 'skip', string> = {  block: 'Update blocked',
+const DECISION_MESSAGE: Record<'block' | 'skip', string> = {
+  block: 'Update blocked',
   skip: 'Update skipped',
 };
 

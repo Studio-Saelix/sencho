@@ -1228,33 +1228,8 @@ export class ImageUpdateService {
         const now = Date.now();
 
         // The same observation answers "would an unattended update touch this
-        // stack", so the Updates view never has to guess. Best effort: a check
-        // that cannot read the policy records none, which the view shows as no
-        // policy note rather than as an allowed update.
-        let unattendedPolicy: StackUpdateUnattendedPolicy | null = null;
-        try {
-            const pair = await withTimeout(
-                resolveUpdatePolicyPair(nodeId, stackName, { scope: 'stack' }),
-                ImageUpdateService.POLICY_READ_TIMEOUT_MS,
-                'update policy render',
-            );
-            unattendedPolicy = pair
-                ? {
-                    decision: pair.unattended.decision === 'allow' ? 'allow' : 'skip',
-                    ineligible: pair.unattended.evaluation === 'evaluated'
-                        ? pair.unattended.services
-                            .filter(s => !s.eligible)
-                            .map(s => ({ service: s.service, policy: s.policy }))
-                        : [],
-                }
-                : null;
-        } catch (error) {
-            console.warn(
-                '[ImageUpdateService] update policy unavailable for %s: %s',
-                sanitizeForLog(stackName),
-                sanitizeForLog(getErrorMessage(error, 'unknown')),
-            );
-        }
+        // stack", so the Updates view never has to guess.
+        const unattendedPolicy = await this.unattendedPolicyForStatus(nodeId, stackName);
 
         const committed = await this.withStackWriteLock(nodeId, stackName, generation, async (gen) => {
             if (checkStatus === 'failed') {
@@ -1295,6 +1270,42 @@ export class ImageUpdateService {
             };
         }
         return { outcome: 'cleared', warning: null };
+    }
+
+    /**
+     * The unattended decision a status write records, so the Updates view can
+     * report a policy skip without guessing. `undefined` means this check could
+     * not read the policy (a remote target, or a render that failed); the row
+     * then keeps the last decision a check that could read it recorded, rather
+     * than erasing it as if no service were ineligible.
+     */
+    private async unattendedPolicyForStatus(
+        nodeId: number,
+        stackName: string,
+    ): Promise<StackUpdateUnattendedPolicy | undefined> {
+        try {
+            const pair = await withTimeout(
+                resolveUpdatePolicyPair(nodeId, stackName, { scope: 'stack' }),
+                ImageUpdateService.POLICY_READ_TIMEOUT_MS,
+                'update policy render',
+            );
+            if (!pair) return undefined;
+            return {
+                decision: pair.unattended.decision === 'allow' ? 'allow' : 'skip',
+                ineligible: pair.unattended.evaluation === 'evaluated'
+                    ? pair.unattended.services
+                        .filter(s => !s.eligible)
+                        .map(s => ({ service: s.service, policy: s.policy }))
+                    : [],
+            };
+        } catch (error) {
+            console.warn(
+                '[ImageUpdateService] update policy unavailable for %s: %s',
+                sanitizeForLog(stackName),
+                sanitizeForLog(getErrorMessage(error, 'unknown')),
+            );
+            return undefined;
+        }
     }
 
     public async recordRemoteCheckFailure(nodeId: number, stack: string, generation: number): Promise<void> {
@@ -1512,6 +1523,10 @@ export class ImageUpdateService {
             const hasUpdate = services.some((s) => s.hasUpdate);
             const lastError = stackStatusLastError(services);
             const notifyMessage = buildAvailabilityNotifyMessage(stackName, services);
+            // A node-wide check answers the same question a single-stack recheck
+            // does, so it records the same unattended decision. Without this a
+            // full refresh left the Updates view with no policy note.
+            const unattendedPolicy = await this.unattendedPolicyForStatus(nodeId, stackName);
 
             const committed = await this.withStackWriteLock(nodeId, stackName, generation, async (gen) => {
                 if (checkStatus === 'failed') {
@@ -1521,6 +1536,7 @@ export class ImageUpdateService {
                 } else {
                     db.upsertStackUpdateStatus(
                         nodeId, stackName, hasUpdate, checkedAt, checkStatus, lastError, services, gen,
+                        unattendedPolicy,
                     );
                 }
             });

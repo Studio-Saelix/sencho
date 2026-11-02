@@ -1981,6 +1981,46 @@ describe('SchedulerService - executeUpdateRemote', () => {
     );
   });
 
+  it('records a failure when a fleet-wide run reaches a node too old to evaluate the label', async () => {
+    mockGetNode.mockReturnValue({ id: 2, name: 'remote', type: 'remote', status: 'online' });
+    mockGetProxyTarget.mockReturnValue({ apiUrl: 'http://remote:1852', apiToken: 'test-token' });
+    const { OFFLINE_META } = await import('../services/CapabilityRegistry');
+    mockProbeRemoteMeta.mockResolvedValue({
+      kind: 'ok',
+      meta: { ...OFFLINE_META, online: true, capabilities: ['remote-image-inspect-v1', 'remote-auto-update-checked-v1'] },
+    });
+
+    const mockFetch = vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({ result: 'Node "remote" failed: it does not evaluate io.sencho.update; update Sencho on that node.' }),
+    });
+    vi.stubGlobal('fetch', mockFetch);
+
+    mockGetScheduledTask.mockReturnValue({
+      id: 90,
+      name: 'remote-fleet-old',
+      action: 'update',
+      target_type: 'fleet',
+      target_id: '*',
+      cron_expression: '0 4 * * *',
+      enabled: true,
+      node_id: 2,
+      created_by: 'admin',
+      last_status: null,
+    });
+
+    const svc = SchedulerService.getInstance();
+    await svc.triggerTask(90, { userId: 1, username: 'admin', role: 'admin' } as const);
+
+    // A fleet-wide run updates nothing on that node, so it is a failure rather
+    // than a green run with a sad line.
+    expect(mockFetch).not.toHaveBeenCalled();
+    expect(mockUpdateScheduledTaskRun).toHaveBeenCalledWith(
+      1,
+      expect.objectContaining({ status: 'failure', error: expect.stringContaining('does not evaluate io.sencho.update') }),
+    );
+  });
+
 });
 
 // ── Lifecycle actions (auto_backup, auto_stop, auto_down, auto_start) ───

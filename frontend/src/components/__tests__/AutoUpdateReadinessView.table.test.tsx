@@ -69,10 +69,16 @@ function preview(stack: string, opts: PreviewOpts = {}) {
   };
 }
 
-function seed(fleet: Record<string, Record<string, boolean>>, previews: Record<string, unknown>, tasks: unknown[] = []) {
+function seed(
+  fleet: Record<string, Record<string, boolean>>,
+  previews: Record<string, unknown>,
+  tasks: unknown[] = [],
+  detail: Record<string, unknown> = {},
+) {
   mockedFetch.mockImplementation((url: string) => {
     if (url === '/image-updates/fleet') return Promise.resolve({ ok: true, json: async () => fleet });
     if (url.startsWith('/scheduled-tasks')) return Promise.resolve({ ok: true, json: async () => tasks });
+    if (url === '/image-updates/detail') return Promise.resolve({ ok: true, json: async () => detail });
     return Promise.resolve({ ok: true, json: async () => ({}) });
   });
   mockedFetchForNode.mockImplementation(async (path: string) => {
@@ -230,6 +236,25 @@ describe('AutoUpdateReadinessView table view', () => {
     expect(stackOrder()).toEqual(['soon', 'later', 'unscheduled']);
     fireEvent.click(header);
     expect(stackOrder()).toEqual(['unscheduled', 'later', 'soon']);
+  });
+
+  it('shows the policy skip instead of a next run for a stack the schedule will skip', async () => {
+    const now = Date.now();
+    seed(
+      { '1': { pinned: true } },
+      { pinned: preview('pinned') },
+      [{ id: 1, enabled: true, action: 'update', target_type: 'stack', target_id: 'pinned', node_id: 1, next_run_at: now + 60 * 60_000 }],
+      { pinned: { checkStatus: 'ok', unattendedPolicy: { decision: 'skip', ineligible: [{ service: 'db', policy: 'manual' }] } } },
+    );
+    render(<AutoUpdateReadinessView />);
+    await screen.findByTestId('readiness-table');
+
+    const row = rowFor('pinned');
+    expect(within(row).getByTestId('auto-pill')).toHaveTextContent('Auto: skipped by update policy');
+    // The covering schedule will not touch this stack, so the row must not
+    // present its next run as if the update would happen.
+    expect(within(row).queryByText(/in 1h/)).toBeNull();
+    expect(within(row).queryByText('Scheduled')).toBeNull();
   });
 
   it('sorts by node name', async () => {

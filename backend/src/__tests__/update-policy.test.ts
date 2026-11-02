@@ -186,6 +186,11 @@ describe('evaluateUpdatePolicy eligibility matrix', () => {
     expect(result.reason).toContain('set to disabled');
   });
 
+  it('reads a refusal for an unrecognized value as one grammatical sentence', () => {
+    const result = evaluateUpdatePolicy(resolution({ app: { update: 'sometimes' } }), stackRequest('scheduled'));
+    expect(result.reason).toBe('"app" is not a recognized value');
+  });
+
   it('fails closed when the model cannot be rendered', () => {
     const blocked = evaluateUpdatePolicy({ renderable: false }, stackRequest('manual'));
     expect(blocked).toMatchObject({ evaluation: 'unrenderable', decision: 'block' });

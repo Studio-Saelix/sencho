@@ -18,6 +18,7 @@ import {
   resolveUpdatePolicy,
   recordUpdatePolicyDecision,
   toUpdatePolicyWire,
+  describePolicySkip,
   UpdatePolicyChangedError,
   UpdatePolicyRefusedError,
   type PolicyRequest,
@@ -209,7 +210,8 @@ async function evaluateUpdatePolicyFor(
   return policy;
 }
 
-const STACK_OP_PRESENT_PARTICIPLE: Record<StackOpAction, string> = {  deploy: 'deploying',
+const STACK_OP_PRESENT_PARTICIPLE: Record<StackOpAction, string> = {
+  deploy: 'deploying',
   down: 'taking down',
   restart: 'restarting',
   stop: 'stopping',
@@ -3121,9 +3123,11 @@ stacksRouter.post('/:stackName/update', async (req: Request, res: Response) => {
       if (trigger !== 'manual') {
         // A trusted unattended caller treats a skip as an outcome, not a failure:
         // the operator declared that this stack is not to be updated automatically.
+        // The note is the one run-history sentence every transport records, so a
+        // webhook's remote pull reads exactly like a local one.
         res.json({
           status: 'skipped',
-          message: updatePolicyRefusalText(`Skipped by ${SENCHO_UPDATE_LABEL}`, policy),
+          message: describePolicySkip(policy),
           updatePolicy: toUpdatePolicyWire(policy),
         });
         return;

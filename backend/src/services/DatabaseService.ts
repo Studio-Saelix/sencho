@@ -6429,6 +6429,10 @@ stmt.run('gitops_schema_version', '1');
      * leaves the stack's existing services_json untouched (COALESCE against the
      * current row) rather than erasing a per-service breakdown that a model-aware
      * caller persisted on a previous check.
+     *
+     * `unattendedPolicy` has the same split: omitted (`undefined`) means this
+     * check could not evaluate the label, so the row keeps the last decision a
+     * check that could read it recorded; `null` explicitly clears it.
      */
     public upsertStackUpdateStatus(
         nodeId: number,
@@ -6439,9 +6443,10 @@ stmt.run('gitops_schema_version', '1');
         lastError: string | null = null,
         services?: StackServiceStatus[],
         generation = 0,
-        unattendedPolicy: StackUpdateUnattendedPolicy | null = null,
+        unattendedPolicy?: StackUpdateUnattendedPolicy | null,
     ): void {
         const servicesJson = services !== undefined ? stringifyServicesJson(services, generation) : null;
+        const evaluatedPolicy = unattendedPolicy !== undefined;
         this.db.prepare(
             `INSERT INTO stack_update_status (node_id, stack_name, has_update, check_status, last_error, checked_at, services_json, unattended_policy_json)
              VALUES (?, ?, ?, ?, ?, ?, ?, ?)
@@ -6451,10 +6456,12 @@ stmt.run('gitops_schema_version', '1');
                last_error = excluded.last_error,
                checked_at = excluded.checked_at,
                services_json = COALESCE(excluded.services_json, stack_update_status.services_json),
-               unattended_policy_json = excluded.unattended_policy_json`
+               unattended_policy_json = CASE WHEN ? THEN excluded.unattended_policy_json
+                 ELSE stack_update_status.unattended_policy_json END`
         ).run(
             nodeId, stackName, hasUpdate ? 1 : 0, checkStatus, lastError, checkedAt, servicesJson,
             unattendedPolicy ? JSON.stringify(unattendedPolicy) : null,
+            evaluatedPolicy ? 1 : 0,
         );
     }
 
