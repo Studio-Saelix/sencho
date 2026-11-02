@@ -34,10 +34,22 @@ vi.mock('../services/ComposeService', async () => {
     ...actual,
     ComposeService: {
       ...actual.ComposeService,
-      getInstance: () => ({ pullStackImages: mockPullStackImages }),
+      getInstance: () => ({
+        // The pull honors io.sencho.update, so the policy resolves against this.
+        renderConfig: async () => ({
+          rendered: JSON.stringify({ services: { web: { image: 'nginx:1' } } }),
+          stderr: '', code: 0, timedOut: false,
+        }),
+        pullStackImages: mockPullStackImages,
+      }),
     },
   };
 });
+
+// The policy module holds the ComposeService class from its own import, so
+// a getInstance mock is not visible to it; these suites are about the code
+// around the policy, which has its own tests.
+vi.mock('../services/updatePolicy', () => import('./__helpers__/allowingUpdatePolicy').then(m => m.allowingUpdatePolicyModule()));
 
 vi.mock('../services/DockerController', async () => {
   const actual = await vi.importActual<typeof import('../services/DockerController')>(

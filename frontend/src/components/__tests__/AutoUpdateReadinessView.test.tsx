@@ -48,6 +48,7 @@ import { SENCHO_OPEN_STACK_EVENT } from '@/lib/events';
 import { requestServiceUpdate } from '@/lib/serviceUpdate';
 import { toast } from '@/components/ui/toast-store';
 import AutoUpdateReadinessView, {
+  AutoPill,
   MobileReadinessCard,
   CadenceStrip,
   type StackCard,
@@ -1787,5 +1788,37 @@ describe('isAuthoritativeNegativePreview (Fleet card drop parity)', () => {
       images: [],
       summary: { has_update: false, check_status: 'ok' },
     })).toBe(false);
+  });
+});
+
+describe('AutoPill', () => {
+  it('reads a policy skip instead of Off, and names the ineligible services in its tooltip', () => {
+    render(<AutoPill autoUpdateEnabled unattendedPolicy={{ decision: 'skip', ineligible: [{ service: 'db', policy: 'disabled' }] }} />);
+    const pill = screen.getByTestId('auto-pill');
+    expect(pill).toHaveTextContent('Auto: skipped by update policy');
+    expect(pill.getAttribute('title')).toContain('db (disabled)');
+    expect(pill).toHaveAttribute('data-state', 'skipped');
+  });
+
+  it('keeps Off when no schedule covers the stack', () => {
+    render(<AutoPill autoUpdateEnabled={false} unattendedPolicy={null} />);
+    expect(screen.getByTestId('auto-pill')).toHaveTextContent('Auto: Off');
+  });
+
+  it('shows nothing for a scheduled stack with no policy note or an allowed one', () => {
+    const { container, rerender } = render(<AutoPill autoUpdateEnabled unattendedPolicy={null} />);
+    expect(container).toBeEmptyDOMElement();
+    rerender(<AutoPill autoUpdateEnabled unattendedPolicy={{ decision: 'allow', ineligible: [] }} />);
+    expect(container).toBeEmptyDOMElement();
+  });
+
+  it('renders the skip on the phone card too', () => {
+    render(
+      <MobileReadinessCard
+        card={card({ unattendedPolicy: { decision: 'skip', ineligible: [{ service: 'db', policy: 'disabled' }] } })}
+        onApply={() => {}}
+      />,
+    );
+    expect(screen.getByTestId('auto-pill')).toHaveTextContent('Auto: skipped by update policy');
   });
 });

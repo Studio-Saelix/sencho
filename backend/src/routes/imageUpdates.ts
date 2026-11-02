@@ -777,6 +777,9 @@ autoUpdateRouter.post('/execute', authMiddleware, async (req: Request, res: Resp
             bypass: false, actor: `auto-update:${req.user?.username ?? 'scheduler'}`,
           }),
           verificationOwner: 'target_local',
+          // This route is the automatic-update entry point; a scheduled task on
+          // a remote node carries `scheduled` through the checked request instead.
+          trigger: 'automatic',
         });
         results.push(applied.message);
       } catch (e) {

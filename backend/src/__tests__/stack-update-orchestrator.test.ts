@@ -27,6 +27,8 @@ vi.mock('../services/effectiveServiceModel', () => ({
 }));
 
 import { StackUpdateOrchestrator, evaluateServiceReplicaConvergence, shortImageId } from '../services/StackUpdateOrchestrator';
+import { allowingPolicy, blockingPolicy } from './__helpers__/updatePolicyFixture';
+import { UpdatePolicyRefusedError } from '../services/updatePolicy';
 
 const orch = () => StackUpdateOrchestrator.getInstance();
 
@@ -85,11 +87,11 @@ describe('shortImageId', () => {
 describe('StackUpdateOrchestrator stack branch', () => {
   it('runs ComposeService.updateStack and returns stack_compose_done', async () => {
     const result = await orch().execute(
-      { nodeId: 0, stackName: 'web', target: { scope: 'stack' }, trigger: 'manual', actor: 'tester' },
+      { nodeId: 0, stackName: 'web', target: { scope: 'stack' }, trigger: 'manual', actor: 'tester', policy: allowingPolicy('web') },
       { atomic: true, terminalWs: null },
     );
     expect(result).toEqual({ kind: 'stack_compose_done', recoveryId: null, deployedGenerationId: null });
-    expect(state.updateStack).toHaveBeenCalledWith('web', undefined, true);
+    expect(state.updateStack).toHaveBeenCalledWith('web', undefined, true, expect.any(Function));
     // recoveryId is forwarded from ComposeService.updateStack
   });
 });
@@ -98,7 +100,10 @@ describe('StackUpdateOrchestrator service branch guards', () => {
   it('rejects a service-scoped update with a non-manual trigger', async () => {
     await expect(
       orch().execute(
-        { nodeId: 0, stackName: 'web', target: { scope: 'service', serviceName: 'app' }, trigger: 'scheduled', actor: 'system' },
+        {
+          nodeId: 0, stackName: 'web', target: { scope: 'service', serviceName: 'app' }, trigger: 'scheduled', actor: 'system',
+          policy: allowingPolicy('web', { scope: 'service', serviceName: 'app' }, 'scheduled', { app: {} }),
+        },
         { policyOptions: { bypass: false, actor: 'system' } },
       ),
     ).rejects.toThrow(/manual/i);
@@ -108,7 +113,10 @@ describe('StackUpdateOrchestrator service branch guards', () => {
   it('refuses a single-service stack with code service_update_single_service', async () => {
     state.model = { renderable: true, services: [spec('only')] };
     const result = await orch().execute(
-      { nodeId: 0, stackName: 'web', target: { scope: 'service', serviceName: 'only' }, trigger: 'manual', actor: 'tester' },
+      {
+        nodeId: 0, stackName: 'web', target: { scope: 'service', serviceName: 'only' }, trigger: 'manual', actor: 'tester',
+        policy: allowingPolicy('web', { scope: 'service', serviceName: 'only' }, 'manual', { 'only': {} }),
+      },
       { policyOptions: { bypass: false, actor: 'tester' } },
     );
     expect(result).toMatchObject({ kind: 'service_failed', code: 'service_update_single_service' });
@@ -120,7 +128,10 @@ describe('StackUpdateOrchestrator service branch guards', () => {
     state.evaluateDockerEndpoint.mockResolvedValue({ reason: 'provider', service: 'socket-proxy', message: 'carries the Docker connection' });
 
     const result = await orch().execute(
-      { nodeId: 0, stackName: 'web', target: { scope: 'service', serviceName: 'socket-proxy' }, trigger: 'manual', actor: 'tester' },
+      {
+        nodeId: 0, stackName: 'web', target: { scope: 'service', serviceName: 'socket-proxy' }, trigger: 'manual', actor: 'tester',
+        policy: allowingPolicy('web', { scope: 'service', serviceName: 'socket-proxy' }, 'manual', { 'socket-proxy': {} }),
+      },
       { policyOptions: { bypass: false, actor: 'tester' } },
     );
 
@@ -131,9 +142,40 @@ describe('StackUpdateOrchestrator service branch guards', () => {
   it('fails closed when the effective model cannot render', async () => {
     state.model = { renderable: false, code: 'effective_model_render_failed', error: 'boom' };
     const result = await orch().execute(
-      { nodeId: 0, stackName: 'web', target: { scope: 'service', serviceName: 'app' }, trigger: 'manual', actor: 'tester' },
+      {
+        nodeId: 0, stackName: 'web', target: { scope: 'service', serviceName: 'app' }, trigger: 'manual', actor: 'tester',
+        policy: allowingPolicy('web', { scope: 'service', serviceName: 'app' }, 'manual', { 'app': {} }),
+      },
       { policyOptions: { bypass: false, actor: 'tester' } },
     );
     expect(result).toMatchObject({ kind: 'service_failed', code: 'effective_model_render_failed' });
+  });
+});
+
+describe('StackUpdateOrchestrator policy contract', () => {
+  it('refuses to run without an allowing decision, and never touches Compose', async () => {
+    await expect(
+      orch().execute(
+        {
+          nodeId: 0, stackName: 'web', target: { scope: 'stack' }, trigger: 'manual', actor: 'tester',
+          policy: blockingPolicy('web'),
+        },
+        { atomic: true, terminalWs: null },
+      ),
+    ).rejects.toThrow(UpdatePolicyRefusedError);
+    expect(state.updateStack).not.toHaveBeenCalled();
+  });
+
+  it('refuses a decision minted for another stack', async () => {
+    await expect(
+      orch().execute(
+        {
+          nodeId: 0, stackName: 'web', target: { scope: 'stack' }, trigger: 'manual', actor: 'tester',
+          policy: allowingPolicy('another-stack'),
+        },
+        { atomic: true, terminalWs: null },
+      ),
+    ).rejects.toThrow(UpdatePolicyRefusedError);
+    expect(state.updateStack).not.toHaveBeenCalled();
   });
 });

@@ -439,6 +439,11 @@ function NotificationRow({ notif, showNodeName, onDelete, onMarkRead, onNavigate
                 >
                     {notif.message}
                 </p>
+                {Array.isArray(notif.route_keys) && notif.route_keys.length > 0 && (
+                    <p className="mt-0.5 font-mono text-[10px] text-stat-subtitle" data-testid="notification-route-keys">
+                        Routing keys: {notif.route_keys.join(', ')}
+                    </p>
+                )}
                 <div className="mt-1 flex items-center justify-between gap-1.5 font-mono text-[10px] uppercase tracking-[0.14em] text-stat-subtitle">
                     <div className="flex items-center gap-1.5">
                         {showNodeName && notif.nodeName ? (

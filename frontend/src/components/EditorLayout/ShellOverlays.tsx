@@ -294,6 +294,16 @@ export function ShellOverlays({
         mode={updateReadiness?.mode}
         onCancel={() => setUpdateReadiness(null)}
         onProceed={() => updateReadiness?.proceed()}
+        onOpenComposeFile={stackActions.openComposeEditor}
+        onProceedService={updateReadiness?.stackFile
+          ? (service) => {
+            // The shared handler closes this dialog and opens that service's
+            // readiness, so the blocked stack never becomes an ad-hoc update.
+            const stackFile = updateReadiness.stackFile;
+            setUpdateReadiness(null);
+            void stackActions.requestServiceUpdate(stackFile, service);
+          }
+          : undefined}
       />
 
       {/* Pre-deploy scan advisory (visibility only; never blocks) */}

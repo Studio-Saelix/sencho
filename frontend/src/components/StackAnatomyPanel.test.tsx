@@ -881,7 +881,7 @@ describe('StackAnatomyPanel hidden helper chips', () => {
     senchoLabels: {
       renderable: true,
       services: Object.fromEntries(
-        Object.entries(services).map(([name, over]) => [name, { links: [], unverifiedLinks: 0, ...over }]),
+        Object.entries(services).map(([name, over]) => [name, { links: [], unverifiedLinks: 0, update: null, notifyRoute: null, ...over }]),
       ),
       entries: [],
     },

@@ -2,7 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   Rocket, RefreshCcw, CircleStop, Play, ArrowUp, Activity, Loader2, AlertCircle,
   TriangleAlert, CircleCheck, HeartPulse, HeartCrack, ArrowDownToLine, Unlock,
-  GitBranch, GitPullRequest, CircleX, Ban,
+  GitBranch, GitPullRequest, CircleX, Ban, SlidersHorizontal,
 } from 'lucide-react';
 import type { LucideIcon } from 'lucide-react';
 import { Button } from '@/components/ui/button';
@@ -30,6 +30,7 @@ interface ActivityEvent {
   timestamp: number;
   stack_name?: string;
   actor_username?: string | null;
+  route_keys?: string[] | null;
   suppression_match?: string | SuppressionMatchSnapshot | null;
 }
 
@@ -51,6 +52,7 @@ const CATEGORY_ICON: Record<string, LucideIcon> = {
   health_gate_passed: HeartPulse,
   health_gate_failed: HeartCrack,
   rollback_generation_released: Unlock,
+  update_policy: SlidersHorizontal,
   git_pull_ready: GitPullRequest,
   git_plan_blocked: Ban,
   git_pull_failed: CircleX,
@@ -100,6 +102,12 @@ function suppressionTooltip(match: SuppressionMatchSnapshot): string {
   const names = match.rules.map((r) => r.name).filter(Boolean);
   const ruleText = names.length > 0 ? names.join(', ') : 'Unnamed rule';
   return `Matched rule: ${ruleText}`;
+}
+
+/** Routing keys on an activity row, read defensively from a proxied body. */
+function routeKeysOf(raw: unknown): string[] {
+  if (!Array.isArray(raw)) return [];
+  return raw.filter((key): key is string => typeof key === 'string' && key !== '');
 }
 
 function isActivityEvent(value: unknown): value is ActivityEvent {
@@ -302,6 +310,7 @@ export function StackActivityTimeline({ stackName, liveEvents }: StackActivityTi
           {g.events.map(e => {
             const Icon = CATEGORY_ICON[e.category ?? ''] ?? Activity;
             const actor = e.actor_username ? formatActor(e.actor_username) : null;
+            const routeKeys = routeKeysOf(e.route_keys);
             const suppression = parseSuppressionMatch(e.suppression_match);
             const showSuppressed = Boolean(
               suppression && (suppression.bellSuppressed || suppression.externalSuppressed),
@@ -331,6 +340,11 @@ export function StackActivityTimeline({ stackName, liveEvents }: StackActivityTi
                         {suppressionTooltip(suppression)}
                       </TooltipContent>
                     </Tooltip>
+                  )}
+                  {routeKeys.length > 0 && (
+                    <div className="mt-0.5 font-mono text-[10px] text-stat-subtitle" data-testid="activity-route-keys">
+                      Routing keys: {routeKeys.join(', ')}
+                    </div>
                   )}
                 </div>
                 <span className="font-mono text-[10px] text-stat-subtitle shrink-0">{formatTimeAgo(e.timestamp)}</span>

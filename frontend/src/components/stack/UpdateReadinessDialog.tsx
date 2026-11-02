@@ -10,6 +10,11 @@ import { apiFetch } from '@/lib/api';
 import { cn } from '@/lib/utils';
 import { formatTimeAgo } from '@/lib/relativeTime';
 import { useAuth } from '@/context/AuthContext';
+import { useNodes } from '@/context/NodeContext';
+import { SENCHO_LABEL_POLICY_CAPABILITY } from '@/lib/capabilities';
+import { POLICY_LABEL_NOT_EVALUATED_COPY, inventoryDeclaresLabel } from '@/lib/labelInventory';
+import { SENCHO_UPDATE_LABEL } from '@/lib/senchoLabels';
+import { openStackEditor } from '@/lib/updatePolicyRefusal';
 import { verdictMeta } from './stackReadinessMeta';
 import type { ReadinessVerdict } from '@/types/readiness';
 
@@ -24,11 +29,28 @@ interface ReadinessSignal {
   affectsVerdict: boolean;
 }
 
+interface UpdatePolicyService {
+  service: string;
+  policy: string;
+  eligible: boolean;
+  reason?: string;
+}
+
+/** Mirrors `updateGuard/types.ts` `UpdatePolicyReadiness`; absent on an older node and on the Fleet rollup. */
+interface UpdatePolicyReadiness {
+  evaluation: 'evaluated' | 'unrenderable';
+  services: UpdatePolicyService[];
+  manualDecision: 'allow' | 'block';
+  unattendedDecision: 'allow' | 'skip';
+  reason: string | null;
+}
+
 interface UpdateReadinessReport {
   stack: string;
   computedAt: number;
   verdict: ReadinessVerdict;
   signals: ReadinessSignal[];
+  updatePolicy?: UpdatePolicyReadiness;
 }
 
 const FETCH_TIMEOUT_MS = 4_000;
@@ -72,6 +94,16 @@ interface UpdateReadinessDialogProps {
   onCancel: () => void;
   /** Caller closes the dialog and starts the update. */
   onProceed: () => void;
+  /**
+   * Opens the Compose file in place. Absent in a context with no editor, where
+   * the blocked policy offers "Open stack editor" instead.
+   */
+  onOpenComposeFile?: () => void;
+  /**
+   * Closes this dialog and opens the named service's readiness. Absent outside
+   * the editor, where no service-scoped handler is mounted.
+   */
+  onProceedService?: (serviceName: string) => void;
 }
 
 /**
@@ -80,10 +112,19 @@ interface UpdateReadinessDialogProps {
  * the single hard block. A slow or failed readiness fetch degrades to an
  * unknown verdict so this dialog can never strand the update path.
  */
-export function UpdateReadinessDialog({ open, stackName, nodeId, serviceName, mode = 'update', onCancel, onProceed }: UpdateReadinessDialogProps) {
+export function UpdateReadinessDialog({ open, stackName, nodeId, serviceName, mode = 'update', onCancel, onProceed, onOpenComposeFile, onProceedService }: UpdateReadinessDialogProps) {
   const { isAdmin } = useAuth();
+  const { nodeMeta } = useNodes();
+  // The capability is per node, and this dialog can be opened for a node that
+  // is not the active one. Unknown meta is treated as capable, matching the
+  // context's optimistic default, so no note is claimed from a failed fetch.
+  const policyMeta = nodeId === null ? undefined : nodeMeta.get(nodeId);
+  const nodeEvaluatesPolicy = policyMeta === undefined
+    || policyMeta.version === null
+    || policyMeta.capabilities.includes(SENCHO_LABEL_POLICY_CAPABILITY);
 
   const [report, setReport] = useState<UpdateReadinessReport | null>(null);
+  const [declaresUpdateLabel, setDeclaresUpdateLabel] = useState(false);
   const [snapshotAt, setSnapshotAt] = useState<number | null>(null);
   const [snapshotKnown, setSnapshotKnown] = useState(false);
   const [snapshotFirst, setSnapshotFirst] = useState(false);
@@ -92,6 +133,7 @@ export function UpdateReadinessDialog({ open, stackName, nodeId, serviceName, mo
   useEffect(() => {
     if (!open) {
       setReport(null);
+      setDeclaresUpdateLabel(false);
       setSnapshotAt(null);
       setSnapshotKnown(false);
       setSnapshotFirst(false);
@@ -99,6 +141,7 @@ export function UpdateReadinessDialog({ open, stackName, nodeId, serviceName, mo
       return;
     }
     setReport(null);
+    setDeclaresUpdateLabel(false);
     const controller = new AbortController();
     let timedOut = false;
     const timer = setTimeout(() => {
@@ -155,11 +198,33 @@ export function UpdateReadinessDialog({ open, stackName, nodeId, serviceName, mo
     };
     void loadCoverage();
 
+    // An older node does not report the update policy at all. The note that
+    // says so is only true for a stack that declares the label, so read the
+    // declared entries on that node only; a current node already answered.
+    const loadDeclaredPolicyLabel = async () => {
+      if (nodeEvaluatesPolicy) return;
+      try {
+        const res = await apiFetch(
+          `/stacks/${encodeURIComponent(stackName)}/label-inventory`,
+          { nodeId, signal: controller.signal },
+        );
+        if (!res.ok) return;
+        const body: unknown = await res.json();
+        setDeclaresUpdateLabel(inventoryDeclaresLabel(body, SENCHO_UPDATE_LABEL));
+      } catch {
+        // Supplemental: without the inventory the note is omitted, never invented.
+        if (!controller.signal.aborted) {
+          console.warn('[UpdateReadiness] label inventory unavailable for the policy note');
+        }
+      }
+    };
+    void loadDeclaredPolicyLabel();
+
     return () => {
       clearTimeout(timer);
       controller.abort();
     };
-  }, [open, stackName, nodeId, isAdmin, serviceName]);
+  }, [open, stackName, nodeId, isAdmin, serviceName, nodeEvaluatesPolicy]);
 
   const proceed = async () => {
     if (snapshotFirst) {
@@ -192,6 +257,18 @@ export function UpdateReadinessDialog({ open, stackName, nodeId, serviceName, mo
 
   const verdict = report ? verdictMeta(report.verdict) : null;
   const VerdictIcon = verdict?.icon;
+
+  const policy = report?.updatePolicy;
+  const policyBlocked = policy?.manualDecision === 'block';
+  const policyReason = policy?.reason ?? null;
+  const eligibleServices = policyBlocked
+    ? (policy?.services ?? []).filter(service => service.eligible)
+    : [];
+  const openComposeFile = () => {
+    if (onOpenComposeFile) onOpenComposeFile();
+    else openStackEditor(nodeId, stackName);
+    onCancel();
+  };
 
   return (
     <Modal open={open} onOpenChange={(next) => { if (!next && !working) onCancel(); }} size="lg">
@@ -244,6 +321,53 @@ export function UpdateReadinessDialog({ open, stackName, nodeId, serviceName, mo
               )}
             </div>
 
+            {policyBlocked && (
+              <div
+                className="rounded-lg border border-warning/40 bg-warning/[0.06] px-3 py-2.5 text-xs text-warning"
+                data-testid="update-policy-blocked"
+              >
+                <div className="flex items-center gap-2">
+                  <ShieldAlert className="h-3.5 w-3.5 shrink-0" strokeWidth={1.5} />
+                  <span className="font-medium">Update policy blocks this update</span>
+                </div>
+                <p className="mt-1 leading-relaxed">
+                  {policyReason ?? `${SENCHO_UPDATE_LABEL} does not allow this update.`}
+                </p>
+                <div className="mt-2 flex flex-wrap items-center gap-1.5">
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    className="h-7 px-2 text-xs max-md:min-h-11"
+                    onClick={openComposeFile}
+                    data-testid="update-policy-open-compose"
+                  >
+                    {onOpenComposeFile ? 'Open Compose file' : 'Open stack editor'}
+                  </Button>
+                  {onProceedService && eligibleServices.map(service => (
+                    <Button
+                      key={service.service}
+                      variant="outline"
+                      size="sm"
+                      className="h-7 px-2 text-xs max-md:min-h-11"
+                      onClick={() => onProceedService(service.service)}
+                      data-testid={`update-policy-service-${service.service}`}
+                    >
+                      Update {service.service}
+                    </Button>
+                  ))}
+                </div>
+              </div>
+            )}
+
+            {!nodeEvaluatesPolicy && declaresUpdateLabel && (
+              <div
+                className="rounded-lg border border-warning/40 bg-warning/[0.06] px-3 py-2 text-xs text-warning"
+                data-testid="update-policy-unsupported"
+              >
+                {POLICY_LABEL_NOT_EVALUATED_COPY}
+              </div>
+            )}
+
             {isAdmin && (
               <label className="flex items-center gap-2 text-[12px] text-foreground/80">
                 <Checkbox
@@ -267,7 +391,10 @@ export function UpdateReadinessDialog({ open, stackName, nodeId, serviceName, mo
           <Button
             size="sm"
             autoFocus
-            disabled={working}
+            disabled={working || policyBlocked}
+            title={policyBlocked
+              ? (policyReason ?? `${SENCHO_UPDATE_LABEL} does not allow this update.`)
+              : undefined}
             data-testid="readiness-proceed"
             onClick={(e) => {
               e.preventDefault();

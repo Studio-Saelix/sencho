@@ -36,6 +36,8 @@ interface NotificationRoute {
     label_ids: number[] | null;
     categories: NotificationCategory[] | null;
     levels: NotificationLevel[] | null;
+    /** Routing keys this rule matches. Empty or null matches every alert. */
+    route_keys: string[] | null;
     channel_type: 'discord' | 'slack' | 'webhook' | 'apprise' | 'ntfy';
     channel_url: string;
     config: { mode: 'keyed' | 'stateless'; tags?: string; has_urls: boolean; providers?: string[]; url_count?: number } | null;
@@ -44,6 +46,19 @@ interface NotificationRoute {
     enabled: boolean;
     created_at: number;
     updated_at: number;
+}
+
+/** Split a comma- or space-separated entry into normalized keys. */
+function splitRouteKeys(raw: string): string[] {
+    return raw.split(/[\s,]+/).map(key => key.trim().toLowerCase()).filter(Boolean);
+}
+
+function mergeRouteKeys(existing: string[], raw: string): string[] {
+    const next = [...existing];
+    for (const key of splitRouteKeys(raw)) {
+        if (!next.includes(key)) next.push(key);
+    }
+    return next;
 }
 
 const LEVEL_LABELS: Record<NotificationLevel, string> = {
@@ -88,6 +103,9 @@ export function NotificationRoutingSection() {
     const [formLabelIds, setFormLabelIds] = useState<number[]>([]);
     const [formCategories, setFormCategories] = useState<NotificationCategory[]>([]);
     const [formLevels, setFormLevels] = useState<NotificationLevel[]>([]);
+    const [formRouteKeys, setFormRouteKeys] = useState<string[]>([]);
+    const [formRouteKeyInput, setFormRouteKeyInput] = useState('');
+    const [routeKeysError, setRouteKeysError] = useState<string | null>(null);
     const [formChannelType, setFormChannelType] = useState<'discord' | 'slack' | 'webhook' | 'apprise' | 'ntfy'>('discord');
     const patternChipsRef = useRef<PatternChipsHandle>(null);
     const [formChannelUrl, setFormChannelUrl] = useState('');
@@ -148,6 +166,9 @@ export function NotificationRoutingSection() {
         setFormLabelIds([]);
         setFormCategories([]);
         setFormLevels([]);
+        setFormRouteKeys([]);
+        setFormRouteKeyInput('');
+        setRouteKeysError(null);
         setFormChannelType('discord');
         setFormChannelUrl('');
         setFormAppriseUrls('');
@@ -170,6 +191,9 @@ export function NotificationRoutingSection() {
         setFormLabelIds(route.label_ids ? [...route.label_ids] : []);
         setFormCategories(route.categories ? [...route.categories] : []);
         setFormLevels(route.levels ? [...route.levels] : []);
+        setFormRouteKeys(route.route_keys ? [...route.route_keys] : []);
+        setFormRouteKeyInput('');
+        setRouteKeysError(null);
         setFormChannelType(route.channel_type);
         setFormChannelUrl(route.channel_url);
         setFormAppriseTags(route.config?.tags ?? '');
@@ -225,6 +249,8 @@ export function NotificationRoutingSection() {
             && !channelTypeChanged
             && !appriseEndpointDirty
             && (Boolean(routes.find(r => r.id === editingId)?.secrets_redacted) || formChannelUrl.includes('<redacted>'));
+        const routeKeys = mergeRouteKeys(formRouteKeys, formRouteKeyInput);
+        setRouteKeysError(null);
         setSaving(true);
         try {
             const body = {
@@ -234,6 +260,7 @@ export function NotificationRoutingSection() {
                 label_ids: formLabelIds.length > 0 ? formLabelIds : null,
                 categories: formCategories.length > 0 ? formCategories : null,
                 levels: formLevels.length > 0 ? formLevels : null,
+                route_keys: routeKeys.length > 0 ? routeKeys : null,
                 channel_type: formChannelType,
                 ...(preserveRedactedUrl ? {} : { channel_url: formChannelUrl.trim() }),
                 ...(needsAppriseConfig
@@ -261,7 +288,13 @@ export function NotificationRoutingSection() {
                 fetchRoutes();
             } else {
                 const err = await res.json().catch(() => ({}));
-                toast.error(err?.error || err?.message || err?.data?.error || 'Something went wrong.');
+                const message: string = err?.error || err?.message || err?.data?.error || 'Something went wrong.';
+                // The server validates keys with the same parser the Compose
+                // label uses; its reason goes inline next to the field.
+                if (res.status === 400 && message.startsWith('route_keys')) {
+                    setRouteKeysError(message.replace(/^route_keys:\s*/, ''));
+                }
+                toast.error(message);
             }
         } catch (e: unknown) {
             toast.error((e as Error)?.message || 'Network error.');
@@ -453,6 +486,67 @@ export function NotificationRoutingSection() {
                                     searchPlaceholder="Search stacks..."
                                     emptyText="No stacks found."
                                 />
+                            </div>
+
+                            <div className="space-y-2">
+                                <Label>Routing keys <span className="text-muted-foreground font-normal text-xs">(optional)</span></Label>
+                                {formRouteKeys.length > 0 && (
+                                    <div className="flex flex-wrap gap-1.5">
+                                        {formRouteKeys.map(key => (
+                                            <Badge key={key} variant="secondary" className="font-mono text-xs gap-1 pr-1">
+                                                {key}
+                                                <button
+                                                    type="button"
+                                                    aria-label={`Remove routing key ${key}`}
+                                                    onClick={() => setFormRouteKeys(prev => prev.filter(k => k !== key))}
+                                                    className="ml-0.5 rounded-full hover:bg-foreground/10 p-0.5"
+                                                >
+                                                    <X className="w-3 h-3" />
+                                                </button>
+                                            </Badge>
+                                        ))}
+                                    </div>
+                                )}
+                                <Input
+                                    placeholder="production, eu-west"
+                                    value={formRouteKeyInput}
+                                    data-testid="route-keys-input"
+                                    aria-invalid={routeKeysError !== null}
+                                    onChange={e => {
+                                        const value = e.target.value;
+                                        // A separator commits the keys typed so far, so the
+                                        // field reads as chips rather than free text.
+                                        if (/[\s,]/.test(value)) {
+                                            setFormRouteKeys(prev => mergeRouteKeys(prev, value));
+                                            setFormRouteKeyInput('');
+                                        } else {
+                                            setFormRouteKeyInput(value);
+                                        }
+                                        setRouteKeysError(null);
+                                    }}
+                                    onKeyDown={e => {
+                                        if (e.key === 'Enter' && formRouteKeyInput.trim()) {
+                                            e.preventDefault();
+                                            setFormRouteKeys(prev => mergeRouteKeys(prev, formRouteKeyInput));
+                                            setFormRouteKeyInput('');
+                                        } else if (e.key === 'Backspace' && !formRouteKeyInput) {
+                                            setFormRouteKeys(prev => prev.slice(0, -1));
+                                        }
+                                    }}
+                                    onBlur={() => {
+                                        if (!formRouteKeyInput.trim()) return;
+                                        setFormRouteKeys(prev => mergeRouteKeys(prev, formRouteKeyInput));
+                                        setFormRouteKeyInput('');
+                                    }}
+                                />
+                                {routeKeysError && (
+                                    <p className="text-xs text-destructive" role="alert" data-testid="route-keys-error">
+                                        {routeKeysError}
+                                    </p>
+                                )}
+                                <p className="text-xs text-muted-foreground">
+                                    Matches alerts from stacks on this instance whose services set io.sencho.notify.route.
+                                </p>
                             </div>
 
                             <div className="space-y-2">
@@ -746,10 +840,14 @@ export function NotificationRoutingSection() {
                             {route.levels && route.levels.length > 0 && route.levels.map((l) => (
                                 <Badge key={l} variant="outline" className="text-[10px]">{LEVEL_LABELS[l]}</Badge>
                             ))}
+                            {route.route_keys && route.route_keys.length > 0 && route.route_keys.map(key => (
+                                <Badge key={key} variant="secondary" className="font-mono text-[10px]">{key}</Badge>
+                            ))}
                             {route.stack_patterns.length === 0
                                 && (!route.label_ids || route.label_ids.length === 0)
                                 && (!route.categories || route.categories.length === 0)
                                 && (!route.levels || route.levels.length === 0)
+                                && (!route.route_keys || route.route_keys.length === 0)
                                 && (
                                     route.node_id === null
                                         ? <span className="text-muted-foreground/50 text-[10px]">Matches all alerts</span>

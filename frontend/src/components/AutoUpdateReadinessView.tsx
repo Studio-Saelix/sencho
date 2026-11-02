@@ -9,7 +9,7 @@ import { RefreshCw, Shield, AlertTriangle, ShieldAlert, CircleSlash, Clock, Play
 import { toast } from '@/components/ui/toast-store';
 import { apiFetch, fetchForNode } from '@/lib/api';
 import { formatTimeAgo } from '@/lib/relativeTime';
-import type { ImageUpdateStatus, StackUpdateInfo } from '@/types/imageUpdates';
+import type { ImageUpdateStatus, StackUpdateInfo, StackUnattendedPolicy } from '@/types/imageUpdates';
 import { isAuthoritativeNegativePreview } from '@/types/imageUpdates';
 import { fetchUpdatePreview } from '@/lib/fetchUpdatePreview';
 import {
@@ -34,6 +34,7 @@ import type { ScheduledTask } from '@/types/scheduling';
 import { SERVICE_SCOPED_UPDATE_CAPABILITY } from '@/lib/capabilities';
 import { requestServiceUpdate } from '@/lib/serviceUpdate';
 import { openEndpointRefusalInEditor } from '@/lib/endpointRefusalHandoff';
+import { toastUpdatePolicyRefusal } from '@/lib/updatePolicyRefusal';
 import { useDeployFeedback } from '@/context/DeployFeedbackContext';
 import { useStackUpdate } from '@/hooks/useStackUpdate';
 
@@ -94,6 +95,23 @@ function withErrorDetail(lead: string, error: string | null | undefined): string
   return error ? `${lead}: ${error}` : `${lead}.`;
 }
 
+/** The node's unattended-policy note, read defensively from a proxied detail body. */
+function readUnattendedPolicy(value: unknown): StackUnattendedPolicy | null {
+  if (!value || typeof value !== 'object') return null;
+  const raw = value as Record<string, unknown>;
+  if (raw.decision !== 'allow' && raw.decision !== 'skip') return null;
+  const ineligible: StackUnattendedPolicy['ineligible'] = [];
+  if (Array.isArray(raw.ineligible)) {
+    for (const item of raw.ineligible) {
+      if (!item || typeof item !== 'object') continue;
+      const entry = item as Record<string, unknown>;
+      if (typeof entry.service !== 'string' || typeof entry.policy !== 'string') continue;
+      ineligible.push({ service: entry.service, policy: entry.policy });
+    }
+  }
+  return { decision: raw.decision, ineligible };
+}
+
 export interface StackCard {
   stack: string;
   nodeId: number;
@@ -112,6 +130,9 @@ export interface StackCard {
   // Post-Apply verification note when Compose succeeded but clearance could
   // not be confirmed (distinct from a failed preview fetch).
   verificationNote: string | null;
+  // What an unattended refresh would do for this stack, when the node recorded
+  // it. Absent on an older node, which shows no policy note.
+  unattendedPolicy?: StackUnattendedPolicy | null;
 }
 
 interface NodeGroup {
@@ -281,6 +302,38 @@ function VersionDiff({ current, next }: { current: string | null; next: string |
   );
 }
 
+/**
+ * The auto-update pill. A policy skip is the more specific fact: the stack has
+ * a covering schedule, but the label keeps unattended refreshes out of it. No
+ * schedule still reads as Off, and a node with no recorded policy adds no note.
+ */
+export function AutoPill({
+  autoUpdateEnabled,
+  unattendedPolicy,
+  compact = false,
+}: {
+  autoUpdateEnabled: boolean;
+  unattendedPolicy?: StackUnattendedPolicy | null;
+  compact?: boolean;
+}) {
+  const skipped = unattendedPolicy?.decision === 'skip';
+  if (!skipped && autoUpdateEnabled) return null;
+  const ineligible = (unattendedPolicy?.ineligible ?? []).map(s => `${s.service} (${s.policy})`).join(', ');
+  return (
+    <span
+      className={compact
+        ? 'inline-flex items-center gap-1 rounded-full border border-card-border px-2 py-[3px] font-mono text-[10px] uppercase tracking-[0.1em] text-stat-subtitle'
+        : 'inline-flex items-center gap-1.5 rounded-full border border-card-border bg-muted/30 px-2.5 py-0.5 font-mono text-[10px] leading-3 uppercase tracking-[0.18em] text-stat-subtitle'}
+      title={skipped ? `Skipped by io.sencho.update: ${ineligible || 'a service is not eligible for unattended updates'}` : undefined}
+      data-testid="auto-pill"
+      data-state={skipped ? 'skipped' : 'off'}
+    >
+      <CircleSlash className="h-3 w-3" strokeWidth={1.5} />
+      {skipped ? 'Auto: skipped by update policy' : 'Auto: Off'}
+    </span>
+  );
+}
+
 function StackReadinessCard({
   card,
   canServiceUpdate = false,
@@ -292,7 +345,7 @@ function StackReadinessCard({
   onApply: (stack: string, nodeId: number) => void;
   onApplyService?: (stack: string, nodeId: number, serviceName: string) => void;
 }) {
-  const { stack, nodeId, preview, previewLoaded, scheduledTask, applying, applyingService, autoUpdateEnabled, verificationNote } = card;
+  const { stack, nodeId, preview, previewLoaded, scheduledTask, applying, applyingService, autoUpdateEnabled, verificationNote, unattendedPolicy } = card;
   const loading = !previewLoaded;
   const uncertain = previewLoaded && !!verificationNote;
   const failed = previewLoaded && preview === null && !verificationNote;
@@ -326,12 +379,7 @@ function StackReadinessCard({
           </span>
         </div>
         <div className="flex items-center gap-2 shrink-0">
-          {!autoUpdateEnabled && (
-            <span className="inline-flex items-center gap-1.5 rounded-full border border-card-border bg-muted/30 px-2.5 py-0.5 font-mono text-[10px] leading-3 uppercase tracking-[0.18em] text-stat-subtitle">
-              <CircleSlash className="h-3 w-3" strokeWidth={1.5} />
-              Auto: Off
-            </span>
-          )}
+          <AutoPill autoUpdateEnabled={autoUpdateEnabled} unattendedPolicy={unattendedPolicy} />
           {previewLoaded && preview && (
             <RiskBadge
               bump={bump}
@@ -646,7 +694,7 @@ function ReadinessTableRow({
   onApplyService: (stack: string, nodeId: number, serviceName: string) => void;
 }) {
   const { card, nodeName, canServiceUpdate } = row;
-  const { stack, nodeId, preview, previewLoaded, scheduledTask, applying, applyingService, autoUpdateEnabled, verificationNote } = card;
+  const { stack, nodeId, preview, previewLoaded, scheduledTask, applying, applyingService, autoUpdateEnabled, verificationNote, unattendedPolicy } = card;
   const loading = !previewLoaded;
   const uncertain = previewLoaded && !!verificationNote;
   const failed = previewLoaded && preview === null && !verificationNote;
@@ -699,11 +747,10 @@ function ReadinessTableRow({
         <span className="text-stat-subtitle/70"> · {formatRelative(nextRun)}</span>
       </span>
     );
-  } else if (!autoUpdateEnabled) {
+  } else if (unattendedPolicy?.decision === 'skip' || !autoUpdateEnabled) {
     schedule = (
-      <span className="inline-flex items-center gap-1 rounded-full border border-card-border bg-muted/30 px-2 py-0.5 font-mono text-[10px] leading-3 uppercase tracking-[0.18em] whitespace-nowrap">
-        <CircleSlash className="h-3 w-3" strokeWidth={1.5} aria-hidden="true" />
-        Auto: Off
+      <span className="whitespace-nowrap">
+        <AutoPill autoUpdateEnabled={autoUpdateEnabled} unattendedPolicy={unattendedPolicy} />
       </span>
     );
   } else if (hasDetail) {
@@ -902,7 +949,7 @@ export function MobileReadinessCard({
   onApply: (stack: string, nodeId: number) => void;
   onApplyService?: (stack: string, nodeId: number, serviceName: string) => void;
 }) {
-  const { stack, nodeId, preview, previewLoaded, scheduledTask, applying, applyingService, autoUpdateEnabled, verificationNote } = card;
+  const { stack, nodeId, preview, previewLoaded, scheduledTask, applying, applyingService, autoUpdateEnabled, verificationNote, unattendedPolicy } = card;
   const uncertain = previewLoaded && !!verificationNote;
   const failed = previewLoaded && preview === null && !verificationNote;
   const blocked = preview?.summary.blocked ?? false;
@@ -928,11 +975,7 @@ export function MobileReadinessCard({
           <div className="mt-px truncate font-heading text-[23px] leading-[26px] text-stat-value">{stack}</div>
         </div>
         <div className="flex shrink-0 items-center gap-1.5">
-          {!autoUpdateEnabled && (
-            <span className="inline-flex items-center gap-1 rounded-full border border-card-border px-2 py-[3px] font-mono text-[10px] uppercase tracking-[0.1em] text-stat-subtitle">
-              <CircleSlash className="h-3 w-3" strokeWidth={1.5} />Auto: Off
-            </span>
-          )}
+          <AutoPill autoUpdateEnabled={autoUpdateEnabled} unattendedPolicy={unattendedPolicy} compact />
           {previewLoaded && preview && (
             <RiskBadge
               bump={bump}
@@ -1151,6 +1194,7 @@ function AutoUpdateReadinessContent({ headerActions }: AutoUpdateReadinessProps)
       // Sticky has_update during a failed check is not a verified rebuild, so those
       // stacks stay in the advisory only.
       let failedLocalStacks = new Set<string>();
+      const unattendedByStack = new Map<string, StackUnattendedPolicy>();
       if (detailRes.ok) {
         const detail = await detailRes.json() as Record<string, StackUpdateInfo>;
         const failures = Object.entries(detail)
@@ -1158,6 +1202,12 @@ function AutoUpdateReadinessContent({ headerActions }: AutoUpdateReadinessProps)
           .map(([stack, info]) => ({ stack, reason: info.lastError }))
           .sort((a, b) => a.stack.localeCompare(b.stack));
         failedLocalStacks = new Set(failures.map(f => f.stack));
+        // The local node's detail is the only place the policy decision rides
+        // along; a remote shows no note rather than an assumed allow.
+        for (const [stack, info] of Object.entries(detail)) {
+          const policy = readUnattendedPolicy(info?.unattendedPolicy);
+          if (policy) unattendedByStack.set(stack, policy);
+        }
         setCheckFailures(failures);
       } else {
         // Clear stale failures rather than persist them across a load, but log:
@@ -1228,6 +1278,7 @@ function AutoUpdateReadinessContent({ headerActions }: AutoUpdateReadinessProps)
             applyingService: null,
             autoUpdateEnabled: scheduledTask !== null,
             verificationNote: null,
+            unattendedPolicy: node.type === 'local' ? (unattendedByStack.get(stack) ?? null) : undefined,
           };
         });
         initialGroups.push({
@@ -1434,6 +1485,10 @@ function AutoUpdateReadinessContent({ headerActions }: AutoUpdateReadinessProps)
                 onClick: () => { openEndpointRefusalInEditor(nodeId, stack, refusal); },
               },
             });
+          } else if (result.policyRefusal) {
+            // Same shared handler the editor uses; this view has no Compose
+            // file, so its action opens the editor at the stack.
+            toastUpdatePolicyRefusal(result.policyRefusal, { nodeId, stackName: stack, inEditor: false });
           } else {
             toast.error(result.error);
           }

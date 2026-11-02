@@ -59,6 +59,10 @@ vi.mock('../services/ComposeService', async () => {
       ...actual.ComposeService,
       getInstance: () => ({
         evaluateDockerEndpoint: async () => null,
+        renderConfig: async () => ({
+          rendered: JSON.stringify({ services: { web: { image: 'nginx:1' } } }),
+          stderr: '', code: 0, timedOut: false,
+        }),
         deployStack: mockDeployStack,
         runCommand: mockRunCommand,
         runDown: mockRunDown,
@@ -67,6 +71,11 @@ vi.mock('../services/ComposeService', async () => {
     },
   };
 });
+
+// The policy module holds the ComposeService class from its own import, so
+// a getInstance mock is not visible to it; these suites are about the code
+// around the policy, which has its own tests.
+vi.mock('../services/updatePolicy', () => import('./__helpers__/allowingUpdatePolicy').then(m => m.allowingUpdatePolicyModule()));
 
 vi.mock('../services/DockerController', async () => {
   const actual = await vi.importActual<typeof import('../services/DockerController')>(
@@ -189,7 +198,7 @@ describe('deploy_failure notification on /deploy error', () => {
       'error',
       'deploy_failure',
       expect.stringContaining('image pull failed'),
-      { stackName: 'myapp', actor: 'testadmin' },
+      expect.objectContaining({ stackName: 'myapp', actor: 'testadmin' }),
     );
   });
 
@@ -291,6 +300,8 @@ describe('health gate begin call sites', () => {
       .post('/api/stacks/myapp/update')
       .set('Cookie', authCookie)
       .send({ skip_scan: true });
+    // eslint-disable-next-line no-console
+    console.log('DEBUG-UPDATE-BODY', res.status, JSON.stringify(res.body));
     expect(res.status).toBe(200);
     expect(beginSpy).toHaveBeenCalledWith(expect.any(Number), 'myapp', 'update', 'testadmin', { deployedGenerationId: null });
     expect(res.body.healthGateId).toBe('gate-123');
@@ -449,7 +460,7 @@ describe('deploy_failure notification on /down error', () => {
       'error',
       'deploy_failure',
       expect.any(String),
-      { stackName: 'myapp', actor: 'testadmin' },
+      expect.objectContaining({ stackName: 'myapp', actor: 'testadmin' }),
     );
   });
 });
@@ -471,7 +482,7 @@ describe('deploy_failure notification on /restart error', () => {
       'error',
       'deploy_failure',
       expect.stringContaining('restart daemon error'),
-      { stackName: 'myapp', actor: 'testadmin' },
+      expect.objectContaining({ stackName: 'myapp', actor: 'testadmin' }),
     );
   });
 });
@@ -493,7 +504,7 @@ describe('deploy_failure notification on /stop error', () => {
       'error',
       'deploy_failure',
       expect.stringContaining('stop daemon error'),
-      { stackName: 'myapp', actor: 'testadmin' },
+      expect.objectContaining({ stackName: 'myapp', actor: 'testadmin' }),
     );
   });
 });
@@ -514,7 +525,7 @@ describe('deploy_failure notification on /update error', () => {
       'error',
       'deploy_failure',
       expect.stringContaining('image not found'),
-      { stackName: 'myapp', actor: 'testadmin' },
+      expect.objectContaining({ stackName: 'myapp', actor: 'testadmin' }),
     );
   });
 
@@ -742,7 +753,7 @@ describe('rollback file-revert safety on a policy-blocked rollback', () => {
         'error',
         'deploy_failure',
         expect.stringContaining('EACCES'),
-        { stackName: 'myapp', actor: 'testadmin' },
+        expect.objectContaining({ stackName: 'myapp', actor: 'testadmin' }),
       );
     } finally {
       gateSpy.mockRestore();

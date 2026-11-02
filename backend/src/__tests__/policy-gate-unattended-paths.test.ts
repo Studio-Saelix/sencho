@@ -50,6 +50,11 @@ vi.mock('../services/TrivyService', () => ({
 vi.mock('../services/NotificationService', () => ({
   NotificationService: { getInstance: () => ({ dispatchAlert: async () => ({ persisted: true }) }) },
 }));
+
+// The policy module holds the ComposeService class from its own import, so a
+// getInstance mock in this suite is invisible to it; the policy's own behavior
+// is covered by its dedicated suites.
+vi.mock('../services/updatePolicy', () => import('./__helpers__/allowingUpdatePolicy').then(m => m.allowingUpdatePolicyModule()));
 vi.mock('../services/FleetSyncService', () => ({ FleetSyncService: { getSelfIdentity: () => 'self-node' } }));
 
 import { describePolicyBlock } from '../helpers/policyGate';

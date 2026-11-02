@@ -10,10 +10,12 @@ import { describe, it, expect, beforeAll, afterAll, afterEach, vi } from 'vitest
 import request from 'supertest';
 import { setupTestDb, cleanupTestDb, loginAsTestAdmin } from './helpers/setupTestDb';
 
-const { mockExecute } = vi.hoisted(() => ({ mockExecute: vi.fn() }));
+const { mockExecute, mockRestore } = vi.hoisted(() => ({ mockExecute: vi.fn(), mockRestore: vi.fn() }));
 
+// A restore is not an image refresh, so the route calls `restore` rather than
+// `execute`; each test stubs the method its own action uses.
 vi.mock('../services/StackUpdateOrchestrator', () => ({
-  StackUpdateOrchestrator: { getInstance: () => ({ execute: mockExecute }) },
+  StackUpdateOrchestrator: { getInstance: () => ({ execute: mockExecute, restore: mockRestore }) },
 }));
 
 let tmpDir: string;
@@ -55,6 +57,7 @@ afterAll(() => {
 
 afterEach(async () => {
   mockExecute.mockReset();
+  mockRestore.mockReset();
   const { StackOpLockService } = await import('../services/StackOpLockService');
   StackOpLockService.resetForTests();
 });
@@ -139,7 +142,7 @@ describe('OrchestratorResult to HTTP mapping', () => {
   });
 
   it('maps a restore service_done to 200', async () => {
-    mockExecute.mockResolvedValue({
+    mockRestore.mockResolvedValue({
       kind: 'service_done',
       serviceName: 'app',
       healthGateId: 'hg-2',
@@ -153,7 +156,7 @@ describe('OrchestratorResult to HTTP mapping', () => {
       .send({ deployedGenerationId: null, recoveryId: 'rec-2' });
     expect(res.status).toBe(200);
     expect(res.body).toMatchObject({ serviceName: 'app', healthGateId: 'hg-2', recoveryId: 'rec-2' });
-    expect(mockExecute).toHaveBeenCalledTimes(1);
+    expect(mockRestore).toHaveBeenCalledTimes(1);
   });
 });
 

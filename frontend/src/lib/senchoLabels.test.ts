@@ -1,11 +1,17 @@
 import { describe, it, expect } from 'vitest';
 import {
+  POLICY_LABEL_KEYS,
+  SENCHO_NOTIFY_ROUTE_LABEL,
+  SENCHO_UPDATE_LABEL,
   applicationLink,
   ignoredLabels,
+  isRoutingKey,
   namedLinks,
   presentServices,
   readSenchoLabels,
   unverifiedLinkCount,
+  updatePolicyOf,
+  notifyRouteOf,
 } from './senchoLabels';
 import { parseServiceUrlResponse, senchoLabelsOf } from './serviceUrlResolve';
 import { serviceUrlFromLabelValue } from './serviceUrlLabel';
@@ -138,8 +144,69 @@ describe('readSenchoLabels', () => {
   });
 });
 
-describe('presentServices', () => {
-  const r = readSenchoLabels(wire);
+describe('behavioral labels', () => {
+  const answer = (service: Record<string, unknown>) => readSenchoLabels({
+    renderable: true,
+    services: { web: service },
+    entries: [],
+  });
+
+  it('reads both fields as null on an older node that does not send them, and keeps the rest', () => {
+    const r = readSenchoLabels({
+      renderable: true,
+      services: { web: { links: [], order: 3, hidden: true } },
+      entries: [],
+    });
+    expect(r && r.renderable ? r.services.web.update : 'missing').toBeNull();
+    expect(notifyRouteOf(r, 'web')).toBeNull();
+    expect(r && r.renderable ? r.services.web.order : null).toBe(3);
+    expect(r && r.renderable ? r.services.web.hidden : null).toBe(true);
+  });
+
+  it.each(['auto', 'manual', 'disabled', 'invalid'] as const)('reads %s as the declared update policy', (value) => {
+    expect(updatePolicyOf(answer({ links: [], order: null, hidden: false, update: value }), 'web')).toBe(value);
+  });
+
+  it('reads a well-formed routing key', () => {
+    expect(notifyRouteOf(answer({ links: [], order: null, hidden: false, notifyRoute: 'production' }), 'web'))
+      .toBe('production');
+    expect(notifyRouteOf(answer({ links: [], order: null, hidden: false, notifyRoute: 'a' }), 'web')).toBe('a');
+    expect(notifyRouteOf(answer({ links: [], order: null, hidden: false, notifyRoute: 'a'.repeat(64) }), 'web'))
+      .toBe('a'.repeat(64));
+  });
+
+  it('rejects the whole answer for an update value or routing key outside the contract', () => {
+    // A typo the node would have normalized is not something this client guesses at.
+    expect(answer({ links: [], order: null, hidden: false, update: 'Auto' })).toBeNull();
+    expect(answer({ links: [], order: null, hidden: false, update: 'true' })).toBeNull();
+    expect(answer({ links: [], order: null, hidden: false, update: 1 })).toBeNull();
+    expect(answer({ links: [], order: null, hidden: false, update: ['auto'] })).toBeNull();
+    expect(answer({ links: [], order: null, hidden: false, notifyRoute: '' })).toBeNull();
+    expect(answer({ links: [], order: null, hidden: false, notifyRoute: 'Production' })).toBeNull();
+    expect(answer({ links: [], order: null, hidden: false, notifyRoute: 'a'.repeat(65) })).toBeNull();
+    expect(answer({ links: [], order: null, hidden: false, notifyRoute: '-prod' })).toBeNull();
+    expect(answer({ links: [], order: null, hidden: false, notifyRoute: 'prod-' })).toBeNull();
+    expect(answer({ links: [], order: null, hidden: false, notifyRoute: 'prod/eu' })).toBeNull();
+    expect(answer({ links: [], order: null, hidden: false, notifyRoute: 7 })).toBeNull();
+  });
+
+  it('accepts the routing-key format the backend parser accepts', () => {
+    expect(isRoutingKey('production')).toBe(true);
+    expect(isRoutingKey('eu.west_1-blue')).toBe(true);
+    expect(isRoutingKey('prod eu')).toBe(false);
+    expect(isRoutingKey('prod:1')).toBe(false);
+  });
+
+  it('mirrors the backend registry exactly, so a key rename cannot drift silently', () => {
+    // backend/src/helpers/senchoLabels.ts: SENCHO_UPDATE_LABEL and
+    // SENCHO_NOTIFY_ROUTE_LABEL, both minCapability sencho-label-policy-v1.
+    expect(SENCHO_UPDATE_LABEL).toBe('io.sencho.update');
+    expect(SENCHO_NOTIFY_ROUTE_LABEL).toBe('io.sencho.notify.route');
+    expect(POLICY_LABEL_KEYS).toEqual(['io.sencho.update', 'io.sencho.notify.route']);
+  });
+});
+
+describe('presentServices', () => {  const r = readSenchoLabels(wire);
   const ranked = (orders: Record<string, number | null>, hidden: string[] = []) => readSenchoLabels({
     renderable: true,
     entries: [],

@@ -14,6 +14,16 @@ import { StackFileRootsService, STACK_SOURCE_ROOT_ID, stackSourceFileRoot, type 
 import { FileRootGateway } from '../services/FileRootGateway';
 import { ComposeService, getComposeRollbackInfo } from '../services/ComposeService';
 import { StackUpdateOrchestrator, shortImageId, type OrchestratorResult } from '../services/StackUpdateOrchestrator';
+import {
+  resolveUpdatePolicy,
+  recordUpdatePolicyDecision,
+  toUpdatePolicyWire,
+  UpdatePolicyChangedError,
+  UpdatePolicyRefusedError,
+  type PolicyRequest,
+  type UpdateTrigger,
+} from '../services/updatePolicy';
+import { SENCHO_UPDATE_LABEL } from '../helpers/senchoLabels';
 import DockerController from '../services/DockerController';
 import { DatabaseService, type ScanPolicy, type StackDossierFields } from '../services/DatabaseService';
 import { type CacheFetchOutcome } from '../services/CacheService';
@@ -126,21 +136,80 @@ const MAX_COMPOSE_PARSE_BYTES = 1_048_576; // 1 MiB
 function dlog(...args: Parameters<typeof console.log>): void {
   if (isDebugEnabled()) console.log(...args);
 }
-function notifyActionFailure(action: string, stackName: string, error: unknown, actor: string): void {
+interface NotifyTarget {
+  /** The service the alert is about, when the action is service-scoped. Routing keys are read for it. */
+  serviceName?: string;
+  nodeId?: number;
+}
+
+function notifyActionFailure(
+  action: string,
+  stackName: string,
+  error: unknown,
+  actor: string,
+  target: NotifyTarget = {},
+): void {
   const message = getErrorMessage(error, `Failed to ${action} stack`);
   NotificationService.getInstance()
-    .dispatchAlert('error', 'deploy_failure', message, { stackName, actor })
+    .dispatchAlert('error', 'deploy_failure', message, {
+      stackName, actor, ...target,
+    })
     .catch(err => console.error('[Stacks] Failed to dispatch failure notification for %s:', sanitizeForLog(stackName), err));
 }
 
-function notifyActionSuccess(category: NotificationCategory, message: string, stackName: string, actor: string): void {
+function notifyActionSuccess(
+  category: NotificationCategory,
+  message: string,
+  stackName: string,
+  actor: string,
+  target: NotifyTarget = {},
+): void {
   NotificationService.getInstance()
-    .dispatchAlert('info', category, message, { stackName, actor })
+    .dispatchAlert('info', category, message, { stackName, actor, ...target })
     .catch(err => console.error('[Stacks] Failed to dispatch activity for %s:', sanitizeForLog(stackName), err));
 }
 
-const STACK_OP_PRESENT_PARTICIPLE: Record<StackOpAction, string> = {
-  deploy: 'deploying',
+/**
+ * The trigger an update request carries. Provenance comes from the trusted
+ * machine-auth header, which the proxy overwrites to `manual` for interactive
+ * requests, so a browser cannot present itself as a scheduled run.
+ */
+function updateTriggerForRequest(req: Request): UpdateTrigger {
+  const source = req.deployContext?.source;
+  if (source === 'webhook') return 'webhook';
+  if (source === 'scheduler') return 'scheduled';
+  return 'manual';
+}
+
+/** The reason part of a refusal, in the label's own words. */
+function updatePolicyReason(policy: { reason: string | null }): string {
+  // The evaluator's reason is a sentence, so it already ends with a period; the
+  // callers below append one only when it does not.
+  return policy.reason ?? 'the stack is not eligible for this update';
+}
+
+/** A refusal sentence that never ends in two periods. */
+function updatePolicyRefusalText(prefix: string, policy: { reason: string | null }): string {
+  const reason = updatePolicyReason(policy);
+  return `${prefix}: ${reason}${reason.endsWith('.') ? '' : '.'}`;
+}
+
+/**
+ * Every image-refresh caller resolves the policy the same way: inside the stack
+ * lock, before the security policy gate, so a refused update never writes the
+ * gate's evidence. A block or skip is recorded as an activity row exactly once.
+ */
+async function evaluateUpdatePolicyFor(
+  nodeId: number,
+  request: PolicyRequest,
+  actor: string | null,
+) {
+  const policy = await resolveUpdatePolicy(nodeId, request);
+  if (policy.decision !== 'allow') recordUpdatePolicyDecision(nodeId, policy, actor);
+  return policy;
+}
+
+const STACK_OP_PRESENT_PARTICIPLE: Record<StackOpAction, string> = {  deploy: 'deploying',
   down: 'taking down',
   restart: 'restarting',
   stop: 'stopping',
@@ -622,6 +691,22 @@ async function runStackBulkOp(
 
   try {
     if (action === 'update') {
+      // Bulk counts as unattended: a run that shows no per-stack readiness or
+      // confirmation cannot honor "only when I explicitly update this stack".
+      // Evaluated before the security gate so a skipped stack writes no evidence.
+      const policy = await evaluateUpdatePolicyFor(
+        req.nodeId,
+        { stack: stackName, target: { scope: 'stack' }, trigger: 'bulk' },
+        user,
+      );
+      if (policy.decision !== 'allow') {
+        return {
+          stackName,
+          ok: false,
+          error: updatePolicyRefusalText(`Skipped by ${SENCHO_UPDATE_LABEL}`, policy),
+          code: 'update_policy_skipped',
+        };
+      }
       const gate = await enforcePolicyPreDeploy(stackName, req.nodeId, buildPolicyGateOptions(req));
       if (!gate.ok) {
         return {
@@ -633,7 +718,7 @@ async function runStackBulkOp(
       }
       const atomic = true;
       const orchResult = await StackUpdateOrchestrator.getInstance().execute(
-        { nodeId: req.nodeId, stackName, target: { scope: 'stack' }, trigger: 'bulk', actor: user },
+        { nodeId: req.nodeId, stackName, target: { scope: 'stack' }, trigger: 'bulk', actor: user, policy },
         { atomic, terminalWs: getTerminalWs(req.get(DEPLOY_SESSION_HEADER)) },
       );
       DatabaseService.getInstance().clearStackUpdateStatus(req.nodeId, stackName);
@@ -674,7 +759,12 @@ async function runStackBulkOp(
     if (isDockerEndpointProtectedError(err)) {
       return { stackName, ok: false, error: err.message, code: DOCKER_ENDPOINT_PROTECTED_CODE };
     }
-    if (action !== 'start') notifyActionFailure(action, stackName, err, user);
+    // The policy changed between evaluation and recreation, or a caller handed
+    // the orchestrator a result that does not allow this stack.
+    if (err instanceof UpdatePolicyChangedError || err instanceof UpdatePolicyRefusedError) {
+      return { stackName, ok: false, error: err.message, code: 'update_policy_blocked' };
+    }
+    if (action !== 'start') notifyActionFailure(action, stackName, err, user, { nodeId: req.nodeId });
     return { stackName, ok: false, error: getErrorMessage(err, `${action} failed`), code: 'op_failed' };
   } finally {
     StackOpLockService.getInstance().release(req.nodeId, stackName);
@@ -2321,8 +2411,23 @@ stacksRouter.post('/:stackName/pull-images', async (req: Request, res: Response)
   // Lock held below. All early-returns must stay inside the try so finally fires.
   if (!tryAcquireStackOpLock(req, res, stackName, 'image_pull')) return;
   try {
+    // Pull images refreshes the stack's images, so the operator's own click is
+    // still a manual update: it is refused when any rendered service is disabled.
+    const policy = await evaluateUpdatePolicyFor(
+      req.nodeId,
+      { stack: stackName, target: { scope: 'stack' }, trigger: 'manual' },
+      req.user?.username ?? null,
+    );
+    if (policy.decision !== 'allow') {
+      res.status(409).json({
+        error: updatePolicyRefusalText(`Update blocked by ${SENCHO_UPDATE_LABEL}`, policy),
+        code: 'update_policy_blocked',
+        updatePolicy: toUpdatePolicyWire(policy),
+      });
+      return;
+    }
     const result = await ComposeService.getInstance(req.nodeId)
-      .pullStackImages(stackName, getTerminalWs(req.get(DEPLOY_SESSION_HEADER)));
+      .pullStackImages(stackName, policy, getTerminalWs(req.get(DEPLOY_SESSION_HEADER)));
     invalidateNodeCaches(req.nodeId);
     dlog(`[Stacks] Image pull completed: ${sanitizeForLog(stackName)}`);
     res.json({
@@ -2628,6 +2733,7 @@ function serviceFailureStatus(code: string): number {
     case 'recovery_not_found':
       return 404;
     case 'policy_blocked':
+    case 'update_policy_blocked':
     case 'recovery_not_restorable':
     case 'recovery_claim_failed':
     case DOCKER_ENDPOINT_PROTECTED_CODE:
@@ -2688,7 +2794,7 @@ async function handleServiceScopedMutation(
       stackName: string,
       serviceName: string,
       actor: string,
-      meta: { previousImageId?: string | null; newImageId?: string | null },
+      meta: { previousImageId?: string | null; newImageId?: string | null; nodeId: number },
     ) => void;
   },
 ): Promise<void> {
@@ -2703,27 +2809,52 @@ async function handleServiceScopedMutation(
 
   const t0 = Date.now();
   let ok = false;
+  const actor = req.user?.username ?? null;
   try {
-    const result = await StackUpdateOrchestrator.getInstance().execute(
-      {
-        nodeId: req.nodeId,
-        stackName,
-        target: { scope: 'service', serviceName },
-        trigger: 'manual',
-        actor: req.user?.username ?? null,
-      },
-      {
-        policyOptions: buildPolicyGateOptions(req),
-        terminalWs: getTerminalWs(req.get(DEPLOY_SESSION_HEADER)),
-        ...(options.recoveryId ? { recoveryId: options.recoveryId } : {}),
-      },
-    );
+    let result: OrchestratorResult;
+    if (options.recoveryId) {
+      // Restore is not an image refresh, so it carries no policy decision.
+      result = await StackUpdateOrchestrator.getInstance().restore(
+        { nodeId: req.nodeId, stackName, target: { scope: 'service', serviceName }, trigger: 'manual', actor },
+        {
+          policyOptions: buildPolicyGateOptions(req),
+          terminalWs: getTerminalWs(req.get(DEPLOY_SESSION_HEADER)),
+          recoveryId: options.recoveryId,
+        },
+      );
+    } else {
+      // The one service is the whole scope, so the policy is read for it alone,
+      // inside the lock and before the security gate can record evidence for an
+      // update this policy then refuses.
+      const policy = await evaluateUpdatePolicyFor(
+        req.nodeId,
+        { stack: stackName, target: { scope: 'service', serviceName }, trigger: 'manual' },
+        actor,
+      );
+      if (policy.decision !== 'allow') {
+        res.status(409).json({
+          error: updatePolicyRefusalText(`Update blocked by ${SENCHO_UPDATE_LABEL}`, policy),
+          code: 'update_policy_blocked',
+          serviceName,
+          updatePolicy: toUpdatePolicyWire(policy),
+        });
+        return;
+      }
+      result = await StackUpdateOrchestrator.getInstance().execute(
+        { nodeId: req.nodeId, stackName, target: { scope: 'service', serviceName }, trigger: 'manual', actor, policy },
+        {
+          policyOptions: buildPolicyGateOptions(req),
+          terminalWs: getTerminalWs(req.get(DEPLOY_SESSION_HEADER)),
+        },
+      );
+    }
     invalidateNodeCaches(req.nodeId);
     ok = sendServiceResult(res, result, serviceName);
     if (ok && result.kind === 'service_done') {
-      options.onSuccess(stackName, serviceName, req.user?.username ?? 'system', {
+      options.onSuccess(stackName, serviceName, actor ?? 'system', {
         previousImageId: result.previousImageId,
         newImageId: result.newImageId,
+        nodeId: req.nodeId,
       });
       NotificationService.getInstance().broadcastEvent({
         type: 'state-invalidate',
@@ -2738,7 +2869,8 @@ async function handleServiceScopedMutation(
         options.notifyFailureAction,
         stackName,
         new Error(result.error),
-        req.user?.username ?? 'system',
+        actor ?? 'system',
+        { serviceName, nodeId: req.nodeId },
       );
     }
   } catch (error: unknown) {
@@ -2750,7 +2882,22 @@ async function handleServiceScopedMutation(
       sanitizeForLog(getErrorMessage(error, 'unknown')),
     );
     if (sendIfDockerEndpointProtected(res, error)) return;
-    notifyActionFailure(options.notifyFailureAction, stackName, error, req.user?.username ?? 'system');
+    if (error instanceof UpdatePolicyChangedError || error instanceof UpdatePolicyRefusedError) {
+      if (!res.headersSent) {
+        res.status(409).json({
+          error: error.message,
+          code: 'update_policy_blocked',
+          serviceName,
+          ...(error instanceof UpdatePolicyRefusedError
+            ? { updatePolicy: toUpdatePolicyWire(error.result) }
+            : {}),
+        });
+      }
+      return;
+    }
+    notifyActionFailure(options.notifyFailureAction, stackName, error, actor ?? 'system', {
+      serviceName, nodeId: req.nodeId,
+    });
     if (!res.headersSent) {
       res.status(500).json({ error: getErrorMessage(error, options.failureMessage), code: options.failureCode });
     }
@@ -2778,6 +2925,7 @@ stacksRouter.post('/:stackName/services/:serviceName/update', async (req: Reques
         `${stackName}/${serviceName} updated${transition}`,
         stackName,
         actor,
+        { serviceName, nodeId: meta.nodeId },
       );
     },
   });
@@ -2959,14 +3107,41 @@ stacksRouter.post('/:stackName/update', async (req: Request, res: Response) => {
   if (!tryAcquireStackOpLock(req, res, stackName, 'update')) return;
   const t0 = Date.now();
   let ok = false;
+  const trigger = updateTriggerForRequest(req);
+  const actor = req.user?.username ?? null;
   try {
+    // Update policy runs inside the lock and before the security gate: a refused
+    // update must not write the gate's evidence rows or start a scan.
+    const policy = await evaluateUpdatePolicyFor(
+      req.nodeId,
+      { stack: stackName, target: { scope: 'stack' }, trigger },
+      actor,
+    );
+    if (policy.decision !== 'allow') {
+      if (trigger !== 'manual') {
+        // A trusted unattended caller treats a skip as an outcome, not a failure:
+        // the operator declared that this stack is not to be updated automatically.
+        res.json({
+          status: 'skipped',
+          message: updatePolicyRefusalText(`Skipped by ${SENCHO_UPDATE_LABEL}`, policy),
+          updatePolicy: toUpdatePolicyWire(policy),
+        });
+        return;
+      }
+      res.status(409).json({
+        error: updatePolicyRefusalText(`Update blocked by ${SENCHO_UPDATE_LABEL}`, policy),
+        code: 'update_policy_blocked',
+        updatePolicy: toUpdatePolicyWire(policy),
+      });
+      return;
+    }
     if (!(await runPolicyGate(req, res, stackName, req.nodeId))) return;
     const skipScan = req.body?.skip_scan === true;
     const debug = isDebugEnabled();
     const atomic = true;
     if (debug) console.debug('[Stacks:debug] Update starting', { stackName, atomic, nodeId: req.nodeId });
     const orchResult = await StackUpdateOrchestrator.getInstance().execute(
-      { nodeId: req.nodeId, stackName, target: { scope: 'stack' }, trigger: 'manual', actor: req.user?.username ?? null },
+      { nodeId: req.nodeId, stackName, target: { scope: 'stack' }, trigger, actor, policy },
       { atomic, terminalWs: getTerminalWs(req.get(DEPLOY_SESSION_HEADER)) },
     );
     // Health observation starts immediately after Compose; registry recheck is
@@ -3007,7 +3182,7 @@ stacksRouter.post('/:stackName/update', async (req: Request, res: Response) => {
       ...policyEvidenceFor(res),
       ...(recheckWarning ? { recheckWarning } : {}),
     });
-    notifyActionSuccess('image_update_applied', `${stackName} updated`, stackName, req.user?.username ?? 'system');
+    notifyActionSuccess('image_update_applied', `${stackName} updated`, stackName, req.user?.username ?? 'system', { nodeId: req.nodeId });
     if (!skipScan) {
       triggerPostDeployScan(stackName, req.nodeId).catch(err =>
         console.error('[Security] Post-deploy scan failed for %s:', sanitizeForLog(stackName), err),
@@ -3016,6 +3191,21 @@ stacksRouter.post('/:stackName/update', async (req: Request, res: Response) => {
   } catch (error: unknown) {
     console.error('[Stacks] Update failed: %s', sanitizeForLog(stackName), error);
     if (sendIfDockerEndpointProtected(res, error)) return;
+    // A policy refusal raised after the check passed: either a caller handed the
+    // orchestrator a result that does not allow this update, or the label
+    // changed while the images were being pulled. Answer it as a refusal.
+    if (error instanceof UpdatePolicyChangedError || error instanceof UpdatePolicyRefusedError) {
+      if (!res.headersSent) {
+        res.status(409).json({
+          error: error.message,
+          code: 'update_policy_blocked',
+          ...(error instanceof UpdatePolicyRefusedError
+            ? { updatePolicy: toUpdatePolicyWire(error.result) }
+            : {}),
+        });
+      }
+      return;
+    }
     const rollbackInfo = getComposeRollbackInfo(error);
     const rolledBack = rollbackInfo?.rolledBack ?? false;
     if (rolledBack) {
@@ -3023,7 +3213,7 @@ stacksRouter.post('/:stackName/update', async (req: Request, res: Response) => {
     } else if (rollbackInfo?.attempted) {
       console.warn(`[Stacks] Update failed, rollback did not complete: ${sanitizeForLog(stackName)}`);
     }
-    notifyActionFailure('update', stackName, error, req.user?.username ?? 'system');
+    notifyActionFailure('update', stackName, error, req.user?.username ?? 'system', { nodeId: req.nodeId });
     if (!res.headersSent) {
       const message = getErrorMessage(error, 'Failed to update');
       // ComposeRollbackError already carries the cause's message; see classifyFailure.

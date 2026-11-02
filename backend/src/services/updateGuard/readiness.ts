@@ -2,6 +2,8 @@ import type { PreflightStatus } from '../preflight/types';
 import type { UpdatePreviewImage, UpdatePreviewSummary } from '../UpdatePreviewService';
 import type { ResolvedRollbackInventory, RollbackGenerationManifest } from '../../types/rollbackGeneration';
 import { describeComposeVersionSkew, type ComposeVersionSkew } from '../../helpers/composeVersionSkew';
+import type { ServiceUpdatePolicy } from '../updatePolicy';
+import { SENCHO_UPDATE_LABEL } from '../../helpers/senchoLabels';
 import type {
   ContainerProbe,
   ReadinessSignal,
@@ -9,6 +11,7 @@ import type {
   RollbackOverall,
   RollbackReadinessItem,
   SignalStatus,
+  UpdatePolicyReadiness,
 } from './types';
 
 /**
@@ -299,6 +302,55 @@ export function diskSignal(
     return { ...base, status: 'warning', affectsVerdict: true, detail: `Disk usage is at ${use}%, close to the ${input.limitPercent}% alert threshold.` };
   }
   return { ...base, status: 'ok', affectsVerdict: true, detail: `Disk usage is at ${use}%.` };
+}
+
+/**
+ * The image-refresh policy this stack's services declare. Never
+ * verdict-affecting: a service pinned to `manual` or `disabled` is a deliberate
+ * choice, so it must not become a Fleet readiness finding. The dialog decides
+ * whether Update is available from the decision itself, not from the verdict.
+ */
+export function updatePolicySignal(input: UpdatePolicyReadiness | Errored | null): ReadinessSignal {
+  const base = { id: 'update_policy' as const, title: 'Update policy' };
+  if (input === 'error' || input === null || input.evaluation === 'unrenderable') {
+    return {
+      ...base,
+      status: 'unknown',
+      affectsVerdict: false,
+      detail: input === 'error' || input === null
+        ? `The update policy could not be read, so Sencho cannot tell whether this update is allowed by ${SENCHO_UPDATE_LABEL}.`
+        : input.reason ?? `Compose could not be rendered, so Sencho cannot evaluate ${SENCHO_UPDATE_LABEL}.`,
+    };
+  }
+  if (input.manualDecision === 'block') {
+    return {
+      ...base,
+      status: 'attention',
+      affectsVerdict: false,
+      detail: `This update is refused by ${SENCHO_UPDATE_LABEL}: ${input.reason ?? 'a service is not eligible'}.`,
+    };
+  }
+  const pinned = input.services.filter(s => s.policy === 'manual' || s.policy === 'invalid');
+  if (pinned.length > 0) {
+    return {
+      ...base,
+      status: 'warning',
+      affectsVerdict: false,
+      detail: `Manual updates are allowed, but scheduled, automatic, webhook and bulk updates skip this stack while `
+        + `${describePinnedServices(pinned)} ${pinned.length === 1 ? 'is' : 'are'} set to `
+        + `${pinned.every(s => s.policy === 'manual') ? 'manual' : 'an unrecognized value'}.`,
+    };
+  }
+  return {
+    ...base,
+    status: 'ok',
+    affectsVerdict: false,
+    detail: `Every service this update touches may be updated, manually and unattended.`,
+  };
+}
+
+function describePinnedServices(services: ServiceUpdatePolicy[]): string {
+  return services.map(s => `"${s.service}"`).join(', ');
 }
 
 /**

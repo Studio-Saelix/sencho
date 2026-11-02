@@ -61,6 +61,25 @@ describe('useStackUpdate', () => {
     window.removeEventListener(SENCHO_OPEN_STACK_EVENT, opened);
   });
 
+  it('offers the editor when io.sencho.update blocks the update, naming the label once', async () => {
+    const error = vi.spyOn(toast, 'error');
+    const refusal = {
+      message: 'Update blocked by io.sencho.update: "db" is set to disabled.',
+      reason: '"db" is set to disabled.',
+      serviceName: 'db',
+    };
+    vi.mocked(postStackUpdate).mockResolvedValue({ kind: 'update-policy-blocked', refusal });
+    const opened = vi.fn();
+    window.addEventListener(SENCHO_OPEN_STACK_EVENT, opened);
+    expect(await update()).toEqual({ ok: false });
+    expect(error.mock.calls[0][0]).toBe(refusal.message);
+    const options = error.mock.calls[0][1];
+    expect(options?.action?.label).toBe('Open stack editor');
+    options?.action?.onClick();
+    expect((opened.mock.calls[0][0] as CustomEvent).detail).toEqual({ nodeId: 2, stackName: 'web', destination: 'editor' });
+    window.removeEventListener(SENCHO_OPEN_STACK_EVENT, opened);
+  });
+
   it('carries the Docker endpoint refusal into the editor handoff', async () => {
     const error = vi.spyOn(toast, 'error');
     const refusal = { message: 'socket-proxy carries the Docker connection', reason: 'provider' as const, service: 'socket-proxy' };

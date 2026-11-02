@@ -3,7 +3,7 @@ const mocks = vi.hoisted(() => ({
   meta: vi.fn(), target: vi.fn(), checks: vi.fn(), fetch: vi.fn(), prepare: vi.fn(),
   authorize: vi.fn(), inspect: vi.fn(), roster: vi.fn(), recheck: vi.fn(),
 }));
-vi.mock('../services/NodeRegistry', () => ({ NodeRegistry: { getInstance: () => ({ probeRemoteMeta: mocks.meta, getProxyTarget: mocks.target }) } }));
+vi.mock('../services/NodeRegistry', () => ({ NodeRegistry: { getInstance: () => ({ probeRemoteMeta: mocks.meta, getProxyTarget: mocks.target, getNode: () => ({ name: 'node-b' }) }) } }));
 vi.mock('../services/ImageUpdateService', () => ({ ImageUpdateService: { isChecksEnabled: mocks.checks } }));
 vi.mock('../services/LicenseService', () => ({ LicenseService: { getInstance: () => ({ getProxyHeaders: () => ({ tier: 'community' }) }) } }));
 vi.mock('../services/license-headers', () => ({ PROXY_TIER_HEADER: 'x-proxy-tier' }));
@@ -12,7 +12,7 @@ vi.mock('../utils/outboundTarget', () => ({ safeRemoteFetch: mocks.fetch }));
 vi.mock('../services/hubPostUpdateVerification', () => ({ awaitHubPostUpdateVerification: mocks.recheck }));
 import { AutoUpdateRemoteCoordinator } from '../services/AutoUpdateRemoteCoordinator';
 
-const CAPABLE = { kind: 'ok' as const, meta: { capabilities: ['remote-image-inspect-v1', 'remote-auto-update-checked-v1'] } };
+const CAPABLE = { kind: 'ok' as const, meta: { capabilities: ['remote-image-inspect-v1', 'remote-auto-update-checked-v1', 'sencho-label-policy-v1'] } };
 const TARGET = { apiUrl: 'https://node.example', apiToken: 'token', trustedLoopback: true };
 const FACTS = {
   name: 'web', model: { renderable: true as const }, services: [], observationToken: 'observation',
@@ -57,12 +57,74 @@ describe('remote automatic update coordinator', () => {
     expect(result.handled ? result.result : null).toContain('"api": updated');
   });
 
-  it('falls back untouched when either checked capability is missing', async () => {
-    mocks.meta.mockResolvedValue({ kind: 'ok', meta: { capabilities: [] } });
+  it('fails a stack when the node cannot evaluate io.sencho.update, rather than skipping it green', async () => {
+    mocks.meta.mockResolvedValue({ kind: 'ok', meta: { capabilities: ['remote-image-inspect-v1', 'remote-auto-update-checked-v1'] } });
     const result = await new AutoUpdateRemoteCoordinator().execute(input());
-    expect(result).toEqual({ handled: false });
+    expect(result).toEqual({
+      handled: true,
+      result: 'Stack "web" failed: node "node-b" does not evaluate io.sencho.update; update Sencho on that node.',
+    });
     expect(mocks.authorize).not.toHaveBeenCalled();
     expect(mocks.fetch).not.toHaveBeenCalled();
+  });
+
+  it('fails a wildcard run once at the node when there is no roster to name', async () => {
+    mocks.meta.mockResolvedValue({ kind: 'ok', meta: { capabilities: [] } });
+    const result = await new AutoUpdateRemoteCoordinator().execute({ ...input(), selection: { target: '*' } });
+    expect(result).toEqual({
+      handled: true,
+      result: 'Node "node-b" failed: it does not evaluate io.sencho.update; update Sencho on that node.',
+    });
+    expect(mocks.roster).not.toHaveBeenCalled();
+    expect(mocks.fetch).not.toHaveBeenCalled();
+  });
+
+  it('leaves an unreachable node to the caller as an unreachable failure', async () => {
+    mocks.meta.mockResolvedValue({ kind: 'transport_failure' });
+    const result = await new AutoUpdateRemoteCoordinator().execute(input());
+    expect(result).toEqual({ handled: false });
+    expect(mocks.fetch).not.toHaveBeenCalled();
+  });
+
+  it('carries the trigger the run was asked for', async () => {
+    await new AutoUpdateRemoteCoordinator().execute(input());
+    const scheduled = JSON.parse(String(mocks.fetch.mock.calls[0][1].body));
+    expect(scheduled.trigger).toBe('scheduled');
+
+    mocks.fetch.mockClear();
+    await new AutoUpdateRemoteCoordinator().execute({
+      ...input(),
+      caller: { kind: 'interactive', authorizeAll: mocks.authorize },
+    });
+    const interactive = JSON.parse(String(mocks.fetch.mock.calls[0][1].body));
+    expect(interactive.trigger).toBe('automatic');
+  });
+
+  it('relays a policy skip as an outcome, with the target reasons', async () => {
+    mocks.fetch.mockResolvedValueOnce(new Response(JSON.stringify({
+      contractVersion: 1, stack: 'web', result: 'update_policy_skipped', applied: false, healthGateId: null,
+      updatePolicy: {
+        contract: 1, stack: 'web', target: { scope: 'stack' }, trigger: 'scheduled',
+        evaluation: 'evaluated', decision: 'skip',
+        services: [
+          { service: 'web', policy: 'manual', eligible: false, reason: 'set to manual' },
+          { service: 'db', policy: 'default', eligible: true },
+        ],
+        fingerprint: 'a'.repeat(40), reason: '"web" is set to manual',
+      },
+    }), { status: 200 }));
+    const result = await new AutoUpdateRemoteCoordinator().execute(input());
+    expect(result).toEqual({ handled: true, result: 'Stack "web": skipped by update policy (web: manual).' });
+    expect(mocks.recheck).not.toHaveBeenCalled();
+  });
+
+  it('refuses a skip whose policy answer cannot be read', async () => {
+    mocks.fetch.mockResolvedValueOnce(new Response(JSON.stringify({
+      contractVersion: 1, stack: 'web', result: 'update_policy_skipped', applied: false, healthGateId: null,
+      updatePolicy: { contract: 1, stack: 'web', decision: 'skip' },
+    }), { status: 200 }));
+    const result = await new AutoUpdateRemoteCoordinator().execute(input());
+    expect(result).toEqual({ handled: true, result: 'Stack "web" failed: Remote automatic update did not complete.' });
   });
 
   it('retries exactly once after a stale observation, then skips truthfully', async () => {

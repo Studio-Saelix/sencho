@@ -156,6 +156,11 @@ vi.mock('../services/SelfIdentityService', () => ({
 vi.mock('../services/ComposeService', () => ({
   ComposeService: {
     getInstance: () => ({
+      // A scheduled update evaluates io.sencho.update first and before the gate.
+      renderConfig: async () => ({
+        rendered: JSON.stringify({ services: { web: { image: 'nginx:1' } } }),
+        stderr: '', code: 0, timedOut: false,
+      }),
       updateStack: mockUpdateStack,
       runCommand: mockRunCommand,
       deployStack: mockDeployStack,
@@ -250,6 +255,11 @@ vi.mock('../helpers/registryDeliveryOutbound', async (importOriginal) => {
     ),
   };
 });
+
+// The policy module holds the ComposeService class from its own import, so
+// a getInstance mock is not visible to it; these suites are about the code
+// around the policy, which has its own tests.
+vi.mock('../services/updatePolicy', () => import('./__helpers__/allowingUpdatePolicy').then(m => m.allowingUpdatePolicyModule()));
 
 vi.mock('../services/RemoteImageUpdateService', () => ({
   RemoteImageUpdateService: {
@@ -927,7 +937,7 @@ describe('SchedulerService - executeUpdate', () => {
     const svc = SchedulerService.getInstance();
     await svc.triggerTask(80, { userId: 1, username: 'admin', role: 'admin' } as const);
 
-    expect(mockUpdateStack).toHaveBeenCalledWith('web-app', undefined, true);
+    expect(mockUpdateStack).toHaveBeenCalledWith('web-app', undefined, true, expect.any(Function));
     expect(mockRecheckStack).toHaveBeenCalledWith(1, 'web-app');
     expect(mockClearStackUpdateStatus).not.toHaveBeenCalled();
     expect(mockBroadcastEvent).toHaveBeenCalledWith(expect.objectContaining({
@@ -992,7 +1002,7 @@ describe('SchedulerService - executeUpdate', () => {
     const svc = SchedulerService.getInstance();
     await svc.triggerTask(82, { userId: 1, username: 'admin', role: 'admin' } as const);
 
-    expect(mockUpdateStack).toHaveBeenCalledWith('web-app', undefined, true);
+    expect(mockUpdateStack).toHaveBeenCalledWith('web-app', undefined, true, expect.any(Function));
     expect(mockUpdateScheduledTaskRun).toHaveBeenCalledWith(
       1,
       expect.objectContaining({ status: 'success' }),

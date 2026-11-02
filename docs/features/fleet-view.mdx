@@ -190,7 +190,7 @@ A subtle `Auto-refreshing every 30 seconds` line at the bottom of the page confi
 
 ## The Readiness tab
 
-The **Readiness** tab answers one question across the whole estate: what needs attention before you operate, update, recover, or rely on this fleet? It reports conditions, not configuration. A setting you deliberately left off is not a finding here. Most findings carry a button that fixes them on the spot, and nothing runs until you press it.
+The **Readiness** tab answers one question across the whole estate: what needs attention before you operate, update, recover, or rely on this fleet? It reports conditions, not configuration. A setting you deliberately left off is not a finding here, and neither is a stack you deliberately held back from unattended updates with its service update policy. Most findings carry a button that fixes them on the spot, and nothing runs until you press it.
 
 Nothing is scored. Every state comes from evidence the hub or the node actually gathered, so a check that could not run reads as `not checked` or `unverified` and never as healthy.
 
@@ -213,7 +213,7 @@ The order is deliberate and worst-first: a known problem outranks a condition th
 | Node did not answer, slow to answer, or out of contact | **Test connection** | Tests the connection from the hub and re-checks. |
 | Stack is stopped, or some services are stopped | **Start stack** | Starts the stack's existing containers, including any that finished on purpose. If its containers were removed there is nothing to start, and the message offers **Open stack** instead, because bringing it back is a deploy. |
 | A check that could not read its evidence | **Check again** | Runs the readiness check again. |
-| An update is available and needs a look | **Review update** | Opens the update review. **Update** there applies it, the same way the stack's own update button does. A stack with nothing to update, or one whose update is blocked, gets **Open stack** instead, so the block is fixed at its cause. |
+| An update is available and needs a look | **Review update** | Opens the update review. **Update** there applies it, the same way the stack's own update button does. A stack with nothing to update, or one whose update is blocked, gets **Open stack** instead, so the block is fixed at its cause. An update started here is refused when a rendered service sets `io.sencho.update: disabled`, the same as the stack's own **Update** action. |
 | Rollback is not ready because no compose file is captured | **Capture recovery point** | Captures one now, so the stack can be rolled back. |
 | A fleet snapshot missed a node | **Take fleet snapshot** | Takes a new snapshot. |
 | A node has never been scanned, or its scans are old | **Scan node** | Scans the node's images and stacks for vulnerabilities, secrets, and misconfigurations. A scan takes a few minutes and runs while you keep working. |
@@ -246,7 +246,7 @@ The matrix is one row per node, problem nodes first, one column per domain, so a
 |--------|---------------|
 | **Connectivity** | Whether the hub can reach the node, over which transport (`local`, `pilot`, or `proxy`), and when it last made successful contact. A configured proxy address is never treated as proof that the node is answering. |
 | **Workloads** | Stacks that are stopped or only partly running, plus uncertainty in the node's stack listing itself. A stack that has not been deployed is not a finding. |
-| **Updates** | The per-stack update verdict for deployed stacks: which carry warnings, which need review first, and which are blocked. |
+| **Updates** | The per-stack update verdict for deployed stacks: which carry warnings, which need review first, and which are blocked. A stack held back on purpose by its service update policy is not a finding here. |
 | **Recovery** | The per-stack rollback verdict for deployed stacks, and whether the latest fleet snapshot skipped the node. Fleet snapshots are optional, so a fleet without one is not a finding. |
 | **Security** | Whether the node's scanner is available, whether scans have run and are fresh, and whether the Security posture asks for action. Security remains the surface for the detail. |
 | **Policy sync** | Whether security policy from this instance is reaching the node: in sync, failing, or paused because its control identity no longer matches. See [Fleet Sync](/features/fleet-sync). |

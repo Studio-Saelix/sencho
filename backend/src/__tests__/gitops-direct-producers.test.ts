@@ -20,6 +20,7 @@ import fsPromises from 'fs/promises';
 import path from 'path';
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { setupTestDb, cleanupTestDb } from './helpers/setupTestDb';
+import { allowingPolicy } from './__helpers__/updatePolicyFixture';
 
 const { mockResolveRef, mockFetchAtCommit, mockVerifyFastForward, mockGitClone, mockGitLog, compose } = vi.hoisted(() => ({
   mockResolveRef: vi.fn(),
@@ -475,7 +476,10 @@ describe('Direct Git producers drive the revision state', () => {
     // The same holds through the orchestrator, which is what the update callers
     // actually use and which carries the binding on to beginStack.
     await expect(StackUpdateOrchestrator.getInstance().execute(
-      { nodeId: 1, stackName, target: { scope: 'stack' }, trigger: 'manual', actor: 'tester' },
+      {
+        nodeId: 1, stackName, target: { scope: 'stack' }, trigger: 'manual', actor: 'tester',
+        policy: allowingPolicy(stackName),
+      },
       { atomic: false, terminalWs: null },
     )).rejects.toThrow();
     expect(store.getTarget(app.id, 1)?.failure_stage).toBeNull();

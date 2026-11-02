@@ -55,6 +55,11 @@ vi.mock('../services/ComposeService', async () => {
   };
 });
 
+// The policy module holds the ComposeService class from its own import, so a
+// getInstance mock in this suite is invisible to it; the policy's own behavior
+// is covered by its dedicated suites.
+vi.mock('../services/updatePolicy', () => import('./__helpers__/allowingUpdatePolicy').then(m => m.allowingUpdatePolicyModule()));
+
 vi.mock('../services/DockerController', async () => {
   const actual = await vi.importActual<typeof import('../services/DockerController')>(
     '../services/DockerController',
@@ -177,7 +182,7 @@ describe('self stack lifecycle refusal', () => {
       .set('Cookie', authCookie);
 
     expect(res.status).toBe(200);
-    expect(mockUpdateStack).toHaveBeenCalledWith('web', undefined, true);
+    expect(mockUpdateStack).toHaveBeenCalledWith('web', undefined, true, expect.any(Function));
   });
 });
 

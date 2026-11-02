@@ -19,13 +19,17 @@ import { describePolicyBlock } from '../helpers/policyGate';
 import { getErrorMessage } from '../utils/errors';
 import { sanitizeForLog } from '../utils/safeLog';
 import type { EffectiveServiceSpec } from './effectiveServiceModel';
+import {
+  assertPolicyAllows,
+  assertUpdatePolicyUnchanged,
+  isUpdatePolicyRefusedError,
+  UpdatePolicyChangedError,
+  type UpdatePolicyResult,
+  type UpdateTarget,
+  type UpdateTrigger,
+} from './updatePolicy';
 
-export type UpdateTarget =
-  | { scope: 'stack' }
-  | { scope: 'service'; serviceName: string };
-
-export type UpdateTrigger =
-  | 'manual' | 'scheduled' | 'automatic' | 'blueprint' | 'webhook' | 'bulk';
+export type { UpdateTarget, UpdateTrigger, UpdatePolicyResult } from './updatePolicy';
 
 export interface UpdateOperationContext {
   nodeId: number;
@@ -34,6 +38,13 @@ export interface UpdateOperationContext {
   trigger: UpdateTrigger;
   actor: string | null;
 }
+
+/**
+ * An update carries the one policy decision that authorizes it. The result is
+ * branded, so it can only come from the policy module, and `execute` refuses
+ * one that does not allow this exact stack, target and trigger.
+ */
+export type UpdateExecutionContext = UpdateOperationContext & { policy: UpdatePolicyResult };
 
 export interface StackComposeOptions {
   atomic: boolean;
@@ -158,21 +169,46 @@ export class StackUpdateOrchestrator {
   }
 
   public async execute(
-    ctx: UpdateOperationContext,
+    ctx: UpdateExecutionContext,
     options: StackComposeOptions | ServiceUpdateOptions,
   ): Promise<OrchestratorResult> {
+    const request = { stack: ctx.stackName, target: ctx.target, trigger: ctx.trigger };
     if (ctx.target.scope === 'stack') {
+      // A stack refusal is thrown, mirroring DockerEndpointProtectedError, so a
+      // caller can never record a refused update as a success.
+      assertPolicyAllows(ctx.policy, request);
       return this.executeStack(ctx, options as StackComposeOptions);
     }
     // Service scope: automation never selects this branch.
     if (ctx.trigger !== 'manual') {
       throw new Error('Service-scoped updates require a manual trigger');
     }
-    const serviceOptions = options as ServiceUpdateOptions;
-    if (serviceOptions.recoveryId) {
-      return this.executeRestore(ctx, ctx.target.serviceName, serviceOptions);
+    try {
+      assertPolicyAllows(ctx.policy, request);
+    } catch (error) {
+      if (isUpdatePolicyRefusedError(error)) {
+        return serviceFailed('update_policy_blocked', error.result.reason ?? error.message);
+      }
+      throw error;
     }
-    return this.executeServiceUpdate(ctx, ctx.target.serviceName, serviceOptions);
+    return this.executeServiceUpdate(ctx, ctx.target.serviceName, options as ServiceUpdateOptions);
+  }
+
+  /**
+   * Restore is not an image refresh, so it carries no policy field: there is no
+   * string marker to forget. Its own guards are unchanged.
+   */
+  public async restore(
+    ctx: UpdateOperationContext,
+    options: ServiceUpdateOptions & { recoveryId: string },
+  ): Promise<OrchestratorResult> {
+    if (ctx.target.scope !== 'service') {
+      throw new Error('Service-scoped restores require a service target');
+    }
+    if (ctx.trigger !== 'manual') {
+      throw new Error('Service-scoped restores require a manual trigger');
+    }
+    return this.executeRestore(ctx, ctx.target.serviceName, options);
   }
 
   /**
@@ -180,11 +216,14 @@ export class StackUpdateOrchestrator {
    * post-success `beginStack(..., 'update')` stay with the caller.
    */
   private async executeStack(
-    ctx: UpdateOperationContext,
+    ctx: UpdateExecutionContext,
     options: StackComposeOptions,
   ): Promise<OrchestratorResult> {
     const updateResult = await ComposeService.getInstance(ctx.nodeId).updateStack(
       ctx.stackName, options.terminalWs ?? undefined, options.atomic,
+      // The policy was evaluated before this update started; confirm it against
+      // a fresh render immediately before the containers are recreated.
+      () => assertUpdatePolicyUnchanged(ctx.nodeId, ctx.policy),
     );
     const recoveryId = updateResult?.recoveryId ?? null;
     return {
@@ -195,7 +234,7 @@ export class StackUpdateOrchestrator {
   }
 
   private async executeServiceUpdate(
-    ctx: UpdateOperationContext,
+    ctx: UpdateExecutionContext,
     serviceName: string,
     options: ServiceUpdateOptions,
   ): Promise<OrchestratorResult> {
@@ -272,8 +311,16 @@ export class StackUpdateOrchestrator {
       try {
         await ComposeService.getInstance(nodeId).updateService(
           stackName, serviceName, spec.hasBuild, options.terminalWs ?? undefined,
+          () => assertUpdatePolicyUnchanged(nodeId, ctx.policy),
         );
       } catch (composeError) {
+        if (composeError instanceof UpdatePolicyChangedError) {
+          return serviceFailed(
+            'update_policy_blocked',
+            composeError.message,
+            { serviceName, mutationStage: 'policy', recoveryId },
+          );
+        }
         if (isDockerEndpointProtectedError(composeError)) {
           return serviceFailed(
             composeError.code,

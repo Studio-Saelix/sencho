@@ -46,6 +46,12 @@ beforeAll(async () => {
   // The update path's Docker endpoint check renders the stack's Compose config; these tests are not about it.
   const { ComposeService } = await import('../services/ComposeService');
   vi.spyOn(ComposeService.prototype, 'evaluateDockerEndpoint').mockResolvedValue(null);
+  // The update policy renders the stack before an unattended or manual update
+  // may run, so the model answers for the label set this suite expects.
+  vi.spyOn(ComposeService.prototype, 'renderConfig').mockResolvedValue({
+    rendered: JSON.stringify({ services: { web: { image: 'nginx:1' } } }),
+    stderr: '', code: 0, timedOut: false,
+  });
   adminCookie = await loginAsTestAdmin(app);
 
   const viewerHash = await bcrypt.hash('viewerpass', 1);
@@ -829,7 +835,7 @@ describe('POST /api/auto-update/execute', () => {
         .set('Cookie', adminCookie)
         .send({ target: 'auto-upd-gate' });
       expect(res.status).toBe(200);
-      expect(updateSpy).toHaveBeenCalledWith('auto-upd-gate', undefined, true);
+      expect(updateSpy).toHaveBeenCalledWith('auto-upd-gate', undefined, true, expect.any(Function));
       expect(recheckSpy).toHaveBeenCalledWith(nodeId, 'auto-upd-gate');
       expect(beginSpy).toHaveBeenCalledWith(nodeId, 'auto-upd-gate', 'update', `auto-update:${TEST_USERNAME}`, { deployedGenerationId: null });
       expect(callOrder.indexOf('beginStack')).toBeLessThan(callOrder.indexOf('recheckStack'));
@@ -928,7 +934,7 @@ describe('POST /api/auto-update/execute', () => {
         .set('Cookie', adminCookie)
         .send({ target: 'auto-upd-digest' });
       expect(res.status).toBe(200);
-      expect(updateSpy).toHaveBeenCalledWith('auto-upd-digest', undefined, true);
+      expect(updateSpy).toHaveBeenCalledWith('auto-upd-digest', undefined, true, expect.any(Function));
       expect(recheckSpy).toHaveBeenCalledWith(nodeId, 'auto-upd-digest');
       expect(clearSpy).not.toHaveBeenCalledWith(nodeId, 'auto-upd-digest');
     } finally {

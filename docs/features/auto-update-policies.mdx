@@ -77,7 +77,7 @@ Once the cause is resolved, the next check (on the interval, or via **Recheck**)
 4. For a higher pinned semver tag (a version diff such as `1.2.3` → `1.2.4`, including major bumps), edit the Compose `image:` reference to the next tag, then deploy the stack from the editor. **Apply now** and the lifecycle **Update** action pull the currently pinned tag only; they do not rewrite the pin.
 5. For a major bump, review the changelog preview and upstream release notes before changing the pin and deploying. **Apply now** is disabled on blocked cards.
 
-On multi-service stacks, the Updates view can also apply a single service when that service has a confirmed same-tag digest update. Scheduled auto-update, webhook pull, and bulk update always refresh the full stack.
+On multi-service stacks, the Updates view can also apply a single service when that service has a confirmed same-tag digest update. Scheduled auto-update, webhook pull, and bulk update always refresh the full stack, subject to each service's update policy.
 6. Use **Recheck** in the hero to force an immediate registry poll across every reachable node. A 2-minute per-node cooldown applies, and the toast tells you how many nodes were triggered, rate-limited, or failed.
 
 **Apply now** runs the same update path as other Compose-pull triggers on a stack: Sencho takes an atomic backup of the compose and env files first, pulls the updated registry images for the tags already written in Compose (or rebuilds from source for services that declare `build:`, then pulls the rest), and recreates the containers. See [Controlling a running stack](/features/stack-management#controlling-a-running-stack) for exactly how a build-aware update differs from a plain pull. Once the containers are up, the [post-update health gate](/features/health-gated-updates#the-post-update-health-gate) observes them for a configurable window and records a passed, failed, or unknown verdict on the stack's timeline, the same as a manual update from the editor toolbar or sidebar. After Apply finishes, Sencho rechecks the stack's update status and keeps the readiness card when an image update is still detected or verification cannot confirm clearance.
@@ -104,8 +104,13 @@ Auto-update is opt-in per stack. A stack participates in unattended updates only
 - **Per-stack schedule.** Create a **Auto-update Stack** task targeting that stack alone. Only this stack is updated when the cron fires.
 - **Fleet-wide schedule.** Create a **Auto-update All Stacks on Node** task targeting a node. Every stack on that node is checked when the cron fires, and stacks with same-tag digest drift are pulled and recreated. If you do not want every stack covered, create per-stack schedules instead.
 - **Label schedule.** Create an **Auto-update stacks by label** task, pick a Stack Label, and choose Entire fleet or one node. At each run Sencho resolves the stacks that currently carry that label and updates those with newer images. Assigning or removing the label changes the next run without editing the schedule.
+- **Per-service update policy.** A service that declares `io.sencho.update: manual` in its Compose file keeps you in control of its image: the update you click still refreshes it, while every unattended update skips the whole stack and records the reason. `disabled` refuses your own update too. Leave the label off, or set it to `auto`, for a service that may be updated without you. See [Sencho Labels · Update policy](/features/sencho-labels#update-policy).
 - **Stack list dot.** Image-update *detection* runs on the configured interval (every 2 hours by default) regardless of whether any schedule is configured. The sidebar dot and the readiness board still show available updates so you can decide what to do with them.
-- **Manual updates are always available.** The lifecycle **Update** action pulls and recreates the tags currently written in Compose, independent of any scheduled task. It does not rewrite a higher-tag advisory into the Compose file.
+- **Manual updates are always available.** The lifecycle **Update** action pulls and recreates the tags currently written in Compose, independent of any scheduled task. It does not rewrite a higher-tag advisory into the Compose file. A service marked `disabled` is the exception: it refuses every update that would touch it, which includes a whole-stack update.
+
+An unattended update is one Sencho runs without you: a scheduled task, an automatic update check that applies a digest rebuild, a webhook `pull`, or a bulk update from the stacks list. It runs only when every rendered service in the stack is `auto` or carries no label. A stack with a `manual` or `disabled` service, or with a value Sencho does not recognize, is skipped for that run before anything is pulled or recreated, and the reason is recorded. Updating that stack yourself, from its own **Update** action, is the way to move it forward.
+
+The Updates view marks such a stack **skipped by update policy** and names the blocking services in the tooltip, so a stack that will not be patched automatically is visible before a run rather than after it.
 
 ## Cleaning up after updates
 
@@ -129,7 +134,9 @@ The task lives alongside restart, prune, snapshot, and scan tasks in the same ti
 
 A scheduled run (including **Run Now**) only auto-applies when Compose already pins the tag that has new registry content: same-tag digest drift, the gray **Digest rebuild** case. Sencho then follows the same update path as **Apply now**: an atomic backup first, then the pull or build-aware rebuild, then the [post-update health gate](/features/health-gated-updates) observing the result.
 
-When detection finds a higher semver tag while Compose still pins the older one (for example Compose says `nginx:1.2.3` and the registry also publishes `1.2.4`), the readiness board and sidebar keep showing the advisory update. The schedule does not rewrite the Compose image reference, so it skips Compose pull and recreate until you change the pin in Compose and deploy. A schedule never bypasses a [deploy enforcement](/features/deploy-enforcement) policy: a run that a policy would block fails with the policy violation recorded in the run history, rather than applying partway.
+When detection finds a higher semver tag while Compose still pins the older one (for example Compose says `nginx:1.2.3` and the registry also publishes `1.2.4`), the readiness board and sidebar keep showing the advisory update. The schedule does not rewrite the Compose image reference, so it skips Compose pull and recreate until you change the pin in Compose and deploy. A schedule never bypasses a [deploy enforcement](/features/deploy-enforcement) policy: a run that a policy would block fails with the policy violation recorded in the run history, rather than applying partway. It also stops before anything is pulled when a service's [update policy](/features/sencho-labels#update-policy) does not allow an unattended update. That outcome is a skip, not a failure: the run stays green and records which services blocked it.
+
+On a node that does not evaluate the update policy, an unattended run fails instead of skipping, and the run history names the node and asks you to update Sencho there. Your own single-stack and single-service updates still work on that node.
 
 ## Multi-node support
 
@@ -191,6 +198,9 @@ A stack that mixes registry images and `build:` services still gets a card, scor
   </Accordion>
   <Accordion title='A scheduled auto-update did not apply and the run history shows a policy error'>
     A [deploy enforcement](/features/deploy-enforcement) policy blocked the update, the same way it would block a manual one. The run history and the dispatched alert name the policy and the matching image findings. Review the findings and either clear them or adjust the policy, then let the next scheduled run or a manual **Apply now** retry.
+  </Accordion>
+  <Accordion title='A scheduled auto-update skipped a stack'>
+    A service in the stack declares `io.sencho.update: manual`, or a value Sencho does not recognize, so the unattended run left the whole stack alone. The run history names the services that blocked it and the run stays green. Open the stack and use its own **Update** action, or change the label to `auto` or remove it. A `disabled` service means no update may touch the stack at all, so change or remove that label before retrying. A run that fails with a message naming a node that does not evaluate `io.sencho.update` is different: update Sencho on that node, or update the stack yourself.
   </Accordion>
 </AccordionGroup>
 

@@ -1,5 +1,5 @@
 import WebSocket from 'ws';
-import { DatabaseService, NotificationHistory } from './DatabaseService';
+import { DatabaseService, NotificationHistory, type NotificationRoute } from './DatabaseService';
 import { NodeRegistry } from './NodeRegistry';
 import { isDebugEnabled } from '../utils/debug';
 import { getErrorMessage } from '../utils/errors';
@@ -22,6 +22,11 @@ import {
 } from '../helpers/notificationChannels';
 import { parseNotificationDispatchRetries } from '../helpers/notificationDispatchRetries';
 import { renderPayloadTemplate } from '../helpers/notificationPayloadTemplate';
+import { serviceRouteKeys, stackRouteKeys } from './senchoRouteKeys';
+import { withTimeout } from '../utils/withTimeout';
+
+/** Routing-key resolution bound: a slow Compose render never holds a notification. */
+const ROUTE_KEY_RESOLUTION_TIMEOUT_MS = 2_000;
 
 export type NotificationCategory =
     | 'deploy_success'
@@ -83,6 +88,9 @@ export type NotificationCategory =
     | 'gitops_rollout_authorization_policy_changed'
     | 'node_update_available'
     | 'dev_build_update_available'
+    // Update-policy block and skip rows. History-only, deduplicated per stack,
+    // reason and day, so a scheduled run that skips every hour writes one row.
+    | 'update_policy'
     | 'system';
 
 export const ALL_NOTIFICATION_CATEGORIES: readonly NotificationCategory[] = [
@@ -108,6 +116,7 @@ export const ALL_SUPPRESSIBLE_CATEGORIES: readonly NotificationCategory[] = [
     'gitops_rollback_started', 'gitops_rollback_completed', 'gitops_rollback_partial_failed',
     'gitops_stateful_confirmation', 'gitops_health_rollout_policy_set',
     'gitops_placement_policy_changed', 'gitops_rollout_authorization_policy_changed',
+    'update_policy',
 ];
 
 /** Webhook timeout: 10 seconds per external dispatch call. */
@@ -236,10 +245,18 @@ export class NotificationService {
         level: 'info' | 'warning' | 'error',
         category: NotificationCategory,
         message: string,
-        options?: { stackName?: string; containerName?: string; actor?: string },
+        options?: {
+            stackName?: string;
+            containerName?: string;
+            actor?: string;
+            /** The service the alert is about. Its own routing key is used. */
+            serviceName?: string;
+            /** The node that raised it; routing keys are read from that node's stack. */
+            nodeId?: number;
+        },
     ): Promise<{ persisted: boolean }> {
         const t0 = Date.now();
-        const { stackName, containerName, actor } = options ?? {};
+        const { stackName, containerName, actor, serviceName, nodeId } = options ?? {};
 
         // dispatchAlert is called fire-and-forget from monitors, event streams,
         // and request handlers across the app. It must never reject: node
@@ -341,7 +358,16 @@ export class NotificationService {
             // 3. Check notification routing rules — always evaluated, matchers compose AND
             const errors: string[] = [];
 
-            const matched = routes.filter(r => matchesNotificationFilters(matchCtx, r));
+            // Routing keys are read only when a rule filters on them, and only
+            // after the bell, so a render can never hold the bell back.
+            const routeKeys = await this.resolveRouteKeys(routes, stackName, serviceName, nodeId ?? localNodeId);
+            const routeMatchCtx = { ...matchCtx, routeKeys };
+            const matched = routes.filter(r => matchesNotificationFilters(routeMatchCtx, r));
+            if (routeKeys.length > 0 && notification.id != null) {
+                // Recorded after dispatch, in the same style as the suppression
+                // match, so the history row says which keys routed it.
+                this.dbService.updateNotificationRouteKeys(notification.id, routeKeys);
+            }
             if (matched.length > 0) {
                 if (isDebugEnabled()) console.log(`[Notify:diag] Matched ${matched.length} route(s) for stack "${sanitizeForLog(stackName ?? '(none)')}", category="${sanitizeForLog(category)}"`);
                 await Promise.allSettled(
@@ -392,6 +418,30 @@ export class NotificationService {
             console.error('[Notify] dispatchAlert failed:', err);
             // History may already be written; callers must not treat that as a miss.
             return { persisted: wroteHistory };
+        }
+    }
+
+    /**
+     * Read the keys an alert was raised with, bounded so a slow render cannot
+     * hold a notification. Untouched when no enabled rule filters on keys, which
+     * is the common case, so an unfiltered install pays nothing.
+     */
+    private async resolveRouteKeys(
+        routes: NotificationRoute[],
+        stackName: string | undefined,
+        serviceName: string | undefined,
+        nodeId: number,
+    ): Promise<string[]> {
+        const needed = routes.some(r => r.route_keys != null && r.route_keys.length > 0);
+        if (!needed || !stackName) return [];
+        const work = serviceName
+            ? serviceRouteKeys(nodeId, stackName, serviceName)
+            : stackRouteKeys(nodeId, stackName);
+        try {
+            return await withTimeout(work, ROUTE_KEY_RESOLUTION_TIMEOUT_MS, 'notification routing keys');
+        } catch (error) {
+            console.warn('[Notify] Could not resolve routing keys for %s:', sanitizeForLog(stackName), error);
+            return [];
         }
     }
 
