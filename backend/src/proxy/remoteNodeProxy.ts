@@ -592,9 +592,12 @@ export function createRemoteProxyMiddleware(): RequestHandler {
     on: {
       ...sharedOn,
       proxyRes: (proxyRes, req, res) => {
-        // The same header-time release as the streaming hop: this hop buffers
-        // the body, so its 30 s proxyTimeout is the idle stall bound, not a
-        // reason to keep the read deadline armed after the remote answered.
+        // The same header-time release as the streaming hop. This hop buffers
+        // the body before writing anything, so a stall after the headers is
+        // ended by the 15 s interactive body-idle callback below, which writes
+        // the 504 terminal before dropping the upstream socket. The 30 s
+        // proxyTimeout is only the backstop for a body that keeps sending
+        // bytes without ever finishing.
         proxyRes.headers['x-sencho-proxy'] = '1';
         const timing = proxyTimings.get(req);
         if (timing) {
@@ -1200,10 +1203,11 @@ export function createRemoteProxyMiddleware(): RequestHandler {
         }
         req.gitopsIdentity = { query: prepared.search.toString(), preRewritePath: req.path };
         beginProxyTiming(req, res);
-        // The identity hop's 30 s proxyTimeout bounds a stalled body. It is not a
-        // UX deadline: a Git sources or drift page is hydration like any other, so
-        // a GET that answers a page is on the interactive clock here too. The
-        // drift re-check is a POST and stays off it.
+        // A Git sources or drift page is hydration like any other, so a GET
+        // that answers a page is on the interactive clock here too; the drift
+        // re-check is a POST and stays off it. Once the headers land, the 15 s
+        // body-idle callback writes the 504 answer, and the identity hop's 30 s
+        // proxyTimeout is the backstop for a body that keeps sending bytes.
         const identityBudgetMs = remainingReadBudgetMs();
         if (identityBudgetMs !== null) {
           armInteractiveReadDeadline(req, res, node.name, identityBudgetMs);

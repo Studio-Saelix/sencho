@@ -30,11 +30,13 @@ let ungrantedServer: http.Server;
 let noEvidenceServer: http.Server;
 let slowEvidenceServer: http.Server;
 let failingEvidenceServer: http.Server;
+let failingVolumeMetaServer: http.Server;
 let grantedNodeId: number;
 let ungrantedNodeId: number;
 let noEvidenceNodeId: number;
 let slowEvidenceNodeId: number;
 let failingEvidenceNodeId: number;
+let failingVolumeNodeId: number;
 let slowMetaCalls = 0;
 let failingMetaCalls = 0;
 
@@ -135,6 +137,22 @@ function failingEvidenceRemote(): http.Server {
   });
 }
 
+/**
+ * Every `/api/meta` answers with an HTTP error. The probe reached the node, so
+ * the cause is `unverified`, not `unreachable` or an upgrade demand.
+ */
+function failingMetaRemote(): http.Server {
+  return http.createServer((req, res) => {
+    if (req.url?.startsWith('/api/meta')) {
+      res.writeHead(502, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: 'bad gateway' }));
+      return;
+    }
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ ok: true }));
+  });
+}
+
 async function listen(server: http.Server): Promise<number> {
   await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
   return (server.address() as import('net').AddressInfo).port;
@@ -181,11 +199,13 @@ beforeAll(async () => {
   noEvidenceServer = noEvidenceRemote();
   slowEvidenceServer = slowEvidenceRemote();
   failingEvidenceServer = failingEvidenceRemote();
+  failingVolumeMetaServer = failingMetaRemote();
   const grantedPort = await listen(grantedServer);
   const ungrantedPort = await listen(ungrantedServer);
   const noEvidencePort = await listen(noEvidenceServer);
   const slowEvidencePort = await listen(slowEvidenceServer);
   const failingEvidencePort = await listen(failingEvidenceServer);
+  const failingVolumePort = await listen(failingVolumeMetaServer);
 
   grantedNodeId = db.addNode({
     name: 'evidence-granted-remote',
@@ -232,6 +252,15 @@ beforeAll(async () => {
     api_url: `http://127.0.0.1:${failingEvidencePort}`,
     api_token: 'failing-token',
   });
+  failingVolumeNodeId = db.addNode({
+    name: 'evidence-failing-volume-remote',
+    type: 'remote',
+    mode: 'proxy',
+    compose_dir: '/tmp',
+    is_default: false,
+    api_url: `http://127.0.0.1:${failingVolumePort}`,
+    api_token: 'failing-volume-token',
+  });
 });
 
 afterAll(async () => {
@@ -240,6 +269,7 @@ afterAll(async () => {
   await new Promise<void>((resolve) => noEvidenceServer.close(() => resolve()));
   await new Promise<void>((resolve) => slowEvidenceServer.close(() => resolve()));
   await new Promise<void>((resolve) => failingEvidenceServer.close(() => resolve()));
+  await new Promise<void>((resolve) => failingVolumeMetaServer.close(() => resolve()));
   cleanupTestDb(tmpDir);
 });
 
@@ -518,6 +548,42 @@ describe('remote proxy ssh-host-key scoped-evidence gate', () => {
     expect(res.body.code).toBe('PERMISSION_DENIED');
 
     clearAssignments(deployerId);
+  });
+});
+
+describe('remote proxy inline probe refusals', () => {
+  it('refuses a named-stack write when the scoped-evidence probe never answers', async () => {
+    grantScopedStackEdit(deployerId, slowEvidenceNodeId, 'web');
+
+    const res = await request(app)
+      .put('/api/stacks/web')
+      .set('Authorization', `Bearer ${deployerBearer}`)
+      .set('x-node-id', String(slowEvidenceNodeId))
+      .send({ content: 'services: {}' });
+
+    // The RBAC probe answered, then the scoped-evidence probe hung. The write
+    // must be refused with the gateway's timeout, not proxied and not called an
+    // upgrade demand.
+    expect(res.status).toBe(504);
+    expect(res.headers[REMOTE_READ_FAILURE_HEADER]).toBe('timeout');
+    expect(res.body.error).not.toMatch(/upgrade/i);
+
+    clearAssignments(deployerId);
+  }, 20_000);
+
+  it('names volume removal when its evidence probe answers with an error', async () => {
+    const res = await request(app)
+      .post('/api/stacks/web/down?removeVolumes=true')
+      .set('Authorization', `Bearer ${deployerBearer}`)
+      .set('x-node-id', String(failingVolumeNodeId));
+
+    // The probe reached the node and got an HTTP error, so the capability is
+    // unverified; the sentence must name volume removal, the thing that could
+    // not be checked, and must not demand an upgrade.
+    expect(res.status).toBe(503);
+    expect(res.headers[REMOTE_READ_FAILURE_HEADER]).toBe('unverified');
+    expect(res.body.error).toMatch(/removing volumes/i);
+    expect(res.body.error).not.toMatch(/permission model|upgrade/i);
   });
 });
 

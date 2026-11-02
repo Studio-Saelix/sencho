@@ -294,8 +294,9 @@ describe('useDashboardData metricsStale threshold', () => {
   });
 
   it('keeps the derived level when a later poll fails after a real sample', async () => {
-    // Once /stats has answered, a subsequent HTTP failure is stale meters, not
-    // an absent reading: the page keeps the last known level plus the chip.
+    // Once both metrics reads have answered, a subsequent ordinary HTTP
+    // failure is stale meters, not an absent reading: the page keeps the last
+    // known level and only counts toward the chip, which needs three failures.
     setEndpointOutcome('/stats', true);
     const { result } = renderHook(() => useDashboardData());
     await act(async () => { await Promise.resolve(); await Promise.resolve(); });
@@ -305,6 +306,39 @@ describe('useDashboardData metricsStale threshold', () => {
     await tickStats();
     expect(result.current.metricsUnreadable).toBe(false);
     expect(result.current.metricsStale).toBe(false);
+  });
+
+  it('replaces the level with Unknown when a later read loses its path to the node', async () => {
+    // A timeout after a sample is not stale meters: the hub lost its path to
+    // the node, so the headline must not keep presenting the old sample as
+    // current health.
+    let timedOut = false;
+    apiFetchMock.mockImplementation((requested: string) => {
+      if (requested === '/stats') {
+        if (timedOut) {
+          return Promise.resolve(new Response(
+            JSON.stringify({ code: 'remote_read_timeout' }),
+            { status: 504, headers: { 'x-sencho-read-timeout': '1' } },
+          ));
+        }
+        return Promise.resolve(okJson(STATS_PAYLOAD));
+      }
+      if (requested === '/system/stats') return Promise.resolve(okJson(SYS_PAYLOAD));
+      if (requested === '/stacks/statuses') return Promise.resolve(okJson({}));
+      if (requested === '/metrics/historical') return Promise.resolve(okJson([]));
+      return Promise.resolve(okJson(null));
+    });
+
+    const { result } = renderHook(() => useDashboardData());
+    await act(async () => { await Promise.resolve(); await Promise.resolve(); });
+    expect(result.current.unreadableCause).toBeNull();
+
+    timedOut = true;
+    await tickStats();
+
+    expect(result.current.metricsUnreadable).toBe(true);
+    expect(result.current.unreadableCause).toBe('timeout');
+    expect(result.current.metricsStale).toBe(true);
   });
 
   it('reports an unverified permission model instead of Healthy', async () => {

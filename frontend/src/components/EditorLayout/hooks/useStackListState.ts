@@ -509,9 +509,16 @@ export function useStackListState() {
         // printing a status code the operator cannot act on.
         const readFailure = classifyRemoteReadFailure(res);
         if (isNamedReadFailure(readFailure)) {
+          // The two capability refusals carry the gateway's own sentence
+          // naming the capability it probed. Read the body only for those, so
+          // an ordinary failure answer is not buffered just to be discarded.
+          const bodyText = readFailure === 'unverified' || readFailure === 'upgrade-required'
+            ? await res.text().catch(() => null)
+            : null;
           return applyStacksFailure(remoteReadFailureMessage(readFailure, {
             nodeName: activeNode?.name,
             status: res.status,
+            body: bodyText,
           }));
         }
         return applyStacksFailure(`Could not load stacks (${res.status})`);
@@ -574,13 +581,19 @@ export function useStackListState() {
       let coveredFileCount = 0;
       const statusProxied = statusOutcome.proxied || proxied;
 
-      const failHydration = (reason: string): string[] => {
+      const failHydration = (reason: string, options: { named?: boolean } = {}): string[] => {
         console.error(`Failed to refresh stack statuses: ${reason}`);
         if (listSucceeded && !background) {
           markMilestone('list_hydrated', { attemptId, outcome: 'error', proxied });
           // Foreground (user-initiated) failures get one explicit signal; the
           // dashboard's background polls stay silent because they self-heal.
-          toast.error('Could not refresh stack statuses. Check the node connection and try again.');
+          // A cause the gateway named keeps its own sentence: telling the
+          // operator to check the connection for a rejected credential sends
+          // them to the wrong fix. Only an unclassified failure keeps the
+          // connection line.
+          toast.error(options.named
+            ? reason
+            : 'Could not refresh stack statuses. Check the node connection and try again.');
         }
         // Same-list failure restores the attempt-start snapshot (stale) so the
         // operator keeps last-known statuses with an explicit stale marker.
@@ -615,7 +628,7 @@ export function useStackListState() {
         return failHydration(remoteReadFailureMessage(statusReadFailure, {
           nodeName: activeNode?.name,
           status: statusOutcome.status,
-        }));
+        }), { named: true });
       }
       if (statusOutcome.ok && isValidBulkPayload(statusOutcome.body)) {
         // Decode already happened inside the shared helper; do not emit a fake
@@ -713,6 +726,12 @@ export function useStackListState() {
       if (listSucceeded) {
         if (!background) {
           markMilestone('list_hydrated', { attemptId, outcome: 'error', proxied });
+          // The list itself loaded, but its statuses did not: the operator
+          // still gets one foreground signal, and a cause apiFetch threw with
+          // keeps its own sentence instead of the connection line.
+          toast.error(isNamedReadFailure(readFailure)
+            ? message
+            : 'Could not refresh stack statuses. Check the node connection and try again.');
         }
         recordHydrationError(currentFingerprintRef.current);
         return latestFileList;

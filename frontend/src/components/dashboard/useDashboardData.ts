@@ -193,8 +193,11 @@ export function useDashboardData(): DashboardData {
   // Whether each live-metrics endpoint has ever returned a sample for the
   // current node. A failure before the first sample is an absent reading, not a
   // stale one: deriving a level from the zero default would report a pass for a
-  // read that never happened. A failure after a sample keeps the last reading
-  // and only marks the numbers stale.
+  // read that never happened. Once both endpoints have sampled, an ordinary
+  // HTTP failure keeps the last reading and only counts toward the stale chip;
+  // a later unreadable failure (a timeout, an unreachable node, a dead Pilot,
+  // no target, a refused address) still replaces the level with Unknown,
+  // because it says the hub lost its path to the node.
   const metricsSampleRef = useRef({ stats: false, sys: false });
   // A bounded read that is not one of the two metrics endpoints (the shared
   // stack-statuses read) can prove the same thing: the node did not answer.

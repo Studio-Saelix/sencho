@@ -138,8 +138,10 @@ export interface DashboardData {
    *  an unverified permission model, a rejected node credential, or an HTTP
    *  answer. */
   metricsUnreadable: boolean;
-  /** The cause behind `metricsUnreadable`, so the headline names it. Null when
-   *  a metrics read has produced a sample. */
+  /** The cause behind `metricsUnreadable`, so the headline names it. Set when a
+   *  metrics read settled without a sample of its own, or when a later read
+   *  shows the hub has no path to the node; cleared when every failed read has
+   *  since produced a sample. */
   unreadableCause: RemoteReadFailure | null;
   /** True once one of the two metrics reads has settled for the active node. */
   metricsSettled: boolean;

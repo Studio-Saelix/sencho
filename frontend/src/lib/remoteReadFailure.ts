@@ -171,21 +171,50 @@ export function remoteReadFailureOf(error: unknown): RemoteReadFailure {
   return error instanceof RemoteReadHttpError ? error.failure : classifyRemoteReadError(error);
 }
 
+/** Longest gateway sentence rendered as-is; a longer body is not trusted copy. */
+const MAX_GATEWAY_ERROR_LENGTH = 400;
+
+/**
+ * The gateway's own sentence for a capability refusal, when the body carries
+ * one. `unverified` and `upgrade-required` cover several capabilities (the RBAC
+ * probe, scoped stack authorization, volume removal), so a fixed sentence would
+ * name the wrong one. An empty, oversized, non-string, or unparseable body keeps
+ * the cause's default copy.
+ */
+function capabilityRefusalMessage(body: string | null | undefined): string | null {
+  if (!body) return null;
+  let error: unknown;
+  try {
+    error = (JSON.parse(body) as { error?: unknown }).error;
+  } catch {
+    return null;
+  }
+  if (typeof error !== 'string') return null;
+  const message = error.trim();
+  if (message.length === 0 || message.length > MAX_GATEWAY_ERROR_LENGTH) return null;
+  return message;
+}
+
 /**
  * One plain sentence for a failed read, naming the node the operator selected.
  * Each cause gets the fix it actually needs: a timeout states only that the
  * read did not answer in time, a rejected node credential points at the stored
  * token, and an unverified capability does not claim the node was silent.
  * `http` keeps the status so an unexpected answer is still visible.
+ *
+ * Pass the response body when the caller has already read it: for `unverified`
+ * and `upgrade-required` the gateway names the capability it probed, and that
+ * sentence is more accurate than the permission-model fallback.
  */
 export function remoteReadFailureMessage(
   failure: RemoteReadFailure,
-  options: { nodeName?: string | null; status?: number } = {},
+  options: { nodeName?: string | null; status?: number; body?: string | null } = {},
 ): string {
   const name = options.nodeName?.trim();
   const subject = name ? `"${name}"` : 'This node';
   // Mid-sentence copy cannot start with a capital when the node is unnamed.
   const target = name ? `"${name}"` : 'this node';
+  const capabilityMessage = capabilityRefusalMessage(options.body);
   switch (failure) {
     case 'timeout':
       return `${subject} did not answer in time. Try again in a moment.`;
@@ -196,9 +225,11 @@ export function remoteReadFailureMessage(
     case 'node-credential':
       return `The stored credential for ${target} was rejected. Update the node's API token in Settings → Nodes.`;
     case 'unverified':
-      return `${subject}'s permission model could not be verified. Try again shortly.`;
+      return capabilityMessage
+        ?? `${subject}'s permission model could not be verified. Try again shortly.`;
     case 'upgrade-required':
-      return `${subject} is running a version that does not enforce per-user permissions. Upgrade it before non-admin users can act on it.`;
+      return capabilityMessage
+        ?? `${subject} is running a version that does not enforce per-user permissions. Upgrade it before non-admin users can act on it.`;
     case 'not-configured':
       return `${subject} has no API URL or token configured. Update it in Settings → Nodes.`;
     case 'pilot-disconnected':

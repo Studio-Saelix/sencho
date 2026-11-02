@@ -143,6 +143,33 @@ describe('remoteReadFailureMessage', () => {
     expect(message).not.toMatch(/do not have access/i);
   });
 
+  it('shows the capability the gateway named on an unverified refusal', () => {
+    const body = JSON.stringify({
+      error: 'Remote node "edge-1" answered with an error, so its support for scoped stack authorization could not be verified. Try again once the node is healthy.',
+    });
+    const message = remoteReadFailureMessage('unverified', { nodeName: 'edge-1', body });
+    expect(message).toMatch(/scoped stack authorization/i);
+    expect(message).not.toMatch(/permission model/i);
+  });
+
+  it('shows the capability the gateway named on an upgrade refusal', () => {
+    const body = JSON.stringify({
+      error: 'Remote node "edge-1" does not support scoped stack authorization. Upgrade it before scoped users can act on it.',
+    });
+    const message = remoteReadFailureMessage('upgrade-required', { nodeName: 'edge-1', body });
+    expect(message).toMatch(/scoped stack authorization/i);
+    expect(message).not.toMatch(/per-user permissions/i);
+  });
+
+  it('keeps the fixed sentence when the body carries no usable error', () => {
+    expect(remoteReadFailureMessage('unverified', { body: JSON.stringify({ code: 'remote_unverified' }) }))
+      .toMatch(/permission model could not be verified/i);
+    expect(remoteReadFailureMessage('upgrade-required', { body: 'not json' }))
+      .toMatch(/does not enforce per-user permissions/i);
+    expect(remoteReadFailureMessage('unverified', { body: JSON.stringify({ error: '   ' }) }))
+      .toMatch(/permission model could not be verified/i);
+  });
+
   it('falls back to a neutral subject when the node is unnamed', () => {
     expect(remoteReadFailureMessage('timeout')).toContain('This node');
   });

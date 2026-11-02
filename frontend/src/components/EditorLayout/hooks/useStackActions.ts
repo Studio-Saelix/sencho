@@ -1096,6 +1096,7 @@ export function useStackActions(options: UseStackActionsOptions) {
           throw new StackOpenError(remoteReadFailureMessage(readFailure, {
             nodeName: activeNode?.name,
             status: res.status,
+            body: text,
           }));
         }
         throw new Error(`Failed to load stack: ${res.status}`);
@@ -1148,8 +1149,23 @@ export function useStackActions(options: UseStackActionsOptions) {
       if (bodySpan !== null) endSpan(bodySpan, { outcome: 'error' });
       if (isAbortError(error) || signal.aborted) { abortAttempt(attemptId); return { ok: false }; }
       console.error('Failed to load file:', error);
+      // A returned answer is classified above. `apiFetch` throws on a 401
+      // before the caller can see it, attaching the response to the error, so
+      // the catch has to classify that response too: a rejected node credential
+      // is not the operator's connection, and a local 401 is an access denial.
       const refused = error instanceof StackOpenError ? error.message : undefined;
-      toast.error(refused ?? stackOpenConnectionMessage(filename));
+      const thrownResponse = (error as { response?: unknown } | null | undefined)?.response;
+      const thrownFailure = thrownResponse instanceof Response
+        ? classifyRemoteReadFailure(thrownResponse)
+        : null;
+      const namedFailure = isNamedReadFailure(thrownFailure)
+        ? remoteReadFailureMessage(thrownFailure, {
+          nodeName: activeNode?.name,
+          status: thrownResponse instanceof Response ? thrownResponse.status : undefined,
+        })
+        : undefined;
+      const openError = refused ?? namedFailure;
+      toast.error(openError ?? stackOpenConnectionMessage(filename));
       stackListState.setSelectedFile(null);
       editorState.setContent('');
       editorState.setOriginalContent('');
@@ -1162,7 +1178,7 @@ export function useStackActions(options: UseStackActionsOptions) {
       editorState.setContainersLoadStatus('idle');
       editorState.setContainersLoadError(null);
       editorState.setEffectiveServices([]);
-      return { ok: false, error: refused };
+      return { ok: false, error: openError };
     } finally {
       if (!signal.aborted) {
         editorState.setIsFileLoading(false);

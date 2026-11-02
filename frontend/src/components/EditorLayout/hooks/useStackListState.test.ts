@@ -23,6 +23,7 @@ vi.mock('@/hooks/useImageUpdates', () => ({
 
 import { useStackListState } from './useStackListState';
 import { __resetStackStatusesFetchForTests } from '@/lib/stackStatusesFetch';
+import { toast } from '@/components/ui/toast-store';
 
 function okJson(payload: unknown): Response {
   return new Response(JSON.stringify(payload), {
@@ -38,6 +39,9 @@ function notFound(): Response {
 beforeEach(() => {
   __resetStackStatusesFetchForTests();
   apiFetchMock.mockReset();
+  vi.mocked(toast.error).mockClear();
+  vi.mocked(toast.success).mockClear();
+  vi.mocked(toast.info).mockClear();
   useNodesMock.mockReset();
   useImageUpdatesMock.mockReset();
   useNodesMock.mockReturnValue({
@@ -111,6 +115,73 @@ describe('useStackListState.refreshStacks failure classification', () => {
     expect(result.current.stacksLoadStatus).toBe('error');
     expect(result.current.stacksLoadError).toMatch(/stored credential/i);
     expect(result.current.stacksLoadError).not.toBe('Unauthorized');
+  });
+
+  it('names a rejected node credential in the status-refresh toast after the list loaded', async () => {
+    apiFetchMock.mockImplementation((endpoint: string) => {
+      if (endpoint === '/stacks') return Promise.resolve(okJson(['web.yml']));
+      if (endpoint === '/stacks/statuses') {
+        return Promise.resolve(new Response('Unauthorized', {
+          status: 401,
+          headers: { 'x-sencho-proxy': '1' },
+        }));
+      }
+      return Promise.resolve(notFound());
+    });
+
+    const { result } = renderHook(() => useStackListState());
+    await act(async () => {
+      await result.current.refreshStacks();
+    });
+
+    // The list itself loaded, so the only signal is the status-refresh toast.
+    // It must name the stored token, not tell the operator to check the
+    // connection for a rejected node credential.
+    expect(toast.error).toHaveBeenCalledWith(expect.stringMatching(/stored credential/i));
+    expect(vi.mocked(toast.error).mock.calls.some(([message]) => String(message).includes('connection'))).toBe(false);
+  });
+
+  it('names an unverified permission model in the status-refresh toast', async () => {
+    apiFetchMock.mockImplementation((endpoint: string) => {
+      if (endpoint === '/stacks') return Promise.resolve(okJson(['web.yml']));
+      if (endpoint === '/stacks/statuses') {
+        return Promise.resolve(new Response(
+          JSON.stringify({ code: 'remote_unverified' }),
+          { status: 503, headers: { 'x-sencho-read-failure': 'unverified' } },
+        ));
+      }
+      return Promise.resolve(notFound());
+    });
+
+    const { result } = renderHook(() => useStackListState());
+    await act(async () => {
+      await result.current.refreshStacks();
+    });
+
+    expect(toast.error).toHaveBeenCalledWith(expect.stringMatching(/permission model could not be verified/i));
+    expect(vi.mocked(toast.error).mock.calls.some(([message]) => String(message).includes('connection'))).toBe(false);
+  });
+
+  it('names a thrown proxied 401 in the status-refresh toast after the list loaded', async () => {
+    const response = new Response('Unauthorized', {
+      status: 401,
+      headers: { 'x-sencho-proxy': '1' },
+    });
+    apiFetchMock.mockImplementation((endpoint: string) => {
+      if (endpoint === '/stacks') return Promise.resolve(okJson(['web.yml']));
+      if (endpoint === '/stacks/statuses') {
+        return Promise.reject(Object.assign(new Error('Unauthorized'), { response }));
+      }
+      return Promise.resolve(notFound());
+    });
+
+    const { result } = renderHook(() => useStackListState());
+    await act(async () => {
+      await result.current.refreshStacks();
+    });
+
+    expect(toast.error).toHaveBeenCalledWith(expect.stringMatching(/stored credential/i));
+    expect(vi.mocked(toast.error).mock.calls.some(([message]) => String(message).includes('connection'))).toBe(false);
   });
 
   it('surfaces a recoverable error on a background failure after the list was already confirmed empty', async () => {

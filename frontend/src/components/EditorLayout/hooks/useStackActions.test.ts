@@ -435,6 +435,86 @@ describe('useStackActions.saveFile', () => {
     expect(vi.mocked(toast.error).mock.calls.some(([message]) => String(message).includes('connection'))).toBe(false);
   });
 
+  it('classifies a thrown proxied 401 as a rejected node credential, not a connection problem', async () => {
+    // apiFetch throws on 401 before the caller sees the response, attaching it
+    // to the error. Opening a stack must classify that response: the operator
+    // needs to update the stored token, not check their own connection.
+    vi.mocked(apiFetch).mockRejectedValue(Object.assign(new Error('Unauthorized'), {
+      response: new Response('Unauthorized', {
+        status: 401,
+        headers: { 'x-sencho-proxy': '1' },
+      }),
+    }));
+    const { result } = setup({ stackList: { selectedFile: null } });
+    let loaded: { ok: boolean; error?: string } = { ok: true };
+    await act(async () => {
+      loaded = await result.current.loadFileForRoute('linked.yml');
+    });
+    expect(loaded.ok).toBe(false);
+    expect(loaded.error).toMatch(/stored credential/i);
+    expect(toast.error).toHaveBeenCalledWith(expect.stringMatching(/stored credential/i));
+    expect(vi.mocked(toast.error).mock.calls.some(([message]) => String(message).includes('connection'))).toBe(false);
+  });
+
+  it('keeps a thrown local 401 an access denial, not a connection problem', async () => {
+    vi.mocked(apiFetch).mockRejectedValue(Object.assign(new Error('Unauthorized'), {
+      response: new Response('Unauthorized', { status: 401 }),
+    }));
+    const { result } = setup({ stackList: { selectedFile: null } });
+    let loaded: { ok: boolean; error?: string } = { ok: true };
+    await act(async () => {
+      loaded = await result.current.loadFileForRoute('linked.yml');
+    });
+    expect(loaded.ok).toBe(false);
+    expect(loaded.error).toMatch(/do not have access/i);
+    expect(vi.mocked(toast.error).mock.calls.some(([message]) => String(message).includes('connection'))).toBe(false);
+  });
+
+  it('shows the gateway sentence for a scoped-evidence upgrade refusal', async () => {
+    // The RBAC probe passed; the follow-up scoped-evidence probe answered
+    // without the capability. Naming the permission model would send the
+    // operator to fix per-user permissions instead of the node version.
+    vi.mocked(apiFetch).mockResolvedValue(new Response(
+      JSON.stringify({ error: 'Remote node "Local" does not support scoped stack authorization. Upgrade it before scoped users can act on it.' }),
+      { status: 403, headers: { 'x-sencho-read-failure': 'upgrade-required' } },
+    ));
+    const { result } = setup({ stackList: { selectedFile: null } });
+    let loaded: { ok: boolean; error?: string } = { ok: true };
+    await act(async () => {
+      loaded = await result.current.loadFileForRoute('linked.yml');
+    });
+    expect(loaded.error).toMatch(/scoped stack authorization/i);
+    expect(loaded.error).not.toMatch(/per-user permissions/i);
+  });
+
+  it('shows the gateway sentence when the scoped-evidence probe fails', async () => {
+    vi.mocked(apiFetch).mockResolvedValue(new Response(
+      JSON.stringify({ error: 'Remote node "Local" answered with an error, so its support for scoped stack authorization could not be verified. Try again once the node is healthy.' }),
+      { status: 503, headers: { 'x-sencho-read-failure': 'unverified' } },
+    ));
+    const { result } = setup({ stackList: { selectedFile: null } });
+    let loaded: { ok: boolean; error?: string } = { ok: true };
+    await act(async () => {
+      loaded = await result.current.loadFileForRoute('linked.yml');
+    });
+    expect(loaded.error).toMatch(/scoped stack authorization/i);
+    expect(loaded.error).not.toMatch(/permission model/i);
+  });
+
+  it('keeps a real permission denial the access sentence', async () => {
+    vi.mocked(apiFetch).mockResolvedValue(new Response(
+      JSON.stringify({ error: 'Permission denied.', code: 'PERMISSION_DENIED' }),
+      { status: 403 },
+    ));
+    const { result } = setup({ stackList: { selectedFile: null } });
+    let loaded: { ok: boolean; error?: string } = { ok: true };
+    await act(async () => {
+      loaded = await result.current.loadFileForRoute('linked.yml');
+    });
+    expect(loaded.error).toMatch(/do not have access/i);
+    expect(loaded.error).not.toMatch(/upgrade|permission model/i);
+  });
+
   it('keeps a missing stack a plain failure instead of telling the operator to update the node', async () => {
     vi.mocked(apiFetch).mockResolvedValue(new Response(JSON.stringify({ error: 'not found' }), { status: 404 }));
     const { result } = setup({ stackList: { selectedFile: null } });
