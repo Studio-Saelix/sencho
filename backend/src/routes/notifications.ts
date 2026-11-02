@@ -22,7 +22,7 @@ import {
   storedAppriseToWriteConfig,
 } from '../helpers/notificationChannels';
 import { parseStackPatternsInput } from '../helpers/stackPattern';
-import {
+import { parseRouteKey } from '../helpers/senchoLabels';import {
   parseNotificationSchedule,
   type NotificationSchedule,
 } from '../helpers/notificationSchedule';
@@ -136,6 +136,40 @@ function validateLevels(levels: unknown, res: Response): boolean {
     return false;
   }
   return true;
+}
+
+/** A rule may name at most this many routing keys; each is normalized by the registry. */
+const MAX_ROUTE_KEYS = 16;
+
+/**
+ * Normalize `route_keys` through the same parser the Compose label uses, so a
+ * key typed here and a key declared in Compose are the same string. Returns
+ * null for "no key filter", false after answering 400.
+ */
+function validateRouteKeys(route_keys: unknown, res: Response): string[] | null | false {
+  if (route_keys === undefined || route_keys === null) return null;
+  if (!Array.isArray(route_keys)) {
+    res.status(400).json({ error: 'route_keys must be an array of routing keys or null' });
+    return false;
+  }
+  if (route_keys.length > MAX_ROUTE_KEYS) {
+    res.status(400).json({ error: `A routing rule matches at most ${MAX_ROUTE_KEYS} routing keys` });
+    return false;
+  }
+  const keys: string[] = [];
+  for (const raw of route_keys) {
+    if (typeof raw !== 'string') {
+      res.status(400).json({ error: 'route_keys must be an array of strings' });
+      return false;
+    }
+    const parsed = parseRouteKey(raw);
+    if (!parsed.ok) {
+      res.status(400).json({ error: `route_keys: ${parsed.reason}` });
+      return false;
+    }
+    if (!keys.includes(parsed.value)) keys.push(parsed.value);
+  }
+  return keys.length > 0 ? keys : null;
 }
 
 function validateAppliesTo(applies_to: unknown, res: Response): NotificationSuppressionAppliesTo | false {
@@ -395,7 +429,7 @@ notificationRoutesRouter.get('/', authMiddleware, (req: Request, res: Response):
 notificationRoutesRouter.post('/', authMiddleware, async (req: Request, res: Response): Promise<void> => {
   if (!requireAdmin(req, res)) return;
   try {
-    const { name, node_id: rawNodeId, stack_patterns, label_ids, categories, levels, channel_type, channel_url, config, priority, enabled } = req.body;
+    const { name, node_id: rawNodeId, stack_patterns, label_ids, categories, levels, route_keys, channel_type, channel_url, config, priority, enabled } = req.body;
 
     if (!name || typeof name !== 'string' || !name.trim()) {
       res.status(400).json({ error: 'Name is required' });
@@ -412,6 +446,8 @@ notificationRoutesRouter.post('/', authMiddleware, async (req: Request, res: Res
     if (!validateLabelIds(label_ids, res)) return;
     if (!validateCategories(categories, res)) return;
     if (!validateLevels(levels, res)) return;
+    const routeKeys = validateRouteKeys(route_keys, res);
+    if (routeKeys === false) return;
     if (!(NOTIFICATION_CHANNEL_TYPES as readonly string[]).includes(channel_type)) {
       res.status(400).json({ error: `channel_type must be ${NOTIFICATION_CHANNEL_TYPES.join(', ')}` });
       return;
@@ -433,6 +469,7 @@ notificationRoutesRouter.post('/', authMiddleware, async (req: Request, res: Res
       label_ids: Array.isArray(label_ids) && label_ids.length > 0 ? label_ids : null,
       categories: Array.isArray(categories) && categories.length > 0 ? (categories as NotificationCategory[]) : null,
       levels: normalizeStoredLevels(levels),
+      route_keys: routeKeys,
       channel_type,
       channel_url: channel_url.trim(),
       config: channel_type === 'apprise' ? normalizeAppriseStoredJson(channel_url.trim(), config) : null,
@@ -459,7 +496,7 @@ notificationRoutesRouter.put('/:id', authMiddleware, async (req: Request, res: R
     const existing = DatabaseService.getInstance().getNotificationRoute(id);
     if (!existing) { res.status(404).json({ error: 'Route not found' }); return; }
 
-    const { name, node_id: rawNodeId, stack_patterns, label_ids, categories, levels, channel_type, channel_url, config, priority, enabled } = req.body;
+    const { name, node_id: rawNodeId, stack_patterns, label_ids, categories, levels, route_keys, channel_type, channel_url, config, priority, enabled } = req.body;
 
     if (name !== undefined && (typeof name !== 'string' || !name.trim())) {
       res.status(400).json({ error: 'Name must be a non-empty string' });
@@ -480,6 +517,12 @@ notificationRoutesRouter.put('/:id', authMiddleware, async (req: Request, res: R
     if (!validateLabelIds(label_ids, res)) return;
     if (!validateCategories(categories, res)) return;
     if ('levels' in req.body && !validateLevels(levels, res)) return;
+    let validatedRouteKeys: string[] | null | undefined;
+    if ('route_keys' in req.body) {
+      const keys = validateRouteKeys(route_keys, res);
+      if (keys === false) return;
+      validatedRouteKeys = keys;
+    }
     if (channel_type !== undefined && !(NOTIFICATION_CHANNEL_TYPES as readonly string[]).includes(channel_type)) {
       res.status(400).json({ error: `channel_type must be ${NOTIFICATION_CHANNEL_TYPES.join(', ')}` });
       return;
@@ -523,6 +566,7 @@ notificationRoutesRouter.put('/:id', authMiddleware, async (req: Request, res: R
     if ('label_ids' in req.body) updates.label_ids = Array.isArray(label_ids) && label_ids.length > 0 ? label_ids : null;
     if ('categories' in req.body) updates.categories = Array.isArray(categories) && categories.length > 0 ? categories : null;
     if ('levels' in req.body) updates.levels = normalizeStoredLevels(levels);
+    if ('route_keys' in req.body) updates.route_keys = validatedRouteKeys ?? null;
     if (channel_type !== undefined) updates.channel_type = channel_type;
     if (channel_url !== undefined || typeChanged) updates.channel_url = effectiveUrl;
     if (effectiveType === 'apprise') updates.config = normalizeAppriseStoredJson(effectiveUrl, effectiveConfig);

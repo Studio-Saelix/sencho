@@ -2,6 +2,7 @@ import { CacheService } from '../services/CacheService';
 import { StackFileRootsService } from '../services/StackFileRootsService';
 import { invalidateNodeNetworkingAggregate } from '../services/network/networkingAggregateCache';
 import { stackReadinessSummaryKey } from '../services/readiness/stackReadinessSummary';
+import { clearRouteKeyCacheForNode } from '../services/senchoRouteKeyCache';
 
 export const REMOTE_META_NAMESPACE = 'remote-meta';
 
@@ -30,6 +31,9 @@ export function invalidateNodeCaches(nodeId: number): void {
   // reflects the change immediately.
   invalidateNodeNetworkingAggregate(nodeId);
   StackFileRootsService.invalidateNode(nodeId);
+  // Routing keys come from the same Compose model, so a save, deploy, or label
+  // edit must not leave a stale key set behind for the alert about it.
+  clearRouteKeyCacheForNode(nodeId);
 }
 
 /**

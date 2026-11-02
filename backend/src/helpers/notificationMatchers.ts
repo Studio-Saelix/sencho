@@ -10,6 +10,8 @@ export interface NotificationFilterRule {
     label_ids: number[] | null;
     categories: string[] | null;
     levels?: NotificationLevel[] | null;
+    /** Routing keys from `io.sencho.notify.route`; a populated filter must intersect the alert's keys. */
+    route_keys?: string[] | null;
 }
 
 export interface NotificationMatchContext {
@@ -18,6 +20,8 @@ export interface NotificationMatchContext {
     category: NotificationCategory;
     level: NotificationLevel;
     stackLabelIds: number[];
+    /** The keys the alert was raised with; empty for a host alert or an unknown service. */
+    routeKeys?: string[];
 }
 
 /** True when all non-empty matchers on the rule match the alert context (AND). */
@@ -38,6 +42,15 @@ export function matchesNotificationFilters(
         && rule.label_ids.length > 0
         && !rule.label_ids.some((id) => ctx.stackLabelIds.includes(id))
     ) {
+        return false;
+    }
+    if (
+        rule.route_keys != null
+        && rule.route_keys.length > 0
+        && !rule.route_keys.some((key) => (ctx.routeKeys ?? []).includes(key))
+    ) {
+        // An alert with no keys fails a populated key filter: a container the
+        // stack's model does not know must not reach every team's route.
         return false;
     }
     if (
