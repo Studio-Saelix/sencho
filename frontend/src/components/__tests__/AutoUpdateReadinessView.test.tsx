@@ -1978,7 +1978,12 @@ describe('AutoPill', () => {
         onApply={() => {}}
       />,
     );
-    expect(screen.getByTestId('auto-pill')).toHaveTextContent('Auto: skipped by update policy');
+    const pill = screen.getByTestId('auto-pill');
+    // The phone header keeps the label short so it fits beside the risk badge;
+    // the tooltip still names the blocking service.
+    expect(pill).toHaveTextContent('Auto: skipped');
+    expect(pill).not.toHaveTextContent('Auto: skipped by update policy');
+    expect(pill.getAttribute('title')).toContain('db (disabled)');
   });
 
   it('shows the policy skip in the phone footer instead of a next run', () => {

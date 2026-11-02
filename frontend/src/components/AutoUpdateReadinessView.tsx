@@ -331,17 +331,23 @@ export function AutoPill({
   // An empty list on a skip means the label could not be evaluated because the
   // Compose model did not render; do not send the operator looking for a label.
   const skipDetail = ineligible || 'the Compose model could not be rendered, so the policy could not be evaluated';
+  // The compact pill sits beside the risk badge in the phone card header. The
+  // full sentence does not fit next to a badge at 320-390px, so it says only
+  // what the header needs; the tooltip and the card footer carry the detail.
+  const label = skipped
+    ? (compact ? 'Auto: skipped' : 'Auto: skipped by update policy')
+    : 'Auto: Off';
   return (
     <span
       className={compact
-        ? 'inline-flex items-center gap-1 rounded-full border border-card-border px-2 py-[3px] font-mono text-[10px] uppercase tracking-[0.1em] text-stat-subtitle'
-        : 'inline-flex items-center gap-1.5 rounded-full border border-card-border bg-muted/30 px-2.5 py-0.5 font-mono text-[10px] leading-3 uppercase tracking-[0.18em] text-stat-subtitle'}
+        ? 'inline-flex min-w-0 max-w-full items-center gap-1 rounded-full border border-card-border px-2 py-[3px] font-mono text-[10px] uppercase tracking-[0.1em] text-stat-subtitle'
+        : 'inline-flex min-w-0 max-w-full items-center gap-1.5 rounded-full border border-card-border bg-muted/30 px-2.5 py-0.5 font-mono text-[10px] leading-3 uppercase tracking-[0.18em] text-stat-subtitle'}
       title={skipped ? `Skipped by io.sencho.update: ${skipDetail}` : undefined}
       data-testid="auto-pill"
       data-state={skipped ? 'skipped' : 'off'}
     >
-      <CircleSlash className="h-3 w-3" strokeWidth={1.5} />
-      {skipped ? 'Auto: skipped by update policy' : 'Auto: Off'}
+      <CircleSlash className="h-3 w-3 shrink-0" strokeWidth={1.5} />
+      <span className="truncate">{label}</span>
     </span>
   );
 }
@@ -382,7 +388,7 @@ function StackReadinessCard({
   return (
     <Card className="flex flex-col gap-4 p-5">
       <div className="flex items-start justify-between gap-3">
-        <div className="flex flex-col gap-1 min-w-0">
+        <div className="flex min-w-0 flex-1 flex-col gap-1">
           <span className="font-mono text-[10px] uppercase tracking-[0.22em] text-stat-subtitle/80">
             Stack
           </span>
@@ -390,7 +396,7 @@ function StackReadinessCard({
             {stack}
           </span>
         </div>
-        <div className="flex items-center gap-2 shrink-0">
+        <div className="flex min-w-0 max-w-full flex-wrap items-center justify-end gap-2">
           <AutoPill autoUpdateEnabled={autoUpdateEnabled} unattendedPolicy={unattendedPolicy} />
           {previewLoaded && preview && (
             <RiskBadge
@@ -987,13 +993,19 @@ export function MobileReadinessCard({
   const rest = dot > 0 ? changelog.slice(dot + 1) : changelog;
 
   return (
-    <div className="flex flex-col gap-[10px] rounded-xl border border-card-border border-t-card-border-top bg-card p-[14px] shadow-card-bevel">
-      <div className="flex items-start justify-between gap-[10px]">
+    <div
+      className="flex flex-col gap-[10px] rounded-xl border border-card-border border-t-card-border-top bg-card p-[14px] shadow-card-bevel"
+      data-testid="mobile-readiness-card"
+    >
+      <div className="flex flex-wrap items-start justify-between gap-[10px]" data-testid="mobile-readiness-header">
         <div className="min-w-0 flex-1">
           <Kicker>stack</Kicker>
           <div className="mt-px truncate font-heading text-[23px] leading-[26px] text-stat-value">{stack}</div>
         </div>
-        <div className="flex shrink-0 items-center gap-1.5">
+        <div
+          className="flex min-w-0 max-w-full flex-wrap items-center justify-end gap-1.5"
+          data-testid="mobile-readiness-status"
+        >
           <AutoPill autoUpdateEnabled={autoUpdateEnabled} unattendedPolicy={unattendedPolicy} compact />
           {previewLoaded && preview && (
             <RiskBadge
