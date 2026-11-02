@@ -125,9 +125,13 @@ export class ImageUpdateFactsService {
         });
         // The decision is evaluated here, where the Compose model lives, so the
         // hub records the same answer an unattended run on this node takes. A
-        // model that cannot be rendered fails closed to skip.
+        // model this observation could not render is already a definite skip;
+        // re-rendering it would let a racing file change disagree with the
+        // facts the hub is about to record.
         const unattendedPolicy = includePolicy
-            ? toUnattendedStatusPolicy(await resolveUpdatePolicyPair(nodeId, stackName, { scope: 'stack' }))
+            ? (bound.model.renderable
+                ? toUnattendedStatusPolicy(await resolveUpdatePolicyPair(nodeId, stackName, { scope: 'stack' }))
+                : { decision: 'skip' as const, ineligible: [] })
             : undefined;
         return {
             name: stackName, observationRevision, observationToken, ...bound, images,

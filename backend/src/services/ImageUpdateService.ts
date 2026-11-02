@@ -1163,12 +1163,9 @@ export class ImageUpdateService {
             // The update result is unknown, but an unattended run fails closed
             // on this same unreadable model. Record that skip without touching
             // the prior update evidence, so the row cannot read "allow".
-            const unattendedPolicy = await this.unattendedPolicyForStatus(nodeId, stackName);
-            if (unattendedPolicy) {
-                await this.withStackWriteLock(nodeId, stackName, generation, () => {
-                    db.recordUnattendedPolicy(nodeId, stackName, unattendedPolicy);
-                });
-            }
+            await this.withStackWriteLock(nodeId, stackName, generation, () => {
+                db.recordUnattendedPolicy(nodeId, stackName, { decision: 'skip', ineligible: [] });
+            });
             return {
                 outcome: 'verification_failed',
                 warning: model.error || UPDATE_VERIFICATION_INCOMPLETE_WARNING,
@@ -1570,15 +1567,16 @@ export class ImageUpdateService {
         const confirmedHasUpdate = checkable.some((r, i) => statuses[i] === 'ok' && r.hasUpdate === true);
         // The effective model could not be rendered, which is exactly the state
         // in which an unattended run fails closed. Record that skip rather than
-        // leaving a prior allow in place.
-        const unattendedPolicy = await this.unattendedPolicyForStatus(nodeId, stackName);
+        // leaving a prior allow in place; re-rendering for the policy could race
+        // a file change and disagree with the model this check observed.
+        const unattendedPolicy: StackUpdateUnattendedPolicy = { decision: 'skip', ineligible: [] };
 
         if (checkable.length > 0 && failed.length === checkable.length) {
             const committed = await this.withStackWriteLock(nodeId, stackName, generation, async () => {
                 db.recordStackCheckFailure(
                     nodeId, stackName, failed[0].error ?? 'Update check failed', checkedAt,
                 );
-                if (unattendedPolicy) db.recordUnattendedPolicy(nodeId, stackName, unattendedPolicy);
+                db.recordUnattendedPolicy(nodeId, stackName, unattendedPolicy);
             });
             return {
                 hasUpdate: previousState[stackName] === true,
@@ -1597,7 +1595,7 @@ export class ImageUpdateService {
 
         const committed = await this.withStackWriteLock(nodeId, stackName, generation, async () => {
             db.upsertStackUpdateStatus(nodeId, stackName, hasUpdate, checkedAt, checkStatus, lastError);
-            if (unattendedPolicy) db.recordUnattendedPolicy(nodeId, stackName, unattendedPolicy);
+            db.recordUnattendedPolicy(nodeId, stackName, unattendedPolicy);
         });
 
         return {

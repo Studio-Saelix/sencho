@@ -164,10 +164,14 @@ it('carries the unattended decision when the request asks for it, and fails clos
         decision: 'skip', ineligible: [{ service: 'web', policy: 'manual' }],
     });
 
-    // An unreadable model records the same skip an unattended run takes.
-    policy.resolveUpdatePolicyPair.mockResolvedValueOnce(null);
+    // A model this observation could not render is a definite skip; it is not
+    // re-rendered for the policy, so a racing fix cannot disagree with the facts.
+    vi.mocked(buildEffectiveServiceModel).mockResolvedValueOnce({
+        renderable: false, code: 'effective_model_render_failed', error: 'Render failed',
+    });
     const failed = await ImageUpdateFactsService.getInstance().collect(1, 'site', 'a'.repeat(32), true);
     expect(failed.unattendedPolicy).toEqual({ decision: 'skip', ineligible: [] });
+    expect(policy.resolveUpdatePolicyPair).toHaveBeenCalledTimes(1);
 });
 
 it('omits the unattended decision when the caller did not ask for one', async () => {
