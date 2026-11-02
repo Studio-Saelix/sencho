@@ -1,4 +1,5 @@
-import { ShieldOff } from 'lucide-react';
+import { RefreshCw, ShieldOff } from 'lucide-react';
+import { Button } from '@/components/ui/button';
 import { Skeleton } from '@/components/ui/skeleton';
 import { SignalRail, type SignalTile } from '@/components/ui/SignalRail';
 import { cn } from '@/lib/utils';
@@ -32,10 +33,37 @@ type NavigateFn = (
  *  not an empty chart, and a failed read is not "no history yet". */
 export type ChartLoadState = 'loading' | 'ready' | 'unavailable';
 
+/**
+ * Why the overview is not on screen. Every cause the gateway established gets
+ * its own kind, so a disconnected Pilot or an unconfigured node is never
+ * described as a node that did not answer.
+ */
+export type OverviewLoadError =
+  | 'unsupported'
+  | 'timeout'
+  | 'unreachable'
+  | 'unauthorized'
+  | 'node-credential'
+  | 'unverified'
+  | 'not-configured'
+  | 'pilot-disconnected'
+  | 'refused'
+  | 'failed';
+
 interface OverviewTabProps {
   overview: SecurityOverview | null;
-  /** 'unsupported' = node has no overview endpoint (benign); 'failed' = a real error. */
-  loadError: 'unsupported' | 'failed' | null;
+  /**
+   * 'unsupported' = node has no overview endpoint (benign); 'timeout' = the node
+   * missed its read deadline and may answer on a retry; 'unreachable' = no
+   * answer at all; 'unauthorized' = the operator's grants, not the node;
+   * 'pilot-disconnected' / 'not-configured' / 'refused' = the hub has no
+   * readable path to the node; 'node-credential' = the hub's stored token for
+   * the node was rejected; 'unverified' = the node answered but its permissions
+   * could not be verified; 'failed' = a real error.
+   */
+  loadError: OverviewLoadError | null;
+  /** Reload every Security read (overview, scan summaries, risk trend, exploit intel). */
+  onReload: () => void;
   trend: SecurityRiskTrendPoint[];
   /** Where the risk-trend read stands; independent of the overview read. */
   trendState: ChartLoadState;
@@ -54,6 +82,53 @@ interface OverviewTabProps {
   /** Verbs, dismissals, and the single handler that runs them for the review queue. */
   reasons: SecurityReasons;
 }
+
+/**
+ * Why the overview is not on screen. Each kind keeps its own cause, because
+ * "the node did not answer", "the node is unreachable", and "you cannot read
+ * this here" send the operator to different places.
+ */
+const UNAVAILABLE_COPY: Record<Exclude<OverviewLoadError, 'unsupported'>, {
+  title: string;
+  body: string;
+}> = {
+  timeout: {
+    title: 'This node did not answer',
+    body: 'The security overview did not arrive in time, so nothing is shown rather than an empty result.',
+  },
+  unreachable: {
+    title: 'This node is unreachable',
+    body: 'The security overview could not be read because the node is not answering. Check that Sencho is running on that host.',
+  },
+  unauthorized: {
+    title: 'No access to this overview',
+    body: 'Your account cannot read the security overview on this node. Ask an administrator for access.',
+  },
+  'node-credential': {
+    title: 'This node rejected the hub credential',
+    body: "The stored API token for this node was rejected. Update the node's token in Settings → Nodes.",
+  },
+  unverified: {
+    title: 'Permissions could not be verified',
+    body: "This node's permission model could not be verified. Try again once the node is healthy.",
+  },
+  'pilot-disconnected': {
+    title: 'The Pilot tunnel is disconnected',
+    body: 'The Pilot tunnel to this node is disconnected. It resumes when the agent reconnects.',
+  },
+  'not-configured': {
+    title: 'This node has no target configured',
+    body: 'This node has no API URL or token configured. Update it in Settings → Nodes.',
+  },
+  refused: {
+    title: 'The hub refused this node’s address',
+    body: "The hub refused this node's address. Check the node's API URL.",
+  },
+  failed: {
+    title: "Couldn't load the overview",
+    body: 'The security overview failed to load for this node. Try again shortly.',
+  },
+};
 
 const STATUS_ROW_TONE: Record<'value' | 'warn' | 'subtitle', string> = {
   value: 'text-stat-value',
@@ -182,6 +257,7 @@ export function OverviewTab({
   onInspect,
   canScan,
   onScanComplete,
+  onReload,
   reasons,
 }: OverviewTabProps) {
   const isMobile = useIsMobile();
@@ -198,14 +274,20 @@ export function OverviewTab({
     );
   }
 
-  if (loadError === 'failed') {
+  if (loadError !== null) {
+    // 'unsupported' returned above, so this is a cause the hub established
+    // about the node, an authorization failure, or a real error.
+    const copy = UNAVAILABLE_COPY[loadError];
+
     return (
       <div className="flex flex-col items-center justify-center py-20 text-center">
         <ShieldOff className="w-12 h-12 text-warning/60 mb-4" strokeWidth={1.5} />
-        <h3 className="text-lg font-medium mb-1">Couldn't load the overview</h3>
-        <p className="text-sm text-muted-foreground">
-          The security overview failed to load for this node. Switch nodes and back, or try again shortly.
-        </p>
+        <h3 className="text-lg font-medium mb-1">{copy.title}</h3>
+        <p className="mb-4 text-sm text-muted-foreground">{copy.body}</p>
+        <Button variant="outline" size="sm" onClick={onReload}>
+          <RefreshCw className="mr-1.5 h-4 w-4" />
+          Retry
+        </Button>
       </div>
     );
   }

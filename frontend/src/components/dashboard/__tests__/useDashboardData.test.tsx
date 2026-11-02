@@ -450,4 +450,53 @@ describe('useDashboardData stackStatuses load states', () => {
       (call) => call[0] === '/stacks/statuses' && call[1]?.nodeId === 7,
     )).toBe(true);
   });
+
+  it('drops a late read from the previous node after a node switch', async () => {
+    // Criterion: node switches supersede in-flight reads, and a late response
+    // cannot write into the new node's state.
+    let resolveNode1Stats: ((r: Response) => void) | null = null;
+    apiFetchMock.mockImplementation((endpoint: string) => {
+      if (endpoint === '/stats') {
+        return new Promise<Response>((resolve) => { resolveNode1Stats = resolve; });
+      }
+      if (endpoint === '/system/stats') return Promise.resolve(okJson(SYS_PAYLOAD));
+      if (endpoint === '/stacks/statuses') return Promise.resolve(okJson({}));
+      if (endpoint === '/metrics/historical') return Promise.resolve(okJson([]));
+      return Promise.resolve(okJson(null));
+    });
+
+    const { result, rerender } = renderHook(() => useDashboardData());
+    await act(async () => { await Promise.resolve(); await Promise.resolve(); });
+
+    // Switch to node 2, which answers straight away.
+    apiFetchMock.mockImplementation((endpoint: string) => {
+      if (endpoint === '/stats') {
+        return Promise.resolve(okJson({ active: 2, managed: 2, unmanaged: 0, exited: 0, total: 2 }));
+      }
+      if (endpoint === '/system/stats') return Promise.resolve(okJson(SYS_PAYLOAD));
+      if (endpoint === '/stacks/statuses') return Promise.resolve(okJson({}));
+      if (endpoint === '/metrics/historical') return Promise.resolve(okJson([]));
+      return Promise.resolve(okJson(null));
+    });
+    useNodesMock.mockReturnValue({
+      activeNode: { id: 2, name: 'edge-2', type: 'remote' },
+      nodes: [
+        { id: 1, name: 'Local', type: 'local' },
+        { id: 2, name: 'edge-2', type: 'remote' },
+      ],
+    });
+    rerender();
+    await act(async () => { await Promise.resolve(); await Promise.resolve(); await Promise.resolve(); });
+    expect(result.current.stats.active).toBe(2);
+
+    // Node 1's abandoned read finally lands, long after the switch.
+    await act(async () => {
+      resolveNode1Stats?.(okJson({ active: 9, managed: 9, unmanaged: 0, exited: 0, total: 9 }));
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    expect(result.current.stats.active).toBe(2);
+    expect(result.current.lastSyncAt).not.toBeNull();
+  });
 });

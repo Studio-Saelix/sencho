@@ -457,9 +457,11 @@ export function writeTerminal(
   const disposition = TERMINALS[kind];
   if (disposition.respond === 'silent') return;
   if (res.headersSent || res.writableEnded) {
-    // Unreachable while this hop owns the response, so if it ever fires the
-    // client is left with a half-written body and no other trace.
-    console.warn(`[Proxy] GitOps identity hop could not answer (kind=${kind}): the response was already sent.`);
+    // The client disconnected mid-flight, or the response body was ended by the
+    // read hop's idle-stall bound after its headers went out. Either way there
+    // is nobody left to answer, and the header-time release means this is no
+    // longer "unreachable" code: it is the expected end of an abandoned answer.
+    console.warn(`[Proxy] GitOps identity hop could not answer (kind=${kind}): the response was already sent or abandoned.`);
     return;
   }
 

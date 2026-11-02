@@ -142,6 +142,18 @@ When two or more nodes are registered, clicking the switcher opens a popover lis
 
 Click any row to switch. All views (dashboard, stack list, editor, resources, logs) immediately reflect the selected node. The **Manage nodes** link at the bottom of the popover opens the Settings → Nodes panel to add, edit, or remove nodes.
 
+### When the selected node does not answer
+
+A page waits a few seconds for the selected node before it gives up, so a remote that has gone silent cannot leave Home, Stacks, Resources, Networking, or Security loading with no end. When the wait runs out:
+
+- the page says the node did not answer and offers **Retry**, instead of drawing zeros or an empty inventory that would read as a healthy node;
+- the dashboard headline reads **Unknown** rather than the last health level, so stale numbers are never presented as current;
+- data you already had stays on screen: the stack-health rows and the **metrics stale** chip mark it stale, and Resources and Security keep their last good rows and report a failed refresh once.
+
+Each cause gets its own words. A node that did not answer, a node the hub cannot reach, a disconnected Pilot tunnel, a node with no API URL or token, and an address the hub refused are told apart on the stack list, Resources, Networking, and Security. The Home headline gives a node that did not answer and one the hub cannot reach the same sentence, and names every other cause. A node that answered but whose permission model could not be verified is not described as silent.
+
+Reads that the codebase knows are slow (disk usage, the volume browser, the full resources inventory) get a longer wait before they are called silent, and a response that has started is bounded by a stall timeout rather than a total-time cap. That longer wait applies to the slow read alone: a page that issues several reads for the node names the failure as soon as any of the faster ones establishes it, rather than leaving a loading table until the slow read's budget runs out. Deploys, updates, image pulls, restores, downloads, log streams, and the live terminals are never cut short by the page's read wait.
+
 ## What top-level views show when a remote node is active
 
 Top-level views that manage fleet-wide state are scoped to the local hub and are hidden from the nav strip when a remote node is the active selection. They reappear automatically when you switch back to your local node.

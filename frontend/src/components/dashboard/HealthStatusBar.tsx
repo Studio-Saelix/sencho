@@ -4,6 +4,7 @@ import { MastheadRail } from '@/components/ui/MastheadRail';
 import type { Stats, SystemStats, NotificationItem, HealthLevel } from './types';
 import { deriveHealth } from './deriveHealth';
 import { countVisibleUnread } from '@/lib/notificationVisibility';
+import { unreadableNodeHeadline, type UnreadableNodeFailure } from '@/lib/remoteReadFailure';
 import { parseHostUsage } from '@/lib/hostUsage';
 
 interface HealthStatusBarProps {
@@ -13,8 +14,18 @@ interface HealthStatusBarProps {
   activeNodeName: string;
   nodeCount: number;
   lastSyncAt: number | null;
-  /** True after several consecutive metrics polls have failed (Docker socket or metrics path down). */
+  /** True when the metrics reads are not answering: several consecutive failures,
+   *  or the first read that shows the hub has no readable path to the selected node. */
   metricsStale?: boolean;
+  /** True when a read stopped at a state where the hub has no readable path to
+   *  the node, as opposed to stale meters. */
+  metricsUnreadable?: boolean;
+  /** Why the node is unreadable, so the bar names a disconnected Pilot or an
+   *  unconfigured node instead of calling every cause "not answering". */
+  unreadableCause?: UnreadableNodeFailure | null;
+  /** True until the first metrics read for the active node settles. The headline
+   *  must not claim the default (healthy) level while that read is still queued. */
+  metricsPending?: boolean;
 }
 
 const healthConfig: Record<HealthLevel, { label: string; textClass: string; railClass: string; tintClass: string }> = {
@@ -36,6 +47,29 @@ const healthConfig: Record<HealthLevel, { label: string; textClass: string; rail
     railClass: 'bg-destructive/70',
     tintClass: 'from-destructive/[0.06] via-transparent to-transparent',
   },
+};
+
+/**
+ * Shown instead of the derived level when the metrics reads are not answering.
+ * A node nobody can reach has no health to report, and its last known zeros must
+ * not be read as a clean bill of health.
+ */
+const unavailableHealth = {
+  label: 'Unknown',
+  textClass: 'text-muted-foreground',
+  railClass: 'bg-muted-foreground/40',
+  tintClass: 'from-muted-foreground/[0.04] via-transparent to-transparent',
+};
+
+/**
+ * Shown until the first metrics read settles. The default counters are zeros,
+ * which would derive "Healthy"; that is a claim about a node nobody has read yet.
+ */
+const pendingHealth = {
+  label: 'Checking',
+  textClass: 'text-muted-foreground',
+  railClass: 'bg-muted-foreground/40',
+  tintClass: 'from-muted-foreground/[0.04] via-transparent to-transparent',
 };
 
 function formatGib(bytes: number): string {
@@ -71,12 +105,18 @@ export function HealthStatusBar({
   nodeCount,
   lastSyncAt,
   metricsStale = false,
+  metricsUnreadable = false,
+  unreadableCause = null,
+  metricsPending = false,
 }: HealthStatusBarProps) {
   const { level, reasons } = useMemo(
     () => deriveHealth(stats, systemStats, notifications),
     [stats, systemStats, notifications],
   );
-  const config = healthConfig[level];
+  // "Unknown" is reserved for a node the hub cannot read. Stale meters with a
+  // known local cause (the Docker socket, the metrics service) keep the derived
+  // level and the stale chip, so the copy does not blame the network for them.
+  const config = metricsUnreadable ? unavailableHealth : metricsPending ? pendingHealth : healthConfig[level];
   const now = useTicker(SYNC_LABEL_TICK_MS);
   const unreadAlerts = countVisibleUnread(notifications);
   const running = `${stats.active}/${stats.total}`;
@@ -87,14 +127,19 @@ export function HealthStatusBar({
   const memLabel = memReading !== null ? formatGib(memReading) : '--';
   const lastSyncLabel = lastSyncAt ? `last sync ${formatAgo(now - lastSyncAt)}` : 'connecting…';
   const metaLine = `${activeNodeName} · ${nodeCount} ${nodeCount === 1 ? 'node' : 'nodes'} · ${lastSyncLabel}`;
-  const reasonsLine = reasons.join(' · ');
+  const reasonsLine = metricsUnreadable
+    ? unreadableNodeHeadline(unreadableCause, activeNodeName)
+    : metricsPending
+      ? 'Reading this node…'
+      : reasons.join(' · ');
+  const live = !metricsUnreadable && !metricsPending && level === 'healthy';
 
   return (
     <div
       className={`relative overflow-hidden rounded-lg border border-card-border border-t-card-border-top bg-card shadow-card-bevel transition-colors`}
     >
       <div className={`pointer-events-none absolute inset-0 bg-gradient-to-r ${config.tintClass}`} />
-      <MastheadRail variant={level === 'healthy' ? 'shimmer' : 'glow'} className={config.railClass} />
+      <MastheadRail variant={live ? 'shimmer' : 'glow'} className={config.railClass} />
       <div className="relative grid grid-cols-[auto_1fr_auto] items-center gap-6 py-5 pl-7 pr-6">
         {/* State column */}
         <div className="flex items-center gap-4">

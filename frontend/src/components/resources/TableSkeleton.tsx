@@ -20,14 +20,25 @@ export function TableSkeleton({ cols, rows = 5 }: { cols: number; rows?: number 
     );
 }
 
-/** Distinct from the empty state: the request failed, so say so and offer the retry. */
-export function TableLoadError({ cols, noun, onRetry }: { cols: number; noun: string; onRetry: () => void }) {
+/**
+ * Distinct from the empty state: the request failed, so say so and offer the
+ * retry. `reason` names why when the cause is known (a node that did not
+ * answer, one that is unreachable, a rejected credential), instead of leaving
+ * the reader to guess whether the node is empty or silent.
+ */
+export function TableLoadError({ cols, noun, onRetry, reason }: {
+    cols: number;
+    noun: string;
+    onRetry: () => void;
+    reason?: string | null;
+}) {
     return (
         <TableBody>
             <TableRow className="hover:bg-transparent">
                 <TableCell colSpan={cols} className="py-8 text-center">
-                    <p className="mb-3 text-sm text-muted-foreground">Could not load {noun}.</p>
-                    <Button variant="outline" size="sm" onClick={onRetry}>Retry</Button>
+                    <p className="text-sm text-muted-foreground">Could not load {noun}.</p>
+                    {reason ? <p className="mt-1 mb-3 text-xs text-stat-subtitle">{reason}</p> : null}
+                    <Button variant="outline" size="sm" className={reason ? 'text-stat-title' : 'mt-3 text-stat-title'} onClick={onRetry}>Retry</Button>
                 </TableCell>
             </TableRow>
         </TableBody>

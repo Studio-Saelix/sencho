@@ -15,7 +15,7 @@
  *    admin-only.
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { render, screen, waitFor, within } from '@testing-library/react';
+import { act, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 
 vi.mock('@/lib/api', () => ({ apiFetch: vi.fn() }));
@@ -80,6 +80,7 @@ function jsonResponse(body: unknown, init: { ok?: boolean; status?: number } = {
   return {
     ok: init.ok ?? true,
     status: init.status ?? 200,
+    headers: new Headers(),
     json: async () => body,
   } as unknown as Response;
 }
@@ -588,6 +589,40 @@ describe('ResourcesView', () => {
 
     await user.click(screen.getByRole('button', { name: 'Retry disk usage' }));
     expect(await screen.findByText('Tidy')).toBeInTheDocument();
+  });
+
+  it('recovers the half-failed page from the table Retry', async () => {
+    // The inventory and disk-usage reads fail together on a silent node. The
+    // Retry the operator reaches for (the table's) must restore both, not leave
+    // the header on "Disk usage unknown" beside a loaded inventory.
+    let resourcesCalls = 0;
+    let dfCalls = 0;
+    mockedFetch.mockImplementation((url: string) => {
+      if (url === '/system/resources') {
+        resourcesCalls += 1;
+        return Promise.resolve(resourcesCalls === 1
+          ? jsonResponse({ error: 'down' }, { ok: false, status: 504 })
+          : jsonResponse({ images: [image('back:again')], volumes: [], networks: [] }));
+      }
+      if (url === '/system/docker-df') {
+        dfCalls += 1;
+        return Promise.resolve(dfCalls === 1
+          ? jsonResponse({ error: 'down' }, { ok: false, status: 504 })
+          : jsonResponse(reclaimableUsage(0, 0)));
+      }
+      return Promise.resolve(jsonResponse({}));
+    });
+
+    const user = userEvent.setup();
+    render(<ResourcesView />);
+
+    expect(await screen.findByText('Disk usage unknown')).toBeInTheDocument();
+    expect(await screen.findByText('Could not load images.')).toBeInTheDocument();
+
+    await user.click(screen.getByRole('button', { name: 'Retry' }));
+    expect(await screen.findByText('back:again')).toBeInTheDocument();
+    expect(await screen.findByText('Tidy')).toBeInTheDocument();
+    expect(dfCalls).toBe(2);
   });
 
   it('fetches a prune plan before enabling confirm, then sends the fingerprint', async () => {
@@ -1252,6 +1287,477 @@ describe('ResourcesView', () => {
         expect(toast.success).not.toHaveBeenCalled();
       });
     });
+  });
+
+  it('does not report "No external containers" when only the external read failed', async () => {
+    // A node that answers /system/resources but misses the read deadline on
+    // /system/orphans has not told us it has none. The only external slice
+    // failed, so that tab names the failure instead of claiming an empty host.
+    mockedFetch.mockImplementation((url: string) => {
+      if (url === '/system/resources') {
+        return Promise.resolve(jsonResponse({ images: [], volumes: [], networks: [] }));
+      }
+      if (url === '/system/orphans') {
+        return Promise.resolve({
+          ok: false,
+          status: 504,
+          json: async () => ({ code: 'remote_read_timeout' }),
+          headers: new Headers({ 'x-sencho-read-timeout': '1' }),
+        } as unknown as Response);
+      }
+      return Promise.resolve(jsonResponse({}));
+    });
+
+    const user = userEvent.setup();
+    render(<ResourcesView />);
+    await waitFor(() => expect(mockedFetch).toHaveBeenCalledWith(
+      '/system/resources',
+      expect.objectContaining({ signal: expect.any(AbortSignal) }),
+    ));
+
+    await user.click(await screen.findByRole('tab', { name: /external/i }));
+    expect(await screen.findByText('Could not load external containers.')).toBeInTheDocument();
+    expect(screen.queryByText('No external containers')).toBeNull();
+  });
+
+  it('settles the external tab when the inventory batch rejects as a whole', async () => {
+    // apiFetch throws on a 401, which rejects the batch before any per-slice
+    // branch runs: the external tab must not keep its skeleton.
+    mockedFetch.mockImplementation((url: string) => {
+      if (url === '/system/resources') {
+        return Promise.resolve(jsonResponse({ images: [], volumes: [], networks: [] }));
+      }
+      if (url === '/system/orphans') return Promise.reject(new Error('Unauthorized'));
+      return Promise.resolve(jsonResponse({}));
+    });
+
+    const user = userEvent.setup();
+    render(<ResourcesView />);
+    await waitFor(() => expect(mockedFetch).toHaveBeenCalledWith(
+      '/system/resources',
+      expect.objectContaining({ signal: expect.any(AbortSignal) }),
+    ));
+
+    await user.click(await screen.findByRole('tab', { name: /external/i }));
+    expect(await screen.findByText('Could not load external containers.')).toBeInTheDocument();
+    expect(screen.queryByText('No external containers')).toBeNull();
+  });
+
+  it('recovers the external read and the disk usage from the external Retry', async () => {
+    let orphansCalls = 0;
+    let dfCalls = 0;
+    mockedFetch.mockImplementation((url: string) => {
+      if (url === '/system/resources') {
+        return Promise.resolve(jsonResponse({ images: [], volumes: [], networks: [] }));
+      }
+      if (url === '/system/orphans') {
+        orphansCalls += 1;
+        return Promise.resolve(orphansCalls === 1
+          ? jsonResponse({ error: 'down' }, { ok: false, status: 504 })
+          : jsonResponse({ 'legacy-app': [{ Id: 'c1', Names: ['/web'], State: 'running', Status: 'Up', Image: 'nginx' }] }));
+      }
+      if (url === '/system/docker-df') {
+        dfCalls += 1;
+        return Promise.resolve(dfCalls === 1
+          ? jsonResponse({ error: 'down' }, { ok: false, status: 504 })
+          : jsonResponse(reclaimableUsage(0, 0)));
+      }
+      return Promise.resolve(jsonResponse({}));
+    });
+
+    const user = userEvent.setup();
+    render(<ResourcesView />);
+
+    await user.click(await screen.findByRole('tab', { name: /external/i }));
+    expect(await screen.findByText('Could not load external containers.')).toBeInTheDocument();
+    expect(await screen.findByText('Disk usage unknown')).toBeInTheDocument();
+
+    await user.click(screen.getByRole('button', { name: 'Retry' }));
+    expect(await screen.findByText('web')).toBeInTheDocument();
+    expect(await screen.findByText('Tidy')).toBeInTheDocument();
+    expect(dfCalls).toBe(2);
+  });
+
+  it('names the external read’s own failure, not the inventory read’s', async () => {
+    // /system/resources succeeds and /system/orphans times out: the external
+    // tab must show the orphans cause rather than an empty inventory reason.
+    mockedFetch.mockImplementation((url: string) => {
+      if (url === '/system/resources') {
+        return Promise.resolve(jsonResponse({ images: [], volumes: [], networks: [] }));
+      }
+      if (url === '/system/orphans') {
+        return Promise.resolve({
+          ok: false,
+          status: 504,
+          json: async () => ({ code: 'remote_read_timeout' }),
+          headers: new Headers({ 'x-sencho-read-timeout': '1' }),
+        } as unknown as Response);
+      }
+      return Promise.resolve(jsonResponse({}));
+    });
+
+    const user = userEvent.setup();
+    render(<ResourcesView />);
+    await waitFor(() => expect(mockedFetch).toHaveBeenCalledWith(
+      '/system/resources',
+      expect.objectContaining({ signal: expect.any(AbortSignal) }),
+    ));
+
+    await user.click(await screen.findByRole('tab', { name: /external/i }));
+    expect(await screen.findByText('Could not load external containers.')).toBeInTheDocument();
+    expect(screen.getByText(/did not answer in time/i)).toBeInTheDocument();
+  });
+
+  it('keeps the external rows and warns when a background refresh fails only on the external read', async () => {
+    let orphansCalls = 0;
+    mockedFetch.mockImplementation((url: string, opts?: RequestInit) => {
+      if (url === '/system/prune/plan' && opts?.method === 'POST') {
+        return Promise.resolve(jsonResponse(samplePrunePlan()));
+      }
+      if (url === '/system/prune/system' && opts?.method === 'POST') {
+        return Promise.resolve(jsonResponse({ success: true, reclaimedBytes: 1000, outcomes: [] }));
+      }
+      if (url === '/system/resources') {
+        return Promise.resolve(jsonResponse({ images: [image('still:here')], volumes: [], networks: [] }));
+      }
+      if (url === '/system/orphans') {
+        orphansCalls += 1;
+        return Promise.resolve(orphansCalls === 1
+          ? jsonResponse({ 'legacy-app': [{ Id: 'c1', Names: ['/web'], State: 'running', Status: 'Up', Image: 'nginx' }] })
+          : jsonResponse({ error: 'boom' }, { ok: false, status: 500 }));
+      }
+      return Promise.resolve(jsonResponse({}));
+    });
+
+    const user = userEvent.setup();
+    render(<ResourcesView />);
+    expect(await screen.findByText('still:here')).toBeInTheDocument();
+
+    await user.click(screen.getByRole('button', { name: 'Prune unused' }));
+    await user.click(await screen.findByRole('button', { name: /Prune/ }));
+
+    await waitFor(() => expect(toast.error).toHaveBeenCalledWith('Failed to refresh resources'));
+    await user.click(await screen.findByRole('tab', { name: /external/i }));
+    expect(await screen.findByText('web')).toBeInTheDocument();
+    expect(screen.queryByText('Could not load external containers.')).toBeNull();
+  });
+
+  it('keeps a confirmed-empty external list and warns when its background refresh fails', async () => {
+    let orphansCalls = 0;
+    mockedFetch.mockImplementation((url: string, opts?: RequestInit) => {
+      if (url === '/system/prune/plan' && opts?.method === 'POST') {
+        return Promise.resolve(jsonResponse(samplePrunePlan()));
+      }
+      if (url === '/system/prune/system' && opts?.method === 'POST') {
+        return Promise.resolve(jsonResponse({ success: true, reclaimedBytes: 1000, outcomes: [] }));
+      }
+      if (url === '/system/resources') {
+        return Promise.resolve(jsonResponse({ images: [image('still:here')], volumes: [], networks: [] }));
+      }
+      if (url === '/system/orphans') {
+        orphansCalls += 1;
+        return Promise.resolve(orphansCalls === 1
+          ? jsonResponse({})
+          : jsonResponse({ error: 'boom' }, { ok: false, status: 500 }));
+      }
+      return Promise.resolve(jsonResponse({}));
+    });
+
+    const user = userEvent.setup();
+    render(<ResourcesView />);
+    expect(await screen.findByText('still:here')).toBeInTheDocument();
+
+    await user.click(screen.getByRole('button', { name: 'Prune unused' }));
+    await user.click(await screen.findByRole('button', { name: /Prune/ }));
+
+    // The first read confirmed an empty list, which is the last good payload: a
+    // failed refresh keeps it and reports the failure once, instead of
+    // replacing a confirmed answer with an error surface.
+    await waitFor(() => expect(toast.error).toHaveBeenCalledWith('Failed to refresh resources'));
+    await user.click(await screen.findByRole('tab', { name: /external/i }));
+    expect(await screen.findByText('No external containers')).toBeInTheDocument();
+    expect(screen.queryByText('Could not load external containers.')).toBeNull();
+  });
+
+  it('names a disconnected Pilot on the tables and on the disk-usage card', async () => {
+    const marked = {
+      ok: false,
+      status: 503,
+      headers: new Headers({ 'x-sencho-read-failure': 'pilot-disconnected' }),
+      json: async () => ({ error: 'Pilot tunnel disconnected.' }),
+    } as unknown as Response;
+    mockedFetch.mockImplementation((url: string) => {
+      if (url === '/system/resources' || url === '/system/docker-df') return Promise.resolve(marked);
+      return Promise.resolve(jsonResponse({}));
+    });
+
+    render(<ResourcesView />);
+
+    expect(await screen.findByText('Could not load images.')).toBeInTheDocument();
+    expect(screen.getAllByText(/Pilot tunnel to this node is disconnected/i).length).toBeGreaterThan(0);
+    expect(screen.queryByText(/503/)).toBeNull();
+    expect(await screen.findByText('Disk usage unknown')).toBeInTheDocument();
+    // One copy on the table, one under the masthead answer.
+    expect(screen.getAllByText(/Pilot tunnel to this node is disconnected/i).length).toBeGreaterThanOrEqual(2);
+  });
+
+  it('names a silent node from the first read that answers, without waiting for the slow inventory read', async () => {
+    // The full resources inventory is on the gateway's 30 second budget, but
+    // the rest of the batch answers on the interactive one. A node that is not
+    // answering must be named by the first of those reads, not after the slow
+    // read's whole budget.
+    let releaseResources: ((r: Response) => void) | undefined;
+    mockedFetch.mockImplementation((url: string) => {
+      if (url === '/system/resources') {
+        return new Promise<Response>((resolve) => { releaseResources = resolve; });
+      }
+      if (url === '/system/orphans') {
+        return Promise.resolve({
+          ok: false,
+          status: 504,
+          headers: new Headers({ 'x-sencho-read-timeout': '1' }),
+          json: async () => ({ code: 'remote_read_timeout' }),
+        } as unknown as Response);
+      }
+      // Disk usage is on the same slow budget; it has not answered either.
+      return new Promise<Response>(() => {});
+    });
+
+    render(<ResourcesView />);
+
+    expect(await screen.findByText('Could not load images.')).toBeInTheDocument();
+    // One copy on the table, one under the disk-usage answer.
+    expect(screen.getAllByText(/did not answer in time/i).length).toBeGreaterThanOrEqual(2);
+    expect(screen.getByText('Disk usage unknown')).toBeInTheDocument();
+
+    // The slow read landing is authoritative and replaces the early failure.
+    releaseResources!(jsonResponse({ images: [image('slow:but-ok')], volumes: [], networks: [] }));
+    expect(await screen.findByText('slow:but-ok')).toBeInTheDocument();
+    expect(screen.queryByText('Could not load images.')).toBeNull();
+  });
+
+  it('settles the page from a marked cause on the scan-summaries read too', async () => {
+    mockedFetch.mockImplementation((url: string) => {
+      if (url === '/system/resources' || url === '/system/docker-df') return new Promise<Response>(() => {});
+      if (url === '/security/image-summaries') {
+        return Promise.resolve({
+          ok: false,
+          status: 503,
+          headers: new Headers({ 'x-sencho-read-failure': 'pilot-disconnected' }),
+          json: async () => ({ error: 'Pilot tunnel disconnected.' }),
+        } as unknown as Response);
+      }
+      return Promise.resolve(jsonResponse({}));
+    });
+
+    render(<ResourcesView />);
+
+    expect(await screen.findByText('Could not load images.')).toBeInTheDocument();
+    expect(screen.getAllByText(/Pilot tunnel to this node is disconnected/i).length).toBeGreaterThan(0);
+  });
+
+  it('does not name the node when a sibling read fails with an ordinary error', async () => {
+    // Only a failure that proves the hub has no readable path to the node may
+    // fail the tables and the usage card while the slow inventory is pending.
+    mockedFetch.mockImplementation((url: string) => {
+      if (url === '/system/resources' || url === '/system/docker-df') return new Promise<Response>(() => {});
+      if (url === '/system/orphans') {
+        return Promise.resolve(jsonResponse({ error: 'boom' }, { ok: false, status: 500 }));
+      }
+      return Promise.resolve(jsonResponse({}));
+    });
+
+    render(<ResourcesView />);
+
+    await waitFor(() => expect(mockedFetch).toHaveBeenCalledWith('/system/orphans', expect.anything()));
+    await act(async () => { await Promise.resolve(); });
+    expect(screen.queryByText('Could not load images.')).toBeNull();
+    expect(screen.queryByText('Disk usage unknown')).toBeNull();
+  });
+
+  it('retries a sibling failure without aborting the slow inventory or disk-usage reads that are still pending', async () => {
+    const resourcesSignals: AbortSignal[] = [];
+    const usageSignals: AbortSignal[] = [];
+    let releaseResources: ((r: Response) => void) | undefined;
+    let orphansCalls = 0;
+    let usageCalls = 0;
+    mockedFetch.mockImplementation((url: string, opts?: RequestInit) => {
+      if (url === '/system/resources') {
+        if (opts?.signal) resourcesSignals.push(opts.signal);
+        return new Promise<Response>((resolve) => { releaseResources = resolve; });
+      }
+      if (url === '/system/docker-df') {
+        usageCalls += 1;
+        if (opts?.signal) usageSignals.push(opts.signal);
+        return new Promise<Response>(() => {});
+      }
+      if (url === '/system/orphans') {
+        orphansCalls += 1;
+        return Promise.resolve(orphansCalls === 1
+          ? ({
+            ok: false,
+            status: 504,
+            headers: new Headers({ 'x-sencho-read-timeout': '1' }),
+            json: async () => ({ code: 'remote_read_timeout' }),
+          } as unknown as Response)
+          : jsonResponse({}));
+      }
+      return Promise.resolve(jsonResponse({}));
+    });
+
+    const user = userEvent.setup();
+    render(<ResourcesView />);
+    expect(await screen.findByText('Could not load images.')).toBeInTheDocument();
+
+    await user.click(screen.getAllByRole('button', { name: 'Retry' })[0]);
+
+    await waitFor(() => expect(orphansCalls).toBe(2));
+    // Neither pending slow read was restarted.
+    expect(usageCalls).toBe(1);
+    expect(usageSignals[0].aborted).toBe(false);
+    expect(resourcesSignals).toHaveLength(1);
+    expect(resourcesSignals[0].aborted).toBe(false);
+
+    releaseResources!(jsonResponse({ images: [image('slow:but-ok')], volumes: [], networks: [] }));
+    expect(await screen.findByText('slow:but-ok')).toBeInTheDocument();
+  });
+
+  const timeoutResponse = () => ({
+    ok: false,
+    status: 504,
+    headers: new Headers({ 'x-sencho-read-timeout': '1' }),
+    json: async () => ({ code: 'remote_read_timeout' }),
+  } as unknown as Response);
+
+  it('does not name the node when a sibling read is refused for access or a credential', async () => {
+    // A viewer without scan access gets a 403 on the scan summaries while the
+    // slow inventory read is healthy and pending: that is not a node-level cause.
+    mockedFetch.mockImplementation((url: string) => {
+      if (url === '/system/resources' || url === '/system/docker-df') return new Promise<Response>(() => {});
+      if (url === '/security/image-summaries') {
+        return Promise.resolve(jsonResponse({ error: 'forbidden' }, { ok: false, status: 403 }));
+      }
+      if (url === '/system/rollback/generations') {
+        return Promise.resolve({
+          ok: false,
+          status: 401,
+          headers: new Headers({ 'x-sencho-proxy': '1' }),
+          json: async () => ({ error: 'bad token' }),
+        } as unknown as Response);
+      }
+      return Promise.resolve(jsonResponse({}));
+    });
+
+    render(<ResourcesView />);
+
+    await waitFor(() => expect(mockedFetch).toHaveBeenCalledWith('/security/image-summaries', expect.anything()));
+    await act(async () => { await Promise.resolve(); });
+    expect(screen.queryByText('Could not load images.')).toBeNull();
+    expect(screen.queryByText('Disk usage unknown')).toBeNull();
+  });
+
+  it('one Retry re-reads every failed sibling region and leaves a healthy disk-usage answer alone', async () => {
+    const calls = { orphans: 0, rollback: 0, summaries: 0, usage: 0 };
+    mockedFetch.mockImplementation((url: string) => {
+      if (url === '/system/resources') return new Promise<Response>(() => {});
+      if (url === '/system/docker-df') {
+        calls.usage += 1;
+        return Promise.resolve(jsonResponse(reclaimableUsage(1000, 500)));
+      }
+      if (url === '/system/orphans') { calls.orphans += 1; return Promise.resolve(calls.orphans === 1 ? timeoutResponse() : jsonResponse({})); }
+      if (url === '/system/rollback/generations') { calls.rollback += 1; return Promise.resolve(calls.rollback === 1 ? timeoutResponse() : jsonResponse({ generations: [] })); }
+      if (url === '/security/image-summaries') { calls.summaries += 1; return Promise.resolve(calls.summaries === 1 ? timeoutResponse() : jsonResponse({})); }
+      return Promise.resolve(jsonResponse({}));
+    });
+
+    const user = userEvent.setup();
+    render(<ResourcesView />);
+    expect(await screen.findByText('Could not load images.')).toBeInTheDocument();
+
+    await user.click(screen.getAllByRole('button', { name: 'Retry' })[0]);
+
+    await waitFor(() => expect(calls.orphans).toBe(2));
+    await waitFor(() => expect(calls.rollback).toBe(2));
+    await waitFor(() => expect(calls.summaries).toBe(2));
+    // The disk-usage read had already answered, so Retry does not refetch it.
+    expect(calls.usage).toBe(1);
+  });
+
+  it('names the Rollback tab’s own cause and its Retry recovers every failed region', async () => {
+    const calls = { orphans: 0, rollback: 0 };
+    mockedFetch.mockImplementation((url: string) => {
+      if (url === '/system/resources') return Promise.resolve(jsonResponse({ images: [image('ok:latest')], volumes: [], networks: [] }));
+      if (url === '/system/orphans') { calls.orphans += 1; return Promise.resolve(calls.orphans === 1 ? timeoutResponse() : jsonResponse({})); }
+      if (url === '/system/rollback/generations') {
+        calls.rollback += 1;
+        return Promise.resolve(calls.rollback === 1
+          ? ({ ok: false, status: 403, headers: new Headers(), json: async () => ({ error: 'forbidden' }) } as unknown as Response)
+          : jsonResponse([]));
+      }
+      return Promise.resolve(jsonResponse({}));
+    });
+
+    const user = userEvent.setup();
+    render(<ResourcesView />);
+    await user.click(await screen.findByRole('tab', { name: /rollback/i }));
+
+    expect(await screen.findByText(/do not have access to this data/i)).toBeInTheDocument();
+    await user.click(screen.getByRole('button', { name: 'Retry' }));
+
+    await waitFor(() => expect(calls.rollback).toBe(2));
+    await waitFor(() => expect(calls.orphans).toBe(2));
+  });
+
+  it('aborts the previous node’s disk-usage read on a node switch', async () => {
+    const usageSignals: AbortSignal[] = [];
+    mockedFetch.mockImplementation((url: string, opts?: RequestInit) => {
+      if (url === '/system/docker-df') {
+        if (opts?.signal) usageSignals.push(opts.signal);
+        return new Promise<Response>(() => {});
+      }
+      if (url === '/system/resources') return new Promise<Response>(() => {});
+      return Promise.resolve(jsonResponse({}));
+    });
+
+    const { rerender } = render(<ResourcesView />);
+    await waitFor(() => expect(usageSignals).toHaveLength(1));
+
+    nodesState.activeNode = { id: 2 };
+    rerender(<ResourcesView />);
+    await waitFor(() => expect(usageSignals).toHaveLength(2));
+
+    expect(usageSignals[0].aborted).toBe(true);
+    expect(usageSignals[1].aborted).toBe(false);
+  });
+
+  it('aborts the previous node’s inventory reads on a node switch and ignores their results', async () => {
+    const resourcesSignals: AbortSignal[] = [];
+    const resourcesResolvers: Array<(r: Response) => void> = [];
+    mockedFetch.mockImplementation((url: string, opts?: RequestInit) => {
+      if (url === '/system/resources') {
+        if (opts?.signal) resourcesSignals.push(opts.signal);
+        return new Promise<Response>((resolve) => resourcesResolvers.push(resolve));
+      }
+      if (url === '/system/orphans') return Promise.resolve(jsonResponse({}));
+      return Promise.resolve(jsonResponse({}));
+    });
+
+    const { rerender } = render(<ResourcesView />);
+    await waitFor(() => expect(resourcesSignals).toHaveLength(1));
+
+    nodesState.activeNode = { id: 2 };
+    rerender(<ResourcesView />);
+    await waitFor(() => expect(resourcesSignals).toHaveLength(2));
+
+    expect(resourcesSignals[0].aborted).toBe(true);
+    expect(resourcesSignals[1].aborted).toBe(false);
+
+    resourcesResolvers[1](jsonResponse({ images: [image('node2-img:latest')], volumes: [], networks: [] }));
+    expect(await screen.findByText('node2-img:latest')).toBeInTheDocument();
+
+    resourcesResolvers[0](jsonResponse({ images: [image('node1-img:latest')], volumes: [], networks: [] }));
+    await waitFor(() => expect(screen.getByText('node2-img:latest')).toBeInTheDocument());
+    expect(screen.queryByText('node1-img:latest')).not.toBeInTheDocument();
   });
 
   describe('progressive hydration', () => {

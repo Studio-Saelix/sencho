@@ -37,6 +37,16 @@ import { VolumeBrowserSheet } from './resources/VolumeBrowserSheet';
 import { VolumeNameLabel } from './resources/VolumeNameLabel';
 import { useTableSort } from '@/hooks/useTableSort';
 import { useRegionData } from '@/hooks/useRegionData';
+import {
+    assertReadOk,
+    classifyRemoteReadError,
+    classifyRemoteReadFailure,
+    isNamedReadFailure,
+    isUnreadableNode,
+    remoteReadFailureMessage,
+    remoteReadFailureOf,
+    type RemoteReadFailure,
+} from '@/lib/remoteReadFailure';
 import { SortableTableHead } from '@/components/ui/sortable-table';
 import { isPrunePlan, type PrunePlan, type PruneScope, type PruneTarget } from '@/lib/prunePlan';
 
@@ -333,9 +343,12 @@ export default function ResourcesView({ headerActions }: ResourcesViewProps = {}
 
     // Loading ownership follows data ownership. The inventory tables, the
     // external-container list, rollback generations, and scan summaries each
-    // hydrate from their own request, so a slow or failed read in one region
-    // cannot hold, or fail, the others. Disk usage keeps its own loader below
-    // because its figures are deliberately dropped when a read fails.
+    // hydrate from their own request, so a slow read in one region cannot hold
+    // the others and an ordinary failure stays in its own region. The one
+    // exception is a failure that proves the node unreadable, which the tables
+    // and the usage card name while the slow inventory read is still pending
+    // (see siblingUnreadable). Disk usage keeps its own loader below because its
+    // figures are deliberately dropped when a read fails.
     const nodeScope = activeNode?.id;
 
     // One warning covers a failed background refresh, whichever region failed:
@@ -352,7 +365,7 @@ export default function ResourcesView({ headerActions }: ResourcesViewProps = {}
 
     const inventoryRegion = useRegionData(nodeScope, async (signal) => {
         const res = await apiFetch('/system/resources', { signal });
-        if (!res.ok) throw new Error(`/system/resources responded ${res.status}`);
+        assertReadOk(res, '/system/resources');
         const body = await res.json() as {
             images?: DockerImage[];
             volumes?: DockerVolume[];
@@ -367,13 +380,13 @@ export default function ResourcesView({ headerActions }: ResourcesViewProps = {}
 
     const orphansRegion = useRegionData(nodeScope, async (signal) => {
         const res = await apiFetch('/system/orphans', { signal });
-        if (!res.ok) throw new Error(`/system/orphans responded ${res.status}`);
+        assertReadOk(res, '/system/orphans');
         return await res.json() as Record<string, UnmanagedContainer[]>;
     }, 0, { onError: notifyRefreshFailed });
 
     const rollbackRegion = useRegionData(nodeScope, async (signal) => {
         const res = await apiFetch('/system/rollback/generations', { signal });
-        if (!res.ok) throw new Error(`/system/rollback/generations responded ${res.status}`);
+        assertReadOk(res, '/system/rollback/generations');
         const body: unknown = await res.json();
         if (!Array.isArray(body)) throw new Error('/system/rollback/generations returned a malformed body');
         return body as RollbackGeneration[];
@@ -381,7 +394,7 @@ export default function ResourcesView({ headerActions }: ResourcesViewProps = {}
 
     const scanSummariesRegion = useRegionData(nodeScope, async (signal) => {
         const res = await apiFetch('/security/image-summaries', { signal });
-        if (!res.ok) throw new Error(`/security/image-summaries responded ${res.status}`);
+        assertReadOk(res, '/security/image-summaries');
         const body: unknown = await res.json();
         return (body ?? {}) as Record<string, ScanSummary>;
     }, 0, { onError: notifyRefreshFailed });
@@ -441,30 +454,36 @@ export default function ResourcesView({ headerActions }: ResourcesViewProps = {}
     // Generation counter so a slow fetch for a previously-active node cannot
     // stomp the visible figures after the user switches nodes.
     const usageGenerationRef = useRef(0);
+    // A node switch abandons the read started for the previous node, so the
+    // backend stops working on an answer nobody will read.
+    const usageAbortRef = useRef<AbortController | null>(null);
 
     // A failed usage load drops the figures rather than keeping stale ones: the
     // masthead then reads "Disk usage unknown" with a Retry instead of a number
     // that may already be out of date.
-    const failUsage = (reason: unknown) => {
+    const failUsage = (reason: unknown, failure?: RemoteReadFailure) => {
         console.error('Failed to fetch disk usage', reason);
-        setUsageLoad({ status: 'error' });
+        setUsageLoad({ status: 'error', failure });
     };
 
     const loadUsage = async ({ background = false }: { background?: boolean } = {}) => {
         const generation = ++usageGenerationRef.current;
+        usageAbortRef.current?.abort();
+        const controller = new AbortController();
+        usageAbortRef.current = controller;
         if (!background) setUsageLoad({ status: 'loading' });
         try {
-            const res = await apiFetch('/system/docker-df');
+            const res = await apiFetch('/system/docker-df', { signal: controller.signal });
             const data = res.ok ? await res.json() : null;
-            if (usageGenerationRef.current !== generation) return;
+            if (usageGenerationRef.current !== generation || controller.signal.aborted) return;
             if (data) {
                 setUsageLoad({ status: 'ready', data });
             } else {
-                failUsage(res.status);
+                failUsage(res.status, classifyRemoteReadFailure(res) ?? undefined);
             }
         } catch (err) {
-            if (usageGenerationRef.current !== generation) return;
-            failUsage(err);
+            if (usageGenerationRef.current !== generation || controller.signal.aborted) return;
+            failUsage(err, classifyRemoteReadError(err));
         }
     };
 
@@ -508,6 +527,7 @@ export default function ResourcesView({ headerActions }: ResourcesViewProps = {}
     // view is gone cannot run state setters.
     useEffect(() => () => {
         usageGenerationRef.current += 1;
+        usageAbortRef.current?.abort();
     }, []);
 
     type PrunePlanRequest = { target?: PruneTarget; targets?: PruneTarget[]; scope: PruneScope };
@@ -717,14 +737,76 @@ export default function ResourcesView({ headerActions }: ResourcesViewProps = {}
     const imageSort = useTableSort(filteredImages, IMAGE_COMPARATORS, 'repo');
     const volumeSort = useTableSort(filteredVolumes, VOLUME_COMPARATORS, 'name');
 
-    const mastheadModel = deriveResourcesMastheadState(usageLoad);
+    // The inventory read is slow by design (the gateway gives it a 30 second
+    // budget) while the other regions answer on the interactive budget. A node
+    // that is not answering is established by the first of those reads to
+    // fail, so the tables and the usage card name it from that read instead of
+    // sitting on a skeleton for the slow read's whole budget. The slow read's
+    // own answer replaces it if it lands.
+    const siblingRegions = [orphansRegion, rollbackRegion, scanSummariesRegion];
+    let siblingUnreadable: RemoteReadFailure | null = null;
+    for (const region of siblingRegions) {
+        if (region.data !== null || region.status !== 'failed') continue;
+        const failure = remoteReadFailureOf(region.error);
+        if (isUnreadableNode(failure)) {
+            siblingUnreadable = failure;
+            break;
+        }
+    }
+    const inventoryFailure: RemoteReadFailure | null = inventoryRegion.data !== null
+        ? null
+        : inventoryRegion.status === 'failed'
+            ? remoteReadFailureOf(inventoryRegion.error)
+            : siblingUnreadable;
+    const inventoryUnavailable = inventoryFailure !== null;
+    const inventoryLoading = inventoryRegion.data === null && !inventoryUnavailable;
+    // Every cause the page can name is named; only the catch-alls (a plain
+    // status or an unclassified error) keep the existing short copy.
+    const nodeName = activeNode?.name;
+    const reasonFor = (failure: RemoteReadFailure | null): string | null => (
+        isNamedReadFailure(failure) ? remoteReadFailureMessage(failure, { nodeName }) : null
+    );
+    const inventoryFailureReason = reasonFor(inventoryFailure);
+    // The external tab names its own read's cause, never the inventory read's.
+    const orphansFailureReason = reasonFor(
+        orphansRegion.data === null && orphansRegion.status === 'failed' ? remoteReadFailureOf(orphansRegion.error) : null,
+    );
+    // The usage figures settle from the same sibling read; a usage answer of its
+    // own, success or failure, takes precedence.
+    const usage: UsageLoad = usageLoad.status === 'ready' || (usageLoad.status === 'error' && usageLoad.failure)
+        ? usageLoad
+        : siblingUnreadable !== null
+            ? { status: 'error', failure: siblingUnreadable }
+            : usageLoad;
+
+    /**
+     * The recovery action behind a Retry. The regions and disk usage are
+     * independent reads, but they fail together on the same node, so one Retry
+     * must recover everything that is unavailable: retrying only the table left
+     * the header on "Disk usage unknown" beside a loaded table. A region that
+     * already has rows is left alone.
+     */
+    const retryPage = () => {
+        // A slow inventory read that is still pending is healthy as far as the
+        // page knows: refreshing it would abort it and restart its budget.
+        if (inventoryRegion.data === null && inventoryRegion.status === 'failed') void inventoryRegion.refresh();
+        for (const region of siblingRegions) {
+            if (region.data === null && region.status === 'failed') void region.refresh();
+        }
+        // The derived usage state can be a sibling's cause while the disk-usage
+        // read is still pending; only its own failure is retried, so a slow
+        // read that may still land is not aborted.
+        if (usageLoad.status === 'error') void loadUsage();
+    };
+
+    const mastheadModel = deriveResourcesMastheadState(usage, nodeName);
     const totalReclaimableBytes = mastheadModel.reclaimableBytes;
 
     // The phone masthead restates the inventory; an unread inventory says so
     // rather than reporting zero images, volumes, and networks.
     const inventoryMeta = inventoryRegion.data !== null
         ? `${images.length} images · ${volumes.length} volumes · ${networks.length} networks`
-        : inventoryRegion.status === 'failed'
+        : inventoryUnavailable
             ? 'Resource inventory unavailable'
             : 'Reading resource inventory';
 
@@ -776,9 +858,9 @@ export default function ResourcesView({ headerActions }: ResourcesViewProps = {}
         <ResourcesActions
             isAdmin={isAdmin}
             canReclaim={mastheadModel.reclaimableItems > 0}
-            reclaimDisabled={usageLoad.status === 'loading'}
-            usageFailed={usageLoad.status === 'error'}
-            onRetryUsage={() => void loadUsage()}
+            reclaimDisabled={usage.status === 'loading'}
+            usageFailed={usage.status === 'error'}
+            onRetryUsage={retryPage}
             onReclaim={() => setConfirmReclaim(true)}
             onPrune={(target) => setConfirmPrune({ target, scope: 'managed' })}
         />
@@ -896,8 +978,8 @@ export default function ResourcesView({ headerActions }: ResourcesViewProps = {}
                                     <TableHead className="text-right text-[11px]">Action</TableHead>
                                 </TableRow>
                             </TableHeader>
-                            {inventoryRegion.status === 'loading' ? <TableSkeleton cols={5} /> : inventoryRegion.status === 'failed' ? (
-                                <TableLoadError cols={5} noun="images" onRetry={inventoryRegion.refresh} />
+                            {inventoryLoading ? <TableSkeleton cols={5} /> : inventoryUnavailable ? (
+                                <TableLoadError cols={5} noun="images" reason={inventoryFailureReason} onRetry={retryPage} />
                             ) : (
                                 <TableBody>
                                     {imageSort.sorted.length === 0 ? (
@@ -1058,8 +1140,8 @@ export default function ResourcesView({ headerActions }: ResourcesViewProps = {}
                                     <TableHead className="text-right text-[11px]">Action</TableHead>
                                 </TableRow>
                             </TableHeader>
-                            {inventoryRegion.status === 'loading' ? <TableSkeleton cols={5} /> : inventoryRegion.status === 'failed' ? (
-                                <TableLoadError cols={5} noun="volumes" onRetry={inventoryRegion.refresh} />
+                            {inventoryLoading ? <TableSkeleton cols={5} /> : inventoryUnavailable ? (
+                                <TableLoadError cols={5} noun="volumes" reason={inventoryFailureReason} onRetry={retryPage} />
                             ) : (
                                 <TableBody>
                                     {volumeSort.sorted.length === 0 ? (
@@ -1160,7 +1242,10 @@ export default function ResourcesView({ headerActions }: ResourcesViewProps = {}
                             orphansRegion.status === 'failed' ? (
                                 <div className="flex flex-col items-center gap-3 p-12 text-sm text-muted-foreground">
                                     <span>Could not load external containers.</span>
-                                    <Button variant="outline" size="sm" onClick={orphansRegion.refresh}>Retry</Button>
+                                    {orphansFailureReason ? (
+                                        <span className="text-xs text-stat-subtitle">{orphansFailureReason}</span>
+                                    ) : null}
+                                    <Button variant="outline" size="sm" className="text-stat-title" onClick={retryPage}>Retry</Button>
                                 </div>
                             ) : (
                                 <div className="p-4"><Skeleton className="h-24 w-full rounded-md" /></div>
@@ -1228,7 +1313,12 @@ export default function ResourcesView({ headerActions }: ResourcesViewProps = {}
                             generations={rollbackGenerations}
                             isLoading={rollbackRegion.data === null && rollbackRegion.status !== 'failed'}
                             loadError={rollbackRegion.data === null && rollbackRegion.status === 'failed'}
-                            onRetry={rollbackRegion.refresh}
+                            loadErrorReason={reasonFor(
+                                rollbackRegion.data === null && rollbackRegion.status === 'failed'
+                                    ? remoteReadFailureOf(rollbackRegion.error)
+                                    : null,
+                            )}
+                            onRetry={retryPage}
                             isAdmin={isAdmin}
                             nodeId={activeNode?.id}
                             onReleased={refreshAll}

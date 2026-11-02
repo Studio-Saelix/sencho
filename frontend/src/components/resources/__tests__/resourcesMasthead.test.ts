@@ -34,6 +34,15 @@ describe('deriveResourcesMastheadState', () => {
     expect(model.subtitle).toBe('Could not read disk usage from this node.');
   });
 
+  it('names the node and the cause when the usage read failed for a known reason', () => {
+    const silent = deriveResourcesMastheadState({ status: 'error', failure: 'pilot-disconnected' }, 'edge-2');
+    expect(silent.subtitle).toBe('The Pilot tunnel to "edge-2" is disconnected. It resumes when the agent reconnects.');
+    const rejected = deriveResourcesMastheadState({ status: 'error', failure: 'node-credential' }, 'edge-2');
+    expect(rejected.subtitle).toMatch(/stored credential for "edge-2" was rejected/);
+    expect(deriveResourcesMastheadState({ status: 'error', failure: 'http' }, 'edge-2').subtitle)
+      .toBe('Could not read disk usage from this node.');
+  });
+
   it('is Tidy when nothing is reclaimable', () => {
     const model = deriveResourcesMastheadState(ready(usage({ managedImageBytes: 2000 })));
     expect(model).toMatchObject({ state: 'Tidy', tone: 'live', reclaimableBytes: 0 });

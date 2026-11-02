@@ -88,6 +88,7 @@ export function useConfigurationStatus() {
   // and the card marks it stale instead of passing it off as current.
   const [stale, setStale] = useState(false);
   const requestSeqRef = useRef(0);
+  const abortRef = useRef<AbortController | null>(null);
 
   const fetchStatus = useCallback(async () => {
     // Poll, invalidation, and reconnect fetches can overlap, and a switch can
@@ -95,24 +96,27 @@ export function useConfigurationStatus() {
     const requestedFor = nodeIdRef.current;
     const seq = ++requestSeqRef.current;
     const current = () => nodeIdRef.current === requestedFor && seq === requestSeqRef.current;
+    abortRef.current?.abort();
+    const controller = new AbortController();
+    abortRef.current = controller;
     try {
-      const res = await apiFetch('/dashboard/configuration');
-      if (!current()) return;
+      const res = await apiFetch('/dashboard/configuration', { signal: controller.signal });
+      if (!current() || controller.signal.aborted) return;
       if (!res.ok) {
         console.error('[dashboard] configuration status fetch failed:', res.status);
         setStale(true);
         return;
       }
       const data = await res.json() as WireConfigurationStatus;
-      if (!current()) return;
+      if (!current() || controller.signal.aborted) return;
       setStatus(normalizeConfigurationStatus(data));
       setStale(false);
     } catch (err) {
-      if (!current()) return;
+      if (!current() || controller.signal.aborted) return;
       console.error('[dashboard] configuration status fetch error:', err);
       setStale(true);
     } finally {
-      if (current()) setLoading(false);
+      if (current() && !controller.signal.aborted) setLoading(false);
     }
   }, []);
 
@@ -128,7 +132,12 @@ export function useConfigurationStatus() {
     const currentNodeId = nodeId;
     const guard = () => { if (nodeIdRef.current === currentNodeId) void fetchStatus(); };
     guard();
-    return visibilityInterval(guard, 60_000);
+    const stopPolling = visibilityInterval(guard, 60_000);
+    return () => {
+      stopPolling();
+      // Release the node read this surface no longer needs.
+      abortRef.current?.abort();
+    };
   }, [nodeId, fetchStatus]);
 
   // Refetch the configuration card when a scheduled-tasks mutation fires

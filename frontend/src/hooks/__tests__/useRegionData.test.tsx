@@ -186,6 +186,27 @@ describe('useRegionData', () => {
     expect(onError.mock.calls[0][1]).toBe(false);
   });
 
+  it('exposes what a failed first read threw, and clears it when the retry starts', async () => {
+    const failure = new Error('/system/orphans responded 504');
+    const { load, pending } = deferredLoader<string>();
+    const { result } = renderHook(() => useRegionData(1, load));
+
+    expect(result.current.error).toBeNull();
+    await waitFor(() => expect(pending).toHaveLength(1));
+    act(() => pending[0].reject(failure));
+    await waitFor(() => expect(result.current.status).toBe('failed'));
+    expect(result.current.error).toBe(failure);
+
+    act(() => { void result.current.refresh(); });
+    await waitFor(() => expect(result.current.status).toBe('loading'));
+    expect(result.current.error).toBeNull();
+
+    await waitFor(() => expect(pending).toHaveLength(2));
+    act(() => pending[1].resolve('recovered'));
+    await waitFor(() => expect(result.current.status).toBe('ready'));
+    expect(result.current.error).toBeNull();
+  });
+
   it('adopts a payload fetched elsewhere for the scope on screen', async () => {
     const { load, pending } = deferredLoader<string[]>();
     const { result } = renderHook(() => useRegionData(1, load));

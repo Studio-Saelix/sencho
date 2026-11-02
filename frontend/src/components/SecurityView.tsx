@@ -6,6 +6,14 @@ import { Tabs, TabsContent, TabsList, TabsTrigger, TabsHighlight, TabsHighlightI
 import { PageMasthead, type MastheadTone } from '@/components/ui/PageMasthead';
 import { CapabilityGate } from '@/components/CapabilityGate';
 import { deriveMasthead, SCANNER_DETECTIONS_NOTE } from './security/securityMasthead';
+import {
+  assertReadOk,
+  classifyRemoteReadError,
+  classifyRemoteReadFailure,
+  isNamedReadFailure,
+  remoteReadFailureMessage,
+  remoteReadFailureOf,
+} from '@/lib/remoteReadFailure';
 import { springs } from '@/lib/motion';
 import { apiFetch } from '@/lib/api';
 import { toast } from '@/components/ui/toast-store';
@@ -24,7 +32,7 @@ import type { SecurityOverview, ScanSummary, ScanDetailTab, SecurityRiskTrendPoi
 import { VulnerabilityScanSheet } from './VulnerabilityScanSheet';
 import { SuppressionsPanel } from './settings/SuppressionsPanel';
 import { MisconfigAckPanel } from './settings/MisconfigAckPanel';
-import { OverviewTab, type ChartLoadState } from './security/OverviewTab';
+import { OverviewTab, type ChartLoadState, type OverviewLoadError } from './security/OverviewTab';
 import { useSecurityReasons } from './security/useSecurityReasons';
 import {
   type ImagesTargetingInput,
@@ -51,13 +59,20 @@ function isScanSummaryMap(v: unknown): v is Record<string, ScanSummary> {
 
 /**
  * What the overview read settled on. A 404 is a benign older node without the
- * endpoint; anything else is a real failure. Both are outcomes of a completed
- * read, not of a load still in flight, so neither may read as a clean posture.
+ * endpoint; anything else is a real failure, carrying the cause the gateway
+ * established when there is one. Both are outcomes of a completed read, not of
+ * a load still in flight, so neither may read as a clean posture.
  */
 type OverviewOutcome =
   | { kind: 'overview'; overview: SecurityOverview }
   | { kind: 'unsupported' }
-  | { kind: 'failed' };
+  | { kind: 'failed'; cause: Exclude<OverviewLoadError, 'unsupported'> };
+
+/** The overview's failure kind for a cause: a named cause keeps its own copy,
+ *  anything else is the generic failure. */
+function overviewFailureCause(failure: ReturnType<typeof classifyRemoteReadError>): Exclude<OverviewLoadError, 'unsupported'> {
+  return isNamedReadFailure(failure) && failure !== 'unsupported' ? failure : 'failed';
+}
 
 /**
  * What one of the secondary chart reads settled on. A 404 means an older node
@@ -109,8 +124,8 @@ export function SecurityView({ activeTab, onTabChange, headerActions }: Security
   // here: image summaries, the risk trend, and exploit intel. A region that
   // already had data keeps showing it, so the refresh failure is reported once
   // instead of blanking the surface or stacking a toast per region. A first read
-  // that fails is reported by the region's own surface (the Images tab or a
-  // chart placeholder) and does not also toast, and an overview failure has its
+  // that fails is reported by the region's own surface (the Images, Compose
+  // risks, or Secrets tab, or a chart placeholder) and does not also toast, and an overview failure has its
   // own masthead state.
   const refreshWarnedRef = useRef(false);
   const notifyRefreshFailed = (_error: unknown, hadData: boolean) => {
@@ -126,17 +141,20 @@ export function SecurityView({ activeTab, onTabChange, headerActions }: Security
         const body = await res.json() as SecurityOverview;
         return { kind: 'overview', overview: body };
       }
-      if (res.status !== 404) console.warn('[Security] overview request failed:', res.status);
-      return { kind: res.status === 404 ? 'unsupported' : 'failed' };
+      if (res.status === 404) return { kind: 'unsupported' };
+      console.warn('[Security] overview request failed:', res.status);
+      // A node the hub could not read, or that rejected the hub's access, is
+      // not a server error: the operator gets copy they can act on.
+      return { kind: 'failed', cause: overviewFailureCause(classifyRemoteReadFailure(res) ?? 'http') };
     } catch (error) {
       console.warn('[Security] failed to load the overview:', error);
-      return { kind: 'failed' };
+      return { kind: 'failed', cause: overviewFailureCause(classifyRemoteReadError(error)) };
     }
   }, reloadToken);
 
   const summariesRegion = useRegionData(nodeScope, async (signal) => {
     const res = await apiFetch('/security/image-summaries', { cache: 'no-store', signal });
-    if (!res.ok) throw new Error(`/security/image-summaries responded ${res.status}`);
+    assertReadOk(res, '/security/image-summaries');
     const body: unknown = await res.json();
     // A 200 with an unexpected shape must not read as "no findings".
     if (!isScanSummaryMap(body)) throw new Error('/security/image-summaries returned an unexpected shape');
@@ -184,14 +202,21 @@ export function SecurityView({ activeTab, onTabChange, headerActions }: Security
 
   const overviewOutcome = overviewRegion.data;
   const overview = overviewOutcome?.kind === 'overview' ? overviewOutcome.overview : null;
-  const overviewLoadError = overviewOutcome?.kind === 'unsupported'
+  const overviewLoadError: OverviewLoadError | null = overviewOutcome?.kind === 'unsupported'
     ? 'unsupported'
-    : overviewOutcome?.kind === 'failed' ? 'failed' : null;
+    : overviewOutcome?.kind === 'failed' ? overviewOutcome.cause : null;
   const summaries = summariesRegion.data ?? {};
   // A region with data keeps rendering it through a refresh; only a scope with
   // no successful read yet is loading, and only a failed first read is an error.
   const summariesLoading = summariesRegion.data === null && summariesRegion.status === 'loading';
   const summariesError = summariesRegion.data === null && summariesRegion.status === 'failed';
+  // The summaries read's own cause, so the scan-result tabs name a disconnected
+  // Pilot instead of saying the scan results "failed to load". A plain status
+  // or an unclassified error keeps the tabs' own copy.
+  const summariesFailure = summariesError ? remoteReadFailureOf(summariesRegion.error) : null;
+  const summariesErrorReason = isNamedReadFailure(summariesFailure)
+    ? remoteReadFailureMessage(summariesFailure, { nodeName: activeNode?.name })
+    : null;
   const trendOutcome = trendRegion.data;
   const trend = trendOutcome?.kind === 'data' ? trendOutcome.data : [];
   // An unsupported (404) outcome is a settled read: the chart shows its own
@@ -389,6 +414,7 @@ export function SecurityView({ activeTab, onTabChange, headerActions }: Security
           <OverviewTab
             overview={nodeOverview}
             loadError={overviewLoadError}
+            onReload={reloadOverview}
             trend={trend}
             trendState={trendState}
             exploitIntel={exploitIntel}
@@ -408,6 +434,8 @@ export function SecurityView({ activeTab, onTabChange, headerActions }: Security
               summaries={summaries}
               loading={summariesLoading}
               error={summariesError}
+              errorReason={summariesErrorReason}
+              onRetry={reloadOverview}
               onInspect={onInspect}
               canScan={canScanImages}
               scanningRef={scanningRef}
@@ -424,13 +452,13 @@ export function SecurityView({ activeTab, onTabChange, headerActions }: Security
 
         <TabsContent value="compose">
           <CapabilityGate capability="vulnerability-scanning" featureName="Vulnerability scanning" resolution="Install a scanner from the Scanner setup tab.">
-            <FindingsTab kind="misconfig" summaries={summaries} loading={summariesLoading} error={summariesError} onInspect={onInspect} />
+            <FindingsTab kind="misconfig" summaries={summaries} loading={summariesLoading} error={summariesError} errorReason={summariesErrorReason} onRetry={reloadOverview} onInspect={onInspect} />
           </CapabilityGate>
         </TabsContent>
 
         <TabsContent value="secrets">
           <CapabilityGate capability="vulnerability-scanning" featureName="Vulnerability scanning" resolution="Install a scanner from the Scanner setup tab.">
-            <FindingsTab kind="secret" summaries={summaries} loading={summariesLoading} error={summariesError} onInspect={onInspect} />
+            <FindingsTab kind="secret" summaries={summaries} loading={summariesLoading} error={summariesError} errorReason={summariesErrorReason} onRetry={reloadOverview} onInspect={onInspect} />
           </CapabilityGate>
         </TabsContent>
 

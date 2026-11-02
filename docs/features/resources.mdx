@@ -18,7 +18,7 @@ The masthead answers one question: how much space a cleanup would free on this n
 | **`<size>` reclaimable** (amber) | Unused images, stopped containers, and dangling volumes that a cleanup can free, with a `·`-separated breakdown underneath (for example `2 unused images · 1 dangling volume`) |
 | **Tidy** | Nothing to reclaim on this node |
 | **Measuring disk** | The node is still computing disk usage. The tables below load first and do not wait for it |
-| **Disk usage unknown** | The node could not report disk usage. Use **Retry disk usage** in the tab strip. An unreadable node never reads as Tidy |
+| **Disk usage unknown** | The node could not report disk usage. Use **Retry disk usage** in the tab strip; it also retries any tab that failed. An unreadable node never reads as Tidy |
 
 The two figures on the right split what Docker stores: **Managed** is the images and volumes your Sencho stacks use, and **External** is the images and volumes used by other Docker projects on the host.
 
@@ -52,7 +52,7 @@ The preview lists the exact items that will be removed (capped with an "and N mo
 
 ## Resource tabs
 
-Four tabs partition your inventory: **Images**, **Volumes**, **External**, and **Rollback**. Each tab shows a count once its own read has answered; a tab whose data is still loading shows no number rather than an implied zero. The tabs load independently, so a slow or failed read behind one of them (rollback generations, external containers, or a scan-summary lookup) never holds the others on a skeleton or fails them. If a tab's read fails, that tab shows an error with a **Retry** button instead of an empty list.
+Four tabs partition your inventory: **Images**, **Volumes**, **External**, and **Rollback**. Each tab shows a count once its own read has answered; a tab whose data is still loading shows no number rather than an implied zero. The tabs load independently, so a slow read behind one of them (rollback generations, external containers, or a scan-summary lookup) never holds the others on a skeleton, and an ordinary failure stays on its own tab. If a tab's read fails, that tab shows an error with a **Retry** button instead of an empty list. The exception is a read that shows the hub has no readable path to the node (it did not answer in time, is unreachable, has a disconnected Pilot tunnel, has no API target configured, or has a refused address): while the full inventory is still loading, the Images and Volumes tabs and the disk-usage card name that cause instead of waiting, and the inventory's own answer replaces it when it arrives.
 
 Network inventory, topology, inspect, and findings live on the dedicated [Networking](/features/networking) page. **Prune unused networks** is in the **⋯** menu of the tab strip.
 
@@ -164,7 +164,7 @@ Lists the recovery generations the node is holding, with a search box, a **Curre
     The figure starts from the unused images, stopped containers, and dangling volumes the node reports, counts only the bytes an unused image does not share with another image, and leaves out images Sencho holds as rollback protection points. Held images are never part of that total and never appear in a prune plan, so the residue after a prune is normally a few megabytes that the storage driver did not free. Held images are listed in the **Rollback** tab and are freed once the hold is released or superseded.
   </Accordion>
   <Accordion title="The masthead says Disk usage unknown">
-    The node did not return its disk usage, so Sencho does not claim the node is tidy. Click **Retry disk usage** in the tab strip. If it keeps failing, check that the node is reachable and that its Docker daemon is running; the tables below load from a separate request and may still be available.
+    The node did not return its disk usage, so Sencho does not claim the node is tidy. Click **Retry disk usage** in the tab strip, which also retries any tab that failed to load. If it keeps failing, check that the node is reachable and that its Docker daemon is running; the tables below load from a separate request and may still be available.
   </Accordion>
   <Accordion title="A prune plan lists several tags for one image">
     Unused images often carry more than one name, such as a version tag and `latest`. Sencho includes every reviewed tag in the prune confirmation. Confirming removes those tags one by one, and Docker deletes the image once no names remain.

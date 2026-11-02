@@ -29,6 +29,11 @@ import { fetchServiceUrlEntry } from './useServiceUrls';
 import { resolveOpenAppTarget, serviceUrlLookupPending } from '@/lib/serviceUrlResolve';
 import { confirmComposeSourceReload } from '@/lib/composeSourceConflict';
 import { StackOpenError, stackOpenConnectionMessage, stackOpenRefusalMessage } from '@/lib/stackOpenError';
+import {
+  classifyRemoteReadFailure,
+  isNamedReadFailure,
+  remoteReadFailureMessage,
+} from '@/lib/remoteReadFailure';
 import { requestServiceUpdate as postServiceUpdate, requestServiceRestore as postServiceRestore } from '@/lib/serviceUpdate';
 import type { EffectiveServiceModelResult } from '@/types/effectiveServices';
 import { absentFault, pendingSourceStatus, type GitSourcePendingMap } from '@/lib/gitopsState';
@@ -1081,7 +1086,19 @@ export function useStackActions(options: UseStackActionsOptions) {
       if (signal.aborted) { abortAttempt(attemptId); return { ok: false }; }
       if (!res.ok) {
         const refused = stackOpenRefusalMessage(filename, res.status, text);
-        throw refused ? new StackOpenError(refused) : new Error(`Failed to load stack: ${res.status}`);
+        if (refused) throw new StackOpenError(refused);
+        // A read with a known cause names that cause, so opening a stack on a
+        // node with a disconnected Pilot is not reported as the operator's
+        // connection. A 404 stays a plain failure: it can be a stack that is
+        // gone as well as a node that does not serve the route.
+        const readFailure = classifyRemoteReadFailure(res);
+        if (isNamedReadFailure(readFailure) && readFailure !== 'unsupported') {
+          throw new StackOpenError(remoteReadFailureMessage(readFailure, {
+            nodeName: activeNode?.name,
+            status: res.status,
+          }));
+        }
+        throw new Error(`Failed to load stack: ${res.status}`);
       }
       const dispatchSpan = beginSpan('state_dispatch', { attemptId, proxied });
       const reloadingOpenFile = stackListState.selectedFile === filename;

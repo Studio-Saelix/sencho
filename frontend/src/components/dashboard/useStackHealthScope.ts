@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { Node } from '@/context/NodeContext';
 import { useNodes } from '@/context/NodeContext';
 import { fetchStackStatusesShared, type StackStatusesFetchResult } from '@/lib/stackStatusesFetch';
+import { isUnreadableNode } from '@/lib/remoteReadFailure';
 import type { StackUpdateInfo } from '@/types/imageUpdates';
 import { parseStackStatusesMap } from './parseStackStatusEntry';
 import { fetchRemoteFacet, startFacetTimeout } from './fetchRemoteFacet';
@@ -102,6 +103,10 @@ function failOrStale(slice: RemoteSlice, reason: NodeHealthFailureReason): Remot
 
 function reasonFromStatusResult(result: StackStatusesFetchResult): NodeHealthFailureReason {
   if (result.failure === 'timeout') return 'timeout';
+  // A disconnected Pilot, an unconfigured target, or a refused address is the
+  // node being unreadable, not a generic error; keep the distinction the
+  // transport now carries.
+  if (isUnreadableNode(result.failure)) return 'unreadable';
   if (result.status === 403) return 'denied';
   return 'error';
 }
