@@ -73,7 +73,7 @@ tags:
   - name: Image Updates
     description: Check for available container image updates across stacks
   - name: Recovery
-    description: Create, verify, and restore application-data recovery points for named Docker volumes on a node. The read calls (`GET`) work with any API token scope; every write call needs a Full Admin token, and a Read Only or Deploy Only token gets `403 SCOPE_DENIED`.
+    description: Create, verify, and restore application-data recovery points for named Docker volumes on a node. The read calls (`GET`) work with a Read Only, Deploy Only, or Full Admin token; every write call needs a Full Admin token. Any other token gets `403 SCOPE_DENIED`, and an Observe Only token gets it on every recovery call.
 
 components:
   securitySchemes:
@@ -5769,7 +5769,7 @@ paths:
         while one of them (or another replacement) runs, or while a stale repository lock
         awaits a reviewed release. A repeated request on a working repository changes nothing
         and takes no lock. Requires permission to change system settings.
-        A Read Only or Deploy Only API token is refused with `403 SCOPE_DENIED`; the call needs a Full Admin token.
+        Only a Full Admin API token may call it; any other scope is refused with `403 SCOPE_DENIED`.
       parameters:
         - $ref: "#/components/parameters/nodeId"
       requestBody:
@@ -5937,7 +5937,7 @@ paths:
         repository answers `503 capability_unavailable` with reason `repository_not_initialized`.
         The capture runs in the background and is followed by a repository-wide metadata
         check before the operation ends.
-        A Read Only or Deploy Only API token is refused with `403 SCOPE_DENIED`; the call needs a Full Admin token.
+        Only a Full Admin API token may call it; any other scope is refused with `403 SCOPE_DENIED`.
       parameters:
         - $ref: "#/components/parameters/nodeId"
       requestBody:
@@ -5995,7 +5995,7 @@ paths:
         every pack file back. The result is appended as a verification on every point in
         the repository and never rewrites an older one. A check that finds damage ends the
         operation `failed` with `integrity_mismatch`. The source volume need not exist any more.
-        A Read Only or Deploy Only API token is refused with `403 SCOPE_DENIED`; the call needs a Full Admin token.
+        Only a Full Admin API token may call it; any other scope is refused with `403 SCOPE_DENIED`.
       parameters:
         - name: pointId
           in: path
@@ -6070,7 +6070,7 @@ paths:
         failures end `partial` with `errorClass: attributes_not_restored` and an
         `xattrWarnings` count, and the volume is kept. A point in a replaced repository
         answers `503 repository_unavailable` with reason `repository_replaced`.
-        A Read Only or Deploy Only API token is refused with `403 SCOPE_DENIED`; the call needs a Full Admin token.
+        Only a Full Admin API token may call it; any other scope is refused with `403 SCOPE_DENIED`.
       parameters:
         - name: pointId
           in: path
@@ -6192,7 +6192,7 @@ paths:
         is settled by the next provisioning attempt. Access is checked first: a caller who
         may not configure the repository gets 403, and an unknown id answers 403 to a caller
         who cannot cancel every kind of operation.
-        A Read Only or Deploy Only API token is refused with `403 SCOPE_DENIED`; the call needs a Full Admin token.
+        Only a Full Admin API token may call it; any other scope is refused with `403 SCOPE_DENIED`.
       parameters:
         - name: id
           in: path
@@ -6234,7 +6234,7 @@ paths:
         previous process remains, Sencho releases the repository lock of an interrupted provisioning,
         and, when restic's own locks are cleared, of interrupted captures, checks and restores
         itself; every storage lock waits for this call.
-        A Read Only or Deploy Only API token is refused with `403 SCOPE_DENIED`; the call needs a Full Admin token.
+        Only a Full Admin API token may call it; any other scope is refused with `403 SCOPE_DENIED`.
       parameters:
         - $ref: "#/components/parameters/nodeId"
       requestBody:

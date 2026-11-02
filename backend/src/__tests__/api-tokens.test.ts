@@ -16,7 +16,7 @@ let authCookie: string;
 
 /** Create an API token directly in the DB and return its raw value. */
 function createTestApiToken(
-  scope: 'read-only' | 'deploy-only' | 'full-admin',
+  scope: 'observe-only' | 'read-only' | 'deploy-only' | 'full-admin',
   expiresAt: number | null = null,
   userId?: number,
 ): string {
@@ -110,7 +110,8 @@ describe('enforceApiTokenScope', () => {
 
 // --- Recovery API scope matrix ---
 // docs/operations/volume-recovery-points.mdx and docs/openapi.yaml state that
-// reads take any scope and every write needs Full Admin. This pins that table.
+// reads take a Read Only, Deploy Only, or Full Admin token, every write needs
+// Full Admin, and an Observe Only token is refused all of them. This pins that table.
 
 const RECOVERY_READS = [
   '/api/recovery/node',
@@ -131,9 +132,25 @@ const RECOVERY_WRITES = [
 
 describe('API token scope on the recovery routes', () => {
   // One token per scope: each user is limited to 25 active tokens.
-  const tokens = {} as Record<'read-only' | 'deploy-only' | 'full-admin', string>;
+  const tokens = {} as Record<'observe-only' | 'read-only' | 'deploy-only' | 'full-admin', string>;
   beforeAll(() => {
-    for (const scope of ['read-only', 'deploy-only', 'full-admin'] as const) tokens[scope] = createTestApiToken(scope);
+    for (const scope of ['observe-only', 'read-only', 'deploy-only', 'full-admin'] as const) {
+      tokens[scope] = createTestApiToken(scope, scope === 'observe-only' ? Date.now() + 86_400_000 : null);
+    }
+  });
+
+  describe('observe-only token', () => {
+    it.each(RECOVERY_READS)('GET %s answers 403 SCOPE_DENIED', async (path) => {
+      const res = await request(app).get(path).set('Authorization', `Bearer ${tokens['observe-only']}`);
+      expect(res.status).toBe(403);
+      expect(res.body.code).toBe('SCOPE_DENIED');
+    });
+
+    it.each(RECOVERY_WRITES)('POST %s answers 403 SCOPE_DENIED', async (path) => {
+      const res = await request(app).post(path).set('Authorization', `Bearer ${tokens['observe-only']}`).send({});
+      expect(res.status).toBe(403);
+      expect(res.body.code).toBe('SCOPE_DENIED');
+    });
   });
 
   describe.each(['read-only', 'deploy-only'] as const)('%s token', (scope) => {
