@@ -32,7 +32,7 @@ const REMOTE_BODY = {
         { kind: 'tunnel', scope: 'public-edge', provider: 'cloudflared', connector: 'cf', path: 'shared-network', certain: false },
         { kind: 'host-port', scope: 'host-published', bind: 'all-interfaces', hostIp: '0.0.0.0', startPort: 8080, endPort: 8080, protocol: 'tcp' },
       ],
-      incomplete: ['runtime-ports-missing'],
+      incomplete: ['runtime-ports-missing', 'runtime-ports-extra'],
       externalNetworks: [],
       runtimeChecked: true,
       conflicts: {
@@ -126,7 +126,7 @@ describe('detected exposure over the remote transports', () => {
     expect(paths.some(p => p.includes(`/api/stacks/${STACK}/networking`))).toBe(true);
     expect(res.body).toEqual(REMOTE_BODY);
     expect(res.body.services[0].detected.answer).toBe('public edge (unverified) + host-published · partly undetermined');
-    expect(res.body.services[0].detected.incomplete).toEqual(['runtime-ports-missing']);
+    expect(res.body.services[0].detected.incomplete).toEqual(['runtime-ports-missing', 'runtime-ports-extra']);
     expect(res.body.services[0].detected.paths).toHaveLength(2);
   });
 });

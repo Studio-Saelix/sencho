@@ -486,6 +486,52 @@ describe('classifyStackExposure: runtime facts', () => {
     expect(both.get('web')).toMatchObject({ status: 'paths', incomplete: ['runtime-ports-missing', 'runtime-ports-extra'] });
   });
 
+  it('compares the protocol, so a tcp/udp swap is both extra and missing', () => {
+    const model = render({ web: { ...app, ports: ['0.0.0.0:8080:80/udp'] } });
+    const detected = classify({
+      name: 'protocolSwap',
+      model,
+      runtime: lookup([container('web', { ports: [{ ip: '0.0.0.0', publishedPort: 8080, privatePort: 80, protocol: 'tcp' }] })]),
+      expected: {},
+    });
+    expect(detected.get('web')).toMatchObject({ status: 'paths', incomplete: ['runtime-ports-missing', 'runtime-ports-extra'] });
+  });
+
+  it('names both directions for an auto-assigned port', () => {
+    const missing = classify({
+      name: 'autoMissing',
+      model: render({ web: { ...app, ports: ['127.0.0.1::3000'] } }),
+      runtime: lookup([container('web')]),
+      expected: {},
+    });
+    expect(missing.get('web')).toMatchObject({ status: 'paths', incomplete: ['runtime-ports-missing'] });
+
+    const extra = classify({
+      name: 'autoExtra',
+      model: render({ web: app }),
+      runtime: lookup([container('web', { ports: [{ ip: '127.0.0.1', publishedPort: 49152, privatePort: 3000, protocol: 'tcp' }] })]),
+      expected: {},
+    });
+    // The file declares no port at all, so the extra publish leaves no path.
+    expect(extra.get('web')).toMatchObject({ status: 'undetermined', reasons: ['runtime-ports-extra'] });
+  });
+
+  it('compares a range that arrives as one entry per port without inventing a difference', () => {
+    const ports = Array.from({ length: 2000 }, (_, index) => ({
+      target: `${40000 + index}`, published: `${40000 + index}`, host_ip: '0.0.0.0', protocol: 'tcp',
+    }));
+    const model = render({ web: { ...app, ports } });
+    const detected = classify({
+      name: 'expandedRangeRuntime',
+      model,
+      runtime: lookup([container('web', { ports: ports.map((_, index) => ({
+        ip: '0.0.0.0', publishedPort: 40000 + index, privatePort: 40000 + index, protocol: 'tcp',
+      })) })]),
+      expected: {},
+    });
+    expect(detected.get('web')).toMatchObject({ status: 'paths', incomplete: [] });
+  });
+
   it('collapses the IPv4 and IPv6 entry Docker reports for one mapping', () => {
     const model = render({ web: { ...app, ports: ['8080:80'] } });
     const detected = classify({
@@ -568,17 +614,26 @@ describe('classifyStackExposure: path size', () => {
   });
 
   it('collapses the per-port entries a rendered range produces into one path', () => {
-    const detected = classify({ name: 'wide', model: render({ web: expandedRange(2000) }), expected: {} }).get('web');
+    const ports = [...(expandedRange(2000).ports as unknown[]), '127.0.0.1:5000:5000'];
+    const model = render({ web: { ...app, ports } });
+    const detected = classify({ name: 'wide', model, expected: {} }).get('web');
     if (detected?.status !== 'paths') throw new Error('expected a paths status');
     expect(detected.paths).toEqual([
       {
         kind: 'host-port', scope: 'host-published', bind: 'all-interfaces',
         hostIp: '0.0.0.0', startPort: 40000, endPort: 41999, protocol: 'tcp',
       },
+      {
+        kind: 'host-port', scope: 'host-loopback', bind: 'loopback',
+        hostIp: '127.0.0.1', startPort: 5000, endPort: 5000, protocol: 'tcp',
+      },
     ]);
-    // The conflict record indexes the collapsed path, so it cannot grow with the
-    // range either.
-    expect(detected.conflicts.internal).toEqual([{ level: 'conflict', reason: 'host-port', paths: [0] }]);
+    // The conflict record indexes the collapsed paths, so it cannot grow with
+    // the range either, and the second path keeps its own index.
+    expect(detected.conflicts.internal).toEqual([
+      { level: 'conflict', reason: 'host-port', paths: [0] },
+      { level: 'conflict', reason: 'loopback-port', paths: [1] },
+    ]);
     expect(detected.conflicts['reverse-proxy']).toEqual([{ level: 'note', reason: 'broad-bind', paths: [0] }]);
   });
 
@@ -590,11 +645,38 @@ describe('classifyStackExposure: path size', () => {
       .toEqual([[8080, 8080, 'tcp'], [8082, 8082, 'tcp'], [8083, 8083, 'udp'], [8084, 8084, 'tcp']]);
   });
 
+  it('treats the two spellings of all interfaces and protocol case as one bind', () => {
+    const model = render({ web: { ...app, ports: ['8080:80', '0.0.0.0:8081:81', '8082:82/TCP'] } });
+    const detected = classify({ name: 'spellings', model, expected: {} }).get('web');
+    if (detected?.status !== 'paths') throw new Error('expected a paths status');
+    expect(detected.paths).toHaveLength(1);
+    expect(detected.paths[0]).toMatchObject({ startPort: 8080, endPort: 8082, bind: 'all-interfaces' });
+  });
+
+  it('keeps two concrete addresses apart even when their ports are adjacent', () => {
+    const model = render({ web: { ...app, ports: ['192.168.1.5:9000:9000', '192.168.1.6:9001:9001'] } });
+    const detected = classify({ name: 'addresses', model, expected: {} }).get('web');
+    if (detected?.status !== 'paths') throw new Error('expected a paths status');
+    expect(detected.paths.map(path => (path.kind === 'host-port' ? [path.hostIp, path.startPort, path.endPort] : null)))
+      .toEqual([['192.168.1.5', 9000, 9000], ['192.168.1.6', 9001, 9001]]);
+  });
+
   it('does not merge an auto-assigned port with a fixed one', () => {
     const model = render({ web: { ...app, ports: ['127.0.0.1:3000:3000', '127.0.0.1::3001'] } });
     const detected = classify({ name: 'mixed', model, expected: {} }).get('web');
     if (detected?.status !== 'paths') throw new Error('expected a paths status');
     expect(detected.paths.filter(path => path.kind === 'host-port')).toHaveLength(2);
+  });
+
+  it('reports several auto-assigned ports as the one piece of evidence they are', () => {
+    const model = render({
+      web: { ...app, ports: Array.from({ length: 100 }, (_, index) => `127.0.0.1::${3000 + index}`) },
+    });
+    const detected = classify({ name: 'dynamicRange', model, expected: {} }).get('web');
+    if (detected?.status !== 'paths') throw new Error('expected a paths status');
+    expect(detected.paths).toEqual([
+      { kind: 'host-port', scope: 'host-loopback', bind: 'loopback', hostIp: '127.0.0.1', startPort: 0, endPort: 0, protocol: 'tcp', dynamic: true },
+    ]);
   });
 });
 

@@ -28,7 +28,9 @@ import { EXPOSURE_INTENTS, type ExposureIntent, type NetworkDriftFacts } from '.
 export type DetectedScope = 'public-edge' | 'private-overlay' | 'host-published' | 'host-loopback';
 
 /** A host-published port, tagged with the namespace root it belongs to when the
- *  service only shares another service's namespace. */
+ *  service only shares another service's namespace. `startPort`/`endPort` are a
+ *  span of host ports: it may cover several declared mappings and it carries no
+ *  container port. */
 export interface DetectedPortFacts {
   hostIp: string;
   startPort: number;
@@ -170,12 +172,14 @@ function isForeignNamespace(service: EffService | undefined): boolean {
   return CONTAINER_MODE.test(service?.networkMode ?? '');
 }
 
-/** Merge contiguous host ports with the same bind, address and protocol into one
- *  path, so the evidence describes the range instead of one entry per port.
- *  `docker compose config` expands `40000-65000:40000-65000` into one entry per
- *  port; without this the detected payload grows with the range. */
+/** Coalesce adjacent host ports of one group into a single range. The caller
+ *  groups by bind class, address and protocol, so this only joins the ports. An
+ *  auto-assigned port has no number to join, and several of them are the same
+ *  evidence, so the group returns one fact. */
 function mergePortFacts(facts: DetectedPortFacts[]): DetectedPortFacts[] {
-  if (facts.some(fact => fact.dynamic)) return facts.map(fact => ({ ...fact }));
+  const first = facts[0];
+  if (!first) return [];
+  if (first.dynamic) return [{ ...first }];
   const sorted = [...facts].sort((a, b) => a.startPort - b.startPort || a.endPort - b.endPort);
   const merged: DetectedPortFacts[] = [];
   for (const fact of sorted) {
@@ -189,11 +193,15 @@ function mergePortFacts(facts: DetectedPortFacts[]): DetectedPortFacts[] {
   return merged;
 }
 
-/** Host-port paths for the ports of a namespace owner, one per contiguous range. */
+/** Host-port paths for the ports of a namespace owner, one per contiguous range.
+ *  `docker compose config` expands `40000-65000:40000-65000` into one entry per
+ *  port; grouping and merging them keeps the evidence the size of the ranges it
+ *  describes instead of growing with them. */
 function hostPortPaths(owner: EffService | undefined, via: string | undefined): DetectedPath[] {
   if (!owner) return [];
   // Keyed by the facts a path distinguishes; insertion order keeps the group
-  // order the file declared.
+  // order the file declared. Every spelling of all interfaces is one bind, and
+  // protocol case is not a distinction.
   const grouped = new Map<string, DetectedPortFacts[]>();
   for (const port of owner.ports) {
     const facts: DetectedPortFacts = {
@@ -204,16 +212,16 @@ function hostPortPaths(owner: EffService | undefined, via: string | undefined): 
       ...(port.dynamic ? { dynamic: true as const } : {}),
       ...(via ? { via } : {}),
     };
-    const key = [bindClass(port.hostIp), port.hostIp, port.protocol, port.dynamic ? 'dynamic' : 'fixed'].join('\u0000');
+    const cls = bindClass(port.hostIp);
+    const key = [cls, cls === 'all' ? '' : port.hostIp, port.protocol.toLowerCase(), port.dynamic ? 'dynamic' : 'fixed'].join('\u0000');
     const list = grouped.get(key);
     if (list) list.push(facts);
     else grouped.set(key, [facts]);
   }
   const paths: DetectedPath[] = [];
-  for (const [key, facts] of grouped) {
-    const [cls] = key.split('\u0000');
+  for (const facts of grouped.values()) {
     for (const factsForRange of mergePortFacts(facts)) {
-      switch (cls) {
+      switch (bindClass(factsForRange.hostIp)) {
         case 'all': paths.push({ kind: 'host-port', scope: 'host-published', bind: 'all-interfaces', ...factsForRange }); break;
         case 'loopback': paths.push({ kind: 'host-port', scope: 'host-loopback', bind: 'loopback', ...factsForRange }); break;
         default: paths.push({ kind: 'host-port', scope: 'host-published', bind: 'address', ...factsForRange });

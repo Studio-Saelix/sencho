@@ -45,6 +45,8 @@ export type DetectedScope = 'public-edge' | 'private-overlay' | 'host-published'
 
 export interface DetectedPortFacts {
   hostIp: string;
+  /** A span of host ports: it may cover several declared mappings, and it
+   *  carries no container port. */
   startPort: number;
   endPort: number;
   dynamic?: true;

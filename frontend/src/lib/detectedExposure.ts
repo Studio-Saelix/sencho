@@ -29,6 +29,20 @@ const REASON_TEXT: Record<UndeterminedReason, string> = {
   'runtime-ports-missing': 'the Compose file declares a port the running container does not publish',
 };
 
+/** The order the reasons read in, so the sentence does not depend on the order
+ *  the node happens to push them in. */
+const REASON_ORDER: readonly UndeterminedReason[] = [
+  'foreign-namespace', 'hidden-connector', 'runtime-attachment', 'runtime-ports-missing', 'runtime-ports-extra',
+];
+
+/** A node from another build may send a reason this build does not know, because
+ *  the reason set travels with the node. Say what is certain rather than dropping
+ *  the sentence. */
+function reasonText(reason: UndeterminedReason): string {
+  return (REASON_TEXT as Record<string, string | undefined>)[reason]
+    ?? 'the running container and the Compose file disagree about the published ports';
+}
+
 export interface ExposureChip {
   level: IntentConflict['level'];
   text: string;
@@ -100,7 +114,12 @@ export function proofLine(detected: DetectedServiceExposure): string | null {
       : [];
   if (reasons.length > 0) {
     const prefix = detected.status === 'undetermined' ? 'could not be determined' : 'partly undetermined';
-    parts.push(`${prefix}: ${reasons.map(reason => REASON_TEXT[reason]).join('; ')}`);
+    const rank = (reason: UndeterminedReason) => {
+      const index = REASON_ORDER.indexOf(reason);
+      return index < 0 ? REASON_ORDER.length : index;
+    };
+    const ordered = [...reasons].sort((a, b) => rank(a) - rank(b));
+    parts.push(`${prefix}: ${ordered.map(reasonText).join('; ')}`);
   }
   const vias = [...new Set(detected.paths
     .map(path => (path.kind === 'host-port' || path.kind === 'host-network') ? path.via : undefined)

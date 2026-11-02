@@ -132,6 +132,18 @@ describe('proofLine', () => {
       .toBe('partly undetermined: the Compose file declares a port the running container does not publish; a running container publishes a port the Compose file does not.');
   });
 
+  it('keeps a readable sentence for a reason from another build', () => {
+    // A node on a different build may send a reason name this build does not
+    // know, because the reason set travels with the node.
+    expect(proofLine(detected({ paths: [broadPort], incomplete: ['runtime-ports-differ'] as never })))
+      .toBe('partly undetermined: the running container and the Compose file disagree about the published ports.');
+  });
+
+  it('reads the reasons in a fixed order whatever order the node sends them', () => {
+    expect(proofLine(detected({ paths: [broadPort], incomplete: ['runtime-ports-extra', 'runtime-ports-missing'] })))
+      .toBe('partly undetermined: the Compose file declares a port the running container does not publish; a running container publishes a port the Compose file does not.');
+  });
+
   it('names the namespace root, the external networks and the unchecked runtime', () => {
     const line = proofLine(detected({
       paths: [viaPort],
@@ -158,6 +170,8 @@ describe('never claims more than Sencho can see', () => {
     }
     texts.push(proofLine(detected({ status: 'undetermined', paths: [], reasons: ['hidden-connector'], answer: 'could not be determined' })) ?? '');
     texts.push(proofLine(detected({ paths: [broadPort], incomplete: ['runtime-attachment'], externalNetworks: ['shared'], runtimeChecked: false })) ?? '');
+    texts.push(proofLine(detected({ paths: [broadPort], incomplete: ['runtime-ports-missing', 'runtime-ports-extra'] })) ?? '');
+    texts.push(proofLine(detected({ paths: [broadPort], incomplete: ['runtime-ports-differ'] as never })) ?? '');
     for (const text of texts) {
       expect(text.toLowerCase()).not.toMatch(/\b(?:internet reachable|internet-reachable|safe|isolated)\b/);
       expect(text.toLowerCase().replace(/unverified/g, '')).not.toMatch(/verified/);
