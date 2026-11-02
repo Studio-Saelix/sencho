@@ -534,16 +534,15 @@ export function recordUpdatePolicyDecision(
     + `Triggered by ${TRIGGER_LABEL[result.trigger]}${actor ? ` from ${actor}` : ''}`
     + `${requested.length > 0 ? `; requested services: ${requested.join(', ')}` : ''}.`;
 
-  // One sanitized line with the same fields the activity row carries, and no
-  // raw object: a structured dump is what a log scanner has to reason about.
+  // One sanitized line, with the fields a log reader needs to correlate it with
+  // the activity row. The actor stays in the row rather than in a log line: it
+  // is the one field a log scanner cannot tell apart from a credential.
   console.log(
-    '[UpdatePolicy] %s for %s on node %s (%s, %s) triggered by %s; ineligible: %s',
+    '[UpdatePolicy] %s for %s on node %s (%s); ineligible: %s',
     sanitizeForLog(result.decision),
     sanitizeForLog(result.stack),
     sanitizeForLog(nodeId),
-    sanitizeForLog(result.evaluation),
     sanitizeForLog(result.target.scope === 'service' ? `service ${result.target.serviceName}` : 'stack'),
-    sanitizeForLog(actor ?? 'unknown'),
     sanitizeForLog(detail),
   );
 
