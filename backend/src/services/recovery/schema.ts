@@ -18,10 +18,16 @@ import type Database from 'better-sqlite3';
  *   - a point with a hold (deploy checkpoint, policy, mobility, drain, last
  *     known good, operator) cannot be deleted.
  */
-export const RECOVERY_SCHEMA_VERSION = 1;
+export const RECOVERY_SCHEMA_VERSION = 2;
 export const RECOVERY_SCHEMA_STATE_KEY = 'recovery_schema_version';
 /** Stable authority id for every storage and repository record this instance owns. */
 export const RECOVERY_AUTHORITY_STATE_KEY = 'recovery_authority_id';
+/**
+ * The repository this node is currently writing points to. A replace moves it;
+ * the previous repository row and its points stay, and stop counting toward
+ * coverage because they are no longer active.
+ */
+export const RECOVERY_ACTIVE_REPOSITORY_STATE_KEY = 'recovery_active_repository_id';
 
 export const RECOVERY_SCHEMA_SQL = `
 CREATE TABLE IF NOT EXISTS recovery_storage_identities (
@@ -159,6 +165,51 @@ CREATE TABLE IF NOT EXISTS recovery_locks (
   stale_since INTEGER NULL,
   PRIMARY KEY (scope, resource_key)
 );
+
+-- Restore intents (schema v2). Written before any byte moves, so a restart can
+-- tell a restore that never started from one that half-wrote a volume. Only the
+-- new-volume mode is implemented; the other two shapes are refused by the route
+-- and kept in the CHECK so a later slice can add them without a rewrite.
+CREATE TABLE IF NOT EXISTS recovery_restore_intents (
+  id TEXT PRIMARY KEY,
+  operation_id TEXT NOT NULL UNIQUE REFERENCES recovery_operations(id),
+  point_id TEXT NOT NULL REFERENCES recovery_points(id),
+  target_mode TEXT NOT NULL CHECK (target_mode IN ('new_volume','new_path','staged_overwrite')),
+  target_volume TEXT NULL,
+  path_scope TEXT NULL,
+  phase TEXT NOT NULL CHECK (phase IN (
+    'recorded','staging','staged_verified','swapping','committed','rolled_back','completion_unknown'
+  )),
+  files_restored INTEGER NULL,
+  bytes_restored INTEGER NULL,
+  verified INTEGER NULL,
+  xattr_warnings INTEGER NULL,
+  actor TEXT NOT NULL,
+  process_epoch TEXT NOT NULL,
+  created_at INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL,
+  CHECK (target_mode <> 'new_volume' OR target_volume IS NOT NULL)
+);
+-- One live restore per target volume: two intents for the same name cannot both
+-- think they created it, and the loser is refused before it touches Docker.
+CREATE UNIQUE INDEX IF NOT EXISTS idx_recovery_restore_target_live
+  ON recovery_restore_intents(target_volume)
+  WHERE target_volume IS NOT NULL AND phase NOT IN ('committed','rolled_back','completion_unknown');
+CREATE INDEX IF NOT EXISTS idx_recovery_restore_intents_phase
+  ON recovery_restore_intents(phase);
+
+-- Repository-wide integrity checks (schema v2). restic's check covers the whole
+-- repository and its data is deduplicated, so one result is evidence about every
+-- point in it, not about the point whose operation happened to run the check.
+CREATE TABLE IF NOT EXISTS recovery_repository_checks (
+  repository_id TEXT NOT NULL REFERENCES recovery_repositories(id),
+  method TEXT NOT NULL CHECK (method IN ('engine_check_metadata','engine_check_read_data')),
+  result TEXT NOT NULL CHECK (result IN ('verified','mismatch','error')),
+  checked_at INTEGER NOT NULL,
+  operation_id TEXT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_recovery_repository_checks
+  ON recovery_repository_checks(repository_id, checked_at);
 `;
 
 export type RecoverySchemaOutcome =
@@ -166,6 +217,20 @@ export type RecoverySchemaOutcome =
   | { kind: 'newer'; storedVersion: number }
   /** The migration threw; recovery stays unavailable and Sencho still boots. */
   | { kind: 'failed' };
+
+/**
+ * The columns later versions added to tables that already existed. Each is added
+ * once, guarded by an existence check, so the migration stays idempotent from
+ * v0, v1 and v2 without a version-of-the-migration table.
+ */
+const ADDED_COLUMNS: ReadonlyArray<{ table: string; column: string; definition: string }> = [
+  { table: 'recovery_operations', column: 'request_digest', definition: 'TEXT NULL' },
+];
+
+function columnExists(db: Database.Database, table: string, column: string): boolean {
+  const rows = db.prepare(`PRAGMA table_info(${table})`).all() as Array<{ name: string }>;
+  return rows.some((row) => row.name === column);
+}
 
 /**
  * Apply the recovery schema to `db`. Idempotent: safe on every boot, on a
@@ -183,6 +248,11 @@ export function applyRecoverySchema(db: Database.Database): RecoverySchemaOutcom
 
   db.transaction(() => {
     db.exec(RECOVERY_SCHEMA_SQL);
+    for (const added of ADDED_COLUMNS) {
+      if (!columnExists(db, added.table, added.column)) {
+        db.exec(`ALTER TABLE ${added.table} ADD COLUMN ${added.column} ${added.definition}`);
+      }
+    }
     db.prepare('INSERT OR REPLACE INTO system_state (key, value) VALUES (?, ?)')
       .run(RECOVERY_SCHEMA_STATE_KEY, String(RECOVERY_SCHEMA_VERSION));
     // Created once and never rotated: every storage and repository record this

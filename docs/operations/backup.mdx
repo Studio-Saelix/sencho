@@ -154,6 +154,8 @@ If other Sencho instances were pointing to your old host as a remote node, updat
 
 | Item | Location | Notes |
 |------|----------|-------|
-| Container data volumes | Wherever each stack's volumes are mounted on the host | Back these up separately per-application |
+| Container data volumes | Wherever each stack's volumes are mounted on the host | Back these up separately per-application, or capture [volume recovery points](/operations/volume-recovery-points) on the node that holds them |
 | Actual container images | Docker image cache | These are re-pulled on next deploy; no backup needed |
 | Sencho logs (docker logs) | Container stdout | Not persisted beyond container lifetime |
+
+Backing up `DATA_DIR` also keeps the key that opens a node's recovery repository. The repository password is encrypted with `encryption.key` and stored in `sencho.db`, so the same two files that restore your configuration are what let Sencho read [volume recovery points](/operations/volume-recovery-points) again. The repository volume itself sits outside `DATA_DIR` and is not part of this copy.

@@ -154,6 +154,37 @@ describe('Self-protection on /api/system delete routes', () => {
     expect(docker.removeVolume).not.toHaveBeenCalled();
   });
 
+  it('names the recovery repository volume as recovery infrastructure, not the running instance', async () => {
+    stubSelfIdentity({ volumeName: 'sencho-recovery-repo' });
+    vi.spyOn(SelfIdentityService.getInstance(), 'isRecoveryVolume').mockImplementation((id: string) => id === 'sencho-recovery-repo');
+    const docker = stubDockerControllerNoops();
+
+    const res = await request(app)
+      .post('/api/system/volumes/delete')
+      .set('Authorization', authHeader)
+      .send({ id: 'sencho-recovery-repo' });
+
+    expect(res.status).toBe(423);
+    expect(res.body.error).toMatch(/volume recovery infrastructure/);
+    expect(res.body.error).not.toMatch(/running Sencho instance/);
+    expect(docker.removeVolume).not.toHaveBeenCalled();
+  });
+
+  it('names the recovery helper image as recovery infrastructure, not the running instance', async () => {
+    stubSelfIdentity({ imageId: SELF_IMAGE });
+    vi.spyOn(SelfIdentityService.getInstance(), 'isRecoveryImage').mockImplementation((id: string) => id === SELF_IMAGE);
+    const docker = stubDockerControllerNoops();
+
+    const res = await request(app)
+      .post('/api/system/images/delete')
+      .set('Authorization', authHeader)
+      .send({ id: SELF_IMAGE });
+
+    expect(res.status).toBe(423);
+    expect(res.body.error).toMatch(/volume recovery infrastructure/);
+    expect(docker.removeImage).not.toHaveBeenCalled();
+  });
+
   it('allows deleting other volumes', async () => {
     stubSelfIdentity({ volumeName: 'sencho_data' });
     const docker = stubDockerControllerNoops();

@@ -15,7 +15,8 @@ import type { StorageDependent } from './types';
  * Storage shared by several stacks is authorized against all of them: the
  * stacks recorded at the last observation and the stacks the caller found
  * using it now, so a dependency added or dropped since cannot narrow the check.
- * Storage with no dependent stack needs the action globally.
+ * Storage with no dependent stack needs the action globally or through a role
+ * assigned on the node itself, which covers every volume on that node.
  *
  * The live set must come from the node's own current Compose model, resolved
  * just before the check. A dependent added after the check is covered only by
@@ -25,7 +26,9 @@ import type { StorageDependent } from './types';
  * The check runs on the node that owns the storage, with the request as it
  * arrived there, so a request relayed by the hub (direct proxy or Pilot) is
  * held to the same rule: machine-auth stack evidence names one stack and can
- * never stand in for the others.
+ * never stand in for the others. The hop arrives as user 0, so a role the user
+ * holds on the node is resolved by the hub, which forwards the role that carries
+ * it (see the recovery node-grant gate in the remote node proxy).
  */
 export type RecoveryAccess = 'read' | 'protect' | 'restore' | 'configure';
 
@@ -45,6 +48,20 @@ export interface RecoveryAuthorization {
   deniedStacks: string[];
 }
 
+/**
+ * The decision when no stack is known for the storage (none declares it, or the
+ * dependent set could not be resolved): the action globally, or through a role
+ * assigned on this node. A node role covers every volume on the node, and a
+ * stack check honors it through the same node assignment, so a volume no stack
+ * declares must not be the one place it is ignored. Repository and key settings
+ * are never checked through a node assignment.
+ */
+function allowedWithoutStack(req: Request, access: RecoveryAccess, action: PermissionAction): boolean {
+  if (checkPermission(req, action)) return true;
+  if (access === 'configure' || typeof req.nodeId !== 'number') return false;
+  return checkPermission(req, action, 'node', String(req.nodeId));
+}
+
 export function authorizeStorageAccess(
   req: Request,
   access: RecoveryAccess,
@@ -52,7 +69,7 @@ export function authorizeStorageAccess(
 ): RecoveryAuthorization {
   const action = RECOVERY_ACCESS_ACTION[access];
   if (access === 'configure' || target === null) {
-    const allowed = checkPermission(req, action);
+    const allowed = allowedWithoutStack(req, access, action);
     return { allowed, action, checkedStacks: [], deniedStacks: [] };
   }
 
@@ -62,11 +79,25 @@ export function authorizeStorageAccess(
   const checkedStacks = [...stacks].sort();
 
   if (checkedStacks.length === 0) {
-    const allowed = checkPermission(req, action);
+    const allowed = allowedWithoutStack(req, access, action);
     return { allowed, action, checkedStacks, deniedStacks: [] };
   }
   const deniedStacks = checkedStacks.filter((stack) => !checkPermission(req, action, 'stack', stack));
   return { allowed: deniedStacks.length === 0, action, checkedStacks, deniedStacks };
+}
+
+/**
+ * Whether the caller may be told that an id names nothing.
+ *
+ * A route that looks a record up before it authorizes would answer an unknown id
+ * differently from one the caller may not touch, so a caller with no access could
+ * learn which ids exist. An id that names nothing is therefore answered as a
+ * denial, unless the caller holds every access the record could have required:
+ * the same node-wide decision a storage with no dependent stack gets, for each
+ * access listed. A caller holding it could read the record anyway.
+ */
+export function mayLearnIdIsUnknown(req: Request, ...accesses: RecoveryAccess[]): boolean {
+  return accesses.every((access) => authorizeStorageAccess(req, access, null).allowed);
 }
 
 /** Guard form: answers 403 without naming the stacks, so a denial leaks no stack names. */

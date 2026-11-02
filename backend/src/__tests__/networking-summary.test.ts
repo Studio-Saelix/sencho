@@ -14,6 +14,7 @@ import { setupTestDb, cleanupTestDb, TEST_USERNAME, TEST_JWT_SECRET } from './he
 import DockerController from '../services/DockerController';
 import { DatabaseService } from '../services/DatabaseService';
 import { NodeRegistry } from '../services/NodeRegistry';
+import { _resetLocalFleetBuildSharesForTests } from '../helpers/localFleetBuildShare';
 import { ComposeEnvFileError } from '../utils/composeDotenv';
 
 let tmpDir: string;
@@ -22,8 +23,13 @@ let authHeader: string;
 
 const STACK = 'netsummary';
 
+function localNodeId(): number {
+  return DatabaseService.getInstance().getDefaultNode()?.id ?? 1;
+}
+
 function stubSnapshot() {
   vi.spyOn(DockerController, 'getInstance').mockReturnValue({
+    ping: vi.fn().mockResolvedValue(undefined),
     getDependencySnapshot: vi.fn().mockResolvedValue({ containers: [], networks: [], volumes: [] }),
   } as unknown as DockerController);
 }
@@ -46,6 +52,7 @@ describe('networking summary', () => {
   });
   afterEach(() => {
     vi.restoreAllMocks();
+    _resetLocalFleetBuildSharesForTests();
     DatabaseService.getInstance().deleteStackExposureIntents(1, STACK);
     DatabaseService.getInstance().deleteMeshStack(1, STACK);
     fs.rmSync(stackDir, { recursive: true, force: true });
@@ -449,6 +456,35 @@ describe('networking summary', () => {
     expect(local.summary.unknownExposure).toBeDefined();
     expect(local.summary.networkDrift).toBeDefined();
   });
+
+  it('keeps the hub\'s declared signals when its Docker snapshot fails', async () => {
+    vi.spyOn(DockerController, 'getInstance').mockReturnValue({
+      getDependencySnapshot: vi.fn().mockRejectedValue(new Error('docker down')),
+    } as unknown as DockerController);
+
+    const res = await request(app).get(`/api/fleet/networking-summary?nodeId=${localNodeId()}`).set('Authorization', authHeader);
+
+    expect(res.status).toBe(200);
+    const local = (res.body.nodes as { nodeId: number; status: string; summary: { exposed: { stacks: string[] } } | null }[])[0];
+    expect(local.status).toBe('ok');
+    expect(local.summary?.exposed.stacks).toContain(STACK);
+  });
+
+  it('cuts a hub summary that outlives the local deadline at 25 s', async () => {
+    vi.spyOn(DockerController, 'getInstance').mockReturnValue({
+      getDependencySnapshot: vi.fn(() => new Promise<never>(() => {})),
+    } as unknown as DockerController);
+
+    const started = Date.now();
+    const res = await request(app).get(`/api/fleet/networking-summary?nodeId=${localNodeId()}`).set('Authorization', authHeader);
+    const elapsedMs = Date.now() - started;
+
+    expect(res.status).toBe(200);
+    const local = (res.body.nodes as { nodeId: number; status: string; summary: unknown; error: string | null }[])[0];
+    expect(local).toMatchObject({ status: 'error', summary: null, error: 'Timed out after 25s' });
+    expect(elapsedMs).toBeGreaterThan(24_000);
+    expect(elapsedMs).toBeLessThan(33_000);
+  }, 40_000);
 
   it('degrades a remote that errors to a node-error while keeping the hub', async () => {
     const db = DatabaseService.getInstance();

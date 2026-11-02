@@ -80,6 +80,8 @@ const RECONNECT_JITTER_MS = 500;
 /** Compose project label key used by docker compose on every container it creates. */
 const COMPOSE_PROJECT_LABEL = 'com.docker.compose.project';
 const COMPOSE_SERVICE_LABEL = 'com.docker.compose.service';
+/** Set by Sencho on every container it starts for a bounded recovery job. */
+const RECOVERY_HELPER_LABEL = 'dev.sencho.recovery.helper';
 
 /**
  * Container-event actions that change observable stack/container state. The
@@ -100,6 +102,8 @@ interface InternalContainerState extends ContainerLifecycleState {
     /** Compose service this container belongs to, for alert routing keys. */
     serviceName?: string;
     isSelf?: boolean;
+    /** A recovery helper: its exit is the operation's result, not a crash. */
+    helperContainer?: boolean;
     lastCrashAlertAt?: number;
     lastActivityAt: number;
     healthStatus?: 'healthy' | 'unhealthy' | 'starting';
@@ -656,7 +660,7 @@ export class DockerEventService {
 
         let classification = classifyDie(
             { at: dieAt, exitCode },
-            { lastKillAt: state.lastKillAt, oomPending: state.oomPending },
+            { lastKillAt: state.lastKillAt, oomPending: state.oomPending, helperContainer: state.helperContainer },
         );
 
         // Die arrived: clear the oom flag regardless (we've now used it).
@@ -865,6 +869,9 @@ export class DockerEventService {
         if (event) {
             const attrs = event.Actor?.Attributes ?? {};
             if (attrs.name && !state.name) state.name = attrs.name;
+            // Sencho's own recovery helpers carry this label. Their exits are the
+            // operation's result, so they never raise a crash signal or alert.
+            if (attrs[RECOVERY_HELPER_LABEL]) state.helperContainer = true;
             const project = attrs[COMPOSE_PROJECT_LABEL];
             if (project && !state.stackName) state.stackName = project;
             const service = attrs[COMPOSE_SERVICE_LABEL];

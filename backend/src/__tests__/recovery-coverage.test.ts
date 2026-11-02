@@ -158,6 +158,18 @@ describe('evaluateRootCoverage', () => {
     expect(reasonOf(root(g2, [p], [verified(p)]))).toBe('older_generation');
   });
 
+  it('does not count a point of the stored generation once the live volume was recreated', () => {
+    const s = storage('a');
+    const p = point(s);
+    const input = { ...root(s, [p], [verified(p)]), liveGenerationChanged: true };
+    expect(reasonOf(input)).toBe('older_generation');
+    expect(evaluateRootCoverage(input, NOW, ROOT_COVERAGE_FRESHNESS_MS).coveringPointId).toBeNull();
+    // Nothing to describe the new bytes either, when no root point was ever taken.
+    expect(reasonOf({ ...root(s, [], []), liveGenerationChanged: true })).toBe('no_point');
+    // An unchanged volume is covered as before.
+    expect(reasonOf({ ...root(s, [p], [verified(p)]), liveGenerationChanged: false })).toBe('covered');
+  });
+
   it('treats a completion time from the future as inconsistent evidence', () => {
     const s = storage('a');
     const p = point(s, { completedAt: NOW + DAY });

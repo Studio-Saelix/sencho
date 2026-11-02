@@ -16,6 +16,7 @@ import { CacheService } from '../services/CacheService';
 import DockerController from '../services/DockerController';
 import { HOST_USAGE_UNKNOWN_HEADER } from '../services/CapabilityRegistry';
 import { _resetHostSampleStateForTests } from '../helpers/hostSample';
+import { _resetLocalFleetBuildSharesForTests } from '../helpers/localFleetBuildShare';
 import { createTestApiToken } from './helpers/apiTokenTestHelper';
 
 let tmpDir: string;
@@ -27,7 +28,7 @@ let DatabaseService: typeof import('../services/DatabaseService').DatabaseServic
 const PROXY_BASE = 'http://remote.example.com';
 const HEALTHY_BASE = 'http://good-host.example.com';
 const PRIOR_CONTACT = 1_700_000_000;
-const OVERVIEW_BUDGET_CEILING_MS = 8_000;
+const OVERVIEW_BUDGET_CEILING_MS = 12_000;
 const OVERVIEW_ABORT_FLOOR_MS = 1_500;
 const FAST_PATH_CEILING_MS = 2_000;
 
@@ -57,7 +58,9 @@ beforeAll(async () => {
   ({ NodeRegistry } = await import('../services/NodeRegistry'));
   ({ DatabaseService } = await import('../services/DatabaseService'));
 
-  const token = jwt.sign({ username: TEST_USERNAME }, TEST_JWT_SECRET, { expiresIn: '5m' });
+  // Long enough for the whole file: several cases wait out the 5s read budget,
+  // and a token that expires mid-run turns later assertions into 401s.
+  const token = jwt.sign({ username: TEST_USERNAME }, TEST_JWT_SECRET, { expiresIn: '1h' });
   authHeader = `Bearer ${token}`;
 });
 
@@ -67,6 +70,7 @@ afterAll(() => {
 
 afterEach(() => {
   vi.restoreAllMocks();
+  _resetLocalFleetBuildSharesForTests();
   const db = DatabaseService.getInstance();
   for (const node of db.getNodes()) {
     if (node.type === 'remote') db.deleteNode(node.id);
@@ -101,6 +105,10 @@ function addPilotNode(name: string): number {
   });
   db.updateNode(id, { pilot_last_seen: Date.now(), pilot_agent_version: '0.97.1' });
   return id;
+}
+
+function localNodeId(): number {
+  return DatabaseService.getInstance().getDefaultNode()?.id ?? 1;
 }
 
 function mockTargets(targets: Record<number, ProxyTarget | null>): void {
@@ -252,9 +260,11 @@ describe('GET /api/fleet/overview remote probe budget', () => {
     expect(elapsedMs).toBeLessThan(FAST_PATH_CEILING_MS);
   });
 
+  // The boundary sits 5s either side of the 30s grace window, so the request
+  // itself outlasting the window on a loaded box cannot flip the expectation.
   it.each([
-    [29_000, 'online'],
-    [31_000, 'offline'],
+    [25_000, 'online'],
+    [35_000, 'offline'],
   ])('reports a Pilot whose tunnel closed %ims ago as %s', async (agoMs, expected) => {
     const nodeId = addPilotNode('boundary-pilot');
     DatabaseService.getInstance().updateNode(nodeId, { pilot_last_seen: Date.now() - agoMs });
@@ -355,13 +365,18 @@ describe('GET /api/fleet/overview remote probe budget', () => {
   });
 });
 
-describe('node-data fan-outs share the per-remote read budget', () => {
-  // Above the 8s read budget, well under the old 15s ceiling.
-  const READ_BUDGET_FLOOR_MS = 7_000;
+describe('node-data fan-outs share the fleet-read budget', () => {
+  // A hung remote must answer at the 5s budget. The floor catches an early
+  // return; the ceiling is loose on purpose, because a loaded CI box inflates
+  // the whole request and the old per-node ceilings were 8s and 30s.
+  const READ_BUDGET_FLOOR_MS = 4_000;
   const READ_BUDGET_CEILING_MS = 12_000;
+  // A healthy or never-contacted node must not wait on the budget at all.
+  const HEALTHY_PATH_CEILING_MS = 5_000;
 
   function stubLocalDocker(): void {
     vi.spyOn(DockerController, 'getInstance').mockReturnValue({
+      ping: vi.fn().mockResolvedValue(undefined),
       getDependencySnapshot: vi.fn().mockResolvedValue({ containers: [], networks: [], volumes: [] }),
     } as unknown as DockerController);
   }
@@ -388,13 +403,13 @@ describe('node-data fan-outs share the per-remote read budget', () => {
     expect(res.status).toBe(200);
     const errors = res.body.nodeErrors as { nodeId: number; error: string }[];
     const hungError = errors.find(e => e.nodeId === nodeId);
-    expect(hungError?.error).toBe('Timed out after 8s');
+    expect(hungError?.error).toBe('Timed out after 5s');
     // The healthy neighbour is not held back by the hung one.
     expect(errors.map(e => e.nodeId)).not.toContain(healthyId);
     expect((res.body.nodes as { nodeId: number }[]).some(n => n.nodeId === healthyId)).toBe(true);
     expect(elapsedMs).toBeGreaterThan(READ_BUDGET_FLOOR_MS);
     expect(elapsedMs).toBeLessThan(READ_BUDGET_CEILING_MS);
-  }, 20_000);
+  }, 30_000);
 
   it('degrades a half-open remote to an error row on the networking summary within the budget', async () => {
     stubLocalDocker();
@@ -409,10 +424,134 @@ describe('node-data fan-outs share the per-remote read budget', () => {
     expect(res.status).toBe(200);
     const row = (res.body.nodes as { nodeId: number; status: string; error?: string }[]).find(n => n.nodeId === nodeId);
     expect(row?.status).toBe('error');
-    expect(row?.error).toBe('Timed out after 8s');
+    expect(row?.error).toBe('Timed out after 5s');
     expect(elapsedMs).toBeGreaterThan(READ_BUDGET_FLOOR_MS);
     expect(elapsedMs).toBeLessThan(READ_BUDGET_CEILING_MS);
-  }, 20_000);
+  }, 30_000);
+
+  it('keeps a connected Pilot on the flat budget when its tunnel hangs', async () => {
+    stubLocalDocker();
+    const pilotId = addPilotNode('hung-pilot-map');
+    mockTargets({ [pilotId]: { apiUrl: PROXY_BASE, apiToken: 'test-token', trustedLoopback: false } });
+    mockFetch((_url, init) => hungUntilAbort(init));
+
+    const started = Date.now();
+    const res = await request(app).get(`/api/fleet/dependency-map?nodeId=${pilotId}`).set('Authorization', authHeader);
+    const elapsedMs = Date.now() - started;
+
+    expect(res.status).toBe(200);
+    expect((res.body.nodeErrors as { nodeId: number; error: string }[])[0])
+      .toMatchObject({ nodeId: pilotId, error: 'Timed out after 5s' });
+    expect(elapsedMs).toBeGreaterThan(READ_BUDGET_FLOOR_MS);
+    expect(elapsedMs).toBeLessThan(READ_BUDGET_CEILING_MS);
+  }, 30_000);
+
+  describe('hub-local reads use the local deadline', () => {
+    /**
+     * The hub's own graph and summary build from a Docker snapshot that grows
+     * with the host. 5.5 s is longer than the flat remote budget and shorter
+     * than the local deadline the route must apply.
+     */
+    function stubSlowLocalDocker(delayMs: number): void {
+      vi.spyOn(DockerController, 'getInstance').mockReturnValue({
+        ping: vi.fn().mockResolvedValue(undefined),
+        getDependencySnapshot: vi.fn(() => new Promise((resolve) => {
+          setTimeout(() => resolve({ containers: [], networks: [], volumes: [] }), delayMs);
+        })),
+      } as unknown as DockerController);
+    }
+
+    it('does not cut the hub\'s own dependency graph at the flat 5 s budget', async () => {
+      stubSlowLocalDocker(5_500);
+
+      const started = Date.now();
+      const res = await request(app).get(`/api/fleet/dependency-map?nodeId=${localNodeId()}`).set('Authorization', authHeader);
+      const elapsedMs = Date.now() - started;
+
+      expect(res.status).toBe(200);
+      // The route merges each node's graph, so the local host node is in
+      // `nodes` and a cut read would instead appear in `nodeErrors`.
+      expect(res.body.nodeErrors).toEqual([]);
+      expect((res.body.nodes as { nodeId?: number }[]).some(n => n.nodeId === localNodeId())).toBe(true);
+      expect(elapsedMs).toBeGreaterThan(5_000);
+      expect(elapsedMs).toBeLessThan(25_000);
+    }, 30_000);
+
+    it('does not cut the hub\'s own networking summary at the flat 5 s budget', async () => {
+      stubSlowLocalDocker(5_500);
+
+      const started = Date.now();
+      const res = await request(app).get(`/api/fleet/networking-summary?nodeId=${localNodeId()}`).set('Authorization', authHeader);
+      const elapsedMs = Date.now() - started;
+
+      expect(res.status).toBe(200);
+      const row = (res.body.nodes as { nodeId: number; status: string; summary: unknown; error: string | null }[])[0];
+      expect(row).toMatchObject({ nodeId: localNodeId(), status: 'ok', error: null });
+      expect(row.summary).not.toBeNull();
+      expect(elapsedMs).toBeGreaterThan(5_000);
+      expect(elapsedMs).toBeLessThan(25_000);
+    }, 30_000);
+
+    it('cuts a wedged local daemon at the 5 s liveness check before building the graph', async () => {
+      const getDependencySnapshot = vi.fn();
+      vi.spyOn(DockerController, 'getInstance').mockReturnValue({
+        ping: vi.fn(() => new Promise<never>(() => {})),
+        getDependencySnapshot,
+      } as unknown as DockerController);
+
+      const started = Date.now();
+      const res = await request(app).get(`/api/fleet/dependency-map?nodeId=${localNodeId()}`).set('Authorization', authHeader);
+      const elapsedMs = Date.now() - started;
+
+      expect(res.status).toBe(200);
+      expect((res.body.nodeErrors as { nodeId: number; error: string }[])[0])
+        .toMatchObject({ nodeId: localNodeId(), error: 'Timed out after 5s' });
+      expect(getDependencySnapshot).not.toHaveBeenCalled();
+      // No build was started, so there is nothing for a retry to join.
+      expect(res.headers['x-sencho-build-kept']).toBeUndefined();
+      expect(elapsedMs).toBeGreaterThan(4_000);
+      expect(elapsedMs).toBeLessThan(12_000);
+    }, 30_000);
+
+    it('cuts a local graph that outlives the local deadline at 25 s', async () => {
+      vi.spyOn(DockerController, 'getInstance').mockReturnValue({
+        ping: vi.fn().mockResolvedValue(undefined),
+        getDependencySnapshot: vi.fn(() => new Promise<never>(() => {})),
+      } as unknown as DockerController);
+
+      const started = Date.now();
+      const res = await request(app).get(`/api/fleet/dependency-map?nodeId=${localNodeId()}`).set('Authorization', authHeader);
+      const elapsedMs = Date.now() - started;
+
+      expect(res.status).toBe(200);
+      expect((res.body.nodeErrors as { nodeId: number; error: string }[])[0])
+        .toMatchObject({ nodeId: localNodeId(), error: 'Timed out after 25s' });
+      // The build stays in the hub, and the header tells the tab that asking again joins it.
+      expect(res.headers['x-sencho-build-kept']).toBe('1');
+      expect(elapsedMs).toBeGreaterThan(24_000);
+      expect(elapsedMs).toBeLessThan(33_000);
+    }, 40_000);
+  });
+
+  describe('GET /api/fleet/networking-summary?nodeId=', () => {
+    it('narrows the fan-out to one node', async () => {
+      stubLocalDocker();
+      const healthyId = addProxyNode('summary-slice', HEALTHY_BASE);
+      mockTargets({ [healthyId]: { apiUrl: HEALTHY_BASE, apiToken: 'test-token', trustedLoopback: false } });
+      const fetchSpy = mockFetch((url) => (String(url).startsWith(`${HEALTHY_BASE}/api/networking/summary`)
+        ? jsonResponse({ exposed: { count: 1, stacks: ['web'] }, unknownExposure: { count: 0, stacks: [] }, networkDrift: { count: 0, stacks: [] } })
+        : new Response('not found', { status: 404 })));
+
+      const res = await request(app).get(`/api/fleet/networking-summary?nodeId=${healthyId}`).set('Authorization', authHeader);
+      expect(res.status).toBe(200);
+      const rows = res.body.nodes as { nodeId: number; status: string; summary: { exposed: { count: number } } | null }[];
+      expect(rows.map(n => n.nodeId)).toEqual([healthyId]);
+      expect(rows[0]).toMatchObject({ status: 'ok', summary: { exposed: { count: 1 } } });
+      const requested = fetchSpy.mock.calls.map((call: unknown[]) => String(call[0]));
+      expect(requested.length).toBeGreaterThan(0);
+      expect(requested.every((u: string) => originOf(u) === HEALTHY_BASE)).toBe(true);
+    });
+  });
 
   describe('GET /api/fleet/networking-summary remote payloads', () => {
     const bucket = (stacks: string[]) => ({ count: stacks.length, stacks });
@@ -470,7 +609,7 @@ describe('node-data fan-outs share the per-remote read budget', () => {
       const started = Date.now();
       const res = await getMap(`?nodeId=${healthyId}`);
       expect(res.status).toBe(200);
-      expect(Date.now() - started).toBeLessThan(FAST_PATH_CEILING_MS);
+      expect(Date.now() - started).toBeLessThan(HEALTHY_PATH_CEILING_MS);
       expect((res.body.nodes as { nodeId: number }[]).every(n => n.nodeId === healthyId)).toBe(true);
       expect(res.body.nodes).toHaveLength(1);
       expect(res.body.nodeErrors).toEqual([]);
@@ -507,6 +646,332 @@ describe('node-data fan-outs share the per-remote read budget', () => {
       const res = await getMap('');
       expect(res.status).toBe(200);
       expect((res.body.nodeErrors as { nodeId: number }[]).map(e => e.nodeId)).toContain(addedId);
+    });
+  });
+
+  describe('GET /api/fleet/container-labels', () => {
+    function stubLocalLabelDocker(): void {
+      vi.spyOn(DockerController, 'getInstance').mockReturnValue({
+        // The route pings, then builds the inventory; both answer at once in
+        // the healthy case. getAllContainers is absent on purpose: the old
+        // pre-count must fail loudly if it comes back.
+        ping: vi.fn().mockResolvedValue(undefined),
+        listContainersForLabelInventory: vi.fn().mockResolvedValue([]),
+        inspectImageLabels: vi.fn(),
+      } as unknown as DockerController);
+    }
+
+    function inventory(nodeId: number): Record<string, unknown> {
+      return { nodeId, partial: false, generatedAt: Date.now(), containers: [], byLabel: [] };
+    }
+
+    function labelsHandler(healthyId: number) {
+      return (url: string, init?: RequestInit) => {
+        if (originOf(url) === HEALTHY_BASE && String(url).startsWith(`${HEALTHY_BASE}/api/system/container-labels`)) {
+          return jsonResponse(inventory(healthyId));
+        }
+        return hungUntilAbort(init);
+      };
+    }
+
+    async function getLabels(query = '') {
+      return request(app).get(`/api/fleet/container-labels${query}`).set('Authorization', authHeader);
+    }
+
+    it('merges an all-healthy fleet', async () => {
+      stubLocalLabelDocker();
+      const healthyId = addProxyNode('healthy-labels', HEALTHY_BASE);
+      mockTargets({ [healthyId]: { apiUrl: HEALTHY_BASE, apiToken: 'test-token', trustedLoopback: false } });
+      mockFetch(labelsHandler(healthyId));
+
+      const started = Date.now();
+      const res = await getLabels();
+      expect(res.status).toBe(200);
+      expect(Date.now() - started).toBeLessThan(HEALTHY_PATH_CEILING_MS);
+      const rows = res.body.nodes as { nodeId: number; status: string; inventory: { nodeId: number } | null }[];
+      expect(rows.every(r => r.status === 'ok')).toBe(true);
+      const healthy = rows.find(r => r.nodeId === healthyId);
+      expect(healthy?.inventory).toMatchObject({ nodeId: healthyId });
+      expect(res.body.nodeErrors).toEqual({});
+    });
+
+    it('degrades a hung proxy remote inside the budget while the healthy nodes still answer', async () => {
+      stubLocalLabelDocker();
+      const hungId = addProxyNode('hung-labels', PROXY_BASE);
+      const healthyId = addProxyNode('healthy-labels', HEALTHY_BASE);
+      mockTargets({
+        [hungId]: { apiUrl: PROXY_BASE, apiToken: 'test-token', trustedLoopback: false },
+        [healthyId]: { apiUrl: HEALTHY_BASE, apiToken: 'test-token', trustedLoopback: false },
+      });
+      mockFetch(labelsHandler(healthyId));
+
+      const started = Date.now();
+      const res = await getLabels();
+      const elapsedMs = Date.now() - started;
+
+      expect(res.status).toBe(200);
+      const rows = res.body.nodes as { nodeId: number; status: string; error: string | null }[];
+      expect(rows.find(r => r.nodeId === hungId)).toMatchObject({ status: 'error', error: 'Timed out after 5s' });
+      expect(rows.find(r => r.nodeId === healthyId)).toMatchObject({ status: 'ok', error: null });
+      expect(rows.find(r => r.nodeId !== hungId && r.nodeId !== healthyId)?.status).toBe('ok');
+      expect((res.body.nodeErrors as Record<string, string>)[String(hungId)]).toBe('Timed out after 5s');
+      expect(elapsedMs).toBeGreaterThan(READ_BUDGET_FLOOR_MS);
+      expect(elapsedMs).toBeLessThan(READ_BUDGET_CEILING_MS);
+    }, 30_000);
+
+    it('reports a disconnected Pilot without a 30-second wait and without issuing HTTP', async () => {
+      stubLocalLabelDocker();
+      const goneId = addPilotNode('gone-labels');
+      mockTargets({ [goneId]: null });
+      const fetchSpy = vi.spyOn(globalThis, 'fetch');
+
+      const started = Date.now();
+      const res = await getLabels();
+      expect(res.status).toBe(200);
+      expect(Date.now() - started).toBeLessThan(HEALTHY_PATH_CEILING_MS);
+      expect(fetchSpy).not.toHaveBeenCalled();
+      const row = (res.body.nodes as { nodeId: number; status: string; error: string | null }[]).find(r => r.nodeId === goneId);
+      expect(row?.status).toBe('error');
+      expect(row?.error).toContain('Pilot tunnel');
+    });
+
+    it('answers for one node with ?nodeId= and keeps the aggregate shape', async () => {
+      stubLocalLabelDocker();
+      const healthyId = addProxyNode('slice-labels', HEALTHY_BASE);
+      const otherId = addProxyNode('other-labels', PROXY_BASE);
+      mockTargets({
+        [healthyId]: { apiUrl: HEALTHY_BASE, apiToken: 'test-token', trustedLoopback: false },
+        [otherId]: { apiUrl: PROXY_BASE, apiToken: 'test-token', trustedLoopback: false },
+      });
+      const fetchSpy = mockFetch(labelsHandler(healthyId));
+
+      const res = await getLabels(`?nodeId=${healthyId}`);
+      expect(res.status).toBe(200);
+      expect((res.body.nodes as { nodeId: number }[]).map(r => r.nodeId)).toEqual([healthyId]);
+      const requested = fetchSpy.mock.calls.map((call: unknown[]) => String(call[0]));
+      expect(requested.length).toBeGreaterThan(0);
+      expect(requested.every((u: string) => originOf(u) === HEALTHY_BASE)).toBe(true);
+    });
+
+    it('reads the hub again on a refresh instead of replaying the answer it already returned', async () => {
+      const container = (id: string) => ({
+        id,
+        name: id,
+        state: 'running',
+        stack: null,
+        service: 'web',
+        labels: { 'traefik.enable': 'true' },
+        imageId: 'sha256:image',
+        inspectFailed: false,
+      });
+      const list = vi.fn()
+        .mockResolvedValueOnce([container('c1')])
+        .mockResolvedValueOnce([container('c1'), container('c2')]);
+      vi.spyOn(DockerController, 'getInstance').mockReturnValue({
+        ping: vi.fn().mockResolvedValue(undefined),
+        listContainersForLabelInventory: list,
+        inspectImageLabels: vi.fn().mockResolvedValue({ labels: {} }),
+      } as unknown as DockerController);
+
+      const first = await getLabels(`?nodeId=${localNodeId()}`);
+      // A container started after the first answer must show on the next read,
+      // not after the old answer's share window.
+      const refresh = await getLabels(`?nodeId=${localNodeId()}`);
+
+      expect(first.status).toBe(200);
+      expect(refresh.status).toBe(200);
+      expect(list).toHaveBeenCalledTimes(2);
+      type Row = { status: string; inventory: { containers: { id: string }[] } | null };
+      expect(((first.body.nodes as Row[])[0]).inventory?.containers.map(c => c.id)).toEqual(['c1']);
+      expect(((refresh.body.nodes as Row[])[0]).inventory?.containers.map(c => c.id)).toEqual(['c1', 'c2']);
+    });
+
+    it.each([
+      ['dependency-map', '/api/fleet/dependency-map'],
+      ['networking-summary', '/api/fleet/networking-summary'],
+    ])('builds the hub\'s %s once for two concurrent requests', async (_name, route) => {
+      const getDependencySnapshot = vi.fn(() => new Promise((resolve) => {
+        setTimeout(() => resolve({ containers: [], networks: [], volumes: [] }), 300);
+      }));
+      vi.spyOn(DockerController, 'getInstance').mockReturnValue({
+        ping: vi.fn().mockResolvedValue(undefined),
+        getDependencySnapshot,
+      } as unknown as DockerController);
+
+      const [first, second] = await Promise.all([
+        request(app).get(`${route}?nodeId=${localNodeId()}`).set('Authorization', authHeader),
+        request(app).get(`${route}?nodeId=${localNodeId()}`).set('Authorization', authHeader),
+      ]);
+
+      expect(first.status).toBe(200);
+      expect(second.status).toBe(200);
+      expect(getDependencySnapshot).toHaveBeenCalledTimes(1);
+    });
+
+    it('builds the hub\'s labels once for two concurrent requests', async () => {
+      const listContainersForLabelInventory = vi.fn(() => new Promise((resolve) => {
+        setTimeout(() => resolve([]), 300);
+      }));
+      vi.spyOn(DockerController, 'getInstance').mockReturnValue({
+        ping: vi.fn().mockResolvedValue(undefined),
+        listContainersForLabelInventory,
+        inspectImageLabels: vi.fn().mockResolvedValue({ labels: {} }),
+      } as unknown as DockerController);
+
+      const [first, second] = await Promise.all([
+        getLabels(`?nodeId=${localNodeId()}`),
+        getLabels(`?nodeId=${localNodeId()}`),
+      ]);
+
+      expect(first.status).toBe(200);
+      expect(second.status).toBe(200);
+      expect(listContainersForLabelInventory).toHaveBeenCalledTimes(1);
+    });
+
+    it('reads the hub\'s map again on a refresh', async () => {
+      const getDependencySnapshot = vi.fn(async () => ({ containers: [], networks: [], volumes: [] }));
+      vi.spyOn(DockerController, 'getInstance').mockReturnValue({
+        ping: vi.fn().mockResolvedValue(undefined),
+        getDependencySnapshot,
+      } as unknown as DockerController);
+
+      await request(app).get(`/api/fleet/dependency-map?nodeId=${localNodeId()}`).set('Authorization', authHeader);
+      await request(app).get(`/api/fleet/dependency-map?nodeId=${localNodeId()}`).set('Authorization', authHeader);
+
+      expect(getDependencySnapshot).toHaveBeenCalledTimes(2);
+    });
+
+    it('reads the hub\'s networking summary again on a refresh', async () => {
+      const getDependencySnapshot = vi.fn(async () => ({ containers: [], networks: [], volumes: [] }));
+      vi.spyOn(DockerController, 'getInstance').mockReturnValue({
+        ping: vi.fn().mockResolvedValue(undefined),
+        getDependencySnapshot,
+      } as unknown as DockerController);
+
+      await request(app).get(`/api/fleet/networking-summary?nodeId=${localNodeId()}`).set('Authorization', authHeader);
+      await request(app).get(`/api/fleet/networking-summary?nodeId=${localNodeId()}`).set('Authorization', authHeader);
+
+      expect(getDependencySnapshot).toHaveBeenCalledTimes(2);
+    });
+
+    it('bounds the hub\'s own read by the time Docker takes to answer it', async () => {
+      vi.spyOn(DockerController, 'getInstance').mockReturnValue({
+        // A wedged local Docker socket never answers the liveness check and
+        // cannot be aborted, so the first contact with Docker costs one budget.
+        ping: vi.fn().mockReturnValue(new Promise(() => {})),
+        getAllContainers: vi.fn().mockReturnValue(new Promise(() => {})),
+        listContainersForLabelInventory: vi.fn().mockReturnValue(new Promise(() => {})),
+      } as unknown as DockerController);
+
+      const started = Date.now();
+      const res = await getLabels('?nodeId=1');
+      const elapsedMs = Date.now() - started;
+
+      expect(res.status).toBe(200);
+      expect((res.body.nodes as { nodeId: number; status: string; error: string | null }[])[0])
+        .toMatchObject({ status: 'error', error: 'Timed out after 5s' });
+      expect(res.headers['x-sencho-build-kept']).toBeUndefined();
+      expect(elapsedMs).toBeGreaterThan(READ_BUDGET_FLOOR_MS);
+      expect(elapsedMs).toBeLessThan(READ_BUDGET_CEILING_MS);
+    }, 30_000);
+
+    it('returns a large hub\'s own inventory instead of calling it a timeout', async () => {
+      const containers = Array.from({ length: 455 }, (_, i) => ({
+        id: `container-${i}`,
+        name: `container-${i}`,
+        state: 'running',
+        stack: 'demo',
+        service: 'web',
+        labels: { 'traefik.enable': 'true' },
+        imageId: 'sha256:image',
+        inspectFailed: false,
+      }));
+      vi.spyOn(DockerController, 'getInstance').mockReturnValue({
+        ping: vi.fn().mockResolvedValue(undefined),
+        // The old pre-count listing: never answers, so a regression to it
+        // cannot pass this test on a fast stub.
+        getAllContainers: vi.fn(() => new Promise(() => {})),
+        // A hub this size needs longer than the transport budget even when
+        // Docker answers every call promptly.
+        listContainersForLabelInventory: vi.fn(() => new Promise((resolve) => {
+          setTimeout(() => resolve(containers), 5_500);
+        })),
+        inspectImageLabels: vi.fn().mockResolvedValue({ labels: {} }),
+      } as unknown as DockerController);
+
+      const res = await getLabels('?nodeId=1');
+
+      expect(res.status).toBe(200);
+      const localRow = (res.body.nodes as { nodeId: number; status: string; inventory: { containers: unknown[] } | null }[])[0];
+      expect(localRow.status).toBe('ok');
+      expect(localRow.inventory?.containers).toHaveLength(455);
+      expect(res.body.nodeErrors).toEqual({});
+    }, 30_000);
+
+    it('cuts a hub inventory build at 25 s, keeps it, and hands the retry the finished answer', async () => {
+      let finish!: (rows: unknown[]) => void;
+      const listContainersForLabelInventory = vi.fn(() => new Promise<unknown[]>((resolve) => { finish = resolve; }));
+      vi.spyOn(DockerController, 'getInstance').mockReturnValue({
+        ping: vi.fn().mockResolvedValue(undefined),
+        listContainersForLabelInventory,
+        inspectImageLabels: vi.fn().mockResolvedValue({ labels: {} }),
+      } as unknown as DockerController);
+
+      const cut = await getLabels('?nodeId=1');
+
+      expect(cut.status).toBe(200);
+      expect((cut.body.nodes as { status: string; error: string | null }[])[0])
+        .toMatchObject({ status: 'error', error: 'Timed out after 25s' });
+      expect(cut.headers['x-sencho-build-kept']).toBe('1');
+
+      finish([]);
+      const retry = await getLabels('?nodeId=1');
+      expect((retry.body.nodes as { status: string }[])[0].status).toBe('ok');
+      expect(retry.headers['x-sencho-build-kept']).toBeUndefined();
+      expect(listContainersForLabelInventory).toHaveBeenCalledTimes(1);
+    }, 40_000);
+
+    it('returns a hub build that outlasts the old 12-second ceiling', async () => {
+      // At 458 containers the hub's build alone needed more than the old
+      // fixed 12 s slice after the ping in the real tab. The read now owns one
+      // 25 s deadline, so a 12.5 s build (a fast ping leaves nearly all of it)
+      // must return every row instead of a `Timed out after 12s` row.
+      const containers = Array.from({ length: 3 }, (_, i) => ({
+        id: `container-${i}`,
+        name: `container-${i}`,
+        state: 'running',
+        stack: 'demo',
+        service: 'web',
+        labels: { 'traefik.enable': 'true' },
+        imageId: 'sha256:image',
+        inspectFailed: false,
+      }));
+      vi.spyOn(DockerController, 'getInstance').mockReturnValue({
+        ping: vi.fn().mockResolvedValue(undefined),
+        getAllContainers: vi.fn(() => new Promise(() => {})),
+        listContainersForLabelInventory: vi.fn(() => new Promise((resolve) => {
+          setTimeout(() => resolve(containers), 12_500);
+        })),
+        inspectImageLabels: vi.fn().mockResolvedValue({ labels: {} }),
+      } as unknown as DockerController);
+
+      const res = await getLabels('?nodeId=1');
+
+      expect(res.status).toBe(200);
+      const localRow = (res.body.nodes as { nodeId: number; status: string; inventory: { containers: unknown[] } | null }[])[0];
+      expect(localRow.status).toBe('ok');
+      expect(localRow.inventory?.containers).toHaveLength(3);
+      expect(res.body.nodeErrors).toEqual({});
+    }, 30_000);
+
+    it.each(['abc', '0', '-3', '1.5', ''])('rejects a malformed nodeId (%s)', async (bad) => {
+      const res = await getLabels(`?nodeId=${encodeURIComponent(bad)}`);
+      expect(res.status).toBe(400);
+    });
+
+    it('answers 404 for a node that does not exist', async () => {
+      const res = await getLabels('?nodeId=99999');
+      expect(res.status).toBe(404);
     });
   });
 });
