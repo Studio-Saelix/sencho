@@ -386,17 +386,29 @@ function StackReadinessCard({
     || applyingService !== null;
 
   return (
-    <Card className="flex flex-col gap-4 p-5">
-      <div className="flex items-start justify-between gap-3">
-        <div className="flex min-w-0 flex-1 flex-col gap-1">
+    <Card className="flex flex-col gap-4 p-5" data-testid="readiness-card">
+      <div
+        className="flex flex-wrap items-start justify-between gap-x-3 gap-y-2"
+        data-testid="readiness-card-header"
+      >
+        {/* A zero flex basis let the status group claim the whole row and
+            collapse the name to 0px at 1024-1536px. The basis is the width
+            below which the group wraps under the identity instead. */}
+        <div className="flex min-w-0 grow basis-32 flex-col gap-1" data-testid="readiness-card-identity">
           <span className="font-mono text-[10px] uppercase tracking-[0.22em] text-stat-subtitle/80">
             Stack
           </span>
-          <span className="font-heading text-2xl leading-tight tracking-tight text-stat-value truncate">
+          <span
+            className="font-heading text-2xl leading-tight tracking-tight text-stat-value truncate"
+            data-testid="readiness-card-stack"
+          >
             {stack}
           </span>
         </div>
-        <div className="flex min-w-0 max-w-full flex-wrap items-center justify-end gap-2">
+        <div
+          className="flex min-w-0 max-w-full flex-wrap items-center justify-end gap-2"
+          data-testid="readiness-card-status"
+        >
           <AutoPill autoUpdateEnabled={autoUpdateEnabled} unattendedPolicy={unattendedPolicy} />
           {previewLoaded && preview && (
             <RiskBadge
@@ -998,9 +1010,14 @@ export function MobileReadinessCard({
       data-testid="mobile-readiness-card"
     >
       <div className="flex flex-wrap items-start justify-between gap-[10px]" data-testid="mobile-readiness-header">
-        <div className="min-w-0 flex-1">
+        <div className="min-w-0 grow basis-32" data-testid="mobile-readiness-identity">
           <Kicker>stack</Kicker>
-          <div className="mt-px truncate font-heading text-[23px] leading-[26px] text-stat-value">{stack}</div>
+          <div
+            className="mt-px truncate font-heading text-[23px] leading-[26px] text-stat-value"
+            data-testid="mobile-readiness-stack"
+          >
+            {stack}
+          </div>
         </div>
         <div
           className="flex min-w-0 max-w-full flex-wrap items-center justify-end gap-1.5"
