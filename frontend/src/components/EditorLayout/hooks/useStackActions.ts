@@ -1075,10 +1075,13 @@ export function useStackActions(options: UseStackActionsOptions) {
     // Name the node this load is pinned to, not whichever node is active by
     // the time the failure renders. loadFileOnNode sets the active node and
     // calls straight into this closure, so `activeNode` can still be the
-    // previous one.
+    // previous one. A pinned id the node list cannot resolve, and a local load
+    // while a remote node is active, leave the name unset: the copy then says
+    // "this node" instead of blaming a node the request never reached.
     const opNode = opNodeId === null
-      ? activeNode
-      : nodes.find((node) => node.id === opNodeId) ?? activeNode;
+      ? (activeNode?.type === 'local' ? activeNode : null)
+      : nodes.find((node) => node.id === opNodeId)
+        ?? (activeNode?.id === opNodeId ? activeNode : null);
     try {
       headersSpan = beginSpan('fetch_headers', { attemptId });
       const res = await apiFetch(`/stacks/${filename}`, { signal, nodeId: opNodeId });

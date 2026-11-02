@@ -487,6 +487,61 @@ describe('useStackActions.saveFile', () => {
     expect(vi.mocked(toast.error).mock.calls.some(([message]) => /"Local"/.test(String(message)))).toBe(false);
   });
 
+  it('leaves the node unnamed when the pinned node is absent from the node list', async () => {
+    // The node list can be stale or still loading, so the pinned id may not
+    // resolve. Falling back to the active node would blame a different node's
+    // stored token; the load's real target is unknown, so the copy stays
+    // neutral.
+    vi.mocked(apiFetch).mockRejectedValue(Object.assign(new Error('Unauthorized'), {
+      response: new Response('Unauthorized', {
+        status: 401,
+        headers: { 'x-sencho-proxy': '1' },
+      }),
+    }));
+    const other = { id: 2, name: 'edge-2', type: 'remote' } as Parameters<typeof useStackActions>[0]['nodes'][number];
+    const pinned = { id: 9, name: 'edge-9', type: 'remote' } as Parameters<typeof useStackActions>[0]['nodes'][number];
+    const { result } = setup({ activeNode: DEFAULT_ACTIVE_NODE, nodes: [other] });
+    await act(async () => {
+      await result.current.loadFileOnNode(pinned, 'linked.yml', { skipUnsavedCheck: true });
+    });
+    const messages = vi.mocked(toast.error).mock.calls.map(([message]) => String(message));
+    expect(messages.some((message) => /stored credential for this node/i.test(message))).toBe(true);
+    expect(messages.some((message) => /"Local"|"edge-2"|"edge-9"/.test(message))).toBe(false);
+  });
+
+  it('leaves the node unnamed on a returned failure when the pinned node is absent from the node list', async () => {
+    vi.mocked(apiFetch).mockResolvedValue(new Response(
+      JSON.stringify({ error: 'Pilot tunnel disconnected.' }),
+      { status: 503, headers: { 'x-sencho-read-failure': 'pilot-disconnected' } },
+    ));
+    const { result } = setup({ activeNode: DEFAULT_ACTIVE_NODE, nodes: [] });
+    await act(async () => {
+      await result.current.loadFile('linked.yml', { nodeId: 9, skipUnsavedCheck: true });
+    });
+    const messages = vi.mocked(toast.error).mock.calls.map(([message]) => String(message));
+    expect(messages.some((message) => /Pilot tunnel to this node is disconnected/i.test(message))).toBe(true);
+    expect(messages.some((message) => /"Local"/.test(message))).toBe(false);
+  });
+
+  it('does not name the active remote node when a load is pinned to the local node', async () => {
+    // An explicit null node id targets the hub's own host, so naming an active
+    // remote node would point the operator at the wrong host.
+    const remote = { id: 9, name: 'edge-1', type: 'remote' } as Parameters<typeof useStackActions>[0]['nodes'][number];
+    vi.mocked(apiFetch).mockRejectedValue(Object.assign(new Error('Unauthorized'), {
+      response: new Response('Unauthorized', {
+        status: 401,
+        headers: { 'x-sencho-proxy': '1' },
+      }),
+    }));
+    const { result } = setup({ activeNode: remote, nodes: [remote] });
+    await act(async () => {
+      await result.current.loadFile('linked.yml', { nodeId: null, skipUnsavedCheck: true });
+    });
+    const messages = vi.mocked(toast.error).mock.calls.map(([message]) => String(message));
+    expect(messages.some((message) => /stored credential for this node/i.test(message))).toBe(true);
+    expect(messages.some((message) => /"edge-1"/.test(message))).toBe(false);
+  });
+
   it('shows the gateway sentence for a scoped-evidence upgrade refusal', async () => {
     // The RBAC probe passed; the follow-up scoped-evidence probe answered
     // without the capability. Naming the permission model would send the
