@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { apiFetch } from '@/lib/api';
 import { runPool } from '@/lib/runPool';
+import { FLEET_READ_ATTEMPTS, hubKeptBuild } from '@/lib/fleetBuildKept';
 import type { ContainerLabelRow, FleetLabelInventoryResponse, LabelIndexRow, LabelSource } from '@/lib/labelInventory';
 
 /** Requests in flight at once, so a large fleet does not exhaust the browser's connections. */
@@ -233,29 +234,39 @@ export function useFleetContainerLabels(nodes: readonly LabelsNodeRef[], reveal:
     await runPool(targets, LABELS_CONCURRENCY, async (node) => {
       let piece: FleetLabelInventoryResponse | null = null;
       let failure: string | null = null;
-      try {
-        const signal = AbortSignal.any([controller.signal, AbortSignal.timeout(LABELS_NODE_TIMEOUT_MS)]);
-        const revealQs = reveal ? '&reveal=1' : '';
-        const res = await apiFetch(`/fleet/container-labels?nodeId=${node.id}${revealQs}`, { localOnly: true, signal });
-        if (res.ok) {
-          const body: unknown = await res.json();
-          const parsed = parseLabelPiece(body);
-          if (!parsed) {
-            failure = 'Unexpected response from the hub';
+      // The hub keeps a build it cut at its deadline, so a second ask joins it
+      // (or takes its finished answer) instead of the tab reporting a slow hub
+      // as failed. The node stays pending across both asks.
+      for (let attempt = 1; attempt <= FLEET_READ_ATTEMPTS; attempt += 1) {
+        piece = null;
+        failure = null;
+        let buildKept = false;
+        try {
+          const signal = AbortSignal.any([controller.signal, AbortSignal.timeout(LABELS_NODE_TIMEOUT_MS)]);
+          const revealQs = reveal ? '&reveal=1' : '';
+          const res = await apiFetch(`/fleet/container-labels?nodeId=${node.id}${revealQs}`, { localOnly: true, signal });
+          if (res.ok) {
+            buildKept = hubKeptBuild(res);
+            const body: unknown = await res.json();
+            const parsed = parseLabelPiece(body);
+            if (!parsed) {
+              failure = 'Unexpected response from the hub';
+            } else {
+              const reason = unusableNodeReason(parsed, node.id);
+              if (reason !== null) failure = reason;
+              else piece = parsed;
+            }
           } else {
-            const reason = unusableNodeReason(parsed, node.id);
-            if (reason !== null) failure = reason;
-            else piece = parsed;
+            const body = await res.json().catch(() => null) as { error?: string } | null;
+            failure = body?.error ?? `Request failed (${res.status})`;
           }
-        } else {
-          const body = await res.json().catch(() => null) as { error?: string } | null;
-          failure = body?.error ?? `Request failed (${res.status})`;
+        } catch (err) {
+          // Superseded or unmounted: a newer load (or nobody) owns the state now.
+          if (controller.signal.aborted) return;
+          console.error('Failed to load Docker labels for node', node.id, err);
+          failure = describeFailure(err);
         }
-      } catch (err) {
-        // Superseded or unmounted: a newer load (or nobody) owns the state now.
-        if (controller.signal.aborted) return;
-        console.error('Failed to load Docker labels for node', node.id, err);
-        failure = describeFailure(err);
+        if (piece !== null || !buildKept) break;
       }
       if (generation !== generationRef.current || controller.signal.aborted) return;
       inFlightRef.current.delete(node.id);

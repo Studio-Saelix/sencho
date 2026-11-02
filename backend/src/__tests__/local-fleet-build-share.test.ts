@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { FleetReadTimeoutError } from '../helpers/fleetReadBudget';
 import {
   LOCAL_FLEET_BUILD_MAX_AGE_MS,
   LOCAL_FLEET_BUILD_SHARE_TTL_MS,
@@ -13,6 +14,20 @@ function boundedBy(afterMs: number) {
     const build = work();
     return new Promise<string>((resolve, reject) => {
       const timer = setTimeout(() => reject(new Cut('deadline')), afterMs);
+      build.then(
+        (value) => { clearTimeout(timer); resolve(value); },
+        (error: unknown) => { clearTimeout(timer); reject(error); },
+      );
+    });
+  };
+}
+
+/** The deadline the hub reads run under: it throws the budget error, not a bare Error. */
+function deadlineAt(afterMs: number) {
+  return (work: () => Promise<string>): Promise<string> => {
+    const build = work();
+    return new Promise<string>((resolve, reject) => {
+      const timer = setTimeout(() => reject(new FleetReadTimeoutError(afterMs, 'test read')), afterMs);
       build.then(
         (value) => { clearTimeout(timer); resolve(value); },
         (error: unknown) => { clearTimeout(timer); reject(error); },
@@ -165,5 +180,37 @@ describe('LocalFleetBuildShare', () => {
     } finally {
       process.off('unhandledRejection', unhandled);
     }
+  });
+});
+
+describe('LocalFleetBuildShare kept-build mark', () => {
+  it('marks a deadline that left its build running as one a retry can join', async () => {
+    const build = heldBuild('answer');
+    const cut = share.read('k', build.start, deadlineAt(100)).catch((err: unknown) => err);
+    await vi.advanceTimersByTimeAsync(100);
+
+    const error = await cut;
+    expect(error).toBeInstanceOf(FleetReadTimeoutError);
+    expect((error as FleetReadTimeoutError).buildKept).toBe(true);
+  });
+
+  it('does not mark a check that timed out before any build was joined', async () => {
+    const build = heldBuild('answer');
+    const bound = (_work: () => Promise<string>): Promise<string> => Promise.reject(new FleetReadTimeoutError(100, 'ping'));
+    const error = await share.read('k', build.start, bound).catch((err: unknown) => err);
+
+    expect((error as FleetReadTimeoutError).buildKept).toBe(false);
+    expect(build.calls()).toBe(0);
+  });
+
+  it('does not mark a timeout raised by a build that itself failed', async () => {
+    let fail!: (error: Error) => void;
+    const failing = new Promise<string>((_resolve, reject) => { fail = reject; });
+    const read = share.read('k', () => failing, unbounded).catch((err: unknown) => err);
+    fail(new FleetReadTimeoutError(50, 'inner call'));
+
+    const error = await read;
+    expect(error).toBeInstanceOf(FleetReadTimeoutError);
+    expect((error as FleetReadTimeoutError).buildKept).toBe(false);
   });
 });

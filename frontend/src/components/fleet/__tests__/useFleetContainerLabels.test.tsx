@@ -47,6 +47,13 @@ function json(body: unknown, status = 200): Response {
   return new Response(JSON.stringify(body), { status, headers: { 'Content-Type': 'application/json' } });
 }
 
+/** What the hub answers when it cut its own read at the deadline and kept the build. */
+function keptBuildCut(nodeId: number): Response {
+  const res = json(hubNodeError(nodeId, 'Timed out after 25s'));
+  res.headers.set('X-Sencho-Build-Kept', '1');
+  return res;
+}
+
 function nodeIdOf(path: string): number {
   return Number(/nodeId=(\d+)/.exec(path)?.[1]);
 }
@@ -173,6 +180,95 @@ describe('useFleetContainerLabels', () => {
     act(() => { result.current.retryFailed(); });
     await waitFor(() => expect(result.current.data?.nodeErrors[2]).toBeUndefined());
     expect(apiFetchMock.mock.calls.map(c => nodeIdOf(String(c[0])))).toEqual([2]);
+  });
+
+  describe('a hub read cut at its deadline with the build kept', () => {
+    it('asks once more, takes the answer, and never shows the cut', async () => {
+      const asked: number[] = [];
+      apiFetchMock.mockImplementation(async (path: string) => {
+        const nodeId = nodeIdOf(path);
+        asked.push(nodeId);
+        if (nodeId === 1 && asked.filter(id => id === 1).length === 1) return keptBuildCut(1);
+        return json(piece(nodeId, [labelRow('traefik.enable', `web-${nodeId}`, nodeId)]));
+      });
+      const { result } = renderHook(() => useFleetContainerLabels(NODES, false));
+
+      await waitFor(() => expect(result.current.loading).toBe(false));
+      expect(asked.filter(id => id === 1)).toHaveLength(2);
+      expect(result.current.data?.nodeErrors).toEqual({});
+      expect(result.current.data?.nodes.map(n => n.nodeId).sort()).toEqual([1, 2, 3]);
+    });
+
+    it('keeps the node pending between the two asks, so the tab never flashes the failure', async () => {
+      let releaseRetry: (r: Response) => void = () => {};
+      let asks = 0;
+      apiFetchMock.mockImplementation((path: string) => {
+        const nodeId = nodeIdOf(path);
+        if (nodeId !== 1) return Promise.resolve(json(piece(nodeId)));
+        asks += 1;
+        return asks === 1 ? Promise.resolve(keptBuildCut(1)) : new Promise<Response>((res) => { releaseRetry = res; });
+      });
+      const { result } = renderHook(() => useFleetContainerLabels(NODES, false));
+
+      await waitFor(() => expect(asks).toBe(2));
+      expect(result.current.loading).toBe(true);
+      expect(result.current.data?.nodeErrors[1]).toBeUndefined();
+      await act(async () => { releaseRetry(json(piece(1))); });
+      await waitFor(() => expect(result.current.loading).toBe(false));
+      expect(result.current.data?.nodeErrors).toEqual({});
+    });
+
+    it('asks only once more when the build is still not ready, then reports the cut', async () => {
+      apiFetchMock.mockImplementation(async (path: string) => {
+        const nodeId = nodeIdOf(path);
+        return nodeId === 1 ? keptBuildCut(1) : json(piece(nodeId));
+      });
+      const { result } = renderHook(() => useFleetContainerLabels(NODES, false));
+
+      await waitFor(() => expect(result.current.loading).toBe(false));
+      expect(apiFetchMock.mock.calls.filter(c => nodeIdOf(String(c[0])) === 1)).toHaveLength(2);
+      expect(result.current.data?.nodeErrors[1]).toBe('Timed out after 25s');
+    });
+
+    it('does not ask again for a node the hub cut without keeping a build', async () => {
+      answerBy({ 1: () => json(piece(1)), 2: () => json(hubNodeError(2, 'Timed out after 5s')), 3: () => json(piece(3)) });
+      const { result } = renderHook(() => useFleetContainerLabels(NODES, false));
+
+      await waitFor(() => expect(result.current.data?.nodeErrors[2]).toBe('Timed out after 5s'));
+      expect(apiFetchMock.mock.calls.filter(c => nodeIdOf(String(c[0])) === 2)).toHaveLength(1);
+    });
+
+    it('asks again with the same reveal mode', async () => {
+      let asks = 0;
+      apiFetchMock.mockImplementation(async (path: string) => {
+        const nodeId = nodeIdOf(path);
+        if (nodeId === 1 && ++asks === 1) return keptBuildCut(1);
+        return json(piece(nodeId));
+      });
+      renderHook(() => useFleetContainerLabels([NODES[0]], true));
+
+      await waitFor(() => expect(asks).toBe(2));
+      expect(apiFetchMock.mock.calls.map(c => c[0])).toEqual([
+        '/fleet/container-labels?nodeId=1&reveal=1',
+        '/fleet/container-labels?nodeId=1&reveal=1',
+      ]);
+    });
+
+    it('stops asking when the tab unmounts between the two asks', async () => {
+      let asks = 0;
+      apiFetchMock.mockImplementation((_path: string, init: { signal: AbortSignal }) => {
+        asks += 1;
+        if (asks === 1) return Promise.resolve(keptBuildCut(1));
+        return new Promise<Response>((_res, rej) => {
+          init.signal.addEventListener('abort', () => rej(new DOMException('aborted', 'AbortError')));
+        });
+      });
+      const { unmount } = renderHook(() => useFleetContainerLabels([NODES[0]], false));
+      await waitFor(() => expect(asks).toBe(2));
+      unmount();
+      await Promise.resolve();
+      expect(asks).toBe(2);
+    });
   });
 
   it('keeps a node\'s last inventory when the hub reports that node unreachable', async () => {

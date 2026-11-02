@@ -507,6 +507,8 @@ describe('node-data fan-outs share the fleet-read budget', () => {
       expect((res.body.nodeErrors as { nodeId: number; error: string }[])[0])
         .toMatchObject({ nodeId: localNodeId(), error: 'Timed out after 5s' });
       expect(getDependencySnapshot).not.toHaveBeenCalled();
+      // No build was started, so there is nothing for a retry to join.
+      expect(res.headers['x-sencho-build-kept']).toBeUndefined();
       expect(elapsedMs).toBeGreaterThan(4_000);
       expect(elapsedMs).toBeLessThan(12_000);
     }, 30_000);
@@ -524,6 +526,8 @@ describe('node-data fan-outs share the fleet-read budget', () => {
       expect(res.status).toBe(200);
       expect((res.body.nodeErrors as { nodeId: number; error: string }[])[0])
         .toMatchObject({ nodeId: localNodeId(), error: 'Timed out after 25s' });
+      // The build stays in the hub, and the header tells the tab that asking again joins it.
+      expect(res.headers['x-sencho-build-kept']).toBe('1');
       expect(elapsedMs).toBeGreaterThan(24_000);
       expect(elapsedMs).toBeLessThan(33_000);
     }, 40_000);
@@ -837,6 +841,19 @@ describe('node-data fan-outs share the fleet-read budget', () => {
       expect(getDependencySnapshot).toHaveBeenCalledTimes(2);
     });
 
+    it('reads the hub\'s networking summary again on a refresh', async () => {
+      const getDependencySnapshot = vi.fn(async () => ({ containers: [], networks: [], volumes: [] }));
+      vi.spyOn(DockerController, 'getInstance').mockReturnValue({
+        ping: vi.fn().mockResolvedValue(undefined),
+        getDependencySnapshot,
+      } as unknown as DockerController);
+
+      await request(app).get(`/api/fleet/networking-summary?nodeId=${localNodeId()}`).set('Authorization', authHeader);
+      await request(app).get(`/api/fleet/networking-summary?nodeId=${localNodeId()}`).set('Authorization', authHeader);
+
+      expect(getDependencySnapshot).toHaveBeenCalledTimes(2);
+    });
+
     it('bounds the hub\'s own read by the time Docker takes to answer it', async () => {
       vi.spyOn(DockerController, 'getInstance').mockReturnValue({
         // A wedged local Docker socket never answers the liveness check and
@@ -853,6 +870,7 @@ describe('node-data fan-outs share the fleet-read budget', () => {
       expect(res.status).toBe(200);
       expect((res.body.nodes as { nodeId: number; status: string; error: string | null }[])[0])
         .toMatchObject({ status: 'error', error: 'Timed out after 5s' });
+      expect(res.headers['x-sencho-build-kept']).toBeUndefined();
       expect(elapsedMs).toBeGreaterThan(READ_BUDGET_FLOOR_MS);
       expect(elapsedMs).toBeLessThan(READ_BUDGET_CEILING_MS);
     }, 30_000);
@@ -889,6 +907,29 @@ describe('node-data fan-outs share the fleet-read budget', () => {
       expect(localRow.inventory?.containers).toHaveLength(455);
       expect(res.body.nodeErrors).toEqual({});
     }, 30_000);
+
+    it('cuts a hub inventory build at 25 s, keeps it, and hands the retry the finished answer', async () => {
+      let finish!: (rows: unknown[]) => void;
+      const listContainersForLabelInventory = vi.fn(() => new Promise<unknown[]>((resolve) => { finish = resolve; }));
+      vi.spyOn(DockerController, 'getInstance').mockReturnValue({
+        ping: vi.fn().mockResolvedValue(undefined),
+        listContainersForLabelInventory,
+        inspectImageLabels: vi.fn().mockResolvedValue({ labels: {} }),
+      } as unknown as DockerController);
+
+      const cut = await getLabels('?nodeId=1');
+
+      expect(cut.status).toBe(200);
+      expect((cut.body.nodes as { status: string; error: string | null }[])[0])
+        .toMatchObject({ status: 'error', error: 'Timed out after 25s' });
+      expect(cut.headers['x-sencho-build-kept']).toBe('1');
+
+      finish([]);
+      const retry = await getLabels('?nodeId=1');
+      expect((retry.body.nodes as { status: string }[])[0].status).toBe('ok');
+      expect(retry.headers['x-sencho-build-kept']).toBeUndefined();
+      expect(listContainersForLabelInventory).toHaveBeenCalledTimes(1);
+    }, 40_000);
 
     it('returns a hub build that outlasts the old 12-second ceiling', async () => {
       // At 458 containers the hub's build alone needed more than the old

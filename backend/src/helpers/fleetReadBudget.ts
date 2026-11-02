@@ -89,11 +89,35 @@ export const LOCAL_FLEET_READ_BUDGET: Readonly<LocalFleetReadBudget> = Object.fr
 /** A read that outlived the fleet-read budget, so a caller can tell it from a transport failure. */
 export class FleetReadTimeoutError extends Error {
   public readonly budgetMs: number;
+  /**
+   * Set by a hub-local build share when the read gave up on a build that is
+   * still running (or finished unread) in this process, so asking again joins
+   * that build instead of paying for it twice. A daemon check that timed out
+   * never started a build and leaves this false.
+   */
+  public buildKept = false;
 
   public constructor(budgetMs: number, label: string) {
     super(`Fleet read "${label}" exceeded its ${budgetMs}ms budget`);
     this.name = 'FleetReadTimeoutError';
     this.budgetMs = budgetMs;
+  }
+}
+
+/**
+ * Response header a per-node Fleet read sets when the hub's own read was cut at
+ * its deadline with the build kept. The tab asks once more on seeing it, which
+ * joins that build, so a large hub's slow cold read is not reported as failed.
+ */
+export const FLEET_BUILD_KEPT_HEADER = 'X-Sencho-Build-Kept';
+
+/** Flag `res` when any settled read was cut at its deadline with its build kept. */
+export function flagKeptBuilds(
+  res: { setHeader(name: string, value: string): unknown },
+  results: readonly PromiseSettledResult<unknown>[],
+): void {
+  if (results.some(r => r.status === 'rejected' && r.reason instanceof FleetReadTimeoutError && r.reason.buildKept)) {
+    res.setHeader(FLEET_BUILD_KEPT_HEADER, '1');
   }
 }
 

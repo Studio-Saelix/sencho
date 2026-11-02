@@ -1,4 +1,4 @@
-import { LOCAL_FLEET_READ_DEADLINE_MS } from './fleetReadBudget';
+import { FleetReadTimeoutError, LOCAL_FLEET_READ_DEADLINE_MS } from './fleetReadBudget';
 
 /**
  * How long a finished hub build nobody has read yet stays available.
@@ -90,10 +90,22 @@ export class LocalFleetBuildShare<T> {
     bound: (work: () => Promise<T>) => Promise<T>,
   ): Promise<T> {
     let joined: SharedBuild<T> | undefined;
-    const result = await bound(() => {
-      joined = this.join(key, start);
-      return joined.promise;
-    });
+    let result: T;
+    try {
+      result = await bound(() => {
+        joined = this.join(key, start);
+        return joined.promise;
+      });
+    } catch (error) {
+      // A deadline that fired while the share still holds the build this
+      // reader joined leaves it for the next reader; say so, so the caller can
+      // tell that asking again is cheap. A build that failed has dropped
+      // itself, and a daemon check that failed never joined one.
+      if (error instanceof FleetReadTimeoutError && joined && this.builds.get(key) === joined) {
+        error.buildKept = true;
+      }
+      throw error;
+    }
     // Only a reader that got the answer reaches this line. A deadline throws
     // above and leaves the build running for the next reader; a failed build
     // was already dropped by `join`.

@@ -91,6 +91,7 @@ import { collectFleetLabelSummaries } from '../helpers/fleetLabelSummary';
 import {
   describeFleetReadFailure,
   fleetReadSignal,
+  flagKeptBuilds,
 } from '../helpers/fleetReadBudget';
 import { readLocalLabelInventory } from '../helpers/localLabelInventory';
 import { readLocalDependencyGraph, readLocalNetworkingSummary } from '../helpers/localFleetReads';
@@ -878,6 +879,7 @@ fleetRouter.get('/dependency-map', authMiddleware, async (req: Request, res: Res
     if (nodes === null) return;
 
     const results = await Promise.allSettled(nodes.map(readNodeGraph));
+    flagKeptBuilds(res, results);
 
     const perNode: FleetNodeGraphResult[] = results.map((result, i) => {
       if (result.status === 'fulfilled') return result.value;
@@ -1046,6 +1048,7 @@ fleetRouter.get('/container-labels', authMiddleware, async (req: Request, res: R
       }),
     );
 
+    flagKeptBuilds(res, results);
     const perNode: FleetNodeLabelInventoryResult[] = results.map((result, i) => {
       if (result.status === 'fulfilled') return result.value;
       console.error(`[Fleet] Container labels fetch failed for node ${nodes[i].name}:`, result.reason);
