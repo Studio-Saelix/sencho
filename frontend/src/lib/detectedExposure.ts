@@ -35,12 +35,18 @@ const REASON_ORDER: readonly UndeterminedReason[] = [
   'foreign-namespace', 'hidden-connector', 'runtime-attachment', 'runtime-ports-missing', 'runtime-ports-extra',
 ];
 
-/** A node from another build may send a reason this build does not know, because
- *  the reason set travels with the node. Say what is certain rather than dropping
- *  the sentence. */
+/** Reason names a node on another build may still send after this set changed. */
+const LEGACY_REASON_TEXT: Record<string, string> = {
+  'runtime-ports-differ': 'the running container and the Compose file disagree about the published ports',
+};
+
+/** The reason set travels with the node, so a node from another build may send a
+ *  name this build does not know. Say what is certain rather than dropping the
+ *  sentence. */
 function reasonText(reason: UndeterminedReason): string {
   return (REASON_TEXT as Record<string, string | undefined>)[reason]
-    ?? 'the running container and the Compose file disagree about the published ports';
+    ?? LEGACY_REASON_TEXT[reason]
+    ?? 'the node reported a reason this version of Sencho does not recognize';
 }
 
 export interface ExposureChip {

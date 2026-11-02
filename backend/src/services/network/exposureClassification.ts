@@ -28,9 +28,10 @@ import { EXPOSURE_INTENTS, type ExposureIntent, type NetworkDriftFacts } from '.
 export type DetectedScope = 'public-edge' | 'private-overlay' | 'host-published' | 'host-loopback';
 
 /** A host-published port, tagged with the namespace root it belongs to when the
- *  service only shares another service's namespace. `startPort`/`endPort` are a
- *  span of host ports: it may cover several declared mappings and it carries no
- *  container port. */
+ *  service only shares another service's namespace. For a fixed publication,
+ *  `startPort`/`endPort` are a span of host ports that may cover several declared
+ *  mappings and carries no container port; an auto-assigned one keeps 0/0 and
+ *  sets `dynamic`. */
 export interface DetectedPortFacts {
   hostIp: string;
   startPort: number;
@@ -173,7 +174,7 @@ function isForeignNamespace(service: EffService | undefined): boolean {
 }
 
 /** Coalesce adjacent host ports of one group into a single range. The caller
- *  groups by bind class, address and protocol, so this only joins the ports. An
+ *  groups the facts before calling this, so it only joins the ports. An
  *  auto-assigned port has no number to join, and several of them are the same
  *  evidence, so the group returns one fact. */
 function mergePortFacts(facts: DetectedPortFacts[]): DetectedPortFacts[] {

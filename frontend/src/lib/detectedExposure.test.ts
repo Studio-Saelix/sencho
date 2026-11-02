@@ -133,10 +133,12 @@ describe('proofLine', () => {
   });
 
   it('keeps a readable sentence for a reason from another build', () => {
-    // A node on a different build may send a reason name this build does not
-    // know, because the reason set travels with the node.
+    // The reason set travels with the node, so another build may send the name
+    // this set replaced, or one this build has never had.
     expect(proofLine(detected({ paths: [broadPort], incomplete: ['runtime-ports-differ'] as never })))
       .toBe('partly undetermined: the running container and the Compose file disagree about the published ports.');
+    expect(proofLine(detected({ paths: [broadPort], incomplete: ['some-future-reason'] as never })))
+      .toBe('partly undetermined: the node reported a reason this version of Sencho does not recognize.');
   });
 
   it('reads the reasons in a fixed order whatever order the node sends them', () => {
