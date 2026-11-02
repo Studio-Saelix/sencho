@@ -16,6 +16,9 @@ vi.mock('@/components/ui/toast-store', () => ({
   },
 }));
 
+const mobileState = { value: false };
+vi.mock('@/hooks/use-is-mobile', () => ({ useIsMobile: () => mobileState.value }));
+
 function generation(overrides: Partial<RollbackGeneration> = {}): RollbackGeneration {
   return {
     id: 'gen-1',
@@ -57,11 +60,33 @@ function stateLabelsInOrder(): string[] {
 
 beforeEach(() => {
   apiFetch.mockReset();
+  mobileState.value = false;
   (toast.success as ReturnType<typeof vi.fn>).mockReset();
   (toast.error as ReturnType<typeof vi.fn>).mockReset();
 });
 
 describe('RollbackGenerationsTab', () => {
+  it('renders a load failure as a wrapping block outside the table on a phone', () => {
+    // The mobile shell pins resource tables to 640px, so a cause inside a cell
+    // is clipped; on a phone the failure is its own block instead.
+    mobileState.value = true;
+    render(
+      <RollbackGenerationsTab
+        generations={[]}
+        isLoading={false}
+        loadError
+        loadErrorReason='"edge-1" did not answer in time.'
+        isAdmin
+        onReleased={vi.fn()}
+      />,
+    );
+
+    const failure = screen.getByText('Could not load rollback generations.');
+    const reason = screen.getByText('"edge-1" did not answer in time.');
+    expect(failure.closest('table')).toBeNull();
+    expect(reason.closest('table')).toBeNull();
+    expect(reason).toHaveClass('break-words');
+  });
   it('shows superseded-generation confirm copy (not the current-generation warning) for a non-current release', async () => {
     const onReleased = vi.fn();
     render(<RollbackGenerationsTab generations={[generation({ isCurrent: false })]} isLoading={false} isAdmin onReleased={onReleased} />);

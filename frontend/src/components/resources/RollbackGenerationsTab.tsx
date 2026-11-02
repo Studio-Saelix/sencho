@@ -12,7 +12,8 @@ import { Info, Search, Unlock } from 'lucide-react';
 import { apiFetch } from '@/lib/api';
 import { toast } from '@/components/ui/toast-store';
 import { SENCHO_OPEN_STACK_EVENT, type SenchoOpenStackDetail } from '@/lib/events';
-import { TableSkeleton, TableLoadError } from './TableSkeleton';
+import { TableSkeleton, TableLoadError, LoadErrorBlock } from './TableSkeleton';
+import { useIsMobile } from '@/hooks/use-is-mobile';
 
 export type RollbackOperationKind =
     | 'update'
@@ -42,6 +43,8 @@ interface RollbackGenerationsTabProps {
     /** The read failed and there is nothing to show; distinct from a confirmed empty list. */
     loadError?: boolean;
     onRetry?: () => void;
+    /** Why the read failed, when its cause is named. */
+    loadErrorReason?: string | null;
     isAdmin: boolean;
     nodeId?: number;
     /** Refetches the Resources page's data after a successful release. */
@@ -177,6 +180,7 @@ export function RollbackGenerationsTab({
     isLoading,
     loadError = false,
     onRetry,
+    loadErrorReason,
     isAdmin,
     nodeId,
     onReleased,
@@ -187,6 +191,7 @@ export function RollbackGenerationsTab({
     const [searchExpanded, setSearchExpanded] = useState(false);
     const [stateFilter, setStateFilter] = useState<RollbackStateFilter>('all');
     const searchRef = useRef<HTMLInputElement>(null);
+    const isMobile = useIsMobile();
     useEffect(() => { if (searchExpanded) searchRef.current?.focus(); }, [searchExpanded]);
 
     const filterCounts: Record<RollbackStateFilter, number> = {
@@ -294,6 +299,9 @@ export function RollbackGenerationsTab({
                 </TooltipProvider>
             </div>
             <div className="rounded-lg border border-card-border border-t-card-border-top bg-card shadow-card-bevel overflow-hidden">
+            {loadError && isMobile ? (
+                <LoadErrorBlock noun="rollback generations" reason={loadErrorReason} onRetry={() => onRetry?.()} />
+            ) : (
             <ScrollArea className="h-[62vh] max-md:h-auto">
                 <Table>
                     <TableHeader>
@@ -307,7 +315,7 @@ export function RollbackGenerationsTab({
                         </TableRow>
                     </TableHeader>
                     {isLoading ? <TableSkeleton cols={6} /> : loadError ? (
-                    <TableLoadError cols={6} noun="rollback generations" onRetry={() => onRetry?.()} />
+                    <TableLoadError cols={6} noun="rollback generations" reason={loadErrorReason} onRetry={() => onRetry?.()} />
                     ) : (
                     <TableBody>
                         {generations.length === 0 ? (
@@ -377,6 +385,7 @@ export function RollbackGenerationsTab({
                     )}
                 </Table>
             </ScrollArea>
+            )}
             </div>
 
             <ConfirmModal

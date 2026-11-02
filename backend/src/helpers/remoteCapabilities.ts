@@ -1,5 +1,9 @@
 import { NodeRegistry } from '../services/NodeRegistry';
-import { CROSS_NODE_RBAC_CAPABILITY, type RemoteMetaProbe } from '../services/CapabilityRegistry';
+import {
+  CROSS_NODE_RBAC_CAPABILITY,
+  type RemoteMetaProbe,
+  type RemoteMetaTransportFailure,
+} from '../services/CapabilityRegistry';
 import { getErrorMessage } from '../utils/errors';
 import { sanitizeForLog } from '../utils/safeLog';
 
@@ -55,21 +59,29 @@ export async function remoteSupportsCrossNodeRbac(nodeId: number): Promise<boole
 export type RemoteCapabilityProbe =
   | { kind: 'supported' }
   | { kind: 'unsupported' }
-  | { kind: 'unreachable'; detail: Exclude<RemoteMetaProbe['kind'], 'ok'> };
+  | {
+    kind: 'unreachable';
+    detail: Exclude<RemoteMetaProbe['kind'], 'ok'>;
+    /**
+     * The transport-level cause when `detail` is `transport_failure`. Kept so a
+     * caller can tell a probe that timed out from one the host refused: both
+     * are "unreachable" for a capability check, but only the timeout is the
+     * read allergy this gateway calls a missed deadline.
+     */
+    transport?: RemoteMetaTransportFailure;
+  };
 
 /**
- * Tri-state capability check for a remote node: whether it advertises a given
- * capability, is reachable but does not advertise it, or is unreachable.
- * Both unsupported and unreachable pass delivery through, but the skip is
- * logged under a different structured code (CAPABILITY_UNSUPPORTED vs
- * REGISTRY_DELIVERY_TARGET_UNREACHABLE), so the tri-state keeps an operator
- * from misreading an outage as a missing capability. The unreachable detail
- * carries the raw probe kind (no_target, transport_failure, http_failure,
- * malformed) so an operator can tell a missing proxy target from a network
- * outage. Only a reachable remote that does not advertise the capability is
- * unsupported.
+ * In-flight tri-state probes, shared per node+capability so a page that fires
+ * several reads at once makes one /api/meta call rather than one per request.
+ *
+ * Only signal-free calls share: an AbortSignal belongs to its caller, and
+ * letting one caller's abort fail another's read would turn a single cancelled
+ * page into a false unreachable answer for everyone else.
  */
-export async function probeRemoteCapability(
+const inFlightProbes = new Map<string, Promise<RemoteCapabilityProbe>>();
+
+async function runProbe(
   nodeId: number,
   capability: string,
   abortSignal?: AbortSignal,
@@ -77,7 +89,9 @@ export async function probeRemoteCapability(
   try {
     const probe = await NodeRegistry.getInstance().probeRemoteMeta(nodeId, abortSignal);
     if (probe.kind !== 'ok') {
-      return { kind: 'unreachable', detail: probe.kind };
+      return probe.kind === 'transport_failure'
+        ? { kind: 'unreachable', detail: probe.kind, transport: probe.detail }
+        : { kind: 'unreachable', detail: probe.kind };
     }
     return probe.meta.capabilities.includes(capability)
       ? { kind: 'supported' }
@@ -92,5 +106,39 @@ export async function probeRemoteCapability(
       sanitizeForLog(getErrorMessage(error, 'unknown')),
     );
     return { kind: 'unreachable', detail: 'transport_failure' };
+  }
+}
+
+/**
+ * Tri-state capability check for a remote node: whether it advertises a given
+ * capability, is reachable but does not advertise it, or is unreachable.
+ * Both unsupported and unreachable pass delivery through, but the skip is
+ * logged under a different structured code (CAPABILITY_UNSUPPORTED vs
+ * REGISTRY_DELIVERY_TARGET_UNREACHABLE), so the tri-state keeps an operator
+ * from misreading an outage as a missing capability. The unreachable detail
+ * carries the raw probe kind (no_target, transport_failure, http_failure,
+ * malformed) so an operator can tell a missing proxy target from a network
+ * outage. Only a reachable remote that does not advertise the capability is
+ * unsupported.
+ *
+ * Concurrent signal-free calls for the same node+capability share one probe.
+ */
+export async function probeRemoteCapability(
+  nodeId: number,
+  capability: string,
+  abortSignal?: AbortSignal,
+): Promise<RemoteCapabilityProbe> {
+  if (abortSignal) return runProbe(nodeId, capability, abortSignal);
+
+  const key = probeKey(nodeId, capability);
+  const existing = inFlightProbes.get(key);
+  if (existing) return existing;
+
+  const probe = runProbe(nodeId, capability);
+  inFlightProbes.set(key, probe);
+  try {
+    return await probe;
+  } finally {
+    inFlightProbes.delete(key);
   }
 }

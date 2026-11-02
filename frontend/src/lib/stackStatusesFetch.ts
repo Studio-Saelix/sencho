@@ -1,12 +1,22 @@
 import { apiFetch } from '@/lib/api';
+import { classifyRemoteReadFailure, type RemoteReadFailure } from '@/lib/remoteReadFailure';
 
 /**
  * Bound for the in-flight owner so a hung remote cannot occupy the coalescer
- * across a dashboard statuses poll tick (10s).
+ * across a dashboard statuses poll tick (10s). The gateway's own interactive
+ * read deadline normally answers first, so this is the backstop for a hub that
+ * is slow to even reach the proxy hop.
  */
 export const STACK_STATUSES_OWNER_TIMEOUT_MS = 8000;
 
-export type StackStatusesFetchFailure = 'http' | 'timeout' | 'auth-abort';
+/** Every cause the classifier establishes, plus the coalescer's own abort.
+ *  The helper must not narrow this: a caller that only knows `timeout` and
+ *  `unreachable` is how a disconnected Pilot reached Home and the sidebar as a
+ *  bare 503. */
+export type StackStatusesFetchFailure = RemoteReadFailure | 'auth-abort';
+
+/** The two failures the coalescer synthesizes itself (no HTTP status). */
+type AbortFailure = 'timeout' | 'auth-abort';
 
 /**
  * Raw transport result for GET /stacks/statuses. Callers keep all
@@ -39,12 +49,12 @@ function nodeKey(nodeId: number | null): NodeKey {
   return nodeId === null ? 'local' : String(nodeId);
 }
 
-function failureFromAbort(reason: unknown): Exclude<StackStatusesFetchFailure, 'http'> {
+function failureFromAbort(reason: unknown): AbortFailure {
   return reason === 'timeout' ? 'timeout' : 'auth-abort';
 }
 
 function abortedResult(
-  failure: Exclude<StackStatusesFetchFailure, 'http'>,
+  failure: AbortFailure,
   coalesced: boolean,
 ): StackStatusesFetchResult {
   return {
@@ -61,19 +71,51 @@ async function requestStackStatuses(
   nodeId: number | null,
   signal: AbortSignal,
 ): Promise<StackStatusesFetchResult> {
-  const res = await apiFetch('/stacks/statuses', { nodeId, signal });
+  let res: Response;
+  try {
+    res = await apiFetch('/stacks/statuses', { nodeId, signal });
+  } catch (error) {
+    // apiFetch throws before the caller sees a 401, attaching the response to
+    // the error. Keep that cause instead of replacing it with a bare HTTP
+    // failure: a rejected node credential is not an unexplained status.
+    const response = (error as { response?: unknown } | null | undefined)?.response;
+    if (!(response instanceof Response)) {
+      return {
+        ok: false,
+        status: 0,
+        proxied: false,
+        body: null,
+        coalesced: false,
+        failure: 'http',
+      };
+    }
+    return {
+      ok: false,
+      status: response.status,
+      proxied: response.headers.get('x-sencho-proxy') === '1',
+      body: null,
+      coalesced: false,
+      failure: classifyRemoteReadFailure(response) ?? 'http',
+    };
+  }
   const proxied = res.headers.get('x-sencho-proxy') === '1';
   let body: unknown = null;
   if (res.ok) {
     body = await res.json();
   }
+  // Every cause the classifier established keeps its own name. A caller that
+  // needs the cause (the dashboard headline, the sidebar card, the fleet stack
+  // health) must be able to tell a disconnected Pilot from a bare 503.
+  const failure: StackStatusesFetchFailure | undefined = res.ok
+    ? undefined
+    : classifyRemoteReadFailure(res) ?? 'http';
   return {
     ok: res.ok,
     status: res.status,
     proxied,
     body,
     coalesced: false,
-    failure: res.ok ? undefined : 'http',
+    failure,
   };
 }
 

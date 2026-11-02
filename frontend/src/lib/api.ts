@@ -84,7 +84,12 @@ export async function apiFetch(
     if (!response.headers.get('x-sencho-proxy')) {
       window.dispatchEvent(new Event('sencho-unauthorized'));
     }
-    throw new Error('Unauthorized');
+    // Carry the response on the error so a caller can still tell an
+    // authorization failure from a transport failure: this throw happens before
+    // the caller can classify the answer itself.
+    const unauthorized = new Error('Unauthorized') as Error & { response?: Response };
+    unauthorized.response = response;
+    throw unauthorized;
   }
 
   // Intercept 404 Node Not Found responses and force context refresh

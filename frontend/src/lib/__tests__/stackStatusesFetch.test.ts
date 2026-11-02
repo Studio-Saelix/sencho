@@ -189,6 +189,20 @@ describe('fetchStackStatusesShared', () => {
     expect(recovered.ok).toBe(true);
   });
 
+  it('classifies a thrown proxied 401 as a rejected node credential', async () => {
+    // apiFetch throws before the caller sees a 401. Replacing it with a bare
+    // HTTP failure loses the one thing the page can act on: the stored node
+    // token, not the operator's session.
+    const response = jsonResponse({ error: 'Unauthorized' }, { status: 401, proxied: true });
+    apiFetchSpy.mockRejectedValueOnce(Object.assign(new Error('Unauthorized'), { response }));
+
+    const failed = await fetchStackStatusesShared(1);
+    expect(failed.ok).toBe(false);
+    expect(failed.failure).toBe('node-credential');
+    expect(failed.status).toBe(401);
+    expect(failed.proxied).toBe(true);
+  });
+
   it('settles JSON decode failures for both waiters and clears the slot', async () => {
     const bad = new Response('not-json', {
       status: 200,
@@ -264,5 +278,45 @@ describe('fetchStackStatusesShared timeout and auth abort', () => {
     const next = await fetchStackStatusesShared(7);
     expect(next.failure).toBeUndefined();
     expect(next.ok).toBe(true);
+  });
+
+  it('reports the gateway read deadline as a timeout, not a generic HTTP failure', async () => {
+    apiFetchSpy.mockResolvedValueOnce(new Response(
+      JSON.stringify({ code: 'remote_read_timeout' }),
+      { status: 504, headers: { 'x-sencho-read-timeout': '1' } },
+    ));
+    const result = await fetchStackStatusesShared(2);
+    expect(result.ok).toBe(false);
+    expect(result.failure).toBe('timeout');
+    expect(result.status).toBe(504);
+  });
+
+  it('carries a marked cause instead of collapsing it into a bare HTTP failure', async () => {
+    // A disconnected Pilot is not a generic 503: the dashboard headline and the
+    // sidebar card name it, so the shared helper must not drop the cause.
+    apiFetchSpy.mockResolvedValueOnce(new Response(
+      JSON.stringify({ error: 'Pilot tunnel disconnected.' }),
+      { status: 503, headers: { 'x-sencho-read-failure': 'pilot-disconnected' } },
+    ));
+    const result = await fetchStackStatusesShared(2);
+    expect(result.ok).toBe(false);
+    expect(result.failure).toBe('pilot-disconnected');
+    expect(result.status).toBe(503);
+  });
+
+  it('reports an unreachable node separately from a timeout', async () => {
+    apiFetchSpy.mockResolvedValueOnce(jsonResponse({ error: 'Remote node is unreachable.' }, { status: 502 }));
+    const result = await fetchStackStatusesShared(2);
+    expect(result.ok).toBe(false);
+    expect(result.failure).toBe('unreachable');
+    expect(result.status).toBe(502);
+  });
+
+  it('leaves a confirmed empty answer a success', async () => {
+    apiFetchSpy.mockResolvedValueOnce(jsonResponse({}));
+    const result = await fetchStackStatusesShared(2);
+    expect(result.ok).toBe(true);
+    expect(result.failure).toBeUndefined();
+    expect(result.body).toEqual({});
   });
 });

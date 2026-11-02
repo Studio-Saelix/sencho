@@ -54,6 +54,11 @@ export type LoadFileOptions = {
   // started for node N cannot retarget to whatever node another tab made
   // active mid-request.
   nodeId?: number | null;
+  // The name of the node `nodeId` targets, known by the caller that holds the
+  // node object. The node list can be stale or still loading, so the load can
+  // fail to resolve a pinned id; the failure copy then uses this name instead
+  // of falling back to "this node" even though the exact target was in hand.
+  nodeName?: string;
 };
 
 export function useOverlayState() {

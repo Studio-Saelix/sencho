@@ -23,6 +23,11 @@ export interface RegionData<T> {
    */
   status: RegionStatus;
   /**
+   * What the failed read threw, while `status` is 'failed'; null otherwise. A
+   * page classifies it to say why the region is unavailable.
+   */
+  error: unknown;
+  /**
    * Refetch, keeping the visible payload until the new response lands. Resolves
    * once the read it starts settles, so a caller that must not accept another
    * action against the pre-refresh payload can keep its busy state until then.
@@ -48,6 +53,7 @@ interface StoredRegion<T> {
   scope: RegionScope;
   status: RegionStatus;
   data: T | null;
+  error: unknown;
 }
 
 /**
@@ -70,7 +76,7 @@ export function useRegionData<T>(
 ): RegionData<T> {
   const loadRef = useRef(load);
   const onErrorRef = useRef(options.onError);
-  const [stored, setStored] = useState<StoredRegion<T>>({ scope, status: 'loading', data: null });
+  const [stored, setStored] = useState<StoredRegion<T>>({ scope, status: 'loading', data: null, error: null });
   const [attempt, setAttempt] = useState(0);
   const generationRef = useRef(0);
   // Whether the scope on screen already has a payload, read at failure time so a
@@ -113,20 +119,20 @@ export function useRegionData<T>(
     setStored((prev) => (
       prev.scope === scope && prev.data !== null
         ? prev
-        : { scope, status: 'loading', data: null }
+        : { scope, status: 'loading', data: null, error: null }
     ));
     void (async () => {
       try {
         const data = await loadRef.current(controller.signal);
         if (generation !== generationRef.current) return;
-        setStored({ scope, status: 'ready', data });
+        setStored({ scope, status: 'ready', data, error: null });
       } catch (error) {
         if (generation !== generationRef.current) return;
         console.warn('[RegionData] load failed:', error);
         setStored((prev) => (
           prev.scope === scope && prev.data !== null
             ? prev
-            : { scope, status: 'failed', data: null }
+            : { scope, status: 'failed', data: null, error }
         ));
         onErrorRef.current?.(error, hadDataRef.current);
       } finally {
@@ -171,11 +177,11 @@ export function useRegionData<T>(
     generationRef.current += 1;
     controllerRef.current?.abort();
     controllerRef.current = null;
-    setStored({ scope, status: 'ready', data });
+    setStored({ scope, status: 'ready', data, error: null });
   }, [scope]);
 
   if (stored.scope !== scope) {
-    return { data: null, status: 'loading', refresh, apply };
+    return { data: null, status: 'loading', error: null, refresh, apply };
   }
-  return { data: stored.data, status: stored.status, refresh, apply };
+  return { data: stored.data, status: stored.status, error: stored.error, refresh, apply };
 }

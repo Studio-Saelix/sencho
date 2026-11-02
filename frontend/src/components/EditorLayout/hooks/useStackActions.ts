@@ -29,6 +29,11 @@ import { fetchServiceUrlEntry } from './useServiceUrls';
 import { resolveOpenAppTarget, serviceUrlLookupPending } from '@/lib/serviceUrlResolve';
 import { confirmComposeSourceReload } from '@/lib/composeSourceConflict';
 import { StackOpenError, stackOpenConnectionMessage, stackOpenRefusalMessage } from '@/lib/stackOpenError';
+import {
+  classifyRemoteReadFailure,
+  isNamedReadFailure,
+  remoteReadFailureMessage,
+} from '@/lib/remoteReadFailure';
 import { requestServiceUpdate as postServiceUpdate, requestServiceRestore as postServiceRestore } from '@/lib/serviceUpdate';
 import { parseUpdatePolicyRefusalText, toastUpdatePolicyRefusal } from '@/lib/updatePolicyRefusal';
 import type { EffectiveServiceModelResult } from '@/types/effectiveServices';
@@ -908,8 +913,10 @@ export function useStackActions(options: UseStackActionsOptions) {
     stackListState.setSearchQuery('');
     // Pin the load to the target node explicitly: activeNode has not re-rendered
     // yet, so an unpinned load would read the stale ref (or, once it does render,
-    // whatever node another tab made active in the shared localStorage).
-    await loadFileRef.current(filename, { ...options, nodeId: node.id });
+    // whatever node another tab made active in the shared localStorage). Forward
+    // the name too: this is the exact target, so the failure copy can name it
+    // even when the render-time node list cannot resolve the id.
+    await loadFileRef.current(filename, { ...options, nodeId: node.id, nodeName: node.name });
   };
 
   const clearEnvState = () => {
@@ -1068,6 +1075,20 @@ export function useStackActions(options: UseStackActionsOptions) {
     // otherwise the node this tab captured. Captured once here so no request in
     // the chain can follow a node another tab made active mid-load.
     const opNodeId = options?.nodeId !== undefined ? options.nodeId : (activeNode?.id ?? null);
+    // Name the node this load is pinned to, not whichever node is active by
+    // the time the failure renders. loadFileOnNode sets the active node and
+    // calls straight into this closure, so `activeNode` can still be the
+    // previous one. A pinned id resolved by the node list names that node; a
+    // pinned id the list cannot resolve (a stale or partially loaded list) uses
+    // the name the caller forwarded, because it held the exact target node. A
+    // local load while a remote node is active, and a pin with no forwarded
+    // name, leave the name unset: the copy then says "this node" instead of
+    // blaming a node the request never reached.
+    const opNode = opNodeId === null
+      ? (activeNode?.type === 'local' ? activeNode : null)
+      : nodes.find((node) => node.id === opNodeId)
+        ?? (activeNode?.id === opNodeId ? activeNode : null);
+    const opNodeName = opNode?.name?.trim() || options?.nodeName?.trim() || null;
     try {
       headersSpan = beginSpan('fetch_headers', { attemptId });
       const res = await apiFetch(`/stacks/${filename}`, { signal, nodeId: opNodeId });
@@ -1082,7 +1103,20 @@ export function useStackActions(options: UseStackActionsOptions) {
       if (signal.aborted) { abortAttempt(attemptId); return { ok: false }; }
       if (!res.ok) {
         const refused = stackOpenRefusalMessage(filename, res.status, text);
-        throw refused ? new StackOpenError(refused) : new Error(`Failed to load stack: ${res.status}`);
+        if (refused) throw new StackOpenError(refused);
+        // A read with a known cause names that cause, so opening a stack on a
+        // node with a disconnected Pilot is not reported as the operator's
+        // connection. A 404 stays a plain failure: it can be a stack that is
+        // gone as well as a node that does not serve the route.
+        const readFailure = classifyRemoteReadFailure(res);
+        if (isNamedReadFailure(readFailure) && readFailure !== 'unsupported') {
+          throw new StackOpenError(remoteReadFailureMessage(readFailure, {
+            nodeName: opNodeName,
+            status: res.status,
+            body: text,
+          }));
+        }
+        throw new Error(`Failed to load stack: ${res.status}`);
       }
       const dispatchSpan = beginSpan('state_dispatch', { attemptId, proxied });
       const reloadingOpenFile = stackListState.selectedFile === filename;
@@ -1132,8 +1166,23 @@ export function useStackActions(options: UseStackActionsOptions) {
       if (bodySpan !== null) endSpan(bodySpan, { outcome: 'error' });
       if (isAbortError(error) || signal.aborted) { abortAttempt(attemptId); return { ok: false }; }
       console.error('Failed to load file:', error);
+      // A returned answer is classified above. `apiFetch` throws on a 401
+      // before the caller can see it, attaching the response to the error, so
+      // the catch has to classify that response too: a rejected node credential
+      // is not the operator's connection, and a local 401 is an access denial.
       const refused = error instanceof StackOpenError ? error.message : undefined;
-      toast.error(refused ?? stackOpenConnectionMessage(filename));
+      const thrownResponse = (error as { response?: unknown } | null | undefined)?.response;
+      const thrownFailure = thrownResponse instanceof Response
+        ? classifyRemoteReadFailure(thrownResponse)
+        : null;
+      const namedFailure = isNamedReadFailure(thrownFailure) && thrownFailure !== 'unsupported'
+        ? remoteReadFailureMessage(thrownFailure, {
+          nodeName: opNodeName,
+          status: thrownResponse instanceof Response ? thrownResponse.status : undefined,
+        })
+        : undefined;
+      const openError = refused ?? namedFailure;
+      toast.error(openError ?? stackOpenConnectionMessage(filename));
       stackListState.setSelectedFile(null);
       editorState.setContent('');
       editorState.setOriginalContent('');
@@ -1146,7 +1195,7 @@ export function useStackActions(options: UseStackActionsOptions) {
       editorState.setContainersLoadStatus('idle');
       editorState.setContainersLoadError(null);
       editorState.setEffectiveServices([]);
-      return { ok: false, error: refused };
+      return { ok: false, error: openError };
     } finally {
       if (!signal.aborted) {
         editorState.setIsFileLoading(false);

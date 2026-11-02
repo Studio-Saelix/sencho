@@ -5,6 +5,7 @@ import { deriveHealth } from '@/components/dashboard/deriveHealth';
 import { useGitOpsSourceStates } from '@/components/dashboard/useGitOpsSourceStates';
 import GitOpsBadge from '@/components/gitops/GitOpsBadge';
 import type { HealthLevel, NotificationItem } from '@/components/dashboard/types';
+import { unreadableNodeHeadline } from '@/lib/remoteReadFailure';
 import { SegmentedControl } from '@/components/ui/segmented-control';
 import {
   STACK_HEALTH_COLLAPSE_SIZE,
@@ -15,7 +16,7 @@ import { useStackHealthScopePreference } from '@/components/dashboard/useStackHe
 import type { RowState } from '@/components/dashboard/classifyRow';
 import { ShowUsageLink } from '@/components/ui/show-usage-link';
 import { parseHostUsage } from '@/lib/hostUsage';
-import { Bar, Kicker, Masthead, MSparkline, StateDot } from './mobile-ui';
+import { Bar, Kicker, Masthead, MSparkline, StateDot, type Tone } from './mobile-ui';
 import { NodeSwitcher } from '@/components/NodeSwitcher';
 
 interface MobileDashboardProps {
@@ -143,6 +144,13 @@ export function MobileDashboard({ notifications, headerActions, onNavigateToStac
   const upCount = healthRows.filter((r) => r.status === 'running').length;
   const downCount = healthRows.filter((r) => r.status === 'exited').length;
   const syncLabel = data.lastSyncAt ? `sync ${formatAgo(now - data.lastSyncAt)}` : 'connecting…';
+  // The headline must not claim the default level before the first read lands:
+  // the counters start at zero, and that is not a measurement.
+  const metricsPending = !data.metricsSettled;
+  const headline = data.metricsUnreadable ? 'Unknown' : metricsPending ? 'Checking' : LEVEL_LABEL[level];
+  const headlineTone: Tone = data.metricsUnreadable
+    ? 'warning'
+    : metricsPending ? 'brand' : LEVEL_TONE[level];
 
   const cpuSub: ReactNode = cpuUnknown ? (
     <span className="inline-flex flex-wrap items-center gap-x-1.5">
@@ -236,15 +244,15 @@ export function MobileDashboard({ notifications, headerActions, onNavigateToStac
     <div className="flex h-full min-h-0 flex-col">
       <Masthead
         kickerSlot={<NodeSwitcher compact onManageNodes={onManageNodes} />}
-        state={LEVEL_LABEL[level]}
-        stateTone={LEVEL_TONE[level]}
-        live={level !== 'healthy' || data.metricsStale}
+        state={headline}
+        stateTone={headlineTone}
+        live={!metricsPending && (level !== 'healthy' || data.metricsStale)}
         meta={
           <span className="inline-flex flex-wrap items-center gap-x-1.5 gap-y-1">
             {/* When metrics polling has died, "sync Xs" would falsely imply
                 liveness, so swap it for a stale marker and a warning chip
                 (mirrors the desktop HealthStatusBar badge). */}
-            <span>{`${stackCount} stacks · ${upCount} up · ${downCount} dn · ${data.metricsStale ? 'metrics paused' : syncLabel}`}</span>
+            <span>{`${stackCount} stacks · ${upCount} up · ${downCount} dn · ${data.metricsStale ? 'metrics paused' : metricsPending ? 'reading this node…' : syncLabel}`}</span>
             {data.metricsStale ? (
               <span className="rounded-sm border border-warning/30 bg-warning/10 px-1.5 py-0.5 font-mono text-[10px] uppercase tracking-wide text-warning">
                 metrics stale
@@ -254,6 +262,11 @@ export function MobileDashboard({ notifications, headerActions, onNavigateToStac
         }
         right={headerActions}
       />
+      {data.metricsUnreadable ? (
+        <p className="border-b border-hairline px-4 pb-[15px] font-mono text-[11px] text-stat-subtitle">
+          {unreadableNodeHeadline(data.unreadableCause, activeNodeName)}
+        </p>
+      ) : null}
 
       <div className="flex-1 min-h-0 overflow-y-auto [scrollbar-width:none] [&::-webkit-scrollbar]:hidden p-[14px] [&>*+*]:mt-[14px]">
         {/* CPU hero */}

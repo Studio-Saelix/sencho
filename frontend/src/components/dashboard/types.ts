@@ -1,3 +1,5 @@
+import type { RemoteReadFailure } from '@/lib/remoteReadFailure';
+
 export interface Stats {
   active: number;
   managed: number;
@@ -131,6 +133,19 @@ export interface DashboardData {
   netHistory: number[];
   /** Anchor timestamp (ms) for the sparkline 10-minute window: the newest metric sample. */
   historyEndAt: number | null;
-  /** True after several consecutive `/stats` or `/system/stats` polls have failed; surfaces a "metrics paused" indicator. */
+  /** True after several consecutive `/stats` or `/system/stats` polls have failed, or on the first read that shows the hub has no readable path to the selected node; surfaces a "metrics paused" indicator. */
   metricsStale: boolean;
+  /** True when a metrics read stopped without a usable sample, so no health
+   *  level can be derived: a bounded timeout, an unreachable node, a
+   *  disconnected Pilot, a node with no target configured, a refused address,
+   *  an unverified permission model, a rejected node credential, or an HTTP
+   *  answer. */
+  metricsUnreadable: boolean;
+  /** The cause behind `metricsUnreadable`, so the headline names it. Set when a
+   *  metrics read settled without a sample of its own, or when a later read
+   *  shows the hub has no path to the node; cleared when every failed read has
+   *  since produced a sample. */
+  unreadableCause: RemoteReadFailure | null;
+  /** True once one of the two metrics reads has settled for the active node. */
+  metricsSettled: boolean;
 }

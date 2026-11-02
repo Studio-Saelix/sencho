@@ -6,6 +6,7 @@ import { isRecord } from '../services/gitops/json';
 import { classifyHistoryRow, classifySourceRow } from '../services/gitops/readAuth';
 import type { GitOpsReadRequirement } from '../services/gitops/readAuth';
 import { sanitizeForLog } from '../utils/safeLog';
+import { REMOTE_READ_TIMEOUT_HEADER } from './interactiveRemoteRead';
 
 /**
  * Ceiling on one decompressed identity response, in bytes.
@@ -353,6 +354,7 @@ export type IdentityTerminalKind =
   | 'parse_error'
   | 'rewrite_failed'
   | 'upstream_failed'
+  | 'timeout'
   | 'downstream_close';
 
 /**
@@ -361,8 +363,8 @@ export type IdentityTerminalKind =
  *
  * Total rather than partial, and the single source for all three decisions this
  * hop makes per terminal (log, timing outcome, response). A partial table meant
- * a missing entry silently read as "use the upstream status", so a ninth kind
- * added later would inherit the remote's 200 for a body the hub could not read.
+ * a missing entry silently read as "use the upstream status", so a kind added
+ * later would inherit the remote's 200 for a body the hub could not read.
  * Here the compiler demands the answer.
  *
  * `rewrite_failed` is a 500 rather than a 502 on purpose: everything it covers
@@ -402,6 +404,14 @@ const TERMINALS: Record<IdentityTerminalKind, IdentityDisposition> = {
     respond: 'generated',
     status: 502,
     body: { error: 'Remote GitOps response failed', code: 'gitops_proxy_upstream_failed' },
+  },
+  // The body stopped arriving after the remote sent headers. The hub has not
+  // written anything yet, so it can still answer with the same timeout status an
+  // interactive read gets rather than dropping the connection unclassified.
+  timeout: {
+    respond: 'generated',
+    status: 504,
+    body: { error: 'The node did not finish the GitOps response in time.', code: 'remote_read_timeout' },
   },
 };
 
@@ -457,9 +467,11 @@ export function writeTerminal(
   const disposition = TERMINALS[kind];
   if (disposition.respond === 'silent') return;
   if (res.headersSent || res.writableEnded) {
-    // Unreachable while this hop owns the response, so if it ever fires the
-    // client is left with a half-written body and no other trace.
-    console.warn(`[Proxy] GitOps identity hop could not answer (kind=${kind}): the response was already sent.`);
+    // The client disconnected mid-flight, or the response body was ended by the
+    // read hop's idle-stall bound after its headers went out. Either way there
+    // is nobody left to answer, and the header-time release means this is no
+    // longer "unreachable" code: it is the expected end of an abandoned answer.
+    console.warn(`[Proxy] GitOps identity hop could not answer (kind=${kind}): the response was already sent or abandoned.`);
     return;
   }
 
@@ -472,6 +484,9 @@ export function writeTerminal(
   // nothing downstream may retain it: a stored page keyed to no validator is
   // exactly how a stale authorized view survives its own permission change.
   res.setHeader('cache-control', 'no-store');
+  // The idle stall is the gateway's read deadline, marked the same way as the
+  // streaming hop. The frontend reads this header together with the 504 status.
+  if (kind === 'timeout') res.setHeader(REMOTE_READ_TIMEOUT_HEADER, '1');
 
   if (disposition.respond === 'generated') {
     // A hub-generated failure never borrows the upstream status: reporting our
@@ -513,12 +528,16 @@ export function writeTerminal(
  * large, fails to decode, dies upstream, or loses its client all converge on
  * the same single-shot responder, and duplicate events are dropped rather than
  * writing a second time onto a finished response.
+ *
+ * Returns a control handle for the caller's idle bound: `timeout()` settles the
+ * hop with the gateway's timeout terminal, which is only honest while nothing
+ * has been written to the client yet.
  */
 export function handleIdentityResponse(
   proxyRes: IncomingMessage,
   res: IdentityResponseSink,
   hooks: IdentityResponseHooks,
-): void {
+): { timeout: () => void } {
   const chunks: Buffer[] = [];
   let total = 0;
   let settled = false;
@@ -565,6 +584,9 @@ export function handleIdentityResponse(
     if (!res.writableEnded) finish('downstream_close');
   });
 
+  /** Settle as the read deadline. Only honest before anything is written. */
+  const controller = { timeout: (): void => finish('timeout') };
+
   // The cause is threaded through rather than discarded: a certificate error,
   // a reset connection, and a timeout each need a different fix and would
   // otherwise collapse into one indistinguishable message.
@@ -577,7 +599,7 @@ export function handleIdentityResponse(
     decoded = decodeStream(proxyRes);
   } catch (error) {
     finish('decompress_error', undefined, error);
-    return;
+    return controller;
   }
 
   decoded.on('error', (error) => finish('decompress_error', undefined, error));
@@ -637,4 +659,6 @@ export function handleIdentityResponse(
     }
     finish('rewrite', rewritten);
   });
+
+  return controller;
 }

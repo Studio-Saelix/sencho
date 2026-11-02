@@ -17,6 +17,7 @@ import {
 } from '../services/license-headers';
 import { DatabaseService } from '../services/DatabaseService';
 import { classifyStackApiPath } from '../helpers/stackRouteAuth';
+import { REMOTE_READ_FAILURE_HEADER } from '../proxy/interactiveRemoteRead';
 
 let tmpDir: string;
 let app: import('express').Express;
@@ -27,9 +28,17 @@ let nodeAdminBearer: string;
 let grantedServer: http.Server;
 let ungrantedServer: http.Server;
 let noEvidenceServer: http.Server;
+let slowEvidenceServer: http.Server;
+let failingEvidenceServer: http.Server;
+let failingVolumeMetaServer: http.Server;
 let grantedNodeId: number;
 let ungrantedNodeId: number;
 let noEvidenceNodeId: number;
+let slowEvidenceNodeId: number;
+let failingEvidenceNodeId: number;
+let failingVolumeNodeId: number;
+let slowMetaCalls = 0;
+let failingMetaCalls = 0;
 
 interface CapturedHop {
   method: string;
@@ -83,6 +92,67 @@ function noEvidenceRemote(): http.Server {
   });
 }
 
+/**
+ * The RBAC probe (first `/api/meta`) answers with the capability, then the
+ * follow-up scoped-evidence probe is accepted and never answered. The probe
+ * times out: that is not proof the node lacks the capability.
+ */
+function slowEvidenceRemote(): http.Server {
+  return http.createServer((req, res) => {
+    if (req.url?.startsWith('/api/meta')) {
+      slowMetaCalls += 1;
+      if (slowMetaCalls === 1) {
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({
+          version: '0.93.0',
+          capabilities: ['cross-node-rbac'],
+        }));
+      }
+      return;
+    }
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ ok: true }));
+  });
+}
+
+/** The RBAC probe answers, then the scoped-evidence probe gets an HTTP error. */
+function failingEvidenceRemote(): http.Server {
+  return http.createServer((req, res) => {
+    if (req.url?.startsWith('/api/meta')) {
+      failingMetaCalls += 1;
+      if (failingMetaCalls === 1) {
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({
+          version: '0.93.0',
+          capabilities: ['cross-node-rbac'],
+        }));
+        return;
+      }
+      res.writeHead(502, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: 'bad gateway' }));
+      return;
+    }
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ ok: true }));
+  });
+}
+
+/**
+ * Every `/api/meta` answers with an HTTP error. The probe reached the node, so
+ * the cause is `unverified`, not `unreachable` or an upgrade demand.
+ */
+function failingMetaRemote(): http.Server {
+  return http.createServer((req, res) => {
+    if (req.url?.startsWith('/api/meta')) {
+      res.writeHead(502, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: 'bad gateway' }));
+      return;
+    }
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ ok: true }));
+  });
+}
+
 async function listen(server: http.Server): Promise<number> {
   await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
   return (server.address() as import('net').AddressInfo).port;
@@ -127,9 +197,15 @@ beforeAll(async () => {
   grantedServer = evidenceRemote();
   ungrantedServer = evidenceRemote();
   noEvidenceServer = noEvidenceRemote();
+  slowEvidenceServer = slowEvidenceRemote();
+  failingEvidenceServer = failingEvidenceRemote();
+  failingVolumeMetaServer = failingMetaRemote();
   const grantedPort = await listen(grantedServer);
   const ungrantedPort = await listen(ungrantedServer);
   const noEvidencePort = await listen(noEvidenceServer);
+  const slowEvidencePort = await listen(slowEvidenceServer);
+  const failingEvidencePort = await listen(failingEvidenceServer);
+  const failingVolumePort = await listen(failingVolumeMetaServer);
 
   grantedNodeId = db.addNode({
     name: 'evidence-granted-remote',
@@ -158,12 +234,42 @@ beforeAll(async () => {
     api_url: `http://127.0.0.1:${noEvidencePort}`,
     api_token: 'noev-token',
   });
+  slowEvidenceNodeId = db.addNode({
+    name: 'evidence-slow-remote',
+    type: 'remote',
+    mode: 'proxy',
+    compose_dir: '/tmp',
+    is_default: false,
+    api_url: `http://127.0.0.1:${slowEvidencePort}`,
+    api_token: 'slow-token',
+  });
+  failingEvidenceNodeId = db.addNode({
+    name: 'evidence-failing-remote',
+    type: 'remote',
+    mode: 'proxy',
+    compose_dir: '/tmp',
+    is_default: false,
+    api_url: `http://127.0.0.1:${failingEvidencePort}`,
+    api_token: 'failing-token',
+  });
+  failingVolumeNodeId = db.addNode({
+    name: 'evidence-failing-volume-remote',
+    type: 'remote',
+    mode: 'proxy',
+    compose_dir: '/tmp',
+    is_default: false,
+    api_url: `http://127.0.0.1:${failingVolumePort}`,
+    api_token: 'failing-volume-token',
+  });
 });
 
 afterAll(async () => {
   await new Promise<void>((resolve) => grantedServer.close(() => resolve()));
   await new Promise<void>((resolve) => ungrantedServer.close(() => resolve()));
   await new Promise<void>((resolve) => noEvidenceServer.close(() => resolve()));
+  await new Promise<void>((resolve) => slowEvidenceServer.close(() => resolve()));
+  await new Promise<void>((resolve) => failingEvidenceServer.close(() => resolve()));
+  await new Promise<void>((resolve) => failingVolumeMetaServer.close(() => resolve()));
   cleanupTestDb(tmpDir);
 });
 
@@ -173,6 +279,8 @@ beforeEach(async () => {
   vi.spyOn(LicenseService.getInstance(), 'getTier').mockReturnValue('paid');
   grantedHops.length = 0;
   ungrantedHops.length = 0;
+  slowMetaCalls = 0;
+  failingMetaCalls = 0;
 });
 
 function grantScopedStackEdit(userId: number, nodeId: number, stackName: string): void {
@@ -244,7 +352,46 @@ describe('remote proxy alerts scoped-evidence gate', () => {
       .send({ stack_name: 'web', metric: 'cpu_percent', operator: '>', threshold: 90, duration_mins: 5, cooldown_mins: 5 });
 
     expect(res.status).toBe(403);
+    expect(res.headers[REMOTE_READ_FAILURE_HEADER]).toBe('upgrade-required');
     expect(res.body.error).toContain('does not support scoped stack authorization');
+
+    clearAssignments(deployerId);
+  });
+
+  it('does not demand an upgrade when the scoped-evidence probe cannot run', async () => {
+    grantScopedStackEdit(deployerId, slowEvidenceNodeId, 'web');
+
+    const res = await request(app)
+      .post('/api/alerts')
+      .set('Authorization', `Bearer ${deployerBearer}`)
+      .set('x-node-id', String(slowEvidenceNodeId))
+      .send({ stack_name: 'web', metric: 'cpu_percent', operator: '>', threshold: 90, duration_mins: 5, cooldown_mins: 5 });
+
+    // The follow-up probe timed out, so the node's version is unknown. Calling
+    // that "upgrade it" would send the operator to fix the wrong thing.
+    expect(res.status).toBe(504);
+    expect(res.headers[REMOTE_READ_FAILURE_HEADER]).toBe('timeout');
+    expect(res.body.error).not.toMatch(/upgrade/i);
+
+    clearAssignments(deployerId);
+  }, 20_000);
+
+  it('names the capability that could not be verified, not the permission model', async () => {
+    grantScopedStackEdit(deployerId, failingEvidenceNodeId, 'web');
+
+    const res = await request(app)
+      .post('/api/alerts')
+      .set('Authorization', `Bearer ${deployerBearer}`)
+      .set('x-node-id', String(failingEvidenceNodeId))
+      .send({ stack_name: 'web', metric: 'cpu_percent', operator: '>', threshold: 90, duration_mins: 5, cooldown_mins: 5 });
+
+    // The RBAC probe answered; only the scoped-evidence probe failed. The copy
+    // must name that capability instead of blaming the permission model.
+    expect(res.status).toBe(503);
+    expect(res.headers[REMOTE_READ_FAILURE_HEADER]).toBe('unverified');
+    expect(res.body.error).toMatch(/scoped stack authorization/i);
+    expect(res.body.error).not.toMatch(/permission model/i);
+    expect(res.body.error).not.toMatch(/upgrade/i);
 
     clearAssignments(deployerId);
   });
@@ -401,6 +548,45 @@ describe('remote proxy ssh-host-key scoped-evidence gate', () => {
     expect(res.body.code).toBe('PERMISSION_DENIED');
 
     clearAssignments(deployerId);
+  });
+});
+
+describe('remote proxy inline probe refusals', () => {
+  it('refuses a named-stack write when the scoped-evidence probe never answers', async () => {
+    grantScopedStackEdit(deployerId, slowEvidenceNodeId, 'web');
+
+    const res = await request(app)
+      .put('/api/stacks/web')
+      .set('Authorization', `Bearer ${deployerBearer}`)
+      .set('x-node-id', String(slowEvidenceNodeId))
+      .send({ content: 'services: {}' });
+
+    // The RBAC probe answered, then the scoped-evidence probe hung. The write
+    // must be refused with the gateway's timeout, not proxied and not called an
+    // upgrade demand.
+    expect(res.status).toBe(504);
+    expect(res.headers[REMOTE_READ_FAILURE_HEADER]).toBe('timeout');
+    expect(res.body.error).not.toMatch(/upgrade/i);
+    // One RBAC probe answered, the second (scoped-evidence) probe hung. That
+    // pins the timeout to the evidence gate rather than some other probe.
+    expect(slowMetaCalls).toBe(2);
+
+    clearAssignments(deployerId);
+  }, 20_000);
+
+  it('names volume removal when its evidence probe answers with an error', async () => {
+    const res = await request(app)
+      .post('/api/stacks/web/down?removeVolumes=true')
+      .set('Authorization', `Bearer ${deployerBearer}`)
+      .set('x-node-id', String(failingVolumeNodeId));
+
+    // The probe reached the node and got an HTTP error, so the capability is
+    // unverified; the sentence must name volume removal, the thing that could
+    // not be checked, and must not demand an upgrade.
+    expect(res.status).toBe(503);
+    expect(res.headers[REMOTE_READ_FAILURE_HEADER]).toBe('unverified');
+    expect(res.body.error).toMatch(/removing volumes/i);
+    expect(res.body.error).not.toMatch(/permission model|upgrade/i);
   });
 });
 

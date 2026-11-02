@@ -1,7 +1,9 @@
 import { apiFetch } from '@/lib/api';
 import { STACK_STATUSES_OWNER_TIMEOUT_MS } from '@/lib/stackStatusesFetch';
+import { classifyRemoteReadError, classifyRemoteReadFailure, type RemoteReadFailure } from '@/lib/remoteReadFailure';
 
-export type RemoteFacetFailure = 'timeout' | 'auth-abort' | 'http' | 'error';
+/** A read failure, plus the coalescer's own abort reason. */
+export type RemoteFacetFailure = RemoteReadFailure | 'auth-abort';
 
 export type RemoteFacetResult =
   | { ok: true; body: unknown }
@@ -21,13 +23,16 @@ export async function fetchRemoteFacet(
   try {
     const res = await apiFetch(path, { nodeId, signal });
     if (!res.ok) {
-      return { ok: false, failure: 'http', status: res.status };
+      // Keep every cause the classifier established. A hand-written list here
+      // is how a disconnected Pilot became a bare HTTP failure in the fleet
+      // facet reads.
+      return { ok: false, failure: classifyRemoteReadFailure(res) ?? 'http', status: res.status };
     }
     return { ok: true, body: await res.json() };
-  } catch {
+  } catch (error) {
     return {
       ok: false,
-      failure: signal.aborted ? abortReasonFailure(signal.reason) : 'error',
+      failure: signal.aborted ? abortReasonFailure(signal.reason) : classifyRemoteReadError(error),
       status: 0,
     };
   }

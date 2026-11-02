@@ -1,5 +1,10 @@
 import type { MastheadMetadataItem, MastheadTone } from '@/components/ui/PageMasthead';
 import { formatBytes } from '@/lib/utils';
+import {
+    isNamedReadFailure,
+    remoteReadFailureMessage,
+    type RemoteReadFailure,
+} from '@/lib/remoteReadFailure';
 
 export interface UsageData {
     reclaimableImages: number;
@@ -16,10 +21,12 @@ export interface UsageData {
 
 export type LoadState = 'loading' | 'ready' | 'error';
 
-/** Disk usage as the page holds it: figures exist only when they were read. */
+/** Disk usage as the page holds it: figures exist only when they were read.
+ *  An error carries the cause when one is worth naming, so the card says a
+ *  disconnected Pilot instead of only "could not read". */
 export type UsageLoad =
     | { status: 'loading' }
-    | { status: 'error' }
+    | { status: 'error'; failure?: RemoteReadFailure }
     | { status: 'ready'; data: UsageData };
 
 export interface ResourcesMastheadModel {
@@ -47,7 +54,7 @@ function plural(count: number, one: string, many: string): string {
  * the node is tidy. Unknown stays visible: a node whose usage could not be read
  * never reads as tidy.
  */
-export function deriveResourcesMastheadState(load: UsageLoad): ResourcesMastheadModel {
+export function deriveResourcesMastheadState(load: UsageLoad, nodeName?: string | null): ResourcesMastheadModel {
     if (load.status === 'loading') {
         return { state: 'Measuring disk', tone: 'idle', metadata: UNKNOWN_METADATA, reclaimableBytes: 0, reclaimableItems: 0 };
     }
@@ -55,7 +62,9 @@ export function deriveResourcesMastheadState(load: UsageLoad): ResourcesMasthead
         return {
             state: 'Disk usage unknown',
             tone: 'warn',
-            subtitle: 'Could not read disk usage from this node.',
+            subtitle: isNamedReadFailure(load.failure)
+                ? remoteReadFailureMessage(load.failure, { nodeName })
+                : 'Could not read disk usage from this node.',
             metadata: UNKNOWN_METADATA,
             reclaimableBytes: 0,
             reclaimableItems: 0,

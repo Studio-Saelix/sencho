@@ -71,11 +71,15 @@ export function useGitOpsSourceStates(): GitOpsSourceStateMap {
    * otherwise land as this node's state, labelling the wrong stacks.
    */
   const generation = useRef(0);
+  const abortRef = useRef<AbortController | null>(null);
 
   const fetchStates = useCallback(async () => {
     const current = ++generation.current;
+    abortRef.current?.abort();
+    const controller = new AbortController();
+    abortRef.current = controller;
     try {
-      const res = await apiFetch('/git-sources');
+      const res = await apiFetch('/git-sources', { signal: controller.signal });
       if (!res.ok) {
         // Says which kind of refusal it was. A 403 here means the badges are
         // frozen because this account may no longer read Git sources, which
@@ -85,22 +89,28 @@ export function useGitOpsSourceStates(): GitOpsSourceStateMap {
       }
       const rows = await res.json() as GitSourceRow[];
       const next = projectSourceStates(rows);
-      if (current !== generation.current) return;
+      if (current !== generation.current || controller.signal.aborted) return;
       setStates(next);
     } catch (e) {
       // The request itself failed. Keep the previous map rather than blanking
       // every badge on one bad poll, but say so: silence here and a quiet
       // fleet look identical.
+      if (controller.signal.aborted) return;
       console.error('[GitOps] source-state fetch failed:', e);
     }
   }, []);
 
   // Blank on a node switch so no stale badge survives into the new node's list,
-  // then ask the node that is now active.
+  // then ask the node that is now active. Leaving Home releases the read so it
+  // does not hold a connection ahead of the next surface.
   useEffect(() => {
     generation.current += 1;
     setStates({});
     void fetchStates();
+    return () => {
+      generation.current += 1;
+      abortRef.current?.abort();
+    };
   }, [nodeId, fetchStates]);
 
   // GitOps state changes on transitions, not on a clock, so there is no poll

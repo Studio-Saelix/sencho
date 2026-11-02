@@ -9,7 +9,10 @@ export type StackHealthNavTarget = { node: Node; file: string };
 
 export type NodeHealthState = 'pending' | 'current' | 'stale' | 'failed' | 'offline';
 
-export type NodeHealthFailureReason = 'timeout' | 'denied' | 'error' | 'malformed';
+/** Why a node's stack health could not be read. `unreadable` covers every cause
+ *  where the hub had no readable path to the node (a disconnected Pilot, an
+ *  unconfigured target, a refused address) besides the named deadline. */
+export type NodeHealthFailureReason = 'timeout' | 'unreadable' | 'denied' | 'error' | 'malformed';
 
 export type StackHealthFreshness = 'current' | 'stale';
 

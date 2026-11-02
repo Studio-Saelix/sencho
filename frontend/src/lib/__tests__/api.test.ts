@@ -142,4 +142,22 @@ describe('withDeploySession', () => {
     expect(headers['X-Custom']).toBe('keep');
     expect(headers[DEPLOY_SESSION_HEADER]).toBe('sess-abc');
   });
+
+  it('carries the response on the Unauthorized error so a remote 401 stays classifiable', async () => {
+    globalThis.fetch = vi.fn().mockResolvedValue(new Response('{}', {
+      status: 401,
+      headers: { 'content-type': 'application/json', 'x-sencho-proxy': '1' },
+    })) as unknown as typeof fetch;
+
+    await expect(apiFetch('/stacks')).rejects.toMatchObject({
+      message: 'Unauthorized',
+      response: expect.any(Response),
+    });
+
+    try {
+      await apiFetch('/stacks');
+    } catch (error) {
+      expect((error as { response?: Response }).response?.status).toBe(401);
+    }
+  });
 });

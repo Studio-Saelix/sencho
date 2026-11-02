@@ -1,6 +1,15 @@
 import type { Request, Response, NextFunction, RequestHandler } from 'express';
+import type { ClientRequest, IncomingMessage } from 'http';
 import { createProxyMiddleware } from 'http-proxy-middleware';
 import type { OnProxyEvent } from 'http-proxy-middleware';
+import {
+  REMOTE_READ_BODY_IDLE_TIMEOUT_MS,
+  REMOTE_READ_FAILURE_HEADER,
+  REMOTE_READ_TIMEOUT_HEADER,
+  isStreamingOrDownloadResponse,
+  remoteReadTimeoutBody,
+  remoteReadTimeoutMs,
+} from './interactiveRemoteRead';
 import {
   IDENTITY_PROXY_TIMEOUT_MS,
   isIdentityFailure,
@@ -25,9 +34,11 @@ import {
 } from '../services/license-headers';
 import { LicenseService } from '../services/LicenseService';
 import { isProxyExemptPath } from '../helpers/proxyExemptPaths';
-import { remoteSupportsCrossNodeRbac, remoteAdvertisesCapability, probeRemoteCapability } from '../helpers/remoteCapabilities';
+import { probeRemoteCapability } from '../helpers/remoteCapabilities';
+import type { RemoteCapabilityProbe } from '../helpers/remoteCapabilities';
 import { hubImageUpdateJsonParser } from '../middleware/jsonParser';
 import {
+  CROSS_NODE_RBAC_CAPABILITY,
   STACK_DOWN_REMOVE_VOLUMES_CAPABILITY,
   STACK_DELETE_PRUNE_VOLUMES_CAPABILITY,
   SERVICE_SCOPED_UPDATE_CAPABILITY,
@@ -80,7 +91,7 @@ import { augmentRemoteProxyWithRegistryDelivery, evaluateRegistryDeliveryProxyGa
  * enforces exactly-once finalization across the downstream finish/close events
  * and the proxy error handler.
  */
-type ProxyTimingOutcome = 'ok' | 'non2xx' | 'aborted' | 'error';
+type ProxyTimingOutcome = 'ok' | 'non2xx' | 'aborted' | 'error' | 'timeout';
 
 interface ProxyTiming {
   startedAt: number;
@@ -134,6 +145,139 @@ function finalizeProxyTiming(req: Request, outcome: ProxyTimingOutcome): void {
 }
 
 /**
+ * Deadline state for an interactive read against a remote node, kept off the
+ * Request type via WeakMaps so it is collected with the request. `fired` lets
+ * the proxy error handler tell our own upstream abort from a real transport
+ * failure; the entry stays for the life of the request, because the abort it
+ * triggers arrives after the deadline has already answered.
+ */
+interface InteractiveReadDeadline {
+  /** Time-to-headers budget; cleared as soon as the remote answers. */
+  headerTimer?: NodeJS.Timeout;
+  /** Idle bound on a body that has started but stopped sending. */
+  bodyIdleTimer?: NodeJS.Timeout;
+  stopBodyWatch?: () => void;
+  fired: boolean;
+}
+
+const interactiveReadDeadlines = new WeakMap<Request, InteractiveReadDeadline>();
+/** The upstream request the hop opened, so a missed deadline can abort it. */
+const proxyRequests = new WeakMap<Request, ClientRequest>();
+
+/**
+ * Bound an interactive read's time to the remote's headers. On expiry the
+ * gateway answers 504 with the timeout code and destroys the upstream request,
+ * so a remote that accepted the connection and then went silent cannot hold a
+ * socket or a page's loading state.
+ */
+function armInteractiveReadDeadline(
+  req: Request,
+  res: Response,
+  nodeName: string | undefined,
+  timeoutMs: number,
+): void {
+  const deadline: InteractiveReadDeadline = { fired: false };
+  deadline.headerTimer = setTimeout(() => {
+    deadline.fired = true;
+    const upstream = proxyRequests.get(req);
+    if (res.headersSent) {
+      // Headers are already on the wire, so the only honest answer left is to
+      // end the response rather than append a JSON error to a partial body. The
+      // hop is still recorded as a timeout: the visible symptom is a truncated
+      // body, and the log should name the bound that caused it.
+      finalizeProxyTiming(req, 'timeout');
+      res.destroy();
+    } else {
+      finalizeProxyTiming(req, 'timeout');
+      res.status(504);
+      res.setHeader(REMOTE_READ_TIMEOUT_HEADER, '1');
+      res.json(remoteReadTimeoutBody(nodeName, timeoutMs));
+    }
+    upstream?.destroy();
+  }, timeoutMs);
+  interactiveReadDeadlines.set(req, deadline);
+  res.once('finish', () => releaseInteractiveReadDeadline(req));
+  res.once('close', () => releaseInteractiveReadDeadline(req));
+}
+
+/**
+ * The remote answered. Release the time-to-headers budget for every response,
+ * then bound only a body that stalls mid-flight. Streams and downloads keep
+ * their own lifetime from their response headers.
+ *
+ * `onBodyIdle` is for a hop that buffers the body before writing anything to the
+ * client (the GitOps identity hop). Its response headers are not on the wire, so
+ * a stall can still be answered honestly; the callback writes that terminal and
+ * settles the hop before the upstream socket is dropped.
+ */
+function noteInteractiveReadHeaders(
+  req: Request,
+  res: Response,
+  proxyRes: IncomingMessage,
+  onBodyIdle?: () => void,
+): void {
+  const deadline = interactiveReadDeadlines.get(req);
+  if (!deadline || deadline.fired) return;
+  if (deadline.headerTimer) {
+    clearTimeout(deadline.headerTimer);
+    deadline.headerTimer = undefined;
+  }
+  if (isStreamingOrDownloadResponse(proxyRes.headers)) {
+    releaseInteractiveReadDeadline(req);
+    return;
+  }
+
+  const stopBodyWatch = (): void => {
+    if (deadline.bodyIdleTimer) {
+      clearTimeout(deadline.bodyIdleTimer);
+      deadline.bodyIdleTimer = undefined;
+    }
+    deadline.stopBodyWatch = undefined;
+  };
+  const onBodyData = (): void => {
+    if (deadline.fired) return;
+    if (deadline.bodyIdleTimer) clearTimeout(deadline.bodyIdleTimer);
+    deadline.bodyIdleTimer = setTimeout(() => {
+      deadline.fired = true;
+      stopBodyWatch();
+      proxyRes.off('data', onBodyData);
+      // The body stopped moving after it started. The identity hop buffers the
+      // whole body before writing anything, so it can still answer with the
+      // gateway's timeout through `onBodyIdle`. The streaming hop has already
+      // handed headers (and possibly part of the body) to the client, so the
+      // only honest end left there is to destroy the in-progress response.
+      finalizeProxyTiming(req, 'timeout');
+      if (onBodyIdle) {
+        onBodyIdle();
+      } else {
+        res.destroy();
+      }
+      proxyRequests.get(req)?.destroy();
+    }, REMOTE_READ_BODY_IDLE_TIMEOUT_MS);
+  };
+  deadline.stopBodyWatch = () => {
+    stopBodyWatch();
+    proxyRes.off('data', onBodyData);
+  };
+  proxyRes.on('data', onBodyData);
+  onBodyData();
+}
+
+/** Release an armed deadline and both of its timers. A deadline that already
+ *  fired stays recorded so the abort it caused is not reported as a transport
+ *  failure. */
+function releaseInteractiveReadDeadline(req: Request): void {
+  const deadline = interactiveReadDeadlines.get(req);
+  if (!deadline) return;
+  if (deadline.headerTimer) {
+    clearTimeout(deadline.headerTimer);
+    deadline.headerTimer = undefined;
+  }
+  deadline.stopBodyWatch?.();
+  if (!deadline.fired) interactiveReadDeadlines.delete(req);
+}
+
+/**
  * Build the remote-node HTTP proxy middleware. Mount once at `/api/` after
  * authGate / auditLog / apiTokenScope; the middleware decides per-request
  * whether to proxy or call next().
@@ -149,6 +293,15 @@ export function createRemoteProxyMiddleware(): RequestHandler {
   // identical however a request is forwarded.
   const sharedOn: OnProxyEvent<Request, Response> = {
     proxyReq: (proxyReq, req) => {
+      // Remember the upstream request so a missed read deadline can abort it.
+      proxyRequests.set(req, proxyReq);
+      // A deadline that fired before the connection existed had nothing to
+      // abort. Destroy the socket as soon as it appears rather than leaving the
+      // hop talk to a remote nobody is waiting for.
+      if (interactiveReadDeadlines.get(req)?.fired) {
+        proxyReq.destroy();
+        return;
+      }
       // Strip headers that must not reach the remote instance:
       // - x-node-id: remote Sencho treats all requests as local
       // - cookie: the browser's sencho_token is signed with THIS instance's JWT secret;
@@ -275,7 +428,12 @@ export function createRemoteProxyMiddleware(): RequestHandler {
         proxyReq.write(req.rawBody);
       }
     },
-    proxyRes: (proxyRes, req) => {
+    proxyRes: (proxyRes, req, res) => {
+      // The remote answered: release the time-to-headers budget for every
+      // response, then keep only the body-idle bound. A stream or download is
+      // released entirely when its headers identify it and keeps its own
+      // lifetime.
+      noteInteractiveReadHeaders(req, res, proxyRes);
       // Mark every response forwarded from a remote node with a sentinel
       // header. The frontend (apiFetch / fetchForNode) checks this before
       // firing the global 'sencho-unauthorized' event: a 401 from a remote
@@ -325,6 +483,10 @@ export function createRemoteProxyMiddleware(): RequestHandler {
       }
     },
     error: (err, req, proxyRes) => {
+      // The read deadline aborts the upstream request itself. That abort is not
+      // a transport failure to report, and the 504 has already answered, so the
+      // error handler must not turn it into a 502 or an audit entry.
+      if (interactiveReadDeadlines.get(req)?.fired) return;
       // Finalize the hop timing with an error outcome before the existing
       // 502 handling; the logged guard keeps the later finish/close a no-op.
       finalizeProxyTiming(req, 'error');
@@ -431,6 +593,13 @@ export function createRemoteProxyMiddleware(): RequestHandler {
     on: {
       ...sharedOn,
       proxyRes: (proxyRes, req, res) => {
+        // The same header-time release as the streaming hop. This hop buffers
+        // the body before writing anything, so on an armed read a stall after
+        // the headers is ended by the 15 s interactive body-idle callback
+        // below, which answers 504 with the gateway's timeout instead of
+        // dropping the connection unclassified. The 30 s proxyTimeout is the
+        // socket-inactivity backstop, and the 1 MiB identity body cap ends an
+        // endless trickle.
         proxyRes.headers['x-sencho-proxy'] = '1';
         const timing = proxyTimings.get(req);
         if (timing) {
@@ -438,7 +607,7 @@ export function createRemoteProxyMiddleware(): RequestHandler {
           timing.ttfbMs = Date.now() - timing.startedAt;
         }
         const nodeId = hubNodeIdFor(req);
-        handleIdentityResponse(proxyRes, res, {
+        const identityResponse = handleIdentityResponse(proxyRes, res, {
           transform: (payload) => {
             // Without an id there is nothing to rewrite the remote's numbering
             // to, and passing its ids through unchanged is the exact defect
@@ -464,6 +633,11 @@ export function createRemoteProxyMiddleware(): RequestHandler {
             finalizeProxyTiming(req, isIdentityFailure(kind) ? 'error' : 'ok');
           },
         });
+        // This hop buffers the whole body before writing anything, so a stall
+        // after the upstream headers can still be answered with a real timeout
+        // status. The streaming hop has already forwarded its headers and keeps
+        // the destroy-only end.
+        noteInteractiveReadHeaders(req, res, proxyRes, () => identityResponse.timeout());
       },
     },
   });
@@ -499,9 +673,11 @@ export function createRemoteProxyMiddleware(): RequestHandler {
 
     const target = NodeRegistry.getInstance().getProxyTarget(req.nodeId);
     if (!target) {
-      const message = node.mode === 'pilot_agent'
+      const pilot = node.mode === 'pilot_agent';
+      const message = pilot
         ? `Pilot tunnel to "${node.name}" is disconnected. Operations will resume when the agent reconnects.`
         : `Remote node "${node.name}" has no API URL or token configured. Update it in Settings → Nodes.`;
+      res.setHeader(REMOTE_READ_FAILURE_HEADER, pilot ? 'pilot-disconnected' : 'not-configured');
       if (isRecoveryProxyPath(req.path)) {
         sendRecoveryTransportRefusal(res, message);
       } else {
@@ -511,6 +687,17 @@ export function createRemoteProxyMiddleware(): RequestHandler {
     }
 
     const runGatedProxy = async (): Promise<void> => {
+      // The read budget covers the whole wait, including any capability probe
+      // this hop must run before it can forward. Time already spent on the gates
+      // is subtracted from the hop's own deadline, so a slow /api/meta probe and
+      // a silent read still add up to one bounded wait instead of two.
+      const readBudgetMs = remoteReadTimeoutMs(req.method, req.path);
+      const gatesStartedAt = Date.now();
+      const remainingReadBudgetMs = (): number | null => {
+        if (readBudgetMs === null) return null;
+        return Math.max(250, readBudgetMs - (Date.now() - gatesStartedAt));
+      };
+
       if (node.mode === 'proxy') {
         try {
           await assertSafeOutboundUrl(target.apiUrl);
@@ -520,6 +707,7 @@ export function createRemoteProxyMiddleware(): RequestHandler {
             ? 'Remote node target is not allowed.'
             : 'Remote node target host could not be resolved.';
           console.warn(`[Proxy] Refused remote target for node ${node.id}: ${error.reason}`);
+          res.setHeader(REMOTE_READ_FAILURE_HEADER, 'refused');
           if (isRecoveryProxyPath(req.path)) {
             sendRecoveryTransportRefusal(res, message);
             return;
@@ -530,16 +718,24 @@ export function createRemoteProxyMiddleware(): RequestHandler {
       }
 
       if (isStackDownWithRemoveVolumes(req)) {
-        const supported = await remoteAdvertisesCapability(req.nodeId, STACK_DOWN_REMOVE_VOLUMES_CAPABILITY);
-        if (!supported) {
+        const capability = await probeRemoteCapability(req.nodeId, STACK_DOWN_REMOVE_VOLUMES_CAPABILITY);
+        if (capability.kind === 'unreachable') {
+          sendProbeUnavailable(res, node.name, capability, 'its support for removing volumes');
+          return;
+        }
+        if (capability.kind === 'unsupported') {
           res.status(400).json({ error: 'Volume removal is not supported on this node' });
           return;
         }
       }
 
       if (isUnacknowledgedStackDelete(req)) {
-        const supported = await remoteAdvertisesCapability(req.nodeId, STACK_DELETE_PRUNE_VOLUMES_CAPABILITY);
-        if (!supported) {
+        const capability = await probeRemoteCapability(req.nodeId, STACK_DELETE_PRUNE_VOLUMES_CAPABILITY);
+        if (capability.kind === 'unreachable') {
+          sendProbeUnavailable(res, node.name, capability, 'its ability to preserve volumes on delete');
+          return;
+        }
+        if (capability.kind === 'unsupported') {
           res.status(400).json({
             error: 'This node cannot guarantee volumes are preserved on delete. Upgrade it before deleting this stack.',
             code: 'capability_unavailable',
@@ -549,8 +745,12 @@ export function createRemoteProxyMiddleware(): RequestHandler {
       }
 
       if (isServiceScopedUpdateRoute(req)) {
-        const supported = await remoteAdvertisesCapability(req.nodeId, SERVICE_SCOPED_UPDATE_CAPABILITY);
-        if (!supported) {
+        const capability = await probeRemoteCapability(req.nodeId, SERVICE_SCOPED_UPDATE_CAPABILITY);
+        if (capability.kind === 'unreachable') {
+          sendProbeUnavailable(res, node.name, capability, 'its support for service-scoped updates');
+          return;
+        }
+        if (capability.kind === 'unsupported') {
           res.status(400).json({ error: 'Service-scoped updates are not supported on this node', code: 'capability_unavailable' });
           return;
         }
@@ -630,12 +830,22 @@ export function createRemoteProxyMiddleware(): RequestHandler {
 
       // Mixed-version RBAC gate (non-admin only). Runs before alert body
       // buffering so an unauthorized client cannot force unbounded memory use.
+      //
+      // Tri-state: a node that did not answer proved nothing about its version,
+      // so it is reported as unavailable rather than as an old node. Only a
+      // reachable remote that answered without the capability is a version
+      // problem, and only that answer deserves the upgrade message.
       if (req.user?.role !== 'admin') {
-        const rbacSupported = await remoteSupportsCrossNodeRbac(req.nodeId);
-        if (!rbacSupported) {
-          res.status(403).json({
-            error: `Remote node "${node.name}" is running a version that does not enforce per-user permissions. Upgrade it before non-admin users can act on it.`,
-          });
+        const rbac = await probeRemoteCapability(req.nodeId, CROSS_NODE_RBAC_CAPABILITY);
+        if (rbac.kind === 'unreachable') {
+          sendProbeUnavailable(res, node.name, rbac);
+          return;
+        }
+        if (rbac.kind === 'unsupported') {
+          refuseUpgradeRequired(
+            res,
+            `Remote node "${node.name}" is running a version that does not enforce per-user permissions. Upgrade it before non-admin users can act on it.`,
+          );
           return;
         }
       }
@@ -661,14 +871,19 @@ export function createRemoteProxyMiddleware(): RequestHandler {
           globalRole === 'admin'
           || (globalRole != null && (ROLE_PERMISSIONS[globalRole]?.includes(classified.action) ?? false));
         if (!globalGrantsPrimary) {
-          const evidenceSupported = await remoteAdvertisesCapability(
+          const evidence = await probeRemoteCapability(
             req.nodeId,
             SCOPED_STACK_AUTH_EVIDENCE_CAPABILITY,
           );
-          if (!evidenceSupported) {
-            res.status(403).json({
-              error: `Remote node "${node.name}" does not support scoped stack authorization. Upgrade it before scoped users can act on it.`,
-            });
+          if (evidence.kind === 'unreachable') {
+            sendProbeUnavailable(res, node.name, evidence, 'its support for scoped stack authorization');
+            return;
+          }
+          if (evidence.kind === 'unsupported') {
+            refuseUpgradeRequired(
+              res,
+              `Remote node "${node.name}" does not support scoped stack authorization. Upgrade it before scoped users can act on it.`,
+            );
             return;
           }
           if (!req.user) {
@@ -715,8 +930,12 @@ export function createRemoteProxyMiddleware(): RequestHandler {
           throw err;
         }
         if (alertCreateHasScopedService(req.rawBody)) {
-          const supported = await remoteAdvertisesCapability(req.nodeId, SERVICE_SCOPED_STACK_ALERT_CAPABILITY);
-          if (!supported) {
+          const capability = await probeRemoteCapability(req.nodeId, SERVICE_SCOPED_STACK_ALERT_CAPABILITY);
+          if (capability.kind === 'unreachable') {
+            sendProbeUnavailable(res, node.name, capability, 'its support for service-scoped alert rules');
+            return;
+          }
+          if (capability.kind === 'unsupported') {
             res.status(400).json({
               error: 'Service-scoped alert rules are not supported on this node',
               code: 'capability_unavailable',
@@ -1017,6 +1236,17 @@ export function createRemoteProxyMiddleware(): RequestHandler {
         }
         req.gitopsIdentity = { query: prepared.search.toString(), preRewritePath: req.path };
         beginProxyTiming(req, res);
+        // A Git sources or drift page is hydration like any other, so a GET
+        // that answers a page is on the interactive clock here too; the drift
+        // re-check is a POST and stays off it. On an armed GET, once the
+        // headers land the 15 s body-idle callback answers 504 with the
+        // gateway's timeout. The identity hop's 30 s proxyTimeout is the
+        // socket-inactivity backstop, and the 1 MiB body cap ends an endless
+        // trickle.
+        const identityBudgetMs = remainingReadBudgetMs();
+        if (identityBudgetMs !== null) {
+          armInteractiveReadDeadline(req, res, node.name, identityBudgetMs);
+        }
         const selectedIdentityProxy = node.mode === 'pilot_agent'
           ? identityProxy
           : target.apiUrl.startsWith('https:') ? safeHttpsIdentityProxy : safeHttpIdentityProxy;
@@ -1027,6 +1257,13 @@ export function createRemoteProxyMiddleware(): RequestHandler {
       beginProxyTiming(req, res);
       if (req.registryDeliveryAbortController?.signal.aborted) {
         return;
+      }
+      // Ordinary interactive reads are bounded; work and streams are not. The
+      // budget already includes any gate time above, so only the hop that
+      // actually answers a page is on the clock.
+      const hopBudgetMs = remainingReadBudgetMs();
+      if (hopBudgetMs !== null) {
+        armInteractiveReadDeadline(req, res, node.name, hopBudgetMs);
       }
       if (req.method === 'POST' && /^\/stacks\/[^/]+\/update\/?$/i.test(req.path)
         && (await probeRemoteCapability(req.nodeId, 'remote-image-inspect-v1')).kind === 'supported') {
@@ -1044,6 +1281,74 @@ export function createRemoteProxyMiddleware(): RequestHandler {
 
     runGatedProxy().catch(next);
   };
+}
+
+/**
+ * Write the answer for a capability probe that could not run. A timeout on the
+ * permission probe is the same missed deadline an admin read gets, so it keeps
+ * the gateway's timeout marker instead of claiming the host is down. Every other
+ * transport failure is the node being unreachable; an HTTP error or a malformed
+ * body means the node answered, so only the requested capability is unverified.
+ *
+ * `subject` names what could not be verified, as a noun phrase that follows "so".
+ * It defaults to the permission model, the RBAC and scoped-evidence gates.
+ *
+ * Callers return immediately after this writes a response.
+ */
+function sendProbeUnavailable(
+  res: Response,
+  nodeName: string,
+  probe: Extract<RemoteCapabilityProbe, { kind: 'unreachable' }>,
+  subject = 'its permission model',
+): void {
+  if (probe.detail === 'transport_failure' && probe.transport === 'timeout') {
+    res.setHeader(REMOTE_READ_FAILURE_HEADER, 'timeout');
+    res.status(504).json(remoteReadTimeoutBody(nodeName));
+    return;
+  }
+  // Only a transport failure establishes silence. An HTTP error or a malformed
+  // body means the node answered, and "did not answer" would send the operator
+  // to the wrong fix.
+  const silent = probe.detail === 'transport_failure';
+  res.setHeader(REMOTE_READ_FAILURE_HEADER, silent ? 'unreachable' : 'unverified');
+  res.status(503).json({
+    error: probeUnavailableMessage(nodeName, probe.detail, subject),
+    code: silent ? 'remote_unreachable' : 'remote_unverified',
+    retryable: true,
+  });
+}
+
+/**
+ * Refuse an action because the node answered without the capability it needs.
+ * Marked apart from `unauthorized`: a 403 from this gate is the node needing an
+ * upgrade, while a real `PERMISSION_DENIED` 403 is the operator's own grants.
+ * The frontend renders the two differently.
+ */
+function refuseUpgradeRequired(res: Response, message: string): void {
+  res.setHeader(REMOTE_READ_FAILURE_HEADER, 'upgrade-required');
+  res.status(403).json({ error: message });
+}
+
+/**
+ * Name the capability refusal by what the probe actually observed. An HTTP
+ * error or a malformed body is not silence: saying the node "did not answer"
+ * would send the operator to check a node that answered.
+ */
+function probeUnavailableMessage(
+  nodeName: string,
+  detail: 'no_target' | 'transport_failure' | 'http_failure' | 'malformed',
+  subject = 'its permission model',
+): string {
+  switch (detail) {
+    case 'http_failure':
+      return `Remote node "${nodeName}" answered with an error, so ${subject} could not be verified. Try again once the node is healthy.`;
+    case 'malformed':
+      return `Remote node "${nodeName}" answered with a response this instance could not read, so ${subject} could not be verified. Try again once the node is healthy.`;
+    case 'no_target':
+      return `Remote node "${nodeName}" has no reachable API target, so ${subject} could not be verified. Check the node in Settings → Nodes.`;
+    case 'transport_failure':
+      return `Remote node "${nodeName}" did not answer, so ${subject} could not be verified. Try again when the node is reachable.`;
+  }
 }
 
 /** Max request body size for buffered settings writes (same as ALERT_PROXY_BODY_LIMIT). */
@@ -1280,14 +1585,19 @@ async function remoteSupportsScopedStackEdit(
   res: Response,
   node: { name: string },
 ): Promise<boolean> {
-  const evidenceSupported = await remoteAdvertisesCapability(
+  const evidence = await probeRemoteCapability(
     req.nodeId,
     SCOPED_STACK_AUTH_EVIDENCE_CAPABILITY,
   );
-  if (!evidenceSupported) {
-    res.status(403).json({
-      error: `Remote node "${node.name}" does not support scoped stack authorization. Upgrade it before scoped users can act on it.`,
-    });
+  if (evidence.kind === 'unreachable') {
+    sendProbeUnavailable(res, node.name, evidence, 'its support for scoped stack authorization');
+    return false;
+  }
+  if (evidence.kind === 'unsupported') {
+    refuseUpgradeRequired(
+      res,
+      `Remote node "${node.name}" does not support scoped stack authorization. Upgrade it before scoped users can act on it.`,
+    );
     return false;
   }
   return true;

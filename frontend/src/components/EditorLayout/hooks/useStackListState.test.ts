@@ -23,6 +23,7 @@ vi.mock('@/hooks/useImageUpdates', () => ({
 
 import { useStackListState } from './useStackListState';
 import { __resetStackStatusesFetchForTests } from '@/lib/stackStatusesFetch';
+import { toast } from '@/components/ui/toast-store';
 
 function okJson(payload: unknown): Response {
   return new Response(JSON.stringify(payload), {
@@ -38,6 +39,9 @@ function notFound(): Response {
 beforeEach(() => {
   __resetStackStatusesFetchForTests();
   apiFetchMock.mockReset();
+  vi.mocked(toast.error).mockClear();
+  vi.mocked(toast.success).mockClear();
+  vi.mocked(toast.info).mockClear();
   useNodesMock.mockReset();
   useImageUpdatesMock.mockReset();
   useNodesMock.mockReturnValue({
@@ -65,6 +69,138 @@ describe('useStackListState.refreshStacks failure classification', () => {
 
     expect(result.current.stacksLoadStatus).toBe('error');
     expect(result.current.files).toEqual([]);
+  });
+
+  it('names an unverified permission model instead of a bare status', async () => {
+    apiFetchMock.mockImplementation((endpoint: string) => {
+      if (endpoint === '/stacks') {
+        return Promise.resolve(new Response(
+          JSON.stringify({ code: 'remote_unverified' }),
+          { status: 503, headers: { 'x-sencho-read-failure': 'unverified' } },
+        ));
+      }
+      return Promise.resolve(notFound());
+    });
+
+    const { result } = renderHook(() => useStackListState());
+    await act(async () => {
+      await result.current.refreshStacks();
+    });
+
+    expect(result.current.stacksLoadStatus).toBe('error');
+    expect(result.current.stacksLoadError).toMatch(/permission model could not be verified/i);
+    expect(result.current.stacksLoadError).not.toMatch(/Could not load stacks \(503\)/);
+  });
+
+  it('names a rejected node credential when apiFetch throws a proxied 401', async () => {
+    // apiFetch throws before the caller sees the response. The catch must
+    // classify the attached response, or a deep link says "Unauthorized" for
+    // the hub's stored node token.
+    const response = new Response('Unauthorized', {
+      status: 401,
+      headers: { 'x-sencho-proxy': '1' },
+    });
+    apiFetchMock.mockImplementation((endpoint: string) => {
+      if (endpoint === '/stacks') {
+        return Promise.reject(Object.assign(new Error('Unauthorized'), { response }));
+      }
+      return Promise.resolve(notFound());
+    });
+
+    const { result } = renderHook(() => useStackListState());
+    await act(async () => {
+      await result.current.refreshStacks();
+    });
+
+    expect(result.current.stacksLoadStatus).toBe('error');
+    expect(result.current.stacksLoadError).toMatch(/stored credential/i);
+    expect(result.current.stacksLoadError).not.toBe('Unauthorized');
+  });
+
+  it('names a rejected node credential in the status-refresh toast after the list loaded', async () => {
+    apiFetchMock.mockImplementation((endpoint: string) => {
+      if (endpoint === '/stacks') return Promise.resolve(okJson(['web.yml']));
+      if (endpoint === '/stacks/statuses') {
+        return Promise.resolve(new Response('Unauthorized', {
+          status: 401,
+          headers: { 'x-sencho-proxy': '1' },
+        }));
+      }
+      return Promise.resolve(notFound());
+    });
+
+    const { result } = renderHook(() => useStackListState());
+    await act(async () => {
+      await result.current.refreshStacks();
+    });
+
+    // The list itself loaded, so the only signal is the status-refresh toast.
+    // It must name the stored token, not tell the operator to check the
+    // connection for a rejected node credential.
+    expect(toast.error).toHaveBeenCalledWith(expect.stringMatching(/stored credential/i));
+    expect(vi.mocked(toast.error).mock.calls.some(([message]) => String(message).includes('connection'))).toBe(false);
+  });
+
+  it('names an unverified permission model in the status-refresh toast', async () => {
+    apiFetchMock.mockImplementation((endpoint: string) => {
+      if (endpoint === '/stacks') return Promise.resolve(okJson(['web.yml']));
+      if (endpoint === '/stacks/statuses') {
+        return Promise.resolve(new Response(
+          JSON.stringify({ code: 'remote_unverified' }),
+          { status: 503, headers: { 'x-sencho-read-failure': 'unverified' } },
+        ));
+      }
+      return Promise.resolve(notFound());
+    });
+
+    const { result } = renderHook(() => useStackListState());
+    await act(async () => {
+      await result.current.refreshStacks();
+    });
+
+    expect(toast.error).toHaveBeenCalledWith(expect.stringMatching(/permission model could not be verified/i));
+    expect(vi.mocked(toast.error).mock.calls.some(([message]) => String(message).includes('connection'))).toBe(false);
+  });
+
+  it('stays silent on a background status-refresh failure', async () => {
+    apiFetchMock.mockImplementation((endpoint: string) => {
+      if (endpoint === '/stacks') return Promise.resolve(okJson(['web.yml']));
+      if (endpoint === '/stacks/statuses') {
+        return Promise.resolve(new Response('Unauthorized', {
+          status: 401,
+          headers: { 'x-sencho-proxy': '1' },
+        }));
+      }
+      return Promise.resolve(notFound());
+    });
+
+    const { result } = renderHook(() => useStackListState());
+    await act(async () => {
+      await result.current.refreshStacks(true);
+    });
+
+    // Dashboard polls self-heal; a toast on every poll would become a storm.
+    expect(toast.error).not.toHaveBeenCalled();
+  });
+
+  it('shows the capability sentence from a list refusal body', async () => {
+    apiFetchMock.mockImplementation((endpoint: string) => {
+      if (endpoint === '/stacks') {
+        return Promise.resolve(new Response(
+          JSON.stringify({ error: 'Remote node "Local" does not support scoped stack authorization. Upgrade it before scoped users can act on it.' }),
+          { status: 403, headers: { 'x-sencho-read-failure': 'upgrade-required' } },
+        ));
+      }
+      return Promise.resolve(notFound());
+    });
+
+    const { result } = renderHook(() => useStackListState());
+    await act(async () => {
+      await result.current.refreshStacks();
+    });
+
+    expect(result.current.stacksLoadError).toMatch(/scoped stack authorization/i);
+    expect(result.current.stacksLoadError).not.toMatch(/per-user permissions/i);
   });
 
   it('surfaces a recoverable error on a background failure after the list was already confirmed empty', async () => {
@@ -724,5 +860,79 @@ describe('useStackListState stale callback node targeting', () => {
     expect(result.current.filesNodeId).toBe(2);
     expect(result.current.hydrationStatus).toBe('ok');
     expect(result.current.actionsReady).toBe(true);
+  });
+
+  it('names a disconnected Pilot on the stack list instead of printing a 503', async () => {
+    apiFetchMock.mockImplementation((endpoint: string) => {
+      if (endpoint === '/stacks') {
+        return Promise.resolve(new Response(JSON.stringify({ error: 'Pilot tunnel disconnected.' }), {
+          status: 503,
+          headers: { 'x-sencho-read-failure': 'pilot-disconnected' },
+        }));
+      }
+      return Promise.resolve(notFound());
+    });
+
+    const { result } = renderHook(() => useStackListState());
+    await act(async () => {
+      await result.current.refreshStacks();
+    });
+
+    expect(result.current.stacksLoadStatus).toBe('error');
+    expect(result.current.stacksLoadError).toMatch(/Pilot tunnel to "Local" is disconnected/i);
+    expect(result.current.stacksLoadError).not.toMatch(/503/);
+  });
+
+  it('names a disconnected Pilot from the stack-statuses read, not a generic status', async () => {
+    apiFetchMock.mockImplementation((endpoint: string) => {
+      if (endpoint === '/stacks') {
+        return Promise.resolve(okJson(['demo.yml']));
+      }
+      if (endpoint === '/stacks/statuses') {
+        return Promise.resolve(new Response(JSON.stringify({ error: 'Pilot tunnel disconnected.' }), {
+          status: 503,
+          headers: { 'x-sencho-read-failure': 'pilot-disconnected' },
+        }));
+      }
+      return Promise.resolve(notFound());
+    });
+
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    try {
+      const { result } = renderHook(() => useStackListState());
+      await act(async () => {
+        await result.current.refreshStacks();
+      });
+
+      expect(result.current.files).toEqual(['demo.yml']);
+      expect(result.current.hydrationDisplay).toBe('error');
+      // The list card falls back to the hydration copy; the status read's own
+      // cause is what the diagnostic carries. Assert the cause survived the
+      // transport instead of collapsing into "status 503".
+      expect(errorSpy).toHaveBeenCalledWith(expect.stringMatching(/Pilot tunnel to "Local" is disconnected/i));
+    } finally {
+      errorSpy.mockRestore();
+    }
+  });
+
+  it('names a missed read deadline on the stack list instead of printing a 504', async () => {
+    apiFetchMock.mockImplementation((endpoint: string) => {
+      if (endpoint === '/stacks') {
+        return Promise.resolve(new Response(JSON.stringify({ code: 'remote_read_timeout' }), {
+          status: 504,
+          headers: { 'x-sencho-read-timeout': '1' },
+        }));
+      }
+      return Promise.resolve(notFound());
+    });
+
+    const { result } = renderHook(() => useStackListState());
+    await act(async () => {
+      await result.current.refreshStacks();
+    });
+
+    expect(result.current.stacksLoadStatus).toBe('error');
+    expect(result.current.files).toEqual([]);
+    expect(result.current.stacksLoadError).toMatch(/did not answer in time/i);
   });
 });

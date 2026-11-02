@@ -2,6 +2,7 @@ import { useState, useEffect, useRef, useMemo, useCallback } from 'react';
 import { apiFetch } from '@/lib/api';
 import { REMOTE_IMAGE_INSPECT_V1_CAPABILITY } from '@/lib/capabilities';
 import { fetchStackStatusesShared } from '@/lib/stackStatusesFetch';
+import { classifyRemoteReadError, classifyRemoteReadFailure, isNamedReadFailure, remoteReadFailureMessage } from '@/lib/remoteReadFailure';
 import {
   newAttemptId,
   abortAttempt,
@@ -448,6 +449,7 @@ export function useStackListState() {
                   body: result.body,
                   proxied: result.proxied,
                   coalesced: result.coalesced,
+                  failure: result.failure,
                   error: null,
                 };
               },
@@ -500,6 +502,29 @@ export function useStackListState() {
       endSpan(headersSpan, { proxied, detail: { status: res.status } });
       if (stale()) { abortAttempt(attemptId); return []; }
       if (!res.ok) {
+        // A named cause (a missed deadline, an unreachable host, a disconnected
+        // Pilot, no configured target, a refused address, an unverified
+        // permission model, a rejected node credential, or an access denial)
+        // names itself, so the sidebar's retry state says why instead of
+        // printing a status code the operator cannot act on.
+        const readFailure = classifyRemoteReadFailure(res);
+        if (isNamedReadFailure(readFailure)) {
+          // The two capability refusals carry the gateway's own sentence
+          // naming the capability it probed. Read the body only for those, so
+          // an ordinary failure answer is not buffered just to be discarded.
+          const bodyText = readFailure === 'unverified' || readFailure === 'upgrade-required'
+            ? await res.text().catch(() => null)
+            : null;
+          // Reading the body is a new await after the supersession check
+          // above; a newer refresh must still win, as it does after every
+          // other await in this function.
+          if (stale()) { abortAttempt(attemptId); return []; }
+          return applyStacksFailure(remoteReadFailureMessage(readFailure, {
+            nodeName: activeNode?.name,
+            status: res.status,
+            body: bodyText,
+          }));
+        }
         return applyStacksFailure(`Could not load stacks (${res.status})`);
       }
       bodySpan = beginSpan('body_decode', { attemptId, background, proxied });
@@ -560,13 +585,19 @@ export function useStackListState() {
       let coveredFileCount = 0;
       const statusProxied = statusOutcome.proxied || proxied;
 
-      const failHydration = (reason: string): string[] => {
+      const failHydration = (reason: string, options: { named?: boolean } = {}): string[] => {
         console.error(`Failed to refresh stack statuses: ${reason}`);
         if (listSucceeded && !background) {
           markMilestone('list_hydrated', { attemptId, outcome: 'error', proxied });
           // Foreground (user-initiated) failures get one explicit signal; the
           // dashboard's background polls stay silent because they self-heal.
-          toast.error('Could not refresh stack statuses. Check the node connection and try again.');
+          // A cause the gateway named keeps its own sentence: telling the
+          // operator to check the connection for a rejected credential sends
+          // them to the wrong fix. Only an unclassified failure keeps the
+          // connection line.
+          toast.error(options.named
+            ? reason
+            : 'Could not refresh stack statuses. Check the node connection and try again.');
         }
         // Same-list failure restores the attempt-start snapshot (stale) so the
         // operator keeps last-known statuses with an explicit stale marker.
@@ -591,6 +622,17 @@ export function useStackListState() {
 
       if (statusOutcome.error) {
         return failHydration(statusOutcome.error.message);
+      }
+      const statusReadFailure = statusOutcome.failure;
+      if (
+        statusReadFailure !== undefined
+        && statusReadFailure !== 'auth-abort'
+        && isNamedReadFailure(statusReadFailure)
+      ) {
+        return failHydration(remoteReadFailureMessage(statusReadFailure, {
+          nodeName: activeNode?.name,
+          status: statusOutcome.status,
+        }), { named: true });
       }
       if (statusOutcome.ok && isValidBulkPayload(statusOutcome.body)) {
         // Decode already happened inside the shared helper; do not emit a fake
@@ -675,7 +717,13 @@ export function useStackListState() {
       if (bodySpan !== null) endSpan(bodySpan, { outcome: 'error' });
       if (stale()) { abortAttempt(attemptId); return []; }
       console.error('Failed to refresh stacks:', error);
-      const message = error instanceof Error ? error.message : 'Failed to load stacks';
+      // apiFetch throws a 401 before the caller sees the response, attaching it
+      // to the error. Classify that response so a rejected node credential (or a
+      // real access denial) names itself, like the returned-answer paths do.
+      const readFailure = classifyRemoteReadError(error);
+      const message = isNamedReadFailure(readFailure)
+        ? remoteReadFailureMessage(readFailure, { nodeName: activeNode?.name })
+        : error instanceof Error ? error.message : 'Failed to load stacks';
       // The list committed but hydrating its statuses threw: keep the confirmed
       // list visible with error evidence, rather than erasing it. A list that
       // never loaded takes the existing failure path.

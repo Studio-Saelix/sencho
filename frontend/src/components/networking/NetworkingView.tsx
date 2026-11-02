@@ -10,6 +10,7 @@ import { LockCard } from '@/components/ui/LockCard';
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table';
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip';
 import { apiFetch } from '@/lib/api';
+import { classifyRemoteReadError, classifyRemoteReadFailure, remoteReadFailureMessage, type RemoteReadFailure } from '@/lib/remoteReadFailure';
 import { toast } from '@/components/ui/toast-store';
 import { useAuth } from '@/context/AuthContext';
 import { useNodes } from '@/context/NodeContext';
@@ -102,6 +103,7 @@ export function NetworkingView({ headerActions }: NetworkingViewProps) {
   const [tab, setTab] = useState<NetworkingTab>('overview');
   const [loading, setLoading] = useState(true);
   const [unsupported, setUnsupported] = useState(false);
+  const [loadFailure, setLoadFailure] = useState<RemoteReadFailure | null>(null);
   const [overview, setOverview] = useState<NodeNetworkingOverview | null>(null);
   const [networks, setNetworks] = useState<NetworkingNetworkRow[]>([]);
   const [findings, setFindings] = useState<NetworkingFinding[]>([]);
@@ -151,6 +153,7 @@ export function NetworkingView({ headerActions }: NetworkingViewProps) {
     let stale = false;
     setLoading(true);
     setUnsupported(false);
+    setLoadFailure(null);
     setOverview(null);
     setNetworks([]);
     setFindings([]);
@@ -164,7 +167,12 @@ export function NetworkingView({ headerActions }: NetworkingViewProps) {
           if (!stale) setUnsupported(true);
           return;
         }
-        if (!response.ok) throw new Error('Failed to load networking data.');
+        if (!response.ok) {
+          // An unreachable or timed-out node is a state, not a thrown error: the
+          // page names it and offers a retry instead of drawing zeroed cards.
+          if (!stale) setLoadFailure(classifyRemoteReadFailure(response) ?? 'http');
+          return;
+        }
         const body = await response.json() as Partial<NetworkingOverviewEnvelope>;
         if (stale) return;
         if (developerModeRef.current) {
@@ -185,7 +193,10 @@ export function NetworkingView({ headerActions }: NetworkingViewProps) {
       } catch (error) {
         if (!stale && !(error instanceof DOMException && error.name === 'AbortError')) {
           console.error('[Networking] Failed to load overview:', error);
-          toast.error('Failed to load networking data.');
+          // A thrown error can still carry an answer: apiFetch throws on 401
+          // before the caller sees the response. Classify it so the page names
+          // the cause instead of generic transport copy.
+          setLoadFailure(classifyRemoteReadError(error));
         }
       } finally {
         if (!stale) setLoading(false);
@@ -347,6 +358,28 @@ export function NetworkingView({ headerActions }: NetworkingViewProps) {
         title="Networking is not available on this node"
         body="Upgrade the node to use the Networking page."
       />
+    );
+  }
+
+  // Nothing on this page was read, so nothing on it may be shown: an empty
+  // network list would read as a clean node.
+  if (loadFailure) {
+    return (
+      <div className="flex flex-1 flex-col items-center justify-center gap-4 p-8 min-h-[280px]">
+        <div className="flex max-w-md flex-col items-center gap-4 rounded-xl border border-card-border bg-card px-10 py-8 text-center">
+          <Unplug className="h-8 w-8 text-warning" strokeWidth={1.5} aria-hidden />
+          <div className="flex flex-col gap-1">
+            <p className="text-sm font-semibold text-stat-value">Networking did not load</p>
+            <p className="text-sm text-stat-subtitle">
+              {remoteReadFailureMessage(loadFailure, { nodeName: activeNode?.name })}
+            </p>
+          </div>
+          <Button type="button" variant="outline" size="sm" onClick={() => setReloadKey(k => k + 1)}>
+            <RefreshCw className="h-4 w-4" />
+            Retry
+          </Button>
+        </div>
+      </div>
     );
   }
 
