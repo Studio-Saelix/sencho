@@ -398,8 +398,7 @@ jobs:
             ci-logs/
           retention-days: 7
 
-  # Single status for branch protection, which requires this exact job name. It also runs the workflow
-  # expression guard, so that check is required.
+  # Single status for branch protection, which requires this exact job name.
   # Passes when every shard passed, or E2E was skipped because change
   # detection succeeded and found no code. A failed detection job fails this
   # check so it cannot turn every gate into a silent skip.
