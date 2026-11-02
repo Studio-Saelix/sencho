@@ -7,6 +7,8 @@ import type { ImageUpdateImageFacts } from './imageUpdateFacts';
 import { DatabaseService } from './DatabaseService';
 import { buildSummary, type UpdatePreviewImage } from './UpdatePreviewService';
 import { parseImageRef } from './registry-api';
+import { probeRemoteCapability } from '../helpers/remoteCapabilities';
+import { SENCHO_LABEL_POLICY_CAPABILITY } from '../helpers/senchoLabels';
 
 export class RemoteImageUpdateService implements RemoteAutoUpdateScanner {
     private static instance: RemoteImageUpdateService;
@@ -20,8 +22,13 @@ export class RemoteImageUpdateService implements RemoteAutoUpdateScanner {
         return fetchRemoteImageUpdateRoster(nodeId, signal);
     }
 
-    public async inspectRemoteStack(nodeId: number, stack: string, signal: AbortSignal) {
-        const facts = await fetchRemoteImageUpdateFacts(nodeId, stack, signal);
+    public async inspectRemoteStack(
+        nodeId: number,
+        stack: string,
+        signal: AbortSignal,
+        options?: { includePolicy?: boolean },
+    ) {
+        const facts = await fetchRemoteImageUpdateFacts(nodeId, stack, signal, options);
         const imageResults = new Map<string, ImageCheckResult>();
         let next = 0;
         const worker = async () => {
@@ -92,7 +99,8 @@ export class RemoteImageUpdateService implements RemoteAutoUpdateScanner {
         const owner = ImageUpdateService.getInstance();
         if (!ImageUpdateService.isChecksEnabled()) return { warning: UPDATE_VERIFICATION_INCOMPLETE_WARNING };
         const generation = owner.reserveStackWriteGeneration(nodeId, stack);
-        const { facts, imageResults } = await this.inspectRemoteStack(nodeId, stack, signal);
+        const includePolicy = await this.targetEvaluatesPolicy(nodeId);
+        const { facts, imageResults } = await this.inspectRemoteStack(nodeId, stack, signal, { includePolicy });
         signal.throwIfAborted();
         return owner.commitRemoteObservation(nodeId, facts, imageResults, generation);
     }
@@ -100,6 +108,7 @@ export class RemoteImageUpdateService implements RemoteAutoUpdateScanner {
     public async checkRemoteNode(nodeId: number, manual = false): Promise<boolean> {
         const owner = ImageUpdateService.getInstance();
         return owner.runRemoteScan(nodeId, manual, async () => {
+            const includePolicy = await this.targetEvaluatesPolicy(nodeId);
             const known = Object.keys(DatabaseService.getInstance().getStackUpdateDetail(nodeId));
             const failureGenerations = new Map(known.map(stack => [stack, owner.reserveStackWriteGeneration(nodeId, stack)]));
             let stacks: string[];
@@ -115,7 +124,7 @@ export class RemoteImageUpdateService implements RemoteAutoUpdateScanner {
             for (const stack of stacks) {
                 try {
                     const signal = AbortSignal.timeout(90_000);
-                    const { facts, imageResults } = await this.inspectRemoteStack(nodeId, stack, signal);
+                    const { facts, imageResults } = await this.inspectRemoteStack(nodeId, stack, signal, { includePolicy });
                     signal.throwIfAborted();
                     await owner.commitRemoteObservation(nodeId, facts, imageResults, generations.get(stack)!);
                 } catch (error) {
@@ -124,5 +133,15 @@ export class RemoteImageUpdateService implements RemoteAutoUpdateScanner {
                 }
             }
         });
+    }
+
+    /**
+     * Whether the target can evaluate `io.sencho.update`. An older target cannot,
+     * so the facts request omits the policy and its rows keep the last decision
+     * instead of the hub guessing one from its own filesystem.
+     */
+    private async targetEvaluatesPolicy(nodeId: number): Promise<boolean> {
+        const capability = await probeRemoteCapability(nodeId, SENCHO_LABEL_POLICY_CAPABILITY);
+        return capability.kind === 'supported';
     }
 }

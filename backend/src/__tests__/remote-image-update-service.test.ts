@@ -9,6 +9,9 @@ vi.mock('../services/remoteImageUpdateClient', () => ({
     fetchRemoteImageUpdateFacts: vi.fn(), fetchRemoteImageUpdateRoster: vi.fn(),
 }));
 vi.mock('../services/remoteImageUpdateProbe', () => ({ probeRemoteImageUpdate: vi.fn() }));
+vi.mock('../helpers/remoteCapabilities', () => ({
+    probeRemoteCapability: vi.fn().mockResolvedValue({ kind: 'supported' }),
+}));
 const owner = vi.hoisted(() => ({ reserveStackWriteGeneration: vi.fn(), commitRemoteObservation: vi.fn() }));
 vi.mock('../services/ImageUpdateService', () => ({
     ImageUpdateService: { getInstance: () => owner, isChecksEnabled: () => true },
@@ -71,4 +74,16 @@ it('reserves a hub generation before fetching facts and never uses the target re
     await RemoteImageUpdateService.getInstance().recheckRemoteStack(2, 'web', new AbortController().signal);
     expect(owner.reserveStackWriteGeneration.mock.invocationCallOrder[0]).toBeLessThan(vi.mocked(fetchRemoteImageUpdateFacts).mock.invocationCallOrder[0]);
     expect(owner.commitRemoteObservation).toHaveBeenCalledWith(2, facts, expect.any(Map), 7);
+    // A target that evaluates the label answers with the policy, so the commit
+    // can record the same skip its own schedule applies.
+    expect(fetchRemoteImageUpdateFacts).toHaveBeenCalledWith(2, 'web', expect.any(AbortSignal), { includePolicy: true });
+});
+
+it('does not ask an older target for a policy it cannot evaluate', async () => {
+    const { probeRemoteCapability } = await import('../helpers/remoteCapabilities');
+    vi.mocked(probeRemoteCapability).mockResolvedValueOnce({ kind: 'unsupported' });
+    owner.reserveStackWriteGeneration.mockReturnValue(7);
+    owner.commitRemoteObservation.mockResolvedValue({ outcome: 'cleared', warning: null });
+    await RemoteImageUpdateService.getInstance().recheckRemoteStack(2, 'web', new AbortController().signal);
+    expect(fetchRemoteImageUpdateFacts).toHaveBeenCalledWith(2, 'web', expect.any(AbortSignal), { includePolicy: false });
 });

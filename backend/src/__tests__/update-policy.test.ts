@@ -21,6 +21,7 @@ import {
   evaluateUpdatePolicy,
   ineligibleServices,
   readRemoteUpdatePolicy,
+  toUnattendedStatusPolicy,
   toUpdatePolicyWire,
   triggerClassOf,
   UpdatePolicyRefusedError,
@@ -269,5 +270,26 @@ describe('the wire projection', () => {
     expect(describePolicySkip(policy)).toBe('skipped by update policy (db: manual)');
     const unrenderable = evaluateUpdatePolicy({ renderable: false }, stackRequest('scheduled'));
     expect(describePolicySkip(unrenderable)).toBe('skipped by update policy (Compose could not be rendered)');
+  });
+});
+
+describe('the Updates-view policy projection', () => {
+  it('records an allow and names the services an unattended run would skip', () => {
+    const allowing = evaluateUpdatePolicy(resolution({ web: {} }), stackRequest('scheduled'));
+    expect(toUnattendedStatusPolicy({ manual: allowing, unattended: allowing })).toEqual({
+      decision: 'allow', ineligible: [],
+    });
+
+    const skipping = evaluateUpdatePolicy(
+      resolution({ web: { update: 'manual' }, db: { update: 'disabled' } }), stackRequest('scheduled'),
+    );
+    expect(toUnattendedStatusPolicy({ manual: skipping, unattended: skipping })).toEqual({
+      decision: 'skip',
+      ineligible: [{ service: 'db', policy: 'disabled' }, { service: 'web', policy: 'manual' }],
+    });
+  });
+
+  it('fails closed to skip when the pair could not be read', () => {
+    expect(toUnattendedStatusPolicy(null)).toEqual({ decision: 'skip', ineligible: [] });
   });
 });

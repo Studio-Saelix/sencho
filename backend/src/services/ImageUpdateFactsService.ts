@@ -22,6 +22,7 @@ import {
     type ImageUpdateStackFacts,
 } from './imageUpdateFacts';
 import { ImageUpdateObservationService } from './ImageUpdateObservationService';
+import { resolveUpdatePolicyPair, toUnattendedStatusPolicy } from './updatePolicy';
 import { parseImageRef, selectLocalRepoDigests } from './registry-api';
 import { NodeRegistry } from './NodeRegistry';
 import { withTimeout } from '../utils/withTimeout';
@@ -108,7 +109,12 @@ export class ImageUpdateFactsService {
         return { model: { renderable: true }, services, images: await this.inspectRefs(docker, [...refs]) };
     }
 
-    async collect(nodeId: number, stackName: string, requestNonce: string): Promise<ImageUpdateStackFacts> {
+    async collect(
+        nodeId: number,
+        stackName: string,
+        requestNonce: string,
+        includePolicy = false,
+    ): Promise<ImageUpdateStackFacts> {
         const bound = await this.readLocal(nodeId, stackName);
         const observationRevision = this.nextRevision();
         const factsHash = hashImageUpdateFacts(bound);
@@ -117,7 +123,16 @@ export class ImageUpdateFactsService {
             contractVersion: 1, requestNonce, stack: stackName,
             observationRevision, factsHash,
         });
-        return { name: stackName, observationRevision, observationToken, ...bound, images };
+        // The decision is evaluated here, where the Compose model lives, so the
+        // hub records the same answer an unattended run on this node takes. A
+        // model that cannot be rendered fails closed to skip.
+        const unattendedPolicy = includePolicy
+            ? toUnattendedStatusPolicy(await resolveUpdatePolicyPair(nodeId, stackName, { scope: 'stack' }))
+            : undefined;
+        return {
+            name: stackName, observationRevision, observationToken, ...bound, images,
+            ...(unattendedPolicy ? { unattendedPolicy } : {}),
+        };
     }
 
     private async probeAuthorities(bound: ImageUpdateBoundFacts): Promise<ImageUpdateImageFacts[]> {

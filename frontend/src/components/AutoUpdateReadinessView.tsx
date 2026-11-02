@@ -1197,7 +1197,7 @@ function AutoUpdateReadinessContent({ headerActions }: AutoUpdateReadinessProps)
       const [statusRes, tasksRes, detailRes] = await Promise.all([
         apiFetch('/image-updates/fleet', { localOnly: true }),
         apiFetch('/scheduled-tasks?action=update', { localOnly: true }),
-        apiFetch('/image-updates/detail', { localOnly: true }),
+        apiFetch('/image-updates/fleet/detail', { localOnly: true }),
       ]);
       if (token !== loadTokenRef.current) return;
 
@@ -1212,25 +1212,32 @@ function AutoUpdateReadinessContent({ headerActions }: AutoUpdateReadinessProps)
       // Sticky has_update during a failed check is not a verified rebuild, so those
       // stacks stay in the advisory only.
       let failedLocalStacks = new Set<string>();
-      const unattendedByStack = new Map<string, StackUnattendedPolicy>();
+      // The policy decision is recorded per node by whichever instance owns the
+      // stack, so the same view can show it for local, proxy and Pilot nodes.
+      const unattendedByNodeStack = new Map<string, StackUnattendedPolicy>();
       if (detailRes.ok) {
-        const detail = await detailRes.json() as Record<string, StackUpdateInfo>;
-        const failures = Object.entries(detail)
+        const fleetDetail = await detailRes.json() as Record<string, Record<string, StackUpdateInfo>>;
+        const currentLocalId = nodesRef.current.find(n => n.type === 'local')?.id ?? null;
+        const localDetail = currentLocalId === null ? {} : (fleetDetail[String(currentLocalId)] ?? {});
+        const failures = Object.entries(localDetail)
           .filter(([, info]) => info.checkStatus === 'failed')
           .map(([stack, info]) => ({ stack, reason: info.lastError }))
           .sort((a, b) => a.stack.localeCompare(b.stack));
         failedLocalStacks = new Set(failures.map(f => f.stack));
-        // The local node's detail is the only place the policy decision rides
-        // along; a remote shows no note rather than an assumed allow.
-        for (const [stack, info] of Object.entries(detail)) {
-          const policy = readUnattendedPolicy(info?.unattendedPolicy);
-          if (policy) unattendedByStack.set(stack, policy);
+        // A node that does not record a decision (an older remote) shows no
+        // note rather than an assumed allow.
+        for (const [nodeIdStr, nodeDetail] of Object.entries(fleetDetail)) {
+          if (!nodeDetail || typeof nodeDetail !== 'object') continue;
+          for (const [stack, info] of Object.entries(nodeDetail)) {
+            const policy = readUnattendedPolicy(info?.unattendedPolicy);
+            if (policy) unattendedByNodeStack.set(`${nodeIdStr}::${stack}`, policy);
+          }
         }
         setCheckFailures(failures);
       } else {
         // Clear stale failures rather than persist them across a load, but log:
         // an empty advisory must not silently stand in for "detail unavailable".
-        console.error('[AutoUpdateReadiness] /image-updates/detail failed:', detailRes.status);
+        console.error('[AutoUpdateReadiness] /image-updates/fleet/detail failed:', detailRes.status);
         setCheckFailures([]);
       }
 
@@ -1296,7 +1303,7 @@ function AutoUpdateReadinessContent({ headerActions }: AutoUpdateReadinessProps)
             applyingService: null,
             autoUpdateEnabled: scheduledTask !== null,
             verificationNote: null,
-            unattendedPolicy: node.type === 'local' ? (unattendedByStack.get(stack) ?? null) : undefined,
+            unattendedPolicy: unattendedByNodeStack.get(`${nodeId}::${stack}`) ?? null,
           };
         });
         initialGroups.push({

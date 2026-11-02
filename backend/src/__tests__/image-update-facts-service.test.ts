@@ -6,6 +6,7 @@ const docker = vi.hoisted(() => ({
     getAllContainers: vi.fn(),
     getDocker: vi.fn(),
 }));
+const policy = vi.hoisted(() => ({ resolveUpdatePolicyPair: vi.fn() }));
 import { ImageUpdateFactsService } from '../services/ImageUpdateFactsService';
 
 vi.mock('../services/NodeRegistry', () => ({
@@ -20,6 +21,13 @@ vi.mock('../services/effectiveServiceModel', () => ({
 vi.mock('../services/imageUpdateTargetAuthority', () => ({
     collectTargetImageAuthority: vi.fn(),
 }));
+vi.mock('../services/ImageUpdateObservationService', () => ({
+    ImageUpdateObservationService: { getInstance: () => ({ issue: () => 'signed-observation' }) },
+}));
+vi.mock('../services/updatePolicy', async (importOriginal) => {
+    const actual = await importOriginal<typeof import('../services/updatePolicy')>();
+    return { ...actual, resolveUpdatePolicyPair: policy.resolveUpdatePolicyPair };
+});
 vi.mock('../services/DockerController', () => ({
     default: { getInstance: () => docker },
 }));
@@ -27,6 +35,7 @@ vi.mock('../services/DockerController', () => ({
 beforeEach(() => {
     vi.clearAllMocks();
     ImageUpdateFactsService.resetForTests();
+    policy.resolveUpdatePolicyPair.mockResolvedValue(null);
     vi.mocked(buildEffectiveServiceModel).mockResolvedValue({
         renderable: true,
         services: [{ name: 'web', declaredImage: 'nginx:1.27', hasBuild: false, expectedReplicas: 1, dependsOn: [], hasHealthcheck: false }],
@@ -136,4 +145,33 @@ it('preserves build-only services without inventing an image reference', async (
         images: [],
     });
     expect(docker.getDocker).not.toHaveBeenCalled();
+});
+
+it('carries the unattended decision when the request asks for it, and fails closed when the model cannot render', async () => {
+    docker.getDocker.mockReturnValue({ getImage: () => ({ inspect: vi.fn().mockResolvedValue({ RepoDigests: [] }) }) });
+    policy.resolveUpdatePolicyPair.mockResolvedValueOnce({
+        manual: { decision: 'block' },
+        unattended: {
+            evaluation: 'evaluated', decision: 'skip',
+            services: [
+                { service: 'web', policy: 'manual', eligible: false, reason: 'set to manual' },
+            ],
+        },
+    });
+    const facts = await ImageUpdateFactsService.getInstance().collect(1, 'site', 'a'.repeat(32), true);
+    expect(facts.unattendedPolicy).toEqual({
+        decision: 'skip', ineligible: [{ service: 'web', policy: 'manual' }],
+    });
+
+    // An unreadable model records the same skip an unattended run takes.
+    policy.resolveUpdatePolicyPair.mockResolvedValueOnce(null);
+    const failed = await ImageUpdateFactsService.getInstance().collect(1, 'site', 'a'.repeat(32), true);
+    expect(failed.unattendedPolicy).toEqual({ decision: 'skip', ineligible: [] });
+});
+
+it('omits the unattended decision when the caller did not ask for one', async () => {
+    docker.getDocker.mockReturnValue({ getImage: () => ({ inspect: vi.fn().mockResolvedValue({ RepoDigests: [] }) }) });
+    const facts = await ImageUpdateFactsService.getInstance().collect(1, 'site', 'a'.repeat(32));
+    expect(facts.unattendedPolicy).toBeUndefined();
+    expect(policy.resolveUpdatePolicyPair).not.toHaveBeenCalled();
 });

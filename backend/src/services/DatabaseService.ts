@@ -6506,6 +6506,24 @@ stmt.run('gitops_schema_version', '1');
     }
 
     /**
+     * Update only the recorded unattended decision, leaving every update-status
+     * field and the write generation untouched. Used when a check observed that
+     * the Compose model cannot render: the update result is unknown, but the
+     * unattended decision is known to fail closed, and prior update evidence
+     * must survive. No existing row means there is nothing to annotate.
+     */
+    public recordUnattendedPolicy(
+        nodeId: number,
+        stackName: string,
+        unattendedPolicy: StackUpdateUnattendedPolicy,
+    ): number {
+        return this.db.prepare(
+            `UPDATE stack_update_status SET unattended_policy_json = ?
+             WHERE node_id = ? AND stack_name = ?`
+        ).run(JSON.stringify(unattendedPolicy), nodeId, stackName).changes;
+    }
+
+    /**
      * Raw has_update map for scanner retention and notification transitions.
      * Ignores check_status: a partial/failed row with has_update=1 stays true
      * so ImageUpdateService can preserve sticky state across incomplete runs.

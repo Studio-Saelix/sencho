@@ -43,6 +43,19 @@ export interface ImageUpdateStackFacts extends ImageUpdateBoundFacts {
     observationRevision: number;
     observationToken: string;
     images: ImageUpdateImageFacts[];
+    /**
+     * The target's unattended decision for this stack, present only when the
+     * request asked for it and the target evaluates the label (the capability
+     * gate is the caller's). Absent means "not evaluated here", so the reader
+     * keeps the last decision it recorded rather than assuming allow.
+     */
+    unattendedPolicy?: ImageUpdateUnattendedPolicyFacts;
+}
+
+/** The Updates-view projection of the unattended decision, evaluated on the node that owns the stack. */
+export interface ImageUpdateUnattendedPolicyFacts {
+    decision: 'allow' | 'skip';
+    ineligible: { service: string; policy: string }[];
 }
 
 export interface ImageUpdateFactsResponse {

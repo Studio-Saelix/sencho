@@ -11,6 +11,7 @@ const {
   mockGetStackUpdateStatus, mockUpsertStackUpdateStatus, mockClearStackUpdateStatus,
   mockClearAllStackUpdateStatus, mockUpdateGlobalSetting,
   mockRecordStackCheckFailure, mockGetStackServicesJson,
+  mockRecordUnattendedPolicy,
   mockGetSystemState, mockSetSystemState, mockAddNotificationHistory,
   mockDispatchAlert, mockBroadcastEvent,
   mockGetStacks, mockGetStackContent, mockGetEnvContent, mockEnvExists,
@@ -25,6 +26,7 @@ const {
   mockClearAllStackUpdateStatus: vi.fn().mockReturnValue(0),
   mockUpdateGlobalSetting: vi.fn(),
   mockRecordStackCheckFailure: vi.fn(),
+  mockRecordUnattendedPolicy: vi.fn(),
   mockGetStackServicesJson: vi.fn().mockReturnValue([]),
   mockGetSystemState: vi.fn().mockReturnValue('1'), // default: backfilled
   mockSetSystemState: vi.fn(),
@@ -70,6 +72,7 @@ vi.mock('../services/DatabaseService', () => ({
       clearStackUpdateStatus: mockClearStackUpdateStatus,
       clearAllStackUpdateStatus: mockClearAllStackUpdateStatus,
       recordStackCheckFailure: mockRecordStackCheckFailure,
+      recordUnattendedPolicy: mockRecordUnattendedPolicy,
       getStackServicesJson: mockGetStackServicesJson,
       getSystemState: mockGetSystemState,
       setSystemState: mockSetSystemState,
@@ -384,6 +387,7 @@ services:
     upsertStackUpdateStatus: mockUpsertStackUpdateStatus,
     clearStackUpdateStatus: mockClearStackUpdateStatus,
     recordStackCheckFailure: mockRecordStackCheckFailure,
+    recordUnattendedPolicy: mockRecordUnattendedPolicy,
     getSystemState: mockGetSystemState,
     setSystemState: mockSetSystemState,
     addNotificationHistory: mockAddNotificationHistory,
@@ -631,6 +635,7 @@ services:
     upsertStackUpdateStatus: mockUpsertStackUpdateStatus,
     clearStackUpdateStatus: mockClearStackUpdateStatus,
     recordStackCheckFailure: mockRecordStackCheckFailure,
+    recordUnattendedPolicy: mockRecordUnattendedPolicy,
     getSystemState: mockGetSystemState,
     setSystemState: mockSetSystemState,
     addNotificationHistory: mockAddNotificationHistory,
@@ -745,6 +750,7 @@ services:
     upsertStackUpdateStatus: mockUpsertStackUpdateStatus,
     clearStackUpdateStatus: mockClearStackUpdateStatus,
     recordStackCheckFailure: mockRecordStackCheckFailure,
+    recordUnattendedPolicy: mockRecordUnattendedPolicy,
     getSystemState: mockGetSystemState,
     setSystemState: mockSetSystemState,
     addNotificationHistory: mockAddNotificationHistory,
@@ -847,6 +853,7 @@ services:
     upsertStackUpdateStatus: mockUpsertStackUpdateStatus,
     clearStackUpdateStatus: mockClearStackUpdateStatus,
     recordStackCheckFailure: mockRecordStackCheckFailure,
+    recordUnattendedPolicy: mockRecordUnattendedPolicy,
     getSystemState: mockGetSystemState,
     setSystemState: mockSetSystemState,
     addNotificationHistory: mockAddNotificationHistory,
@@ -1308,6 +1315,7 @@ services:
     upsertStackUpdateStatus: mockUpsertStackUpdateStatus,
     clearStackUpdateStatus: mockClearStackUpdateStatus,
     recordStackCheckFailure: mockRecordStackCheckFailure,
+    recordUnattendedPolicy: mockRecordUnattendedPolicy,
     getSystemState: mockGetSystemState,
     setSystemState: mockSetSystemState,
     addNotificationHistory: mockAddNotificationHistory,
@@ -1363,6 +1371,7 @@ services:
     upsertStackUpdateStatus: mockUpsertStackUpdateStatus,
     clearStackUpdateStatus: mockClearStackUpdateStatus,
     recordStackCheckFailure: mockRecordStackCheckFailure,
+    recordUnattendedPolicy: mockRecordUnattendedPolicy,
     getSystemState: mockGetSystemState,
     setSystemState: mockSetSystemState,
     addNotificationHistory: mockAddNotificationHistory,
@@ -1635,6 +1644,7 @@ services:
     upsertStackUpdateStatus: mockUpsertStackUpdateStatus,
     clearStackUpdateStatus: mockClearStackUpdateStatus,
     recordStackCheckFailure: mockRecordStackCheckFailure,
+    recordUnattendedPolicy: mockRecordUnattendedPolicy,
     getSystemState: mockGetSystemState,
     setSystemState: mockSetSystemState,
     addNotificationHistory: mockAddNotificationHistory,
@@ -1678,7 +1688,7 @@ services:
         { service: 'worker', image: 'worker:latest', hasUpdate: false, checkStatus: 'ok', lastError: null },
       ],
       expect.any(Number),
-      undefined,
+      { decision: 'skip', ineligible: [] },
     );
   });
 
@@ -1711,6 +1721,30 @@ services:
       expect.any(Array),
       expect.any(Number),
       { decision: 'skip', ineligible: [{ service: 'web', policy: 'manual' }] },
+    );
+  });
+
+  it('records skip, not the last decision, when the Compose model cannot be rendered', async () => {
+    mockGetStacks.mockResolvedValue(['stackA']);
+    mockGetStackContent.mockResolvedValue(TWO_SERVICE_COMPOSE);
+    mockGetStackUpdateStatus.mockReturnValue({ stackA: false });
+    mockBuildEffectiveServiceModel.mockResolvedValueOnce({
+      renderable: true,
+      services: [specFor('web', 'web:latest')],
+    });
+    // The policy render fails closed (resolveUpdatePolicyPair returns null), so
+    // the row must show the skip an unattended run would take, not a stale allow.
+    mockResolveUpdatePolicyPair.mockResolvedValueOnce(null);
+    const service = ImageUpdateService.getInstance();
+    stubCheckImagePerRef(service, ['web:latest']);
+
+    await (service as any).checkNode(1, fakeDb());
+
+    expect(mockUpsertStackUpdateStatus).toHaveBeenCalledWith(
+      1, 'stackA', true, expect.any(Number), 'ok', null,
+      expect.any(Array),
+      expect.any(Number),
+      { decision: 'skip', ineligible: [] },
     );
   });
 
@@ -1756,6 +1790,9 @@ services:
 
     // Legacy path never passes a services/generation payload.
     expect(mockUpsertStackUpdateStatus).toHaveBeenCalledWith(1, 'stackA', true, expect.any(Number), 'ok', null);
+    // The model could not render, so the policy fails closed instead of keeping
+    // an older "allow" the row may carry.
+    expect(mockRecordUnattendedPolicy).toHaveBeenCalledWith(1, 'stackA', { decision: 'skip', ineligible: [] });
   });
 
   it('names sorted services with hasUpdate in the availability notification for a multi-service stack', async () => {
@@ -1827,9 +1864,9 @@ services:
       1, 'stackA', false, expect.any(Number), 'ok', null,
       expect.any(Array),
       expect.any(Number),
-      // This suite stubs Compose, so the policy cannot be read: the write omits
-      // it and the row keeps whatever the last evaluating check recorded.
-      undefined,
+      // This suite stubs Compose, so the model cannot be rendered and the
+      // decision fails closed to skip, matching what an unattended run does.
+      { decision: 'skip', ineligible: [] },
     );
     const upsertsAfterRecheck = mockUpsertStackUpdateStatus.mock.calls.length;
     expect(mockDispatchAlert).not.toHaveBeenCalled();
@@ -1886,7 +1923,7 @@ services:
           { service: 'worker', image: 'worker:latest', hasUpdate: false, checkStatus: 'ok', lastError: null },
         ],
         expect.any(Number),
-        undefined,
+        { decision: 'skip', ineligible: [] },
       );
     });
 
@@ -2038,11 +2075,11 @@ services:
         1, 'stackA', false, expect.any(Number), 'ok', null,
         expect.any(Array),
         expect.any(Number),
-        undefined,
+        { decision: 'skip', ineligible: [] },
       );
     });
 
-    it('returns verification_failed and leaves the prior row untouched when the model cannot render', async () => {
+    it('returns verification_failed and records only the fail-closed policy when the model cannot render', async () => {
       mockBuildEffectiveServiceModel.mockResolvedValueOnce({ renderable: false, code: 'effective_model_render_failed', error: 'no model in test' });
       const service = ImageUpdateService.getInstance();
 
@@ -2051,6 +2088,9 @@ services:
       expect(result).toEqual({ outcome: 'verification_failed', warning: 'no model in test' });
       expect(mockUpsertStackUpdateStatus).not.toHaveBeenCalled();
       expect(mockRecordStackCheckFailure).not.toHaveBeenCalled();
+      // The update result is unknown, but the unattended decision is not: the
+      // schedule fails closed on the same unreadable model.
+      expect(mockRecordUnattendedPolicy).toHaveBeenCalledWith(1, 'stackA', { decision: 'skip', ineligible: [] });
     });
 
     it('returns verification_incomplete and preserves prior hasUpdate on a fully failed check', async () => {

@@ -78,7 +78,7 @@ function seed(
   mockedFetch.mockImplementation((url: string) => {
     if (url === '/image-updates/fleet') return Promise.resolve({ ok: true, json: async () => fleet });
     if (url.startsWith('/scheduled-tasks')) return Promise.resolve({ ok: true, json: async () => tasks });
-    if (url === '/image-updates/detail') return Promise.resolve({ ok: true, json: async () => detail });
+    if (url === '/image-updates/fleet/detail') return Promise.resolve({ ok: true, json: async () => ({ '1': detail }) });
     return Promise.resolve({ ok: true, json: async () => ({}) });
   });
   mockedFetchForNode.mockImplementation(async (path: string) => {

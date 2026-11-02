@@ -39,6 +39,21 @@ describe('remote image facts boundary', () => {
         expect(() => parseRemoteImageUpdateFacts(body, nonce, 'web')).toThrow('Invalid remote image facts');
     });
 
+    it('accepts the optional unattended policy and rejects a malformed one', () => {
+        const body = response();
+        body.stacks[0].unattendedPolicy = { decision: 'skip', ineligible: [{ service: 'db', policy: 'manual' }] };
+        expect(parseRemoteImageUpdateFacts(body, nonce, 'web')).toEqual(body);
+
+        for (const bad of [
+            { decision: 'maybe', ineligible: [] },
+            { decision: 'skip', ineligible: [{ service: 'db' }] },
+            { decision: 'skip', ineligible: [], extra: true },
+        ]) {
+            body.stacks[0].unattendedPolicy = bad as never;
+            expect(() => parseRemoteImageUpdateFacts(body, nonce, 'web')).toThrow('Invalid remote image facts');
+        }
+    });
+
     it('accepts render failures only without partial image evidence', () => {
         const body = response();
         body.stacks[0].model = { renderable: false, code: 'effective_model_render_failed', error: 'Cannot render' };

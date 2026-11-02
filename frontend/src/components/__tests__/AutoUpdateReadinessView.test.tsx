@@ -594,13 +594,15 @@ describe('AutoUpdateReadinessView desktop Apply now', () => {
           }],
         });
       }
-      if (url === '/image-updates/detail') {
+      if (url === '/image-updates/fleet/detail') {
         return Promise.resolve({
           ok: true,
           json: async () => ({
-            nextcloud: {
-              checkStatus: 'ok',
-              unattendedPolicy: { decision: 'skip', ineligible: [{ service: 'db', policy: 'manual' }] },
+            '1': {
+              nextcloud: {
+                checkStatus: 'ok',
+                unattendedPolicy: { decision: 'skip', ineligible: [{ service: 'db', policy: 'manual' }] },
+              },
             },
           }),
         });
@@ -608,6 +610,49 @@ describe('AutoUpdateReadinessView desktop Apply now', () => {
       return Promise.resolve({ ok: true, json: async () => ({}) });
     });
     mockedFetchForNode.mockResolvedValue({ ok: true, json: async () => card().preview });
+
+    render(<AutoUpdateReadinessView />);
+    await screen.findByTestId('readiness-table');
+    fireEvent.click(screen.getByRole('radio', { name: 'Cards' }));
+
+    expect(await screen.findByText('Skipped by update policy')).toBeInTheDocument();
+    expect(screen.queryByText(/Scheduled ·/)).toBeNull();
+  });
+
+  it('shows the recorded policy skip for a stack on a remote node', async () => {
+    mockNodes.splice(0, mockNodes.length,
+      { id: 1, name: 'Local', type: 'local', status: 'online' },
+      { id: 2, name: 'Edge', type: 'remote', status: 'online' },
+    );
+    mockedFetch.mockImplementation((url: string) => {
+      if (url === '/image-updates/fleet') {
+        return Promise.resolve({ ok: true, json: async () => ({ '2': { nextcloud: true } }) });
+      }
+      if (url.startsWith('/scheduled-tasks')) {
+        return Promise.resolve({
+          ok: true,
+          json: async () => [{
+            id: 1, enabled: true, action: 'update', target_type: 'stack', target_id: 'nextcloud',
+            node_id: 2, next_run_at: Date.now() + 60 * 60_000,
+          }],
+        });
+      }
+      if (url === '/image-updates/fleet/detail') {
+        return Promise.resolve({
+          ok: true,
+          json: async () => ({
+            '2': {
+              nextcloud: {
+                checkStatus: 'ok',
+                unattendedPolicy: { decision: 'skip', ineligible: [{ service: 'db', policy: 'disabled' }] },
+              },
+            },
+          }),
+        });
+      }
+      return Promise.resolve({ ok: true, json: async () => ({}) });
+    });
+    mockedFetchForNode.mockResolvedValue({ ok: true, json: async () => card({ nodeId: 2 }).preview });
 
     render(<AutoUpdateReadinessView />);
     await screen.findByTestId('readiness-table');
@@ -1121,8 +1166,8 @@ describe('AutoUpdateReadinessView desktop Apply now', () => {
 /**
  * Local-node stacks whose latest check could not determine status never appear
  * in the card grid (which lists confirmed updates only), so the readiness view
- * surfaces them in a "could not be checked" advisory fed by a parallel local
- * /image-updates/detail fetch.
+ * surfaces them in a "could not be checked" advisory fed by the fleet detail
+ * fetch (which also carries each node's recorded policy).
  */
 describe('AutoUpdateReadinessView check-failed advisory', () => {
   const mockedFetch = apiFetch as unknown as ReturnType<typeof vi.fn>;
@@ -1138,12 +1183,14 @@ describe('AutoUpdateReadinessView check-failed advisory', () => {
     mockedFetch.mockImplementation((url: string) => {
       if (url === '/image-updates/fleet') return Promise.resolve({ ok: true, json: async () => ({}) });
       if (url.startsWith('/scheduled-tasks')) return Promise.resolve({ ok: true, json: async () => [] });
-      if (url === '/image-updates/detail') {
+      if (url === '/image-updates/fleet/detail') {
         return Promise.resolve({
           ok: true,
           json: async () => ({
-            grafana: { hasUpdate: false, checkStatus: 'failed', lastError: 'Registry unreachable for ghcr.io/acme/grafana:latest', checkedAt: 1 },
-            web: { hasUpdate: false, checkStatus: 'ok', lastError: null, checkedAt: 1 },
+            '1': {
+              grafana: { hasUpdate: false, checkStatus: 'failed', lastError: 'Registry unreachable for ghcr.io/acme/grafana:latest', checkedAt: 1 },
+              web: { hasUpdate: false, checkStatus: 'ok', lastError: null, checkedAt: 1 },
+            },
           }),
         });
       }
@@ -1171,12 +1218,14 @@ describe('AutoUpdateReadinessView check-failed advisory', () => {
         });
       }
       if (url.startsWith('/scheduled-tasks')) return Promise.resolve({ ok: true, json: async () => [] });
-      if (url === '/image-updates/detail') {
+      if (url === '/image-updates/fleet/detail') {
         return Promise.resolve({
           ok: true,
           json: async () => ({
-            grafana: { hasUpdate: true, checkStatus: 'failed', lastError: 'Registry unreachable', checkedAt: 1 },
-            web: { hasUpdate: true, checkStatus: 'ok', lastError: null, checkedAt: 1 },
+            '1': {
+              grafana: { hasUpdate: true, checkStatus: 'failed', lastError: 'Registry unreachable', checkedAt: 1 },
+              web: { hasUpdate: true, checkStatus: 'ok', lastError: null, checkedAt: 1 },
+            },
           }),
         });
       }
@@ -1245,13 +1294,15 @@ describe('AutoUpdateReadinessView check-failed advisory', () => {
           }]),
         });
       }
-      if (url === '/image-updates/detail') {
+      if (url === '/image-updates/fleet/detail') {
         // Sticky hasUpdate with a successful check still enters the fleet grid;
         // only the fresh preview can prove verification-only.
         return Promise.resolve({
           ok: true,
           json: async () => ({
-            redis: { hasUpdate: true, checkStatus: 'ok', lastError: null, checkedAt: 1 },
+            '1': {
+              redis: { hasUpdate: true, checkStatus: 'ok', lastError: null, checkedAt: 1 },
+            },
           }),
         });
       }
@@ -1328,12 +1379,14 @@ describe('AutoUpdateReadinessView check-failed advisory', () => {
           ]),
         });
       }
-      if (url === '/image-updates/detail') {
+      if (url === '/image-updates/fleet/detail') {
         return Promise.resolve({
           ok: true,
           json: async () => ({
-            web: { hasUpdate: true, checkStatus: 'ok', lastError: null, checkedAt: 1 },
-            redis: { hasUpdate: true, checkStatus: 'ok', lastError: null, checkedAt: 1 },
+            '1': {
+              web: { hasUpdate: true, checkStatus: 'ok', lastError: null, checkedAt: 1 },
+              redis: { hasUpdate: true, checkStatus: 'ok', lastError: null, checkedAt: 1 },
+            },
           }),
         });
       }
@@ -1400,11 +1453,13 @@ describe('AutoUpdateReadinessView check-failed advisory', () => {
           }]),
         });
       }
-      if (url === '/image-updates/detail') {
+      if (url === '/image-updates/fleet/detail') {
         return Promise.resolve({
           ok: true,
           json: async () => ({
-            redis: { hasUpdate: true, checkStatus: 'ok', lastError: null, checkedAt: 1 },
+            '1': {
+              redis: { hasUpdate: true, checkStatus: 'ok', lastError: null, checkedAt: 1 },
+            },
           }),
         });
       }
@@ -1449,11 +1504,13 @@ describe('AutoUpdateReadinessView check-failed advisory', () => {
       if (url.startsWith('/scheduled-tasks')) {
         return Promise.resolve({ ok: true, json: async () => [] });
       }
-      if (url === '/image-updates/detail') {
+      if (url === '/image-updates/fleet/detail') {
         return Promise.resolve({
           ok: true,
           json: async () => ({
-            nginx: { hasUpdate: true, checkStatus: 'ok', lastError: null, checkedAt: 1 },
+            '1': {
+              nginx: { hasUpdate: true, checkStatus: 'ok', lastError: null, checkedAt: 1 },
+            },
           }),
         });
       }
@@ -1520,11 +1577,13 @@ describe('AutoUpdateReadinessView check-failed advisory', () => {
       if (url.startsWith('/scheduled-tasks')) {
         return Promise.resolve({ ok: true, json: async () => [] });
       }
-      if (url === '/image-updates/detail') {
+      if (url === '/image-updates/fleet/detail') {
         return Promise.resolve({
           ok: true,
           json: async () => ({
-            redis: { hasUpdate: true, checkStatus: 'ok', lastError: null, checkedAt: 1 },
+            '1': {
+              redis: { hasUpdate: true, checkStatus: 'ok', lastError: null, checkedAt: 1 },
+            },
           }),
         });
       }
@@ -1569,11 +1628,13 @@ describe('AutoUpdateReadinessView check-failed advisory', () => {
       if (url.startsWith('/scheduled-tasks')) {
         return Promise.resolve({ ok: true, json: async () => [] });
       }
-      if (url === '/image-updates/detail') {
+      if (url === '/image-updates/fleet/detail') {
         return Promise.resolve({
           ok: true,
           json: async () => ({
-            redis: { hasUpdate: true, checkStatus: 'ok', lastError: null, checkedAt: 1 },
+            '1': {
+              redis: { hasUpdate: true, checkStatus: 'ok', lastError: null, checkedAt: 1 },
+            },
           }),
         });
       }
@@ -1621,7 +1682,7 @@ describe('AutoUpdateReadinessView check-failed advisory', () => {
         return Promise.resolve({ ok: true, json: async () => [] });
       }
       // Local-only detail cannot see remote sticky failures; preview must move them.
-      if (url === '/image-updates/detail') {
+      if (url === '/image-updates/fleet/detail') {
         return Promise.resolve({ ok: true, json: async () => ({}) });
       }
       return Promise.resolve({ ok: true, json: async () => ({}) });

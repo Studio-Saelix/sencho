@@ -26,14 +26,22 @@ async function readFactsBody(response: Awaited<ReturnType<typeof safeRemoteFetch
     return JSON.parse(Buffer.concat(chunks, size).toString('utf8'));
 }
 
-async function requestFacts(nodeId: number, selection: { stack: string } | { roster: true }, signal: AbortSignal) {
+async function requestFacts(
+    nodeId: number,
+    selection: { stack: string } | { roster: true },
+    signal: AbortSignal,
+    options?: { includePolicy?: boolean },
+) {
     signal.throwIfAborted();
     const target = NodeRegistry.getInstance().getProxyTarget(nodeId);
     if (!target) throw new Error('Remote target is unavailable');
     const nonce = randomBytes(16).toString('hex');
     const response = await safeRemoteFetch(`${target.apiUrl.replace(/\/$/, '')}/api/image-updates/inspect-facts`, {
         method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${target.apiToken}` },
-        body: JSON.stringify({ contractVersion: 1, requestNonce: nonce, ...selection }), signal,
+        body: JSON.stringify({
+            contractVersion: 1, requestNonce: nonce, ...selection,
+            ...(options?.includePolicy ? { policy: true } : {}),
+        }), signal,
     }, target.trustedLoopback);
     if (!response.ok) {
         await response.body?.cancel();
@@ -44,8 +52,13 @@ async function requestFacts(nodeId: number, selection: { stack: string } | { ros
     return { nonce, value };
 }
 
-export async function fetchRemoteImageUpdateFacts(nodeId: number, stack: string, signal: AbortSignal): Promise<ImageUpdateStackFacts> {
-    const { nonce, value } = await requestFacts(nodeId, { stack }, signal);
+export async function fetchRemoteImageUpdateFacts(
+    nodeId: number,
+    stack: string,
+    signal: AbortSignal,
+    options?: { includePolicy?: boolean },
+): Promise<ImageUpdateStackFacts> {
+    const { nonce, value } = await requestFacts(nodeId, { stack }, signal, options);
     return parseRemoteImageUpdateFacts(value, nonce, stack).stacks[0];
 }
 

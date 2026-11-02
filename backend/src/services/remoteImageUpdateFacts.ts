@@ -29,6 +29,10 @@ const service = z.object({
     name: text, declaredImage: text.nullable(), runtimeImages: z.array(text).max(IMAGE_UPDATE_FACTS_IMAGE_LIMIT),
     hasBuild: z.boolean(),
 }).strict();
+const unattendedPolicy = z.object({
+    decision: z.enum(['allow', 'skip']),
+    ineligible: z.array(z.object({ service: text, policy: text }).strict()).max(512),
+}).strict();
 const image = z.object({
     ref: text, localDigests: z.array(z.string().regex(/^sha256:[a-f0-9]{64}$/)).max(256),
     platform: z.object({ os: text, architecture: text }).strict().nullable(),
@@ -39,6 +43,7 @@ const stack = z.object({
     name: stackName, observationRevision: z.number().int().positive().max(Number.MAX_SAFE_INTEGER),
     observationToken: z.string().min(1).max(4096), model,
     services: z.array(service), images: z.array(image).max(IMAGE_UPDATE_FACTS_IMAGE_LIMIT),
+    unattendedPolicy: unattendedPolicy.optional(),
 }).strict().superRefine((value, context) => {
     const refs = new Set(value.images.map(entry => entry.ref));
     const names = new Set(value.services.map(entry => entry.name));

@@ -1,5 +1,5 @@
 import crypto from 'crypto';
-import { DatabaseService } from './DatabaseService';
+import { DatabaseService, type StackUpdateUnattendedPolicy } from './DatabaseService';
 import { ComposeService } from './ComposeService';
 import { NodeRegistry } from './NodeRegistry';
 import { withTimeout } from '../utils/withTimeout';
@@ -305,6 +305,25 @@ export async function resolveUpdatePolicy(
 export interface UpdatePolicyPair {
   manual: UpdatePolicyResult;
   unattended: UpdatePolicyResult;
+}
+
+/**
+ * The Updates-view projection of the unattended decision. A render that could
+ * not be read fails closed to skip, because that is what the unattended run
+ * itself does; recording the last evaluable decision instead would show
+ * "allow" for a stack the schedule skips. Callers that genuinely cannot ask
+ * the node (an older remote) omit the value rather than calling this.
+ */
+export function toUnattendedStatusPolicy(pair: UpdatePolicyPair | null): StackUpdateUnattendedPolicy {
+  if (!pair) return { decision: 'skip', ineligible: [] };
+  return {
+    decision: pair.unattended.decision === 'allow' ? 'allow' : 'skip',
+    ineligible: pair.unattended.evaluation === 'evaluated'
+      ? pair.unattended.services
+        .filter(s => !s.eligible)
+        .map(s => ({ service: s.service, policy: s.policy }))
+      : [],
+  };
 }
 
 /**

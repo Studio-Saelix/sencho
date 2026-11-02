@@ -102,3 +102,48 @@ it('keeps a recorded policy when a remote observation cannot evaluate it', async
     expect(result.outcome).toBe('cleared');
     expect(db.getStackUpdateDetail(0)['remote-policy'].unattendedPolicy).toMatchObject({ decision: 'skip' });
 });
+
+it('records the unattended decision the target sent with remote facts', async () => {
+    const scanner = ImageUpdateService.getInstance();
+    const db = DatabaseService.getInstance();
+    db.upsertStackUpdateStatus(0, 'remote-evaluated', false, 1000, 'ok', null, [], 0, {
+        decision: 'allow', ineligible: [],
+    });
+    const facts: ImageUpdateStackFacts = {
+        name: 'remote-evaluated', observationRevision: 1, observationToken: 'fixture',
+        model: { renderable: true },
+        services: [{ name: 'app', declaredImage: 'nginx:latest', runtimeImages: [], hasBuild: false }],
+        images: [],
+        unattendedPolicy: { decision: 'skip', ineligible: [{ service: 'db', policy: 'disabled' }] },
+    };
+    const generation = scanner.reserveStackWriteGeneration(0, 'remote-evaluated');
+    const result = await scanner.commitRemoteObservation(
+        0, facts, new Map([['nginx:latest', { hasUpdate: false, checkStatus: 'ok' }]]), generation,
+    );
+    expect(result.outcome).toBe('cleared');
+    // Evaluated on the node that owns the stack, so the hub replaces its prior
+    // decision instead of keeping it.
+    expect(db.getStackUpdateDetail(0)['remote-evaluated'].unattendedPolicy).toEqual({
+        decision: 'skip', ineligible: [{ service: 'db', policy: 'disabled' }],
+    });
+});
+
+it('records the target decision even when the remote model cannot render', async () => {
+    const scanner = ImageUpdateService.getInstance();
+    const db = DatabaseService.getInstance();
+    db.upsertStackUpdateStatus(0, 'remote-broken', false, 1000, 'ok', null, [], 0, {
+        decision: 'allow', ineligible: [],
+    });
+    const facts: ImageUpdateStackFacts = {
+        name: 'remote-broken', observationRevision: 1, observationToken: 'fixture',
+        model: { renderable: false, code: 'effective_model_render_failed', error: 'compose render failed' },
+        services: [], images: [],
+        unattendedPolicy: { decision: 'skip', ineligible: [] },
+    };
+    const generation = scanner.reserveStackWriteGeneration(0, 'remote-broken');
+    const result = await scanner.commitRemoteObservation(0, facts, new Map(), generation);
+    expect(result.outcome).toBe('verification_failed');
+    expect(db.getStackUpdateDetail(0)['remote-broken'].unattendedPolicy).toEqual({
+        decision: 'skip', ineligible: [],
+    });
+});
