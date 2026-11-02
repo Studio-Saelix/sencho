@@ -38,8 +38,11 @@ vi.mock('@/components/security/ImagesTab', () => ({
   ),
 }));
 vi.mock('@/components/security/FindingsTab', () => ({
-  FindingsTab: ({ errorReason }: { errorReason?: string | null }) => (
-    <div data-testid="findings-error-reason">{errorReason ?? 'none'}</div>
+  FindingsTab: ({ errorReason, onRetry }: { errorReason?: string | null; onRetry?: () => void }) => (
+    <div>
+      <div data-testid="findings-error-reason">{errorReason ?? 'none'}</div>
+      <button type="button" onClick={onRetry}>Retry findings</button>
+    </div>
   ),
 }));
 vi.mock('@/components/security/ScanPolicyManager', () => ({ ScanPolicyManager: () => null }));
@@ -179,5 +182,26 @@ describe('SecurityView named read failures', () => {
 
     await waitFor(() => expect(summaryCalls).toBe(2));
     await waitFor(() => expect(screen.getByTestId('images-error-reason').textContent).toBe('none'));
+  });
+
+  it('wires Retry on the Compose risks and Secrets tabs to the page reads', async () => {
+    for (const tab of ['compose', 'secrets'] as const) {
+      let summaryCalls = 0;
+      apiFetchMock.mockReset();
+      apiFetchMock.mockImplementation((url: string) => {
+        if (url === '/security/overview') return Promise.resolve(markedFailure('timeout', 504));
+        if (url === '/security/image-summaries') {
+          summaryCalls += 1;
+          return Promise.resolve(summaryCalls === 1 ? markedFailure('timeout', 504) : jsonOk({}));
+        }
+        return Promise.resolve(jsonOk([]));
+      });
+      const user = userEvent.setup();
+      const { unmount } = render(<SecurityView activeTab={tab} onTabChange={vi.fn()} />);
+      await waitFor(() => expect(screen.getByTestId('findings-error-reason').textContent).toMatch(/did not answer in time/i));
+      await user.click(screen.getByRole('button', { name: 'Retry findings' }));
+      await waitFor(() => expect(summaryCalls).toBe(2));
+      unmount();
+    }
   });
 });

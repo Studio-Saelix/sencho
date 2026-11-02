@@ -15,7 +15,7 @@ interface HealthStatusBarProps {
   nodeCount: number;
   lastSyncAt: number | null;
   /** True when the metrics reads are not answering: several consecutive failures,
-   *  or the first read that shows the hub has no readable path to the selected remote node. */
+   *  or the first read that shows the hub has no readable path to the selected node. */
   metricsStale?: boolean;
   /** True when a read stopped at a state where the hub has no readable path to
    *  the node, as opposed to stale meters. */

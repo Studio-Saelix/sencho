@@ -1683,6 +1683,31 @@ describe('ResourcesView', () => {
     expect(calls.usage).toBe(1);
   });
 
+  it('names the Rollback tab’s own cause and its Retry recovers every failed region', async () => {
+    const calls = { orphans: 0, rollback: 0 };
+    mockedFetch.mockImplementation((url: string) => {
+      if (url === '/system/resources') return Promise.resolve(jsonResponse({ images: [image('ok:latest')], volumes: [], networks: [] }));
+      if (url === '/system/orphans') { calls.orphans += 1; return Promise.resolve(calls.orphans === 1 ? timeoutResponse() : jsonResponse({})); }
+      if (url === '/system/rollback/generations') {
+        calls.rollback += 1;
+        return Promise.resolve(calls.rollback === 1
+          ? ({ ok: false, status: 403, headers: new Headers(), json: async () => ({ error: 'forbidden' }) } as unknown as Response)
+          : jsonResponse([]));
+      }
+      return Promise.resolve(jsonResponse({}));
+    });
+
+    const user = userEvent.setup();
+    render(<ResourcesView />);
+    await user.click(await screen.findByRole('tab', { name: /rollback/i }));
+
+    expect(await screen.findByText(/do not have access to this data/i)).toBeInTheDocument();
+    await user.click(screen.getByRole('button', { name: 'Retry' }));
+
+    await waitFor(() => expect(calls.rollback).toBe(2));
+    await waitFor(() => expect(calls.orphans).toBe(2));
+  });
+
   it('aborts the previous node’s disk-usage read on a node switch', async () => {
     const usageSignals: AbortSignal[] = [];
     mockedFetch.mockImplementation((url: string, opts?: RequestInit) => {

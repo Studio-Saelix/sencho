@@ -130,7 +130,7 @@ export interface DashboardData {
   netHistory: number[];
   /** Anchor timestamp (ms) for the sparkline 10-minute window: the newest metric sample. */
   historyEndAt: number | null;
-  /** True after several consecutive `/stats` or `/system/stats` polls have failed, or on the first read that shows the hub has no readable path to the selected remote node; surfaces a "metrics paused" indicator. */
+  /** True after several consecutive `/stats` or `/system/stats` polls have failed, or on the first read that shows the hub has no readable path to the selected node; surfaces a "metrics paused" indicator. */
   metricsStale: boolean;
   /** True when a read stopped at a state where the hub has no readable path to
    *  the node (a bounded timeout, an unreachable node, a disconnected Pilot, a

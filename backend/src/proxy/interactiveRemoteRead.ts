@@ -96,7 +96,7 @@ const LONG_LIVED_READS: ReadonlyArray<RegExp> = [
 /**
  * Interactive reads that are slow by design and get the longer budget above.
  * Each one shells out to Docker or pulls a helper image before it can answer,
- * which can legitimately take tens of seconds on a large host. The longer
+ * which can legitimately take many seconds on a large host. The longer
  * budget still bounds a node that never answers; it does not replace the
  * route's own work, so this list is about how long the page may wait, not about
  * cancelling the operation.

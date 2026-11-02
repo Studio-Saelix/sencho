@@ -57,10 +57,12 @@ interface OverviewTabProps {
    * missed its read deadline and may answer on a retry; 'unreachable' = no
    * answer at all; 'unauthorized' = the operator's grants, not the node;
    * 'pilot-disconnected' / 'not-configured' / 'refused' = the hub has no
-   * readable path to the node; 'failed' = a real error.
+   * readable path to the node; 'node-credential' = the hub's stored token for
+   * the node was rejected; 'unverified' = the node answered but its permissions
+   * could not be verified; 'failed' = a real error.
    */
   loadError: OverviewLoadError | null;
-  /** Retry the overview read and the scan-result reads behind it. */
+  /** Reload every Security read (overview, scan summaries, risk trend, exploit intel). */
   onReload: () => void;
   trend: SecurityRiskTrendPoint[];
   /** Where the risk-trend read stands; independent of the overview read. */

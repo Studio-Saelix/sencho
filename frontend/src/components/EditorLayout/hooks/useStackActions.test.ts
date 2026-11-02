@@ -435,6 +435,18 @@ describe('useStackActions.saveFile', () => {
     expect(vi.mocked(toast.error).mock.calls.some(([message]) => String(message).includes('connection'))).toBe(false);
   });
 
+  it('keeps a missing stack a plain failure instead of telling the operator to update the node', async () => {
+    vi.mocked(apiFetch).mockResolvedValue(new Response(JSON.stringify({ error: 'not found' }), { status: 404 }));
+    const { result } = setup({ stackList: { selectedFile: null } });
+    let loaded: { ok: boolean; error?: string } = { ok: true };
+    await act(async () => {
+      loaded = await result.current.loadFileForRoute('gone.yml');
+    });
+    expect(loaded.ok).toBe(false);
+    expect(loaded.error ?? '').not.toMatch(/does not serve this data/i);
+    expect(vi.mocked(toast.error).mock.calls.some(([message]) => /does not serve this data/i.test(String(message)))).toBe(false);
+  });
+
   it('refreshes service URLs only when the open stack is reloaded', async () => {
     const onStackFilesChanged = vi.fn();
     vi.mocked(apiFetch).mockImplementation((url: string) => {

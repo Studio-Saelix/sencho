@@ -124,8 +124,8 @@ export function SecurityView({ activeTab, onTabChange, headerActions }: Security
   // here: image summaries, the risk trend, and exploit intel. A region that
   // already had data keeps showing it, so the refresh failure is reported once
   // instead of blanking the surface or stacking a toast per region. A first read
-  // that fails is reported by the region's own surface (the Images tab or a
-  // chart placeholder) and does not also toast, and an overview failure has its
+  // that fails is reported by the region's own surface (the Images, Compose
+  // risks, or Secrets tab, or a chart placeholder) and does not also toast, and an overview failure has its
   // own masthead state.
   const refreshWarnedRef = useRef(false);
   const notifyRefreshFailed = (_error: unknown, hadData: boolean) => {

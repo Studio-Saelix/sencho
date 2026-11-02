@@ -79,9 +79,10 @@ export function classifyRemoteReadFailure(res: Response): RemoteReadFailure | nu
  * target configured, or the hub refused its address. These are the causes a
  * page names outright and retries, as opposed to an answer the node did give.
  *
- * Every surface that reports whether a node is readable asks this one question,
- * so a new cause cannot be named on one page and collapsed to a status code on
- * the next. `unverified` is deliberately absent: that node answered, and its
+ * Every surface that reports whether a node is readable (Home, the stack list,
+ * the Resources sibling fallback) asks this one question. A page that words a
+ * region's own failure uses `isNamedReadFailure` instead, which also covers the
+ * causes about access and credentials. `unverified` is deliberately absent: that node answered, and its
  * permission model is the thing that could not be read.
  */
 export type UnreadableNodeFailure =
