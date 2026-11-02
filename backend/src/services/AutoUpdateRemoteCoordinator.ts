@@ -154,10 +154,10 @@ export class AutoUpdateRemoteCoordinator {
     const stacks = 'targets' in input.selection
       ? input.selection.targets
       : input.selection.target === '*' ? [null] : [input.selection.target];
-    const reason = `node "${nodeName}" advertises the label policy but not the checked remote-update contract; update Sencho on that node.`;
+    const reason = `node "${nodeName}" advertises the label policy but does not support checked remote updates; update Sencho on that node.`;
     return stacks
       .map(stack => stack === null
-        ? `Node "${nodeName}" failed: it advertises the label policy but not the checked remote-update contract; update Sencho on that node.`
+        ? `Node "${nodeName}" failed: it advertises the label policy but does not support checked remote updates; update Sencho on that node.`
         : `Stack "${stack}" failed: ${reason}`)
       .join('\n');
   }
