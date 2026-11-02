@@ -316,7 +316,7 @@ describe('redaction boundary', () => {
 
   it('names the two node answers that are not network faults', () => {
     expect(redaction.errorDetailFor('node_refused')).toBe('The node refused the request.');
-    expect(redaction.errorDetailFor('node_error')).toBe('The node could not answer the request.');
+    expect(redaction.errorDetailFor('node_error')).toBe('The node, or the recovery helper running on it, failed to complete the request.');
   });
 
   it('accepts plain metadata and paths under a home directory', () => {

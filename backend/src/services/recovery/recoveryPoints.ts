@@ -310,6 +310,14 @@ export class RecoveryPointStore {
     return this.require(pointId);
   }
 
+  /** The point an operation created, when it made one. */
+  findBySourceOperation(operationId: string): RecoveryPoint | null {
+    const row = recoveryDb().prepare(
+      'SELECT * FROM recovery_points WHERE source_operation_id = ? ORDER BY started_at DESC LIMIT 1',
+    ).get(operationId) as PointRow | undefined;
+    return row ? toPoint(row) : null;
+  }
+
   get(id: string): RecoveryPoint | null {
     const row = recoveryDb().prepare('SELECT * FROM recovery_points WHERE id = ?').get(id) as PointRow | undefined;
     return row ? toPoint(row) : null;
@@ -319,6 +327,25 @@ export class RecoveryPointStore {
     const rows = recoveryDb().prepare(
       'SELECT * FROM recovery_points WHERE storage_id = ? ORDER BY started_at DESC, id',
     ).all(storageId) as PointRow[];
+    return rows.map(toPoint);
+  }
+
+  /** Every point of a storage key, all generations and both kinds, newest first. */
+  listForStorageKey(storageKey: string): RecoveryPoint[] {
+    const rows = recoveryDb().prepare(`
+      SELECT p.* FROM recovery_points p
+      JOIN recovery_storage_identities s ON s.id = p.storage_id
+      WHERE s.storage_key = ?
+      ORDER BY p.started_at DESC, p.id
+    `).all(storageKey) as PointRow[];
+    return rows.map(toPoint);
+  }
+
+  /** Every point recorded against one repository, newest first. */
+  listForRepository(repositoryId: string): RecoveryPoint[] {
+    const rows = recoveryDb().prepare(
+      'SELECT * FROM recovery_points WHERE repository_id = ? ORDER BY started_at DESC, id',
+    ).all(repositoryId) as PointRow[];
     return rows.map(toPoint);
   }
 
@@ -352,6 +379,80 @@ export class RecoveryPointStore {
       id: r.id, pointId: r.point_id, method: r.method, result: r.result,
       verifiedAt: r.verified_at, operationId: r.operation_id,
     }));
+  }
+
+  /** Verifications grouped by point, for a coverage read over a set of points. */
+  verificationsForPoints(pointIds: readonly string[]): Map<string, IntegrityVerification[]> {
+    const out = new Map<string, IntegrityVerification[]>();
+    if (pointIds.length === 0) return out;
+    const placeholders = pointIds.map(() => '?').join(',');
+    const rows = recoveryDb().prepare(`
+      SELECT id, point_id, method, result, verified_at, operation_id
+      FROM recovery_point_verifications WHERE point_id IN (${placeholders})
+      ORDER BY verified_at, id
+    `).all(...pointIds) as Array<{
+      id: string; point_id: string; method: IntegrityMethod; result: IntegrityResult;
+      verified_at: number; operation_id: string | null;
+    }>;
+    for (const row of rows) {
+      const list = out.get(row.point_id) ?? [];
+      list.push({
+        id: row.id, pointId: row.point_id, method: row.method, result: row.result,
+        verifiedAt: row.verified_at, operationId: row.operation_id,
+      });
+      out.set(row.point_id, list);
+    }
+    return out;
+  }
+
+  /**
+   * Append one repository-wide check result to every finished point of the
+   * repository, in one transaction, and record it as the repository's last
+   * check. A `restic check` covers the whole repository and the data is
+   * deduplicated, so one result is evidence about every point in it: a missing
+   * pack must stop every root in that repository from reading Protected, not
+   * only the root whose operation ran the check.
+   *
+   * Returns the number of points that received a verification.
+   */
+  recordVerificationForRepository(
+    repositoryId: string,
+    method: IntegrityMethod,
+    result: IntegrityResult,
+    operationId: string | null,
+    now = Date.now(),
+  ): number {
+    const db = recoveryDb();
+    return db.transaction((): number => {
+      if (!db.prepare('SELECT 1 FROM recovery_repositories WHERE id = ?').get(repositoryId)) {
+        throw new RecoveryError('repository_unavailable');
+      }
+      const points = db.prepare(`
+        SELECT id FROM recovery_points
+        WHERE repository_id = ? AND status IN ('succeeded','partial') AND snapshot_id IS NOT NULL
+      `).all(repositoryId) as Array<{ id: string }>;
+      const insert = db.prepare(`
+        INSERT INTO recovery_point_verifications (id, point_id, method, result, verified_at, operation_id)
+        VALUES (?, ?, ?, ?, ?, ?)
+      `);
+      for (const point of points) {
+        insert.run(randomUUID(), point.id, method, result, now, operationId);
+      }
+      db.prepare(`
+        INSERT INTO recovery_repository_checks (repository_id, method, result, checked_at, operation_id)
+        VALUES (?, ?, ?, ?, ?)
+      `).run(repositoryId, method, result, now, operationId);
+      return points.length;
+    }).immediate();
+  }
+
+  /** The repository's most recent check, or null when none has run. */
+  latestRepositoryCheck(repositoryId: string): { method: IntegrityMethod; result: IntegrityResult; checkedAt: number } | null {
+    const row = recoveryDb().prepare(`
+      SELECT method, result, checked_at FROM recovery_repository_checks
+      WHERE repository_id = ? ORDER BY checked_at DESC, rowid DESC LIMIT 1
+    `).get(repositoryId) as { method: IntegrityMethod; result: IntegrityResult; checked_at: number } | undefined;
+    return row ? { method: row.method, result: row.result, checkedAt: row.checked_at } : null;
   }
 
   addHold(hold: Omit<RecoveryPointHold, 'createdAt'>, now = Date.now()): void {

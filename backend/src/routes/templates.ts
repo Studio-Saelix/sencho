@@ -1,5 +1,6 @@
 import { Router, type Request, type Response } from 'express';
 import { isDockerEndpointProtectedError } from '../helpers/dockerEndpointError';
+import { isRecoveryVolumeProtectedError } from '../helpers/recoveryVolumeGuard';
 import path from 'path';
 import { promises as fsPromises } from 'fs';
 import { authMiddleware } from '../middleware/auth';
@@ -14,6 +15,7 @@ import { MissingExternalNetworksError } from '../services/network/missingExterna
 import { isValidStackName, isPathWithinBase } from '../utils/validation';
 import { isDebugEnabled } from '../utils/debug';
 import { getErrorMessage } from '../utils/errors';
+import { sanitizeForLog } from '../utils/safeLog';
 import { policyEvidenceFor, runPolicyGate, triggerPostDeployScan } from '../helpers/policyGate';
 import { invalidateNodeCaches } from '../helpers/cacheInvalidation';
 import { getRegistryDeliveryContext, getRegistryDeliveryLockContext } from '../helpers/registryDeliveryContext';
@@ -220,8 +222,18 @@ templatesRouter.post('/deploy', authMiddleware, async (req: Request, res: Respon
         let dockerDownCompleted = true;
         let fileDeleteCompleted = true;
         let dockerDownRefused = false;
+        const compose = ComposeService.getInstance(req.nodeId);
         try {
-          await ComposeService.getInstance(req.nodeId).downStack(stackName, { removeVolumes: true });
+          try {
+            await compose.downStack(stackName, { removeVolumes: true });
+          } catch (volumeErr) {
+            // A volume removal the node refuses (the stack declares the recovery
+            // repository, or its volumes could not be read) must not strand the
+            // rollback: take the stack down without removing volumes.
+            if (!isRecoveryVolumeProtectedError(volumeErr)) throw volumeErr;
+            console.error('[Templates] Rollback of %s keeps its volumes: %s', sanitizeForLog(stackName), sanitizeForLog(volumeErr.message));
+            await compose.downStack(stackName);
+          }
         } catch (downErr) {
           dockerDownCompleted = false;
           dockerDownRefused = isDockerEndpointProtectedError(downErr);

@@ -169,6 +169,22 @@ describe('POST /api/stacks/:name/down removeVolumes', () => {
     expect(mockRunDown).toHaveBeenCalledWith('web', { removeVolumes: true }, undefined);
   });
 
+  it('answers 423 with the recovery code when the node refuses to remove a recovery repository volume', async () => {
+    const { RecoveryVolumeProtectedError } = await import('../helpers/recoveryVolumeGuard');
+    vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    dispatchAlertSpy.mockClear();
+    mockRunDown.mockRejectedValue(new RecoveryVolumeProtectedError('declares a recovery repository volume'));
+
+    const res = await request(app)
+      .post('/api/stacks/web/down?removeVolumes=true')
+      .set('Cookie', authCookie);
+
+    expect(res.status).toBe(423);
+    expect(res.body).toEqual({ error: 'declares a recovery repository volume', code: 'recovery_volume_protected' });
+    // A refusal is not a failed down, and the stack is not reported as taken down.
+    expect(dispatchAlertSpy).not.toHaveBeenCalled();
+  });
+
   it('allows deploy-only API tokens to POST /down?removeVolumes=true', async () => {
     const token = createDeployOnlyToken();
     const res = await request(app)

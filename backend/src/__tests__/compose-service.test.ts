@@ -298,7 +298,10 @@ vi.mock('../services/ServiceUpdateRecoveryService', () => ({
 
 vi.mock('../services/SelfIdentityService', () => ({
   default: {
-    getInstance: () => ({ getBindMounts: mockGetBindMounts }),
+    getInstance: () => ({
+      getBindMounts: mockGetBindMounts,
+      isRecoveryVolume: (name: string) => name === 'registered-repository-volume',
+    }),
   },
 }));
 
@@ -2909,6 +2912,110 @@ describe('ComposeService - registry delivery cleanup logging', () => {
 
 // ── runDown ────────────────────────────────────────────────────────────
 
+const RECOVERY_REPOSITORY_VOLUME = 'sencho-recovery-b90046dbc292-f10bb14901f3-g3';
+
+/** Make `renderConfig` answer with a model that declares the named Docker volumes. */
+function stubRenderedVolumes(svc: ComposeService, names: string[]) {
+  return vi.spyOn(svc, 'renderConfig').mockResolvedValue({
+    rendered: JSON.stringify({
+      name: 'my-stack',
+      services: { web: { image: 'alpine:3.20' } },
+      volumes: Object.fromEntries(names.map((name, index) => [`vol${index}`, { name }])),
+    }),
+    stderr: '',
+    code: 0,
+    timedOut: false,
+  });
+}
+
+describe('ComposeService - a volume removal that would delete the recovery repository', () => {
+  const declared = [
+    ['the active repository volume', RECOVERY_REPOSITORY_VOLUME],
+    ['a kept volume of a replaced repository', 'sencho-recovery-b90046dbc292-f10bb14901f3-g4'],
+    ['a volume the engine registered under another name', 'registered-repository-volume'],
+  ] as const;
+
+  for (const [label, volume] of declared) {
+    it(`refuses runDown --volumes for a stack that declares ${label}`, async () => {
+      setupAutoCloseSpawn();
+      const svc = ComposeService.getInstance(1);
+      stubRenderedVolumes(svc, ['my-stack_data', volume]);
+
+      await expect(svc.runDown('my-stack', { removeVolumes: true })).rejects.toMatchObject({ code: 'recovery_volume_protected' });
+      expect(mockSpawn).not.toHaveBeenCalledWith('docker', expect.arrayContaining(['down']), expect.anything());
+    });
+
+    it(`refuses downStack --volumes for a stack that declares ${label}, and does not swallow it`, async () => {
+      setupAutoCloseSpawn();
+      const svc = ComposeService.getInstance(1);
+      stubRenderedVolumes(svc, [volume]);
+
+      await expect(svc.downStack('my-stack', { removeVolumes: true })).rejects.toMatchObject({ code: 'recovery_volume_protected' });
+      expect(mockSpawn).not.toHaveBeenCalledWith('docker', expect.arrayContaining(['down']), expect.anything());
+    });
+  }
+
+  const unfinished = [
+    ['Compose rejects the project (a non-zero exit, which `down` can still get past)', { rendered: null, stderr: 'required variable is missing', code: 15, timedOut: false }],
+    ['the render timed out', { rendered: null, stderr: 'timed out', code: null, timedOut: true }],
+    ['the render was killed at the size cap or did not spawn', { rendered: null, stderr: 'too large', code: null, timedOut: false }],
+    ['the render is not JSON', { rendered: 'not json', stderr: '', code: 0, timedOut: false }],
+    ['the render is JSON that is not a model (null)', { rendered: 'null', stderr: '', code: 0, timedOut: false }],
+    ['the render is JSON that is not a model (an array)', { rendered: '[]', stderr: '', code: 0, timedOut: false }],
+  ] as const;
+
+  for (const [label, result] of unfinished) {
+    it(`refuses runDown and downStack when ${label}, because nothing can then be promised`, async () => {
+      setupAutoCloseSpawn();
+      const svc = ComposeService.getInstance(1);
+      vi.spyOn(svc, 'renderConfig').mockResolvedValue({ ...result });
+
+      const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+      await expect(svc.runDown('my-stack', { removeVolumes: true })).rejects.toMatchObject({ code: 'recovery_volume_protected' });
+      await expect(svc.downStack('my-stack', { removeVolumes: true })).rejects.toMatchObject({ code: 'recovery_volume_protected' });
+      expect(mockSpawn).not.toHaveBeenCalledWith('docker', expect.arrayContaining(['down']), expect.anything());
+      // The refusal is never silent: the node log says the check could not run.
+      expect(warn.mock.calls.some((call) => String(call[0]).includes('recovery repository'))).toBe(true);
+      warn.mockRestore();
+    });
+  }
+
+  it('still takes a stack that cannot be rendered down, without removing volumes', async () => {
+    setupAutoCloseSpawn();
+    const svc = ComposeService.getInstance(1);
+    vi.spyOn(svc, 'renderConfig').mockResolvedValue({ rendered: null, stderr: 'required variable is missing', code: 15, timedOut: false });
+
+    await svc.downStack('my-stack');
+    await svc.runDown('my-stack');
+
+    expect(mockSpawn).toHaveBeenCalledWith('docker', ['compose', 'down', '--remove-orphans'], expect.any(Object));
+    expect(mockSpawn).toHaveBeenCalledWith('docker', ['compose', 'down'], expect.any(Object));
+  });
+
+  it('still takes the same stack down, and deletes it, without removing volumes', async () => {
+    setupAutoCloseSpawn();
+    const svc = ComposeService.getInstance(1);
+    stubRenderedVolumes(svc, [RECOVERY_REPOSITORY_VOLUME]);
+
+    await svc.runDown('my-stack');
+    await svc.downStack('my-stack');
+    await svc.downStack('my-stack', { removeVolumes: false });
+
+    expect(mockSpawn).toHaveBeenCalledWith('docker', ['compose', 'down'], expect.any(Object));
+    expect(mockSpawn).toHaveBeenCalledWith('docker', ['compose', 'down', '--remove-orphans'], expect.any(Object));
+  });
+
+  it('removes the volumes of a stack that declares none of the repository', async () => {
+    setupAutoCloseSpawn();
+    const svc = ComposeService.getInstance(1);
+    stubRenderedVolumes(svc, ['my-stack_data', 'sencho-data']);
+
+    await svc.downStack('my-stack', { removeVolumes: true });
+
+    expect(mockSpawn).toHaveBeenCalledWith('docker', ['compose', 'down', '--volumes', '--remove-orphans'], expect.any(Object));
+  });
+});
+
 describe('ComposeService - runDown', () => {
   it('runs plain docker compose down by default', async () => {
     setupAutoCloseSpawn();
@@ -2927,6 +3034,7 @@ describe('ComposeService - runDown', () => {
     setupAutoCloseSpawn();
 
     const svc = ComposeService.getInstance(1);
+    stubRenderedVolumes(svc, ['my-stack_data']);
     await svc.runDown('my-stack', { removeVolumes: true });
 
     expect(mockSpawn).toHaveBeenCalledWith(
@@ -2940,7 +3048,10 @@ describe('ComposeService - runDown', () => {
     setupAutoCloseSpawn();
 
     const svc = ComposeService.getInstance(1);
+    const render = stubRenderedVolumes(svc, [RECOVERY_REPOSITORY_VOLUME]);
     await svc.runDown('my-stack', { removeVolumes: false });
+    // Plain down removes no volume, so it neither renders nor refuses.
+    expect(render).not.toHaveBeenCalled();
 
     expect(mockSpawn).toHaveBeenCalledWith(
       'docker',
@@ -2957,6 +3068,7 @@ describe('ComposeService - downStack', () => {
     setupAutoCloseSpawn();
 
     const svc = ComposeService.getInstance(1);
+    stubRenderedVolumes(svc, ['my-stack_data']);
     await svc.downStack('my-stack', { removeVolumes: true });
 
     expect(mockSpawn).toHaveBeenCalledWith(

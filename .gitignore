@@ -14,7 +14,11 @@ backend/public/
 # Sencho User Data & Mocks
 data/
 mock_data/
-docker/
+# A local docker/ scratch directory is ignored, but the committed recovery helper
+# image source lives there: ignore its contents, not the directory, so the helper
+# can be tracked while anything else a developer drops in stays out of git.
+docker/*
+!docker/recovery-helper/
 sencho.json
 
 # OS Generated Files

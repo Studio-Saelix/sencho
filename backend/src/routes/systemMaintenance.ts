@@ -59,8 +59,14 @@ function rejectIfSelf(kind: 'image' | 'volume' | 'network', id: string, res: Res
     (kind === 'volume' && self.isOwnVolume(id)) ||
     (kind === 'network' && self.isOwnNetwork(id));
   if (!matched) return false;
+  // The recovery repository and the helper image are Sencho's own infrastructure
+  // but not the running instance, and telling an operator the instance cannot be
+  // deleted sends them looking for the wrong thing.
+  const recovery = (kind === 'volume' && self.isRecoveryVolume(id)) || (kind === 'image' && self.isRecoveryImage(id));
   res.status(423).json({
-    error: 'Cannot delete the running Sencho instance',
+    error: recovery
+      ? 'This is part of Sencho\'s volume recovery infrastructure and cannot be deleted here'
+      : 'Cannot delete the running Sencho instance',
     kind,
     id,
   });

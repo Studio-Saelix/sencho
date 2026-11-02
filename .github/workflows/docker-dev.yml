@@ -100,6 +100,57 @@ jobs:
       # these layers from the buildkit daemon cache. Same gate the PR and release
       # builds apply. Scanning only amd64 is a defensible proxy for the multi-arch
       # manifest: distro package CVEs are arch-agnostic.
+      # --- Recovery helper image -------------------------------------------
+      # The helper is built from the same commit, scanned, smoke tested, and
+      # pushed BY DIGEST ONLY before the main image. The main build bakes that
+      # digest in as `SENCHO_RECOVERY_HELPER_IMAGE`, so a Sencho image can only
+      # ever run the helper built beside it. No tag exists until the main image
+      # has passed its own gates: a release that fails a gate leaves no helper
+      # tag behind, and a tag could be repointed later where a digest cannot.
+      - name: Build recovery helper for scan (amd64, loaded)
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7
+        with:
+          context: docker/recovery-helper
+          push: false
+          load: true
+          platforms: linux/amd64
+          tags: localhost/sencho-recovery-helper:dev-scan
+          cache-from: type=gha,scope=recovery-helper
+          cache-to: type=gha,scope=recovery-helper,mode=max
+
+      - name: Scan recovery helper for vulnerabilities (Trivy)
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          image-ref: localhost/sencho-recovery-helper:dev-scan
+          exit-code: '1'
+          severity: 'CRITICAL,HIGH'
+          format: 'table'
+          trivy-config: trivy-recovery-helper.yaml
+
+      - name: Smoke test recovery helper
+        # The image is `FROM scratch`: the only thing to prove is that restic and
+        # the identity probe both exec, and that a probe reports a root.
+        run: |
+          set -euo pipefail
+          docker run --rm --network none localhost/sencho-recovery-helper:dev-scan version
+          docker run --rm --network none --entrypoint /sencho-recovery-probe \
+            localhost/sencho-recovery-helper:dev-scan / | grep -q '"ino"'
+
+      - name: Push recovery helper by digest
+        id: helper
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7
+        with:
+          context: docker/recovery-helper
+          platforms: linux/amd64,linux/arm64
+          # Digest only: `name-canonical` is what lets the tag step below refer to
+          # this exact manifest list after the main image has passed its gates.
+          outputs: >-
+            type=image,
+            name=ghcr.io/studio-saelix/sencho-recovery-helper-dev,
+            push-by-digest=true,name-canonical=true,push=true
+          cache-from: type=gha,scope=recovery-helper
+          cache-to: type=gha,scope=recovery-helper,mode=max
+
       - name: Build dev image for pre-publish scan (amd64, loaded)
         uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7
         with:
@@ -110,7 +161,8 @@ jobs:
           tags: localhost/sencho:dev-scan
           cache-from: type=gha
           build-args: |
-            APK_CACHE_BUST=${{ steps.apk-bust.outputs.date }}
+            APK_CACHE_BUST=${ steps.apk-bust.outputs.date }
+            SENCHO_RECOVERY_HELPER_IMAGE=ghcr.io/studio-saelix/sencho-recovery-helper-dev@${ steps.helper.outputs.digest }
 
       - name: Scan dev image for vulnerabilities (Trivy)
         # Same HIGH/CRITICAL policy and OpenVEX source of truth (trivy.yaml ->
@@ -148,6 +200,35 @@ jobs:
           echo "FAILED: /api/health did not become ready within 30s"
           exit 1
 
+      - name: Assert the built image pins a recovery helper digest
+        run: |
+          set -euo pipefail
+          baked=$(docker run --rm --entrypoint sh localhost/sencho:dev-scan \
+            -c 'printf %s "$SENCHO_RECOVERY_HELPER_IMAGE"')
+          case "$baked" in
+            *@sha256:*) echo "pinned helper: $baked" ;;
+            *) echo "FAILED: baked helper reference is not a digest: '$baked'"; exit 1 ;;
+          esac
+
+      - name: Tag the integration recovery helper
+        # The digest was pushed before the main build. Tags are added only after
+        # the dev image passed its scan, smoke test and push, and they carry the
+        # same tag set as the image they belong to.
+        env:
+          HELPER_DIGEST: ${{ steps.helper.outputs.digest }}
+          TAGS: ${{ steps.meta.outputs.tags }}
+        run: |
+          set -euo pipefail
+          [ -n "$HELPER_DIGEST" ] || { echo "FAILED: no helper digest"; exit 1; }
+          while IFS= read -r tag; do
+            [ -n "$tag" ] || continue
+            helper_tag=$(printf '%s' "$tag" \
+              | sed -e 's#^ghcr.io/studio-saelix/sencho-dev:#ghcr.io/studio-saelix/sencho-recovery-helper-dev:#')
+            [ "$helper_tag" != "$tag" ] || { echo "FAILED: unexpected tag $tag"; exit 1; }
+            docker buildx imagetools create -t "$helper_tag" \
+              "ghcr.io/studio-saelix/sencho-recovery-helper-dev@${HELPER_DIGEST}"
+          done <<< "$TAGS"
+
       - name: Build and push dev image
         uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7
         with:
@@ -162,4 +243,5 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max
           build-args: |
-            APK_CACHE_BUST=${{ steps.apk-bust.outputs.date }}
+            APK_CACHE_BUST=${ steps.apk-bust.outputs.date }
+            SENCHO_RECOVERY_HELPER_IMAGE=ghcr.io/studio-saelix/sencho-recovery-helper-dev@${ steps.helper.outputs.digest }

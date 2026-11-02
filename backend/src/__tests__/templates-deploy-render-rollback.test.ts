@@ -119,6 +119,107 @@ describe('POST /api/templates/deploy refused by the external-network gate', () =
   });
 });
 
+describe('POST /api/templates/deploy rolled back through the real teardown', () => {
+  it('still removes the files of a stack Compose cannot render, taking it down without volumes, so the same name can be retried', async () => {
+    vi.restoreAllMocks();
+    vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    vi.spyOn(ComposeService.prototype, 'evaluateDockerEndpoint').mockResolvedValue(null);
+    // Compose rejects the project, as it does for the malformed file that failed the deploy.
+    vi.spyOn(ComposeService.prototype, 'renderConfig').mockResolvedValue({
+      rendered: null, stderr: 'yaml: line 4', code: 15, timedOut: false,
+    });
+    const execute = vi.spyOn(ComposeService.prototype as unknown as { execute: () => Promise<void> }, 'execute')
+      .mockResolvedValue(undefined);
+    mockResolveMissingExternalNetworks.mockResolvedValue({
+      status: 'render_unavailable',
+      autoCreateEnabled: false,
+      stackName: 'real-teardown',
+      networks: [],
+      declaredExternalCount: 0,
+      renderError: YAML_WORDED_RENDER_ERROR,
+    });
+
+    const res = await request(app)
+      .post('/api/templates/deploy')
+      .set('Authorization', `Bearer ${adminToken}`)
+      .send({ stackName: 'real-teardown', template: minimalTemplate });
+
+    expect(res.status).toBe(500);
+    expect(res.body.rolledBack).toBe(true);
+    // The volume removal was refused (nothing could be checked), so the stack was
+    // taken down on its own and no volume was removed.
+    const argLists = execute.mock.calls.map((call) => (call as unknown[])[1] as string[]);
+    expect(argLists.length).toBeGreaterThan(0);
+    expect(argLists.some((args) => args.includes('--volumes'))).toBe(false);
+    const { FileSystemService } = await import('../services/FileSystemService');
+    expect(await FileSystemService.getInstance().getStacks()).not.toContain('real-teardown');
+  });
+});
+
+describe('POST /api/templates/deploy when the volume removal of the rollback is refused', () => {
+  it('rolls back by taking the stack down without removing volumes, and still removes its files', async () => {
+    const { RecoveryVolumeProtectedError } = await import('../helpers/recoveryVolumeGuard');
+    vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    const downStack = vi.spyOn(ComposeService.prototype, 'downStack')
+      .mockRejectedValueOnce(new RecoveryVolumeProtectedError('declares a recovery repository volume'))
+      .mockResolvedValue(undefined);
+    mockResolveMissingExternalNetworks.mockResolvedValue({
+      status: 'render_unavailable',
+      autoCreateEnabled: false,
+      stackName: 'repo-volume-rollback',
+      networks: [],
+      declaredExternalCount: 0,
+      renderError: YAML_WORDED_RENDER_ERROR,
+    });
+
+    const res = await request(app)
+      .post('/api/templates/deploy')
+      .set('Authorization', `Bearer ${adminToken}`)
+      .send({ stackName: 'repo-volume-rollback', template: minimalTemplate });
+
+    expect(res.status).toBe(500);
+    expect(res.body.rolledBack).toBe(true);
+    expect(downStack.mock.calls).toEqual([
+      ['repo-volume-rollback', { removeVolumes: true }],
+      ['repo-volume-rollback'],
+    ]);
+    const { FileSystemService } = await import('../services/FileSystemService');
+    expect(await FileSystemService.getInstance().getStacks()).not.toContain('repo-volume-rollback');
+  });
+});
+
+describe('POST /api/templates/deploy when the plain teardown after a refused volume removal is refused', () => {
+  it('keeps the stack files, because the endpoint guard says containers may still be running', async () => {
+    const { RecoveryVolumeProtectedError } = await import('../helpers/recoveryVolumeGuard');
+    const { DockerEndpointProtectedError } = await import('../helpers/dockerEndpointGuard');
+    vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    vi.spyOn(ComposeService.prototype, 'downStack')
+      .mockRejectedValueOnce(new RecoveryVolumeProtectedError('volumes could not be read'))
+      .mockRejectedValueOnce(new DockerEndpointProtectedError({ reason: 'provider', service: 'socket-proxy', message: 'carries the Docker connection' }));
+    mockResolveMissingExternalNetworks.mockResolvedValue({
+      status: 'render_unavailable',
+      autoCreateEnabled: false,
+      stackName: 'second-refused',
+      networks: [],
+      declaredExternalCount: 0,
+      renderError: YAML_WORDED_RENDER_ERROR,
+    });
+
+    const res = await request(app)
+      .post('/api/templates/deploy')
+      .set('Authorization', `Bearer ${adminToken}`)
+      .send({ stackName: 'second-refused', template: minimalTemplate });
+
+    expect(res.status).toBe(500);
+    expect(res.body.rolledBack).toBe(false);
+    const { FileSystemService } = await import('../services/FileSystemService');
+    expect(await FileSystemService.getInstance().getStacks()).toContain('second-refused');
+  });
+});
+
 describe('POST /api/templates/deploy when the rollback teardown is refused', () => {
   it('keeps the stack files, because containers may still be running, and reports no rollback', async () => {
     const { DockerEndpointProtectedError } = await import('../helpers/dockerEndpointGuard');
