@@ -1858,4 +1858,18 @@ describe('AutoPill', () => {
     );
     expect(screen.getByTestId('auto-pill')).toHaveTextContent('Auto: skipped by update policy');
   });
+
+  it('shows the policy skip in the phone footer instead of a next run', () => {
+    render(
+      <MobileReadinessCard
+        card={card({
+          scheduledTask: { next_run_at: Date.now() + 60 * 60_000 } as StackCard['scheduledTask'],
+          unattendedPolicy: { decision: 'skip', ineligible: [{ service: 'db', policy: 'disabled' }] },
+        })}
+        onApply={() => {}}
+      />,
+    );
+    expect(screen.getByText('Skipped by update policy')).toBeInTheDocument();
+    expect(screen.queryByText(/in 1h/)).toBeNull();
+  });
 });
