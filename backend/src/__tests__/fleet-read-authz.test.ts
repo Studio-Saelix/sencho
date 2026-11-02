@@ -4,11 +4,12 @@
  * host stats, versions, and cross-node topology, so they require node:read.
  * Every shipped role carries node:read except deployer, the denial persona here.
  */
-import { describe, it, expect, beforeAll, afterAll } from 'vitest';
+import { describe, it, expect, beforeAll, afterAll, afterEach } from 'vitest';
 import request from 'supertest';
 import jwt from 'jsonwebtoken';
 import bcrypt from 'bcrypt';
 import { setupTestDb, cleanupTestDb, TEST_JWT_SECRET } from './helpers/setupTestDb';
+import { _resetLocalFleetBuildSharesForTests } from '../helpers/localFleetBuildShare';
 
 let tmpDir: string;
 let app: import('express').Express;
@@ -41,6 +42,10 @@ beforeAll(async () => {
 });
 
 afterAll(() => cleanupTestDb(tmpDir));
+
+afterEach(() => {
+  _resetLocalFleetBuildSharesForTests();
+});
 
 describe('fleet topology reads require node:read', () => {
   for (const route of NODE_READ_ROUTES) {

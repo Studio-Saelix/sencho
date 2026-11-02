@@ -1,5 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { apiFetch } from '@/lib/api';
+import { runPool } from '@/lib/runPool';
+import { FLEET_READ_ATTEMPTS, hubKeptBuild } from '@/lib/fleetBuildKept';
 import type { FleetDependencyMap } from '@/lib/dependency-map-layout';
 
 /** A map older than this is re-fetched when the Map tab is reopened. */
@@ -9,7 +11,7 @@ export const MAP_STALE_MS = 60_000;
 const MAP_CONCURRENCY = 4;
 
 /** A node that has not answered by now is reported as failed, so Refresh and Retry never stay locked behind it. */
-export const MAP_NODE_TIMEOUT_MS = 20_000;
+export const MAP_NODE_TIMEOUT_MS = 28_000;
 
 export interface MapNodeRef {
   id: number;
@@ -64,17 +66,6 @@ function isMapPiece(value: unknown): value is FleetDependencyMap {
   if (typeof value !== 'object' || value === null) return false;
   const v = value as Record<string, unknown>;
   return ['nodes', 'edges', 'flags', 'nodeErrors', 'parseErrors'].every(key => Array.isArray(v[key]));
-}
-
-async function runPool<T>(items: readonly T[], limit: number, worker: (item: T) => Promise<void>): Promise<void> {
-  let next = 0;
-  const lanes = Array.from({ length: Math.min(limit, items.length) }, async () => {
-    while (next < items.length) {
-      const item = items[next++];
-      await worker(item);
-    }
-  });
-  await Promise.all(lanes);
 }
 
 /**
@@ -132,30 +123,42 @@ export function useFleetMap(active: boolean, nodes: readonly MapNodeRef[]): Flee
     await runPool(targets, MAP_CONCURRENCY, async (node) => {
       let piece: FleetDependencyMap | null = null;
       let failure: string | null = null;
-      try {
-        const signal = AbortSignal.any([controller.signal, AbortSignal.timeout(MAP_NODE_TIMEOUT_MS)]);
-        const res = await apiFetch(`/fleet/dependency-map?nodeId=${node.id}`, { localOnly: true, signal });
-        if (res.ok) {
-          const body: unknown = await res.json();
-          if (isMapPiece(body)) piece = body;
-          else failure = 'Unexpected response from the hub';
-        } else {
-          const body = await res.json().catch(() => null) as { error?: string } | null;
-          failure = body?.error ?? `Request failed (${res.status})`;
+      // The hub keeps a build it cut at its deadline, so a second ask joins it
+      // (or takes its finished answer) instead of the tab reporting a slow hub
+      // as failed. The node stays pending across both asks.
+      for (let attempt = 1; attempt <= FLEET_READ_ATTEMPTS; attempt += 1) {
+        piece = null;
+        failure = null;
+        let buildKept = false;
+        try {
+          const signal = AbortSignal.any([controller.signal, AbortSignal.timeout(MAP_NODE_TIMEOUT_MS)]);
+          const res = await apiFetch(`/fleet/dependency-map?nodeId=${node.id}`, { localOnly: true, signal });
+          if (res.ok) {
+            buildKept = hubKeptBuild(res);
+            const body: unknown = await res.json();
+            if (isMapPiece(body)) piece = body;
+            else failure = 'Unexpected response from the hub';
+          } else {
+            const body = await res.json().catch(() => null) as { error?: string } | null;
+            failure = body?.error ?? `Request failed (${res.status})`;
+          }
+        } catch (err) {
+          // Superseded or unmounted: a newer load (or nobody) owns the state now.
+          if (controller.signal.aborted) return;
+          console.error('Failed to load the dependency map for node', node.id, err);
+          if (err instanceof SyntaxError) {
+            failure = 'Invalid response from the hub';
+          } else if (err instanceof DOMException && (err.name === 'TimeoutError' || err.name === 'AbortError')) {
+            failure = 'Timed out reading this node';
+          } else if (err instanceof Error) {
+            failure = err.message;
+          } else {
+            failure = 'Failed to load dependency map';
+          }
         }
-      } catch (err) {
-        // Superseded or unmounted: a newer load (or nobody) owns the state now.
-        if (controller.signal.aborted) return;
-        console.error('Failed to load the dependency map for node', node.id, err);
-        if (err instanceof SyntaxError) {
-          failure = 'Invalid response from the hub';
-        } else if (err instanceof DOMException && (err.name === 'TimeoutError' || err.name === 'AbortError')) {
-          failure = 'Timed out reading this node';
-        } else if (err instanceof Error) {
-          failure = err.message;
-        } else {
-          failure = 'Failed to load dependency map';
-        }
+        // The cut read is the piece that carries this node's own error.
+        const cut = piece?.nodeErrors.some(e => e.nodeId === node.id) ?? false;
+        if (!(buildKept && cut) || controller.signal.aborted) break;
       }
       if (generation !== generationRef.current || controller.signal.aborted) return;
       inFlightRef.current.delete(node.id);

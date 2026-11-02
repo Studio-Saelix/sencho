@@ -2136,6 +2136,16 @@ class DockerController {
     return this.validateApiData<any[]>(containers);
   }
 
+  /**
+   * Cheap liveness check against the daemon. `/containers/json` scales with the
+   * host (seconds on a hub with hundreds of containers), so it cannot also be
+   * the first-contact check inside a flat transport budget. `/_ping` answers
+   * from the daemon's own state and stays fast while the listing is slow.
+   */
+  public async ping(): Promise<void> {
+    await this.docker.ping();
+  }
+
   public async getAllContainers() {
     const containers = await this.docker.listContainers({ all: true });
     return this.validateApiData<any[]>(containers);
@@ -2170,6 +2180,13 @@ class DockerController {
    * Containers with runtime labels for the label-inventory API. Resolves stack
    * membership with the same multi-fallback strategy as bulk status. Captures the
    * image ref so label provenance can distinguish image-inherited labels.
+   *
+   * `/containers/json` already returns each container row's labels and image
+   * ID, so those rows are built from the one listing. Inspecting every
+   * container added a Docker round trip per container (hundreds on a large
+   * hub) without changing a value; inspect remains only as a fallback when an
+   * older API omits the label field or the image ID. Image-level labels are
+   * still read per unique image by the caller.
    */
   public async listContainersForLabelInventory(): Promise<LabelInventoryRow[]> {
     const knownStacks = await FileSystemService.getInstance(this.nodeId).getStacks();
@@ -2177,7 +2194,7 @@ class DockerController {
       Id?: string;
       Names?: string[];
       State?: string;
-      Labels?: Record<string, string>;
+      Labels?: Record<string, string> | null;
       ImageID?: string;
     }>;
     const projectToStack = await DockerController.resolveProjectNameMap(knownStacks);
@@ -2196,16 +2213,33 @@ class DockerController {
         const id = c.Id ?? '';
         const name = (c.Names?.[0] ?? '').replace(/^\//, '');
         const state = c.State ?? 'unknown';
+        const listedLabels = c.Labels ?? undefined;
         const stack = DockerController.resolveContainerStack(
-          c.Labels,
+          listedLabels,
           projectToStack,
           knownStackSet,
           absDirToStack,
           resolvedBase,
         );
-        const service = c.Labels?.['com.docker.compose.service'] ?? null;
+        const service = listedLabels?.['com.docker.compose.service'] ?? null;
         if (!id) {
           results[i] = { id, name, state, stack, service, labels: {}, imageId: c.ImageID ?? '', inspectFailed: true };
+          continue;
+        }
+        // The listing carries the same label map and image ID as an inspect.
+        // Use it unless an older API omitted the label field or the image ID.
+        // A present but null label map means "no labels", not "unavailable".
+        if (c.Labels !== undefined && c.ImageID) {
+          results[i] = {
+            id,
+            name,
+            state,
+            stack,
+            service,
+            labels: c.Labels ?? {},
+            imageId: c.ImageID,
+            inspectFailed: false,
+          };
           continue;
         }
         let labels: Record<string, string>;

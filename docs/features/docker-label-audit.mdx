@@ -66,12 +66,14 @@ Automation tools such as Watchtower, Diun, and Traefik read Docker labels to dec
 
 ### Partial or unreachable nodes
 
-A banner appears above the table whenever the fleet-wide fetch was incomplete:
+The tab reads each node on its own, a few at a time, and draws each answer as it lands, with a `Checking n of N nodes` line above the table while the rest are pending when you open the tab or press Refresh. One node that is offline or slow does not hold back the containers from the nodes that answered. A banner appears above the table whenever the fleet-wide read was incomplete:
 
-- **Could not reach *node*.** The node did not respond to the label-inventory request, whether because it is offline, the network call timed out, or (on a mixed-version fleet) the node does not implement the endpoint at all. That node contributes no rows to either layout.
+- **Could not read *node* (*reason*).** The node did not answer in time (for example *Timed out after 5s*), the network call failed, or (on a mixed-version fleet) the node does not implement the endpoint at all. A node that has never answered contributes no rows to either layout; a node that answered before and then failed keeps its last rows until it answers again, and the banner says so.
 - **Some containers or images could not be inspected on *node*.** The node responded, but `docker inspect` failed for one or more containers or their images on that node. The affected labels show the **Unknown** provenance badge instead of being silently dropped.
 
-Both conditions can appear together across different nodes in the same fleet. The rest of the data from healthy nodes is still shown; the banner only names what is missing.
+The hub's own inventory gets one 25-second deadline, measured from the start of the read, to list its containers and inspect each unique image; the cheap daemon check is capped at 5 seconds inside that deadline, so a large hub is not reported as timed out before it can build its answer. The container rows come from the listing, which already carries each container's labels and image ID, so a large hub does not pay for a container inspect per container; image-level labels are still read once per unique image. A build that another tab load or **Retry** already started in the same reveal mode is shared, so the second request waits for that answer instead of listing the hub again. A build that finished after its own load had given up is kept for 10 seconds, and the next request takes it, so **Retry** returns it as soon as the daemon check passes; it reflects the hub as of when that build started. Once a request has received an answer it is not reused, so **Refresh** or a reload after a load that succeeded reads the hub again and shows a container you just started or removed. When the hub's read is cut at 25 seconds with its build kept, the tab asks once more before it shows a banner, and that second ask joins the build or takes its finished answer, so a large hub on a busy host draws instead of reporting a timeout. The banner appears when that second ask fails too. A Docker socket that never answers the daemon check is reported as timed out after 5 seconds with no second ask, because no build was started. One that stalls while listing or inspecting is cut off at 25 seconds and asked again once, so its banner appears after about 50 seconds.
+
+Both conditions can appear together across different nodes in the same fleet. The rest of the data from healthy nodes is still shown; the banner only names what is missing, and **Retry** reloads only the nodes that failed. Refreshing keeps the last inventory each node returned until its new answer replaces it, so a failed refresh does not blank the table.
 
 Runtime labels are static until the container is recreated. Changes declared in Compose require save and redeploy before they appear on running containers.
 
@@ -108,7 +110,7 @@ A redacted value displays a lock icon in place of the real text. Admins can reve
 
 Both tabs require the active node to report the `container-label-inventory` capability; a node running an older Sencho release does not advertise it, and the tab is hidden entirely until the node is updated. There is no tier gate: Docker Label Audit is available on every plan.
 
-For the **Fleet** tab specifically, the gate is evaluated against the active (normally local) node, not every enrolled node individually. A remote fleet node that lacks the capability does not hide the whole tab; instead, that node's containers fail to fetch and it shows up in the ["Could not reach" banner](#partial-or-unreachable-nodes) alongside any other unreachable node.
+For the **Fleet** tab specifically, the gate is evaluated against the active (normally local) node, not every enrolled node individually. A remote fleet node that lacks the capability does not hide the whole tab; instead, that node's containers fail to fetch and it shows up in the ["Could not read" banner](#partial-or-unreachable-nodes) alongside any node the tab could not read.
 
 ## Limitations
 

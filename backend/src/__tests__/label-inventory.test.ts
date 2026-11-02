@@ -10,6 +10,7 @@ import { ComposeService } from '../services/ComposeService';
 import DockerController from '../services/DockerController';
 import { DatabaseService } from '../services/DatabaseService';
 import { NodeRegistry } from '../services/NodeRegistry';
+import { _resetLocalFleetBuildSharesForTests } from '../helpers/localFleetBuildShare';
 import {
   buildNodeLabelInventory,
   buildStackLabelInventory,
@@ -74,6 +75,9 @@ function stubDockerList(
     return { labels: {} };
   });
   vi.spyOn(DockerController, 'getInstance').mockReturnValue({
+    // The fleet route pings before it builds; getAllContainers is absent on
+    // purpose, so the removed pre-count would fail loudly if it came back.
+    ping: vi.fn().mockResolvedValue(undefined),
     listContainersForLabelInventory: vi.fn().mockResolvedValue(withDefaults),
     getContainersByStack: vi.fn().mockImplementation(async (stack: string) =>
       withDefaults.filter(r => r.stack === stack).map(r => ({
@@ -101,7 +105,10 @@ beforeAll(async () => {
 });
 
 afterAll(() => cleanupTestDb(tmpDir));
-afterEach(() => vi.restoreAllMocks());
+afterEach(() => {
+  vi.restoreAllMocks();
+  _resetLocalFleetBuildSharesForTests();
+});
 
 describe('buildNodeLabelInventory', () => {
   it('builds inverted index and compose-system provenance', async () => {

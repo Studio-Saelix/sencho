@@ -21,6 +21,13 @@ function json(body: unknown, status = 200): Response {
   return new Response(JSON.stringify(body), { status, headers: { 'Content-Type': 'application/json' } });
 }
 
+/** What the hub answers when it cut its own read at the deadline and kept the build. */
+function keptBuildCut(nodeId: number): Response {
+  const res = json(piece(nodeId, { nodes: [], nodeErrors: [{ nodeId, nodeName: `node${nodeId}`, error: 'Timed out after 25s' }] }));
+  res.headers.set('X-Sencho-Build-Kept', '1');
+  return res;
+}
+
 /** Answers `/fleet/dependency-map?nodeId=N` from a per-node handler. */
 function nodeIdOf(path: string): number {
   return Number(/nodeId=(\d+)/.exec(path)?.[1]);
@@ -35,6 +42,12 @@ const allOk = () => answerBy({ 1: () => json(piece(1)), 2: () => json(piece(2)),
 // A block body: returning the mock would make the runner call it as a cleanup hook.
 beforeEach(() => { apiFetchMock.mockReset(); });
 afterEach(() => vi.useRealTimers());
+
+describe('map node timeout', () => {
+  it('stays above the hub\'s 25 s local read deadline so the server answers first', () => {
+    expect(MAP_NODE_TIMEOUT_MS).toBeGreaterThan(25_000);
+  });
+});
 
 describe('mergeMapPieces', () => {
   it('concatenates slices in node order and appends request failures as node errors', () => {
@@ -150,6 +163,82 @@ describe('useFleetMap', () => {
     apiFetchMock.mockClear();
     await act(async () => { result.current.retryFailed(); });
     expect(apiFetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  describe('a hub read cut at its deadline with the build kept', () => {
+    it('asks once more, takes the answer, and never shows the cut', async () => {
+      let asks = 0;
+      answerBy({
+        1: () => (++asks === 1 ? keptBuildCut(1) : json(piece(1))),
+        2: () => json(piece(2)),
+        3: () => json(piece(3)),
+      });
+      const { result } = renderHook(() => useFleetMap(true, NODES));
+
+      await waitFor(() => expect(result.current.loading).toBe(false));
+      expect(asks).toBe(2);
+      expect(result.current.data?.nodeErrors).toEqual([]);
+      expect(result.current.data?.nodes.map(n => n.nodeId)).toEqual([1, 2, 3]);
+    });
+
+    it('caps the second ask at one when the answer is cut again, then reports the cut', async () => {
+      answerBy({ 1: () => keptBuildCut(1), 2: () => json(piece(2)), 3: () => json(piece(3)) });
+      const { result } = renderHook(() => useFleetMap(true, NODES));
+
+      await waitFor(() => expect(result.current.loading).toBe(false));
+      expect(apiFetchMock.mock.calls.filter(c => nodeIdOf(String(c[0])) === 1)).toHaveLength(2);
+      expect(result.current.data?.nodeErrors.map(e => [e.nodeId, e.error])).toEqual([[1, 'Timed out after 25s']]);
+    });
+
+    it('does not ask again for a node the hub cut without keeping a build', async () => {
+      const cut = piece(2, { nodes: [], nodeErrors: [{ nodeId: 2, nodeName: 'edge', error: 'Timed out after 5s' }] });
+      answerBy({ 1: () => json(piece(1)), 2: () => json(cut), 3: () => json(piece(3)) });
+      const { result } = renderHook(() => useFleetMap(true, NODES));
+
+      await waitFor(() => expect(result.current.loading).toBe(false));
+      expect(apiFetchMock.mock.calls.filter(c => nodeIdOf(String(c[0])) === 2)).toHaveLength(1);
+    });
+
+    it('does not ask again when the header rides an answer with no error for that node', async () => {
+      const usable = json(piece(1));
+      usable.headers.set('X-Sencho-Build-Kept', '1');
+      answerBy({ 1: () => usable, 2: () => json(piece(2)), 3: () => json(piece(3)) });
+      const { result } = renderHook(() => useFleetMap(true, NODES));
+
+      await waitFor(() => expect(result.current.loading).toBe(false));
+      expect(apiFetchMock.mock.calls.filter(c => nodeIdOf(String(c[0])) === 1)).toHaveLength(1);
+    });
+
+    it('does not ask a second time when the tab unmounts while the first answer is still being read', async () => {
+      let releaseBody: () => void = () => {};
+      const slow = keptBuildCut(1);
+      const body = new Promise<unknown>((res) => { releaseBody = () => res(piece(1, { nodes: [], nodeErrors: [{ nodeId: 1, nodeName: 'node1', error: 'Timed out after 25s' }] })); });
+      slow.json = () => body;
+      apiFetchMock.mockImplementation(() => Promise.resolve(slow));
+      const { unmount } = renderHook(() => useFleetMap(true, [NODES[0]]));
+      await waitFor(() => expect(apiFetchMock).toHaveBeenCalledTimes(1));
+      unmount();
+      await act(async () => { releaseBody(); await body; });
+      expect(apiFetchMock).toHaveBeenCalledTimes(1);
+    });
+
+    it('keeps the node pending between the two asks', async () => {
+      let releaseRetry: (r: Response) => void = () => {};
+      let asks = 0;
+      answerBy({
+        1: () => (++asks === 1 ? keptBuildCut(1) : new Promise<Response>((res) => { releaseRetry = res; })),
+        2: () => json(piece(2)),
+        3: () => json(piece(3)),
+      });
+      const { result } = renderHook(() => useFleetMap(true, NODES));
+
+      await waitFor(() => expect(asks).toBe(2));
+      expect(result.current.loading).toBe(true);
+      expect(result.current.data?.nodeErrors ?? []).toEqual([]);
+      await act(async () => { releaseRetry(json(piece(1))); });
+      await waitFor(() => expect(result.current.loading).toBe(false));
+      expect(result.current.data?.nodeErrors).toEqual([]);
+    });
   });
 
   it('keeps the drawn map while a refresh runs, replacing each node as its new answer lands', async () => {
