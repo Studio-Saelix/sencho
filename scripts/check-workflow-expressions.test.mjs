@@ -49,7 +49,7 @@ describe('check-workflow-expressions', () => {
   })
 
   it('rejects a build-arg under a |- block and one on the key line', () => {
-    for (const name of ['bad-build-arg-chomp.yml', 'bad-build-arg-inline.yml']) {
+    for (const name of ['bad-build-arg-chomp.yml', 'bad-build-arg-inline.yml', 'bad-build-arg-quoted.yml']) {
       const r = run(fixture(name))
       assert.equal(r.status, 1, name)
       assert.match(r.stderr, /build-arg reads/, name)

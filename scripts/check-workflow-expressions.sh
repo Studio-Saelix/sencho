@@ -40,6 +40,6 @@ while IFS= read -r f; do
       if ($0 ~ /(steps|inputs)\./ && $0 !~ /\$\{\{/) flag($0)
     }
     END { exit bad }' "$f" >&2 || fail=1
-done < <(grep -rlE --include='*.yml' --include='*.yaml' 'build-args:' "$@" || true)
+done < <(grep -rlE --include='*.yml' --include='*.yaml' 'build-args"?:' "$@" || true)
 
 exit "$fail"
