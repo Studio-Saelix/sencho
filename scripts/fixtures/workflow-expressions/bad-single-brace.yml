@@ -1,0 +1,7 @@
+jobs:
+  build:
+    steps:
+      - uses: docker/build-push-action@v6
+        with:
+          build-args: |
+            SENCHO_RECOVERY_HELPER_IMAGE=${ steps.helper.outputs.digest }
