@@ -912,8 +912,10 @@ export function useStackActions(options: UseStackActionsOptions) {
     stackListState.setSearchQuery('');
     // Pin the load to the target node explicitly: activeNode has not re-rendered
     // yet, so an unpinned load would read the stale ref (or, once it does render,
-    // whatever node another tab made active in the shared localStorage).
-    await loadFileRef.current(filename, { ...options, nodeId: node.id });
+    // whatever node another tab made active in the shared localStorage). Forward
+    // the name too: this is the exact target, so the failure copy can name it
+    // even when the render-time node list cannot resolve the id.
+    await loadFileRef.current(filename, { ...options, nodeId: node.id, nodeName: node.name });
   };
 
   const clearEnvState = () => {
@@ -1075,13 +1077,17 @@ export function useStackActions(options: UseStackActionsOptions) {
     // Name the node this load is pinned to, not whichever node is active by
     // the time the failure renders. loadFileOnNode sets the active node and
     // calls straight into this closure, so `activeNode` can still be the
-    // previous one. A pinned id the node list cannot resolve, and a local load
-    // while a remote node is active, leave the name unset: the copy then says
-    // "this node" instead of blaming a node the request never reached.
+    // previous one. A pinned id resolved by the node list names that node; a
+    // pinned id the list cannot resolve (a stale or partially loaded list) uses
+    // the name the caller forwarded, because it held the exact target node. A
+    // local load while a remote node is active, and a pin with no forwarded
+    // name, leave the name unset: the copy then says "this node" instead of
+    // blaming a node the request never reached.
     const opNode = opNodeId === null
       ? (activeNode?.type === 'local' ? activeNode : null)
       : nodes.find((node) => node.id === opNodeId)
         ?? (activeNode?.id === opNodeId ? activeNode : null);
+    const opNodeName = opNode?.name?.trim() || options?.nodeName?.trim() || null;
     try {
       headersSpan = beginSpan('fetch_headers', { attemptId });
       const res = await apiFetch(`/stacks/${filename}`, { signal, nodeId: opNodeId });
@@ -1104,7 +1110,7 @@ export function useStackActions(options: UseStackActionsOptions) {
         const readFailure = classifyRemoteReadFailure(res);
         if (isNamedReadFailure(readFailure) && readFailure !== 'unsupported') {
           throw new StackOpenError(remoteReadFailureMessage(readFailure, {
-            nodeName: opNode?.name,
+            nodeName: opNodeName,
             status: res.status,
             body: text,
           }));
@@ -1170,7 +1176,7 @@ export function useStackActions(options: UseStackActionsOptions) {
         : null;
       const namedFailure = isNamedReadFailure(thrownFailure) && thrownFailure !== 'unsupported'
         ? remoteReadFailureMessage(thrownFailure, {
-          nodeName: opNode?.name,
+          nodeName: opNodeName,
           status: thrownResponse instanceof Response ? thrownResponse.status : undefined,
         })
         : undefined;

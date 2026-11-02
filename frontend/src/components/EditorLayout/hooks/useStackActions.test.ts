@@ -487,11 +487,11 @@ describe('useStackActions.saveFile', () => {
     expect(vi.mocked(toast.error).mock.calls.some(([message]) => /"Local"/.test(String(message)))).toBe(false);
   });
 
-  it('leaves the node unnamed when the pinned node is absent from the node list', async () => {
-    // The node list can be stale or still loading, so the pinned id may not
-    // resolve. Falling back to the active node would blame a different node's
-    // stored token; the load's real target is unknown, so the copy stays
-    // neutral.
+  it('names the target node when loadFileOnNode has its object but the list cannot resolve it', async () => {
+    // loadFileOnNode holds the exact target Node, so the pinned id missing from
+    // the stale or still-loading list must not discard the name. The active
+    // node is a different host and must never be named instead.
+    vi.mocked(toast.error).mockClear();
     vi.mocked(apiFetch).mockRejectedValue(Object.assign(new Error('Unauthorized'), {
       response: new Response('Unauthorized', {
         status: 401,
@@ -505,8 +505,24 @@ describe('useStackActions.saveFile', () => {
       await result.current.loadFileOnNode(pinned, 'linked.yml', { skipUnsavedCheck: true });
     });
     const messages = vi.mocked(toast.error).mock.calls.map(([message]) => String(message));
-    expect(messages.some((message) => /stored credential for this node/i.test(message))).toBe(true);
-    expect(messages.some((message) => /"Local"|"edge-2"|"edge-9"/.test(message))).toBe(false);
+    expect(messages.some((message) => /stored credential for "edge-9"/i.test(message))).toBe(true);
+    expect(messages.some((message) => /"Local"|"edge-2"/.test(message))).toBe(false);
+  });
+
+  it('names the target node on a returned failure when loadFileOnNode outruns the node list', async () => {
+    vi.mocked(toast.error).mockClear();
+    vi.mocked(apiFetch).mockResolvedValue(new Response(
+      JSON.stringify({ error: 'Pilot tunnel disconnected.' }),
+      { status: 503, headers: { 'x-sencho-read-failure': 'pilot-disconnected' } },
+    ));
+    const pinned = { id: 9, name: 'edge-9', type: 'remote' } as Parameters<typeof useStackActions>[0]['nodes'][number];
+    const { result } = setup({ activeNode: DEFAULT_ACTIVE_NODE, nodes: [] });
+    await act(async () => {
+      await result.current.loadFileOnNode(pinned, 'linked.yml', { skipUnsavedCheck: true });
+    });
+    const messages = vi.mocked(toast.error).mock.calls.map(([message]) => String(message));
+    expect(messages.some((message) => /Pilot tunnel to "edge-9" is disconnected/i.test(message))).toBe(true);
+    expect(messages.some((message) => /"Local"/.test(message))).toBe(false);
   });
 
   it('leaves the node unnamed on a returned failure when the pinned node is absent from the node list', async () => {
@@ -539,6 +555,25 @@ describe('useStackActions.saveFile', () => {
     });
     const messages = vi.mocked(toast.error).mock.calls.map(([message]) => String(message));
     expect(messages.some((message) => /stored credential for this node/i.test(message))).toBe(true);
+    expect(messages.some((message) => /"edge-1"/.test(message))).toBe(false);
+  });
+
+  it('names the local node when loadFileOnNode targets it while a remote node is active', async () => {
+    // loadFileOnNode sets the active node but the hook has not re-rendered, so
+    // the resolution still sees the remote node. The caller holds the local
+    // node, and the copy must name it rather than stay neutral.
+    vi.mocked(toast.error).mockClear();
+    const remote = { id: 9, name: 'edge-1', type: 'remote' } as Parameters<typeof useStackActions>[0]['nodes'][number];
+    const local = { id: 1, name: 'Local', type: 'local' } as Parameters<typeof useStackActions>[0]['nodes'][number];
+    vi.mocked(apiFetch).mockRejectedValue(Object.assign(new Error('Unauthorized'), {
+      response: new Response('Unauthorized', { status: 401 }),
+    }));
+    const { result } = setup({ activeNode: remote, nodes: [] });
+    await act(async () => {
+      await result.current.loadFileOnNode(local, 'linked.yml', { skipUnsavedCheck: true });
+    });
+    const messages = vi.mocked(toast.error).mock.calls.map(([message]) => String(message));
+    expect(messages.some((message) => /do not have access to this data on "Local"/i.test(message))).toBe(true);
     expect(messages.some((message) => /"edge-1"/.test(message))).toBe(false);
   });
 
