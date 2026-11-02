@@ -6,7 +6,7 @@ description: Capture, verify, and restore the data inside one named Docker volum
 A volume recovery point is a snapshot of the bytes inside one named Docker volume, stored in a recovery repository on the node that holds that volume. Sencho creates points, checks their integrity, and restores them into a new volume. This page covers the storage rules behind those actions and the HTTP calls that drive them.
 
 <Note>
-  Volume recovery points are managed through Sencho's API. The examples on this page use an API token created in **Settings > API Tokens**. See [API Overview](/api-reference/overview) for the token scopes, the base URL, and node routing. Reading status, points, and operations works with a Read Only, Deploy Only, or Full Admin token. Every call that changes something (provision the repository, capture, verify, restore, cancel, release a lock) needs a **Full Admin** token: a Read Only or Deploy Only token is refused with `403 SCOPE_DENIED`. An Observe Only token is refused every recovery call.
+  Volume recovery points are managed through Sencho's API. The examples on this page use an API token created in **Settings > API Tokens**. See [API Overview](/api-reference/overview) for the token scopes, the base URL, and node routing. Reading status, points, and operations passes the scope check for a Read Only, Deploy Only, or Full Admin token; the role the token maps to still decides which records it may read. Every call that changes something (provision the repository, capture, verify, restore, cancel, release a lock) needs a **Full Admin** token: a Read Only or Deploy Only token is refused with `403 SCOPE_DENIED`. An Observe Only token is refused every recovery call.
 </Note>
 
 ## Configuration recovery and data recovery are separate
