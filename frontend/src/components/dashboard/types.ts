@@ -70,6 +70,7 @@ export type NotificationCategory =
     | 'health_gate_passed'
     | 'health_gate_failed'
     | 'rollback_generation_released'
+    | 'update_policy'
     | 'node_update_available'
     | 'dev_build_update_available'
     | 'system';
@@ -86,6 +87,8 @@ export interface NotificationItem {
   stack_name?: string;
   container_name?: string;
   actor_username?: string | null;
+  /** Routing keys the alert carried, when it came from services that set io.sencho.notify.route. */
+  route_keys?: string[] | null;
 }
 
 export interface StackStatusEntry {

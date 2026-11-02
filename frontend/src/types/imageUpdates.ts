@@ -73,6 +73,17 @@ export interface StackServiceUpdateStatus {
 }
 
 /**
+ * What an unattended image refresh (scheduled, automatic, webhook, bulk) would
+ * do for a stack, as the node's one policy evaluator decided. Absent on an
+ * older node, which shows no policy note rather than an allowed update.
+ */
+export interface StackUnattendedPolicy {
+    decision: 'allow' | 'skip';
+    /** Services the label keeps out of an unattended refresh, with their declared policy. */
+    ineligible: Array<{ service: string; policy: string }>;
+}
+
+/**
  * Rich per-stack update status from `GET /api/image-updates/detail`. `lastError`
  * carries the failure reason when `checkStatus` is 'failed' or 'partial'.
  */
@@ -83,6 +94,8 @@ export interface StackUpdateInfo {
     checkedAt: number;
     /** Per-service breakdown; absent when the stack has no persisted per-service data yet. */
     services?: StackServiceUpdateStatus[];
+    /** The unattended decision, when the node recorded one. */
+    unattendedPolicy?: StackUnattendedPolicy;
 }
 
 /**

@@ -146,6 +146,32 @@ describe('service update and restore refusals', () => {
     });
   });
 
+  it('carries the update policy refusal, so the shared handler can offer the Compose file', async () => {
+    mockedApiFetch.mockResolvedValue(new Response(JSON.stringify({
+      error: 'Update blocked by io.sencho.update: "api" is set to disabled.',
+      code: 'update_policy_blocked',
+      serviceName: 'api',
+      updatePolicy: { reason: '"api" is set to disabled.' },
+    }), { status: 409 }));
+    const result = await requestServiceUpdate({ nodeId: 1, stackName: 'web', serviceName: 'api' });
+    expect(result).toMatchObject({
+      ok: false,
+      code: 'update_policy_blocked',
+      policyRefusal: {
+        message: 'Update blocked by io.sencho.update: "api" is set to disabled.',
+        reason: '"api" is set to disabled.',
+        serviceName: 'api',
+      },
+    });
+  });
+
+  it('leaves the refusal absent when the body is malformed, so callers keep their generic failure', async () => {
+    mockedApiFetch.mockResolvedValue(new Response(JSON.stringify({ code: 'update_policy_blocked' }), { status: 409 }));
+    const result = await requestServiceUpdate({ nodeId: 1, stackName: 'web', serviceName: 'api' });
+    expect(result).toMatchObject({ ok: false });
+    expect(result.ok ? undefined : result.policyRefusal).toBeUndefined();
+  });
+
   it('returns the Docker endpoint refusal for a service restore', async () => {
     mockedApiFetch.mockResolvedValue(new Response(JSON.stringify(body), { status: 409 }));
     const result = await requestServiceRestore({ nodeId: 1, stackName: 'web', serviceName: 'socket-proxy', recoveryId: 'rec-1' });

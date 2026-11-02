@@ -68,6 +68,17 @@ describe('NotificationPanel row actions', () => {
     expect(h.onOpenChange).not.toHaveBeenCalled();
   });
 
+  it('shows the routing keys an alert carried', () => {
+    setup({ notifications: [notif({ route_keys: ['production'] })] });
+    expect(screen.getByTestId('notification-route-keys')).toHaveTextContent('Routing keys: production');
+  });
+
+  it('never counts a history-only update_policy row as unread', () => {
+    setup({ notifications: [notif({ category: 'update_policy', level: 'warning', is_read: 0 })] });
+    expect(screen.queryByRole('button', { name: 'Mark all read' })).toBeNull();
+    expect(screen.queryByText(/\d+ unread/)).toBeNull();
+  });
+
   it('offers Mark read only on unread rows', () => {
     setup({ notifications: [notif({ id: 1, is_read: 1 }), notif({ id: 2, is_read: 0 })] });
     expect(screen.getAllByRole('button', { name: 'Mark read' })).toHaveLength(1);

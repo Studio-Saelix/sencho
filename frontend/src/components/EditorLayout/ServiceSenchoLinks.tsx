@@ -6,8 +6,11 @@ import {
   unverifiedLinkCount,
   type SenchoLabelResolution,
 } from '@/lib/senchoLabels';
+import { updatePolicyChip } from './serviceUpdatePolicy';
 
 const LINK_CLASS = 'inline-flex min-w-0 max-w-full items-center gap-1 text-brand hover:underline max-md:min-h-11';
+const POLICY_CHIP_CLASS =
+  'inline-flex items-center gap-1 rounded-full border border-muted bg-card/40 px-2 py-0.5 font-mono text-[10px] uppercase tracking-[0.14em] text-stat-subtitle';
 
 function hostOf(url: string): string {
   try {
@@ -26,17 +29,18 @@ interface ServiceSenchoLinksProps {
 
 /**
  * Links and diagnostics declared for a service with `io.sencho.*` labels: the
- * named links, the application link when no published port carries it, and a
- * quiet count of labels Sencho ignored. Every anchor target was validated by
- * the node and is checked again on read.
+ * named links, the application link when no published port carries it, the
+ * update policy in force, and a quiet count of labels Sencho ignored. Every
+ * anchor target was validated by the node and is checked again on read.
  */
 export function ServiceSenchoLinks({ resolution, service, applicationLinkShown }: ServiceSenchoLinksProps) {
   const application = applicationLinkShown ? undefined : applicationLink(resolution, service);
   const named = namedLinks(resolution, service);
   const ignored = ignoredLabels(resolution, service);
   const unverified = unverifiedLinkCount(resolution, service);
+  const policyChip = updatePolicyChip(resolution, service);
   const notShown = ignored.length + unverified;
-  if (!application && named.length === 0 && notShown === 0) return null;
+  if (!application && named.length === 0 && notShown === 0 && !policyChip) return null;
 
   return (
     <div className="flex min-w-0 max-w-full flex-wrap items-center gap-x-3 gap-y-0.5 font-mono text-[11px]" data-testid="service-sencho-links">
@@ -52,6 +56,11 @@ export function ServiceSenchoLinks({ resolution, service, applicationLinkShown }
           <ArrowUpRight className="h-3 w-3 shrink-0" strokeWidth={1.5} />
         </a>
       ))}
+      {policyChip && (
+        <span className={POLICY_CHIP_CLASS} title={policyChip.title} data-testid="service-update-policy">
+          {policyChip.label}
+        </span>
+      )}
       {notShown > 0 && (
         <span
           className="text-warning"

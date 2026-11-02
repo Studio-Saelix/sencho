@@ -114,6 +114,28 @@ describe('postStackUpdate', () => {
     expect(await postStackUpdate({ nodeId: 1, stackName: 'web' })).toMatchObject({ kind: 'failed' });
   });
 
+  it('classifies an update-policy refusal, keeping the server sentence and the reason', async () => {
+    vi.mocked(apiFetch).mockResolvedValue(json(409, {
+      error: 'Update blocked by io.sencho.update: "db" is set to disabled.',
+      code: 'update_policy_blocked',
+      serviceName: 'db',
+      updatePolicy: { reason: '"db" is set to disabled.' },
+    }));
+    expect(await postStackUpdate({ nodeId: 1, stackName: 'web' })).toEqual({
+      kind: 'update-policy-blocked',
+      refusal: {
+        message: 'Update blocked by io.sencho.update: "db" is set to disabled.',
+        reason: '"db" is set to disabled.',
+        serviceName: 'db',
+      },
+    });
+  });
+
+  it('falls back to a generic failure when an update_policy_blocked body carries nothing to show', async () => {
+    vi.mocked(apiFetch).mockResolvedValue(json(409, { code: 'update_policy_blocked' }));
+    expect(await postStackUpdate({ nodeId: 1, stackName: 'web' })).toMatchObject({ kind: 'failed' });
+  });
+
   it('takes the failure message, rollback and classification from the body', async () => {
     vi.mocked(apiFetch).mockResolvedValue(json(500, {
       error: 'compose up failed',

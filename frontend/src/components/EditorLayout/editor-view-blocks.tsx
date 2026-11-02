@@ -53,6 +53,7 @@ import type { ContainerInfo, ContainerStatsEntry, StackAction } from './EditorVi
 import type { EffectiveServiceSpec } from '@/types/effectiveServices';
 import type { StackServiceUpdateStatus } from '@/types/imageUpdates';
 import { isConfirmedServiceUpdate } from '@/types/imageUpdates';
+import { serviceUpdateButtonState } from './serviceUpdatePolicy';
 
 const extractUptime = (status: string | undefined): string | null => {
     if (!status) return null;
@@ -323,6 +324,8 @@ export interface ServiceUpdateAffordance {
     showUpdateAction: boolean;
     busy: boolean;
     replicaCopy: string;
+    /** Set when the service's io.sencho.update label rules an update out; the backend refuses it too. */
+    policyBlocked?: { title: string };
     onRequest: () => void;
 }
 
@@ -589,7 +592,7 @@ export function ContainersHealth({
                     variant="outline"
                     className="h-7 rounded-md px-2 max-md:h-11"
                     onClick={affordance.onRequest}
-                    disabled={affordance.busy}
+                    disabled={affordance.busy || Boolean(affordance.policyBlocked)}
                   >
                     <CloudDownload className="h-3.5 w-3.5 mr-1.5" strokeWidth={1.5} />
                     {affordance.busy
@@ -597,7 +600,7 @@ export function ContainersHealth({
                         : (affordance.mode === 'rebuild' ? 'Rebuild' : 'Update')}
                   </Button>
                 </TooltipTrigger>
-                <TooltipContent>{affordance.replicaCopy}</TooltipContent>
+                <TooltipContent>{affordance.policyBlocked?.title ?? affordance.replicaCopy}</TooltipContent>
               </Tooltip>
             </TooltipProvider>
         );
@@ -915,12 +918,16 @@ export function ContainersHealth({
                         const replicaCopy = mode === 'rebuild'
                             ? `Rebuilds all ${spec.expectedReplicas} ${replicaWord}`
                             : `Updates all ${spec.expectedReplicas} ${replicaWord}`;
+                        // A service whose label is `disabled` keeps its Update
+                        // button off and says why; the route refuses it anyway.
+                        const policyState = serviceUpdateButtonState(sencho, spec.name);
                         const updateAffordance: ServiceUpdateAffordance = {
                             hasUpdate,
                             mode,
                             showUpdateAction,
                             busy,
                             replicaCopy,
+                            ...(policyState.disabled ? { policyBlocked: { title: policyState.title ?? '' } } : {}),
                             onRequest: () => onRequestServiceUpdate?.(spec.name, mode),
                         };
 

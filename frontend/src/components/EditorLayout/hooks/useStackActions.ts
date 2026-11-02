@@ -30,6 +30,7 @@ import { resolveOpenAppTarget, serviceUrlLookupPending } from '@/lib/serviceUrlR
 import { confirmComposeSourceReload } from '@/lib/composeSourceConflict';
 import { StackOpenError, stackOpenConnectionMessage, stackOpenRefusalMessage } from '@/lib/stackOpenError';
 import { requestServiceUpdate as postServiceUpdate, requestServiceRestore as postServiceRestore } from '@/lib/serviceUpdate';
+import { parseUpdatePolicyRefusalText, toastUpdatePolicyRefusal } from '@/lib/updatePolicyRefusal';
 import type { EffectiveServiceModelResult } from '@/types/effectiveServices';
 import { absentFault, pendingSourceStatus, type GitSourcePendingMap } from '@/lib/gitopsState';
 import type { GitOpsRevisionCarrier } from '@/types/gitops';
@@ -1818,6 +1819,16 @@ export function useStackActions(options: UseStackActionsOptions) {
           return { ok: false, errorMessage: 'Protected by Sencho' };
         }
         if (response.status === 409) {
+          const policyRefusal = parseUpdatePolicyRefusalText(rawBody, response.status);
+          if (policyRefusal) {
+            toastUpdatePolicyRefusal(policyRefusal, {
+              nodeId: opNodeId ?? null,
+              stackName,
+              inEditor: true,
+              onOpenComposeFile: stackListState.selectedFile === stackFile ? openComposeEditor : undefined,
+            });
+            return { ok: false, errorMessage: policyRefusal.message };
+          }
           const inProgress = parseStackOpInProgress(rawBody);
           if (inProgress) {
             // The save half already reported success, so the bare in-progress
@@ -2283,6 +2294,16 @@ export function useStackActions(options: UseStackActionsOptions) {
                 toast.error(message);
                 return { ok: false as const, errorMessage: message };
               }
+              case 'update-policy-blocked':
+                // The label is authoritative; the editor only offers the way to
+                // change it, in the same Compose file the update runs from.
+                toastUpdatePolicyRefusal(outcome.refusal, {
+                  nodeId: opNodeId,
+                  stackName,
+                  inEditor: true,
+                  onOpenComposeFile: stackListState.selectedFile === stackFile ? openComposeEditor : undefined,
+                });
+                return { ok: false as const, errorMessage: outcome.refusal.message };
               case 'failed':
                 recordActionFailureFor(stackFile, stackName, action, startedAt, outcome.error.message, outcome.error.rolledBack === true, outcome.error.failure);
                 await refreshSelectedContainers(stackName, stackFile);
@@ -2476,6 +2497,15 @@ export function useStackActions(options: UseStackActionsOptions) {
           if (!result.ok) {
             if (openServiceEndpointRefusal(result, stackFile, opNodeId)) {
               return { ok: false as const, errorMessage: 'Protected by Sencho' };
+            }
+            if (result.policyRefusal) {
+              toastUpdatePolicyRefusal(result.policyRefusal, {
+                nodeId: opNodeId,
+                stackName,
+                inEditor: true,
+                onOpenComposeFile: stackListState.selectedFile === stackFile ? openComposeEditor : undefined,
+              });
+              return { ok: false as const, errorMessage: result.policyRefusal.message };
             }
             toast.error(result.error);
             return { ok: false as const, errorMessage: result.error };
