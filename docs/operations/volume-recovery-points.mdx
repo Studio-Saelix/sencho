@@ -6,7 +6,7 @@ description: Capture, verify, and restore the data inside one named Docker volum
 A volume recovery point is a snapshot of the bytes inside one named Docker volume, stored in a recovery repository on the node that holds that volume. Sencho creates points, checks their integrity, and restores them into a new volume. This page covers the storage rules behind those actions and the HTTP calls that drive them.
 
 <Note>
-  Volume recovery points are managed through Sencho's API. The examples on this page use an API token created in **Settings > API Tokens**. See [API Overview](/api-reference/overview) for the token scopes, the base URL, and node routing. Reading status, points, and operations works with a Read Only, Deploy Only, or Full Admin token. Every call that changes something (provision the repository, capture, verify, restore, cancel, release a lock) needs a **Full Admin** token: a Read Only or Deploy Only token is refused with `403 SCOPE_DENIED`, so a backup job cannot use a Deploy Only token. An Observe Only token is refused every recovery call.
+  Volume recovery points are managed through Sencho's API. The examples on this page use an API token created in **Settings > API Tokens**. See [API Overview](/api-reference/overview) for the token scopes, the base URL, and node routing. Reading status, points, and operations works with a Read Only, Deploy Only, or Full Admin token. Every call that changes something (provision the repository, capture, verify, restore, cancel, release a lock) needs a **Full Admin** token: a Read Only or Deploy Only token is refused with `403 SCOPE_DENIED`. An Observe Only token is refused every recovery call.
 </Note>
 
 ## Configuration recovery and data recovery are separate
@@ -455,7 +455,7 @@ A restart does not leave the node closed. When Sencho starts it removes the help
 
 ### Error responses
 
-Every error from these routes has the same shape. `code` is the upper-cased error class, so a client can switch on one field. A refusal can also carry a `reason`, a stable token for the specific cause: `engine_starting`, `repository_not_initialized`, `repository_replaced`, or `not_cancellable`.
+Every error from these routes has the same shape, except the `403 SCOPE_DENIED` that an API token of the wrong scope gets before the request reaches a route: that body carries `error` and `code` only, with no `errorClass`. `code` is the upper-cased error class, so a client can switch on one field. A refusal can also carry a `reason`, a stable token for the specific cause: `engine_starting`, `repository_not_initialized`, `repository_replaced`, or `not_cancellable`.
 
 ```json
 {

@@ -73,7 +73,7 @@ tags:
   - name: Image Updates
     description: Check for available container image updates across stacks
   - name: Recovery
-    description: Create, verify, and restore application-data recovery points for named Docker volumes on a node. The read calls (`GET`) work with a Read Only, Deploy Only, or Full Admin token; every write call needs a Full Admin token. Any other token gets `403 SCOPE_DENIED`, and an Observe Only token gets it on every recovery call.
+    description: Create, verify, and restore application-data recovery points for named Docker volumes on a node. The read calls (`GET`) work with a Read Only, Deploy Only, or Full Admin token; every write call needs a Full Admin token. A write call with any other scope, and every recovery call with an Observe Only token, gets `403 SCOPE_DENIED`.
 
 components:
   securitySchemes:
@@ -1765,11 +1765,16 @@ components:
           schema:
             $ref: "#/components/schemas/RecoveryError"
     RecoveryForbidden:
-      description: The caller lacks the access this recovery action needs.
+      description: |
+        The caller lacks the access this recovery action needs. An API token whose scope
+        does not allow the call is refused before the route runs, with `code: SCOPE_DENIED`
+        and no `errorClass`.
       content:
         application/json:
           schema:
-            $ref: "#/components/schemas/RecoveryError"
+            oneOf:
+              - $ref: "#/components/schemas/RecoveryError"
+              - $ref: "#/components/schemas/Error"
     RecoveryConflict:
       description: A live lock is held, an interrupted operation left a stale lock, the storage identity is unknown, a check found a mismatch, an operation was interrupted, or a remote node needs an update.
       content:

@@ -156,6 +156,7 @@ describe('API token scope on the recovery routes', () => {
   describe.each(['read-only', 'deploy-only'] as const)('%s token', (scope) => {
     it.each(RECOVERY_READS)('GET %s is not refused by the scope gate', async (path) => {
       const res = await request(app).get(path).set('Authorization', `Bearer ${tokens[scope]}`);
+      expect(res.status).not.toBe(401);
       expect(res.body.code).not.toBe('SCOPE_DENIED');
     });
 
@@ -168,6 +169,13 @@ describe('API token scope on the recovery routes', () => {
 
   it.each(RECOVERY_WRITES)('full-admin token POST %s passes the scope gate', async (path) => {
     const res = await request(app).post(path).set('Authorization', `Bearer ${tokens['full-admin']}`).send({});
+    expect(res.status).not.toBe(401);
+    expect(res.body.code).not.toBe('SCOPE_DENIED');
+  });
+
+  it.each(RECOVERY_READS)('full-admin token GET %s passes the scope gate', async (path) => {
+    const res = await request(app).get(path).set('Authorization', `Bearer ${tokens['full-admin']}`);
+    expect(res.status).not.toBe(401);
     expect(res.body.code).not.toBe('SCOPE_DENIED');
   });
 });
