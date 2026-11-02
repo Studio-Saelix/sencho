@@ -161,8 +161,8 @@ jobs:
           tags: localhost/sencho:dev-scan
           cache-from: type=gha
           build-args: |
-            APK_CACHE_BUST=${ steps.apk-bust.outputs.date }
-            SENCHO_RECOVERY_HELPER_IMAGE=ghcr.io/studio-saelix/sencho-recovery-helper-dev@${ steps.helper.outputs.digest }
+            APK_CACHE_BUST=${{ steps.apk-bust.outputs.date }}
+            SENCHO_RECOVERY_HELPER_IMAGE=ghcr.io/studio-saelix/sencho-recovery-helper-dev@${{ steps.helper.outputs.digest }}
 
       - name: Scan dev image for vulnerabilities (Trivy)
         # Same HIGH/CRITICAL policy and OpenVEX source of truth (trivy.yaml ->
@@ -243,5 +243,5 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max
           build-args: |
-            APK_CACHE_BUST=${ steps.apk-bust.outputs.date }
-            SENCHO_RECOVERY_HELPER_IMAGE=ghcr.io/studio-saelix/sencho-recovery-helper-dev@${ steps.helper.outputs.digest }
+            APK_CACHE_BUST=${{ steps.apk-bust.outputs.date }}
+            SENCHO_RECOVERY_HELPER_IMAGE=ghcr.io/studio-saelix/sencho-recovery-helper-dev@${{ steps.helper.outputs.digest }}

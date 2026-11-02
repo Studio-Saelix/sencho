@@ -177,8 +177,8 @@ jobs:
           tags: localhost/sencho:release-scan
           cache-from: type=registry,ref=saelix/sencho:buildcache
           build-args: |
-            APK_CACHE_BUST=${ steps.apk-bust.outputs.date }
-            SENCHO_RECOVERY_HELPER_IMAGE=saelix/sencho-recovery-helper@${ steps.helper.outputs.digest }
+            APK_CACHE_BUST=${{ steps.apk-bust.outputs.date }}
+            SENCHO_RECOVERY_HELPER_IMAGE=saelix/sencho-recovery-helper@${{ steps.helper.outputs.digest }}
 
       - name: Re-scan release image for vulnerabilities (Trivy)
         # Gates the release on the same HIGH/CRITICAL policy as the PR scan.
@@ -238,8 +238,8 @@ jobs:
           cache-from: type=registry,ref=saelix/sencho:buildcache
           cache-to: type=registry,ref=saelix/sencho:buildcache,mode=max
           build-args: |
-            APK_CACHE_BUST=${ steps.apk-bust.outputs.date }
-            SENCHO_RECOVERY_HELPER_IMAGE=saelix/sencho-recovery-helper@${ steps.helper.outputs.digest }
+            APK_CACHE_BUST=${{ steps.apk-bust.outputs.date }}
+            SENCHO_RECOVERY_HELPER_IMAGE=saelix/sencho-recovery-helper@${{ steps.helper.outputs.digest }}
           # SBOM + provenance attestations are embedded as OCI referrers on the
           # published image. Inspect with: docker buildx imagetools inspect <img>
           sbom: true
