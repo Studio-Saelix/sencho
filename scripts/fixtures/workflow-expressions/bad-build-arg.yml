@@ -1,0 +1,8 @@
+jobs:
+  build:
+    steps:
+      - uses: docker/build-push-action@v6
+        with:
+          build-args: |
+            APK_CACHE_BUST=steps.apk-bust.outputs.date
+          tags: x

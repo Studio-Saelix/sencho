@@ -1,0 +1,11 @@
+jobs:
+  build:
+    steps:
+      - id: helper
+        run: echo "digest=abc" >> "$GITHUB_OUTPUT"
+      - uses: docker/build-push-action@v6
+        with:
+          build-args: |
+            SENCHO_RECOVERY_HELPER_IMAGE=${{ steps.helper.outputs.digest }}
+            APK_CACHE_BUST=${{ steps.apk-bust.outputs.date }}
+      - run: echo "$${HOME} ${HOME}"

@@ -158,7 +158,8 @@ jobs:
         working-directory: ./backend
         run: npm run test:docker-integration
 
-  # Single status for branch protection, which requires this exact job name.
+  # Single status for branch protection, which requires this exact job name. It also runs the workflow
+  # expression guard, so that check is required.
   # Passes when both backend jobs passed, or both were skipped because change
   # detection succeeded and found no code.
   backend-result:
@@ -168,6 +169,13 @@ jobs:
     needs: [changes, backend, backend-docker-integration]
     if: always()
     steps:
+      # Branch protection requires this job and it always runs, so the guard cannot be skipped or left advisory here.
+      - name: Checkout Code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Workflow expression guard
+        run: bash scripts/check-workflow-expressions.sh .github
+
       - name: Check backend results
         env:
           CHANGES: ${{ needs.changes.result }}
@@ -448,4 +456,5 @@ jobs:
           node --test scripts/release-highlights.test.mjs
           node --test scripts/audit-with-vex.test.mjs
           node --test scripts/check-pr-title.test.mjs
+          node --test scripts/check-workflow-expressions.test.mjs
           node --test scripts/check-version-transition.test.mjs

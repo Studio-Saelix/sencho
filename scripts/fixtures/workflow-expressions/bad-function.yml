@@ -1,0 +1,4 @@
+jobs:
+  b:
+    steps:
+      - run: echo ${ hashFiles(x) }
