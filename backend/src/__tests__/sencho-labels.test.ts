@@ -68,13 +68,16 @@ describe('registry', () => {
     expect(new Set(ids).size).toBe(ids.length);
     for (const def of SENCHO_LABEL_DEFINITIONS) {
       expect(def.scope).toBe('service');
-      expect(def.onInvalid).toBe('ignore-with-diagnostic');
+      // A protective label may fail closed instead of being ignored.
+      expect(['ignore-with-diagnostic', 'restrict-unattended']).toContain(def.onInvalid);
       expect(def.summary.length).toBeGreaterThan(0);
       expect(def.example.startsWith('io.sencho.')).toBe(true);
       expect(['compose', 'compose-or-deployed']).toContain(def.trust);
     }
-    // Presentation is the rule; the protective label is the one documented exception.
-    expect(SENCHO_LABEL_DEFINITIONS.filter(d => d.effect !== 'presentation').map(d => d.id)).toEqual(['infrastructure']);
+    // Presentation is the rule; the protective label and the two behavioral ones
+    // are the documented exceptions.
+    expect(SENCHO_LABEL_DEFINITIONS.filter(d => d.effect !== 'presentation').map(d => d.id))
+      .toEqual(['infrastructure', 'update', 'notify-route']);
     expect(CAPABILITIES).toContain(SENCHO_LABELS_CAPABILITY);
   });
 
@@ -90,7 +93,11 @@ describe('registry', () => {
   it('gives every definition the parser that reads its value type', () => {
     for (const def of SENCHO_LABEL_DEFINITIONS) {
       expect(typeof def.parse).toBe('function');
-      const sample = def.valueType === 'url' ? 'https://a.example.com' : def.valueType === 'integer' ? '3' : 'true';
+      const sample = def.valueType === 'url' ? 'https://a.example.com'
+        : def.valueType === 'integer' ? '3'
+        : def.valueType === 'enum' ? 'auto'
+        : def.valueType === 'routing-key' ? 'production'
+        : 'true';
       expect(def.parse(sample).ok).toBe(true);
       expect(def.parse('definitely not valid').ok).toBe(false);
     }
@@ -221,7 +228,7 @@ describe('resolveSenchoLabels', () => {
     ]);
     expect(r.services.web.order).toBe(10);
     expect(r.services.redis.hidden).toBe(true);
-    expect(r.services.plain).toEqual({ links: [], order: null, hidden: false });
+    expect(r.services.plain).toEqual({ links: [], order: null, hidden: false, update: null, notifyRoute: null });
     expect(r.entries.every(e => e.state === 'active')).toBe(true);
   });
 
@@ -244,7 +251,7 @@ describe('resolveSenchoLabels', () => {
     const r = resolveRendered(model({
       web: { 'io.sencho.url': secret, 'io.sencho.hidden': 'maybe', 'io.sencho.order': '1.5' },
     }));
-    expect(r.services.web).toEqual({ links: [], order: null, hidden: false });
+    expect(r.services.web).toEqual({ links: [], order: null, hidden: false, update: null, notifyRoute: null });
     expect(r.entries.map(e => [e.key, e.state])).toEqual([
       ['io.sencho.hidden', 'invalid'],
       ['io.sencho.order', 'invalid'],
@@ -390,7 +397,7 @@ describe('label behavior annotations', () => {
     expect(invalid?.state).toBe('invalid');
     expect(invalid?.reason).toContain('The only accepted value is true');
     // The protective label changes no presentation metadata.
-    expect(marked.services.web).toEqual({ links: [], order: null, hidden: false });
+    expect(marked.services.web).toEqual({ links: [], order: null, hidden: false, update: null, notifyRoute: null });
   });
 
   it('reports a deployed infrastructure copy as the guard reads it, not as inert', () => {
@@ -414,7 +421,7 @@ describe('label behavior annotations', () => {
     for (const key of SENCHO_MANAGED_LABELS) {
       const declared = resolveRendered(model({ web: { [key]: 'true' } }));
       expect(declaredLabelBehavior(declared, 'web', key)).toEqual({ state: 'invalid', reason: MANAGED_LABEL_DECLARED_REASON });
-      expect(declared.services.web).toEqual({ links: [], order: null, hidden: false });
+      expect(declared.services.web).toEqual({ links: [], order: null, hidden: false, update: null, notifyRoute: null });
       expect(deployedCopyBehavior(key, 'true', 'runtime')).toEqual({ state: 'inert', reason: MANAGED_LABEL_DEPLOYED_REASON });
     }
   });
