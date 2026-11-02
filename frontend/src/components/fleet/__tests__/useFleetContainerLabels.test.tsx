@@ -230,6 +230,20 @@ describe('useFleetContainerLabels', () => {
       expect(result.current.data?.nodeErrors[1]).toBe('Timed out after 25s');
     });
 
+    it('reports the second ask\'s own reason when the daemon stopped answering after the cut', async () => {
+      let asks = 0;
+      answerBy({
+        1: () => (++asks === 1 ? keptBuildCut(1) : json(hubNodeError(1, 'Timed out after 5s'))),
+        2: () => json(piece(2)),
+        3: () => json(piece(3)),
+      });
+      const { result } = renderHook(() => useFleetContainerLabels(NODES, false));
+
+      await waitFor(() => expect(result.current.loading).toBe(false));
+      expect(asks).toBe(2);
+      expect(result.current.data?.nodeErrors[1]).toBe('Timed out after 5s');
+    });
+
     it('does not ask again for a node the hub cut without keeping a build', async () => {
       answerBy({ 1: () => json(piece(1)), 2: () => json(hubNodeError(2, 'Timed out after 5s')), 3: () => json(piece(3)) });
       const { result } = renderHook(() => useFleetContainerLabels(NODES, false));

@@ -190,6 +190,21 @@ describe('useFleetMap', () => {
       expect(result.current.data?.nodeErrors.map(e => [e.nodeId, e.error])).toEqual([[1, 'Timed out after 25s']]);
     });
 
+    it('reports the second ask\'s own reason when the daemon stopped answering after the cut', async () => {
+      let asks = 0;
+      const wedged = piece(1, { nodes: [], nodeErrors: [{ nodeId: 1, nodeName: 'node1', error: 'Timed out after 5s' }] });
+      answerBy({
+        1: () => (++asks === 1 ? keptBuildCut(1) : json(wedged)),
+        2: () => json(piece(2)),
+        3: () => json(piece(3)),
+      });
+      const { result } = renderHook(() => useFleetMap(true, NODES));
+
+      await waitFor(() => expect(result.current.loading).toBe(false));
+      expect(asks).toBe(2);
+      expect(result.current.data?.nodeErrors.map(e => [e.nodeId, e.error])).toEqual([[1, 'Timed out after 5s']]);
+    });
+
     it('does not ask again for a node the hub cut without keeping a build', async () => {
       const cut = piece(2, { nodes: [], nodeErrors: [{ nodeId: 2, nodeName: 'edge', error: 'Timed out after 5s' }] });
       answerBy({ 1: () => json(piece(1)), 2: () => json(cut), 3: () => json(piece(3)) });
