@@ -1714,6 +1714,36 @@ services:
     );
   });
 
+  it('records the unattended policy on a failed check instead of erasing it', async () => {
+    mockGetStacks.mockResolvedValue(['stackA']);
+    mockGetStackContent.mockResolvedValue(TWO_SERVICE_COMPOSE);
+    mockGetStackUpdateStatus.mockReturnValue({});
+    mockBuildEffectiveServiceModel.mockResolvedValueOnce({
+      renderable: true,
+      services: [specFor('web', 'web:latest'), specFor('worker', 'worker:latest')],
+    });
+    mockResolveUpdatePolicyPair.mockResolvedValueOnce({
+      manual: { decision: 'block' },
+      unattended: {
+        decision: 'skip',
+        evaluation: 'evaluated',
+        services: [{ service: 'web', policy: 'disabled', eligible: false, reason: 'set to disabled' }],
+      },
+    });
+    const service = ImageUpdateService.getInstance();
+    // Every image check fails, so the row is recorded through the failure path.
+    (service as any).checkImage = vi.fn().mockResolvedValue({
+      hasUpdate: false, checkStatus: 'failed', error: 'Registry unreachable',
+    });
+
+    await (service as any).checkNode(1, fakeDb());
+
+    expect(mockRecordStackCheckFailure).toHaveBeenCalledWith(
+      1, 'stackA', expect.any(String), expect.any(Number), expect.any(Array), expect.any(Number),
+      { decision: 'skip', ineligible: [{ service: 'web', policy: 'disabled' }] },
+    );
+  });
+
   it('falls back to the legacy whole-stack tally when the effective model is not renderable', async () => {
     mockGetStacks.mockResolvedValue(['stackA']);
     mockGetStackContent.mockResolvedValue(TWO_SERVICE_COMPOSE);

@@ -361,7 +361,7 @@ describe('the update-policy activity row', () => {
 });
 
 describe('the recorded unattended policy', () => {
-  it('survives a check that could not evaluate it, and is cleared by an explicit clear or a failed check', async () => {
+  it('survives a check that could not evaluate it, and a failed check, until one evaluates it', async () => {
     const { DatabaseService } = await import('../services/DatabaseService');
     const db = DatabaseService.getInstance();
     const nodeId = db.getDefaultNode()!.id!;
@@ -382,11 +382,20 @@ describe('the recorded unattended policy', () => {
     db.upsertStackUpdateStatus(nodeId, stack, false, Date.now(), 'ok', null, [], 0, null);
     expect(db.getStackUpdateDetail(nodeId)[stack].unattendedPolicy).toBeUndefined();
 
+    // A failed check that could not read the label keeps the row as it was.
     db.upsertStackUpdateStatus(nodeId, stack, false, Date.now(), 'ok', null, [], 0, {
       decision: 'allow', ineligible: [],
     });
     db.recordStackCheckFailure(nodeId, stack, 'registry unreachable', Date.now(), [], 0);
-    expect(db.getStackUpdateDetail(nodeId)[stack].unattendedPolicy).toBeUndefined();
+    expect(db.getStackUpdateDetail(nodeId)[stack].unattendedPolicy).toMatchObject({ decision: 'allow' });
+
+    // A failed check that did read the label records the decision it saw.
+    db.recordStackCheckFailure(nodeId, stack, 'registry unreachable', Date.now(), [], 0, {
+      decision: 'skip', ineligible: [{ service: 'web', policy: 'disabled' }],
+    });
+    expect(db.getStackUpdateDetail(nodeId)[stack].unattendedPolicy).toMatchObject({
+      decision: 'skip', ineligible: [{ service: 'web', policy: 'disabled' }],
+    });
   });
 });
 

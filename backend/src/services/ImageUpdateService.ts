@@ -1233,7 +1233,7 @@ export class ImageUpdateService {
 
         const committed = await this.withStackWriteLock(nodeId, stackName, generation, async (gen) => {
             if (checkStatus === 'failed') {
-                db.recordStackCheckFailure(nodeId, stackName, lastError ?? 'Update check failed', now, services, gen);
+                db.recordStackCheckFailure(nodeId, stackName, lastError ?? 'Update check failed', now, services, gen, unattendedPolicy);
             } else {
                 db.upsertStackUpdateStatus(nodeId, stackName, hasUpdate, now, checkStatus, lastError, services, gen, unattendedPolicy);
             }
@@ -1532,6 +1532,7 @@ export class ImageUpdateService {
                 if (checkStatus === 'failed') {
                     db.recordStackCheckFailure(
                         nodeId, stackName, lastError ?? 'Update check failed', checkedAt, services, gen,
+                        unattendedPolicy,
                     );
                 } else {
                     db.upsertStackUpdateStatus(

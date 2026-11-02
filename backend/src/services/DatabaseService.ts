@@ -6472,6 +6472,10 @@ stmt.run('gitops_schema_version', '1');
      * check_status / last_error / checked_at, leaving has_update intact; a
      * first-ever failed check inserts a row with has_update = 0 so the stack
      * still appears with its failure reason.
+     *
+     * `unattendedPolicy` follows the same rule as the upsert: omitted means the
+     * check could not evaluate the label and the row keeps the last decision;
+     * a value records the decision this check observed.
      */
     public recordStackCheckFailure(
         nodeId: number,
@@ -6480,20 +6484,25 @@ stmt.run('gitops_schema_version', '1');
         checkedAt: number,
         services?: StackServiceStatus[],
         generation = 0,
+        unattendedPolicy?: StackUpdateUnattendedPolicy,
     ): void {
         const servicesJson = services !== undefined ? stringifyServicesJson(services, generation) : null;
+        const evaluatedPolicy = unattendedPolicy !== undefined;
         this.db.prepare(
-            `INSERT INTO stack_update_status (node_id, stack_name, has_update, check_status, last_error, checked_at, services_json)
-             VALUES (?, ?, 0, 'failed', ?, ?, ?)
+            `INSERT INTO stack_update_status (node_id, stack_name, has_update, check_status, last_error, checked_at, services_json, unattended_policy_json)
+             VALUES (?, ?, 0, 'failed', ?, ?, ?, ?)
              ON CONFLICT(node_id, stack_name) DO UPDATE SET
                check_status = 'failed',
                last_error = excluded.last_error,
                checked_at = excluded.checked_at,
                services_json = COALESCE(excluded.services_json, stack_update_status.services_json),
-               -- A failed check evaluated nothing, so it cannot vouch for the
-               -- policy the previous check recorded.
-               unattended_policy_json = NULL`
-        ).run(nodeId, stackName, lastError, checkedAt, servicesJson);
+               unattended_policy_json = CASE WHEN ? THEN excluded.unattended_policy_json
+                 ELSE stack_update_status.unattended_policy_json END`
+        ).run(
+            nodeId, stackName, lastError, checkedAt, servicesJson,
+            unattendedPolicy ? JSON.stringify(unattendedPolicy) : null,
+            evaluatedPolicy ? 1 : 0,
+        );
     }
 
     /**
