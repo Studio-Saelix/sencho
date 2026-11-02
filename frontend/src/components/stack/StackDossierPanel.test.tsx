@@ -225,6 +225,44 @@ describe('StackDossierPanel', () => {
     expect(vi.mocked(copyToClipboard).mock.calls[0][0]).not.toContain('## Storage portability');
   });
 
+  it('prints a networking read failure in the export instead of dropping the section', async () => {
+    vi.mocked(apiFetch).mockImplementation(async (input: string) => {
+      const url = String(input);
+      if (url.includes('/dossier')) return jsonRes({ ...EMPTY_DOSSIER_FIELDS });
+      return jsonRes(null, false);
+    });
+    render(<StackDossierPanel stackName="web" anatomy={anatomy} canEdit />);
+    await screen.findByTestId('dossier-panel');
+    fireEvent.click(screen.getByTestId('dossier-copy-btn'));
+    await waitFor(() => expect(copyToClipboard).toHaveBeenCalled());
+    const text = vi.mocked(copyToClipboard).mock.calls[0][0];
+    expect(text).toContain('## Network exposure');
+    expect(text).toContain('Network exposure could not be read for this stack.');
+  });
+
+  it('prints an intent read failure rather than calling every service unset', async () => {
+    vi.mocked(apiFetch).mockImplementation(async (input: string) => {
+      const url = String(input);
+      if (url.includes('/dossier')) return jsonRes({ ...EMPTY_DOSSIER_FIELDS });
+      if (url.includes('/networking')) {
+        return jsonRes({
+          renderable: true,
+          networks: [],
+          services: [{ name: 'web', publishedPorts: [], detected: { answer: 'host-published' } }],
+        });
+      }
+      return jsonRes({ error: 'down' }, false);
+    });
+    render(<StackDossierPanel stackName="web" anatomy={anatomy} canEdit />);
+    await screen.findByTestId('dossier-panel');
+    fireEvent.click(screen.getByTestId('dossier-copy-btn'));
+    await waitFor(() => expect(copyToClipboard).toHaveBeenCalled());
+    const text = vi.mocked(copyToClipboard).mock.calls[0][0];
+    expect(text).toContain('Exposure intent could not be read for this stack.');
+    expect(text).toContain('detected: host-published');
+    expect(text).not.toContain('auto (detected)');
+  });
+
   it('suppresses the warning when a reload fails, never showing the previous stack stale', async () => {
     vi.mocked(apiFetch)
       .mockResolvedValueOnce(jsonRes({ ...EMPTY_DOSSIER_FIELDS, access_urls: 'http://host:9000' }))

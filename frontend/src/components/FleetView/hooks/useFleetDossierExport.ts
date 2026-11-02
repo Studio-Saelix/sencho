@@ -92,7 +92,7 @@ async function loadDossier(stackName: string, nodeId: number): Promise<StackDoss
   }
 }
 
-async function loadNetworking(stackName: string, nodeId: number): Promise<NetworkExposureSummary | null> {
+async function loadNetworking(stackName: string, nodeId: number): Promise<NetworkExposureSummary> {
   try {
     const [facts, exposure] = await Promise.all([
       getJson<NetworkFactsInput>(`/stacks/${encodeURIComponent(stackName)}/networking`, nodeId),
@@ -102,7 +102,8 @@ async function loadNetworking(stackName: string, nodeId: number): Promise<Networ
   } catch (err) {
     if (isUnauthorized(err)) throw err;
     console.warn(`[FleetDossier] networking load failed for "${stackName}" on node ${nodeId}:`, err);
-    return null;
+    // A failed read is a failure to report, never "nothing to document".
+    return buildNetworkExposureSummary(null, []);
   }
 }
 
