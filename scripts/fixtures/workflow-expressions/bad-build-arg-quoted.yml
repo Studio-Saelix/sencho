@@ -2,4 +2,4 @@ jobs:
   b:
     steps:
       - with:
-          "build-args": X=steps.a.b
+          "build-args": X=steps.a.outputs.b

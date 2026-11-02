@@ -1,0 +1,4 @@
+jobs:
+  b:
+    steps:
+      - run: docker inspect --format x{{{{.Id y

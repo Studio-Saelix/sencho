@@ -1,0 +1,5 @@
+jobs:
+  b:
+    steps:
+      - run: echo ${ jobs.build.result }
+      - run: echo ${ steps['a'].outputs.b }

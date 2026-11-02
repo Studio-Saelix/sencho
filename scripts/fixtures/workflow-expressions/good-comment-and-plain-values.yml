@@ -1,0 +1,10 @@
+jobs:
+  b:
+    steps:
+      - with:
+          build-args: |
+            DOC=steps.md
+            URL=https://inputs.example.com
+            OK=${{ steps.a.outputs.b }}
+      # old bug: ${ steps.helper.outputs.digest }
+      - run: echo ok
