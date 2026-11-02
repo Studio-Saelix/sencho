@@ -1029,7 +1029,14 @@ export class MonitorService {
                                     'warning',
                                     'monitor_alert',
                                     message,
-                                    { stackName: rule.stack_name, containerName, actor: 'system:monitor' },
+                                    {
+                                        stackName: rule.stack_name,
+                                        containerName,
+                                        actor: 'system:monitor',
+                                        // An unlabeled container carries the sentinel, which is not a
+                                        // service name and must never be used as a routing key.
+                                        serviceName: serviceName === UNLABELED_SERVICE_KEY ? undefined : serviceName,
+                                    },
                                 );
                                 if (!persisted) {
                                     // History was not written; do not advance cooldown or we silence retries.

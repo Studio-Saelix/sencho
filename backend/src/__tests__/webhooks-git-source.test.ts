@@ -465,6 +465,14 @@ describe('node-aware Git source webhooks', () => {
         });
         const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response('{}', { status: 200 }));
 
+        // The remote pull first confirms the node evaluates io.sencho.update;
+        // a node that answers keeps the delivery gate's refusal in front.
+        const NodeRegistry = (await import('../services/NodeRegistry')).NodeRegistry;
+        const { OFFLINE_META } = await import('../services/CapabilityRegistry');
+        vi.spyOn(NodeRegistry.getInstance(), 'probeRemoteMeta').mockResolvedValue({
+            kind: 'ok', meta: { ...OFFLINE_META, online: true, capabilities: ['sencho-label-policy-v1'] },
+        });
+
         const outbound = await import('../helpers/registryDeliveryOutbound');
         vi.mocked(outbound.prepareOutboundRegistryDeliveryBody).mockResolvedValueOnce({
             ok: false as const,
@@ -511,6 +519,14 @@ describe('node-aware Git source webhooks', () => {
             enabled: true,
         });
         const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response('{}', { status: 200 }));
+
+        // The remote pull first confirms the node evaluates io.sencho.update;
+        // a node that answers keeps the delivery gate's refusal in front.
+        const NodeRegistry = (await import('../services/NodeRegistry')).NodeRegistry;
+        const { OFFLINE_META } = await import('../services/CapabilityRegistry');
+        vi.spyOn(NodeRegistry.getInstance(), 'probeRemoteMeta').mockResolvedValue({
+            kind: 'ok', meta: { ...OFFLINE_META, online: true, capabilities: ['sencho-label-policy-v1'] },
+        });
 
         const outbound = await import('../helpers/registryDeliveryOutbound');
         vi.mocked(outbound.prepareOutboundRegistryDeliveryBody).mockResolvedValueOnce({

@@ -8,7 +8,7 @@ import { isValidStackName } from '../utils/validation';
 import { ImageUpdateFactsService, ImageUpdateFactsError } from '../services/ImageUpdateFactsService';
 import { ImageUpdateObservationService, ImageUpdateObservationError } from '../services/ImageUpdateObservationService';
 import { hashImageUpdateFacts, IMAGE_UPDATE_FACTS_IMAGE_LIMIT } from '../services/imageUpdateFacts';
-import { applyAutomaticStackUpdate } from '../services/automaticStackUpdate';
+import { applyAutomaticStackUpdate, type AutomaticUpdateTrigger } from '../services/automaticStackUpdate';
 import { skippedVerification } from '../services/hubPostUpdateVerification';
 
 interface CheckedUpdateRequest {
@@ -16,19 +16,30 @@ interface CheckedUpdateRequest {
   stack: string;
   digestUpdateImages: string[];
   observationToken: string;
+  /** `scheduled` when a scheduled task asked for it; `automatic` otherwise. */
+  trigger: AutomaticUpdateTrigger;
 }
 
 function parseCheckedRequest(body: unknown): CheckedUpdateRequest | null {
   if (!body || typeof body !== 'object' || Array.isArray(body)) return null;
   const value = body as Record<string, unknown>;
-  if (Object.keys(value).some(key => !['contractVersion', 'stack', 'digestUpdateImages', 'observationToken', REGISTRY_DELIVERY_BODY_FIELD].includes(key))) return null;
+  if (Object.keys(value).some(key => !['contractVersion', 'stack', 'digestUpdateImages', 'observationToken', 'trigger', REGISTRY_DELIVERY_BODY_FIELD].includes(key))) return null;
   if (value.contractVersion !== 1 || typeof value.stack !== 'string' || !isValidStackName(value.stack)
     || typeof value.observationToken !== 'string' || !value.observationToken || value.observationToken.length > 4096
     || !Array.isArray(value.digestUpdateImages) || value.digestUpdateImages.length === 0
     || value.digestUpdateImages.length > IMAGE_UPDATE_FACTS_IMAGE_LIMIT
     || !value.digestUpdateImages.every((ref): ref is string => typeof ref === 'string' && ref.length > 0 && ref.length <= 2048)
     || new Set(value.digestUpdateImages).size !== value.digestUpdateImages.length) return null;
-  return { contractVersion: 1, stack: value.stack, observationToken: value.observationToken, digestUpdateImages: value.digestUpdateImages };
+  // Absent is an older hub, which only ran automatic checks.
+  const trigger = value.trigger === undefined ? 'automatic' : value.trigger;
+  if (trigger !== 'scheduled' && trigger !== 'automatic') return null;
+  return {
+    contractVersion: 1,
+    stack: value.stack,
+    observationToken: value.observationToken,
+    digestUpdateImages: value.digestUpdateImages,
+    trigger,
+  };
 }
 
 export const checkedAutoUpdateRouter = Router();
@@ -62,6 +73,7 @@ checkedAutoUpdateRouter.post('/execute-checked', authMiddleware, async (req: Req
       nodeId: req.nodeId, stackName: input.stack, updatedImages: input.digestUpdateImages,
       policyOptions: buildPolicyGateOptions(req, { bypass: false, actor: `auto-update:${req.user?.username ?? 'scheduler'}` }),
       verificationOwner: 'hub_authority',
+      trigger: input.trigger,
       observation: {
         verify: async () => { await verifyFacts(); },
         consume: async () => {
@@ -74,6 +86,7 @@ checkedAutoUpdateRouter.post('/execute-checked', authMiddleware, async (req: Req
     res.json({
       ...envelope, result: result.result, applied: result.applied, healthGateId: result.healthGateId,
       ...(result.endpointRefusal ? { endpointRefusal: result.endpointRefusal } : {}),
+      ...(result.updatePolicy ? { updatePolicy: result.updatePolicy } : {}),
       ...policyEvidenceFor(res),
     });
   } catch (error) {

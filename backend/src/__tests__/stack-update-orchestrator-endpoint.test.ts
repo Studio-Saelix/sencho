@@ -6,6 +6,7 @@
  */
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import type { EffectiveServiceModelResult, EffectiveServiceSpec } from '../services/effectiveServiceModel';
+import { allowingPolicy, blockingPolicy } from './__helpers__/updatePolicyFixture';
 
 const { state } = vi.hoisted(() => ({
   state: {
@@ -101,6 +102,9 @@ function spec(name: string): EffectiveServiceSpec {
 
 const ctx = {
   nodeId: 0, stackName: 'web', target: { scope: 'service' as const, serviceName: 'socket-proxy' }, trigger: 'manual' as const, actor: 'tester',
+  // The brand can only come from the evaluator, so the fixture policy is minted
+  // through it against a model that contains the target service.
+  policy: allowingPolicy('web', { scope: 'service', serviceName: 'socket-proxy' }, 'manual', { 'socket-proxy': {} }),
 };
 
 beforeEach(() => {
@@ -154,7 +158,7 @@ describe('service-scoped restore', () => {
   it('refuses up front, before the claim, the retag, or the gate', async () => {
     state.evaluateDockerEndpoint.mockResolvedValue(refusal);
 
-    const result = await orch().execute(ctx, restoreOptions);
+    const result = await orch().restore(ctx, restoreOptions);
 
     expect(result).toMatchObject({ kind: 'service_failed', code: 'docker_endpoint_protected', error: refusal.message, recoveryId: 'rec-1' });
     expect(state.claim).not.toHaveBeenCalled();
@@ -166,7 +170,7 @@ describe('service-scoped restore', () => {
   it('keeps the refusal code when the guard refuses inside the recreate, and gives the claimed recovery back', async () => {
     state.recreateServiceFromLocal.mockRejectedValue(new DockerEndpointProtectedError(refusal));
 
-    const result = await orch().execute(ctx, restoreOptions);
+    const result = await orch().restore(ctx, restoreOptions);
 
     expect(result).toMatchObject({
       kind: 'service_failed',
@@ -183,8 +187,20 @@ describe('service-scoped restore', () => {
   it('still reports any other recreate error as a restore compose failure', async () => {
     state.recreateServiceFromLocal.mockRejectedValue(new Error('no such image'));
 
-    const result = await orch().execute(ctx, restoreOptions);
+    const result = await orch().restore(ctx, restoreOptions);
 
     expect(result).toMatchObject({ kind: 'service_failed', code: 'restore_compose_failed', error: 'no such image' });
+  });
+});
+
+describe('policy contract on the service branch', () => {
+  it('reports a non-allowing decision as update_policy_blocked, not as a Compose failure', async () => {
+    const result = await orch().execute(
+      { ...ctx, policy: blockingPolicy('web', { scope: 'service', serviceName: 'socket-proxy' }) },
+      { policyOptions },
+    );
+
+    expect(result).toMatchObject({ kind: 'service_failed', code: 'update_policy_blocked' });
+    expect(state.updateService).not.toHaveBeenCalled();
   });
 });

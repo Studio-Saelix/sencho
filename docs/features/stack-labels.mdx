@@ -6,7 +6,7 @@ description: "Per-node tags that group your stacks by purpose, surface them unde
 A **Stack Label** is a per-node tag (name plus color) applied to any stack. A labeled stack groups under that label's header in the sidebar instead of the flat list, and Fleet View can filter the overview by tag. The Fleet view offers two label-driven fleet actions (stop every stack labeled `prod` across every node, or add a label to stacks across nodes in one shot), and admins also get one-click shortcuts for muting a label's notifications.
 
 <Note>
-  Stack Labels are a different feature from **Compose Labels** (the raw `labels:` key-value metadata Docker Compose services declare) and from **Node Labels** (used for Blueprint placement). See [Docker Label Audit](/features/docker-label-audit) for the former; Stack Labels never read or write Compose-level labels.
+  Stack Labels are a different feature from **Compose Labels** (the raw `labels:` key-value metadata Docker Compose services declare) and from **Node Labels** (used for Blueprint placement). See [Docker Label Audit](/features/docker-label-audit) for the former; Stack Labels never read or write Compose-level labels. They are also unrelated to the Compose labels that hold a service back from updates or give its alerts a routing key. See [Sencho Labels](/features/sencho-labels).
 </Note>
 
 <img

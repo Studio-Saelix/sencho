@@ -56,6 +56,14 @@ describe('notificationVisibility', () => {
     expect(isVisibleUnread(n)).toBe(false);
   });
 
+  it('never counts a history-only update_policy row as unread, whatever its level', () => {
+    const n = notif({ category: 'update_policy', level: 'warning' });
+    expect(isVisibleUnread(n)).toBe(false);
+    expect(countVisibleUnread([n])).toBe(0);
+    // It stays in the feed as a read activity record.
+    expect(filterPanelVisible([n])).toEqual([n]);
+  });
+
   it('badge count ignores hidden unread but includes visible unread', () => {
     const hidden = notif({ id: 1, category: 'deploy_success', actor_username: 'alice' });
     const visible = notif({ id: 2, category: 'monitor_alert', level: 'error' });
@@ -73,6 +81,10 @@ describe('isActionableAlert', () => {
     expect(isActionableAlert(notif({ category: 'image_update_available' }))).toBe(true);
     expect(isActionableAlert(notif({ category: 'node_update_available' }))).toBe(true);
     expect(isActionableAlert(notif({ category: 'dev_build_update_available' }))).toBe(true);
+  });
+
+  it('rejects a history-only update_policy row even though it is a warning', () => {
+    expect(isActionableAlert(notif({ category: 'update_policy', level: 'warning' }))).toBe(false);
   });
 
   it('rejects info rows that only report history', () => {

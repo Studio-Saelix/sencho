@@ -3,6 +3,8 @@ import {
   MANAGED_LABEL_DECLARED_REASON,
   MANAGED_LABEL_DEPLOYED_REASON,
   MANAGED_LABEL_KEYS,
+  POLICY_LABEL_KEYS,
+  SENCHO_NOTIFY_ROUTE_LABEL,
   type SenchoLabelState,
 } from './senchoLabels';
 
@@ -112,6 +114,63 @@ export const SENCHO_LABELS_NODE_COPY =
 export const SENCHO_LABEL_NOT_REPORTED_COPY =
   'This node does not report whether Sencho acts on this label.';
 
+/** Shown on a policy label row when the node's version does not evaluate behavioral labels. */
+export const POLICY_LABEL_NOT_EVALUATED_COPY =
+  "This node's version does not evaluate this label. Update Sencho on the node.";
+
+/** The one-line meaning of a declared `io.sencho.notify.route` label. */
+export const NOTIFY_ROUTE_MATCH_COPY =
+  'Matched by the routing rules of the instance that runs this stack.';
+
+/** What the audit says about a policy label, independent of where the copy came from. */
+export type PolicyLabelRowState = 'active' | 'ignored' | 'not-evaluated';
+
+export const POLICY_LABEL_STATE_LABELS: Record<PolicyLabelRowState, string> = {
+  active: 'Active',
+  ignored: 'Ignored',
+  'not-evaluated': 'Not evaluated',
+};
+
+/**
+ * The state of a behavioral label row. It comes from the row's own `behavior`
+ * (which the node derives from the rendered Compose model) and the node's
+ * capability, never from a container's `changed` list: a stale container can
+ * list a key as changed while its declared value is still the one in force.
+ */
+export function policyLabelRowState(
+  label: Pick<LabelValue, 'key' | 'behavior'>,
+  nodeEvaluatesPolicy: boolean,
+): PolicyLabelRowState | null {
+  if (!POLICY_LABEL_KEYS.includes(label.key)) return null;
+  if (!nodeEvaluatesPolicy) return 'not-evaluated';
+  if (label.behavior?.state === 'active') return 'active';
+  if (label.behavior?.state === 'invalid') return 'ignored';
+  return null;
+}
+
+/** True when the declared `io.sencho.notify.route` copy is in force for this row. */
+export function showsNotifyRouteMatch(label: Pick<LabelValue, 'key' | 'behavior'>, nodeEvaluatesPolicy: boolean): boolean {
+  return label.key === SENCHO_NOTIFY_ROUTE_LABEL
+    && policyLabelRowState(label, nodeEvaluatesPolicy) === 'active';
+}
+
+/**
+ * Whether a stack's label inventory declares a key, read defensively: the
+ * route is proxied to the node unchecked, and a malformed body never claims the
+ * label is declared.
+ */
+export function inventoryDeclaresLabel(raw: unknown, key: string): boolean {
+  if (!raw || typeof raw !== 'object') return false;
+  const services = (raw as { services?: unknown }).services;
+  if (!Array.isArray(services)) return false;
+  return services.some(svc => {
+    if (!svc || typeof svc !== 'object') return false;
+    const declared = (svc as { declaredLabels?: unknown }).declaredLabels;
+    if (!Array.isArray(declared)) return false;
+    return declared.some(entry => !!entry && typeof entry === 'object' && (entry as { key?: unknown }).key === key);
+  });
+}
+
 const SENCHO_NAMESPACE = 'io.sencho.';
 const UNREADABLE_BEHAVIOR_REASON = 'The node reported a label status this version of Sencho cannot read.';
 const MAX_BEHAVIOR_TEXT = 240;
@@ -195,7 +254,7 @@ export function withReadBehaviors(inventory: StackLabelInventory): StackLabelInv
 }
 
 export const LABEL_DISAMBIGUATION_COPY =
-  'Docker labels are metadata declared on Compose services or attached to running containers. Labels in the io.sencho.* namespace, when declared in the Compose file, tell Sencho how to present a service. They are different from Sencho Stack Labels used for organizing stacks and Node Labels used for Blueprint placement.';
+  'Docker labels are metadata declared on Compose services or attached to running containers. Labels in the io.sencho.* namespace, when declared in the Compose file, change how Sencho presents a service and, for io.sencho.update and io.sencho.notify.route, how it updates the service and routes its alerts. They are different from Sencho Stack Labels used for organizing stacks and Node Labels used for Blueprint placement.';
 
 export const SOURCE_LABELS: Record<LabelSource, string> = {
   compose: 'Declared in Compose',

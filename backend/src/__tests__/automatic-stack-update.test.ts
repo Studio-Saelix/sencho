@@ -3,8 +3,9 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 const mocks = vi.hoisted(() => ({
   endpoint: vi.fn(), policy: vi.fn(), execute: vi.fn(), beginStack: vi.fn(), link: vi.fn(),
   recheck: vi.fn(), invalidate: vi.fn(), broadcast: vi.fn(), alert: vi.fn(),
+  render: vi.fn(), log: vi.fn(),
 }));
-vi.mock('../services/ComposeService', () => ({ ComposeService: { getInstance: () => ({ evaluateDockerEndpoint: mocks.endpoint }) } }));
+vi.mock('../services/ComposeService', () => ({ ComposeService: { getInstance: () => ({ evaluateDockerEndpoint: mocks.endpoint, renderConfig: mocks.render }) } }));
 vi.mock('../services/PolicyEnforcement', () => ({ enforcePolicyPreDeploy: mocks.policy }));
 vi.mock('../services/StackUpdateOrchestrator', () => ({ StackUpdateOrchestrator: { getInstance: () => ({ execute: mocks.execute }) } }));
 vi.mock('../services/HealthGateService', () => ({ HealthGateService: { getInstance: () => ({ beginStack: mocks.beginStack }) } }));
@@ -12,7 +13,7 @@ vi.mock('../services/StackUpdateRecoveryService', () => ({ StackUpdateRecoverySe
 vi.mock('../services/ImageUpdateService', () => ({ ImageUpdateService: { getInstance: () => ({ recheckStack: mocks.recheck }) }, UPDATE_VERIFICATION_INCOMPLETE_WARNING: 'Verification incomplete' }));
 vi.mock('../services/NotificationService', () => ({ NotificationService: { getInstance: () => ({ broadcastEvent: mocks.broadcast, dispatchAlert: mocks.alert }) } }));
 vi.mock('../helpers/cacheInvalidation', () => ({ invalidateNodeCaches: mocks.invalidate }));
-vi.mock('../services/DatabaseService', () => ({ DatabaseService: {} }));
+vi.mock('../services/DatabaseService', () => ({ DatabaseService: { getInstance: () => ({ addNotificationHistory: mocks.log }) } }));
 
 import { applyAutomaticStackUpdate } from '../services/automaticStackUpdate';
 import { StackOpLockService } from '../services/StackOpLockService';
@@ -25,6 +26,13 @@ beforeEach(() => {
   mocks.execute.mockResolvedValue({ kind: 'stack_compose_done', deployedGenerationId: 'generation', recoveryId: 'recovery' });
   mocks.beginStack.mockReturnValue('health');
   mocks.recheck.mockResolvedValue({});
+  mocks.render.mockResolvedValue({
+    rendered: JSON.stringify({ services: { web: { image: 'nginx:1' } } }),
+    stderr: '',
+    code: 0,
+    timedOut: false,
+  });
+  mocks.log.mockReturnValue({ id: 1, is_read: true });
 });
 
 const input = { nodeId: 1, stackName: 'web', updatedImages: ['nginx:1'], policyOptions: { bypass: false, actor: 'automatic:test' } };
@@ -122,5 +130,66 @@ describe('automatic stack apply pipeline', () => {
     expect(mocks.policy).not.toHaveBeenCalled();
     expect(mocks.execute).not.toHaveBeenCalled();
     expect(mocks.alert).not.toHaveBeenCalled();
+  });
+});
+
+describe('update policy in the automatic pipeline', () => {
+  const disabledModel = () => ({
+    rendered: JSON.stringify({
+      services: {
+        web: { image: 'nginx:1', labels: { 'io.sencho.update': 'manual' } },
+      },
+    }),
+    stderr: '',
+    code: 0,
+    timedOut: false,
+  });
+
+  it('skips before the observation is verified or spent, and before the security gate', async () => {
+    mocks.render.mockResolvedValue(disabledModel());
+    const verify = vi.fn();
+    const consume = vi.fn();
+
+    const result = await applyAutomaticStackUpdate({
+      ...input, verificationOwner: 'hub_authority', observation: { verify, consume },
+    });
+
+    expect(result).toMatchObject({ result: 'update_policy_skipped', applied: false, healthGateId: null });
+    expect(result.message).toBe('Stack "web": skipped by update policy (web: manual).');
+    expect(result.updatePolicy).toMatchObject({ decision: 'skip', trigger: 'automatic' });
+    expect(verify).not.toHaveBeenCalled();
+    expect(consume).not.toHaveBeenCalled();
+    expect(mocks.policy).not.toHaveBeenCalled();
+    expect(mocks.endpoint).not.toHaveBeenCalled();
+    expect(mocks.execute).not.toHaveBeenCalled();
+  });
+
+  it('records one activity row for the skip, without a label value', async () => {
+    mocks.render.mockResolvedValue(disabledModel());
+
+    await applyAutomaticStackUpdate({ ...input, verificationOwner: 'hub_authority' });
+
+    expect(mocks.log).toHaveBeenCalledTimes(1);
+    const row = mocks.log.mock.calls[0][1];
+    expect(row).toMatchObject({ category: 'update_policy', read: true, stack_name: 'web' });
+    expect(row.message).toContain('web (manual)');
+  });
+
+  it('passes the trigger it was asked for through to the executor', async () => {
+    await applyAutomaticStackUpdate({ ...input, verificationOwner: 'hub_authority', trigger: 'scheduled' });
+
+    expect(mocks.execute).toHaveBeenCalledWith(
+      expect.objectContaining({ trigger: 'scheduled', actor: 'automatic:test' }),
+      { atomic: true, terminalWs: null },
+    );
+  });
+
+  it('fails closed when the model cannot be rendered', async () => {
+    mocks.render.mockResolvedValue({ rendered: null, stderr: 'boom', code: 1, timedOut: false });
+
+    const result = await applyAutomaticStackUpdate({ ...input, verificationOwner: 'hub_authority' });
+
+    expect(result).toMatchObject({ result: 'update_policy_skipped', applied: false });
+    expect(mocks.execute).not.toHaveBeenCalled();
   });
 });

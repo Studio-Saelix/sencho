@@ -1,12 +1,29 @@
+import type { ServiceUpdatePolicy } from '../updatePolicy';
+
 /** Overall verdict of an update readiness check. */
 export type ReadinessVerdict = 'ready' | 'ready_with_warnings' | 'review_required' | 'blocked' | 'unknown';
 
 /** Graded status of a single readiness signal. */
 export type SignalStatus = 'ok' | 'warning' | 'attention' | 'blocked' | 'unknown';
 
+/**
+ * The update policy behind a readiness report: what the operator's own update
+ * would do, and what an unattended update would do, for the same target. Never
+ * changes the verdict: a deliberately pinned stack is a choice, not a finding.
+ */
+export interface UpdatePolicyReadiness {
+  evaluation: 'unrenderable' | 'evaluated';
+  /** Every service this update would touch, with its declared policy. */
+  services: ServiceUpdatePolicy[];
+  manualDecision: 'allow' | 'block';
+  unattendedDecision: 'allow' | 'skip';
+  /** The refusal reason, or null when a manual update is allowed. Never a label value. */
+  reason: string | null;
+}
+
 /** One input to the readiness verdict (preflight, drift, containers, ...). */
 export interface ReadinessSignal {
-  id: 'preflight' | 'drift' | 'containers' | 'healthchecks' | 'update_preview' | 'build_services' | 'backup_slot' | 'disk' | 'compose_version' | 'service';
+  id: 'preflight' | 'drift' | 'containers' | 'healthchecks' | 'update_preview' | 'build_services' | 'backup_slot' | 'disk' | 'compose_version' | 'update_policy' | 'service';
   status: SignalStatus;
   /** Short headline ("Compose Doctor", "Running containers"). */
   title: string;
@@ -27,6 +44,11 @@ export interface UpdateReadinessReport {
   signals: ReadinessSignal[];
   /** The service this report is scoped to, or null for a full-stack check. */
   serviceName: string | null;
+  /**
+   * The update policy for this target, or undefined when the caller did not ask
+   * for it (the batched Fleet rollup does not). Never affects `verdict`.
+   */
+  updatePolicy?: UpdatePolicyReadiness;
   /**
    * Non-blocking notes that never affect `verdict` (sibling health,
    * dependsOn relationships). Always empty for a full-stack check.

@@ -211,6 +211,9 @@ export async function computeStackReadinessEvidence(
     withTimeout(
       guard.computeUpdateReadiness(nodeId, stack, undefined, {
         includeComposeVersion: false,
+        // The policy is informational and never verdict-affecting, so the batch
+        // does not pay a render per stack for it.
+        includeUpdatePolicy: false,
         captureContainerProbes: (captured) => {
           probes = captured;
           options.captureContainerProbes?.(captured);

@@ -1,5 +1,10 @@
 import { describe, it, expect } from 'vitest';
 import {
+  NOTIFY_ROUTE_MATCH_COPY,
+  POLICY_LABEL_NOT_EVALUATED_COPY,
+  inventoryDeclaresLabel,
+  policyLabelRowState,
+  showsNotifyRouteMatch,
   sourcesPresent,
   matchesSearch,
   readLabelBehavior,
@@ -108,5 +113,51 @@ describe('withReadBehaviors', () => {
     ['a missing timestamp', inventory({ generatedAt: undefined })],
   ])('treats %s as a failed read instead of an empty inventory', (_label, body) => {
     expect(() => withReadBehaviors(body as StackLabelInventory)).toThrow('Unexpected label inventory payload');
+  });
+});
+
+
+describe('policyLabelRowState', () => {
+  const row = (key: string, state?: 'active' | 'invalid' | 'inert' | 'unsupported') => ({
+    key,
+    ...(state ? { behavior: { state } } : {}),
+  });
+
+  it('reads the row behavior for a node that evaluates the labels', () => {
+    expect(policyLabelRowState(row('io.sencho.update', 'active'), true)).toBe('active');
+    // An unrecognized value is reported as invalid by the node, which is the Ignored state.
+    expect(policyLabelRowState(row('io.sencho.update', 'invalid'), true)).toBe('ignored');
+    expect(policyLabelRowState(row('io.sencho.notify.route', 'active'), true)).toBe('active');
+    // A copy the audit reports as inert carries no policy state of its own.
+    expect(policyLabelRowState(row('io.sencho.update', 'inert'), true)).toBeNull();
+  });
+
+  it('never claims a state for a label outside the behavioral pair', () => {
+    expect(policyLabelRowState(row('io.sencho.url', 'active'), true)).toBeNull();
+    expect(policyLabelRowState(row('traefik.enable', 'active'), true)).toBeNull();
+  });
+
+  it('reports an older node as not evaluating the label, whatever the row claims', () => {
+    expect(policyLabelRowState(row('io.sencho.update', 'active'), false)).toBe('not-evaluated');
+    expect(policyLabelRowState(row('io.sencho.notify.route', 'invalid'), false)).toBe('not-evaluated');
+    expect(POLICY_LABEL_NOT_EVALUATED_COPY).toContain('does not evaluate this label');
+  });
+
+  it('shows the routing note only for an active notify.route row', () => {
+    expect(showsNotifyRouteMatch(row('io.sencho.notify.route', 'active'), true)).toBe(true);
+    expect(showsNotifyRouteMatch(row('io.sencho.notify.route', 'invalid'), true)).toBe(false);
+    expect(showsNotifyRouteMatch(row('io.sencho.notify.route', 'active'), false)).toBe(false);
+    expect(showsNotifyRouteMatch(row('io.sencho.update', 'active'), true)).toBe(false);
+    expect(NOTIFY_ROUTE_MATCH_COPY).toBe('Matched by the routing rules of the instance that runs this stack.');
+  });
+});
+
+describe('inventoryDeclaresLabel', () => {
+  it('finds a declared key and tolerates a malformed body', () => {
+    expect(inventoryDeclaresLabel({ services: [{ declaredLabels: [{ key: 'io.sencho.update' }] }] }, 'io.sencho.update')).toBe(true);
+    expect(inventoryDeclaresLabel({ services: [{ declaredLabels: [{ key: 'io.sencho.url' }] }] }, 'io.sencho.update')).toBe(false);
+    expect(inventoryDeclaresLabel(null, 'io.sencho.update')).toBe(false);
+    expect(inventoryDeclaresLabel({ services: 'nope' }, 'io.sencho.update')).toBe(false);
+    expect(inventoryDeclaresLabel({ services: [null, { declaredLabels: [null] }] }, 'io.sencho.update')).toBe(false);
   });
 });

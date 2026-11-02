@@ -35,6 +35,7 @@ interface FakeEvent {
   timestamp: number;
   stack_name?: string;
   actor_username?: string | null;
+  route_keys?: string[] | null;
 }
 
 function evt(overrides: Partial<FakeEvent> = {}): FakeEvent {
@@ -263,6 +264,21 @@ describe('StackActivityTimeline - actor rendering', () => {
     ]));
     render(<StackActivityTimeline stackName="web" />);
     await waitFor(() => expect(screen.getByText(/via Git provider/)).toBeTruthy());
+  });
+
+  it('renders an update-policy row with its routing keys', async () => {
+    mockFetch.mockReturnValueOnce(jsonResponse([
+      evt({
+        id: 7,
+        level: 'warning',
+        category: 'update_policy',
+        message: 'Update blocked by io.sencho.update: "db" is set to disabled.',
+        route_keys: ['production'],
+      }),
+    ]));
+    render(<StackActivityTimeline stackName="web" />);
+    await waitFor(() => expect(screen.getByText(/Update blocked by io.sencho.update/)).toBeTruthy());
+    expect(screen.getByTestId('activity-route-keys')).toHaveTextContent('Routing keys: production');
   });
 });
 

@@ -5,17 +5,19 @@
  */
 import { describe, it, expect, beforeEach, afterEach, beforeAll, afterAll, vi } from 'vitest';
 import request from 'supertest';
+import express from 'express';
 import bcrypt from 'bcrypt';
 import jwt from 'jsonwebtoken';
 import fs from 'fs';
 import path from 'path';
-import { setupTestDb, cleanupTestDb, loginAsTestAdmin, TEST_JWT_SECRET } from './helpers/setupTestDb';
+import { setupTestDb, cleanupTestDb, loginAsTestAdmin, TEST_JWT_SECRET, TEST_USERNAME } from './helpers/setupTestDb';
 
 let tmpDir: string;
 let app: import('express').Express;
 let DatabaseService: typeof import('../services/DatabaseService').DatabaseService;
 let adminCookie: string;
 let viewerCookie: string;
+let remoteNodeId: number;
 
 /** Sign a JWT for an already-seeded user, using their live token_version. */
 function userToken(username: string): string {
@@ -46,6 +48,12 @@ beforeAll(async () => {
   // The update path's Docker endpoint check renders the stack's Compose config; these tests are not about it.
   const { ComposeService } = await import('../services/ComposeService');
   vi.spyOn(ComposeService.prototype, 'evaluateDockerEndpoint').mockResolvedValue(null);
+  // The update policy renders the stack before an unattended or manual update
+  // may run, so the model answers for the label set this suite expects.
+  vi.spyOn(ComposeService.prototype, 'renderConfig').mockResolvedValue({
+    rendered: JSON.stringify({ services: { web: { image: 'nginx:1' } } }),
+    stderr: '', code: 0, timedOut: false,
+  });
   adminCookie = await loginAsTestAdmin(app);
 
   const viewerHash = await bcrypt.hash('viewerpass', 1);
@@ -59,6 +67,13 @@ beforeAll(async () => {
 
   const nodeAdminHash = await bcrypt.hash('nodeadminpass', 1);
   DatabaseService.getInstance().addUser({ username: 'iu-node-admin', password_hash: nodeAdminHash, role: 'node-admin' });
+
+  // A remote target for the coordinator branch: the route consults the node's
+  // type before it hands the request to the remote coordinator.
+  remoteNodeId = DatabaseService.getInstance().addNode({
+    name: 'iu-remote-exec', type: 'remote', mode: 'proxy', compose_dir: '/unused',
+    is_default: false, api_url: 'http://127.0.0.1:1', api_token: 'fixture-token',
+  });
 });
 
 afterAll(() => cleanupTestDb(tmpDir));
@@ -829,7 +844,7 @@ describe('POST /api/auto-update/execute', () => {
         .set('Cookie', adminCookie)
         .send({ target: 'auto-upd-gate' });
       expect(res.status).toBe(200);
-      expect(updateSpy).toHaveBeenCalledWith('auto-upd-gate', undefined, true);
+      expect(updateSpy).toHaveBeenCalledWith('auto-upd-gate', undefined, true, expect.any(Function));
       expect(recheckSpy).toHaveBeenCalledWith(nodeId, 'auto-upd-gate');
       expect(beginSpy).toHaveBeenCalledWith(nodeId, 'auto-upd-gate', 'update', `auto-update:${TEST_USERNAME}`, { deployedGenerationId: null });
       expect(callOrder.indexOf('beginStack')).toBeLessThan(callOrder.indexOf('recheckStack'));
@@ -928,7 +943,7 @@ describe('POST /api/auto-update/execute', () => {
         .set('Cookie', adminCookie)
         .send({ target: 'auto-upd-digest' });
       expect(res.status).toBe(200);
-      expect(updateSpy).toHaveBeenCalledWith('auto-upd-digest', undefined, true);
+      expect(updateSpy).toHaveBeenCalledWith('auto-upd-digest', undefined, true, expect.any(Function));
       expect(recheckSpy).toHaveBeenCalledWith(nodeId, 'auto-upd-digest');
       expect(clearSpy).not.toHaveBeenCalledWith(nodeId, 'auto-upd-digest');
     } finally {
@@ -937,6 +952,56 @@ describe('POST /api/auto-update/execute', () => {
       updateSpy.mockRestore();
       recheckSpy.mockRestore();
       clearSpy.mockRestore();
+    }
+  });
+});
+
+describe('POST /api/auto-update/execute against a remote target', () => {
+  /** Mount the auto-update router with a fixed remote node context, away from the remote proxy. */
+  async function remoteApp(): Promise<import('express').Express> {
+    const { autoUpdateRouter } = await import('../routes/imageUpdates');
+    const app = express();
+    app.use(express.json());
+    // Bearer auth only, so the test app needs no cookie middleware; the empty
+    // cookie bag keeps the shared auth middleware's cookie read defined.
+    app.use((req, _res, next) => { req.cookies = {}; req.nodeId = remoteNodeId; next(); });
+    app.use('/api/auto-update', autoUpdateRouter);
+    return app;
+  }
+
+  it('answers a node-level remote failure as an error, never a success-shaped 200', async () => {
+    const { AutoUpdateRemoteCoordinator } = await import('../services/AutoUpdateRemoteCoordinator');
+    const executeSpy = vi.spyOn(AutoUpdateRemoteCoordinator.prototype, 'execute').mockResolvedValue({
+      handled: true, failed: true,
+      result: 'Stack "web" failed: node "iu-remote-exec" did not answer, so the update could not be checked against io.sencho.update.',
+    });
+    try {
+      const res = await request(await remoteApp())
+        .post('/api/auto-update/execute')
+        .set('Authorization', `Bearer ${userToken(TEST_USERNAME)}`)
+        .send({ target: 'web' });
+      expect(res.status).toBe(503);
+      expect(res.body.error).toContain('did not answer');
+      expect(res.body.result).toBeUndefined();
+    } finally {
+      executeSpy.mockRestore();
+    }
+  });
+
+  it('still answers a handled remote outcome with the success shape', async () => {
+    const { AutoUpdateRemoteCoordinator } = await import('../services/AutoUpdateRemoteCoordinator');
+    const executeSpy = vi.spyOn(AutoUpdateRemoteCoordinator.prototype, 'execute').mockResolvedValue({
+      handled: true, result: 'Stack "web": skipped by update policy (web: manual).',
+    });
+    try {
+      const res = await request(await remoteApp())
+        .post('/api/auto-update/execute')
+        .set('Authorization', `Bearer ${userToken(TEST_USERNAME)}`)
+        .send({ target: 'web' });
+      expect(res.status).toBe(200);
+      expect(res.body.result).toContain('skipped by update policy');
+    } finally {
+      executeSpy.mockRestore();
     }
   });
 });

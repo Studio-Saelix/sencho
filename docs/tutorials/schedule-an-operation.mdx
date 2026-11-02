@@ -98,6 +98,10 @@ Check from two places, since either alone could be misleading (a table that has 
 
 The footer confirms the schedule is alive: the next run time is shown there too, matching the row's **Next Run** in the table. You can now rely on the nightly restart without being at the console at 3:00 AM.
 
+<Note>
+  This task restarts containers, so it never pulls an image and its **Details** cell reports the restart count. A scheduled update uses the same cell to report its update policy decision: a stack left alone because a service does not allow unattended updates reads `Stack "x": skipped by update policy (db: manual).` and the run stays **Success**, while a run against a node that does not evaluate `io.sencho.update` fails and reads `Stack "x" failed: node "n" does not evaluate io.sencho.update; update Sencho on that node.` See [Sencho Labels · Update policy](/features/sencho-labels#update-policy).
+</Note>
+
 ## If something goes wrong
 
 **You don't see Schedules in the launcher or More menu.** Schedules is a hub-level view. If a remote node is the active selection, the hub-only views (Schedules, Audit, Logs, Update) are missing. Click the node switcher next to the Sencho logo, pick **Local**, and reopen the launcher (or **More**): Schedules is back under **Operations**.

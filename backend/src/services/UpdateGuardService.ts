@@ -36,11 +36,20 @@ import {
   isTroubledContainer,
   preflightSignal,
   serviceSignal,
+  updatePolicySignal,
   updatePreviewSignal,
   type Errored,
   type ServiceMembership,
 } from './updateGuard/readiness';
-import type { ContainerProbe, ReadinessSignal, RollbackReadinessReport, UpdateReadinessReport } from './updateGuard/types';
+import type {
+  ContainerProbe,
+  ReadinessSignal,
+  RollbackReadinessReport,
+  UpdatePolicyReadiness,
+  UpdateReadinessReport,
+} from './updateGuard/types';
+import { resolveUpdatePolicyPair, type UpdatePolicyPair } from './updatePolicy';
+import { SENCHO_UPDATE_LABEL } from '../helpers/senchoLabels';
 
 // Bound on the network-and-socket-backed inputs (container probe, update
 // preview, disk stats, and the Compose version probe) so a hung registry,
@@ -76,6 +85,13 @@ export interface UpdateReadinessOptions {
    * then adds the signal with `composeVersionSignalFor`.
    */
   includeComposeVersion?: boolean;
+  /**
+   * When false, no update-policy render is made and no policy signal or
+   * `updatePolicy` field is added. A batched caller (the Fleet readiness rollup)
+   * sets this: the policy never affects a verdict, so a per-stack render is cost
+   * without a finding.
+   */
+  includeUpdatePolicy?: boolean;
   /**
    * Receives the full-stack container probes this report was built from, so a
    * caller that deferred the version probe can add its signal without a second
@@ -229,6 +245,7 @@ export class UpdateGuardService {
     // when none remains the probe is skipped and reported as the informational
     // unknown.
     const includeComposeVersion = options.includeComposeVersion !== false;
+    const includeUpdatePolicy = options.includeUpdatePolicy !== false;
     const versionProbeBudget = includeComposeVersion ? optionalProbeBudget(options.deadlineEpochMs) : 0;
     let composeVersionProbe: Promise<string | null | Errored> | null = null;
     if (!serviceName && includeComposeVersion) {
@@ -247,7 +264,7 @@ export class UpdateGuardService {
       }
     }
 
-    const [preflight, drift, containers, siblings, preview, backup, disk] = await Promise.all([
+    const [preflight, drift, containers, siblings, preview, backup, disk, updatePolicyPair] = await Promise.all([
       this.collect('preflight', stackName, async () => ComposeDoctorService.getInstance().getLatest(nodeId, stackName)),
       this.collect('drift', stackName, async () =>
         db.getOpenDriftFindings(nodeId, stackName).filter(f => !serviceName || f.service === serviceName).length),
@@ -269,6 +286,18 @@ export class UpdateGuardService {
       }),
       this.collect('backup info', stackName, () => FileSystemService.getInstance(nodeId).getBackupInfo(stackName)),
       this.collect('disk', stackName, () => this.readDiskUsage()),
+      includeUpdatePolicy
+        // One render answers both trigger classes. It is bounded like the other
+        // optional inputs and never competes with the verdict's own evidence.
+        ? this.collect('update policy', stackName, () =>
+            withTimeout(
+              resolveUpdatePolicyPair(nodeId, stackName, serviceName
+                ? { scope: 'service', serviceName }
+                : { scope: 'stack' }),
+              INPUT_TIMEOUT_MS,
+              'readiness update policy',
+            ))
+        : Promise.resolve<Errored>('error'),
     ]);
 
     // Hand the probes to a caller that deferred the optional version signal,
@@ -308,12 +337,16 @@ export class UpdateGuardService {
         ].filter((note): note is string => note !== null)
       : [];
 
+    const updatePolicy = includeUpdatePolicy ? toUpdatePolicyReadiness(updatePolicyPair) : null;
+    if (updatePolicy) signals.push(updatePolicySignal(updatePolicy));
+
     return {
       stack: stackName,
       computedAt: now,
       verdict: aggregateVerdict(signals),
       signals,
       serviceName: serviceName ?? null,
+      ...(updatePolicy ? { updatePolicy } : {}),
       advisories,
     };
   }
@@ -534,4 +567,29 @@ export class UpdateGuardService {
       return 'error';
     }
   }
+}
+
+/**
+ * Project a resolved pair onto the report field. An unreadable render is
+ * reported as unrenderable and blocks the manual update, matching what the
+ * update route itself would do.
+ */
+function toUpdatePolicyReadiness(pair: UpdatePolicyPair | null | Errored): UpdatePolicyReadiness {
+  if (pair === 'error' || pair === null) {
+    return {
+      evaluation: 'unrenderable',
+      services: [],
+      manualDecision: 'block',
+      unattendedDecision: 'skip',
+      reason: `Compose could not be rendered, so Sencho cannot evaluate ${SENCHO_UPDATE_LABEL}.`,
+    };
+  }
+  const { manual, unattended } = pair;
+  return {
+    evaluation: manual.evaluation === 'evaluated' ? 'evaluated' : 'unrenderable',
+    services: manual.evaluation === 'evaluated' ? manual.services : [],
+    manualDecision: manual.decision === 'allow' ? 'allow' : 'block',
+    unattendedDecision: unattended.decision === 'allow' ? 'allow' : 'skip',
+    reason: manual.reason,
+  };
 }

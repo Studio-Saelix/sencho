@@ -15,11 +15,17 @@ export interface SenchoLink {
   url: string;
 }
 
+export type SenchoUpdatePolicy = 'auto' | 'manual' | 'disabled' | 'invalid';
+
 export interface SenchoServiceLabels {
   /** At most one application link, listed first, then uniquely named links. */
   links: SenchoLink[];
   order: number | null;
   hidden: boolean;
+  /** `null` when the service declares none; `invalid` when the declared value is unrecognized. */
+  update: SenchoUpdatePolicy | null;
+  /** The service's notification routing key, or null when it declares none. */
+  notifyRoute: string | null;
   /** Links the node reported that this client refused to show (failed the second check). */
   unverifiedLinks: number;
 }
@@ -47,12 +53,34 @@ export const DEPLOYED_TRUSTED_LABEL_KEYS: readonly string[] = ['io.sencho.infras
 /** Keys Sencho stamps on containers it creates, mirroring the backend's SENCHO_MANAGED_LABELS. */
 export const MANAGED_LABEL_KEYS: readonly string[] = ['io.sencho.mesh', 'io.sencho.helper', 'io.sencho.operation'];
 
+/** The update-eligibility label, as the backend registry spells it. */
+export const SENCHO_UPDATE_LABEL = 'io.sencho.update';
+
+/** The notification routing-key label, as the backend registry spells it. */
+export const SENCHO_NOTIFY_ROUTE_LABEL = 'io.sencho.notify.route';
+
+/**
+ * The two behavioral labels, mirroring the backend registry's
+ * `sencho-label-policy-v1` entries. Used for copy and key echoes only; whether a
+ * node acts on them comes from its capability, never from this list.
+ */
+export const POLICY_LABEL_KEYS: readonly string[] = [SENCHO_UPDATE_LABEL, SENCHO_NOTIFY_ROUTE_LABEL];
+
 export const MANAGED_LABEL_DECLARED_REASON = 'Reserved for containers Sencho creates; it has no effect in a Compose file.';
 export const MANAGED_LABEL_DEPLOYED_REASON = 'Set by Sencho on a container it manages.';
 
 const LINK_NAME_PATTERN = /^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$/;
 const MAX_LINK_NAME_LENGTH = 32;
 const UNREADABLE_STATE_REASON = 'The node reported a status this version of Sencho cannot read.';
+
+/** 1 to 64 characters of `[a-z0-9._-]`, starting and ending with a letter or digit. */
+const ROUTING_KEY_PATTERN = /^[a-z0-9](?:[a-z0-9._-]*[a-z0-9])?$/;
+const MAX_ROUTING_KEY_LENGTH = 64;
+
+/** Mirrors the node's routing-key format, so a key this client shows is one the node accepted. */
+export function isRoutingKey(value: unknown): value is string {
+  return typeof value === 'string' && value.length <= MAX_ROUTING_KEY_LENGTH && ROUTING_KEY_PATTERN.test(value);
+}
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return !!value && typeof value === 'object' && !Array.isArray(value);
@@ -113,10 +141,21 @@ function readService(value: unknown): SenchoServiceLabels | null {
     : null;
   if (value.order !== null && order === null) return null;
   if (typeof value.hidden !== 'boolean') return null;
+  // The behavioral labels are absent on an older node (read as null), but a
+  // present field with another shape rejects the answer like any other field.
+  const update = value.update;
+  if (update !== undefined && update !== null
+    && update !== 'auto' && update !== 'manual' && update !== 'disabled' && update !== 'invalid') {
+    return null;
+  }
+  const notifyRoute = value.notifyRoute;
+  if (notifyRoute !== undefined && notifyRoute !== null && !isRoutingKey(notifyRoute)) return null;
   return {
     links: links.links,
     order,
     hidden: value.hidden,
+    update: update ?? null,
+    notifyRoute: notifyRoute ?? null,
     unverifiedLinks: links.unverified,
   };
 }
@@ -152,6 +191,16 @@ export function applicationLink(resolution: SenchoLabelResolution | null | undef
 /** Valid named links in display order. */
 export function namedLinks(resolution: SenchoLabelResolution | null | undefined, service: string | undefined): SenchoLink[] {
   return labelsFor(resolution, service)?.links.filter(link => link.name !== null) ?? [];
+}
+
+/** The service's `io.sencho.update` policy, or null when it declares none (or the node does not report it). */
+export function updatePolicyOf(resolution: SenchoLabelResolution | null | undefined, service: string | undefined): SenchoUpdatePolicy | null {
+  return labelsFor(resolution, service)?.update ?? null;
+}
+
+/** The service's `io.sencho.notify.route` key, or null when it declares none (or the node does not report it). */
+export function notifyRouteOf(resolution: SenchoLabelResolution | null | undefined, service: string | undefined): string | null {
+  return labelsFor(resolution, service)?.notifyRoute ?? null;
 }
 
 /** Declared `io.sencho.*` labels of a service that Sencho ignored, with the reason. */

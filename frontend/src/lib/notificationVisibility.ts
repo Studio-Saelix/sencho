@@ -9,6 +9,13 @@ const PANEL_HIDDEN_CATEGORIES = new Set<NotificationCategory>([
   'image_update_applied',
 ]);
 
+/**
+ * Policy decisions are written already read and exist for the activity record.
+ * They never add to the bell's unread count and never ask for action in the
+ * Home preview, whatever their level or actor.
+ */
+const HISTORY_ONLY_CATEGORIES = new Set<NotificationCategory>(['update_policy']);
+
 function isHumanActor(actor: string | null | undefined): boolean {
   if (actor == null || actor === '') return false;
   if (actor === 'system' || actor.startsWith('system:')) return false;
@@ -26,11 +33,17 @@ export function isPanelHiddenNotification(n: NotificationItem): boolean {
 }
 
 export function isVisibleUnread(n: NotificationItem): boolean {
+  if (isHistoryOnly(n)) return false;
   return !n.is_read && !isPanelHiddenNotification(n);
 }
 
 export function countVisibleUnread(notifications: NotificationItem[]): number {
   return notifications.filter(isVisibleUnread).length;
+}
+
+/** True for a row that exists for the activity record and never counts as unread. */
+function isHistoryOnly(n: NotificationItem): boolean {
+  return n.category !== undefined && HISTORY_ONLY_CATEGORIES.has(n.category as NotificationCategory);
 }
 
 export function filterPanelVisible(notifications: NotificationItem[]): NotificationItem[] {
@@ -55,6 +68,7 @@ const ACTIONABLE_INFO_CATEGORIES = new Set<NotificationCategory>([
  * `ACTIONABLE_INFO_CATEGORIES`. The feed keeps those rows; the preview does not.
  */
 export function isActionableAlert(n: NotificationItem): boolean {
+  if (isHistoryOnly(n)) return false;
   if (isPanelHiddenNotification(n)) return false;
   if (n.level === 'warning' || n.level === 'error') return true;
   if (n.level !== 'info' || n.category === undefined) return false;

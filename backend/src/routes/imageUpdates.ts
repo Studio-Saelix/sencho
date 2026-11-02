@@ -54,15 +54,19 @@ imageUpdatesRouter.post('/inspect-facts', authMiddleware, async (req: Request, r
     return;
   }
   const stackName = typeof input.stack === 'string' ? input.stack : null;
+  // A policy evaluation is opt-in: an older hub never asks for it, so this node
+  // never adds the field to a response that an older strict parser would reject.
+  const includePolicy = input.policy === true;
+  const policyKeyValid = input.policy === undefined || typeof input.policy === 'boolean';
   const mode = input.roster === true ? 'roster'
     : input.allStacks === true ? 'allStacks'
       : stackName !== null ? 'stack' : null;
   const allowedKeys = (keys: string[]): boolean =>
     Object.keys(input).every(key => ['contractVersion', 'requestNonce'].includes(key) || keys.includes(key));
-  if (input.contractVersion !== 1 || !requestNonce || !mode
+  if (input.contractVersion !== 1 || !requestNonce || !mode || !policyKeyValid
     || (mode === 'roster' && !allowedKeys(['roster']))
-    || (mode === 'allStacks' && !allowedKeys(['allStacks']))
-    || (mode === 'stack' && !(allowedKeys(['stack']) && stackName !== null && isValidStackName(stackName)))) {
+    || (mode === 'allStacks' && !allowedKeys(['allStacks', 'policy']))
+    || (mode === 'stack' && !(allowedKeys(['stack', 'policy']) && stackName !== null && isValidStackName(stackName)))) {
     res.status(400).json({ ...envelope, error: 'Invalid image update facts request' });
     return;
   }
@@ -90,7 +94,7 @@ imageUpdatesRouter.post('/inspect-facts', authMiddleware, async (req: Request, r
         res.status(404).json({ ...envelope, error: 'Stack not found' });
         return;
       }
-      const facts = await factsService.collect(req.nodeId, stackName, requestNonce);
+      const facts = await factsService.collect(req.nodeId, stackName, requestNonce, includePolicy);
       res.json({ ...envelope, stacks: [facts] });
       return;
     }
@@ -102,7 +106,7 @@ imageUpdatesRouter.post('/inspect-facts', authMiddleware, async (req: Request, r
     const collected = [];
     let bytes = Buffer.byteLength(JSON.stringify({ ...envelope, stacks: [] }));
     for (const stackName of stacks) {
-      const facts = await factsService.collect(req.nodeId, stackName, requestNonce);
+      const facts = await factsService.collect(req.nodeId, stackName, requestNonce, includePolicy);
       bytes += Buffer.byteLength(JSON.stringify(facts)) + (collected.length ? 1 : 0);
       if (bytes > IMAGE_UPDATE_FACTS_BYTE_LIMIT) {
         res.status(413).json({ ...envelope, error: 'Image update facts response exceeds the byte cap; request stacks by name' });
@@ -707,6 +711,14 @@ autoUpdateRouter.post('/execute', authMiddleware, async (req: Request, res: Resp
           res.status(503).json({ error: 'Remote automatic update capability changed. Retry the request.' });
           return;
         }
+        // A node-level failure (unreachable, unable to evaluate the label, or
+        // missing a checked-update capability) is an error, not a success-shaped
+        // 200: the operator "run automatic update now" action must never look
+        // like it ran.
+        if (result.failed) {
+          res.status(503).json({ error: result.result });
+          return;
+        }
         res.json({ result: result.result });
       } catch (error) {
         if (error !== denied) throw error;
@@ -780,6 +792,9 @@ autoUpdateRouter.post('/execute', authMiddleware, async (req: Request, res: Resp
             bypass: false, actor: `auto-update:${req.user?.username ?? 'scheduler'}`,
           }),
           verificationOwner: 'target_local',
+          // This route is the automatic-update entry point; a scheduled task on
+          // a remote node carries `scheduled` through the checked request instead.
+          trigger: 'automatic',
         });
         results.push(applied.message);
       } catch (e) {

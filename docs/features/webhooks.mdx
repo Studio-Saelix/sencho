@@ -47,8 +47,10 @@ After you click **Create**, the new webhook's secret appears once in a green cal
 | **Restart** | Restarts the stack's running containers. |
 | **Stop** | Stops the stack. |
 | **Start** | Starts a stopped stack. |
-| **Pull & Update** | Pulls the latest images and recreates changed containers. |
+| **Pull & Update** | Pulls the latest images and recreates changed containers. Honors each service's update policy. |
 | **Git source sync** | Fetches the stack's linked Git source and follows its configured apply behavior (review, auto-write, or auto-deploy). Requires a [Git source](/features/git-sources) on the stack. For push events straight from the Git host, use provider hooks, described on [Trigger pulls from Git hosts and CI](/features/git-webhooks), instead of this action. |
+
+A `pull` trigger is an unattended image refresh, so it honors each service's [update policy](/features/sencho-labels#update-policy) the same way a scheduled update does, whether the stack runs on the local node or on a remote one. A stack with a service set to `manual` or `disabled`, or with a value Sencho does not recognize, is skipped before anything is pulled or recreated, and the reason is recorded in **Recent executions**. A pull aimed at a node that does not evaluate the label fails and says so. The other actions are not image refreshes and are not affected by the label.
 
 ## Managing webhooks
 
@@ -187,6 +189,10 @@ Sencho retains the last 100 executions per webhook and surfaces the 20 most rece
 
   <Accordion title="The action returns 202 but the stack does not change.">
     A 202 means the action was accepted, not that it produced a visible change. **Pull & Update** is a no-op if the registry has no newer image for any service in the stack; **Start** is a no-op on an already-running stack. Check the stack's **Activity** sheet to confirm what actually ran, and the webhook's **Recent executions** for the action's status and duration.
+  </Accordion>
+
+  <Accordion title="Recent executions says the pull was skipped by update policy">
+    A service in the stack sets `io.sencho.update: manual`, or a value Sencho does not recognize, so the unattended pull left the whole stack alone. Update the stack from its own **Update** action, change the label to `auto` or remove it, then trigger the webhook again. A `disabled` service refuses your own update too, so change or remove that label first. A message naming a node that does not evaluate `io.sencho.update` means that node does not honor the label yet, so a pull there fails instead of skipping.
   </Accordion>
 
   <Accordion title="Recent executions shows 'Skipped ... another operation is already in progress'.">

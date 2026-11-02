@@ -200,4 +200,28 @@ describe('stack_update_status services_json (per-service reduction)', () => {
 
     expect(db().getStackServicesJson(NODE, 'stackA')).toEqual(SERVICES);
   });
+
+  it('recordUnattendedPolicy rewrites only the policy and leaves the update evidence alone', () => {
+    db().upsertStackUpdateStatus(NODE, 'web', true, 1000, 'ok', null, SERVICES, 4, {
+      decision: 'allow', ineligible: [],
+    });
+    db().upsertStackUpdateStatus(NODE + 1, 'web', false, 2000, 'ok', null, SERVICES, 5, {
+      decision: 'allow', ineligible: [],
+    });
+
+    expect(db().recordUnattendedPolicy(NODE, 'web', { decision: 'skip', ineligible: [] })).toBe(1);
+
+    expect(db().getStackUpdateDetail(NODE).web).toEqual({
+      hasUpdate: true, checkStatus: 'ok', lastError: null, checkedAt: 1000,
+      services: SERVICES,
+      unattendedPolicy: { decision: 'skip', ineligible: [] },
+    });
+    expect(db().getStackUpdateWriteGeneration(NODE, 'web')).toBe(4);
+    // Another node's same-named row is untouched.
+    expect(db().getStackUpdateDetail(NODE + 1).web).toMatchObject({
+      checkedAt: 2000, unattendedPolicy: { decision: 'allow', ineligible: [] },
+    });
+    // No row means there is no update evidence to annotate.
+    expect(db().recordUnattendedPolicy(NODE, 'absent', { decision: 'skip', ineligible: [] })).toBe(0);
+  });
 });

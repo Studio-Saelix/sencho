@@ -79,6 +79,7 @@ const RECONNECT_JITTER_MS = 500;
 
 /** Compose project label key used by docker compose on every container it creates. */
 const COMPOSE_PROJECT_LABEL = 'com.docker.compose.project';
+const COMPOSE_SERVICE_LABEL = 'com.docker.compose.service';
 /** Set by Sencho on every container it starts for a bounded recovery job. */
 const RECOVERY_HELPER_LABEL = 'dev.sencho.recovery.helper';
 
@@ -98,6 +99,8 @@ const SETTINGS_CACHE_MS = 500;
 interface InternalContainerState extends ContainerLifecycleState {
     name?: string;
     stackName?: string;
+    /** Compose service this container belongs to, for alert routing keys. */
+    serviceName?: string;
     isSelf?: boolean;
     /** A recovery helper: its exit is the operation's result, not a crash. */
     helperContainer?: boolean;
@@ -578,6 +581,7 @@ export class DockerEventService {
                 state.stackName,
                 state.name,
                 state.isSelf === true,
+                state.serviceName,
             );
             persisted = result.persisted;
             if (persisted) {
@@ -745,7 +749,7 @@ export class DockerEventService {
         // rate-suppressed alerts don't silently lock out the next real crash.
         if (state) state.lastCrashAlertAt = Date.now();
 
-        await this.emitError('monitor_alert', message, info.stackName, info.name, info.isSelf === true);
+        await this.emitError('monitor_alert', message, info.stackName, info.name, info.isSelf === true, state?.serviceName);
     }
 
     private isCrashAlertsEnabled(): boolean {
@@ -870,6 +874,8 @@ export class DockerEventService {
             if (attrs[RECOVERY_HELPER_LABEL]) state.helperContainer = true;
             const project = attrs[COMPOSE_PROJECT_LABEL];
             if (project && !state.stackName) state.stackName = project;
+            const service = attrs[COMPOSE_SERVICE_LABEL];
+            if (service && !state.serviceName) state.serviceName = service;
         }
         if (this.isSelfContainer(id, state.name)) {
             state.isSelf = true;
@@ -921,14 +927,22 @@ export class DockerEventService {
         stackName?: string,
         containerName?: string,
         systemOnly = false,
-    ): { stackName?: string; containerName?: string; actor: string } {
-        return systemOnly
-            ? { actor: 'system:docker-events' }
-            : { stackName, containerName, actor: 'system:docker-events' };
+        serviceName?: string,
+    ): { stackName?: string; containerName?: string; actor: string; serviceName?: string; nodeId: number } {
+        // The node id travels with the alert so its routing keys are read from
+        // the stack that actually raised it, never from whichever node is default.
+        if (systemOnly) return { actor: 'system:docker-events', nodeId: this.nodeId };
+        return {
+            stackName,
+            containerName,
+            actor: 'system:docker-events',
+            nodeId: this.nodeId,
+            ...(serviceName ? { serviceName } : {}),
+        };
     }
 
-    private async emitError(category: NotificationCategory, message: string, stackName?: string, containerName?: string, systemOnly = false): Promise<{ persisted: boolean }> {
-        return this.notifier.dispatchAlert('error', category, message, this.buildAlertOptions(stackName, containerName, systemOnly));
+    private async emitError(category: NotificationCategory, message: string, stackName?: string, containerName?: string, systemOnly = false, serviceName?: string): Promise<{ persisted: boolean }> {
+        return this.notifier.dispatchAlert('error', category, message, this.buildAlertOptions(stackName, containerName, systemOnly, serviceName));
     }
 
     private async emitWarning(category: NotificationCategory, message: string, stackName?: string, containerName?: string): Promise<{ persisted: boolean }> {

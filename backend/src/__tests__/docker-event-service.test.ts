@@ -252,7 +252,9 @@ describe('DockerEventService - die classification', () => {
             'error',
             'monitor_alert',
             expect.stringContaining('Container Crash Detected'),
-            { actor: 'system:docker-events' },
+            // A self-container alert stays system-only: it names no stack, so no
+            // routing key can apply, and it carries the node that raised it.
+            expect.objectContaining({ actor: 'system:docker-events' }),
         );
     });
 
@@ -381,7 +383,7 @@ describe('DockerEventService - die classification', () => {
             'error',
             'monitor_alert',
             expect.stringContaining('Healthcheck failed'),
-            { actor: 'system:docker-events' },
+            expect.objectContaining({ actor: 'system:docker-events' }),
         );
     });
 

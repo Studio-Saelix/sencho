@@ -533,6 +533,12 @@ describe('WebhookService.execute: health gate begin call sites', () => {
         const { HealthGateService } = await import('../services/HealthGateService');
         vi.spyOn(policyGate, 'assertPolicyGateAllows').mockResolvedValue({});
         vi.spyOn(fs.FileSystemService.prototype, 'getStacks').mockResolvedValue([stack]);
+        // The pull honors io.sencho.update, so the model must render for the
+        // update to proceed at all.
+        vi.spyOn(compose.ComposeService.prototype, 'renderConfig').mockResolvedValue({
+            rendered: JSON.stringify({ services: { web: { image: 'nginx:1' } } }),
+            stderr: '', code: 0, timedOut: false,
+        });
         vi.spyOn(compose.ComposeService.prototype, 'updateStack').mockResolvedValue({ recoveryId: null, deployedGenerationId: null, gitopsOperationId: null });
         const beginSpy = vi.spyOn(HealthGateService.getInstance(), 'beginStack').mockReturnValue('gate-hook');
 
@@ -563,6 +569,10 @@ describe('WebhookService.execute: Docker endpoint guard refusals', () => {
         const { DockerEndpointProtectedError } = await import('../helpers/dockerEndpointError');
         vi.spyOn(policyGate, 'assertPolicyGateAllows').mockResolvedValue({});
         vi.spyOn(fs.FileSystemService.prototype, 'getStacks').mockResolvedValue([stack]);
+        vi.spyOn(compose.ComposeService.prototype, 'renderConfig').mockResolvedValue({
+            rendered: JSON.stringify({ services: { web: { image: 'nginx:1' } } }),
+            stderr: '', code: 0, timedOut: false,
+        });
         vi.spyOn(compose.ComposeService.prototype, method).mockRejectedValue(new DockerEndpointProtectedError({
             reason: 'provider',
             service: 'socket-proxy',
@@ -577,5 +587,31 @@ describe('WebhookService.execute: Docker endpoint guard refusals', () => {
         expect(DatabaseService.getInstance().getWebhookExecutions(id)[0]).toMatchObject({ status: 'failure' });
         expect(DatabaseService.getInstance().getWebhookExecutions(id)[0].error).toContain('carries the Docker connection');
         expect(beginSpy).not.toHaveBeenCalled();
+    });
+});
+
+describe('WebhookService.execute: update policy on a pull', () => {
+    it('records a policy skip as a success with the note, never as a failure', async () => {
+        const stack = 'hook-pull-policy';
+        const { id } = createWebhook({ action: 'pull', stack });
+        const webhook = DatabaseService.getInstance().getWebhook(id)!;
+
+        const fs = await import('../services/FileSystemService');
+        const compose = await import('../services/ComposeService');
+        vi.spyOn(fs.FileSystemService.prototype, 'getStacks').mockResolvedValue([stack]);
+        vi.spyOn(compose.ComposeService.prototype, 'renderConfig').mockResolvedValue({
+            rendered: JSON.stringify({ services: { web: { image: 'nginx:1', labels: { 'io.sencho.update': 'manual' } } } }),
+            stderr: '', code: 0, timedOut: false,
+        });
+        const update = vi.spyOn(compose.ComposeService.prototype, 'updateStack');
+
+        const result = await WebhookService.getInstance().execute(webhook, 'pull', 'test', true);
+
+        expect(result.success).toBe(true);
+        expect(update).not.toHaveBeenCalled();
+        expect(DatabaseService.getInstance().getWebhookExecutions(id)[0]).toMatchObject({
+            status: 'success',
+            error: 'skipped by update policy (web: manual)',
+        });
     });
 });

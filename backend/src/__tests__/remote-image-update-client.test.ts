@@ -27,6 +27,29 @@ it('rejects a mismatched nonce instead of accepting stale facts', async () => {
     await expect(fetchRemoteImageUpdateFacts(2, 'web', new AbortController().signal)).rejects.toThrow('Invalid remote image facts');
 });
 
+it('asks for the unattended policy only when the caller requested it', async () => {
+    const stack = {
+        name: 'web', observationRevision: 1, observationToken: 'signed-observation',
+        model: { renderable: true }, services: [], images: [],
+        unattendedPolicy: { decision: 'allow', ineligible: [] },
+    };
+    vi.mocked(safeRemoteFetch).mockImplementation(async () => (
+        new Response(JSON.stringify({ contractVersion: 1, requestNonce: nonce, stacks: [stack] }))
+    ));
+    const signal = new AbortController().signal;
+
+    expect(await fetchRemoteImageUpdateFacts(2, 'web', signal, { includePolicy: true })).toEqual(stack);
+    expect(vi.mocked(safeRemoteFetch).mock.calls[0][1]).toMatchObject({
+        body: JSON.stringify({ contractVersion: 1, requestNonce: nonce, stack: 'web', policy: true }),
+    });
+
+    vi.mocked(safeRemoteFetch).mockClear();
+    await fetchRemoteImageUpdateFacts(2, 'web', signal);
+    expect(vi.mocked(safeRemoteFetch).mock.calls[0][1]).toMatchObject({
+        body: JSON.stringify({ contractVersion: 1, requestNonce: nonce, stack: 'web' }),
+    });
+});
+
 it('bounds received bytes even without a content-length header', async () => {
     const cancel = vi.fn();
     const stream = new ReadableStream<Uint8Array>({

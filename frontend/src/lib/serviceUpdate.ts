@@ -1,5 +1,6 @@
 import { apiFetch, withDeploySession } from './api';
 import { dockerEndpointRefusal, type DockerEndpointRefusal } from './stackUpdate';
+import { parseUpdatePolicyRefusal, type UpdatePolicyRefusal } from './updatePolicyRefusal';
 
 export interface RequestServiceUpdateParams {
     nodeId: number | null;
@@ -34,6 +35,8 @@ export interface ServiceUpdateFailure {
     status?: number;
     /** The Docker endpoint guard's refusal, when that is why the request failed. */
     endpointRefusal?: DockerEndpointRefusal;
+    /** The `io.sencho.update` refusal, when the label rules this update out. */
+    policyRefusal?: UpdatePolicyRefusal;
 }
 
 export type ServiceUpdateResult = ServiceUpdateSuccess | ServiceUpdateFailure;
@@ -68,6 +71,7 @@ export async function requestServiceUpdate(params: RequestServiceUpdateParams): 
                 recoveryId: isRecord(body) && typeof body.recoveryId === 'string' ? body.recoveryId : undefined,
                 status: res.status,
                 endpointRefusal: dockerEndpointRefusal(JSON.stringify(body), res.status) ?? undefined,
+                policyRefusal: parseUpdatePolicyRefusal(body, res.status) ?? undefined,
             };
         }
         if (!isRecord(body) || typeof body.serviceName !== 'string') {

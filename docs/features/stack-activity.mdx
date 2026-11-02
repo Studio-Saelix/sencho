@@ -22,9 +22,11 @@ Each entry in the activity list contains four pieces of information:
 
 If a [notification mute rule](/features/alerts-notifications#mute-rules) blocks delivery of a matching alert, the entry still appears here with a **Suppressed** badge next to the message. Hovering the badge shows which rule matched. Suppression only affects delivery to the bell and external channels; the activity row itself is never suppressed.
 
+A notification row shows the routing keys that routed it, for example **Routing keys: production**. A stack-level notification lists every key its services carry, and the line appears only when a keyed rule routed the row. See [Alerts & Notifications](/features/alerts-notifications#notification-routing).
+
 ## Event categories
 
-Eleven categories have a dedicated icon. Any other notification scoped to a stack (deploy failures, scan findings, monitor alerts) also flows into the timeline and renders with a generic activity icon. Automatic creation of missing external networks during deploy writes a history-only activity row (`network_auto_created`) on the stack timeline; it does not appear in the notification bell.
+Twelve categories have a dedicated icon. Any other notification scoped to a stack (deploy failures, scan findings, monitor alerts) also flows into the timeline and renders with a generic activity icon. Automatic creation of missing external networks during deploy writes a history-only activity row (`network_auto_created`) on the stack timeline; it does not appear in the notification bell.
 
 | Category | Example message |
 |----------|-----------------|
@@ -39,6 +41,9 @@ Eleven categories have a dedicated icon. Any other notification scoped to a stac
 | Update started | `tautulli update started` |
 | Health gate passed | `plex: health gate passed` |
 | Health gate failed | `plex: health gate failed` |
+| Update policy | `Update skipped by io.sencho.update: db (manual). Triggered by a scheduled update` |
+
+An unattended update that leaves a stack alone because of its service update policy writes one **Update policy** row per stack, per reason, per day, so a schedule that skips every hour still produces a single row for the day. The row records the trigger, the actor, the requested services, the blocking services, and the decision. It is easy to find in the timeline, and it never marks anything unread. See [Sencho Labels · Update policy](/features/sencho-labels#update-policy).
 
 ## Day grouping
 

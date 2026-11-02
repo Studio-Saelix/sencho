@@ -1098,7 +1098,7 @@ describe('MonitorService - breach state machine', () => {
       'warning',
       'monitor_alert',
       'The **CPU usage** for **api** in **my-stack** (container **my-stack-api-1**) has exceeded your threshold of **80%** (Currently: 90%).',
-      { stackName: 'my-stack', containerName: 'my-stack-api-1', actor: 'system:monitor' },
+      expect.objectContaining({ stackName: 'my-stack', containerName: 'my-stack-api-1', actor: 'system:monitor' }),
     );
     expect(mockUpsertStackAlertServiceCooldown).toHaveBeenCalledWith(1, 'api', expect.any(Number));
     expect(mockUpdateStackAlertLastFired).toHaveBeenCalledWith(1, expect.any(Number));
@@ -1276,7 +1276,7 @@ describe('MonitorService - breach state machine', () => {
       'warning',
       'monitor_alert',
       'The **CPU usage** for **api** in **my-stack** (container **abcdef123456**) has exceeded your threshold of **80%** (Currently: 90%).',
-      { stackName: 'my-stack', containerName: 'abcdef123456', actor: 'system:monitor' },
+      expect.objectContaining({ stackName: 'my-stack', containerName: 'abcdef123456', actor: 'system:monitor' }),
     );
   });
 });
@@ -1455,7 +1455,7 @@ describe('MonitorService - restart_count metric', () => {
       'warning',
       'monitor_alert',
       expect.stringContaining('Restart count'),
-      { stackName: 'my-stack', containerName: 'c1', actor: 'system:monitor' },
+      expect.objectContaining({ stackName: 'my-stack', containerName: 'c1', actor: 'system:monitor' }),
     );
   });
 

@@ -6,6 +6,14 @@ import { PROXY_TIER_HEADER, deployProvenanceHeaders } from './license-headers';
 import DockerController from './DockerController';
 import { ComposeService } from './ComposeService';
 import { StackUpdateOrchestrator } from './StackUpdateOrchestrator';
+import type { OrchestratorResult } from './StackUpdateOrchestrator';
+import {
+    describePolicySkip,
+    recordUpdatePolicyDecision,
+    resolveUpdatePolicy,
+    type UpdatePolicyResult,
+} from './updatePolicy';
+import { SENCHO_UPDATE_LABEL } from '../helpers/senchoLabels';
 import { StackOpLockService, stackOpSkipMessage as skipMessage } from './StackOpLockService';
 import { FileSystemService } from './FileSystemService';
 import { StackUpdateRecoveryService } from './StackUpdateRecoveryService';
@@ -65,6 +73,17 @@ export class TaskAuthorizationError extends Error {
         this.name = 'TaskAuthorizationError';
     }
 }
+
+/**
+ * A scheduled stack whose services declare an update policy that this run may
+ * not touch. It is an outcome, not a failure: the operator asked for it.
+ */
+interface PolicySkipped {
+    kind: 'update_policy_skipped';
+    policy: UpdatePolicyResult;
+}
+
+type UpdateRunOutcome = PolicySkipped | OrchestratorResult;
 
 export class SchedulerService {
     private static instance: SchedulerService;
@@ -1041,103 +1060,43 @@ export class SchedulerService {
     }
 
     /**
-     * Proxy auto-update execution to a remote Sencho instance.
-     * The remote node runs the image checks and compose update locally.
+     * Proxy an automatic update to a remote Sencho instance. The node runs its
+     * own checks and update, and its own io.sencho.update evaluation.
+     *
+     * The coordinator is the only transport here: a node that cannot confirm it
+     * evaluates the label reports a failure, and no legacy endpoint is asked.
+     * That endpoint would mutate images without the label ever being read.
      */
     private async executeUpdateRemote(nodeId: number, target: string, authorizeAll: UpdateAuthorization): Promise<string> {
         const coordinated = await new AutoUpdateRemoteCoordinator().execute({
             nodeId, selection: { target }, caller: { kind: 'scheduled', authorizeAll },
             scanner: RemoteImageUpdateService.getInstance(),
         });
-        if (coordinated.handled) return coordinated.result;
-        await authorizeAll(nodeId, target === '*' ? [] : [target]);
-        const proxyTarget = this.requireRemoteProxyTarget(nodeId);
-        const baseUrl = proxyTarget.apiUrl.replace(/\/$/, '');
-        const proxyHeaders = LicenseService.getInstance().getProxyHeaders();
-        if (isDebugEnabled()) {
-            console.log(`[SchedulerService] executeUpdateRemote: node=${nodeId} target=${target}`);
+        if (coordinated.handled) {
+            // `failed` marks a node-level failure (no answer, or too old to
+            // evaluate the label), not a per-stack outcome. It fails the run for
+            // every target shape, including a fleet-wide one: a run that updates
+            // nothing must never be recorded green.
+            if (coordinated.failed) throw new Error(coordinated.result);
+            return coordinated.result;
         }
-        const startTime = Date.now();
-        try {
-            const response = await safeRemoteFetch(`${baseUrl}/api/auto-update/execute`, {
-                method: 'POST',
-                headers: {
-                    'Content-Type': 'application/json',
-                    'Authorization': `Bearer ${proxyTarget.apiToken}`,
-                    [PROXY_TIER_HEADER]: proxyHeaders.tier,
-                },
-                body: JSON.stringify({ target }),
-                signal: AbortSignal.timeout(300_000), // 5 minute timeout for long updates
-            }, proxyTarget.trustedLoopback);
-
-            if (!response.ok) {
-                throw new Error(this.remoteProxyFailureMessage(nodeId, await this.remoteResponseDetail(response)));
-            }
-
-            const body = await response.json() as { result?: string };
-            if (isDebugEnabled()) {
-                console.log(`[SchedulerService] executeUpdateRemote: completed in ${Date.now() - startTime}ms`);
-            }
-            return body.result || 'Remote auto-update completed (no details returned).';
-        } catch (err) {
-            this.rethrowRemoteProxyError(nodeId, err);
-        }
+        // The coordinator handles every probe outcome, so this is defensive.
+        throw this.remoteProxyFailureMessage(nodeId, `the node did not confirm it evaluates ${SENCHO_UPDATE_LABEL}`);
     }
 
-    /** Proxy auto-update for an explicit stack list on a remote node (label selector). */
+    /** Proxy an automatic update for an explicit stack list on a remote node (label selector). */
     private async executeUpdateRemoteTargets(nodeId: number, targets: string[], authorizeAll: UpdateAuthorization): Promise<string> {
         const coordinated = await new AutoUpdateRemoteCoordinator().execute({
             nodeId, selection: { targets }, caller: { kind: 'scheduled', authorizeAll },
             scanner: RemoteImageUpdateService.getInstance(),
         });
+        // A node-level failure is never a per-stack skip line: it fails the label
+        // run even when the selector matched no stack on that node.
+        if (coordinated.handled && coordinated.failed) throw new Error(coordinated.result);
         if (coordinated.handled) return coordinated.result;
-        await authorizeAll(nodeId, targets);
-        const proxyTarget = this.requireRemoteProxyTarget(nodeId);
-        const baseUrl = proxyTarget.apiUrl.replace(/\/$/, '');
-        const proxyHeaders = LicenseService.getInstance().getProxyHeaders();
-        if (isDebugEnabled()) {
-            console.log(`[SchedulerService] executeUpdateRemoteTargets: node=${nodeId} count=${targets.length}`);
-        }
-        const startTime = Date.now();
-        try {
-            const response = await safeRemoteFetch(`${baseUrl}/api/auto-update/execute`, {
-                method: 'POST',
-                headers: {
-                    'Content-Type': 'application/json',
-                    'Authorization': `Bearer ${proxyTarget.apiToken}`,
-                    [PROXY_TIER_HEADER]: proxyHeaders.tier,
-                },
-                body: JSON.stringify({ targets }),
-                signal: AbortSignal.timeout(300_000),
-            }, proxyTarget.trustedLoopback);
-
-            // Older remotes only accept { target }. Fall back to one call per
-            // stack so mixed-version fleets still complete the label schedule.
-            if (response.status === 400) {
-                const detail = await this.remoteResponseDetail(response);
-                if (/target/i.test(detail)) {
-                    const parts: string[] = [];
-                    for (const stackName of targets) {
-                        parts.push(await this.executeUpdateRemote(nodeId, stackName, authorizeAll));
-                    }
-                    return parts.join('\n');
-                }
-                throw new Error(this.remoteProxyFailureMessage(nodeId, detail));
-            }
-
-            if (!response.ok) {
-                throw new Error(this.remoteProxyFailureMessage(nodeId, await this.remoteResponseDetail(response)));
-            }
-
-            const body = await response.json() as { result?: string };
-            if (isDebugEnabled()) {
-                console.log(`[SchedulerService] executeUpdateRemoteTargets: completed in ${Date.now() - startTime}ms`);
-            }
-            return body.result || 'Remote auto-update completed (no details returned).';
-        } catch (err) {
-            this.rethrowRemoteProxyError(nodeId, err);
-        }
+        throw this.remoteProxyFailureMessage(nodeId, `the node did not confirm it evaluates ${SENCHO_UPDATE_LABEL}`);
     }
+
 
     /**
      * Proxy a stack lifecycle action to a remote Sencho instance. ComposeService,
@@ -1441,23 +1400,38 @@ export class SchedulerService {
 
         const { updatedImages } = gate;
 
-        await this.enforceSchedulerPolicyGate(
-            stackName,
-            nodeId,
-            'Auto-update',
-            `/api/scheduled-tasks/auto-update/${stackName}`,
-        );
         // Atomic backup/rollback is the default deploy mode: take a pre-op
         // backup and roll back on failure for every scheduled auto-update.
         const atomic = true;
         const lock = await StackOpLockService.getInstance().runExclusive(
             nodeId, stackName, 'update', 'system',
-            () => StackUpdateOrchestrator.getInstance().execute(
-                { nodeId, stackName, target: { scope: 'stack' }, trigger: 'scheduled', actor: 'system:scheduler' },
-                { atomic, terminalWs: null },
-            ),
+            async (): Promise<UpdateRunOutcome> => {
+                // Update policy runs inside the lock and before the security gate,
+                // so a skipped stack writes no policy evidence for an update it
+                // never makes.
+                const policy = await resolveUpdatePolicy(nodeId, {
+                    stack: stackName, target: { scope: 'stack' }, trigger: 'scheduled',
+                });
+                if (policy.decision !== 'allow') {
+                    recordUpdatePolicyDecision(nodeId, policy, 'system:scheduler');
+                    return { kind: 'update_policy_skipped', policy };
+                }
+                await this.enforceSchedulerPolicyGate(
+                    stackName,
+                    nodeId,
+                    'Auto-update',
+                    `/api/scheduled-tasks/auto-update/${stackName}`,
+                );
+                return StackUpdateOrchestrator.getInstance().execute(
+                    { nodeId, stackName, target: { scope: 'stack' }, trigger: 'scheduled', actor: 'system:scheduler', policy },
+                    { atomic, terminalWs: null },
+                );
+            },
         );
         if (!lock.ran) return skipMessage(stackName, lock.existing.action);
+        if (lock.result?.kind === 'update_policy_skipped') {
+            return `Stack "${stackName}": ${describePolicySkip(lock.result.policy)}.`;
+        }
 
         // Health observation starts immediately after Compose; registry recheck is
         // isolated so a verification failure cannot turn Compose success into a failure.

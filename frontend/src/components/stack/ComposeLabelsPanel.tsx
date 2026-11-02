@@ -12,16 +12,22 @@ import { useNodes } from '@/context/NodeContext';
 import { LabelBehaviorStatus } from './LabelBehaviorBadge';
 import {
   LABEL_DISAMBIGUATION_COPY,
+  NOTIFY_ROUTE_MATCH_COPY,
+  POLICY_LABEL_NOT_EVALUATED_COPY,
+  POLICY_LABEL_STATE_LABELS,
   SENCHO_LABELS_NODE_COPY,
   SOURCE_LABELS,
   SOURCE_FACET_LABELS,
   matchesSearch,
+  policyLabelRowState,
+  showsNotifyRouteMatch,
   sourcesPresent,
   withReadBehaviors,
   type LabelSource,
   type LabelValue,
   type StackLabelInventory,
 } from '@/lib/labelInventory';
+import { SENCHO_LABELS_V1_CAPABILITY, SENCHO_LABEL_POLICY_CAPABILITY } from '@/lib/capabilities';
 
 const LABEL_CLASS = 'font-mono text-[10px] uppercase tracking-[0.18em] text-stat-subtitle';
 const CARD_CLASS = 'rounded-lg border border-muted px-3 py-2.5';
@@ -37,10 +43,15 @@ function labelVisible(label: LabelValue, search: string, excluded: Set<LabelSour
   return parentHit || matchesSearch(search, label.key, label.value);
 }
 
-function LabelRow({ label, onReveal }: { label: LabelValue; onReveal?: () => void }) {
+function LabelRow({ label, nodeEvaluatesPolicy, onReveal }: { label: LabelValue; nodeEvaluatesPolicy: boolean; onReveal?: () => void }) {
   const { isAdmin } = useAuth();
+  const policyState = policyLabelRowState(label, nodeEvaluatesPolicy);
   return (
-    <div className="flex flex-wrap items-center gap-2 border-t border-muted py-2 first:border-t-0" data-testid="compose-label-row">
+    <div
+      className="flex flex-wrap items-center gap-2 border-t border-muted py-2 first:border-t-0"
+      data-testid="compose-label-row"
+      data-policy-state={policyState ?? undefined}
+    >
       <span className="font-mono text-[12px] font-medium text-foreground/90">{label.key}</span>
       <span className="text-muted-foreground">=</span>
       <span className="inline-flex items-center gap-1 font-mono text-xs text-foreground/80">
@@ -50,7 +61,22 @@ function LabelRow({ label, onReveal }: { label: LabelValue; onReveal?: () => voi
       <span className="rounded border border-muted px-1.5 py-0.5 font-mono text-[10px] text-stat-subtitle">
         {SOURCE_LABELS[label.source]}
       </span>
-      <LabelBehaviorStatus label={label} />
+      {policyState === 'not-evaluated' ? (
+        <>
+          <span
+            className="rounded border border-muted px-1.5 py-0.5 font-mono text-[10px] text-stat-subtitle"
+            title={POLICY_LABEL_NOT_EVALUATED_COPY}
+          >
+            {POLICY_LABEL_STATE_LABELS['not-evaluated']}
+          </span>
+          <span className="text-[11px] text-warning">{POLICY_LABEL_NOT_EVALUATED_COPY}</span>
+        </>
+      ) : (
+        <LabelBehaviorStatus label={label} />
+      )}
+      {showsNotifyRouteMatch(label, nodeEvaluatesPolicy) && (
+        <span className="text-[11px] text-stat-subtitle">{NOTIFY_ROUTE_MATCH_COPY}</span>
+      )}
       {label.redacted && isAdmin && onReveal && (
         <button type="button" onClick={onReveal} className="font-mono text-[10px] uppercase text-brand hover:underline">
           Reveal
@@ -85,7 +111,10 @@ export default function ComposeLabelsPanel({ stackName }: { stackName: string })
   const { isAdmin } = useAuth();
   const { hasCapability, activeNodeMeta } = useNodes();
   // A failed or pending node info fetch has no version; only a node that answered and lacks the capability is old.
-  const nodeLacksSenchoLabels = activeNodeMeta?.version != null && !hasCapability('sencho-labels-v1');
+  const nodeLacksSenchoLabels = activeNodeMeta?.version != null && !hasCapability(SENCHO_LABELS_V1_CAPABILITY);
+  // An older node does not evaluate the behavioral labels; that is a capability
+  // answer, not an absent field in its resolution.
+  const nodeEvaluatesPolicy = !(activeNodeMeta?.version != null && !hasCapability(SENCHO_LABEL_POLICY_CAPABILITY));
   const [inventory, setInventory] = useState<StackLabelInventory | null>(null);
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState(false);
@@ -333,7 +362,7 @@ export default function ComposeLabelsPanel({ stackName }: { stackName: string })
             <div className="mt-3">
               <p className="font-mono text-[10px] uppercase tracking-[0.18em] text-stat-subtitle mb-1">Declared in Compose</p>
               {declaredVisible.map((label) => (
-                <LabelRow key={`decl-${label.key}`} label={label} onReveal={isAdmin && !revealSecrets ? handleReveal : undefined} />
+                <LabelRow key={`decl-${label.key}`} label={label} nodeEvaluatesPolicy={nodeEvaluatesPolicy} onReveal={isAdmin && !revealSecrets ? handleReveal : undefined} />
               ))}
             </div>
           )}
@@ -357,7 +386,7 @@ export default function ComposeLabelsPanel({ stackName }: { stackName: string })
                   )}
                   {runtimeVisible.length > 0 ? (
                     runtimeVisible.map((label) => (
-                      <LabelRow key={`rt-${label.key}`} label={label} onReveal={isAdmin && !revealSecrets ? handleReveal : undefined} />
+                      <LabelRow key={`rt-${label.key}`} label={label} nodeEvaluatesPolicy={nodeEvaluatesPolicy} onReveal={isAdmin && !revealSecrets ? handleReveal : undefined} />
                     ))
                   ) : (
                     !filtersActive && <p className="text-xs text-stat-subtitle">No runtime labels on this container.</p>

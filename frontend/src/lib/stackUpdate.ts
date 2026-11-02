@@ -1,6 +1,7 @@
 import { apiFetch, withDeploySession } from '@/lib/api';
 import type { FailureClassification } from '@/components/EditorLayout/EditorView';
 import type { PolicyBlockPayload } from '@/components/stack/PolicyBlockDialog';
+import { parseUpdatePolicyRefusalText, type UpdatePolicyRefusal } from './updatePolicyRefusal';
 
 export const isRecord = (value: unknown): value is Record<string, unknown> =>
   typeof value === 'object' && value !== null;
@@ -214,6 +215,7 @@ export type StackUpdateOutcome =
   | { kind: 'docker-endpoint'; refusal: DockerEndpointRefusal }
   | { kind: 'busy'; message: string }
   | { kind: 'policy-blocked'; payload: PolicyBlockPayload; policyName: string }
+  | { kind: 'update-policy-blocked'; refusal: UpdatePolicyRefusal }
   | { kind: 'failed'; error: StackActionError };
 
 interface PostStackUpdateParams {
@@ -249,6 +251,8 @@ export async function postStackUpdate({
   if (response.status === 409) {
     const inProgress = parseStackOpInProgress(rawBody);
     if (inProgress) return { kind: 'busy', message: stackOpInProgressMessage(stackName, inProgress) };
+    const updatePolicy = parseUpdatePolicyRefusalText(rawBody, response.status);
+    if (updatePolicy) return { kind: 'update-policy-blocked', refusal: updatePolicy };
     const payload = parsePolicyBlock(rawBody);
     if (payload?.policy) return { kind: 'policy-blocked', payload, policyName: payload.policy.name };
   }

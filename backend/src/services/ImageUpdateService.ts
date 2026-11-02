@@ -2,7 +2,8 @@ import path from 'path';
 import YAML from 'yaml';
 import { CronExpressionParser } from 'cron-parser';
 import DockerController from './DockerController';
-import { DatabaseService, type StackCheckStatus, type StackServiceStatus } from './DatabaseService';
+import { DatabaseService, type StackCheckStatus, type StackServiceStatus, type StackUpdateUnattendedPolicy } from './DatabaseService';
+import { resolveUpdatePolicyPair, toUnattendedStatusPolicy } from './updatePolicy';
 import { FileSystemService } from './FileSystemService';
 import { RegistryService } from './RegistryService';
 import { NodeRegistry } from './NodeRegistry';
@@ -437,6 +438,7 @@ export class ImageUpdateService {
     private static readonly MODE_SETTING_KEY = 'image_update_check_mode';
     private static readonly CRON_SETTING_KEY = 'image_update_check_cron';
     private static readonly ENABLED_SETTING_KEY = 'image_update_checks_enabled';
+    /** Bound on the policy render during a check, so one slow render cannot stall a pass. */
     private static readonly JITTER_FRACTION = 0.1;                // ±10% so a fleet does not poll in lockstep
     private static readonly STARTUP_DELAY_MS = 2 * 60 * 1000;    // 2 min after boot
 
@@ -1138,8 +1140,10 @@ export class ImageUpdateService {
 
     /**
      * Re-check a single stack after a service-scoped update or restore, or
-     * after a manual full-stack update. On a render failure the prior row is
-     * left untouched and a verification_failed result is returned.
+     * after a manual full-stack update. On a render failure the prior update
+     * fields and the write generation are left untouched, only the fail-closed
+     * unattended policy is rewritten, and a verification_failed result is
+     * returned.
      */
     public async recheckStack(
         nodeId: number,
@@ -1156,6 +1160,12 @@ export class ImageUpdateService {
         const docker = DockerController.getInstance(nodeId);
         const model = await buildEffectiveServiceModel(nodeId, stackName);
         if (!model.renderable) {
+            // The update result is unknown, but an unattended run fails closed
+            // on this same unreadable model. Record that skip without touching
+            // the prior update evidence, so the row cannot read "allow".
+            await this.withStackWriteLock(nodeId, stackName, generation, () => {
+                db.recordUnattendedPolicy(nodeId, stackName, { decision: 'skip', ineligible: [] });
+            });
             return {
                 outcome: 'verification_failed',
                 warning: model.error || UPDATE_VERIFICATION_INCOMPLETE_WARNING,
@@ -1224,11 +1234,15 @@ export class ImageUpdateService {
         const lastError = stackStatusLastError(services);
         const now = Date.now();
 
+        // The same observation answers "would an unattended update touch this
+        // stack", so the Updates view never has to guess.
+        const unattendedPolicy = await this.unattendedPolicyForStatus(nodeId, stackName);
+
         const committed = await this.withStackWriteLock(nodeId, stackName, generation, async (gen) => {
             if (checkStatus === 'failed') {
-                db.recordStackCheckFailure(nodeId, stackName, lastError ?? 'Update check failed', now, services, gen);
+                db.recordStackCheckFailure(nodeId, stackName, lastError ?? 'Update check failed', now, services, gen, unattendedPolicy);
             } else {
-                db.upsertStackUpdateStatus(nodeId, stackName, hasUpdate, now, checkStatus, lastError, services, gen);
+                db.upsertStackUpdateStatus(nodeId, stackName, hasUpdate, now, checkStatus, lastError, services, gen, unattendedPolicy);
             }
         });
         // A newer scanner reservation dropped this write; do not report cleared.
@@ -1265,6 +1279,41 @@ export class ImageUpdateService {
         return { outcome: 'cleared', warning: null };
     }
 
+    /**
+     * The unattended decision a local status write records, so the Updates view
+     * can report a policy skip without guessing. A model that cannot be
+     * rendered, or a policy read that fails, records skip because the unattended
+     * run fails closed the same way. `undefined` is only for a non-local target,
+     * whose decision is evaluated on its own node and arrives with the facts;
+     * this instance must not guess one from its own filesystem.
+     */
+    private async unattendedPolicyForStatus(
+        nodeId: number,
+        stackName: string,
+    ): Promise<StackUpdateUnattendedPolicy | undefined> {
+        try {
+            const node = NodeRegistry.getInstance().getNode(nodeId);
+            if (node && node.type !== 'local') return undefined;
+        } catch {
+            // A registry that cannot answer still leaves the render below free
+            // to fail closed; do not turn it into "not evaluated".
+        }
+        try {
+            // resolveUpdatePolicyPair already bounds the whole evaluation; a
+            // second timeout here would race it into the outer catch, which is
+            // the one path that must not keep a stale allow.
+            const pair = await resolveUpdatePolicyPair(nodeId, stackName, { scope: 'stack' });
+            return toUnattendedStatusPolicy(pair);
+        } catch (error) {
+            console.warn(
+                '[ImageUpdateService] update policy unavailable for %s: %s',
+                sanitizeForLog(stackName),
+                sanitizeForLog(getErrorMessage(error, 'unknown')),
+            );
+            return { decision: 'skip', ineligible: [] };
+        }
+    }
+
     public async recordRemoteCheckFailure(nodeId: number, stack: string, generation: number): Promise<void> {
         const db = DatabaseService.getInstance();
         await this.withStackWriteLock(nodeId, stack, generation, gen => {
@@ -1297,6 +1346,7 @@ export class ImageUpdateService {
                     Date.now(), db.getStackServicesJson(nodeId, facts.name).map(service => ({
                         ...service, checkStatus: 'failed' as const, lastError: model.error,
                     })), gen,
+                    facts.unattendedPolicy,
                 );
             });
             if (!committed) return { outcome: 'verification_incomplete', warning: UPDATE_VERIFICATION_INCOMPLETE_WARNING };
@@ -1311,9 +1361,15 @@ export class ImageUpdateService {
         const lastError = stackStatusLastError(services);
         const committed = await this.withStackWriteLock(nodeId, facts.name, generation, gen => {
             if (checkStatus === 'failed') {
-                db.recordStackCheckFailure(nodeId, facts.name, lastError ?? 'Update check failed', Date.now(), services, gen);
+                db.recordStackCheckFailure(
+                    nodeId, facts.name, lastError ?? 'Update check failed', Date.now(), services, gen,
+                    facts.unattendedPolicy,
+                );
             } else {
-                db.upsertStackUpdateStatus(nodeId, facts.name, hasUpdate, Date.now(), checkStatus, lastError, services, gen);
+                db.upsertStackUpdateStatus(
+                    nodeId, facts.name, hasUpdate, Date.now(), checkStatus, lastError, services, gen,
+                    facts.unattendedPolicy,
+                );
             }
         });
         if (!committed || checkStatus !== 'ok') {
@@ -1480,15 +1536,21 @@ export class ImageUpdateService {
             const hasUpdate = services.some((s) => s.hasUpdate);
             const lastError = stackStatusLastError(services);
             const notifyMessage = buildAvailabilityNotifyMessage(stackName, services);
+            // A node-wide check answers the same question a single-stack recheck
+            // does, so it records the same unattended decision. Without this a
+            // full refresh left the Updates view with no policy note.
+            const unattendedPolicy = await this.unattendedPolicyForStatus(nodeId, stackName);
 
             const committed = await this.withStackWriteLock(nodeId, stackName, generation, async (gen) => {
                 if (checkStatus === 'failed') {
                     db.recordStackCheckFailure(
                         nodeId, stackName, lastError ?? 'Update check failed', checkedAt, services, gen,
+                        unattendedPolicy,
                     );
                 } else {
                     db.upsertStackUpdateStatus(
                         nodeId, stackName, hasUpdate, checkedAt, checkStatus, lastError, services, gen,
+                        unattendedPolicy,
                     );
                 }
             });
@@ -1503,12 +1565,18 @@ export class ImageUpdateService {
         const failed = checkable.filter((_, i) => statuses[i] === 'failed');
         const partial = checkable.filter((_, i) => statuses[i] === 'partial');
         const confirmedHasUpdate = checkable.some((r, i) => statuses[i] === 'ok' && r.hasUpdate === true);
+        // The effective model could not be rendered, which is exactly the state
+        // in which an unattended run fails closed. Record that skip rather than
+        // leaving a prior allow in place; re-rendering for the policy could race
+        // a file change and disagree with the model this check observed.
+        const unattendedPolicy: StackUpdateUnattendedPolicy = { decision: 'skip', ineligible: [] };
 
         if (checkable.length > 0 && failed.length === checkable.length) {
             const committed = await this.withStackWriteLock(nodeId, stackName, generation, async () => {
                 db.recordStackCheckFailure(
                     nodeId, stackName, failed[0].error ?? 'Update check failed', checkedAt,
                 );
+                db.recordUnattendedPolicy(nodeId, stackName, unattendedPolicy);
             });
             return {
                 hasUpdate: previousState[stackName] === true,
@@ -1527,6 +1595,7 @@ export class ImageUpdateService {
 
         const committed = await this.withStackWriteLock(nodeId, stackName, generation, async () => {
             db.upsertStackUpdateStatus(nodeId, stackName, hasUpdate, checkedAt, checkStatus, lastError);
+            db.recordUnattendedPolicy(nodeId, stackName, unattendedPolicy);
         });
 
         return {

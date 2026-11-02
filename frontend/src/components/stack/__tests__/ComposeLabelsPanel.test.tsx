@@ -13,12 +13,17 @@ vi.mock('@/context/AuthContext', () => ({
 }));
 
 let senchoLabelsSupported = true;
+let policySupported = true;
 // `null` models a node info fetch that failed or has not resolved: no version, no capabilities.
 let nodeMeta: { version: string | null } | null = { version: '0.99.0' };
 vi.mock('@/context/NodeContext', () => ({
   useNodes: () => ({
     activeNodeMeta: nodeMeta,
-    hasCapability: (cap: string) => cap !== 'sencho-labels-v1' || senchoLabelsSupported,
+    hasCapability: (cap: string) => {
+      if (cap === 'sencho-labels-v1') return senchoLabelsSupported;
+      if (cap === 'sencho-label-policy-v1') return policySupported;
+      return true;
+    },
   }),
 }));
 
@@ -53,6 +58,8 @@ const mockInventory = {
 describe('ComposeLabelsPanel', () => {
   beforeEach(() => {
     senchoLabelsSupported = true;
+    policySupported = true;
+    nodeMeta = { version: '0.99.0' };
     vi.mocked(apiFetch).mockResolvedValue({
       ok: true,
       json: async () => mockInventory,
@@ -401,6 +408,7 @@ describe('ComposeLabelsPanel io.sencho.* status', () => {
 
   beforeEach(() => {
     senchoLabelsSupported = true;
+    policySupported = true;
     nodeMeta = { version: '0.99.0' };
     vi.mocked(apiFetch).mockResolvedValue({ ok: true, json: async () => senchoInventory } as Response);
   });
@@ -509,5 +517,76 @@ describe('ComposeLabelsPanel io.sencho.* status', () => {
     render(<ComposeLabelsPanel stackName="demo" />);
     await screen.findByText('web');
     expect(screen.queryByTestId('sencho-labels-unsupported')).toBeNull();
+  });
+
+  it('shows the behavior state for a policy label even when a stale container lists it as changed', async () => {
+    // The audit's changed list describes the container; the declared value is
+    // what Sencho acts on, so the row reads the behavior, not the mismatch.
+    vi.mocked(apiFetch).mockResolvedValue({
+      ok: true,
+      json: async () => ({
+        stackName: 'demo', renderable: true, partial: false, generatedAt: Date.now(),
+        services: [{
+          service: 'web',
+          declaredLabels: [
+            { key: 'io.sencho.update', value: 'manual', source: 'compose' as const, behavior: { state: 'active' as const } },
+            { key: 'io.sencho.notify.route', value: 'staging', source: 'compose' as const, behavior: { state: 'active' as const } },
+          ],
+          replicas: [{
+            id: 'c1', name: 'demo-web-1', state: 'running',
+            runtimeLabels: [
+              { key: 'io.sencho.update', value: 'auto', source: 'runtime' as const, behavior: { state: 'inert' as const } },
+            ],
+            onlyInCompose: [], onlyOnContainer: [], inBoth: [],
+            changed: ['io.sencho.update'],
+          }],
+        }],
+      }),
+    } as Response);
+    render(<ComposeLabelsPanel stackName="demo" />);
+    const updateRow = (await screen.findAllByText('io.sencho.update'))[0].closest('[data-testid="compose-label-row"]');
+    expect(updateRow).toHaveAttribute('data-policy-state', 'active');
+    expect(screen.getByText('Matched by the routing rules of the instance that runs this stack.')).toBeInTheDocument();
+  });
+
+  it('marks a policy label on a node without the capability as not evaluated, with the reason', async () => {
+    policySupported = false;
+    vi.mocked(apiFetch).mockResolvedValue({
+      ok: true,
+      json: async () => ({
+        stackName: 'demo', renderable: true, partial: false, generatedAt: Date.now(),
+        services: [{
+          service: 'web',
+          declaredLabels: [
+            { key: 'io.sencho.update', value: 'disabled', source: 'compose' as const, behavior: { state: 'active' as const } },
+          ],
+          replicas: [],
+        }],
+      }),
+    } as Response);
+    render(<ComposeLabelsPanel stackName="demo" />);
+    const row = (await screen.findAllByText('io.sencho.update'))[0].closest('[data-testid="compose-label-row"]');
+    expect(row).toHaveAttribute('data-policy-state', 'not-evaluated');
+    expect(screen.getByText("This node's version does not evaluate this label. Update Sencho on the node.")).toBeInTheDocument();
+  });
+
+  it('keeps an invalid policy value as Ignored rather than dropping the row', async () => {
+    vi.mocked(apiFetch).mockResolvedValue({
+      ok: true,
+      json: async () => ({
+        stackName: 'demo', renderable: true, partial: false, generatedAt: Date.now(),
+        services: [{
+          service: 'web',
+          declaredLabels: [
+            { key: 'io.sencho.update', value: 'sometimes', source: 'compose' as const, behavior: { state: 'invalid' as const, reason: 'Use auto, manual, or disabled.' } },
+          ],
+          replicas: [],
+        }],
+      }),
+    } as Response);
+    render(<ComposeLabelsPanel stackName="demo" />);
+    const row = (await screen.findAllByText('io.sencho.update'))[0].closest('[data-testid="compose-label-row"]');
+    expect(row).toHaveAttribute('data-policy-state', 'ignored');
+    expect(screen.getByText('Use auto, manual, or disabled.')).toBeInTheDocument();
   });
 });

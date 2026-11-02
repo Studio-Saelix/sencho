@@ -85,6 +85,8 @@ Check from two independent surfaces so you're not trusting a single UI element.
 
 **The webhook's own history.** Back on **Settings → Automation → Webhooks**, expand **Recent executions** on the card. A green check confirms `deploy` succeeded, with the timestamp and duration of the run you just triggered.
 
+A pipeline that uses **Pull & Update** instead of a full deploy gets the same acceptance and the same history, with one extra check: a pull is an unattended image refresh, so it honors each service's update policy. A stack with a `manual` or `disabled` service is skipped before anything is pulled, and the reason appears in **Recent executions**. A pull aimed at a node that does not evaluate `io.sencho.update` fails and says so. See [Sencho Labels · Update policy](/features/sencho-labels#update-policy).
+
 <Frame>
   <img src="/images/tutorials/set-up-a-webhook/webhook-recent-executions.png" alt="Deploy storefront webhook card with Recent executions expanded, showing one entry: a green check, deploy, a timestamp, and a duration of 5.1 seconds." />
 </Frame>

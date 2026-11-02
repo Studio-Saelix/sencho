@@ -48,6 +48,7 @@ import { SENCHO_OPEN_STACK_EVENT } from '@/lib/events';
 import { requestServiceUpdate } from '@/lib/serviceUpdate';
 import { toast } from '@/components/ui/toast-store';
 import AutoUpdateReadinessView, {
+  AutoPill,
   MobileReadinessCard,
   CadenceStrip,
   type StackCard,
@@ -579,6 +580,141 @@ describe('AutoUpdateReadinessView desktop Apply now', () => {
     expect(screen.getByText(/0 of 1 ready to apply automatically/)).toBeInTheDocument();
   });
 
+  it('does not present a next run on the card for a stack the schedule will skip', async () => {
+    mockedFetch.mockImplementation((url: string) => {
+      if (url === '/image-updates/fleet') {
+        return Promise.resolve({ ok: true, json: async () => ({ '1': { nextcloud: true } }) });
+      }
+      if (url.startsWith('/scheduled-tasks')) {
+        return Promise.resolve({
+          ok: true,
+          json: async () => [{
+            id: 1, enabled: true, action: 'update', target_type: 'stack', target_id: 'nextcloud',
+            node_id: 1, next_run_at: Date.now() + 60 * 60_000,
+          }],
+        });
+      }
+      if (url === '/image-updates/fleet/detail') {
+        return Promise.resolve({
+          ok: true,
+          json: async () => ({
+            '1': {
+              nextcloud: {
+                checkStatus: 'ok',
+                unattendedPolicy: { decision: 'skip', ineligible: [{ service: 'db', policy: 'manual' }] },
+              },
+            },
+          }),
+        });
+      }
+      return Promise.resolve({ ok: true, json: async () => ({}) });
+    });
+    mockedFetchForNode.mockResolvedValue({ ok: true, json: async () => card().preview });
+
+    render(<AutoUpdateReadinessView />);
+    await screen.findByTestId('readiness-table');
+    fireEvent.click(screen.getByRole('radio', { name: 'Cards' }));
+
+    expect(await screen.findByText('Skipped by update policy')).toBeInTheDocument();
+    expect(screen.queryByText(/Scheduled ·/)).toBeNull();
+  });
+
+  it('shows the recorded policy skip for a stack on a remote node', async () => {
+    mockNodes.splice(0, mockNodes.length,
+      { id: 1, name: 'Local', type: 'local', status: 'online' },
+      { id: 2, name: 'Edge', type: 'remote', status: 'online' },
+    );
+    mockedFetch.mockImplementation((url: string) => {
+      if (url === '/image-updates/fleet') {
+        return Promise.resolve({ ok: true, json: async () => ({ '2': { nextcloud: true } }) });
+      }
+      if (url.startsWith('/scheduled-tasks')) {
+        return Promise.resolve({
+          ok: true,
+          json: async () => [{
+            id: 1, enabled: true, action: 'update', target_type: 'stack', target_id: 'nextcloud',
+            node_id: 2, next_run_at: Date.now() + 60 * 60_000,
+          }],
+        });
+      }
+      if (url === '/image-updates/fleet/detail') {
+        return Promise.resolve({
+          ok: true,
+          json: async () => ({
+            '2': {
+              nextcloud: {
+                checkStatus: 'ok',
+                unattendedPolicy: { decision: 'skip', ineligible: [{ service: 'db', policy: 'disabled' }] },
+              },
+            },
+          }),
+        });
+      }
+      return Promise.resolve({ ok: true, json: async () => ({}) });
+    });
+    mockedFetchForNode.mockResolvedValue({ ok: true, json: async () => card({ nodeId: 2 }).preview });
+
+    render(<AutoUpdateReadinessView />);
+    await screen.findByTestId('readiness-table');
+    fireEvent.click(screen.getByRole('radio', { name: 'Cards' }));
+
+    expect(await screen.findByText('Skipped by update policy')).toBeInTheDocument();
+    expect(screen.queryByText(/Scheduled ·/)).toBeNull();
+    expect(screen.getByText(/0 of 1 ready to apply automatically/)).toBeInTheDocument();
+  });
+
+  it('keeps the same-named stack on another node out of the skip', async () => {
+    mockNodes.splice(0, mockNodes.length,
+      { id: 1, name: 'Local', type: 'local', status: 'online' },
+      { id: 2, name: 'Edge', type: 'remote', status: 'online' },
+    );
+    mockedFetch.mockImplementation((url: string) => {
+      if (url === '/image-updates/fleet') {
+        return Promise.resolve({ ok: true, json: async () => ({ '1': { nextcloud: true }, '2': { nextcloud: true } }) });
+      }
+      if (url.startsWith('/scheduled-tasks')) {
+        return Promise.resolve({
+          ok: true,
+          json: async () => [
+            {
+              id: 1, enabled: true, action: 'update', target_type: 'stack', target_id: 'nextcloud',
+              node_id: 1, next_run_at: Date.now() + 60 * 60_000,
+            },
+            {
+              id: 2, enabled: true, action: 'update', target_type: 'stack', target_id: 'nextcloud',
+              node_id: 2, next_run_at: Date.now() + 60 * 60_000,
+            },
+          ],
+        });
+      }
+      if (url === '/image-updates/fleet/detail') {
+        return Promise.resolve({
+          ok: true,
+          json: async () => ({
+            '1': { nextcloud: { checkStatus: 'ok', unattendedPolicy: { decision: 'allow', ineligible: [] } } },
+            '2': {
+              nextcloud: {
+                checkStatus: 'ok',
+                unattendedPolicy: { decision: 'skip', ineligible: [{ service: 'db', policy: 'manual' }] },
+              },
+            },
+          }),
+        });
+      }
+      return Promise.resolve({ ok: true, json: async () => ({}) });
+    });
+    mockedFetchForNode.mockResolvedValue({ ok: true, json: async () => card().preview });
+
+    render(<AutoUpdateReadinessView />);
+    await screen.findByTestId('readiness-table');
+    fireEvent.click(screen.getByRole('radio', { name: 'Cards' }));
+
+    // The node-scoped key keeps the local allow and the remote skip apart even
+    // though both nodes run a stack with the same name.
+    expect(await screen.findAllByText(/Scheduled ·/)).toHaveLength(1);
+    expect(screen.getByText('Skipped by update policy')).toBeInTheDocument();
+  });
+
   it('applies a single service and refreshes the authoritative update preview', async () => {
     mockNodeMeta.set(1, {
       version: '1.0.0',
@@ -1083,8 +1219,8 @@ describe('AutoUpdateReadinessView desktop Apply now', () => {
 /**
  * Local-node stacks whose latest check could not determine status never appear
  * in the card grid (which lists confirmed updates only), so the readiness view
- * surfaces them in a "could not be checked" advisory fed by a parallel local
- * /image-updates/detail fetch.
+ * surfaces them in a "could not be checked" advisory fed by the fleet detail
+ * fetch (which also carries each node's recorded policy).
  */
 describe('AutoUpdateReadinessView check-failed advisory', () => {
   const mockedFetch = apiFetch as unknown as ReturnType<typeof vi.fn>;
@@ -1100,12 +1236,14 @@ describe('AutoUpdateReadinessView check-failed advisory', () => {
     mockedFetch.mockImplementation((url: string) => {
       if (url === '/image-updates/fleet') return Promise.resolve({ ok: true, json: async () => ({}) });
       if (url.startsWith('/scheduled-tasks')) return Promise.resolve({ ok: true, json: async () => [] });
-      if (url === '/image-updates/detail') {
+      if (url === '/image-updates/fleet/detail') {
         return Promise.resolve({
           ok: true,
           json: async () => ({
-            grafana: { hasUpdate: false, checkStatus: 'failed', lastError: 'Registry unreachable for ghcr.io/acme/grafana:latest', checkedAt: 1 },
-            web: { hasUpdate: false, checkStatus: 'ok', lastError: null, checkedAt: 1 },
+            '1': {
+              grafana: { hasUpdate: false, checkStatus: 'failed', lastError: 'Registry unreachable for ghcr.io/acme/grafana:latest', checkedAt: 1 },
+              web: { hasUpdate: false, checkStatus: 'ok', lastError: null, checkedAt: 1 },
+            },
           }),
         });
       }
@@ -1133,12 +1271,14 @@ describe('AutoUpdateReadinessView check-failed advisory', () => {
         });
       }
       if (url.startsWith('/scheduled-tasks')) return Promise.resolve({ ok: true, json: async () => [] });
-      if (url === '/image-updates/detail') {
+      if (url === '/image-updates/fleet/detail') {
         return Promise.resolve({
           ok: true,
           json: async () => ({
-            grafana: { hasUpdate: true, checkStatus: 'failed', lastError: 'Registry unreachable', checkedAt: 1 },
-            web: { hasUpdate: true, checkStatus: 'ok', lastError: null, checkedAt: 1 },
+            '1': {
+              grafana: { hasUpdate: true, checkStatus: 'failed', lastError: 'Registry unreachable', checkedAt: 1 },
+              web: { hasUpdate: true, checkStatus: 'ok', lastError: null, checkedAt: 1 },
+            },
           }),
         });
       }
@@ -1207,13 +1347,15 @@ describe('AutoUpdateReadinessView check-failed advisory', () => {
           }]),
         });
       }
-      if (url === '/image-updates/detail') {
+      if (url === '/image-updates/fleet/detail') {
         // Sticky hasUpdate with a successful check still enters the fleet grid;
         // only the fresh preview can prove verification-only.
         return Promise.resolve({
           ok: true,
           json: async () => ({
-            redis: { hasUpdate: true, checkStatus: 'ok', lastError: null, checkedAt: 1 },
+            '1': {
+              redis: { hasUpdate: true, checkStatus: 'ok', lastError: null, checkedAt: 1 },
+            },
           }),
         });
       }
@@ -1290,12 +1432,14 @@ describe('AutoUpdateReadinessView check-failed advisory', () => {
           ]),
         });
       }
-      if (url === '/image-updates/detail') {
+      if (url === '/image-updates/fleet/detail') {
         return Promise.resolve({
           ok: true,
           json: async () => ({
-            web: { hasUpdate: true, checkStatus: 'ok', lastError: null, checkedAt: 1 },
-            redis: { hasUpdate: true, checkStatus: 'ok', lastError: null, checkedAt: 1 },
+            '1': {
+              web: { hasUpdate: true, checkStatus: 'ok', lastError: null, checkedAt: 1 },
+              redis: { hasUpdate: true, checkStatus: 'ok', lastError: null, checkedAt: 1 },
+            },
           }),
         });
       }
@@ -1362,11 +1506,13 @@ describe('AutoUpdateReadinessView check-failed advisory', () => {
           }]),
         });
       }
-      if (url === '/image-updates/detail') {
+      if (url === '/image-updates/fleet/detail') {
         return Promise.resolve({
           ok: true,
           json: async () => ({
-            redis: { hasUpdate: true, checkStatus: 'ok', lastError: null, checkedAt: 1 },
+            '1': {
+              redis: { hasUpdate: true, checkStatus: 'ok', lastError: null, checkedAt: 1 },
+            },
           }),
         });
       }
@@ -1411,11 +1557,13 @@ describe('AutoUpdateReadinessView check-failed advisory', () => {
       if (url.startsWith('/scheduled-tasks')) {
         return Promise.resolve({ ok: true, json: async () => [] });
       }
-      if (url === '/image-updates/detail') {
+      if (url === '/image-updates/fleet/detail') {
         return Promise.resolve({
           ok: true,
           json: async () => ({
-            nginx: { hasUpdate: true, checkStatus: 'ok', lastError: null, checkedAt: 1 },
+            '1': {
+              nginx: { hasUpdate: true, checkStatus: 'ok', lastError: null, checkedAt: 1 },
+            },
           }),
         });
       }
@@ -1482,11 +1630,13 @@ describe('AutoUpdateReadinessView check-failed advisory', () => {
       if (url.startsWith('/scheduled-tasks')) {
         return Promise.resolve({ ok: true, json: async () => [] });
       }
-      if (url === '/image-updates/detail') {
+      if (url === '/image-updates/fleet/detail') {
         return Promise.resolve({
           ok: true,
           json: async () => ({
-            redis: { hasUpdate: true, checkStatus: 'ok', lastError: null, checkedAt: 1 },
+            '1': {
+              redis: { hasUpdate: true, checkStatus: 'ok', lastError: null, checkedAt: 1 },
+            },
           }),
         });
       }
@@ -1531,11 +1681,13 @@ describe('AutoUpdateReadinessView check-failed advisory', () => {
       if (url.startsWith('/scheduled-tasks')) {
         return Promise.resolve({ ok: true, json: async () => [] });
       }
-      if (url === '/image-updates/detail') {
+      if (url === '/image-updates/fleet/detail') {
         return Promise.resolve({
           ok: true,
           json: async () => ({
-            redis: { hasUpdate: true, checkStatus: 'ok', lastError: null, checkedAt: 1 },
+            '1': {
+              redis: { hasUpdate: true, checkStatus: 'ok', lastError: null, checkedAt: 1 },
+            },
           }),
         });
       }
@@ -1582,8 +1734,9 @@ describe('AutoUpdateReadinessView check-failed advisory', () => {
       if (url.startsWith('/scheduled-tasks')) {
         return Promise.resolve({ ok: true, json: async () => [] });
       }
-      // Local-only detail cannot see remote sticky failures; preview must move them.
-      if (url === '/image-updates/detail') {
+      // This node records no detail row for the remote stack; the preview must
+      // move it into the advisory.
+      if (url === '/image-updates/fleet/detail') {
         return Promise.resolve({ ok: true, json: async () => ({}) });
       }
       return Promise.resolve({ ok: true, json: async () => ({}) });
@@ -1787,5 +1940,63 @@ describe('isAuthoritativeNegativePreview (Fleet card drop parity)', () => {
       images: [],
       summary: { has_update: false, check_status: 'ok' },
     })).toBe(false);
+  });
+});
+
+describe('AutoPill', () => {
+  it('reads a policy skip instead of Off, and names the ineligible services in its tooltip', () => {
+    render(<AutoPill autoUpdateEnabled unattendedPolicy={{ decision: 'skip', ineligible: [{ service: 'db', policy: 'disabled' }] }} />);
+    const pill = screen.getByTestId('auto-pill');
+    expect(pill).toHaveTextContent('Auto: skipped by update policy');
+    expect(pill.getAttribute('title')).toContain('db (disabled)');
+    expect(pill).toHaveAttribute('data-state', 'skipped');
+  });
+
+  it('keeps Off when no schedule covers the stack', () => {
+    render(<AutoPill autoUpdateEnabled={false} unattendedPolicy={null} />);
+    expect(screen.getByTestId('auto-pill')).toHaveTextContent('Auto: Off');
+  });
+
+  it('shows nothing for a scheduled stack with no policy note or an allowed one', () => {
+    const { container, rerender } = render(<AutoPill autoUpdateEnabled unattendedPolicy={null} />);
+    expect(container).toBeEmptyDOMElement();
+    rerender(<AutoPill autoUpdateEnabled unattendedPolicy={{ decision: 'allow', ineligible: [] }} />);
+    expect(container).toBeEmptyDOMElement();
+  });
+
+  it('names an unrenderable Compose, not a missing label, when the skip has no ineligible service', () => {
+    render(<AutoPill autoUpdateEnabled unattendedPolicy={{ decision: 'skip', ineligible: [] }} />);
+    const pill = screen.getByTestId('auto-pill');
+    expect(pill).toHaveAttribute('title', expect.stringContaining('Compose model could not be rendered'));
+    expect(pill.getAttribute('title')).not.toContain('a service is not eligible');
+  });
+
+  it('renders the skip on the phone card too', () => {
+    render(
+      <MobileReadinessCard
+        card={card({ unattendedPolicy: { decision: 'skip', ineligible: [{ service: 'db', policy: 'disabled' }] } })}
+        onApply={() => {}}
+      />,
+    );
+    const pill = screen.getByTestId('auto-pill');
+    // The phone header keeps the label short so it fits beside the risk badge;
+    // the tooltip still names the blocking service.
+    expect(pill).toHaveTextContent('Auto: skipped');
+    expect(pill).not.toHaveTextContent('Auto: skipped by update policy');
+    expect(pill.getAttribute('title')).toContain('db (disabled)');
+  });
+
+  it('shows the policy skip in the phone footer instead of a next run', () => {
+    render(
+      <MobileReadinessCard
+        card={card({
+          scheduledTask: { next_run_at: Date.now() + 60 * 60_000 } as StackCard['scheduledTask'],
+          unattendedPolicy: { decision: 'skip', ineligible: [{ service: 'db', policy: 'disabled' }] },
+        })}
+        onApply={() => {}}
+      />,
+    );
+    expect(screen.getByText('Skipped by update policy')).toBeInTheDocument();
+    expect(screen.queryByText(/in 1h/)).toBeNull();
   });
 });

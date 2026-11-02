@@ -31,11 +31,27 @@ export const SENCHO_URL_LABEL = 'io.sencho.url';
 /** The protective label the Docker endpoint guard reads from the file and from deployed containers. */
 export const SENCHO_INFRASTRUCTURE_LABEL = 'io.sencho.infrastructure';
 
+/** Per-service image-refresh eligibility. Read by the one update-policy evaluator. */
+export const SENCHO_UPDATE_LABEL = 'io.sencho.update';
+
+/** Per-service notification routing key. Read by the one routing-key resolver. */
+export const SENCHO_NOTIFY_ROUTE_LABEL = 'io.sencho.notify.route';
+
 /** Capability advertised by nodes that resolve this contract. Older nodes degrade as a whole. */
 export const SENCHO_LABELS_CAPABILITY = 'sencho-labels-v1';
 
-export type SenchoLabelId = 'url' | 'url-named' | 'order' | 'hidden' | 'infrastructure';
+/**
+ * Capability advertised by nodes that evaluate the behavioral labels
+ * (`io.sencho.update`, `io.sencho.notify.route`). Whether a node evaluates them
+ * comes from this flag, never from the fields being absent in its answer.
+ */
+export const SENCHO_LABEL_POLICY_CAPABILITY = 'sencho-label-policy-v1';
+
+export type SenchoLabelId = 'url' | 'url-named' | 'order' | 'hidden' | 'infrastructure' | 'update' | 'notify-route';
 export type SenchoLabelEffect = 'presentation' | 'operations';
+
+/** The accepted values of the update-eligibility label. */
+export type UpdatePolicyLabel = 'auto' | 'manual' | 'disabled';
 
 /**
  * Where a label may be read from. `compose` is the rendered, authored model;
@@ -64,9 +80,13 @@ interface SenchoLabelDefinitionBase {
   effect: SenchoLabelEffect;
   /** Where the label is read from; `compose-or-deployed` is the protective exception. */
   trust: SenchoLabelTrust;
-  /** Every invalid value is ignored with a diagnostic; none breaks a view. */
-  onInvalid: 'ignore-with-diagnostic';
-  minCapability: typeof SENCHO_LABELS_CAPABILITY;
+  /**
+   * What an invalid value does. `ignore-with-diagnostic` changes nothing;
+   * `restrict-unattended` fails closed for unattended image refreshes while
+   * leaving manual ones to the operator.
+   */
+  onInvalid: 'ignore-with-diagnostic' | 'restrict-unattended';
+  minCapability: typeof SENCHO_LABELS_CAPABILITY | typeof SENCHO_LABEL_POLICY_CAPABILITY;
   summary: string;
   example: string;
 }
@@ -81,7 +101,9 @@ export type SenchoLabelDefinition =
   | (SenchoLabelDefinitionBase & { id: 'url-named'; match: PrefixMatch; valueType: 'url'; parse: (raw: string) => ParseResult<string> })
   | (SenchoLabelDefinitionBase & { id: 'order'; match: ExactMatch; valueType: 'integer'; parse: (raw: string) => ParseResult<number> })
   | (SenchoLabelDefinitionBase & { id: 'hidden'; match: ExactMatch; valueType: 'boolean'; parse: (raw: string) => ParseResult<boolean> })
-  | (SenchoLabelDefinitionBase & { id: 'infrastructure'; match: ExactMatch; valueType: 'literal-true'; trust: 'compose-or-deployed'; effect: 'operations'; parse: (raw: string) => ParseResult<true> });
+  | (SenchoLabelDefinitionBase & { id: 'infrastructure'; match: ExactMatch; valueType: 'literal-true'; trust: 'compose-or-deployed'; effect: 'operations'; parse: (raw: string) => ParseResult<true> })
+  | (SenchoLabelDefinitionBase & { id: 'update'; match: ExactMatch; valueType: 'enum'; effect: 'operations'; minCapability: typeof SENCHO_LABEL_POLICY_CAPABILITY; onInvalid: 'restrict-unattended'; parse: (raw: string) => ParseResult<UpdatePolicyLabel> })
+  | (SenchoLabelDefinitionBase & { id: 'notify-route'; match: ExactMatch; valueType: 'routing-key'; effect: 'operations'; minCapability: typeof SENCHO_LABEL_POLICY_CAPABILITY; parse: (raw: string) => ParseResult<string> });
 
 const MAX_URL_LENGTH = 2048;
 const MAX_LINK_NAME_LENGTH = 32;
@@ -144,6 +166,55 @@ function parseSenchoLiteralTrue(raw: string): ParseResult<true> {
   // The reason never echoes the value; it matches the guard's advice, which is to fix the label before the stack is changed again.
   if (raw === 'true') return { ok: true, value: true };
   return { ok: false, reason: 'The only accepted value is true. Sencho refuses changes to this stack until it is fixed.' };
+}
+
+const UPDATE_POLICY_VALUES: readonly UpdatePolicyLabel[] = ['auto', 'manual', 'disabled'];
+
+/**
+ * The update-eligibility value, trimmed and case-insensitive. An unrecognized
+ * value is not an error the operator can ignore: it restricts unattended image
+ * refreshes, so a typo in a protective label can never cause an auto-update.
+ * The reason never echoes the value.
+ */
+export function parseUpdatePolicy(raw: string): ParseResult<UpdatePolicyLabel> {
+  const value = raw.trim().toLowerCase();
+  const match = UPDATE_POLICY_VALUES.find(candidate => candidate === value);
+  if (match) return { ok: true, value: match };
+  return {
+    ok: false,
+    reason: 'Use auto, manual, or disabled. Sencho skips unattended updates for this stack until the value is fixed.',
+  };
+}
+
+const MAX_ROUTING_KEY_LENGTH = 64;
+const ROUTING_KEY_PATTERN = /^[a-z0-9](?:[a-z0-9._-]*[a-z0-9])?$/;
+// A routing key is a short team or environment name, never an address. `:`, `/`
+// and `@` are the three shapes a URL, host:port, or user@host carries, so a
+// value with any of them is refused before the character class is applied.
+const ROUTING_KEY_ADDRESS_SHAPE = /[:/@\s]/;
+
+/**
+ * A notification routing key, trimmed and lowercased. The format rejects
+ * URL- and address-shaped values so a Compose label cannot smuggle a
+ * destination or a credential into a routing rule. It cannot recognize every
+ * secret; keys are shown in plain text in the UI and in history.
+ */
+export function parseRouteKey(raw: string): ParseResult<string> {
+  const value = raw.trim().toLowerCase();
+  if (!value) return { ok: false, reason: 'Use a routing key such as production.' };
+  if (ROUTING_KEY_ADDRESS_SHAPE.test(value)) {
+    return { ok: false, reason: 'Use a routing key such as production, not a URL or address.' };
+  }
+  if (value.length > MAX_ROUTING_KEY_LENGTH) {
+    return { ok: false, reason: `Routing keys are at most ${MAX_ROUTING_KEY_LENGTH} characters.` };
+  }
+  if (!ROUTING_KEY_PATTERN.test(value)) {
+    return {
+      ok: false,
+      reason: 'Use lowercase letters, digits, dots, hyphens, and underscores, starting and ending with a letter or digit.',
+    };
+  }
+  return { ok: true, value };
 }
 
 /**
@@ -259,6 +330,38 @@ export const SENCHO_LABEL_DEFINITIONS: readonly SenchoLabelDefinition[] = [
     summary: 'Marks the service that carries this node\'s Docker connection.',
     example: 'io.sencho.infrastructure: "true"',
   },
+  {
+    id: 'update',
+    match: { kind: 'exact', key: SENCHO_UPDATE_LABEL },
+    scope: 'service',
+    valueType: 'enum',
+    parse: parseUpdatePolicy,
+    defaultBehavior: 'Updates are allowed for this service, manual and unattended.',
+    precedence: 'A whole-stack image refresh is refused when any rendered service is not eligible; Sencho never narrows the operation to the eligible services.',
+    conflict: 'The merged Compose model decides the value. An unrecognized value restricts unattended updates and allows manual ones.',
+    effect: 'operations',
+    trust: 'compose',
+    onInvalid: 'restrict-unattended',
+    minCapability: SENCHO_LABEL_POLICY_CAPABILITY,
+    summary: 'Whether Sencho may refresh this service\'s image.',
+    example: 'io.sencho.update: manual',
+  },
+  {
+    id: 'notify-route',
+    match: { kind: 'exact', key: SENCHO_NOTIFY_ROUTE_LABEL },
+    scope: 'service',
+    valueType: 'routing-key',
+    parse: parseRouteKey,
+    defaultBehavior: 'Alerts from this service are not matched by a routing-key filter.',
+    precedence: 'A stack-level alert carries the union of its services\' keys, and every routing rule whose keys intersect fires.',
+    conflict: 'The merged Compose model decides the value. Keys are lowercased.',
+    effect: 'operations',
+    trust: 'compose',
+    onInvalid: 'ignore-with-diagnostic',
+    minCapability: SENCHO_LABEL_POLICY_CAPABILITY,
+    summary: 'Routing key that notification rules match for this service.',
+    example: 'io.sencho.notify.route: production',
+  },
 ];
 
 /** The definition that owns a key, or null for a key the registry does not know. */
@@ -283,6 +386,13 @@ export interface SenchoServiceLabels {
   links: SenchoLink[];
   order: number | null;
   hidden: boolean;
+  /**
+   * null: the label is absent. `invalid`: declared with an unrecognized value,
+   * which restricts unattended image refreshes and allows manual ones.
+   */
+  update: UpdatePolicyLabel | 'invalid' | null;
+  /** The service's notification routing key, or null when it declares none. */
+  notifyRoute: string | null;
 }
 
 export type SenchoLabelState = 'active' | 'invalid' | 'unsupported';
@@ -395,6 +505,23 @@ function applyLabel(def: SenchoLabelDefinition, key: string, raw: string, draft:
       const marked = def.parse(raw);
       return marked.ok ? entry('active') : entry('invalid', marked.reason);
     }
+    case 'update': {
+      // An unrecognized value is recorded as `invalid`, never as absent: the
+      // policy evaluator must be able to fail closed on it.
+      const policy = def.parse(raw);
+      if (!policy.ok) {
+        draft.resolved.update = 'invalid';
+        return entry('invalid', policy.reason);
+      }
+      draft.resolved.update = policy.value;
+      return entry('active');
+    }
+    case 'notify-route': {
+      const key = def.parse(raw);
+      if (!key.ok) return entry('invalid', key.reason);
+      draft.resolved.notifyRoute = key.value;
+      return entry('active');
+    }
     default: {
       // Compile-time exhaustiveness: a new registry entry must get a case above.
       const unhandled: never = def;
@@ -405,7 +532,7 @@ function applyLabel(def: SenchoLabelDefinition, key: string, raw: string, draft:
 
 function resolveService(service: string, labels: Map<string, string>, entries: SenchoLabelEntry[]): SenchoServiceLabels {
   const draft: ServiceDraft = {
-    resolved: { links: [], order: null, hidden: false },
+    resolved: { links: [], order: null, hidden: false, update: null, notifyRoute: null },
     named: [],
     namedSeen: new Set(),
   };

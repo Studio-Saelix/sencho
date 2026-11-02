@@ -477,4 +477,74 @@ describe('NotificationRoutingSection', () => {
         });
     });
 
+    it('sends the routing keys from comma-separated chips', async () => {
+        mockedFetch.mockImplementation(async (url: string, opts?: { method?: string }) => {
+            if (url === '/notification-routes' && !opts?.method) {
+                return { ok: true, json: async () => [] };
+            }
+            if (url === '/stacks') return { ok: true, json: async () => [] };
+            if (url === '/labels') return { ok: true, json: async () => [] };
+            if (url === '/notification-routes' && opts?.method === 'POST') {
+                return { ok: true, json: async () => ({ id: 99 }) };
+            }
+            return { ok: true, json: async () => ([]) };
+        });
+        render(<NotificationRoutingSection />);
+        await userEvent.click(await screen.findByRole('button', { name: /Add route/i }));
+        await userEvent.type(screen.getByPlaceholderText(/Production alerts/i), 'Prod');
+        await userEvent.type(screen.getByPlaceholderText(/discord/i), 'https://discord.com/api/webhooks/1/token');
+        await userEvent.type(screen.getByTestId('route-keys-input'), 'Production,eu-west');
+        await userEvent.click(screen.getByRole('button', { name: 'Create' }));
+        await waitFor(() => {
+            const post = mockedFetch.mock.calls.find(
+                ([url, opts]) => url === '/notification-routes' && (opts as { method?: string })?.method === 'POST',
+            );
+            expect(post).toBeDefined();
+            expect(JSON.parse((post![1] as { body: string }).body).route_keys).toEqual(['production', 'eu-west']);
+        });
+    });
+
+    it('shows the server reason inline when a routing key is rejected', async () => {
+        mockedFetch.mockImplementation(async (url: string, opts?: { method?: string }) => {
+            if (url === '/notification-routes' && !opts?.method) {
+                return { ok: true, json: async () => [] };
+            }
+            if (url === '/stacks') return { ok: true, json: async () => [] };
+            if (url === '/labels') return { ok: true, json: async () => [] };
+            if (url === '/notification-routes' && opts?.method === 'POST') {
+                return {
+                    ok: false,
+                    status: 400,
+                    json: async () => ({ error: 'route_keys: Use a routing key such as production.' }),
+                };
+            }
+            return { ok: true, json: async () => ([]) };
+        });
+        render(<NotificationRoutingSection />);
+        await userEvent.click(await screen.findByRole('button', { name: /Add route/i }));
+        await userEvent.type(screen.getByPlaceholderText(/Production alerts/i), 'Prod');
+        await userEvent.type(screen.getByPlaceholderText(/discord/i), 'https://discord.com/api/webhooks/1/token');
+        await userEvent.type(screen.getByTestId('route-keys-input'), 'https://bad');
+        await userEvent.click(screen.getByRole('button', { name: 'Create' }));
+        expect(await screen.findByTestId('route-keys-error')).toHaveTextContent('Use a routing key such as production.');
+    });
+
+    it('lists a rule by its routing keys instead of as a match-all rule', async () => {
+        mockedFetch.mockImplementation(async (url: string, opts?: { method?: string }) => {
+            if (url === '/notification-routes' && !opts?.method) {
+                return {
+                    ok: true,
+                    json: async () => [{ ...APPRISE_ROUTE, route_keys: ['production'] }],
+                };
+            }
+            if (url === '/stacks') return { ok: true, json: async () => [] };
+            if (url === '/labels') return { ok: true, json: async () => [] };
+            return { ok: true, json: async () => ([]) };
+        });
+        render(<NotificationRoutingSection />);
+        await waitFor(() => expect(screen.getByText('Ops Apprise')).toBeInTheDocument());
+        expect(screen.getByText('production')).toBeInTheDocument();
+        expect(screen.queryByText('Matches all alerts')).toBeNull();
+        expect(screen.queryByText('Matches all alerts on this node')).toBeNull();
+    });
 });

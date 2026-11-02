@@ -74,7 +74,7 @@ describe('effective-anatomy route', () => {
     expect(res.body.serviceUrlClear).toEqual({ web: 'root' });
     // The resolution is always present, and a service without labels resolves to no metadata.
     expect(res.body.senchoLabels).toMatchObject({ renderable: true, entries: [] });
-    expect(res.body.senchoLabels.services.web).toEqual({ links: [], order: null, hidden: false });
+    expect(res.body.senchoLabels.services.web).toEqual({ links: [], order: null, hidden: false, update: null, notifyRoute: null });
   });
 
   it('serves the resolved io.sencho labels, with interpolation already applied and diagnostics free of values', async () => {

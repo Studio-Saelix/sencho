@@ -156,6 +156,11 @@ vi.mock('../services/SelfIdentityService', () => ({
 vi.mock('../services/ComposeService', () => ({
   ComposeService: {
     getInstance: () => ({
+      // A scheduled update evaluates io.sencho.update first and before the gate.
+      renderConfig: async () => ({
+        rendered: JSON.stringify({ services: { web: { image: 'nginx:1' } } }),
+        stderr: '', code: 0, timedOut: false,
+      }),
       updateStack: mockUpdateStack,
       runCommand: mockRunCommand,
       deployStack: mockDeployStack,
@@ -250,6 +255,11 @@ vi.mock('../helpers/registryDeliveryOutbound', async (importOriginal) => {
     ),
   };
 });
+
+// The policy module holds the ComposeService class from its own import, so
+// a getInstance mock is not visible to it; these suites are about the code
+// around the policy, which has its own tests.
+vi.mock('../services/updatePolicy', () => import('./__helpers__/allowingUpdatePolicy').then(m => m.allowingUpdatePolicyModule()));
 
 vi.mock('../services/RemoteImageUpdateService', () => ({
   RemoteImageUpdateService: {
@@ -927,7 +937,7 @@ describe('SchedulerService - executeUpdate', () => {
     const svc = SchedulerService.getInstance();
     await svc.triggerTask(80, { userId: 1, username: 'admin', role: 'admin' } as const);
 
-    expect(mockUpdateStack).toHaveBeenCalledWith('web-app', undefined, true);
+    expect(mockUpdateStack).toHaveBeenCalledWith('web-app', undefined, true, expect.any(Function));
     expect(mockRecheckStack).toHaveBeenCalledWith(1, 'web-app');
     expect(mockClearStackUpdateStatus).not.toHaveBeenCalled();
     expect(mockBroadcastEvent).toHaveBeenCalledWith(expect.objectContaining({
@@ -992,7 +1002,7 @@ describe('SchedulerService - executeUpdate', () => {
     const svc = SchedulerService.getInstance();
     await svc.triggerTask(82, { userId: 1, username: 'admin', role: 'admin' } as const);
 
-    expect(mockUpdateStack).toHaveBeenCalledWith('web-app', undefined, true);
+    expect(mockUpdateStack).toHaveBeenCalledWith('web-app', undefined, true, expect.any(Function));
     expect(mockUpdateScheduledTaskRun).toHaveBeenCalledWith(
       1,
       expect.objectContaining({ status: 'success' }),
@@ -1898,16 +1908,15 @@ describe('SchedulerService - executeUpdateRemote', () => {
     vi.unstubAllGlobals();
   });
 
-  it('proxies update execution to remote node', async () => {
+  it('reports a remote node that cannot confirm the label as a failed run, without asking a legacy endpoint', async () => {
     mockGetNode.mockReturnValue({ id: 2, name: 'remote', type: 'remote', status: 'online' });
-    mockGetProxyTarget.mockReturnValue({
-      apiUrl: 'http://remote:1852',
-      apiToken: 'test-token',
-    });
+    mockGetProxyTarget.mockReturnValue({ apiUrl: 'http://remote:1852', apiToken: 'test-token' });
+    // The probe cannot confirm the node evaluates io.sencho.update.
+    mockProbeRemoteMeta.mockResolvedValue({ kind: 'no_target' });
 
     const mockFetch = vi.fn().mockResolvedValue({
       ok: true,
-      json: async () => ({ result: 'Stack "web": updated (nginx:latest).' }),
+      json: async () => ({ result: 'Stack "web-app": updated (nginx:latest).' }),
     });
     vi.stubGlobal('fetch', mockFetch);
 
@@ -1926,34 +1935,27 @@ describe('SchedulerService - executeUpdateRemote', () => {
     const svc = SchedulerService.getInstance();
     await svc.triggerTask(88, { userId: 1, username: 'admin', role: 'admin' } as const);
 
-    expect(mockFetch).toHaveBeenCalledWith(
-      'http://remote:1852/api/auto-update/execute',
-      expect.objectContaining({
-        method: 'POST',
-        headers: expect.objectContaining({
-          'Authorization': 'Bearer test-token',
-          'x-sencho-tier': 'paid',
-        }),
-        body: JSON.stringify({ target: 'web-app' }),
-      })
-    );
+    // The unattended update did not happen and the run is not green: a node that
+    // cannot confirm the label is a failure, never a silent mutation.
+    expect(mockFetch).not.toHaveBeenCalled();
     expect(mockUpdateScheduledTaskRun).toHaveBeenCalledWith(
       1,
-      expect.objectContaining({ status: 'success' })
+      expect.objectContaining({ status: 'failure', error: expect.stringContaining('did not answer') }),
     );
   });
 
-  it('records failure when remote node returns error', async () => {
+  it('records a failure when the remote node is too old to evaluate the label', async () => {
     mockGetNode.mockReturnValue({ id: 2, name: 'remote', type: 'remote', status: 'online' });
-    mockGetProxyTarget.mockReturnValue({
-      apiUrl: 'http://remote:1852',
-      apiToken: 'test-token',
+    mockGetProxyTarget.mockReturnValue({ apiUrl: 'http://remote:1852', apiToken: 'test-token' });
+    const { OFFLINE_META } = await import('../services/CapabilityRegistry');
+    mockProbeRemoteMeta.mockResolvedValue({
+      kind: 'ok',
+      meta: { ...OFFLINE_META, online: true, capabilities: ['remote-image-inspect-v1', 'remote-auto-update-checked-v1'] },
     });
 
     const mockFetch = vi.fn().mockResolvedValue({
-      ok: false,
-      status: 500,
-      json: async () => ({ error: 'Internal error' }),
+      ok: true,
+      json: async () => ({ result: 'Stack "web-app": updated (nginx:latest).' }),
     });
     vi.stubGlobal('fetch', mockFetch);
 
@@ -1972,11 +1974,53 @@ describe('SchedulerService - executeUpdateRemote', () => {
     const svc = SchedulerService.getInstance();
     await svc.triggerTask(89, { userId: 1, username: 'admin', role: 'admin' } as const);
 
+    expect(mockFetch).not.toHaveBeenCalled();
     expect(mockUpdateScheduledTaskRun).toHaveBeenCalledWith(
       1,
-      expect.objectContaining({ status: 'failure', error: expect.stringContaining('Remote node "remote" (id=2): Internal error') })
+      expect.objectContaining({ status: 'failure', error: expect.stringContaining('does not evaluate io.sencho.update') }),
     );
   });
+
+  it('records a failure when a fleet-wide run reaches a node too old to evaluate the label', async () => {
+    mockGetNode.mockReturnValue({ id: 2, name: 'remote', type: 'remote', status: 'online' });
+    mockGetProxyTarget.mockReturnValue({ apiUrl: 'http://remote:1852', apiToken: 'test-token' });
+    const { OFFLINE_META } = await import('../services/CapabilityRegistry');
+    mockProbeRemoteMeta.mockResolvedValue({
+      kind: 'ok',
+      meta: { ...OFFLINE_META, online: true, capabilities: ['remote-image-inspect-v1', 'remote-auto-update-checked-v1'] },
+    });
+
+    const mockFetch = vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({ result: 'Node "remote" failed: it does not evaluate io.sencho.update; update Sencho on that node.' }),
+    });
+    vi.stubGlobal('fetch', mockFetch);
+
+    mockGetScheduledTask.mockReturnValue({
+      id: 90,
+      name: 'remote-fleet-old',
+      action: 'update',
+      target_type: 'fleet',
+      target_id: '*',
+      cron_expression: '0 4 * * *',
+      enabled: true,
+      node_id: 2,
+      created_by: 'admin',
+      last_status: null,
+    });
+
+    const svc = SchedulerService.getInstance();
+    await svc.triggerTask(90, { userId: 1, username: 'admin', role: 'admin' } as const);
+
+    // A fleet-wide run updates nothing on that node, so it is a failure rather
+    // than a green run with a sad line.
+    expect(mockFetch).not.toHaveBeenCalled();
+    expect(mockUpdateScheduledTaskRun).toHaveBeenCalledWith(
+      1,
+      expect.objectContaining({ status: 'failure', error: expect.stringContaining('does not evaluate io.sencho.update') }),
+    );
+  });
+
 });
 
 // ── Lifecycle actions (auto_backup, auto_stop, auto_down, auto_start) ───

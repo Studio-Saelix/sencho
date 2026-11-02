@@ -82,7 +82,21 @@ describe('image update facts roster', () => {
     const response = await factsRequest({ ...envelope, stack: 'web' }, scope);
     expect(response.status).toBe(200);
     expect(response.body).toEqual({ ...envelope, stacks: [stackFacts] });
-    expect(collect).toHaveBeenCalledExactlyOnceWith(nodeId, 'web', requestNonce);
+    expect(collect).toHaveBeenCalledExactlyOnceWith(nodeId, 'web', requestNonce, false);
+  });
+
+  it('asks the node to evaluate the unattended policy only when the request opts in', async () => {
+    const { collect } = await mockFacts();
+    const response = await factsRequest({ ...envelope, stack: 'web', policy: true });
+    expect(response.status).toBe(200);
+    expect(collect).toHaveBeenCalledExactlyOnceWith(nodeId, 'web', requestNonce, true);
+
+    collect.mockClear();
+    const all = await factsRequest({ ...envelope, allStacks: true, policy: true });
+    expect(all.status).toBe(200);
+    expect(collect).toHaveBeenCalledTimes(2);
+    expect(collect).toHaveBeenNthCalledWith(1, nodeId, 'web', requestNonce, true);
+    expect(collect).toHaveBeenNthCalledWith(2, nodeId, 'database', requestNonce, true);
   });
 
   it('returns all stack facts without changing their observation metadata', async () => {
@@ -98,6 +112,8 @@ describe('image update facts roster', () => {
     { ...envelope, stack: '../escape' },
     { ...envelope, stack: '/absolute' },
     { ...envelope, roster: true, stack: 'web' },
+    { ...envelope, roster: true, policy: true },
+    { ...envelope, stack: 'web', policy: 'yes' },
     { ...envelope, allStacks: true, extra: true },
     { ...envelope, contractVersion: 2, roster: true },
     { ...envelope, requestNonce: '', roster: true },

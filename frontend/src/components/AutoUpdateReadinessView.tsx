@@ -9,7 +9,7 @@ import { RefreshCw, Shield, AlertTriangle, ShieldAlert, CircleSlash, Clock, Play
 import { toast } from '@/components/ui/toast-store';
 import { apiFetch, fetchForNode } from '@/lib/api';
 import { formatTimeAgo } from '@/lib/relativeTime';
-import type { ImageUpdateStatus, StackUpdateInfo } from '@/types/imageUpdates';
+import type { ImageUpdateStatus, StackUpdateInfo, StackUnattendedPolicy } from '@/types/imageUpdates';
 import { isAuthoritativeNegativePreview } from '@/types/imageUpdates';
 import { fetchUpdatePreview } from '@/lib/fetchUpdatePreview';
 import {
@@ -34,6 +34,7 @@ import type { ScheduledTask } from '@/types/scheduling';
 import { SERVICE_SCOPED_UPDATE_CAPABILITY } from '@/lib/capabilities';
 import { requestServiceUpdate } from '@/lib/serviceUpdate';
 import { openEndpointRefusalInEditor } from '@/lib/endpointRefusalHandoff';
+import { toastUpdatePolicyRefusal } from '@/lib/updatePolicyRefusal';
 import { useDeployFeedback } from '@/context/DeployFeedbackContext';
 import { useStackUpdate } from '@/hooks/useStackUpdate';
 
@@ -94,6 +95,23 @@ function withErrorDetail(lead: string, error: string | null | undefined): string
   return error ? `${lead}: ${error}` : `${lead}.`;
 }
 
+/** The node's unattended-policy note, read defensively from a proxied detail body. */
+function readUnattendedPolicy(value: unknown): StackUnattendedPolicy | null {
+  if (!value || typeof value !== 'object') return null;
+  const raw = value as Record<string, unknown>;
+  if (raw.decision !== 'allow' && raw.decision !== 'skip') return null;
+  const ineligible: StackUnattendedPolicy['ineligible'] = [];
+  if (Array.isArray(raw.ineligible)) {
+    for (const item of raw.ineligible) {
+      if (!item || typeof item !== 'object') continue;
+      const entry = item as Record<string, unknown>;
+      if (typeof entry.service !== 'string' || typeof entry.policy !== 'string') continue;
+      ineligible.push({ service: entry.service, policy: entry.policy });
+    }
+  }
+  return { decision: raw.decision, ineligible };
+}
+
 export interface StackCard {
   stack: string;
   nodeId: number;
@@ -112,6 +130,9 @@ export interface StackCard {
   // Post-Apply verification note when Compose succeeded but clearance could
   // not be confirmed (distinct from a failed preview fetch).
   verificationNote: string | null;
+  // What an unattended refresh would do for this stack, when the node recorded
+  // it. Absent on an older node, which shows no policy note.
+  unattendedPolicy?: StackUnattendedPolicy | null;
 }
 
 interface NodeGroup {
@@ -281,6 +302,56 @@ function VersionDiff({ current, next }: { current: string | null; next: string |
   );
 }
 
+/**
+ * True when the recorded unattended decision keeps a covering schedule from
+ * touching this stack. Every surface that would otherwise present a next-run
+ * time (table, card footer, phone card) asks this first.
+ */
+function isPolicySkipped(unattendedPolicy?: StackUnattendedPolicy | null): boolean {
+  return unattendedPolicy?.decision === 'skip';
+}
+
+/**
+ * The auto-update pill. A policy skip is the more specific fact: the stack has
+ * a covering schedule, but the label keeps unattended refreshes out of it. No
+ * schedule still reads as Off, and a node with no recorded policy adds no note.
+ */
+export function AutoPill({
+  autoUpdateEnabled,
+  unattendedPolicy,
+  compact = false,
+}: {
+  autoUpdateEnabled: boolean;
+  unattendedPolicy?: StackUnattendedPolicy | null;
+  compact?: boolean;
+}) {
+  const skipped = isPolicySkipped(unattendedPolicy);
+  if (!skipped && autoUpdateEnabled) return null;
+  const ineligible = (unattendedPolicy?.ineligible ?? []).map(s => `${s.service} (${s.policy})`).join(', ');
+  // An empty list on a skip means the label could not be evaluated because the
+  // Compose model did not render; do not send the operator looking for a label.
+  const skipDetail = ineligible || 'the Compose model could not be rendered, so the policy could not be evaluated';
+  // The compact pill sits beside the risk badge in the phone card header. The
+  // full sentence does not fit next to a badge at 320-390px, so it says only
+  // what the header needs; the tooltip and the card footer carry the detail.
+  const label = skipped
+    ? (compact ? 'Auto: skipped' : 'Auto: skipped by update policy')
+    : 'Auto: Off';
+  return (
+    <span
+      className={compact
+        ? 'inline-flex min-w-0 max-w-full items-center gap-1 rounded-full border border-card-border px-2 py-[3px] font-mono text-[10px] uppercase tracking-[0.1em] text-stat-subtitle'
+        : 'inline-flex min-w-0 max-w-full items-center gap-1.5 rounded-full border border-card-border bg-muted/30 px-2.5 py-0.5 font-mono text-[10px] leading-3 uppercase tracking-[0.18em] text-stat-subtitle'}
+      title={skipped ? `Skipped by io.sencho.update: ${skipDetail}` : undefined}
+      data-testid="auto-pill"
+      data-state={skipped ? 'skipped' : 'off'}
+    >
+      <CircleSlash className="h-3 w-3 shrink-0" strokeWidth={1.5} />
+      <span className="truncate">{label}</span>
+    </span>
+  );
+}
+
 function StackReadinessCard({
   card,
   canServiceUpdate = false,
@@ -292,7 +363,7 @@ function StackReadinessCard({
   onApply: (stack: string, nodeId: number) => void;
   onApplyService?: (stack: string, nodeId: number, serviceName: string) => void;
 }) {
-  const { stack, nodeId, preview, previewLoaded, scheduledTask, applying, applyingService, autoUpdateEnabled, verificationNote } = card;
+  const { stack, nodeId, preview, previewLoaded, scheduledTask, applying, applyingService, autoUpdateEnabled, verificationNote, unattendedPolicy } = card;
   const loading = !previewLoaded;
   const uncertain = previewLoaded && !!verificationNote;
   const failed = previewLoaded && preview === null && !verificationNote;
@@ -315,23 +386,30 @@ function StackReadinessCard({
     || applyingService !== null;
 
   return (
-    <Card className="flex flex-col gap-4 p-5">
-      <div className="flex items-start justify-between gap-3">
-        <div className="flex flex-col gap-1 min-w-0">
+    <Card className="flex flex-col gap-4 p-5" data-testid="readiness-card">
+      <div
+        className="flex flex-wrap items-start justify-between gap-x-3 gap-y-2"
+        data-testid="readiness-card-header"
+      >
+        {/* A zero flex basis let the status group claim the whole row and
+            collapse the name to 0px at 1024-1536px. The basis is the width
+            below which the group wraps under the identity instead. */}
+        <div className="flex min-w-0 grow basis-32 flex-col gap-1" data-testid="readiness-card-identity">
           <span className="font-mono text-[10px] uppercase tracking-[0.22em] text-stat-subtitle/80">
             Stack
           </span>
-          <span className="font-heading text-2xl leading-tight tracking-tight text-stat-value truncate">
+          <span
+            className="font-heading text-2xl leading-tight tracking-tight text-stat-value truncate"
+            data-testid="readiness-card-stack"
+          >
             {stack}
           </span>
         </div>
-        <div className="flex items-center gap-2 shrink-0">
-          {!autoUpdateEnabled && (
-            <span className="inline-flex items-center gap-1.5 rounded-full border border-card-border bg-muted/30 px-2.5 py-0.5 font-mono text-[10px] leading-3 uppercase tracking-[0.18em] text-stat-subtitle">
-              <CircleSlash className="h-3 w-3" strokeWidth={1.5} />
-              Auto: Off
-            </span>
-          )}
+        <div
+          className="flex min-w-0 max-w-full flex-wrap items-center justify-end gap-2"
+          data-testid="readiness-card-status"
+        >
+          <AutoPill autoUpdateEnabled={autoUpdateEnabled} unattendedPolicy={unattendedPolicy} />
           {previewLoaded && preview && (
             <RiskBadge
               bump={bump}
@@ -440,7 +518,12 @@ function StackReadinessCard({
 
               <div className="mt-auto flex items-center justify-between gap-3 pt-1">
                 <div className="flex items-center gap-1.5 font-mono text-[11px] text-stat-subtitle">
-                  {nextRun ? (
+                  {isPolicySkipped(unattendedPolicy) ? (
+                    <>
+                      <CircleSlash className="h-3.5 w-3.5" strokeWidth={1.5} aria-hidden="true" />
+                      <span data-testid="readiness-schedule">Skipped by update policy</span>
+                    </>
+                  ) : nextRun ? (
                     <>
                       <CalendarClock className="h-3.5 w-3.5" strokeWidth={1.5} aria-hidden="true" />
                       <span>Scheduled · <span className="text-stat-value">{formatClock(nextRun)}</span></span>
@@ -646,7 +729,7 @@ function ReadinessTableRow({
   onApplyService: (stack: string, nodeId: number, serviceName: string) => void;
 }) {
   const { card, nodeName, canServiceUpdate } = row;
-  const { stack, nodeId, preview, previewLoaded, scheduledTask, applying, applyingService, autoUpdateEnabled, verificationNote } = card;
+  const { stack, nodeId, preview, previewLoaded, scheduledTask, applying, applyingService, autoUpdateEnabled, verificationNote, unattendedPolicy } = card;
   const loading = !previewLoaded;
   const uncertain = previewLoaded && !!verificationNote;
   const failed = previewLoaded && preview === null && !verificationNote;
@@ -692,18 +775,19 @@ function ReadinessTableRow({
   let schedule: ReactNode = null;
   if (loading) {
     // Nothing to show until the registry check settles.
+  } else if (isPolicySkipped(unattendedPolicy) || !autoUpdateEnabled) {
+    // The label keeps this stack out of the schedule, so a next-run time would
+    // claim an update that will not happen. The pill is the whole truth.
+    schedule = (
+      <span className="whitespace-nowrap">
+        <AutoPill autoUpdateEnabled={autoUpdateEnabled} unattendedPolicy={unattendedPolicy} />
+      </span>
+    );
   } else if (hasDetail && nextRun) {
     schedule = (
       <span className="tabular-nums">
         <span className="text-stat-value">{formatClock(nextRun)}</span>
         <span className="text-stat-subtitle/70"> · {formatRelative(nextRun)}</span>
-      </span>
-    );
-  } else if (!autoUpdateEnabled) {
-    schedule = (
-      <span className="inline-flex items-center gap-1 rounded-full border border-card-border bg-muted/30 px-2 py-0.5 font-mono text-[10px] leading-3 uppercase tracking-[0.18em] whitespace-nowrap">
-        <CircleSlash className="h-3 w-3" strokeWidth={1.5} aria-hidden="true" />
-        Auto: Off
       </span>
     );
   } else if (hasDetail) {
@@ -902,7 +986,7 @@ export function MobileReadinessCard({
   onApply: (stack: string, nodeId: number) => void;
   onApplyService?: (stack: string, nodeId: number, serviceName: string) => void;
 }) {
-  const { stack, nodeId, preview, previewLoaded, scheduledTask, applying, applyingService, autoUpdateEnabled, verificationNote } = card;
+  const { stack, nodeId, preview, previewLoaded, scheduledTask, applying, applyingService, autoUpdateEnabled, verificationNote, unattendedPolicy } = card;
   const uncertain = previewLoaded && !!verificationNote;
   const failed = previewLoaded && preview === null && !verificationNote;
   const blocked = preview?.summary.blocked ?? false;
@@ -921,18 +1005,25 @@ export function MobileReadinessCard({
   const rest = dot > 0 ? changelog.slice(dot + 1) : changelog;
 
   return (
-    <div className="flex flex-col gap-[10px] rounded-xl border border-card-border border-t-card-border-top bg-card p-[14px] shadow-card-bevel">
-      <div className="flex items-start justify-between gap-[10px]">
-        <div className="min-w-0 flex-1">
+    <div
+      className="flex flex-col gap-[10px] rounded-xl border border-card-border border-t-card-border-top bg-card p-[14px] shadow-card-bevel"
+      data-testid="mobile-readiness-card"
+    >
+      <div className="flex flex-wrap items-start justify-between gap-[10px]" data-testid="mobile-readiness-header">
+        <div className="min-w-0 grow basis-32" data-testid="mobile-readiness-identity">
           <Kicker>stack</Kicker>
-          <div className="mt-px truncate font-heading text-[23px] leading-[26px] text-stat-value">{stack}</div>
+          <div
+            className="mt-px truncate font-heading text-[23px] leading-[26px] text-stat-value"
+            data-testid="mobile-readiness-stack"
+          >
+            {stack}
+          </div>
         </div>
-        <div className="flex shrink-0 items-center gap-1.5">
-          {!autoUpdateEnabled && (
-            <span className="inline-flex items-center gap-1 rounded-full border border-card-border px-2 py-[3px] font-mono text-[10px] uppercase tracking-[0.1em] text-stat-subtitle">
-              <CircleSlash className="h-3 w-3" strokeWidth={1.5} />Auto: Off
-            </span>
-          )}
+        <div
+          className="flex min-w-0 max-w-full flex-wrap items-center justify-end gap-1.5"
+          data-testid="mobile-readiness-status"
+        >
+          <AutoPill autoUpdateEnabled={autoUpdateEnabled} unattendedPolicy={unattendedPolicy} compact />
           {previewLoaded && preview && (
             <RiskBadge
               bump={bump}
@@ -1008,7 +1099,9 @@ export function MobileReadinessCard({
             )}
             <div className="flex items-center justify-between gap-[10px] pt-0.5">
               <span className={`font-mono text-[11px] ${blocked || reviewRequired ? 'text-destructive' : 'text-stat-subtitle'}`}>
-                {nextRun ? <>{formatClock(nextRun)} · {formatRelative(nextRun)}</> : (blocked || reviewRequired ? 'Held for review' : 'No schedule')}
+                {isPolicySkipped(unattendedPolicy)
+                  ? 'Skipped by update policy'
+                  : nextRun ? <>{formatClock(nextRun)} · {formatRelative(nextRun)}</> : (blocked || reviewRequired ? 'Held for review' : 'No schedule')}
               </span>
               <Button
                 size="sm"
@@ -1136,7 +1229,7 @@ function AutoUpdateReadinessContent({ headerActions }: AutoUpdateReadinessProps)
       const [statusRes, tasksRes, detailRes] = await Promise.all([
         apiFetch('/image-updates/fleet', { localOnly: true }),
         apiFetch('/scheduled-tasks?action=update', { localOnly: true }),
-        apiFetch('/image-updates/detail', { localOnly: true }),
+        apiFetch('/image-updates/fleet/detail', { localOnly: true }),
       ]);
       if (token !== loadTokenRef.current) return;
 
@@ -1151,18 +1244,33 @@ function AutoUpdateReadinessContent({ headerActions }: AutoUpdateReadinessProps)
       // Sticky has_update during a failed check is not a verified rebuild, so those
       // stacks stay in the advisory only.
       let failedLocalStacks = new Set<string>();
+      // The policy decision is evaluated by the instance that owns the stack
+      // and persisted with its row, so the same view can show it for local,
+      // proxy and Pilot nodes that advertise the inspect capability.
+      const unattendedByNodeStack = new Map<string, StackUnattendedPolicy>();
       if (detailRes.ok) {
-        const detail = await detailRes.json() as Record<string, StackUpdateInfo>;
-        const failures = Object.entries(detail)
+        const fleetDetail = await detailRes.json() as Record<string, Record<string, StackUpdateInfo>>;
+        const currentLocalId = nodesRef.current.find(n => n.type === 'local')?.id ?? null;
+        const localDetail = currentLocalId === null ? {} : (fleetDetail[String(currentLocalId)] ?? {});
+        const failures = Object.entries(localDetail)
           .filter(([, info]) => info.checkStatus === 'failed')
           .map(([stack, info]) => ({ stack, reason: info.lastError }))
           .sort((a, b) => a.stack.localeCompare(b.stack));
         failedLocalStacks = new Set(failures.map(f => f.stack));
+        // A node that does not record a decision (an older remote) shows no
+        // note rather than an assumed allow.
+        for (const [nodeIdStr, nodeDetail] of Object.entries(fleetDetail)) {
+          if (!nodeDetail || typeof nodeDetail !== 'object') continue;
+          for (const [stack, info] of Object.entries(nodeDetail)) {
+            const policy = readUnattendedPolicy(info?.unattendedPolicy);
+            if (policy) unattendedByNodeStack.set(`${nodeIdStr}::${stack}`, policy);
+          }
+        }
         setCheckFailures(failures);
       } else {
         // Clear stale failures rather than persist them across a load, but log:
         // an empty advisory must not silently stand in for "detail unavailable".
-        console.error('[AutoUpdateReadiness] /image-updates/detail failed:', detailRes.status);
+        console.error('[AutoUpdateReadiness] /image-updates/fleet/detail failed:', detailRes.status);
         setCheckFailures([]);
       }
 
@@ -1228,6 +1336,7 @@ function AutoUpdateReadinessContent({ headerActions }: AutoUpdateReadinessProps)
             applyingService: null,
             autoUpdateEnabled: scheduledTask !== null,
             verificationNote: null,
+            unattendedPolicy: unattendedByNodeStack.get(`${nodeId}::${stack}`) ?? null,
           };
         });
         initialGroups.push({
@@ -1434,6 +1543,10 @@ function AutoUpdateReadinessContent({ headerActions }: AutoUpdateReadinessProps)
                 onClick: () => { openEndpointRefusalInEditor(nodeId, stack, refusal); },
               },
             });
+          } else if (result.policyRefusal) {
+            // Same shared handler the editor uses; this view has no Compose
+            // file, so its action opens the editor at the stack.
+            toastUpdatePolicyRefusal(result.policyRefusal, { nodeId, stackName: stack, inEditor: false });
           } else {
             toast.error(result.error);
           }
@@ -1569,9 +1682,11 @@ function AutoUpdateReadinessContent({ headerActions }: AutoUpdateReadinessProps)
   const flatCards = useMemo(() => groups.flatMap(g => g.cards), [groups]);
   const { total, ready } = useMemo(() => {
     const t = flatCards.length;
-    // Schedule-covered and actionable (confirmed update/rebuild, not blocked).
+    // Schedule-covered and actionable (confirmed update/rebuild, not blocked),
+    // and not a stack the recorded policy keeps the schedule from touching.
     const r = flatCards.filter(c =>
       c.autoUpdateEnabled
+      && !isPolicySkipped(c.unattendedPolicy)
       && c.previewLoaded
       && c.preview !== null
       && isActionableUpdatePreview(c.preview),

@@ -12,6 +12,15 @@ vi.mock('@/context/AuthContext', () => ({
   useAuth: () => authState,
 }));
 
+let nodeMetaMap = new Map<number, { version: string | null; capabilities: string[]; fetchedAt: number }>();
+vi.mock('@/context/NodeContext', () => ({
+  useNodes: () => ({
+    nodeMeta: nodeMetaMap,
+    hasCapability: () => true,
+    activeNodeMeta: null,
+  }),
+}));
+
 import { apiFetch } from '@/lib/api';
 import { toast } from '@/components/ui/toast-store';
 
@@ -30,11 +39,15 @@ function routeApi(over: {
   readiness?: () => Promise<Response>;
   coverage?: () => Promise<Response>;
   snapshot?: () => Promise<Response>;
+  inventory?: () => Promise<Response>;
 } = {}) {
   vi.mocked(apiFetch).mockImplementation((url: string, options?: { method?: string }) => {
     const u = String(url);
     if (u.includes('/update-readiness')) {
       return (over.readiness ?? (() => Promise.resolve(new Response(JSON.stringify(report('ready')), { status: 200 }))))();
+    }
+    if (u.includes('/label-inventory')) {
+      return (over.inventory ?? (() => Promise.resolve(new Response(JSON.stringify({ services: [] }), { status: 200 }))))();
     }
     if (u.includes('/snapshots/coverage')) {
       return (over.coverage ?? (() => Promise.resolve(new Response(JSON.stringify({ latestAt: null }), { status: 200 }))))();
@@ -64,6 +77,7 @@ describe('UpdateReadinessDialog', () => {
     vi.mocked(apiFetch).mockReset();
     vi.clearAllMocks();
     authState.isAdmin = true;
+    nodeMetaMap = new Map();
   });
 
   const verdictCases: Array<{ verdict: Verdict; label: string }> = [
@@ -214,5 +228,119 @@ describe('UpdateReadinessDialog', () => {
     await waitFor(() => expect(screen.getByTestId('readiness-verdict')).toBeInTheDocument());
     fireEvent.click(screen.getByText('Cancel'));
     expect(props.onCancel).toHaveBeenCalledTimes(1);
+  });
+
+  const policyReport = (over: Record<string, unknown> = {}) => ({
+    stack: 'web',
+    computedAt: Date.now(),
+    verdict: 'ready',
+    signals: [
+      { id: 'preflight', status: 'ok', title: 'Compose Doctor', detail: 'The last preflight passed.', affectsVerdict: true },
+      { id: 'update_policy', status: 'attention', title: 'Update policy', detail: 'This update is refused by io.sencho.update: "db" is set to disabled.', affectsVerdict: false },
+    ],
+    updatePolicy: {
+      evaluation: 'evaluated',
+      services: [
+        { service: 'db', policy: 'disabled', eligible: false, reason: 'The service is set to disabled.' },
+        { service: 'api', policy: 'default', eligible: true },
+      ],
+      manualDecision: 'block',
+      unattendedDecision: 'skip',
+      reason: '"db" is set to disabled.',
+      ...over,
+    },
+  });
+
+  it('renders the update-policy signal with the other signals', async () => {
+    routeApi({ readiness: () => Promise.resolve(new Response(JSON.stringify(policyReport()), { status: 200 })) });
+    setup();
+    await waitFor(() => expect(screen.getByText('Update policy')).toBeInTheDocument());
+    expect(screen.getByText(/refused by io.sencho.update/)).toBeInTheDocument();
+  });
+
+  it('disables Update and explains why when the policy blocks a manual update', async () => {
+    routeApi({ readiness: () => Promise.resolve(new Response(JSON.stringify(policyReport()), { status: 200 })) });
+    const props = setup();
+    await waitFor(() => expect(screen.getByTestId('update-policy-blocked')).toBeInTheDocument());
+    const proceed = screen.getByTestId('readiness-proceed');
+    expect(proceed).toBeDisabled();
+    expect(proceed.getAttribute('title')).toContain('"db" is set to disabled');
+    fireEvent.click(proceed);
+    expect(props.onProceed).not.toHaveBeenCalled();
+  });
+
+  it('offers Update for the eligible services only, through the shared handler', async () => {
+    routeApi({ readiness: () => Promise.resolve(new Response(JSON.stringify(policyReport()), { status: 200 })) });
+    const onProceedService = vi.fn();
+    setup({ onProceedService });
+    await waitFor(() => expect(screen.getByTestId('update-policy-service-api')).toBeInTheDocument());
+    expect(screen.queryByTestId('update-policy-service-db')).toBeNull();
+    fireEvent.click(screen.getByTestId('update-policy-service-api'));
+    expect(onProceedService).toHaveBeenCalledWith('api');
+  });
+
+  it('offers the Compose file inside the editor, and the editor outside it', async () => {
+    routeApi({ readiness: () => Promise.resolve(new Response(JSON.stringify(policyReport()), { status: 200 })) });
+    const onOpenComposeFile = vi.fn();
+    const inside = setup({ onOpenComposeFile });
+    await waitFor(() => expect(screen.getByTestId('update-policy-open-compose')).toBeInTheDocument());
+    expect(screen.getByTestId('update-policy-open-compose')).toHaveTextContent('Open Compose file');
+    fireEvent.click(screen.getByTestId('update-policy-open-compose'));
+    expect(onOpenComposeFile).toHaveBeenCalledTimes(1);
+    expect(inside.onCancel).toHaveBeenCalledTimes(1);
+  });
+
+  it('names the editor as the destination when no Compose-file handler is mounted', async () => {
+    routeApi({ readiness: () => Promise.resolve(new Response(JSON.stringify(policyReport()), { status: 200 })) });
+    const props = setup();
+    await waitFor(() => expect(screen.getByTestId('update-policy-open-compose')).toBeInTheDocument());
+    expect(screen.getByTestId('update-policy-open-compose')).toHaveTextContent('Open stack editor');
+    fireEvent.click(screen.getByTestId('update-policy-open-compose'));
+    expect(props.onCancel).toHaveBeenCalledTimes(1);
+  });
+
+  it('keeps Update enabled when the policy allows the update', async () => {
+    routeApi({ readiness: () => Promise.resolve(new Response(JSON.stringify(policyReport({ manualDecision: 'allow', reason: null })), { status: 200 })) });
+    setup();
+    await waitFor(() => expect(screen.getByTestId('readiness-verdict')).toBeInTheDocument());
+    expect(screen.getByTestId('readiness-proceed')).toBeEnabled();
+    expect(screen.queryByTestId('update-policy-blocked')).toBeNull();
+  });
+
+  it('notes a node that does not evaluate the label only when the stack declares it', async () => {
+    nodeMetaMap = new Map([[1, { version: '0.90.0', capabilities: [], fetchedAt: Date.now() }]]);
+    routeApi({
+      readiness: () => Promise.resolve(new Response(JSON.stringify(report('ready')), { status: 200 })),
+      inventory: () => Promise.resolve(new Response(JSON.stringify({
+        services: [{ service: 'web', declaredLabels: [{ key: 'io.sencho.update', value: 'manual', source: 'compose' }] }],
+      }), { status: 200 })),
+    });
+    setup();
+    expect(await screen.findByTestId('update-policy-unsupported')).toHaveTextContent('does not evaluate this label');
+  });
+
+  it('omits the note on an older node when the stack declares no io.sencho.update', async () => {
+    nodeMetaMap = new Map([[1, { version: '0.90.0', capabilities: [], fetchedAt: Date.now() }]]);
+    routeApi({
+      inventory: () => Promise.resolve(new Response(JSON.stringify({
+        services: [{ service: 'web', declaredLabels: [{ key: 'io.sencho.url', value: 'https://x.example.com', source: 'compose' }] }],
+      }), { status: 200 })),
+    });
+    setup();
+    await waitFor(() => expect(screen.getByTestId('readiness-verdict')).toBeInTheDocument());
+    await waitFor(() => {
+      const calls = vi.mocked(apiFetch).mock.calls.filter(c => String(c[0]).includes('/label-inventory'));
+      expect(calls).toHaveLength(1);
+    });
+    expect(screen.queryByTestId('update-policy-unsupported')).toBeNull();
+  });
+
+  it('does not read the label inventory on a node that evaluates the policy', async () => {
+    nodeMetaMap = new Map([[1, { version: '1.0.0', capabilities: ['sencho-label-policy-v1'], fetchedAt: Date.now() }]]);
+    routeApi();
+    setup();
+    await waitFor(() => expect(screen.getByTestId('readiness-verdict')).toBeInTheDocument());
+    const calls = vi.mocked(apiFetch).mock.calls.filter(c => String(c[0]).includes('/label-inventory'));
+    expect(calls).toHaveLength(0);
   });
 });

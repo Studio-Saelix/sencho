@@ -10,6 +10,7 @@ import { NodeRegistry } from '../services/NodeRegistry';
 import { SOPS_DIRECT_MUTATION_MESSAGE } from '../services/gitops/sops/prepareOverlay';
 import type { GitOpsGenerationRow } from '../services/gitops/types';
 import type { RollbackInvocationRecord } from '../types/rollbackGeneration';
+import { allowingPolicy } from './__helpers__/updatePolicyFixture';
 
 let tmpDir: string;
 
@@ -236,6 +237,6 @@ describe('ComposeService SOPS overlay args and mutation guards', () => {
     const stackName = 'sops-refuse-pull-images';
     seedSopsStack(stackName, 'gen-sops-refuse-pull-images');
     const compose = ComposeService.getInstance(NodeRegistry.getInstance().getDefaultNodeId());
-    await expect(compose.pullStackImages(stackName)).rejects.toThrow(SOPS_DIRECT_MUTATION_MESSAGE);
+    await expect(compose.pullStackImages(stackName, allowingPolicy(stackName))).rejects.toThrow(SOPS_DIRECT_MUTATION_MESSAGE);
   });
 });

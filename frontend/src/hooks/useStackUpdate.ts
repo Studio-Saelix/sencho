@@ -4,6 +4,7 @@ import { useDeployFeedback } from '@/context/DeployFeedbackContext';
 import { openEndpointRefusalInEditor } from '@/lib/endpointRefusalHandoff';
 import { SENCHO_OPEN_STACK_EVENT, type SenchoOpenStackDetail } from '@/lib/events';
 import { postStackUpdate, type StackUpdateOutcome } from '@/lib/stackUpdate';
+import { toastUpdatePolicyRefusal } from '@/lib/updatePolicyRefusal';
 
 interface StackUpdateRequest {
   nodeId: number;
@@ -84,6 +85,11 @@ export function useStackUpdate() {
             toast.error(message, { action: openEditor });
             return { ok: false as const, errorMessage: message };
           }
+          case 'update-policy-blocked':
+            // The label is the only place this decision can change, so the toast
+            // names the editor and the Compose file rather than a settings page.
+            toastUpdatePolicyRefusal(outcome.refusal, { nodeId, stackName, inEditor: false });
+            return { ok: false as const, errorMessage: outcome.refusal.message };
           case 'failed': {
             // The classification names the cause and the next step; a rollback means
             // the stack is back on its old version.

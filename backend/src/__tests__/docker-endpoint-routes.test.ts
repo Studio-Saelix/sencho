@@ -56,6 +56,11 @@ vi.mock('../services/ComposeService', async () => {
   };
 });
 
+// The policy module holds the ComposeService class from its own import, so the
+// getInstance mock above is invisible to it; these tests are about the Docker
+// endpoint guard, and the policy has its own suites.
+vi.mock('../services/updatePolicy', () => import('./__helpers__/allowingUpdatePolicy').then(m => m.allowingUpdatePolicyModule()));
+
 vi.mock('../services/DockerController', async () => {
   const actual = await vi.importActual<typeof import('../services/DockerController')>(
     '../services/DockerController',
@@ -330,20 +335,25 @@ describe('a service-scoped update or restore refused after the route check', () 
     while (spies.length) spies.pop()?.mockRestore();
   });
 
+  // A restore is not an image refresh, so the route calls `restore` rather than
+  // `execute`; each case stubs the method its route actually uses.
   const routes = [
-    ['update', '/api/stacks/infra/services/web/update'],
-    ['restore', '/api/stacks/infra/services/web/restore'],
+    ['update', '/api/stacks/infra/services/web/update', 'execute'],
+    ['restore', '/api/stacks/infra/services/web/restore', 'restore'],
   ] as const;
 
-  it.each(routes)('maps a refused %s the orchestrator reports to 409 with the guard code', async (_name, url) => {
+  it.each(routes)('maps a refused %s the orchestrator reports to 409 with the guard code', async (_name, url, method) => {
     const { StackUpdateOrchestrator } = await import('../services/StackUpdateOrchestrator');
     mockEvaluate.mockResolvedValue(null);
-    spies.push(vi.spyOn(StackUpdateOrchestrator.getInstance(), 'execute').mockResolvedValue({
-      kind: 'service_failed',
+    const outcome = {
+      kind: 'service_failed' as const,
       code: 'docker_endpoint_protected',
       error: refusal.message,
       serviceName: 'web',
-    }));
+    };
+    spies.push(method === 'restore'
+      ? vi.spyOn(StackUpdateOrchestrator.getInstance(), 'restore').mockResolvedValue(outcome)
+      : vi.spyOn(StackUpdateOrchestrator.getInstance(), 'execute').mockResolvedValue(outcome));
 
     const res = await request(app).post(url).set('Cookie', authCookie).send({ recoveryId: 'rec-1' });
 
@@ -351,13 +361,16 @@ describe('a service-scoped update or restore refused after the route check', () 
     expect(res.body).toMatchObject({ code: 'docker_endpoint_protected', error: refusal.message });
   });
 
-  it.each(routes)('maps a refusal thrown inside the %s to 409, not a generic 500', async (_name, url) => {
+  it.each(routes)('maps a refusal thrown inside the %s to 409, not a generic 500', async (_name, url, method) => {
     const { StackUpdateOrchestrator } = await import('../services/StackUpdateOrchestrator');
     const { DockerEndpointProtectedError } = await import('../helpers/dockerEndpointGuard');
     mockEvaluate.mockResolvedValue(null);
+    const rejection = new DockerEndpointProtectedError(refusal);
     spies.push(
       vi.spyOn(console, 'error').mockImplementation(() => undefined),
-      vi.spyOn(StackUpdateOrchestrator.getInstance(), 'execute').mockRejectedValue(new DockerEndpointProtectedError(refusal)),
+      method === 'restore'
+        ? vi.spyOn(StackUpdateOrchestrator.getInstance(), 'restore').mockRejectedValue(rejection)
+        : vi.spyOn(StackUpdateOrchestrator.getInstance(), 'execute').mockRejectedValue(rejection),
     );
 
     const res = await request(app).post(url).set('Cookie', authCookie).send({ recoveryId: 'rec-1' });
