@@ -22,8 +22,8 @@ export function TableSkeleton({ cols, rows = 5 }: { cols: number; rows?: number 
 
 /**
  * Distinct from the empty state: the request failed, so say so and offer the
- * retry. `reason` names why when the failure is one the operator can act on
- * (a node that did not answer, a node that is unreachable), instead of leaving
+ * retry. `reason` names why when the cause is known (a node that did not
+ * answer, one that is unreachable, a rejected credential), instead of leaving
  * the reader to guess whether the node is empty or silent.
  */
 export function TableLoadError({ cols, noun, onRetry, reason }: {

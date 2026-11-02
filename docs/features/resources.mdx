@@ -18,7 +18,7 @@ The masthead answers one question: how much space a cleanup would free on this n
 | **`<size>` reclaimable** (amber) | Unused images, stopped containers, and dangling volumes that a cleanup can free, with a `·`-separated breakdown underneath (for example `2 unused images · 1 dangling volume`) |
 | **Tidy** | Nothing to reclaim on this node |
 | **Measuring disk** | The node is still computing disk usage. The tables below load first and do not wait for it |
-| **Disk usage unknown** | The node could not report disk usage. Use **Retry disk usage** in the tab strip. An unreadable node never reads as Tidy |
+| **Disk usage unknown** | The node could not report disk usage. Use **Retry disk usage** in the tab strip; it also retries any tab that failed. An unreadable node never reads as Tidy |
 
 The two figures on the right split what Docker stores: **Managed** is the images and volumes your Sencho stacks use, and **External** is the images and volumes used by other Docker projects on the host.
 
@@ -164,7 +164,7 @@ Lists the recovery generations the node is holding, with a search box, a **Curre
     The figure starts from the unused images, stopped containers, and dangling volumes the node reports, counts only the bytes an unused image does not share with another image, and leaves out images Sencho holds as rollback protection points. Held images are never part of that total and never appear in a prune plan, so the residue after a prune is normally a few megabytes that the storage driver did not free. Held images are listed in the **Rollback** tab and are freed once the hold is released or superseded.
   </Accordion>
   <Accordion title="The masthead says Disk usage unknown">
-    The node did not return its disk usage, so Sencho does not claim the node is tidy. Click **Retry disk usage** in the tab strip. If it keeps failing, check that the node is reachable and that its Docker daemon is running; the tables below load from a separate request and may still be available.
+    The node did not return its disk usage, so Sencho does not claim the node is tidy. Click **Retry disk usage** in the tab strip, which also retries any tab that failed to load. If it keeps failing, check that the node is reachable and that its Docker daemon is running; the tables below load from a separate request and may still be available.
   </Accordion>
   <Accordion title="A prune plan lists several tags for one image">
     Unused images often carry more than one name, such as a version tag and `latest`. Sencho includes every reviewed tag in the prune confirmation. Confirming removes those tags one by one, and Docker deletes the image once no names remain.

@@ -513,3 +513,11 @@ it('names the read cause on the error state instead of a generic failure', () =>
   expect(screen.getByText(/no API URL or token configured/i)).toBeInTheDocument();
   expect(screen.queryByText(/failed to load for this node/i)).toBeNull();
 });
+
+it('offers Retry on the error state and calls it', async () => {
+  const onRetry = vi.fn();
+  const user = userEvent.setup();
+  render(<ImagesTab {...base} error onRetry={onRetry} summaries={{}} />);
+  await user.click(screen.getByRole('button', { name: 'Retry' }));
+  expect(onRetry).toHaveBeenCalledTimes(1);
+});

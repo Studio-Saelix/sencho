@@ -1,5 +1,6 @@
 import { useMemo } from 'react';
 import { KeyRound, FileWarning, AlertTriangle } from 'lucide-react';
+import { Button } from '@/components/ui/button';
 import { Skeleton } from '@/components/ui/skeleton';
 import { SeverityBadge } from '@/components/ui/SeverityBadge';
 import type { ScanSummary, ScanDetailTab } from '@/types/security';
@@ -14,6 +15,8 @@ interface FindingsTabProps {
   error?: boolean;
   /** Why the summaries read failed, when the cause is worth naming. */
   errorReason?: string | null;
+  /** Re-reads the scan summaries after a failed read. */
+  onRetry?: () => void;
   onInspect: (scanId: number, initialTab?: ScanDetailTab) => void;
 }
 
@@ -44,7 +47,7 @@ const COPY: Record<FindingsKind, {
 
 /** Index of images/stacks that carry findings of the given kind. Rows open the
  *  existing scan sheet on the matching detail tab. */
-export function FindingsTab({ kind, summaries, loading, error, errorReason, onInspect }: FindingsTabProps) {
+export function FindingsTab({ kind, summaries, loading, error, errorReason, onRetry, onInspect }: FindingsTabProps) {
   const copy = COPY[kind];
   const Icon = copy.icon;
   const rows = useMemo(
@@ -65,6 +68,7 @@ export function FindingsTab({ kind, summaries, loading, error, errorReason, onIn
         <p className="text-sm text-muted-foreground max-w-md">
           {errorReason ?? 'Scan results failed to load for this node. Try again shortly.'}
         </p>
+        {onRetry ? <Button variant="outline" size="sm" className="mt-4" onClick={onRetry}>Retry</Button> : null}
       </div>
     );
   }

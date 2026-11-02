@@ -76,3 +76,11 @@ it('names the read cause on the error state instead of a generic failure', () =>
   expect(screen.getByText(/Pilot tunnel to "edge-2" is disconnected/i)).toBeInTheDocument();
   expect(screen.queryByText(/failed to load for this node/i)).toBeNull();
 });
+
+it('offers Retry on the error state and calls it', async () => {
+  const onRetry = vi.fn();
+  const user = userEvent.setup();
+  render(<FindingsTab kind="secret" summaries={{}} loading={false} error onRetry={onRetry} onInspect={vi.fn()} />);
+  await user.click(screen.getByRole('button', { name: 'Retry' }));
+  expect(onRetry).toHaveBeenCalledTimes(1);
+});

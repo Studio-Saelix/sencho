@@ -41,6 +41,7 @@ import {
     assertReadOk,
     classifyRemoteReadError,
     classifyRemoteReadFailure,
+    isNamedReadFailure,
     isUnreadableNode,
     remoteReadFailureMessage,
     remoteReadFailureOf,
@@ -759,13 +760,11 @@ export default function ResourcesView({ headerActions }: ResourcesViewProps = {}
             : siblingUnreadable;
     const inventoryUnavailable = inventoryFailure !== null;
     const inventoryLoading = inventoryRegion.data === null && !inventoryUnavailable;
-    // Only the failures whose cause the operator can act on are named; a plain
-    // 4xx/5xx keeps the existing short copy.
+    // Every cause the page can name is named; only the catch-alls (a plain
+    // status or an unclassified error) keep the existing short copy.
     const nodeName = activeNode?.name;
     const reasonFor = (failure: RemoteReadFailure | null): string | null => (
-        failure !== null && isUnreadableNode(failure)
-            ? remoteReadFailureMessage(failure, { nodeName })
-            : null
+        isNamedReadFailure(failure) ? remoteReadFailureMessage(failure, { nodeName }) : null
     );
     const inventoryFailureReason = reasonFor(inventoryFailure);
     // The external tab names its own read's cause, never the inventory read's.
@@ -794,10 +793,13 @@ export default function ResourcesView({ headerActions }: ResourcesViewProps = {}
         for (const region of siblingRegions) {
             if (region.data === null && region.status === 'failed') void region.refresh();
         }
-        if (usage.status === 'error') void loadUsage();
+        // The derived usage state can be a sibling's cause while the disk-usage
+        // read is still pending; only its own failure is retried, so a slow
+        // read that may still land is not aborted.
+        if (usageLoad.status === 'error') void loadUsage();
     };
 
-    const mastheadModel = deriveResourcesMastheadState(usage);
+    const mastheadModel = deriveResourcesMastheadState(usage, nodeName);
     const totalReclaimableBytes = mastheadModel.reclaimableBytes;
 
     // The phone masthead restates the inventory; an unread inventory says so
@@ -1311,7 +1313,12 @@ export default function ResourcesView({ headerActions }: ResourcesViewProps = {}
                             generations={rollbackGenerations}
                             isLoading={rollbackRegion.data === null && rollbackRegion.status !== 'failed'}
                             loadError={rollbackRegion.data === null && rollbackRegion.status === 'failed'}
-                            onRetry={rollbackRegion.refresh}
+                            loadErrorReason={reasonFor(
+                                rollbackRegion.data === null && rollbackRegion.status === 'failed'
+                                    ? remoteReadFailureOf(rollbackRegion.error)
+                                    : null,
+                            )}
+                            onRetry={retryPage}
                             isAdmin={isAdmin}
                             nodeId={activeNode?.id}
                             onReleased={refreshAll}

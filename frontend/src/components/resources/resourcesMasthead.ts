@@ -1,7 +1,7 @@
 import type { MastheadMetadataItem, MastheadTone } from '@/components/ui/PageMasthead';
 import { formatBytes } from '@/lib/utils';
 import {
-    isUnreadableNode,
+    isNamedReadFailure,
     remoteReadFailureMessage,
     type RemoteReadFailure,
 } from '@/lib/remoteReadFailure';
@@ -54,7 +54,7 @@ function plural(count: number, one: string, many: string): string {
  * the node is tidy. Unknown stays visible: a node whose usage could not be read
  * never reads as tidy.
  */
-export function deriveResourcesMastheadState(load: UsageLoad): ResourcesMastheadModel {
+export function deriveResourcesMastheadState(load: UsageLoad, nodeName?: string | null): ResourcesMastheadModel {
     if (load.status === 'loading') {
         return { state: 'Measuring disk', tone: 'idle', metadata: UNKNOWN_METADATA, reclaimableBytes: 0, reclaimableItems: 0 };
     }
@@ -62,8 +62,8 @@ export function deriveResourcesMastheadState(load: UsageLoad): ResourcesMasthead
         return {
             state: 'Disk usage unknown',
             tone: 'warn',
-            subtitle: load.failure !== undefined && isUnreadableNode(load.failure)
-                ? remoteReadFailureMessage(load.failure)
+            subtitle: isNamedReadFailure(load.failure)
+                ? remoteReadFailureMessage(load.failure, { nodeName })
                 : 'Could not read disk usage from this node.',
             metadata: UNKNOWN_METADATA,
             reclaimableBytes: 0,

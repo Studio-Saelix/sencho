@@ -42,6 +42,8 @@ interface RollbackGenerationsTabProps {
     /** The read failed and there is nothing to show; distinct from a confirmed empty list. */
     loadError?: boolean;
     onRetry?: () => void;
+    /** Why the read failed, when its cause is named. */
+    loadErrorReason?: string | null;
     isAdmin: boolean;
     nodeId?: number;
     /** Refetches the Resources page's data after a successful release. */
@@ -177,6 +179,7 @@ export function RollbackGenerationsTab({
     isLoading,
     loadError = false,
     onRetry,
+    loadErrorReason,
     isAdmin,
     nodeId,
     onReleased,
@@ -307,7 +310,7 @@ export function RollbackGenerationsTab({
                         </TableRow>
                     </TableHeader>
                     {isLoading ? <TableSkeleton cols={6} /> : loadError ? (
-                    <TableLoadError cols={6} noun="rollback generations" onRetry={() => onRetry?.()} />
+                    <TableLoadError cols={6} noun="rollback generations" reason={loadErrorReason} onRetry={() => onRetry?.()} />
                     ) : (
                     <TableBody>
                         {generations.length === 0 ? (

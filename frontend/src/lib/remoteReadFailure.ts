@@ -189,9 +189,9 @@ export function remoteReadFailureMessage(
     case 'unreachable':
       return `${subject} is unreachable. Check that Sencho is running on that host.`;
     case 'unauthorized':
-      return `You do not have access to this data on ${name ? `"${name}"` : 'this node'}.`;
+      return `You do not have access to this data on ${target}.`;
     case 'node-credential':
-      return `The stored credential for ${subject} was rejected. Update the node's API token in Settings → Nodes.`;
+      return `The stored credential for ${target} was rejected. Update the node's API token in Settings → Nodes.`;
     case 'unverified':
       return `${subject}'s permission model could not be verified. Try again shortly.`;
     case 'not-configured':

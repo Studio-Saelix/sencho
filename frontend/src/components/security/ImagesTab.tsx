@@ -176,6 +176,8 @@ interface ImagesTabProps {
   error?: boolean;
   /** Why the summaries read failed, when the cause is worth naming. */
   errorReason?: string | null;
+  /** Re-reads the scan summaries after a failed read. */
+  onRetry?: () => void;
   onInspect: (scanId: number, initialTab?: ScanDetailTab, driverVulnerabilityIds?: string[]) => void;
   /** Admin on a node with a ready scanner; gates the scan Actions column. */
   canScan: boolean;
@@ -202,6 +204,7 @@ export function ImagesTab({
   loading,
   error,
   errorReason,
+  onRetry,
   onInspect,
   canScan,
   scanningRef,
@@ -306,6 +309,7 @@ export function ImagesTab({
         <p className="text-sm text-muted-foreground">
           {errorReason ?? 'Scan results failed to load for this node. Try again shortly.'}
         </p>
+        {onRetry ? <Button variant="outline" size="sm" className="mt-4" onClick={onRetry}>Retry</Button> : null}
       </div>
     );
   }

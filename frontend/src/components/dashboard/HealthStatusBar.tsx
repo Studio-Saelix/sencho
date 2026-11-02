@@ -15,7 +15,7 @@ interface HealthStatusBarProps {
   nodeCount: number;
   lastSyncAt: number | null;
   /** True when the metrics reads are not answering: several consecutive failures,
-   *  or one bounded gateway timeout against a remote node. */
+   *  or the first read that shows the hub has no readable path to the selected remote node. */
   metricsStale?: boolean;
   /** True when a read stopped at a state where the hub has no readable path to
    *  the node, as opposed to stale meters. */
@@ -113,7 +113,7 @@ export function HealthStatusBar({
     () => deriveHealth(stats, systemStats, notifications),
     [stats, systemStats, notifications],
   );
-  // "Unknown" is reserved for a node that did not answer. Stale meters with a
+  // "Unknown" is reserved for a node the hub cannot read. Stale meters with a
   // known local cause (the Docker socket, the metrics service) keep the derived
   // level and the stale chip, so the copy does not blame the network for them.
   const config = metricsUnreadable ? unavailableHealth : metricsPending ? pendingHealth : healthConfig[level];

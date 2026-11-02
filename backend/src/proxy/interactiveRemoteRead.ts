@@ -18,8 +18,8 @@
  * Routes the codebase already knows are slow to answer (a df over a large image
  * store, a volume-browser helper-image pull, a full resources inventory) get a
  * longer time-to-headers budget instead of the five-second one. Cutting those
- * off would label a healthy node as silent, and the read itself already carries
- * a server-side budget.
+ * off would label a healthy node as silent. A node that never answers is still
+ * bounded by the longer budget.
  *
  * This is a read deadline only. Deploys, updates, pulls, restores, exports,
  * event streams, and log tails keep their own lifetimes: they are work, not
@@ -102,7 +102,7 @@ const LONG_LIVED_READS: ReadonlyArray<RegExp> = [
  * cancelling the operation.
  */
 const SLOW_READS: ReadonlyArray<RegExp> = [
-  // `docker system df`, which takes tens of seconds on a large containerd store.
+  // `docker system df`, which can take many seconds on a large containerd store.
   /^\/system\/docker-df\/?$/,
   // The full resources inventory, including the volume df section.
   /^\/system\/resources\/?$/,

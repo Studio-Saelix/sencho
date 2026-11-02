@@ -1087,11 +1087,12 @@ export function useStackActions(options: UseStackActionsOptions) {
       if (!res.ok) {
         const refused = stackOpenRefusalMessage(filename, res.status, text);
         if (refused) throw new StackOpenError(refused);
-        // A read the gateway marked with its cause names that cause, so opening
-        // a stack on a node with a disconnected Pilot is not reported as the
-        // operator's connection.
+        // A read with a known cause names that cause, so opening a stack on a
+        // node with a disconnected Pilot is not reported as the operator's
+        // connection. A 404 stays a plain failure: it can be a stack that is
+        // gone as well as a node that does not serve the route.
         const readFailure = classifyRemoteReadFailure(res);
-        if (isNamedReadFailure(readFailure)) {
+        if (isNamedReadFailure(readFailure) && readFailure !== 'unsupported') {
           throw new StackOpenError(remoteReadFailureMessage(readFailure, {
             nodeName: activeNode?.name,
             status: res.status,

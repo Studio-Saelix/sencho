@@ -98,7 +98,8 @@ export function buildNetHistory(
 // being refreshed (the Docker socket or the metrics service is unreachable)
 // rather than just slow. Polling continues; the indicator describes the
 // freshness of the visible numbers, not the polling cadence. The threshold
-// is chosen so a single transient hiccup does not trip the indicator.
+// is chosen so a single transient hiccup does not trip the indicator. A read
+// that proves the hub has no readable path to the node trips it at once.
 const METRICS_STALE_THRESHOLD = 3;
 
 /** The first cause that means the hub has no readable path to the node, in the

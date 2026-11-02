@@ -211,9 +211,11 @@ export function SecurityView({ activeTab, onTabChange, headerActions }: Security
   const summariesLoading = summariesRegion.data === null && summariesRegion.status === 'loading';
   const summariesError = summariesRegion.data === null && summariesRegion.status === 'failed';
   // The summaries read's own cause, so the scan-result tabs name a disconnected
-  // Pilot instead of saying the scan results "failed to load".
-  const summariesErrorReason = summariesError
-    ? remoteReadFailureMessage(remoteReadFailureOf(summariesRegion.error), { nodeName: activeNode?.name })
+  // Pilot instead of saying the scan results "failed to load". A plain status
+  // or an unclassified error keeps the tabs' own copy.
+  const summariesFailure = summariesError ? remoteReadFailureOf(summariesRegion.error) : null;
+  const summariesErrorReason = isNamedReadFailure(summariesFailure)
+    ? remoteReadFailureMessage(summariesFailure, { nodeName: activeNode?.name })
     : null;
   const trendOutcome = trendRegion.data;
   const trend = trendOutcome?.kind === 'data' ? trendOutcome.data : [];
@@ -433,6 +435,7 @@ export function SecurityView({ activeTab, onTabChange, headerActions }: Security
               loading={summariesLoading}
               error={summariesError}
               errorReason={summariesErrorReason}
+              onRetry={reloadOverview}
               onInspect={onInspect}
               canScan={canScanImages}
               scanningRef={scanningRef}
@@ -449,13 +452,13 @@ export function SecurityView({ activeTab, onTabChange, headerActions }: Security
 
         <TabsContent value="compose">
           <CapabilityGate capability="vulnerability-scanning" featureName="Vulnerability scanning" resolution="Install a scanner from the Scanner setup tab.">
-            <FindingsTab kind="misconfig" summaries={summaries} loading={summariesLoading} error={summariesError} errorReason={summariesErrorReason} onInspect={onInspect} />
+            <FindingsTab kind="misconfig" summaries={summaries} loading={summariesLoading} error={summariesError} errorReason={summariesErrorReason} onRetry={reloadOverview} onInspect={onInspect} />
           </CapabilityGate>
         </TabsContent>
 
         <TabsContent value="secrets">
           <CapabilityGate capability="vulnerability-scanning" featureName="Vulnerability scanning" resolution="Install a scanner from the Scanner setup tab.">
-            <FindingsTab kind="secret" summaries={summaries} loading={summariesLoading} error={summariesError} errorReason={summariesErrorReason} onInspect={onInspect} />
+            <FindingsTab kind="secret" summaries={summaries} loading={summariesLoading} error={summariesError} errorReason={summariesErrorReason} onRetry={reloadOverview} onInspect={onInspect} />
           </CapabilityGate>
         </TabsContent>
 

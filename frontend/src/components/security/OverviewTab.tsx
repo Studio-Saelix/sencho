@@ -60,7 +60,7 @@ interface OverviewTabProps {
    * readable path to the node; 'failed' = a real error.
    */
   loadError: OverviewLoadError | null;
-  /** Retry the overview read (the surface's only recovery path when it fails). */
+  /** Retry the overview read and the scan-result reads behind it. */
   onReload: () => void;
   trend: SecurityRiskTrendPoint[];
   /** Where the risk-trend read stands; independent of the overview read. */
@@ -124,7 +124,7 @@ const UNAVAILABLE_COPY: Record<Exclude<OverviewLoadError, 'unsupported'>, {
   },
   failed: {
     title: "Couldn't load the overview",
-    body: 'The security overview failed to load for this node. Switch nodes and back, or try again shortly.',
+    body: 'The security overview failed to load for this node. Try again shortly.',
   },
 };
 

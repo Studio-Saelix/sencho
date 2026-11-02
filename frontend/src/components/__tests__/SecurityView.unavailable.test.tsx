@@ -6,6 +6,7 @@
  */
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { render, screen, waitFor } from '@testing-library/react';
+import userEvent from '@testing-library/user-event';
 
 const apiFetchMock = vi.fn();
 vi.mock('@/lib/api', () => ({ apiFetch: (...args: unknown[]) => apiFetchMock(...args) }));
@@ -29,8 +30,11 @@ vi.mock('@/components/security/OverviewTab', () => ({
   ),
 }));
 vi.mock('@/components/security/ImagesTab', () => ({
-  ImagesTab: ({ errorReason }: { errorReason?: string | null }) => (
-    <div data-testid="images-error-reason">{errorReason ?? 'none'}</div>
+  ImagesTab: ({ errorReason, onRetry }: { errorReason?: string | null; onRetry?: () => void }) => (
+    <div>
+      <div data-testid="images-error-reason">{errorReason ?? 'none'}</div>
+      <button type="button" onClick={onRetry}>Retry images</button>
+    </div>
   ),
 }));
 vi.mock('@/components/security/FindingsTab', () => ({
@@ -121,5 +125,59 @@ describe('SecurityView named read failures', () => {
     render(<SecurityView activeTab="overview" onTabChange={vi.fn()} />);
 
     await waitFor(() => expect(screen.getByTestId('overview-load-error').textContent).toBe('unsupported'));
+  });
+
+  it('keeps each surface on its own cause', async () => {
+    mockReads(markedFailure('timeout', 504), markedFailure('unauthorized', 403));
+
+    render(<SecurityView activeTab="images" onTabChange={vi.fn()} />);
+
+    await waitFor(() => expect(screen.getByTestId('images-error-reason').textContent).toMatch(/do not have access/i));
+  });
+
+  it('keeps a plain server error on the scan tabs generic rather than naming a cause it does not have', async () => {
+    mockReads(
+      markedFailure('timeout', 504),
+      { ok: false, status: 500, headers: new Headers(), json: async () => ({ error: 'boom' }) } as unknown as Response,
+    );
+
+    render(<SecurityView activeTab="images" onTabChange={vi.fn()} />);
+
+    await waitFor(() => expect(apiFetchMock.mock.calls.filter((c) => c[0] === '/security/image-summaries').length).toBeGreaterThan(0));
+    await waitFor(() => expect(screen.getByTestId('images-error-reason').textContent).toBe('none'));
+  });
+
+  it('names a rejected node credential when the overview read throws on the 401', async () => {
+    const rejected = new Response('{}', { status: 401, headers: { 'x-sencho-proxy': '1' } });
+    apiFetchMock.mockImplementation((url: string) => {
+      if (url === '/security/overview') return Promise.reject(Object.assign(new Error('Unauthorized'), { response: rejected }));
+      if (url === '/security/image-summaries') return Promise.resolve(jsonOk({}));
+      return Promise.resolve(jsonOk([]));
+    });
+
+    render(<SecurityView activeTab="overview" onTabChange={vi.fn()} />);
+
+    await waitFor(() => expect(screen.getByTestId('overview-load-error').textContent).toBe('node-credential'));
+  });
+
+  it('retries the reads from the scan-result tabs and recovers the page', async () => {
+    let summaryCalls = 0;
+    apiFetchMock.mockImplementation((url: string) => {
+      if (url === '/security/overview') return Promise.resolve(markedFailure('timeout', 504));
+      if (url === '/security/image-summaries') {
+        summaryCalls += 1;
+        return Promise.resolve(summaryCalls === 1 ? markedFailure('timeout', 504) : jsonOk({}));
+      }
+      return Promise.resolve(jsonOk([]));
+    });
+    const user = userEvent.setup();
+
+    render(<SecurityView activeTab="images" onTabChange={vi.fn()} />);
+    await waitFor(() => expect(screen.getByTestId('images-error-reason').textContent).toMatch(/did not answer in time/i));
+
+    await user.click(screen.getByRole('button', { name: 'Retry images' }));
+
+    await waitFor(() => expect(summaryCalls).toBe(2));
+    await waitFor(() => expect(screen.getByTestId('images-error-reason').textContent).toBe('none'));
   });
 });

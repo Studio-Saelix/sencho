@@ -1575,8 +1575,9 @@ describe('ResourcesView', () => {
     expect(screen.queryByText('Disk usage unknown')).toBeNull();
   });
 
-  it('retries a sibling failure without aborting the slow inventory read that is still pending', async () => {
+  it('retries a sibling failure without aborting the slow inventory or disk-usage reads that are still pending', async () => {
     const resourcesSignals: AbortSignal[] = [];
+    const usageSignals: AbortSignal[] = [];
     let releaseResources: ((r: Response) => void) | undefined;
     let orphansCalls = 0;
     let usageCalls = 0;
@@ -1587,6 +1588,7 @@ describe('ResourcesView', () => {
       }
       if (url === '/system/docker-df') {
         usageCalls += 1;
+        if (opts?.signal) usageSignals.push(opts.signal);
         return new Promise<Response>(() => {});
       }
       if (url === '/system/orphans') {
@@ -1610,13 +1612,97 @@ describe('ResourcesView', () => {
     await user.click(screen.getAllByRole('button', { name: 'Retry' })[0]);
 
     await waitFor(() => expect(orphansCalls).toBe(2));
-    await waitFor(() => expect(usageCalls).toBe(2));
-    // The pending inventory read was never restarted.
+    // Neither pending slow read was restarted.
+    expect(usageCalls).toBe(1);
+    expect(usageSignals[0].aborted).toBe(false);
     expect(resourcesSignals).toHaveLength(1);
     expect(resourcesSignals[0].aborted).toBe(false);
 
     releaseResources!(jsonResponse({ images: [image('slow:but-ok')], volumes: [], networks: [] }));
     expect(await screen.findByText('slow:but-ok')).toBeInTheDocument();
+  });
+
+  const timeoutResponse = () => ({
+    ok: false,
+    status: 504,
+    headers: new Headers({ 'x-sencho-read-timeout': '1' }),
+    json: async () => ({ code: 'remote_read_timeout' }),
+  } as unknown as Response);
+
+  it('does not name the node when a sibling read is refused for access or a credential', async () => {
+    // A viewer without scan access gets a 403 on the scan summaries while the
+    // slow inventory read is healthy and pending: that is not a node-level cause.
+    mockedFetch.mockImplementation((url: string) => {
+      if (url === '/system/resources' || url === '/system/docker-df') return new Promise<Response>(() => {});
+      if (url === '/security/image-summaries') {
+        return Promise.resolve(jsonResponse({ error: 'forbidden' }, { ok: false, status: 403 }));
+      }
+      if (url === '/system/rollback/generations') {
+        return Promise.resolve({
+          ok: false,
+          status: 401,
+          headers: new Headers({ 'x-sencho-proxy': '1' }),
+          json: async () => ({ error: 'bad token' }),
+        } as unknown as Response);
+      }
+      return Promise.resolve(jsonResponse({}));
+    });
+
+    render(<ResourcesView />);
+
+    await waitFor(() => expect(mockedFetch).toHaveBeenCalledWith('/security/image-summaries', expect.anything()));
+    await act(async () => { await Promise.resolve(); });
+    expect(screen.queryByText('Could not load images.')).toBeNull();
+    expect(screen.queryByText('Disk usage unknown')).toBeNull();
+  });
+
+  it('one Retry re-reads every failed sibling region and leaves a healthy disk-usage answer alone', async () => {
+    const calls = { orphans: 0, rollback: 0, summaries: 0, usage: 0 };
+    mockedFetch.mockImplementation((url: string) => {
+      if (url === '/system/resources') return new Promise<Response>(() => {});
+      if (url === '/system/docker-df') {
+        calls.usage += 1;
+        return Promise.resolve(jsonResponse(reclaimableUsage(1000, 500)));
+      }
+      if (url === '/system/orphans') { calls.orphans += 1; return Promise.resolve(calls.orphans === 1 ? timeoutResponse() : jsonResponse({})); }
+      if (url === '/system/rollback/generations') { calls.rollback += 1; return Promise.resolve(calls.rollback === 1 ? timeoutResponse() : jsonResponse({ generations: [] })); }
+      if (url === '/security/image-summaries') { calls.summaries += 1; return Promise.resolve(calls.summaries === 1 ? timeoutResponse() : jsonResponse({})); }
+      return Promise.resolve(jsonResponse({}));
+    });
+
+    const user = userEvent.setup();
+    render(<ResourcesView />);
+    expect(await screen.findByText('Could not load images.')).toBeInTheDocument();
+
+    await user.click(screen.getAllByRole('button', { name: 'Retry' })[0]);
+
+    await waitFor(() => expect(calls.orphans).toBe(2));
+    await waitFor(() => expect(calls.rollback).toBe(2));
+    await waitFor(() => expect(calls.summaries).toBe(2));
+    // The disk-usage read had already answered, so Retry does not refetch it.
+    expect(calls.usage).toBe(1);
+  });
+
+  it('aborts the previous node’s disk-usage read on a node switch', async () => {
+    const usageSignals: AbortSignal[] = [];
+    mockedFetch.mockImplementation((url: string, opts?: RequestInit) => {
+      if (url === '/system/docker-df') {
+        if (opts?.signal) usageSignals.push(opts.signal);
+        return new Promise<Response>(() => {});
+      }
+      if (url === '/system/resources') return new Promise<Response>(() => {});
+      return Promise.resolve(jsonResponse({}));
+    });
+
+    const { rerender } = render(<ResourcesView />);
+    await waitFor(() => expect(usageSignals).toHaveLength(1));
+
+    nodesState.activeNode = { id: 2 };
+    rerender(<ResourcesView />);
+    await waitFor(() => expect(usageSignals).toHaveLength(2));
+
+    expect(usageSignals[0].aborted).toBe(true);
+    expect(usageSignals[1].aborted).toBe(false);
   });
 
   it('aborts the previous node’s inventory reads on a node switch and ignores their results', async () => {
