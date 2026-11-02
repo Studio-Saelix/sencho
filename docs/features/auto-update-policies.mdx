@@ -110,7 +110,7 @@ Auto-update is opt-in per stack. A stack participates in unattended updates only
 
 An unattended update is one Sencho runs without you: a scheduled task, an automatic update check that applies a digest rebuild, a webhook `pull`, or a bulk update from the stacks list. It runs only when every rendered service in the stack is `auto` or carries no label. A stack with a `manual` or `disabled` service, or with a value Sencho does not recognize, is skipped for that run before anything is pulled or recreated, and the reason is recorded. Updating that stack yourself, from its own **Update** action, is the way to move it forward.
 
-The Updates view marks such a stack **skipped by update policy** and names the blocking services in the tooltip, so a stack that will not be patched automatically is visible before a run rather than after it.
+The Updates view marks such a stack **skipped by update policy** and names the blocking services in the tooltip, so a stack that will not be patched automatically is visible before a run rather than after it. When the Compose model cannot be rendered, the check records the same skip the unattended run takes and the tooltip says the model could not be read, instead of keeping an earlier decision. Each node records the decision for its own stacks, so the view shows it for stacks on a proxy or Pilot node too, as long as that node evaluates the label.
 
 ## Cleaning up after updates
 
@@ -200,7 +200,7 @@ A stack that mixes registry images and `build:` services still gets a card, scor
     A [deploy enforcement](/features/deploy-enforcement) policy blocked the update, the same way it would block a manual one. The run history and the dispatched alert name the policy and the matching image findings. Review the findings and either clear them or adjust the policy, then let the next scheduled run or a manual **Apply now** retry.
   </Accordion>
   <Accordion title='A scheduled auto-update skipped a stack'>
-    A service in the stack declares `io.sencho.update: manual`, or a value Sencho does not recognize, so the unattended run left the whole stack alone. The run history names the services that blocked it and the run stays green. Open the stack and use its own **Update** action, or change the label to `auto` or remove it. A `disabled` service means no update may touch the stack at all, so change or remove that label before retrying. A run that fails with a message naming a node that does not evaluate `io.sencho.update` is different: update Sencho on that node, or update the stack yourself.
+    A service in the stack declares `io.sencho.update: manual`, or a value Sencho does not recognize, so the unattended run left the whole stack alone. The run history names the services that blocked it and the run stays green. Open the stack and use its own **Update** action, or change the label to `auto` or remove it. A `disabled` service means no update may touch the stack at all, so change or remove that label before retrying. A run that fails with a message naming a node that does not evaluate `io.sencho.update` is different: update Sencho on that node, or update the stack yourself. If the message says the Compose model could not be rendered, fix the compose or env error; until it renders, unattended updates fail closed and the Updates view marks the stack skipped.
   </Accordion>
 </AccordionGroup>
 

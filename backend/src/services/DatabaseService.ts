@@ -101,7 +101,7 @@ export interface StackUpdateDetail {
     checkedAt: number;
     /** Per-service breakdown; omitted when the stack has no persisted per-service data (no effective model available yet, or corrupt JSON). */
     services?: StackServiceStatus[];
-    /** Omitted when the check did not evaluate the policy (an older node, or a failed check). */
+    /** Omitted when the check did not evaluate the policy (an older node, or a check that never observed the model). */
     unattendedPolicy?: StackUpdateUnattendedPolicy;
 }
 

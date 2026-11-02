@@ -31,7 +31,7 @@ const service = z.object({
 }).strict();
 const unattendedPolicy = z.object({
     decision: z.enum(['allow', 'skip']),
-    ineligible: z.array(z.object({ service: text, policy: text }).strict()).max(512),
+    ineligible: z.array(z.object({ service: text, policy: text }).strict()),
 }).strict();
 const image = z.object({
     ref: text, localDigests: z.array(z.string().regex(/^sha256:[a-f0-9]{64}$/)).max(256),
@@ -54,6 +54,16 @@ const stack = z.object({
         || [...used].some(ref => !refs.has(ref)) || [...refs].some(ref => !used.has(ref))
         || (!value.model.renderable && (value.services.length > 0 || value.images.length > 0))) {
         context.addIssue({ code: 'custom', message: 'Incomplete or duplicate image evidence' });
+    }
+    const policy = value.unattendedPolicy;
+    if (policy && (policy.decision === 'allow'
+        ? policy.ineligible.length > 0
+        : policy.ineligible.some(entry => !names.has(entry.service))
+        || (!value.model.renderable && policy.ineligible.length > 0))) {
+        context.addIssue({ code: 'custom', message: 'Inconsistent unattended policy evidence' });
+    }
+    if (policy && !value.model.renderable && policy.decision !== 'skip') {
+        context.addIssue({ code: 'custom', message: 'An unrenderable model can only skip' });
     }
 });
 const envelope = {

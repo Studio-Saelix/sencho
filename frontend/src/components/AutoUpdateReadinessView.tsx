@@ -328,12 +328,15 @@ export function AutoPill({
   const skipped = isPolicySkipped(unattendedPolicy);
   if (!skipped && autoUpdateEnabled) return null;
   const ineligible = (unattendedPolicy?.ineligible ?? []).map(s => `${s.service} (${s.policy})`).join(', ');
+  // An empty list on a skip means the label could not be evaluated because the
+  // Compose model did not render; do not send the operator looking for a label.
+  const skipDetail = ineligible || 'the Compose model could not be rendered, so the policy could not be evaluated';
   return (
     <span
       className={compact
         ? 'inline-flex items-center gap-1 rounded-full border border-card-border px-2 py-[3px] font-mono text-[10px] uppercase tracking-[0.1em] text-stat-subtitle'
         : 'inline-flex items-center gap-1.5 rounded-full border border-card-border bg-muted/30 px-2.5 py-0.5 font-mono text-[10px] leading-3 uppercase tracking-[0.18em] text-stat-subtitle'}
-      title={skipped ? `Skipped by io.sencho.update: ${ineligible || 'a service is not eligible for unattended updates'}` : undefined}
+      title={skipped ? `Skipped by io.sencho.update: ${skipDetail}` : undefined}
       data-testid="auto-pill"
       data-state={skipped ? 'skipped' : 'off'}
     >
@@ -1212,8 +1215,9 @@ function AutoUpdateReadinessContent({ headerActions }: AutoUpdateReadinessProps)
       // Sticky has_update during a failed check is not a verified rebuild, so those
       // stacks stay in the advisory only.
       let failedLocalStacks = new Set<string>();
-      // The policy decision is recorded per node by whichever instance owns the
-      // stack, so the same view can show it for local, proxy and Pilot nodes.
+      // The policy decision is evaluated by the instance that owns the stack
+      // and persisted with its row, so the same view can show it for local,
+      // proxy and Pilot nodes that advertise the inspect capability.
       const unattendedByNodeStack = new Map<string, StackUnattendedPolicy>();
       if (detailRes.ok) {
         const fleetDetail = await detailRes.json() as Record<string, Record<string, StackUpdateInfo>>;
@@ -1649,9 +1653,11 @@ function AutoUpdateReadinessContent({ headerActions }: AutoUpdateReadinessProps)
   const flatCards = useMemo(() => groups.flatMap(g => g.cards), [groups]);
   const { total, ready } = useMemo(() => {
     const t = flatCards.length;
-    // Schedule-covered and actionable (confirmed update/rebuild, not blocked).
+    // Schedule-covered and actionable (confirmed update/rebuild, not blocked),
+    // and not a stack the recorded policy keeps the schedule from touching.
     const r = flatCards.filter(c =>
       c.autoUpdateEnabled
+      && !isPolicySkipped(c.unattendedPolicy)
       && c.previewLoaded
       && c.preview !== null
       && isActionableUpdatePreview(c.preview),

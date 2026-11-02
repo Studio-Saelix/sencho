@@ -31,7 +31,7 @@ it('asks for the unattended policy only when the caller requested it', async () 
     const stack = {
         name: 'web', observationRevision: 1, observationToken: 'signed-observation',
         model: { renderable: true }, services: [], images: [],
-        unattendedPolicy: { decision: 'skip', ineligible: [{ service: 'db', policy: 'manual' }] },
+        unattendedPolicy: { decision: 'allow', ineligible: [] },
     };
     vi.mocked(safeRemoteFetch).mockImplementation(async () => (
         new Response(JSON.stringify({ contractVersion: 1, requestNonce: nonce, stacks: [stack] }))

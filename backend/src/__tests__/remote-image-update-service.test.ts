@@ -1,7 +1,9 @@
 import { beforeEach, expect, it, vi } from 'vitest';
 import { RemoteImageUpdateService } from '../services/RemoteImageUpdateService';
-import { fetchRemoteImageUpdateFacts } from '../services/remoteImageUpdateClient';
+import { fetchRemoteImageUpdateFacts, fetchRemoteImageUpdateRoster } from '../services/remoteImageUpdateClient';
 import { probeRemoteImageUpdate } from '../services/remoteImageUpdateProbe';
+import { probeRemoteCapability } from '../helpers/remoteCapabilities';
+import { SENCHO_LABEL_POLICY_CAPABILITY } from '../helpers/senchoLabels';
 import type { ImageUpdateStackFacts } from '../services/imageUpdateFacts';
 import type { ImageUpdateDetectResult } from '../services/imageUpdateDetect';
 
@@ -12,7 +14,11 @@ vi.mock('../services/remoteImageUpdateProbe', () => ({ probeRemoteImageUpdate: v
 vi.mock('../helpers/remoteCapabilities', () => ({
     probeRemoteCapability: vi.fn().mockResolvedValue({ kind: 'supported' }),
 }));
-const owner = vi.hoisted(() => ({ reserveStackWriteGeneration: vi.fn(), commitRemoteObservation: vi.fn() }));
+const owner = vi.hoisted(() => ({
+    reserveStackWriteGeneration: vi.fn(),
+    commitRemoteObservation: vi.fn(),
+    runRemoteScan: vi.fn(),
+}));
 vi.mock('../services/ImageUpdateService', () => ({
     ImageUpdateService: { getInstance: () => owner, isChecksEnabled: () => true },
     UPDATE_VERIFICATION_INCOMPLETE_WARNING: 'Incomplete',
@@ -32,7 +38,12 @@ const facts: ImageUpdateStackFacts = {
 beforeEach(() => {
     vi.clearAllMocks();
     vi.mocked(fetchRemoteImageUpdateFacts).mockResolvedValue(structuredClone(facts));
+    vi.mocked(fetchRemoteImageUpdateRoster).mockResolvedValue(['web']);
     vi.mocked(probeRemoteImageUpdate).mockResolvedValue(success);
+    owner.runRemoteScan.mockImplementation(async (_nodeId: number, _manual: boolean, scan: () => Promise<void>) => {
+        await scan();
+        return true;
+    });
 });
 
 it('uses safe hub evidence to replace an anonymous failure through the scanner entry point', async () => {
@@ -77,13 +88,23 @@ it('reserves a hub generation before fetching facts and never uses the target re
     // A target that evaluates the label answers with the policy, so the commit
     // can record the same skip its own schedule applies.
     expect(fetchRemoteImageUpdateFacts).toHaveBeenCalledWith(2, 'web', expect.any(AbortSignal), { includePolicy: true });
+    expect(probeRemoteCapability).toHaveBeenCalledWith(2, SENCHO_LABEL_POLICY_CAPABILITY);
+});
+
+it('asks a policy-capable target for the decision on a full node scan', async () => {
+    owner.reserveStackWriteGeneration.mockReturnValue(7);
+    owner.commitRemoteObservation.mockResolvedValue({ outcome: 'cleared', warning: null });
+    await RemoteImageUpdateService.getInstance().checkRemoteNode(2, true);
+    expect(fetchRemoteImageUpdateFacts).toHaveBeenCalledWith(2, 'web', expect.any(AbortSignal), { includePolicy: true });
+    expect(owner.commitRemoteObservation).toHaveBeenCalledWith(2, facts, expect.any(Map), 7);
+    expect(probeRemoteCapability).toHaveBeenCalledWith(2, SENCHO_LABEL_POLICY_CAPABILITY);
 });
 
 it('does not ask an older target for a policy it cannot evaluate', async () => {
-    const { probeRemoteCapability } = await import('../helpers/remoteCapabilities');
     vi.mocked(probeRemoteCapability).mockResolvedValueOnce({ kind: 'unsupported' });
     owner.reserveStackWriteGeneration.mockReturnValue(7);
     owner.commitRemoteObservation.mockResolvedValue({ outcome: 'cleared', warning: null });
     await RemoteImageUpdateService.getInstance().recheckRemoteStack(2, 'web', new AbortController().signal);
     expect(fetchRemoteImageUpdateFacts).toHaveBeenCalledWith(2, 'web', expect.any(AbortSignal), { includePolicy: false });
+    expect(probeRemoteCapability).toHaveBeenCalledWith(2, SENCHO_LABEL_POLICY_CAPABILITY);
 });

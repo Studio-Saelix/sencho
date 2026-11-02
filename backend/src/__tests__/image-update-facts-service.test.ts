@@ -159,6 +159,7 @@ it('carries the unattended decision when the request asks for it, and fails clos
         },
     });
     const facts = await ImageUpdateFactsService.getInstance().collect(1, 'site', 'a'.repeat(32), true);
+    expect(policy.resolveUpdatePolicyPair).toHaveBeenCalledWith(1, 'site', { scope: 'stack' });
     expect(facts.unattendedPolicy).toEqual({
         decision: 'skip', ineligible: [{ service: 'web', policy: 'manual' }],
     });

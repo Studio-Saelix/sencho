@@ -39,19 +39,31 @@ describe('remote image facts boundary', () => {
         expect(() => parseRemoteImageUpdateFacts(body, nonce, 'web')).toThrow('Invalid remote image facts');
     });
 
-    it('accepts the optional unattended policy and rejects a malformed one', () => {
+    it('accepts the optional unattended policy and rejects a malformed or inconsistent one', () => {
         const body = response();
-        body.stacks[0].unattendedPolicy = { decision: 'skip', ineligible: [{ service: 'db', policy: 'manual' }] };
+        body.stacks[0].unattendedPolicy = { decision: 'skip', ineligible: [{ service: 'app', policy: 'manual' }] };
         expect(parseRemoteImageUpdateFacts(body, nonce, 'web')).toEqual(body);
 
         for (const bad of [
             { decision: 'maybe', ineligible: [] },
             { decision: 'skip', ineligible: [{ service: 'db' }] },
             { decision: 'skip', ineligible: [], extra: true },
+            { decision: 'allow', ineligible: [{ service: 'app', policy: 'manual' }] },
+            { decision: 'skip', ineligible: [{ service: 'missing', policy: 'manual' }] },
         ]) {
             body.stacks[0].unattendedPolicy = bad as never;
             expect(() => parseRemoteImageUpdateFacts(body, nonce, 'web')).toThrow('Invalid remote image facts');
         }
+
+        // A model that did not render can only skip, and a skip with no named
+        // service means exactly that.
+        body.stacks[0].model = { renderable: false, code: 'effective_model_render_failed', error: 'Cannot render' };
+        body.stacks[0].services = [];
+        body.stacks[0].images = [];
+        body.stacks[0].unattendedPolicy = { decision: 'skip', ineligible: [] };
+        expect(parseRemoteImageUpdateFacts(body, nonce, 'web')).toEqual(body);
+        body.stacks[0].unattendedPolicy = { decision: 'allow', ineligible: [] };
+        expect(() => parseRemoteImageUpdateFacts(body, nonce, 'web')).toThrow('Invalid remote image facts');
     });
 
     it('accepts render failures only without partial image evidence', () => {

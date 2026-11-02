@@ -96,6 +96,7 @@ describe('image update facts roster', () => {
     expect(all.status).toBe(200);
     expect(collect).toHaveBeenCalledTimes(2);
     expect(collect).toHaveBeenNthCalledWith(1, nodeId, 'web', requestNonce, true);
+    expect(collect).toHaveBeenNthCalledWith(2, nodeId, 'database', requestNonce, true);
   });
 
   it('returns all stack facts without changing their observation metadata', async () => {

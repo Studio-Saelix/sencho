@@ -46,8 +46,8 @@ const {
   // (falls back to the legacy whole-stack tally) unless a test overrides this,
   // matching how no real Compose model exists in this unit-test environment.
   mockBuildEffectiveServiceModel: vi.fn().mockResolvedValue({ renderable: false, code: 'effective_model_render_failed', error: 'no model in test' }),
-  // A status write records the unattended decision when it can read it; null
-  // means "this check could not", which the DB preserves.
+  // A status write records the unattended decision when it can read it; a null
+  // pair means the policy render failed closed, which records skip.
   mockResolveUpdatePolicyPair: vi.fn().mockResolvedValue(null),
 }));
 
@@ -1724,7 +1724,7 @@ services:
     );
   });
 
-  it('records skip, not the last decision, when the Compose model cannot be rendered', async () => {
+  it('records skip when the policy render fails closed while the model itself rendered', async () => {
     mockGetStacks.mockResolvedValue(['stackA']);
     mockGetStackContent.mockResolvedValue(TWO_SERVICE_COMPOSE);
     mockGetStackUpdateStatus.mockReturnValue({ stackA: false });
@@ -1864,8 +1864,8 @@ services:
       1, 'stackA', false, expect.any(Number), 'ok', null,
       expect.any(Array),
       expect.any(Number),
-      // This suite stubs Compose, so the model cannot be rendered and the
-      // decision fails closed to skip, matching what an unattended run does.
+      // The policy lookup returns null in this suite, so the decision fails
+      // closed to skip, matching what an unattended run does.
       { decision: 'skip', ineligible: [] },
     );
     const upsertsAfterRecheck = mockUpsertStackUpdateStatus.mock.calls.length;

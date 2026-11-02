@@ -439,7 +439,6 @@ export class ImageUpdateService {
     private static readonly CRON_SETTING_KEY = 'image_update_check_cron';
     private static readonly ENABLED_SETTING_KEY = 'image_update_checks_enabled';
     /** Bound on the policy render during a check, so one slow render cannot stall a pass. */
-    private static readonly POLICY_READ_TIMEOUT_MS = 10_000;
     private static readonly JITTER_FRACTION = 0.1;                // ±10% so a fleet does not poll in lockstep
     private static readonly STARTUP_DELAY_MS = 2 * 60 * 1000;    // 2 min after boot
 
@@ -1141,8 +1140,10 @@ export class ImageUpdateService {
 
     /**
      * Re-check a single stack after a service-scoped update or restore, or
-     * after a manual full-stack update. On a render failure the prior row is
-     * left untouched and a verification_failed result is returned.
+     * after a manual full-stack update. On a render failure the prior update
+     * fields and the write generation are left untouched, only the fail-closed
+     * unattended policy is rewritten, and a verification_failed result is
+     * returned.
      */
     public async recheckStack(
         nodeId: number,
@@ -1282,22 +1283,29 @@ export class ImageUpdateService {
     }
 
     /**
-     * The unattended decision a status write records, so the Updates view can
-     * report a policy skip without guessing. A model that cannot be rendered
-     * records skip, because the unattended run fails closed the same way;
-     * `undefined` is only for a target this instance cannot evaluate (an older
-     * remote), where the row keeps the last decision a check recorded.
+     * The unattended decision a local status write records, so the Updates view
+     * can report a policy skip without guessing. A model that cannot be
+     * rendered, or a policy read that fails, records skip because the unattended
+     * run fails closed the same way. `undefined` is only for a non-local target,
+     * whose decision is evaluated on its own node and arrives with the facts;
+     * this instance must not guess one from its own filesystem.
      */
     private async unattendedPolicyForStatus(
         nodeId: number,
         stackName: string,
     ): Promise<StackUpdateUnattendedPolicy | undefined> {
         try {
-            const pair = await withTimeout(
-                resolveUpdatePolicyPair(nodeId, stackName, { scope: 'stack' }),
-                ImageUpdateService.POLICY_READ_TIMEOUT_MS,
-                'update policy render',
-            );
+            const node = NodeRegistry.getInstance().getNode(nodeId);
+            if (node && node.type !== 'local') return undefined;
+        } catch {
+            // A registry that cannot answer still leaves the render below free
+            // to fail closed; do not turn it into "not evaluated".
+        }
+        try {
+            // resolveUpdatePolicyPair already bounds the whole evaluation; a
+            // second timeout here would race it into the outer catch, which is
+            // the one path that must not keep a stale allow.
+            const pair = await resolveUpdatePolicyPair(nodeId, stackName, { scope: 'stack' });
             return toUnattendedStatusPolicy(pair);
         } catch (error) {
             console.warn(
@@ -1305,7 +1313,7 @@ export class ImageUpdateService {
                 sanitizeForLog(stackName),
                 sanitizeForLog(getErrorMessage(error, 'unknown')),
             );
-            return undefined;
+            return { decision: 'skip', ineligible: [] };
         }
     }
 

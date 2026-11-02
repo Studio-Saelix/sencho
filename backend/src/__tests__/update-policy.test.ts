@@ -283,7 +283,11 @@ describe('the Updates-view policy projection', () => {
     const skipping = evaluateUpdatePolicy(
       resolution({ web: { update: 'manual' }, db: { update: 'disabled' } }), stackRequest('scheduled'),
     );
-    expect(toUnattendedStatusPolicy({ manual: skipping, unattended: skipping })).toEqual({
+    // The projection reads the unattended decision only, never the manual one.
+    const manualBlock = evaluateUpdatePolicy(
+      resolution({ web: { update: 'manual' }, db: { update: 'disabled' } }), stackRequest('manual'),
+    );
+    expect(toUnattendedStatusPolicy({ manual: manualBlock, unattended: skipping })).toEqual({
       decision: 'skip',
       ineligible: [{ service: 'db', policy: 'disabled' }, { service: 'web', policy: 'manual' }],
     });
