@@ -111,6 +111,12 @@ beforeEach(async () => {
   // The route's Docker endpoint check renders the stack's Compose config; this test is not about it.
   const { ComposeService } = await import('../services/ComposeService');
   vi.spyOn(ComposeService.prototype, 'evaluateDockerEndpoint').mockResolvedValue(null);
+  // The update policy renders the stack before an unattended or manual update
+  // may run, so the model answers for the label set this suite expects.
+  vi.spyOn(ComposeService.prototype, 'renderConfig').mockResolvedValue({
+    rendered: JSON.stringify({ services: { web: { image: 'nginx:1' } } }),
+    stderr: '', code: 0, timedOut: false,
+  });
   callOrder.length = 0;
   mockExecute.mockReset();
   mockRecheckStack.mockReset();

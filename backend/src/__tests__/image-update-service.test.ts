@@ -1753,6 +1753,9 @@ services:
       1, 'stackA', false, expect.any(Number), 'ok', null,
       expect.any(Array),
       expect.any(Number),
+      // The check records the unattended policy it observed; this suite stubs
+      // Compose, so no policy could be read and none is recorded.
+      null,
     );
     const upsertsAfterRecheck = mockUpsertStackUpdateStatus.mock.calls.length;
     expect(mockDispatchAlert).not.toHaveBeenCalled();
@@ -1809,6 +1812,7 @@ services:
           { service: 'worker', image: 'worker:latest', hasUpdate: false, checkStatus: 'ok', lastError: null },
         ],
         expect.any(Number),
+        null,
       );
     });
 
@@ -1960,6 +1964,7 @@ services:
         1, 'stackA', false, expect.any(Number), 'ok', null,
         expect.any(Array),
         expect.any(Number),
+        null,
       );
     });
 

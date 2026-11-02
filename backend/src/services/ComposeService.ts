@@ -21,6 +21,7 @@ import { DriftLedgerService } from './DriftLedgerService';
 import SelfIdentityService from './SelfIdentityService';
 import { parseEffectiveModel, type EffectiveModel } from './preflight/effectiveModel';
 import { deriveStackExposure } from './preflight/exposure';
+import { assertPolicyAllows, type UpdatePolicyResult } from './updatePolicy';
 
 import { isDebugEnabled } from '../utils/debug';
 import { getErrorMessage } from '../utils/errors';
@@ -2630,6 +2631,7 @@ export class ComposeService {
     stackName: string,
     ws?: WebSocket,
     atomic?: boolean,
+    beforeUp?: () => Promise<void>,
   ): Promise<{ recoveryId: string | null; deployedGenerationId: string | null; gitopsOperationId: string | null }> {
     await this.assertSopsOverlayOrRefuse(stackName);
     await this.assertRequiredEnvPresent(stackName);
@@ -2704,6 +2706,13 @@ export class ComposeService {
         await recoverySvc.abandon(candidate.id);
         throw new Error('Failed to mark recovery generation as acquired');
       }
+
+      // Last point before the runtime is touched. The policy was evaluated
+      // before this update started, but a Compose save can land while the
+      // images are pulled, so it is confirmed once more against a fresh render.
+      // A refusal here leaves the previous runtime intact and the candidate
+      // abandoned, never a compensating rollback of an update that never ran.
+      if (beforeUp) await beforeUp();
 
       const dockerController = DockerController.getInstance(this.nodeId);
       sendOutput('=== Classifying legacy orphans ===\n');
@@ -2896,8 +2905,12 @@ export class ComposeService {
    */
   async pullStackImages(
     stackName: string,
+    policy: UpdatePolicyResult,
     ws?: WebSocket,
   ): Promise<{ skippedBuildBacked: string[] }> {
+    // A pull is an image refresh: the caller cannot reach Compose without an
+    // allowing decision for this exact stack and trigger.
+    assertPolicyAllows(policy, { stack: stackName, target: { scope: 'stack' }, trigger: policy.trigger });
     const stackDir = path.join(this.baseDir, stackName);
     const sendOutput = (data: string) => {
       if (ws && ws.readyState === WebSocket.OPEN) ws.send(data);
@@ -2946,7 +2959,13 @@ export class ComposeService {
    * keep their container ids and StartedAt. No drift re-baseline and no dangling
    * prune here; the orchestrator owns per-service post-update reconciliation.
    */
-  async updateService(stackName: string, serviceName: string, hasBuild: boolean, ws?: WebSocket): Promise<void> {
+  async updateService(
+    stackName: string,
+    serviceName: string,
+    hasBuild: boolean,
+    ws?: WebSocket,
+    beforeUp?: () => Promise<void>,
+  ): Promise<void> {
     await this.assertSopsOverlayOrRefuse(stackName);
     await this.assertRequiredEnvPresent(stackName);
     await this.assertDockerEndpointSafe(stackName, { kind: 'service', service: serviceName });
@@ -2964,6 +2983,9 @@ export class ComposeService {
         await this.execute('docker', await this.authoredComposeArgs(stackName, ['pull', serviceName]), stackDir, ws, true, env, getComposeStallTimeoutMs());
       }
       sendOutput(`=== Recreating ${serviceName} ===\n`);
+      // The policy was evaluated before the pull, so it is confirmed once more
+      // against a fresh render immediately before the container is recreated.
+      if (beforeUp) await beforeUp();
       await this.execute('docker', await this.authoredComposeArgs(stackName, ['up', '-d', '--no-deps', '--force-recreate', serviceName]), stackDir, ws, true, env, getComposeStallTimeoutMs());
     }, sendOutput);
   }

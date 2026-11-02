@@ -266,6 +266,8 @@ describe('UpdateGuardService.computeUpdateReadiness wiring', () => {
     expect(report.stack).toBe('app');
     expect(report.signals.map(s => s.id)).toEqual([
       'preflight', 'drift', 'containers', 'healthchecks', 'update_preview', 'build_services', 'backup_slot', 'disk',
+      // The update policy is one more input; it never affects the verdict.
+      'update_policy',
     ]);
     // The container probe failure is the verdict-affecting unknown.
     expect(report.verdict).toBe('unknown');

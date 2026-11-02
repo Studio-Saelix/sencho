@@ -7,13 +7,21 @@ import { FileSystemService } from './FileSystemService';
 import { GitSourceService } from './GitSourceService';
 import { HealthGateService } from './HealthGateService';
 import { LicenseService } from './LicenseService';
-import { PROXY_TIER_HEADER } from './license-headers';
+import { PROXY_TIER_HEADER, deployProvenanceHeaders } from './license-headers';
 import { NodeRegistry } from './NodeRegistry';
 import { safeRemoteFetch } from '../utils/outboundTarget';
 import { getErrorMessage } from '../utils/errors';
 import { redactSensitiveText } from '../utils/safeLog';
 import { isValidStackName } from '../utils/validation';
 import { assertPolicyGateAllows, buildSystemPolicyGateOptions } from '../helpers/policyGate';
+import { probeRemoteCapability } from '../helpers/remoteCapabilities';
+import { SENCHO_LABEL_POLICY_CAPABILITY, SENCHO_UPDATE_LABEL } from '../helpers/senchoLabels';
+import {
+    describePolicySkip,
+    recordUpdatePolicyDecision,
+    resolveUpdatePolicy,
+    unsupportedNodeMessage,
+} from './updatePolicy';
 import { awaitHubPostUpdateVerification } from './hubPostUpdateVerification';
 import {
     appendRegistryDeliveryCode,
@@ -185,6 +193,10 @@ export class WebhookService {
             const lockAction = WEBHOOK_LOCK_ACTION[action];
             if (!lockAction) throw new Error(`Unknown action: ${action}`);
             const compose = ComposeService.getInstance(nodeId);
+            // A `pull` is an image refresh, so update policy can skip it. The
+            // skip is an outcome the operator declared, recorded as a success
+            // carrying the note rather than as a webhook failure.
+            let policySkipNote: string | null = null;
             // Run the lifecycle op under the per-stack lock so a webhook cannot
             // race a manual deploy/update/rollback/backup on the same stack.
             const lock = await StackOpLockService.getInstance().runExclusive(
@@ -220,13 +232,21 @@ export class WebhookService {
                             await compose.runCommand(stackName, 'start');
                             break;
                         case 'pull': {
+                            const updatePolicy = await resolveUpdatePolicy(nodeId, {
+                                stack: stackName, target: { scope: 'stack' }, trigger: 'webhook',
+                            });
+                            if (updatePolicy.decision !== 'allow') {
+                                recordUpdatePolicyDecision(nodeId, updatePolicy, 'system:webhook');
+                                policySkipNote = describePolicySkip(updatePolicy);
+                                break;
+                            }
                             await assertPolicyGateAllows(
                                 stackName,
                                 nodeId,
                                 buildSystemPolicyGateOptions('webhook', { auditPath: `/api/webhooks/${webhookId}/execute` }),
                             );
                             const orchResult = await StackUpdateOrchestrator.getInstance().execute(
-                                { nodeId, stackName, target: { scope: 'stack' }, trigger: 'webhook', actor: 'system:webhook' },
+                                { nodeId, stackName, target: { scope: 'stack' }, trigger: 'webhook', actor: 'system:webhook', policy: updatePolicy },
                                 { atomic: atomic ?? false, terminalWs: null },
                             );
                             const healthGateId = HealthGateService.getInstance().beginStack(nodeId, stackName, 'update', 'system:webhook', { deployedGenerationId: orchResult.kind === 'stack_compose_done' ? orchResult.deployedGenerationId : null });
@@ -246,6 +266,10 @@ export class WebhookService {
                 const error = stackOpSkipMessage(stackName, lock.existing.action);
                 this.recordExecution(webhookId, action, 'failure', triggerSource, durationMs, error);
                 return { success: false, error, duration_ms: durationMs };
+            }
+            if (policySkipNote) {
+                this.recordExecution(webhookId, action, 'success', triggerSource, durationMs, policySkipNote);
+                return { success: true, duration_ms: durationMs };
             }
             this.recordExecution(webhookId, action, 'success', triggerSource, durationMs, null);
             return { success: true, duration_ms: durationMs };
@@ -298,6 +322,17 @@ export class WebhookService {
     ): Promise<ExecutionResult> {
         const startTime = Date.now();
         try {
+            // A remote `pull` is an image refresh, so the node must evaluate
+            // io.sencho.update. A node that answers and does not is too old; a
+            // node that does not answer is unreachable. Neither is a skip.
+            if (action === 'pull') {
+                const refusal = await this.remotePullPolicyRefusal(nodeId, stackName);
+                if (refusal) {
+                    const durationMs = Date.now() - startTime;
+                    this.recordExecution(webhookId, action, 'failure', triggerSource, durationMs, refusal);
+                    return { success: false, error: refusal, duration_ms: durationMs };
+                }
+            }
             const endpoint = action === 'git-pull'
                 ? 'git-source/webhook-pull'
                 : action === 'pull'
@@ -355,6 +390,19 @@ export class WebhookService {
         }
     }
 
+    /**
+     * Refuse a remote pull whose node cannot evaluate io.sencho.update, or that
+     * did not answer. Fails closed: an unevaluated remote pull would otherwise
+     * run an update the operator may have disabled in the Compose file.
+     */
+    private async remotePullPolicyRefusal(nodeId: number, stackName: string): Promise<string | null> {
+        const nodeName = NodeRegistry.getInstance().getNode(nodeId)?.name ?? `node ${nodeId}`;
+        const capability = await probeRemoteCapability(nodeId, SENCHO_LABEL_POLICY_CAPABILITY);
+        if (capability.kind === 'supported') return null;
+        if (capability.kind === 'unsupported') return unsupportedNodeMessage(nodeName, stackName);
+        return `Stack "${stackName}" failed: node "${nodeName}" did not answer, so the update could not be checked against ${SENCHO_UPDATE_LABEL}.`;
+    }
+
     private async remoteStackRequest(
         nodeId: number,
         stackName: string,
@@ -367,6 +415,9 @@ export class WebhookService {
 
         const headers: Record<string, string> = { 'Content-Type': 'application/json' };
         if (target.apiToken) headers.Authorization = `Bearer ${target.apiToken}`;
+        // Trusted provenance: the remote records the update as a webhook run, so
+        // its own update policy applies as to any unattended update.
+        if (method === 'POST') Object.assign(headers, deployProvenanceHeaders('webhook', 'system:webhook'));
 
         const licenseHeaders = LicenseService.getInstance().getProxyHeaders();
         headers[PROXY_TIER_HEADER] = licenseHeaders.tier;
@@ -381,11 +432,14 @@ export class WebhookService {
             const host = targetBase.host;
             const hostname = targetBase.hostname;
 
-            // Verify the hostname is in the configured-node allow-list.
+            // Verify the hostname is in the configured-node allow-list. A Pilot
+            // target is a loopback tunnel to a node that is configured, so its
+            // hostname is never one of the configured urls; the tunnel is the
+            // trust boundary and the request still carries the node's own token.
             const allowedHosts = DatabaseService.getInstance().getNodes()
                 .filter(n => n.api_url)
                 .map(n => new URL(n.api_url!).hostname);
-            if (!allowedHosts.includes(hostname)) {
+            if (!target.trustedLoopback && !allowedHosts.includes(hostname)) {
                 throw new Error('Remote node hostname is not a configured node');
             }
 

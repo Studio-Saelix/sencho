@@ -10,6 +10,16 @@ import { NotificationService } from './NotificationService';
 import { invalidateNodeCaches } from '../helpers/cacheInvalidation';
 import { getRegistryDeliveryLockContext } from '../helpers/registryDeliveryContext';
 import { sanitizeForLog } from '../utils/safeLog';
+import {
+  describePolicySkip,
+  recordUpdatePolicyDecision,
+  resolveUpdatePolicy,
+  toUpdatePolicyWire,
+  type RemoteUpdatePolicy,
+} from './updatePolicy';
+
+/** How an automatic update was asked for, so a remote run records the same trigger as a local one. */
+export type AutomaticUpdateTrigger = 'scheduled' | 'automatic';
 
 export interface AutomaticStackUpdateInput {
   nodeId: number;
@@ -18,23 +28,44 @@ export interface AutomaticStackUpdateInput {
   policyOptions: PolicyEnforcementOptions;
   verificationOwner: 'hub_authority' | 'target_local';
   observation?: { verify: () => Promise<void>; consume: () => Promise<void> };
+  /** Defaults to `automatic`; a scheduled run carries `scheduled` so the two never blur. */
+  trigger?: AutomaticUpdateTrigger;
 }
 
 export interface AutomaticStackUpdateResult {
-  result: 'applied' | 'rejected' | 'policy_blocked';
+  result: 'applied' | 'rejected' | 'policy_blocked' | 'update_policy_skipped';
   applied: boolean;
   healthGateId: string | null;
   message: string;
   recheckWarning?: string;
   /** Why the Docker endpoint guard refused the update, so a remote caller can report it. */
   endpointRefusal?: string;
+  /** The decision behind an `update_policy_skipped`, for a remote caller to re-validate. */
+  updatePolicy?: RemoteUpdatePolicy;
 }
 
 /** Shared automatic mutation pipeline. Checked observations are validated under its exact stack lock. */
 export async function applyAutomaticStackUpdate(input: AutomaticStackUpdateInput): Promise<AutomaticStackUpdateResult> {
   const { nodeId, stackName } = input;
+  const trigger = input.trigger ?? 'automatic';
   const lock = await StackOpLockService.getInstance().runExclusive(
     nodeId, stackName, 'update', 'system', async () => {
+      // Update policy first: it is cheap, deterministic, and refuses before the
+      // gate writes evidence or the observation is spent, so a skipped stack
+      // never burns a checked observation or records a scan it did not act on.
+      const updatePolicy = await resolveUpdatePolicy(nodeId, {
+        stack: stackName, target: { scope: 'stack' }, trigger,
+      });
+      if (updatePolicy.decision !== 'allow') {
+        recordUpdatePolicyDecision(nodeId, updatePolicy, input.policyOptions.actor ?? null);
+        return {
+          result: 'update_policy_skipped' as const,
+          applied: false,
+          healthGateId: null,
+          message: `Stack "${stackName}": ${describePolicySkip(updatePolicy)}.`,
+          updatePolicy: toUpdatePolicyWire(updatePolicy),
+        };
+      }
       await input.observation?.verify();
       const policy = await enforcePolicyPreDeploy(stackName, nodeId, { ...input.policyOptions, bypass: false });
       if (!policy.ok) {
@@ -64,7 +95,7 @@ export async function applyAutomaticStackUpdate(input: AutomaticStackUpdateInput
       }
       await input.observation?.consume();
       const mutation = await StackUpdateOrchestrator.getInstance().execute(
-        { nodeId, stackName, target: { scope: 'stack' }, trigger: 'automatic', actor: input.policyOptions.actor },
+        { nodeId, stackName, target: { scope: 'stack' }, trigger, actor: input.policyOptions.actor, policy: updatePolicy },
         { atomic: true, terminalWs: null },
       );
       const healthGateId = HealthGateService.getInstance().beginStack(nodeId, stackName, 'update', input.policyOptions.actor, {

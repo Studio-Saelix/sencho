@@ -11,6 +11,7 @@
 import { describe, it, expect, beforeAll, afterAll, beforeEach, vi } from 'vitest';
 import request from 'supertest';
 import { setupTestDb, cleanupTestDb, loginAsTestAdmin } from './helpers/setupTestDb';
+import { allowEveryUpdatePolicy } from './__helpers__/allowingUpdatePolicy';
 
 const {
   mockUpdateStack,
@@ -36,11 +37,22 @@ vi.mock('../services/ComposeService', async () => {
       ...actual.ComposeService,
       getInstance: () => ({
         evaluateDockerEndpoint: async () => null,
+        // The update policy reads io.sencho.update from this render; an empty
+        // label set allows both classes.
+        renderConfig: async () => ({
+          rendered: JSON.stringify({ services: { web: { image: 'nginx:1' } } }),
+          stderr: '', code: 0, timedOut: false,
+        }),
         updateStack: mockUpdateStack,
       }),
     },
   };
 });
+
+// The policy module holds the ComposeService class from its own import, so
+// a getInstance mock is not visible to it; these suites are about the code
+// around the policy, which has its own tests.
+vi.mock('../services/updatePolicy', () => import('./__helpers__/allowingUpdatePolicy').then(m => m.allowingUpdatePolicyModule()));
 
 vi.mock('../services/DockerController', async () => {
   const actual = await vi.importActual<typeof import('../services/DockerController')>(

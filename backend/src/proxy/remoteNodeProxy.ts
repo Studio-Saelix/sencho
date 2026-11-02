@@ -43,6 +43,7 @@ import { removeStackMuteRules } from '../helpers/notificationSuppressionSync';
 import { redactSensitiveText } from '../utils/safeLog';
 import { isValidStackName } from '../utils/validation';
 import { isDebugEnabled } from '../utils/debug';
+import { SENCHO_LABEL_POLICY_CAPABILITY, SENCHO_UPDATE_LABEL } from '../helpers/senchoLabels';
 import { logDebugTiming, templatizeHydrationPath } from '../utils/requestTiming';
 import { invalidateFleetUpdateCache, isFullStackUpdatePath, isUpdatePreviewPath } from '../helpers/fleetUpdateCache';
 import {
@@ -541,6 +542,37 @@ export function createRemoteProxyMiddleware(): RequestHandler {
         if (!supported) {
           res.status(400).json({ error: 'Service-scoped updates are not supported on this node', code: 'capability_unavailable' });
           return;
+        }
+      }
+
+      // Bulk update refreshes images on every selected stack, so the target must
+      // evaluate io.sencho.update itself: the hub cannot know whether those
+      // stacks declare `disabled`. The probe is tri-state, so a node that did
+      // not answer is reported as unreachable, never as too old.
+      if (req.method === 'POST' && /^\/stacks\/bulk\/?$/.test(req.path)) {
+        const rawBody = await bufferProxyJsonBody(req, res, PROXY_JSON_BODY_LIMIT, {
+          logPrefix: '[remoteNodeProxy] bulk update',
+          encodingError: 'Compressed request bodies are not supported for remote bulk updates',
+          tooLargeError: 'Bulk update payload too large',
+        });
+        if (!rawBody) return;
+        req.rawBody = rawBody;
+        if (bulkBodyIsUpdate(rawBody)) {
+          const capability = await probeRemoteCapability(req.nodeId, SENCHO_LABEL_POLICY_CAPABILITY);
+          if (capability.kind === 'unsupported') {
+            res.status(400).json({
+              error: `Remote node "${node.name}" does not evaluate ${SENCHO_UPDATE_LABEL}. Update Sencho on that node before running a bulk update on it.`,
+              code: 'capability_unavailable',
+            });
+            return;
+          }
+          if (capability.kind !== 'supported') {
+            res.status(503).json({
+              error: `Remote node "${node.name}" did not answer, so a bulk update on it cannot be checked against ${SENCHO_UPDATE_LABEL} right now. Check that the node is online, then try again.`,
+              code: 'node_unreachable',
+            });
+            return;
+          }
         }
       }
 
@@ -1103,6 +1135,18 @@ function isAgentObservationRoute(method: string, path: string): boolean {
 /** POST /alerts (path is post-/api strip). */
 function isAlertCreateRoute(req: Request): boolean {
   return req.method === 'POST' && /^\/alerts\/?$/.test(req.path);
+}
+
+/** True when a buffered bulk body asks for the update action. */
+function bulkBodyIsUpdate(rawBody: Buffer): boolean {
+  if (rawBody.length === 0) return false;
+  try {
+    const parsed = JSON.parse(rawBody.toString('utf-8')) as { action?: unknown };
+    return parsed.action === 'update';
+  } catch {
+    // A body the hub cannot parse is forwarded as-is; the remote rejects it.
+    return false;
+  }
 }
 
 /** Max request body size for buffered JSON proxy gates (same as express.json()). */

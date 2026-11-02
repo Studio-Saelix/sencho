@@ -84,6 +84,16 @@ export interface StackServiceStatus {
     lastError: string | null;
 }
 
+/**
+ * Whether an unattended image refresh may touch a stack, recorded with the
+ * update check that observed it so the Updates view can tell the truth about a
+ * stack an unattended update will skip.
+ */
+export interface StackUpdateUnattendedPolicy {
+    decision: 'allow' | 'skip';
+    ineligible: { service: string; policy: string }[];
+}
+
 export interface StackUpdateDetail {
     hasUpdate: boolean;
     checkStatus: StackCheckStatus;
@@ -91,6 +101,8 @@ export interface StackUpdateDetail {
     checkedAt: number;
     /** Per-service breakdown; omitted when the stack has no persisted per-service data (no effective model available yet, or corrupt JSON). */
     services?: StackServiceStatus[];
+    /** Omitted when the check did not evaluate the policy (an older node, or a failed check). */
+    unattendedPolicy?: StackUpdateUnattendedPolicy;
 }
 
 const SERVICES_JSON_VERSION = 1;
@@ -183,6 +195,30 @@ function isStackServiceStatus(value: unknown): value is StackServiceStatus {
         && typeof v.hasUpdate === 'boolean'
         && (v.checkStatus === 'ok' || v.checkStatus === 'partial' || v.checkStatus === 'failed' || v.checkStatus === 'not_checkable')
         && (v.lastError === null || typeof v.lastError === 'string');
+}
+
+/**
+ * Parses stack_update_status.unattended_policy_json safely. A missing or corrupt
+ * value means the policy was not evaluated, which the Updates view shows as no
+ * policy note rather than as an allowed update.
+ */
+export function parseUnattendedPolicyJson(raw: string | null | undefined): StackUpdateUnattendedPolicy | null {
+    if (!raw) return null;
+    try {
+        const parsed = JSON.parse(raw) as { decision?: unknown; ineligible?: unknown };
+        if (parsed?.decision !== 'allow' && parsed?.decision !== 'skip') return null;
+        const ineligible = Array.isArray(parsed.ineligible)
+            ? parsed.ineligible
+                .filter((entry): entry is { service: string; policy: string } =>
+                    !!entry && typeof entry === 'object'
+                    && typeof (entry as { service?: unknown }).service === 'string'
+                    && typeof (entry as { policy?: unknown }).policy === 'string')
+                .map(entry => ({ service: entry.service, policy: entry.policy }))
+            : [];
+        return { decision: parsed.decision, ineligible };
+    } catch {
+        return null;
+    }
 }
 
 /** Parses stack_update_status.services_json safely; a missing, corrupt, or version-mismatched value yields an empty list rather than throwing. */
@@ -681,6 +717,11 @@ export interface NotificationHistory {
     container_name?: string;
     actor_username?: string | null;
     suppression_match?: string | null;
+    /**
+     * The routing keys this alert was routed with, recorded after dispatch.
+     * JSON in the column; parsed here.
+     */
+    route_keys?: string[] | null;
     /** The GitOps operation this notification reports on, if any. */
     gitops_operation_id?: string | null;
     /**
@@ -942,6 +983,21 @@ export interface Registry {
     updated_at: number;
 }
 
+/** Parse a JSON array column of routing keys, tolerating a malformed row. */
+function parseRouteKeysColumn(value: unknown): string[] | null {
+    if (typeof value !== 'string' || value.length === 0) return null;
+    try {
+        const parsed: unknown = JSON.parse(value);
+        if (!Array.isArray(parsed)) return null;
+        const keys = parsed.filter((key): key is string => typeof key === 'string' && key.length > 0);
+        return keys.length > 0 ? keys : null;
+    } catch {
+        // A corrupt column is treated as "no keys", which matches every alert
+        // exactly as an unfiltered rule does, never as a rule that matches none.
+        return null;
+    }
+}
+
 export interface NotificationRoute {
     id: number;
     name: string;
@@ -950,6 +1006,11 @@ export interface NotificationRoute {
     label_ids: number[] | null;
     categories: string[] | null;
     levels: ('info' | 'warning' | 'error')[] | null;
+    /**
+     * Routing rules match an alert only when one of these keys intersects the
+     * alert's keys. Null or empty matches every alert, as before.
+     */
+    route_keys?: string[] | null;
     channel_type: 'discord' | 'slack' | 'webhook' | 'apprise' | 'ntfy';
     channel_url: string;
     config?: string | null;
@@ -1304,6 +1365,7 @@ export class DatabaseService {
         this.migrateNotificationRoutesMatchers();
         this.migrateNotificationChannelConfig();
         this.migrateNotificationRouteLevels();
+        this.migrateNotificationRouteKeys();
         this.migrateNotificationSuppressionRules();
         this.migrateNotificationHistoryContext();
         this.migrateScanPolicyFleetColumns();
@@ -2472,6 +2534,9 @@ export class DatabaseService {
         // Per-service image-update snapshot. Must run AFTER the composite-PK
         // recreate above so it is never silently dropped on old installs.
         maybeAddCol('stack_update_status', 'services_json', 'TEXT');
+        // Whether an unattended image refresh may touch the stack, recorded by
+        // the check that observed it.
+        maybeAddCol('stack_update_status', 'unattended_policy_json', 'TEXT');
 
         this.migrateHealthGateTargetSchema();
 
@@ -3035,6 +3100,16 @@ stmt.run('gitops_schema_version', '1');
 
     private migrateNotificationRouteLevels(): void {
         this.tryAddColumn('notification_routes', 'levels', 'TEXT NULL');
+    }
+
+    /**
+     * Routing keys from `io.sencho.notify.route`: the keys a rule matches on,
+     * and the keys a dispatched alert was routed with (recorded after dispatch,
+     * so the bell is never held waiting for the key lookup).
+     */
+    private migrateNotificationRouteKeys(): void {
+        this.tryAddColumn('notification_routes', 'route_keys', 'TEXT NULL');
+        this.tryAddColumn('notification_history', 'route_keys', 'TEXT NULL');
     }
 
     private migrateNotificationSuppressionRules(): void {
@@ -3925,6 +4000,7 @@ stmt.run('gitops_schema_version', '1');
             label_ids: row.label_ids ? JSON.parse(row.label_ids as string) as number[] : null,
             categories: row.categories ? JSON.parse(row.categories as string) as string[] : null,
             levels: row.levels ? JSON.parse(row.levels as string) as ('info' | 'warning' | 'error')[] : null,
+            route_keys: parseRouteKeysColumn(row.route_keys),
             channel_type,
             channel_url: fields.url,
             config: fields.config,
@@ -3962,7 +4038,7 @@ stmt.run('gitops_schema_version', '1');
     public createNotificationRoute(route: Omit<NotificationRoute, 'id'>): NotificationRoute {
         const stored = this.storeAppriseFields(route.channel_type === 'apprise', route.channel_url, route.config);
         const result = this.db.prepare(
-            'INSERT INTO notification_routes (name, node_id, stack_patterns, label_ids, categories, levels, channel_type, channel_url, config, priority, enabled, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)'
+            'INSERT INTO notification_routes (name, node_id, stack_patterns, label_ids, categories, levels, route_keys, channel_type, channel_url, config, priority, enabled, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)'
         ).run(
             route.name,
             route.node_id ?? null,
@@ -3970,6 +4046,7 @@ stmt.run('gitops_schema_version', '1');
             route.label_ids ? JSON.stringify(route.label_ids) : null,
             route.categories ? JSON.stringify(route.categories) : null,
             route.levels && route.levels.length > 0 ? JSON.stringify(route.levels) : null,
+            route.route_keys && route.route_keys.length > 0 ? JSON.stringify(route.route_keys) : null,
             route.channel_type,
             stored.url,
             stored.config,
@@ -3996,6 +4073,10 @@ stmt.run('gitops_schema_version', '1');
         if ('levels' in updates) {
             fields.push('levels = ?');
             values.push(updates.levels && updates.levels.length > 0 ? JSON.stringify(updates.levels) : null);
+        }
+        if ('route_keys' in updates) {
+            fields.push('route_keys = ?');
+            values.push(updates.route_keys && updates.route_keys.length > 0 ? JSON.stringify(updates.route_keys) : null);
         }
         if (updates.channel_type !== undefined) { fields.push('channel_type = ?'); values.push(updates.channel_type); }
         if (updates.channel_url !== undefined) {
@@ -5656,6 +5737,7 @@ stmt.run('gitops_schema_version', '1');
             category: row.category ?? undefined,
             actor_username: row.actor_username ?? null,
             suppression_match: row.suppression_match ?? null,
+            route_keys: parseRouteKeysColumn(row.route_keys),
         };
     }
 
@@ -5671,7 +5753,7 @@ stmt.run('gitops_schema_version', '1');
         const categories = [
             'deploy_success', 'deploy_failure', 'stack_started', 'stack_stopped', 'stack_restarted',
             'image_update_applied', 'update_started', 'health_gate_passed', 'health_gate_failed',
-            'network_auto_created', 'rollback_generation_released',
+            'network_auto_created', 'rollback_generation_released', 'update_policy',
         ];
         const placeholders = categories.map(() => '?').join(', ');
         const sql = `
@@ -5684,13 +5766,16 @@ stmt.run('gitops_schema_version', '1');
             .map(row => this.mapNotificationRow(row as any));
     }
 
-    public addNotificationHistory(nodeId: number, notification: Omit<NotificationHistory, 'id' | 'is_read'>): NotificationHistory {
+    public addNotificationHistory(
+        nodeId: number,
+        notification: Omit<NotificationHistory, 'id' | 'is_read'> & { read?: boolean },
+    ): NotificationHistory {
         const dedupeKey = notification.dedupe_key ?? null;
         const stmt = this.db.prepare(
             `INSERT INTO notification_history (
                 node_id, level, message, timestamp, is_read, stack_name, container_name,
                 category, actor_username, gitops_operation_id, dedupe_key
-            ) VALUES (?, ?, ?, ?, 0, ?, ?, ?, ?, ?, ?)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(dedupe_key) WHERE dedupe_key IS NOT NULL DO NOTHING`
         );
         const result = stmt.run(
@@ -5698,6 +5783,9 @@ stmt.run('gitops_schema_version', '1');
             notification.level,
             notification.message,
             notification.timestamp,
+            // History-only rows (update-policy decisions) land already read so
+            // they never inflate the bell's unread count.
+            notification.read === true ? 1 : 0,
             notification.stack_name ?? null,
             notification.container_name ?? null,
             notification.category ?? null,
@@ -5817,6 +5905,15 @@ stmt.run('gitops_schema_version', '1');
         snapshot: { rules: { id: number; name: string }[]; bellSuppressed: boolean; externalSuppressed: boolean },
     ): void {
         this.db.prepare('UPDATE notification_history SET suppression_match = ? WHERE id = ?').run(JSON.stringify(snapshot), id);
+    }
+
+    /**
+     * Record the routing keys an already-dispatched alert was routed with. Runs
+     * after the bell broadcast so key resolution can never delay the bell.
+     */
+    public updateNotificationRouteKeys(id: number, keys: string[]): void {
+        if (keys.length === 0) return;
+        this.db.prepare('UPDATE notification_history SET route_keys = ? WHERE id = ?').run(JSON.stringify(keys), id);
     }
 
     // --- Container Metrics ---
@@ -6342,18 +6439,23 @@ stmt.run('gitops_schema_version', '1');
         lastError: string | null = null,
         services?: StackServiceStatus[],
         generation = 0,
+        unattendedPolicy: StackUpdateUnattendedPolicy | null = null,
     ): void {
         const servicesJson = services !== undefined ? stringifyServicesJson(services, generation) : null;
         this.db.prepare(
-            `INSERT INTO stack_update_status (node_id, stack_name, has_update, check_status, last_error, checked_at, services_json)
-             VALUES (?, ?, ?, ?, ?, ?, ?)
+            `INSERT INTO stack_update_status (node_id, stack_name, has_update, check_status, last_error, checked_at, services_json, unattended_policy_json)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?)
              ON CONFLICT(node_id, stack_name) DO UPDATE SET
                has_update = excluded.has_update,
                check_status = excluded.check_status,
                last_error = excluded.last_error,
                checked_at = excluded.checked_at,
-               services_json = COALESCE(excluded.services_json, stack_update_status.services_json)`
-        ).run(nodeId, stackName, hasUpdate ? 1 : 0, checkStatus, lastError, checkedAt, servicesJson);
+               services_json = COALESCE(excluded.services_json, stack_update_status.services_json),
+               unattended_policy_json = COALESCE(excluded.unattended_policy_json, stack_update_status.unattended_policy_json)`
+        ).run(
+            nodeId, stackName, hasUpdate ? 1 : 0, checkStatus, lastError, checkedAt, servicesJson,
+            unattendedPolicy ? JSON.stringify(unattendedPolicy) : null,
+        );
     }
 
     /**
@@ -6431,17 +6533,19 @@ stmt.run('gitops_schema_version', '1');
      */
     public getStackUpdateDetail(nodeId: number): Record<string, StackUpdateDetail> {
         const rows = this.db.prepare(
-            'SELECT stack_name, has_update, check_status, last_error, checked_at, services_json FROM stack_update_status WHERE node_id = ?'
-        ).all(nodeId) as Array<{ stack_name: string; has_update: number; check_status: string | null; last_error: string | null; checked_at: number; services_json: string | null }>;
+            'SELECT stack_name, has_update, check_status, last_error, checked_at, services_json, unattended_policy_json FROM stack_update_status WHERE node_id = ?'
+        ).all(nodeId) as Array<{ stack_name: string; has_update: number; check_status: string | null; last_error: string | null; checked_at: number; services_json: string | null; unattended_policy_json: string | null }>;
         const result: Record<string, StackUpdateDetail> = {};
         for (const row of rows) {
             const services = parseServicesJson(row.services_json);
+            const unattendedPolicy = parseUnattendedPolicyJson(row.unattended_policy_json);
             result[row.stack_name] = {
                 hasUpdate: row.has_update === 1,
                 checkStatus: (row.check_status === 'failed' || row.check_status === 'partial') ? row.check_status : 'ok',
                 lastError: row.last_error,
                 checkedAt: row.checked_at,
                 ...(services.length > 0 ? { services } : {}),
+                ...(unattendedPolicy ? { unattendedPolicy } : {}),
             };
         }
         return result;

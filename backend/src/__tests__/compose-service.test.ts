@@ -1,3 +1,5 @@
+import { allowingPolicy } from './__helpers__/updatePolicyFixture';
+
 /**
  * Unit tests for ComposeService — subprocess handling, deploy/rollback,
  * registry auth temp dir management, and WebSocket output.
@@ -2351,7 +2353,7 @@ describe('ComposeService - pullStackImages', () => {
     setupAutoCloseSpawn();
 
     const svc = ComposeService.getInstance(1);
-    const promise = svc.pullStackImages('my-stack');
+    const promise = svc.pullStackImages('my-stack', allowingPolicy('my-stack'));
     await vi.advanceTimersByTimeAsync(3100);
     const result = await promise;
 
@@ -2380,7 +2382,7 @@ describe('ComposeService - pullStackImages', () => {
     setupAutoCloseSpawn();
 
     const svc = ComposeService.getInstance(1);
-    const promise = svc.pullStackImages('my-stack');
+    const promise = svc.pullStackImages('my-stack', allowingPolicy('my-stack'));
     await vi.advanceTimersByTimeAsync(3100);
     const result = await promise;
 
@@ -2411,7 +2413,7 @@ describe('ComposeService - pullStackImages', () => {
     // No "Deploy blocked:" prefix: the editor wraps this in its own
     // "Image pull failed:" prefix, and the remedy names the chosen action rather
     // than telling the operator to deploy, which is a different action.
-    await expect(svc.pullStackImages('my-stack')).rejects.toThrow(
+    await expect(svc.pullStackImages('my-stack', allowingPolicy('my-stack'))).rejects.toThrow(
       'required environment variable API_KEY is missing. Define it in a .env or env_file, then run Save & Pull Images again.',
     );
 
@@ -2450,7 +2452,7 @@ describe('ComposeService - pullStackImages', () => {
     setupAutoCloseSpawn();
 
     const svc = ComposeService.getInstance(1);
-    const promise = svc.pullStackImages('my-stack');
+    const promise = svc.pullStackImages('my-stack', allowingPolicy('my-stack'));
     await vi.advanceTimersByTimeAsync(3100);
     await promise;
 
@@ -2468,7 +2470,7 @@ describe('ComposeService - pullStackImages', () => {
     setupAutoCloseSpawn();
 
     const svc = ComposeService.getInstance(1);
-    const promise = svc.pullStackImages('my-stack');
+    const promise = svc.pullStackImages('my-stack', allowingPolicy('my-stack'));
     await vi.advanceTimersByTimeAsync(3100);
     await promise;
 
@@ -2484,7 +2486,7 @@ describe('ComposeService - pullStackImages', () => {
     const ws = createMockWs();
 
     const svc = ComposeService.getInstance(1);
-    const promise = svc.pullStackImages('my-stack', ws);
+    const promise = svc.pullStackImages('my-stack', allowingPolicy('my-stack'), ws);
     await vi.advanceTimersByTimeAsync(3100);
     await promise;
 
@@ -2510,7 +2512,7 @@ describe('ComposeService - pullStackImages', () => {
     });
 
     const svc = ComposeService.getInstance(1);
-    const result = svc.pullStackImages('my-stack').then(() => null, (e: Error) => e);
+    const result = svc.pullStackImages('my-stack', allowingPolicy('my-stack')).then(() => null, (e: Error) => e);
     await vi.runAllTimersAsync();
     const error = await result;
 
@@ -3599,5 +3601,43 @@ describe('ComposeService - Compose version notice', () => {
     expect(noticeIndex).toBeGreaterThan(recreating);
     // The notice was already in the log when the up (the last spawn) started.
     expect(logLengthAtSpawn[logLengthAtSpawn.length - 1]).toBeGreaterThan(noticeIndex);
+  });
+});
+
+// ── Update policy re-check immediately before `up` ─────────────────────
+
+describe('ComposeService - update policy re-check in updateStack', () => {
+  it('refuses to recreate when the policy changed between the pull and the up', async () => {
+    mockGetRegistries.mockReturnValue([]);
+    mockClassifyLegacyOrphansForUpdate.mockResolvedValue({ status: 'none' });
+    setupAutoCloseSpawn();
+    const policyChanged = new Error('The update policy changed while the update was running');
+
+    await expect(
+      ComposeService.getInstance(1).updateStack(
+        'my-stack',
+        undefined,
+        true,
+        () => Promise.reject(policyChanged),
+      ),
+    ).rejects.toThrow(/policy changed/);
+
+    const spawnArgs = mockSpawn.mock.calls.map(c => c[1] as string[]);
+    // The pull ran; the recreation never did.
+    expect(spawnArgs.some(args => args.includes('pull') || args.includes('--pull'))).toBe(true);
+    expect(spawnArgs.some(args => args.includes('up'))).toBe(false);
+  });
+
+  it('recreates when the re-check passes', async () => {
+    mockGetRegistries.mockReturnValue([]);
+    mockClassifyLegacyOrphansForUpdate.mockResolvedValue({ status: 'none' });
+    setupAutoCloseSpawn();
+    const beforeUp = vi.fn().mockResolvedValue(undefined);
+
+    await ComposeService.getInstance(1).updateStack('my-stack', undefined, true, beforeUp);
+
+    expect(beforeUp).toHaveBeenCalledTimes(1);
+    const spawnArgs = mockSpawn.mock.calls.map(c => c[1] as string[]);
+    expect(spawnArgs.some(args => args.includes('up'))).toBe(true);
   });
 });

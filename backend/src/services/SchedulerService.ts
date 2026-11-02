@@ -6,6 +6,13 @@ import { PROXY_TIER_HEADER, deployProvenanceHeaders } from './license-headers';
 import DockerController from './DockerController';
 import { ComposeService } from './ComposeService';
 import { StackUpdateOrchestrator } from './StackUpdateOrchestrator';
+import type { OrchestratorResult } from './StackUpdateOrchestrator';
+import {
+    describePolicySkip,
+    recordUpdatePolicyDecision,
+    resolveUpdatePolicy,
+    type UpdatePolicyResult,
+} from './updatePolicy';
 import { StackOpLockService, stackOpSkipMessage as skipMessage } from './StackOpLockService';
 import { FileSystemService } from './FileSystemService';
 import { StackUpdateRecoveryService } from './StackUpdateRecoveryService';
@@ -65,6 +72,17 @@ export class TaskAuthorizationError extends Error {
         this.name = 'TaskAuthorizationError';
     }
 }
+
+/**
+ * A scheduled stack whose services declare an update policy that this run may
+ * not touch. It is an outcome, not a failure: the operator asked for it.
+ */
+interface PolicySkipped {
+    kind: 'update_policy_skipped';
+    policy: UpdatePolicyResult;
+}
+
+type UpdateRunOutcome = PolicySkipped | OrchestratorResult;
 
 export class SchedulerService {
     private static instance: SchedulerService;
@@ -1441,23 +1459,38 @@ export class SchedulerService {
 
         const { updatedImages } = gate;
 
-        await this.enforceSchedulerPolicyGate(
-            stackName,
-            nodeId,
-            'Auto-update',
-            `/api/scheduled-tasks/auto-update/${stackName}`,
-        );
         // Atomic backup/rollback is the default deploy mode: take a pre-op
         // backup and roll back on failure for every scheduled auto-update.
         const atomic = true;
         const lock = await StackOpLockService.getInstance().runExclusive(
             nodeId, stackName, 'update', 'system',
-            () => StackUpdateOrchestrator.getInstance().execute(
-                { nodeId, stackName, target: { scope: 'stack' }, trigger: 'scheduled', actor: 'system:scheduler' },
-                { atomic, terminalWs: null },
-            ),
+            async (): Promise<UpdateRunOutcome> => {
+                // Update policy runs inside the lock and before the security gate,
+                // so a skipped stack writes no policy evidence for an update it
+                // never makes.
+                const policy = await resolveUpdatePolicy(nodeId, {
+                    stack: stackName, target: { scope: 'stack' }, trigger: 'scheduled',
+                });
+                if (policy.decision !== 'allow') {
+                    recordUpdatePolicyDecision(nodeId, policy, 'system:scheduler');
+                    return { kind: 'update_policy_skipped', policy };
+                }
+                await this.enforceSchedulerPolicyGate(
+                    stackName,
+                    nodeId,
+                    'Auto-update',
+                    `/api/scheduled-tasks/auto-update/${stackName}`,
+                );
+                return StackUpdateOrchestrator.getInstance().execute(
+                    { nodeId, stackName, target: { scope: 'stack' }, trigger: 'scheduled', actor: 'system:scheduler', policy },
+                    { atomic, terminalWs: null },
+                );
+            },
         );
         if (!lock.ran) return skipMessage(stackName, lock.existing.action);
+        if (lock.result?.kind === 'update_policy_skipped') {
+            return `Stack "${stackName}": ${describePolicySkip(lock.result.policy)}.`;
+        }
 
         // Health observation starts immediately after Compose; registry recheck is
         // isolated so a verification failure cannot turn Compose success into a failure.

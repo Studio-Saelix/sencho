@@ -2,7 +2,8 @@ import path from 'path';
 import YAML from 'yaml';
 import { CronExpressionParser } from 'cron-parser';
 import DockerController from './DockerController';
-import { DatabaseService, type StackCheckStatus, type StackServiceStatus } from './DatabaseService';
+import { DatabaseService, type StackCheckStatus, type StackServiceStatus, type StackUpdateUnattendedPolicy } from './DatabaseService';
+import { resolveUpdatePolicyPair } from './updatePolicy';
 import { FileSystemService } from './FileSystemService';
 import { RegistryService } from './RegistryService';
 import { NodeRegistry } from './NodeRegistry';
@@ -437,6 +438,8 @@ export class ImageUpdateService {
     private static readonly MODE_SETTING_KEY = 'image_update_check_mode';
     private static readonly CRON_SETTING_KEY = 'image_update_check_cron';
     private static readonly ENABLED_SETTING_KEY = 'image_update_checks_enabled';
+    /** Bound on the policy render during a check, so one slow render cannot stall a pass. */
+    private static readonly POLICY_READ_TIMEOUT_MS = 10_000;
     private static readonly JITTER_FRACTION = 0.1;                // ±10% so a fleet does not poll in lockstep
     private static readonly STARTUP_DELAY_MS = 2 * 60 * 1000;    // 2 min after boot
 
@@ -1224,11 +1227,40 @@ export class ImageUpdateService {
         const lastError = stackStatusLastError(services);
         const now = Date.now();
 
+        // The same observation answers "would an unattended update touch this
+        // stack", so the Updates view never has to guess. Best effort: a check
+        // that cannot read the policy records none, which the view shows as no
+        // policy note rather than as an allowed update.
+        let unattendedPolicy: StackUpdateUnattendedPolicy | null = null;
+        try {
+            const pair = await withTimeout(
+                resolveUpdatePolicyPair(nodeId, stackName, { scope: 'stack' }),
+                ImageUpdateService.POLICY_READ_TIMEOUT_MS,
+                'update policy render',
+            );
+            unattendedPolicy = pair
+                ? {
+                    decision: pair.unattended.decision === 'allow' ? 'allow' : 'skip',
+                    ineligible: pair.unattended.evaluation === 'evaluated'
+                        ? pair.unattended.services
+                            .filter(s => !s.eligible)
+                            .map(s => ({ service: s.service, policy: s.policy }))
+                        : [],
+                }
+                : null;
+        } catch (error) {
+            console.warn(
+                '[ImageUpdateService] update policy unavailable for %s: %s',
+                sanitizeForLog(stackName),
+                sanitizeForLog(getErrorMessage(error, 'unknown')),
+            );
+        }
+
         const committed = await this.withStackWriteLock(nodeId, stackName, generation, async (gen) => {
             if (checkStatus === 'failed') {
                 db.recordStackCheckFailure(nodeId, stackName, lastError ?? 'Update check failed', now, services, gen);
             } else {
-                db.upsertStackUpdateStatus(nodeId, stackName, hasUpdate, now, checkStatus, lastError, services, gen);
+                db.upsertStackUpdateStatus(nodeId, stackName, hasUpdate, now, checkStatus, lastError, services, gen, unattendedPolicy);
             }
         });
         // A newer scanner reservation dropped this write; do not report cleared.
