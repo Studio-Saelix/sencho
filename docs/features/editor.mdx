@@ -63,6 +63,8 @@ Below the action bar, the **CONTAINERS** section lists every container the stack
 | **Action buttons** | **Image source links**, **View logs**, **Inspect image**, **Open bash shell** (admin only), **Service actions**. Per-container image references and registry links live here, not in the header. **Inspect image** opens the same image detail sheet as Resources; Used by shows the current stack only from this entry point. |
 | **Live stats** | CPU, memory, and net I/O with rolling sparklines. Only rendered while the container is running. Stats refresh on the same 1500 ms cadence as the dashboard. |
 
+A service card carries an **Updates** chip when the service declares an update policy in its Compose labels: **Updates: manual** for `manual`, **Updates: off** for `disabled`, and **Updates: unattended off** for a value Sencho does not recognize. A `disabled` service also keeps its **Update** button disabled and explains why. See [Sencho Labels · Update policy](/features/sencho-labels#update-policy).
+
 ### Service actions
 
 When the container has a compose service name attached, an extra `⋮` button appears at the right of the row. It opens **Restart service**, **Stop service**, or **Start service** depending on the current state. Service actions affect a single service; for full-stack operations use the action bar above.

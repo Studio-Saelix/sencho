@@ -250,6 +250,8 @@ The table columns are:
 
 The sheet paginates at 20 rows per page; navigate with the **Previous** / **Next** controls in the footer. Run history is retained for 30 days; older runs are purged automatically.
 
+An auto-update run that leaves a stack alone because of its update policy appears in **Details** in one of two ways. A stack skipped because a service does not allow unattended updates reads `Stack "x": skipped by update policy (db: manual).`, and the run stays **Success**: nothing was pulled or recreated, and a skip is not a failure. A run aimed at a node that does not evaluate the label reads `Stack "x" failed: node "n" does not evaluate io.sencho.update; update Sencho on that node.`, and the run is **Failed**, because that node cannot tell whether the stack allows the update. See [Sencho Labels · Update policy](/features/sencho-labels#update-policy).
+
 The CSV export includes every run in the history with columns: Timestamp, Source, Status, Duration (s), Details.
 
 ## How it works
@@ -257,7 +259,7 @@ The CSV export includes every run in the history with columns: Timestamp, Source
 A background Scheduler Service evaluates due tasks every 60 seconds. When a task's next run time has passed:
 
 1. The scheduler checks that the target node still exists and is online; a deleted or offline node fails the run before anything executes.
-2. It executes the configured action using the same internal services that power the equivalent UI buttons (Restart, Snapshot, Prune, and so on). Auto-update Stack and Start / Bring Up Stack additionally run through the same [deploy-enforcement](/features/deploy-enforcement) scan-policy gate as a manual deploy: if the stack's images violate an active policy, the run is blocked and recorded as a failure instead of deploying, and a warning notification names the policy and the offending images. Scheduled Auto-update Stack runs always take an atomic pre-update backup and roll back on failure, the same mechanism documented in [Atomic Deployments](/features/atomic-deployments), regardless of that feature's instance-wide default.
+2. It executes the configured action using the same internal services that power the equivalent UI buttons (Restart, Snapshot, Prune, and so on). Auto-update Stack and Start / Bring Up Stack additionally run through the same [deploy-enforcement](/features/deploy-enforcement) scan-policy gate as a manual deploy: if the stack's images violate an active policy, the run is blocked and recorded as a failure instead of deploying, and a warning notification names the policy and the offending images. Before an auto-update pulls anything, it also applies each service's [update policy](/features/sencho-labels#update-policy): a stack with a service set to `manual` or `disabled`, or with a value Sencho does not recognize, is skipped and the reason is recorded in the run history. Scheduled Auto-update Stack runs always take an atomic pre-update backup and roll back on failure, the same mechanism documented in [Atomic Deployments](/features/atomic-deployments), regardless of that feature's instance-wide default.
 3. The result is logged to the execution history.
 4. On failure, an `error`-level notification goes out through the configured channels. On recovery from a previously failing state, an `info`-level recovery notification is dispatched.
 5. The next run time is recalculated from the cron expression.
@@ -288,6 +290,9 @@ If Sencho restarts while a task is mid-execution, the orphaned run record is mar
   </Accordion>
   <Accordion title="A scheduled Auto-update or Start / Bring Up Stack run was blocked by a policy">
     Auto-update Stack and Start / Bring Up Stack run through the same [deploy-enforcement](/features/deploy-enforcement) scan-policy gate as a manual deploy. If the stack's current images match an active blocking policy, the run fails with a message naming the policy and the offending images, and a matching warning notification is dispatched. Review or adjust the policy, or update the flagged images, then click **Run now** to retry.
+  </Accordion>
+  <Accordion title="A scheduled auto-update run says it was skipped by update policy">
+    A service in the stack declares `io.sencho.update: manual`, or a value Sencho does not recognize, so the run left the whole stack alone. The run stays green and its details name the blocking services, for example `Stack "x": skipped by update policy (db: manual).` Open the stack and use its own **Update** action, or change the label to `auto` or remove it, then click **Run now**. A run that fails with a message naming a node that does not evaluate `io.sencho.update` is different: update Sencho on that node, or update the stack yourself.
   </Accordion>
   <Accordion title="A scheduled task failed because another operation was already running">
     Sencho serializes operations per stack. If a manual deploy, restart, or other lifecycle action is already in progress for a stack when its scheduled task fires, the schedule skips that turn and records a failure naming the operation that was already running, instead of queuing behind it. No action is needed: the task fires again at its next cron tick. Click **Run now** if you want to retry immediately once the other operation finishes.

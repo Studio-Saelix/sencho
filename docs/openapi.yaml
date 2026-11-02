@@ -136,6 +136,59 @@ components:
           description: Machine-readable error code (e.g., `PAID_REQUIRED`, `SCOPE_DENIED`).
           enum: [PAID_REQUIRED, SCOPE_DENIED]
 
+    UpdatePolicyDecision:
+      type: object
+      description: |
+        The one decision that authorizes an image refresh, computed from the
+        stack's rendered Compose model. Present on a refusal and on a skip.
+      required: [contract, stack, target, trigger, evaluation, decision, reason]
+      properties:
+        contract:
+          type: integer
+          enum: [1]
+        stack:
+          type: string
+        target:
+          type: object
+          required: [scope]
+          properties:
+            scope:
+              type: string
+              enum: [stack, service]
+            serviceName:
+              type: string
+        trigger:
+          type: string
+          enum: [manual, scheduled, automatic, blueprint, webhook, bulk]
+        evaluation:
+          type: string
+          enum: [evaluated, unrenderable]
+        decision:
+          type: string
+          enum: [allow, block, skip]
+        services:
+          type: array
+          description: Every service the operation would touch, with its declared policy.
+          items:
+            type: object
+            required: [service, policy, eligible]
+            properties:
+              service:
+                type: string
+              policy:
+                type: string
+                enum: [default, auto, manual, disabled, invalid]
+              eligible:
+                type: boolean
+              reason:
+                type: string
+        fingerprint:
+          type: string
+          description: Fingerprint of the per-service policies, for the pre-recreate re-check.
+        reason:
+          type: [string, "null"]
+          description: Fixed text naming the refusing services, never a raw label value.
+
     SuccessMessage:
       type: object
       required: [message]
@@ -1487,6 +1540,29 @@ components:
         application/json:
           schema:
             $ref: "#/components/schemas/Error"
+    UpdatePolicyBlocked:
+      description: |
+        Refused by the stack's `io.sencho.update` policy before any image was
+        pulled or container recreated. Sencho never narrows the operation to the
+        eligible services: the eligible ones are listed so the operator can
+        update one on its own.
+      content:
+        application/json:
+          schema:
+            type: object
+            required: [error, code, updatePolicy]
+            properties:
+              error:
+                type: string
+                example: 'Update blocked by io.sencho.update: "db" is set to disabled.'
+              code:
+                type: string
+                enum: [update_policy_blocked]
+              serviceName:
+                type: string
+                description: The service, for a service-scoped update or pull.
+              updatePolicy:
+                $ref: "#/components/schemas/UpdatePolicyDecision"
 
 paths:
   # ── Health ──────────────────────────────────────────────
@@ -2720,12 +2796,23 @@ paths:
         Pulls latest images and recreates containers (`docker compose pull && up -d`)
         using atomic update with automatic rollback on failure.
         Requires `stack:deploy` permission.
+
+        The stack's services decide whether the update may run. A service whose
+        `io.sencho.update` label is `disabled` refuses the whole update, before
+        any image is pulled. A `manual` or unrecognized value has no effect on
+        an update the operator asked for; it removes the stack from unattended
+        updates. When the request carries trusted unattended provenance
+        (`x-sencho-deploy-source` of `webhook` or `scheduler` on machine auth),
+        a stack that may not be updated unattended answers 200 with
+        `status: skipped` instead of 409.
       parameters:
         - $ref: "#/components/parameters/stackName"
         - $ref: "#/components/parameters/nodeId"
       responses:
         "200":
-          description: Update completed.
+          description: |
+            Update completed, or skipped by the update policy when the request
+            carried trusted unattended provenance.
           content:
             application/json:
               schema:
@@ -2734,7 +2821,13 @@ paths:
                 properties:
                   status:
                     type: string
+                    enum: [Update completed, skipped]
                     example: Update completed
+                  message:
+                    type: string
+                    description: Present on a skip, naming the services that refused it.
+                  updatePolicy:
+                    $ref: "#/components/schemas/UpdatePolicyDecision"
                   healthGateId:
                     type: string
                     nullable: true
@@ -2764,6 +2857,8 @@ paths:
                     type: boolean
                   failure:
                     $ref: "#/components/schemas/FailureClassification"
+        "409":
+          $ref: "#/components/responses/UpdatePolicyBlocked"
 
   /api/stacks/{stackName}/rollback:
     post:
@@ -2937,6 +3032,11 @@ paths:
                       properties:
                         id:
                           type: string
+                          description: |
+                            Includes `update_policy`, which reports the stack's
+                            `io.sencho.update` decision. It never affects the
+                            verdict: a deliberately pinned stack is a choice,
+                            not a readiness finding.
                         status:
                           type: string
                           enum: [ok, warning, attention, blocked, unknown]
@@ -2946,6 +3046,42 @@ paths:
                           type: string
                         affectsVerdict:
                           type: boolean
+                  updatePolicy:
+                    type: object
+                    description: |
+                      The policy behind this report, computed from one render.
+                      Absent when the caller did not ask for it (the batched
+                      Fleet rollup) and on a node that does not evaluate the
+                      label. The dialog decides whether the operator may update
+                      from `manualDecision`, not from the verdict.
+                    required: [evaluation, services, manualDecision, unattendedDecision, reason]
+                    properties:
+                      evaluation:
+                        type: string
+                        enum: [evaluated, unrenderable]
+                      services:
+                        type: array
+                        items:
+                          type: object
+                          required: [service, policy, eligible]
+                          properties:
+                            service:
+                              type: string
+                            policy:
+                              type: string
+                              enum: [default, auto, manual, disabled, invalid]
+                            eligible:
+                              type: boolean
+                            reason:
+                              type: string
+                      manualDecision:
+                        type: string
+                        enum: [allow, block]
+                      unattendedDecision:
+                        type: string
+                        enum: [allow, skip]
+                      reason:
+                        type: [string, "null"]
         "400":
           description: Invalid service scope.
           content:
@@ -3023,6 +3159,10 @@ paths:
         Manually pulls or builds one declared service, then recreates only that
         service with `--no-deps --force-recreate`. Multi-service stacks only.
         Requires `stack:deploy`. Automation paths continue to update the full stack.
+
+        A service whose `io.sencho.update` label is `disabled` is refused with
+        409 before any Compose call. This is the operator's own update, so
+        `manual` and an unrecognized value do not block it.
       parameters:
         - $ref: "#/components/parameters/stackName"
         - name: serviceName
@@ -3062,6 +3202,8 @@ paths:
                 $ref: "#/components/schemas/Error"
         "403":
           $ref: "#/components/responses/Forbidden"
+        "409":
+          $ref: "#/components/responses/UpdatePolicyBlocked"
         "500":
           description: Service update failed.
           content:

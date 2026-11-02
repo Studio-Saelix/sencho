@@ -496,6 +496,7 @@ Create routing rules that direct specific alert types to specific notification c
 | **Node** | Specific node, or all nodes if left empty. |
 | **Stack patterns** | Glob patterns with `*` (for example `prod-*`) matching stack names. |
 | **Labels** | Apply this rule to stacks that carry any of the selected labels. |
+| **Routing keys** | One or more routing keys, matched against the `io.sencho.notify.route` labels on a stack's services. A rule with keys matches only alerts that carry at least one of them; empty matches any alert. |
 | **Categories** | Event categories that trigger the rule (crash, deploy, vulnerability, etc.). |
 | **Severity** | Info, warning, and/or error levels. Empty matches any severity. |
 | **Channel type** | `discord`, `slack`, `webhook`, `apprise`, or `ntfy`. |

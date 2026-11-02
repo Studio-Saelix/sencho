@@ -235,11 +235,13 @@ Each row includes:
 
 When a stack declares more than one Compose service, each service with a single matching container renders as one flat container card. When a registry image update is confirmed for that service, the card shows **Update** immediately left of the image source links control (with an update badge). Build-backed services without a confirmed registry update show **Rebuild** in the same place. The **Service actions** kebab for Start / Stop / Restart stays on the card.
 
+Each service row follows that service's update policy. A service set to `io.sencho.update: disabled` keeps its **Update** button disabled and explains why: no update may touch it. A service set to `manual` keeps its own **Update** button, while every unattended update leaves the whole stack alone. See [Sencho Labels · Update policy](/features/sencho-labels#update-policy).
+
 Services with multiple replicas keep a shared header above their nested container cards. That header owns the same **Update** / **Rebuild** rules, the update badge, and **Start / Stop / Restart** for every replica. Nested cards keep logs, inspect image, shell, ports, and metrics only.
 
 A declared service with no running containers shows a compact row with the service name, Update/Rebuild under the same rules, and the Service actions kebab (so you can still Start the service).
 
-After a service update succeeds and the image check clears, the **Update** button disappears. The editor toolbar **Update** action still updates the entire stack at any time.
+After a service update succeeds and the image check clears, the **Update** button disappears. The editor toolbar **Update** action still updates the entire stack at any time. That whole-stack update is refused when any rendered service is `disabled`, and the refusal names the services that block it.
 
 Single-service stacks keep the existing flat container layout; service headers do not appear.
 
@@ -396,7 +398,7 @@ The stack header groups actions by frequency of use. The most common action is t
 | Primary | **Restart** | `docker compose restart` | Restarts all containers in the stack. |
 | Secondary | **Stop** | `docker compose stop` | Stops containers without removing them. State is preserved. |
 | Secondary | **Take down** | `docker compose down` | Removes containers and compose-created networks. The stack definition stays on disk so you can deploy again later. Optional volume removal is available in the confirmation dialog. |
-| Secondary | **Update** | `docker compose pull` + `up -d` (or build-aware rebuild when services declare `build:`) | Pulls registry images and recreates containers. When one or more services use `build:`, Update rebuilds those images from source (`compose build --pull`), pulls any remaining registry images, then recreates containers. |
+| Secondary | **Update** | `docker compose pull` + `up -d` (or build-aware rebuild when services declare `build:`) | Pulls registry images and recreates containers. When one or more services use `build:`, Update rebuilds those images from source (`compose build --pull`), pulls any remaining registry images, then recreates containers. Refused when a rendered service sets `io.sencho.update: disabled`. |
 | Overflow | **Rollback** | Restores recovery generation | Prefers the current recovery generation: restores the managed authored inventory and held prior image IDs where available, then redeploys. Only shown when a generation or fallback backup exists. |
 | Overflow | **Scan config** | Trivy config scan | Scans the compose file for misconfigurations (admin role). |
 | Overflow | **Monitor** | Opens Monitor sheet | Opens the stack **Monitor** sheet on the Alerts tab (alert rules and Auto-heal). Same sheet as sidebar **Alerts** / **Auto-Heal**. |
@@ -408,7 +410,7 @@ The stack header groups actions by frequency of use. The most common action is t
 | Placement | Button | Command | What it does |
 |-----------|--------|---------|--------------|
 | Primary | **Start** | `docker compose up -d` | Starts the stack. |
-| Secondary | **Update** | `docker compose pull` + `up -d` (or build-aware rebuild when services declare `build:`) | Pulls registry images and recreates containers. When one or more services use `build:`, Update rebuilds those images from source (`compose build --pull`), pulls any remaining registry images, then recreates containers. |
+| Secondary | **Update** | `docker compose pull` + `up -d` (or build-aware rebuild when services declare `build:`) | Pulls registry images and recreates containers. When one or more services use `build:`, Update rebuilds those images from source (`compose build --pull`), pulls any remaining registry images, then recreates containers. Refused when a rendered service sets `io.sencho.update: disabled`. |
 | Overflow | **Monitor** | Opens Monitor sheet | Opens the stack **Monitor** sheet on the Alerts tab. |
 | Overflow | **Delete** | Removes files | Deletes the stack directory. |
 
@@ -441,7 +443,7 @@ Bulk mode lets you run a single lifecycle action across several stacks at once, 
 - **Start**: deploys every selected stack that is currently down.
 - **Stop**: stops every selected stack that is currently running.
 - **Restart**: restarts every selected stack that is currently running.
-- **Update**: pulls the latest image tags and redeploys.
+- **Update**: pulls the latest image tags and redeploys. Bulk update treats each selected stack as an unattended update: a stack with a `manual` service, or with a value Sencho does not recognize, is skipped, and a `disabled` service skips it too. Open such a stack and use its own **Update** action.
 
 Press `B` again or toggle the bulk mode button to leave bulk mode.
 
@@ -454,6 +456,8 @@ Inside the stack detail view, container cards expose quick actions (View logs, I
 - **Restart service**: stops and starts all containers for that service.
 - **Stop service**: stops all containers for that service. Only shown when the service is running.
 - **Start service**: starts all containers for that service. Only shown when the service is stopped or exited.
+
+A service row also carries an **Update** button when a registry update is confirmed for that service. Updating one service refreshes only that service, and it is how a `manual` service moves forward without a whole-stack update. A `disabled` service has no available update: its **Update** button is disabled and explains why.
 
 For services running multiple replicas, the action applies to every replica simultaneously. Sibling services are not affected.
 
