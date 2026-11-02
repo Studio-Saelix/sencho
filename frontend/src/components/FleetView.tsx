@@ -86,7 +86,7 @@ export function FleetView({
         [can, isAdmin],
     );
     const canExportDossier = can('node:read') && can('stack:read');
-    const { hasCapability, nodes: registryNodes } = useNodes();
+    const { hasCapability, nodes: registryNodes, isLoading: registryLoading } = useNodes();
     const { experimental, experimentalReady } = useExperimental();
     const containerLabelsEnabled = hasCapability('container-label-inventory');
     // Visual fail-closed while /meta loads; permission gates still apply when on.
@@ -128,8 +128,8 @@ export function FleetView({
     const [internalTab, setInternalTab] = useState<FleetTab>('overview');
     const activeTab = controlledTab ?? internalTab;
     // Owned here so returning to Map shows the last result while it revalidates.
-    const mapNodes = useMemo(() => registryNodes.map(n => ({ id: n.id, name: n.name })), [registryNodes]);
-    const fleetMap = useFleetMap(activeTab === 'dependencies', mapNodes);
+    const nodeRefs = useMemo(() => registryNodes.map(n => ({ id: n.id, name: n.name })), [registryNodes]);
+    const fleetMap = useFleetMap(activeTab === 'dependencies', nodeRefs);
 
     // Coming back to Readiness re-checks a failed or stale result. A ref keeps
     // the live state out of the dependency array so only a tab change fires it.
@@ -304,7 +304,7 @@ export function FleetView({
                 </TabsContent>
                 {containerLabelsEnabled && (
                     <TabsContent value="container-labels">
-                        <ContainerLabelsTab onNavigateToNode={onNavigateToNode} />
+                        <ContainerLabelsTab onNavigateToNode={onNavigateToNode} nodes={nodeRefs} nodesLoading={registryLoading} />
                     </TabsContent>
                 )}
                 <TabsContent value="deployments">

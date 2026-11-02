@@ -31,10 +31,14 @@ import { isValidStackName } from '../utils/validation';
 import { sanitizeForLog } from '../utils/safeLog';
 import { logDebugTiming } from '../utils/requestTiming';
 import { getErrorMessage } from '../utils/errors';
+import { fleetReadSignal } from '../helpers/fleetReadBudget';
 
 // Fleet aggregation cache: 2-minute TTL, shared across dashboard tabs.
 const FLEET_CACHE_TTL = 120_000;
-const REMOTE_NODE_FETCH_TIMEOUT_MS = 5000;
+// Interactive fleet reads run on the shared fleet-read budget
+// (helpers/fleetReadBudget.ts). This one is left for the remote refresh action
+// below, which starts a scan on the node rather than reading a result.
+const REMOTE_NODE_REFRESH_TIMEOUT_MS = 5000;
 
 export const imageUpdatesRouter = Router();
 
@@ -179,7 +183,10 @@ imageUpdatesRouter.get('/overlay-status', authMiddleware, async (req: Request, r
     return;
   }
   try {
-    const capability = await probeRemoteCapability(parsed, 'remote-image-inspect-v1');
+    // One budget for the whole node read: the capability probe and the status
+    // fetch share the deadline, so a hung remote costs 5 s, not 10.
+    const signal = fleetReadSignal();
+    const capability = await probeRemoteCapability(parsed, 'remote-image-inspect-v1', signal);
     if (capability.kind === 'supported') {
       const status = ImageUpdateService.getInstance().getRemoteScanStatus(parsed);
       res.json({
@@ -193,21 +200,16 @@ imageUpdatesRouter.get('/overlay-status', authMiddleware, async (req: Request, r
       res.status(503).json({ error: 'Node proxy target unavailable' });
       return;
     }
-    const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), REMOTE_NODE_FETCH_TIMEOUT_MS);
-    try {
-      const resp = await safeRemoteFetch(`${proxyTarget.apiUrl.replace(/\/$/, '')}/api/image-updates/status`, {
-        headers: proxyTarget.apiToken ? { Authorization: `Bearer ${proxyTarget.apiToken}` } : {},
-        signal: controller.signal,
-      }, proxyTarget.trustedLoopback);
-      if (!resp.ok) {
-        res.status(502).json({ error: 'Failed to read target image update status' });
-        return;
-      }
-      res.json(normalizeTargetStatus(await resp.json()));
-    } finally {
-      clearTimeout(timeout);
+    const resp = await safeRemoteFetch(`${proxyTarget.apiUrl.replace(/\/$/, '')}/api/image-updates/status`, {
+      headers: proxyTarget.apiToken ? { Authorization: `Bearer ${proxyTarget.apiToken}` } : {},
+      // The same signal the probe ran under, so the two stages cannot add up.
+      signal,
+    }, proxyTarget.trustedLoopback);
+    if (!resp.ok) {
+      res.status(502).json({ error: 'Failed to read target image update status' });
+      return;
     }
+    res.json(normalizeTargetStatus(await resp.json()));
   } catch (error) {
     console.error('[ImageUpdates] Failed to read overlay status:', error);
     res.status(500).json({ error: 'Failed to read overlay status' });
@@ -455,24 +457,23 @@ imageUpdatesRouter.get('/fleet', authMiddleware, async (req: Request, res: Respo
           .filter((entry): entry is { node: typeof entry.node; proxyTarget: NonNullable<typeof entry.proxyTarget> } => entry.proxyTarget !== null);
         const remoteResults = await Promise.allSettled(
           remoteCandidates.map(async ({ node, proxyTarget }) => {
-            const capability = await probeRemoteCapability(node.id, 'remote-image-inspect-v1');
+            // One deadline per node read, shared by the capability probe and
+            // the status fetch, so a hung remote costs the budget once.
+            const signal = fleetReadSignal();
+            const capability = await probeRemoteCapability(node.id, 'remote-image-inspect-v1', signal);
             if (capability.kind === 'supported') {
               return { nodeId: node.id, data: db.getConfirmedStackUpdateStatus(node.id) };
             }
             const baseUrl = proxyTarget.apiUrl.replace(/\/$/, '');
-            const controller = new AbortController();
-            const timeout = setTimeout(() => controller.abort(), REMOTE_NODE_FETCH_TIMEOUT_MS);
             try {
               const resp = await safeRemoteFetch(`${baseUrl}/api/image-updates`, {
                 headers: proxyTarget.apiToken
                   ? { Authorization: `Bearer ${proxyTarget.apiToken}` }
                   : {},
-                signal: controller.signal,
+                signal,
               }, proxyTarget.trustedLoopback);
-              clearTimeout(timeout);
               if (resp.ok) return { nodeId: node.id, data: await resp.json() as Record<string, boolean> };
             } catch (error: unknown) {
-              clearTimeout(timeout);
               console.warn(
                 `[Image updates] Status fetch failed for node "${sanitizeForLog(node.name)}":`,
                 getErrorMessage(error, 'unknown'),
@@ -504,7 +505,7 @@ imageUpdatesRouter.get('/fleet/detail', authMiddleware, async (_req: Request, re
     const data: Record<number, ReturnType<DatabaseService['getStackUpdateDetail']>> = {};
     await Promise.all(db.getNodes().map(async node => {
       if (node.type === 'local'
-        || (await probeRemoteCapability(node.id, 'remote-image-inspect-v1')).kind === 'supported') {
+        || (await probeRemoteCapability(node.id, 'remote-image-inspect-v1', fleetReadSignal())).kind === 'supported') {
         data[node.id] = db.getStackUpdateDetail(node.id);
       }
     }));
@@ -556,9 +557,11 @@ imageUpdatesRouter.post('/fleet/refresh', authMiddleware, async (_req: Request, 
     remoteCandidates.map(async ({ node, proxyTarget }) => {
       const baseUrl = proxyTarget.apiUrl.replace(/\/$/, '');
       const controller = new AbortController();
-      const timeout = setTimeout(() => controller.abort(), REMOTE_NODE_FETCH_TIMEOUT_MS);
+      const timeout = setTimeout(() => controller.abort(), REMOTE_NODE_REFRESH_TIMEOUT_MS);
       try {
-        const capability = await probeRemoteCapability(node.id, 'remote-image-inspect-v1');
+        // The probe runs under the same clock as the refresh it gates, so it
+        // cannot spend the budget and leave the request waiting on a dead node.
+        const capability = await probeRemoteCapability(node.id, 'remote-image-inspect-v1', controller.signal);
         if (capability.kind === 'supported') {
           clearTimeout(timeout);
           const status = !ImageUpdateService.isChecksEnabled() ? 409

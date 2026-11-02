@@ -11,6 +11,7 @@ let app: import('express').Express;
 let server: http.Server;
 let capableNode: number;
 let legacyNode: number;
+let hungNode: number;
 let viewerId: number;
 let admin: string;
 let viewer: string;
@@ -34,6 +35,9 @@ beforeAll(async () => {
   server = http.createServer((req, res) => {
     const path = req.url ?? '';
     res.setHeader('content-type', 'application/json');
+    // A half-open remote: TCP accepted, no answer, so every stage costs its
+    // whole budget.
+    if (path.startsWith('/hung/')) return;
     if (path.endsWith('/api/meta')) {
       const capabilities = ['cross-node-rbac', 'scoped-stack-auth-evidence'];
       if (path.startsWith('/capable/') && inspectSupported) capabilities.push('remote-image-inspect-v1');
@@ -271,6 +275,36 @@ describe('hub-owned remote image update routing', () => {
     expect(detail.body[capableNode].uncertain.checkStatus).toBe('partial');
     expect(detail.body[legacyNode]).toBeUndefined();
   });
+
+  it('bounds a hung remote\'s fleet reads by one budget, not the probe plus the read', async () => {
+    const port = (server.address() as import('net').AddressInfo).port;
+    hungNode = db.addNode({
+      name: 'hung', type: 'remote', mode: 'proxy', compose_dir: '/unused', is_default: false,
+      api_url: `http://127.0.0.1:${port}/hung`, api_token: 'fixture-token',
+    });
+    db.updateNodeStatus(hungNode, 'online');
+    const { invalidateFleetUpdateCache } = await import('../helpers/fleetUpdateCache');
+    invalidateFleetUpdateCache();
+    try {
+      const fleetStarted = Date.now();
+      const summary = await request(app).get('/api/image-updates/fleet').set('Authorization', admin);
+      const fleetElapsed = Date.now() - fleetStarted;
+      expect(summary.status).toBe(200);
+      // The probe and the status fetch share one 5 s deadline; before that they
+      // could add up to 10 s.
+      expect(fleetElapsed).toBeGreaterThan(3_500);
+      expect(fleetElapsed).toBeLessThan(8_000);
+
+      const overlayStarted = Date.now();
+      await request(app).get(`/api/image-updates/overlay-status?targetNodeId=${hungNode}`).set('Authorization', admin);
+      const overlayElapsed = Date.now() - overlayStarted;
+      expect(overlayElapsed).toBeGreaterThan(3_500);
+      expect(overlayElapsed).toBeLessThan(8_000);
+    } finally {
+      db.deleteNode(hungNode);
+      invalidateFleetUpdateCache();
+    }
+  }, 30_000);
 
   it('branches fleet refresh by capability without broadening the global permission', async () => {
     const check = vi.spyOn(remoteScanner, 'checkRemoteNode').mockResolvedValue(true);
