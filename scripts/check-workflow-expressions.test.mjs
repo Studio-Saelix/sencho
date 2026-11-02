@@ -48,6 +48,26 @@ describe('check-workflow-expressions', () => {
     assert.match(r.stdout, /bad-braces\.yml:5:/)
   })
 
+  it('rejects a build-arg under a |- block and one on the key line', () => {
+    for (const name of ['bad-build-arg-chomp.yml', 'bad-build-arg-inline.yml']) {
+      const r = run(fixture(name))
+      assert.equal(r.status, 1, name)
+      assert.match(r.stderr, /build-arg reads/, name)
+    }
+  })
+
+  it('rejects a single-brace function call', () => {
+    const r = run(fixture('bad-function.yml'))
+    assert.equal(r.status, 1)
+    assert.match(r.stdout, /bad-function\.yml:4:/)
+  })
+
+  it('fails on a path that does not exist instead of passing on nothing', () => {
+    const r = run(fixture('missing.yml'))
+    assert.equal(r.status, 2)
+    assert.match(r.stderr, /no such path/)
+  })
+
   it('passes on the repository workflows', () => {
     const r = spawnSync('bash', [guard, join(here, '..', '.github')], { encoding: 'utf8' })
     assert.equal(r.status, 0, r.stdout + r.stderr)
