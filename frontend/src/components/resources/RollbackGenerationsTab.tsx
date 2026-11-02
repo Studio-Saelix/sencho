@@ -12,7 +12,8 @@ import { Info, Search, Unlock } from 'lucide-react';
 import { apiFetch } from '@/lib/api';
 import { toast } from '@/components/ui/toast-store';
 import { SENCHO_OPEN_STACK_EVENT, type SenchoOpenStackDetail } from '@/lib/events';
-import { TableSkeleton, TableLoadError } from './TableSkeleton';
+import { TableSkeleton, TableLoadError, LoadErrorBlock } from './TableSkeleton';
+import { useIsMobile } from '@/hooks/use-is-mobile';
 
 export type RollbackOperationKind =
     | 'update'
@@ -190,6 +191,7 @@ export function RollbackGenerationsTab({
     const [searchExpanded, setSearchExpanded] = useState(false);
     const [stateFilter, setStateFilter] = useState<RollbackStateFilter>('all');
     const searchRef = useRef<HTMLInputElement>(null);
+    const isMobile = useIsMobile();
     useEffect(() => { if (searchExpanded) searchRef.current?.focus(); }, [searchExpanded]);
 
     const filterCounts: Record<RollbackStateFilter, number> = {
@@ -297,6 +299,9 @@ export function RollbackGenerationsTab({
                 </TooltipProvider>
             </div>
             <div className="rounded-lg border border-card-border border-t-card-border-top bg-card shadow-card-bevel overflow-hidden">
+            {loadError && isMobile ? (
+                <LoadErrorBlock noun="rollback generations" reason={loadErrorReason} onRetry={() => onRetry?.()} />
+            ) : (
             <ScrollArea className="h-[62vh] max-md:h-auto">
                 <Table>
                     <TableHeader>
@@ -380,6 +385,7 @@ export function RollbackGenerationsTab({
                     )}
                 </Table>
             </ScrollArea>
+            )}
             </div>
 
             <ConfirmModal

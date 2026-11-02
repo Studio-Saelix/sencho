@@ -32,7 +32,7 @@ import { ResourcesActions } from './resources/ResourcesActions';
 import { deriveResourcesMastheadState, type UsageLoad } from './resources/resourcesMasthead';
 import { ImageDetailsSheet } from './resources/ImageDetailsSheet';
 import { RollbackGenerationsTab, type RollbackGeneration } from './resources/RollbackGenerationsTab';
-import { TableSkeleton, TableLoadError } from './resources/TableSkeleton';
+import { TableSkeleton, TableLoadError, LoadErrorBlock } from './resources/TableSkeleton';
 import { VolumeBrowserSheet } from './resources/VolumeBrowserSheet';
 import { VolumeNameLabel } from './resources/VolumeNameLabel';
 import { useTableSort } from '@/hooks/useTableSort';
@@ -803,11 +803,15 @@ export default function ResourcesView({ headerActions }: ResourcesViewProps = {}
     const totalReclaimableBytes = mastheadModel.reclaimableBytes;
 
     // The phone masthead restates the inventory; an unread inventory says so
-    // rather than reporting zero images, volumes, and networks.
+    // rather than reporting zero images, volumes, and networks. The cause rides
+    // with it so the node's state is readable at the top of every tab, not only
+    // in the block below (the wide tables scroll sideways on a phone).
     const inventoryMeta = inventoryRegion.data !== null
         ? `${images.length} images · ${volumes.length} volumes · ${networks.length} networks`
         : inventoryUnavailable
-            ? 'Resource inventory unavailable'
+            ? inventoryFailureReason
+                ? `Resource inventory unavailable · ${inventoryFailureReason}`
+                : 'Resource inventory unavailable'
             : 'Reading resource inventory';
 
     // Reclaim frees everything the masthead advertises. Order matters:
@@ -967,6 +971,9 @@ export default function ResourcesView({ headerActions }: ResourcesViewProps = {}
                             )}
                         </div>
                         <div className="rounded-lg border border-card-border border-t-card-border-top bg-card shadow-card-bevel overflow-hidden">
+                        {inventoryUnavailable && isMobile ? (
+                            <LoadErrorBlock noun="images" reason={inventoryFailureReason} onRetry={retryPage} />
+                        ) : (
                         <ScrollArea className="h-[62vh] max-md:h-auto">
                         <Table>
                             <TableHeader>
@@ -1104,6 +1111,7 @@ export default function ResourcesView({ headerActions }: ResourcesViewProps = {}
                             )}
                         </Table>
                         </ScrollArea>
+                        )}
                         </div>
                     </TabsContent>
 
@@ -1129,6 +1137,9 @@ export default function ResourcesView({ headerActions }: ResourcesViewProps = {}
                             )}
                         </div>
                         <div className="rounded-lg border border-card-border border-t-card-border-top bg-card shadow-card-bevel overflow-hidden">
+                        {inventoryUnavailable && isMobile ? (
+                            <LoadErrorBlock noun="volumes" reason={inventoryFailureReason} onRetry={retryPage} />
+                        ) : (
                         <ScrollArea className="h-[62vh] max-md:h-auto">
                         <Table>
                             <TableHeader>
@@ -1210,6 +1221,7 @@ export default function ResourcesView({ headerActions }: ResourcesViewProps = {}
                             )}
                         </Table>
                         </ScrollArea>
+                        )}
                         </div>
                     </TabsContent>
 

@@ -20,6 +20,22 @@ export function TableSkeleton({ cols, rows = 5 }: { cols: number; rows?: number 
     );
 }
 
+/** The failure copy itself, shared by the in-table row and the phone block so
+ *  the two layouts can never drift in what they say. */
+function LoadErrorCopy({ noun, onRetry, reason }: {
+    noun: string;
+    onRetry: () => void;
+    reason?: string | null;
+}) {
+    return (
+        <>
+            <p className="text-sm text-muted-foreground">Could not load {noun}.</p>
+            {reason ? <p className="mt-1 mb-3 text-xs text-stat-subtitle break-words">{reason}</p> : null}
+            <Button variant="outline" size="sm" className={reason ? 'text-stat-title max-md:min-h-11' : 'mt-3 text-stat-title max-md:min-h-11'} onClick={onRetry}>Retry</Button>
+        </>
+    );
+}
+
 /**
  * Distinct from the empty state: the request failed, so say so and offer the
  * retry. `reason` names why when the cause is known (a node that did not
@@ -36,11 +52,27 @@ export function TableLoadError({ cols, noun, onRetry, reason }: {
         <TableBody>
             <TableRow className="hover:bg-transparent">
                 <TableCell colSpan={cols} className="py-8 text-center">
-                    <p className="text-sm text-muted-foreground">Could not load {noun}.</p>
-                    {reason ? <p className="mt-1 mb-3 text-xs text-stat-subtitle">{reason}</p> : null}
-                    <Button variant="outline" size="sm" className={reason ? 'text-stat-title' : 'mt-3 text-stat-title'} onClick={onRetry}>Retry</Button>
+                    <LoadErrorCopy noun={noun} onRetry={onRetry} reason={reason} />
                 </TableCell>
             </TableRow>
         </TableBody>
+    );
+}
+
+/**
+ * The same failure outside a table, for the phone layout. Below `md` the
+ * resource tables are pinned to 640px and scroll sideways, so a cause rendered
+ * in a table cell has most of its sentence off screen. A failure that must be
+ * read is its own block there instead, wrapping to the viewport.
+ */
+export function LoadErrorBlock({ noun, onRetry, reason }: {
+    noun: string;
+    onRetry: () => void;
+    reason?: string | null;
+}) {
+    return (
+        <div className="flex flex-col items-center px-4 py-8 text-center">
+            <LoadErrorCopy noun={noun} onRetry={onRetry} reason={reason} />
+        </div>
     );
 }

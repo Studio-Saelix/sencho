@@ -1708,6 +1708,40 @@ describe('ResourcesView', () => {
     await waitFor(() => expect(calls.orphans).toBe(2));
   });
 
+  it('keeps a failure cause readable on a phone by rendering it outside the sideways-scrolled tables', async () => {
+    // Below md the resource tables are pinned to 640px and scroll sideways, so
+    // a cause inside a table cell is clipped off screen. The phone layout
+    // renders the failure as its own block and repeats the cause in the masthead.
+    mobileState.value = true;
+    mockedFetch.mockImplementation((url: string) => {
+      if (url === '/system/docker-df') return Promise.resolve(jsonResponse(reclaimableUsage(0, 0)));
+      if (url === '/system/resources'
+        || url === '/system/orphans'
+        || url === '/system/rollback/generations'
+        || url === '/security/image-summaries') {
+        return Promise.resolve(timeoutResponse());
+      }
+      return Promise.resolve(jsonResponse({}));
+    });
+
+    const user = userEvent.setup();
+    render(<ResourcesView />);
+
+    // The phone masthead names the cause beside the unavailable inventory.
+    expect(await screen.findByText(/Resource inventory unavailable · This node did not answer in time/i)).toBeInTheDocument();
+
+    const imagesFailure = await screen.findByText('Could not load images.');
+    expect(imagesFailure.closest('table')).toBeNull();
+    // One copy in the block, one in the masthead.
+    expect(screen.getAllByText(/did not answer in time/i).length).toBeGreaterThanOrEqual(2);
+
+    await user.click(screen.getByRole('tab', { name: /volumes/i }));
+    expect((await screen.findByText('Could not load volumes.')).closest('table')).toBeNull();
+
+    await user.click(screen.getByRole('tab', { name: /rollback/i }));
+    expect((await screen.findByText('Could not load rollback generations.')).closest('table')).toBeNull();
+  });
+
   it('aborts the previous node’s disk-usage read on a node switch', async () => {
     const usageSignals: AbortSignal[] = [];
     mockedFetch.mockImplementation((url: string, opts?: RequestInit) => {
