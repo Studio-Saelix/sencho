@@ -22,7 +22,7 @@ import {
 } from '../helpers/notificationChannels';
 import { parseNotificationDispatchRetries } from '../helpers/notificationDispatchRetries';
 import { renderPayloadTemplate } from '../helpers/notificationPayloadTemplate';
-import { serviceRouteKeys, stackRouteKeys } from './senchoRouteKeys';
+import { peekRouteKeys, serviceRouteKeys, stackRouteKeys } from './senchoRouteKeys';
 import { withTimeout } from '../utils/withTimeout';
 
 /** Routing-key resolution bound: a slow Compose render never holds a notification. */
@@ -365,8 +365,13 @@ export class NotificationService {
             const matched = routes.filter(r => matchesNotificationFilters(routeMatchCtx, r));
             if (routeKeys.length > 0 && notification.id != null) {
                 // Recorded after dispatch, in the same style as the suppression
-                // match, so the history row says which keys routed it.
-                this.dbService.updateNotificationRouteKeys(notification.id, routeKeys);
+                // match, so the history row says which keys routed it. An
+                // annotation write that fails must not stop the delivery below.
+                try {
+                    this.dbService.updateNotificationRouteKeys(notification.id, routeKeys);
+                } catch (annotateError) {
+                    console.warn('[Notify] Could not record the routing keys:', annotateError);
+                }
             }
             if (matched.length > 0) {
                 if (isDebugEnabled()) console.log(`[Notify:diag] Matched ${matched.length} route(s) for stack "${sanitizeForLog(stackName ?? '(none)')}", category="${sanitizeForLog(category)}"`);
@@ -441,7 +446,9 @@ export class NotificationService {
             return await withTimeout(work, ROUTE_KEY_RESOLUTION_TIMEOUT_MS, 'notification routing keys');
         } catch (error) {
             console.warn('[Notify] Could not resolve routing keys for %s:', sanitizeForLog(stackName), error);
-            return [];
+            // A slow render must not cost the alert its route: the last answer
+            // this process resolved is better than no key at all.
+            return peekRouteKeys(nodeId, stackName, serviceName);
         }
     }
 

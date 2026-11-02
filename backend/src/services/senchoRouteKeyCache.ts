@@ -17,6 +17,16 @@ export interface RouteKeyCacheEntry {
 
 const entries = new Map<string, RouteKeyCacheEntry>();
 
+/**
+ * Bumped per node on invalidation. A render that started before the bump must
+ * not write its pre-edit answer back into the cache afterwards.
+ */
+const epochs = new Map<number, number>();
+
+export function routeKeyCacheEpoch(nodeId: number): number {
+  return epochs.get(nodeId) ?? 0;
+}
+
 export function routeKeyCacheKey(nodeId: number, stackName: string): string {
   return `${nodeId}\u0000${stackName}`;
 }
@@ -31,6 +41,7 @@ export function writeRouteKeyCache(nodeId: number, stackName: string, entry: Rou
 
 /** Drop every cached key set for a node. Called from `invalidateNodeCaches`. */
 export function clearRouteKeyCacheForNode(nodeId: number): void {
+  epochs.set(nodeId, routeKeyCacheEpoch(nodeId) + 1);
   const prefix = `${nodeId}\u0000`;
   for (const key of [...entries.keys()]) {
     if (key.startsWith(prefix)) entries.delete(key);

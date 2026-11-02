@@ -62,6 +62,7 @@ describe('remote automatic update coordinator', () => {
     const result = await new AutoUpdateRemoteCoordinator().execute(input());
     expect(result).toEqual({
       handled: true,
+      failed: true,
       result: 'Stack "web" failed: node "node-b" does not evaluate io.sencho.update; update Sencho on that node.',
     });
     expect(mocks.authorize).not.toHaveBeenCalled();
@@ -73,16 +74,23 @@ describe('remote automatic update coordinator', () => {
     const result = await new AutoUpdateRemoteCoordinator().execute({ ...input(), selection: { target: '*' } });
     expect(result).toEqual({
       handled: true,
+      failed: true,
       result: 'Node "node-b" failed: it does not evaluate io.sencho.update; update Sencho on that node.',
     });
     expect(mocks.roster).not.toHaveBeenCalled();
     expect(mocks.fetch).not.toHaveBeenCalled();
   });
 
-  it('leaves an unreachable node to the caller as an unreachable failure', async () => {
+  it('reports an unreachable node as unreachable, without falling back to a legacy mutation', async () => {
     mocks.meta.mockResolvedValue({ kind: 'transport_failure' });
     const result = await new AutoUpdateRemoteCoordinator().execute(input());
-    expect(result).toEqual({ handled: false });
+    expect(result).toEqual({
+      handled: true,
+      failed: true,
+      result: 'Stack "web" failed: node "node-b" did not answer, so the update could not be checked against io.sencho.update.',
+    });
+    // The legacy endpoint is never asked, so an old node cannot mutate without
+    // the label being evaluated.
     expect(mocks.fetch).not.toHaveBeenCalled();
   });
 

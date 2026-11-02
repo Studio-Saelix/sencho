@@ -6451,7 +6451,7 @@ stmt.run('gitops_schema_version', '1');
                last_error = excluded.last_error,
                checked_at = excluded.checked_at,
                services_json = COALESCE(excluded.services_json, stack_update_status.services_json),
-               unattended_policy_json = COALESCE(excluded.unattended_policy_json, stack_update_status.unattended_policy_json)`
+               unattended_policy_json = excluded.unattended_policy_json`
         ).run(
             nodeId, stackName, hasUpdate ? 1 : 0, checkStatus, lastError, checkedAt, servicesJson,
             unattendedPolicy ? JSON.stringify(unattendedPolicy) : null,
@@ -6482,7 +6482,10 @@ stmt.run('gitops_schema_version', '1');
                check_status = 'failed',
                last_error = excluded.last_error,
                checked_at = excluded.checked_at,
-               services_json = COALESCE(excluded.services_json, stack_update_status.services_json)`
+               services_json = COALESCE(excluded.services_json, stack_update_status.services_json),
+               -- A failed check evaluated nothing, so it cannot vouch for the
+               -- policy the previous check recorded.
+               unattended_policy_json = NULL`
         ).run(nodeId, stackName, lastError, checkedAt, servicesJson);
     }
 

@@ -11,7 +11,7 @@ import { createAutoUpdateDigestGateState, recordAutoUpdateImageCheck, messageWhe
 import { awaitHubPostUpdateVerification, type HubVerificationTransport } from './hubPostUpdateVerification';
 import { getErrorMessage } from '../utils/errors';
 import { sanitizeForLog } from '../utils/safeLog';
-import { SENCHO_LABEL_POLICY_CAPABILITY } from '../helpers/senchoLabels';
+import { SENCHO_LABEL_POLICY_CAPABILITY, SENCHO_UPDATE_LABEL } from '../helpers/senchoLabels';
 import {
   describePolicySkip,
   readRemoteUpdatePolicy,
@@ -77,17 +77,20 @@ function checkedResult(value: unknown, stack: string): CheckedResult | null {
 
 /** Uses checked execution only when both machine contracts are live on the target. */
 export class AutoUpdateRemoteCoordinator {
-  async execute(input: RemoteAutoUpdateInput): Promise<{ handled: false } | { handled: true; result: string }> {
+  async execute(input: RemoteAutoUpdateInput): Promise<{ handled: false } | { handled: true; result: string; failed?: boolean }> {
     const meta = await NodeRegistry.getInstance().probeRemoteMeta(input.nodeId, AbortSignal.timeout(10_000));
-    // A node that did not answer stays the caller's unreachable failure: it is
-    // never reported as a node that is merely older.
-    if (meta.kind !== 'ok') return { handled: false };
     const nodeName = NodeRegistry.getInstance().getNode(input.nodeId)?.name ?? `node ${input.nodeId}`;
+    // A node that did not answer is an unreachable failure, handled here rather
+    // than handed to a legacy endpoint that could mutate images without ever
+    // evaluating io.sencho.update.
+    if (meta.kind !== 'ok') {
+      return { handled: true, failed: true, result: this.uansweredLines(input, nodeName) };
+    }
     // An unattended update on a node that cannot evaluate io.sencho.update is a
     // failure with a stated reason, never a green skip: the hub cannot know
     // whether that node's stacks declare `disabled`.
     if (!meta.meta.capabilities.includes(SENCHO_LABEL_POLICY_CAPABILITY)) {
-      return { handled: true, result: this.unsupportedLines(input, nodeName) };
+      return { handled: true, failed: true, result: this.unsupportedLines(input, nodeName) };
     }
     if (!meta.meta.capabilities.includes('remote-image-inspect-v1')
       || !meta.meta.capabilities.includes('remote-auto-update-checked-v1')) {
@@ -115,6 +118,18 @@ export class AutoUpdateRemoteCoordinator {
       }
     }
     return { handled: true, result: results.length ? results.join('\n') : 'No stacks found on node; skipped.' };
+  }
+
+  /** The failure lines for a node that answered nothing: unreachable, never "too old". */
+  private uansweredLines(input: RemoteAutoUpdateInput, nodeName: string): string {
+    const stacks = 'targets' in input.selection
+      ? input.selection.targets
+      : input.selection.target === '*' ? [null] : [input.selection.target];
+    return stacks
+      .map(stack => stack === null
+        ? `Node "${nodeName}" failed: it did not answer, so the update could not be checked against ${SENCHO_UPDATE_LABEL}.`
+        : `Stack "${stack}" failed: node "${nodeName}" did not answer, so the update could not be checked against ${SENCHO_UPDATE_LABEL}.`)
+      .join('\n');
   }
 
   /** One failure line per requested stack, or one node-level line for a wildcard with no roster. */

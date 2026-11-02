@@ -1059,103 +1059,39 @@ export class SchedulerService {
     }
 
     /**
-     * Proxy auto-update execution to a remote Sencho instance.
-     * The remote node runs the image checks and compose update locally.
+     * Proxy an automatic update to a remote Sencho instance. The node runs its
+     * own checks and update, and its own io.sencho.update evaluation.
+     *
+     * The coordinator is the only transport here: a node that cannot confirm it
+     * evaluates the label reports a failure, and no legacy endpoint is asked.
+     * That endpoint would mutate images without the label ever being read.
      */
     private async executeUpdateRemote(nodeId: number, target: string, authorizeAll: UpdateAuthorization): Promise<string> {
         const coordinated = await new AutoUpdateRemoteCoordinator().execute({
             nodeId, selection: { target }, caller: { kind: 'scheduled', authorizeAll },
             scanner: RemoteImageUpdateService.getInstance(),
         });
-        if (coordinated.handled) return coordinated.result;
-        await authorizeAll(nodeId, target === '*' ? [] : [target]);
-        const proxyTarget = this.requireRemoteProxyTarget(nodeId);
-        const baseUrl = proxyTarget.apiUrl.replace(/\/$/, '');
-        const proxyHeaders = LicenseService.getInstance().getProxyHeaders();
-        if (isDebugEnabled()) {
-            console.log(`[SchedulerService] executeUpdateRemote: node=${nodeId} target=${target}`);
+        if (coordinated.handled) {
+            // One named stack that could not be updated is a failed run, not a
+            // green run with a sad line. A wildcard run keeps its per-stack
+            // lines, and a label run counts them through its own failure check.
+            if (coordinated.failed && target !== '*') throw new Error(coordinated.result);
+            return coordinated.result;
         }
-        const startTime = Date.now();
-        try {
-            const response = await safeRemoteFetch(`${baseUrl}/api/auto-update/execute`, {
-                method: 'POST',
-                headers: {
-                    'Content-Type': 'application/json',
-                    'Authorization': `Bearer ${proxyTarget.apiToken}`,
-                    [PROXY_TIER_HEADER]: proxyHeaders.tier,
-                },
-                body: JSON.stringify({ target }),
-                signal: AbortSignal.timeout(300_000), // 5 minute timeout for long updates
-            }, proxyTarget.trustedLoopback);
-
-            if (!response.ok) {
-                throw new Error(this.remoteProxyFailureMessage(nodeId, await this.remoteResponseDetail(response)));
-            }
-
-            const body = await response.json() as { result?: string };
-            if (isDebugEnabled()) {
-                console.log(`[SchedulerService] executeUpdateRemote: completed in ${Date.now() - startTime}ms`);
-            }
-            return body.result || 'Remote auto-update completed (no details returned).';
-        } catch (err) {
-            this.rethrowRemoteProxyError(nodeId, err);
-        }
+        // The coordinator handles every probe outcome, so this is defensive.
+        throw this.remoteProxyFailureMessage(nodeId, 'the node did not confirm it evaluates io.sencho.update');
     }
 
-    /** Proxy auto-update for an explicit stack list on a remote node (label selector). */
+    /** Proxy an automatic update for an explicit stack list on a remote node (label selector). */
     private async executeUpdateRemoteTargets(nodeId: number, targets: string[], authorizeAll: UpdateAuthorization): Promise<string> {
         const coordinated = await new AutoUpdateRemoteCoordinator().execute({
             nodeId, selection: { targets }, caller: { kind: 'scheduled', authorizeAll },
             scanner: RemoteImageUpdateService.getInstance(),
         });
         if (coordinated.handled) return coordinated.result;
-        await authorizeAll(nodeId, targets);
-        const proxyTarget = this.requireRemoteProxyTarget(nodeId);
-        const baseUrl = proxyTarget.apiUrl.replace(/\/$/, '');
-        const proxyHeaders = LicenseService.getInstance().getProxyHeaders();
-        if (isDebugEnabled()) {
-            console.log(`[SchedulerService] executeUpdateRemoteTargets: node=${nodeId} count=${targets.length}`);
-        }
-        const startTime = Date.now();
-        try {
-            const response = await safeRemoteFetch(`${baseUrl}/api/auto-update/execute`, {
-                method: 'POST',
-                headers: {
-                    'Content-Type': 'application/json',
-                    'Authorization': `Bearer ${proxyTarget.apiToken}`,
-                    [PROXY_TIER_HEADER]: proxyHeaders.tier,
-                },
-                body: JSON.stringify({ targets }),
-                signal: AbortSignal.timeout(300_000),
-            }, proxyTarget.trustedLoopback);
-
-            // Older remotes only accept { target }. Fall back to one call per
-            // stack so mixed-version fleets still complete the label schedule.
-            if (response.status === 400) {
-                const detail = await this.remoteResponseDetail(response);
-                if (/target/i.test(detail)) {
-                    const parts: string[] = [];
-                    for (const stackName of targets) {
-                        parts.push(await this.executeUpdateRemote(nodeId, stackName, authorizeAll));
-                    }
-                    return parts.join('\n');
-                }
-                throw new Error(this.remoteProxyFailureMessage(nodeId, detail));
-            }
-
-            if (!response.ok) {
-                throw new Error(this.remoteProxyFailureMessage(nodeId, await this.remoteResponseDetail(response)));
-            }
-
-            const body = await response.json() as { result?: string };
-            if (isDebugEnabled()) {
-                console.log(`[SchedulerService] executeUpdateRemoteTargets: completed in ${Date.now() - startTime}ms`);
-            }
-            return body.result || 'Remote auto-update completed (no details returned).';
-        } catch (err) {
-            this.rethrowRemoteProxyError(nodeId, err);
-        }
+        throw this.remoteProxyFailureMessage(nodeId, 'the node did not confirm it evaluates io.sencho.update');
     }
+
 
     /**
      * Proxy a stack lifecycle action to a remote Sencho instance. ComposeService,

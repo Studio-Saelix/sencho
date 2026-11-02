@@ -148,6 +148,35 @@ describe('resolving a stack keys', () => {
     await expect(stackRouteKeys(3, 'failing')).resolves.toEqual(['production']);
   });
 
+  it('discards a render that started before an invalidation', async () => {
+    serveModel({ web: { notifyRoute: 'production' } });
+    let release!: (value: { rendered: string; stderr: string; code: number; timedOut: boolean }) => void;
+    renderSpy.render.mockImplementationOnce(() => new Promise(resolve => {
+      release = resolve;
+    }));
+
+    const pending = stackRouteKeys(5, 'racing');
+    // The stack is edited while the render is in flight.
+    invalidateNodeCaches(5);
+    serveModel({ web: { notifyRoute: 'staging' } });
+    release({ rendered: JSON.stringify(renderedModel({ web: { notifyRoute: 'production' } })), stderr: '', code: 0, timedOut: false });
+
+    // The answer that arrives late is pre-edit, so it is not cached: the next
+    // read renders again and sees the new key.
+    await pending;
+    renderSpy.render.mockClear();
+    serveModel({ web: { notifyRoute: 'staging' } });
+    await expect(stackRouteKeys(5, 'racing')).resolves.toEqual(['staging']);
+    expect(renderSpy.render).toHaveBeenCalledTimes(1);
+  });
+
+  it('keeps the last keys without extending their life while the render keeps failing', async () => {
+    serveModel({ web: { notifyRoute: 'production' } });
+    await expect(stackRouteKeys(6, 'broken')).resolves.toEqual(['production']);
+    renderSpy.render.mockResolvedValue({ rendered: null, stderr: 'bad compose', code: 1, timedOut: false });
+    await expect(stackRouteKeys(6, 'broken')).resolves.toEqual(['production']);
+  });
+
   it('drops a node keys when the node caches are invalidated', async () => {
     serveModel({ web: { notifyRoute: 'production' } });
     await stackRouteKeys(4, 'web');
@@ -270,9 +299,11 @@ describe('dispatching an alert with routing keys', () => {
 });
 
 describe('the update-policy activity row', () => {
-  const decision = (update: string) => evaluateUpdatePolicy(
+  // Each case uses its own stack: the dedupe key is per stack, decision,
+  // reason and day, so sharing one would make the cases overlap.
+  const decision = (update: string, stack = 'activity-stack') => evaluateUpdatePolicy(
     resolveSenchoLabels(renderedModel({ web: {}, db: { update } })),
-    { stack: 'activity-stack', target: { scope: 'stack' }, trigger: 'scheduled' },
+    { stack, target: { scope: 'stack' }, trigger: 'scheduled' },
   );
 
   it('writes one read row a day for the same stack and reason, and the stack activity lists it', async () => {
@@ -296,16 +327,60 @@ describe('the update-policy activity row', () => {
     expect(db.getNodeStackActivity(nodeId, { limit: 20 }).some(row => row.category === 'update_policy')).toBe(true);
   });
 
+  it('writes a new row on another day for the same stack and reason', async () => {
+    const { DatabaseService } = await import('../services/DatabaseService');
+    const db = DatabaseService.getInstance();
+    const nodeId = db.getDefaultNode()!.id!;
+    const before = db.getNotificationHistory(nodeId, 50, 'update_policy').length;
+
+    vi.useFakeTimers();
+    try {
+      vi.setSystemTime(new Date('2026-03-01T10:00:00Z'));
+      recordUpdatePolicyDecision(nodeId, decision('manual', 'day-stack'), 'system:scheduler');
+      vi.setSystemTime(new Date('2026-03-02T10:00:00Z'));
+      recordUpdatePolicyDecision(nodeId, decision('manual', 'day-stack'), 'system:scheduler');
+    } finally {
+      vi.useRealTimers();
+    }
+
+    expect(db.getNotificationHistory(nodeId, 50, 'update_policy').length).toBe(before + 2);
+  });
+
   it('writes a new row when the reason changes', async () => {
     const { DatabaseService } = await import('../services/DatabaseService');
     const db = DatabaseService.getInstance();
     const nodeId = db.getDefaultNode()!.id!;
 
-    recordUpdatePolicyDecision(nodeId, decision('manual'), 'system:scheduler');
-    recordUpdatePolicyDecision(nodeId, decision('disabled'), 'system:scheduler');
+    const before = db.getNotificationHistory(nodeId, 50, 'update_policy').length;
+    recordUpdatePolicyDecision(nodeId, decision('manual', 'reason-change-stack'), 'system:scheduler');
+    recordUpdatePolicyDecision(nodeId, decision('disabled', 'reason-change-stack'), 'system:scheduler');
 
     const rows = db.getNotificationHistory(nodeId, 50, 'update_policy');
-    expect(rows).toHaveLength(2);
+    expect(rows.length).toBe(before + 2);
+  });
+});
+
+describe('the recorded unattended policy', () => {
+  it('is cleared when a later check cannot evaluate it, and when a check fails', async () => {
+    const { DatabaseService } = await import('../services/DatabaseService');
+    const db = DatabaseService.getInstance();
+    const nodeId = db.getDefaultNode()!.id!;
+    const stack = 'policy-clear';
+
+    db.upsertStackUpdateStatus(nodeId, stack, false, Date.now(), 'ok', null, [], 0, {
+      decision: 'skip', ineligible: [{ service: 'web', policy: 'manual' }],
+    });
+    expect(db.getStackUpdateDetail(nodeId)[stack].unattendedPolicy).toMatchObject({ decision: 'skip' });
+
+    // A check that could not read the policy writes nothing to show.
+    db.upsertStackUpdateStatus(nodeId, stack, false, Date.now(), 'ok', null, [], 0, null);
+    expect(db.getStackUpdateDetail(nodeId)[stack].unattendedPolicy).toBeUndefined();
+
+    db.upsertStackUpdateStatus(nodeId, stack, false, Date.now(), 'ok', null, [], 0, {
+      decision: 'allow', ineligible: [],
+    });
+    db.recordStackCheckFailure(nodeId, stack, 'registry unreachable', Date.now(), [], 0);
+    expect(db.getStackUpdateDetail(nodeId)[stack].unattendedPolicy).toBeUndefined();
   });
 });
 

@@ -1,6 +1,8 @@
 import crypto from 'crypto';
 import { DatabaseService } from './DatabaseService';
 import { ComposeService } from './ComposeService';
+import { NodeRegistry } from './NodeRegistry';
+import { withTimeout } from '../utils/withTimeout';
 import {
   resolveSenchoLabels,
   SENCHO_UPDATE_LABEL,
@@ -235,6 +237,23 @@ export function assertPolicyAllows(policy: UpdatePolicyResult, request: PolicyRe
 const RENDER_TIMEOUT_MS = 25_000;
 
 /**
+ * Bound on the whole evaluation, not only the render. A caller that holds the
+ * stack lock (an update, or a scheduled pass over every stack) must not wait on
+ * a hung daemon; a timeout fails closed like any other unreadable model.
+ */
+const POLICY_READ_TIMEOUT_MS = 10_000;
+
+/**
+ * A remote node's stack is rendered on that node. Rendering it here would read
+ * this instance's filesystem and could evaluate a same-named local stack, so a
+ * remote target is unrenderable rather than wrongly allowed.
+ */
+function isLocalNode(nodeId: number): boolean {
+  const node = NodeRegistry.getInstance().getNode(nodeId);
+  return node === undefined || node.type === 'local';
+}
+
+/**
  * One render, parsed into the registry's resolution. Null when the model cannot
  * be read: a failed, timed-out, capped, or unparseable render.
  */
@@ -266,7 +285,12 @@ export async function resolveUpdatePolicy(
   nodeId: number,
   request: PolicyRequest,
 ): Promise<UpdatePolicyResult> {
-  const resolution = await renderResolution(nodeId, request.stack);
+  if (!isLocalNode(nodeId)) return unrenderable(request, UNRENDERABLE_REASON);
+  const resolution = await withTimeout(
+    renderResolution(nodeId, request.stack),
+    POLICY_READ_TIMEOUT_MS,
+    'update policy render',
+  ).catch(() => null);
   if (!resolution) return unrenderable(request, UNRENDERABLE_REASON);
   return evaluateUpdatePolicy(resolution, request);
 }
@@ -287,7 +311,12 @@ export async function resolveUpdatePolicyPair(
   stackName: string,
   target: UpdateTarget,
 ): Promise<UpdatePolicyPair | null> {
-  const resolution = await renderResolution(nodeId, stackName);
+  if (!isLocalNode(nodeId)) return null;
+  const resolution = await withTimeout(
+    renderResolution(nodeId, stackName),
+    POLICY_READ_TIMEOUT_MS,
+    'update policy render',
+  ).catch(() => null);
   if (!resolution) return null;
   return {
     manual: evaluateUpdatePolicy(resolution, { stack: stackName, target, trigger: 'manual' }),

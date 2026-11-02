@@ -1,7 +1,9 @@
 import { ComposeService } from './ComposeService';
+import { NodeRegistry } from './NodeRegistry';
 import { resolveSenchoLabels, type SenchoLabelResolution } from '../helpers/senchoLabels';
 import {
   readRouteKeyCache,
+  routeKeyCacheEpoch,
   writeRouteKeyCache,
   type ServiceRouteKeys,
 } from './senchoRouteKeyCache';
@@ -54,7 +56,36 @@ async function renderServiceKeys(nodeId: number, stackName: string): Promise<Ser
   }
 }
 
+/**
+ * A remote node's stack is rendered on that node, so this process cannot read
+ * its labels. Reporting none is honest: the alert matches no key filter rather
+ * than matching a local stack that happens to share the name.
+ */
+function isLocalNode(nodeId: number): boolean {
+  const node = NodeRegistry.getInstance().getNode(nodeId);
+  return node === undefined || node.type === 'local';
+}
+
+/** The last answer this process resolved for a stack, expired or not. */
+export function peekRouteKeys(nodeId: number, stackName: string, serviceName?: string): string[] {
+  const cached = readRouteKeyCache(nodeId, stackName);
+  if (!cached) return [];
+  if (serviceName === undefined) {
+    const keys = new Set<string>();
+    for (const key of Object.values(cached.services)) {
+      if (key) keys.add(key);
+    }
+    return [...keys].sort();
+  }
+  const own = Object.prototype.hasOwnProperty.call(cached.services, serviceName)
+    ? cached.services[serviceName]
+    : null;
+  return own ? [own] : [];
+}
+
 async function currentServiceKeys(nodeId: number, stackName: string): Promise<ServiceRouteKeys | null> {
+  if (!isLocalNode(nodeId)) return null;
+
   const cached = readRouteKeyCache(nodeId, stackName);
   if (cached && cached.expiresAt > Date.now()) return cached.services;
 
@@ -62,12 +93,18 @@ async function currentServiceKeys(nodeId: number, stackName: string): Promise<Se
   const pending = inFlight.get(pendingKey);
   if (pending) return pending;
 
+  const epochAtStart = routeKeyCacheEpoch(nodeId);
   const work = (async (): Promise<ServiceRouteKeys | null> => {
     const rendered = await renderServiceKeys(nodeId, stackName);
-    // Stale while error: keep the last keys this process resolved.
-    const resolved = rendered ?? cached?.services ?? null;
-    if (resolved) writeRouteKeyCache(nodeId, stackName, { expiresAt: Date.now() + CACHE_TTL_MS, services: resolved });
-    return resolved;
+    if (rendered && routeKeyCacheEpoch(nodeId) === epochAtStart) {
+      // Only a successful render is cached. Extending the TTL from a failed
+      // render would keep pre-break keys alive for as long as Compose stays
+      // broken, which is exactly when a deploy-failure alert is raised.
+      writeRouteKeyCache(nodeId, stackName, { expiresAt: Date.now() + CACHE_TTL_MS, services: rendered });
+      return rendered;
+    }
+    // Stale while error, without refreshing the entry it falls back to.
+    return rendered ?? cached?.services ?? null;
   })();
 
   inFlight.set(pendingKey, work);
