@@ -40,6 +40,54 @@ export interface ServiceTunnelExposure {
   path: TunnelPath;
 }
 
+/** Detected exposure. Mirrors the backend `exposureClassification` types. */
+export type DetectedScope = 'public-edge' | 'private-overlay' | 'host-published' | 'host-loopback';
+
+export interface DetectedPortFacts {
+  hostIp: string;
+  startPort: number;
+  endPort: number;
+  dynamic?: true;
+  protocol: string;
+  /** The namespace root the path belongs to, when the service only shares it. */
+  via?: string;
+}
+
+export type DetectedPath =
+  | { kind: 'tunnel'; scope: TunnelScope; provider: TunnelProvider; connector: string; path: TunnelPath; certain: boolean }
+  | { kind: 'connector'; scope: 'private-overlay'; provider: 'tailscale' | 'wireguard' }
+  | ({ kind: 'host-port'; scope: 'host-published'; bind: 'all-interfaces' | 'address' } & DetectedPortFacts)
+  | ({ kind: 'host-port'; scope: 'host-loopback'; bind: 'loopback' } & DetectedPortFacts)
+  | { kind: 'host-network'; scope: 'host-published'; via?: string };
+
+export type UndeterminedReason = 'foreign-namespace' | 'hidden-connector' | 'runtime-attachment' | 'runtime-ports-differ';
+
+export type ConflictReason = 'host-port' | 'loopback-port' | 'host-network' | 'tunnel' | 'broad-bind' | 'shared-namespace';
+
+export interface IntentConflict {
+  level: 'conflict' | 'possible' | 'note';
+  reason: ConflictReason;
+  /** Indexes into the service's `paths`. */
+  paths: number[];
+}
+
+interface DetectedCommon {
+  /** The one-line answer the backend synthesized. */
+  answer: string;
+  externalNetworks: string[];
+  /** True only when the runtime was read and the service has a running container. */
+  runtimeChecked: boolean;
+  /** Every intent value, evaluated (an empty array means nothing was found). */
+  conflicts: Record<ExposureIntent, IntentConflict[]>;
+  suggestedIntent: 'same-node' | null;
+}
+
+export type DetectedServiceExposure = DetectedCommon & (
+  | { status: 'paths'; paths: DetectedPath[]; incomplete: UndeterminedReason[] }
+  | { status: 'none-known'; paths: [] }
+  | { status: 'undetermined'; paths: []; reasons: UndeterminedReason[] }
+);
+
 export type NetworkingOwnership = 'system' | 'sencho-managed' | 'compose-managed' | 'unmanaged';
 export type NetworkingFindingSeverity = 'critical' | 'high' | 'medium' | 'info';
 

@@ -31,7 +31,7 @@ function json(payload: unknown, ok = true): Response {
 
 const COMPOSE = 'services:\n  plex:\n    image: x\n    ports:\n      - "32400:32400"\n';
 
-interface NodeStacks { [nodeId: number]: Record<string, { compose?: Response; dossierPurpose?: string }>; }
+interface NodeStacks { [nodeId: number]: Record<string, { compose?: Response; dossierPurpose?: string; networking?: Response; exposure?: Response }>; }
 
 function wireFetchForNode(stacks: NodeStacks) {
   fetchForNodeMock.mockImplementation((endpoint: string, nodeId: number) => {
@@ -49,6 +49,10 @@ function wireFetchForNode(stacks: NodeStacks) {
     if (sub === '/dossier') {
       return Promise.resolve(json({ purpose: entry.dossierPurpose ?? '' }));
     }
+    if (sub === '/networking') {
+      return Promise.resolve(entry.networking ?? json({ renderable: true, networks: [], services: [] }));
+    }
+    if (sub === '/exposure') return Promise.resolve(entry.exposure ?? json({ intents: [] }));
     return Promise.resolve(json({}, false));
   });
 }
@@ -202,5 +206,46 @@ describe('useFleetDossierExport', () => {
     expect(downloadBlobMock).not.toHaveBeenCalled();
     expect(toastSuccess).not.toHaveBeenCalled();
     expect(toastError).toHaveBeenCalledTimes(1);
+  });
+
+  it('prints a failed networking read instead of dropping the section', async () => {
+    wireOverview([{ id: 1, name: 'local', type: 'local', status: 'online' }]);
+    wireFetchForNode({
+      1: {
+        readable: {
+          networking: json({
+            renderable: true,
+            networks: [],
+            services: [{ name: 'quiet', publishedPorts: [], detected: { answer: 'no known exposure path' } }],
+          }),
+        },
+        unreadable: { networking: json({ error: 'boom' }, false) },
+      },
+    });
+
+    const { result } = renderHook(() => useFleetDossierExport());
+    await act(async () => { await result.current.exportDossier(); });
+
+    const files = await readZip();
+    expect(files['stacks/local--unreadable.md']).toContain('## Network exposure');
+    expect(files['stacks/local--unreadable.md']).toContain('Network exposure could not be read for this stack.');
+    expect(files['stacks/local--readable.md']).toContain('detected: no known exposure path');
+  });
+
+  it('prints the detection line for a rendered model and the render failure otherwise', async () => {
+    wireOverview([{ id: 1, name: 'local', type: 'local', status: 'online' }]);
+    wireFetchForNode({
+      1: {
+        plain: {},
+        broken: { networking: json({ renderable: false, networks: [], services: [] }) },
+      },
+    });
+
+    const { result } = renderHook(() => useFleetDossierExport());
+    await act(async () => { await result.current.exportDossier(); });
+
+    const files = await readZip();
+    expect(files['stacks/local--broken.md']).toContain('Detected exposure could not be determined (the Compose model did not render).');
+    expect(files['stacks/local--plain.md']).toContain('## Network exposure');
   });
 });

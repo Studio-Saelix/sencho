@@ -3,7 +3,7 @@
  * exposure intents, and the shared dependency snapshot.
  */
 import type { DependencySnapshot } from '../DockerController';
-import type { ExposureIntent, NetworkFactPort, StackNetworkFacts } from './types';
+import type { ExposureIntent, NetworkFactPort, NetworkFactService, StackNetworkFacts } from './types';
 import { isHostNetwork } from './normalize';
 import { getExposureContext, type ExposureContext } from './exposureContext';
 import { dismissFields } from './networkingDismissals';
@@ -74,6 +74,12 @@ function effectiveIntent(service: string, stackIntent: ExposureIntent | null, by
   return Object.prototype.hasOwnProperty.call(byService, service) ? byService[service] : stackIntent ?? null;
 }
 
+/** The detected answer as one sentence, appended to the unclassified cards. A
+ *  node that predates detection adds nothing rather than inventing a path. */
+function detectedSentence(service: NetworkFactService | undefined): string {
+  return service?.detected ? ` Detected exposure: ${service.detected.answer}.` : '';
+}
+
 /** Host-mode severity matrix, parameterized by documented Dossier access.
  *  Internal/same-node are a contradiction regardless of documentation: high. Unset
  *  and unknown are unclassified exposure under host networking (no network
@@ -139,7 +145,7 @@ function addExposureFindings(
         'exposure-unclassified',
         'info',
         'Publishing without exposure intent',
-        `Stack "${facts.stack}" publishes ports from "${service.name}" without a classified exposure intent.`,
+        `Stack "${facts.stack}" publishes ports from "${service.name}" without a classified exposure intent.${detectedSentence(service)}`,
         { stack: facts.stack, service: service.name },
         [intentAction],
         { targets: portTargets(service.publishedPorts) },
@@ -204,6 +210,7 @@ function addTunnelExposureFindings(
 
   const flagged = (kind: NetworkingFindingKind, service: string) =>
     out.some(f => f.kind === kind && f.stack === facts.stack && f.service === service);
+  const byServiceName = new Map(facts.services.map(service => [service.name, service]));
   for (const [service, tunnel] of tunnelExposureByService(facts.tunnels)) {
     const intent = effectiveIntent(service, context.stackIntent, context.serviceIntents);
     const via = describeServiceTunnel(tunnel);
@@ -216,7 +223,7 @@ function addTunnelExposureFindings(
         'exposure-unclassified',
         'info',
         'Reachable through a tunnel without exposure intent',
-        `Service "${service}" in stack "${facts.stack}" has no classified exposure intent. ${via}`,
+        `Service "${service}" in stack "${facts.stack}" has no classified exposure intent. ${via}${detectedSentence(byServiceName.get(service))}`,
         { stack: facts.stack, service },
         [intentAction],
         { targets },

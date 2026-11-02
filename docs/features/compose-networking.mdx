@@ -51,7 +51,7 @@ If `docker compose config` cannot produce a model (usually a YAML error, an unre
 <Frame>
   <img
     src="/images/compose-networking/networking-exposure-intent.png"
-    alt="The exposure intent section showing a stack row with REVERSE-PROXY highlighted, and one service row (swag) with INHERIT highlighted and an arrow indicator reading 'reverse-proxy', showing the intent inherited from the stack"
+    alt="The exposure intent section showing a stack row with REVERSE-PROXY highlighted and a swag service row with INHERIT highlighted and an arrow indicator reading 'reverse-proxy', with a detected line above the service pills reading 'detected: host-published' and a 'broad bind alongside reverse-proxy' note chip"
   />
 </Frame>
 
@@ -67,6 +67,8 @@ Exposure intent is how you tell Sencho what a stack *should* be reachable from, 
 | **temporary** | A short-lived exposure (a label for tracking only, not a functional configuration). |
 | **unknown** | Not yet classified. |
 
+The intent is what you *want*; Sencho also reads what the stack actually says and shows that beside it. See [Detected exposure](#detected-exposure) below.
+
 **How inheritance works:** the stack row's pill options end in **unset**, which clears the stack-level classification entirely. The per-service row's pills end in **inherit** instead: a service with no override of its own takes on the stack's intent, shown by an arrow indicator next to the inherit pill (for example, `→ reverse-proxy`). Selecting inherit on a service clears its override; selecting unset on the stack clears the stack's classification.
 
 **Permissions:** editing the intent requires stack edit access. With read-only access you can see the current classification but not change it.
@@ -74,6 +76,44 @@ Exposure intent is how you tell Sencho what a stack *should* be reachable from, 
 **How Doctor uses it:** Sencho stores the intent separately from the computed networking facts. When the two drift apart (a service classified `internal` that is publishing a host port or sits behind a tunnel, for example), the **Doctor** tab flags the mismatch. See [Compose Doctor](/features/compose-doctor) for the full list of exposure-aware findings.
 
 **Tunnel-exposed services:** a service behind a Cloudflare Tunnel publishes no host port but is reachable from the internet, so classify it **public** (or **reverse-proxy** when the tunnel points at your proxy). A service reached over Tailscale or WireGuard is reachable only by the peers of that private network; **lan** is the closest intent. A service that only shares a network with a connector you know does not route to it, or that shares a network namespace with a cloudflared connector, can stay **internal**: Doctor asks you to confirm that, and Security takes the intent at your word. See [Tunnels and private overlays](#tunnels-and-private-overlays).
+
+## Detected exposure
+
+Every service row in the exposure-intent section also shows one quiet line: **detected:** the exposure Sencho can actually see, worked out from the rendered Compose model, the tunnel connectors in it, and, when Docker is reachable, the running containers. It is read-only: nothing is written unless you choose an intent, and Sencho never sets one for you.
+
+| Detected answer | What Sencho saw |
+|-----------------|-----------------|
+| **public edge** | A Cloudflare Tunnel connector in the stack reaches this service. Always marked **unverified**: Cloudflare's ingress rules choose which origin a request reaches, and Sencho cannot read them. |
+| **private overlay** | A Tailscale or WireGuard connector reaches this service. A shared network namespace is marked certain, because the peers address the connector directly; a shared or host network is unverified, because Serve, ACLs and AllowedIPs decide the routing. Peer authorization is never claimed. |
+| **host-published** | The service publishes a host port, uses the host network, or shares the namespace of a service that does. When the bind is on every interface it is described as broad, never as reachable from the internet. |
+| **same host only** | The only publish is a loopback-bound port (`127.0.0.1` / `::1`). |
+| **no known exposure path** | Sencho found no path at all. This is absence of evidence, not a safety claim: it never means internal, isolated or safe. A service on an external network carries the caveat that a connector in another stack on that network could reach it. |
+| **could not be determined** | The reach is hidden: the service shares a network namespace with a container from outside this stack, a connector runs in another container's namespace, a running container is attached to a network the stack does not declare, or a running container publishes ports the Compose file does not. |
+
+When the reach is only partly known, the known paths stay listed and the answer ends in **partly undetermined**; the proof line in the services card names the reason. The same line names the namespace a shared host path comes from, the external networks a connector of another stack could reach over, and **runtime not checked** when Docker was unavailable or the service has no running container. A missing runtime is never shown as a clean result.
+
+**What Sencho never claims:** internet reachability, verified Cloudflare or tailnet routing, peer authorization, or that a service is safe. An unrenderable Compose model shows the render error instead of a detection.
+
+**Auto (detected).** When neither the service nor the stack has an intent, the picker reads **→ auto (detected)** and the answer line shows what Sencho sees. This is presentation only. A declared **unknown** is still a declaration: it shows the answer but offers no adoption.
+
+**Conflicts.** When a declared intent contradicts the facts, one small chip follows the answer:
+
+| Chip | When |
+|------|------|
+| **conflicts with internal: published port** | The service is classified `internal` or `same-node` but publishes a host port on a non-loopback interface. `internal` also flags a loopback-only port, the way Compose Doctor reads it. The chip names the intent you declared. |
+| **conflicts with internal: host network** | The intent is `internal` or `same-node` and the service uses the host network. |
+| **conflicts with internal: tunnel** | The intent is `internal` or `same-node` and a tunnel reaches the service with certainty, such as a Tailscale shared namespace whose peers address it directly. |
+| **may conflict with internal: tunnel** | The intent is `internal` or `same-node` and a tunnel could route here, but its routing is configured outside the Compose file. |
+| **broad bind alongside reverse-proxy** (or **temporary**) | The intent is `reverse-proxy` or `temporary` and the service binds on every interface or uses the host network. This is a note, not a contradiction: those intents may deliberately bind broadly. |
+| **shared namespace with …**, **host network through …** | The service reaches the host only through another service's namespace. This stays a note, because no other Sencho engine counts it. |
+
+A chip names the class of fact, never the port numbers; the services card below is the proof. The panel does not read Compose Doctor acknowledgements, so a **may conflict** chip stays until the intent changes or the tunnel goes away.
+
+**Use same-node.** When nothing is declared and every path is an own loopback-only publication, the runtime was read, the service has a running container, there is no external network and no other doubt, the row offers **Use same-node**. One click writes that service's intent through the same control as the picker, and **inherit** on the picker clears it again. No other adoption is offered: a Cloudflare Tunnel could mean `public` or `reverse-proxy`, and an overlay could be `lan` or `internal`.
+
+**Older nodes** do not report detection, and the line says so instead of guessing. If the intent list itself cannot be read, the section says so instead of showing **auto (detected)** or offering an adoption.
+
+**Three meanings of "unknown".** The `unknown` *intent* is a declaration that you have not classified the service. The Fleet filter *unknown exposure* counts stacks that publish something without any intent. A detected **could not be determined** is about the evidence, not about you: Sencho saw the service but cannot establish its reach.
 
 ## Networks
 
