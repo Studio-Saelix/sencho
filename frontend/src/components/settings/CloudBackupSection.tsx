@@ -222,6 +222,9 @@ export function CloudBackupSection() {
     const [encryptArchives, setEncryptArchives] = useState(false);
     const [passphraseSaved, setPassphraseSaved] = useState(false);
     const [pendingEnable, setPendingEnable] = useState(false);
+    // Read inside resyncConfirmed, which must not depend on pendingEnable.
+    const pendingEnableRef = useRef(false);
+    useEffect(() => { pendingEnableRef.current = pendingEnable; }, [pendingEnable]);
     const [passphraseDraft, setPassphraseDraft] = useState('');
     const [passphraseError, setPassphraseError] = useState('');
     const [savingEncryption, setSavingEncryption] = useState(false);
@@ -332,6 +335,13 @@ export function CloudBackupSection() {
             setProvider(data.provider);
             setEncryptArchives(data.encrypt_archives === true);
             setPassphraseSaved(data.archive_passphrase === '***');
+            // A stored passphrase settles a pending enable (the draft is what
+            // was stored); otherwise the operator is still mid-way and can
+            // retry. An unsaved replacement draft is never discarded here.
+            if (data.archive_passphrase === '***' && pendingEnableRef.current) {
+                setPendingEnable(false);
+                setPassphraseDraft('');
+            }
         } catch {
             setLoadFailed(true);
             setProvider(confirmedRef.current.provider);
@@ -729,13 +739,16 @@ export function CloudBackupSection() {
         <>
             <SettingsField
                 label="Encrypt archives"
-                helper="Seal off-site archives before they leave this instance. Off by default."
+                helper={pendingEnable
+                    ? 'Not on yet. Save a passphrase below to start sealing uploads, or switch this off to cancel.'
+                    : 'Seal off-site archives before they leave this instance. Off by default.'}
+                tone={pendingEnable ? 'warn' : 'default'}
                 htmlFor="archive-encryption"
             >
                 <TogglePill
                     id="archive-encryption"
                     aria-label="Encrypt archives"
-                    checked={encryptArchives}
+                    checked={encryptArchives || pendingEnable}
                     disabled={savingEncryption || saving}
                     onChange={handleEncryptToggle}
                 />
@@ -761,12 +774,12 @@ export function CloudBackupSection() {
                             }}
                         />
                         {passphraseError ? <p className="text-sm text-destructive">{passphraseError}</p> : null}
-                        {passphraseDraft ? (
+                        {passphraseDraft || pendingEnable ? (
                             <BusyButton
                                 size="sm"
                                 className="self-start"
                                 pending={savingEncryption}
-                                disabled={saving}
+                                disabled={saving || (pendingEnable && passphraseDraft.length < 12)}
                                 busyLabel="Saving"
                                 onClick={handleSavePassphrase}
                             >

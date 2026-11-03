@@ -93,9 +93,36 @@ describe('CloudBackupSection archive encryption', () => {
         const user = userEvent.setup();
         const encryptSwitch = screen.getByRole('switch', { name: 'Encrypt archives' });
         await user.click(encryptSwitch);
-        expect(encryptSwitch).not.toBeChecked();
         expect(screen.getByText(/lost passphrase cannot be recovered/)).toBeInTheDocument();
         expect(apiFetch.mock.calls.some(call => call[1]?.method === 'PUT')).toBe(false);
+    });
+
+    it('shows the switch on with a not-on-yet note while the passphrase is pending, and cancels on a second click', async () => {
+        render(<CloudBackupSection />);
+        const user = userEvent.setup();
+        const encryptSwitch = await screen.findByRole('switch', { name: 'Encrypt archives' });
+        await user.click(encryptSwitch);
+        expect(encryptSwitch).toBeChecked();
+        expect(screen.getByText(/Not on yet\. Save a passphrase below/)).toBeInTheDocument();
+        expect(screen.getByLabelText('Archive passphrase')).toBeInTheDocument();
+
+        await user.click(encryptSwitch);
+        expect(encryptSwitch).not.toBeChecked();
+        expect(screen.queryByText(/Not on yet/)).not.toBeInTheDocument();
+        expect(screen.queryByLabelText('Archive passphrase')).not.toBeInTheDocument();
+        expect(apiFetch.mock.calls.some(call => call[1]?.method === 'PUT')).toBe(false);
+    });
+
+    it('keeps Save passphrase visible but disabled under 12 characters while the enable is pending', async () => {
+        render(<CloudBackupSection />);
+        const user = userEvent.setup();
+        await user.click(await screen.findByRole('switch', { name: 'Encrypt archives' }));
+        const save = screen.getByRole('button', { name: 'Save passphrase' });
+        expect(save).toBeDisabled();
+        await user.type(screen.getByLabelText('Archive passphrase'), 'short');
+        expect(save).toBeDisabled();
+        await user.type(screen.getByLabelText('Archive passphrase'), '-but-long-enough');
+        expect(save).toBeEnabled();
     });
 
     it('asks for a passphrase in an overlay and leaves a wrong passphrase on that overlay', async () => {
@@ -535,6 +562,88 @@ describe('CloudBackupSection encryption writes', () => {
         });
         expect(body).not.toHaveProperty('custom');
         expect(body).not.toHaveProperty('provider');
+    });
+
+    it('settles the pending enable after a passphrase save: switch stays on, note gone, next click turns it off', async () => {
+        configPayload = { ...customConfig, encrypt_archives: false, archive_passphrase: '' };
+        render(<CloudBackupSection />);
+        const user = userEvent.setup();
+        const toggle = await screen.findByRole('switch', { name: 'Encrypt archives' });
+        await user.click(toggle);
+        await user.type(screen.getByLabelText('Archive passphrase'), 'correct-horse-battery');
+        await user.click(screen.getByRole('button', { name: 'Save passphrase' }));
+        await waitFor(() => expect(toast.success).toHaveBeenCalledWith('Archive passphrase saved.'));
+        expect(toggle).toBeChecked();
+        expect(screen.queryByText(/Not on yet/)).not.toBeInTheDocument();
+        expect(screen.queryByRole('button', { name: 'Save passphrase' })).not.toBeInTheDocument();
+
+        await user.click(toggle);
+        await waitFor(() => expect(putBodies()).toHaveLength(2));
+        expect(JSON.parse(putBodies()[1])).toEqual({ encrypt_archives: false, archive_passphrase: '***' });
+    });
+
+    it('keeps the pending enable and its Save passphrase button when the save is refused', async () => {
+        configPayload = { ...customConfig, encrypt_archives: false, archive_passphrase: '' };
+        const base = apiFetch.getMockImplementation()!;
+        apiFetch.mockImplementation(async (path: string, options?: { method?: string }) => (
+            path === '/cloud-backup/config' && options?.method === 'PUT'
+                ? json({ error: 'save refused' }, 400)
+                : base(path, options)
+        ));
+        render(<CloudBackupSection />);
+        const user = userEvent.setup();
+        const toggle = await screen.findByRole('switch', { name: 'Encrypt archives' });
+        await user.click(toggle);
+        await user.type(screen.getByLabelText('Archive passphrase'), 'correct-horse-battery');
+        await user.click(screen.getByRole('button', { name: 'Save passphrase' }));
+        await waitFor(() => expect(toast.error).toHaveBeenCalledWith('save refused'));
+        expect(toggle).toBeChecked();
+        expect(screen.getByText(/Not on yet/)).toBeInTheDocument();
+        expect(screen.getByRole('button', { name: 'Save passphrase' })).toBeEnabled();
+    });
+
+    it('settles the pending enable when a passphrase save is stored but its answer is lost', async () => {
+        configPayload = { ...customConfig, encrypt_archives: false, archive_passphrase: '' };
+        const base = apiFetch.getMockImplementation()!;
+        let stored = false;
+        apiFetch.mockImplementation(async (path: string, options?: { method?: string }) => {
+            if (path === '/cloud-backup/config' && options?.method === 'PUT') {
+                stored = true;
+                throw new Error('network down');
+            }
+            if (path === '/cloud-backup/config' && stored) {
+                return json({ ...configPayload, encrypt_archives: true, archive_passphrase: '***' });
+            }
+            return base(path, options);
+        });
+        render(<CloudBackupSection />);
+        const user = userEvent.setup();
+        const toggle = await screen.findByRole('switch', { name: 'Encrypt archives' });
+        await user.click(toggle);
+        await user.type(screen.getByLabelText('Archive passphrase'), 'correct-horse-battery');
+        await user.click(screen.getByRole('button', { name: 'Save passphrase' }));
+        await waitFor(() => expect(toast.error).toHaveBeenCalledWith('network down'));
+        await waitFor(() => expect(screen.queryByText(/Not on yet/)).not.toBeInTheDocument());
+        expect(toggle).toBeChecked();
+        expect(screen.queryByRole('button', { name: 'Save passphrase' })).not.toBeInTheDocument();
+    });
+
+    it('keeps an unsaved replacement passphrase when an unrelated write loses its answer', async () => {
+        configPayload = { ...customConfig, encrypt_archives: true, archive_passphrase: '***' };
+        const base = apiFetch.getMockImplementation()!;
+        apiFetch.mockImplementation(async (path: string, options?: { method?: string }) => {
+            if (path === '/cloud-backup/config' && options?.method === 'PUT') throw new Error('network down');
+            return base(path, options);
+        });
+        render(<CloudBackupSection />);
+        const user = userEvent.setup();
+        const draft = await screen.findByLabelText('Archive passphrase');
+        await user.type(draft, 'replacement-passphrase');
+        await user.click(screen.getByRole('switch', { name: 'Encrypt archives' }));
+        await waitFor(() => expect(toast.error).toHaveBeenCalledWith('network down'));
+        await waitFor(() => expect(apiFetch.mock.calls.filter(call => call[0] === '/cloud-backup/config' && !call[1]?.method).length).toBeGreaterThan(1));
+        expect(screen.getByLabelText('Archive passphrase')).toHaveValue('replacement-passphrase');
+        expect(screen.getByRole('button', { name: 'Save passphrase' })).toBeInTheDocument();
     });
 
     it('turning encryption off writes only the flag and the placeholder passphrase', async () => {
