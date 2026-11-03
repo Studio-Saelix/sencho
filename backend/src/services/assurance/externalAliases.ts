@@ -62,8 +62,19 @@ export interface TrivyMisconfigInput {
   path?: string;
 }
 
-function subjectFromPath(path: string | undefined, fallback: AssuranceRule['subject']): AssuranceSubject {
-  return { kind: fallback, key: path ?? 'stack' };
+/**
+ * The subject key for an equivalent alias: the service the scanner names,
+ * falling back to the file. Keying on the service is what lets it land on the
+ * same fingerprint as the Compose Doctor finding for that service. External
+ * findings that cannot dedupe (related or unmapped) key on the file instead, so
+ * two files checked for the same rule never collapse into one.
+ */
+function subjectForEquivalent(
+  service: string | undefined,
+  path: string | undefined,
+  fallback: AssuranceRule['subject'],
+): AssuranceSubject {
+  return { kind: fallback, key: service ?? path ?? 'stack' };
 }
 
 /** Normalize a Trivy misconfiguration finding into the contract. */
@@ -81,18 +92,24 @@ export function resolveExternalFinding(
   input: TrivyMisconfigInput,
   alias: { ruleId: CanonicalRuleId; relation: AliasRelation } | undefined,
 ): AssuranceFinding {
+  // Every scanner-supplied string is redacted at this boundary. A valid Compose
+  // service name is unchanged by redaction, so identifiers stay joinable.
+  const service = input.service === undefined ? undefined : redactSensitiveText(input.service);
   const scope: AssuranceScope = {
     nodeId: input.nodeId,
     stack: input.stack,
-    ...(input.service !== undefined ? { service: input.service } : {}),
+    ...(service !== undefined ? { service } : {}),
   };
   const rule = alias ? getAssuranceRule(alias.ruleId) : undefined;
   const title = redactSensitiveText(input.title);
   const message = redactSensitiveText(input.message);
+  // Scanner free text, so the path is redacted like the title and message before
+  // it reaches the subject key or the location.
+  const path = input.path === undefined ? undefined : redactSensitiveText(input.path);
   const externalSeverity = input.severity ?? 'UNKNOWN';
 
   if (alias?.relation === 'equivalent' && rule) {
-    const subject = subjectFromPath(input.path, rule.subject);
+    const subject = subjectForEquivalent(service, path, rule.subject);
     return {
       ruleId: rule.id,
       ruleVersion: rule.version,
@@ -106,7 +123,7 @@ export function resolveExternalFinding(
         subjectKey: findingSubjectKey(scope, subject),
         basis: 'structured',
       },
-      ...(input.path !== undefined ? { location: { path: input.path } } : {}),
+      ...(path !== undefined ? { location: { path } } : {}),
       evidence: [{ layer: 'authored', provider: 'trivy', externalSeverity }],
       title,
       message,
@@ -119,7 +136,7 @@ export function resolveExternalFinding(
 
   const ruleId = externalRuleId('trivy', input.id);
   const subjectKind: SubjectKind = 'image';
-  const subject = subjectFromPath(input.path, subjectKind);
+  const subject: AssuranceSubject = { kind: subjectKind, key: path ?? 'stack' };
   return {
     ruleId,
     ruleVersion: null,
@@ -133,7 +150,7 @@ export function resolveExternalFinding(
       subjectKey: findingSubjectKey(scope, subject),
       basis: 'structured',
     },
-    ...(input.path !== undefined ? { location: { path: input.path } } : {}),
+    ...(path !== undefined ? { location: { path } } : {}),
     evidence: [{ layer: 'authored', provider: 'trivy', externalSeverity }],
     title,
     message,

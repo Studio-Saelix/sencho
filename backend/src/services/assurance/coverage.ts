@@ -106,13 +106,17 @@ export const REQUIREMENT_LABEL: Record<EvidenceRequirement, string> = {
 
 /**
  * What did not run, in one clause, or null when every verdict-affecting check
- * ran. Note rules are excluded: they never change the verdict.
+ * ran. Note rules are excluded: they never change the verdict. An unknown
+ * requirement name (coverage written by a newer build) degrades to a count
+ * instead of leaking `undefined` into operator copy.
  */
 export function describeCoverageGaps(coverage: AssuranceCoverage): string | null {
   const skipped = coverage.skipped.filter(entry => entry.affectsVerdict);
   if (skipped.length === 0) return null;
-  const reasons = [...new Set(skipped.flatMap(entry => entry.missing.map(requirement => REQUIREMENT_LABEL[requirement])))];
-  return `${skipped.length} check${skipped.length === 1 ? '' : 's'} could not run: ${reasons.join(', ')}`;
+  const reasons = [...new Set(skipped.flatMap(entry =>
+    entry.missing.map(requirement => REQUIREMENT_LABEL[requirement]).filter(Boolean)))];
+  const count = `${skipped.length} check${skipped.length === 1 ? '' : 's'} could not run`;
+  return reasons.length > 0 ? `${count}: ${reasons.join(', ')}` : count;
 }
 
 /** Coverage for a run stored before coverage existed, or from an older node. */

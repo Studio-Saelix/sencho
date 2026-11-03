@@ -81,8 +81,18 @@ describe('fingerprints', () => {
   });
 
   it('are not deduplicated when they come from a related external alias', () => {
-    const related = normalize(hit('privileged', { service: 'web', sourcePath: 'web' }));
-    expect(dedupeKey(related)).toBe(related.identity.fingerprint);
+    const related = normalizeTrivyMisconfig({
+      nodeId: 1,
+      stack: 'demo',
+      id: 'DS002',
+      title: 'Image user should not be root',
+      message: 'Add a USER line to the Dockerfile',
+      severity: 'HIGH',
+      path: 'Dockerfile',
+    });
+    expect(related.externalAlias?.relation).toBe('related');
+    expect(related.ruleId).toBe('external:trivy:DS002');
+    expect(dedupeKey(related)).toBeNull();
   });
 });
 
@@ -258,6 +268,46 @@ describe('external aliases', () => {
     const serialized = JSON.stringify(serializeFinding(finding));
     expect(serialized).not.toContain('hunter2');
     expect(serialized).not.toContain('user:pass');
+  });
+
+  it('redacts a scanner path before it reaches the subject or location', () => {
+    const finding = normalizeTrivyMisconfig({
+      ...input,
+      id: 'DS999',
+      path: 'https://user:pass@host/deploy/.env',
+    });
+    expect(finding.subject.key).not.toContain('user:pass');
+    expect(finding.location?.path).not.toContain('user:pass');
+    expect(JSON.stringify(serializeFinding(finding))).not.toContain('user:pass');
+  });
+
+  it('redacts a scanner-supplied service name', () => {
+    const finding = normalizeTrivyMisconfig({
+      ...input,
+      id: 'DS999',
+      service: 'web PASSWORD=hunter2',
+      path: 'Dockerfile',
+    });
+    expect(finding.scope.service).not.toContain('hunter2');
+    expect(JSON.stringify(serializeFinding(finding))).not.toContain('hunter2');
+  });
+
+  it('keeps a file-level external finding keyed on the file, even with a service', () => {
+    const finding = normalizeTrivyMisconfig({
+      ...input,
+      id: 'DS002',
+      service: 'web',
+      path: 'Dockerfile',
+    });
+    expect(finding.subject).toEqual({ kind: 'image', key: 'Dockerfile' });
+  });
+
+  it('keys an equivalent alias on the service so it can dedupe with the canonical engine', () => {
+    const finding = resolveExternalFinding(
+      { ...input, service: 'web', path: 'compose.yaml' },
+      { ruleId: 'root-user', relation: 'equivalent' },
+    );
+    expect(finding.subject).toEqual({ kind: 'service', key: 'web' });
   });
 
   it('uses one explicit severity table', () => {

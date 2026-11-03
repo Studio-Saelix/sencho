@@ -5,7 +5,7 @@
  */
 import { describe, it, expect } from 'vitest';
 import { runRules } from '../services/preflight/rules';
-import { runAssuranceRules } from '../services/assurance/coverage';
+import { runAssuranceRules, describeCoverageGaps, parseCoverage } from '../services/assurance/coverage';
 import { COMPOSE_DOCTOR_RULES, getAssuranceRule } from '../services/assurance/ruleRegistry';
 import { EVIDENCE_REQUIREMENTS } from '../services/assurance/types';
 import type { PreflightContext } from '../services/preflight/types';
@@ -115,5 +115,27 @@ describe('coverage state', () => {
     expect(coverage.skipped).toEqual([]);
     expect(coverage.state).toBe('complete');
     expect(coverage.evaluated).toBe(COMPOSE_DOCTOR_RULES.length - 1);
+  });
+});
+
+describe('coverage gap copy', () => {
+  it('names the missing evidence when it can', () => {
+    const { coverage } = runAssuranceRules(dropEvidence(maximalContext(), 'node-state'));
+    expect(describeCoverageGaps(coverage)).toContain('node state unavailable');
+  });
+
+  it('degrades to a count when a stored requirement name is unknown', () => {
+    const coverage = parseCoverage(JSON.stringify({
+      state: 'partial',
+      evaluated: 10,
+      notApplicable: 0,
+      skipped: [{ ruleId: 'privileged', missing: ['a-requirement-from-a-newer-build'], affectsVerdict: true }],
+    }));
+    expect(describeCoverageGaps(coverage)).toBe('1 check could not run');
+  });
+
+  it('says nothing when only note rules were skipped', () => {
+    const { coverage } = runAssuranceRules(dropEvidence(maximalContext(), 'compose-version'));
+    expect(describeCoverageGaps(coverage)).toBeNull();
   });
 });
