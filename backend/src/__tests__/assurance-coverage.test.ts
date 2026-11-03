@@ -185,7 +185,7 @@ describe('frontend coverage copy', () => {
   it('does not throw on a coverage shape from another build, and ignores inherited keys', async () => {
     const frontend = await load();
     const odd = (skipped: unknown) => ({ state: 'partial', evaluated: 1, notApplicable: 0, skipped }) as never;
-    expect(frontend.coverageGapLine(odd('not-a-list'))).toBeNull();
+    expect(frontend.coverageGapLine(odd('not-a-list'))).toBe('1 or more checks could not run.');
     expect(frontend.coverageGapLine(odd([null, { affectsVerdict: true, missing: 'node-state' }])))
       .toBe('1 check could not run.');
     const inherited = { ruleId: 'privileged', missing: ['constructor', 'toString'], affectsVerdict: true };
@@ -196,29 +196,45 @@ describe('frontend coverage copy', () => {
   it('words every malformed shape the same on both sides, and neither throws', async () => {
     const frontend = await load();
     const entry = (over: Record<string, unknown>) => ({ ruleId: 'privileged', missing: ['node-state'], affectsVerdict: true, ...over });
-    const shapes: Record<string, unknown> = {
-      'skipped is not a list': 'not-a-list',
-      'skipped is missing': undefined,
-      'skipped is null': null,
-      'an entry is null': [null],
-      'an entry is a string': ['node-state'],
-      'missing is a string': [entry({ missing: 'node-state' })],
-      'missing is absent': [entry({ missing: undefined })],
-      'missing holds a non-string': [entry({ missing: [7, null, 'node-state'] })],
-      'affectsVerdict is truthy but not true': [entry({ affectsVerdict: 'yes' }), entry({ affectsVerdict: 1 })],
-      'affectsVerdict is false': [entry({ affectsVerdict: false })],
-      'one valid entry among bad ones': [null, 'x', entry({})],
+    // Each shape is stated as an absolute clause: a regression made on both
+    // sides at once must still fail here.
+    const NONE = '1 or more checks could not run';
+    const shapes: Record<string, [skipped: unknown, clause: string]> = {
+      'skipped is not a list': ['not-a-list', NONE],
+      'skipped is missing': [undefined, NONE],
+      'skipped is null': [null, NONE],
+      'an entry is null': [[null], NONE],
+      'an entry is a string': [['node-state'], NONE],
+      'missing is a string': [[entry({ missing: 'node-state' })], '1 check could not run'],
+      'missing is absent': [[entry({ missing: undefined })], '1 check could not run'],
+      'missing holds a non-string': [[entry({ missing: [7, null, ['node-state'], 'node-state'] })], '1 check could not run: node state unavailable'],
+      'affectsVerdict is truthy but not true': [[entry({ affectsVerdict: 'yes' }), entry({ affectsVerdict: 1 })], NONE],
+      'one valid entry among bad ones': [[null, 'x', entry({})], '1 check could not run: node state unavailable'],
     };
-    const shaped = (skipped: unknown) => ({ state: 'partial', evaluated: 1, notApplicable: 0, skipped }) as never;
-    for (const [name, skipped] of Object.entries(shapes)) {
-      const clause = describeCoverageGaps(shaped(skipped));
-      expect(frontend.coverageGapLine(shaped(skipped)), name).toBe(clause === null ? null : `${clause}.`);
+    const shaped = (state: string, skipped: unknown) => ({ state, evaluated: 1, notApplicable: 0, skipped }) as never;
+    for (const [name, [skipped, clause]] of Object.entries(shapes)) {
+      expect(describeCoverageGaps(shaped('partial', skipped)), name).toBe(clause);
+      expect(frontend.coverageGapLine(shaped('partial', skipped)), name).toBe(`${clause}.`);
+      // A complete run keeps naming a verdict-affecting skip it can read, but
+      // owes nothing when the list names none.
+      const complete = clause === NONE ? null : clause;
+      expect(describeCoverageGaps(shaped('complete', skipped)), `${name} (complete)`).toBe(complete);
+      expect(frontend.coverageGapLine(shaped('complete', skipped)), `${name} (complete)`)
+        .toBe(complete === null ? null : `${complete}.`);
     }
-    expect(describeCoverageGaps(shaped('not-a-list'))).toBeNull();
-    // A truthy-but-not-true flag is not a verdict-affecting skip.
-    expect(describeCoverageGaps(shaped(shapes['affectsVerdict is truthy but not true']))).toBeNull();
-    expect(describeCoverageGaps(shaped(shapes['one valid entry among bad ones'])))
-      .toBe('1 check could not run: node state unavailable');
+    // A skip that does not affect the verdict is not a gap on a complete run.
+    const noteOnly = shaped('complete', [entry({ affectsVerdict: false })]);
+    expect(describeCoverageGaps(noteOnly)).toBeNull();
+    expect(frontend.coverageGapLine(noteOnly)).toBeNull();
+  });
+
+  it('says nothing for unrecorded or absent coverage on both sides, whatever its list holds', async () => {
+    const frontend = await load();
+    const listed = { state: 'unrecorded', evaluated: 0, notApplicable: 0, skipped: [{ ruleId: 'privileged', missing: ['node-state'], affectsVerdict: true }] } as never;
+    for (const coverage of [listed, undefined, null] as never[]) {
+      expect(describeCoverageGaps(coverage)).toBeNull();
+      expect(frontend.coverageGapLine(coverage)).toBeNull();
+    }
   });
 
   it('degrades an unknown requirement to a count like the backend', async () => {

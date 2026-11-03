@@ -13,6 +13,7 @@ import {
 } from '../services/updateGuard/readiness';
 import type { ContainerProbe, ReadinessSignal } from '../services/updateGuard/types';
 import type { AssuranceCoverage } from '../services/assurance/types';
+import { parseCoverage } from '../services/assurance/coverage';
 
 /** A run where every verdict-affecting check ran. */
 const COMPLETE: AssuranceCoverage = { state: 'complete', evaluated: 42, notApplicable: 0, skipped: [] };
@@ -91,6 +92,21 @@ describe('preflightSignal', () => {
     expect(signal.status).toBe('unknown');
     expect(signal.affectsVerdict).toBe(false);
     expect(signal.detail).toContain('2 checks could not run: node state unavailable');
+  });
+
+  it('does not report a partial run as passed when its skipped list names no readable check', () => {
+    const stored = (skipped: unknown[]) => parseCoverage(JSON.stringify({ state: 'partial', evaluated: 9, notApplicable: 0, skipped }));
+    const malformed = [
+      { ruleId: 'privileged', missing: ['node-state'], affectsVerdict: 'true' },
+      { ruleId: 'privileged', missing: 'node-state', affectsVerdict: true },
+    ];
+    for (const coverage of [stored([]), stored(malformed)]) {
+      expect(coverage.state).toBe('partial');
+      const signal = preflightSignal({ activeStatus: 'pass', coverage });
+      expect(signal.status).toBe('unknown');
+      expect(signal.affectsVerdict).toBe(false);
+      expect(signal.detail).toContain('1 or more checks could not run');
+    }
   });
 
   it('does not report an unrecorded run as passed', () => {

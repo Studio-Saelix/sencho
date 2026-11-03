@@ -132,12 +132,15 @@ describe('fingerprints', () => {
   });
 
   it('ignore legacy identities, which are documented as not dedupable', () => {
+    // The rows differ in text, so only the legacy skip keeps them from colliding.
     const rows = ['legacy-a', 'legacy-b'].map(id => normalizeStoredFinding({
       id, run_id: 'run', rule_id: 'privileged', severity: 'high', title: 'Privileged container',
-      message: 'm', source_path: null, remediation: null, service: 'web', created_at: 1,
+      message: `row ${id}`, source_path: null, remediation: null, service: 'web', created_at: 1,
       rule_version: null, subject_kind: null, subject_key: null,
     }, 1, STACK));
+    expect(rows.map(row => row.identity.basis)).toEqual(['legacy', 'legacy']);
     expect(rows[0].identity.fingerprint).toBe(rows[1].identity.fingerprint);
+    expect(rows[0].message).not.toBe(rows[1].message);
     expect(findFingerprintCollisions(rows)).toEqual([]);
   });
 
@@ -178,6 +181,10 @@ describe('fingerprints', () => {
       ['no remediation', { remediation: undefined }],
       ['a line in the same file', { location: { path: 'web', line: 12 } }],
       ['the file the path lives in', { location: { path: 'web', file: 'compose.override.yaml' } }],
+      ['a column', { location: { path: 'web', column: 4 } }],
+      ['an end line', { location: { path: 'web', endLine: 20 } }],
+      ['an end column', { location: { path: 'web', endColumn: 9 } }],
+      ['having a location at all', { location: undefined }],
       ['confidence', { confidence: 'inferred' as const }],
       ['completeness', { completeness: 'partial' as const }],
       ['class', { findingClass: 'information' as const }],
@@ -189,7 +196,7 @@ describe('fingerprints', () => {
       expect(findFingerprintCollisions([first, second])).toEqual(['privileged']);
     });
 
-    it('does not flag a pair that agrees on every field the contract exposes', () => {
+    it('does not flag an identical pair, however often it repeats', () => {
       expect(findFingerprintCollisions([base(), base(), base()])).toEqual([]);
     });
 

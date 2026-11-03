@@ -17,7 +17,7 @@ export interface PreflightAcknowledgementDecision {
 
 export interface PreflightAckFilterContext {
     renderedHash: string | null;
-    /** Parsed service name to image ref from the latest stored run. */
+    /** Parsed service name to image ref of the run the findings come from. */
     serviceImages: Record<string, string>;
 }
 

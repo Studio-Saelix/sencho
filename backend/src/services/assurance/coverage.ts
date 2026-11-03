@@ -104,24 +104,34 @@ export const REQUIREMENT_LABEL: Record<EvidenceRequirement, string> = {
   'compose-version': 'Compose version unknown',
 };
 
+/** Said for a partial run whose skipped list names no verdict-affecting check. */
+const UNNAMED_GAP = '1 or more checks could not run';
+
 /**
  * What did not run, in one clause, or null when every verdict-affecting check
- * ran. Note rules are excluded: they never change the verdict. The input is not
- * trusted to match its type (coverage can come from a node on another build, or
- * from a caller that skipped `parseCoverage`): a `skipped` that is not a list, an
- * entry that is not an object, a `missing` that is not a list, and an unknown
- * requirement name each degrade to fewer reasons or a bare count instead of a
- * throw or `undefined` in operator copy. The Doctor tab applies the same rules
- * (frontend `coverageGapLine`).
+ * ran (or the run recorded no coverage, which callers report on their own). Note
+ * rules are excluded: they never change the verdict.
+ *
+ * The input is not trusted to match its type, because a caller can skip
+ * `parseCoverage` and a node on another build can send another shape. A
+ * `skipped` that is not a list, an entry that is not an object, a `missing` that
+ * is not a list, and a requirement that is not a known name each degrade to
+ * fewer reasons or a bare count instead of a throw or `undefined` in operator
+ * copy. A `partial` run whose list names no verdict-affecting skip still says
+ * that something did not run: unreadable detail never turns into "all ran".
+ * Frontend `coverageGapLine` applies the same rules and adds a full stop.
  */
-export function describeCoverageGaps(coverage: AssuranceCoverage): string | null {
+export function describeCoverageGaps(coverage: AssuranceCoverage | null | undefined): string | null {
+  if (!coverage || coverage.state === 'unrecorded') return null;
   const entries: readonly AssuranceCoverageSkip[] = Array.isArray(coverage.skipped) ? coverage.skipped : [];
   const skipped = entries.filter(entry => entry?.affectsVerdict === true);
-  if (skipped.length === 0) return null;
+  if (skipped.length === 0) return coverage.state === 'partial' ? UNNAMED_GAP : null;
   const reasons = [...new Set(skipped.flatMap(entry => {
-    const missing: readonly EvidenceRequirement[] = Array.isArray(entry.missing) ? entry.missing : [];
+    const missing: readonly unknown[] = Array.isArray(entry.missing) ? entry.missing : [];
     return missing.flatMap(requirement =>
-      Object.hasOwn(REQUIREMENT_LABEL, requirement) ? [REQUIREMENT_LABEL[requirement]] : []);
+      typeof requirement === 'string' && Object.hasOwn(REQUIREMENT_LABEL, requirement)
+        ? [REQUIREMENT_LABEL[requirement as EvidenceRequirement]]
+        : []);
   }))];
   const count = `${skipped.length} check${skipped.length === 1 ? '' : 's'} could not run`;
   return reasons.length > 0 ? `${count}: ${reasons.join(', ')}` : count;

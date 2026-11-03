@@ -461,6 +461,7 @@ describe('getLatest', () => {
     expect(r.status).toBe('never-run');
     expect(r.ranAt).toBeNull();
     expect(r.findings).toEqual([]);
+    expect(r.coverage.state).toBe('unrecorded');
   });
 });
 
@@ -524,6 +525,42 @@ describe('preflight acknowledgements', () => {
       expect(stored.findings).toEqual(fresh.findings);
       expect(stored.activeStatus).toBe(fresh.activeStatus);
       expect(stored.activeCount).toBe(fresh.activeCount);
+    });
+
+    it('applies a time-boxed acknowledgement on a fresh run only while it is live', async () => {
+      stubDocker(model('nginx:1.27'));
+      db().upsertPreflightAcknowledgement(ack({ expiry_mode: 'days', expires_at: Date.now() - 1000 }));
+      expect((await doctor().runPreflight(nodeId, STACK, 'tester')).acknowledgedCount).toBe(0);
+      db().upsertPreflightAcknowledgement(ack({ expiry_mode: 'days', expires_at: Date.now() + 3_600_000 }));
+      const live = await doctor().runPreflight(nodeId, STACK, 'tester');
+      expect(live.acknowledgedCount).toBe(1);
+      expect(live.findings.find(finding => finding.acknowledged)?.acknowledgementExpiry).toBe('days');
+    });
+
+    it('reads the compose hash of this run, not of the last stored one, when the run cannot be stored', async () => {
+      stubDocker(model('nginx:1.27'));
+      const first = await doctor().runPreflight(nodeId, STACK, 'tester');
+      db().upsertPreflightAcknowledgement(ack({ expiry_mode: 'until_compose_change', anchor_rendered_hash: first.renderedHash }));
+      expect((await doctor().runPreflight(nodeId, STACK, 'tester')).acknowledgedCount).toBe(1);
+
+      // The file changed and storing the new run fails: the stored run still holds
+      // the anchored hash, which must not keep the acknowledgement alive.
+      writeStack(STACK, 'services:\n  web:\n    image: nginx:latest\n    ports:\n      - "9090:80"\n');
+      vi.spyOn(console, 'error').mockImplementation(() => {});
+      vi.spyOn(db(), 'replacePreflightRun').mockImplementation(() => { throw new Error('disk full'); });
+      const changed = await doctor().runPreflight(nodeId, STACK, 'tester');
+      expect(changed.renderedHash).not.toBe(first.renderedHash);
+      expect(changed.acknowledgedCount).toBe(0);
+    });
+
+    it('does not apply a compose-anchored acknowledgement when the source cannot be read', async () => {
+      stubDocker(model('nginx:1.27'));
+      db().upsertPreflightAcknowledgement(ack({ expiry_mode: 'until_compose_change', anchor_rendered_hash: 'anything' }));
+      fs.rmSync(path.join(process.env.COMPOSE_DIR as string, STACK, 'compose.yaml'));
+      vi.spyOn(console, 'warn').mockImplementation(() => {});
+      const fresh = await doctor().runPreflight(nodeId, STACK, 'tester');
+      expect(fresh.renderedHash).toBeNull();
+      expect(fresh.acknowledgedCount).toBe(0);
     });
 
     it('reads the images of this run, not of the last stored one, when the run cannot be stored', async () => {
@@ -873,16 +910,47 @@ describe('Compose Assurance contract persistence', () => {
       }
     });
 
-    it('is the read the Doctor wire report is built from', () => {
-      db().upsertPreflightAcknowledgement(ack('privileged', 'db'));
-      const service = doctor();
-      const read = vi.spyOn(service, 'getLatestAssurance');
-      const report = service.getLatest(nodeId, stack);
-      expect(read).toHaveBeenCalledWith(nodeId, stack);
-      const { findings } = service.getLatestAssurance(nodeId, stack);
-      // Finding for finding, the wire acknowledgement is the normalized decision.
-      expect(report.findings.map(finding => [finding.ruleId, finding.service, finding.acknowledged, finding.acknowledgementId]))
-        .toEqual(findings.map(finding => [finding.ruleId, finding.scope.service, finding.decision !== undefined, finding.decision?.id]));
+    it('carries every decision field to the wire exactly as the normalized read has it', () => {
+      const soon = Date.now() + 86_400_000;
+      db().replacePreflightRun(
+        { id: 'ack-run', node_id: nodeId, stack_name: stack, source_hash: null, rendered_hash: 'hash-1', service_images: JSON.stringify({ db: 'postgres:16' }), status: 'high', highest_severity: 'high', created_at: 2, created_by: 'tester', coverage: null },
+        [
+          row('f-web', 'privileged', 'high', 'web'),
+          row('f-info', 'healthcheck-inherited', 'info', 'db'),
+          row('f-db', 'privileged', 'high', 'db'),
+          row('f-warn', 'no-restart-policy', 'warning', 'web'),
+          row('f-img', 'image-latest', 'warning', 'db'),
+        ],
+      );
+      db().upsertPreflightAcknowledgement(ack('privileged', 'web'));
+      db().upsertPreflightAcknowledgement(ack('privileged', 'db', { expiry_mode: 'days', expires_at: soon }));
+      db().upsertPreflightAcknowledgement(ack('no-restart-policy', 'web', { expiry_mode: 'until_compose_change', anchor_rendered_hash: 'hash-1' }));
+      db().upsertPreflightAcknowledgement(ack('image-latest', 'db', { expiry_mode: 'until_image_change', anchor_image_ref: 'postgres:16' }));
+
+      const wire = doctor().getLatest(nodeId, stack).findings;
+      const { findings } = doctor().getLatestAssurance(nodeId, stack);
+      expect(wire).toHaveLength(findings.length);
+      // Finding for finding, in the same order, the wire fields are the decision's.
+      findings.forEach((finding, index) => {
+        const projected = wire[index];
+        expect([projected.ruleId, projected.service]).toEqual([finding.ruleId, finding.scope.service]);
+        expect(projected.acknowledged).toBe(finding.decision !== undefined);
+        expect(projected.acknowledgementId).toBe(finding.decision?.id);
+        expect(projected.acknowledgementReason).toBe(finding.decision?.reason);
+        expect(projected.acknowledgementExpiry).toBe(finding.decision?.expiry.mode);
+        expect(projected.acknowledgementExpiresAt).toBe(finding.decision?.expiry.expiresAt);
+      });
+      // Stated outright, so a regression made on both sides still fails.
+      const summary = wire.filter(finding => finding.acknowledged)
+        .map(finding => [finding.ruleId, finding.service, finding.acknowledgementReason, finding.acknowledgementExpiry, finding.acknowledgementExpiresAt]);
+      expect(summary).toEqual(expect.arrayContaining([
+        ['privileged', 'web', 'privileged web', 'forever', undefined],
+        ['privileged', 'db', 'privileged db', 'days', soon],
+        ['no-restart-policy', 'web', 'no-restart-policy web', 'until_compose_change', undefined],
+        ['image-latest', 'db', 'image-latest db', 'until_image_change', undefined],
+      ]));
+      expect(summary).toHaveLength(4);
+      expect(wire.filter(finding => !finding.acknowledged).every(finding => finding.acknowledgementId === undefined)).toBe(true);
     });
   });
 

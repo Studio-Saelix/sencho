@@ -60,8 +60,8 @@ function sortNormalized(findings: AssuranceFinding[]): AssuranceFinding[] {
 }
 
 /** Project one finding onto the Doctor wire shape, without a decision. The wire
- *  type predates the contract and stays additive: subject, identity, and
- *  coverage are backend internals until a normalized wire format exists. */
+ *  type predates the contract and stays additive: a finding's subject and
+ *  identity are backend internals until a normalized wire format exists. */
 function projectFinding(finding: AssuranceFinding): PreflightFinding {
   return {
     ruleId: finding.ruleId,
@@ -238,10 +238,12 @@ export class ComposeDoctorService {
   }
 
   /**
-   * The latest stored run with its normalized findings, each carrying the
-   * read-time acknowledgement decision, and its coverage. `getLatest` (the Doctor
-   * route, readiness, and the networking findings all read it) is a projection of
-   * this, so the contract is on the hot path rather than a parallel model.
+   * The latest stored run row, its normalized findings (an acknowledged one
+   * carries its read-time decision), and its coverage. `getLatest` is a
+   * projection of this, and the Doctor tab's GET route, update readiness, and the
+   * networking findings all read `getLatest`, so the contract is on the hot path
+   * rather than a parallel model. A fresh `runPreflight` decides its findings the
+   * same way (`decideFindings`).
    */
   getLatestAssurance(nodeId: number, stackName: string): {
     run: PreflightRunRow | null;
@@ -253,7 +255,7 @@ export class ComposeDoctorService {
     const { acks, ackCtx } = loadAcknowledgementInputs(nodeId, stackName, run.rendered_hash, run.service_images);
     return {
       run,
-      // One clock reading for the whole read, as the wire report takes.
+      // One clock reading for the whole read.
       findings: decideFindings(this.readNormalized(nodeId, stackName, run.id), ackCtx, acks, Date.now()),
       coverage: parseCoverage(run.coverage),
     };

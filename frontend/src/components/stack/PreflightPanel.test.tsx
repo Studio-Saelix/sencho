@@ -126,6 +126,17 @@ describe('PreflightPanel', () => {
     expect(status).toHaveTextContent('No issues in the checks that ran. 1 check could not run.');
   });
 
+  it('does not claim all clear on a partial run whose skipped list names no verdict check', async () => {
+    vi.mocked(apiFetch).mockResolvedValue(jsonRes(report({
+      coverage: { state: 'partial', evaluated: 40, notApplicable: 0, skipped: [] },
+    })));
+    render(<PreflightPanel stackName="web" />);
+    const status = await screen.findByTestId('preflight-status');
+    expect(status).toHaveTextContent('partial check');
+    expect(status).toHaveTextContent('No issues in the checks that ran. 1 or more checks could not run.');
+    expect(status).not.toHaveTextContent(/all clear/i);
+  });
+
   it('does not claim all clear when coverage was not recorded', async () => {    vi.mocked(apiFetch).mockResolvedValue(jsonRes(report({
       coverage: { state: 'unrecorded', evaluated: 0, notApplicable: 0, skipped: [] },
     })));

@@ -36,7 +36,9 @@ export const REQUIREMENT_LABEL: Record<EvidenceRequirement, string> = {
 
 /**
  * What did not run, in one clause, or null when every verdict-affecting check
- * ran. An older node omits `coverage` entirely, which reads as unrecorded.
+ * ran. An older node omits `coverage` entirely, which reads as unrecorded. A
+ * partial run whose list names no verdict-affecting skip still says that
+ * something did not run, as the backend clause does.
  */
 export function coverageGapLine(coverage: AssuranceCoverage | undefined): string | null {
   if (!coverage || coverage.state === 'unrecorded') return null;
@@ -44,10 +46,12 @@ export function coverageGapLine(coverage: AssuranceCoverage | undefined): string
   // entry that is not what the type says is skipped instead of thrown on.
   const skipped = (Array.isArray(coverage.skipped) ? coverage.skipped : [])
     .filter(entry => entry?.affectsVerdict === true);
-  if (skipped.length === 0) return null;
+  if (skipped.length === 0) return coverage.state === 'partial' ? '1 or more checks could not run.' : null;
   const reasons = [...new Set(skipped.flatMap(entry =>
     (Array.isArray(entry.missing) ? entry.missing : []).flatMap(requirement =>
-      Object.hasOwn(REQUIREMENT_LABEL, requirement) ? [REQUIREMENT_LABEL[requirement]] : [])))];
+      typeof requirement === 'string' && Object.hasOwn(REQUIREMENT_LABEL, requirement)
+        ? [REQUIREMENT_LABEL[requirement]]
+        : [])))];
   const count = `${skipped.length} check${skipped.length === 1 ? '' : 's'} could not run`;
   return reasons.length > 0 ? `${count}: ${reasons.join(', ')}.` : `${count}.`;
 }
