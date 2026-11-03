@@ -4,7 +4,8 @@
  * These tests use a throwaway stack that is created via the browser's
  * authenticated fetch (so cookies are carried) and cleaned up in afterAll.
  * Pull tests use an unreachable URL on purpose so the suite does not depend
- * on real network egress or a specific upstream repo being available.
+ * on real network egress or a specific upstream repo being available, and
+ * tests that need a reachable repository use the local HTTPS fixture server.
  */
 import { test, expect, Page } from '@playwright/test';
 import { loginAs } from './helpers';
@@ -12,6 +13,14 @@ import { gitAvailable, buildFixtureRepo, serveRepos, fullProjectFiles, multiFile
 import { sshGitFixtureAvailable, startSshGitFixture, type SshGitE2eFixture } from './sshGit.helper';
 
 const TEST_STACK = 'e2e-git-source-stack';
+
+// A reachable public-style compose repository, served locally so that saving a
+// source (which runs a live dry-run fetch) never waits on github.com.
+const DEMO_COMPOSE_PATH = 'demo/compose.yaml';
+
+function serveDemoRepo() {
+  return serveRepos({ demo: buildFixtureRepo({ [DEMO_COMPOSE_PATH]: 'services:\n  web:\n    image: nginx\n' }) });
+}
 
 async function createTestStackViaApi(page: Page) {
   return page.evaluate(async (name) => {
@@ -45,7 +54,10 @@ async function openGitSourcePanel(page: Page) {
 }
 
 test.describe('Git Sources', () => {
+  let demo: { url: string; close: () => void } | undefined;
+
   test.beforeAll(async ({ browser }) => {
+    if (gitAvailable()) demo = await serveDemoRepo();
     const page = await browser.newPage();
     await loginAs(page);
     await deleteTestStackViaApi(page);
@@ -54,11 +66,34 @@ test.describe('Git Sources', () => {
   });
 
   test.afterAll(async ({ browser }) => {
+    demo?.close();
     const page = await browser.newPage();
     await loginAs(page);
     await deleteTestStackViaApi(page);
     await page.close();
   });
+
+  /** Links TEST_STACK to the local demo repository; returns the PUT status. */
+  function linkDemoSource(page: Page) {
+    if (!demo) throw new Error('the demo repository is not being served');
+    return page.evaluate(async ({ name, repoUrl, composePath }) => {
+      const res = await fetch(`/api/stacks/${name}/git-source`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        credentials: 'include',
+        body: JSON.stringify({
+          repo_url: repoUrl,
+          branch: 'main',
+          compose_path: composePath,
+          sync_env: false,
+          auth_type: 'none',
+          auto_apply_on_webhook: false,
+          auto_deploy_on_apply: false,
+        }),
+      });
+      return res.status;
+    }, { name: TEST_STACK, repoUrl: `${demo.url}/demo.git`, composePath: DEMO_COMPOSE_PATH });
+  }
 
   test.beforeEach(async ({ page }) => {
     await loginAs(page);
@@ -158,38 +193,15 @@ test.describe('Git Sources', () => {
   });
 
   test('configure, view pending-empty state, and detach via AlertDialog', async ({ page }) => {
-    // Seed a git source directly via API so we can exercise the detach-confirm
-    // flow without depending on a reachable upstream.
-    const putStatus = await page.evaluate(async (name) => {
-      const res = await fetch(`/api/stacks/${name}/git-source`, {
-        method: 'PUT',
-        headers: { 'Content-Type': 'application/json' },
-        credentials: 'include',
-        body: JSON.stringify({
-          repo_url: 'https://github.com/docker/awesome-compose.git',
-          branch: 'master',
-          compose_path: 'nginx-golang/compose.yaml',
-          sync_env: false,
-          auth_type: 'none',
-          auto_apply_on_webhook: false,
-          auto_deploy_on_apply: false,
-        }),
-      });
-      return res.status;
-    }, TEST_STACK);
-
-    // Either the dry-run succeeded (2xx) or the network blocked it (4xx/5xx).
-    // If it failed, skip the rest of the detach flow to keep the suite robust.
-    if (putStatus >= 400) {
-      test.skip(true, `Upstream dry-run returned ${putStatus}; skipping detach path`);
-      return;
-    }
+    test.skip(!demo, 'system git binary is not available');
+    // Seed a git source directly via API so we can exercise the detach-confirm flow.
+    expect(await linkDemoSource(page)).toBe(200);
 
     await openGitSourcePanel(page);
 
     // The Source tab reads out the saved repo URL; editing is a deliberate step.
     await page.getByRole('tab', { name: 'Source' }).click();
-    await expect(page.getByTestId('git-source-summary')).toContainText(/awesome-compose/);
+    await expect(page.getByTestId('git-source-summary')).toContainText(/demo\.git/);
 
     // Click Detach → AlertDialog appears → confirm → source cleared.
     await page.getByRole('dialog').getByRole('button', { name: 'Detach', exact: true }).click();
@@ -201,27 +213,8 @@ test.describe('Git Sources', () => {
   });
 
   test('the automation tab offers suspend and resume for a linked source', async ({ page }) => {
-    const putStatus = await page.evaluate(async (name) => {
-      const res = await fetch(`/api/stacks/${name}/git-source`, {
-        method: 'PUT',
-        headers: { 'Content-Type': 'application/json' },
-        credentials: 'include',
-        body: JSON.stringify({
-          repo_url: 'https://github.com/docker/awesome-compose.git',
-          branch: 'master',
-          compose_path: 'nginx-golang/compose.yaml',
-          sync_env: false,
-          auth_type: 'none',
-          auto_apply_on_webhook: false,
-          auto_deploy_on_apply: false,
-        }),
-      });
-      return res.status;
-    }, TEST_STACK);
-    if (putStatus >= 400) {
-      test.skip(true, `Upstream dry-run returned ${putStatus}; skipping suspend path`);
-      return;
-    }
+    test.skip(!demo, 'system git binary is not available');
+    expect(await linkDemoSource(page)).toBe(200);
 
     await openGitSourcePanel(page);
     await expect(page.getByRole('navigation', { name: /sheet location/i })).toContainText(TEST_STACK);
@@ -272,7 +265,10 @@ async function openCreateStackDialog(page: Page) {
 }
 
 test.describe('Create stack from Git', () => {
+  let demo: { url: string; close: () => void } | undefined;
+
   test.beforeAll(async ({ browser }) => {
+    if (gitAvailable()) demo = await serveDemoRepo();
     const page = await browser.newPage();
     await loginAs(page);
     await deleteCreateFromGitStack(page);
@@ -280,6 +276,7 @@ test.describe('Create stack from Git', () => {
   });
 
   test.afterAll(async ({ browser }) => {
+    demo?.close();
     const page = await browser.newPage();
     await loginAs(page);
     await deleteCreateFromGitStack(page);
@@ -330,18 +327,17 @@ test.describe('Create stack from Git', () => {
   });
 
   test('happy path: fetches compose, creates stack, links git source', async ({ page }) => {
-    // Use a public demo repo. If network egress is blocked, the POST fails
-    // and we skip the rest of the test rather than hanging the suite.
-    const result = await page.evaluate(async (name) => {
+    test.skip(!demo, 'system git binary is not available');
+    const result = await page.evaluate(async ({ name, repoUrl, composePath }) => {
       const res = await fetch(`/api/stacks/from-git`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         credentials: 'include',
         body: JSON.stringify({
           stack_name: name,
-          repo_url: 'https://github.com/docker/awesome-compose.git',
-          branch: 'master',
-          compose_path: 'nginx-golang/compose.yaml',
+          repo_url: repoUrl,
+          branch: 'main',
+          compose_path: composePath,
           auth_type: 'none',
           auto_apply_on_webhook: false,
           auto_deploy_on_apply: false,
@@ -349,13 +345,9 @@ test.describe('Create stack from Git', () => {
         }),
       });
       return { status: res.status, body: await res.json().catch(() => ({})) };
-    }, CREATE_FROM_GIT_STACK);
+    }, { name: CREATE_FROM_GIT_STACK, repoUrl: `${demo?.url}/demo.git`, composePath: DEMO_COMPOSE_PATH });
 
-    if (result.status >= 400) {
-      test.skip(true, `Upstream unreachable (status ${result.status}); skipping happy path`);
-      return;
-    }
-    expect(result.status).toBe(200);
+    expect(result.status, JSON.stringify(result.body)).toBe(200);
     expect(result.body?.source?.stack_name).toBe(CREATE_FROM_GIT_STACK);
     expect(result.body?.source?.last_applied_commit_sha).toBeTruthy();
 
@@ -373,38 +365,7 @@ test.describe('Create stack from Git', () => {
   });
 
   test('UI flow: success toast includes the short commit SHA', async ({ page }) => {
-    // Pre-flight check: if the upstream is unreachable from this runner, the
-    // UI flow will also fail. Probe the API with a throwaway name first so we
-    // skip cleanly instead of hanging on a dialog that never resolves.
-    const probeName = `${CREATE_FROM_GIT_STACK}-probe`;
-    const probe = await page.evaluate(async (name) => {
-      const res = await fetch(`/api/stacks/from-git`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        credentials: 'include',
-        body: JSON.stringify({
-          stack_name: name,
-          repo_url: 'https://github.com/docker/awesome-compose.git',
-          branch: 'master',
-          compose_path: 'nginx-golang/compose.yaml',
-          auth_type: 'none',
-          deploy_now: false,
-        }),
-      });
-      return { status: res.status };
-    }, probeName);
-
-    // Always tear down the probe, whether it succeeded or not.
-    await page.evaluate(async (name) => {
-      await fetch(`/api/stacks/${name}/git-source`, { method: 'DELETE', credentials: 'include' }).catch(() => {});
-      await fetch(`/api/stacks/${name}`, { method: 'DELETE', credentials: 'include' }).catch(() => {});
-    }, probeName);
-
-    if (probe.status >= 400) {
-      test.skip(true, `Upstream unreachable (status ${probe.status}); skipping UI toast test`);
-      return;
-    }
-
+    test.skip(!demo, 'system git binary is not available');
     const uiName = `${CREATE_FROM_GIT_STACK}-ui`;
     // Ensure no leftover row from a prior failing run.
     await page.evaluate(async (name) => {
@@ -417,12 +378,12 @@ test.describe('Create stack from Git', () => {
       await page.getByRole('dialog').getByRole('tab', { name: /From Git/i }).click();
 
       await page.locator('#create-git-stack-name').fill(uiName);
-      await page.locator('#git-source-repo').fill('https://github.com/docker/awesome-compose.git');
-      await page.locator('#git-source-branch').fill('master');
+      await page.locator('#git-source-repo').fill(`${demo?.url}/demo.git`);
+      await page.locator('#git-source-branch').fill('main');
       // Drive the compose-file picker: add the repo path, then drop the default
       // compose.yaml so only the intended file is deployed.
       const createDialog = page.getByRole('dialog');
-      await createDialog.getByPlaceholder('path/to/compose.yaml').fill('nginx-golang/compose.yaml');
+      await createDialog.getByPlaceholder('path/to/compose.yaml').fill(DEMO_COMPOSE_PATH);
       await createDialog.getByPlaceholder('path/to/compose.yaml').press('Enter');
       await createDialog.getByRole('button', { name: 'Remove compose.yaml' }).click();
 
