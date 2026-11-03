@@ -67,6 +67,13 @@ const echoing = (descriptor: Record<string, unknown>) => async (args: { headers?
 const descriptor = (state = 'unavailable', reason = 'engine_not_installed', contractVersion = 1, version = 1) => ({
   contractVersion,
   volumeProtection: { capability: 'volume-protection-v1', version, state, reason },
+  restoreModes: ['new_volume', 'staged_overwrite'] as string[],
+});
+
+/** The same answer from a node that predates the restore-mode field. */
+const legacyDescriptor = (state = 'available', reason = 'engine_registered') => ({
+  contractVersion: 1,
+  volumeProtection: { capability: 'volume-protection-v1', version: 1, state, reason },
 });
 
 describe('advertising', () => {
@@ -154,9 +161,39 @@ describe('resolveRemoteVolumeProtection', () => {
       { contractVersion: 1, volumeProtection: { ...descriptor().volumeProtection, capability: 'other' } },
       { contractVersion: 1, volumeProtection: { ...descriptor().volumeProtection, state: 'protected' } },
       { contractVersion: 1, volumeProtection: { ...descriptor().volumeProtection, reason: 'because' } },
+      // A mode this build cannot read is refused whole, never narrowed to what
+      // the hub happens to understand: it would otherwise send work the node
+      // cannot finish.
+      { ...descriptor(), restoreModes: ['new_volume', 'rewrite_in_place'] },
+      { ...descriptor(), restoreModes: 'staged_overwrite' },
+      { ...descriptor(), restoreModes: [7] },
     ]) {
       expect(resolve({ kind: 'ok', data })).toMatchObject({ state: 'unknown', reason: 'descriptor_invalid' });
     }
+  });
+
+  it('reads a descriptor without restore modes as new_volume only', async () => {
+    const capability = await import('../services/recovery/capability');
+    expect(capability.resolveRemoteRecoveryRead({ kind: 'ok', data: legacyDescriptor() }))
+      .toEqual({ status: { capability: 'volume-protection-v1', version: 1, state: 'available', reason: 'engine_registered' }, restoreModes: ['new_volume'] });
+  });
+
+  it('reads the modes a node advertises, and none when the status is not its own answer', async () => {
+    const read = await import('../services/recovery/remoteSupport');
+    const original = await import('../helpers/nodeProxyJson');
+    const spy = vi.spyOn(original, 'readNodeProxyJson').mockImplementation(echoing({
+      ...descriptor('available', 'engine_registered'),
+      restoreModes: ['new_volume'],
+    }) as never);
+    read.resetRemoteRecoverySupportCacheForTests();
+    const resolved = await read.resolveRemoteRecoverySupport(1);
+    expect(resolved.restoreModes).toEqual(['new_volume']);
+    spy.mockReset();
+
+    read.resetRemoteRecoverySupportCacheForTests();
+    vi.spyOn(original, 'readNodeProxyJson').mockImplementation(async () => ({ kind: 'transport', detail: 'no route' }));
+    const unreachable = await read.resolveRemoteRecoverySupport(2);
+    expect(unreachable.restoreModes).toBeNull();
   });
 });
 
@@ -369,5 +406,74 @@ describe('the hop to a node that is not there', () => {
       .set('x-node-id', String(pilotNodeId));
     expect(res.status).toBe(503);
     expect(res.body.errorClass).toBeUndefined();
+  });
+});
+
+
+describe('the hub preflight and a node without the overwrite surface', () => {
+  it('answers 409 UPDATE_REQUIRED when the node never advertised staged_overwrite', async () => {
+    const support = await import('../services/recovery/remoteSupport');
+    const original = await import('../helpers/nodeProxyJson');
+    // An older node: it has volume protection, but it answers the descriptor
+    // without restoreModes, which this build reads as new_volume only.
+    vi.spyOn(original, 'readNodeProxyJson').mockImplementation(echoing(legacyDescriptor()) as never);
+    support.resetRemoteRecoverySupportCacheForTests();
+    const preflight = await support.preflightRecoveryRequest(1, 'staged_overwrite');
+    expect(preflight).toMatchObject({
+      ok: false,
+      httpStatus: 409,
+      code: 'UPDATE_REQUIRED',
+      errorClass: 'update_required',
+    });
+    // The same node still accepts work it does advertise.
+    support.resetRemoteRecoverySupportCacheForTests();
+    expect(await support.preflightRecoveryRequest(1, 'new_volume')).toMatchObject({ ok: true });
+  });
+
+  it('does not narrow the preflight for a request that needs no mode', async () => {
+    const support = await import('../services/recovery/remoteSupport');
+    const original = await import('../helpers/nodeProxyJson');
+    vi.spyOn(original, 'readNodeProxyJson').mockImplementation(echoing(legacyDescriptor()) as never);
+    support.resetRemoteRecoverySupportCacheForTests();
+    expect(await support.preflightRecoveryRequest(1)).toMatchObject({ ok: true });
+  });
+});
+
+describe('a node that cannot restore over an existing volume', () => {
+  it('advertises staged_overwrite, so the field is not dead code', async () => {
+    const res = await request(app).get('/api/recovery/node').set('Authorization', authHeader);
+    expect(res.body.restoreModes).toEqual(['new_volume', 'staged_overwrite']);
+  });
+
+  it('refuses an overwrite with 409 UPDATE_REQUIRED when the node never advertised it', async () => {
+    const remote = await import('../services/recovery/remoteSupport');
+    remote.resetRemoteRecoverySupportCacheForTests();
+    // This build, but a node that only ever learned the first restore shape.
+    mockRead.mockImplementation(echoing({
+      contractVersion: 1,
+      volumeProtection: { capability: 'volume-protection-v1', version: 1, state: 'available', reason: 'engine_registered' },
+      restoreModes: ['new_volume'],
+    }));
+    const refused = await remote.preflightRecoveryRequest(proxyNodeId, 'staged_overwrite');
+    expect(refused).toMatchObject({
+      ok: false, httpStatus: 409, code: 'UPDATE_REQUIRED', errorClass: 'update_required',
+    });
+    // The same node still serves a restore into a new volume.
+    expect(await remote.preflightRecoveryRequest(proxyNodeId, 'new_volume')).toMatchObject({ ok: true });
+    // And a request that names no mode is not narrowed by the list.
+    expect(await remote.preflightRecoveryRequest(proxyNodeId)).toMatchObject({ ok: true });
+    remote.resetRemoteRecoverySupportCacheForTests();
+  });
+
+  it('reads a node with no restore-mode field as new_volume only', async () => {
+    const remote = await import('../services/recovery/remoteSupport');
+    remote.resetRemoteRecoverySupportCacheForTests();
+    mockRead.mockImplementation(echoing({
+      contractVersion: 1,
+      volumeProtection: { capability: 'volume-protection-v1', version: 1, state: 'available', reason: 'engine_registered' },
+    }));
+    const read = await remote.resolveRemoteRecoverySupport(proxyNodeId);
+    expect(read.restoreModes).toEqual(['new_volume']);
+    remote.resetRemoteRecoverySupportCacheForTests();
   });
 });

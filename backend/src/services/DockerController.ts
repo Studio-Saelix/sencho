@@ -3265,8 +3265,19 @@ class DockerController {
     }
   }
 
+  /**
+   * Refuse a start or restart while a staged overwrite has fenced a volume the
+   * container mounts. The fence store answers from one indexed read and is
+   * consulted only when a fence is live, so the common case is one query.
+   */
+  private async assertVolumeNotFenced(containerId: string): Promise<void> {
+    const { assertContainerNotFenced } = await import('./recovery/restoreFence');
+    await assertContainerNotFenced(this.docker, containerId);
+  }
+
   // State-safe: silently ignores 304 "already started" errors
   public async startContainer(containerId: string) {
+    await this.assertVolumeNotFenced(containerId);
     try {
       const container = this.docker.getContainer(containerId);
       await container.start();
@@ -3329,6 +3340,7 @@ class DockerController {
 
   public async restartContainer(containerId: string, options?: RestartContainerOptions) {
     await this.assertNotDockerEndpointContainer(containerId, 'restart', options);
+    await this.assertVolumeNotFenced(containerId);
     const container = this.docker.getContainer(containerId);
     await container.restart();
   }

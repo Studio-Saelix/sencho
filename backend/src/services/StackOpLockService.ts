@@ -1,4 +1,5 @@
 import { DatabaseService } from './DatabaseService';
+import { RestoreFenceStore } from './recovery/restoreFence';
 /**
  * Tracks in-flight stack lifecycle operations (deploy, down, restart, stop,
  * start, update, rollback, backup, delete, git_apply, image_pull) per
@@ -14,7 +15,14 @@ import { DatabaseService } from './DatabaseService';
  * which matches the lifecycle of any in-flight `docker compose` child process.
  */
 
-export type StackOpAction = 'deploy' | 'down' | 'restart' | 'stop' | 'start' | 'update' | 'rollback' | 'backup' | 'delete' | 'git_apply' | 'image_pull';
+export type StackOpAction = 'deploy' | 'down' | 'restart' | 'stop' | 'start' | 'update' | 'rollback' | 'backup' | 'delete' | 'git_apply' | 'image_pull'
+  /**
+   * Not an operation anyone starts: the conflict a Compose lifecycle gets when a
+   * staged overwrite has fenced one of the stack's containers. It is a lock
+   * action so every existing caller turns it into its own 409 or skip without a
+   * second code path.
+   */
+  | 'data_restore';
 
 /**
  * Note returned by a background path that skipped its operation because a manual
@@ -74,6 +82,22 @@ export class StackOpLockService {
     const k = this.key(nodeId, stackName);
     const existing = this.locks.get(k);
     if (existing) return { acquired: false, existing };
+    // A staged overwrite has stopped this stack's containers and pinned their
+    // restart policies. Starting one on data that is mid-swap is the failure this
+    // fence exists for, and it is a durable record rather than this map, so it
+    // survives a restart of Sencho. The fence is asked only on the success path,
+    // so a live lock stays the answer when both apply.
+    if (action !== 'data_restore' && RestoreFenceStore.getInstance().isStackFenced(stackName)) {
+      return {
+        acquired: false,
+        existing: {
+          action: 'data_restore',
+          startedAt: Date.now(),
+          user: 'system:data-restore',
+          context: { kind: 'data_restore' },
+        },
+      };
+    }
     this.locks.set(k, { action, startedAt: Date.now(), user, context });
     return { acquired: true };
   }

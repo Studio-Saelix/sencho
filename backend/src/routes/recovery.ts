@@ -12,6 +12,7 @@ import {
   sha256Digest,
 } from '../services/recovery/operationRunner';
 import {
+  authorizeNodeWide,
   authorizeStorageAccess,
   mayLearnIdIsUnknown,
   RECOVERY_ACCESS_ACTION,
@@ -89,6 +90,16 @@ const ERROR_STATUS: Readonly<Record<RecoveryErrorClass, number>> = {
   node_refused: 503,
   node_error: 503,
   internal: 500,
+  // The overwrite surface. A changed precondition, a moved generation and a
+  // dependent that appeared are all "ask for a new preview"; a fence that cannot
+  // be applied and a missing volume are the node's state, not the request's.
+  precondition_failed: 409,
+  dependents_changed: 409,
+  fence_unavailable: 503,
+  pre_restore_failed: 422,
+  insufficient_space: 507,
+  cleanup_failed: 500,
+  not_cancellable: 409,
 };
 
 /** The machine code a client switches on, one per class. */
@@ -183,6 +194,20 @@ const restoreBody = idempotencyBody.extend({
 
 const repositoryBody = idempotencyBody.extend({
   replace: z.boolean().optional(),
+});
+
+/**
+ * The overwrite confirmation: the token the preview answered with and the volume
+ * name typed back. A 255-character bound matches the name Docker accepts, so a
+ * pasted sentence is refused here rather than compared against a real name.
+ */
+const overwriteBody = idempotencyBody.extend({
+  confirmationToken: z.string().trim().regex(/^[0-9a-f]{64}$/),
+  confirmVolumeName: volumeNameField,
+});
+
+const resolveBody = z.object({
+  action: z.enum(['retry', 'release_fence']),
 });
 
 const lockReleaseBody = z.object({
@@ -537,11 +562,19 @@ recoveryRouter.post('/points/:pointId/verify', handle(async (req, res) => {
  * reserved recovery prefix. A name that starts with a known stack's Compose
  * project name would put data under that stack's own volume naming, so it also
  * needs `restore` access on that stack.
+ *
+ * Restoring over the point's own volume is a different operation with its own
+ * confirmation, and it lives on `/overwrite` below.
  */
 recoveryRouter.post('/points/:pointId/restore', handle(async (req, res) => {
   const body = parseBody(restoreBody, req.body);
   if (body.targetMode !== undefined && body.targetMode !== 'new_volume') {
-    throw new RecoveryError('invalid_request');
+    throw new RecoveryError('invalid_request', {
+      reason: 'wrong_route',
+      detail: body.targetMode === 'staged_overwrite'
+        ? 'Restoring over a point\'s own volume needs the overwrite route, where you can review what stops first.'
+        : 'Restoring to a host path is not available on this route.',
+    });
   }
   const pointId = paramOf(req, 'pointId');
   const digest = sha256Digest(['restore', pointId, body.targetVolumeName, 'new_volume']);
@@ -587,8 +620,80 @@ recoveryRouter.post('/points/:pointId/restore', handle(async (req, res) => {
   res.status(result.replayed ? 200 : 202).json({ operation: result.operation });
 }));
 
-// --- Operations -------------------------------------------------------------
+// --- Restore over the existing volume ---------------------------------------
 
+/**
+ * What an overwrite would do, before anything is stopped.
+ *
+ * No side effects: no row, no Docker mutation, no helper container that writes.
+ * The token in the answer is bound to the exact state described, so the overwrite
+ * can only run against what the operator actually saw. Authorized like the
+ * overwrite itself, because the answer names the stacks and containers it would
+ * stop.
+ */
+recoveryRouter.post('/points/:pointId/overwrite/preview', handle(async (req, res) => {
+  const preview = await engineService(req).previewOverwrite({
+    pointId: paramOf(req, 'pointId'),
+    actor: actorOf(req),
+    transport: req.machineAuthScope ?? 'local',
+    authorizeStack: (stackName) => checkPermission(req, RECOVERY_ACCESS_ACTION.restore, 'stack', stackName),
+    authorizeGlobal: () => authorizeNodeWide(req, 'restore'),
+  });
+  res.json(preview);
+}));
+
+/**
+ * Restore a point over its own volume.
+ *
+ * Three things gate the destructive part: the confirmation token recomputed from
+ * the current state, the volume name typed back exactly, and `restore` access on
+ * every dependent. A refusal writes nothing, so the same idempotency key can be
+ * sent again once the operator has previewed and confirmed again.
+ */
+recoveryRouter.post('/points/:pointId/overwrite', handle(async (req, res) => {
+  const body = parseBody(overwriteBody, req.body);
+  const pointId = paramOf(req, 'pointId');
+  const result = await engineService(req).admitOverwrite({
+    pointId,
+    confirmationToken: body.confirmationToken,
+    confirmVolumeName: body.confirmVolumeName,
+    actor: actorOf(req),
+    idempotencyKey: body.idempotencyKey,
+    // The token is part of the request identity: a re-confirmation after the
+    // state moved is a different request, not a replay of the refused one.
+    requestDigest: sha256Digest(['staged_overwrite', pointId, body.confirmationToken, body.confirmVolumeName]),
+    transport: req.machineAuthScope ?? 'local',
+    authorizeStack: (stackName) => checkPermission(req, RECOVERY_ACCESS_ACTION.restore, 'stack', stackName),
+    authorizeGlobal: () => authorizeNodeWide(req, 'restore'),
+  });
+  res.status(result.replayed ? 200 : 202).json({
+    operation: result.operation,
+    intentId: result.intentId ?? null,
+  });
+}));
+
+/**
+ * Resolve a restore that did not settle.
+ *
+ * `retry` re-runs the reconciler, which reads the swap journal and is idempotent.
+ * `release_fence` accepts the volume as it now is: it restores the recorded
+ * restart policies, starts nothing, and is logged with the actor, because the
+ * next thing that happens to that data is the operator's decision.
+ */
+recoveryRouter.post('/restores/:intentId/resolve', handle(async (req, res) => {
+  const body = parseBody(resolveBody, req.body);
+  const intentId = paramOf(req, 'intentId');
+  const result = await engineService(req).resolveOverwrite({
+    intentId,
+    action: body.action,
+    actor: actorOf(req),
+    authorizeStack: (stackName) => checkPermission(req, RECOVERY_ACCESS_ACTION.restore, 'stack', stackName),
+    authorizeGlobal: () => authorizeNodeWide(req, 'restore'),
+  });
+  res.json(result);
+}));
+
+// --- Operations -------------------------------------------------------------
 /** The operation with its progress and whatever evidence it produced. */
 recoveryRouter.get('/operations/:id', handle(async (req, res) => {
   const operation = RecoveryOperationStore.getInstance().get(paramOf(req, 'id'));
@@ -629,8 +734,19 @@ recoveryRouter.post('/operations/:id/cancel', handle(async (req, res) => {
   if (operation.kind === 'repository_init') {
     // A half-provisioned repository is settled by the next provision attempt, not
     // by an abort in the middle of volume creation.
-    sendRecoveryError(res, 'invalid_request', { reason: 'not_cancellable' });
+    sendRecoveryError(res, 'not_cancellable');
     return;
+  }
+  if (operation.kind === 'restore') {
+    // An overwrite is cancellable while the live volume has not started to
+    // change. From `swapping` on, the originals have begun moving and the only
+    // safe outcomes are roll forward or reconciliation, never a stop.
+    const intent = RestoreIntentStore.getInstance().getByOperation(operation.id);
+    if (intent && intent.targetMode === 'staged_overwrite'
+      && (intent.phase === 'swapping' || intent.phase === 'swapped')) {
+      sendRecoveryError(res, 'not_cancellable');
+      return;
+    }
   }
   engineService(req).cancel(operation.id);
   res.status(202).json({ operation: RecoveryOperationStore.getInstance().get(operation.id) ?? operation });
@@ -660,6 +776,21 @@ function operationResult(operation: RecoveryOperation): unknown {
               bytesRestored: intent.bytesRestored,
               verified: intent.verified,
               xattrWarnings: intent.xattrWarnings,
+            }
+          : null,
+        // An overwrite reports the durable facts a client needs to describe it
+        // without reading a host path or the contents of the volume.
+        restore: intent && intent.targetMode === 'staged_overwrite'
+          ? {
+              intentId: intent.id,
+              mode: intent.targetMode,
+              phase: intent.phase,
+              fenceState: intent.fenceState,
+              preRestorePointId: intent.preRestorePointId,
+              stagedVerified: intent.verified,
+              filesRestored: intent.filesRestored,
+              bytesRestored: intent.bytesRestored,
+              outcomeClass: intent.outcomeClass,
             }
           : null,
       };

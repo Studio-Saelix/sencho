@@ -486,8 +486,9 @@ describe('GET /api/recovery/operations/:id', () => {
       requestDigest: engine.sha256Digest(['repository_init', 'provision']),
     });
     const res = await request(app).post(`/api/recovery/operations/${operation.operation.id}/cancel`).set('Cookie', adminCookie);
-    expect(res.status).toBe(400);
-    expect(res.body.reason).toBe('not_cancellable');
+    expect(res.status).toBe(409);
+    expect(res.body.errorClass).toBe('not_cancellable');
+    expect(res.body.code).toBe('NOT_CANCELLABLE');
   });
 });
 
@@ -549,8 +550,8 @@ describe('an id or state is not reported to a caller who may not act on it', () 
 
     // The administrator still gets the state answer, and the unknown id its 400.
     const admin = await request(app).post(`/api/recovery/operations/${operationId}/cancel`).set('Cookie', adminCookie);
-    expect(admin.status).toBe(400);
-    expect(admin.body.reason).toBe('not_cancellable');
+    expect(admin.status).toBe(409);
+    expect(admin.body.errorClass).toBe('not_cancellable');
     const adminMissing = await request(app).post(`/api/recovery/operations/${unknown()}/cancel`).set('Cookie', adminCookie);
     expect(adminMissing.status).toBe(400);
     expect(adminMissing.body.reason).toBeUndefined();
@@ -1181,6 +1182,64 @@ describe('audit summaries', () => {
     expect(getAuditSummary('POST', 'recovery/storage/points')).toBe('Created a recovery point');
     expect(getAuditSummary('POST', 'recovery/points/abc/verify')).toBe('Verified recovery point: abc');
     expect(getAuditSummary('POST', 'recovery/points/abc/restore')).toBe('Restored recovery point: abc');
+    expect(getAuditSummary('POST', 'recovery/points/abc/overwrite')).toBe('Restored over the existing volume: abc');
+    expect(getAuditSummary('POST', 'recovery/restores/intent-1/resolve')).toBe('Resolved a restore over the existing volume: intent-1');
     expect(getAuditSummary('POST', 'recovery/locks/release')).toBe('Released a stale recovery lock');
+  });
+});
+
+
+describe('restore over the existing volume', () => {
+  const token = 'a'.repeat(64);
+
+  it('refuses the preview to a caller who may not restore, before it describes anything', async () => {
+    const res = await request(app).post('/api/recovery/points/p1/overwrite/preview').set('Cookie', viewerCookie).send({});
+    expect(res.status).toBe(403);
+    expect(res.body).toMatchObject({ errorClass: 'permission_denied', code: 'PERMISSION_DENIED' });
+  });
+
+  it('answers the preview 503 while the engine is starting', async () => {
+    const res = await request(app).post('/api/recovery/points/p1/overwrite/preview').set('Cookie', adminCookie).send({});
+    expect(res.status).toBe(503);
+    expect(res.body).toMatchObject({ errorClass: 'capability_unavailable', reason: 'engine_starting' });
+  });
+
+  it('rejects a confirmation that is not a token, and a body without one', async () => {
+    service().markReadyForTests();
+    for (const body of [
+      { idempotencyKey: randomUUID(), confirmVolumeName: 'app_data' },
+      { idempotencyKey: randomUUID(), confirmationToken: 'not-a-token', confirmVolumeName: 'app_data' },
+      { idempotencyKey: randomUUID(), confirmationToken: token },
+    ]) {
+      const res = await request(app).post('/api/recovery/points/p1/overwrite').set('Cookie', adminCookie).send(body);
+      expect(res.status).toBe(400);
+      expect(res.body.errorClass).toBe('invalid_request');
+    }
+  });
+
+  it('rejects a typed volume name Docker could not have created', async () => {
+    service().markReadyForTests();
+    const res = await request(app).post('/api/recovery/points/p1/overwrite').set('Cookie', adminCookie)
+      .send({ idempotencyKey: randomUUID(), confirmationToken: token, confirmVolumeName: '../escape' });
+    expect(res.status).toBe(400);
+  });
+
+  it('refuses the resolve route to a caller who may not restore, and an unknown action', async () => {
+    const viewer = await request(app).post('/api/recovery/restores/i1/resolve').set('Cookie', viewerCookie)
+      .send({ action: 'retry' });
+    expect(viewer.status).toBe(403);
+    const bad = await request(app).post('/api/recovery/restores/i1/resolve').set('Cookie', adminCookie)
+      .send({ action: 'explode' });
+    expect(bad.status).toBe(400);
+  });
+
+  it('keeps the restore-to-new route refusing the overwrite mode, and says where to go', async () => {
+    service().markReadyForTests();
+    const res = await request(app).post('/api/recovery/points/p1/restore').set('Cookie', adminCookie)
+      .send({ idempotencyKey: randomUUID(), targetVolumeName: 'fresh', targetMode: 'staged_overwrite' });
+    expect(res.status).toBe(400);
+    expect(res.body.errorClass).toBe('invalid_request');
+    expect(res.body.reason).toBe('wrong_route');
+    expect(res.body.error).toContain('overwrite route');
   });
 });

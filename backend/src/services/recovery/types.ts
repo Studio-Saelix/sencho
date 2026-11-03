@@ -184,7 +184,21 @@ export type RecoveryErrorClass =
   | 'transport_unreachable'
   | 'node_refused'
   | 'node_error'
-  | 'internal';
+  | 'internal'
+  /** The storage or its dependents changed since the operator confirmed. */
+  | 'precondition_failed'
+  /** A container or stack started depending on the target after admission. */
+  | 'dependents_changed'
+  /** The durable restore fence could not be applied or released. */
+  | 'fence_unavailable'
+  /** The pre-restore point did not end complete. */
+  | 'pre_restore_failed'
+  /** The target or the helper scratch had no room for the restored data. */
+  | 'insufficient_space'
+  /** The data was committed but the work directory could not be removed. */
+  | 'cleanup_failed'
+  /** The operation has passed its commit point and cannot be rolled back. */
+  | 'not_cancellable';
 
 interface RecoveryPointBase {
   id: string;
@@ -221,7 +235,15 @@ export type RecoveryPointOutcome =
  */
 export type RecoveryPoint = RecoveryPointBase & RecoveryPointScope & RecoveryPointOutcome;
 
-export type PointHolderKind = 'deploy_checkpoint' | 'recovery_policy' | 'mobility' | 'drain' | 'last_known_good' | 'operator';
+export type PointHolderKind =
+  | 'deploy_checkpoint'
+  | 'recovery_policy'
+  | 'mobility'
+  | 'drain'
+  | 'last_known_good'
+  | 'operator'
+  /** A restore intent holds the point it restores and the point it takes first. */
+  | 'restore_intent';
 
 /** Something that must keep a point from retention (checkpoint, policy, mobility, drain, LKG). */
 export interface RecoveryPointHold {
@@ -310,6 +332,12 @@ export type VolumeProtectionStatus = {
 export interface RecoveryNodeDescriptor {
   contractVersion: number;
   volumeProtection: VolumeProtectionStatus;
+  /**
+   * The restore modes this node can execute. A node that predates the field is
+   * read as `['new_volume']`, which is what it can do, so a missing list never
+   * widens what the hub will send it.
+   */
+  restoreModes: RestoreMode[];
 }
 
 // --- Operations and locks ---------------------------------------------------
@@ -411,14 +439,37 @@ export type CreatePointRequest = {
  * pinned to the generation token the operator saw. The executor must compare it
  * with a fresh observation of the storage, not only the stored identity, so a
  * volume recreated since then is refused.
+ *
+ * `workDir` is the hidden directory the swap helper creates inside the target
+ * volume, relative to its root. The pre-restore point is not an input: the
+ * operation creates it, because only the operation can stop the workloads and
+ * prove the point complete before any live entry moves.
  */
 export type RestoreTarget =
   | { mode: 'new_volume'; volumeName: string }
   | { mode: 'new_path'; hostPath: string }
-  | { mode: 'staged_overwrite'; storageId: string; expectedGenerationToken: string; preRestorePointId: string };
+  | { mode: 'staged_overwrite'; storageId: string; expectedGenerationToken: string; workDir: string; volumeName: string };
+
+/** The restore shapes a node can execute. */
+export type RestoreMode = RestoreTarget['mode'];
 
 export type RestoreIntentPhase =
-  | 'recorded' | 'staging' | 'staged_verified' | 'swapping' | 'committed' | 'rolled_back' | 'completion_unknown';
+  | 'recorded'
+  | 'staging'
+  | 'staged_verified'
+  /** The workloads are durably fenced (restart policy `no`, then stopped). */
+  | 'fenced'
+  /** The workloads are stopped while the pre-restore point is taken. */
+  | 'protecting'
+  /** The point is being restored inside the target's work directory. */
+  | 'materializing'
+  /** The journal is written and entries are being renamed. */
+  | 'swapping'
+  /** The commit point: the target holds the complete swapped set. */
+  | 'swapped'
+  | 'committed'
+  | 'rolled_back'
+  | 'completion_unknown';
 
 /**
  * The shape of a restore's durable record. The slice that implements restore

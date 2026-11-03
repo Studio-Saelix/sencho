@@ -1,4 +1,5 @@
 import {
+  HELPER_RESTORE_MOUNT,
   RecoveryHelperRunner,
   resticCommand,
   type HelperRunSpec,
@@ -160,10 +161,27 @@ export class ResticEngine implements BackupEngine {
   }
 
   async restore(intent: RestoreIntent, ctx: EngineExecutionContext): Promise<EngineResult<RestoreEvidence>> {
-    if (intent.target.mode !== 'new_volume') return { ok: false, errorClass: 'invalid_request' };
     const repository = this.deps.repositoryFor(intent.repositoryId);
     if (!repository) return { ok: false, errorClass: 'repository_unavailable' };
     if (!intent.snapshotId) return { ok: false, errorClass: 'invalid_request' };
+
+    let args: string[];
+    if (intent.target.mode === 'new_volume') {
+      // `snapshot:/data` puts the captured root's contents at the target root,
+      // which is the right shape for a volume Sencho created.
+      args = ['restore', `${intent.snapshotId}:/data`, '--target', HELPER_RESTORE_MOUNT];
+    } else if (intent.target.mode === 'staged_overwrite') {
+      // The whole snapshot, into a work directory inside the live volume. That
+      // gives `.../incoming/data/...`, so the captured root's own owner and mode
+      // arrive as an ordinary entry the swap can apply to the volume root.
+      const workDir = intent.target.workDir;
+      if (!/^\.sencho-restore-[0-9a-f-]{36}\/incoming$/.test(workDir)) {
+        return { ok: false, errorClass: 'invalid_request' };
+      }
+      args = ['restore', intent.snapshotId, '--target', `${HELPER_RESTORE_MOUNT}/${workDir}`];
+    } else {
+      return { ok: false, errorClass: 'invalid_request' };
+    }
 
     const accumulator = newRestoreAccumulator();
     const spec: HelperRunSpec = {
@@ -171,13 +189,7 @@ export class ResticEngine implements BackupEngine {
       operationId: ctx.operationId,
       // `--no-lock`: the repository mount is read-only and Sencho's repository
       // lock is the mutual exclusion, so restic must not try to write a lock.
-      cmd: resticCommand('/repo', [
-        'restore', `${intent.snapshotId}:/data`,
-        '--target', '/restore',
-        '--verify',
-        '--json',
-        '--no-lock',
-      ]),
+      cmd: resticCommand('/repo', [...args, '--verify', '--json', '--no-lock']),
       mounts: { repository: repository.locator, target: intent.target.volumeName },
       stdinSecret: this.deps.secret,
       signal: ctx.signal,

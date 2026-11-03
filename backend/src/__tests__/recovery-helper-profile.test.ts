@@ -93,6 +93,30 @@ describe('recovery helper profiles', () => {
     expect(HELPER_PROFILES.backup.capAdd).toEqual(['DAC_READ_SEARCH']);
     // --verify reads restored files back after their ownership is applied.
     expect(HELPER_PROFILES.restore.capAdd).toEqual(['CHOWN', 'FOWNER', 'FSETID', 'DAC_READ_SEARCH']);
+    // The rename swap moves entries in a root the application owns and deletes
+    // the work directory afterwards, so it needs the same ownership override the
+    // restore has plus DAC_OVERRIDE. It is the widest profile, and it is confined
+    // to one application volume with no repository mount and no network.
+    expect(HELPER_PROFILES.swap.capAdd).toEqual(['CHOWN', 'FOWNER', 'DAC_OVERRIDE', 'DAC_READ_SEARCH']);
+  });
+
+  it('gives the swap profile exactly one writable mount and no repository', () => {
+    expect(HELPER_PROFILES.swap).toEqual({
+      user: '0:0',
+      capAdd: ['CHOWN', 'FOWNER', 'DAC_OVERRIDE', 'DAC_READ_SEARCH'],
+      repositoryReadOnly: true,
+      needsRepository: false,
+      source: null,
+      target: 'read_write',
+      tmpfs: { '/tmp': 'size=64m,mode=1777' },
+      pidsLimit: 256,
+      memoryBytes: 1024 * 1024 * 1024,
+      timeoutMs: null,
+    });
+    const { hostConfig } = specFor('swap');
+    expect(hostConfig.Mounts).toEqual([
+      { Type: 'volume', Source: 'dst-vol', Target: HELPER_RESTORE_MOUNT, ReadOnly: false, VolumeOptions: { NoCopy: true } },
+    ]);
   });
 
   it('mounts the source read-only and only the restore target writable', () => {

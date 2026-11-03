@@ -155,6 +155,8 @@ export interface ProbeReport {
   uid: number;
   gid: number;
   mode: number;
+  /** Bytes available to a write, when the probe reported statfs. */
+  free: number | null;
 }
 
 /** Parse the probe's one JSON line. Anything else is not a report. */
@@ -169,17 +171,48 @@ export function parseProbeReport(line: string): ProbeReport | null {
     for (const key of nums) {
       if (typeof record[key] !== 'number' || !Number.isSafeInteger(record[key])) return null;
     }
+    const free = record.free;
+    if (free !== undefined && (typeof free !== 'number' || !Number.isSafeInteger(free) || free < 0)) return null;
     return {
       dev: record.dev as number,
       ino: record.ino as number,
       uid: record.uid as number,
       gid: record.gid as number,
       mode: record.mode as number,
+      free: typeof free === 'number' ? free : null,
     };
   } catch {
     // Anything that is not one JSON object of integers is not a probe report.
     return null;
   }
+}
+
+/**
+ * Read the probe's report for one volume. It reads metadata and statfs only,
+ * never a file, so it is safe on a live volume.
+ */
+export async function probeVolumeReport(input: {
+  runner: RecoveryHelperRunner;
+  operationId: string;
+  volumeName: string;
+  profile?: HelperProfile;
+}): Promise<ProbeReport> {
+  const lines: string[] = [];
+  const result = await input.runner.run({
+    profile: input.profile ?? 'probe',
+    operationId: input.operationId,
+    cmd: [RECOVERY_HELPER_PROBE_PATH, '/data'],
+    mounts: { source: input.volumeName },
+    onStdoutLine: (line) => {
+      if (lines.length === 0) lines.push(line);
+    },
+  });
+  if (result.exitCode !== 0) {
+    throw new RecoveryError(result.exitCode === null ? 'capability_unavailable' : 'identity_unknown');
+  }
+  const report = parseProbeReport(lines[0] ?? '');
+  if (!report) throw new RecoveryError('identity_unknown');
+  return report;
 }
 
 /**
@@ -196,21 +229,7 @@ export async function probeGenerationToken(input: {
   createdAt: string | null;
   profile?: HelperProfile;
 }): Promise<string> {
-  const lines: string[] = [];
-  const result = await input.runner.run({
-    profile: input.profile ?? 'probe',
-    operationId: input.operationId,
-    cmd: [RECOVERY_HELPER_PROBE_PATH, '/data'],
-    mounts: { source: input.volumeName },
-    onStdoutLine: (line) => {
-      if (lines.length === 0) lines.push(line);
-    },
-  });
-  if (result.exitCode !== 0) {
-    throw new RecoveryError(result.exitCode === null ? 'capability_unavailable' : 'identity_unknown');
-  }
-  const report = parseProbeReport(lines[0] ?? '');
-  if (!report) throw new RecoveryError('identity_unknown');
+  const report = await probeVolumeReport(input);
   return `${input.createdAt ?? 'unknown'}|${report.dev}:${report.ino}`;
 }
 

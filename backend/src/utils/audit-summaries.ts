@@ -180,6 +180,8 @@ export const AUDIT_ROUTE_SUMMARIES: Record<string, string> = {
   'POST /recovery/storage/points': 'Created a recovery point',
   'POST /recovery/points/*/verify': 'Verified recovery point',
   'POST /recovery/points/*/restore': 'Restored recovery point',
+  'POST /recovery/points/*/overwrite': 'Restored over the existing volume',
+  'POST /recovery/restores/*/resolve': 'Resolved a restore over the existing volume',
   'POST /recovery/operations/*/cancel': 'Cancelled recovery operation',
   'POST /recovery/locks/release': 'Released a stale recovery lock',
 };

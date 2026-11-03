@@ -223,6 +223,9 @@ const STACK_OP_PRESENT_PARTICIPLE: Record<StackOpAction, string> = {
   delete: 'deleting',
   git_apply: 'applying Git changes',
   image_pull: 'pulling images',
+  // Not an operation anyone starts: the conflict a lifecycle request gets while
+  // a data restore owns the stack's containers.
+  data_restore: 'restoring its data',
 };
 
 function linkStackUpdateRecoveryGate(recoveryId: string | null | undefined, healthGateId: string | null): void {

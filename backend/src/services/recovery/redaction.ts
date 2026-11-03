@@ -33,6 +33,20 @@ const ERROR_DETAIL: Record<RecoveryErrorClass, string> = {
   node_refused: 'The node refused the request.',
   node_error: 'The node, or the recovery helper running on it, failed to complete the request.',
   internal: 'The recovery operation failed.',
+  precondition_failed:
+    'The volume or its dependents changed since this overwrite was confirmed. Ask for a new preview and confirm again.',
+  dependents_changed:
+    'A container or stack started using the volume after this overwrite was admitted, so it was stopped before any live data moved.',
+  fence_unavailable:
+    'The workloads using this volume could not be stopped safely, so nothing was changed.',
+  pre_restore_failed:
+    'The point taken before the overwrite was not complete, so nothing in the volume was changed.',
+  insufficient_space:
+    'There is not enough free space to restore this point next to the existing data.',
+  cleanup_failed:
+    'The restored data is in place, but the temporary restore directory could not be removed. The workloads stay stopped until this is resolved.',
+  not_cancellable:
+    'This restore has passed the point where it can be rolled back safely and cannot be cancelled.',
 };
 
 export function errorDetailFor(errorClass: RecoveryErrorClass): string {

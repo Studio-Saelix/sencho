@@ -187,7 +187,7 @@ The target name must satisfy all of these:
 - The name does not start with `sencho-recovery-`.
 - If the name starts with a known stack's name followed by an underscore, you need the same access that changing that stack does.
 
-Any other `targetMode` is refused as an invalid request. `new_path` and `staged_overwrite` are not implemented.
+Any other `targetMode` is refused as an invalid request. Restoring over a point's own volume is a separate operation with its own confirmation, described in [Restore over the existing volume](#restore-over-the-existing-volume). Restoring to a host path is not available.
 
 ```bash
 curl -X POST https://your-sencho-instance:1852/api/recovery/points/5b1c8b7e-2f60-4a63-8f38-0f7f1d2c3a44/restore \
@@ -206,6 +206,152 @@ If the restore fails, Sencho removes only the volume it created, and only when i
 Some extended attributes cannot be applied: file capabilities (`security.capability`) and SELinux labels are the usual cases. When those are the only failures, the operation reports `partial` with `errorClass: "attributes_not_restored"`, the restore result carries an `xattrWarnings` count, and the volume is kept, because the files are there and only part of their metadata is not.
 
 A restore only works against the active repository. A point in a repository that has been replaced answers `503` with `errorClass: "repository_unavailable"` and `reason: "repository_replaced"`. Restore it before replacing, or take a new point.
+
+## Restore over the existing volume
+
+Restoring a point over its own volume puts the captured bytes back on the volume the data came from. The data stays on the same volume, so every stack that mounts it keeps its mount and its Compose file, and the volume keeps its name, its driver and its labels.
+
+This is the destructive recovery path. Restoring to a new volume is the safer option: it never touches the running data, and it is the right choice when you can move a stack to a new volume. Use an overwrite when the data has to stay where it is.
+
+### What the preview tells you before anything stops
+
+Ask for the preview first. It writes nothing, changes nothing, and answers every fact the decision needs:
+
+- the point: when it was taken, its consistency, and whether it is still the volume's current generation;
+- the node the volume and the point live on, and how the request reaches it;
+- the target volume with its storage generation, and whether it can be overwritten at all;
+- every stack and container that mounts the volume, whether each is running, and the restart policy each has;
+- whether anything is using the volume right now;
+- how the swap is done, and that it is not one atomic step;
+- an estimate of the space the restored copy needs, and the free space the helper could see;
+- the fact that a point is taken before the overwrite starts, with the workloads stopped;
+- the warnings that apply, and a confirmation token bound to exactly this state.
+
+```bash
+curl -X POST https://your-sencho-instance:1852/api/recovery/points/5b1c8b7e-2f60-4a63-8f38-0f7f1d2c3a44/overwrite/preview \
+  -H "Authorization: Bearer $SENCHO_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{}'
+```
+
+An answer looks like this, shortened:
+
+```json
+{
+  "point": { "id": "5b1c8b7e-...", "consistency": "crash_consistent_live", "generation": 3, "isCurrentGeneration": true },
+  "node": { "id": 1, "name": "docker-01", "transport": "local" },
+  "target": { "volumeName": "web_data", "generation": 3, "generationToken": "...", "eligible": true, "ineligibleReason": null },
+  "dependents": {
+    "stacks": ["web"],
+    "containers": [{ "id": "c1...", "name": "web-db-1", "stack": "web", "running": true, "restartPolicy": { "Name": "always" } }]
+  },
+  "inUse": true,
+  "swap": { "method": "fenced_rename", "atomic": false, "supported": true, "reason": null },
+  "space": { "requiredBytes": 734003200, "freeBytes": 5368709120, "sufficient": true },
+  "preRestorePoint": { "required": true, "consistency": "crash_consistent_stopped" },
+  "warnings": ["..."],
+  "confirmation": { "token": "9f2c...64 hex characters" }
+}
+```
+
+The token changes whenever the state does. A container that starts using the volume, a stack that starts or stops, the volume being recreated, or the recovery repository being replaced all produce a different token, so the token you confirmed can only ever describe what you actually saw.
+
+### Confirm the overwrite
+
+Send the token back with the volume name typed out. Both must match the current state, and you need the access that restoring a point from the volume's stacks requires.
+
+```bash
+curl -X POST https://your-sencho-instance:1852/api/recovery/points/5b1c8b7e-2f60-4a63-8f38-0f7f1d2c3a44/overwrite \
+  -H "Authorization: Bearer $SENCHO_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "confirmationToken": "9f2c0f5e8a1d4b7c6e3a2f9b8d5c4e1a7b0f3d6c9e2a5b8f1c4d7e0a3b6c9f2d",
+    "confirmVolumeName": "web_data",
+    "idempotencyKey": "overwrite-web-data-2026-11-03"
+  }'
+```
+
+The answer is `202` with the operation. A refused admission writes no row, so the same idempotency key can be sent again once you have previewed and confirmed again.
+
+### What happens, in order
+
+1. **Stage and prove the point.** The point is restored and verified into a separate staging volume. A wrong key, a missing or damaged file in the repository, a full disk, or metadata that could not be restored all fail here. The live volume is untouched and no container has been stopped.
+2. **Fence the workloads.** Every container that mounts the volume, running or stopped, is recorded, its restart policy is set to `no`, and then it is stopped. Setting the policy first means a Docker daemon restart after a power cut cannot bring a container back on data that is half swapped.
+3. **Take a point of the current data.** With the workloads stopped, Sencho takes a root point of the volume as it is now. That point is held for the life of the operation. An overwrite without a complete pre-restore point is refused, and there is no option to continue anyway.
+4. **Copy the point inside the volume.** The same snapshot is restored and verified again, into a hidden directory inside the target volume. The live files are still untouched.
+5. **Swap by renames.** The original top-level entries are moved into that hidden directory, then the restored entries are moved up to the volume root, and then the captured root's owner, mode and modification time are applied. Every rename is atomic and the set of them is not.
+6. **Delete the originals, then restart.** The hidden directory holds the originals, and it is removed before any workload starts, because some engines treat an unknown directory in their data root as data. Only after that do the restart policies come back and the containers that were running start again.
+
+From then on the previous data is recoverable through the pre-restore point, which is held until the operation settles.
+
+### The window that is not atomic
+
+Docker cannot rename a volume or exchange two volumes, so there is no atomic replacement of a named volume. The swap above is a journaled series of renames instead:
+
+- the workloads are stopped for the whole window, so nothing reads the volume while it is between states;
+- each step is written to a journal before it happens, and the state is read back from the volume's own contents plus that journal, so a crash at any point can be resumed;
+- before the swap completes, the direction is rollback, and the originals are put back;
+- after it completes, the direction is roll forward, and the clean-up finishes.
+
+The volume root itself is briefly in a state that is neither the old data nor the new data. That is why the workloads are stopped and why the operation is durable rather than a sequence of best-effort calls.
+
+### After a crash
+
+Startup settles every overwrite a previous process left open, and the operation reports where it ended. The rule is that a workload restarts only when the volume is proven to hold either the original entries or the complete new set:
+
+| What the journal says | Result |
+| --- | --- |
+| the point was still being staged, nothing live moved | rolled back |
+| the workloads were fenced but the swap had not started | rolled back, fence released, workloads restarted |
+| the swap started and did not complete | originals restored from the journal, then rolled back and restarted |
+| the swap completed | rolled forward, cleaned up, restarted |
+| the journal or the volume cannot be read | left unsettled, fence kept held, `completion_unknown` |
+
+An operation that ends `completion_unknown` keeps its restart policies pinned and its points held. Nothing starts until you decide.
+
+### Resolve a restore that did not settle
+
+Two actions, both explicit and both recorded in the audit log:
+
+- `retry` runs the same reconciliation again. It is safe to repeat, and it is what you use after fixing whatever blocked it, such as a Docker daemon that was not reachable.
+- `release_fence` accepts the volume as it now is. It restores every recorded restart policy, starts nothing, and leaves the operation `completion_unknown`, because accepting the fence does not prove what the data is.
+
+```bash
+curl -X POST https://your-sencho-instance:1852/api/recovery/restores/3f4a9c1e-7b2d-4e6a-8c5f-1d0e2b3a4c5d/resolve \
+  -H "Authorization: Bearer $SENCHO_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{ "action": "retry" }'
+```
+
+Both actions need the same access as the overwrite itself, and both are refused while the operation is still running.
+
+### While the overwrite runs
+
+The volume belongs to the restore until it settles. For as long as the fence is held:
+
+- every Compose lifecycle action on a stack that mounts the volume is refused with `409` and the conflict action is `data_restore`;
+- a container that mounts the volume cannot be started or restarted, including by auto-heal and by the scheduler;
+- the Files & Volumes browser refuses the volume, for reading as well as writing;
+- a second restore into the same volume is refused, and a capture of it is refused by the storage lock.
+
+Deploying to a dependent stack during the overwrite is refused rather than queued. Wait for the operation to settle, or resolve it.
+
+### Limits
+
+- A container started outside Sencho, for example with the Docker CLI on the host, is not fenced. Sencho checks again just before the swap starts and refuses if one is running, but a container started in the moment between that check and the swap is not stopped.
+- The restored data is crash consistent, not application consistent. A database may need to recover, replay or check its files on the next start. Nothing quiesces the application first.
+- Your Compose files and environment files are not changed. Only the contents of the volume change.
+- The recovery repository is a Docker volume on this host. Losing the host loses both the data and the points that protect it.
+- An overwrite is only admitted when the target can be restored into. The recovery repository's own volume, Sencho's own volumes, reserved names, an anonymous volume, a volume using a driver other than `local`, a volume with driver options, and any volume mounted by the container that runs the Docker endpoint are refused.
+- While the fence is held, a container's restart policy differs from its Compose model, so drift observation may report it. Enforcement redeploys are refused by the fence.
+- If Sencho cannot read its own recovery records, for example after a downgrade to an older build, the fence checks cannot answer. Sencho then refuses nothing on that basis and logs one warning, so a manual start or a deploy is not blocked by the record; the containers' restart policies are still pinned to `no`, so a Docker daemon restart does not bring them back. Fix the build mismatch and restart Sencho before resolving the restore.
+- Cancelling is accepted until the swap starts. From that point the answer is `409` with `errorClass: "not_cancellable"`, because the originals have begun to move and the only safe endings are roll forward or reconciliation.
+
+### Operation result
+
+`GET /api/recovery/operations/:id` for an overwrite adds a `restore` block to the intent: `mode`, `phase`, `fenceState`, `preRestorePointId`, `stagedVerified`, `filesRestored`, `bytesRestored` and `outcomeClass`. It names volumes and counts, never a host path or the contents of a file.
+
+The outcomes are distinct: `succeeded`, `failed` with an error class, `cancelled` only before the swap starts, `partial` with `errorClass: "cleanup_failed"` when the data is committed but the work directory could not be removed, and `completion_unknown` when the state could not be proven.
 
 ## The recovery repository
 
@@ -307,7 +453,7 @@ Reading points requires read access to the stacks that use the volume. Capturing
 
 ## The HTTP surface
 
-Every request below takes a Bearer token and, for a remote node, the usual node routing. The `GET` calls accept a Read Only, Deploy Only, or Full Admin token; the `POST` calls (repository, capture, verify, restore, cancel, and lock release) need a Full Admin token, and any other scope, Observe Only included, gets `403 SCOPE_DENIED` before the request reaches the route. The capture, verify, restore, and repository calls require an `idempotencyKey` of 1 to 200 characters. A new request answers `202`; a replay of the same key answers `200` with the operation it already created. Reusing a key for a different request is refused.
+Every request below takes a Bearer token and, for a remote node, the usual node routing. The `GET` calls accept a Read Only, Deploy Only, or Full Admin token; the `POST` calls (repository, capture, verify, restore, overwrite, cancel, resolve, and lock release) need a Full Admin token, and any other scope, Observe Only included, gets `403 SCOPE_DENIED` before the request reaches the route. The capture, verify, restore, overwrite, and repository calls require an `idempotencyKey` of 1 to 200 characters. A new request answers `202`; a replay of the same key answers `200` with the operation it already created. Reusing a key for a different request is refused.
 
 ### Read this node's recovery status
 
@@ -453,9 +599,19 @@ Use `scope: "repository"` with the repository id to release the repository lock.
 
 A restart does not leave the node closed. When Sencho starts it removes the helpers a previous process left and clears restic's own locks. Once no helper of the previous process remains, it releases the repository lock of an interrupted provisioning, because the next provision request continues it, and, if restic's locks were cleared, the repository lock of any capture, verification, or restore that was interrupted, because none of them leaves anything in the repository to review. The volume that was being captured keeps its storage lock until you release it. If a helper could not be removed, or restic's locks could not be cleared, the repository lock stays stale and an administrator releases it.
 
+### Preview, confirm and resolve an overwrite
+
+| Route | Body | Answers |
+| --- | --- | --- |
+| `POST /api/recovery/points/:pointId/overwrite/preview` | none | `200` with the facts and the confirmation token. Writes no row and changes nothing. |
+| `POST /api/recovery/points/:pointId/overwrite` | `idempotencyKey`, `confirmationToken`, `confirmVolumeName` | `202` with the operation, or `200` on a replay. A refusal writes no row. |
+| `POST /api/recovery/restores/:intentId/resolve` | `action`, either `retry` or `release_fence` | `200` with the outcome the reconciler reached. |
+
+The preview needs the access that restoring the volume's stacks requires, and the overwrite and resolve need the same. A target that is not eligible answers `400 invalid_request`. A token that no longer matches the state answers `409 precondition_failed`. A target without room for the restored copy answers `507 insufficient_space`. A restore whose operation is still running in this process answers `409 lock_held`. The walkthrough, including what stops, the non-atomic window, and the crash table, is in [Restore over the existing volume](#restore-over-the-existing-volume).
+
 ### Error responses
 
-Every error from these routes has the same shape, except the `403 SCOPE_DENIED` that an API token of the wrong scope gets before the request reaches a route: that body carries `error` and `code` only, with no `errorClass`. `code` is the upper-cased error class, so a client can switch on one field. A refusal can also carry a `reason`, a stable token for the specific cause: `engine_starting`, `repository_not_initialized`, `repository_replaced`, or `not_cancellable`.
+Every error from these routes has the same shape, except the `403 SCOPE_DENIED` that an API token of the wrong scope gets before the request reaches a route: that body carries `error` and `code` only, with no `errorClass`. `code` is the upper-cased error class, so a client can switch on one field. A refusal can also carry a `reason`, a stable token for the specific cause: `engine_starting`, `repository_not_initialized`, `repository_replaced`, `not_cancellable`, `generation_changed`, `dependents_changed`, or `wrong_route`.
 
 ```json
 {
@@ -469,16 +625,19 @@ Every error from these routes has the same shape, except the `403 SCOPE_DENIED` 
 |--------|---------------|
 | `400` | `invalid_request` |
 | `403` | `permission_denied` |
-| `409` | `update_required`, `identity_unknown`, `lock_held`, `lock_stale`, `integrity_mismatch`, `interrupted` |
-| `422` | `source_unreadable`, `attributes_not_restored` (these end an operation; they are not request errors) |
-| `500` | `internal` |
-| `503` | `capability_unavailable`, `schema_unsupported`, `repository_unavailable`, `repository_key_unavailable`, `transport_unreachable`, `node_refused`, `node_error` |
+| `409` | `update_required`, `identity_unknown`, `lock_held`, `lock_stale`, `integrity_mismatch`, `interrupted`, `precondition_failed`, `dependents_changed`, `not_cancellable` |
+| `422` | `source_unreadable`, `attributes_not_restored`, `pre_restore_failed` (these end an operation; they are not request errors) |
+| `500` | `internal`, `cleanup_failed` (only as the class of a `partial` operation) |
+| `503` | `capability_unavailable`, `schema_unsupported`, `repository_unavailable`, `repository_key_unavailable`, `transport_unreachable`, `node_refused`, `node_error`, `fence_unavailable` |
+| `507` | `insufficient_space` |
 
 A remote node whose status answer the control instance cannot read answers `503` with `errorClass: "internal"` and `code: "NODE_DESCRIPTOR_INVALID"`. For a remote node, the control instance answers `503` with `errorClass: "transport_unreachable"` whenever it cannot reach the node when the request arrives: a stopped node, a disconnected Pilot tunnel, or a target it will not call. A Pilot tunnel that drops while a request is in flight answers a plain `502`; if that request started something, send it again with the same idempotency key to find out what happened. A per-user permission check the control instance makes itself, before the request reaches the node, answers with `error` and, usually, `code`, and no `errorClass`.
 
-Access is checked before anything about the record is reported. A point in a state the request cannot act on, a volume that cannot be protected, and a restore target that already exists answer `403 permission_denied` to a caller who may not act on that record, the same answer as for a record the caller may not touch. An id that names nothing (an operation, a storage, a point, a volume) answers `403` too, unless the caller holds the access node-wide: a global role, or a role on the node. For an unknown operation id that also means permission to change system settings, because a repository operation needs it. A caller with that access gets the specific `400 invalid_request`. Cancelling a repository provisioning operation answers `403` unless the caller may configure the repository, and only then `400` with `reason: "not_cancellable"`.
+Access is checked before anything about the record is reported. A point in a state the request cannot act on, a volume that cannot be protected, and a restore target that already exists answer `403 permission_denied` to a caller who may not act on that record, the same answer as for a record the caller may not touch. An id that names nothing (an operation, a storage, a point, a volume) answers `403` too, unless the caller holds the access node-wide: a global role, or a role on the node. For an unknown operation id that also means permission to change system settings, because a repository operation needs it. A caller with that access gets the specific `400 invalid_request`. Cancelling a repository provisioning operation, or an overwrite that has started its swap, answers `409` with `errorClass: "not_cancellable"`.
 
 While the node is still starting, a mutating request answers `503` with `errorClass: "capability_unavailable"` and `reason: "engine_starting"`. Wait for startup to finish and retry.
+
+A node whose build predates the overwrite routes answers the preview and the overwrite with `409 UPDATE_REQUIRED` from the control instance, before the request reaches it. Update that node, or restore to a new volume on it.
 
 A `partial` capture is not an HTTP error: the request was admitted, the point is stored as `partial`, and the operation carries `source_unreadable`. Read the operation to see it.
 

@@ -1,13 +1,13 @@
 import { randomUUID } from 'crypto';
 import { readNodeProxyJson } from '../../helpers/nodeProxyJson';
 import { sanitizeForLog } from '../../utils/safeLog';
-import { resolveRemoteVolumeProtection } from './capability';
+import { resolveRemoteRecoveryRead } from './capability';
 import { RECOVERY_OPERATION_HEADER } from './dispatcher';
 import {
   VOLUME_PROTECTION_CAPABILITY,
   VOLUME_PROTECTION_CAPABILITY_VERSION,
 } from './types';
-import type { RecoveryErrorClass, VolumeProtectionStatus } from './types';
+import type { RecoveryErrorClass, RestoreMode, VolumeProtectionStatus } from './types';
 
 /**
  * One answer to "can this remote node run recovery work", used by everything
@@ -31,6 +31,8 @@ export const RECOVERY_SUPPORT_CACHE_TTL_MS = 30_000;
 interface CacheEntry {
   expiresAt: number;
   status: VolumeProtectionStatus;
+  /** What the node says it can execute, or null when the read did not say. */
+  restoreModes: RestoreMode[] | null;
 }
 
 const cache = new Map<number, CacheEntry>();
@@ -56,6 +58,8 @@ function normalizeRemoteStatus(status: VolumeProtectionStatus): VolumeProtection
 export interface RecoverySupportRead {
   operationId: string;
   status: VolumeProtectionStatus;
+  /** The restore shapes the node advertised, or null when the read did not say. */
+  restoreModes: RestoreMode[] | null;
   fetchedAt: number;
 }
 
@@ -71,7 +75,7 @@ export async function resolveRemoteRecoverySupport(
   const cached = cache.get(nodeId);
   const at = now();
   if (cached && cached.expiresAt > at) {
-    return { operationId: randomUUID(), status: cached.status, fetchedAt: at };
+    return { operationId: randomUUID(), status: cached.status, restoreModes: cached.restoreModes, fetchedAt: at };
   }
   const operationId = randomUUID();
   const read = await readNodeProxyJson({
@@ -85,6 +89,7 @@ export async function resolveRemoteRecoverySupport(
     ? (read.data as Record<string, unknown>).operationId
     : undefined;
   let status: VolumeProtectionStatus;
+  let restoreModes: RestoreMode[] | null;
   if (read.kind === 'ok' && echoed !== operationId) {
     // An answer to some other dispatch, or from a hop that drops the header, is
     // not evidence about this one.
@@ -93,11 +98,15 @@ export async function resolveRemoteRecoverySupport(
       nodeId, operationId, typeof echoed === 'string' ? sanitizeForLog(echoed).slice(0, 64) : String(echoed),
     );
     status = { ...KEY, state: 'unknown', reason: 'descriptor_mismatch' };
+    restoreModes = null;
   } else {
-    status = normalizeRemoteStatus(resolveRemoteVolumeProtection(read));
+    const resolved = resolveRemoteRecoveryRead(read);
+    status = normalizeRemoteStatus(resolved.status);
+    // A node reported as an older build is not asked what it can execute.
+    restoreModes = status === resolved.status ? resolved.restoreModes : null;
   }
-  cache.set(nodeId, { expiresAt: at + RECOVERY_SUPPORT_CACHE_TTL_MS, status });
-  return { operationId, status, fetchedAt: at };
+  cache.set(nodeId, { expiresAt: at + RECOVERY_SUPPORT_CACHE_TTL_MS, status, restoreModes });
+  return { operationId, status, restoreModes, fetchedAt: at };
 }
 
 export type RecoveryPreflight =
@@ -108,9 +117,28 @@ export type RecoveryPreflight =
  * The preflight a mutating recovery request must pass before it reaches a remote
  * node. It can only refuse: a node that says it is available is trusted to answer
  * for itself, including answering `503` while its engine is still starting.
+ *
+ * `requiredMode` narrows the question to one restore shape. A node that is
+ * otherwise healthy but never advertised that shape is an older build for this
+ * request, and `409 UPDATE_REQUIRED` is what the operator is told instead of a
+ * destructive request the node would refuse halfway through.
  */
-export async function preflightRecoveryRequest(nodeId: number): Promise<RecoveryPreflight> {
-  const { status } = await resolveRemoteRecoverySupport(nodeId);
+export async function preflightRecoveryRequest(
+  nodeId: number,
+  requiredMode?: RestoreMode,
+): Promise<RecoveryPreflight> {
+  const { status, restoreModes } = await resolveRemoteRecoverySupport(nodeId);
+  if (requiredMode !== undefined && restoreModes !== null && !restoreModes.includes(requiredMode)) {
+    return {
+      ok: false,
+      httpStatus: 409,
+      code: 'UPDATE_REQUIRED',
+      errorClass: 'update_required',
+      message: requiredMode === 'staged_overwrite'
+        ? 'This node needs an update before it can restore over an existing volume.'
+        : 'This node needs an update before it can run this restore.',
+    };
+  }
   if (status.state === 'available') return { ok: true, status };
   if (status.state === 'unavailable') {
     // The node has the engine and will answer with its own reason, which the

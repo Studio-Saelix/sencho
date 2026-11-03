@@ -83,6 +83,7 @@ import {
 } from '../helpers/registryDeliveryBodyLimits';
 import { classifyRegistryDeliveryOp } from '../helpers/registryOpClassifier';
 import { preflightRecoveryRequest } from '../services/recovery/remoteSupport';
+import type { RestoreMode } from '../services/recovery/types';
 import { augmentRemoteProxyWithRegistryDelivery, evaluateRegistryDeliveryProxyGate } from '../helpers/registryDeliveryProxy';
 
 /**
@@ -793,7 +794,7 @@ export function createRemoteProxyMiddleware(): RequestHandler {
       // described one way and refused another. A node with the engine passes
       // through and answers for itself, including `503` while boot is running.
       if (isRecoveryProxyPath(req.path) && !isRecoveryDescriptorPath(req.path)) {
-        const preflight = await preflightRecoveryRequest(req.nodeId);
+        const preflight = await preflightRecoveryRequest(req.nodeId, requiredRestoreModeFor(req.method, req.path));
         if (!preflight.ok) {
           res.status(preflight.httpStatus).json({
             error: preflight.message,
@@ -1365,6 +1366,21 @@ function isRecoveryProxyPath(path: string): boolean {
 /** The descriptor route is the one recovery path that must always reach the node. */
 function isRecoveryDescriptorPath(path: string): boolean {
   return /^\/recovery\/node\/?(?:\?|$)/i.test(path);
+}
+
+/**
+ * The restore shape a recovery path needs the node to have advertised. Only the
+ * overwrite routes narrow the preflight: every other recovery route works
+ * against `new_volume`, which every node with the engine already speaks.
+ */
+function requiredRestoreModeFor(method: string, path: string): RestoreMode | undefined {
+  if (method.toUpperCase() !== 'POST') return undefined;
+  // The resolve route belongs to the same feature: a node that never advertised
+  // the overwrite has no intent a resolve could act on.
+  if (/^\/recovery\/restores\/[^/]+\/resolve\/?(?:\?|$)/i.test(path)) return 'staged_overwrite';
+  return /^\/recovery\/(?:points\/[^/]+\/overwrite(?:\/preview)?|restores\/[^/]+\/resolve)\/?(?:\?|$)/i.test(path)
+    ? 'staged_overwrite'
+    : undefined;
 }
 
 /** A recovery URL with its `/api` prefix still on, as the proxy's error hook sees it. */
