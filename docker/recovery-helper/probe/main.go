@@ -9,7 +9,9 @@
 // and it runs inside the recovery helper with the root mounted read-only.
 //
 // Usage: sencho-recovery-probe <path>
-//        sencho-recovery-probe swap <prepare|commit|status|rollback|cleanup> --root <path> --id <intent>
+//
+//	sencho-recovery-probe swap <prepare|commit|status|rollback|cleanup> --root <path> --id <intent>
+//
 // Output: one JSON object on stdout. Exit 0 on success, 1 with an {"error"}
 // object on failure.
 package main

@@ -359,6 +359,68 @@ func TestRootMetadataIsAppliedAfterCommit(t *testing.T) {
 	}
 }
 
+// A commit that applied the incoming root's metadata and then failed before the
+// journal recorded it (a chown that landed, a chmod that did not, a crash) is
+// rolled back to a root that still carries the incoming owner, mode and mtime
+// unless the rollback puts the original back. A plain rollback also moved the
+// root's mtime with its renames, so both shapes are pinned.
+func TestRollbackRestoresTheOriginalRootMetadata(t *testing.T) {
+	for _, partial := range []bool{false, true} {
+		name := "after renames only"
+		if partial {
+			name = "after the incoming root metadata was applied"
+		}
+		t.Run(name, func(t *testing.T) {
+			request := setupVolume(t, map[string]string{"db.bin": "original"}, map[string]string{"new.txt": "restored"})
+			original := time.Now().Add(-48 * time.Hour).Truncate(time.Second)
+			if err := os.Chmod(request.Root, 0o711); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Chtimes(request.Root, original, original); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := swapPrepare(request); err != nil {
+				t.Fatalf("prepare: %v", err)
+			}
+			writeCommitMarkerForTests = false
+			_, err := swapCommit(request)
+			writeCommitMarkerForTests = true
+			if err != nil {
+				t.Fatalf("commit: %v", err)
+			}
+			if partial {
+				plan, err := readPlan(filepath.Join(request.Root, workDirPrefix+testIntent, planFileName))
+				if err != nil {
+					t.Fatal(err)
+				}
+				if err := applyRootMeta(request.Root, plan.Root); err != nil {
+					t.Fatalf("apply: %v", err)
+				}
+				var applied syscall.Stat_t
+				if err := syscall.Stat(request.Root, &applied); err != nil {
+					t.Fatal(err)
+				}
+				if applied.Mode&0o7777 != 0o750 {
+					t.Fatalf("the incoming mode was not applied: %o", applied.Mode&0o7777)
+				}
+			}
+			if _, err := swapRollback(request); err != nil {
+				t.Fatalf("rollback: %v", err)
+			}
+			var st syscall.Stat_t
+			if err := syscall.Stat(request.Root, &st); err != nil {
+				t.Fatal(err)
+			}
+			if got := st.Mode & 0o7777; got != 0o711 {
+				t.Fatalf("root mode after rollback = %o, want 711", got)
+			}
+			if got := time.Unix(st.Mtim.Sec, st.Mtim.Nsec).Truncate(time.Second); !got.Equal(original) {
+				t.Fatalf("root mtime after rollback = %s, want %s", got, original)
+			}
+		})
+	}
+}
+
 func TestCommitIntoAnEmptyVolume(t *testing.T) {
 	request := setupVolume(t, map[string]string{}, map[string]string{"new.txt": "restored"})
 	if _, err := swapPrepare(request); err != nil {

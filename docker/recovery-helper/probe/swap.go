@@ -84,8 +84,13 @@ type swapPlan struct {
 	Originals []string `json:"originals"`
 	Incoming  []string `json:"incoming"`
 	Root      rootMeta `json:"root"`
-	RootDev   int64    `json:"root_dev"`
-	RootIno   uint64   `json:"root_ino"`
+	// The volume root's own owner, mode and mtime before the swap. A commit that
+	// applied part of `Root` and then failed is rolled back to these, so a
+	// rollback leaves the root exactly as it found it. Absent in a journal an
+	// older helper wrote, which a rollback leaves alone.
+	OriginalRoot *rootMeta `json:"original_root,omitempty"`
+	RootDev      int64     `json:"root_dev"`
+	RootIno      uint64    `json:"root_ino"`
 }
 
 type swapReport struct {
@@ -250,6 +255,12 @@ func swapPrepare(request swapRequest) (swapReport, error) {
 			GID:   st.Gid,
 			Mode:  uint32(st.Mode) & 0o7777,
 			Mtime: time.Unix(st.Mtim.Sec, st.Mtim.Nsec).UnixNano(),
+		},
+		OriginalRoot: &rootMeta{
+			UID:   rootStat.Uid,
+			GID:   rootStat.Gid,
+			Mode:  uint32(rootStat.Mode) & 0o7777,
+			Mtime: time.Unix(rootStat.Mtim.Sec, rootStat.Mtim.Nsec).UnixNano(),
 		},
 		RootDev: int64(rootStat.Dev),
 		RootIno: rootStat.Ino,
@@ -611,11 +622,27 @@ func swapRollback(request swapRequest) (swapReport, error) {
 			return swapReport{}, err
 		}
 	}
+	// The commit applies the incoming root's owner, mode and mtime last, so a
+	// failure part way through it (a chown that landed, a chmod that did not)
+	// leaves the root carrying them. Putting the original back is idempotent, and
+	// it runs before the work directory goes so a failure here can be retried.
+	if plan.OriginalRoot != nil {
+		if err := applyRootMeta(request.Root, *plan.OriginalRoot); err != nil {
+			return swapReport{}, err
+		}
+	}
 	if err := os.RemoveAll(workDir); err != nil {
 		return swapReport{}, err
 	}
 	if err := syncDir(request.Root); err != nil {
 		return swapReport{}, err
+	}
+	// The renames and the removal above moved the root's mtime, so it is set last.
+	if plan.OriginalRoot != nil {
+		mtime := time.Unix(0, plan.OriginalRoot.Mtime)
+		if err := os.Chtimes(request.Root, mtime, mtime); err != nil {
+			return swapReport{}, err
+		}
 	}
 	return swapReport{Status: statusRolledBack, Originals: plan.Originals, Incoming: plan.Incoming}, nil
 }
