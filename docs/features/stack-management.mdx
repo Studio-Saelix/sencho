@@ -487,6 +487,8 @@ Clearing the URL is refused when:
 
 When setting or clearing is refused, the pencil explains the source and leaves the open file unchanged.
 
+A service that still sets its link with `sencho.service.url` shows that label as ignored on its card; on desktop, editors get **Rename to io.sencho.url** beside it. See [Sencho Labels](/features/sencho-labels).
+
 The stack is refused outright when its compose file is a symlink pointing outside the stack directory (including into another stack) or a dangling symlink, or when the stack directory is itself a symlink. The URL list is then unavailable and the generated link stays.
 
 When the label cannot be added or removed without changing anything else, the pencil leaves the file as it is and asks you to edit the label in the editor. That happens for a shared block of labels reused inside a one-line `{ }` service, a comment inside a bracketed `[ ]` or `{ }` label list that removing the URL would take with it, or a file that uses `!reset`, `!override`, or another custom YAML tag anywhere.

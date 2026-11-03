@@ -367,6 +367,8 @@ export interface ContainersHealthProps {
     sourceServices?: readonly string[] | null;
     lockedServices?: ReadonlyMap<string, ServiceUrlEditBlock>;
     onEditServiceUrl?: (serviceName: string) => void;
+    /** Desktop only: the phone layout passes no handler, so the flag shows without the rename. */
+    onRenameRetiredUrl?: (serviceName: string) => void;
     onRetryServiceUrls?: () => void;
 }
 
@@ -473,6 +475,7 @@ export function ContainersHealth({
     sourceServices,
     lockedServices,
     onEditServiceUrl,
+    onRenameRetiredUrl,
     onRetryServiceUrls,
 }: ContainersHealthProps) {
     // Multi-service only: a single-service stack keeps the existing flat layout
@@ -487,6 +490,10 @@ export function ContainersHealth({
     // their health visible and reveals them in place.
     const [showHidden, setShowHidden] = useState(false);
     const sencho = senchoLabelsOf(serviceUrlEntry);
+    const renameRetiredUrlFor = (service: string | undefined) =>
+        canEditServiceUrl && onRenameRetiredUrl && service && sourceServices?.includes(service)
+            ? () => onRenameRetiredUrl(service)
+            : undefined;
     const presentation = presentServices(effectiveServices.map(spec => spec.name), sencho);
     const specByName = new Map(effectiveServices.map(spec => [spec.name, spec]));
     const orderedSpecs = presentation.order.flatMap(name => specByName.get(name) ?? []);
@@ -715,6 +722,7 @@ export function ContainersHealth({
                                                     resolution={sencho}
                                                     service={composeService}
                                                     applicationLinkShown={portLinkOpensApplication([container], composeService, serviceUrlEntry, activeNode)}
+                                                    onRenameRetiredUrl={renameRetiredUrlFor(composeService)}
                                                 />
                                             )}
                                         </div>
@@ -958,7 +966,7 @@ export function ContainersHealth({
                                                 </span>
                                             )}
                                         </div>
-                                        <ServiceSenchoLinks resolution={sencho} service={spec.name} applicationLinkShown={false} />
+                                        <ServiceSenchoLinks resolution={sencho} service={spec.name} applicationLinkShown={false} onRenameRetiredUrl={renameRetiredUrlFor(spec.name)} />
                                     </div>
                                     <div className="flex shrink-0 items-center gap-1">
                                         {renderServiceUpdateButton(updateAffordance)}
@@ -989,6 +997,7 @@ export function ContainersHealth({
                                             resolution={sencho}
                                             service={spec.name}
                                             applicationLinkShown={portLinkOpensApplication(group, spec.name, serviceUrlEntry, activeNode)}
+                                            onRenameRetiredUrl={renameRetiredUrlFor(spec.name)}
                                         />
                                     </div>
                                     <div className="flex shrink-0 items-center gap-1">

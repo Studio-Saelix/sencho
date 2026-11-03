@@ -1,6 +1,9 @@
 /** Same allowlist the backend applies before a service URL can be opened or saved. */
 export const SERVICE_URL_LABEL = 'io.sencho.url';
 
+/** Mirrors the backend `RETIRED_URL_LABEL`: the earlier draft spelling of the application link label. Sencho does not read it; the editor offers to rename it. */
+export const RETIRED_URL_LABEL = 'sencho.service.url';
+
 const MAX_SERVICE_URL_LENGTH = 2048;
 // Spaces, C0/C1 controls, and invisible or direction-changing format characters,
 // the same set as the backend validator (backend/src/helpers/senchoLabels.ts).

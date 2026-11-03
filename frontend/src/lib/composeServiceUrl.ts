@@ -1,5 +1,5 @@
 import { isAlias, isMap, isPair, isScalar, isSeq, parse, parseDocument, visit, type YAMLMap, type YAMLSeq } from 'yaml';
-import { SERVICE_URL_LABEL } from './serviceUrlLabel';
+import { RETIRED_URL_LABEL, SERVICE_URL_LABEL } from './serviceUrlLabel';
 
 /**
  * A custom YAML tag (`!reset`, `!override`) makes the parser warn about the tag it
@@ -1082,6 +1082,130 @@ export function patchServiceUrlLabel(source: string, serviceName: string, url: s
       return { ok: false, reason: 'unsupported' };
     }
     console.error('Failed to update the service URL label:', error);
+    return { ok: false, reason: 'parse' };
+  }
+}
+
+function isRetiredListItem(text: string): boolean {
+  return text === RETIRED_URL_LABEL || text.startsWith(`${RETIRED_URL_LABEL}=`);
+}
+
+/** The file as stable JSON with the retired label renamed on one service, or dropped when the current key is already declared. */
+function modelWithRenamedLabel(source: string, serviceName: string, schema?: 'failsafe'): string {
+  const parsed: unknown = parse(source, { ...QUIET_TAGS, merge: true, schema });
+  const model: unknown = JSON.parse(JSON.stringify(parsed ?? null));
+  const record = serviceOf(model, serviceName);
+  const labels = record?.labels;
+  if (record && Array.isArray(labels)) {
+    const declared = labels.some(item => typeof item === 'string' && isUrlListItem(item));
+    record.labels = labels.flatMap(item => {
+      if (typeof item !== 'string' || !isRetiredListItem(item)) return [item];
+      return declared ? [] : [`${SERVICE_URL_LABEL}${item.slice(RETIRED_URL_LABEL.length)}`];
+    });
+  } else if (record && labels && typeof labels === 'object') {
+    const map = labels as Record<string, unknown>;
+    if (RETIRED_URL_LABEL in map) {
+      if (!(SERVICE_URL_LABEL in map)) map[SERVICE_URL_LABEL] = map[RETIRED_URL_LABEL];
+      delete map[RETIRED_URL_LABEL];
+    }
+  }
+  return stableJson(model);
+}
+
+/** Splice that replaces the label name inside a key or list-item token, keeping its quotes and everything after it. */
+function renameTokenSplice(source: string, node: unknown, retired: string, current: string): Splice {
+  const range = nodeRange(node);
+  if (!range) throw new UnsupportedLayout('missing compose range');
+  const quoted = source[range[0]] === '"' || source[range[0]] === "'";
+  const start = range[0] + (quoted ? 1 : 0);
+  if (source.slice(start, start + retired.length) !== retired) throw new UnsupportedLayout('The label name is not written plainly');
+  return { start, end: start + retired.length, text: current };
+}
+
+/**
+ * Rename the retired `sencho.service.url` label to `io.sencho.url` on one service,
+ * keeping the value text exactly as written (interpolation and `$$` included). When
+ * the current label is already declared on the service, the retired one is removed
+ * instead, because the current one is the one Sencho reads. Only a label declared
+ * directly on the service in this file is renamed: anchors, aliases, merges, custom
+ * tags and interpolated list keys are refused as `unsupported`. So is a service that
+ * merges or extends another block without setting the label itself, and any result
+ * whose parsed model differs from the expected one. When the service holds no
+ * retired label in this file and inherits nothing, the source comes back unchanged
+ * with `ok: true`; callers detect that by comparing the text.
+ */
+export function renameRetiredServiceUrlLabel(source: string, serviceName: string): ServiceUrlPatch {
+  let doc: ReturnType<typeof parseDocument>;
+  let parsed: unknown;
+  try {
+    doc = parseDocument(source, QUIET_TAGS);
+    if (doc.errors.length > 0) {
+      console.warn(`Label rename on ${serviceName} refused: the compose file does not parse (${doc.errors[0].message}).`);
+      return { ok: false, reason: 'parse' };
+    }
+    parsed = parse(source, { ...QUIET_TAGS, merge: true });
+  } catch (error) {
+    console.error('Failed to read the compose file for a label rename:', error);
+    return { ok: false, reason: 'parse' };
+  }
+  const services = doc.get('services');
+  if (!isMap(services)) return { ok: false, reason: 'missing-service' };
+  const pair = services.items.find(item => labelText(item.key) === serviceName);
+  if (!pair) return { ok: false, reason: 'missing-service' };
+  const service = pair.value;
+  if (!isMap(service) || anchorName(service)) return { ok: false, reason: 'unsupported' };
+  const labelPair = service.items.find(item => labelText(item.key) === 'labels');
+  const labels = labelPair ? labelPair.value : null;
+  // A service that merges or extends another block may take the label from that block.
+  const inherits = mapHasMerge(service) || service.items.some(item => labelText(item.key) === 'extends');
+  // Nothing to rename when the service does not set the label itself. Refuse if it may be inherited
+  // from a block this file cannot show to be harmless; otherwise it is set in another file or not at all.
+  const notSetHere = (): ServiceUrlPatch => (inherits ? { ok: false, reason: 'unsupported' } : { ok: true, yaml: source });
+  if (labels == null || (isScalar(labels) && (labels.value == null || labels.value === ''))) return notSetHere();
+  if (!isMap(labels) && !isSeq(labels)) return { ok: false, reason: 'unsupported' };
+  if (anchorName(labels) || hasCustomTag(doc) || listLabelKeyInterpolated(serviceOf(parsed, serviceName)?.labels)) {
+    return { ok: false, reason: 'unsupported' };
+  }
+
+  try {
+    const splices: Splice[] = [];
+    const flow = isFlow(source, labels);
+    if (isMap(labels)) {
+      if (mapHasMerge(labels)) return { ok: false, reason: 'unsupported' };
+      const retired = labels.items.find(item => labelText(item.key) === RETIRED_URL_LABEL);
+      if (!retired) return notSetHere();
+      const declared = labels.items.some(item => labelText(item.key) === SERVICE_URL_LABEL);
+      if (!declared) splices.push(renameTokenSplice(source, retired.key, RETIRED_URL_LABEL, SERVICE_URL_LABEL));
+      else if (flow) splices.push(...editFlow(source, labels, new Set([retired]), null));
+      else splices.push(deleteSpan(source, retired.key, retired.value));
+    } else {
+      const texts = labels.items.map(item => resolvedLabelText(doc, item));
+      if (labels.items.some((item, index) => isAlias(item) && isRetiredListItem(texts[index]))) {
+        return { ok: false, reason: 'unsupported' };
+      }
+      const retired = labels.items.filter((_, index) => isRetiredListItem(texts[index]));
+      if (retired.length === 0) return notSetHere();
+      if (texts.some(isUrlListItem)) {
+        if (flow) splices.push(...editFlow(source, labels, new Set(retired), null));
+        else for (const item of retired) splices.push(deleteSpan(source, item, item));
+      } else {
+        for (const item of retired) splices.push(renameTokenSplice(source, item, RETIRED_URL_LABEL, SERVICE_URL_LABEL));
+      }
+    }
+    const yaml = applySplices(source, splices);
+    if (parseDocument(yaml, QUIET_TAGS).errors.length > 0) throw new UnsupportedLayout('the patched text does not parse');
+    for (const schema of [undefined, 'failsafe'] as const) {
+      const expected = modelWithRenamedLabel(source, serviceName, schema);
+      const actual = stableJson(JSON.parse(JSON.stringify(parse(yaml, { ...QUIET_TAGS, merge: true, schema }) ?? null)));
+      if (expected !== actual) throw new UnsupportedLayout(`the ${schema ?? 'typed'} model changed beyond the label rename`);
+    }
+    return { ok: true, yaml };
+  } catch (error) {
+    if (error instanceof UnsupportedLayout) {
+      console.warn(`Label rename on ${serviceName} refused:`, error.message);
+      return { ok: false, reason: 'unsupported' };
+    }
+    console.error('Failed to rename the service URL label:', error);
     return { ok: false, reason: 'parse' };
   }
 }

@@ -36,7 +36,7 @@ export interface LabelValue {
   value: string;
   source: LabelSource;
   redacted?: boolean;
-  /** Whether Sencho acts on this `io.sencho.*` label. Absent for every other label. */
+  /** Whether Sencho acts on this `io.sencho.*` label, or flags the retired link label (declared Compose copy only). Absent for every other label. */
   behavior?: LabelBehavior;
 }
 

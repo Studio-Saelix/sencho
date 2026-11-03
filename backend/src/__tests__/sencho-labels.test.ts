@@ -8,6 +8,8 @@ import { describe, it, expect } from 'vitest';
 import {
   MANAGED_LABEL_DECLARED_REASON,
   MANAGED_LABEL_DEPLOYED_REASON,
+  RETIRED_URL_LABEL,
+  RETIRED_URL_LABEL_REASON,
   SENCHO_INFRASTRUCTURE_LABEL,
   SENCHO_LABEL_DEFINITIONS,
   SENCHO_LABELS_CAPABILITY,
@@ -278,8 +280,36 @@ describe('resolveSenchoLabels', () => {
     expect(r.entries.map(e => [e.key, e.state])).toEqual([
       ['io.sencho.URL', 'unsupported'],
       ['io.sencho.future', 'unsupported'],
+      ['sencho.service.url', 'unsupported'],
     ]);
     expect(r.services.web.links).toEqual([]);
+  });
+
+  it('flags the retired link label without reading it as a link', () => {
+    const r = resolveRendered(model({
+      map: { 'sencho.service.url': 'https://old.example.com', other: 'x' },
+      listed: ['sencho.service.url=${APP_URL}', 'other=x'],
+      bare: ['sencho.service.url'],
+    }));
+    for (const service of ['map', 'listed', 'bare']) {
+      expect(r.services[service].links).toEqual([]);
+      const entry = r.entries.find(e => e.service === service && e.key === 'sencho.service.url');
+      expect(entry).toMatchObject({ state: 'unsupported', definition: null, reason: RETIRED_URL_LABEL_REASON });
+    }
+    // Fixed text only: the value (which may be an interpolated secret) is never echoed.
+    expect(JSON.stringify(r.entries)).not.toContain('old.example.com');
+    expect(JSON.stringify(r.entries)).not.toContain('APP_URL');
+  });
+
+  it('keeps io.sencho.url active when the retired label is declared beside it', () => {
+    const r = resolveRendered(model({
+      web: { 'io.sencho.url': 'https://new.example.com', 'sencho.service.url': 'https://old.example.com' },
+    }));
+    expect(r.services.web.links).toEqual([{ name: null, url: 'https://new.example.com' }]);
+    expect(r.entries.map(e => [e.key, e.state])).toEqual([
+      ['io.sencho.url', 'active'],
+      ['sencho.service.url', 'unsupported'],
+    ]);
   });
 
   it('reads list syntax, numeric and boolean scalars, and the last duplicate in a list', () => {
@@ -369,6 +399,20 @@ describe('label behavior annotations', () => {
     expect(declaredLabelBehavior(resolved, 'web', 'io.sencho.url')).toMatchObject({ state: 'active', summary: expect.any(String) });
     expect(declaredLabelBehavior(resolved, 'web', 'io.sencho.order')).toMatchObject({ state: 'invalid' });
     expect(declaredLabelBehavior(resolved, 'web', 'traefik.enable')).toBeUndefined();
+  });
+
+  it('annotates the retired link label on its declared copy only', () => {
+    const retired = resolveRendered(model({ web: { [RETIRED_URL_LABEL]: 'https://old.example.com' } }));
+    expect(declaredLabelBehavior(retired, 'web', RETIRED_URL_LABEL)).toEqual({ state: 'unsupported', reason: RETIRED_URL_LABEL_REASON });
+    expect(deployedCopyBehavior(RETIRED_URL_LABEL, 'https://old.example.com', 'runtime')).toBeUndefined();
+    const raw = { state: 'unsupported', reason: RETIRED_URL_LABEL_REASON };
+    expect(sanitizeRemoteBehavior('compose', RETIRED_URL_LABEL, raw)).toEqual({ state: 'unsupported', reason: RETIRED_URL_LABEL_REASON });
+    for (const source of ['runtime', 'image', 'compose-system', 'unknown'] as const) {
+      expect(sanitizeRemoteBehavior(source, RETIRED_URL_LABEL, raw), source).toBeUndefined();
+    }
+    // A model that did not render yields no metadata, so the retired label is inert like every other Sencho label.
+    expect(declaredLabelBehavior(unrenderableSenchoLabels(), 'web', RETIRED_URL_LABEL)?.state).toBe('inert');
+    expect(sanitizeRemoteBehavior('compose', RETIRED_URL_LABEL, undefined)).toBeUndefined();
   });
 
   it('treats everything as inert when the model did not render', () => {
@@ -487,7 +531,7 @@ describe('remote behavior sanitizing', () => {
     expect(out?.summary?.length).toBe(240);
   });
 
-  it('drops a behavior for a key outside the namespace and for a claim the hub does not honor', () => {
+  it('drops a behavior for a key outside the namespace (other than the retired link label) and for a claim the hub does not honor', () => {
     expect(sanitizeRemoteBehavior('compose', 'traefik.enable', { state: 'active' })).toBeUndefined();
     // A presentation label cannot be active from a running container; the hub's reason replaces the node's text.
     expect(sanitizeRemoteBehavior('runtime', 'io.sencho.url', { state: 'active', reason: 'This link is active.' })).toEqual({

@@ -28,10 +28,10 @@ import { ThemeQuickSwitch } from './theme/ThemeQuickSwitch';
 import { useNotifications } from './EditorLayout/hooks/useNotifications';
 import { useContainerStats } from './EditorLayout/hooks/useContainerStats';
 import { useSidebarContextMenu } from './EditorLayout/hooks/useSidebarContextMenu';
-import { useServiceUrls } from './EditorLayout/hooks/useServiceUrls';
+import { fetchServiceUrlEntry, useServiceUrls } from './EditorLayout/hooks/useServiceUrls';
 import { ServiceUrlModal } from './EditorLayout/ServiceUrlModal';
 import { patchServiceUrlLabel } from '@/lib/composeServiceUrl';
-import { commitServiceUrlWrite } from '@/lib/serviceUrlWrite';
+import { commitServiceUrlWrite, planRetiredUrlRename, runRetiredRename } from '@/lib/serviceUrlWrite';
 import { serviceKeyGet, serviceUrlClearBlockedMessage, serviceUrlClearState, serviceUrlSaveBlockedMessage } from '@/lib/serviceUrlResolve';
 import { sameServiceUrlTarget, type ServiceUrlDialogTarget } from '@/lib/serviceUrlTarget';
 import { confirmComposeSourceReload } from '@/lib/composeSourceConflict';
@@ -453,6 +453,7 @@ export default function EditorLayout() {
     onStackFilesChangedRef.current = () => { void refreshServiceUrls(); };
   }, [selectedFile, activeNode?.id, can, serviceUrlEntry, refreshServiceUrls]);
 
+  const renameInFlightRef = useRef(false);
   const [serviceUrlTarget, setServiceUrlTarget] = useState<ServiceUrlDialogTarget | null>(null);
   const [serviceUrlDirty, setServiceUrlDirty] = useState(false);
   const [serviceUrlSaving, setServiceUrlSaving] = useState(false);
@@ -1088,6 +1089,104 @@ export default function EditorLayout() {
     verifySavedUrl,
   ]);
 
+  /**
+   * Rename the retired link label on one service to `io.sencho.url` in the open
+   * compose file. Same write path as the link editor (etag, source-changed reload,
+   * optional diff preview); success means the node no longer reports the old label.
+   */
+  const renameRetiredServiceUrl = useCallback(async (serviceName: string) => {
+    if (!selectedFile) return;
+    const captured = { stackName: selectedFile, nodeId: activeNode?.id ?? null };
+    const stackKey = captured.stackName.replace(/\.(ya?ml)$/, '');
+    const plan = planRetiredUrlRename({
+      content,
+      originalContent: editorState.originalContent,
+      canEdit: can('stack:edit', 'stack', stackKey, captured.nodeId),
+      service: serviceName,
+    });
+    if (!plan.ok) {
+      toast.error(plan.message);
+      return;
+    }
+    const nextContent = plan.next;
+    const etag = editorState.composeEtag;
+    const filename = editorState.composeFilename;
+    const stillOpen = () => selectedFileRef.current === captured.stackName && activeNodeIdRef.current === captured.nodeId;
+    const write = async () => {
+      if (!canRef.current('stack:edit', 'stack', stackKey, captured.nodeId)) {
+        toast.error('You cannot edit this stack.');
+        return;
+      }
+      if (!stillOpen()) {
+        toast.error('This stack is no longer open, so the label was not renamed.');
+        return;
+      }
+      const run = await runRetiredRename({
+        inFlight: renameInFlightRef,
+        nextContent,
+        service: serviceName,
+        save: () => stackActions.saveComposeContent({
+          content: nextContent,
+          stackName: captured.stackName,
+          nodeId: captured.nodeId,
+          etag,
+          filename,
+        }),
+        applyContent: (next) => { if (stillOpen()) setContent(next); },
+        isCurrent: stillOpen,
+        refresh: refreshServiceUrls,
+        refetch: () => fetchServiceUrlEntry(captured.nodeId, captured.stackName),
+      });
+      if (run.status === 'busy') {
+        toast.info('A rename is already in progress.');
+      } else if (run.status === 'save-threw') {
+        toast.error('The label could not be renamed.');
+      } else if (run.status === 'save-refused') {
+        const { result } = run;
+        if (result.conflict && result.code === 'compose_source_changed' && stillOpen()) {
+          if (confirmComposeSourceReload(message => window.confirm(message))) {
+            setContent(result.currentContent);
+            editorState.setOriginalContent(result.currentContent);
+            editorState.setComposeEtag(result.etag);
+            editorState.setComposeFilename(result.filename);
+            toast.info('Reloaded the current compose file.');
+            void refreshServiceUrls();
+          } else {
+            toast.error('The compose file on disk changed, so the label was not renamed.');
+          }
+          return;
+        }
+        toast.error(result.conflict ? 'The compose file changed before it could be saved.' : result.error);
+      } else if (run.current) {
+        if (run.verified) toast.success('The link now comes from io.sencho.url.');
+        else toast.error('The file was saved, but the rename could not be verified.');
+      }
+    };
+    if (diffPreviewEnabled) {
+      overlayState.setDiffPreview({
+        mode: 'save',
+        language: 'yaml',
+        original: editorState.originalContent,
+        modified: nextContent,
+        fileName: filename || 'compose.yaml',
+        onConfirm: write,
+      });
+      return;
+    }
+    await write();
+  }, [
+    activeNode?.id,
+    can,
+    content,
+    diffPreviewEnabled,
+    editorState,
+    overlayState,
+    refreshServiceUrls,
+    selectedFile,
+    setContent,
+    stackActions,
+  ]);
+
   const renderEditor = (headerActions?: ReactNode) => (
     <>
     <EditorView
@@ -1165,6 +1264,7 @@ export default function EditorLayout() {
           serviceName,
         });
       }}
+      onRenameRetiredUrl={(serviceName) => { void renameRetiredServiceUrl(serviceName); }}
       onRetryServiceUrls={() => { void refreshServiceUrls(); }}
       setActiveTab={setActiveTab}
       setLogsMode={setLogsMode}
