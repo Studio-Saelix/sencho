@@ -3,6 +3,7 @@
  * declarations match the rules' own guards, and the coverage state tells the
  * truth about what ran.
  */
+import fs from 'fs';
 import path from 'path';
 import { describe, it, expect } from 'vitest';
 import { runRules } from '../services/preflight/rules';
@@ -125,6 +126,24 @@ describe('coverage gap copy', () => {
   it('names the missing evidence when it can', () => {
     const { coverage } = runAssuranceRules(dropEvidence(maximalContext(), 'node-state'));
     expect(describeCoverageGaps(coverage)).toContain('node state unavailable');
+  });
+
+  // The Compose Doctor docs quote these sentences. When a rule's requirements or
+  // `affectsVerdict` change, the count in the sentence changes with them.
+  it('counts only verdict-affecting skips in the sentences the docs quote', () => {
+    const clauseFor = (requirement: (typeof EVIDENCE_REQUIREMENTS)[number]) =>
+      describeCoverageGaps(runAssuranceRules(dropEvidence(maximalContext(), requirement)).coverage);
+    expect(clauseFor('node-state')).toBe('6 checks could not run: node state unavailable');
+    expect(clauseFor('env-context')).toBe('2 checks could not run: env files unreadable');
+  });
+
+  it('keeps the Compose Doctor docs in step with those sentences', () => {
+    const docs = fs.readFileSync(path.resolve(__dirname, '../../../docs/features/compose-doctor.mdx'), 'utf8');
+    const quoted = [...docs.matchAll(/\d+ checks could not run: [a-z ]+/g)].map(m => m[0]);
+    expect(quoted.length).toBeGreaterThan(0);
+    const product = EVIDENCE_REQUIREMENTS.map(requirement =>
+      describeCoverageGaps(runAssuranceRules(dropEvidence(maximalContext(), requirement)).coverage));
+    for (const sentence of quoted) expect(product, `docs quote "${sentence}"`).toContain(sentence);
   });
 
   it('degrades to a count when a stored requirement name is unknown', () => {
