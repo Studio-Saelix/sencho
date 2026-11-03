@@ -128,11 +128,12 @@ test.describe('io.sencho.* labels', () => {
       content: 'services:\n  web:\n    image: nginx:alpine\n    labels:\n      sencho.service.url: https://app.example.com\n',
     });
     expect(body.ok).toBe(true);
+    // The seeded override still gives web a named docs link, so only the application link is checked here.
     expect(body.json.serviceUrls).toEqual({});
-    expect(body.json.senchoLabels.services.web.links).toEqual([]);
-    expect(body.json.senchoLabels.entries.filter(e => e.service === 'web')).toEqual([
-      expect.objectContaining({ key: 'sencho.service.url', state: 'unsupported' }),
-    ]);
+    expect(body.json.senchoLabels.services.web.links.filter(link => link.name === null)).toEqual([]);
+    const webEntries = body.json.senchoLabels.entries.filter(e => e.service === 'web');
+    expect(webEntries.find(e => e.key === 'sencho.service.url')).toMatchObject({ state: 'unsupported' });
+    expect(webEntries.some(e => e.key === 'io.sencho.url')).toBe(false);
   });
 
   test('resolves labels from the merged model: override wins, links validate, order and hidden apply', async ({ page }) => {
