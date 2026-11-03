@@ -729,13 +729,16 @@ export function CloudBackupSection() {
         <>
             <SettingsField
                 label="Encrypt archives"
-                helper="Seal off-site archives before they leave this instance. Off by default."
+                helper={pendingEnable
+                    ? 'Not on yet. Save a passphrase below to start sealing uploads, or switch this off to cancel.'
+                    : 'Seal off-site archives before they leave this instance. Off by default.'}
+                tone={pendingEnable ? 'warn' : 'default'}
                 htmlFor="archive-encryption"
             >
                 <TogglePill
                     id="archive-encryption"
                     aria-label="Encrypt archives"
-                    checked={encryptArchives}
+                    checked={encryptArchives || pendingEnable}
                     disabled={savingEncryption || saving}
                     onChange={handleEncryptToggle}
                 />
@@ -761,12 +764,12 @@ export function CloudBackupSection() {
                             }}
                         />
                         {passphraseError ? <p className="text-sm text-destructive">{passphraseError}</p> : null}
-                        {passphraseDraft ? (
+                        {passphraseDraft || pendingEnable ? (
                             <BusyButton
                                 size="sm"
                                 className="self-start"
                                 pending={savingEncryption}
-                                disabled={saving}
+                                disabled={saving || (pendingEnable && passphraseDraft.length < 12)}
                                 busyLabel="Saving"
                                 onClick={handleSavePassphrase}
                             >

@@ -93,9 +93,36 @@ describe('CloudBackupSection archive encryption', () => {
         const user = userEvent.setup();
         const encryptSwitch = screen.getByRole('switch', { name: 'Encrypt archives' });
         await user.click(encryptSwitch);
-        expect(encryptSwitch).not.toBeChecked();
         expect(screen.getByText(/lost passphrase cannot be recovered/)).toBeInTheDocument();
         expect(apiFetch.mock.calls.some(call => call[1]?.method === 'PUT')).toBe(false);
+    });
+
+    it('shows the switch on with a not-on-yet note while the passphrase is pending, and cancels on a second click', async () => {
+        render(<CloudBackupSection />);
+        const user = userEvent.setup();
+        const encryptSwitch = await screen.findByRole('switch', { name: 'Encrypt archives' });
+        await user.click(encryptSwitch);
+        expect(encryptSwitch).toBeChecked();
+        expect(screen.getByText(/Not on yet\. Save a passphrase below/)).toBeInTheDocument();
+        expect(screen.getByLabelText('Archive passphrase')).toBeInTheDocument();
+
+        await user.click(encryptSwitch);
+        expect(encryptSwitch).not.toBeChecked();
+        expect(screen.queryByText(/Not on yet/)).not.toBeInTheDocument();
+        expect(screen.queryByLabelText('Archive passphrase')).not.toBeInTheDocument();
+        expect(apiFetch.mock.calls.some(call => call[1]?.method === 'PUT')).toBe(false);
+    });
+
+    it('keeps Save passphrase visible but disabled under 12 characters while the enable is pending', async () => {
+        render(<CloudBackupSection />);
+        const user = userEvent.setup();
+        await user.click(await screen.findByRole('switch', { name: 'Encrypt archives' }));
+        const save = screen.getByRole('button', { name: 'Save passphrase' });
+        expect(save).toBeDisabled();
+        await user.type(screen.getByLabelText('Archive passphrase'), 'short');
+        expect(save).toBeDisabled();
+        await user.type(screen.getByLabelText('Archive passphrase'), '-but-long-enough');
+        expect(save).toBeEnabled();
     });
 
     it('asks for a passphrase in an overlay and leaves a wrong passphrase on that overlay', async () => {
