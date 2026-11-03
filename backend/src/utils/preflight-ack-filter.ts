@@ -12,6 +12,7 @@ export interface PreflightAcknowledgementDecision {
     acknowledgementId?: number;
     acknowledgementReason?: string;
     acknowledgementExpiry?: PreflightAckExpiryMode;
+    acknowledgementExpiresAt?: number;
 }
 
 export interface PreflightAckFilterContext {
@@ -118,6 +119,7 @@ export function applyPreflightAcknowledgements<T extends PreflightFinding>(
             acknowledgementId: match.id,
             acknowledgementReason: match.reason,
             acknowledgementExpiry: match.expiry_mode,
+            ...(match.expires_at !== null ? { acknowledgementExpiresAt: match.expires_at } : {}),
         };
     });
 }

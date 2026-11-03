@@ -22,7 +22,7 @@ When you trigger **Update** from the stack editor toolbar or the sidebar menu, S
 
 The verdict is computed from signals Sencho already tracks, so the check is fast and never re-runs anything heavy:
 
-- **Compose Doctor**: the stored result of the last [preflight run](/features/compose-doctor). A blocker finding makes the verdict Blocked; high-risk findings ask for review. If Compose Doctor has never run, the dialog says so without dragging the verdict down.
+- **Compose Doctor**: the stored result of the last [preflight run](/features/compose-doctor). A blocker finding makes the verdict Blocked; high-risk findings ask for review. A clean result counts as a positive signal only when every check that affects the result ran; a run that skipped a check, or one stored before coverage was recorded, shows as unknown with the reason named. If Compose Doctor has never run, the dialog says so without dragging the verdict down.
 - **Drift**: open [drift findings](/features/stack-drift) warn you that the running state has diverged, so the rollback target may not match what is running.
 - **Current containers**: a container that is already unhealthy, restarting, or crashed before the update makes the result hard to evaluate; the dialog asks you to look first.
 - **Healthcheck coverage**: how many services define healthchecks, which determines how thoroughly the post-update health gate can verify the result.

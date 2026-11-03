@@ -11,6 +11,7 @@
  */
 import { ComposeDoctorService } from '../ComposeDoctorService';
 import type { PreflightFinding } from '../preflight/types';
+import type { CanonicalRuleId } from '../assurance/types';
 import type { DependencySnapshot } from '../DockerController';
 import type { StackNetworkFacts } from './types';
 import { describeServiceTunnel, describeTunnelConnector } from './tunnelDetection';
@@ -26,8 +27,12 @@ import type {
   NetworkingRecommendedAction,
 } from './networkingTypes';
 
-/** The Compose Doctor rules with a networking-relevant interpretation. */
-export const DOCTOR_NETWORKING_RULE_KIND: Record<string, NetworkingFindingKind> = {
+/**
+ * The Compose Doctor rules with a networking-relevant interpretation, keyed by
+ * canonical rule id. Typing the keys against the registry means a renamed rule
+ * fails to compile here, instead of silently dropping networking findings.
+ */
+const DOCTOR_NETWORKING_RULE_KIND = {
   'port-conflict-node': 'port-conflict-node',
   'port-conflict-internal': 'port-conflict-internal',
   'external-network-missing': 'external-network-missing',
@@ -41,7 +46,15 @@ export const DOCTOR_NETWORKING_RULE_KIND: Record<string, NetworkingFindingKind> 
   'exposure-port-vs-dossier': 'exposure-port-vs-dossier',
   'reverse-proxy-undocumented': 'reverse-proxy-undocumented',
   'new-network': 'new-network',
-};
+} as const satisfies Partial<Record<CanonicalRuleId, NetworkingFindingKind>>;
+
+/** Look up a Doctor rule's networking interpretation. */
+export function doctorNetworkingKind(ruleId: string): NetworkingFindingKind | undefined {
+  for (const [key, kind] of Object.entries(DOCTOR_NETWORKING_RULE_KIND)) {
+    if (key === ruleId) return kind;
+  }
+  return undefined;
+}
 
 export const DOCTOR_NETWORKING_RULE_IDS = Object.keys(DOCTOR_NETWORKING_RULE_KIND);
 
@@ -229,7 +242,7 @@ export function applyDoctorNetworkingFindings(
     const facts = factsByStack.get(stack);
 
     for (const f of report.findings) {
-      const kind = DOCTOR_NETWORKING_RULE_KIND[f.ruleId];
+      const kind = doctorNetworkingKind(f.ruleId);
       if (!kind) continue;
       if (!isStillPlausible(kind, f, facts, snapshot)) continue;
 

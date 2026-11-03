@@ -60,7 +60,11 @@ The summary card at the top of the Doctor tab reflects the overall outcome of th
 | **High risk** | Highest active finding is high risk | Amber card with a count of active findings by severity |
 | **Warning** | Highest active finding is a warning | Blue card with a count of active findings by severity |
 | **Info** | All active findings are informational | Muted card with a count of active findings by severity |
+| **Partial check** | Model rendered; no active findings, but one or more checks that affect the result could not run | Muted card with "partial check" and "No issues in the checks that ran. 5 checks could not run: node state unavailable." |
+| **Coverage not recorded** | The stored run was made before Sencho recorded which checks ran, or came from a node running an older version | Muted card with "pass · coverage not recorded" and "Run preflight again to confirm every check ran." |
 | **All clear · findings acknowledged** | Model rendered; every finding from the last run has been acknowledged | Green card with "No active findings remain. One or more detected issues were reviewed and acknowledged by an authorized operator." |
+
+**All clear** appears only when every check that affects the result ran. A run that skipped a check reports a **partial check** instead, and a run stored before coverage was recorded reports **coverage not recorded**. Both still list any findings they did produce; the difference is that a clean result from an incomplete run is not presented as a clean bill of health.
 
 The summary card also shows when the run happened and who triggered it: "ran 5 minutes ago by admin". When active findings remain alongside acknowledgements, the line adds a count: "3 active (1 blocker · 2 warning) · 2 acknowledged".
 
@@ -220,9 +224,9 @@ When the daemon is unreachable:
 - All model-only rules still run and produce findings as normal.
 - All node-state rules are skipped.
 - An info finding ("Node-state checks skipped") is added to make the gap visible.
-- The run completes with a valid status reflecting whatever model-only rules found.
+- The run is recorded as a **partial check**: the checks that were skipped are counted and their missing evidence is named.
 
-A partial run (where node-state checks were skipped) is stored and displayed like any other run. Run preflight again once the node is reachable to get full coverage.
+A partial run is stored and displayed like any other run, but it never reports All Clear, even when the model-only rules found nothing. Run preflight again once the node is reachable to get full coverage.
 
 ## Health-Gated Updates
 
@@ -231,7 +235,8 @@ The last stored preflight result feeds directly into the [Health-Gated Updates](
 - A blocker finding sets the update verdict to **blocked**.
 - A model that failed to render, or one or more high-risk findings, sets the verdict to **review required**.
 - Warning-only findings do not block the verdict on their own, but keep it from reading a clean **ready**; combined with an otherwise clean update they surface as **ready with warnings**.
-- A clean pass (no active findings, or only info-level ones) contributes a positive signal toward **ready**.
+- A clean pass (no active findings, or only info-level ones) contributes a positive signal toward **ready**, provided every check that affects the result ran.
+- A clean run that skipped a check, or one stored before Sencho recorded coverage, shows Compose Doctor as **unknown** in the dialog, with a note naming what did not run. It does not drag the verdict down by itself; running preflight again restores a firm signal.
 - Preflight that has never run is noted in the dialog as **unknown** for that signal, without dragging the overall verdict down by itself.
 
 Other signals (current container health, the pending image change, the rollback backup, and disk space) are combined with this one; the dialog's overall verdict reflects the worst signal across all of them, not preflight alone. Running preflight before updating gives the readiness check the most accurate signal for this stack.

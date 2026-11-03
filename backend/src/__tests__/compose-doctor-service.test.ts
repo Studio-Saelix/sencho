@@ -12,6 +12,24 @@ import { setupTestDb, cleanupTestDb } from './helpers/setupTestDb';
 import DockerController from '../services/DockerController';
 import { ComposeService } from '../services/ComposeService';
 
+/**
+ * Toggle for an env-context failure. The service imports the resolver directly,
+ * so the only way to make that one collection step fail is to wrap the module;
+ * the wrapper delegates unless this flag is set, and tests reset it in a
+ * `finally`.
+ */
+const envSourceFailure = vi.hoisted(() => ({ fail: false }));
+vi.mock('../helpers/envFileResolution', async (importOriginal) => {
+  const original = await importOriginal<typeof import('../helpers/envFileResolution')>();
+  return {
+    ...original,
+    resolveStackEnvSources: async (...args: Parameters<typeof original.resolveStackEnvSources>) => {
+      if (envSourceFailure.fail) throw new Error('env sources unreadable');
+      return original.resolveStackEnvSources(...args);
+    },
+  };
+});
+
 const SECRET = 'pw-7Q2x-never-store';
 
 let tmpDir: string;
@@ -615,5 +633,119 @@ describe('Compose version mismatch note', () => {
     expect(report.renderable).toBe(true);
     expect(report.findings.some(f => f.ruleId === 'compose-version-mismatch')).toBe(false);
     expect(warn.mock.calls.some(call => String(call[0]).includes('Compose version check unavailable'))).toBe(true);
+  });
+});
+
+describe('Compose Assurance contract persistence', () => {
+  const STACK = 'assurance-run';
+  const cleanModel = () => ({
+    name: STACK,
+    services: {
+      web: { image: 'nginx:1.27', restart: 'unless-stopped', healthcheck: { test: ['CMD', 'true'] } },
+    },
+    networks: {},
+    volumes: {},
+  });
+
+  beforeEach(() => { writeStack(STACK); });
+  afterEach(() => {
+    envSourceFailure.fail = false;
+    fs.rmSync(path.join(process.env.COMPOSE_DIR as string, STACK), { recursive: true, force: true });
+    db().replacePreflightRun(
+      { id: 'cleanup', node_id: nodeId, stack_name: 'assurance-legacy', source_hash: null, rendered_hash: null, service_images: null, status: 'pass', highest_severity: null, created_at: 1, created_by: null },
+      [],
+    );
+    db().deleteNode(987655);
+  });
+
+  it('persists rule versions, subjects, and coverage', async () => {
+    stubDocker(cleanModel());
+    const report = await doctor().runPreflight(nodeId, STACK, 'tester');
+    expect(report.coverage.state).toBe('complete');
+
+    const run = db().getLatestPreflightRun(nodeId, STACK);
+    expect(run?.coverage).toBeTruthy();
+    const stored = JSON.parse(run!.coverage!) as { state: string; evaluated: number };
+    expect(stored.state).toBe('complete');
+    expect(stored.evaluated).toBeGreaterThan(0);
+
+    const rows = db().getPreflightFindings(run!.id);
+    for (const row of rows) {
+      expect(row.rule_version).not.toBeNull();
+      expect(typeof row.subject_kind).toBe('string');
+      expect(typeof row.subject_key).toBe('string');
+    }
+    const normalized = doctor().getLatestAssurance(nodeId, STACK);
+    expect(normalized.coverage.state).toBe('complete');
+    expect(normalized.findings.every(finding => finding.identity.basis === 'structured')).toBe(true);
+  });
+
+  it('reads a legacy row as unrecorded coverage, a legacy identity, and redacted text', () => {
+    const legacy = 'assurance-legacy';
+    db().replacePreflightRun(
+      { id: 'legacy-run', node_id: nodeId, stack_name: legacy, source_hash: null, rendered_hash: null, service_images: null, status: 'high', highest_severity: 'high', created_at: 2, created_by: 'tester' },
+      [{
+        id: 'legacy-finding',
+        run_id: 'legacy-run',
+        rule_id: 'privileged',
+        severity: 'high',
+        title: 'Privileged container',
+        message: 'The stack references https://user:pass@host/x.env',
+        source_path: 'https://user:pass@host/x.env',
+        remediation: null,
+        service: 'web',
+        created_at: 2,
+      }],
+    );
+
+    const report = doctor().getLatest(nodeId, legacy);
+    expect(report.coverage.state).toBe('unrecorded');
+    expect(report.findings[0].message).not.toContain('user:pass');
+    expect(report.findings[0].sourcePath).not.toContain('user:pass');
+
+    const normalized = doctor().getLatestAssurance(nodeId, legacy);
+    expect(normalized.coverage.state).toBe('unrecorded');
+    expect(normalized.findings[0].identity.basis).toBe('legacy');
+    expect(normalized.findings[0].ruleVersion).toBeNull();
+  });
+
+  it('does not throw on a stored rule id that is no longer registered', () => {
+    const legacy = 'assurance-retired';
+    db().replacePreflightRun(
+      { id: 'retired-run', node_id: nodeId, stack_name: legacy, source_hash: null, rendered_hash: null, service_images: null, status: 'warning', highest_severity: 'warning', created_at: 2, created_by: 'tester', coverage: null },
+      [{
+        id: 'retired-finding', run_id: 'retired-run', rule_id: 'a-retired-rule', severity: 'warning',
+        title: 'Old rule', message: 'Old message', source_path: null, remediation: null, service: null,
+        created_at: 2, rule_version: null, subject_kind: null, subject_key: null,
+      }],
+    );
+    const normalized = doctor().getLatestAssurance(nodeId, legacy);
+    expect(normalized.findings[0].ruleId).toBe('a-retired-rule');
+    expect(normalized.findings[0].findingClass).toBe('information');
+    expect(normalized.findings[0].ruleVersion).toBeNull();
+  });
+
+  it('records an env-source failure as partial coverage instead of a silent pass', async () => {
+    envSourceFailure.fail = true;
+    try {
+      // Compose still reports an unset name, so the raw-stderr fallback warning
+      // is the one env finding that survives an unreadable env context.
+      stubDocker(cleanModel(), 'WARN The "MISSING" variable is not set. Defaulting to a blank string.');
+      const report = await doctor().runPreflight(nodeId, STACK, 'tester');
+      expect(report.renderable).toBe(true);
+      expect(report.coverage.state).toBe('partial');
+      const skipped = report.coverage.skipped.map(entry => entry.ruleId);
+      expect(skipped).toEqual(expect.arrayContaining(['env-unset', 'env-file-missing']));
+      expect(skipped).not.toContain('env-literal-dollar');
+      expect(report.coverage.skipped.find(entry => entry.ruleId === 'env-unset')?.missing).toEqual(['env-context']);
+      // The fallback warning is still reported, exactly as before the contract.
+      expect(report.findings.map(finding => finding.ruleId)).toContain('env-literal-dollar');
+
+      const run = db().getLatestPreflightRun(nodeId, STACK);
+      expect((JSON.parse(run!.coverage!) as { state: string }).state).toBe('partial');
+      expect(doctor().getLatest(nodeId, STACK).coverage.state).toBe('partial');
+    } finally {
+      envSourceFailure.fail = false;
+    }
   });
 });

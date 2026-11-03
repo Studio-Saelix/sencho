@@ -1,4 +1,6 @@
 import type { PreflightStatus } from '../preflight/types';
+import type { AssuranceCoverage } from '../assurance/types';
+import { describeCoverageGaps } from '../assurance/coverage';
 import type { UpdatePreviewImage, UpdatePreviewSummary } from '../UpdatePreviewService';
 import type { ResolvedRollbackInventory, RollbackGenerationManifest } from '../../types/rollbackGeneration';
 import { describeComposeVersionSkew, type ComposeVersionSkew } from '../../helpers/composeVersionSkew';
@@ -32,7 +34,7 @@ const formatAge = (timestamp: number, now: number): string => {
 };
 
 export function preflightSignal(
-  input: { activeStatus: PreflightStatus } | Errored,
+  input: { activeStatus: PreflightStatus; coverage?: AssuranceCoverage } | Errored,
 ): ReadinessSignal {
   const base = { id: 'preflight' as const, title: 'Compose Doctor' };
   if (input === 'error') {
@@ -50,8 +52,25 @@ export function preflightSignal(
     case 'warning':
       return { ...base, status: 'warning', affectsVerdict: true, detail: 'The last preflight found warnings.' };
     case 'pass':
-    case 'info':
+    case 'info': {
+      // A clean result only reads as passed when every verdict-affecting check
+      // ran. A skipped check or an unrecorded run is "cannot tell", not "fine".
+      const coverage = input.coverage;
+      if (!coverage || coverage.state === 'unrecorded') {
+        return {
+          ...base, status: 'unknown', affectsVerdict: false,
+          detail: 'The last preflight found no issues, but its coverage was not recorded. Run preflight again to confirm every check ran.',
+        };
+      }
+      const gap = describeCoverageGaps(coverage);
+      if (gap) {
+        return {
+          ...base, status: 'unknown', affectsVerdict: false,
+          detail: `The last preflight found no issues, but ${gap}. Run preflight again to confirm every check ran.`,
+        };
+      }
       return { ...base, status: 'ok', affectsVerdict: true, detail: 'The last preflight passed.' };
+    }
   }
 }
 

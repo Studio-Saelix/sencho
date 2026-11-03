@@ -40,6 +40,7 @@ function ctx(over: Partial<PreflightContext> = {}): PreflightContext {
     existingContainers: [], nodeStateAvailable: true, bindChecks: [],
     stackIntent: null, serviceIntents: {}, accessUrlPorts: new Set(), hasAccessUrls: false,
     exposureAvailable: true,
+    envContextAvailable: true,
     isSelfStack: false,
     meshManaged: false,
     healthchecks: {},

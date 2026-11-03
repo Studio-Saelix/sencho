@@ -1944,7 +1944,7 @@ stacksRouter.post('/:stackName/preflight/run', async (req: Request, res: Respons
 const PREFLIGHT_ACK_EXPIRY_MODES = new Set<PreflightAckExpiryMode>([
   'forever', 'until_compose_change', 'days', 'until_image_change',
 ]);
-const PREFLIGHT_RULE_ID_SET = new Set(RULE_IDS);
+const PREFLIGHT_RULE_ID_SET: ReadonlySet<string> = new Set(RULE_IDS);
 
 stacksRouter.get('/:stackName/preflight/acknowledgements', async (req: Request, res: Response) => {
   const stackName = req.params.stackName as string;

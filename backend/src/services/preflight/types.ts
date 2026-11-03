@@ -2,9 +2,33 @@ import type { EffectiveModel } from './effectiveModel';
 import type { ExposureIntent } from '../network/types';
 import type { LiteralDollarWarning } from '../../helpers/unsetEnvClassification';
 import type { ComposeVersionSkew } from '../../helpers/composeVersionSkew';
+import type {
+  AssuranceCoverage, AssuranceSeverity, CanonicalRuleId, SubjectKind,
+} from '../assurance/types';
 
-/** Graded severity of a single preflight finding. */
-export type PreflightSeverity = 'blocker' | 'high' | 'warning' | 'info';
+/** Graded severity of a single preflight finding. One scale across every
+ *  assurance surface: the Compose Assurance contract owns it. */
+export type PreflightSeverity = AssuranceSeverity;
+
+/**
+ * Raw output of a single rule, before it is normalized into an
+ * {@link AssuranceFinding} and before acknowledgements are applied. Never
+ * leaves the backend.
+ */
+export interface RuleHit {
+  /** Typed to the registry, so a rule reporting an unregistered id fails to compile. */
+  ruleId: CanonicalRuleId;
+  severity: PreflightSeverity;
+  title: string;
+  message: string;
+  sourcePath?: string;
+  remediation?: string;
+  service?: string;
+  /** Set by rules that can emit several findings for one service, so their
+   *  fingerprints stay distinct. Defaults to the registry subject kind plus
+   *  `sourcePath ?? service ?? stack`. */
+  subject?: { kind: SubjectKind; key: string };
+}
 
 /**
  * Overall outcome of a run. `pass` = renderable with no findings;
@@ -32,6 +56,8 @@ export interface PreflightFinding {
   acknowledgementId?: number;
   acknowledgementReason?: string;
   acknowledgementExpiry?: 'forever' | 'until_compose_change' | 'days' | 'until_image_change';
+  /** Epoch ms the acknowledgement lapses, when it is time-boxed. */
+  acknowledgementExpiresAt?: number;
 }
 
 /** The full report returned by both the GET (latest) and POST (run) routes. */
@@ -48,6 +74,9 @@ export interface PreflightReport {
   sourceHash: string | null;
   renderedHash: string | null;
   findings: PreflightFinding[];
+  /** Which checks ran. Additive; a report from an older node omits it and is
+   *  read as `unrecorded`. */
+  coverage: AssuranceCoverage;
   /** Severity/status after filtering acknowledged findings. */
   activeStatus: PreflightStatus;
   activeHighestSeverity: PreflightSeverity | null;
@@ -158,6 +187,10 @@ export interface PreflightContext {
    *  from a genuinely unset intent. Gates the intent-interpretation rules so a
    *  transient read failure does not fabricate unclassified/undocumented findings. */
   exposureAvailable: boolean;
+  /** True when the authored env context (env files, interpolation refs) was
+   *  read. False gates the env rules so a resolution failure is reported as
+   *  partial coverage instead of a silent pass. */
+  envContextAvailable: boolean;
   /** True when this stack is the running Sencho instance on the node. */
   isSelfStack: boolean;
   /** True when the stack is opted into Sencho Mesh, so its services join the

@@ -12,11 +12,17 @@ import { parseEffectiveModel, type EffectiveModel } from './preflight/effectiveM
 import { getExposureContext } from './network/exposureContext';
 import { isStackMeshManaged } from './network/managedMeshAttachment';
 import type { ExposureIntent } from './network/types';
-import { runRules, SEVERITY_RANK, RULE_IDS, RENDER_FAILED_RULE_ID, isPreflightNoteFinding } from './preflight/rules';
+import { SEVERITY_RANK, RENDER_FAILED_RULE_ID, isPreflightNoteFinding } from './preflight/rules';
 import type {
   BindCheck, NodePortBinding, PreflightContext, PreflightFinding, PreflightReport, PreflightSeverity, PreflightStatus, MissingEnvFile,
   ServiceHealthcheckEvidence,
 } from './preflight/types';
+import type { AssuranceCoverage } from './assurance/types';
+import { runAssuranceRules, parseCoverage, unrecordedCoverage } from './assurance/coverage';
+import {
+  normalizeDoctorHit, normalizeStoredFinding, withDecision, type AssuranceFinding,
+} from './assurance/finding';
+import { assuranceRuleOrder, getAssuranceRule } from './assurance/ruleRegistry';
 import { collectServiceHealthcheckEvidence } from './healthcheck/collectServiceHealthcheckEvidence';
 import { applyPreflightAcknowledgements, parseServiceImages } from '../utils/preflight-ack-filter';
 
@@ -38,12 +44,32 @@ import { withTimeout } from '../utils/withTimeout';
 
 const MAX_RENDER_ERROR = 600; // chars kept from a (redacted) render error
 
-const ruleOrder = new Map(RULE_IDS.map((id, i) => [id, i]));
 /** Severity descending, then registry order, so output is deterministic. */
-function sortFindings(findings: PreflightFinding[]): PreflightFinding[] {
-  return [...findings].sort((a, b) =>
-    (SEVERITY_RANK[b.severity] - SEVERITY_RANK[a.severity]) ||
-    ((ruleOrder.get(a.ruleId) ?? 0) - (ruleOrder.get(b.ruleId) ?? 0)));
+function compareFindings(
+  a: { severity: PreflightSeverity; ruleId: string },
+  b: { severity: PreflightSeverity; ruleId: string },
+): number {
+  return (SEVERITY_RANK[b.severity] - SEVERITY_RANK[a.severity])
+    || (assuranceRuleOrder(a.ruleId) - assuranceRuleOrder(b.ruleId));
+}
+
+function sortNormalized(findings: AssuranceFinding[]): AssuranceFinding[] {
+  return [...findings].sort(compareFindings);
+}
+
+/** Project the contract onto the Doctor wire shape. The wire type predates the
+ *  contract and stays additive: subject, identity, and coverage are backend
+ *  internals until a normalized wire format exists. */
+function projectFindings(findings: readonly AssuranceFinding[]): PreflightFinding[] {
+  return findings.map(finding => ({
+    ruleId: finding.ruleId,
+    severity: finding.severity,
+    title: finding.title,
+    message: finding.message,
+    ...(finding.location?.path !== undefined ? { sourcePath: finding.location.path } : {}),
+    ...(finding.remediation !== undefined ? { remediation: finding.remediation } : {}),
+    ...(finding.scope.service !== undefined ? { service: finding.scope.service } : {}),
+  }));
 }
 
 function highestOf(findings: PreflightFinding[]): PreflightSeverity | null {
@@ -144,7 +170,13 @@ export class ComposeDoctorService {
     const sourceServiceNames = source !== null ? parseComposeDependencies(source).services.map(s => s.name) : [];
 
     const ctx = await this.buildContext(nodeId, stackName, sourceServiceNames, sourceReadable);
-    const findings = sortFindings(runRules(ctx));
+    const { findings: hits, coverage } = runAssuranceRules(ctx);
+    const normalized = sortNormalized(hits.map(hit => {
+      const rule = getAssuranceRule(hit.ruleId);
+      if (!rule) throw new Error(`Compose Doctor rule "${hit.ruleId}" is missing from the assurance registry`);
+      return normalizeDoctorHit(nodeId, stackName, hit, rule);
+    }));
+    const findings = projectFindings(normalized);
     const highestSeverity = highestOf(findings);
     const status: PreflightStatus = !ctx.renderable ? 'unrenderable' : (highestSeverity ?? 'pass');
     const serviceImages = buildServiceImages(ctx.model);
@@ -160,13 +192,41 @@ export class ComposeDoctorService {
       sourceHash: hashes.sourceHash,
       renderedHash: hashes.renderedHash,
       findings,
+      coverage,
       activeStatus: status,
       activeHighestSeverity: highestSeverity,
       activeCount: findings.length,
       acknowledgedCount: 0,
     };
-    this.persist(nodeId, report, serviceImages);
+    this.persist(nodeId, report, serviceImages, normalized);
     return enrichReport(nodeId, stackName, report);
+  }
+
+  /**
+   * The normalized findings of the latest stored run, with the read-time
+   * acknowledgement decision attached. The Doctor wire shape is a projection of
+   * this, so the contract is on the hot path rather than a parallel model.
+   */
+  getLatestAssurance(nodeId: number, stackName: string): { findings: AssuranceFinding[]; coverage: AssuranceCoverage } {
+    const report = this.getLatest(nodeId, stackName);
+    const run = DatabaseService.getInstance().getLatestPreflightRun(nodeId, stackName);
+    if (!run) return { findings: [], coverage: unrecordedCoverage() };
+    const normalized = this.readNormalized(nodeId, stackName, run.id);
+    return {
+      coverage: report.coverage,
+      findings: normalized.map((finding, i) => {
+        const projected = report.findings[i];
+        return projected ? withDecision(finding, projected) : finding;
+      }),
+    };
+  }
+
+  /** Read stored rows through the contract: redacted, sorted, legacy-aware. */
+  private readNormalized(nodeId: number, stackName: string, runId: string): AssuranceFinding[] {
+    return sortNormalized(
+      DatabaseService.getInstance().getPreflightFindings(runId)
+        .map(row => normalizeStoredFinding(row, nodeId, stackName)),
+    );
   }
 
   /** Read the last stored run for a stack, mapped to the report shape. */
@@ -177,18 +237,11 @@ export class ComposeDoctorService {
       return {
         stack: stackName, ranAt: null, ranBy: null, renderable: true, renderError: null,
         status: 'never-run', highestSeverity: null, sourceHash: null, renderedHash: null, findings: [],
+        coverage: unrecordedCoverage(),
         activeStatus: 'never-run', activeHighestSeverity: null, activeCount: 0, acknowledgedCount: 0,
       };
     }
-    const findings = sortFindings(db.getPreflightFindings(run.id).map(r => ({
-      ruleId: r.rule_id,
-      severity: r.severity as PreflightSeverity,
-      title: r.title,
-      message: r.message,
-      sourcePath: r.source_path ?? undefined,
-      remediation: r.remediation ?? undefined,
-      service: r.service ?? undefined,
-    })));
+    const findings = projectFindings(this.readNormalized(nodeId, stackName, run.id));
     const renderable = run.status !== 'unrenderable';
     // The render error is carried by the render-failed finding, not a column.
     const renderError = renderable ? null : (findings.find(f => f.ruleId === RENDER_FAILED_RULE_ID)?.message ?? null);
@@ -203,6 +256,7 @@ export class ComposeDoctorService {
       sourceHash: run.source_hash,
       renderedHash: run.rendered_hash,
       findings,
+      coverage: parseCoverage(run.coverage),
     };
     return enrichReport(nodeId, stackName, base);
   }
@@ -228,6 +282,9 @@ export class ComposeDoctorService {
       console.warn('[ComposeDoctor] env-file resolution failed for %s:',
         sanitizeForLog(stackName), sanitizeForLog(getErrorMessage(err, 'unknown')));
     }
+    // A resolution failure is recorded as missing evidence, so the env rules are
+    // reported as skipped instead of quietly returning nothing.
+    const envContextAvailable = envSources !== null;
 
     try {
       const result = await ComposeService.getInstance(nodeId).renderConfig(stackName);
@@ -312,6 +369,7 @@ export class ComposeDoctorService {
       accessUrlPorts,
       hasAccessUrls,
       exposureAvailable,
+      envContextAvailable,
       isSelfStack: selfStack,
       meshManaged,
       healthchecks,
@@ -428,7 +486,12 @@ export class ComposeDoctorService {
   }
 
   /** Persist the run, replacing any prior run for this stack. Best-effort. */
-  private persist(nodeId: number, report: PreflightReport, serviceImages: string | null): void {
+  private persist(
+    nodeId: number,
+    report: PreflightReport,
+    serviceImages: string | null,
+    normalized: readonly AssuranceFinding[],
+  ): void {
     if (report.ranAt === null) return;
     try {
       const runId = randomUUID();
@@ -444,17 +507,21 @@ export class ComposeDoctorService {
           highest_severity: report.highestSeverity,
           created_at: report.ranAt,
           created_by: report.ranBy,
+          coverage: JSON.stringify(report.coverage),
         },
-        report.findings.map(f => ({
+        normalized.map(finding => ({
           id: randomUUID(),
           run_id: runId,
-          rule_id: f.ruleId,
-          severity: f.severity,
-          title: f.title,
-          message: f.message,
-          source_path: f.sourcePath ?? null,
-          remediation: f.remediation ?? null,
-          service: f.service ?? null,
+          rule_id: finding.ruleId,
+          severity: finding.severity,
+          title: finding.title,
+          message: finding.message,
+          source_path: finding.location?.path ?? null,
+          remediation: finding.remediation ?? null,
+          service: finding.scope.service ?? null,
+          rule_version: finding.ruleVersion,
+          subject_kind: finding.subject.kind,
+          subject_key: finding.subject.key,
           created_at: report.ranAt!,
         })),
       );

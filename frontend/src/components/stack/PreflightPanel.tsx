@@ -19,6 +19,21 @@ import { isPreflightNoteFinding } from '@/lib/preflightNotes';
 type PreflightSeverity = 'blocker' | 'high' | 'warning' | 'info';
 type PreflightStatus = 'never-run' | 'pass' | 'unrenderable' | PreflightSeverity;
 type PreflightAckExpiryMode = 'forever' | 'until_compose_change' | 'days' | 'until_image_change';
+type EvidenceRequirement =
+  | 'source'
+  | 'effective-model'
+  | 'env-context'
+  | 'node-state'
+  | 'exposure-context'
+  | 'compose-version';
+
+/** Which checks ran. A report from an older node omits it and reads as unrecorded. */
+interface AssuranceCoverage {
+  state: 'complete' | 'partial' | 'unrecorded';
+  evaluated: number;
+  notApplicable: number;
+  skipped: { ruleId: string; missing: EvidenceRequirement[]; affectsVerdict: boolean }[];
+}
 
 interface PreflightFinding {
   ruleId: string;
@@ -47,6 +62,7 @@ interface PreflightReport {
   activeCount: number;
   acknowledgedCount: number;
   findings: PreflightFinding[];
+  coverage?: AssuranceCoverage;
 }
 
 const LABEL_CLASS = 'font-mono text-[10px] uppercase tracking-[0.18em] text-stat-subtitle';
@@ -71,6 +87,35 @@ const EXPIRY_LABELS: Record<PreflightAckExpiryMode, string> = {
   until_image_change: 'Until image changes',
 };
 
+const NEUTRAL_SUMMARY = {
+  icon: Info,
+  tone: 'border-muted bg-card/40 text-stat-subtitle',
+} as const;
+
+/** Human-readable name for a missing evidence source. */
+const REQUIREMENT_LABEL: Record<EvidenceRequirement, string> = {
+  source: 'compose file unreadable',
+  'effective-model': 'rendered model unavailable',
+  'env-context': 'env files unreadable',
+  'node-state': 'node state unavailable',
+  'exposure-context': 'exposure settings unreadable',
+  'compose-version': 'Compose version unknown',
+};
+
+/**
+ * What did not run, in one clause, or null when every verdict-affecting check
+ * ran. An older node omits `coverage` entirely, which reads as unrecorded.
+ */
+function coverageGapLine(coverage: AssuranceCoverage | undefined): string | null {
+  if (!coverage || coverage.state === 'unrecorded') return null;
+  const skipped = (coverage.skipped ?? []).filter(entry => entry.affectsVerdict);
+  if (skipped.length === 0) return null;
+  const reasons = [...new Set(skipped.flatMap(entry =>
+    (entry.missing ?? []).map(requirement => REQUIREMENT_LABEL[requirement]).filter(Boolean)))];
+  if (reasons.length === 0) return `${skipped.length} check${skipped.length === 1 ? '' : 's'} could not run.`;
+  return `${skipped.length} check${skipped.length === 1 ? '' : 's'} could not run: ${reasons.join(', ')}.`;
+}
+
 function summaryMeta(
   report: PreflightReport,
   activeFindings: PreflightFinding[],
@@ -84,6 +129,26 @@ function summaryMeta(
     };
   }
   if (report.activeCount === 0) {
+    // A clean result only reads as "all clear" when every verdict-affecting
+    // check ran. Unrecorded coverage (an older run or an older node) and a run
+    // with skipped checks are reported as what they are: not a clean bill.
+    if (!report.coverage || report.coverage.state === 'unrecorded') {
+      return {
+        label: `${report.activeStatus} · coverage not recorded`,
+        icon: NEUTRAL_SUMMARY.icon,
+        tone: NEUTRAL_SUMMARY.tone,
+        line: 'Run preflight again to confirm every check ran.',
+      };
+    }
+    const gap = coverageGapLine(report.coverage);
+    if (gap) {
+      return {
+        label: 'partial check',
+        icon: NEUTRAL_SUMMARY.icon,
+        tone: NEUTRAL_SUMMARY.tone,
+        line: `No issues in the checks that ran. ${gap}`,
+      };
+    }
     const acknowledgedOnly = report.acknowledgedCount > 0;
     return {
       label: acknowledgedOnly ? 'all clear · findings acknowledged' : 'all clear',
