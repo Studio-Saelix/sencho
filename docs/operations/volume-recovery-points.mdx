@@ -328,7 +328,7 @@ Both actions need the same access as the overwrite itself, held to every stack t
 
 ### While the overwrite runs
 
-The volume belongs to the restore until it settles. While the operation runs, a Compose lifecycle action or a stack or service start or restart on a dependent stack is refused with `409` and `code: "stack_op_in_progress"`, because the restore holds that stack's lock. After the operation ends with the fence still held, and for a container that no stack lock covers, the refusals below apply. For as long as the fence is held:
+The volume belongs to the restore until it settles. While the operation runs, a Compose lifecycle action or a stack start or restart on a dependent stack is refused with `409` and `code: "stack_op_in_progress"`, because the restore holds that stack's lock. The service and single-container routes take no stack lock, so they are refused with `data_restore` only once the fence is held, and after the operation ends with the fence still held the refusals below apply to every route. For as long as the fence is held:
 
 - every Compose lifecycle action on a stack that mounts the volume is refused with `409` and the conflict action is `data_restore`;
 - a container that mounts the volume cannot be started or restarted, including by auto-heal and by the scheduler. The single-container, stack and service routes answer `409` with `code: "data_restore"` (a stack route answers `stack_op_in_progress` instead while the restore holds the stack's lock), and a bulk row carries the same code;

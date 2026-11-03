@@ -6457,11 +6457,14 @@ paths:
         Request errors: `409 precondition_failed` with `reason: generation_changed` or
         `reason: dependents_changed` (the state moved since the preview; preview again),
         `409 lock_held` (another restore holds the volume or its fence), and
-        `507 insufficient_space`. Errors found after admission answer `202` and end the
-        operation `failed`, with the class in `errorClass` on `GET /api/recovery/operations/{id}`:
-        `pre_restore_failed`, `fence_unavailable` (a container start was still unanswered or a
-        container could not be fenced, with nothing stopped), `dependents_changed` (a container
-        set that changed at the fence), `cleanup_failed`, and the rest of the class list.
+        `507 insufficient_space`. Errors found after admission answer `202` and show up on
+        `GET /api/recovery/operations/{id}`, where the operation ends `failed`, `partial` (the
+        data is committed but the originals could not be removed, or the fence could not be
+        released) or `completion_unknown`, with the class in `errorClass`: `pre_restore_failed`,
+        `fence_unavailable` (a container start was still unanswered, with nothing stopped, or a
+        container could not be fenced and the rollback restarted what had stopped),
+        `dependents_changed` (a container set that changed at the fence), `cleanup_failed`, and
+        the rest of the class list.
         A request to the new-volume route naming `staged_overwrite` is refused with
         `reason: wrong_route`.
         Only a Full Admin API token may call it; any other scope is refused with `403 SCOPE_DENIED`.
@@ -6555,8 +6558,8 @@ paths:
         workload has no fence to release (`400 invalid_request`, `reason: no_fence`), and one
         whose fence is already released cannot be accepted again (`reason: fence_released`).
         `release_fence` on a restore that already settled answers a plain `400 invalid_request`,
-        and a fence that cannot be released answers `503 fence_unavailable` with the restore
-        unchanged. A call made while this process still works on the restore answers
+        and a fence that cannot be released answers `503 fence_unavailable` and leaves the
+        restore's phase unchanged. A call made while this process still works on the restore answers
         `409 lock_held`.
         Access is held to the stacks the fence stopped, not only the stacks that use the
         volume now; an id that names nothing is answered like a restore the caller may not touch.
