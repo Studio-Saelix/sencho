@@ -126,6 +126,7 @@ describe('renameRetiredServiceUrlLabel', () => {
       ['an aliased list item', 'x: &i sencho.service.url=https://a.example.com\nservices:\n  web:\n    labels:\n      - *i\n'],
       ['a service that merges another block and has no labels of its own', 'x-base: &base\n  labels:\n    sencho.service.url: https://a.example.com\nservices:\n  web:\n    <<: *base\n'],
       ['a service that extends another and has no labels of its own', 'services:\n  base:\n    labels:\n      sencho.service.url: https://a.example.com\n  web:\n    extends: base\n'],
+      ['a service that extends a service in another file and has no labels of its own', 'services:\n  web:\n    extends:\n      file: other.yml\n      service: base\n'],
       ['an escaped key', 'services:\n  web:\n    labels:\n      "sencho\\x2eservice.url": https://a.example.com\n'],
     ])('refuses %s', (_name, source) => {
       expect(refused(source)).toMatchObject(UNSUPPORTED);

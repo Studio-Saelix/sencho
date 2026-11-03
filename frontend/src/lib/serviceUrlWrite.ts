@@ -71,11 +71,13 @@ export type RetiredRenameRun<T extends { ok: boolean }> =
   | { status: 'saved'; verified: boolean; current: boolean };
 
 /**
- * Save a planned rename and prove it took effect. One rename at a time: a second
- * call while a save is in flight would reuse the first call's etag and report a
- * conflict it caused itself. After a successful save the node's answer is read
- * again when the refresh was superseded (it returns null), and a rename the node
- * still reports is never called done.
+ * Save a planned rename and, while its stack is still open, check that it took
+ * effect. One rename at a time: a second call while a save is in flight would
+ * reuse the first call's etag and report a conflict it caused itself. The editor
+ * text changes only after the save is accepted. After a successful save the
+ * node's answer is read again when the refresh was superseded (it returns null),
+ * and a rename the node still reports is never called done. When the stack was
+ * left before the check, it is skipped and `current` is false.
  */
 export async function runRetiredRename<T extends { ok: boolean }>(deps: {
   inFlight: { current: boolean };

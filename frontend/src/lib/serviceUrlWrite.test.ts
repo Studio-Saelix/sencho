@@ -134,8 +134,12 @@ describe('runRetiredRename', () => {
   });
 
   it('releases the guard and leaves the editor alone when the save is refused or throws', async () => {
-    const refused = deps({ save: vi.fn(async () => ({ ok: false as const, conflict: true, code: 'compose_source_changed' })) });
-    await expect(runRetiredRename(refused)).resolves.toMatchObject({ status: 'save-refused', result: { code: 'compose_source_changed' } });
+    const refusal = { ok: false as const, conflict: true, code: 'compose_source_changed' };
+    const refused = deps({ save: vi.fn(async () => refusal) });
+    const run = await runRetiredRename(refused);
+    expect(run.status).toBe('save-refused');
+    // The caller reads the conflict payload from the very object the save returned.
+    if (run.status === 'save-refused') expect(run.result).toBe(refusal);
     expect(refused.applyContent).not.toHaveBeenCalled();
     expect(refused.inFlight.current).toBe(false);
 
@@ -152,11 +156,21 @@ describe('runRetiredRename', () => {
   });
 
   it('never calls the rename done while the node still reports the retired label', async () => {
-    await expect(runRetiredRename(deps({ refresh: vi.fn(async () => stale()) }))).resolves.toMatchObject({ verified: false });
+    await expect(runRetiredRename(deps({ refresh: vi.fn(async () => stale()) })))
+      .resolves.toEqual({ status: 'saved', verified: false, current: true });
     vi.spyOn(console, 'error').mockImplementation(() => undefined);
     const broken = deps({ refresh: vi.fn(async () => { throw new Error('boom'); }) });
-    await expect(runRetiredRename(broken)).resolves.toMatchObject({ status: 'saved', verified: false });
+    await expect(runRetiredRename(broken)).resolves.toEqual({ status: 'saved', verified: false, current: true });
     expect(broken.inFlight.current).toBe(false);
+    const refetchBroken = deps({ refresh: vi.fn(async () => null), refetch: vi.fn(async () => { throw new Error('boom'); }) });
+    await expect(runRetiredRename(refetchBroken)).resolves.toEqual({ status: 'saved', verified: false, current: true });
+    expect(refetchBroken.inFlight.current).toBe(false);
+  });
+
+  it('reports a stack switched while the node was being asked, so no toast names the wrong stack', async () => {
+    let open = true;
+    const d = deps({ isCurrent: () => open, refresh: vi.fn(async () => { open = false; return clean(); }) });
+    await expect(runRetiredRename(d)).resolves.toEqual({ status: 'saved', verified: true, current: false });
   });
 
   it('skips verification and reports a switched stack, so no toast names the wrong one', async () => {
