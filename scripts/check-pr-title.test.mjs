@@ -11,7 +11,7 @@
 import { describe, it } from 'node:test'
 import assert from 'node:assert/strict'
 
-import { allowedTypes, parseTitle, checkTitle } from './check-pr-title.mjs'
+import { allowedTypes, visibleTypes, parseTitle, checkTitle } from './check-pr-title.mjs'
 
 const TYPES = [
   'feat',
@@ -65,6 +65,41 @@ describe('allowedTypes', () => {
     assert.throws(
       () => allowedTypes({ rules: { 'type-enum': [2, 'always', []] } }),
       /type-enum/,
+    )
+  })
+})
+
+const VISIBLE = ['feat', 'fix', 'perf', 'revert', 'security']
+
+// ---------------------------------------------------------------------------
+// visibleTypes
+// ---------------------------------------------------------------------------
+
+describe('visibleTypes', () => {
+  it('reads the types the real release-please config shows in the changelog', () => {
+    assert.deepEqual(visibleTypes('release-please-config.json'), VISIBLE)
+  })
+
+  it('leaves out sections marked hidden', () => {
+    const config = {
+      packages: {
+        '.': {
+          'changelog-sections': [
+            { type: 'fix', section: 'Fixed' },
+            { type: 'ci', section: 'CI/CD', hidden: true },
+          ],
+        },
+      },
+    }
+
+    assert.deepEqual(visibleTypes(config), ['fix'])
+  })
+
+  it('fails closed when the config has no changelog sections', () => {
+    assert.throws(() => visibleTypes({}), /changelog-sections/)
+    assert.throws(
+      () => visibleTypes({ packages: { '.': { 'changelog-sections': [] } } }),
+      /changelog-sections/,
     )
   })
 })
@@ -203,5 +238,35 @@ describe('checkTitle', () => {
 
   it('treats surrounding whitespace as absent', () => {
     assert.match(checkTitle('\n\t ', TYPES), /empty/)
+  })
+
+  it('rejects a changelog-visible type with the ci scope', () => {
+    // release-please decides visibility from the type, so fix(ci) lands in the
+    // Fixed section even though only workflow files changed.
+    for (const title of [
+      'fix(ci): evaluate the helper digest in image workflows',
+      'feat(ci): add a nightly scan',
+      'security(ci): pin an action by digest',
+    ]) {
+      const failure = checkTitle(title, TYPES, VISIBLE)
+
+      assert.ok(failure, title)
+      assert.match(failure, /ci: /)
+      assert.match(failure, /BEGIN_COMMIT_OVERRIDE/)
+    }
+  })
+
+  it('accepts the ci type, with or without a scope', () => {
+    assert.equal(checkTitle('ci: shard the e2e suite', TYPES, VISIBLE), null)
+    assert.equal(checkTitle('ci(release): publish the helper to both registries', TYPES, VISIBLE), null)
+  })
+
+  it('only matches the exact ci scope', () => {
+    assert.equal(checkTitle('fix(cia-rules): keep the rule table sorted', TYPES, VISIBLE), null)
+    assert.equal(checkTitle('fix(docker): stop the dev image drifting', TYPES, VISIBLE), null)
+  })
+
+  it('does not apply the ci-scope rule when no visible types are given', () => {
+    assert.equal(checkTitle('fix(ci): evaluate the helper digest', TYPES), null)
   })
 })
