@@ -1,5 +1,5 @@
 import { redactSensitiveText } from '../../utils/safeLog';
-import type { RecoveryErrorClass } from './types';
+import type { RecoveryErrorClass, RecoveryRefusalReason } from './types';
 
 /**
  * The redaction boundary for recovery.
@@ -60,7 +60,7 @@ export function isRecoveryErrorClass(value: unknown): value is RecoveryErrorClas
 /** What a refusal can say beyond its class: a machine reason and a more specific sentence. */
 export interface RecoveryErrorOptions {
   /** A stable token a client can switch on, such as `repository_not_initialized`. */
-  reason?: string;
+  reason?: RecoveryRefusalReason;
   /** A fixed sentence for this refusal. Never built from engine output. */
   detail?: string;
 }
@@ -68,7 +68,7 @@ export interface RecoveryErrorOptions {
 /** A recovery failure that already carries its sanitized class. */
 export class RecoveryError extends Error {
   readonly errorClass: RecoveryErrorClass;
-  readonly reason: string | undefined;
+  readonly reason: RecoveryRefusalReason | undefined;
   readonly detail: string;
   constructor(errorClass: RecoveryErrorClass, options: RecoveryErrorOptions = {}) {
     const detail = options.detail ?? ERROR_DETAIL[errorClass];

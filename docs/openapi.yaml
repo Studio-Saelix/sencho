@@ -1561,7 +1561,7 @@ components:
             `engine_starting` while the node is still starting, `repository_not_initialized`
             when no repository has been provisioned (both `503 capability_unavailable`),
             `repository_replaced` for a restore of a point in a replaced repository
-            (`503 repository_unavailable`), and `not_cancellable`. The overwrite routes add
+            (`503 repository_unavailable`). The overwrite routes add
             `wrong_route` (a `staged_overwrite` or `new_path` mode asked for on the new-volume
             route), `generation_changed` (the volume's generation moved since the preview),
             `dependents_changed` (a stack or container started using the volume after the
@@ -1959,7 +1959,7 @@ components:
               - $ref: "#/components/schemas/RecoveryError"
               - $ref: "#/components/schemas/Error"
     RecoveryConflict:
-      description: A live lock is held, an interrupted operation left a stale lock, the storage identity is unknown, a check found a mismatch, an operation was interrupted, or a remote node needs an update.
+      description: A live lock is held, an interrupted operation left a stale lock, the storage identity is unknown, a check found a mismatch, an operation was interrupted, an operation cannot be cancelled any more, or a remote node needs an update.
       content:
         application/json:
           schema:
@@ -6663,9 +6663,11 @@ paths:
       summary: Cancel a running operation
       description: |
         Asks a running operation to stop. A capture settles its point as failed before it
-        settles the operation. A repository provisioning operation is refused as an
-        invalid request (`reason: not_cancellable`), because a half-provisioned repository
-        is settled by the next provisioning attempt. Access is checked first: a caller who
+        settles the operation. A repository provisioning operation is refused with
+        `409 not_cancellable`, because a half-provisioned repository is settled by the next
+        provisioning attempt; so is an overwrite restore whose swap has started, because the
+        originals have begun to move and the only safe endings are roll forward or
+        reconciliation. Access is checked first: a caller who
         may not configure the repository gets 403, and an unknown id answers 403 to a caller
         who cannot cancel every kind of operation.
         Only a Full Admin API token may call it; any other scope is refused with `403 SCOPE_DENIED`.
@@ -6693,6 +6695,8 @@ paths:
           $ref: "#/components/responses/Unauthorized"
         "403":
           $ref: "#/components/responses/RecoveryForbidden"
+        "409":
+          $ref: "#/components/responses/RecoveryConflict"
         "500":
           $ref: "#/components/responses/RecoveryInternalError"
 

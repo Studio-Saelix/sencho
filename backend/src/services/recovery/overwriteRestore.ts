@@ -37,7 +37,6 @@ import type {
   BackupEngine,
   EngineExecutionContext,
   OperationFinish,
-  OverwriteRefusalReason,
   RecoveryErrorClass,
   RecoveryPoint,
   RecoveryProgress,
@@ -484,7 +483,7 @@ export async function prepareOverwriteAdmission(deps: OverwriteDeps, input: {
   });
   if (liveGenerationToken !== observed.generationToken) {
     throw new RecoveryError('precondition_failed', {
-      reason: 'generation_changed' satisfies OverwriteRefusalReason,
+      reason: 'generation_changed',
       detail: 'This volume was recreated since the preview. Ask for a new preview and confirm again.',
     });
   }
@@ -497,7 +496,7 @@ export async function prepareOverwriteAdmission(deps: OverwriteDeps, input: {
   });
   if (expected !== input.confirmationToken) {
     throw new RecoveryError('precondition_failed', {
-      reason: 'dependents_changed' satisfies OverwriteRefusalReason,
+      reason: 'dependents_changed',
       detail: 'A container or stack using this volume changed since the preview. Ask for a new preview and confirm again.',
     });
   }
@@ -1462,7 +1461,7 @@ export async function resolveOverwriteIntent(
   // accepting the volume here would leave the staging volume with no owner.
   if (intent.fenceState === 'none' && (PRE_FENCE_PHASES.includes(intent.phase) || FENCED_PHASES.includes(intent.phase))) {
     throw new RecoveryError('invalid_request', {
-      reason: 'no_fence' satisfies OverwriteRefusalReason,
+      reason: 'no_fence',
       detail: 'This restore never stopped a workload, so there is no fence to release. Retry it to finish its clean-up.',
     });
   }
@@ -1471,12 +1470,12 @@ export async function resolveOverwriteIntent(
   if (intent.fenceState === 'released') {
     if (intent.phase === 'swapped' && intent.outcomeClass === 'cleanup_failed') {
       throw new RecoveryError('invalid_request', {
-        reason: 'fence_released' satisfies OverwriteRefusalReason,
+        reason: 'fence_released',
         detail: 'The fence is already released, but the originals are still in the volume. Retry this restore to remove them.',
       });
     }
     throw new RecoveryError('invalid_request', {
-      reason: 'fence_released' satisfies OverwriteRefusalReason,
+      reason: 'fence_released',
       detail: 'The fence on this restore has been released, so it can no longer roll forward or back. Restore again from a point if you need different data.',
     });
   }

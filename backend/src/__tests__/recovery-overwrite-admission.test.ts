@@ -235,7 +235,7 @@ describe('admission', () => {
     const fake = fakeDocker({ volumes: [{ name: VOLUME }], containers: [mountingContainer()] });
     const seeded = seed({ createdAt: fake.volumes.get(VOLUME)?.createdAt ?? '' });
     await expect(confirm(fake, seeded.pointId, { token: 'f'.repeat(64) }))
-      .rejects.toMatchObject({ errorClass: 'precondition_failed' });
+      .rejects.toMatchObject({ errorClass: 'precondition_failed', reason: 'dependents_changed' });
     expect(intents.RestoreIntentStore.getInstance().listUnsettled()).toHaveLength(0);
   });
 
@@ -250,7 +250,7 @@ describe('admission', () => {
       pointId: seeded.pointId,
       confirmationToken: preview.confirmation.token,
       confirmVolumeName: VOLUME,
-    })).rejects.toMatchObject({ errorClass: 'precondition_failed' });
+    })).rejects.toMatchObject({ errorClass: 'precondition_failed', reason: 'dependents_changed' });
   });
 
   it('refuses a typed name that is not the target', async () => {
@@ -394,12 +394,13 @@ describe('admission', () => {
       pointId: seeded.pointId,
       confirmationToken: preview.confirmation.token,
       confirmVolumeName: VOLUME,
-    })).rejects.toMatchObject({ errorClass: 'precondition_failed' });
+    })).rejects.toMatchObject({ errorClass: 'precondition_failed', reason: 'dependents_changed' });
   });
 
   it('refuses a volume recreated after the point was taken', async () => {
     const fake = fakeDocker({ volumes: [{ name: VOLUME }], containers: [mountingContainer()] });
     const seeded = seed({ createdAt: '2020-01-01T00:00:00.000Z' });
-    await expect(confirm(fake, seeded.pointId)).rejects.toMatchObject({ errorClass: 'precondition_failed' });
+    await expect(confirm(fake, seeded.pointId))
+      .rejects.toMatchObject({ errorClass: 'precondition_failed', reason: 'generation_changed' });
   });
 });

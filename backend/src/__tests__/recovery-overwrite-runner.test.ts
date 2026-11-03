@@ -915,7 +915,7 @@ describe('a staging volume that cannot be removed', () => {
     await expect(overwrite.resolveOverwriteIntent(
       pipelineDeps(fake, successHelper()),
       { intentId: seeded.intentId, action: 'release_fence' },
-    )).rejects.toMatchObject({ errorClass: 'invalid_request' });
+    )).rejects.toMatchObject({ errorClass: 'invalid_request', reason: 'no_fence' });
     expect(intents.RestoreIntentStore.getInstance().get(seeded.intentId)?.phase).toBe('staged_verified');
   });
 });

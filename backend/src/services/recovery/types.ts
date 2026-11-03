@@ -201,18 +201,22 @@ export type RecoveryErrorClass =
   | 'not_cancellable';
 
 /**
- * The `reason` tokens the route-level refusals of the overwrite surface carry.
- * Each is named in `docs/openapi.yaml` and on the operator page; a token added
- * here without both fails `recovery-error-surface.test.ts`.
+ * Every `reason` token a recovery refusal can carry beside its class. A
+ * `RecoveryError` takes only these, so a new token cannot be thrown without being
+ * listed here, and `recovery-error-surface.test.ts` then requires it in the API
+ * reference and on the operator page.
  */
-export const OVERWRITE_REFUSAL_REASONS = [
+export const RECOVERY_REFUSAL_REASONS = [
+  'engine_starting',
+  'repository_not_initialized',
+  'repository_replaced',
   'wrong_route',
   'generation_changed',
   'dependents_changed',
   'no_fence',
   'fence_released',
 ] as const;
-export type OverwriteRefusalReason = (typeof OVERWRITE_REFUSAL_REASONS)[number];
+export type RecoveryRefusalReason = (typeof RECOVERY_REFUSAL_REASONS)[number];
 
 interface RecoveryPointBase {
   id: string;

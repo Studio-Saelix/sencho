@@ -613,7 +613,7 @@ The preview needs the access that restoring the volume's stacks requires, and th
 
 ### Error responses
 
-Every error from these routes has the same shape, except the `403 SCOPE_DENIED` that an API token of the wrong scope gets before the request reaches a route: that body carries `error` and `code` only, with no `errorClass`. `code` is the upper-cased error class, so a client can switch on one field. A refusal can also carry a `reason`, a stable token for the specific cause: `engine_starting`, `repository_not_initialized`, `repository_replaced`, `not_cancellable`, `generation_changed`, `dependents_changed`, `wrong_route`, `no_fence`, or `fence_released`.
+Every error from these routes has the same shape, except the `403 SCOPE_DENIED` that an API token of the wrong scope gets before the request reaches a route: that body carries `error` and `code` only, with no `errorClass`. `code` is the upper-cased error class, so a client can switch on one field. A refusal can also carry a `reason`, a stable token for the specific cause: `engine_starting`, `repository_not_initialized`, `repository_replaced`, `generation_changed`, `dependents_changed`, `wrong_route`, `no_fence`, or `fence_released`.
 
 ```json
 {
