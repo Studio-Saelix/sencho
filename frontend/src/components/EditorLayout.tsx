@@ -28,13 +28,11 @@ import { ThemeQuickSwitch } from './theme/ThemeQuickSwitch';
 import { useNotifications } from './EditorLayout/hooks/useNotifications';
 import { useContainerStats } from './EditorLayout/hooks/useContainerStats';
 import { useSidebarContextMenu } from './EditorLayout/hooks/useSidebarContextMenu';
-import { useServiceUrls } from './EditorLayout/hooks/useServiceUrls';
+import { fetchServiceUrlEntry, useServiceUrls } from './EditorLayout/hooks/useServiceUrls';
 import { ServiceUrlModal } from './EditorLayout/ServiceUrlModal';
-import { patchServiceUrlLabel, renameRetiredServiceUrlLabel } from '@/lib/composeServiceUrl';
-import { commitServiceUrlWrite } from '@/lib/serviceUrlWrite';
-import { senchoLabelsOf, serviceKeyGet, serviceUrlClearBlockedMessage, serviceUrlClearState, serviceUrlSaveBlockedMessage } from '@/lib/serviceUrlResolve';
-import { ignoredLabels } from '@/lib/senchoLabels';
-import { RETIRED_URL_LABEL } from '@/lib/serviceUrlLabel';
+import { patchServiceUrlLabel } from '@/lib/composeServiceUrl';
+import { commitServiceUrlWrite, planRetiredUrlRename, retiredRenameVerified } from '@/lib/serviceUrlWrite';
+import { serviceKeyGet, serviceUrlClearBlockedMessage, serviceUrlClearState, serviceUrlSaveBlockedMessage } from '@/lib/serviceUrlResolve';
 import { sameServiceUrlTarget, type ServiceUrlDialogTarget } from '@/lib/serviceUrlTarget';
 import { confirmComposeSourceReload } from '@/lib/composeSourceConflict';
 import { useActiveNodeReapplyEligibility } from './EditorLayout/hooks/useActiveNodeReapplyEligibility';
@@ -455,6 +453,7 @@ export default function EditorLayout() {
     onStackFilesChangedRef.current = () => { void refreshServiceUrls(); };
   }, [selectedFile, activeNode?.id, can, serviceUrlEntry, refreshServiceUrls]);
 
+  const renameInFlightRef = useRef(false);
   const [serviceUrlTarget, setServiceUrlTarget] = useState<ServiceUrlDialogTarget | null>(null);
   const [serviceUrlDirty, setServiceUrlDirty] = useState(false);
   const [serviceUrlSaving, setServiceUrlSaving] = useState(false);
@@ -1099,39 +1098,23 @@ export default function EditorLayout() {
     if (!selectedFile) return;
     const captured = { stackName: selectedFile, nodeId: activeNode?.id ?? null };
     const stackKey = captured.stackName.replace(/\.(ya?ml)$/, '');
-    if (!can('stack:edit', 'stack', stackKey, captured.nodeId)) {
-      toast.error('You cannot edit this stack.');
+    const plan = planRetiredUrlRename({
+      content,
+      originalContent: editorState.originalContent,
+      canEdit: can('stack:edit', 'stack', stackKey, captured.nodeId),
+      service: serviceName,
+    });
+    if (!plan.ok) {
+      toast.error(plan.message);
       return;
     }
-    if (content !== editorState.originalContent) {
-      toast.error('Save or discard your changes to the compose file first, then rename the label.');
-      return;
-    }
-    let patched: ReturnType<typeof renameRetiredServiceUrlLabel>;
-    try {
-      patched = renameRetiredServiceUrlLabel(content, serviceName);
-    } catch (error) {
-      console.error('Failed to rename the service URL label:', error);
-      toast.error('The compose file could not be updated.');
-      return;
-    }
-    if (!patched.ok) {
-      toast.error(patched.reason === 'missing-service'
-        ? 'That service is defined in another compose file.'
-        : patched.reason === 'unsupported'
-          ? 'The label cannot be renamed here without changing other parts of this compose file. Rename it in the editor instead.'
-          : 'The compose file could not be updated.');
-      return;
-    }
-    if (patched.yaml === content) {
-      toast.error('The label is not in the open compose file. Rename it in the file that sets it.');
-      return;
-    }
-    const nextContent = patched.yaml;
+    const nextContent = plan.next;
     const etag = editorState.composeEtag;
     const filename = editorState.composeFilename;
     const stillOpen = () => selectedFileRef.current === captured.stackName && activeNodeIdRef.current === captured.nodeId;
     const write = async () => {
+      // A second click before the first save returns would reuse the old etag and report a conflict it caused itself.
+      if (renameInFlightRef.current) return;
       if (!canRef.current('stack:edit', 'stack', stackKey, captured.nodeId)) {
         toast.error('You cannot edit this stack.');
         return;
@@ -1140,18 +1123,26 @@ export default function EditorLayout() {
         toast.error('This stack is no longer open, so the label was not renamed.');
         return;
       }
+      renameInFlightRef.current = true;
       try {
-        const result = await commitServiceUrlWrite(
-          nextContent,
-          () => stackActions.saveComposeContent({
-            content: nextContent,
-            stackName: captured.stackName,
-            nodeId: captured.nodeId,
-            etag,
-            filename,
-          }),
-          (next) => { if (stillOpen()) setContent(next); },
-        );
+        let result;
+        try {
+          result = await commitServiceUrlWrite(
+            nextContent,
+            () => stackActions.saveComposeContent({
+              content: nextContent,
+              stackName: captured.stackName,
+              nodeId: captured.nodeId,
+              etag,
+              filename,
+            }),
+            (next) => { if (stillOpen()) setContent(next); },
+          );
+        } catch (error) {
+          console.error('Failed to rename the service URL label:', error);
+          toast.error('The label could not be renamed.');
+          return;
+        }
         if (!result.ok) {
           if (result.conflict && result.code === 'compose_source_changed' && stillOpen()) {
             if (confirmComposeSourceReload(message => window.confirm(message))) {
@@ -1170,13 +1161,18 @@ export default function EditorLayout() {
           return;
         }
         if (!stillOpen()) return;
-        const next = await refreshServiceUrls();
-        const stillRetired = ignoredLabels(senchoLabelsOf(next), serviceName).some(entry => entry.key === RETIRED_URL_LABEL);
-        if (next?.status === 'ready' && !stillRetired) toast.success('Renamed to io.sencho.url.');
+        // The save already happened. A refresh that another refresh superseded answers null, so read once more directly.
+        let verified = false;
+        try {
+          const next = (await refreshServiceUrls()) ?? await fetchServiceUrlEntry(captured.nodeId, captured.stackName);
+          verified = retiredRenameVerified(next, serviceName);
+        } catch (error) {
+          console.error('Failed to verify the renamed service URL label:', error);
+        }
+        if (verified) toast.success('The link now comes from io.sencho.url.');
         else toast.error('The file was saved, but the rename could not be verified.');
-      } catch (error) {
-        console.error('Failed to rename the service URL label:', error);
-        toast.error('The label could not be renamed.');
+      } finally {
+        renameInFlightRef.current = false;
       }
     };
     if (diffPreviewEnabled) {

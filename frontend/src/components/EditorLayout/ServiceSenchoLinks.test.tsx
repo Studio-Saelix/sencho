@@ -48,7 +48,7 @@ describe('ServiceSenchoLinks', () => {
 describe('retired link label', () => {
   const retired = resolution(
     { web: { links: [], order: null, hidden: false } },
-    [{ service: 'web', key: 'sencho.service.url', state: 'unsupported', reason: 'Rename this label to show the link.' }],
+    [{ service: 'web', key: 'sencho.service.url', state: 'unsupported', reason: 'Rename or remove this label.' }],
   );
 
   it('offers the rename only when the caller allows it, and runs it on click', () => {

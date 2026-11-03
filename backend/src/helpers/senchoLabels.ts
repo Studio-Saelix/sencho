@@ -2,7 +2,8 @@
  * The `io.sencho.*` Compose label contract: one typed registry of every label
  * Sencho reads, and a resolver that turns a successfully rendered Compose model
  * into the active metadata. Docker owns `com.docker.compose.*`; this namespace
- * is Sencho's and is the only public one.
+ * is Sencho's and is the only public one. The one other key Sencho reports on
+ * is the retired link label (`RETIRED_URL_LABEL`), which it never reads.
  *
  * Trust rule: only labels declared on a service of the rendered, authored
  * Compose model can become active. Image, runtime-only, and unknown-provenance
@@ -386,7 +387,7 @@ export function isSenchoLabelKey(key: string): boolean {
 
 /** Fixed text for the retired link label; it never echoes the value. */
 export const RETIRED_URL_LABEL_REASON =
-  'Sencho reads a service\'s application link from io.sencho.url. Rename this label to show the link.';
+  'Sencho reads a service\'s application link only from io.sencho.url. Rename or remove this label.';
 
 /** A key the resolver reports on: the `io.sencho.*` namespace plus the retired link label. */
 function isDiagnosedLabelKey(key: string): boolean {
@@ -702,7 +703,8 @@ function remoteOriginOf(source: LabelSource): InertOrigin {
 
 /**
  * Rebuild a remote node's `behavior` field by field. Absent stays absent (an
- * older node), and a label outside the namespace never carries one. A value this
+ * older node), and a label outside the namespace never carries one, except the
+ * declared Compose copy of the retired link label. A value this
  * version cannot read degrades to `unsupported` with a fixed reason instead of
  * failing the node's whole inventory. Only the declared Compose copy of a
  * presentation label can be anything but inert; the protective infrastructure
@@ -714,7 +716,6 @@ function remoteOriginOf(source: LabelSource): InertOrigin {
  * a stale container) better than the hub can.
  */
 export function sanitizeRemoteBehavior(source: LabelSource, key: string, raw: unknown): LabelBehavior | undefined {
-  // Only the declared Compose copy of the retired label carries a status, as on the node that reports it.
   if (raw === undefined || !(isSenchoLabelKey(key) || (key === RETIRED_URL_LABEL && source === 'compose'))) return undefined;
   const o = raw && typeof raw === 'object' && !Array.isArray(raw) ? raw as Record<string, unknown> : null;
   const state = o && typeof o.state === 'string' && VALID_LABEL_BEHAVIOR_STATES.has(o.state)

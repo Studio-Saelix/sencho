@@ -407,7 +407,11 @@ describe('label behavior annotations', () => {
     expect(deployedCopyBehavior(RETIRED_URL_LABEL, 'https://old.example.com', 'runtime')).toBeUndefined();
     const raw = { state: 'unsupported', reason: RETIRED_URL_LABEL_REASON };
     expect(sanitizeRemoteBehavior('compose', RETIRED_URL_LABEL, raw)).toEqual({ state: 'unsupported', reason: RETIRED_URL_LABEL_REASON });
-    expect(sanitizeRemoteBehavior('runtime', RETIRED_URL_LABEL, raw)).toBeUndefined();
+    for (const source of ['runtime', 'image', 'compose-system', 'unknown'] as const) {
+      expect(sanitizeRemoteBehavior(source, RETIRED_URL_LABEL, raw), source).toBeUndefined();
+    }
+    // A model that did not render yields no metadata, so the retired label is inert like every other Sencho label.
+    expect(declaredLabelBehavior(unrenderableSenchoLabels(), 'web', RETIRED_URL_LABEL)?.state).toBe('inert');
     expect(sanitizeRemoteBehavior('compose', RETIRED_URL_LABEL, undefined)).toBeUndefined();
   });
 

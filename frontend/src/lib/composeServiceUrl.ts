@@ -1090,7 +1090,7 @@ function isRetiredListItem(text: string): boolean {
   return text === RETIRED_URL_LABEL || text.startsWith(`${RETIRED_URL_LABEL}=`);
 }
 
-/** The file as plain data with the retired label renamed on one service, or dropped when the current key is already declared. */
+/** The file as stable JSON with the retired label renamed on one service, or dropped when the current key is already declared. */
 function modelWithRenamedLabel(source: string, serviceName: string, schema?: 'failsafe'): string {
   const parsed: unknown = parse(source, { ...QUIET_TAGS, merge: true, schema });
   const model: unknown = JSON.parse(JSON.stringify(parsed ?? null));
@@ -1136,7 +1136,10 @@ export function renameRetiredServiceUrlLabel(source: string, serviceName: string
   let parsed: unknown;
   try {
     doc = parseDocument(source, QUIET_TAGS);
-    if (doc.errors.length > 0) return { ok: false, reason: 'parse' };
+    if (doc.errors.length > 0) {
+      console.warn(`Label rename on ${serviceName} refused: the compose file does not parse (${doc.errors[0].message}).`);
+      return { ok: false, reason: 'parse' };
+    }
     parsed = parse(source, { ...QUIET_TAGS, merge: true });
   } catch (error) {
     console.error('Failed to read the compose file for a label rename:', error);
@@ -1150,6 +1153,8 @@ export function renameRetiredServiceUrlLabel(source: string, serviceName: string
   if (!isMap(service) || anchorName(service)) return { ok: false, reason: 'unsupported' };
   const labelPair = service.items.find(item => labelText(item.key) === 'labels');
   const labels = labelPair ? labelPair.value : null;
+  // No labels in this file: whatever sets the retired label lives in another one, so there is nothing to rename here.
+  if (labels == null || (isScalar(labels) && (labels.value == null || labels.value === ''))) return { ok: true, yaml: source };
   if (!isMap(labels) && !isSeq(labels)) return { ok: false, reason: 'unsupported' };
   if (anchorName(labels) || hasCustomTag(doc) || listLabelKeyInterpolated(serviceOf(parsed, serviceName)?.labels)) {
     return { ok: false, reason: 'unsupported' };

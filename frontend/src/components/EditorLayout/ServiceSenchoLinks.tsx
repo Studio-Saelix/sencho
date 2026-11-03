@@ -81,7 +81,7 @@ export function ServiceSenchoLinks({ resolution, service, applicationLinkShown, 
         <button
           type="button"
           onClick={onRenameRetiredUrl}
-          className="font-mono text-[10px] uppercase text-brand hover:underline max-md:min-h-11"
+          className="font-mono text-[10px] uppercase text-brand hover:underline"
           data-testid="service-sencho-rename-retired"
         >
           Rename to io.sencho.url

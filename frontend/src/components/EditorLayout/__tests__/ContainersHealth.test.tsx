@@ -938,6 +938,47 @@ describe('io.sencho.* labels on the container list', () => {
     expect(screen.getByText('3 containers')).toBeInTheDocument();
   });
 
+  describe('rename of the retired link label', () => {
+    const retiredResolution = {
+      renderable: true,
+      services: { web: { links: [], order: null, hidden: false }, api: { links: [], order: null, hidden: false } },
+      entries: [
+        { service: 'web', key: 'sencho.service.url', state: 'unsupported', reason: 'Rename or remove this label.' },
+        { service: 'api', key: 'sencho.service.url', state: 'unsupported', reason: 'Rename or remove this label.' },
+      ],
+    };
+    const containers = () => [box('web'), box('api')];
+    const services = () => [svc('api'), svc('web')];
+    const renderRename = (extra: Partial<ContainersHealthProps>) =>
+      renderStack(entryFor(retiredResolution), containers(), services(), extra);
+
+    it('offers the rename on a service in the open file to an editor, and passes the service name', async () => {
+      const user = userEvent.setup();
+      const onRename = vi.fn();
+      renderRename({ canEditServiceUrl: true, sourceServices: ['web'], onRenameRetiredUrl: onRename });
+      const buttons = screen.getAllByRole('button', { name: 'Rename to io.sencho.url' });
+      expect(buttons).toHaveLength(1);
+      await user.click(buttons[0]);
+      expect(onRename).toHaveBeenCalledWith('web');
+    });
+
+    it.each([
+      ['a viewer without edit rights', { canEditServiceUrl: false, sourceServices: ['web', 'api'] }],
+      ['a service defined only in another file', { canEditServiceUrl: true, sourceServices: ['other'] }],
+      ['a file whose services are not known', { canEditServiceUrl: true, sourceServices: null }],
+    ])('shows the flag but no rename for %s', (_name, extra) => {
+      renderRename({ ...extra, onRenameRetiredUrl: vi.fn() });
+      expect(screen.getAllByTestId('service-sencho-ignored')).toHaveLength(2);
+      expect(screen.queryByRole('button', { name: 'Rename to io.sencho.url' })).toBeNull();
+    });
+
+    it('shows the flag but no rename when no handler is passed, as on the phone layout', () => {
+      renderRename({ canEditServiceUrl: true, sourceServices: ['web', 'api'] });
+      expect(screen.getAllByTestId('service-sencho-ignored')).toHaveLength(2);
+      expect(screen.queryByRole('button', { name: 'Rename to io.sencho.url' })).toBeNull();
+    });
+  });
+
   it('reveals hidden services in place and collapses them again', async () => {
     const user = userEvent.setup();
     renderStack(entryFor(resolution), stack(), specs());

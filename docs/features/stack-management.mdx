@@ -471,7 +471,7 @@ A published port on a container card is a link. It opens the service's `io.sench
 
 Editors see a pencil labeled **Edit service URL** on a port row to set or clear the URL when the service is defined in the compose file that is open and the list of URLs has loaded. When the list cannot be loaded, the generated link stays, the pencil explains that the list is unavailable, and **Retry** loads it again. A later refresh that fails keeps the last address and the pencil, says the refresh failed, and offers **Retry**.
 
-A service that still sets its link with `sencho.service.url` shows that label as ignored on its card, with **Rename to io.sencho.url** for editors. See [Sencho Labels](/features/sencho-labels).
+A service that still sets its link with `sencho.service.url` shows that label as ignored on its card; on desktop, editors get **Rename to io.sencho.url** beside it. See [Sencho Labels](/features/sencho-labels).
 
 The pencil changes only that label, and Sencho checks the source again right before the save. A service that shares the edited block through a YAML anchor gets its own copy, so it keeps its current values. The address is saved in the compose file and is visible to anyone who can read the stack, so it must not contain a password.
 

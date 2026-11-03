@@ -13,7 +13,7 @@ export type LabelSource = 'compose' | 'runtime' | 'image' | 'compose-system' | '
 
 export type LabelBehaviorState = SenchoLabelState | 'inert';
 
-/** Whether Sencho acts on an `io.sencho.*` label. Absent for every other label and on older nodes. */
+/** Whether Sencho acts on an `io.sencho.*` label, or flags the retired link label. Absent for every other label and on older nodes. */
 export interface LabelBehavior {
   state: LabelBehaviorState;
   reason?: string;
@@ -193,7 +193,7 @@ function unhonoredInertReason(source: LabelSource): string {
 /**
  * Rebuild a node's `behavior` field by field before it reaches the screen. Absent
  * stays absent (an older node), and a label outside the namespace never carries
- * one. Anything unreadable becomes `unsupported` with a fixed reason. Only the
+ * one, except the declared Compose copy of the retired link label. Anything unreadable becomes `unsupported` with a fixed reason. Only the
  * declared Compose copy of a presentation label, or a deployed copy of the
  * protective infrastructure label, keeps the reported state; everything else is
  * inert, so one wrong answer neither crashes a row nor shows an unearned Active.
@@ -202,7 +202,6 @@ function unhonoredInertReason(source: LabelSource): string {
  * inert keeps its reason, which names the origin.
  */
 export function readLabelBehavior(source: LabelSource, key: string, raw: unknown): LabelBehavior | undefined {
-  // Only the declared Compose copy of the retired link label carries a status, as on the node that reports it.
   if (raw === undefined || !(isSenchoLabelKey(key) || (key === RETIRED_URL_LABEL && source === 'compose'))) return undefined;
   const o = raw && typeof raw === 'object' && !Array.isArray(raw) ? raw as Record<string, unknown> : null;
   const state = o && typeof o.state === 'string' && Object.prototype.hasOwnProperty.call(BEHAVIOR_LABELS, o.state)

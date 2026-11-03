@@ -1,4 +1,4 @@
-import { describe, expect, it, vi } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { renameRetiredServiceUrlLabel } from './composeServiceUrl';
 
 function renamed(source: string, service = 'web'): string {
@@ -53,8 +53,42 @@ describe('renameRetiredServiceUrlLabel', () => {
     const list = 'services:\n  web:\n    labels:\n      - io.sencho.url=https://new.example.com\n      - sencho.service.url=https://old.example.com\n';
     expect(renamed(list)).toBe('services:\n  web:\n    labels:\n      - io.sencho.url=https://new.example.com\n');
     const flow = 'services:\n  web:\n    labels: { io.sencho.url: "https://n.example.com", sencho.service.url: "https://o.example.com" }\n';
-    expect(renamed(flow)).toContain('io.sencho.url');
-    expect(renamed(flow)).not.toContain('sencho.service.url');
+    expect(renamed(flow)).toBe('services:\n  web:\n    labels: { io.sencho.url: "https://n.example.com" }\n');
+    const crlf = 'services:\r\n  web:\r\n    labels:\r\n      io.sencho.url: https://n.example.com\r\n      sencho.service.url: https://o.example.com\r\n      other: x\r\n';
+    expect(renamed(crlf)).toBe('services:\r\n  web:\r\n    labels:\r\n      io.sencho.url: https://n.example.com\r\n      other: x\r\n');
+  });
+
+  it('keeps the current key even when its value is empty, so the retired value is dropped with it', () => {
+    expect(renamed('services:\n  web:\n    labels:\n      io.sencho.url: ""\n      sencho.service.url: https://o.example.com\n'))
+      .toBe('services:\n  web:\n    labels:\n      io.sencho.url: ""\n');
+  });
+
+  it('renames every duplicate retired list item, or drops them all when the current key is declared', () => {
+    expect(renamed('services:\n  web:\n    labels:\n      - sencho.service.url=https://a.example.com\n      - sencho.service.url=https://b.example.com\n'))
+      .toBe('services:\n  web:\n    labels:\n      - io.sencho.url=https://a.example.com\n      - io.sencho.url=https://b.example.com\n');
+    expect(renamed('services:\n  web:\n    labels:\n      - sencho.service.url=https://a.example.com\n      - io.sencho.url=https://n.example.com\n      - sencho.service.url=https://b.example.com\n'))
+      .toBe('services:\n  web:\n    labels:\n      - io.sencho.url=https://n.example.com\n');
+  });
+
+  it('keeps comments, tabs after the colon and odd indentation', () => {
+    expect(renamed('services:\n  web:\n      labels:\n          sencho.service.url:\thttps://a.example.com # keep\n'))
+      .toBe('services:\n  web:\n      labels:\n          io.sencho.url:\thttps://a.example.com # keep\n');
+    expect(renamed('services:\n  web:\n    labels:\n      - sencho.service.url=https://a.example.com # keep\n'))
+      .toBe('services:\n  web:\n    labels:\n      - io.sencho.url=https://a.example.com # keep\n');
+  });
+
+  it('leaves a key that is not exactly the retired label alone', () => {
+    const source = 'services:\n  web:\n    labels:\n      "sencho.service.url ": https://a.example.com\n      sencho.service.urls: x\n';
+    expect(renamed(source)).toBe(source);
+  });
+
+  it.each([
+    ['no labels key', 'services:\n  web:\n    image: nginx\n'],
+    ['an empty labels value', 'services:\n  web:\n    labels:\n'],
+    ['an empty string labels value', 'services:\n  web:\n    labels: ""\n'],
+    ['an empty labels map', 'services:\n  web:\n    labels: {}\n'],
+  ])('leaves the file unchanged when the service has %s here (the label lives in another file)', (_name, source) => {
+    expect(renamed(source)).toBe(source);
   });
 
   it('touches only the named service', () => {
@@ -75,21 +109,24 @@ describe('renameRetiredServiceUrlLabel', () => {
   });
 
   describe('refusals', () => {
+    afterEach(() => vi.restoreAllMocks());
     const refused = (source: string, service = 'web') => {
       vi.spyOn(console, 'warn').mockImplementation(() => undefined);
       return renameRetiredServiceUrlLabel(source, service);
     };
+    const UNSUPPORTED = { ok: false, reason: 'unsupported' };
 
-    it('refuses anchored, aliased and merged labels and anchored services', () => {
-      expect(refused('x-l: &l\n  sencho.service.url: https://a.example.com\nservices:\n  web:\n    labels: *l\n')).toEqual({ ok: false, reason: 'unsupported' });
-      expect(refused('services:\n  web:\n    labels: &l\n      sencho.service.url: https://a.example.com\n')).toEqual({ ok: false, reason: 'unsupported' });
-      expect(refused('x-l: &l\n  y: z\nservices:\n  web:\n    labels:\n      <<: *l\n      sencho.service.url: https://a.example.com\n')).toEqual({ ok: false, reason: 'unsupported' });
-      expect(refused('services:\n  web: &w\n    labels:\n      sencho.service.url: https://a.example.com\n')).toEqual({ ok: false, reason: 'unsupported' });
-    });
-
-    it('refuses custom tags and interpolated list keys', () => {
-      expect(refused('services:\n  web:\n    labels: !override\n      sencho.service.url: https://a.example.com\n')).toEqual({ ok: false, reason: 'unsupported' });
-      expect(refused('services:\n  web:\n    labels:\n      - "${K}=v"\n      - sencho.service.url=https://a.example.com\n')).toEqual({ ok: false, reason: 'unsupported' });
+    it.each([
+      ['labels shared through an alias', 'x-l: &l\n  sencho.service.url: https://a.example.com\nservices:\n  web:\n    labels: *l\n'],
+      ['an anchored labels block', 'services:\n  web:\n    labels: &l\n      sencho.service.url: https://a.example.com\n'],
+      ['a merged labels block', 'x-l: &l\n  y: z\nservices:\n  web:\n    labels:\n      <<: *l\n      sencho.service.url: https://a.example.com\n'],
+      ['an anchored service', 'services:\n  web: &w\n    labels:\n      sencho.service.url: https://a.example.com\n'],
+      ['a custom YAML tag', 'services:\n  web:\n    labels: !override\n      sencho.service.url: https://a.example.com\n'],
+      ['an interpolated list key', 'services:\n  web:\n    labels:\n      - "${K}=v"\n      - sencho.service.url=https://a.example.com\n'],
+      ['an aliased list item', 'x: &i sencho.service.url=https://a.example.com\nservices:\n  web:\n    labels:\n      - *i\n'],
+      ['an escaped key', 'services:\n  web:\n    labels:\n      "sencho\\x2eservice.url": https://a.example.com\n'],
+    ])('refuses %s', (_name, source) => {
+      expect(refused(source)).toMatchObject(UNSUPPORTED);
     });
 
     it('reports a missing service and unparsable text', () => {
