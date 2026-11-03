@@ -430,6 +430,47 @@ describe('the hub preflight and a node without the overwrite surface', () => {
     expect(await support.preflightRecoveryRequest(1, 'new_volume')).toMatchObject({ ok: true });
   });
 
+  // The hub middleware, not only the preflight, has to pick the mode from the
+  // path: a route that slips out of the pattern reaches an older node unchecked.
+  const overwriteSurface = [
+    '/api/recovery/points/pt-1/overwrite/preview',
+    '/api/recovery/points/pt-1/overwrite',
+    '/api/recovery/restores/intent-1/resolve',
+  ];
+
+  for (const [label, getId] of [
+    ['a direct-proxy node', () => proxyNodeId],
+    ['a Pilot node', () => pilotNodeId],
+  ] as const) {
+    it(`refuses every overwrite route for ${label} that never advertised it, before the hop`, async () => {
+      mockRead.mockImplementation(echoing(legacyDescriptor()) as never);
+      // A Pilot node with no live tunnel has no proxy target and is refused
+      // before the preflight; give it one so the request reaches it.
+      const { PilotTunnelManager } = await import('../services/PilotTunnelManager');
+      vi.spyOn(PilotTunnelManager.getInstance(), 'getLoopbackUrl').mockReturnValue('http://127.0.0.1:9');
+      for (const path of overwriteSurface) {
+        const res = await request(app)
+          .post(path)
+          .set('Authorization', authHeader)
+          .set('x-node-id', String(getId()))
+          .send({});
+        expect(res.status, path).toBe(409);
+        expect(res.body, path).toMatchObject({ code: 'UPDATE_REQUIRED', errorClass: 'update_required' });
+      }
+    });
+  }
+
+  it('narrows only the overwrite routes: a POST restore, a cancel, and every GET need no mode', async () => {
+    const { requiredRestoreModeFor } = await import('../proxy/remoteNodeProxy');
+    for (const path of ['/recovery/points/pt-1/overwrite/preview', '/recovery/points/pt-1/overwrite', '/recovery/restores/intent-1/resolve/']) {
+      expect(requiredRestoreModeFor('POST', path), path).toBe('staged_overwrite');
+      expect(requiredRestoreModeFor('GET', path), `GET ${path}`).toBeUndefined();
+    }
+    for (const path of ['/recovery/points/pt-1/restore', '/recovery/points/pt-1/verify', '/recovery/operations/op-1/cancel', '/recovery/storage/points', '/recovery/locks/release', '/recovery/restores/intent-1']) {
+      expect(requiredRestoreModeFor('POST', path), path).toBeUndefined();
+    }
+  });
+
   it('does not narrow the preflight for a request that needs no mode', async () => {
     const support = await import('../services/recovery/remoteSupport');
     const original = await import('../helpers/nodeProxyJson');

@@ -1373,11 +1373,10 @@ function isRecoveryDescriptorPath(path: string): boolean {
  * overwrite routes narrow the preflight: every other recovery route works
  * against `new_volume`, which every node with the engine already speaks.
  */
-function requiredRestoreModeFor(method: string, path: string): RestoreMode | undefined {
+export function requiredRestoreModeFor(method: string, path: string): RestoreMode | undefined {
   if (method.toUpperCase() !== 'POST') return undefined;
   // The resolve route belongs to the same feature: a node that never advertised
   // the overwrite has no intent a resolve could act on.
-  if (/^\/recovery\/restores\/[^/]+\/resolve\/?(?:\?|$)/i.test(path)) return 'staged_overwrite';
   return /^\/recovery\/(?:points\/[^/]+\/overwrite(?:\/preview)?|restores\/[^/]+\/resolve)\/?(?:\?|$)/i.test(path)
     ? 'staged_overwrite'
     : undefined;
