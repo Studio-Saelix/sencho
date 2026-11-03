@@ -116,12 +116,11 @@ function observableContent(finding: AssuranceFinding): string {
  * A rule that emits several hits for one source path, service, or stack must
  * give each hit a distinct `subject` (or `sourcePath`); otherwise the hits are
  * indistinguishable to any consumer that pairs or dedupes on identity. Findings
- * that agree on every compared field (see `observableContent`: severity, class,
- * whether it affects the verdict, title, message, remediation, the whole
- * location, confidence, completeness) are one fact reported twice (a port
- * published on both an IPv4 and an IPv6 address): a consumer reading what the
- * finding reports could not tell them apart, so they are not a collision. A pair
- * that differs in any of those fields is two facts under one identity. Legacy rows are skipped: their identity is documented as not
+ * that agree on every field `observableContent` compares are one fact reported
+ * twice (a port published on both an IPv4 and an IPv6 address): a consumer
+ * reading what the finding reports could not tell them apart, so they are not a
+ * collision. A pair that differs in any of those fields is two facts under one
+ * identity. Legacy rows are skipped: their identity is documented as not
  * dedupable.
  */
 export function findFingerprintCollisions(findings: readonly AssuranceFinding[]): string[] {
