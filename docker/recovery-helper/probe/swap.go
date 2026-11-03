@@ -84,10 +84,11 @@ type swapPlan struct {
 	Originals []string `json:"originals"`
 	Incoming  []string `json:"incoming"`
 	Root      rootMeta `json:"root"`
-	// The volume root's own owner, mode and mtime before the swap. A commit that
-	// applied part of `Root` and then failed is rolled back to these, so a
-	// rollback leaves the root exactly as it found it. Absent in a journal an
-	// older helper wrote, which a rollback leaves alone.
+	// The volume root's own owner, mode and mtime as `prepare` found them (the
+	// work directory already exists then, so the mtime is the one after it was
+	// created). A commit that applied part of `Root` and then failed is rolled
+	// back to these. Absent in a journal an older helper wrote, which a rollback
+	// leaves alone.
 	OriginalRoot *rootMeta `json:"original_root,omitempty"`
 	RootDev      int64     `json:"root_dev"`
 	RootIno      uint64    `json:"root_ino"`
@@ -535,7 +536,10 @@ func applyRootMeta(root string, meta rootMeta) error {
 	if err := os.Chown(root, int(meta.UID), int(meta.GID)); err != nil {
 		return err
 	}
-	if err := os.Chmod(root, os.FileMode(meta.Mode)); err != nil {
+	// syscall.Chmod takes the raw mode. os.Chmod would drop setuid, setgid and
+	// sticky, which Go carries as separate flags and the recorded mode holds as
+	// the 0o7000 bits.
+	if err := syscall.Chmod(root, meta.Mode); err != nil {
 		return err
 	}
 	mtime := time.Unix(0, meta.Mtime)
@@ -625,7 +629,9 @@ func swapRollback(request swapRequest) (swapReport, error) {
 	// The commit applies the incoming root's owner, mode and mtime last, so a
 	// failure part way through it (a chown that landed, a chmod that did not)
 	// leaves the root carrying them. Putting the original back is idempotent, and
-	// it runs before the work directory goes so a failure here can be retried.
+	// owner and mode go before the work directory so a failure there can be
+	// retried. The mtime is set after the removal, which moves it; a failure of
+	// that last step cannot be retried, and only the mtime is lost.
 	if plan.OriginalRoot != nil {
 		if err := applyRootMeta(request.Root, *plan.OriginalRoot); err != nil {
 			return swapReport{}, err

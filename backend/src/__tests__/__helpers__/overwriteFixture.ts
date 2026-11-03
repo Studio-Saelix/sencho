@@ -115,7 +115,8 @@ export function fakeDocker(input: {
       update: async (options: { RestartPolicy: { Name: string } }) => {
         record(`update:${id}`);
         const found = containers.get(id);
-        if (found) found.HostConfig = { RestartPolicy: options.RestartPolicy };
+        if (!found) throw Object.assign(new Error('no such container'), { statusCode: 404 });
+        found.HostConfig = { RestartPolicy: options.RestartPolicy };
       },
       stop: async () => {
         record(`stop:${id}`);

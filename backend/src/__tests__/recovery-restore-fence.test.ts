@@ -383,16 +383,75 @@ describe('a start that races the fence', () => {
     expect(removed).toEqual(['helper']);
   });
 
-  it('stops waiting for a start that does not answer in time', async () => {
+  it('reports a start that does not answer in time, and stops waiting for one that has hung', async () => {
     const hold = gate();
     const run = fence.startUnderFence([], () => hold.promise);
     const started = Date.now();
-    await expect(fence.waitForStartsInFlight(20)).resolves.toBeUndefined();
+    // False: the caller cannot treat what it observes as settled.
+    await expect(fence.waitForStartsInFlight(20)).resolves.toBe(false);
     expect(Date.now() - started).toBeLessThan(5_000);
+    // A start pending longer than the hung threshold is a stuck call, not one
+    // about to land, so the next fence does not pay the whole cap again.
+    fence.setStartDrainTimeoutForTests(120_000, 20);
+    try {
+      await new Promise((resolve) => setTimeout(resolve, 40));
+      await expect(fence.waitForStartsInFlight(20)).resolves.toBe(true);
+    } finally {
+      fence.setStartDrainTimeoutForTests(120_000);
+    }
     // It is only released here, so a later case does not wait on it.
     hold.open();
     await run;
-    await fence.waitForStartsInFlight();
+    await expect(fence.waitForStartsInFlight()).resolves.toBe(true);
+  });
+
+  it('refuses to apply the fence while a start has not answered', async () => {
+    const intentId = seedIntent('fenced');
+    const fake = fakeDocker({
+      containers: [
+        container({ Id: 'c1', State: 'running', Mounts: [{ Type: 'volume', Name: VOLUME }] }),
+        container({ Id: 'x', State: 'exited' }),
+      ],
+    });
+    vi.spyOn(NodeRegistryModule.NodeRegistry.getInstance(), 'getDocker').mockReturnValue(fake.docker);
+    const hold = gate();
+    const reachedDaemon = gate();
+    delayContainerCall(fake, 'start', 'x', hold.promise, reachedDaemon.open);
+    const start = DockerController.getInstance(1).startContainer('x');
+    await reachedDaemon.promise;
+    fence.RestoreFenceStore.getInstance().recordMembers(intentId, [member()]);
+    fence.setStartDrainTimeoutForTests(20);
+    try {
+      await expect(fence.applyRestoreFence(
+        intentId, fake.docker, fence.RestoreFenceStore.getInstance().listMembers(intentId),
+      )).rejects.toMatchObject({ errorClass: 'fence_unavailable' });
+    } finally {
+      fence.setStartDrainTimeoutForTests(120_000);
+      hold.open();
+      await start;
+    }
+    // Nothing was pinned or stopped: the fence was refused before the first change.
+    expect(fake.calls).toEqual(['start:x']);
+  });
+
+  it('releases a fence whose member container no longer exists', async () => {
+    const intentId = seedIntent('swapped');
+    const fake = fakeDocker({
+      containers: [container({ Id: 'c2', State: 'exited', HostConfig: { RestartPolicy: { Name: 'no' } } })],
+    });
+    fence.RestoreFenceStore.getInstance().recordMembers(intentId, [
+      member({ containerId: 'c-gone', containerName: 'gone-1', restartPolicy: { Name: 'always' }, wasRunning: true }),
+      member({ containerId: 'c2', containerName: 'two-1', restartPolicy: { Name: 'always' }, wasRunning: true }),
+    ]);
+    await fence.releaseRestoreFence(
+      intentId, fake.docker, fence.RestoreFenceStore.getInstance().listMembers(intentId), { restart: true },
+    );
+    // A removed container has no policy to restore, so it cannot hold the volume
+    // fenced; the others are still released.
+    expect(intents.RestoreIntentStore.getInstance().get(intentId)?.fenceState).toBe('released');
+    expect(fake.containers.get('c2')?.HostConfig.RestartPolicy).toEqual({ Name: 'always' });
+    expect(fake.containers.get('c2')?.State).toBe('running');
+    expect(fence.RestoreFenceStore.getInstance().listMembers(intentId).every((row) => row.releasedAt !== null)).toBe(true);
   });
 
   it('hands back the start\'s own result and error', async () => {

@@ -800,6 +800,8 @@ describe('a staging volume that cannot be removed', () => {
 
     expect(outcomes).toEqual([{ state: 'failed', errorClass: 'attributes_not_restored' }]);
     expect(intents.RestoreIntentStore.getInstance().get(seeded.intentId)?.phase).toBe('staging');
+    expect(intents.RestoreIntentStore.getInstance().get(seeded.intentId)?.outcomeClass).toBe('cleanup_failed');
+    expect(fence.RestoreFenceStore.getInstance().liveIntentForVolume(VOLUME)).toBe(seeded.intentId);
     expect(points.RecoveryPointStore.getInstance().listHolds(seeded.pointId)).toHaveLength(1);
   });
 
@@ -822,6 +824,7 @@ describe('a staging volume that cannot be removed', () => {
     expect(fake.calls.some((call) => call.startsWith('stop:') || call.startsWith('update:'))).toBe(false);
     const open = intents.RestoreIntentStore.getInstance().get(seeded.intentId);
     expect(open?.phase).toBe('staged_verified');
+    expect(open?.outcomeClass).toBe('cleanup_failed');
     expect(points.RecoveryPointStore.getInstance().listHolds(seeded.pointId)).toHaveLength(1);
     expect(intents.RestoreIntentStore.getInstance().listUnsettled('staged_overwrite')).toHaveLength(1);
 
@@ -1016,5 +1019,240 @@ describe('a container start that is in flight when the fence goes up', () => {
     expect(fake.calls.indexOf('start:c1')).toBeLessThan(fake.calls.indexOf('stop:c1'));
     // It was running when the fence observed it, so the release brought it back.
     expect(fake.containers.get('c1')?.State).toBe('running');
+  });
+});
+
+describe('the fence window between the first recheck and the stop', () => {
+  /**
+   * Hold a start of an unrelated container in flight, so the pipeline waits
+   * after it has recorded the fence, and hand back what the case needs to act
+   * during that wait.
+   */
+  async function holdAStartInFlight(fake: ReturnType<typeof fakeDocker>) {
+    const registry = (await import('../services/NodeRegistry')).NodeRegistry.getInstance();
+    vi.spyOn(registry, 'getDocker').mockReturnValue(fake.docker);
+    const hold = gate();
+    const atDaemon = gate();
+    delayContainerCall(fake, 'start', 'x', hold.promise, atDaemon.open);
+    const start = DockerController.getInstance(1).startContainer('x');
+    await atDaemon.promise;
+    return { hold, start };
+  }
+
+  async function untilFenceHeld(intentId: string): Promise<void> {
+    await vi.waitFor(() => {
+      expect(intents.RestoreIntentStore.getInstance().get(intentId)?.fenceState).toBe('held');
+    });
+  }
+
+  it('aborts without touching a member the operator stopped, when a new container appears meanwhile', async () => {
+    const member = container({ Id: 'c1', State: 'running', Mounts: [{ Type: 'volume', Name: VOLUME }] });
+    const other = container({ Id: 'x', State: 'exited' });
+    const fake = fakeDocker({ volumes: [{ name: VOLUME }], containers: [member, other] });
+    const seeded = seed({ createdAt: fake.volumes.get(VOLUME)?.createdAt ?? '', members: [member] });
+    const { hold, start } = await holdAStartInFlight(fake);
+
+    const finished = run({ fake, helper: successHelper(), engine: scriptedEngine(), seeded });
+    await untilFenceHeld(seeded.intentId);
+    // The operator stops c1 and a second container mounts the volume.
+    fake.containers.get('c1')!.State = 'exited';
+    fake.containers.set('c2', container({ Id: 'c2', State: 'running', Mounts: [{ Type: 'volume', Name: VOLUME }] }));
+    hold.open();
+    await start;
+    const { outcomes } = await finished;
+
+    expect(outcomes).toEqual([{ state: 'failed', errorClass: 'dependents_changed' }]);
+    // Nothing was applied, so nothing is released: c1 stays as the operator left it.
+    expect(fake.calls.filter((call) => call.endsWith(':c1'))).toEqual([]);
+    expect(fake.containers.get('c1')?.State).toBe('exited');
+    const intent = intents.RestoreIntentStore.getInstance().get(seeded.intentId);
+    expect(intent?.phase).toBe('rolled_back');
+    expect(intent?.fenceState).toBe('none');
+    expect(fence.RestoreFenceStore.getInstance().isVolumeFenced(VOLUME)).toBe(false);
+    expect(fence.RestoreFenceStore.getInstance().liveIntentForVolume(VOLUME)).toBeNull();
+  });
+
+  it('settles cleanly, with no fence left, when a member is removed meanwhile', async () => {
+    const member = container({ Id: 'c1', State: 'running', Mounts: [{ Type: 'volume', Name: VOLUME }] });
+    const other = container({ Id: 'x', State: 'exited' });
+    const fake = fakeDocker({ volumes: [{ name: VOLUME }], containers: [member, other] });
+    const seeded = seed({ createdAt: fake.volumes.get(VOLUME)?.createdAt ?? '', members: [member] });
+    const { hold, start } = await holdAStartInFlight(fake);
+
+    const finished = run({ fake, helper: successHelper(), engine: scriptedEngine(), seeded });
+    await untilFenceHeld(seeded.intentId);
+    // A redeploy replaces c1 with a container of another id.
+    fake.containers.delete('c1');
+    fake.containers.set('c1-new', container({ Id: 'c1-new', State: 'running', Mounts: [{ Type: 'volume', Name: VOLUME }] }));
+    hold.open();
+    await start;
+    const { outcomes } = await finished;
+
+    expect(outcomes).toEqual([{ state: 'failed', errorClass: 'dependents_changed' }]);
+    const intent = intents.RestoreIntentStore.getInstance().get(seeded.intentId);
+    expect(intent?.phase).toBe('rolled_back');
+    expect(intent?.fenceState).toBe('none');
+    expect(intent?.outcomeClass).toBeNull();
+    expect(fence.RestoreFenceStore.getInstance().liveIntentForVolume(VOLUME)).toBeNull();
+  });
+
+  it('refuses the fence, before stopping anything, when a start does not answer in time', async () => {
+    const member = container({ Id: 'c1', State: 'running', Mounts: [{ Type: 'volume', Name: VOLUME }] });
+    const other = container({ Id: 'x', State: 'exited' });
+    const fake = fakeDocker({ volumes: [{ name: VOLUME }], containers: [member, other] });
+    const seeded = seed({ createdAt: fake.volumes.get(VOLUME)?.createdAt ?? '', members: [member] });
+    const { hold, start } = await holdAStartInFlight(fake);
+    fence.setStartDrainTimeoutForTests(30);
+    try {
+      const { outcomes } = await run({ fake, helper: successHelper(), engine: scriptedEngine(), seeded });
+      expect(outcomes).toEqual([{ state: 'failed', errorClass: 'fence_unavailable' }]);
+    } finally {
+      fence.setStartDrainTimeoutForTests(120_000);
+      hold.open();
+      await start;
+    }
+    expect(fake.calls.filter((call) => call.endsWith(':c1'))).toEqual([]);
+    const intent = intents.RestoreIntentStore.getInstance().get(seeded.intentId);
+    expect(intent?.phase).toBe('rolled_back');
+    expect(intent?.fenceState).toBe('none');
+  });
+});
+
+describe('the staging volume around the other phases', () => {
+  const stagingName = (intentId: string) => overwrite.stagingVolumeFor(intentId);
+
+  it('settles a rollback from the swap phases even if the staging volume is somehow still there', async () => {
+    const member = container({ Id: 'c1', State: 'running', Mounts: [{ Type: 'volume', Name: VOLUME }] });
+    const fake = fakeDocker({ volumes: [{ name: VOLUME }], containers: [member] });
+    const seeded = seed({ createdAt: fake.volumes.get(VOLUME)?.createdAt ?? '', members: [member] });
+    fake.volumes.set(stagingName(seeded.intentId), {
+      labels: intentLabels(seeded.intentId), createdAt: new Date().toISOString(),
+    });
+    walkTo(seeded.intentId, 'swapping');
+    fence.RestoreFenceStore.getInstance().setFenceState(seeded.intentId, 'held');
+    fake.failOn = (call) => (call.startsWith('removeVolume:') ? new Error('volume is busy') : null);
+
+    // The swap journal is gone after the rollback, so an open intent could never
+    // be read again: it settles, and the leftover is logged.
+    const outcome = await overwrite.rollbackIntent(pipelineDeps(fake, successHelper()), seeded.intentId);
+    expect(outcome).toBe('rolled_back');
+    expect(intents.RestoreIntentStore.getInstance().get(seeded.intentId)?.phase).toBe('rolled_back');
+  });
+
+  it('answers unknown, and stays open, when the staging volume and the fence release both fail', async () => {
+    const member = container({ Id: 'c1', State: 'running', Mounts: [{ Type: 'volume', Name: VOLUME }] });
+    const fake = fakeDocker({ volumes: [{ name: VOLUME }], containers: [member] });
+    const seeded = seed({ createdAt: fake.volumes.get(VOLUME)?.createdAt ?? '', members: [member] });
+    fake.volumes.set(stagingName(seeded.intentId), {
+      labels: intentLabels(seeded.intentId), createdAt: new Date().toISOString(),
+    });
+    walkTo(seeded.intentId, 'staged_verified');
+    fence.RestoreFenceStore.getInstance().setFenceState(seeded.intentId, 'held');
+    fake.failOn = (call) => (call.startsWith('removeVolume:') || call === 'update:c1' ? new Error('daemon refused') : null);
+
+    const outcome = await overwrite.rollbackIntent(pipelineDeps(fake, successHelper()), seeded.intentId);
+    expect(outcome).toBe('unknown');
+    const open = intents.RestoreIntentStore.getInstance().get(seeded.intentId);
+    expect(open?.phase).toBe('staged_verified');
+    expect(open?.fenceState).toBe('release_failed');
+  });
+
+  it('removes a staging volume that exists when its creation reported a failure', async () => {
+    const member = container({ Id: 'c1', State: 'running', Mounts: [{ Type: 'volume', Name: VOLUME }] });
+    const fake = fakeDocker({ volumes: [{ name: VOLUME }], containers: [member] });
+    const seeded = seed({ createdAt: fake.volumes.get(VOLUME)?.createdAt ?? '', members: [member] });
+    // Docker made the volume and the answer was lost.
+    fake.volumes.set(stagingName(seeded.intentId), {
+      labels: intentLabels(seeded.intentId), createdAt: new Date().toISOString(),
+    });
+    fake.failOn = (call) => (call.startsWith('createVolume:')
+      ? Object.assign(new Error('socket hang up'), { statusCode: 500 })
+      : null);
+
+    const { outcomes } = await run({ fake, helper: successHelper(), engine: scriptedEngine(), seeded });
+    expect(outcomes).toEqual([{ state: 'failed', errorClass: 'node_error' }]);
+    expect(fake.volumes.has(stagingName(seeded.intentId))).toBe(false);
+    expect(intents.RestoreIntentStore.getInstance().get(seeded.intentId)?.phase).toBe('rolled_back');
+  });
+
+  it('keeps that intent open when the volume it made cannot be removed', async () => {
+    const member = container({ Id: 'c1', State: 'running', Mounts: [{ Type: 'volume', Name: VOLUME }] });
+    const fake = fakeDocker({ volumes: [{ name: VOLUME }], containers: [member] });
+    const seeded = seed({ createdAt: fake.volumes.get(VOLUME)?.createdAt ?? '', members: [member] });
+    fake.volumes.set(stagingName(seeded.intentId), {
+      labels: intentLabels(seeded.intentId), createdAt: new Date().toISOString(),
+    });
+    fake.failOn = (call) => {
+      if (call.startsWith('createVolume:')) return Object.assign(new Error('socket hang up'), { statusCode: 500 });
+      return call.startsWith('removeVolume:') ? new Error('volume is busy') : null;
+    };
+
+    await run({ fake, helper: successHelper(), engine: scriptedEngine(), seeded });
+    const open = intents.RestoreIntentStore.getInstance().get(seeded.intentId);
+    expect(open?.phase).toBe('staging');
+    expect(open?.outcomeClass).toBe('cleanup_failed');
+    expect(points.RecoveryPointStore.getInstance().listHolds(seeded.pointId)).toHaveLength(1);
+  });
+
+  it('refuses release_fence on a fenced intent whose fence was never held', async () => {
+    const member = container({ Id: 'c1', State: 'running', Mounts: [{ Type: 'volume', Name: VOLUME }] });
+    const fake = fakeDocker({ volumes: [{ name: VOLUME }], containers: [member] });
+    const seeded = seed({ createdAt: fake.volumes.get(VOLUME)?.createdAt ?? '', members: [member] });
+    // A crash between recording the phase and holding the fence.
+    walkTo(seeded.intentId, 'fenced');
+    await expect(overwrite.resolveOverwriteIntent(
+      pipelineDeps(fake, successHelper()),
+      { intentId: seeded.intentId, action: 'release_fence' },
+    )).rejects.toMatchObject({ errorClass: 'invalid_request' });
+    expect(intents.RestoreIntentStore.getInstance().get(seeded.intentId)?.phase).toBe('fenced');
+  });
+});
+
+describe('startup reconciliation and a fence it cannot release', () => {
+  it('settles a proven rollback with fence_unavailable instead of calling the data unknown', async () => {
+    const member = container({ Id: 'c1', State: 'running', Mounts: [{ Type: 'volume', Name: VOLUME }] });
+    const fake = fakeDocker({ volumes: [{ name: VOLUME }], containers: [member] });
+    const seeded = seed({ createdAt: fake.volumes.get(VOLUME)?.createdAt ?? '', members: [member] });
+    walkTo(seeded.intentId, 'protecting');
+    fence.RestoreFenceStore.getInstance().setFenceState(seeded.intentId, 'held');
+    fake.containers.get('c1')!.State = 'exited';
+    const broken = { value: true };
+    fake.failOn = (call) => (broken.value && call === 'update:c1' ? new Error('daemon refused') : null);
+
+    await overwrite.reconcileOverwriteIntentsAtStartup(pipelineDeps(fake, successHelper()));
+    const first = intents.RestoreIntentStore.getInstance().get(seeded.intentId);
+    expect(first?.phase).toBe('rolled_back');
+    expect(first?.outcomeClass).toBe('fence_unavailable');
+    expect(first?.fenceState).toBe('release_failed');
+    // Reserved while its fence is held, so no second overwrite records the pinned policy.
+    expect(fence.RestoreFenceStore.getInstance().liveIntentForVolume(VOLUME)).toBe(seeded.intentId);
+
+    broken.value = false;
+    await overwrite.reconcileOverwriteIntentsAtStartup(pipelineDeps(fake, successHelper()));
+    const second = intents.RestoreIntentStore.getInstance().get(seeded.intentId);
+    expect(second?.phase).toBe('rolled_back');
+    expect(second?.outcomeClass).toBeNull();
+    expect(second?.fenceState).toBe('released');
+    expect(fake.containers.get('c1')?.State).toBe('running');
+  });
+
+  it('does not restart the workloads of an intent that is still unproven', async () => {
+    const member = container({ Id: 'c1', State: 'running', Mounts: [{ Type: 'volume', Name: VOLUME }] });
+    const fake = fakeDocker({ volumes: [{ name: VOLUME }], containers: [member] });
+    const seeded = seed({ createdAt: fake.volumes.get(VOLUME)?.createdAt ?? '', members: [member] });
+    walkTo(seeded.intentId, 'swapping');
+    fence.RestoreFenceStore.getInstance().setFenceState(seeded.intentId, 'held');
+    fake.containers.get('c1')!.State = 'exited';
+    const helper = scriptedHelper({ swapAnswers: [{ action: 'status', exitCode: 0, status: 'inconsistent' }] });
+
+    const result = await overwrite.reconcileOverwriteIntentsAtStartup(pipelineDeps(fake, helper));
+    expect(result.unknown).toBe(1);
+    // The journal could not be proven, so the fence stays held until an operator decides.
+    const intent = intents.RestoreIntentStore.getInstance().get(seeded.intentId);
+    expect(intent?.phase).toBe('completion_unknown');
+    expect(intent?.fenceState).toBe('held');
+    expect(fake.calls).not.toContain('start:c1');
+    expect(fake.containers.get('c1')?.State).toBe('exited');
+    expect(points.RecoveryPointStore.getInstance().listHolds(seeded.pointId)).toHaveLength(1);
   });
 });

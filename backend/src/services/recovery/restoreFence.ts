@@ -312,8 +312,12 @@ export async function applyRestoreFence(
   RestoreFenceStore.getInstance().setFenceState(intentId, 'held');
   // A start that passed its check before that line is still on its way to the
   // daemon. Waiting for it means the stop below finds the container started,
-  // instead of the start landing after the stop and on the swap.
-  await waitForStartsInFlight();
+  // instead of the start landing after the stop and on the swap. A start that
+  // does not answer in time is not something to stop around: refuse the fence.
+  if (!await waitForStartsInFlight()) {
+    console.warn('[Recovery] A container start did not answer before the fence was applied; refusing the fence.');
+    throw new RecoveryError('fence_unavailable');
+  }
   for (const member of members) {
     const container = docker.getContainer(member.containerId) as unknown as InspectableContainer;
     try {
@@ -362,6 +366,14 @@ export async function releaseRestoreFence(
       }
       store.markMemberReleased(intentId, member.containerId, now);
     } catch (err) {
+      if ((err as { statusCode?: number }).statusCode === 404) {
+        // The container is gone (removed or recreated since the fence): there is
+        // no policy to restore and nothing to start, and retrying can never
+        // succeed, so it must not hold the volume fenced.
+        console.warn('[Recovery] Fenced container %s no longer exists; nothing to release.', sanitizeForLog(member.containerName));
+        store.markMemberReleased(intentId, member.containerId, now);
+        continue;
+      }
       failed = true;
       console.warn(
         '[Recovery] Could not release the fence on container %s:',
@@ -375,13 +387,25 @@ export async function releaseRestoreFence(
 }
 
 /**
- * Starts that passed the fence check and have not been answered by the daemon.
- * The entries never reject: only the settling matters here.
+ * Starts that passed the fence check and have not been answered by the daemon,
+ * with the time each began. The entries never reject: only the settling matters.
  */
-const startsInFlight = new Set<Promise<void>>();
+const startsInFlight = new Map<Promise<void>, number>();
 
-/** The longest a fence waits for a start already in flight. Docker answers a start in moments. */
-const START_DRAIN_TIMEOUT_MS = 30_000;
+/**
+ * The longest a fence waits for a start already in flight. A restart includes the
+ * container's stop grace period, so this is minutes, not moments.
+ */
+let startDrainTimeoutMs = 120_000;
+
+/** A start pending this long is a hung daemon call, and later fences stop waiting for it. */
+let hungStartAfterMs = 10 * 60_000;
+
+/** Test seam: shorten the waits so a hung start can be exercised. */
+export function setStartDrainTimeoutForTests(ms: number, hungAfterMs = 10 * 60_000): void {
+  startDrainTimeoutMs = ms;
+  hungStartAfterMs = hungAfterMs;
+}
 
 /**
  * Run a start that must not land on a fenced volume.
@@ -389,9 +413,11 @@ const START_DRAIN_TIMEOUT_MS = 30_000;
  * The check and the registration are one synchronous step with the fence write
  * that closes the other side (`setFenceState` is synchronous too), so a start
  * either sees the fence and is refused, or is registered before the fence exists
- * and is waited for by `applyRestoreFence`. There is no third order. This is the
- * single place a Sencho-initiated start passes: the container start and restart
- * of `DockerController` and the Files & Volumes helper container.
+ * and is waited for by `applyRestoreFence`. There is no third order. It guards the
+ * starts Sencho makes of a single container (the start and restart of
+ * `DockerController`) and the Files & Volumes helper container. A fence's own
+ * release and the recovery helper's containers start without it on purpose, and
+ * a Compose lifecycle is held by the stack lock instead.
  */
 export function startUnderFence<T>(volumeNames: readonly string[], start: () => Promise<T>): Promise<T> {
   const fenced = RestoreFenceStore.getInstance().liveFencedVolumeNames();
@@ -404,20 +430,30 @@ export function startUnderFence<T>(volumeNames: readonly string[], start: () => 
     return Promise.reject(err);
   }
   const settled = run.then(() => undefined, () => undefined);
-  startsInFlight.add(settled);
+  startsInFlight.set(settled, Date.now());
   void settled.then(() => startsInFlight.delete(settled));
   return run;
 }
 
-/** Resolve once every start that is in flight now has been answered, or after the cap. */
-export async function waitForStartsInFlight(timeoutMs = START_DRAIN_TIMEOUT_MS): Promise<void> {
-  if (startsInFlight.size === 0) return;
+/**
+ * Wait until every start that is in flight now has been answered. False means a
+ * start was still unanswered when the cap ran out, so the caller cannot treat the
+ * containers it observes as settled and must not stop them as if they were.
+ *
+ * A start that has itself been pending for ten minutes is a hung daemon call, not
+ * a start about to land: it is not waited for again, so one hung call cannot make
+ * every later fence pay the whole cap.
+ */
+export async function waitForStartsInFlight(timeoutMs = startDrainTimeoutMs): Promise<boolean> {
+  const now = Date.now();
+  const pending = [...startsInFlight].filter(([, startedAt]) => now - startedAt < hungStartAfterMs).map(([run]) => run);
+  if (pending.length === 0) return true;
   let timer: NodeJS.Timeout | undefined;
-  const capped = new Promise<void>((resolve) => {
-    timer = setTimeout(resolve, timeoutMs);
+  const capped = new Promise<boolean>((resolve) => {
+    timer = setTimeout(() => resolve(false), timeoutMs);
   });
   try {
-    await Promise.race([Promise.all([...startsInFlight]).then(() => undefined), capped]);
+    return await Promise.race([Promise.all(pending).then(() => true), capped]);
   } finally {
     if (timer) clearTimeout(timer);
   }
@@ -425,8 +461,8 @@ export async function waitForStartsInFlight(timeoutMs = START_DRAIN_TIMEOUT_MS):
 
 /**
  * Start or restart one container unless a volume it mounts is fenced. Called
- * from `DockerController`, which is the one place every single-container start
- * and restart passes through. The mounts are read only while a fence is live, so
+ * from `DockerController`, through which every single-container start and
+ * restart of the Sencho process passes. The mounts are read only while a fence is live, so
  * the common case costs one query; the registration still happens, because a
  * fence installed a moment later has to find this start.
  */

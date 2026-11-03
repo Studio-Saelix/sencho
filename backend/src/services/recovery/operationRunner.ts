@@ -43,6 +43,7 @@ import {
   resolveOverwriteIntent,
   runOverwritePipeline,
   type OverwriteDeps,
+  type OverwriteIntentScope,
   type OverwritePreview,
   type ResolveAction,
 } from './overwriteRestore';
@@ -873,7 +874,7 @@ export class RecoveryEngineService {
       authorizeStack: (stackName: string) => boolean;
       authorizeGlobal: () => boolean;
     },
-    recorded?: { stacks: readonly string[]; unowned: boolean },
+    recorded?: OverwriteIntentScope,
   ): Promise<void> {
     const point = this.points.get(pointId);
     const storage = point ? StorageIdentityStore.getInstance().getById(point.storageId) : null;

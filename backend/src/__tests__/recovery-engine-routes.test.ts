@@ -1248,8 +1248,8 @@ describe('restore over the existing volume', () => {
 describe('an overwrite is authorized against the stacks its fence stopped', () => {
   /**
    * A point of `app_data`, whose stored dependents are `alpha` only, and an
-   * overwrite intent that stopped `alpha` and `beta`. `beta` has since dropped the
-   * volume, so neither the stored nor the live dependents name it.
+   * overwrite intent that recorded `alpha` and `beta` and stopped `beta`. `beta` has
+   * since dropped the volume, so neither the stored nor the live dependents name it.
    */
   async function seedStoppedStacks(): Promise<{ intentId: string; operationId: string }> {
     service().markReadyForTests();
@@ -1332,6 +1332,36 @@ describe('an overwrite is authorized against the stacks its fence stopped', () =
     const admin = await request(app).post(`/api/recovery/restores/${intentId}/resolve`)
       .set('Cookie', adminCookie).send({ action: 'retry' });
     expect(admin.status).toBe(200);
+  });
+
+  it('holds resolve to a stack only the intent recorded, one with no container and no longer declaring the volume', async () => {
+    const { intentId } = await seedStoppedStacks();
+    // `gamma` is in the intent's own record and nowhere else: no fence member,
+    // no stored dependent, no live model.
+    recoveryDbModule.recoveryDb().prepare('UPDATE recovery_restore_intents SET dependent_stacks_json = ? WHERE id = ?')
+      .run(JSON.stringify(['alpha', 'beta', 'gamma']), intentId);
+    const alphaBeta = await userEditing('edits-alpha-beta-gamma-gap', ['alpha', 'beta']);
+    const denied = await request(app).post(`/api/recovery/restores/${intentId}/resolve`)
+      .set('Cookie', alphaBeta).send({ action: 'retry' });
+    expect(denied.status).toBe(403);
+    const all = await userEditing('edits-all-three', ['alpha', 'beta', 'gamma']);
+    const allowed = await request(app).post(`/api/recovery/restores/${intentId}/resolve`)
+      .set('Cookie', all).send({ action: 'retry' });
+    expect(allowed.status).toBe(200);
+  });
+
+  it('holds cancelling to the node-wide check when the fence stopped a container no stack owns', async () => {
+    const { operationId, intentId } = await seedStoppedStacks();
+    const { RestoreFenceStore } = await import('../services/recovery/restoreFence');
+    RestoreFenceStore.getInstance().recordMembers(intentId, [{
+      containerId: 'c-loose', containerName: 'loose-1', stackName: null, projectName: null,
+      restartPolicy: { Name: 'no' }, wasRunning: true,
+    }]);
+    const both = await userEditing('edits-both-cancel-loose', ['alpha', 'beta']);
+    const denied = await request(app).post(`/api/recovery/operations/${operationId}/cancel`).set('Cookie', both);
+    expect(denied.status).toBe(403);
+    const admin = await request(app).post(`/api/recovery/operations/${operationId}/cancel`).set('Cookie', adminCookie);
+    expect(admin.status).not.toBe(403);
   });
 
   it('holds cancelling the operation to the same set', async () => {

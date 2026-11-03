@@ -308,7 +308,7 @@ Startup settles every overwrite a previous process left open, and the operation 
 | the swap completed | rolled forward, cleaned up, restarted |
 | the journal or the volume cannot be read | left unsettled, fence kept held, `completion_unknown` |
 
-An operation that ends `completion_unknown` keeps its restart policies pinned and its points held. Nothing starts until you decide.
+An operation that ends `completion_unknown` keeps its restart policies pinned and its points held. Nothing starts until you decide; startup releases the fence only of a restore that has settled. When the data is proven but the restart policies cannot be restored, the restore settles `committed` or `rolled_back` with `outcomeClass: "fence_unavailable"`, keeps the volume reserved, and the next start of Sencho or a `retry` releases the fence and clears the class.
 
 ### Resolve a restore that did not settle
 
@@ -334,7 +334,7 @@ The volume belongs to the restore until it settles. For as long as the fence is 
 - a container that mounts the volume cannot be started or restarted, including by auto-heal and by the scheduler;
 - the Files & Volumes browser refuses the volume, for reading as well as writing;
 - a second restore into the same volume is refused with `lock_held`, and a capture of it is refused by the storage lock. The refusal lasts until the restore has settled and its fence is released, so a restore that committed but could not release the fence (`partial` with `errorClass: "fence_unavailable"`) still holds the volume; `retry`, or the next start of Sencho, releases it;
-- a container start that Sencho began just before the fence was recorded is waited for, for up to 30 seconds, and the container is then stopped by the fence like the others.
+- a container start that Sencho began just before the fence was recorded is waited for, for up to two minutes, before Sencho looks at the containers and stops them. A container that is one of the recorded dependents is then stopped like the others, and one that appeared in the meantime aborts the restore with `dependents_changed`, with nothing stopped. A start that has not answered by then aborts the restore with `fence_unavailable`, also with nothing stopped.
 
 Deploying to a dependent stack during the overwrite is refused rather than queued. Wait for the operation to settle, or resolve it.
 

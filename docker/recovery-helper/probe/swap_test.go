@@ -421,6 +421,77 @@ func TestRollbackRestoresTheOriginalRootMetadata(t *testing.T) {
 	}
 }
 
+// Go's os.Chmod drops setuid, setgid and sticky unless they are passed as flags,
+// so a volume root with one of those bits must come out of a rollback, and out
+// of a commit, with it intact.
+func TestRootSpecialModeBitsSurviveRollbackAndCommit(t *testing.T) {
+	const want = syscall.S_ISGID | 0o775
+	for _, commit := range []bool{false, true} {
+		name := "rollback"
+		if commit {
+			name = "commit"
+		}
+		t.Run(name, func(t *testing.T) {
+			request := setupVolume(t, map[string]string{"db.bin": "original"}, map[string]string{"new.txt": "restored"})
+			snapshot := filepath.Join(request.Root, workDirPrefix+testIntent, incomingDirName, snapshotRootName)
+			if err := syscall.Chmod(request.Root, want); err != nil {
+				t.Fatal(err)
+			}
+			if err := syscall.Chmod(snapshot, want); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := swapPrepare(request); err != nil {
+				t.Fatalf("prepare: %v", err)
+			}
+			if commit {
+				if _, err := swapCommit(request); err != nil {
+					t.Fatalf("commit: %v", err)
+				}
+			} else if _, err := swapRollback(request); err != nil {
+				t.Fatalf("rollback: %v", err)
+			}
+			var st syscall.Stat_t
+			if err := syscall.Stat(request.Root, &st); err != nil {
+				t.Fatal(err)
+			}
+			if got := st.Mode & 0o7777; got != want {
+				t.Fatalf("root mode = %o, want %o", got, want)
+			}
+		})
+	}
+}
+
+// A journal an older helper wrote has no original root, and a rollback leaves
+// the root alone rather than reading zeros as an owner and mode.
+func TestRollbackWithoutAnOriginalRootLeavesTheRootAlone(t *testing.T) {
+	request := setupVolume(t, map[string]string{"db.bin": "original"}, map[string]string{"new.txt": "restored"})
+	if err := os.Chmod(request.Root, 0o711); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := swapPrepare(request); err != nil {
+		t.Fatalf("prepare: %v", err)
+	}
+	planPath := filepath.Join(request.Root, workDirPrefix+testIntent, planFileName)
+	plan, err := readPlan(planPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	plan.OriginalRoot = nil
+	if err := writePlan(planPath, plan); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := swapRollback(request); err != nil {
+		t.Fatalf("rollback: %v", err)
+	}
+	var st syscall.Stat_t
+	if err := syscall.Stat(request.Root, &st); err != nil {
+		t.Fatal(err)
+	}
+	if got := st.Mode & 0o7777; got != 0o711 {
+		t.Fatalf("root mode = %o, want 711", got)
+	}
+}
+
 func TestCommitIntoAnEmptyVolume(t *testing.T) {
 	request := setupVolume(t, map[string]string{}, map[string]string{"new.txt": "restored"})
 	if _, err := swapPrepare(request); err != nil {
