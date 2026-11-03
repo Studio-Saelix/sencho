@@ -18,7 +18,7 @@ import type { PreflightFindingRow } from '../services/DatabaseService';
 import { runRules } from '../services/preflight/rules';
 import { EVIDENCE_REQUIREMENTS } from '../services/assurance/types';
 import {
-  maximalContext, wideContext, degradedNodeStateContext, unrenderableContext, dossierContext, dropEvidence,
+  svc, maximalContext, wideContext, degradedNodeStateContext, unrenderableContext, dossierContext, dropEvidence,
 } from './helpers/assuranceFixture';
 
 const STACK = 'proj';
@@ -84,8 +84,8 @@ describe('fingerprints', () => {
   });
 
   it('are unique within every evidence variant of the maximal run', () => {
-    // Each variant drops or changes one evidence source, so a rule that only
-    // emits several hits in a degraded run is covered too.
+    // Each variant changes the evidence the rules see, so a rule that only emits
+    // several hits in a degraded run is covered too.
     const variants = {
       maximal: maximalContext(),
       wide: wideContext(),
@@ -101,7 +101,7 @@ describe('fingerprints', () => {
     }
   });
 
-  it('hold in the wide run, where repeatable rules emit several hits per service', () => {
+  it('are checked against a wide run that widens each repeatable rule', () => {
     const count = (ctx: ReturnType<typeof maximalContext>) => {
       const byRule = new Map<string, number>();
       for (const source of runRules(ctx)) byRule.set(source.ruleId, (byRule.get(source.ruleId) ?? 0) + 1);
@@ -142,15 +142,47 @@ describe('fingerprints', () => {
   });
 
   it('are unique across a batch of external findings that name different files', () => {
-    const input = (path: string) => ({
+    const input = (path: string, message = 'Add a USER line') => ({
       nodeId: 1, stack: 'demo', id: 'DS002', title: 'Image user should not be root',
-      message: 'Add a USER line', severity: 'HIGH', path,
+      message, severity: 'HIGH', path,
     });
     const distinct = ['a/Dockerfile', 'b/Dockerfile'].map(path => normalizeTrivyMisconfig(input(path)));
     expect(findFingerprintCollisions(distinct)).toEqual([]);
-    // The same check twice against one file is the collision the guard names.
-    const repeated = [input('a/Dockerfile'), input('a/Dockerfile')].map(normalizeTrivyMisconfig);
+    // Two different results for one check against one file share an identity.
+    const repeated = [input('a/Dockerfile'), input('a/Dockerfile', 'Another instruction')].map(normalizeTrivyMisconfig);
     expect(findFingerprintCollisions(repeated)).toEqual(['external:trivy:DS002']);
+  });
+
+  it('do not flag one fact reported twice, such as a port published on IPv4 and IPv6', () => {
+    const published = (hostIp: string) => ({ startPort: 8080, endPort: 8080, hostIp, protocol: 'tcp' });
+    const base = maximalContext();
+    const ctx = maximalContext({
+      model: { ...(base.model as NonNullable<typeof base.model>), services: [svc({ name: 'web', ports: [published(''), published('[::]')] })] },
+      nodePorts: [],
+    });
+    const exposed = runRules(ctx).filter(source => source.ruleId === 'port-exposed-all-interfaces').map(source => normalize(source));
+    expect(exposed).toHaveLength(2);
+    expect(exposed[0].identity.fingerprint).toBe(exposed[1].identity.fingerprint);
+    expect(findFingerprintCollisions(exposed)).toEqual([]);
+  });
+
+  it('name every colliding rule once and none of the clean ones', () => {
+    const clash = (ruleId: RuleHit['ruleId']) => ['a', 'b', 'c'].map(message => normalize(hit(ruleId, { service: 'web', message })));
+    const clean = normalize(hit('privileged', { service: 'web', sourcePath: 'web' }));
+    expect(findFingerprintCollisions([...clash('port-exposed-all-interfaces'), clean, ...clash('port-conflict-node')]))
+      .toEqual(['port-conflict-node', 'port-exposed-all-interfaces']);
+  });
+
+  it('are the same when a stored run is read back as when it was produced', () => {
+    for (const live of runRules(wideContext()).map(source => normalize(source))) {
+      const stored = normalizeStoredFinding({
+        id: 'row', run_id: 'run', rule_id: live.ruleId, severity: live.severity, title: live.title,
+        message: live.message, source_path: live.location?.path ?? null, remediation: live.remediation ?? null,
+        service: live.scope.service ?? null, created_at: 1,
+        rule_version: live.ruleVersion, subject_kind: live.subject.kind, subject_key: live.subject.key,
+      }, 1, STACK);
+      expect(stored.identity.fingerprint, `${live.ruleId} ${live.subject.key}`).toBe(live.identity.fingerprint);
+    }
   });
 
   it('are not deduplicated when they come from a related external alias', () => {

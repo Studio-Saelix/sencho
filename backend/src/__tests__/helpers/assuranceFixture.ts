@@ -176,10 +176,12 @@ export function maximalContext(over: Partial<PreflightContext> = {}): PreflightC
 }
 
 /**
- * The maximal context with a second instance of every repeatable subject: more
- * conflicting ports, external and new networks and volumes, duplicate and
- * taken container names. A rule that emits one hit per subject then emits
- * several for the same service, which is where a missing subject collides.
+ * The maximal context with a second instance of the repeatable subjects that
+ * seven rules report per item: node port conflicts, missing external networks
+ * and volumes, new networks and volumes, and duplicate or taken container
+ * names. A rule that emits one hit per subject then emits several hits, which
+ * is where a missing subject collides. Only the port conflict rule gives one
+ * service several hits; the others vary by network, volume, or container name.
  */
 export function wideContext(): PreflightContext {
   const base = maximalContext();

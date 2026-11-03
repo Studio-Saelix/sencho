@@ -149,8 +149,9 @@ describe('frontend coverage copy', () => {
   const frontendModule = path.resolve(__dirname, '../../../frontend/src/lib/coverageGaps.ts');
   type FrontendCoverage = {
     REQUIREMENT_LABEL: Record<string, string>;
-    coverageGapLine: (coverage: ReturnType<typeof parseCoverage>) => string | null;
+    coverageGapLine: (coverage: ReturnType<typeof parseCoverage> | undefined) => string | null;
   };
+  // The module must stay import-free: the `@/` alias does not resolve here.
   const load = () => import(/* @vite-ignore */ frontendModule) as Promise<FrontendCoverage>;
 
   it('names every evidence source exactly as the backend does', async () => {
@@ -168,6 +169,28 @@ describe('frontend coverage copy', () => {
     }
     const everything = runAssuranceRules(dropEvidence(dropEvidence(maximalContext(), 'node-state'), 'env-context'));
     expect(frontend.coverageGapLine(everything.coverage)).toBe(`${describeCoverageGaps(everything.coverage)}.`);
+  });
+
+  it('words every coverage state like the backend', async () => {
+    const frontend = await load();
+    const skipped = [{ ruleId: 'privileged', missing: ['node-state'], affectsVerdict: true }];
+    for (const state of ['complete', 'partial', 'unrecorded'] as const) {
+      const coverage = parseCoverage(JSON.stringify({ state, evaluated: 10, notApplicable: 0, skipped }));
+      const clause = state === 'unrecorded' ? null : describeCoverageGaps(coverage);
+      expect(frontend.coverageGapLine(coverage), state).toBe(clause === null ? null : `${clause}.`);
+    }
+    expect(frontend.coverageGapLine(undefined)).toBeNull();
+  });
+
+  it('does not throw on a coverage shape from another build, and ignores inherited keys', async () => {
+    const frontend = await load();
+    const odd = (skipped: unknown) => ({ state: 'partial', evaluated: 1, notApplicable: 0, skipped }) as never;
+    expect(frontend.coverageGapLine(odd('not-a-list'))).toBeNull();
+    expect(frontend.coverageGapLine(odd([null, { affectsVerdict: true, missing: 'node-state' }])))
+      .toBe('1 check could not run.');
+    const inherited = { ruleId: 'privileged', missing: ['constructor', 'toString'], affectsVerdict: true };
+    expect(frontend.coverageGapLine(odd([inherited]))).toBe('1 check could not run.');
+    expect(describeCoverageGaps(odd([inherited]))).toBe('1 check could not run');
   });
 
   it('degrades an unknown requirement to a count like the backend', async () => {

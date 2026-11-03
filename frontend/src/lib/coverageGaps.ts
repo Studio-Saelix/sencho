@@ -1,9 +1,12 @@
 /**
- * Evidence coverage as the Compose Doctor tab shows it. The labels and the
- * sentence mirror backend `REQUIREMENT_LABEL` and `describeCoverageGaps`
- * (assurance/coverage.ts); a backend test loads this module and fails when the
- * two drift, so the Doctor tab and the update-readiness dialog name a missing
- * evidence source the same way.
+ * Evidence coverage as the Compose Doctor tab shows it. The labels mirror
+ * backend `REQUIREMENT_LABEL`, and the sentence is the backend
+ * `describeCoverageGaps` clause plus a full stop (assurance/coverage.ts). A
+ * backend test loads this module and fails when they drift, so the Doctor tab
+ * and the update-readiness dialog name a missing evidence source the same way.
+ *
+ * Keep this file free of imports: the backend test loads it by path, where the
+ * `@/` alias does not resolve.
  */
 export type EvidenceRequirement =
   | 'source'
@@ -37,10 +40,14 @@ export const REQUIREMENT_LABEL: Record<EvidenceRequirement, string> = {
  */
 export function coverageGapLine(coverage: AssuranceCoverage | undefined): string | null {
   if (!coverage || coverage.state === 'unrecorded') return null;
-  const skipped = (coverage.skipped ?? []).filter(entry => entry.affectsVerdict);
+  // A node on another build may send a shape this one does not expect, so an
+  // entry that is not what the type says is skipped instead of thrown on.
+  const skipped = (Array.isArray(coverage.skipped) ? coverage.skipped : [])
+    .filter(entry => entry?.affectsVerdict === true);
   if (skipped.length === 0) return null;
   const reasons = [...new Set(skipped.flatMap(entry =>
-    (entry.missing ?? []).map(requirement => REQUIREMENT_LABEL[requirement]).filter(Boolean)))];
-  if (reasons.length === 0) return `${skipped.length} check${skipped.length === 1 ? '' : 's'} could not run.`;
-  return `${skipped.length} check${skipped.length === 1 ? '' : 's'} could not run: ${reasons.join(', ')}.`;
+    (Array.isArray(entry.missing) ? entry.missing : []).flatMap(requirement =>
+      Object.hasOwn(REQUIREMENT_LABEL, requirement) ? [REQUIREMENT_LABEL[requirement]] : [])))];
+  const count = `${skipped.length} check${skipped.length === 1 ? '' : 's'} could not run`;
+  return reasons.length > 0 ? `${count}: ${reasons.join(', ')}.` : `${count}.`;
 }

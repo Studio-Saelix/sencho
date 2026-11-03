@@ -114,7 +114,8 @@ export function describeCoverageGaps(coverage: AssuranceCoverage): string | null
   const skipped = coverage.skipped.filter(entry => entry.affectsVerdict);
   if (skipped.length === 0) return null;
   const reasons = [...new Set(skipped.flatMap(entry =>
-    entry.missing.map(requirement => REQUIREMENT_LABEL[requirement]).filter(Boolean)))];
+    entry.missing.flatMap(requirement =>
+      Object.hasOwn(REQUIREMENT_LABEL, requirement) ? [REQUIREMENT_LABEL[requirement]] : [])))];
   const count = `${skipped.length} check${skipped.length === 1 ? '' : 's'} could not run`;
   return reasons.length > 0 ? `${count}: ${reasons.join(', ')}` : count;
 }

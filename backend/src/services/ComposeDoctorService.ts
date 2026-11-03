@@ -5,7 +5,7 @@ import { randomUUID } from 'crypto';
 import DockerController from './DockerController';
 import { ComposeService } from './ComposeService';
 import { FileSystemService } from './FileSystemService';
-import { DatabaseService } from './DatabaseService';
+import { DatabaseService, type PreflightAcknowledgement } from './DatabaseService';
 import { computeStackHashes } from './DriftLedgerService';
 import { parseComposeDependencies } from '../helpers/composeDependencyParse';
 import { parseEffectiveModel, type EffectiveModel } from './preflight/effectiveModel';
@@ -24,7 +24,9 @@ import {
 } from './assurance/finding';
 import { assuranceRuleOrder, getAssuranceRule } from './assurance/ruleRegistry';
 import { collectServiceHealthcheckEvidence } from './healthcheck/collectServiceHealthcheckEvidence';
-import { applyPreflightAcknowledgements, parseServiceImages } from '../utils/preflight-ack-filter';
+import {
+  applyPreflightAcknowledgements, parseServiceImages, type PreflightAckFilterContext,
+} from '../utils/preflight-ack-filter';
 
 import { isPathWithinBase } from '../utils/validation';
 import { getErrorMessage } from '../utils/errors';
@@ -57,7 +59,7 @@ function sortNormalized(findings: AssuranceFinding[]): AssuranceFinding[] {
   return [...findings].sort(compareFindings);
 }
 
-/** Project the contract onto the Doctor wire shape. The wire type predates the
+/** Project one finding onto the Doctor wire shape. The wire type predates the
  *  contract and stays additive: subject, identity, and coverage are backend
  *  internals until a normalized wire format exists. */
 function projectFinding(finding: AssuranceFinding): PreflightFinding {
@@ -115,14 +117,15 @@ function buildServiceImages(model: EffectiveModel | null): string | null {
 }
 
 /** The acknowledgements of a stack plus the stored context their expiry reads. */
-function loadAcknowledgementInputs(nodeId: number, stackName: string, renderedHash: string | null) {
-  const db = DatabaseService.getInstance();
+function loadAcknowledgementInputs(
+  nodeId: number,
+  stackName: string,
+  renderedHash: string | null,
+  serviceImagesJson: string | null,
+): { acks: PreflightAcknowledgement[]; ackCtx: PreflightAckFilterContext } {
   return {
-    acks: db.getPreflightAcknowledgements(nodeId, stackName),
-    ctx: {
-      renderedHash,
-      serviceImages: parseServiceImages(db.getLatestPreflightRun(nodeId, stackName)?.service_images ?? null),
-    },
+    acks: DatabaseService.getInstance().getPreflightAcknowledgements(nodeId, stackName),
+    ackCtx: { renderedHash, serviceImages: parseServiceImages(serviceImagesJson) },
   };
 }
 
@@ -131,8 +134,9 @@ function enrichReport(
   stackName: string,
   report: Omit<PreflightReport, 'activeStatus' | 'activeHighestSeverity' | 'activeCount' | 'acknowledgedCount'>,
 ): PreflightReport {
-  const { acks, ctx } = loadAcknowledgementInputs(nodeId, stackName, report.renderedHash);
-  const findings = applyPreflightAcknowledgements(report.findings, ctx, acks);
+  const run = DatabaseService.getInstance().getLatestPreflightRun(nodeId, stackName);
+  const { acks, ackCtx } = loadAcknowledgementInputs(nodeId, stackName, report.renderedHash, run?.service_images ?? null);
+  const findings = applyPreflightAcknowledgements(report.findings, ackCtx, acks);
   return {
     ...report,
     findings,
@@ -186,12 +190,11 @@ export class ComposeDoctorService {
     }));
     const collisions = findFingerprintCollisions(normalized);
     if (collisions.length > 0) {
-      // A rule that emits several hits for one service without a distinct subject
-      // makes its findings indistinguishable by identity. They are all kept (the
-      // wire report is unchanged), and the offending rule ids are named here so
-      // the missing subject is fixed in the rule.
-      console.warn('[ComposeDoctor] Findings share a fingerprint for rule(s): %s',
-        sanitizeForLog(collisions.join(', ')));
+      // Different findings under one identity mean a rule emitted several hits
+      // without a distinct subject. They are all kept (the wire report is
+      // unchanged), and the rule ids are named here so the rule gets its subject.
+      console.warn('[ComposeDoctor] Findings share a fingerprint for rule(s) %s in %s on node %d',
+        sanitizeForLog(collisions.join(', ')), sanitizeForLog(stackName), nodeId);
     }
     const findings = projectFindings(normalized);
     const highestSeverity = highestOf(findings);
@@ -227,14 +230,16 @@ export class ComposeDoctorService {
   getLatestAssurance(nodeId: number, stackName: string): { findings: AssuranceFinding[]; coverage: AssuranceCoverage } {
     const run = DatabaseService.getInstance().getLatestPreflightRun(nodeId, stackName);
     if (!run) return { findings: [], coverage: unrecordedCoverage() };
-    const { acks, ctx } = loadAcknowledgementInputs(nodeId, stackName, run.rendered_hash);
+    const { acks, ackCtx } = loadAcknowledgementInputs(nodeId, stackName, run.rendered_hash, run.service_images ?? null);
+    // One clock reading for the whole read, as the wire report takes.
+    const now = Date.now();
     return {
       coverage: parseCoverage(run.coverage),
       // Each finding gets its own decision from its own projection. Nothing pairs
       // two sequences by position, so a later sort or filter cannot move a
       // decision onto another finding.
       findings: this.readNormalized(nodeId, stackName, run.id).map(finding =>
-        withDecision(finding, applyPreflightAcknowledgements([projectFinding(finding)], ctx, acks)[0])),
+        withDecision(finding, applyPreflightAcknowledgements([projectFinding(finding)], ackCtx, acks, now)[0])),
     };
   }
 

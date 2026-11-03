@@ -99,23 +99,27 @@ export function findingFingerprint(
 }
 
 /**
- * Rule ids whose findings share a fingerprint within one run. A rule that emits
- * several hits for one service must give each a distinct subject (or source
- * path); otherwise the hits are indistinguishable to any consumer that pairs or
- * dedupes on identity. Legacy rows are skipped: their identity is documented as
- * not dedupable.
+ * Rule ids with two different findings under one fingerprint in a single run.
+ * A rule that emits several hits for one source path, service, or stack must
+ * give each hit a distinct `subject` (or `sourcePath`); otherwise the hits are
+ * indistinguishable to any consumer that pairs or dedupes on identity. Findings
+ * that repeat the same title, message, and path under one fingerprint are one
+ * fact reported twice (a port published on both an IPv4 and an IPv6 address),
+ * not a collision. Legacy rows are skipped: their identity is documented as not
+ * dedupable.
  */
 export function findFingerprintCollisions(findings: readonly AssuranceFinding[]): string[] {
-  const byFingerprint = new Map<string, string[]>();
+  const byFingerprint = new Map<string, { ruleId: string; contents: Set<string> }>();
   for (const finding of findings) {
     if (finding.identity.basis === 'legacy') continue;
+    const content = JSON.stringify([finding.title, finding.message, finding.location?.path ?? null]);
     const seen = byFingerprint.get(finding.identity.fingerprint);
-    if (seen) seen.push(finding.ruleId);
-    else byFingerprint.set(finding.identity.fingerprint, [finding.ruleId]);
+    if (seen) seen.contents.add(content);
+    else byFingerprint.set(finding.identity.fingerprint, { ruleId: finding.ruleId, contents: new Set([content]) });
   }
   const colliding = new Set<string>();
-  for (const ruleIds of byFingerprint.values()) {
-    if (ruleIds.length > 1) for (const ruleId of ruleIds) colliding.add(ruleId);
+  for (const { ruleId, contents } of byFingerprint.values()) {
+    if (contents.size > 1) colliding.add(ruleId);
   }
   return [...colliding].sort();
 }
@@ -215,9 +219,9 @@ function decisionForSerialize(decision: AssuranceDecision): AssuranceDecision {
 }
 
 /** The subject a rule's hit carries, falling back to the registry kind plus the
- *  most specific value the hit names. The fallback is one value per service, so
- *  a rule that emits several hits for a service must set `hit.subject` or a
- *  distinct `sourcePath`; `findFingerprintCollisions` flags one that does not. */
+ *  most specific value the hit names: its source path, else its service, else
+ *  the stack. A rule that emits several hits sharing that value must set
+ *  `hit.subject`; `findFingerprintCollisions` flags one that does not. */
 export function subjectForHit(rule: AssuranceRule, stackName: string, hit: RuleHit): AssuranceSubject {
   if (hit.subject) return hit.subject;
   return { kind: rule.subject, key: hit.sourcePath ?? hit.service ?? stackName };

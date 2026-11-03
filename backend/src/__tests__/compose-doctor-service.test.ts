@@ -741,42 +741,84 @@ describe('Compose Assurance contract persistence', () => {
     expect(normalized.findings[0].ruleVersion).toBeNull();
   });
 
-  it('attaches each acknowledgement decision to the finding it was matched for', () => {
-    const stack = 'assurance-legacy';
+  describe('acknowledgement decisions on normalized findings', () => {
+    const stack = 'assurance-acks';
     const row = (id: string, ruleId: string, severity: string, service: string) => ({
       id, run_id: 'ack-run', rule_id: ruleId, severity, title: ruleId, message: 'm',
       source_path: null, remediation: null, service, created_at: 2,
       rule_version: 1, subject_kind: 'service', subject_key: service,
     });
-    // Stored in an order that differs from the severity-then-registry order the
-    // read path returns, so a pairing by position would attach decisions wrongly.
-    db().replacePreflightRun(
-      { id: 'ack-run', node_id: nodeId, stack_name: stack, source_hash: null, rendered_hash: null, service_images: null, status: 'high', highest_severity: 'high', created_at: 2, created_by: 'tester', coverage: null },
-      [
-        row('f-web', 'privileged', 'high', 'web'),
-        row('f-info', 'healthcheck-inherited', 'info', 'db'),
-        row('f-db', 'privileged', 'high', 'db'),
-        row('f-warn', 'restart-policy-missing', 'warning', 'web'),
-      ],
-    );
-    db().upsertPreflightAcknowledgement({
-      node_id: nodeId, stack_name: stack, rule_id: 'privileged', service: 'db', reason: 'db needs it',
-      expiry_mode: 'forever', expires_at: null, anchor_rendered_hash: null, anchor_image_ref: null,
-      created_by: 'tester', created_at: Date.now(),
+    const ack = (ruleId: string, service: string | null, over: Record<string, unknown> = {}) => ({
+      node_id: nodeId, stack_name: stack, rule_id: ruleId, service, reason: `${ruleId} ${service ?? 'any'}`,
+      expiry_mode: 'forever' as const, expires_at: null, anchor_rendered_hash: null, anchor_image_ref: null,
+      created_by: 'tester', created_at: Date.now(), ...over,
     });
-    try {
+    const decidedPairs = () => doctor().getLatestAssurance(nodeId, stack).findings
+      .filter(finding => finding.decision)
+      .map(finding => [finding.ruleId, finding.scope.service, finding.decision?.expiry.mode]);
+
+    beforeEach(() => {
+      // Stored in an order that differs from the severity-then-registry order the
+      // read path returns.
+      db().replacePreflightRun(
+        { id: 'ack-run', node_id: nodeId, stack_name: stack, source_hash: null, rendered_hash: 'hash-1', service_images: null, status: 'high', highest_severity: 'high', created_at: 2, created_by: 'tester', coverage: null },
+        [
+          row('f-web', 'privileged', 'high', 'web'),
+          row('f-info', 'healthcheck-inherited', 'info', 'db'),
+          row('f-db', 'privileged', 'high', 'db'),
+          row('f-warn', 'no-restart-policy', 'warning', 'web'),
+        ],
+      );
+    });
+    afterEach(() => {
+      db().getDb().prepare('DELETE FROM preflight_acknowledgements WHERE node_id = ? AND stack_name = ?').run(nodeId, stack);
+      db().replacePreflightRun(
+        { id: 'cleanup-acks', node_id: nodeId, stack_name: stack, source_hash: null, rendered_hash: null, service_images: null, status: 'pass', highest_severity: null, created_at: 1, created_by: null },
+        [],
+      );
+    });
+
+    it('attaches a decision only to the finding it was matched for', () => {
+      db().upsertPreflightAcknowledgement(ack('privileged', 'db'));
       const { findings } = doctor().getLatestAssurance(nodeId, stack);
       expect(findings).toHaveLength(4);
-      const decided = findings.filter(finding => finding.decision);
-      expect(decided.map(finding => [finding.ruleId, finding.scope.service])).toEqual([['privileged', 'db']]);
-      expect(decided[0].decision?.reason).toBe('db needs it');
+      expect(decidedPairs()).toEqual([['privileged', 'db', 'forever']]);
+      expect(findings.find(finding => finding.decision)?.decision?.reason).toBe('privileged db');
       // The wire report agrees finding for finding.
-      const report = doctor().getLatest(nodeId, stack);
-      expect(report.findings.filter(finding => finding.acknowledged).map(finding => [finding.ruleId, finding.service]))
-        .toEqual([['privileged', 'db']]);
-    } finally {
-      db().getDb().prepare('DELETE FROM preflight_acknowledgements WHERE node_id = ? AND stack_name = ?').run(nodeId, stack);
-    }
+      expect(doctor().getLatest(nodeId, stack).findings.filter(finding => finding.acknowledged)
+        .map(finding => [finding.ruleId, finding.service])).toEqual([['privileged', 'db']]);
+    });
+
+    it('applies a stack-wide acknowledgement anchored to the stored rendered hash', () => {
+      db().upsertPreflightAcknowledgement(ack('no-restart-policy', null, { expiry_mode: 'until_compose_change', anchor_rendered_hash: 'hash-1' }));
+      expect(decidedPairs()).toEqual([['no-restart-policy', 'web', 'until_compose_change']]);
+      // An anchor from a different Compose version no longer applies.
+      db().upsertPreflightAcknowledgement(ack('no-restart-policy', null, { expiry_mode: 'until_compose_change', anchor_rendered_hash: 'hash-0' }));
+      expect(decidedPairs()).toEqual([]);
+    });
+
+    it('does not apply an expired acknowledgement or one for another rule', () => {
+      db().upsertPreflightAcknowledgement(ack('privileged', 'web', { expiry_mode: 'days', expires_at: Date.now() - 1000 }));
+      db().upsertPreflightAcknowledgement(ack('image-latest', 'web'));
+      expect(decidedPairs()).toEqual([]);
+    });
+
+    it('does not depend on the order of any other read of the same rows', () => {
+      // A second read that returned the rows in another order (a later sort or
+      // filter on one path) must not move a decision onto another finding.
+      db().upsertPreflightAcknowledgement(ack('privileged', 'db'));
+      const service = doctor() as unknown as { readNormalized: (...args: unknown[]) => unknown[] };
+      const real = service.readNormalized.bind(service);
+      let reads = 0;
+      vi.spyOn(service, 'readNormalized').mockImplementation((...args: unknown[]) => {
+        const rows = real(...args);
+        return reads++ === 0 ? rows : [...rows].reverse();
+      });
+      const decided = doctor().getLatestAssurance(nodeId, stack).findings
+        .filter(finding => finding.decision)
+        .map(finding => [finding.ruleId, finding.scope.service]);
+      expect(decided).toEqual([['privileged', 'db']]);
+    });
   });
 
   it('names the rule when two findings share a fingerprint, and keeps both', async () => {
