@@ -222,6 +222,9 @@ export function CloudBackupSection() {
     const [encryptArchives, setEncryptArchives] = useState(false);
     const [passphraseSaved, setPassphraseSaved] = useState(false);
     const [pendingEnable, setPendingEnable] = useState(false);
+    // Read inside resyncConfirmed, which must not depend on pendingEnable.
+    const pendingEnableRef = useRef(false);
+    useEffect(() => { pendingEnableRef.current = pendingEnable; }, [pendingEnable]);
     const [passphraseDraft, setPassphraseDraft] = useState('');
     const [passphraseError, setPassphraseError] = useState('');
     const [savingEncryption, setSavingEncryption] = useState(false);
@@ -332,9 +335,10 @@ export function CloudBackupSection() {
             setProvider(data.provider);
             setEncryptArchives(data.encrypt_archives === true);
             setPassphraseSaved(data.archive_passphrase === '***');
-            // A stored passphrase settles a pending enable; otherwise the
-            // operator is still mid-way and can retry the save.
-            if (data.archive_passphrase === '***') {
+            // A stored passphrase settles a pending enable (the draft is what
+            // was stored); otherwise the operator is still mid-way and can
+            // retry. An unsaved replacement draft is never discarded here.
+            if (data.archive_passphrase === '***' && pendingEnableRef.current) {
                 setPendingEnable(false);
                 setPassphraseDraft('');
             }

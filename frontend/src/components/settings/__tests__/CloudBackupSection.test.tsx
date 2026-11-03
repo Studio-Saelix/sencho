@@ -628,6 +628,24 @@ describe('CloudBackupSection encryption writes', () => {
         expect(screen.queryByRole('button', { name: 'Save passphrase' })).not.toBeInTheDocument();
     });
 
+    it('keeps an unsaved replacement passphrase when an unrelated write loses its answer', async () => {
+        configPayload = { ...customConfig, encrypt_archives: true, archive_passphrase: '***' };
+        const base = apiFetch.getMockImplementation()!;
+        apiFetch.mockImplementation(async (path: string, options?: { method?: string }) => {
+            if (path === '/cloud-backup/config' && options?.method === 'PUT') throw new Error('network down');
+            return base(path, options);
+        });
+        render(<CloudBackupSection />);
+        const user = userEvent.setup();
+        const draft = await screen.findByLabelText('Archive passphrase');
+        await user.type(draft, 'replacement-passphrase');
+        await user.click(screen.getByRole('switch', { name: 'Encrypt archives' }));
+        await waitFor(() => expect(toast.error).toHaveBeenCalledWith('network down'));
+        await waitFor(() => expect(apiFetch.mock.calls.filter(call => call[0] === '/cloud-backup/config' && !call[1]?.method).length).toBeGreaterThan(1));
+        expect(screen.getByLabelText('Archive passphrase')).toHaveValue('replacement-passphrase');
+        expect(screen.getByRole('button', { name: 'Save passphrase' })).toBeInTheDocument();
+    });
+
     it('turning encryption off writes only the flag and the placeholder passphrase', async () => {
         configPayload = { ...customConfig, encrypt_archives: true, archive_passphrase: '***' };
         render(<CloudBackupSection />);
