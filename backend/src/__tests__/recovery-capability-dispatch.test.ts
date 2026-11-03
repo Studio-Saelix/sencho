@@ -432,41 +432,112 @@ describe('the hub preflight and a node without the overwrite surface', () => {
 
   // The hub middleware, not only the preflight, has to pick the mode from the
   // path: a route that slips out of the pattern reaches an older node unchecked.
+  // Both nodes point at a closed loopback port, so a broken guard fails this test
+  // with a fast transport refusal instead of sending the request to a real host.
   const overwriteSurface = [
     '/api/recovery/points/pt-1/overwrite/preview',
     '/api/recovery/points/pt-1/overwrite',
     '/api/recovery/restores/intent-1/resolve',
   ];
+  const otherPosts = [
+    '/api/recovery/points/pt-1/restore',
+    '/api/recovery/points/pt-1/verify',
+    '/api/recovery/operations/op-1/cancel',
+  ];
+  let closedProxyNodeId: number;
 
-  for (const [label, getId] of [
-    ['a direct-proxy node', () => proxyNodeId],
+  beforeAll(() => {
+    closedProxyNodeId = DatabaseService.getInstance().addNode({
+      name: 'recovery-overwrite-closed-port', type: 'remote', api_url: 'http://127.0.0.1:9', api_token: 't', compose_dir: '/srv', is_default: false,
+    });
+  });
+
+  const transports = [
+    ['a direct-proxy node', () => closedProxyNodeId],
     ['a Pilot node', () => pilotNodeId],
-  ] as const) {
-    it(`refuses every overwrite route for ${label} that never advertised it, before the hop`, async () => {
-      mockRead.mockImplementation(echoing(legacyDescriptor()) as never);
-      // A Pilot node with no live tunnel has no proxy target and is refused
-      // before the preflight; give it one so the request reaches it.
-      const { PilotTunnelManager } = await import('../services/PilotTunnelManager');
-      vi.spyOn(PilotTunnelManager.getInstance(), 'getLoopbackUrl').mockReturnValue('http://127.0.0.1:9');
+  ] as const;
+
+  /** A Pilot node with no live tunnel is refused before the preflight; stub a loopback URL so a request reaches it. */
+  const giveTunnel = async (nodeId: number) => {
+    if (nodeId !== pilotNodeId) return;
+    const { PilotTunnelManager } = await import('../services/PilotTunnelManager');
+    vi.spyOn(PilotTunnelManager.getInstance(), 'getLoopbackUrl').mockReturnValue('http://127.0.0.1:9');
+  };
+
+  const post = (path: string, nodeId: number) => request(app)
+    .post(path)
+    .set('Authorization', authHeader)
+    .set('x-node-id', String(nodeId))
+    .send({});
+
+  for (const [label, getId] of transports) {
+    describe(label, () => {
       for (const path of overwriteSurface) {
-        const res = await request(app)
-          .post(path)
-          .set('Authorization', authHeader)
-          .set('x-node-id', String(getId()))
-          .send({});
-        expect(res.status, path).toBe(409);
-        expect(res.body, path).toMatchObject({ code: 'UPDATE_REQUIRED', errorClass: 'update_required' });
+        it(`refuses POST ${path} when the node never advertised the overwrite, before forwarding it`, async () => {
+          mockRead.mockImplementation(echoing(legacyDescriptor()) as never);
+          await giveTunnel(getId());
+          const res = await post(path, getId());
+          expect(res.status).toBe(409);
+          expect(res.body).toMatchObject({ code: 'UPDATE_REQUIRED', errorClass: 'update_required' });
+          expect(res.body.error).toMatch(/restore over an existing volume/);
+          // Only the hub's own descriptor read happened; nothing was forwarded.
+          expect(mockRead.mock.calls.map(([args]) => args.path)).toEqual(['/api/recovery/node']);
+        });
+
+        it(`lets POST ${path} through to a node that advertises the overwrite`, async () => {
+          mockRead.mockImplementation(echoing(descriptor('available', 'engine_registered')) as never);
+          await giveTunnel(getId());
+          const res = await post(path, getId());
+          expect(res.body.code).not.toBe('UPDATE_REQUIRED');
+          expect(res.status).not.toBe(409);
+        });
+      }
+
+      for (const path of otherPosts) {
+        it(`does not refuse POST ${path} as an update-required request for a node without the overwrite`, async () => {
+          mockRead.mockImplementation(echoing(legacyDescriptor()) as never);
+          await giveTunnel(getId());
+          const res = await post(path, getId());
+          expect(res.body.code).not.toBe('UPDATE_REQUIRED');
+        });
       }
     });
   }
 
-  it('narrows only the overwrite routes: a POST restore, a cancel, and every GET need no mode', async () => {
+  it('maps only the three overwrite routes, on POST, to the overwrite mode', async () => {
     const { requiredRestoreModeFor } = await import('../proxy/remoteNodeProxy');
-    for (const path of ['/recovery/points/pt-1/overwrite/preview', '/recovery/points/pt-1/overwrite', '/recovery/restores/intent-1/resolve/']) {
+    const narrowed = [
+      '/recovery/points/pt-1/overwrite/preview',
+      '/recovery/points/pt-1/overwrite/preview/',
+      '/recovery/points/pt-1/overwrite',
+      '/recovery/points/pt-1/overwrite/',
+      '/recovery/restores/intent-1/resolve',
+      '/recovery/restores/intent-1/resolve/',
+      '/recovery/Points/pt-1/Overwrite',
+      '/RECOVERY/RESTORES/intent-1/RESOLVE',
+    ];
+    for (const path of narrowed) {
       expect(requiredRestoreModeFor('POST', path), path).toBe('staged_overwrite');
-      expect(requiredRestoreModeFor('GET', path), `GET ${path}`).toBeUndefined();
+      expect(requiredRestoreModeFor('post', path), `post ${path}`).toBe('staged_overwrite');
+      for (const method of ['GET', 'HEAD', 'PUT', 'PATCH', 'DELETE']) {
+        expect(requiredRestoreModeFor(method, path), `${method} ${path}`).toBeUndefined();
+      }
     }
-    for (const path of ['/recovery/points/pt-1/restore', '/recovery/points/pt-1/verify', '/recovery/operations/op-1/cancel', '/recovery/storage/points', '/recovery/locks/release', '/recovery/restores/intent-1']) {
+    const open = [
+      '/recovery/points/pt-1/restore',
+      '/recovery/points/pt-1/verify',
+      '/recovery/operations/op-1/cancel',
+      '/recovery/storage/points',
+      '/recovery/repository',
+      '/recovery/locks/release',
+      '/recovery/restores/intent-1',
+      '/recovery/restores/intent-1/other',
+      '/recovery/restores/a/b/resolve',
+      '/recovery/points/pt-1/overwrite/extra',
+      '/recovery/points/pt-1/overwrite-x',
+      '/recovery/points/overwrite',
+    ];
+    for (const path of open) {
       expect(requiredRestoreModeFor('POST', path), path).toBeUndefined();
     }
   });
