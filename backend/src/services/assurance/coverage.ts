@@ -106,16 +106,23 @@ export const REQUIREMENT_LABEL: Record<EvidenceRequirement, string> = {
 
 /**
  * What did not run, in one clause, or null when every verdict-affecting check
- * ran. Note rules are excluded: they never change the verdict. An unknown
- * requirement name (coverage written by a newer build) degrades to a count
- * instead of leaking `undefined` into operator copy.
+ * ran. Note rules are excluded: they never change the verdict. The input is not
+ * trusted to match its type (coverage can come from a node on another build, or
+ * from a caller that skipped `parseCoverage`): a `skipped` that is not a list, an
+ * entry that is not an object, a `missing` that is not a list, and an unknown
+ * requirement name each degrade to fewer reasons or a bare count instead of a
+ * throw or `undefined` in operator copy. The Doctor tab applies the same rules
+ * (frontend `coverageGapLine`).
  */
 export function describeCoverageGaps(coverage: AssuranceCoverage): string | null {
-  const skipped = coverage.skipped.filter(entry => entry.affectsVerdict);
+  const entries: readonly AssuranceCoverageSkip[] = Array.isArray(coverage.skipped) ? coverage.skipped : [];
+  const skipped = entries.filter(entry => entry?.affectsVerdict === true);
   if (skipped.length === 0) return null;
-  const reasons = [...new Set(skipped.flatMap(entry =>
-    entry.missing.flatMap(requirement =>
-      Object.hasOwn(REQUIREMENT_LABEL, requirement) ? [REQUIREMENT_LABEL[requirement]] : [])))];
+  const reasons = [...new Set(skipped.flatMap(entry => {
+    const missing: readonly EvidenceRequirement[] = Array.isArray(entry.missing) ? entry.missing : [];
+    return missing.flatMap(requirement =>
+      Object.hasOwn(REQUIREMENT_LABEL, requirement) ? [REQUIREMENT_LABEL[requirement]] : []);
+  }))];
   const count = `${skipped.length} check${skipped.length === 1 ? '' : 's'} could not run`;
   return reasons.length > 0 ? `${count}: ${reasons.join(', ')}` : count;
 }

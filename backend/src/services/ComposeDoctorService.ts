@@ -5,7 +5,7 @@ import { randomUUID } from 'crypto';
 import DockerController from './DockerController';
 import { ComposeService } from './ComposeService';
 import { FileSystemService } from './FileSystemService';
-import { DatabaseService, type PreflightAcknowledgement } from './DatabaseService';
+import { DatabaseService, type PreflightAcknowledgement, type PreflightRunRow } from './DatabaseService';
 import { computeStackHashes } from './DriftLedgerService';
 import { parseComposeDependencies } from '../helpers/composeDependencyParse';
 import { parseEffectiveModel, type EffectiveModel } from './preflight/effectiveModel';
@@ -59,9 +59,9 @@ function sortNormalized(findings: AssuranceFinding[]): AssuranceFinding[] {
   return [...findings].sort(compareFindings);
 }
 
-/** Project one finding onto the Doctor wire shape. The wire type predates the
- *  contract and stays additive: subject, identity, and coverage are backend
- *  internals until a normalized wire format exists. */
+/** Project one finding onto the Doctor wire shape, without a decision. The wire
+ *  type predates the contract and stays additive: subject, identity, and
+ *  coverage are backend internals until a normalized wire format exists. */
 function projectFinding(finding: AssuranceFinding): PreflightFinding {
   return {
     ruleId: finding.ruleId,
@@ -74,8 +74,38 @@ function projectFinding(finding: AssuranceFinding): PreflightFinding {
   };
 }
 
-function projectFindings(findings: readonly AssuranceFinding[]): PreflightFinding[] {
-  return findings.map(projectFinding);
+/** The wire finding of a decided finding: the acknowledgement fields are read
+ *  off the finding's own decision, so the wire and the contract cannot disagree. */
+function projectDecided(finding: AssuranceFinding): PreflightFinding {
+  const wire = projectFinding(finding);
+  const decision = finding.decision;
+  if (!decision) return { ...wire, acknowledged: false };
+  return {
+    ...wire,
+    acknowledged: true,
+    acknowledgementId: decision.id,
+    acknowledgementReason: decision.reason,
+    acknowledgementExpiry: decision.expiry.mode,
+    ...(decision.expiry.expiresAt !== undefined ? { acknowledgementExpiresAt: decision.expiry.expiresAt } : {}),
+  };
+}
+
+/**
+ * Attach each finding's acknowledgement decision. Every finding is matched on
+ * its own projection, so nothing pairs two sequences by position and a later
+ * sort or filter cannot move a decision onto another finding. `now` is read once
+ * by the caller, so every finding of one report sees the same clock.
+ */
+function decideFindings(
+  findings: readonly AssuranceFinding[],
+  ackCtx: PreflightAckFilterContext,
+  acks: PreflightAcknowledgement[],
+  now: number,
+): AssuranceFinding[] {
+  return findings.map(finding => {
+    const [decided] = applyPreflightAcknowledgements([projectFinding(finding)], ackCtx, acks, now);
+    return withDecision(finding, decided);
+  });
 }
 
 function highestOf(findings: PreflightFinding[]): PreflightSeverity | null {
@@ -126,21 +156,6 @@ function loadAcknowledgementInputs(
   return {
     acks: DatabaseService.getInstance().getPreflightAcknowledgements(nodeId, stackName),
     ackCtx: { renderedHash, serviceImages: parseServiceImages(serviceImagesJson) },
-  };
-}
-
-function enrichReport(
-  nodeId: number,
-  stackName: string,
-  report: Omit<PreflightReport, 'activeStatus' | 'activeHighestSeverity' | 'activeCount' | 'acknowledgedCount'>,
-): PreflightReport {
-  const run = DatabaseService.getInstance().getLatestPreflightRun(nodeId, stackName);
-  const { acks, ackCtx } = loadAcknowledgementInputs(nodeId, stackName, report.renderedHash, run?.service_images ?? null);
-  const findings = applyPreflightAcknowledgements(report.findings, ackCtx, acks);
-  return {
-    ...report,
-    findings,
-    ...activeFields(report.renderable, findings),
   };
 }
 
@@ -196,10 +211,13 @@ export class ComposeDoctorService {
       console.warn('[ComposeDoctor] Findings share a fingerprint for rule(s) %s in %s on node %d',
         sanitizeForLog(collisions.join(', ')), sanitizeForLog(stackName), nodeId);
     }
-    const findings = projectFindings(normalized);
+    const serviceImages = buildServiceImages(ctx.model);
+    // The decisions use the hashes and images this run stores, not whatever run
+    // is stored last, so a failed persist cannot pair them with an older run.
+    const { acks, ackCtx } = loadAcknowledgementInputs(nodeId, stackName, hashes.renderedHash, serviceImages);
+    const findings = decideFindings(normalized, ackCtx, acks, Date.now()).map(projectDecided);
     const highestSeverity = highestOf(findings);
     const status: PreflightStatus = !ctx.renderable ? 'unrenderable' : (highestSeverity ?? 'pass');
-    const serviceImages = buildServiceImages(ctx.model);
 
     const report: PreflightReport = {
       stack: stackName,
@@ -213,35 +231,31 @@ export class ComposeDoctorService {
       renderedHash: hashes.renderedHash,
       findings,
       coverage,
-      activeStatus: status,
-      activeHighestSeverity: highestSeverity,
-      activeCount: findings.length,
-      acknowledgedCount: 0,
+      ...activeFields(ctx.renderable, findings),
     };
     this.persist(nodeId, report, serviceImages, normalized);
-    return enrichReport(nodeId, stackName, report);
+    return report;
   }
 
   /**
-   * The normalized findings of the latest stored run, with the read-time
-   * acknowledgement decision attached. The Doctor wire shape is a projection of
+   * The latest stored run with its normalized findings, each carrying the
+   * read-time acknowledgement decision, and its coverage. `getLatest` (the Doctor
+   * route, readiness, and the networking findings all read it) is a projection of
    * this, so the contract is on the hot path rather than a parallel model.
    */
-  getLatestAssurance(nodeId: number, stackName: string): { findings: AssuranceFinding[]; coverage: AssuranceCoverage } {
+  getLatestAssurance(nodeId: number, stackName: string): {
+    run: PreflightRunRow | null;
+    findings: AssuranceFinding[];
+    coverage: AssuranceCoverage;
+  } {
     const run = DatabaseService.getInstance().getLatestPreflightRun(nodeId, stackName);
-    if (!run) return { findings: [], coverage: unrecordedCoverage() };
+    if (!run) return { run: null, findings: [], coverage: unrecordedCoverage() };
     const { acks, ackCtx } = loadAcknowledgementInputs(nodeId, stackName, run.rendered_hash, run.service_images);
-    // One clock reading for the whole read, as the wire report takes.
-    const now = Date.now();
     return {
+      run,
+      // One clock reading for the whole read, as the wire report takes.
+      findings: decideFindings(this.readNormalized(nodeId, stackName, run.id), ackCtx, acks, Date.now()),
       coverage: parseCoverage(run.coverage),
-      // Each finding gets its own decision from its own projection. Nothing pairs
-      // two sequences by position, so a later sort or filter cannot move a
-      // decision onto another finding.
-      findings: this.readNormalized(nodeId, stackName, run.id).map(finding => {
-        const [decided] = applyPreflightAcknowledgements([projectFinding(finding)], ackCtx, acks, now);
-        return withDecision(finding, decided);
-      }),
     };
   }
 
@@ -255,21 +269,20 @@ export class ComposeDoctorService {
 
   /** Read the last stored run for a stack, mapped to the report shape. */
   getLatest(nodeId: number, stackName: string): PreflightReport {
-    const db = DatabaseService.getInstance();
-    const run = db.getLatestPreflightRun(nodeId, stackName);
+    const { run, findings: decided, coverage } = this.getLatestAssurance(nodeId, stackName);
     if (!run) {
       return {
         stack: stackName, ranAt: null, ranBy: null, renderable: true, renderError: null,
         status: 'never-run', highestSeverity: null, sourceHash: null, renderedHash: null, findings: [],
-        coverage: unrecordedCoverage(),
+        coverage,
         activeStatus: 'never-run', activeHighestSeverity: null, activeCount: 0, acknowledgedCount: 0,
       };
     }
-    const findings = projectFindings(this.readNormalized(nodeId, stackName, run.id));
+    const findings = decided.map(projectDecided);
     const renderable = run.status !== 'unrenderable';
     // The render error is carried by the render-failed finding, not a column.
     const renderError = renderable ? null : (findings.find(f => f.ruleId === RENDER_FAILED_RULE_ID)?.message ?? null);
-    const base: Omit<PreflightReport, 'activeStatus' | 'activeHighestSeverity' | 'activeCount' | 'acknowledgedCount'> = {
+    return {
       stack: stackName,
       ranAt: run.created_at,
       ranBy: run.created_by,
@@ -280,9 +293,9 @@ export class ComposeDoctorService {
       sourceHash: run.source_hash,
       renderedHash: run.rendered_hash,
       findings,
-      coverage: parseCoverage(run.coverage),
+      coverage,
+      ...activeFields(renderable, findings),
     };
-    return enrichReport(nodeId, stackName, base);
   }
 
   private async buildContext(nodeId: number, stackName: string, sourceServiceNames: string[], sourceReadable: boolean): Promise<PreflightContext> {

@@ -98,21 +98,34 @@ export function findingFingerprint(
   return hash([ruleId, scope.stack, scope.service ?? '', subject.kind, subject.key]);
 }
 
+/** Everything a consumer can read from a finding except what the fingerprint
+ *  already fixes (rule, scope, subject) and the provenance and decision that
+ *  differ by design between sources. */
+function observableContent(finding: AssuranceFinding): string {
+  const wire = serializeFinding(finding);
+  return JSON.stringify([
+    wire.severity, wire.findingClass, wire.affectsVerdict, wire.title, wire.message,
+    wire.remediation ?? null, wire.location ?? null, wire.confidence, wire.completeness,
+  ]);
+}
+
 /**
  * Rule ids with two different findings under one fingerprint in a single run.
  * A rule that emits several hits for one source path, service, or stack must
  * give each hit a distinct `subject` (or `sourcePath`); otherwise the hits are
  * indistinguishable to any consumer that pairs or dedupes on identity. Findings
- * that repeat the same title, message, and path under one fingerprint are one
- * fact reported twice (a port published on both an IPv4 and an IPv6 address),
- * not a collision. Legacy rows are skipped: their identity is documented as not
- * dedupable.
+ * that agree on every other observable field (severity, class, title, message,
+ * remediation, the whole location, confidence, completeness) are one fact
+ * reported twice (a port published on both an IPv4 and an IPv6 address): no
+ * consumer could tell them apart, so they are not a collision. A pair that
+ * differs in any of those fields is two facts under one identity. Legacy rows
+ * are skipped: their identity is documented as not dedupable.
  */
 export function findFingerprintCollisions(findings: readonly AssuranceFinding[]): string[] {
   const byFingerprint = new Map<string, { ruleId: string; contents: Set<string> }>();
   for (const finding of findings) {
     if (finding.identity.basis === 'legacy') continue;
-    const content = JSON.stringify([finding.title, finding.message, finding.location?.path ?? null]);
+    const content = observableContent(finding);
     const seen = byFingerprint.get(finding.identity.fingerprint);
     if (seen) seen.contents.add(content);
     else byFingerprint.set(finding.identity.fingerprint, { ruleId: finding.ruleId, contents: new Set([content]) });

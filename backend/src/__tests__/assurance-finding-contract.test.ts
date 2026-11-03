@@ -166,6 +166,43 @@ describe('fingerprints', () => {
     expect(findFingerprintCollisions(exposed)).toEqual([]);
   });
 
+  describe('with the same title, message, and path under one fingerprint', () => {
+    const base = () => normalize(hit('privileged', {
+      service: 'web', sourcePath: 'web', title: 'Privileged container', message: 'Same text', remediation: 'Drop it',
+    }));
+    const twin = (over: Partial<AssuranceFinding>): AssuranceFinding => ({ ...base(), ...over });
+
+    it.each([
+      ['severity', { severity: 'warning' as const }],
+      ['remediation', { remediation: 'Drop it from every service' }],
+      ['no remediation', { remediation: undefined }],
+      ['a line in the same file', { location: { path: 'web', line: 12 } }],
+      ['the file the path lives in', { location: { path: 'web', file: 'compose.override.yaml' } }],
+      ['confidence', { confidence: 'inferred' as const }],
+      ['completeness', { completeness: 'partial' as const }],
+      ['class', { findingClass: 'information' as const }],
+      ['whether it affects the verdict', { affectsVerdict: false }],
+    ])('flags two facts that differ only in %s', (_name, over) => {
+      const first = base();
+      const second = twin(over as Partial<AssuranceFinding>);
+      expect(second.identity.fingerprint).toBe(first.identity.fingerprint);
+      expect(findFingerprintCollisions([first, second])).toEqual(['privileged']);
+    });
+
+    it('does not flag a pair that agrees on every field the contract exposes', () => {
+      expect(findFingerprintCollisions([base(), base(), base()])).toEqual([]);
+    });
+
+    it('does not flag the same fact seen through different evidence or a decision', () => {
+      const decided = withDecision(base(), {
+        ruleId: 'privileged', severity: 'high', title: '', message: '', acknowledged: true, acknowledgementId: 4,
+        acknowledgementReason: 'ok', acknowledgementExpiry: 'forever',
+      });
+      const elsewhere = twin({ evidence: [{ layer: 'authored', provider: 'trivy', externalSeverity: 'HIGH' }] });
+      expect(findFingerprintCollisions([base(), decided, elsewhere])).toEqual([]);
+    });
+  });
+
   it('name every colliding rule once and none of the clean ones', () => {
     const clash = (ruleId: RuleHit['ruleId']) => ['a', 'b', 'c'].map(message => normalize(hit(ruleId, { service: 'web', message })));
     const clean = normalize(hit('privileged', { service: 'web', sourcePath: 'web' }));

@@ -193,6 +193,34 @@ describe('frontend coverage copy', () => {
     expect(describeCoverageGaps(odd([inherited]))).toBe('1 check could not run');
   });
 
+  it('words every malformed shape the same on both sides, and neither throws', async () => {
+    const frontend = await load();
+    const entry = (over: Record<string, unknown>) => ({ ruleId: 'privileged', missing: ['node-state'], affectsVerdict: true, ...over });
+    const shapes: Record<string, unknown> = {
+      'skipped is not a list': 'not-a-list',
+      'skipped is missing': undefined,
+      'skipped is null': null,
+      'an entry is null': [null],
+      'an entry is a string': ['node-state'],
+      'missing is a string': [entry({ missing: 'node-state' })],
+      'missing is absent': [entry({ missing: undefined })],
+      'missing holds a non-string': [entry({ missing: [7, null, 'node-state'] })],
+      'affectsVerdict is truthy but not true': [entry({ affectsVerdict: 'yes' }), entry({ affectsVerdict: 1 })],
+      'affectsVerdict is false': [entry({ affectsVerdict: false })],
+      'one valid entry among bad ones': [null, 'x', entry({})],
+    };
+    const shaped = (skipped: unknown) => ({ state: 'partial', evaluated: 1, notApplicable: 0, skipped }) as never;
+    for (const [name, skipped] of Object.entries(shapes)) {
+      const clause = describeCoverageGaps(shaped(skipped));
+      expect(frontend.coverageGapLine(shaped(skipped)), name).toBe(clause === null ? null : `${clause}.`);
+    }
+    expect(describeCoverageGaps(shaped('not-a-list'))).toBeNull();
+    // A truthy-but-not-true flag is not a verdict-affecting skip.
+    expect(describeCoverageGaps(shaped(shapes['affectsVerdict is truthy but not true']))).toBeNull();
+    expect(describeCoverageGaps(shaped(shapes['one valid entry among bad ones'])))
+      .toBe('1 check could not run: node state unavailable');
+  });
+
   it('degrades an unknown requirement to a count like the backend', async () => {
     const frontend = await load();
     const coverage = parseCoverage(JSON.stringify({

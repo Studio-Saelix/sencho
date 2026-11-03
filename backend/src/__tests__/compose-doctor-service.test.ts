@@ -496,6 +496,52 @@ describe('preflight acknowledgements', () => {
     expect(latest.status).toBe('high');
     expect(latest.activeStatus).not.toBe('high');
   });
+
+  describe('on a fresh run', () => {
+    const ack = (over: Record<string, unknown>) => ({
+      node_id: nodeId, stack_name: STACK, rule_id: 'port-exposed-all-interfaces', service: 'web', reason: 'intentional',
+      expiry_mode: 'forever' as const, expires_at: null, anchor_rendered_hash: null, anchor_image_ref: null,
+      created_by: 'tester', created_at: Date.now(), ...over,
+    });
+    const model = (image: string) => ({
+      name: STACK,
+      services: { web: { image, ports: [{ target: 80, published: '8080', protocol: 'tcp' }], restart: 'always', healthcheck: { test: ['CMD', 'x'] } } },
+      networks: {}, volumes: {},
+    });
+    afterEach(() => {
+      db().getDb().prepare('DELETE FROM preflight_acknowledgements WHERE node_id = ? AND stack_name = ?').run(nodeId, STACK);
+    });
+
+    it('returns the same decisions as a later read of the stored run', async () => {
+      stubDocker(model('nginx:1.27'));
+      await doctor().runPreflight(nodeId, STACK, 'tester');
+      db().upsertPreflightAcknowledgement(ack({ reason: 'Bind publicly on purpose' }));
+      const fresh = await doctor().runPreflight(nodeId, STACK, 'tester');
+      expect(fresh.acknowledgedCount).toBe(1);
+      expect(fresh.findings.filter(finding => finding.acknowledged).map(finding => finding.ruleId))
+        .toEqual(['port-exposed-all-interfaces']);
+      const stored = doctor().getLatest(nodeId, STACK);
+      expect(stored.findings).toEqual(fresh.findings);
+      expect(stored.activeStatus).toBe(fresh.activeStatus);
+      expect(stored.activeCount).toBe(fresh.activeCount);
+    });
+
+    it('reads the images of this run, not of the last stored one, when the run cannot be stored', async () => {
+      stubDocker(model('nginx:1.27'));
+      await doctor().runPreflight(nodeId, STACK, 'tester');
+      db().upsertPreflightAcknowledgement(ack({ expiry_mode: 'until_image_change', anchor_image_ref: 'nginx:1.27' }));
+      expect(doctor().getLatest(nodeId, STACK).acknowledgedCount).toBe(1);
+
+      // The image changed, and storing the new run fails: the stored run still
+      // records the old image, which must not keep the acknowledgement alive.
+      vi.spyOn(console, 'error').mockImplementation(() => {});
+      vi.spyOn(db(), 'replacePreflightRun').mockImplementation(() => { throw new Error('disk full'); });
+      stubDocker(model('nginx:1.28'));
+      const fresh = await doctor().runPreflight(nodeId, STACK, 'tester');
+      expect(fresh.acknowledgedCount).toBe(0);
+      expect(fresh.findings.find(finding => finding.ruleId === 'port-exposed-all-interfaces')?.acknowledged).toBe(false);
+    });
+  });
 });
 
 describe('node deletion cleanup', () => {
@@ -803,21 +849,40 @@ describe('Compose Assurance contract persistence', () => {
       expect(decidedPairs()).toEqual([]);
     });
 
-    it('does not depend on the order of any other read of the same rows', () => {
-      // A second read that returned the rows in another order (a later sort or
-      // filter on one path) must not move a decision onto another finding.
+    it('lands each decision on its finding whatever order the rows are stored in', () => {
       db().upsertPreflightAcknowledgement(ack('privileged', 'db'));
-      const service = doctor() as unknown as { readNormalized: (...args: unknown[]) => unknown[] };
-      const real = service.readNormalized.bind(service);
-      let reads = 0;
-      vi.spyOn(service, 'readNormalized').mockImplementation((...args: unknown[]) => {
-        const rows = real(...args);
-        return reads++ === 0 ? rows : [...rows].reverse();
+      db().upsertPreflightAcknowledgement(ack('no-restart-policy', 'web'));
+      const stored = [
+        row('f-web', 'privileged', 'high', 'web'),
+        row('f-info', 'healthcheck-inherited', 'info', 'db'),
+        row('f-db', 'privileged', 'high', 'db'),
+        row('f-warn', 'no-restart-policy', 'warning', 'web'),
+      ];
+      const run = { id: 'ack-run', node_id: nodeId, stack_name: stack, source_hash: null, rendered_hash: 'hash-1', service_images: null, status: 'high', highest_severity: 'high', created_at: 2, created_by: 'tester', coverage: null };
+      const outcomes = [stored, [...stored].reverse(), [stored[2], stored[3], stored[0], stored[1]]].map(rows => {
+        db().replacePreflightRun(run, rows);
+        return {
+          normalized: decidedPairs(),
+          wire: doctor().getLatest(nodeId, stack).findings
+            .filter(finding => finding.acknowledged).map(finding => [finding.ruleId, finding.service]),
+        };
       });
-      const decided = doctor().getLatestAssurance(nodeId, stack).findings
-        .filter(finding => finding.decision)
-        .map(finding => [finding.ruleId, finding.scope.service]);
-      expect(decided).toEqual([['privileged', 'db']]);
+      for (const outcome of outcomes) {
+        expect(outcome.normalized.map(pair => pair.slice(0, 2))).toEqual([['privileged', 'db'], ['no-restart-policy', 'web']]);
+        expect(outcome.wire).toEqual([['privileged', 'db'], ['no-restart-policy', 'web']]);
+      }
+    });
+
+    it('is the read the Doctor wire report is built from', () => {
+      db().upsertPreflightAcknowledgement(ack('privileged', 'db'));
+      const service = doctor();
+      const read = vi.spyOn(service, 'getLatestAssurance');
+      const report = service.getLatest(nodeId, stack);
+      expect(read).toHaveBeenCalledWith(nodeId, stack);
+      const { findings } = service.getLatestAssurance(nodeId, stack);
+      // Finding for finding, the wire acknowledgement is the normalized decision.
+      expect(report.findings.map(finding => [finding.ruleId, finding.service, finding.acknowledged, finding.acknowledgementId]))
+        .toEqual(findings.map(finding => [finding.ruleId, finding.scope.service, finding.decision !== undefined, finding.decision?.id]));
     });
   });
 
