@@ -37,6 +37,7 @@ import {
 import {
   prepareOverwriteAdmission,
   previewOverwrite as buildOverwritePreview,
+  overwriteIntentScope,
   recordOverwriteIntent,
   reconcileOverwriteIntentsAtStartup,
   resolveOverwriteIntent,
@@ -821,7 +822,12 @@ export class RecoveryEngineService {
       await this.requireStorageAccessForIntent('', input);
       throw new RecoveryError('invalid_request');
     }
-    await this.requireStorageAccessForIntent(intent.pointId, input);
+    // The stacks the fence stopped, not only the stacks that use the volume now.
+    await this.requireStorageAccessForIntent(
+      intent.pointId,
+      input,
+      overwriteIntentScope(intent, RestoreFenceStore.getInstance()),
+    );
     this.requireReady();
     const operation = intent.operationId ? this.operations.get(intent.operationId) : null;
     // A decision taken while this process is still working on the intent would
@@ -867,6 +873,7 @@ export class RecoveryEngineService {
       authorizeStack: (stackName: string) => boolean;
       authorizeGlobal: () => boolean;
     },
+    recorded?: { stacks: readonly string[]; unowned: boolean },
   ): Promise<void> {
     const point = this.points.get(pointId);
     const storage = point ? StorageIdentityStore.getInstance().getById(point.storageId) : null;
@@ -874,6 +881,12 @@ export class RecoveryEngineService {
       if (context.storageKey === null) return authorize.authorizeGlobal();
       for (const dependent of context.dependents) {
         if (!authorize.authorizeStack(dependent.stackName)) return false;
+      }
+      // An intent adds the stacks its fence owns to the live and stored ones, so
+      // a dependency dropped since cannot narrow the check.
+      if (recorded?.unowned && !authorize.authorizeGlobal()) return false;
+      for (const stackName of recorded?.stacks ?? []) {
+        if (!authorize.authorizeStack(stackName)) return false;
       }
       return true;
     });

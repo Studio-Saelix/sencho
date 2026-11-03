@@ -9,8 +9,9 @@
  */
 import { describe, it, expect, beforeAll, afterAll, beforeEach, vi } from 'vitest';
 import { randomUUID } from 'crypto';
+import { PassThrough } from 'stream';
 import { setupTestDb, cleanupTestDb } from './helpers/setupTestDb';
-import { fakeDocker, container, intentLabels } from './__helpers__/overwriteFixture';
+import { fakeDocker, container, intentLabels, gate, delayContainerCall } from './__helpers__/overwriteFixture';
 import { DataRestoreFenceError } from '../helpers/dataRestoreFenceError';
 import type { FenceMemberInput } from '../services/recovery/restoreFence';
 import type { RestoreIntentPhase } from '../services/recovery/types';
@@ -286,6 +287,121 @@ describe('what the fence closes', () => {
     } finally {
       spy.mockRestore();
     }
+  });
+});
+
+describe('a start that races the fence', () => {
+  it('lands before the stop, because the fence waits for a start already in flight', async () => {
+    const fake = fakeDocker({
+      containers: [container({ Id: 'c1', State: 'exited', Mounts: [{ Type: 'volume', Name: VOLUME }] })],
+    });
+    vi.spyOn(NodeRegistryModule.NodeRegistry.getInstance(), 'getDocker').mockReturnValue(fake.docker);
+    const hold = gate();
+    const reachedDaemon = gate();
+    delayContainerCall(fake, 'start', 'c1', hold.promise, reachedDaemon.open);
+
+    // No fence yet, so the start passes its check and is on its way to the daemon.
+    const start = DockerController.getInstance(1).startContainer('c1');
+    await reachedDaemon.promise;
+
+    const intentId = seedIntent('fenced');
+    fence.RestoreFenceStore.getInstance().recordMembers(intentId, [member({ wasRunning: false })]);
+    const applying = fence.applyRestoreFence(
+      intentId, fake.docker, fence.RestoreFenceStore.getInstance().listMembers(intentId),
+    );
+    // The fence is recorded, but nothing is stopped while that start is unanswered.
+    await new Promise((resolve) => setImmediate(resolve));
+    expect(fence.RestoreFenceStore.getInstance().isVolumeFenced(VOLUME)).toBe(true);
+    expect(fake.calls).toEqual([]);
+
+    hold.open();
+    await start;
+    await applying;
+    expect(fake.calls).toEqual(['start:c1', 'update:c1', 'stop:c1']);
+    expect(fake.containers.get('c1')?.State).toBe('exited');
+  });
+
+  it('is refused when the fence appears while the container\'s mounts are being read', async () => {
+    seedIntent('fenced');
+    fence.RestoreFenceStore.getInstance().setFenceState(
+      (recoveryDbModule.recoveryDb().prepare('SELECT id FROM recovery_restore_intents').get() as { id: string }).id,
+      'held',
+    );
+    const fake = fakeDocker({
+      containers: [container({ Id: 'c3', State: 'exited', Mounts: [{ Type: 'volume', Name: 'other_data' }] })],
+    });
+    vi.spyOn(NodeRegistryModule.NodeRegistry.getInstance(), 'getDocker').mockReturnValue(fake.docker);
+    const hold = gate();
+    const reachedInspect = gate();
+    delayContainerCall(fake, 'inspect', 'c3', hold.promise, reachedInspect.open);
+
+    // A fence on another volume is live, so the start reads the mounts first. The
+    // fence on this container's volume is recorded while it waits for them.
+    const start = DockerController.getInstance(1).startContainer('c3');
+    const refused = expect(start).rejects.toMatchObject({ code: 'data_restore' });
+    await reachedInspect.promise;
+    recoveryDbModule.recoveryDb().prepare(
+      "UPDATE recovery_restore_intents SET target_volume = 'other_data'",
+    ).run();
+    hold.open();
+    await refused;
+    expect(fake.calls).toEqual([]);
+  });
+
+  it('refuses the Files & Volumes helper when the fence lands after its volume check', async () => {
+    seedIntent('fenced');
+    fence.RestoreFenceStore.getInstance().setFenceState(
+      (recoveryDbModule.recoveryDb().prepare('SELECT id FROM recovery_restore_intents').get() as { id: string }).id,
+      'held',
+    );
+    const removed: string[] = [];
+    const started = vi.fn(async () => undefined);
+    const docker = {
+      getVolume: () => ({ inspect: async () => ({ Name: VOLUME }) }),
+      getImage: () => ({ inspect: async () => ({ Id: 'sha256:helper' }) }),
+      createContainer: async () => ({
+        attach: async () => {
+          const stream = new PassThrough();
+          setImmediate(() => stream.end());
+          return stream;
+        },
+        start: started,
+        wait: async () => ({ StatusCode: 0 }),
+        remove: async () => { removed.push('helper'); },
+      }),
+      modem: { demuxStream: () => undefined },
+    } as unknown as import('dockerode');
+    vi.spyOn(DockerController.prototype, 'getDocker').mockReturnValue(docker);
+    // The up-front check says the volume is free; the fence is there by the time
+    // the helper container is about to start.
+    vi.spyOn(fence.RestoreFenceStore.prototype, 'isVolumeFenced').mockReturnValue(false);
+
+    const browser = VolumeBrowserService.VolumeBrowserService.getInstance(1);
+    await expect(browser.listDir(VOLUME, '')).rejects.toMatchObject({ code: 'data_restore' });
+    expect(started).not.toHaveBeenCalled();
+    // The helper container that was created is not left behind.
+    expect(removed).toEqual(['helper']);
+  });
+
+  it('stops waiting for a start that does not answer in time', async () => {
+    const hold = gate();
+    const run = fence.startUnderFence([], () => hold.promise);
+    const started = Date.now();
+    await expect(fence.waitForStartsInFlight(20)).resolves.toBeUndefined();
+    expect(Date.now() - started).toBeLessThan(5_000);
+    // It is only released here, so a later case does not wait on it.
+    hold.open();
+    await run;
+    await fence.waitForStartsInFlight();
+  });
+
+  it('hands back the start\'s own result and error', async () => {
+    await expect(fence.startUnderFence([VOLUME], async () => 'started')).resolves.toBe('started');
+    await expect(fence.startUnderFence([], async () => { throw new Error('daemon said no'); }))
+      .rejects.toThrow('daemon said no');
+    await expect(fence.startUnderFence([], () => { throw new Error('threw at once'); }))
+      .rejects.toThrow('threw at once');
+    await fence.waitForStartsInFlight();
   });
 });
 

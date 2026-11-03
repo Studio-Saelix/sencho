@@ -24,6 +24,8 @@ import { RecoveryOperationStore } from '../services/recovery/operations';
 import { RecoveryPointStore } from '../services/recovery/recoveryPoints';
 import { RecoveryRepositoryStore } from '../services/recovery/repositories';
 import { RestoreIntentStore } from '../services/recovery/restoreIntents';
+import { RestoreFenceStore } from '../services/recovery/restoreFence';
+import { overwriteIntentScope } from '../services/recovery/overwriteRestore';
 import { StorageIdentityStore, deriveStorageKey, isDockerVolumeName } from '../services/recovery/storageIdentity';
 import {
   describeIneligible,
@@ -818,10 +820,17 @@ function authorizeOperation(req: Request, operation: RecoveryOperation, access: 
   if (!storage) return authorizeStorageAccess(req, access, null).allowed;
   // The stored dependent set, without a Compose render: this is a read of work
   // already recorded, not a decision to change data.
-  return authorizeStorageAccess(req, access, {
-    storageKey: storage.storageKey,
-    liveDependents: StorageIdentityStore.getInstance().listDependents(storage.storageKey),
-  }).allowed;
+  const dependents = [...StorageIdentityStore.getInstance().listDependents(storage.storageKey)];
+  // An overwrite is also held to the stacks its fence stopped: cancelling it
+  // rolls back and starts those containers, and a stack that has since dropped
+  // the volume is no longer in the stored set.
+  const intent = operation.kind === 'restore' ? RestoreIntentStore.getInstance().getByOperation(operation.id) : null;
+  if (intent && intent.targetMode === 'staged_overwrite') {
+    const scope = overwriteIntentScope(intent, RestoreFenceStore.getInstance());
+    if (scope.unowned && !authorizeNodeWide(req, access)) return false;
+    for (const stackName of scope.stacks) dependents.push({ stackName, serviceName: null });
+  }
+  return authorizeStorageAccess(req, access, { storageKey: storage.storageKey, liveDependents: dependents }).allowed;
 }
 
 // --- Locks ------------------------------------------------------------------

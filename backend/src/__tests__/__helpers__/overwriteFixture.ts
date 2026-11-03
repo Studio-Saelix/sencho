@@ -250,3 +250,30 @@ export function scriptedEngine(script: EngineScript = {}): EngineRecorder {
 export function intentLabels(intentId: string): Record<string, string> {
   return { [HELPER_LABEL_RESTORE_INTENT]: intentId };
 }
+
+/** A promise a test settles by hand, to hold one step of a race open. */
+export function gate(): { promise: Promise<void>; open: () => void } {
+  let open = () => {};
+  const promise = new Promise<void>((resolve) => { open = resolve; });
+  return { promise, open };
+}
+
+/**
+ * Make one container call of a fake Docker wait at `until` before it runs, and
+ * say when the call arrived, so a test can act while a start or an inspect is on
+ * its way.
+ */
+export function delayContainerCall(
+  fake: FakeDocker,
+  call: 'start' | 'inspect',
+  containerId: string,
+  until: Promise<void>,
+  entered: () => void,
+): void {
+  const getContainer = fake.docker.getContainer.bind(fake.docker);
+  (fake.docker as unknown as { getContainer: (id: string) => unknown }).getContainer = (id: string) => {
+    const real = getContainer(id) as unknown as Record<string, (...args: unknown[]) => Promise<unknown>>;
+    if (id !== containerId) return real;
+    return { ...real, [call]: async (...args: unknown[]) => { entered(); await until; return real[call](...args); } };
+  };
+}

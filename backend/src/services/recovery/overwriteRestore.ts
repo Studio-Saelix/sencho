@@ -12,6 +12,7 @@ import {
   fenceIdentityFor,
   releaseRestoreFence,
   RestoreFenceStore,
+  waitForStartsInFlight,
   type FenceMember,
   type FenceMemberInput,
   type RestartPolicy,
@@ -504,7 +505,9 @@ export async function prepareOverwriteAdmission(deps: OverwriteDeps, input: {
     throw new RecoveryError('insufficient_space');
   }
   if (deps.fence.liveIntentForVolume(observed.volumeName)) {
-    throw new RecoveryError('lock_held', { detail: 'Another restore is already running on this volume.' });
+    throw new RecoveryError('lock_held', {
+      detail: 'Another restore of this volume has not finished. Wait for it, or resolve it, then preview again.',
+    });
   }
 
   return {
@@ -667,9 +670,12 @@ async function stagePoint(ctx: OverwriteRunContext, state: PipelineState): Promi
     result = { ok: false as const, errorClass: classifyRecoveryError(err) };
   }
   if (!result.ok) {
-    await removeLabelledVolume(deps.docker, stagingVolume, state.intent.id);
-    deps.intents.advance(state.intent.id, 'rolled_back', { outcomeClass: result.errorClass });
-    releaseHolds(deps, state.intent.id);
+    if (await stagingVolumeGone(deps, state.intent)) {
+      deps.intents.advance(state.intent.id, 'rolled_back', { outcomeClass: result.errorClass });
+      releaseHolds(deps, state.intent.id);
+    } else {
+      keepForCleanup(deps, state.intent.id);
+    }
     ctx.finish(
       result.errorClass === 'interrupted'
         ? { state: 'cancelled' }
@@ -678,9 +684,12 @@ async function stagePoint(ctx: OverwriteRunContext, state: PipelineState): Promi
     return false;
   }
   if (result.evidence.verified === false) {
-    await removeLabelledVolume(deps.docker, stagingVolume, state.intent.id);
-    deps.intents.advance(state.intent.id, 'rolled_back', { outcomeClass: 'attributes_not_restored' });
-    releaseHolds(deps, state.intent.id);
+    if (await stagingVolumeGone(deps, state.intent)) {
+      deps.intents.advance(state.intent.id, 'rolled_back', { outcomeClass: 'attributes_not_restored' });
+      releaseHolds(deps, state.intent.id);
+    } else {
+      keepForCleanup(deps, state.intent.id);
+    }
     ctx.finish({ state: 'failed', errorClass: 'attributes_not_restored' });
     return false;
   }
@@ -698,21 +707,53 @@ async function removeStaging(ctx: OverwriteRunContext, state: PipelineState): Pr
   const deps = ctx.deps;
   const stagingVolume = state.intent.stagingVolume;
   if (!stagingVolume) return true;
-  const removed = await removeLabelledVolume(deps.docker, stagingVolume, state.intent.id);
-  if (removed === 'removed' || removed === 'missing') return true;
-  if (removed === 'in_use' || removed === 'not_ours') {
-    // The staging volume is not provably disposable, so Sencho keeps the intent
-    // and the holds rather than guessing. No workload was touched.
-    deps.intents.advance(state.intent.id, 'completion_unknown', { outcomeClass: 'lock_held' });
-    ctx.finish({ state: 'completion_unknown' });
-    return false;
-  }
-  // It is still ours and unused, and reconciliation from `staged_verified`
-  // removes it, so the operation ends and nothing live moved.
-  deps.intents.advance(state.intent.id, 'rolled_back', { outcomeClass: 'node_error' });
-  releaseHolds(deps, state.intent.id);
-  ctx.finish({ state: 'failed', errorClass: 'node_error' });
+  if (await stagingVolumeGone(deps, state.intent)) return true;
+  // The staging volume is a full copy of the point and is still on disk. The
+  // intent stays in `staged_verified`, with its holds, so startup reconciliation
+  // and a `retry` remove it later; settling now would make it unreachable. No
+  // workload was touched.
+  keepForCleanup(deps, state.intent.id);
+  ctx.finish({ state: 'failed', errorClass: 'cleanup_failed' });
   return false;
+}
+
+/**
+ * Remove the intent's staging volume and report whether it is gone. A volume
+ * that carries another label is not Sencho's to remove and not Sencho's disk, so
+ * it counts as gone; one that is in use or whose removal failed is still ours
+ * and still holds a copy of the point, and its name is logged for the operator.
+ */
+async function stagingVolumeGone(
+  deps: OverwriteDeps,
+  intent: { id: string; stagingVolume: string | null },
+): Promise<boolean> {
+  if (!intent.stagingVolume) return true;
+  const removed = await removeLabelledVolume(deps.docker, intent.stagingVolume, intent.id);
+  if (removed === 'removed' || removed === 'missing') return true;
+  if (removed === 'not_ours') {
+    console.warn(
+      '[Recovery] Left %s alone: it does not carry the label of restore %s.',
+      sanitizeForLog(intent.stagingVolume),
+      intent.id,
+    );
+    return true;
+  }
+  console.warn(
+    '[Recovery] The staging volume %s of restore %s was not removed (%s). It stays until a retry removes it.',
+    sanitizeForLog(intent.stagingVolume),
+    intent.id,
+    removed,
+  );
+  return false;
+}
+
+/**
+ * Leave an intent in the pre-fence phase it is in, with its holds, because its
+ * staging volume could not be removed. Such an intent is not terminal, so the
+ * reconciler visits it again, and it keeps the target reserved until it settles.
+ */
+function keepForCleanup(deps: OverwriteDeps, intentId: string, now = Date.now()): void {
+  deps.intents.update(intentId, { outcomeClass: 'cleanup_failed' }, now);
 }
 
 /**
@@ -726,13 +767,21 @@ async function fenceWorkloads(ctx: OverwriteRunContext, state: PipelineState): P
     await settleRollback(ctx, state, dependency === 'changed' ? 'dependents_changed' : 'identity_unknown');
     return false;
   }
+  deps.intents.advance(state.intent.id, 'fenced');
+  // From here the workloads are being stopped, so the fence is live: every
+  // Sencho path that could start or browse one is refused from this record.
+  deps.fence.setFenceState(state.intent.id, 'held');
+  // A start that passed its check before the fence was recorded is still on its
+  // way; the observation below has to see its result, so it is waited for first.
+  await waitForStartsInFlight();
   const current = await listMountingContainers(deps, state.intent.targetVolume ?? '');
   const recorded = new Set(state.members.map((member) => member.containerId));
   if (current.length !== state.members.length || current.some((container) => !recorded.has(container.id))) {
     await settleRollback(ctx, state, 'dependents_changed');
     return false;
   }
-  // Refresh the recorded facts: a container may have restarted since admission.
+  // Refresh the recorded facts: a container may have restarted since admission,
+  // including one a start in flight just brought up.
   deps.fence.recordMembers(state.intent.id, current.map((container) => ({
     containerId: container.id,
     containerName: container.name,
@@ -742,10 +791,6 @@ async function fenceWorkloads(ctx: OverwriteRunContext, state: PipelineState): P
     wasRunning: container.running,
   })));
   state.members = deps.fence.listMembers(state.intent.id);
-  deps.intents.advance(state.intent.id, 'fenced');
-  // From here the workloads are being stopped, so the fence is live: every
-  // Sencho path that could start or browse one is refused from this record.
-  deps.fence.setFenceState(state.intent.id, 'held');
   try {
     await applyRestoreFence(state.intent.id, deps.docker, state.members);
   } catch (err) {
@@ -930,7 +975,10 @@ async function swapAndCleanup(ctx: OverwriteRunContext, state: PipelineState): P
   }
 
   const released = await releaseAfterCommit(ctx, state);
-  deps.intents.advance(state.intent.id, 'committed', { outcomeClass: null });
+  // The data is committed either way. A fence that could not be released is
+  // still held, so the intent says so rather than clearing the class, and the
+  // volume stays reserved until a retry or the next boot releases it.
+  deps.intents.advance(state.intent.id, 'committed', { outcomeClass: released ? null : 'fence_unavailable' });
   releaseHolds(deps, state.intent.id);
   ctx.finish(released ? { state: 'succeeded' } : { state: 'partial', errorClass: 'fence_unavailable' });
   return released;
@@ -978,6 +1026,8 @@ async function settleRollback(
   errorClass: RecoveryErrorClass,
 ): Promise<void> {
   const outcome = await rollbackIntent(ctx.deps, state.intent.id);
+  // `cleanup_pending` means the live volume is as it was and only the staging
+  // volume is left, so the operation reports its own failure.
   if (outcome === 'unknown') {
     ctx.finish({ state: 'completion_unknown' });
     return;
@@ -1003,7 +1053,8 @@ function markUnknown(
   deps.intents.advance(intent.id, 'completion_unknown', { outcomeClass }, now);
 }
 
-type RollbackOutcome = 'rolled_back' | 'unknown';
+/** `cleanup_pending`: rolled back, but the staging volume is still on disk, so the intent stays open. */
+type RollbackOutcome = 'rolled_back' | 'unknown' | 'cleanup_pending';
 
 /** Shared by the live pipeline, reconciliation and the resolve retry. */
 export async function rollbackIntent(deps: OverwriteDeps, intentId: string): Promise<RollbackOutcome> {
@@ -1027,18 +1078,25 @@ export async function rollbackIntent(deps: OverwriteDeps, intentId: string): Pro
       return 'unknown';
     }
   }
-  if (intent.stagingVolume) {
-    await removeLabelledVolume(deps.docker, intent.stagingVolume, intentId);
-  }
+  const stagingGone = await stagingVolumeGone(deps, intent);
   const released = await releaseFence(deps, intentId, true);
+  if (!stagingGone) {
+    keepForCleanup(deps, intentId);
+    return released ? 'cleanup_pending' : 'unknown';
+  }
   try {
-    deps.intents.advance(intentId, 'rolled_back', { outcomeClass: null });
+    deps.intents.advance(intentId, 'rolled_back', { outcomeClass: released ? null : 'fence_unavailable' });
   } catch (err) {
     // A phase that already settled is not an error on a retry.
     console.warn('[Recovery] Restore intent %s could not settle rolled_back:', intentId, errorMessageForLog(err));
   }
   releaseHolds(deps, intentId);
   return released ? 'rolled_back' : 'unknown';
+}
+
+/** A settled intent stops reporting `fence_unavailable` once its fence is released. */
+function clearFenceOutcome(deps: OverwriteDeps, intent: RestoreIntentRecord): void {
+  if (intent.outcomeClass === 'fence_unavailable') deps.intents.update(intent.id, { outcomeClass: null });
 }
 
 async function releaseFence(deps: OverwriteDeps, intentId: string, restart: boolean): Promise<boolean> {
@@ -1103,9 +1161,15 @@ async function recheckDependents(
   if (current.length !== state.members.length) return 'changed';
   if (current.some((container) => !recorded.has(container.id))) return 'changed';
   if (options.requireStopped && current.some((container) => container.running)) return 'changed';
-  const recordedStacks = new Set(
-    state.members.map((member) => member.stackName).filter((name): name is string => name !== null),
-  );
+  // A dependent is a stack whose model declares the volume, and a stack that was
+  // taken down still does. It has no fence member, so the set to compare with is
+  // the one admission recorded (every declaring stack), plus the stacks of the
+  // containers the fence owns. A stack that appeared after admission is in
+  // neither, and that is what aborts here.
+  const recordedStacks = new Set<string>(state.intent.dependentStacks);
+  for (const member of state.members) {
+    if (member.stackName !== null) recordedStacks.add(member.stackName);
+  }
   for (const dependent of resolution.dependents) {
     if (!recordedStacks.has(dependent.stackName)) return 'changed';
   }
@@ -1153,6 +1217,7 @@ export async function reconcileOverwriteIntentsAtStartup(
   for (const intent of deps.intents.listWithLiveFence('staged_overwrite')) {
     const released = await releaseFence(deps, intent.id, true);
     if (released) {
+      clearFenceOutcome(deps, intent);
       deps.points.removeHold({ pointId: intent.pointId, holderKind: 'restore_intent', holderRef: intent.id });
       if (intent.preRestorePointId) {
         deps.points.removeHold({
@@ -1187,8 +1252,15 @@ export async function reconcileOverwriteIntent(
     // ours and unused, and leave the workloads exactly as they were. A fence that
     // was recorded but never applied is released here too, which is a no-op on
     // a container that was never stopped.
-    if (intent.stagingVolume) await removeLabelledVolume(deps.docker, intent.stagingVolume, intent.id);
-    if (!await releaseFence(deps, intent.id, true)) {
+    const stagingGone = await stagingVolumeGone(deps, intent);
+    const released = await releaseFence(deps, intent.id, true);
+    // An open staging volume wins over the fence: the phase stays reachable, so
+    // the next pass retries both.
+    if (!stagingGone) {
+      keepForCleanup(deps, intent.id, now);
+      return 'unknown';
+    }
+    if (!released) {
       markUnknown(deps, intent, 'fence_unavailable', now);
       return 'unknown';
     }
@@ -1210,8 +1282,12 @@ export async function reconcileOverwriteIntent(
       markUnknown(deps, intent, 'identity_unknown', now);
       return 'unknown';
     }
-    if (intent.stagingVolume) await removeLabelledVolume(deps.docker, intent.stagingVolume, intent.id);
+    const stagingGone = await stagingVolumeGone(deps, intent);
     const released = await releaseFence(deps, intent.id, true);
+    if (!stagingGone) {
+      keepForCleanup(deps, intent.id, now);
+      return 'unknown';
+    }
     if (!released) {
       markUnknown(deps, intent, 'fence_unavailable', now);
       return 'unknown';
@@ -1341,12 +1417,21 @@ export async function resolveOverwriteIntent(
       if (intent.fenceState === 'held' || intent.fenceState === 'release_failed') {
         const released = await releaseFence(deps, intent.id, true);
         if (!released) throw new RecoveryError('fence_unavailable');
+        clearFenceOutcome(deps, intent);
       }
       return { outcome: intent.phase === 'committed' ? 'committed' : 'rolled_back' };
     }
     return { outcome: await reconcileOverwriteIntent(deps, intent) };
   }
   if (intent.phase === 'committed' || intent.phase === 'rolled_back') throw new RecoveryError('invalid_request');
+  // Before the fence nothing was stopped, so there is nothing to release, and
+  // accepting the volume here would leave the staging volume with no owner.
+  if (intent.fenceState === 'none' && PRE_FENCE_PHASES.includes(intent.phase)) {
+    throw new RecoveryError('invalid_request', {
+      reason: 'no_fence',
+      detail: 'This restore never stopped a workload, so there is no fence to release. Retry it to finish its clean-up.',
+    });
+  }
   // Once the fence has been released, the workloads may be running again, so no
   // reconciliation step may move data under them.
   if (intent.fenceState === 'released') {
@@ -1380,6 +1465,27 @@ export async function resolveOverwriteIntent(
     deps.intents.update(intent.id, { outcomeClass: intent.outcomeClass ?? undefined });
   }
   return { outcome: 'fence_released' };
+}
+
+/**
+ * Who an overwrite touched: the stacks it recorded at admission and the stacks
+ * of the containers its fence owns, plus whether the fence owns one that no
+ * stack claims. The live dependents of the volume are not this set, because a
+ * stack can drop the volume or be renamed after the fence stopped its containers,
+ * and the decisions that start those containers again (resolve, cancel) must be
+ * held to the stacks that were actually stopped.
+ */
+export function overwriteIntentScope(
+  intent: Pick<RestoreIntentRecord, 'id' | 'dependentStacks'>,
+  fence: Pick<RestoreFenceStore, 'listMembers'>,
+): { stacks: string[]; unowned: boolean } {
+  const stacks = new Set<string>(intent.dependentStacks);
+  let unowned = false;
+  for (const member of fence.listMembers(intent.id)) {
+    if (member.stackName) stacks.add(member.stackName);
+    else unowned = true;
+  }
+  return { stacks: [...stacks].sort(), unowned };
 }
 
 /** The paths a preview or a support response may name, relative to the volume. */

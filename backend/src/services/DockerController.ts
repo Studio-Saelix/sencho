@@ -3266,21 +3266,20 @@ class DockerController {
   }
 
   /**
-   * Refuse a start or restart while a staged overwrite has fenced a volume the
-   * container mounts. The fence store answers from one indexed read and is
-   * consulted only when a fence is live, so the common case is one query.
+   * Run a start or restart unless a staged overwrite has fenced a volume the
+   * container mounts. The fence is checked and the start registered in one
+   * step, so a start cannot slip between the check and a fence being installed
+   * (see `startUnderFence`). Docker is asked only when a fence is live.
    */
-  private async assertVolumeNotFenced(containerId: string): Promise<void> {
-    const { assertContainerNotFenced } = await import('./recovery/restoreFence');
-    await assertContainerNotFenced(this.docker, containerId);
+  private async startUnderFence<T>(containerId: string, start: () => Promise<T>): Promise<T> {
+    const { startContainerUnderFence } = await import('./recovery/restoreFence');
+    return startContainerUnderFence(this.docker, containerId, start);
   }
 
   // State-safe: silently ignores 304 "already started" errors
   public async startContainer(containerId: string) {
-    await this.assertVolumeNotFenced(containerId);
     try {
-      const container = this.docker.getContainer(containerId);
-      await container.start();
+      await this.startUnderFence(containerId, () => this.docker.getContainer(containerId).start());
     } catch (error: any) {
       if (error?.statusCode === 304) {
         // Container already running - not an error
@@ -3340,9 +3339,7 @@ class DockerController {
 
   public async restartContainer(containerId: string, options?: RestartContainerOptions) {
     await this.assertNotDockerEndpointContainer(containerId, 'restart', options);
-    await this.assertVolumeNotFenced(containerId);
-    const container = this.docker.getContainer(containerId);
-    await container.restart();
+    await this.startUnderFence(containerId, () => this.docker.getContainer(containerId).restart());
   }
 
   public async getOrphanContainers(knownStackNames: string[]) {

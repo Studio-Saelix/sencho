@@ -637,7 +637,11 @@ export class VolumeBrowserService {
         stream.once('close', () => resolve());
       });
       docker.modem.demuxStream(stream, stdoutStream, stderrStream);
-      await container.start();
+      // The helper mounts the volume, so it is a start like any other: refused
+      // once an overwrite fences the volume, and waited for if it was already
+      // on its way when the fence went up.
+      const { startUnderFence } = await import('./recovery/restoreFence');
+      await startUnderFence([volumeName], () => container.start());
       if (wantStdin && opts.stdin) {
         // Feed the file content to the container's stdin, then close it so the
         // helper's `cat > file` sees EOF and exits.

@@ -311,6 +311,44 @@ describe('admission', () => {
     })).rejects.toMatchObject({ errorClass: 'lock_held' });
   });
 
+  it('refuses while a settled overwrite still holds its fence', async () => {
+    const fake = fakeDocker({ volumes: [{ name: VOLUME }], containers: [mountingContainer()] });
+    const seeded = seed({ createdAt: fake.volumes.get(VOLUME)?.createdAt ?? '' });
+    const base = deps(fake.docker, scriptedHelper());
+    const preview = await overwrite.previewOverwrite(base, seeded.pointId);
+    const db = recoveryDbModule.recoveryDb();
+    const operationId = randomUUID();
+    db.prepare(`INSERT INTO recovery_operations (id, idempotency_key, kind, storage_id, point_id, actor, transport, state, process_epoch, created_at, updated_at)
+      VALUES (?, ?, 'restore', ?, ?, 'admin', 'local', 'partial', 'e', 1, 1)`)
+      .run(operationId, randomUUID(), seeded.storageId, seeded.pointId);
+    const store = intents.RestoreIntentStore.getInstance();
+    const intent = store.recordOverwrite({
+      operationId,
+      pointId: seeded.pointId,
+      targetVolume: VOLUME,
+      actor: 'admin',
+      processEpoch: 'e',
+      stagingVolume: 'sencho-recovery-stage-y',
+      expectedGenerationToken: seeded.generationToken,
+    });
+    for (const phase of ['staging', 'staged_verified', 'fenced', 'protecting', 'materializing', 'swapping', 'swapped', 'committed'] as const) {
+      store.advance(intent.id, phase);
+    }
+    // Committed, but the release failed: the containers are still stopped with
+    // their restart policy pinned to `no`.
+    store.setFenceState(intent.id, 'release_failed');
+    const attempt = () => overwrite.prepareOverwriteAdmission(base, {
+      pointId: seeded.pointId,
+      confirmationToken: preview.confirmation.token,
+      confirmVolumeName: VOLUME,
+    });
+    await expect(attempt()).rejects.toMatchObject({ errorClass: 'lock_held' });
+
+    // Once the fence is released the volume is free again.
+    store.setFenceState(intent.id, 'released');
+    await expect(attempt()).resolves.toMatchObject({ storageKey: expect.any(String) });
+  });
+
   it('records the intent, the source hold and the exact fence set together', async () => {
     const fake = fakeDocker({ volumes: [{ name: VOLUME }], containers: [mountingContainer()] });
     const createdAt = fake.volumes.get(VOLUME)?.createdAt ?? '';

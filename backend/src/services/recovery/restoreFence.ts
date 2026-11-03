@@ -244,12 +244,14 @@ export class RestoreFenceStore {
   }
 
   /**
-   * The unsettled overwrite that owns a volume, or null.
+   * The overwrite that owns a volume, or null.
    *
-   * It matches on the phase, not on the fence state: an overwrite owns its volume
-   * from admission, before the fence exists, and a second one must be refused from
-   * that moment. The fence state only says whether the workloads are already
-   * stopped.
+   * An overwrite owns its volume from admission, before the fence exists, until
+   * it settles and until its fence is released. Both conditions count: an intent
+   * that settled `committed` or `rolled_back` while its release failed still
+   * has the workloads stopped with their restart policy pinned to `no`, and a
+   * second overwrite admitted then would record that pinned policy as the
+   * original.
    */
   liveIntentForVolume(volumeName: string): string | null {
     try {
@@ -257,7 +259,10 @@ export class RestoreFenceStore {
         SELECT id FROM recovery_restore_intents
         WHERE target_mode = 'staged_overwrite'
           AND target_volume = ?
-          AND phase NOT IN ('committed','rolled_back','completion_unknown')
+          AND (
+            phase NOT IN ('committed','rolled_back','completion_unknown')
+            OR fence_state IN ${LIVE_FENCE_STATE}
+          )
         LIMIT 1
       `).get(volumeName) as { id: string } | undefined;
       return row?.id ?? null;
@@ -305,6 +310,10 @@ export async function applyRestoreFence(
 ): Promise<void> {
   // Recorded first: every start and deploy from this instant on is refused.
   RestoreFenceStore.getInstance().setFenceState(intentId, 'held');
+  // A start that passed its check before that line is still on its way to the
+  // daemon. Waiting for it means the stop below finds the container started,
+  // instead of the start landing after the stop and on the swap.
+  await waitForStartsInFlight();
   for (const member of members) {
     const container = docker.getContainer(member.containerId) as unknown as InspectableContainer;
     try {
@@ -366,24 +375,79 @@ export async function releaseRestoreFence(
 }
 
 /**
- * Refuse a container start or restart while any volume it mounts is fenced.
- * Called from `DockerController`, which is the one place every single-container
- * start and restart passes through.
+ * Starts that passed the fence check and have not been answered by the daemon.
+ * The entries never reject: only the settling matters here.
  */
-export async function assertContainerNotFenced(docker: FenceDocker, containerId: string): Promise<void> {
-  const store = RestoreFenceStore.getInstance();
-  const fenced = store.liveFencedVolumeNames();
-  if (fenced.length === 0) return;
+const startsInFlight = new Set<Promise<void>>();
+
+/** The longest a fence waits for a start already in flight. Docker answers a start in moments. */
+const START_DRAIN_TIMEOUT_MS = 30_000;
+
+/**
+ * Run a start that must not land on a fenced volume.
+ *
+ * The check and the registration are one synchronous step with the fence write
+ * that closes the other side (`setFenceState` is synchronous too), so a start
+ * either sees the fence and is refused, or is registered before the fence exists
+ * and is waited for by `applyRestoreFence`. There is no third order. This is the
+ * single place a Sencho-initiated start passes: the container start and restart
+ * of `DockerController` and the Files & Volumes helper container.
+ */
+export function startUnderFence<T>(volumeNames: readonly string[], start: () => Promise<T>): Promise<T> {
+  const fenced = RestoreFenceStore.getInstance().liveFencedVolumeNames();
+  const hit = volumeNames.find((name) => fenced.includes(name));
+  if (hit) return Promise.reject(new DataRestoreFenceError(hit));
+  let run: Promise<T>;
+  try {
+    run = start();
+  } catch (err) {
+    return Promise.reject(err);
+  }
+  const settled = run.then(() => undefined, () => undefined);
+  startsInFlight.add(settled);
+  void settled.then(() => startsInFlight.delete(settled));
+  return run;
+}
+
+/** Resolve once every start that is in flight now has been answered, or after the cap. */
+export async function waitForStartsInFlight(timeoutMs = START_DRAIN_TIMEOUT_MS): Promise<void> {
+  if (startsInFlight.size === 0) return;
+  let timer: NodeJS.Timeout | undefined;
+  const capped = new Promise<void>((resolve) => {
+    timer = setTimeout(resolve, timeoutMs);
+  });
+  try {
+    await Promise.race([Promise.all([...startsInFlight]).then(() => undefined), capped]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
+
+/**
+ * Start or restart one container unless a volume it mounts is fenced. Called
+ * from `DockerController`, which is the one place every single-container start
+ * and restart passes through. The mounts are read only while a fence is live, so
+ * the common case costs one query; the registration still happens, because a
+ * fence installed a moment later has to find this start.
+ */
+export async function startContainerUnderFence<T>(
+  docker: FenceDocker,
+  containerId: string,
+  start: () => Promise<T>,
+): Promise<T> {
+  if (RestoreFenceStore.getInstance().liveFencedVolumeNames().length === 0) return startUnderFence([], start);
   let mounts: Array<{ Type?: string; Name?: string }>;
   try {
     const inspected = await (docker.getContainer(containerId) as unknown as InspectableContainer).inspect();
     mounts = inspected.Mounts ?? [];
   } catch (err) {
-    if ((err as { statusCode?: number }).statusCode === 404) return;
+    if ((err as { statusCode?: number }).statusCode === 404) return startUnderFence([], start);
     throw err;
   }
-  const hit = mounts.find((m) => m.Type === 'volume' && m.Name !== undefined && fenced.includes(m.Name));
-  if (hit?.Name) throw new DataRestoreFenceError(hit.Name);
+  const names = mounts
+    .filter((m) => m.Type === 'volume' && m.Name !== undefined)
+    .map((m) => m.Name as string);
+  return startUnderFence(names, start);
 }
 
 /**
