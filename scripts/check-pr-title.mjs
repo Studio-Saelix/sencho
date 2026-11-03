@@ -20,17 +20,20 @@
  * the rules that matter for the release pipeline (a parsable type, and an empty
  * subject). Length, casing, and full commitlint validation stay in the local
  * hook, which sees the whole commit; this runs against a one-line title where a
- * stricter rule set would only produce noise.
+ * stricter rule set would only produce noise. The one exception is the ci-scope
+ * rule below.
  *
  * It also rejects a changelog-visible type scoped `ci`. release-please decides
  * what the changelog shows from the type alone, so `fix(ci): ...` lands in the
  * Fixed section even when only workflow files changed and no operator can
- * observe the change. CI work is typed `ci:`, which the config hides.
+ * observe the change. CI work is typed `ci:`, which the config hides. A squash
+ * that already merged with such a title is retyped with a BEGIN_COMMIT_OVERRIDE
+ * block in its PR body, which this check never reads.
  *
  * Usage:
  *   node scripts/check-pr-title.mjs "<title>"
  *
- * Exits 0 when the title parses, 1 with an explanation when it does not.
+ * Exits 0 when the title is acceptable, 1 with an explanation when it is not.
  */
 
 import { readFileSync } from 'node:fs'
@@ -78,8 +81,8 @@ export function allowedTypes(commitlintConfig) {
  * The commit types release-please shows in the changelog: every section in
  * release-please-config.json that is not marked `hidden`. Read from the config
  * so this check cannot drift from what the release notes actually render.
- * Fails closed on a config with no sections. Takes either a path or an
- * already-loaded config object.
+ * Fails closed on a config with no sections. Takes either a path relative to
+ * the repo root or an already-loaded config object.
  */
 export function visibleTypes(releasePleaseConfig) {
   const config =
@@ -126,7 +129,7 @@ export function parseTitle(title, types) {
   return { type, scope: scope ?? null, breaking: breaking === '!', subject }
 }
 
-export function checkTitle(title, types, changelogTypes = []) {
+export function checkTitle(title, types, changelogTypes) {
   const trimmed = (title ?? '').trim()
 
   if (trimmed === '') {
@@ -135,7 +138,7 @@ export function checkTitle(title, types, changelogTypes = []) {
 
   const parsed = parseTitle(trimmed, types)
 
-  if (parsed && parsed.scope === 'ci' && changelogTypes.includes(parsed.type)) {
+  if (parsed && parsed.scope?.trim().toLowerCase() === 'ci' && changelogTypes.includes(parsed.type)) {
     return [
       `The pull request title files a CI change under a visible type: "${trimmed}"`,
       '',
@@ -144,10 +147,7 @@ export function checkTitle(title, types, changelogTypes = []) {
       '',
       'Use ci: <subject> (hidden from the changelog) instead.',
       'If the change really is observable, for example a workflow change that alters',
-      'what a published image contains, name the area operators see instead of ci,',
-      'such as fix(release): or fix(images):.',
-      'To retype a squash that already merged, add a BEGIN_COMMIT_OVERRIDE block to its',
-      'PR body (see the release flow notes).',
+      'what a published image contains, name the area operators see instead of ci.',
     ].join('\n')
   }
 

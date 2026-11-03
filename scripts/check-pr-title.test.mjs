@@ -8,6 +8,9 @@
  * visible here as a test change instead of a silent divergence.
  */
 
+import { spawnSync } from 'node:child_process'
+import { dirname, resolve } from 'node:path'
+import { fileURLToPath } from 'node:url'
 import { describe, it } from 'node:test'
 import assert from 'node:assert/strict'
 
@@ -69,6 +72,9 @@ describe('allowedTypes', () => {
   })
 })
 
+// Mirrors release-please-config.json on purpose: the visibleTypes test below
+// compares it with the real file, so a change to the visible sections shows up
+// as a test diff here.
 const VISIBLE = ['feat', 'fix', 'perf', 'revert', 'security']
 
 // ---------------------------------------------------------------------------
@@ -200,7 +206,7 @@ describe('checkTitle', () => {
     ]
 
     for (const title of real) {
-      assert.equal(checkTitle(title, TYPES), null, title)
+      assert.equal(checkTitle(title, TYPES, VISIBLE), null, title)
     }
   })
 
@@ -208,6 +214,7 @@ describe('checkTitle', () => {
     const failure = checkTitle(
       'Surface runtime build identity across About, shell, and Admiral Account',
       TYPES,
+      VISIBLE,
     )
 
     assert.ok(failure)
@@ -216,14 +223,14 @@ describe('checkTitle', () => {
   })
 
   it('names the allowed types and an example when it fails', () => {
-    const failure = checkTitle('nope: missing the colon', TYPES)
+    const failure = checkTitle('nope: missing the colon', TYPES, VISIBLE)
 
     assert.match(failure, /security/)
     assert.match(failure, /fix\(dashboard\): /)
   })
 
   it('rejects an empty title', () => {
-    assert.match(checkTitle('   ', TYPES), /empty/)
+    assert.match(checkTitle('   ', TYPES, VISIBLE), /empty/)
   })
 
   it('accepts a title longer than the local commit hook allows', () => {
@@ -233,26 +240,28 @@ describe('checkTitle', () => {
     const long =
       'chore(deps): bump the all-npm-backend group across 1 directory with 14 updates and a rather long trailing description to exceed the limit'
 
-    assert.equal(checkTitle(long, TYPES), null)
+    assert.equal(checkTitle(long, TYPES, VISIBLE), null)
   })
 
   it('treats surrounding whitespace as absent', () => {
-    assert.match(checkTitle('\n\t ', TYPES), /empty/)
+    assert.match(checkTitle('\n\t ', TYPES, VISIBLE), /empty/)
   })
 
   it('rejects a changelog-visible type with the ci scope', () => {
     // release-please decides visibility from the type, so fix(ci) lands in the
-    // Fixed section even though only workflow files changed.
+    // changelog even though only workflow files changed.
     for (const title of [
       'fix(ci): evaluate the helper digest in image workflows',
       'feat(ci): add a nightly scan',
       'security(ci): pin an action by digest',
+      'fix(ci)!: drop the legacy runner',
+      'fix(CI): evaluate the helper digest',
+      'fix( ci ): evaluate the helper digest',
     ]) {
       const failure = checkTitle(title, TYPES, VISIBLE)
 
       assert.ok(failure, title)
-      assert.match(failure, /ci: /)
-      assert.match(failure, /BEGIN_COMMIT_OVERRIDE/)
+      assert.match(failure, /Use ci: /)
     }
   })
 
@@ -265,8 +274,26 @@ describe('checkTitle', () => {
     assert.equal(checkTitle('fix(cia-rules): keep the rule table sorted', TYPES, VISIBLE), null)
     assert.equal(checkTitle('fix(docker): stop the dev image drifting', TYPES, VISIBLE), null)
   })
+})
 
-  it('does not apply the ci-scope rule when no visible types are given', () => {
-    assert.equal(checkTitle('fix(ci): evaluate the helper digest', TYPES), null)
+// ---------------------------------------------------------------------------
+// CLI
+// ---------------------------------------------------------------------------
+
+describe('check-pr-title CLI', () => {
+  const script = resolve(dirname(fileURLToPath(import.meta.url)), 'check-pr-title.mjs')
+  const run = (title) => spawnSync(process.execPath, [script, title], { encoding: 'utf-8' })
+
+  it('rejects a visible type scoped ci against the real config', () => {
+    // Runs the real script so a change that stops passing the visible types
+    // into the check turns this red instead of silently disabling the rule.
+    const result = run('fix(ci): evaluate the helper digest in image workflows')
+
+    assert.equal(result.status, 1)
+    assert.match(result.stderr, /ci: <subject>/)
+  })
+
+  it('accepts a ci type title', () => {
+    assert.equal(run('ci: evaluate the helper digest in image workflows').status, 0)
   })
 })
