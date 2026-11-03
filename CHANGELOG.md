@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [0.98.2](https://github.com/Studio-Saelix/sencho/compare/v0.98.1...v0.98.2) (2026-11-03)
 
 
+### Highlights
+
+<!-- highlights-hash: f6685b5cd8b05a45 -->
+
+Fleet operations get the most attention here. Interactive reads against remote nodes now have deadlines, so a single unreachable node can no longer leave a tab hanging, and a missed deadline is reported by name instead of failing silently. The Actions tab has been rebuilt as a quieter list with task sheets, and Sencho now refuses operations that would stop the container carrying its own Docker connection. When a deploy is refused because the Docker endpoint is gone, you can recreate that endpoint on its own.
+
+Networking and labels work together more closely. Sencho detects tunnel and private-overlay exposure in Compose stacks and shows it next to the exposure you declared, so the two can be compared directly. Image update decisions and alert routing now come from io.sencho labels, following a documented label contract. A misplaced sencho.service.url is flagged and can be renamed to io.sencho.url in one click, and a rendered double dollar sign is reconciled with the container's single dollar.
+
+For agents and automation, there is a new Observe Only token scope with read-only observation endpoints. Off-site snapshot archives can be encrypted with a passphrase. Volume recovery points are in place and can restore to a new volume, though the broader recovery work is still foundation only, with no backup or restore flow yet. Evidence availability is now an explicit deploy-gate policy, and a deploy blocked by failed evidence logs the real cause.
+
+Mesh membership confirmations are more honest, addresses are copyable, and failures are easier to read. Aliases and port reservations stay stable while a node is offline, and the leftover paid-tier gate is gone. Elsewhere, unreachable nodes no longer show a false update prompt, the connection pin matches between the phone card and the topology map, and the Docker host's cores and memory are reported correctly inside a nested container. The Recovery Vault is now the Snapshot Vault, with the managed vault held behind the experimental flag.
+
 ### Added
 
 * **api:** add an Observe Only token scope and read-only observation endpoints for AI agents ([#2226](https://github.com/Studio-Saelix/sencho/issues/2226)) ([729da01](https://github.com/Studio-Saelix/sencho/commit/729da01ba6e7ff964d3299b4897f8bd36b148a12))
