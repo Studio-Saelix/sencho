@@ -77,6 +77,11 @@ describe('renameRetiredServiceUrlLabel', () => {
       .toBe('services:\n  web:\n    labels:\n      - io.sencho.url=https://a.example.com # keep\n');
   });
 
+  it('renames the label a service sets itself even when it also extends or merges a block', () => {
+    expect(renamed('services:\n  base:\n    image: nginx\n  web:\n    extends: base\n    labels:\n      sencho.service.url: https://a.example.com\n'))
+      .toBe('services:\n  base:\n    image: nginx\n  web:\n    extends: base\n    labels:\n      io.sencho.url: https://a.example.com\n');
+  });
+
   it('leaves a key that is not exactly the retired label alone', () => {
     const source = 'services:\n  web:\n    labels:\n      "sencho.service.url ": https://a.example.com\n      sencho.service.urls: x\n';
     expect(renamed(source)).toBe(source);
@@ -127,6 +132,9 @@ describe('renameRetiredServiceUrlLabel', () => {
       ['a service that merges another block and has no labels of its own', 'x-base: &base\n  labels:\n    sencho.service.url: https://a.example.com\nservices:\n  web:\n    <<: *base\n'],
       ['a service that extends another and has no labels of its own', 'services:\n  base:\n    labels:\n      sencho.service.url: https://a.example.com\n  web:\n    extends: base\n'],
       ['a service that extends a service in another file and has no labels of its own', 'services:\n  web:\n    extends:\n      file: other.yml\n      service: base\n'],
+      ['a service with its own labels that also extends a block in this file', 'services:\n  base:\n    labels:\n      sencho.service.url: https://a.example.com\n  web:\n    extends: base\n    labels:\n      other: x\n'],
+      ['a service with its own label list that also merges a block', 'x-base: &base\n  image: nginx\nservices:\n  web:\n    <<: *base\n    labels:\n      - other=x\n'],
+      ['a service with empty own labels that extends a block', 'services:\n  base:\n    labels:\n      sencho.service.url: https://a.example.com\n  web:\n    extends: base\n    labels: {}\n'],
       ['an escaped key', 'services:\n  web:\n    labels:\n      "sencho\\x2eservice.url": https://a.example.com\n'],
     ])('refuses %s', (_name, source) => {
       expect(refused(source)).toMatchObject(UNSUPPORTED);

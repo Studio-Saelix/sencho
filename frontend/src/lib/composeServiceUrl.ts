@@ -1129,9 +1129,10 @@ function renameTokenSplice(source: string, node: unknown, retired: string, curre
  * instead, because the current one is the one Sencho reads. Only a label declared
  * directly on the service in this file is renamed: anchors, aliases, merges, custom
  * tags and interpolated list keys are refused as `unsupported`, and so is any result
- * whose parsed model differs from the expected one. When the service holds no
- * retired label in this file the source comes back unchanged with `ok: true`;
- * callers detect that by comparing the text.
+ * whose parsed model differs from the expected one, and so is a service that
+ * merges or extends another block without setting the label itself. When the
+ * service holds no retired label in this file and inherits nothing, the source
+ * comes back unchanged with `ok: true`; callers detect that by comparing the text.
  */
 export function renameRetiredServiceUrlLabel(source: string, serviceName: string): ServiceUrlPatch {
   let doc: ReturnType<typeof parseDocument>;
@@ -1155,12 +1156,11 @@ export function renameRetiredServiceUrlLabel(source: string, serviceName: string
   if (!isMap(service) || anchorName(service)) return { ok: false, reason: 'unsupported' };
   const labelPair = service.items.find(item => labelText(item.key) === 'labels');
   const labels = labelPair ? labelPair.value : null;
-  if (labels == null || (isScalar(labels) && (labels.value == null || labels.value === ''))) {
-    // A service that inherits through a merge or `extends` may take the label from a block that is in this very file.
-    if (mapHasMerge(service) || service.items.some(item => labelText(item.key) === 'extends')) return { ok: false, reason: 'unsupported' };
-    // Otherwise whatever sets the retired label lives in another file, so there is nothing to rename here.
-    return { ok: true, yaml: source };
-  }
+  // A service that merges or extends another block may take the label from a block that is in this very file.
+  const inherits = mapHasMerge(service) || service.items.some(item => labelText(item.key) === 'extends');
+  // When the service does not set the label itself, there is nothing to rename in this file: refuse if it may be inherited from here, else it lives in another file.
+  const notSetHere = (): ServiceUrlPatch => (inherits ? { ok: false, reason: 'unsupported' } : { ok: true, yaml: source });
+  if (labels == null || (isScalar(labels) && (labels.value == null || labels.value === ''))) return notSetHere();
   if (!isMap(labels) && !isSeq(labels)) return { ok: false, reason: 'unsupported' };
   if (anchorName(labels) || hasCustomTag(doc) || listLabelKeyInterpolated(serviceOf(parsed, serviceName)?.labels)) {
     return { ok: false, reason: 'unsupported' };
@@ -1172,7 +1172,7 @@ export function renameRetiredServiceUrlLabel(source: string, serviceName: string
     if (isMap(labels)) {
       if (mapHasMerge(labels)) return { ok: false, reason: 'unsupported' };
       const retired = labels.items.find(item => labelText(item.key) === RETIRED_URL_LABEL);
-      if (!retired) return { ok: true, yaml: source };
+      if (!retired) return notSetHere();
       const declared = labels.items.some(item => labelText(item.key) === SERVICE_URL_LABEL);
       if (!declared) splices.push(renameTokenSplice(source, retired.key, RETIRED_URL_LABEL, SERVICE_URL_LABEL));
       else if (flow) splices.push(...editFlow(source, labels, new Set([retired]), null));
@@ -1183,7 +1183,7 @@ export function renameRetiredServiceUrlLabel(source: string, serviceName: string
         return { ok: false, reason: 'unsupported' };
       }
       const retired = labels.items.filter((_, index) => isRetiredListItem(texts[index]));
-      if (retired.length === 0) return { ok: true, yaml: source };
+      if (retired.length === 0) return notSetHere();
       if (texts.some(isUrlListItem)) {
         if (flow) splices.push(...editFlow(source, labels, new Set(retired), null));
         else for (const item of retired) splices.push(deleteSpan(source, item, item));
