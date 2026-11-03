@@ -41,7 +41,6 @@ import {
   reconcileOverwriteIntentsAtStartup,
   resolveOverwriteIntent,
   runOverwritePipeline,
-  stagingVolumeFor,
   type OverwriteDeps,
   type OverwritePreview,
   type ResolveAction,
@@ -772,29 +771,19 @@ export class RecoveryEngineService {
           { scope: 'storage', resourceKey: admitted.storageKey },
           { scope: 'repository', resourceKey: repository.id },
         ],
-        (operation) => {
-          const intent = this.intents.recordOverwrite({
-            id: intentId,
-            operationId: operation.id,
-            pointId: admitted.point.id,
-            targetVolume: admitted.storage.locator,
-            actor: input.actor,
-            processEpoch: this.processEpoch,
-            stagingVolume: stagingVolumeFor(intentId),
-            expectedGenerationToken: admitted.liveGenerationToken,
-            dependentStacks: admitted.stacks,
-          });
-          this.points.addHold({
-            pointId: admitted.point.id,
-            holderKind: 'restore_intent',
-            holderRef: intent.id,
-          });
-          // The exact set the fence will own is written at admission, so a crash
-          // before the pipeline starts leaves nothing to guess and the pre-fence
-          // recheck compares against what the operator confirmed.
-          deps.fence.recordMembers(intent.id, admitted.fenceMembers);
-          return intent;
-        },
+        // One implementation of the admission rows: the intent, the source hold
+        // and the exact fence set, written inside the operation's transaction.
+        (operation) => recordOverwriteIntent(deps, {
+          intentId,
+          operationId: operation.id,
+          pointId: admitted.point.id,
+          targetVolume: admitted.storage.locator,
+          actor: input.actor,
+          processEpoch: this.processEpoch,
+          expectedGenerationToken: admitted.liveGenerationToken,
+          fenceMembers: admitted.fenceMembers,
+          dependentStacks: admitted.stacks,
+        }),
       );
     } catch (err) {
       releaseStacks();

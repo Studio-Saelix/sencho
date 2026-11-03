@@ -541,6 +541,8 @@ export function recordOverwriteIntent(
     processEpoch: string;
     expectedGenerationToken: string;
     fenceMembers: readonly FenceMemberInput[];
+    /** Every stack whose model declares the volume, with or without containers. */
+    dependentStacks?: readonly string[];
   },
 ): RestoreIntentRecord {
   const intent = deps.intents.recordOverwrite({
@@ -552,6 +554,7 @@ export function recordOverwriteIntent(
     processEpoch: input.processEpoch,
     stagingVolume: stagingVolumeFor(input.intentId),
     expectedGenerationToken: input.expectedGenerationToken,
+    dependentStacks: input.dependentStacks ? [...input.dependentStacks] : undefined,
   });
   deps.points.addHold({ pointId: input.pointId, holderKind: 'restore_intent', holderRef: intent.id });
   deps.fence.recordMembers(intent.id, input.fenceMembers);
