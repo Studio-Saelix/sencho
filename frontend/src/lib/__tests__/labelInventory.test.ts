@@ -42,6 +42,16 @@ describe('matchesSearch', () => {
   });
 });
 
+describe('readLabelBehavior for the retired link label', () => {
+  it('keeps the status of the declared copy and drops any other', () => {
+    const raw = { state: 'unsupported', reason: 'Rename this label to show the link.' };
+    expect(readLabelBehavior('compose', 'sencho.service.url', raw)).toEqual(raw);
+    expect(readLabelBehavior('runtime', 'sencho.service.url', raw)).toBeUndefined();
+    expect(readLabelBehavior('compose', 'sencho.service.url', undefined)).toBeUndefined();
+    expect(readLabelBehavior('compose', 'sencho.other', raw)).toBeUndefined();
+  });
+});
+
 describe('readLabelBehavior', () => {
   it('names the origin when it drops a claim about a copy Sencho does not act on', () => {
     expect(readLabelBehavior('runtime', 'io.sencho.url', { state: 'active' })).toEqual({

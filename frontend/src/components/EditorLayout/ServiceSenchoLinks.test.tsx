@@ -1,5 +1,5 @@
-import { render, screen } from '@testing-library/react';
-import { describe, expect, it } from 'vitest';
+import { fireEvent, render, screen } from '@testing-library/react';
+import { describe, expect, it, vi } from 'vitest';
 import { ServiceSenchoLinks } from './ServiceSenchoLinks';
 import { serviceUpdateButtonState, updatePolicyChip } from './serviceUpdatePolicy';
 import { readSenchoLabels } from '@/lib/senchoLabels';
@@ -42,6 +42,33 @@ describe('ServiceSenchoLinks', () => {
       <ServiceSenchoLinks resolution={resolution({ web: { links: [], order: null, hidden: false } })} service="web" applicationLinkShown={false} />,
     );
     expect(container).toBeEmptyDOMElement();
+  });
+});
+
+describe('retired link label', () => {
+  const retired = resolution(
+    { web: { links: [], order: null, hidden: false } },
+    [{ service: 'web', key: 'sencho.service.url', state: 'unsupported', reason: 'Rename this label to show the link.' }],
+  );
+
+  it('offers the rename only when the caller allows it, and runs it on click', () => {
+    const onRename = vi.fn();
+    const { rerender } = render(<ServiceSenchoLinks resolution={retired} service="web" applicationLinkShown={false} />);
+    expect(screen.getByTestId('service-sencho-ignored')).toHaveTextContent('1 Sencho label ignored');
+    expect(screen.queryByTestId('service-sencho-rename-retired')).toBeNull();
+
+    rerender(<ServiceSenchoLinks resolution={retired} service="web" applicationLinkShown={false} onRenameRetiredUrl={onRename} />);
+    fireEvent.click(screen.getByRole('button', { name: 'Rename to io.sencho.url' }));
+    expect(onRename).toHaveBeenCalledTimes(1);
+  });
+
+  it('does not offer the rename for other ignored labels', () => {
+    const other = resolution(
+      { web: { links: [], order: null, hidden: false } },
+      [{ service: 'web', key: 'io.sencho.future', state: 'unsupported', reason: 'Sencho does not recognize this label.' }],
+    );
+    render(<ServiceSenchoLinks resolution={other} service="web" applicationLinkShown={false} onRenameRetiredUrl={vi.fn()} />);
+    expect(screen.queryByTestId('service-sencho-rename-retired')).toBeNull();
   });
 });
 

@@ -7,6 +7,7 @@ import {
   SENCHO_NOTIFY_ROUTE_LABEL,
   type SenchoLabelState,
 } from './senchoLabels';
+import { RETIRED_URL_LABEL } from './serviceUrlLabel';
 
 export type LabelSource = 'compose' | 'runtime' | 'image' | 'compose-system' | 'unknown';
 
@@ -201,7 +202,8 @@ function unhonoredInertReason(source: LabelSource): string {
  * inert keeps its reason, which names the origin.
  */
 export function readLabelBehavior(source: LabelSource, key: string, raw: unknown): LabelBehavior | undefined {
-  if (raw === undefined || !isSenchoLabelKey(key)) return undefined;
+  // Only the declared Compose copy of the retired link label carries a status, as on the node that reports it.
+  if (raw === undefined || !(isSenchoLabelKey(key) || (key === RETIRED_URL_LABEL && source === 'compose'))) return undefined;
   const o = raw && typeof raw === 'object' && !Array.isArray(raw) ? raw as Record<string, unknown> : null;
   const state = o && typeof o.state === 'string' && Object.prototype.hasOwnProperty.call(BEHAVIOR_LABELS, o.state)
     ? o.state as LabelBehaviorState

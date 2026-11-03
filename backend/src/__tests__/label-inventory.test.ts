@@ -504,6 +504,31 @@ describe('io.sencho.* behavior annotations', () => {
     expect(declared['plain'].behavior).toBeUndefined();
   });
 
+  it('flags the retired link label on the declaration and not on a differing container copy', async () => {
+    writeStack('sl3b', { 'compose.yaml': 'services:\n  web:\n    image: nginx\n' });
+    stubRender({ web: { 'sencho.service.url': 'https://old.example.com' } });
+    stubDockerList([
+      {
+        id: 'c1', name: 'sl3b-web-1', state: 'running', stack: 'sl3b', service: 'web', imageId: 'img1',
+        labels: { 'sencho.service.url': 'https://old.example.com' },
+      },
+      {
+        id: 'c2', name: 'sl3b-web-2', state: 'running', stack: 'sl3b', service: 'web', imageId: 'img1',
+        labels: { 'sencho.service.url': 'https://stale.example.com' },
+      },
+    ]);
+    const inv = await buildStackLabelInventory(nodeId, 'sl3b');
+    const web = inv.services.find(s => s.service === 'web');
+    expect(web?.declaredLabels.find(l => l.key === 'sencho.service.url')?.behavior).toMatchObject({
+      state: 'unsupported',
+      reason: expect.stringContaining('io.sencho.url'),
+    });
+    const copies = web?.replicas.map(r => r.runtimeLabels.find(l => l.key === 'sencho.service.url')?.behavior) ?? [];
+    // A container copy equal to the declaration is that declaration; a different one is only a runtime leftover.
+    expect(copies.filter(Boolean)).toHaveLength(1);
+    expect(copies.find(Boolean)).toMatchObject({ state: 'unsupported' });
+  });
+
   it('judges each replica of a service on its own value against the one declaration', async () => {
     writeStack('sl4', { 'compose.yaml': 'services:\n  web:\n    image: nginx\n' });
     stubRender({ web: { 'io.sencho.hidden': 'true' } });

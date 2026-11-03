@@ -209,6 +209,7 @@ export interface EditorViewProps {
     onRequestServiceUpdate?: (serviceName: string, mode: 'update' | 'rebuild') => void;
     serviceUrlEntry?: ServiceUrlEntry | null;
     onEditServiceUrl?: (serviceName: string) => void;
+    onRenameRetiredUrl?: (serviceName: string) => void;
     onRetryServiceUrls?: () => void;
 
     // UI state setters
@@ -319,6 +320,7 @@ export function EditorView(props: EditorViewProps) {
         onRequestServiceUpdate,
         serviceUrlEntry = null,
         onEditServiceUrl,
+        onRenameRetiredUrl,
         onRetryServiceUrls,
         setActiveTab,
         setLogsMode,
@@ -578,6 +580,7 @@ export function EditorView(props: EditorViewProps) {
                                     sourceServices={sourceServices}
                                     lockedServices={lockedServices}
                                     onEditServiceUrl={onEditServiceUrl}
+                                    onRenameRetiredUrl={onRenameRetiredUrl}
                                     onRetryServiceUrls={onRetryServiceUrls}
                                     containersExpanded={containersExpanded}
                                     onToggleContainersExpand={toggleContainersExpand}
@@ -612,6 +615,7 @@ export function EditorView(props: EditorViewProps) {
                                 sourceServices={sourceServices}
                                 lockedServices={lockedServices}
                                 onEditServiceUrl={onEditServiceUrl}
+                                onRenameRetiredUrl={onRenameRetiredUrl}
                                 onRetryServiceUrls={onRetryServiceUrls}
                                 containersLoadStatus={containersLoadStatus}
                                 containersLoadError={containersLoadError}

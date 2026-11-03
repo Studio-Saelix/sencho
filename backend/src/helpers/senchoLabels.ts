@@ -28,6 +28,14 @@ export const SENCHO_LABEL_NAMESPACE = 'io.sencho.';
 /** The application link label; the Compose editor and the URL pipeline key off it. */
 export const SENCHO_URL_LABEL = 'io.sencho.url';
 
+/**
+ * The application link label of the earlier draft contract. It is not part of
+ * the registry and is never read as a link: a Compose file that still sets it
+ * gets an `unsupported` entry that points at `io.sencho.url`, so the link does
+ * not disappear without a word.
+ */
+export const RETIRED_URL_LABEL = 'sencho.service.url';
+
 /** The protective label the Docker endpoint guard reads from the file and from deployed containers. */
 export const SENCHO_INFRASTRUCTURE_LABEL = 'io.sencho.infrastructure';
 
@@ -376,6 +384,15 @@ export function isSenchoLabelKey(key: string): boolean {
   return key.startsWith(SENCHO_LABEL_NAMESPACE);
 }
 
+/** Fixed text for the retired link label; it never echoes the value. */
+export const RETIRED_URL_LABEL_REASON =
+  'Sencho reads a service\'s application link from io.sencho.url. Rename this label to show the link.';
+
+/** A key the resolver reports on: the `io.sencho.*` namespace plus the retired link label. */
+function isDiagnosedLabelKey(key: string): boolean {
+  return isSenchoLabelKey(key) || key === RETIRED_URL_LABEL;
+}
+
 export interface SenchoLink {
   /** `null` is the service's application link (`io.sencho.url`). */
   name: string | null;
@@ -536,12 +553,13 @@ function resolveService(service: string, labels: Map<string, string>, entries: S
     named: [],
     namedSeen: new Set(),
   };
-  for (const key of [...labels.keys()].filter(isSenchoLabelKey).sort()) {
+  for (const key of [...labels.keys()].filter(isDiagnosedLabelKey).sort()) {
     const def = findSenchoLabelDefinition(key);
     const write: EntryWriter = (state, reason) => {
       entries.push({ service, key, state, definition: def?.id ?? null, ...(reason ? { reason } : {}) });
     };
-    if (isManagedSenchoLabel(key)) write('invalid', MANAGED_LABEL_DECLARED_REASON);
+    if (key === RETIRED_URL_LABEL) write('unsupported', RETIRED_URL_LABEL_REASON);
+    else if (isManagedSenchoLabel(key)) write('invalid', MANAGED_LABEL_DECLARED_REASON);
     else if (!def) write('unsupported', 'Sencho does not recognize this label.');
     else applyLabel(def, key, labels.get(key) ?? '', draft, write);
   }
@@ -652,13 +670,13 @@ function entryIndex(resolution: RenderedResolution): Map<string, SenchoLabelEntr
   return index;
 }
 
-/** Annotation for an `io.sencho.*` label declared on a rendered service. */
+/** Annotation for an `io.sencho.*` label, or the retired link label, declared on a rendered service. */
 export function declaredLabelBehavior(
   resolution: SenchoLabelResolution,
   service: string,
   key: string,
 ): LabelBehavior | undefined {
-  if (!isSenchoLabelKey(key)) return undefined;
+  if (!isDiagnosedLabelKey(key)) return undefined;
   if (!resolution.renderable) return { state: 'inert', reason: INERT_REASON.unrendered };
   const found = entryIndex(resolution).get(`${service}\0${key}`);
   if (!found) return undefined;
@@ -696,7 +714,8 @@ function remoteOriginOf(source: LabelSource): InertOrigin {
  * a stale container) better than the hub can.
  */
 export function sanitizeRemoteBehavior(source: LabelSource, key: string, raw: unknown): LabelBehavior | undefined {
-  if (raw === undefined || !isSenchoLabelKey(key)) return undefined;
+  // Only the declared Compose copy of the retired label carries a status, as on the node that reports it.
+  if (raw === undefined || !(isSenchoLabelKey(key) || (key === RETIRED_URL_LABEL && source === 'compose'))) return undefined;
   const o = raw && typeof raw === 'object' && !Array.isArray(raw) ? raw as Record<string, unknown> : null;
   const state = o && typeof o.state === 'string' && VALID_LABEL_BEHAVIOR_STATES.has(o.state)
     ? o.state as LabelBehaviorState

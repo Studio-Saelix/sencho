@@ -6,6 +6,7 @@ import {
   unverifiedLinkCount,
   type SenchoLabelResolution,
 } from '@/lib/senchoLabels';
+import { RETIRED_URL_LABEL } from '@/lib/serviceUrlLabel';
 import { updatePolicyChip } from './serviceUpdatePolicy';
 
 const LINK_CLASS = 'inline-flex min-w-0 max-w-full items-center gap-1 text-brand hover:underline max-md:min-h-11';
@@ -25,6 +26,8 @@ interface ServiceSenchoLinksProps {
   service: string | undefined;
   /** A published-port link already opens the application link, so it is not repeated. */
   applicationLinkShown: boolean;
+  /** Set when the retired link label can be renamed in the open compose file by this user. */
+  onRenameRetiredUrl?: () => void;
 }
 
 /**
@@ -33,13 +36,14 @@ interface ServiceSenchoLinksProps {
  * update policy in force, and a quiet count of labels Sencho ignored. Every
  * anchor target was validated by the node and is checked again on read.
  */
-export function ServiceSenchoLinks({ resolution, service, applicationLinkShown }: ServiceSenchoLinksProps) {
+export function ServiceSenchoLinks({ resolution, service, applicationLinkShown, onRenameRetiredUrl }: ServiceSenchoLinksProps) {
   const application = applicationLinkShown ? undefined : applicationLink(resolution, service);
   const named = namedLinks(resolution, service);
   const ignored = ignoredLabels(resolution, service);
   const unverified = unverifiedLinkCount(resolution, service);
   const policyChip = updatePolicyChip(resolution, service);
   const notShown = ignored.length + unverified;
+  const canRename = !!onRenameRetiredUrl && ignored.some(entry => entry.key === RETIRED_URL_LABEL);
   if (!application && named.length === 0 && notShown === 0 && !policyChip) return null;
 
   return (
@@ -72,6 +76,16 @@ export function ServiceSenchoLinks({ resolution, service, applicationLinkShown }
         >
           {notShown} Sencho label{notShown === 1 ? '' : 's'} ignored
         </span>
+      )}
+      {canRename && (
+        <button
+          type="button"
+          onClick={onRenameRetiredUrl}
+          className="font-mono text-[10px] uppercase text-brand hover:underline max-md:min-h-11"
+          data-testid="service-sencho-rename-retired"
+        >
+          Rename to io.sencho.url
+        </button>
       )}
     </div>
   );

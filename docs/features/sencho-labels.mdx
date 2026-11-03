@@ -203,7 +203,10 @@ Update policy and notification routing travel under a separate capability, `senc
     The value must be a whole number such as `"10"`; `first` or `1.5` is ignored and listed as **Ignored**. Services without a valid order always sort after ordered ones.
   </Accordion>
   <Accordion title="A label shows as Unsupported">
-    Sencho does not define that key. Check the spelling against the table above. Keys outside the `io.sencho.` namespace are ordinary Docker labels and are never marked.
+    Sencho does not define that key. Check the spelling against the table above. Keys outside the `io.sencho.` namespace are ordinary Docker labels and are never marked, with one exception: `sencho.service.url` is marked **Unsupported** because the application link is read only from `io.sencho.url`.
+  </Accordion>
+  <Accordion title="A link set with sencho.service.url does not show">
+    Sencho reads a service's application link only from `io.sencho.url`. A `sencho.service.url` label is marked **Unsupported** in the **Compose Labels** tab and counted as an ignored label on the service's card. Editors see **Rename to io.sencho.url** beside it: it renames the key in the open Compose file and keeps the value exactly as written, including `${VAR}` references. If `io.sencho.url` is already set on the service, the rename removes the old label instead. The rename is refused when the label sits in a shared block, or in a different Compose file than the one that is open; rename it in the file that sets it.
   </Accordion>
   <Accordion title="A Sencho label shows as Ignored but the spelling looks right">
     Two cases ignore a correct-looking key. A key Sencho reserves for containers it creates (`io.sencho.mesh`, `io.sencho.helper`, `io.sencho.operation`) has no effect in a Compose file. A link name that another key already defines, after lowercasing, is also ignored; the key that sorts first wins.

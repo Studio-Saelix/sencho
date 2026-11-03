@@ -112,6 +112,29 @@ test.describe('io.sencho.* labels', () => {
     await deleteStack(page);
   });
 
+  test('flags the retired link label and reads no link from it', async ({ page }) => {
+    const body = await page.evaluate(async ({ stackName, content }: { stackName: string; content: string }) => {
+      const write = await fetch(`/api/stacks/${stackName}`, {
+        method: 'PUT',
+        credentials: 'include',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ content }),
+      });
+      if (!write.ok) throw new Error(`write failed: ${write.status}`);
+      const res = await fetch(`/api/stacks/${stackName}/effective-anatomy`, { credentials: 'include' });
+      return { ok: res.ok, json: await res.json() as { senchoLabels: SenchoResolution; serviceUrls: Record<string, string> } };
+    }, {
+      stackName: STACK,
+      content: 'services:\n  web:\n    image: nginx:alpine\n    labels:\n      sencho.service.url: https://app.example.com\n',
+    });
+    expect(body.ok).toBe(true);
+    expect(body.json.serviceUrls).toEqual({});
+    expect(body.json.senchoLabels.services.web.links).toEqual([]);
+    expect(body.json.senchoLabels.entries.filter(e => e.service === 'web')).toEqual([
+      expect.objectContaining({ key: 'sencho.service.url', state: 'unsupported' }),
+    ]);
+  });
+
   test('resolves labels from the merged model: override wins, links validate, order and hidden apply', async ({ page }) => {
     const body = await page.evaluate(async (stackName: string) => {
       const res = await fetch(`/api/stacks/${stackName}/effective-anatomy`, { credentials: 'include' });
