@@ -347,11 +347,12 @@ describeIf('staged overwrite against real Docker', () => {
       createVolume(source);
       populateSource(source);
       const point = await capture(source);
-      // Every pack, not one: restic only fails a restore when the data it needs
-      // is missing, and one arbitrary pack may hold nothing this snapshot reads.
-      // Deleting them all makes "the repository lost its data" deterministic.
+      // Every data file, not one: a local restic repository keeps its packs under
+      // data/<xx>/, and restic only fails a restore when the data it needs is
+      // missing, so one arbitrary pack could hold nothing this snapshot reads.
+      // The index and the snapshot stay, so the loss is data and not history.
       docker(['run', '--rm', '--network', 'none', '-v', `${repositoryVolume}:/repo`, BUSYBOX, 'sh', '-c',
-        'rm -f /repo/packs/*']);
+        'rm -f /repo/data/*/*']);
 
       createVolume(target);
       runInVolume(target, ['set -e', 'printf "keep-me" > keep.txt', 'chmod 755 /data'].join('\n'));
