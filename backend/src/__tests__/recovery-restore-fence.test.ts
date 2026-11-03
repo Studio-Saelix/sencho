@@ -206,6 +206,25 @@ describe('what the fence closes', () => {
     expect(service.tryAcquire(1, 'other', 'deploy', 'alice').acquired).toBe(true);
   });
 
+  it('refuses a stack whose model declares the volume but which has no container now', () => {
+    // A stack can declare the volume and have no container at this instant. A
+    // deploy of it would start one, so it is a dependent even with no member row.
+    const intentId = seedIntent('fenced');
+    const store = fence.RestoreFenceStore.getInstance();
+    store.setFenceState(intentId, 'held');
+    recoveryDbModule.recoveryDb().prepare(
+      'UPDATE recovery_restore_intents SET dependent_stacks_json = ? WHERE id = ?',
+    ).run(JSON.stringify(['stack-dir', 'other-stack']), intentId);
+
+    const service = locks.StackOpLockService.getInstance();
+    for (const name of ['stack-dir', 'other-stack']) {
+      const result = service.tryAcquire(1, name, 'deploy', 'alice');
+      expect(result.acquired, name).toBe(false);
+      expect(result.acquired === false && result.existing.action).toBe('data_restore');
+    }
+    expect(service.tryAcquire(1, 'unrelated', 'deploy', 'alice').acquired).toBe(true);
+  });
+
   it('stops closing a stack once the fence is released or settled', () => {
     const intentId = seedIntent('fenced');
     const store = fence.RestoreFenceStore.getInstance();

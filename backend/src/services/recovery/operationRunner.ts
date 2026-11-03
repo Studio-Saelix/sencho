@@ -37,6 +37,7 @@ import {
 import {
   prepareOverwriteAdmission,
   previewOverwrite as buildOverwritePreview,
+  recordOverwriteIntent,
   reconcileOverwriteIntentsAtStartup,
   resolveOverwriteIntent,
   runOverwritePipeline,

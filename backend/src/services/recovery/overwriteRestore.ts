@@ -525,6 +525,39 @@ export async function prepareOverwriteAdmission(deps: OverwriteDeps, input: {
   };
 }
 
+/**
+ * The rows an admission writes, in one place so the route and the tests can
+ * reach the same shape: the intent, the source hold and the exact fence set.
+ * Runs inside the operation's own transaction.
+ */
+export function recordOverwriteIntent(
+  deps: OverwriteDeps,
+  input: {
+    intentId: string;
+    operationId: string;
+    pointId: string;
+    targetVolume: string;
+    actor: string;
+    processEpoch: string;
+    expectedGenerationToken: string;
+    fenceMembers: readonly FenceMemberInput[];
+  },
+): RestoreIntentRecord {
+  const intent = deps.intents.recordOverwrite({
+    id: input.intentId,
+    operationId: input.operationId,
+    pointId: input.pointId,
+    targetVolume: input.targetVolume,
+    actor: input.actor,
+    processEpoch: input.processEpoch,
+    stagingVolume: stagingVolumeFor(input.intentId),
+    expectedGenerationToken: input.expectedGenerationToken,
+  });
+  deps.points.addHold({ pointId: input.pointId, holderKind: 'restore_intent', holderRef: intent.id });
+  deps.fence.recordMembers(intent.id, input.fenceMembers);
+  return intent;
+}
+
 // --- The pipeline -----------------------------------------------------------
 
 export interface OverwriteRunContext {
@@ -1194,6 +1227,20 @@ export async function reconcileOverwriteIntent(
     action: 'status',
   });
   const swapStatus = status.report?.status ?? null;
+  if (swapStatus === 'absent' && intent.phase === 'swapped') {
+    // Cleanup only removes the work directory after the journal says the swap
+    // committed, so an absent journal on a `swapped` intent means the clean-up
+    // finished and the process died before the fence was released. There is
+    // nothing left to move, and the data is proven: finish the release.
+    const released = await releaseFence(deps, intent.id, true);
+    if (!released) {
+      markUnknown(deps, intent, 'fence_unavailable', now);
+      return 'unknown';
+    }
+    deps.intents.advance(intent.id, 'committed', { outcomeClass: null }, now);
+    releaseHolds(deps, intent.id);
+    return 'committed';
+  }
   if (swapStatus === null || swapStatus === 'inconsistent' || swapStatus === 'absent') {
     markUnknown(deps, intent, 'identity_unknown', now);
     return 'unknown';

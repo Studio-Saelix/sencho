@@ -304,6 +304,7 @@ Startup settles every overwrite a previous process left open, and the operation 
 | the point was still being staged, nothing live moved | rolled back |
 | the workloads were fenced but the swap had not started | rolled back, fence released, workloads restarted |
 | the swap started and did not complete | originals restored from the journal, then rolled back and restarted |
+| every entry moved but the journal did not record the commit | finished forward: the root metadata is applied and the commit recorded, then cleaned up and restarted |
 | the swap completed | rolled forward, cleaned up, restarted |
 | the journal or the volume cannot be read | left unsettled, fence kept held, `completion_unknown` |
 

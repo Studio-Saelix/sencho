@@ -258,7 +258,7 @@ export class RestoreIntentStore {
       );
     } catch (err) {
       const message = (err as Error).message ?? '';
-      if (/UNIQUE|constraint/i.test(message)) {
+      if (/UNIQUE constraint failed/i.test(message)) {
         console.warn('[Recovery] Refused a second live restore into %s', sanitizeForLog(input.targetVolume));
         throw new RecoveryError('lock_held');
       }

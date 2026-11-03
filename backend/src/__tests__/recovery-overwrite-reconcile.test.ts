@@ -317,6 +317,31 @@ describe('the resolve route decisions', () => {
   });
 });
 
+describe('a fence that outlived its intent', () => {
+  it('is released at startup even when the intent is terminal', async () => {
+    const { seeded, fake } = await seed({ phase: 'swapped', createdAt: new Date().toISOString(), fenced: true });
+    intents.RestoreIntentStore.getInstance().advance(seeded.intentId, 'committed');
+    // A release that failed after the commit left the fence held.
+    intents.RestoreIntentStore.getInstance().setFenceState(seeded.intentId, 'held');
+    expect(fence.RestoreFenceStore.getInstance().isVolumeFenced(VOLUME)).toBe(true);
+    await overwrite.reconcileOverwriteIntentsAtStartup(deps(fake, answers()));
+    expect(fence.RestoreFenceStore.getInstance().isVolumeFenced(VOLUME)).toBe(false);
+    expect(fake.containers.get('c1')?.State).toBe('running');
+  });
+
+  it('can be released by the resolve route after the intent settled', async () => {
+    const { seeded, fake } = await seed({ phase: 'swapped', createdAt: new Date().toISOString(), fenced: true });
+    intents.RestoreIntentStore.getInstance().advance(seeded.intentId, 'committed');
+    intents.RestoreIntentStore.getInstance().setFenceState(seeded.intentId, 'release_failed');
+    const result = await overwrite.resolveOverwriteIntent(deps(fake, answers()), {
+      intentId: seeded.intentId,
+      action: 'retry',
+    });
+    expect(result.outcome).toBe('committed');
+    expect(fence.RestoreFenceStore.getInstance().isVolumeFenced(VOLUME)).toBe(false);
+  });
+});
+
 describe('startup reconciliation', () => {
   it('settles every unsettled overwrite and reports the counts', async () => {
     const { fake } = await seed({ phase: 'staged_verified', createdAt: new Date().toISOString(), fenced: false });

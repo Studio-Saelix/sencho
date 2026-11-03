@@ -311,6 +311,54 @@ describe('admission', () => {
     })).rejects.toMatchObject({ errorClass: 'lock_held' });
   });
 
+  it('records the intent, the source hold and the exact fence set together', async () => {
+    const fake = fakeDocker({ volumes: [{ name: VOLUME }], containers: [mountingContainer()] });
+    const createdAt = fake.volumes.get(VOLUME)?.createdAt ?? '';
+    const seeded = seed({ createdAt });
+    const base = deps(fake.docker, scriptedHelper());
+    const admitted = await confirm(fake, seeded.pointId);
+    recoveryDbModule.recoveryDb().prepare(`INSERT INTO recovery_operations
+      (id, idempotency_key, kind, storage_id, point_id, actor, transport, state, process_epoch, created_at, updated_at)
+      VALUES ('op-overwrite', 'key-overwrite', 'restore', ?, ?, 'admin', 'local', 'running', 'e', 1, 1)`)
+      .run(seeded.storageId, seeded.pointId);
+    const intentId = randomUUID();
+    const intent = overwrite.recordOverwriteIntent(base, {
+      intentId,
+      operationId: 'op-overwrite',
+      pointId: admitted.point.id,
+      targetVolume: admitted.storage.locator,
+      actor: 'admin',
+      processEpoch: 'e',
+      expectedGenerationToken: admitted.liveGenerationToken,
+      fenceMembers: admitted.fenceMembers,
+    });
+    expect(intent.id).toBe(intentId);
+    expect(intent.targetMode).toBe('staged_overwrite');
+    expect(intent.stagingVolume).toBe(overwrite.stagingVolumeFor(intentId));
+    expect(fence.RestoreFenceStore.getInstance().listMembers(intentId)).toEqual([
+      expect.objectContaining({ containerId: 'c1', stackName: 'stack-dir', wasRunning: true }),
+    ]);
+    expect(points.RecoveryPointStore.getInstance().listHolds(seeded.pointId)).toEqual([
+      expect.objectContaining({ holderKind: 'restore_intent', holderRef: intentId }),
+    ]);
+  });
+
+  it('binds the token to the running state and restart policy the preview showed', async () => {
+    const fake = fakeDocker({ volumes: [{ name: VOLUME }], containers: [mountingContainer()] });
+    const seeded = seed({ createdAt: fake.volumes.get(VOLUME)?.createdAt ?? '' });
+    const helper = scriptedHelper();
+    const base = deps(fake.docker, helper);
+    const preview = await overwrite.previewOverwrite(base, seeded.pointId);
+    // The same container stops after the preview: same ids and stack, different
+    // promised behavior, so the confirmation must be refused.
+    fake.containers.get('c1')!.State = 'exited';
+    await expect(overwrite.prepareOverwriteAdmission(base, {
+      pointId: seeded.pointId,
+      confirmationToken: preview.confirmation.token,
+      confirmVolumeName: VOLUME,
+    })).rejects.toMatchObject({ errorClass: 'precondition_failed' });
+  });
+
   it('refuses a volume recreated after the point was taken', async () => {
     const fake = fakeDocker({ volumes: [{ name: VOLUME }], containers: [mountingContainer()] });
     const seeded = seed({ createdAt: '2020-01-01T00:00:00.000Z' });
