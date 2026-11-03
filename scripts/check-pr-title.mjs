@@ -20,14 +20,23 @@
  * the rules that matter for the release pipeline (a parsable type, and an empty
  * subject). Length, casing, and full commitlint validation stay in the local
  * hook, which sees the whole commit; this runs against a one-line title where a
- * stricter rule set would only produce noise.
+ * stricter rule set would only produce noise. The one exception is the ci-scope
+ * rule below.
+ *
+ * It also rejects a changelog-visible type scoped `ci`. release-please decides
+ * what the changelog shows from the type alone, so `fix(ci): ...` lands in the
+ * Fixed section even when only workflow files changed and no operator can
+ * observe the change. CI work is typed `ci:`, which the config hides. A squash
+ * that already merged with such a title is retyped with a BEGIN_COMMIT_OVERRIDE
+ * block in its PR body, which this check never reads.
  *
  * Usage:
  *   node scripts/check-pr-title.mjs "<title>"
  *
- * Exits 0 when the title parses, 1 with an explanation when it does not.
+ * Exits 0 when the title is acceptable, 1 with an explanation when it is not.
  */
 
+import { readFileSync } from 'node:fs'
 import { createRequire } from 'node:module'
 import { dirname, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -69,6 +78,26 @@ export function allowedTypes(commitlintConfig) {
 }
 
 /**
+ * The commit types release-please shows in the changelog: every section in
+ * release-please-config.json that is not marked `hidden`. Read from the config
+ * so this check cannot drift from what the release notes actually render.
+ * Fails closed on a config with no sections. Takes either a path relative to
+ * the repo root or an already-loaded config object.
+ */
+export function visibleTypes(releasePleaseConfig) {
+  const config =
+    typeof releasePleaseConfig === 'string'
+      ? JSON.parse(readFileSync(resolve(repoRoot, releasePleaseConfig), 'utf-8'))
+      : releasePleaseConfig
+  const sections = config?.packages?.['.']?.['changelog-sections']
+  if (!Array.isArray(sections) || sections.length === 0) {
+    throw new Error('No changelog-sections found in release-please-config.json')
+  }
+
+  return sections.filter((section) => !section.hidden).map((section) => section.type)
+}
+
+/**
  * Parse a title into its conventional-commit parts, or return null when the
  * title does not match `<type>[(<scope>)][!]: <subject>`.
  *
@@ -100,14 +129,29 @@ export function parseTitle(title, types) {
   return { type, scope: scope ?? null, breaking: breaking === '!', subject }
 }
 
-export function checkTitle(title, types) {
+export function checkTitle(title, types, changelogTypes) {
   const trimmed = (title ?? '').trim()
 
   if (trimmed === '') {
     return 'The pull request title is empty.'
   }
 
-  if (parseTitle(trimmed, types)) {
+  const parsed = parseTitle(trimmed, types)
+
+  if (parsed && parsed.scope?.trim().toLowerCase() === 'ci' && changelogTypes.includes(parsed.type)) {
+    return [
+      `The pull request title files a CI change under a visible type: "${trimmed}"`,
+      '',
+      `release-please shows every ${parsed.type}: commit in the release notes, whatever its scope,`,
+      'so this would list a workflow change that no operator can observe.',
+      '',
+      'Use ci: <subject> (hidden from the changelog) instead.',
+      'If the change really is observable, for example a workflow change that alters',
+      'what a published image contains, name the area operators see instead of ci.',
+    ].join('\n')
+  }
+
+  if (parsed) {
     return null
   }
 
@@ -130,7 +174,7 @@ export function checkTitle(title, types) {
 export function main(argv) {
   const title = argv[2] ?? process.env.PR_TITLE ?? ''
   const types = allowedTypes('commitlint.config.js')
-  const failure = checkTitle(title, types)
+  const failure = checkTitle(title, types, visibleTypes('release-please-config.json'))
 
   if (failure) {
     console.error(failure)
