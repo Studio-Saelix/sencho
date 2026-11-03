@@ -53,12 +53,16 @@ describe('docs/openapi.yaml', () => {
     ]));
   });
 
-  it('lists every recovery error class the router can answer', async () => {
+  it('lists exactly the recovery error classes the router can answer, in both enums', async () => {
     const spec = parse(fs.readFileSync(path.resolve(__dirname, '../../../docs/openapi.yaml'), 'utf8')) as {
-      components: { schemas: { RecoveryError: { properties: { errorClass: { enum: string[] } } } } };
+      components: { schemas: Record<string, { properties: { errorClass: { enum: Array<string | null> } } }> };
     };
     const { ERROR_STATUS } = await import('../routes/recovery');
-    const documented = spec.components.schemas.RecoveryError.properties.errorClass.enum;
-    expect(Object.keys(ERROR_STATUS).filter((name) => !documented.includes(name))).toEqual([]);
+    const answered = Object.keys(ERROR_STATUS).sort();
+    const error = spec.components.schemas.RecoveryError.properties.errorClass.enum;
+    // An operation's class may also be null (it did not fail).
+    const operation = spec.components.schemas.RecoveryOperation.properties.errorClass.enum.filter((name) => name !== null);
+    expect([...error].sort()).toEqual(answered);
+    expect([...operation].sort()).toEqual(answered);
   });
 });

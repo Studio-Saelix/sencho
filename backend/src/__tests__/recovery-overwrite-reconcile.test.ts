@@ -366,6 +366,56 @@ describe('the resolve route decisions', () => {
     expect(intents.RestoreIntentStore.getInstance().get(seeded.intentId)?.phase).toBe('committed');
   });
 
+  it('refuses a second release_fence after a failed clean-up and points at retry', async () => {
+    const { seeded, fake } = await seed({ phase: 'swapped', createdAt: new Date().toISOString(), fenced: true });
+    const failing = scriptedHelper({
+      swapAnswers: [
+        { action: 'status', exitCode: 0, status: 'swapped' },
+        { action: 'cleanup', exitCode: 1, stderr: 'helper image missing' },
+      ],
+    });
+    await overwrite.resolveOverwriteIntent(deps(fake, failing), { intentId: seeded.intentId, action: 'release_fence' });
+    await expect(overwrite.resolveOverwriteIntent(deps(fake, failing), {
+      intentId: seeded.intentId,
+      action: 'release_fence',
+    })).rejects.toMatchObject({ errorClass: 'invalid_request', reason: 'fence_released', detail: expect.stringContaining('Retry') });
+  });
+
+  it('finishes a failed clean-up at the next boot without touching a container or the volume root', async () => {
+    const { seeded, fake } = await seed({ phase: 'swapped', createdAt: new Date().toISOString(), fenced: true });
+    const failing = scriptedHelper({
+      swapAnswers: [
+        { action: 'status', exitCode: 0, status: 'swapped' },
+        { action: 'cleanup', exitCode: 1, stderr: 'helper image missing' },
+      ],
+    });
+    await overwrite.resolveOverwriteIntent(deps(fake, failing), { intentId: seeded.intentId, action: 'release_fence' });
+    const callsBefore = fake.calls.length;
+    const boot = answers();
+    const result = await overwrite.reconcileOverwriteIntentsAtStartup(deps(fake, boot));
+    expect(result.committed).toBe(1);
+    expect(intents.RestoreIntentStore.getInstance().get(seeded.intentId)?.phase).toBe('committed');
+    expect(boot.runs.map((run) => run.cmd[2])).not.toContain('rollback');
+    expect(fake.calls.slice(callsBefore).filter((call) => call.startsWith('start:') || call.startsWith('stop:'))).toEqual([]);
+  });
+
+  it('leaves the originals to a retry when the journal says swapped but the swap had not advanced', async () => {
+    const { seeded, fake } = await seed({ phase: 'swapping', createdAt: new Date().toISOString(), fenced: true });
+    const helper = answers();
+    const result = await overwrite.resolveOverwriteIntent(deps(fake, helper), {
+      intentId: seeded.intentId,
+      action: 'release_fence',
+    });
+    // Only a `swapped` intent is cleaned up here; `swapping` is parked for a retry.
+    expect(result.outcome).toBe('fence_released');
+    expect(helper.runs.filter((run) => run.profile === 'swap').map((run) => run.cmd[2])).toEqual(['status']);
+    expect(intents.RestoreIntentStore.getInstance().get(seeded.intentId)?.phase).toBe('completion_unknown');
+    const retry = answers();
+    const settled = await overwrite.resolveOverwriteIntent(deps(fake, retry), { intentId: seeded.intentId, action: 'retry' });
+    expect(settled.outcome).toBe('committed');
+    expect(retry.runs.filter((run) => run.profile === 'swap').map((run) => run.cmd[2])).toEqual(['status', 'commit', 'cleanup']);
+  });
+
   it('refuses to resolve a committed intent', async () => {
     const { seeded, fake } = await seed({ phase: 'swapped', createdAt: new Date().toISOString(), fenced: true });
     intents.RestoreIntentStore.getInstance().advance(seeded.intentId, 'committed');
@@ -409,6 +459,16 @@ describe('startup reconciliation', () => {
     expect(result).toEqual({ rolledBack: 0, committed: 0, unknown: 1 });
     expect(fence.RestoreFenceStore.getInstance().isVolumeFenced(VOLUME)).toBe(true);
     expect(fake.calls).not.toContain('start:c1');
+  });
+
+  it('counts a restore it settled but could not release once, as settled', async () => {
+    const { seeded, fake } = await seed({ phase: 'fenced', createdAt: new Date().toISOString(), fenced: true });
+    fake.failOn = (call) => (call === 'update:c1' ? new Error('daemon refused') : null);
+    const result = await overwrite.reconcileOverwriteIntentsAtStartup(deps(fake, answers()));
+    const settled = intents.RestoreIntentStore.getInstance().get(seeded.intentId);
+    expect(settled?.phase).toBe('rolled_back');
+    expect(settled?.outcomeClass).toBe('fence_unavailable');
+    expect(result).toEqual({ rolledBack: 1, committed: 0, unknown: 0 });
   });
 
   it('counts a restore it just parked once, not once per pass', async () => {

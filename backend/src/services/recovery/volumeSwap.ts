@@ -141,6 +141,13 @@ export async function runSwapStep(input: {
     return { ok: false, report, errorClass: 'node_error' };
   }
   if (result.exitCode !== 0) {
+    console.warn(
+      '[Recovery] Swap helper %s for %s exited %d: %s',
+      input.action,
+      sanitizeForLog(input.intentId),
+      result.exitCode,
+      sanitizeForLog(result.stderrTail ?? ''),
+    );
     return { ok: false, report, errorClass: null };
   }
   if (!report) {

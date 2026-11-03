@@ -1562,11 +1562,11 @@ components:
             when no repository has been provisioned (both `503 capability_unavailable`),
             `repository_replaced` for a restore of a point in a replaced repository
             (`503 repository_unavailable`), and `not_cancellable`. The overwrite routes add
-            `wrong_route` (a restore over the point's own volume asked for on the new-volume
+            `wrong_route` (a `staged_overwrite` or `new_path` mode asked for on the new-volume
             route), `generation_changed` (the volume's generation moved since the preview),
             `dependents_changed` (a stack or container started using the volume after the
             preview), `no_fence` (`release_fence` on a restore that never stopped a workload),
-            and `fence_released` (a decision on a restore whose fence is already released).
+            and `fence_released` (`release_fence` on a restore whose fence is already released).
 
     RecoveryOperation:
       type: object
@@ -1607,8 +1607,9 @@ components:
       required: [point, node, target, dependents, inUse, swap, space, preRestorePoint, warnings, confirmation]
       description: |
         What restoring a point over its own volume would do. Nothing was written to answer it.
-        `confirmation.token` is bound to the state described here (the point, the volume's
-        generation, the dependents and the node), so the overwrite can only run against what
+        `confirmation.token` is bound to the state described here (the point, the volume and its
+        generation, the repository, and each dependent container's id, stack, running state and
+        restart policy), so the overwrite can only run against what
         the caller saw.
       properties:
         point:
@@ -6353,8 +6354,9 @@ paths:
                   enum: [new_volume, new_path, staged_overwrite]
                   description: |
                     Only `new_volume` is accepted; any other value is refused as an invalid request.
-                    `staged_overwrite` is refused with `reason: wrong_route`: restoring over a point's
-                    own volume is `POST /api/recovery/points/{pointId}/overwrite`.
+                    Both other values are refused with `reason: wrong_route`. For `staged_overwrite`,
+                    restoring over a point's own volume is
+                    `POST /api/recovery/points/{pointId}/overwrite`; `new_path` is not available.
                   default: new_volume
       responses:
         "202":
@@ -6452,11 +6454,16 @@ paths:
         state that cannot be proven ends `completion_unknown` and is settled with
         `POST /api/recovery/restores/{intentId}/resolve`.
 
-        Errors: `409 precondition_failed` (the state moved since the preview; preview again),
-        `409 dependents_changed`, `409 lock_held` (another restore holds the volume or its
-        fence), `422 pre_restore_failed`, `507 insufficient_space`, and `503 fence_unavailable`
-        (a container could not be fenced, with nothing stopped). A request to the new-volume
-        route naming `staged_overwrite` is refused with `reason: wrong_route`.
+        Request errors: `409 precondition_failed` with `reason: generation_changed` or
+        `reason: dependents_changed` (the state moved since the preview; preview again),
+        `409 lock_held` (another restore holds the volume or its fence), and
+        `507 insufficient_space`. Errors found after admission answer `202` and end the
+        operation `failed`, with the class in `errorClass` on `GET /api/recovery/operations/{id}`:
+        `pre_restore_failed`, `fence_unavailable` (a container start was still unanswered or a
+        container could not be fenced, with nothing stopped), `dependents_changed` (a container
+        set that changed at the fence), `cleanup_failed`, and the rest of the class list.
+        A request to the new-volume route naming `staged_overwrite` is refused with
+        `reason: wrong_route`.
         Only a Full Admin API token may call it; any other scope is refused with `403 SCOPE_DENIED`.
       parameters:
         - name: pointId
@@ -6520,12 +6527,6 @@ paths:
           $ref: "#/components/responses/RecoveryForbidden"
         "409":
           $ref: "#/components/responses/RecoveryConflict"
-        "422":
-          description: The pre-restore point did not end complete, so nothing was replaced (`pre_restore_failed`).
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/RecoveryError"
         "503":
           $ref: "#/components/responses/RecoveryUnavailable"
         "507":
@@ -6553,7 +6554,10 @@ paths:
         other case it leaves the restore `completion_unknown`. A restore that never stopped a
         workload has no fence to release (`400 invalid_request`, `reason: no_fence`), and one
         whose fence is already released cannot be accepted again (`reason: fence_released`).
-        A call made while this process still works on the restore answers `409 lock_held`.
+        `release_fence` on a restore that already settled answers a plain `400 invalid_request`,
+        and a fence that cannot be released answers `503 fence_unavailable` with the restore
+        unchanged. A call made while this process still works on the restore answers
+        `409 lock_held`.
         Access is held to the stacks the fence stopped, not only the stacks that use the
         volume now; an id that names nothing is answered like a restore the caller may not touch.
         Only a Full Admin API token may call it; any other scope is refused with `403 SCOPE_DENIED`.

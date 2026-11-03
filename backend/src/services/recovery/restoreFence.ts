@@ -434,7 +434,7 @@ export function startUnderFence<T>(volumeNames: readonly string[], start: () => 
     return Promise.reject(err);
   }
   const settled = run.then(() => undefined, () => undefined);
-  startsInFlight.set(settled, Date.now());
+  startsInFlight.set(settled, performance.now());
   void settled.then(() => startsInFlight.delete(settled));
   return run;
 }
@@ -448,11 +448,18 @@ export function startUnderFence<T>(volumeNames: readonly string[], start: () => 
  * is not waited for (one hung call must not make every later fence pay the whole
  * cap), but it is not stepped around either: it may still land on the volume, so
  * the answer is false at once, the same as when the cap runs out. The refusal
- * lasts until that call answers or Sencho restarts.
+ * lasts until that call answers or Sencho restarts, and it is not scoped to the
+ * volume: a start registers before anyone knows what it mounts.
  */
 export async function waitForStartsInFlight(timeoutMs = startDrainTimeoutMs): Promise<boolean> {
-  const now = Date.now();
-  if ([...startsInFlight.values()].some((startedAt) => now - startedAt >= hungStartAfterMs)) return false;
+  const now = performance.now();
+  const hung = [...startsInFlight.values()].filter((startedAt) => now - startedAt >= hungStartAfterMs);
+  if (hung.length > 0) {
+    // Not volume-scoped: a start registers before anyone knows which volumes it
+    // mounts, so any hung start refuses every fence until it answers.
+    console.warn('[Recovery] %d container start(s) have been pending for over %d seconds; refusing the fence.', hung.length, Math.round(hungStartAfterMs / 1000));
+    return false;
+  }
   const pending = [...startsInFlight.keys()];
   if (pending.length === 0) return true;
   let timer: NodeJS.Timeout | undefined;

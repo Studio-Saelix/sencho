@@ -51,6 +51,7 @@ containersRouter.post('/:id/start', async (req: Request, res: Response) => {
       res.status(409).json({ error: error.message, code: error.code });
       return;
     }
+    console.error('[Containers] Start failed for %s:', sanitizeForLog(req.params.id as string), error);
     res.status(500).json({ error: 'Failed to start container' });
   }
 });

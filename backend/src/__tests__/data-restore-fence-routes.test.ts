@@ -1,7 +1,9 @@
 /**
  * A container start refused because a data restore owns a volume it mounts is
- * answered `409 data_restore` on every route that starts a container, as the
- * Files & Volumes browser already does. A generic 500 would tell the operator
+ * answered `409 data_restore` on every route that starts a container without
+ * the stack lock (while the restore runs, a stack route answers
+ * `stack_op_in_progress` from the lock first), as the Files & Volumes browser
+ * already does. A generic 500 would tell the operator
  * the start failed, not that a restore owns the data.
  */
 import fs from 'fs';

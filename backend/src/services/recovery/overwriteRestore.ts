@@ -786,6 +786,7 @@ async function fenceWorkloads(ctx: OverwriteRunContext, state: PipelineState): P
   // policies and start members an operator stopped since, or fail on a member
   // that no longer exists and leave the volume fenced for good.
   if (!drained) {
+    console.warn('[Recovery] A container start is still unanswered; refusing the fence on %s.', state.intent.id);
     deps.fence.setFenceState(state.intent.id, 'none');
     await settleRollback(ctx, state, 'fence_unavailable');
     return false;
@@ -1245,8 +1246,8 @@ export async function reconcileOverwriteIntentsAtStartup(
     // swap, a leftover work directory) keeps its fence until the operator decides:
     // restarting its workloads would start them on data nobody has proven.
     if (intent.phase !== 'committed' && intent.phase !== 'rolled_back') {
-      // The pass above counted every intent it visited. One it did not (an
-      // operator-parked `completion_unknown` restore) is still an open restore.
+      // The pass above counted every intent it visited. One it did not (parked
+      // at `completion_unknown` with its fence held) is still an open restore.
       if (!visited.has(intent.id)) result.unknown += 1;
       continue;
     }
@@ -1259,7 +1260,8 @@ export async function reconcileOverwriteIntentsAtStartup(
           pointId: intent.preRestorePointId, holderKind: 'restore_intent', holderRef: intent.id,
         });
       }
-    } else {
+    } else if (!visited.has(intent.id)) {
+      // A restore the pass above settled and counted is not counted again.
       result.unknown += 1;
     }
   }
@@ -1466,6 +1468,12 @@ export async function resolveOverwriteIntent(
   // Once the fence has been released, the workloads may be running again, so no
   // reconciliation step may move data under them.
   if (intent.fenceState === 'released') {
+    if (intent.phase === 'swapped' && intent.outcomeClass === 'cleanup_failed') {
+      throw new RecoveryError('invalid_request', {
+        reason: 'fence_released',
+        detail: 'The fence is already released, but the originals are still in the volume. Retry this restore to remove them.',
+      });
+    }
     throw new RecoveryError('invalid_request', {
       reason: 'fence_released',
       detail: 'The fence on this restore has been released, so it can no longer roll forward or back. Restore again from a point if you need different data.',
@@ -1501,6 +1509,11 @@ export async function resolveOverwriteIntent(
       action: 'cleanup',
     });
     if (!cleaned.ok) {
+      console.warn(
+        '[Recovery] Fence released on %s, but the originals could not be removed (%s); retry the restore to finish.',
+        intent.id,
+        cleaned.errorClass ?? 'helper_failed',
+      );
       deps.intents.update(intent.id, { outcomeClass: 'cleanup_failed' });
       return { outcome: 'fence_released' };
     }
