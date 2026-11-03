@@ -234,6 +234,20 @@ describe('reconciliation at the journal', () => {
     }
   });
 
+  it('finishes a committed swap whose fence release failed, with the journal already cleaned', async () => {
+    const { seeded, fake } = await seed({ phase: 'swapped', createdAt: new Date().toISOString(), fenced: true });
+    intents.RestoreIntentStore.getInstance().setFenceState(seeded.intentId, 'release_failed');
+    // Cleanup ran and removed the work directory, so the helper answers `absent`.
+    const helper = scriptedHelper({ swapAnswers: [{ action: 'status', exitCode: 0, status: 'absent' }] });
+    const outcome = await overwrite.reconcileOverwriteIntent(
+      deps(fake, helper), intents.RestoreIntentStore.getInstance().get(seeded.intentId)!,
+    );
+    expect(outcome).toBe('committed');
+    expect(intents.RestoreIntentStore.getInstance().get(seeded.intentId)?.phase).toBe('committed');
+    expect(fence.RestoreFenceStore.getInstance().isVolumeFenced(VOLUME)).toBe(false);
+    expect(fake.containers.get('c1')?.State).toBe('running');
+  });
+
   it('is idempotent: a second run changes nothing', async () => {
     const { seeded, fake } = await seed({ phase: 'swapping', createdAt: new Date().toISOString(), fenced: true });
     const helper = answers();

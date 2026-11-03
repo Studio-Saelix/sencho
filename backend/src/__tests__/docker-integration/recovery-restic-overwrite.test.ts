@@ -339,7 +339,7 @@ describeIf('staged overwrite against real Docker', () => {
     }
   }, 300_000);
 
-  it('fails the copy when a pack is missing, with the live volume unchanged', async () => {
+  it('fails the copy when repository data is missing, with the live volume unchanged', async () => {
     const source = volumeName('sencho-it-dmg-src');
     const target = volumeName('sencho-it-dmg-dst');
     const intentId = randomUUID();
@@ -347,8 +347,11 @@ describeIf('staged overwrite against real Docker', () => {
       createVolume(source);
       populateSource(source);
       const point = await capture(source);
+      // Every pack, not one: restic only fails a restore when the data it needs
+      // is missing, and one arbitrary pack may hold nothing this snapshot reads.
+      // Deleting them all makes "the repository lost its data" deterministic.
       docker(['run', '--rm', '--network', 'none', '-v', `${repositoryVolume}:/repo`, BUSYBOX, 'sh', '-c',
-        'find /repo/packs -name "*.pack" | head -1 | xargs rm -f']);
+        'rm -f /repo/packs/*']);
 
       createVolume(target);
       runInVolume(target, ['set -e', 'printf "keep-me" > keep.txt', 'chmod 755 /data'].join('\n'));

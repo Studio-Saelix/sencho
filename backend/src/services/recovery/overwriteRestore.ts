@@ -1280,7 +1280,14 @@ export async function reconcileOverwriteIntent(
     }
     const released = await releaseFence(deps, intent.id, true);
     if (!released) {
-      markUnknown(deps, intent, 'fence_unavailable', now);
+      const current = deps.intents.get(intent.id);
+      if (current?.phase === 'swapped') {
+        // The data is committed and cleaned; only the fence is left. Keeping the
+        // phase lets a retry finish it instead of pinning it as unknown.
+        deps.intents.update(intent.id, { outcomeClass: 'fence_unavailable' }, now);
+      } else {
+        markUnknown(deps, intent, 'fence_unavailable', now);
+      }
       return 'unknown';
     }
     deps.intents.advance(intent.id, 'committed', { outcomeClass: null }, now);
