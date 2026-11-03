@@ -104,7 +104,7 @@ export const REQUIREMENT_LABEL: Record<EvidenceRequirement, string> = {
   'compose-version': 'Compose version unknown',
 };
 
-/** Said for a partial run whose skipped list names no verdict-affecting check. */
+/** Said for a run that is not complete and whose list names no verdict-affecting check. */
 const UNNAMED_GAP = '1 or more checks could not run';
 
 /**
@@ -117,15 +117,16 @@ const UNNAMED_GAP = '1 or more checks could not run';
  * `skipped` that is not a list, an entry that is not an object, a `missing` that
  * is not a list, and a requirement that is not a known name each degrade to
  * fewer reasons or a bare count instead of a throw or `undefined` in operator
- * copy. A `partial` run whose list names no verdict-affecting skip still says
- * that something did not run: unreadable detail never turns into "all ran".
+ * copy. A run that is not `complete` and whose list names no verdict-affecting
+ * skip still says that something did not run: unreadable detail, or a state this
+ * build does not know, never turns into "all ran".
  * Frontend `coverageGapLine` applies the same rules and adds a full stop.
  */
 export function describeCoverageGaps(coverage: AssuranceCoverage | null | undefined): string | null {
   if (!coverage || coverage.state === 'unrecorded') return null;
   const entries: readonly AssuranceCoverageSkip[] = Array.isArray(coverage.skipped) ? coverage.skipped : [];
   const skipped = entries.filter(entry => entry?.affectsVerdict === true);
-  if (skipped.length === 0) return coverage.state === 'partial' ? UNNAMED_GAP : null;
+  if (skipped.length === 0) return coverage.state === 'complete' ? null : UNNAMED_GAP;
   const reasons = [...new Set(skipped.flatMap(entry => {
     const missing: readonly unknown[] = Array.isArray(entry.missing) ? entry.missing : [];
     return missing.flatMap(requirement =>

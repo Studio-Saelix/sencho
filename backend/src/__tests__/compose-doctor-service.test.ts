@@ -555,7 +555,11 @@ describe('preflight acknowledgements', () => {
 
     it('does not apply a compose-anchored acknowledgement when the source cannot be read', async () => {
       stubDocker(model('nginx:1.27'));
-      db().upsertPreflightAcknowledgement(ack({ expiry_mode: 'until_compose_change', anchor_rendered_hash: 'anything' }));
+      // The stored run holds the anchored hash; an unreadable source must not
+      // fall back to it.
+      const first = await doctor().runPreflight(nodeId, STACK, 'tester');
+      db().upsertPreflightAcknowledgement(ack({ expiry_mode: 'until_compose_change', anchor_rendered_hash: first.renderedHash }));
+      expect((await doctor().runPreflight(nodeId, STACK, 'tester')).acknowledgedCount).toBe(1);
       fs.rmSync(path.join(process.env.COMPOSE_DIR as string, STACK, 'compose.yaml'));
       vi.spyOn(console, 'warn').mockImplementation(() => {});
       const fresh = await doctor().runPreflight(nodeId, STACK, 'tester');
@@ -910,7 +914,7 @@ describe('Compose Assurance contract persistence', () => {
       }
     });
 
-    it('carries every decision field to the wire exactly as the normalized read has it', () => {
+    it('carries every acknowledgement field to the wire exactly as the normalized read decided it', () => {
       const soon = Date.now() + 86_400_000;
       db().replacePreflightRun(
         { id: 'ack-run', node_id: nodeId, stack_name: stack, source_hash: null, rendered_hash: 'hash-1', service_images: JSON.stringify({ db: 'postgres:16' }), status: 'high', highest_severity: 'high', created_at: 2, created_by: 'tester', coverage: null },

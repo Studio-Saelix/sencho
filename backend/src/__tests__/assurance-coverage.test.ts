@@ -207,7 +207,8 @@ describe('frontend coverage copy', () => {
       'an entry is a string': [['node-state'], NONE],
       'missing is a string': [[entry({ missing: 'node-state' })], '1 check could not run'],
       'missing is absent': [[entry({ missing: undefined })], '1 check could not run'],
-      'missing holds a non-string': [[entry({ missing: [7, null, ['node-state'], 'node-state'] })], '1 check could not run: node state unavailable'],
+      'missing holds a non-string': [[entry({ missing: [7, null, 'node-state'] })], '1 check could not run: node state unavailable'],
+      'missing holds only a nested list': [[entry({ missing: [['node-state']] })], '1 check could not run'],
       'affectsVerdict is truthy but not true': [[entry({ affectsVerdict: 'yes' }), entry({ affectsVerdict: 1 })], NONE],
       'one valid entry among bad ones': [[null, 'x', entry({})], '1 check could not run: node state unavailable'],
     };
@@ -222,10 +223,16 @@ describe('frontend coverage copy', () => {
       expect(frontend.coverageGapLine(shaped('complete', skipped)), `${name} (complete)`)
         .toBe(complete === null ? null : `${complete}.`);
     }
-    // A skip that does not affect the verdict is not a gap on a complete run.
-    const noteOnly = shaped('complete', [entry({ affectsVerdict: false })]);
-    expect(describeCoverageGaps(noteOnly)).toBeNull();
-    expect(frontend.coverageGapLine(noteOnly)).toBeNull();
+    // A skip that does not affect the verdict is not a gap on a complete run,
+    // but a run that says it is partial, or says a state this build does not
+    // know, cannot be read as complete.
+    const noteOnly = (state: string) => shaped(state, [entry({ affectsVerdict: false })]);
+    expect(describeCoverageGaps(noteOnly('complete'))).toBeNull();
+    expect(frontend.coverageGapLine(noteOnly('complete'))).toBeNull();
+    for (const state of ['partial', 'a-state-from-a-newer-build', undefined as unknown as string]) {
+      expect(describeCoverageGaps(noteOnly(state)), String(state)).toBe(NONE);
+      expect(frontend.coverageGapLine(noteOnly(state)), String(state)).toBe(`${NONE}.`);
+    }
   });
 
   it('says nothing for unrecorded or absent coverage on both sides, whatever its list holds', async () => {

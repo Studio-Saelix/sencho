@@ -99,7 +99,8 @@ export function findingFingerprint(
 }
 
 /** The fields of a finding that say what it reports, compared to tell two facts
- *  apart. Left out: what the fingerprint already fixes (rule, scope, subject),
+ *  apart. Not compared: what the fingerprint already fixes (rule, scope,
+ *  subject), what is constant within one run of one rule (rule version, node),
  *  and the evidence, decision, external alias, and fix reference, which describe
  *  where a finding came from or what was done about it, not what it reports. */
 function observableContent(finding: AssuranceFinding): string {
@@ -115,12 +116,12 @@ function observableContent(finding: AssuranceFinding): string {
  * A rule that emits several hits for one source path, service, or stack must
  * give each hit a distinct `subject` (or `sourcePath`); otherwise the hits are
  * indistinguishable to any consumer that pairs or dedupes on identity. Findings
- * that agree on every other reported field (severity, class, whether it affects
- * the verdict, title, message, remediation, the whole location, confidence,
- * completeness) are one fact reported twice (a port published on both an IPv4
- * and an IPv6 address): no consumer could tell them apart, so they are not a
- * collision. A pair that differs in any of those fields is two facts under one
- * identity. Legacy rows are skipped: their identity is documented as not
+ * that agree on every compared field (see `observableContent`: severity, class,
+ * whether it affects the verdict, title, message, remediation, the whole
+ * location, confidence, completeness) are one fact reported twice (a port
+ * published on both an IPv4 and an IPv6 address): a consumer reading what the
+ * finding reports could not tell them apart, so they are not a collision. A pair
+ * that differs in any of those fields is two facts under one identity. Legacy rows are skipped: their identity is documented as not
  * dedupable.
  */
 export function findFingerprintCollisions(findings: readonly AssuranceFinding[]): string[] {
@@ -236,7 +237,8 @@ function decisionForSerialize(decision: AssuranceDecision): AssuranceDecision {
 /** The subject a rule's hit carries, falling back to the registry kind plus the
  *  most specific value the hit names: its source path, else its service, else
  *  the stack. A rule that emits several hits sharing that value must set
- *  `hit.subject`; `findFingerprintCollisions` flags one whose hits then differ. */
+ *  `hit.subject`; `findFingerprintCollisions` flags such a rule when the hits
+ *  that share the subject also differ in what they report. */
 export function subjectForHit(rule: AssuranceRule, stackName: string, hit: RuleHit): AssuranceSubject {
   if (hit.subject) return hit.subject;
   return { kind: rule.subject, key: hit.sourcePath ?? hit.service ?? stackName };
