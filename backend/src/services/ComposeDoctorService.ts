@@ -230,7 +230,7 @@ export class ComposeDoctorService {
   getLatestAssurance(nodeId: number, stackName: string): { findings: AssuranceFinding[]; coverage: AssuranceCoverage } {
     const run = DatabaseService.getInstance().getLatestPreflightRun(nodeId, stackName);
     if (!run) return { findings: [], coverage: unrecordedCoverage() };
-    const { acks, ackCtx } = loadAcknowledgementInputs(nodeId, stackName, run.rendered_hash, run.service_images ?? null);
+    const { acks, ackCtx } = loadAcknowledgementInputs(nodeId, stackName, run.rendered_hash, run.service_images);
     // One clock reading for the whole read, as the wire report takes.
     const now = Date.now();
     return {
@@ -238,8 +238,10 @@ export class ComposeDoctorService {
       // Each finding gets its own decision from its own projection. Nothing pairs
       // two sequences by position, so a later sort or filter cannot move a
       // decision onto another finding.
-      findings: this.readNormalized(nodeId, stackName, run.id).map(finding =>
-        withDecision(finding, applyPreflightAcknowledgements([projectFinding(finding)], ackCtx, acks, now)[0])),
+      findings: this.readNormalized(nodeId, stackName, run.id).map(finding => {
+        const [decided] = applyPreflightAcknowledgements([projectFinding(finding)], ackCtx, acks, now);
+        return withDecision(finding, decided);
+      }),
     };
   }
 
