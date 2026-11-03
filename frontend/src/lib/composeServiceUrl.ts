@@ -1128,11 +1128,11 @@ function renameTokenSplice(source: string, node: unknown, retired: string, curre
  * the current label is already declared on the service, the retired one is removed
  * instead, because the current one is the one Sencho reads. Only a label declared
  * directly on the service in this file is renamed: anchors, aliases, merges, custom
- * tags and interpolated list keys are refused as `unsupported`, and so is any result
- * whose parsed model differs from the expected one, and so is a service that
- * merges or extends another block without setting the label itself. When the
- * service holds no retired label in this file and inherits nothing, the source
- * comes back unchanged with `ok: true`; callers detect that by comparing the text.
+ * tags and interpolated list keys are refused as `unsupported`. So is a service that
+ * merges or extends another block without setting the label itself, and any result
+ * whose parsed model differs from the expected one. When the service holds no
+ * retired label in this file and inherits nothing, the source comes back unchanged
+ * with `ok: true`; callers detect that by comparing the text.
  */
 export function renameRetiredServiceUrlLabel(source: string, serviceName: string): ServiceUrlPatch {
   let doc: ReturnType<typeof parseDocument>;
@@ -1156,9 +1156,10 @@ export function renameRetiredServiceUrlLabel(source: string, serviceName: string
   if (!isMap(service) || anchorName(service)) return { ok: false, reason: 'unsupported' };
   const labelPair = service.items.find(item => labelText(item.key) === 'labels');
   const labels = labelPair ? labelPair.value : null;
-  // A service that merges or extends another block may take the label from a block that is in this very file.
+  // A service that merges or extends another block may take the label from that block.
   const inherits = mapHasMerge(service) || service.items.some(item => labelText(item.key) === 'extends');
-  // When the service does not set the label itself, there is nothing to rename in this file: refuse if it may be inherited from here, else it lives in another file.
+  // Nothing to rename when the service does not set the label itself. Refuse if it may be inherited
+  // from a block this file cannot show to be harmless; otherwise it is set in another file or not at all.
   const notSetHere = (): ServiceUrlPatch => (inherits ? { ok: false, reason: 'unsupported' } : { ok: true, yaml: source });
   if (labels == null || (isScalar(labels) && (labels.value == null || labels.value === ''))) return notSetHere();
   if (!isMap(labels) && !isSeq(labels)) return { ok: false, reason: 'unsupported' };
