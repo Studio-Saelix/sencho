@@ -367,6 +367,7 @@ export interface ContainersHealthProps {
     sourceServices?: readonly string[] | null;
     lockedServices?: ReadonlyMap<string, ServiceUrlEditBlock>;
     onEditServiceUrl?: (serviceName: string) => void;
+    /** Desktop only: the phone layout passes no handler, so the flag shows without the rename (authoring stays on desktop). */
     onRenameRetiredUrl?: (serviceName: string) => void;
     onRetryServiceUrls?: () => void;
 }

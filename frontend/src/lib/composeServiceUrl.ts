@@ -1129,7 +1129,9 @@ function renameTokenSplice(source: string, node: unknown, retired: string, curre
  * instead, because the current one is the one Sencho reads. Only a label declared
  * directly on the service in this file is renamed: anchors, aliases, merges, custom
  * tags and interpolated list keys are refused as `unsupported`, and so is any result
- * whose parsed model differs from the expected one.
+ * whose parsed model differs from the expected one. When the service holds no
+ * retired label in this file the source comes back unchanged with `ok: true`;
+ * callers detect that by comparing the text.
  */
 export function renameRetiredServiceUrlLabel(source: string, serviceName: string): ServiceUrlPatch {
   let doc: ReturnType<typeof parseDocument>;
@@ -1153,8 +1155,12 @@ export function renameRetiredServiceUrlLabel(source: string, serviceName: string
   if (!isMap(service) || anchorName(service)) return { ok: false, reason: 'unsupported' };
   const labelPair = service.items.find(item => labelText(item.key) === 'labels');
   const labels = labelPair ? labelPair.value : null;
-  // No labels in this file: whatever sets the retired label lives in another one, so there is nothing to rename here.
-  if (labels == null || (isScalar(labels) && (labels.value == null || labels.value === ''))) return { ok: true, yaml: source };
+  if (labels == null || (isScalar(labels) && (labels.value == null || labels.value === ''))) {
+    // A service that inherits through a merge or `extends` may take the label from a block that is in this very file.
+    if (mapHasMerge(service) || service.items.some(item => labelText(item.key) === 'extends')) return { ok: false, reason: 'unsupported' };
+    // Otherwise whatever sets the retired label lives in another file, so there is nothing to rename here.
+    return { ok: true, yaml: source };
+  }
   if (!isMap(labels) && !isSeq(labels)) return { ok: false, reason: 'unsupported' };
   if (anchorName(labels) || hasCustomTag(doc) || listLabelKeyInterpolated(serviceOf(parsed, serviceName)?.labels)) {
     return { ok: false, reason: 'unsupported' };

@@ -124,6 +124,8 @@ describe('renameRetiredServiceUrlLabel', () => {
       ['a custom YAML tag', 'services:\n  web:\n    labels: !override\n      sencho.service.url: https://a.example.com\n'],
       ['an interpolated list key', 'services:\n  web:\n    labels:\n      - "${K}=v"\n      - sencho.service.url=https://a.example.com\n'],
       ['an aliased list item', 'x: &i sencho.service.url=https://a.example.com\nservices:\n  web:\n    labels:\n      - *i\n'],
+      ['a service that merges another block and has no labels of its own', 'x-base: &base\n  labels:\n    sencho.service.url: https://a.example.com\nservices:\n  web:\n    <<: *base\n'],
+      ['a service that extends another and has no labels of its own', 'services:\n  base:\n    labels:\n      sencho.service.url: https://a.example.com\n  web:\n    extends: base\n'],
       ['an escaped key', 'services:\n  web:\n    labels:\n      "sencho\\x2eservice.url": https://a.example.com\n'],
     ])('refuses %s', (_name, source) => {
       expect(refused(source)).toMatchObject(UNSUPPORTED);

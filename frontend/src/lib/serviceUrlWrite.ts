@@ -20,6 +20,12 @@ export async function commitServiceUrlWrite<T extends { ok: boolean }>(
 
 export type RetiredRenamePlan = { ok: true; next: string } | { ok: false; message: string };
 
+const REFUSAL_MESSAGE: Record<Extract<ReturnType<typeof renameRetiredServiceUrlLabel>, { ok: false }>['reason'], string> = {
+  'missing-service': 'That service is defined in another compose file.',
+  unsupported: 'The label cannot be renamed here without changing other parts of this compose file. Rename it in the editor instead.',
+  parse: 'The compose file could not be read or updated as YAML. Fix any YAML error in the editor, then try again.',
+};
+
 /**
  * What a click on "Rename to io.sencho.url" may do to the open compose buffer:
  * the rewritten text, or the one sentence that says why nothing is written.
@@ -41,16 +47,7 @@ export function planRetiredUrlRename(input: {
     console.error('Failed to rename the service URL label:', error);
     return { ok: false, message: 'The compose file could not be updated.' };
   }
-  if (!patched.ok) {
-    return {
-      ok: false,
-      message: patched.reason === 'missing-service'
-        ? 'That service is defined in another compose file.'
-        : patched.reason === 'unsupported'
-          ? 'The label cannot be renamed here without changing other parts of this compose file. Rename it in the editor instead.'
-          : 'The compose file could not be read as YAML. Fix it in the editor, then try again.',
-    };
-  }
+  if (!patched.ok) return { ok: false, message: REFUSAL_MESSAGE[patched.reason] };
   if (patched.yaml === input.content) {
     return { ok: false, message: 'The label is not in the open compose file. Rename it in the file that sets it.' };
   }
@@ -61,4 +58,56 @@ export function planRetiredUrlRename(input: {
 export function retiredRenameVerified(entry: ServiceUrlEntry | null | undefined, service: string): boolean {
   if (entry?.status !== 'ready') return false;
   return !ignoredLabels(senchoLabelsOf(entry), service).some(label => label.key === RETIRED_URL_LABEL);
+}
+
+function isRefused<T extends { ok: boolean }>(result: T): result is Extract<T, { ok: false }> {
+  return !result.ok;
+}
+
+export type RetiredRenameRun<T extends { ok: boolean }> =
+  | { status: 'busy' }
+  | { status: 'save-threw' }
+  | { status: 'save-refused'; result: Extract<T, { ok: false }> }
+  | { status: 'saved'; verified: boolean; current: boolean };
+
+/**
+ * Save a planned rename and prove it took effect. One rename at a time: a second
+ * call while a save is in flight would reuse the first call's etag and report a
+ * conflict it caused itself. After a successful save the node's answer is read
+ * again when the refresh was superseded (it returns null), and a rename the node
+ * still reports is never called done.
+ */
+export async function runRetiredRename<T extends { ok: boolean }>(deps: {
+  inFlight: { current: boolean };
+  nextContent: string;
+  service: string;
+  save: () => Promise<T>;
+  applyContent: (content: string) => void;
+  /** Whether the stack and node the rename was started on are still open. */
+  isCurrent: () => boolean;
+  refresh: () => Promise<ServiceUrlEntry | null>;
+  refetch: () => Promise<ServiceUrlEntry>;
+}): Promise<RetiredRenameRun<T>> {
+  if (deps.inFlight.current) return { status: 'busy' };
+  deps.inFlight.current = true;
+  try {
+    let result: T;
+    try {
+      result = await commitServiceUrlWrite(deps.nextContent, deps.save, deps.applyContent);
+    } catch (error) {
+      console.error('Failed to rename the service URL label:', error);
+      return { status: 'save-threw' };
+    }
+    if (isRefused(result)) return { status: 'save-refused', result };
+    if (!deps.isCurrent()) return { status: 'saved', verified: false, current: false };
+    let verified = false;
+    try {
+      verified = retiredRenameVerified((await deps.refresh()) ?? await deps.refetch(), deps.service);
+    } catch (error) {
+      console.error('Failed to verify the renamed service URL label:', error);
+    }
+    return { status: 'saved', verified, current: deps.isCurrent() };
+  } finally {
+    deps.inFlight.current = false;
+  }
 }

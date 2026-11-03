@@ -531,7 +531,7 @@ describe('remote behavior sanitizing', () => {
     expect(out?.summary?.length).toBe(240);
   });
 
-  it('drops a behavior for a key outside the namespace and for a claim the hub does not honor', () => {
+  it('drops a behavior for a key outside the namespace (other than the retired link label) and for a claim the hub does not honor', () => {
     expect(sanitizeRemoteBehavior('compose', 'traefik.enable', { state: 'active' })).toBeUndefined();
     // A presentation label cannot be active from a running container; the hub's reason replaces the node's text.
     expect(sanitizeRemoteBehavior('runtime', 'io.sencho.url', { state: 'active', reason: 'This link is active.' })).toEqual({

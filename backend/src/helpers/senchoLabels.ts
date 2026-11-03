@@ -704,9 +704,9 @@ function remoteOriginOf(source: LabelSource): InertOrigin {
 /**
  * Rebuild a remote node's `behavior` field by field. Absent stays absent (an
  * older node), and a label outside the namespace never carries one, except the
- * declared Compose copy of the retired link label. A value this
- * version cannot read degrades to `unsupported` with a fixed reason instead of
- * failing the node's whole inventory. Only the declared Compose copy of a
+ * declared Compose copy of the retired link label. A value this version cannot
+ * read degrades to `unsupported` with a fixed reason instead of failing the
+ * node's whole inventory. Only the declared Compose copy of a
  * presentation label can be anything but inert; the protective infrastructure
  * label keeps its reported state from a deployed copy too.
  *

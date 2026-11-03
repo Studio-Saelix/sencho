@@ -69,7 +69,7 @@ describe('readLabelBehavior', () => {
       .toEqual({ state: 'inert', reason: 'Recreate the container to apply it.' });
   });
 
-  it('never accepts a behavior outside the namespace, and reserves the keys Sencho sets', () => {
+  it('never accepts a behavior outside the namespace other than the retired link label, and reserves the keys Sencho sets', () => {
     expect(readLabelBehavior('compose', 'traefik.enable', { state: 'active' })).toBeUndefined();
     expect(readLabelBehavior('compose', 'io.sencho.mesh', { state: 'active' })).toEqual({
       state: 'invalid',

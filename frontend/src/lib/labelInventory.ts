@@ -193,8 +193,9 @@ function unhonoredInertReason(source: LabelSource): string {
 /**
  * Rebuild a node's `behavior` field by field before it reaches the screen. Absent
  * stays absent (an older node), and a label outside the namespace never carries
- * one, except the declared Compose copy of the retired link label. Anything unreadable becomes `unsupported` with a fixed reason. Only the
- * declared Compose copy of a presentation label, or a deployed copy of the
+ * one, except the declared Compose copy of the retired link label. Anything
+ * unreadable becomes `unsupported` with a fixed reason. Only the declared
+ * Compose copy of a presentation label, or a deployed copy of the
  * protective infrastructure label, keeps the reported state; everything else is
  * inert, so one wrong answer neither crashes a row nor shows an unearned Active.
  * A claim the client drops carries the client's own reason, so a node's text

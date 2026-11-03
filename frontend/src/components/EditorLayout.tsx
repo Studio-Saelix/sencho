@@ -31,7 +31,7 @@ import { useSidebarContextMenu } from './EditorLayout/hooks/useSidebarContextMen
 import { fetchServiceUrlEntry, useServiceUrls } from './EditorLayout/hooks/useServiceUrls';
 import { ServiceUrlModal } from './EditorLayout/ServiceUrlModal';
 import { patchServiceUrlLabel } from '@/lib/composeServiceUrl';
-import { commitServiceUrlWrite, planRetiredUrlRename, retiredRenameVerified } from '@/lib/serviceUrlWrite';
+import { commitServiceUrlWrite, planRetiredUrlRename, runRetiredRename } from '@/lib/serviceUrlWrite';
 import { serviceKeyGet, serviceUrlClearBlockedMessage, serviceUrlClearState, serviceUrlSaveBlockedMessage } from '@/lib/serviceUrlResolve';
 import { sameServiceUrlTarget, type ServiceUrlDialogTarget } from '@/lib/serviceUrlTarget';
 import { confirmComposeSourceReload } from '@/lib/composeSourceConflict';
@@ -1113,8 +1113,6 @@ export default function EditorLayout() {
     const filename = editorState.composeFilename;
     const stillOpen = () => selectedFileRef.current === captured.stackName && activeNodeIdRef.current === captured.nodeId;
     const write = async () => {
-      // A second click before the first save returns would reuse the old etag and report a conflict it caused itself.
-      if (renameInFlightRef.current) return;
       if (!canRef.current('stack:edit', 'stack', stackKey, captured.nodeId)) {
         toast.error('You cannot edit this stack.');
         return;
@@ -1123,56 +1121,45 @@ export default function EditorLayout() {
         toast.error('This stack is no longer open, so the label was not renamed.');
         return;
       }
-      renameInFlightRef.current = true;
-      try {
-        let result;
-        try {
-          result = await commitServiceUrlWrite(
-            nextContent,
-            () => stackActions.saveComposeContent({
-              content: nextContent,
-              stackName: captured.stackName,
-              nodeId: captured.nodeId,
-              etag,
-              filename,
-            }),
-            (next) => { if (stillOpen()) setContent(next); },
-          );
-        } catch (error) {
-          console.error('Failed to rename the service URL label:', error);
-          toast.error('The label could not be renamed.');
-          return;
-        }
-        if (!result.ok) {
-          if (result.conflict && result.code === 'compose_source_changed' && stillOpen()) {
-            if (confirmComposeSourceReload(message => window.confirm(message))) {
-              setContent(result.currentContent);
-              editorState.setOriginalContent(result.currentContent);
-              editorState.setComposeEtag(result.etag);
-              editorState.setComposeFilename(result.filename);
-              toast.info('Reloaded the current compose file.');
-              void refreshServiceUrls();
-            } else {
-              toast.error('The compose file on disk changed, so the label was not renamed.');
-            }
-            return;
+      const run = await runRetiredRename({
+        inFlight: renameInFlightRef,
+        nextContent,
+        service: serviceName,
+        save: () => stackActions.saveComposeContent({
+          content: nextContent,
+          stackName: captured.stackName,
+          nodeId: captured.nodeId,
+          etag,
+          filename,
+        }),
+        applyContent: (next) => { if (stillOpen()) setContent(next); },
+        isCurrent: stillOpen,
+        refresh: refreshServiceUrls,
+        refetch: () => fetchServiceUrlEntry(captured.nodeId, captured.stackName),
+      });
+      if (run.status === 'busy') {
+        toast.info('A rename is already in progress.');
+      } else if (run.status === 'save-threw') {
+        toast.error('The label could not be renamed.');
+      } else if (run.status === 'save-refused') {
+        const { result } = run;
+        if (result.conflict && result.code === 'compose_source_changed' && stillOpen()) {
+          if (confirmComposeSourceReload(message => window.confirm(message))) {
+            setContent(result.currentContent);
+            editorState.setOriginalContent(result.currentContent);
+            editorState.setComposeEtag(result.etag);
+            editorState.setComposeFilename(result.filename);
+            toast.info('Reloaded the current compose file.');
+            void refreshServiceUrls();
+          } else {
+            toast.error('The compose file on disk changed, so the label was not renamed.');
           }
-          toast.error(result.conflict ? 'The compose file changed before it could be saved.' : result.error);
           return;
         }
-        if (!stillOpen()) return;
-        // The save already happened. A refresh that another refresh superseded answers null, so read once more directly.
-        let verified = false;
-        try {
-          const next = (await refreshServiceUrls()) ?? await fetchServiceUrlEntry(captured.nodeId, captured.stackName);
-          verified = retiredRenameVerified(next, serviceName);
-        } catch (error) {
-          console.error('Failed to verify the renamed service URL label:', error);
-        }
-        if (verified) toast.success('The link now comes from io.sencho.url.');
+        toast.error(result.conflict ? 'The compose file changed before it could be saved.' : result.error);
+      } else if (run.current) {
+        if (run.verified) toast.success('The link now comes from io.sencho.url.');
         else toast.error('The file was saved, but the rename could not be verified.');
-      } finally {
-        renameInFlightRef.current = false;
       }
     };
     if (diffPreviewEnabled) {
