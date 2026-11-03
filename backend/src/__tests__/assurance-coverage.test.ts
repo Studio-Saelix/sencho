@@ -3,9 +3,12 @@
  * declarations match the rules' own guards, and the coverage state tells the
  * truth about what ran.
  */
+import path from 'path';
 import { describe, it, expect } from 'vitest';
 import { runRules } from '../services/preflight/rules';
-import { runAssuranceRules, describeCoverageGaps, parseCoverage } from '../services/assurance/coverage';
+import {
+  runAssuranceRules, describeCoverageGaps, parseCoverage, REQUIREMENT_LABEL,
+} from '../services/assurance/coverage';
 import { COMPOSE_DOCTOR_RULES, getAssuranceRule } from '../services/assurance/ruleRegistry';
 import { EVIDENCE_REQUIREMENTS } from '../services/assurance/types';
 import type { PreflightContext } from '../services/preflight/types';
@@ -137,5 +140,42 @@ describe('coverage gap copy', () => {
   it('says nothing when only note rules were skipped', () => {
     const { coverage } = runAssuranceRules(dropEvidence(maximalContext(), 'compose-version'));
     expect(describeCoverageGaps(coverage)).toBeNull();
+  });
+});
+
+describe('frontend coverage copy', () => {
+  // The Doctor tab words the same gaps the readiness dialog does. The frontend
+  // module is a pure TypeScript file, so it is loaded here and compared by value.
+  const frontendModule = path.resolve(__dirname, '../../../frontend/src/lib/coverageGaps.ts');
+  type FrontendCoverage = {
+    REQUIREMENT_LABEL: Record<string, string>;
+    coverageGapLine: (coverage: ReturnType<typeof parseCoverage>) => string | null;
+  };
+  const load = () => import(/* @vite-ignore */ frontendModule) as Promise<FrontendCoverage>;
+
+  it('names every evidence source exactly as the backend does', async () => {
+    const frontend = await load();
+    expect(frontend.REQUIREMENT_LABEL).toEqual(REQUIREMENT_LABEL);
+    expect(Object.keys(REQUIREMENT_LABEL).sort()).toEqual([...EVIDENCE_REQUIREMENTS].sort());
+  });
+
+  it('words a coverage gap as the backend clause plus a full stop', async () => {
+    const frontend = await load();
+    for (const requirement of EVIDENCE_REQUIREMENTS) {
+      const { coverage } = runAssuranceRules(dropEvidence(maximalContext(), requirement));
+      const clause = describeCoverageGaps(coverage);
+      expect(frontend.coverageGapLine(coverage), requirement).toBe(clause === null ? null : `${clause}.`);
+    }
+    const everything = runAssuranceRules(dropEvidence(dropEvidence(maximalContext(), 'node-state'), 'env-context'));
+    expect(frontend.coverageGapLine(everything.coverage)).toBe(`${describeCoverageGaps(everything.coverage)}.`);
+  });
+
+  it('degrades an unknown requirement to a count like the backend', async () => {
+    const frontend = await load();
+    const coverage = parseCoverage(JSON.stringify({
+      state: 'partial', evaluated: 10, notApplicable: 0,
+      skipped: [{ ruleId: 'privileged', missing: ['a-requirement-from-a-newer-build'], affectsVerdict: true }],
+    }));
+    expect(frontend.coverageGapLine(coverage)).toBe(`${describeCoverageGaps(coverage)}.`);
   });
 });

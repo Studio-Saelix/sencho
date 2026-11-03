@@ -20,7 +20,7 @@ import type {
 import type { AssuranceCoverage } from './assurance/types';
 import { runAssuranceRules, parseCoverage, unrecordedCoverage } from './assurance/coverage';
 import {
-  normalizeDoctorHit, normalizeStoredFinding, withDecision, type AssuranceFinding,
+  findFingerprintCollisions, normalizeDoctorHit, normalizeStoredFinding, withDecision, type AssuranceFinding,
 } from './assurance/finding';
 import { assuranceRuleOrder, getAssuranceRule } from './assurance/ruleRegistry';
 import { collectServiceHealthcheckEvidence } from './healthcheck/collectServiceHealthcheckEvidence';
@@ -60,8 +60,8 @@ function sortNormalized(findings: AssuranceFinding[]): AssuranceFinding[] {
 /** Project the contract onto the Doctor wire shape. The wire type predates the
  *  contract and stays additive: subject, identity, and coverage are backend
  *  internals until a normalized wire format exists. */
-function projectFindings(findings: readonly AssuranceFinding[]): PreflightFinding[] {
-  return findings.map(finding => ({
+function projectFinding(finding: AssuranceFinding): PreflightFinding {
+  return {
     ruleId: finding.ruleId,
     severity: finding.severity,
     title: finding.title,
@@ -69,7 +69,11 @@ function projectFindings(findings: readonly AssuranceFinding[]): PreflightFindin
     ...(finding.location?.path !== undefined ? { sourcePath: finding.location.path } : {}),
     ...(finding.remediation !== undefined ? { remediation: finding.remediation } : {}),
     ...(finding.scope.service !== undefined ? { service: finding.scope.service } : {}),
-  }));
+  };
+}
+
+function projectFindings(findings: readonly AssuranceFinding[]): PreflightFinding[] {
+  return findings.map(projectFinding);
 }
 
 function highestOf(findings: PreflightFinding[]): PreflightSeverity | null {
@@ -110,21 +114,25 @@ function buildServiceImages(model: EffectiveModel | null): string | null {
   return Object.keys(map).length > 0 ? JSON.stringify(map) : null;
 }
 
+/** The acknowledgements of a stack plus the stored context their expiry reads. */
+function loadAcknowledgementInputs(nodeId: number, stackName: string, renderedHash: string | null) {
+  const db = DatabaseService.getInstance();
+  return {
+    acks: db.getPreflightAcknowledgements(nodeId, stackName),
+    ctx: {
+      renderedHash,
+      serviceImages: parseServiceImages(db.getLatestPreflightRun(nodeId, stackName)?.service_images ?? null),
+    },
+  };
+}
+
 function enrichReport(
   nodeId: number,
   stackName: string,
   report: Omit<PreflightReport, 'activeStatus' | 'activeHighestSeverity' | 'activeCount' | 'acknowledgedCount'>,
 ): PreflightReport {
-  const db = DatabaseService.getInstance();
-  const acks = db.getPreflightAcknowledgements(nodeId, stackName);
-  const serviceImages = parseServiceImages(
-    db.getLatestPreflightRun(nodeId, stackName)?.service_images ?? null,
-  );
-  const findings = applyPreflightAcknowledgements(
-    report.findings,
-    { renderedHash: report.renderedHash, serviceImages },
-    acks,
-  );
+  const { acks, ctx } = loadAcknowledgementInputs(nodeId, stackName, report.renderedHash);
+  const findings = applyPreflightAcknowledgements(report.findings, ctx, acks);
   return {
     ...report,
     findings,
@@ -176,6 +184,15 @@ export class ComposeDoctorService {
       if (!rule) throw new Error(`Compose Doctor rule "${hit.ruleId}" is missing from the assurance registry`);
       return normalizeDoctorHit(nodeId, stackName, hit, rule);
     }));
+    const collisions = findFingerprintCollisions(normalized);
+    if (collisions.length > 0) {
+      // A rule that emits several hits for one service without a distinct subject
+      // makes its findings indistinguishable by identity. They are all kept (the
+      // wire report is unchanged), and the offending rule ids are named here so
+      // the missing subject is fixed in the rule.
+      console.warn('[ComposeDoctor] Findings share a fingerprint for rule(s): %s',
+        sanitizeForLog(collisions.join(', ')));
+    }
     const findings = projectFindings(normalized);
     const highestSeverity = highestOf(findings);
     const status: PreflightStatus = !ctx.renderable ? 'unrenderable' : (highestSeverity ?? 'pass');
@@ -208,16 +225,16 @@ export class ComposeDoctorService {
    * this, so the contract is on the hot path rather than a parallel model.
    */
   getLatestAssurance(nodeId: number, stackName: string): { findings: AssuranceFinding[]; coverage: AssuranceCoverage } {
-    const report = this.getLatest(nodeId, stackName);
     const run = DatabaseService.getInstance().getLatestPreflightRun(nodeId, stackName);
     if (!run) return { findings: [], coverage: unrecordedCoverage() };
-    const normalized = this.readNormalized(nodeId, stackName, run.id);
+    const { acks, ctx } = loadAcknowledgementInputs(nodeId, stackName, run.rendered_hash);
     return {
-      coverage: report.coverage,
-      findings: normalized.map((finding, i) => {
-        const projected = report.findings[i];
-        return projected ? withDecision(finding, projected) : finding;
-      }),
+      coverage: parseCoverage(run.coverage),
+      // Each finding gets its own decision from its own projection. Nothing pairs
+      // two sequences by position, so a later sort or filter cannot move a
+      // decision onto another finding.
+      findings: this.readNormalized(nodeId, stackName, run.id).map(finding =>
+        withDecision(finding, applyPreflightAcknowledgements([projectFinding(finding)], ctx, acks)[0])),
     };
   }
 

@@ -5,7 +5,7 @@
  */
 import { describe, it, expect } from 'vitest';
 import {
-  normalizeDoctorHit, normalizeStoredFinding, serializeFinding, withDecision,
+  findFingerprintCollisions, normalizeDoctorHit, normalizeStoredFinding, serializeFinding, withDecision,
   type AssuranceFinding,
 } from '../services/assurance/finding';
 import { getAssuranceRule } from '../services/assurance/ruleRegistry';
@@ -16,7 +16,10 @@ import { applyPreflightAcknowledgements } from '../utils/preflight-ack-filter';
 import type { RuleHit } from '../services/preflight/types';
 import type { PreflightFindingRow } from '../services/DatabaseService';
 import { runRules } from '../services/preflight/rules';
-import { maximalContext } from './helpers/assuranceFixture';
+import { EVIDENCE_REQUIREMENTS } from '../services/assurance/types';
+import {
+  maximalContext, wideContext, degradedNodeStateContext, unrenderableContext, dossierContext, dropEvidence,
+} from './helpers/assuranceFixture';
 
 const STACK = 'proj';
 
@@ -78,6 +81,76 @@ describe('fingerprints', () => {
     const fingerprints = findings.map(finding => finding.identity.fingerprint);
     expect(fingerprints.length).toBeGreaterThan(30);
     expect(new Set(fingerprints).size).toBe(fingerprints.length);
+  });
+
+  it('are unique within every evidence variant of the maximal run', () => {
+    // Each variant drops or changes one evidence source, so a rule that only
+    // emits several hits in a degraded run is covered too.
+    const variants = {
+      maximal: maximalContext(),
+      wide: wideContext(),
+      degraded: degradedNodeStateContext(),
+      unrenderable: unrenderableContext(),
+      dossier: dossierContext(),
+      ...Object.fromEntries(EVIDENCE_REQUIREMENTS.map(requirement =>
+        [`without ${requirement}`, dropEvidence(maximalContext(), requirement)])),
+    };
+    for (const [name, ctx] of Object.entries(variants)) {
+      const findings = runRules(ctx).map(source => normalize(source));
+      expect(findFingerprintCollisions(findings), name).toEqual([]);
+    }
+  });
+
+  it('hold in the wide run, where repeatable rules emit several hits per service', () => {
+    const count = (ctx: ReturnType<typeof maximalContext>) => {
+      const byRule = new Map<string, number>();
+      for (const source of runRules(ctx)) byRule.set(source.ruleId, (byRule.get(source.ruleId) ?? 0) + 1);
+      return byRule;
+    };
+    const maximal = count(maximalContext());
+    const wide = count(wideContext());
+    const widened = ['port-conflict-node', 'external-network-missing', 'external-volume-missing',
+      'new-network', 'new-volume', 'container-name-internal-dup', 'container-name-collision'];
+    for (const ruleId of widened) {
+      expect(wide.get(ruleId) ?? 0, ruleId).toBeGreaterThan(maximal.get(ruleId) ?? 0);
+    }
+  });
+
+  it('collide for one rule and service when the hits name no subject or path', () => {
+    // The fallback subject is one value per service. This is the shape a future
+    // per-port or per-variable rule would produce if it forgot to set a subject.
+    const first = normalize(hit('port-exposed-all-interfaces', { service: 'web' }));
+    const second = normalize(hit('port-exposed-all-interfaces', { service: 'web', message: 'Another port' }));
+    expect(first.identity.fingerprint).toBe(second.identity.fingerprint);
+    expect(findFingerprintCollisions([first, second])).toEqual(['port-exposed-all-interfaces']);
+  });
+
+  it('do not collide once each hit names its subject', () => {
+    const findings = ['8080/tcp', '9090/tcp'].map(key =>
+      normalize(hit('port-exposed-all-interfaces', { service: 'web', subject: { kind: 'port', key } })));
+    expect(findFingerprintCollisions(findings)).toEqual([]);
+  });
+
+  it('ignore legacy identities, which are documented as not dedupable', () => {
+    const rows = ['legacy-a', 'legacy-b'].map(id => normalizeStoredFinding({
+      id, run_id: 'run', rule_id: 'privileged', severity: 'high', title: 'Privileged container',
+      message: 'm', source_path: null, remediation: null, service: 'web', created_at: 1,
+      rule_version: null, subject_kind: null, subject_key: null,
+    }, 1, STACK));
+    expect(rows[0].identity.fingerprint).toBe(rows[1].identity.fingerprint);
+    expect(findFingerprintCollisions(rows)).toEqual([]);
+  });
+
+  it('are unique across a batch of external findings that name different files', () => {
+    const input = (path: string) => ({
+      nodeId: 1, stack: 'demo', id: 'DS002', title: 'Image user should not be root',
+      message: 'Add a USER line', severity: 'HIGH', path,
+    });
+    const distinct = ['a/Dockerfile', 'b/Dockerfile'].map(path => normalizeTrivyMisconfig(input(path)));
+    expect(findFingerprintCollisions(distinct)).toEqual([]);
+    // The same check twice against one file is the collision the guard names.
+    const repeated = [input('a/Dockerfile'), input('a/Dockerfile')].map(normalizeTrivyMisconfig);
+    expect(findFingerprintCollisions(repeated)).toEqual(['external:trivy:DS002']);
   });
 
   it('are not deduplicated when they come from a related external alias', () => {

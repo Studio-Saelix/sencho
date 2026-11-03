@@ -15,25 +15,11 @@ import { Label } from '@/components/ui/label';
 import { Combobox, type ComboboxOption } from '@/components/ui/combobox';
 import { Modal, ModalHeader, ModalBody, ModalFooter, ConfirmModal } from '@/components/ui/modal';
 import { isPreflightNoteFinding } from '@/lib/preflightNotes';
+import { coverageGapLine, type AssuranceCoverage } from '@/lib/coverageGaps';
 
 type PreflightSeverity = 'blocker' | 'high' | 'warning' | 'info';
 type PreflightStatus = 'never-run' | 'pass' | 'unrenderable' | PreflightSeverity;
 type PreflightAckExpiryMode = 'forever' | 'until_compose_change' | 'days' | 'until_image_change';
-type EvidenceRequirement =
-  | 'source'
-  | 'effective-model'
-  | 'env-context'
-  | 'node-state'
-  | 'exposure-context'
-  | 'compose-version';
-
-/** Which checks ran. A report from an older node omits it and reads as unrecorded. */
-interface AssuranceCoverage {
-  state: 'complete' | 'partial' | 'unrecorded';
-  evaluated: number;
-  notApplicable: number;
-  skipped: { ruleId: string; missing: EvidenceRequirement[]; affectsVerdict: boolean }[];
-}
 
 interface PreflightFinding {
   ruleId: string;
@@ -91,30 +77,6 @@ const NEUTRAL_SUMMARY = {
   icon: Info,
   tone: 'border-muted bg-card/40 text-stat-subtitle',
 } as const;
-
-/** Human-readable name for a missing evidence source. */
-const REQUIREMENT_LABEL: Record<EvidenceRequirement, string> = {
-  source: 'compose file unreadable',
-  'effective-model': 'rendered model unavailable',
-  'env-context': 'env files unreadable',
-  'node-state': 'node state unavailable',
-  'exposure-context': 'exposure settings unreadable',
-  'compose-version': 'Compose version unknown',
-};
-
-/**
- * What did not run, in one clause, or null when every verdict-affecting check
- * ran. An older node omits `coverage` entirely, which reads as unrecorded.
- */
-function coverageGapLine(coverage: AssuranceCoverage | undefined): string | null {
-  if (!coverage || coverage.state === 'unrecorded') return null;
-  const skipped = (coverage.skipped ?? []).filter(entry => entry.affectsVerdict);
-  if (skipped.length === 0) return null;
-  const reasons = [...new Set(skipped.flatMap(entry =>
-    (entry.missing ?? []).map(requirement => REQUIREMENT_LABEL[requirement]).filter(Boolean)))];
-  if (reasons.length === 0) return `${skipped.length} check${skipped.length === 1 ? '' : 's'} could not run.`;
-  return `${skipped.length} check${skipped.length === 1 ? '' : 's'} could not run: ${reasons.join(', ')}.`;
-}
 
 function summaryMeta(
   report: PreflightReport,

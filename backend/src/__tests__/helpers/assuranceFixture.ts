@@ -175,6 +175,40 @@ export function maximalContext(over: Partial<PreflightContext> = {}): PreflightC
   };
 }
 
+/**
+ * The maximal context with a second instance of every repeatable subject: more
+ * conflicting ports, external and new networks and volumes, duplicate and
+ * taken container names. A rule that emits one hit per subject then emits
+ * several for the same service, which is where a missing subject collides.
+ */
+export function wideContext(): PreflightContext {
+  const base = maximalContext();
+  const model = base.model as EffectiveModel;
+  return maximalContext({
+    model: {
+      ...model,
+      services: [
+        ...model.services,
+        svc({ name: 'four', image: 'busybox:1.36', containerName: 'dup-name-2' }),
+        svc({ name: 'five', image: 'busybox:1.36', containerName: 'dup-name-2' }),
+        svc({ name: 'six', image: 'busybox:1.36', containerName: 'taken-2' }),
+      ],
+      networks: {
+        ...model.networks,
+        ext2: { name: 'ext-net-2', external: true, internal: false },
+        backend: { name: 'proj_backend', external: false, internal: false },
+      },
+      volumes: {
+        ...model.volumes,
+        extvol2: { name: 'ext-vol-2', external: true, internal: false },
+        data: { name: 'proj_data', external: false, internal: false },
+      },
+    },
+    nodePorts: [8080, 9090, 5432, 2375].map(publishedPort => ({ publishedPort, protocol: 'tcp', ip: '', stack: 'other' })),
+    existingContainers: [{ name: 'taken', stack: 'other' }, { name: 'taken-2', stack: 'other' }],
+  });
+}
+
 /** The maximal context, minus the node snapshot: `node-state-unavailable` fires. */
 export function degradedNodeStateContext(): PreflightContext {
   return maximalContext({

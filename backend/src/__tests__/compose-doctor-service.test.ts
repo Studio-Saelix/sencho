@@ -30,6 +30,22 @@ vi.mock('../helpers/envFileResolution', async (importOriginal) => {
   };
 });
 
+/**
+ * Extra rule hits appended to a run, to stand in for a rule that emits several
+ * hits for one service without a subject. Tests clear it in a `finally`.
+ */
+const injectedHits = vi.hoisted(() => ({ extra: [] as unknown[] }));
+vi.mock('../services/assurance/coverage', async (importOriginal) => {
+  const original = await importOriginal<typeof import('../services/assurance/coverage')>();
+  return {
+    ...original,
+    runAssuranceRules: (...args: Parameters<typeof original.runAssuranceRules>) => {
+      const run = original.runAssuranceRules(...args);
+      return { ...run, findings: [...run.findings, ...(injectedHits.extra as typeof run.findings)] };
+    },
+  };
+});
+
 const SECRET = 'pw-7Q2x-never-store';
 
 let tmpDir: string;
@@ -723,6 +739,66 @@ describe('Compose Assurance contract persistence', () => {
     expect(normalized.findings[0].ruleId).toBe('a-retired-rule');
     expect(normalized.findings[0].findingClass).toBe('information');
     expect(normalized.findings[0].ruleVersion).toBeNull();
+  });
+
+  it('attaches each acknowledgement decision to the finding it was matched for', () => {
+    const stack = 'assurance-legacy';
+    const row = (id: string, ruleId: string, severity: string, service: string) => ({
+      id, run_id: 'ack-run', rule_id: ruleId, severity, title: ruleId, message: 'm',
+      source_path: null, remediation: null, service, created_at: 2,
+      rule_version: 1, subject_kind: 'service', subject_key: service,
+    });
+    // Stored in an order that differs from the severity-then-registry order the
+    // read path returns, so a pairing by position would attach decisions wrongly.
+    db().replacePreflightRun(
+      { id: 'ack-run', node_id: nodeId, stack_name: stack, source_hash: null, rendered_hash: null, service_images: null, status: 'high', highest_severity: 'high', created_at: 2, created_by: 'tester', coverage: null },
+      [
+        row('f-web', 'privileged', 'high', 'web'),
+        row('f-info', 'healthcheck-inherited', 'info', 'db'),
+        row('f-db', 'privileged', 'high', 'db'),
+        row('f-warn', 'restart-policy-missing', 'warning', 'web'),
+      ],
+    );
+    db().upsertPreflightAcknowledgement({
+      node_id: nodeId, stack_name: stack, rule_id: 'privileged', service: 'db', reason: 'db needs it',
+      expiry_mode: 'forever', expires_at: null, anchor_rendered_hash: null, anchor_image_ref: null,
+      created_by: 'tester', created_at: Date.now(),
+    });
+    try {
+      const { findings } = doctor().getLatestAssurance(nodeId, stack);
+      expect(findings).toHaveLength(4);
+      const decided = findings.filter(finding => finding.decision);
+      expect(decided.map(finding => [finding.ruleId, finding.scope.service])).toEqual([['privileged', 'db']]);
+      expect(decided[0].decision?.reason).toBe('db needs it');
+      // The wire report agrees finding for finding.
+      const report = doctor().getLatest(nodeId, stack);
+      expect(report.findings.filter(finding => finding.acknowledged).map(finding => [finding.ruleId, finding.service]))
+        .toEqual([['privileged', 'db']]);
+    } finally {
+      db().getDb().prepare('DELETE FROM preflight_acknowledgements WHERE node_id = ? AND stack_name = ?').run(nodeId, stack);
+    }
+  });
+
+  it('names the rule when two findings share a fingerprint, and keeps both', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    stubDocker(cleanModel());
+    const duplicate = { ruleId: 'privileged', severity: 'high', title: 'Privileged container', message: 'm', service: 'web' };
+    injectedHits.extra = [duplicate, { ...duplicate, message: 'again' }];
+    try {
+      const report = await doctor().runPreflight(nodeId, STACK, 'tester');
+      expect(report.findings.filter(finding => finding.ruleId === 'privileged')).toHaveLength(2);
+      const logged = warn.mock.calls.map(call => call.map(String).join(' '));
+      expect(logged.some(line => line.includes('share a fingerprint') && line.includes('privileged'))).toBe(true);
+    } finally {
+      injectedHits.extra = [];
+    }
+  });
+
+  it('stays quiet when every finding has its own fingerprint', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    stubDocker(cleanModel());
+    await doctor().runPreflight(nodeId, STACK, 'tester');
+    expect(warn.mock.calls.some(call => call.map(String).join(' ').includes('share a fingerprint'))).toBe(false);
   });
 
   it('records an env-source failure as partial coverage instead of a silent pass', async () => {

@@ -98,6 +98,28 @@ export function findingFingerprint(
   return hash([ruleId, scope.stack, scope.service ?? '', subject.kind, subject.key]);
 }
 
+/**
+ * Rule ids whose findings share a fingerprint within one run. A rule that emits
+ * several hits for one service must give each a distinct subject (or source
+ * path); otherwise the hits are indistinguishable to any consumer that pairs or
+ * dedupes on identity. Legacy rows are skipped: their identity is documented as
+ * not dedupable.
+ */
+export function findFingerprintCollisions(findings: readonly AssuranceFinding[]): string[] {
+  const byFingerprint = new Map<string, string[]>();
+  for (const finding of findings) {
+    if (finding.identity.basis === 'legacy') continue;
+    const seen = byFingerprint.get(finding.identity.fingerprint);
+    if (seen) seen.push(finding.ruleId);
+    else byFingerprint.set(finding.identity.fingerprint, [finding.ruleId]);
+  }
+  const colliding = new Set<string>();
+  for (const ruleIds of byFingerprint.values()) {
+    if (ruleIds.length > 1) for (const ruleId of ruleIds) colliding.add(ruleId);
+  }
+  return [...colliding].sort();
+}
+
 /** The rule-independent correlation key for one fact. */
 export function findingSubjectKey(scope: AssuranceScope, subject: AssuranceSubject): string {
   return hash([scope.stack, scope.service ?? '', subject.kind, subject.key]);
@@ -193,7 +215,9 @@ function decisionForSerialize(decision: AssuranceDecision): AssuranceDecision {
 }
 
 /** The subject a rule's hit carries, falling back to the registry kind plus the
- *  most specific value the hit names. */
+ *  most specific value the hit names. The fallback is one value per service, so
+ *  a rule that emits several hits for a service must set `hit.subject` or a
+ *  distinct `sourcePath`; `findFingerprintCollisions` flags one that does not. */
 export function subjectForHit(rule: AssuranceRule, stackName: string, hit: RuleHit): AssuranceSubject {
   if (hit.subject) return hit.subject;
   return { kind: rule.subject, key: hit.sourcePath ?? hit.service ?? stackName };
