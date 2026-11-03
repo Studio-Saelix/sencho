@@ -47,6 +47,7 @@ import {
 } from '../services/recovery/redaction';
 import { ROOT_COVERAGE_FRESHNESS_MS } from '../services/recovery/types';
 import type {
+  OverwriteRefusalReason,
   RecoveryErrorClass,
   RecoveryOperation,
   RootCoverageReason,
@@ -572,7 +573,7 @@ recoveryRouter.post('/points/:pointId/restore', handle(async (req, res) => {
   const body = parseBody(restoreBody, req.body);
   if (body.targetMode !== undefined && body.targetMode !== 'new_volume') {
     throw new RecoveryError('invalid_request', {
-      reason: 'wrong_route',
+      reason: 'wrong_route' satisfies OverwriteRefusalReason,
       detail: body.targetMode === 'staged_overwrite'
         ? 'Restoring over a point\'s own volume needs the overwrite route, where you can review what stops first.'
         : 'Restoring to a host path is not available on this route.',

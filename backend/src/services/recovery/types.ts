@@ -200,6 +200,20 @@ export type RecoveryErrorClass =
   /** The operation has passed its commit point and cannot be rolled back. */
   | 'not_cancellable';
 
+/**
+ * The `reason` tokens the route-level refusals of the overwrite surface carry.
+ * Each is named in `docs/openapi.yaml` and on the operator page; a token added
+ * here without both fails `recovery-error-surface.test.ts`.
+ */
+export const OVERWRITE_REFUSAL_REASONS = [
+  'wrong_route',
+  'generation_changed',
+  'dependents_changed',
+  'no_fence',
+  'fence_released',
+] as const;
+export type OverwriteRefusalReason = (typeof OVERWRITE_REFUSAL_REASONS)[number];
+
 interface RecoveryPointBase {
   id: string;
   schemaVersion: number;
