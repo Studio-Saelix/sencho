@@ -16,11 +16,7 @@ import { execFileSync } from 'child_process';
 import { randomUUID } from 'crypto';
 import type Docker from 'dockerode';
 import { setupTestDb, cleanupTestDb } from '../helpers/setupTestDb';
-import {
-  RecoveryHelperRunner,
-  type HelperProfile,
-  type HelperProfileSpec,
-} from '../../services/recovery/restic/helperRunner';
+import { RecoveryHelperRunner } from '../../services/recovery/restic/helperRunner';
 import { ResticEngine } from '../../services/recovery/restic/ResticEngine';
 import {
   RepositoryProvisioner,
