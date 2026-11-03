@@ -383,19 +383,22 @@ describe('a start that races the fence', () => {
     expect(removed).toEqual(['helper']);
   });
 
-  it('reports a start that does not answer in time, and stops waiting for one that has hung', async () => {
+  it('reports a start that does not answer in time, and refuses at once for one that has hung', async () => {
     const hold = gate();
     const run = fence.startUnderFence([], () => hold.promise);
     const started = Date.now();
     // False: the caller cannot treat what it observes as settled.
     await expect(fence.waitForStartsInFlight(20)).resolves.toBe(false);
     expect(Date.now() - started).toBeLessThan(5_000);
-    // A start pending longer than the hung threshold is a stuck call, not one
-    // about to land, so the next fence does not pay the whole cap again.
+    // A start pending longer than the hung threshold may still land, so it is
+    // neither waited for (the next fence does not pay the whole cap again) nor
+    // stepped around: the answer is false at once.
     fence.setStartDrainTimeoutForTests(120_000, 20);
     try {
       await new Promise((resolve) => setTimeout(resolve, 40));
-      await expect(fence.waitForStartsInFlight(20)).resolves.toBe(true);
+      const hungAt = Date.now();
+      await expect(fence.waitForStartsInFlight(60_000)).resolves.toBe(false);
+      expect(Date.now() - hungAt).toBeLessThan(1_000);
     } finally {
       fence.setStartDrainTimeoutForTests(120_000);
     }
@@ -431,6 +434,38 @@ describe('a start that races the fence', () => {
       await start;
     }
     // Nothing was pinned or stopped: the fence was refused before the first change.
+    expect(fake.calls).toEqual(['start:x']);
+  });
+
+  it('refuses to apply the fence at once while a start has hung', async () => {
+    const intentId = seedIntent('fenced');
+    const fake = fakeDocker({
+      containers: [
+        container({ Id: 'c1', State: 'running', Mounts: [{ Type: 'volume', Name: VOLUME }] }),
+        container({ Id: 'x', State: 'exited' }),
+      ],
+    });
+    vi.spyOn(NodeRegistryModule.NodeRegistry.getInstance(), 'getDocker').mockReturnValue(fake.docker);
+    const hold = gate();
+    const reachedDaemon = gate();
+    delayContainerCall(fake, 'start', 'x', hold.promise, reachedDaemon.open);
+    const start = DockerController.getInstance(1).startContainer('x');
+    await reachedDaemon.promise;
+    fence.RestoreFenceStore.getInstance().recordMembers(intentId, [member()]);
+    // Pending longer than the hung threshold, with a cap that would outlast the test.
+    fence.setStartDrainTimeoutForTests(60_000, 1);
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    try {
+      const began = Date.now();
+      await expect(fence.applyRestoreFence(
+        intentId, fake.docker, fence.RestoreFenceStore.getInstance().listMembers(intentId),
+      )).rejects.toMatchObject({ errorClass: 'fence_unavailable' });
+      expect(Date.now() - began).toBeLessThan(10_000);
+    } finally {
+      fence.setStartDrainTimeoutForTests(120_000);
+      hold.open();
+      await start;
+    }
     expect(fake.calls).toEqual(['start:x']);
   });
 

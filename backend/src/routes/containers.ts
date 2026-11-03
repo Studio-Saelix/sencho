@@ -6,6 +6,7 @@ import { requirePermission } from '../middleware/permissions';
 import { requireAdmin } from '../middleware/tierGates';
 import { invalidateNodeCaches } from '../helpers/cacheInvalidation';
 import { isDockerEndpointProtectedError } from '../helpers/dockerEndpointGuard';
+import { isDataRestoreFenceError } from '../helpers/dataRestoreFenceError';
 import { sanitizeForLog } from '../utils/safeLog';
 
 export const containersRouter = Router();
@@ -44,6 +45,12 @@ containersRouter.post('/:id/start', async (req: Request, res: Response) => {
     invalidateNodeCaches(req.nodeId);
     res.json({ message: 'Container started' });
   } catch (error) {
+    // A data restore owns a volume this container mounts: say so, as the Files
+    // and Volumes browser does, instead of answering a generic 500.
+    if (isDataRestoreFenceError(error)) {
+      res.status(409).json({ error: error.message, code: error.code });
+      return;
+    }
     res.status(500).json({ error: 'Failed to start container' });
   }
 });
@@ -77,6 +84,10 @@ containersRouter.post('/:id/restart', async (req: Request, res: Response) => {
   } catch (error) {
     if (isDockerEndpointProtectedError(error)) {
       res.status(409).json({ error: error.message, code: error.code, reason: error.reason });
+      return;
+    }
+    if (isDataRestoreFenceError(error)) {
+      res.status(409).json({ error: error.message, code: error.code });
       return;
     }
     console.error('[Containers] Restart failed for %s:', sanitizeForLog(req.params.id as string), error);

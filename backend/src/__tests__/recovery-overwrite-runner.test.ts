@@ -1116,6 +1116,32 @@ describe('the fence window between the first recheck and the stop', () => {
     expect(intent?.phase).toBe('rolled_back');
     expect(intent?.fenceState).toBe('none');
   });
+
+  it('refuses at once, stopping nothing, when the only start in flight has hung', async () => {
+    const member = container({ Id: 'c1', State: 'running', Mounts: [{ Type: 'volume', Name: VOLUME }] });
+    const other = container({ Id: 'x', State: 'exited' });
+    const fake = fakeDocker({ volumes: [{ name: VOLUME }], containers: [member, other] });
+    const seeded = seed({ createdAt: fake.volumes.get(VOLUME)?.createdAt ?? '', members: [member] });
+    const { hold, start } = await holdAStartInFlight(fake);
+    // The start is older than the hung threshold, and the cap is far longer than
+    // the test: only an immediate refusal finishes inside it.
+    fence.setStartDrainTimeoutForTests(60_000, 1);
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    try {
+      const began = Date.now();
+      const { outcomes } = await run({ fake, helper: successHelper(), engine: scriptedEngine(), seeded });
+      expect(Date.now() - began).toBeLessThan(10_000);
+      expect(outcomes).toEqual([{ state: 'failed', errorClass: 'fence_unavailable' }]);
+    } finally {
+      fence.setStartDrainTimeoutForTests(120_000);
+      hold.open();
+      await start;
+    }
+    expect(fake.calls.filter((call) => call.endsWith(':c1'))).toEqual([]);
+    const intent = intents.RestoreIntentStore.getInstance().get(seeded.intentId);
+    expect(intent?.phase).toBe('rolled_back');
+    expect(intent?.fenceState).toBe('none');
+  });
 });
 
 describe('the staging volume around the other phases', () => {

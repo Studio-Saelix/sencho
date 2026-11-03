@@ -117,6 +117,7 @@ import {
 } from '../helpers/selfStackGuard';
 import { refuseIfDockerEndpoint, sendIfDockerEndpointProtected } from '../helpers/dockerEndpointRoute';
 import { DOCKER_ENDPOINT_PROTECTED_CODE, isDockerEndpointProtectedError } from '../helpers/dockerEndpointGuard';
+import { isDataRestoreFenceError, DATA_RESTORE_FENCE_CODE } from '../helpers/dataRestoreFenceError';
 import { RECOVERY_VOLUME_PROTECTED_CODE, sendIfRecoveryVolumeProtected } from '../helpers/recoveryVolumeGuard';
 import { getActiveCapabilities, STACK_DOWN_REMOVE_VOLUMES_CAPABILITY, SERVICE_SCOPED_UPDATE_CAPABILITY } from '../services/CapabilityRegistry';
 import { ServiceUpdateRecoveryService } from '../services/ServiceUpdateRecoveryService';
@@ -752,6 +753,9 @@ async function runStackBulkOp(
       if (outcome.kind === 'endpoint-protected') {
         return { stackName, ok: false, error: outcome.message, code: DOCKER_ENDPOINT_PROTECTED_CODE };
       }
+      if (outcome.kind === 'data-restore') {
+        return { stackName, ok: false, error: outcome.message, code: DATA_RESTORE_FENCE_CODE };
+      }
       if (outcome.kind === 'error') {
         if (action !== 'start') notifyActionFailure(action, stackName, new Error(outcome.message), user);
         return { stackName, ok: false, error: outcome.message, code: 'op_failed' };
@@ -764,6 +768,9 @@ async function runStackBulkOp(
     // Raised inside the lock after the pre-check passed: still a refusal, not a failed operation.
     if (isDockerEndpointProtectedError(err)) {
       return { stackName, ok: false, error: err.message, code: DOCKER_ENDPOINT_PROTECTED_CODE };
+    }
+    if (isDataRestoreFenceError(err)) {
+      return { stackName, ok: false, error: err.message, code: DATA_RESTORE_FENCE_CODE };
     }
     // The policy changed between evaluation and recreation, or a caller handed
     // the orchestrator a result that does not allow this stack.
@@ -2534,6 +2541,8 @@ export type ContainerActionOutcome =
   | { kind: 'docker-unavailable'; message: string }
   /** The Docker endpoint guard refused the batch before any container was touched. */
   | { kind: 'endpoint-protected'; message: string; reason: string }
+  /** A data restore owns a volume one of the containers mounts, so its start was refused. */
+  | { kind: 'data-restore'; message: string }
   | { kind: 'error'; message: string };
 
 /**
@@ -2592,6 +2601,7 @@ export async function containerActionForStack(
     if (isDockerEndpointProtectedError(error)) {
       return { kind: 'endpoint-protected', message: error.message, reason: error.reason };
     }
+    if (isDataRestoreFenceError(error)) return { kind: 'data-restore', message: error.message };
     if (isDockerUnavailableError(error)) {
       return { kind: 'docker-unavailable', message: getErrorMessage(error, 'Docker daemon is unreachable') };
     }
@@ -2630,6 +2640,10 @@ async function bulkContainerOp(
     }
     if (outcome.kind === 'endpoint-protected') {
       res.status(409).json({ error: outcome.message, code: DOCKER_ENDPOINT_PROTECTED_CODE, reason: outcome.reason });
+      return;
+    }
+    if (outcome.kind === 'data-restore') {
+      res.status(409).json({ error: outcome.message, code: DATA_RESTORE_FENCE_CODE });
       return;
     }
     if (outcome.kind === 'error') {
@@ -2721,6 +2735,10 @@ async function handleServiceAction(
   } catch (error: unknown) {
     console.error('[Stacks] Service %s failed: %s/%s', sanitizeForLog(action), sanitizeForLog(stackName), sanitizeForLog(serviceName), error);
     if (sendIfDockerEndpointProtected(res, error)) return;
+    if (isDataRestoreFenceError(error)) {
+      res.status(409).json({ error: error.message, code: error.code });
+      return;
+    }
     res.status(500).json({ error: getErrorMessage(error, `Failed to ${action} service`) });
   }
 }

@@ -1229,7 +1229,9 @@ export async function reconcileOverwriteIntentsAtStartup(
   now = Date.now(),
 ): Promise<OverwriteReconciliation> {
   const result: OverwriteReconciliation = { rolledBack: 0, committed: 0, unknown: 0 };
+  const visited = new Set<string>();
   for (const intent of deps.intents.listUnsettled('staged_overwrite')) {
+    visited.add(intent.id);
     const outcome = await reconcileOverwriteIntent(deps, intent, now);
     if (outcome === 'rolled_back') result.rolledBack += 1;
     else if (outcome === 'committed') result.committed += 1;
@@ -1242,7 +1244,12 @@ export async function reconcileOverwriteIntentsAtStartup(
     // Only a settled intent is released here. One that is still open (an unproven
     // swap, a leftover work directory) keeps its fence until the operator decides:
     // restarting its workloads would start them on data nobody has proven.
-    if (intent.phase !== 'committed' && intent.phase !== 'rolled_back') continue;
+    if (intent.phase !== 'committed' && intent.phase !== 'rolled_back') {
+      // The pass above counted every intent it visited. One it did not (an
+      // operator-parked `completion_unknown` restore) is still an open restore.
+      if (!visited.has(intent.id)) result.unknown += 1;
+      continue;
+    }
     const released = await releaseFence(deps, intent.id, true);
     if (released) {
       clearFenceOutcome(deps, intent);
@@ -1478,7 +1485,25 @@ export async function resolveOverwriteIntent(
         action: 'status',
       })).report?.status ?? null
     : null;
-  if (status === 'swapped' && intent.phase === 'swapped') {
+  if (status === 'swapped' && intent.phase === 'swapped' && intent.targetVolume) {
+    // `committed` is terminal, and nothing visits a settled intent again, so it
+    // is reached only once the work directory (a full copy of the data this
+    // overwrite replaced) is gone. The journal says the swap committed, which is
+    // what `cleanup` needs. If it cannot run, the operator's choice to release
+    // the fence still stands, but the intent stays `swapped` with the class set,
+    // so the next boot or a `retry` finishes the clean-up and the volume stays
+    // reserved until then.
+    const cleaned = await runSwapStep({
+      runner: deps.runner(),
+      operationId: `overwrite-resolve-${intent.id}`,
+      volumeName: intent.targetVolume,
+      intentId: intent.id,
+      action: 'cleanup',
+    });
+    if (!cleaned.ok) {
+      deps.intents.update(intent.id, { outcomeClass: 'cleanup_failed' });
+      return { outcome: 'fence_released' };
+    }
     deps.intents.advance(intent.id, 'committed', { outcomeClass: null });
     releaseHolds(deps, intent.id);
     return { outcome: 'committed' };

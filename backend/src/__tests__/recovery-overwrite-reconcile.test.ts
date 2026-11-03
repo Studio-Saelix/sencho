@@ -321,6 +321,51 @@ describe('the resolve route decisions', () => {
     expect(fake.containers.get('c1')?.State).toBe('exited');
   });
 
+  it('removes the work directory before it calls a journal-proven swap committed', async () => {
+    const { seeded, fake } = await seed({ phase: 'swapped', createdAt: new Date().toISOString(), fenced: true });
+    const helper = answers();
+    const result = await overwrite.resolveOverwriteIntent(deps(fake, helper), {
+      intentId: seeded.intentId,
+      action: 'release_fence',
+    });
+    expect(result.outcome).toBe('committed');
+    expect(helper.runs.filter((run) => run.profile === 'swap').map((run) => run.cmd[2])).toEqual(['status', 'cleanup']);
+    expect(intents.RestoreIntentStore.getInstance().get(seeded.intentId)?.phase).toBe('committed');
+  });
+
+  it('keeps the intent open when the clean-up cannot run, so a later pass removes the copy', async () => {
+    const { seeded, fake } = await seed({ phase: 'swapped', createdAt: new Date().toISOString(), fenced: true });
+    const failingHelper = scriptedHelper({
+      swapAnswers: [
+        { action: 'status', exitCode: 0, status: 'swapped' },
+        { action: 'cleanup', exitCode: 1, stderr: 'helper image missing' },
+      ],
+    });
+    const result = await overwrite.resolveOverwriteIntent(deps(fake, failingHelper), {
+      intentId: seeded.intentId,
+      action: 'release_fence',
+    });
+    // The operator's choice to release the fence stands.
+    expect(result.outcome).toBe('fence_released');
+    expect(fence.RestoreFenceStore.getInstance().isVolumeFenced(VOLUME)).toBe(false);
+    // The original data is still in the volume, so the intent is not terminal.
+    const open = intents.RestoreIntentStore.getInstance().get(seeded.intentId);
+    expect(open?.phase).toBe('swapped');
+    expect(open?.outcomeClass).toBe('cleanup_failed');
+    expect(intents.RestoreIntentStore.getInstance().listUnsettled('staged_overwrite').map((i) => i.id)).toContain(seeded.intentId);
+    expect(fence.RestoreFenceStore.getInstance().liveIntentForVolume(VOLUME)).toBe(seeded.intentId);
+
+    // The next boot (or a retry) finishes it.
+    const retryHelper = answers();
+    const settled = await overwrite.resolveOverwriteIntent(deps(fake, retryHelper), {
+      intentId: seeded.intentId,
+      action: 'retry',
+    });
+    expect(settled.outcome).toBe('committed');
+    expect(retryHelper.runs.filter((run) => run.profile === 'swap').map((run) => run.cmd[2])).toContain('cleanup');
+    expect(intents.RestoreIntentStore.getInstance().get(seeded.intentId)?.phase).toBe('committed');
+  });
+
   it('refuses to resolve a committed intent', async () => {
     const { seeded, fake } = await seed({ phase: 'swapped', createdAt: new Date().toISOString(), fenced: true });
     intents.RestoreIntentStore.getInstance().advance(seeded.intentId, 'committed');
@@ -357,6 +402,24 @@ describe('a fence that outlived its intent', () => {
 });
 
 describe('startup reconciliation', () => {
+  it('counts a parked restore whose fence it keeps held', async () => {
+    const { seeded, fake } = await seed({ phase: 'swapping', createdAt: new Date().toISOString(), fenced: true });
+    intents.RestoreIntentStore.getInstance().advance(seeded.intentId, 'completion_unknown', { outcomeClass: 'identity_unknown' });
+    const result = await overwrite.reconcileOverwriteIntentsAtStartup(deps(fake, answers()));
+    expect(result).toEqual({ rolledBack: 0, committed: 0, unknown: 1 });
+    expect(fence.RestoreFenceStore.getInstance().isVolumeFenced(VOLUME)).toBe(true);
+    expect(fake.calls).not.toContain('start:c1');
+  });
+
+  it('counts a restore it just parked once, not once per pass', async () => {
+    const { seeded, fake } = await seed({ phase: 'swapping', createdAt: new Date().toISOString(), fenced: true });
+    const helper = scriptedHelper({ swapAnswers: [{ action: 'status', exitCode: 0, status: 'inconsistent' }] });
+    const result = await overwrite.reconcileOverwriteIntentsAtStartup(deps(fake, helper));
+    expect(result.unknown).toBe(1);
+    expect(intents.RestoreIntentStore.getInstance().get(seeded.intentId)?.phase).toBe('completion_unknown');
+    expect(fence.RestoreFenceStore.getInstance().isVolumeFenced(VOLUME)).toBe(true);
+  });
+
   it('settles every unsettled overwrite and reports the counts', async () => {
     const { fake } = await seed({ phase: 'staged_verified', createdAt: new Date().toISOString(), fenced: false });
     const helper = answers();

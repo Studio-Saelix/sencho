@@ -398,7 +398,11 @@ const startsInFlight = new Map<Promise<void>, number>();
  */
 let startDrainTimeoutMs = 120_000;
 
-/** A start pending this long is a hung daemon call, and later fences stop waiting for it. */
+/**
+ * A start pending this long is a hung daemon call. A fence does not wait for it
+ * again (that would make every fence pay the whole cap), and does not go ahead
+ * around it either: it refuses at once, because the start may still land.
+ */
 let hungStartAfterMs = 10 * 60_000;
 
 /** Test seam: shorten the waits so a hung start can be exercised. */
@@ -440,13 +444,16 @@ export function startUnderFence<T>(volumeNames: readonly string[], start: () => 
  * start was still unanswered when the cap ran out, so the caller cannot treat the
  * containers it observes as settled and must not stop them as if they were.
  *
- * A start that has itself been pending for ten minutes is a hung daemon call, not
- * a start about to land: it is not waited for again, so one hung call cannot make
- * every later fence pay the whole cap.
+ * A start that has itself been pending for ten minutes is a hung daemon call. It
+ * is not waited for (one hung call must not make every later fence pay the whole
+ * cap), but it is not stepped around either: it may still land on the volume, so
+ * the answer is false at once, the same as when the cap runs out. The refusal
+ * lasts until that call answers or Sencho restarts.
  */
 export async function waitForStartsInFlight(timeoutMs = startDrainTimeoutMs): Promise<boolean> {
   const now = Date.now();
-  const pending = [...startsInFlight].filter(([, startedAt]) => now - startedAt < hungStartAfterMs).map(([run]) => run);
+  if ([...startsInFlight.values()].some((startedAt) => now - startedAt >= hungStartAfterMs)) return false;
+  const pending = [...startsInFlight.keys()];
   if (pending.length === 0) return true;
   let timer: NodeJS.Timeout | undefined;
   const capped = new Promise<boolean>((resolve) => {

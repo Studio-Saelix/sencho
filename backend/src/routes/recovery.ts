@@ -72,7 +72,7 @@ export const recoveryRouter = Router();
  * stale, and never `202` for work that has not been admitted.
  */
 
-const ERROR_STATUS: Readonly<Record<RecoveryErrorClass, number>> = {
+export const ERROR_STATUS: Readonly<Record<RecoveryErrorClass, number>> = {
   invalid_request: 400,
   permission_denied: 403,
   capability_unavailable: 503,
