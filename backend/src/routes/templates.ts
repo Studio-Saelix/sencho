@@ -181,7 +181,7 @@ templatesRouter.post('/deploy', authMiddleware, async (req: Request, res: Respon
     }
 
     try {
-      if (!(await runPolicyGate(req, res, stackName, req.nodeId))) {
+      if (!(await runPolicyGate(req, res, stackName, req.nodeId, { imageSource: 'compose' }))) {
         try {
           await fsService.deleteStack(stackName);
         } catch (cleanupErr) {

@@ -24,6 +24,9 @@ type PolicyBlock = {
   // or rollback) targets that node even if the active node changes while the
   // dialog is open.
   nodeId: number | null;
+  // Set when the block came from a single-service update, so the bypass retries
+  // that service rather than the whole stack.
+  serviceName?: string;
 };
 type Container = { id: string; name: string };
 

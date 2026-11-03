@@ -14,8 +14,17 @@ import { buildEffectiveServiceModel } from './effectiveServiceModel';
 import { DriftLedgerService } from './DriftLedgerService';
 import { MeshService } from './MeshService';
 import { DatabaseService } from './DatabaseService';
-import { enforcePolicyForImageRefs, type PolicyEnforcementOptions } from './PolicyEnforcement';
-import { describePolicyBlock } from '../helpers/policyGate';
+import {
+  enforcePolicyForImageRefs,
+  type EvaluatedCandidate,
+  type PolicyEnforcementOptions,
+} from './PolicyEnforcement';
+import {
+  describePolicyBlock,
+  PulledCandidateBlockedError,
+  policyBlockPayload,
+  verifyPulledCandidates,
+} from '../helpers/policyGate';
 import { getErrorMessage } from '../utils/errors';
 import { sanitizeForLog } from '../utils/safeLog';
 import type { EffectiveServiceSpec } from './effectiveServiceModel';
@@ -49,6 +58,12 @@ export type UpdateExecutionContext = UpdateOperationContext & { policy: UpdatePo
 export interface StackComposeOptions {
   atomic: boolean;
   terminalWs?: WebSocket | null;
+  /**
+   * Runs after the pull and before `up`. The update route passes the gate's
+   * candidate verifier here so a tag that moved between the gate and the pull is
+   * re-evaluated while the new image is local and not yet running.
+   */
+  verifyPulled?: () => Promise<void>;
 }
 
 export interface ServiceUpdateOptions {
@@ -78,12 +93,19 @@ export type OrchestratorResult =
       serviceName?: string;
       mutationStage?: string;
       recoveryId?: string | null;
+      /** The policy decision behind a `policy_blocked` refusal, for the block dialog. */
+      policyBlock?: ReturnType<typeof policyBlockPayload>;
     };
 
 function serviceFailed(
   code: string,
   error: string,
-  extra?: { serviceName?: string; mutationStage?: string; recoveryId?: string | null },
+  extra?: {
+    serviceName?: string;
+    mutationStage?: string;
+    recoveryId?: string | null;
+    policyBlock?: ReturnType<typeof policyBlockPayload>;
+  },
 ): Extract<OrchestratorResult, { kind: 'service_failed' }> {
   return { kind: 'service_failed', code, error, ...extra };
 }
@@ -221,9 +243,13 @@ export class StackUpdateOrchestrator {
   ): Promise<OrchestratorResult> {
     const updateResult = await ComposeService.getInstance(ctx.nodeId).updateStack(
       ctx.stackName, options.terminalWs ?? undefined, options.atomic,
-      // The policy was evaluated before this update started; confirm it against
-      // a fresh render immediately before the containers are recreated.
-      () => assertUpdatePolicyUnchanged(ctx.nodeId, ctx.policy),
+      // Both checks run after the pull and before `up`: the update policy is
+      // confirmed against a fresh render, and the pulled digests are compared
+      // with the candidates the security gate evaluated.
+      async () => {
+        await assertUpdatePolicyUnchanged(ctx.nodeId, ctx.policy);
+        await options.verifyPulled?.();
+      },
     );
     const recoveryId = updateResult?.recoveryId ?? null;
     return {
@@ -279,10 +305,19 @@ export class StackUpdateOrchestrator {
     let recoveryId: string | null = null;
     let recoveryAvailable = false;
     try {
-      const policyFailure = await this.checkPolicyOrFail(
-        stackName, nodeId, serviceName, spec.declaredImage ? [spec.declaredImage] : [], options.policyOptions, 'update',
+      // A registry image the update would pull for this service only; a
+      // build-backed service has no registry image to evaluate, so the installed
+      // one is what runs.
+      const gate = await this.checkPolicyOrFail(
+        stackName,
+        nodeId,
+        serviceName,
+        spec.declaredImage ? [spec.declaredImage] : [],
+        { ...options.policyOptions, imageSource: spec.hasBuild ? 'installed' : 'registry' },
+        'update',
       );
-      if (policyFailure) return policyFailure;
+      if (!gate.ok) return gate.failure;
+      const evaluatedCandidates = gate.candidates;
 
       const prepared = await HealthGateService.getInstance().prepare({
         nodeId, stackName,
@@ -311,9 +346,28 @@ export class StackUpdateOrchestrator {
       try {
         await ComposeService.getInstance(nodeId).updateService(
           stackName, serviceName, spec.hasBuild, options.terminalWs ?? undefined,
-          () => assertUpdatePolicyUnchanged(nodeId, ctx.policy),
+          async () => {
+            await assertUpdatePolicyUnchanged(nodeId, ctx.policy);
+            await verifyPulledCandidates(stackName, nodeId, evaluatedCandidates, options.policyOptions);
+          },
         );
       } catch (composeError) {
+        if (composeError instanceof PulledCandidateBlockedError) {
+          return serviceFailed(
+            'policy_blocked',
+            composeError.message,
+            {
+              serviceName,
+              mutationStage: 'policy',
+              recoveryId,
+              policyBlock: policyBlockPayload(
+                composeError.gate.policy,
+                composeError.gate.violations,
+                composeError.gate.evidence,
+              ),
+            },
+          );
+        }
         if (composeError instanceof UpdatePolicyChangedError) {
           return serviceFailed(
             'update_policy_blocked',
@@ -437,10 +491,10 @@ export class StackUpdateOrchestrator {
       }
 
       const scanTarget = await this.resolveRestoreScanTarget(nodeId, recovery);
-      const policyFailure = await this.checkPolicyOrFail(
+      const restoreGate = await this.checkPolicyOrFail(
         stackName, nodeId, serviceName, [scanTarget], options.policyOptions, 'rollback', recoveryId,
       );
-      if (policyFailure) return policyFailure;
+      if (!restoreGate.ok) return restoreGate.failure;
 
       const prepared = await HealthGateService.getInstance().prepare({
         nodeId, stackName,
@@ -596,15 +650,28 @@ export class StackUpdateOrchestrator {
     policyOptions: PolicyEnforcementOptions,
     action: 'update' | 'rollback',
     recoveryId?: string | null,
-  ): Promise<Extract<OrchestratorResult, { kind: 'service_failed' }> | null> {
-    if (refs.length === 0) return null;
+  ): Promise<
+    | { ok: true; candidates: EvaluatedCandidate[] }
+    | { ok: false; failure: Extract<OrchestratorResult, { kind: 'service_failed' }> }
+  > {
+    if (refs.length === 0) return { ok: true, candidates: [] };
     const gate = await enforcePolicyForImageRefs(stackName, nodeId, refs, policyOptions);
-    if (gate.ok || gate.bypassed) return null;
-    return serviceFailed(
-      'policy_blocked',
-      `Service "${serviceName}": ${describePolicyBlock(gate.policy, gate.violations, action, gate.evidence)}`,
-      { serviceName, mutationStage: 'policy', recoveryId },
-    );
+    if (gate.ok || gate.bypassed) return { ok: true, candidates: gate.evaluatedCandidates ?? [] };
+    return {
+      ok: false,
+      failure: serviceFailed(
+        'policy_blocked',
+        `Service "${serviceName}": ${describePolicyBlock(gate.policy, gate.violations, action, gate.evidence)}`,
+        {
+          serviceName,
+          mutationStage: 'policy',
+          recoveryId,
+          // The dialog and its bypass open on the same payload a stack-level
+          // block sends, rather than on a bare error string.
+          policyBlock: policyBlockPayload(gate.policy, gate.violations, gate.evidence),
+        },
+      ),
+    };
   }
 
   private async observePreparedService(

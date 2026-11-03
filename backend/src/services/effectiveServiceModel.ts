@@ -28,6 +28,14 @@ export interface EffectiveServiceSpec {
   name: string;
   declaredImage: string | null;
   hasBuild: boolean;
+  /**
+   * Compose's own `pull_policy` for this service, or null when the service does
+   * not declare one. A plain `up` fetches the image for `always`, `daily`,
+   * `weekly` and `every_*`, which is why the deploy gate reads it: those services
+   * run the registry image, not the one on the node. Absent means the Compose
+   * default (`missing`), which pulls only when the image is not on the node.
+   */
+  pullPolicy?: string | null;
   /** May be 0 (explicit `scale: 0` or `deploy.replicas: 0`); defaults to 1 when neither is set, matching Compose's own default. */
   expectedReplicas: number;
   dependsOn: string[];
@@ -81,6 +89,7 @@ function parseServiceSpec(name: string, raw: unknown): EffectiveServiceSpec {
     name,
     declaredImage: asString(svc.image) ?? null,
     hasBuild: !!svc.build && typeof svc.build === 'object',
+    pullPolicy: asString(svc.pull_policy) ?? null,
     expectedReplicas: expectedReplicasOf(svc, deploy),
     dependsOn: dependsOnNames(svc.depends_on),
     hasHealthcheck,

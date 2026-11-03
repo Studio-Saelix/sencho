@@ -31,6 +31,7 @@ import EnvironmentPanel from './stack/EnvironmentPanel';
 import ComposeLabelsPanel from './stack/ComposeLabelsPanel';
 import StackNetworkingPanel from './stack/StackNetworkingPanel';
 import { useNodes } from '@/context/NodeContext';
+import { CANDIDATE_IMAGE_GATE_CAPABILITY } from '@/lib/capabilities';
 import { isPreflightNoteFinding } from '@/lib/preflightNotes';
 import type { NotificationItem } from '@/components/dashboard/types';
 
@@ -437,6 +438,8 @@ export default function StackAnatomyPanel({
   const showUpdateBanner = hasUpdate || rebuildAvailable;
   const showCheckStatusBanner = previewUncertain && !showUpdateBanner;
   const updateKind = updatePreview?.summary.update_kind ?? 'none';
+  // Optimistic while meta loads, so the note does not flash on a supported node.
+  const candidateGateSupported = hasCapability(CANDIDATE_IMAGE_GATE_CAPABILITY);
   const blocked = Boolean(updatePreview?.summary.blocked);
   // Another image in the stack failed digest verification: applying the
   // full-stack update would pull/recreate that image as collateral, so the
@@ -765,6 +768,15 @@ export default function StackAnatomyPanel({
                 </div>
                 {blocked && updatePreview.summary.blocked_reason && (
                   <div className="mt-1 font-mono text-[10px] text-destructive">{updatePreview.summary.blocked_reason}</div>
+                )}
+                {!candidateGateSupported && (
+                  // The node still gates this update, but it checks the image it
+                  // already holds. Said once, quietly, beside the verb that would
+                  // pull: the update is not blocked, because a person is deciding.
+                  <div className="mt-1 font-mono text-[10px] text-stat-subtitle break-words">
+                    Security policy on this node checks the image already installed, not the new one.
+                    {' '}Update this node for the new image to be checked.
+                  </div>
                 )}
               </div>
               {canEdit && !blocked && canApplyPreview && (

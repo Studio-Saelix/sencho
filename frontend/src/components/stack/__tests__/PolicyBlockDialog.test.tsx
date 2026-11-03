@@ -523,3 +523,92 @@ describe('PolicyBlockDialog lead sentence', () => {
     expect(lead?.textContent).toMatch(new RegExp(`^Policy prod-gate blocks ${plural} on `));
   });
 });
+
+describe('PolicyBlockDialog candidate image', () => {
+  const candidatePayload: PolicyBlockPayload = {
+    error: 'blocked',
+    policy: { id: 1, name: 'prod-gate', maxSeverity: 'HIGH', blockOnSeverity: 1, blockOnKev: 0, blockOnFixable: 0 },
+    violations: [
+      { imageRef: 'app:latest', severity: 'CRITICAL', criticalCount: 1, highCount: 0, kevCount: 0, fixableCount: 0, reasons: ['severity'], scanId: 7 },
+    ],
+    evidence: {
+      outcome: 'block',
+      summary: 'Vulnerability scan: current, blocked by the Scan failed setting, set to block',
+      records: [
+        {
+          source: 'vulnerability_scan',
+          state: 'current',
+          target: 'app:latest',
+          subject: 'candidate',
+          digest: 'sha256:4f2a1c9d8e7b0000000000000000000000000000000000000000000000000000',
+          platformDigest: 'sha256:4f2a1c9d8e7b0000000000000000000000000000000000000000000000000000',
+          platform: 'linux/amd64',
+          collectedAt: Date.now(),
+        },
+      ],
+      applications: [
+        { source: 'vulnerability_scan', state: 'current', outcome: 'block', rule: 'security_scan_failure=block', target: 'app:latest' },
+      ],
+    },
+  };
+
+  it('names the image the update would install, and its platform', () => {
+    render(<PolicyBlockDialog open payload={candidatePayload} stackName="web" action="update" onOpenSettings={vi.fn(() => true)} canBypass={false} canEditSettings={false} bypassing={false} onClose={vi.fn()} onBypass={vi.fn()} />);
+    expect(screen.getByText(/New image 4f2a1c9d8e7b/)).toBeInTheDocument();
+    expect(screen.getByText(/· linux\/amd64/)).toBeInTheDocument();
+  });
+
+  it('says why an unresolvable candidate could not be evaluated', () => {
+    const unresolved: PolicyBlockPayload = {
+      ...candidatePayload,
+      // No candidate was resolved, so there is no record naming one.
+      evidence: {
+        outcome: 'block',
+        summary: 'Vulnerability scan: unavailable, blocked by the Scan failed setting, set to block',
+        records: [{ source: 'vulnerability_scan', state: 'unavailable', target: 'app:latest', subject: 'candidate', collectedAt: null, reason: 'The registry image could not be resolved' }],
+        applications: [{ source: 'vulnerability_scan', state: 'unavailable', outcome: 'block', rule: 'security_scan_failure=block', target: 'app:latest' }],
+      },
+      violations: [
+        {
+          imageRef: 'app:latest', severity: 'UNKNOWN', criticalCount: 0, highCount: 0, kevCount: 0, fixableCount: 0, reasons: [], scanId: 0,
+          error: 'The image this operation would pull could not be resolved: The registry image could not be resolved: Registry error (503)',
+        },
+      ],
+    };
+    render(<PolicyBlockDialog open payload={unresolved} stackName="web" action="update" onOpenSettings={vi.fn(() => true)} canBypass={false} canEditSettings={false} bypassing={false} onClose={vi.fn()} onBypass={vi.fn()} />);
+    // Both the image row and the paragraph below it say "could not be evaluated".
+    expect(screen.getAllByText(/could not be evaluated/i).length).toBeGreaterThan(0);
+    expect(screen.getByText(/Registry error \(503\)/)).toBeInTheDocument();
+    // No candidate line: there was no candidate to name.
+    expect(screen.queryByText(/New image/)).toBeNull();
+  });
+
+  it('reads an unsupported node version as "not evaluated on this node version"', () => {
+    const unsupported: PolicyBlockPayload = {
+      error: 'blocked',
+      policy: { id: 1, name: 'prod-gate', maxSeverity: 'HIGH', blockOnSeverity: 1, blockOnKev: 0, blockOnFixable: 0 },
+      violations: [
+        { imageRef: '(node)', severity: 'UNKNOWN', criticalCount: 0, highCount: 0, kevCount: 0, fixableCount: 0, reasons: [], scanId: 0, error: "This node's version checks the image already installed, not the image this update would pull" },
+      ],
+      evidence: {
+        outcome: 'block',
+        summary: 'Vulnerability scan: not supported on this node, blocked by the Candidate not evaluated setting, set to block',
+        records: [
+          { source: 'vulnerability_scan', state: 'unsupported', target: '(node)', collectedAt: null, reason: "This node's version checks the image already installed, not the image this update would pull" },
+        ],
+        applications: [
+          { source: 'vulnerability_scan', state: 'unsupported', outcome: 'block', rule: 'security_candidate_unproven=block' },
+        ],
+      },
+    };
+    render(<PolicyBlockDialog open payload={unsupported} stackName="web" action="update" onOpenSettings={vi.fn(() => true)} canBypass={false} canEditSettings={false} bypassing={false} onClose={vi.fn()} onBypass={vi.fn()} />);
+    const rows = [...document.body.querySelectorAll('li')].map((li) => li.textContent ?? '');
+    expect(rows.some((t) => t.includes('not evaluated on this node version'))).toBe(true);
+  });
+
+  it('renders an older payload exactly as before, with no candidate line', () => {
+    render(<PolicyBlockDialog open payload={publicPayload} stackName="web" action="deploy" onOpenSettings={vi.fn(() => true)} canBypass canEditSettings={false} bypassing={false} onClose={vi.fn()} onBypass={vi.fn()} />);
+    expect(screen.getByText('nginx:1.14')).toBeInTheDocument();
+    expect(screen.queryByText(/New image/)).toBeNull();
+  });
+});

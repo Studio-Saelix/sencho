@@ -44,7 +44,7 @@ This tutorial covers one block-on-deploy policy scoped to a single stack pattern
     </Frame>
   </Step>
   <Step title="Deploy the stack and watch the gate fire">
-    Open the `prod-web` stack and select **Start**. Sencho enumerates the stack's images, runs a pre-flight Trivy scan against `nginx:1.14`, and evaluates the result against the policy before any container starts. This is the first scan of this image digest, so budget up to a couple of minutes rather than the sub-second result a cached rescan gets.
+    Open the `prod-web` stack and select **Start**. The image is not on the node yet, so Sencho resolves what `nginx:1.14` points at on the registry for this node's platform, runs a pre-flight Trivy scan against that exact image digest, and evaluates the result against the policy before any container starts. Nothing is pulled to do this: the tag on the node is untouched until the deploy itself. This is the first scan of this image digest, so budget up to a couple of minutes rather than the sub-second result a cached rescan gets.
 
     Instead of a running container, a **Deploy blocked by security policy** dialog appears, naming the policy and every condition it blocks on. The violation row shows `nginx:1.14` with its finding counts and a **Severity**, **KEV**, and **Fixable** badge, each matching a condition the image tripped.
 
@@ -53,6 +53,10 @@ This tutorial covers one block-on-deploy policy scoped to a single stack pattern
     </Frame>
 
     This is a hard gate, not an advisory: the stack has no running containers and stays that way until the image clears the policy or an admin overrides it.
+
+    <Note>
+      When the operation is an **Update** rather than a first deploy, the row also shows the image the update would install, as `New image <digest> · <platform>`. That is the registry image that was evaluated; the tag above it is the one you authored.
+    </Note>
   </Step>
   <Step title="Bypass the block as admin">
     Select **Deploy anyway**. The button is only active because you're signed in as `admin`; a non-admin session sees a disabled **Admin required to bypass** button in its place and cannot proceed. Sencho retries the deploy with the block ignored, pulls the image, starts the container, and runs its usual health-gate observation window.

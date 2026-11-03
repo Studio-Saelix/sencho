@@ -35,6 +35,48 @@ const TRIVY_TEMP_DIR_PREFIX = 'sencho-trivy-';
 const TRIVY_TEMP_DIR_MAX_AGE_MS = 60 * 60 * 1000; // 1 hour
 
 /**
+ * How long a vulnerability-database reading is reused before asking Trivy again.
+ * Short, because the reading only exists to decide whether a cached scan may be
+ * trusted, and a stale reading could authorise a row the current database has
+ * already superseded.
+ */
+const VULN_DB_INFO_TTL_MS = 60 * 1000;
+
+/** The Trivy vulnerability database build the findings were produced against. */
+export interface VulnerabilityDbInfo {
+    /** Epoch ms of the database build (`VulnerabilityDB.UpdatedAt`). */
+    updatedAt: number;
+    /** Epoch ms after which Trivy expects a newer database, or null when it does not say. */
+    nextUpdate: number | null;
+    /** When this reading was taken. */
+    readAt: number;
+}
+
+/**
+ * Options for one image scan.
+ *
+ * `scanRef` decouples the reference handed to Trivy from the reference the scan
+ * row is keyed and displayed by. The deploy gate scans `repo@sha256:<digest>` (the
+ * image that update would install) while the row keeps the authored tag, so
+ * History, compare and per-image retention keep reading one identity per tag.
+ */
+export interface ImageScanOptions {
+    useCache?: boolean;
+    digest?: string | null;
+    scanners?: readonly TrivyScanner[];
+    /** The exact reference handed to `trivy image`; defaults to `imageRef`. */
+    scanRef?: string;
+    /**
+     * Cache reuse rule. `digest` (the default, and every path except the deploy
+     * gate) reuses any completed row for the digest inside the TTL. `database`
+     * additionally requires the row to have come from the current, not-yet-due
+     * vulnerability database, because findings from an older database can miss a
+     * CVE the operator's policy would have blocked.
+     */
+    cacheRule?: 'digest' | 'database';
+}
+
+/**
  * Sweep leftover sencho-trivy-* temp dirs in the system tmp dir whose mtime
  * is older than 1 hour. Runs once at service boot to clean up DOCKER_CONFIG
  * dirs orphaned by a crashed scan process. Best-effort; swallows readdir or
@@ -249,6 +291,15 @@ export interface TrivyScanResult {
         trivyVersion: string | null;
         scanDurationMs: number;
     };
+    /**
+     * True when these findings came from a stored row rather than a scan that
+     * just ran. The database revision is then the cached row's, never the one
+     * Trivy holds now: the findings predate whatever database was downloaded
+     * since, and stamping the current build on them would claim otherwise.
+     */
+    fromCache?: boolean;
+    /** The database build the findings came from, when the row recorded one. */
+    databaseUpdatedAt?: number | null;
 }
 
 export interface TrivyComposeScanResult {
@@ -435,6 +486,8 @@ class TrivyService {
     private scanningNodes: Set<number> = new Set();
     private cacheDirEnsured: string | null = null;
     private detectionTimestamp = 0;
+    /** Last vulnerability-database reading, refreshed after every completed scan. */
+    private vulnDbInfo: VulnerabilityDbInfo | null = null;
 
     public static getInstance(): TrivyService {
         if (!TrivyService.instance) {
@@ -613,14 +666,87 @@ class TrivyService {
         return this.scanningImages.has(this.stackScanKey(nodeId, stackName));
     }
 
+    /**
+     * The vulnerability database build Trivy currently holds, read from
+     * `trivy version --format json` with the same cache directory a scan uses.
+     *
+     * Memoized briefly because the deploy gate asks once per candidate, and
+     * refreshed after every completed scan so a database Trivy downloaded during
+     * that scan is what the next cache decision sees. A read that fails returns
+     * null, which the cache rule treats as "cannot prove the row is current", i.e.
+     * a miss rather than a hit.
+     */
+    async getVulnerabilityDbInfo(options: { refresh?: boolean } = {}): Promise<VulnerabilityDbInfo | null> {
+        const now = Date.now();
+        if (!options.refresh && this.vulnDbInfo && now - this.vulnDbInfo.readAt < VULN_DB_INFO_TTL_MS) {
+            return this.vulnDbInfo;
+        }
+        const binary = this.binaryPath;
+        if (!binary) return null;
+        try {
+            const { env, cleanup } = await this.buildEnv();
+            try {
+                const { stdout } = await execFileAsync(
+                    binary,
+                    ['version', '--format', 'json'],
+                    { env, timeout: 30_000, maxBuffer: 8 * 1024 * 1024 },
+                );
+                const parsed = JSON.parse(stdout) as {
+                    VulnerabilityDB?: { UpdatedAt?: unknown; NextUpdate?: unknown };
+                };
+                const db = parsed.VulnerabilityDB;
+                const updatedAt = typeof db?.UpdatedAt === 'string' ? Date.parse(db.UpdatedAt) : NaN;
+                const nextUpdate = typeof db?.NextUpdate === 'string' ? Date.parse(db.NextUpdate) : NaN;
+                if (!Number.isFinite(updatedAt)) {
+                    this.vulnDbInfo = null;
+                    return null;
+                }
+                this.vulnDbInfo = {
+                    updatedAt,
+                    nextUpdate: Number.isFinite(nextUpdate) ? nextUpdate : null,
+                    readAt: now,
+                };
+                return this.vulnDbInfo;
+            } finally {
+                cleanup();
+            }
+        } catch (err) {
+            diag(`getVulnerabilityDbInfo: read failed: ${getErrorMessage(err, 'unknown')}`);
+            this.vulnDbInfo = null;
+            return null;
+        }
+    }
+
+    /**
+     * Whether a cached row may answer this scan.
+     *
+     * The digest rule is the historical one: any completed row for the digest
+     * inside the TTL. The database rule (the deploy gate) additionally requires
+     * the row to have been produced by the database build Trivy holds now, and
+     * that build to still be inside its own `NextUpdate` window. A row written
+     * before database revisions were recorded has no revision, so it misses once
+     * and the fresh scan records one.
+     */
+    private async canReuseCachedScan(
+        cached: VulnerabilityScan,
+        rule: 'digest' | 'database',
+        now: number,
+    ): Promise<boolean> {
+        if (now - cached.scanned_at >= DIGEST_CACHE_TTL_MS) return false;
+        if (rule !== 'database') return true;
+        const info = await this.getVulnerabilityDbInfo();
+        if (!info) return false;
+        // An unknown expiry is not proof the build is still inside its window, so
+        // it is a miss: the gate may only reuse a row it can show is current.
+        if (info.nextUpdate === null || now >= info.nextUpdate) return false;
+        if (cached.vuln_db_updated_at === null || cached.vuln_db_updated_at === undefined) return false;
+        return cached.vuln_db_updated_at === info.updatedAt;
+    }
+
     async scanImage(
         imageRef: string,
         nodeId: number,
-        options: {
-            useCache?: boolean;
-            digest?: string | null;
-            scanners?: readonly TrivyScanner[];
-        } = {},
+        options: ImageScanOptions = {},
     ): Promise<TrivyScanResult> {
         if (isSenchoRollbackHoldRef(imageRef)) {
             throw new Error('Sencho rollback-hold images are recovery state and cannot be scanned');
@@ -650,7 +776,7 @@ class TrivyService {
                     digest,
                     scannersUsed,
                 );
-                if (cached && startedAt - cached.scanned_at < DIGEST_CACHE_TTL_MS) {
+                if (cached && (await this.canReuseCachedScan(cached, options.cacheRule ?? 'digest', startedAt))) {
                     diag(
                         `scanImage: cache hit for digest=${digest} scanId=${cached.id} ageMs=${startedAt - cached.scanned_at}`,
                     );
@@ -666,6 +792,8 @@ class TrivyService {
                     return {
                         imageRef,
                         imageDigest: digest,
+                        fromCache: true,
+                        databaseUpdatedAt: cached.vuln_db_updated_at ?? null,
                         scannedAt: cached.scanned_at,
                         totalVulnerabilities: cached.total_vulnerabilities,
                         criticalCount: cached.critical_count,
@@ -725,7 +853,7 @@ class TrivyService {
                     '--no-progress',
                     '--scanners',
                     scannersUsed,
-                    imageRef,
+                    options.scanRef ?? imageRef,
                 ];
                 const execStart = Date.now();
                 const { stdout } = await execFileAsync(binary, args, {
@@ -850,7 +978,7 @@ class TrivyService {
         scanId: number,
         imageRef: string,
         nodeId: number,
-        opts: { useCache?: boolean; scanners?: readonly TrivyScanner[] } = {},
+        opts: ImageScanOptions = {},
     ): Promise<VulnerabilityScan> {
         const db = DatabaseService.getInstance();
         const startedAt = Date.now();
@@ -858,7 +986,16 @@ class TrivyService {
             const result = await this.scanImage(imageRef, nodeId, {
                 useCache: opts.useCache,
                 scanners: opts.scanners,
+                // A candidate scan persists the digest it actually scanned, and
+                // keeps the authored tag as the row's identity.
+                digest: opts.digest,
+                scanRef: opts.scanRef,
+                cacheRule: opts.cacheRule,
             });
+            // Read after a scan that actually ran, so a database Trivy downloaded
+            // during it is what gets recorded. A cache hit kept findings from an
+            // older build, and keeps that build's revision with it.
+            const dbInfo = result.fromCache ? null : await this.getVulnerabilityDbInfo({ refresh: true });
             db.updateVulnerabilityScan(scanId, {
                 image_digest: result.imageDigest,
                 scanned_at: result.scannedAt,
@@ -875,6 +1012,7 @@ class TrivyService {
                 os_info: result.metadata.os,
                 trivy_version: result.metadata.trivyVersion,
                 scan_duration_ms: result.metadata.scanDurationMs,
+                vuln_db_updated_at: result.fromCache ? (result.databaseUpdatedAt ?? null) : (dbInfo?.updatedAt ?? null),
                 status: 'completed',
             });
             db.insertVulnerabilityDetails(
@@ -955,7 +1093,7 @@ class TrivyService {
         nodeId: number,
         triggeredBy: VulnScanTrigger,
         stackContext: string | null = null,
-        opts: { useCache?: boolean; scanners?: readonly TrivyScanner[] } = {},
+        opts: ImageScanOptions = {},
     ): Promise<VulnerabilityScan> {
         const scanId = this.beginScan(imageRef, nodeId, triggeredBy, stackContext, opts.scanners);
         return this.finishScan(scanId, imageRef, nodeId, opts);
@@ -969,18 +1107,31 @@ class TrivyService {
      * scanner (secrets/misconfig are irrelevant to the gate and add latency).
      * The scan is persisted as a normal row with triggered_by=deploy-preflight
      * so the history and compare views continue to work unchanged.
+     *
+     * `scanRef` and `digest` are how the gate evaluates the image an update will
+     * install: Trivy is pointed at `repo@sha256:<platform digest>`, the row keeps
+     * the authored tag, and the digest it stores is the registry index digest, so
+     * the post-update scan of the installed image hits the same row. The database
+     * cache rule applies here and only here.
      */
     async scanImagePreflight(
         imageRef: string,
         nodeId: number,
         stackName: string | null,
+        opts: { scanRef?: string; digest?: string | null } = {},
     ): Promise<VulnerabilityScan> {
         return this.runScanAndPersist(
             imageRef,
             nodeId,
             'deploy-preflight',
             stackName,
-            { useCache: true, scanners: ['vuln'] },
+            {
+                useCache: true,
+                scanners: ['vuln'],
+                cacheRule: 'database',
+                ...(opts.scanRef ? { scanRef: opts.scanRef } : {}),
+                ...(opts.digest ? { digest: opts.digest } : {}),
+            },
         );
     }
 

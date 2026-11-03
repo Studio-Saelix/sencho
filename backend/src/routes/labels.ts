@@ -233,7 +233,9 @@ labelsRouter.post('/:id/action', authMiddleware, async (req: Request, res: Respo
               stackName,
               req.nodeId,
               // A dry run allows nothing, so it leaves no allowed-evidence row.
-              { ...buildPolicyGateOptions(req), recordAllowedEvidence: !isDryRun },
+              // A labelled deploy is a plain `up`, so the gate evaluates the
+              // registry image only for services Compose will pull.
+              { ...buildPolicyGateOptions(req, { imageSource: 'compose' }), recordAllowedEvidence: !isDryRun },
             );
             if (!gate.ok) {
               const blockedMsg = describePolicyBlock(gate.policy, gate.violations, 'deploy', gate.evidence);

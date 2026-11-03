@@ -1136,6 +1136,14 @@ export interface VulnerabilityScan {
     stack_context: string | null;
     // JSON-encoded PolicyEvaluation; null if never evaluated.
     policy_evaluation: string | null;
+    /**
+     * Epoch ms of the Trivy vulnerability-database build these findings came
+     * from, or null for a row written before revisions were recorded. The deploy
+     * gate reuses a cached scan only when this matches the database Trivy holds.
+     * Optional on the type because rows read back from SQLite always carry it
+     * (null when unset), while a fixture may describe a scan without one.
+     */
+    vuln_db_updated_at?: number | null;
 }
 
 // Fail-closed allowlist of the scanners_used values that ran the vulnerability
@@ -1373,6 +1381,7 @@ export class DatabaseService {
         this.migrateSecretMisconfigColumns();
         this.migrateAgentsAndNotificationsNodeId();
         this.migratePolicyEvaluationColumn();
+        this.migrateVulnDbUpdatedAtColumn();
         this.migrateNotificationCategory();
         this.migrateNotificationActor();
         this.migrateNotificationGitOpsDedupe();
@@ -1767,7 +1776,8 @@ export class DatabaseService {
         triggered_by TEXT NOT NULL DEFAULT 'manual',
         status TEXT NOT NULL DEFAULT 'completed',
         error TEXT,
-        stack_context TEXT
+        stack_context TEXT,
+        vuln_db_updated_at INTEGER
       );
 
       CREATE INDEX IF NOT EXISTS idx_vuln_scans_node_image ON vulnerability_scans(node_id, image_ref);
@@ -3427,6 +3437,17 @@ stmt.run('gitops_schema_version', '1');
         } catch {
             /* column already present */
         }
+    }
+
+    /**
+     * The Trivy vulnerability-database build a scan's findings came from.
+     *
+     * Nullable on purpose: rows written before this column existed have no
+     * revision, and the deploy gate's cache rule reads null as "cannot prove this
+     * row is current", so each such row misses once and a fresh scan records one.
+     */
+    private migrateVulnDbUpdatedAtColumn(): void {
+        this.tryAddColumn('vulnerability_scans', 'vuln_db_updated_at', 'INTEGER');
     }
 
     private migrateNotificationCategory(): void {
@@ -8578,8 +8599,10 @@ stmt.run('gitops_schema_version', '1');
     // --- Vulnerability Scans ---
 
     public createVulnerabilityScan(
-        scan: Omit<VulnerabilityScan, 'id' | 'policy_evaluation'> & {
+        scan: Omit<VulnerabilityScan, 'id' | 'policy_evaluation' | 'vuln_db_updated_at'> & {
             policy_evaluation?: string | null;
+            /** Optional: a row starts in progress and the revision is written when it completes. */
+            vuln_db_updated_at?: number | null;
         },
     ): number {
         const stmt = this.db.prepare(
@@ -8589,8 +8612,9 @@ stmt.run('gitops_schema_version', '1');
                 low_count, unknown_count, fixable_count,
                 secret_count, misconfig_count, scanners_used,
                 highest_severity, os_info, trivy_version, scan_duration_ms,
-                triggered_by, status, error, stack_context, policy_evaluation
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+                triggered_by, status, error, stack_context, policy_evaluation,
+                vuln_db_updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         );
         const result = stmt.run(
             scan.node_id,
@@ -8616,6 +8640,7 @@ stmt.run('gitops_schema_version', '1');
             scan.error,
             scan.stack_context,
             scan.policy_evaluation ?? null,
+            scan.vuln_db_updated_at ?? null,
         );
         return result.lastInsertRowid as number;
     }
@@ -8631,6 +8656,7 @@ stmt.run('gitops_schema_version', '1');
             'secret_count', 'misconfig_count', 'scanners_used',
             'highest_severity', 'os_info', 'trivy_version', 'scan_duration_ms',
             'triggered_by', 'status', 'error', 'stack_context', 'policy_evaluation',
+            'vuln_db_updated_at',
         ]);
         const fields: string[] = [];
         const values: unknown[] = [];

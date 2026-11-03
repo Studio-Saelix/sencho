@@ -7,7 +7,7 @@
  * function stops being Fast-Refresh eligible, which the component-only rule
  * enforces.
  */
-import type { PolicyBlockPayload } from './PolicyBlockDialog';
+import type { PolicyBlockEvidenceRecord, PolicyBlockPayload } from './PolicyBlockDialog';
 
 /** Spelled out rather than derived: 'allow' + 'd' is not a word. */
 const OUTCOME_PAST_TENSE: Record<'allow' | 'warn' | 'block', string> = {
@@ -28,7 +28,10 @@ const EVIDENCE_STATE_LABEL: Record<string, string> = {
   unavailable: 'unavailable',
   failed: 'failed',
   partial: 'incomplete',
-  unsupported: 'not supported on this node',
+  // The one `unsupported` the dialog meets today is a node whose build cannot
+  // evaluate a candidate image, so the wording says that rather than the generic
+  // "not supported".
+  unsupported: 'not evaluated on this node version',
   not_evaluated: 'never evaluated',
   unknown: 'indeterminate',
 };
@@ -158,4 +161,26 @@ export function buildEvidenceLines(evidence: PolicyBlockPayload['evidence']): Ev
   }
 
   return lines;
+}
+
+/** First 12 hex characters of a digest, for an inline reference. */
+export function shortDigest(digest: string | null | undefined): string | null {
+  if (typeof digest !== 'string') return null;
+  const bare = digest.startsWith('sha256:') ? digest.slice(7) : digest;
+  return bare.slice(0, 12);
+}
+
+/**
+ * The candidate evidence for one image, when the gate resolved the image an
+ * update would install. Only a record that named a digest is worth showing: the
+ * point of the line is which new image will run.
+ */
+export function candidateEvidenceFor(
+  evidence: PolicyBlockPayload['evidence'],
+  imageRef: string,
+): PolicyBlockEvidenceRecord | null {
+  const record = (evidence?.records ?? []).find(
+    (r) => r.subject === 'candidate' && r.target === imageRef && typeof r.digest === 'string',
+  );
+  return record ?? null;
 }

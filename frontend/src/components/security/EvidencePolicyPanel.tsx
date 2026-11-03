@@ -328,7 +328,7 @@ export function EvidencePolicyPanel({ nodeId, nodeName }: { nodeId: number; node
 
       <PolicyRow
         label="Candidate not evaluated"
-        help="When an image a Git-managed source is about to accept cannot be evaluated. This path has no person in the loop, so it is held by default even if you allow a failed scan above. Default: block."
+        help="When the image an automatic update, scheduled run, webhook, or Git-managed source would run cannot be evaluated. No person is in the loop, so it is held by default even if you allow a failed scan above. Default: block."
         value={policy.candidateUnproven}
         defaultValue={defaults.candidateUnproven}
         disabled={disabled}

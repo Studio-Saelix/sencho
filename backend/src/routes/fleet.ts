@@ -3644,7 +3644,7 @@ fleetRouter.post('/snapshots/:id/restore', authMiddleware, async (req: Request, 
     if (redeploy) {
       // Local deploys are gated centrally here; remote deploys are gated by the
       // remote node's own deploy endpoint.
-      if (node.type === 'local' && !(await runPolicyGate(req, res, stackName, node.id))) return;
+      if (node.type === 'local' && !(await runPolicyGate(req, res, stackName, node.id, { imageSource: 'compose' }))) return;
       const redeployResult = await redeploySnapshotStack(node, stackName);
       if (redeployResult.policyEvidence) res.locals.policyEvidence = redeployResult.policyEvidence;
     }
@@ -3755,7 +3755,8 @@ fleetRouter.post('/snapshots/:id/restore-all', authMiddleware, async (req: Reque
       }
     }
 
-    const policyOptions = buildPolicyGateOptions(req);
+    // Every stack here is redeployed with a plain `up`.
+    const policyOptions = buildPolicyGateOptions(req, { imageSource: 'compose' });
     const results: SnapshotRestoreResult[] = [];
 
     // Restore every stack independently: one stack failing (unreachable node,

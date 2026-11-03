@@ -38,8 +38,8 @@ describe('buildEffectiveServiceModel', () => {
     expect(result.renderable).toBe(true);
     if (!result.renderable) throw new Error('expected renderable');
     expect(result.services).toEqual([
-      { name: 'web', declaredImage: 'nginx:latest', hasBuild: false, expectedReplicas: 1, dependsOn: ['db'], hasHealthcheck: true },
-      { name: 'db', declaredImage: 'postgres:16', hasBuild: false, expectedReplicas: 1, dependsOn: [], hasHealthcheck: false },
+      { name: 'web', declaredImage: 'nginx:latest', hasBuild: false, pullPolicy: null, expectedReplicas: 1, dependsOn: ['db'], hasHealthcheck: true },
+      { name: 'db', declaredImage: 'postgres:16', hasBuild: false, pullPolicy: null, expectedReplicas: 1, dependsOn: [], hasHealthcheck: false },
     ]);
   });
 

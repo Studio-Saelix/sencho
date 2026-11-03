@@ -1507,6 +1507,10 @@ export class BlueprintService {
         const gate = await enforcePolicyForImageRefs(blueprint.name, node.id, imageRefs, {
             bypass: false,
             actor: 'blueprint-reconciler',
+            // The blueprint's own content is what will be applied and pulled, and
+            // the reconciler has nobody to ask.
+            imageSource: 'compose',
+            unattended: true,
             auditMethod: 'POST',
             auditPath: `/api/blueprints/${blueprint.id}/apply`,
             // The apply below runs the gate again against the stack as written to
@@ -1655,7 +1659,13 @@ export class BlueprintService {
                     ({ policyEvidence } = await assertPolicyGateAllows(
                         stackName,
                         nodeId,
-                        buildSystemPolicyGateOptions('blueprint', { auditPath }),
+                        buildSystemPolicyGateOptions('blueprint', {
+                            auditPath,
+                            // A blueprint applies its content with a plain `up`,
+                            // unless digest pins turn it into `--pull never`.
+                            imageSource: options.digestPins ? 'installed' : 'compose',
+                            unattended: true,
+                        }),
                     ));
                     await ComposeService.getInstance(nodeId).deployStack(
                         stackName,

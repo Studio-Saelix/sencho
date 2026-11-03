@@ -8,7 +8,7 @@ import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
 import { SeverityChip } from '@/components/VulnerabilityScanSheet';
 import type { VulnSeverity } from '@/types/security';
-import { buildEvidenceLines } from './policyBlockEvidence';
+import { buildEvidenceLines, candidateEvidenceFor, shortDigest } from './policyBlockEvidence';
 
 /** Risk inputs a deploy gate can block on; mirrors the backend reason set. */
 export type PolicyBlockReason = 'severity' | 'kev' | 'fixable';
@@ -46,7 +46,23 @@ export interface PolicyBlockEvidenceRecord {
   target: string;
   collectedAt?: number | null;
   reason?: string;
+  /** The image digest this evidence is bound to (the index digest for a candidate). */
+  digest?: string | null;
+  /**
+   * Which image the evidence describes. `candidate` is the registry image an
+   * update would install, resolved before anything is pulled; `installed` is the
+   * one already on the node. Absent on older payloads, which only ever described
+   * the installed image.
+   */
+  subject?: 'installed' | 'candidate';
+  /** The exact manifest that was scanned (the platform child of an index). */
+  platformDigest?: string | null;
+  /** The platform the candidate was resolved for. */
+  platform?: string | null;
+  /** Trivy vulnerability-database build time the findings came from. */
+  databaseUpdatedAt?: number | null;
 }
+
 
 export interface PolicyBlockPayload {
   error: string;
@@ -205,10 +221,22 @@ export function PolicyBlockDialog({
               No violation details were returned. Check the scan history for this stack for more context.
             </div>
           ) : (
-            violations.map((v) => (
+            violations.map((v) => {
+              // The image this update would install, when the gate resolved it.
+              // Shown under the authored tag so the operator can see which new
+              // image was evaluated instead of the one already on the node.
+              const candidate = candidateEvidenceFor(payload?.evidence, v.imageRef);
+              const candidateDigest = shortDigest(candidate?.digest ?? candidate?.platformDigest);
+              return (
               <div key={`${v.imageRef}-${v.scanId}`} className="px-4 py-3 flex items-center justify-between gap-4">
                 <div className="min-w-0">
                   <div className="font-mono text-sm truncate">{v.imageRef}</div>
+                  {candidateDigest && (
+                    <div className="font-mono text-[10px] text-stat-subtitle mt-0.5">
+                      New image {candidateDigest}
+                      {candidate?.platform ? ` · ${candidate.platform}` : ''}
+                    </div>
+                  )}
                   {v.error ? (
                     <>
                       <div className="font-mono text-[10px] uppercase tracking-[0.18em] text-stat-subtitle">
@@ -237,7 +265,8 @@ export function PolicyBlockDialog({
                 </div>
                 <SeverityChip severity={normalizeSeverity(String(v.severity))} />
               </div>
-            ))
+              );
+            })
           )}
         </div>
         {violations.some((v) => v.error) && (

@@ -1,0 +1,408 @@
+/**
+ * The deploy gate on the image an operation will run, not the one already on the
+ * node.
+ *
+ * The defect these cover: every pulling path claimed a policy check but scanned
+ * the installed image, so a floating tag was proven safe and then replaced by
+ * whatever the pull found. Each test drives the real evaluator with a stubbed
+ * scanner, registry resolver and effective model, and asserts what was evaluated,
+ * what was recorded, and what was refused.
+ */
+import { describe, it, expect, vi, beforeEach } from 'vitest';
+import type { ScanPolicy, VulnerabilityScan } from '../services/DatabaseService';
+
+const INDEX = `sha256:${'1'.repeat(64)}`;
+const PLATFORM_DIGEST = `sha256:${'2'.repeat(64)}`;
+const OTHER_DIGEST = `sha256:${'3'.repeat(64)}`;
+
+interface TrivyStub {
+  isTrivyAvailable: ReturnType<typeof vi.fn>;
+  scanImagePreflight: ReturnType<typeof vi.fn>;
+}
+interface DbStub {
+  getMatchingPolicy: ReturnType<typeof vi.fn>;
+  insertAuditLog: ReturnType<typeof vi.fn>;
+  getGlobalSettings: ReturnType<typeof vi.fn>;
+  getAllVulnerabilityDetails: ReturnType<typeof vi.fn>;
+  getCveSuppressions: ReturnType<typeof vi.fn>;
+  getCveIntel: ReturnType<typeof vi.fn>;
+}
+
+const trivyStub: TrivyStub = { isTrivyAvailable: vi.fn(), scanImagePreflight: vi.fn() };
+const composeStub = { listStackImages: vi.fn() };
+const dbStub: DbStub = {
+  getMatchingPolicy: vi.fn(),
+  insertAuditLog: vi.fn(),
+  getGlobalSettings: vi.fn(),
+  getAllVulnerabilityDetails: vi.fn(),
+  getCveSuppressions: vi.fn(),
+  getCveIntel: vi.fn(),
+};
+const notificationStub = { dispatchAlert: vi.fn() };
+
+/** Injected resolver behaviour, changed per test. */
+const candidates = vi.hoisted(() => ({
+  resolve: vi.fn(),
+  localImageExists: vi.fn(),
+  platform: { os: 'linux', architecture: 'amd64' } as { os: string; architecture: string } | null,
+}));
+/** Injected effective model, changed per test. */
+const models = vi.hoisted(() => ({
+  build: vi.fn(),
+}));
+const dockerStub = vi.hoisted(() => ({ getDocker: vi.fn(), getImage: vi.fn(), inspect: vi.fn() }));
+
+vi.mock('../services/TrivyService', () => ({ default: { getInstance: () => trivyStub } }));
+vi.mock('../services/ComposeService', () => ({ ComposeService: { getInstance: () => composeStub } }));
+vi.mock('../services/DatabaseService', () => ({ DatabaseService: { getInstance: () => dbStub } }));
+vi.mock('../services/NotificationService', () => ({ NotificationService: { getInstance: () => notificationStub } }));
+vi.mock('../services/FleetSyncService', () => ({ FleetSyncService: { getSelfIdentity: () => 'self-node' } }));
+vi.mock('../services/effectiveServiceModel', () => ({ buildEffectiveServiceModel: models.build }));
+vi.mock('../services/DockerController', () => ({
+  default: {
+    getInstance: () => ({
+      getDocker: () => {
+        dockerStub.getDocker();
+        return { getImage: (ref: string) => { dockerStub.getImage(ref); return { inspect: dockerStub.inspect }; } };
+      },
+    }),
+  },
+}));
+vi.mock('../services/candidateImage', async () => {
+  const actual = await vi.importActual<typeof import('../services/candidateImage')>('../services/candidateImage');
+  return {
+    ...actual,
+    nodePlatformFor: async () => candidates.platform,
+    localImageExists: (nodeId: number, ref: string) => candidates.localImageExists(nodeId, ref),
+    resolveCandidateImage: (nodeId: number, ref: string, platform: unknown) =>
+      candidates.resolve(nodeId, ref, platform),
+  };
+});
+
+import { enforcePolicyPreDeploy } from '../services/PolicyEnforcement';
+
+function mkPolicy(overrides: Partial<ScanPolicy> = {}): ScanPolicy {
+  return {
+    id: 1,
+    name: 'prod-gate',
+    node_id: 1,
+    stack_pattern: null,
+    max_severity: 'HIGH',
+    block_on_severity: 1,
+    block_on_kev: 0,
+    block_on_fixable: 0,
+    block_on_deploy: 1,
+    enabled: 1,
+    created_at: Date.now(),
+    fleet_node_id: null,
+    ...overrides,
+  } as ScanPolicy;
+}
+
+function mkScan(overrides: Partial<VulnerabilityScan> = {}): VulnerabilityScan {
+  return {
+    id: 42,
+    node_id: 1,
+    image_ref: 'web:latest',
+    image_digest: INDEX,
+    scanned_at: Date.now(),
+    total_vulnerabilities: 0,
+    critical_count: 0,
+    high_count: 0,
+    medium_count: 0,
+    low_count: 0,
+    unknown_count: 0,
+    fixable_count: 0,
+    secret_count: 0,
+    misconfig_count: 0,
+    scanners_used: 'vuln',
+    highest_severity: 'LOW',
+    os_info: null,
+    trivy_version: '0.50.0',
+    scan_duration_ms: 12,
+    triggered_by: 'deploy-preflight',
+    status: 'completed',
+    error: null,
+    stack_context: 'web',
+    policy_evaluation: null,
+    vuln_db_updated_at: Date.UTC(2026, 0, 2),
+    ...overrides,
+  };
+}
+
+const CANDIDATE_RESOLUTION = {
+  kind: 'candidate' as const,
+  ref: 'registry.example.com/web:latest',
+  scanRef: `registry.example.com/web@${PLATFORM_DIGEST}`,
+  indexDigest: INDEX,
+  platformDigest: PLATFORM_DIGEST,
+  platform: 'linux/amd64',
+  qualification: 'qualified' as const,
+};
+
+function modelWith(services: Array<Record<string, unknown>>) {
+  models.build.mockResolvedValue({ renderable: true, services });
+}
+
+beforeEach(() => {
+  vi.clearAllMocks();
+  dbStub.getMatchingPolicy.mockReturnValue(mkPolicy());
+  dbStub.getGlobalSettings.mockReturnValue({});
+  dbStub.getCveIntel.mockReturnValue(new Map());
+  dbStub.getCveSuppressions.mockReturnValue([]);
+  dbStub.getAllVulnerabilityDetails.mockReturnValue([]);
+  trivyStub.isTrivyAvailable.mockReturnValue(true);
+  trivyStub.scanImagePreflight.mockResolvedValue(mkScan());
+  composeStub.listStackImages.mockResolvedValue(['registry.example.com/web:latest']);
+  candidates.platform = { os: 'linux', architecture: 'amd64' };
+  candidates.localImageExists.mockResolvedValue(true);
+  candidates.resolve.mockResolvedValue(CANDIDATE_RESOLUTION);
+  models.build.mockResolvedValue({
+    renderable: true,
+    services: [
+      { name: 'web', declaredImage: 'registry.example.com/web:latest', hasBuild: false, pullPolicy: null, expectedReplicas: 1, dependsOn: [], hasHealthcheck: false },
+    ],
+  });
+  dockerStub.inspect.mockResolvedValue({ RepoDigests: [`registry.example.com/web@${INDEX}`] });
+});
+
+describe('registry mode (an update that pulls)', () => {
+  it('scans the registry image by platform digest and keeps the authored tag on the row', async () => {
+    const result = await enforcePolicyPreDeploy('web', 1, {
+      bypass: false, actor: 'u', imageSource: 'registry',
+    });
+
+    expect(result.ok).toBe(true);
+    // The exact manifest, not the tag: a tag would resolve to the index or to the
+    // local image, and neither is what this node will run.
+    expect(trivyStub.scanImagePreflight).toHaveBeenCalledWith(
+      'registry.example.com/web:latest', 1, 'web',
+      { scanRef: `registry.example.com/web@${PLATFORM_DIGEST}`, digest: INDEX },
+    );
+    // The installed image is not scanned in addition: it is not what will run.
+    expect(trivyStub.scanImagePreflight).toHaveBeenCalledTimes(1);
+
+    const record = result.evidence?.records.find((r) => r.source === 'vulnerability_scan');
+    expect(record).toMatchObject({
+      subject: 'candidate',
+      target: 'registry.example.com/web:latest',
+      digest: INDEX,
+      platformDigest: PLATFORM_DIGEST,
+      platform: 'linux/amd64',
+      databaseUpdatedAt: Date.UTC(2026, 0, 2),
+    });
+    expect(result.evaluatedCandidates).toEqual([
+      {
+        ref: 'registry.example.com/web:latest',
+        indexDigest: INDEX,
+        platformDigest: PLATFORM_DIGEST,
+      },
+    ]);
+  });
+
+  it('refuses a vulnerable candidate even though the installed image is clean', async () => {
+    trivyStub.scanImagePreflight.mockResolvedValue(mkScan({
+      highest_severity: 'CRITICAL',
+      critical_count: 1,
+      total_vulnerabilities: 1,
+    }));
+
+    const result = await enforcePolicyPreDeploy('web', 1, {
+      bypass: false, actor: 'u', imageSource: 'registry',
+    });
+
+    expect(result.ok).toBe(false);
+    expect(result.violations[0]).toMatchObject({ imageRef: 'registry.example.com/web:latest', severity: 'CRITICAL' });
+    // The clean installed image was never consulted, which is the whole point.
+    expect(trivyStub.scanImagePreflight).toHaveBeenCalledTimes(1);
+  });
+
+  it('allows a clean candidate even when the installed image would have been vulnerable', async () => {
+    // The scanner only ever sees the candidate, so a clean answer is a clean
+    // candidate; there is no installed scan to disagree with.
+    const result = await enforcePolicyPreDeploy('web', 1, {
+      bypass: false, actor: 'u', imageSource: 'registry',
+    });
+    expect(result.ok).toBe(true);
+    expect(trivyStub.scanImagePreflight.mock.calls[0][3]).toMatchObject({ digest: INDEX });
+  });
+
+  it('does not pull, tag or inspect any image to evaluate the candidate', async () => {
+    await enforcePolicyPreDeploy('web', 1, { bypass: false, actor: 'u', imageSource: 'registry' });
+    expect(dockerStub.getDocker).not.toHaveBeenCalled();
+    expect(dockerStub.getImage).not.toHaveBeenCalled();
+  });
+
+  it('keeps a digest-pinned reference on the installed image, with no registry call', async () => {
+    composeStub.listStackImages.mockResolvedValue([`registry.example.com/web@${PLATFORM_DIGEST}`]);
+    modelWith([{ name: 'web', declaredImage: `registry.example.com/web@${PLATFORM_DIGEST}`, hasBuild: false, pullPolicy: null, expectedReplicas: 1, dependsOn: [], hasHealthcheck: false }]);
+    candidates.resolve.mockResolvedValue({
+      kind: 'installed',
+      ref: `registry.example.com/web@${PLATFORM_DIGEST}`,
+      why: 'digest_pinned',
+    });
+
+    const result = await enforcePolicyPreDeploy('web', 1, { bypass: false, actor: 'u', imageSource: 'registry' });
+
+    expect(result.ok).toBe(true);
+    expect(trivyStub.scanImagePreflight).toHaveBeenCalledWith(
+      `registry.example.com/web@${PLATFORM_DIGEST}`, 1, 'web', undefined,
+    );
+    expect(result.evaluatedCandidates).toBeUndefined();
+  });
+
+  it('keeps a build-backed service on the installed image, without asking the registry', async () => {
+    composeStub.listStackImages.mockResolvedValue(['web:latest']);
+    modelWith([{ name: 'web', declaredImage: 'web:latest', hasBuild: true, pullPolicy: null, expectedReplicas: 1, dependsOn: [], hasHealthcheck: false }]);
+
+    const result = await enforcePolicyPreDeploy('web', 1, { bypass: false, actor: 'u', imageSource: 'registry' });
+
+    expect(result.ok).toBe(true);
+    expect(candidates.resolve).not.toHaveBeenCalled();
+    expect(trivyStub.scanImagePreflight).toHaveBeenCalledWith('web:latest', 1, 'web', undefined);
+    expect(result.evidence?.records[0]).toMatchObject({ subject: 'installed' });
+  });
+});
+
+describe('compose mode (a plain up)', () => {
+  it('evaluates the registry image for a service whose pull policy pulls on up', async () => {
+    modelWith([{ name: 'web', declaredImage: 'registry.example.com/web:latest', hasBuild: false, pullPolicy: 'always', expectedReplicas: 1, dependsOn: [], hasHealthcheck: false }]);
+
+    const result = await enforcePolicyPreDeploy('web', 1, { bypass: false, actor: 'u', imageSource: 'compose' });
+
+    expect(result.ok).toBe(true);
+    expect(candidates.resolve).toHaveBeenCalledTimes(1);
+    expect(trivyStub.scanImagePreflight.mock.calls[0][3]).toMatchObject({ digest: INDEX });
+  });
+
+  it('keeps the installed image when the policy is the default and the image is present', async () => {
+    modelWith([{ name: 'web', declaredImage: 'registry.example.com/web:latest', hasBuild: false, pullPolicy: null, expectedReplicas: 1, dependsOn: [], hasHealthcheck: false }]);
+    candidates.localImageExists.mockResolvedValue(true);
+
+    const result = await enforcePolicyPreDeploy('web', 1, { bypass: false, actor: 'u', imageSource: 'compose' });
+
+    expect(result.ok).toBe(true);
+    expect(candidates.resolve).not.toHaveBeenCalled();
+    expect(trivyStub.scanImagePreflight).toHaveBeenCalledWith('registry.example.com/web:latest', 1, 'web', undefined);
+  });
+
+  it('evaluates the registry image when Compose would pull because the image is missing', async () => {
+    modelWith([{ name: 'web', declaredImage: 'registry.example.com/web:latest', hasBuild: false, pullPolicy: 'missing', expectedReplicas: 1, dependsOn: [], hasHealthcheck: false }]);
+    candidates.localImageExists.mockResolvedValue(false);
+
+    await enforcePolicyPreDeploy('web', 1, { bypass: false, actor: 'u', imageSource: 'compose' });
+
+    expect(candidates.resolve).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('a candidate that cannot be resolved', () => {
+  const UNRESOLVED = {
+    kind: 'unresolved' as const,
+    ref: 'registry.example.com/web:latest',
+    state: 'unavailable' as const,
+    failureClass: 'registry_unavailable' as const,
+    reason: 'The registry image could not be resolved: Registry error (503)',
+  };
+
+  beforeEach(() => {
+    candidates.resolve.mockResolvedValue(UNRESOLVED);
+  });
+
+  it('blocks a manual update under the Scan failed rule and never scans the installed image', async () => {
+    const result = await enforcePolicyPreDeploy('web', 1, { bypass: false, actor: 'u', imageSource: 'registry' });
+
+    expect(result.ok).toBe(false);
+    expect(trivyStub.scanImagePreflight).not.toHaveBeenCalled();
+    expect(result.violations[0].error).toContain('could not be resolved');
+    const application = result.evidence?.applications.find((a) => a.target === 'registry.example.com/web:latest');
+    expect(application?.rule).toBe('security_scan_failure=block');
+    expect(result.evidence?.records[0]).toMatchObject({ subject: 'candidate', state: 'unavailable' });
+  });
+
+  it('holds an unattended update under Candidate not evaluated even when Scan failed is set to allow', async () => {
+    dbStub.getGlobalSettings.mockReturnValue({
+      security_scan_failure: 'allow',
+      security_scanner_unavailable: 'allow',
+      security_candidate_unproven: 'block',
+    });
+
+    const result = await enforcePolicyPreDeploy('web', 1, {
+      bypass: false, actor: 'system:scheduler', imageSource: 'registry', unattended: true,
+    });
+
+    expect(result.ok).toBe(false);
+    expect(result.evidence?.applications[0].rule).toBe('security_candidate_unproven=block');
+  });
+
+  it('allows an unattended update when Candidate not evaluated is set to allow', async () => {
+    dbStub.getGlobalSettings.mockReturnValue({
+      security_scan_failure: 'block',
+      security_scanner_unavailable: 'allow',
+      security_candidate_unproven: 'allow',
+    });
+
+    const result = await enforcePolicyPreDeploy('web', 1, {
+      bypass: false, actor: 'system:webhook', imageSource: 'registry', unattended: true,
+    });
+
+    expect(result.ok).toBe(true);
+    expect(trivyStub.scanImagePreflight).not.toHaveBeenCalled();
+  });
+});
+
+describe('unattended vocabulary', () => {
+  it('applies Candidate not evaluated to a failed candidate scan, not Scan failed', async () => {
+    trivyStub.scanImagePreflight.mockRejectedValue(new Error('trivy process crashed'));
+
+    const result = await enforcePolicyPreDeploy('web', 1, {
+      bypass: false, actor: 'system:image-update', imageSource: 'registry', unattended: true,
+    });
+
+    expect(result.ok).toBe(false);
+    expect(result.evidence?.applications[0].rule).toBe('security_candidate_unproven=block');
+  });
+
+  it('applies Candidate not evaluated to a missing scanner on an unattended pulling path', async () => {
+    trivyStub.isTrivyAvailable.mockReturnValue(false);
+
+    const result = await enforcePolicyPreDeploy('web', 1, {
+      bypass: false, actor: 'system:scheduler', imageSource: 'compose', unattended: true,
+    });
+
+    expect(result.ok).toBe(false);
+    expect(result.evidence?.applications[0].rule).toBe('security_candidate_unproven=block');
+  });
+
+  it('keeps Scan failed for an unattended operation that runs the installed image', async () => {
+    trivyStub.scanImagePreflight.mockRejectedValue(new Error('trivy process crashed'));
+
+    const result = await enforcePolicyPreDeploy('web', 1, {
+      bypass: false, actor: 'system:recovery', imageSource: 'installed', unattended: true,
+    });
+
+    expect(result.ok).toBe(false);
+    expect(result.evidence?.applications[0].rule).toBe('security_scan_failure=block');
+  });
+});
+
+describe('installed mode is unchanged', () => {
+  it('scans the installed tag with no candidate options and no registry call', async () => {
+    const result = await enforcePolicyPreDeploy('web', 1, { bypass: false, actor: 'u' });
+
+    expect(result.ok).toBe(true);
+    expect(candidates.resolve).not.toHaveBeenCalled();
+    expect(trivyStub.scanImagePreflight).toHaveBeenCalledWith(
+      'registry.example.com/web:latest', 1, 'web', undefined,
+    );
+    expect(result.evaluatedCandidates).toBeUndefined();
+  });
+
+  it('reports a candidate digest only when one was actually evaluated', async () => {
+    // A different candidate on the same tag is a different decision; the pair is
+    // carried so the pull can prove it installed that one.
+    trivyStub.scanImagePreflight.mockResolvedValue(mkScan({ image_digest: OTHER_DIGEST }));
+    const result = await enforcePolicyPreDeploy('web', 1, { bypass: false, actor: 'u', imageSource: 'registry' });
+    expect(result.evaluatedCandidates?.[0].indexDigest).toBe(INDEX);
+  });
+});

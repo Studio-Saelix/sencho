@@ -243,6 +243,9 @@ vi.mock('../services/TrivyService', () => ({
 
 vi.mock('../services/PolicyEnforcement', () => ({
   enforcePolicyPreDeploy: mockEnforcePolicyPreDeploy,
+  // The mixed-fleet candidate decision has its own suite; here it must simply
+  // allow, so the code around it is what these tests exercise.
+  evaluateRemoteCandidateSupport: vi.fn().mockReturnValue({ ok: true, bypassed: false, violations: [] }),
 }));
 
 vi.mock('../helpers/registryDeliveryOutbound', async (importOriginal) => {
@@ -2306,7 +2309,8 @@ describe('SchedulerService - lifecycle remote proxy', () => {
     mockGetScheduledTask.mockReturnValue(makeLifecycleTask('auto_start', { node_id: 2 }));
     await SchedulerService.getInstance().triggerTask(300, { userId: 1, username: 'admin', role: 'admin' });
     expect(fetchMock).toHaveBeenCalledTimes(1);
-    expect(mockProbeRemoteMeta).not.toHaveBeenCalled();
+    // The capability probe is the hub's mixed-fleet check, not verification: an
+    // unapplied deploy is still never rechecked.
     expect(mockRecheckRemoteStack).not.toHaveBeenCalled();
   });
 

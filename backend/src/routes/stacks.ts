@@ -90,7 +90,7 @@ import { isDebugEnabled } from '../utils/debug';
 import { errorMessageForLog, sanitizeForLog } from '../utils/safeLog';
 import { logDebugTiming } from '../utils/requestTiming';
 import { sendGitSourceError } from '../utils/gitSourceHttp';
-import { allowedPolicyEvidence, buildPolicyGateOptions, type AllowedPolicyEvidence, policyBlockPayload, policyEvidenceFor, runPolicyGate, triggerPostDeployScan, describePolicyBlock, isPostDeployScanRunning } from '../helpers/policyGate';
+import { allowedPolicyEvidence, buildPolicyGateOptions, type AllowedPolicyEvidence, policyBlockPayload, policyEvidenceFor, pulledCandidateVerifier, runPolicyGate, triggerPostDeployScan, describePolicyBlock, isPostDeployScanRunning, PulledCandidateBlockedError, verifyPulledCandidates } from '../helpers/policyGate';
 import { parseComposePreview, type ComposePreview } from '../helpers/composePreview';
 import { filterContainersByComposeService } from '../helpers/composeServiceMatch';
 import { invalidateNodeCaches } from '../helpers/cacheInvalidation';
@@ -710,7 +710,10 @@ async function runStackBulkOp(
           code: 'update_policy_skipped',
         };
       }
-      const gate = await enforcePolicyPreDeploy(stackName, req.nodeId, buildPolicyGateOptions(req));
+      const gate = await enforcePolicyPreDeploy(stackName, req.nodeId, buildPolicyGateOptions(req, {
+        imageSource: 'registry',
+        unattended: false,
+      }));
       if (!gate.ok) {
         return {
           stackName,
@@ -722,7 +725,15 @@ async function runStackBulkOp(
       const atomic = true;
       const orchResult = await StackUpdateOrchestrator.getInstance().execute(
         { nodeId: req.nodeId, stackName, target: { scope: 'stack' }, trigger: 'bulk', actor: user, policy },
-        { atomic, terminalWs: getTerminalWs(req.get(DEPLOY_SESSION_HEADER)) },
+        {
+          atomic,
+          terminalWs: getTerminalWs(req.get(DEPLOY_SESSION_HEADER)),
+          // A tag can move between the gate and the pull; the image that landed
+          // is confirmed before any container is recreated.
+          verifyPulled: () => verifyPulledCandidates(
+            stackName, req.nodeId, gate.evaluatedCandidates, buildPolicyGateOptions(req),
+          ),
+        },
       );
       DatabaseService.getInstance().clearStackUpdateStatus(req.nodeId, stackName);
       NotificationService.getInstance().broadcastEvent({
@@ -1439,7 +1450,8 @@ stacksRouter.post('/from-git', async (req: Request, res: Response) => {
       const gate = await enforcePolicyPreDeploy(
         stack_name,
         req.nodeId,
-        buildPolicyGateOptions(req),
+        // A plain `up` pulls only what Compose's own pull policy makes it pull.
+        buildPolicyGateOptions(req, { imageSource: 'compose' }),
       );
       if (!gate.ok) {
         deployError = describePolicyBlock(gate.policy, gate.violations, 'deploy', gate.evidence);
@@ -2325,7 +2337,7 @@ stacksRouter.post('/:stackName/deploy', async (req: Request, res: Response) => {
   const t0 = Date.now();
   let ok = false;
   try {
-    if (!(await runPolicyGate(req, res, stackName, req.nodeId))) return;
+    if (!(await runPolicyGate(req, res, stackName, req.nodeId, { imageSource: 'compose' }))) return;
     const skipScan = req.body?.skip_scan === true;
     const debug = isDebugEnabled();
     const atomic = true;
@@ -2775,6 +2787,9 @@ function sendServiceResult(res: Response, result: OrchestratorResult, serviceNam
       serviceName: result.serviceName ?? serviceName,
       ...(result.mutationStage ? { mutationStage: result.mutationStage } : {}),
       ...(result.recoveryId ? { recoveryId: result.recoveryId } : {}),
+      // The same block payload a stack-level refusal sends, so the dialog and
+      // its admin bypass open for a single-service update too.
+      ...(result.policyBlock ?? {}),
     });
     return false;
   }
@@ -3145,14 +3160,21 @@ stacksRouter.post('/:stackName/update', async (req: Request, res: Response) => {
       });
       return;
     }
-    if (!(await runPolicyGate(req, res, stackName, req.nodeId))) return;
+    if (!(await runPolicyGate(req, res, stackName, req.nodeId, {
+      imageSource: 'registry',
+      unattended: trigger !== 'manual',
+    }))) return;
     const skipScan = req.body?.skip_scan === true;
     const debug = isDebugEnabled();
     const atomic = true;
     if (debug) console.debug('[Stacks:debug] Update starting', { stackName, atomic, nodeId: req.nodeId });
     const orchResult = await StackUpdateOrchestrator.getInstance().execute(
       { nodeId: req.nodeId, stackName, target: { scope: 'stack' }, trigger, actor, policy },
-      { atomic, terminalWs: getTerminalWs(req.get(DEPLOY_SESSION_HEADER)) },
+      {
+        atomic,
+        terminalWs: getTerminalWs(req.get(DEPLOY_SESSION_HEADER)),
+        verifyPulled: pulledCandidateVerifier(req, res, stackName, req.nodeId),
+      },
     );
     // Health observation starts immediately after Compose; registry recheck is
     // isolated so a verification failure cannot turn Compose success into 500.
@@ -3212,6 +3234,18 @@ stacksRouter.post('/:stackName/update', async (req: Request, res: Response) => {
           ...(error instanceof UpdatePolicyRefusedError
             ? { updatePolicy: toUpdatePolicyWire(error.result) }
             : {}),
+        });
+      }
+      return;
+    }
+    if (error instanceof PulledCandidateBlockedError) {
+      // The tag moved between the gate and the pull, and the image that landed
+      // is refused. Nothing was recreated, so this is the same refusal the gate
+      // would have sent, with the same dialog payload and bypass.
+      if (!res.headersSent) {
+        res.status(409).json({
+          error: error.message,
+          ...policyBlockPayload(error.gate.policy, error.gate.violations, error.gate.evidence),
         });
       }
       return;
@@ -3415,7 +3449,7 @@ stacksRouter.post('/:stackName/rollback', async (req: Request, res: Response) =>
     } else {
       await fsSvc.restoreStackFiles(stackName);
     }
-    if (!(await runPolicyGate(req, res, stackName, req.nodeId))) {
+    if (!(await runPolicyGate(req, res, stackName, req.nodeId, { imageSource: 'compose' }))) {
       try {
         await revertRestore();
       } catch (revertError) {

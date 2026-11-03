@@ -45,6 +45,15 @@ import {
     type SecurityEvidenceState,
 } from './securityEvidence';
 import {
+    localImageExists,
+    nodePlatformFor,
+    pullPolicyPullsOnUp,
+    resolveCandidateImage,
+    type CandidateResolution,
+    type ImageSource,
+} from './candidateImage';
+import { buildEffectiveServiceModel } from './effectiveServiceModel';
+import {
     resolveSecurityEvidencePolicy,
     type SecurityEvidencePolicy,
 } from './securityEvidencePolicy';
@@ -75,6 +84,29 @@ export interface PolicyEnforcementOptions {
     bypass: boolean;
     actor: string;
     ip?: string;
+    /**
+     * Which image the operation will run. Defaults to `installed`, which is what
+     * the node holds now and what every path evaluated before candidate
+     * resolution existed. A path that pulls sets `registry` or `compose` and the
+     * gate evaluates the registry image instead.
+     */
+    imageSource?: ImageSource;
+    /**
+     * True when no person is in the loop (auto-update, scheduled run, webhook,
+     * Git source, mesh). Read when `imageSource` is not `installed` or when
+     * `pulledCandidate` is set: an unattended path cannot ask anyone, so unproven
+     * candidate evidence is held by the Candidate not evaluated rule rather than
+     * the attended Scan failed rule.
+     */
+    unattended?: boolean;
+    /**
+     * The installed image being scanned is the candidate this operation just
+     * pulled, after the pull showed a different digest than the gate evaluated.
+     * It is evaluated as an installed image (that is where it lives now) but the
+     * evidence keeps candidate semantics, so an unattended update still holds it
+     * under Candidate not evaluated rather than the attended rule.
+     */
+    pulledCandidate?: boolean;
     /** HTTP method of the originating request; used for audit attribution. */
     auditMethod?: string;
     /** Request path of the originating route; used for audit attribution. */
@@ -121,6 +153,22 @@ export interface PolicyEnforcementResult {
      * when the gate short-circuited before any evidence was required.
      */
     evidence?: EvidenceGateDecision;
+    /**
+     * The registry candidates this decision evaluated, when the operation will
+     * pull. The pull executor compares the digests it actually fetched against
+     * these before recreating anything: a tag can move between the gate and the
+     * pull, and the image that lands must be the image that was proven.
+     */
+    evaluatedCandidates?: EvaluatedCandidate[];
+}
+
+/** One registry candidate a gate decision covered. */
+export interface EvaluatedCandidate {
+    ref: string;
+    /** The digest the tag resolved to when the gate ran. */
+    indexDigest: string;
+    /** The platform child digest that was scanned. */
+    platformDigest: string;
 }
 
 /**
@@ -268,6 +316,15 @@ function decideScannerUnavailable(
     stackName: string,
     opts: PolicyEnforcementOptions,
 ): PolicyEnforcementResult {
+    // An unattended pulling path has its own rule for "no evidence at all", and
+    // for the same reason the GitOps candidate path does: a setting an operator
+    // relaxes to get past a scanner outage at the keyboard must not become
+    // standing authority for an automation to install an image nothing proved.
+    const unattendedCandidate = isUnattendedCandidatePath(opts);
+    const outcome = unattendedCandidate ? evidencePolicy.candidateUnproven : evidencePolicy.scannerUnavailable;
+    const rule = unattendedCandidate
+        ? ruleClause('security_candidate_unproven', outcome)
+        : ruleClause('security_scanner_unavailable', outcome);
     const classification = classifyScannerEvidence({ available: false, collectedAt: null });
     const records: SecurityEvidenceRecord[] = [
         {
@@ -282,8 +339,8 @@ function decideScannerUnavailable(
         {
             source: 'scanner_availability',
             state: classification.state,
-            outcome: evidencePolicy.scannerUnavailable,
-            rule: ruleClause('security_scanner_unavailable', evidencePolicy.scannerUnavailable),
+            outcome,
+            rule,
         },
     ]);
 
@@ -322,6 +379,94 @@ function decideScannerUnavailable(
 }
 
 type PreflightScan = Pick<VulnerabilityScan, 'id' | 'highest_severity' | 'critical_count' | 'high_count' | 'total_vulnerabilities'>;
+
+/** True when this decision covers an image an unattended operation will pull. */
+function isUnattendedCandidatePath(opts: PolicyEnforcementOptions): boolean {
+    if (opts.unattended !== true) return false;
+    return (opts.imageSource ?? 'installed') !== 'installed' || opts.pulledCandidate === true;
+}
+
+/**
+ * The configured rule and its key for "evidence about the image could not be
+ * obtained". Attended operations ask the Scan failed setting (a person can retry
+ * or accept the risk); unattended pulling operations ask Candidate not evaluated,
+ * because nobody is there to answer and the image was never on the node before.
+ */
+function failureRule(
+    evidencePolicy: SecurityEvidencePolicy,
+    opts: PolicyEnforcementOptions,
+): { key: string; outcome: EvidenceAvailabilityOutcome } {
+    return isUnattendedCandidatePath(opts)
+        ? { key: 'security_candidate_unproven', outcome: evidencePolicy.candidateUnproven }
+        : { key: 'security_scan_failure', outcome: evidencePolicy.scanFailure };
+}
+
+/** One reference's role for this gate call. */
+type CandidatePlanEntry =
+    | { kind: 'installed'; why: 'digest_pinned' | 'not_pulled' | 'build' }
+    | { kind: 'candidate'; resolution: CandidateResolution & { kind: 'candidate' } }
+    | { kind: 'unresolved'; resolution: CandidateResolution & { kind: 'unresolved' } };
+
+/**
+ * Decide, for each reference, whether this operation will run the registry image
+ * or the one already on the node, and resolve the registry image.
+ *
+ * The plan is per service, from the fully rendered model, because `build`
+ * services have no registry image and a Compose `pull_policy` decides whether a
+ * plain `up` fetches. When the model cannot be rendered (or the caller supplied
+ * bare references, as the GitOps candidate path does), every reference is
+ * treated as a candidate: the stricter reading, because nothing then proves the
+ * operation will not pull it.
+ */
+async function planCandidates(
+    nodeId: number,
+    imageRefs: readonly string[],
+    mode: Exclude<ImageSource, 'installed'>,
+    modelServices: Awaited<ReturnType<typeof buildEffectiveServiceModel>> | null,
+): Promise<Map<string, CandidatePlanEntry>> {
+    const plan = new Map<string, CandidatePlanEntry>();
+    if (imageRefs.length === 0) return plan;
+    const services = modelServices && modelServices.renderable ? modelServices.services : null;
+    const platform = await nodePlatformFor(nodeId);
+
+    const resolveEntry = async (ref: string): Promise<CandidatePlanEntry> => {
+        const resolution = await resolveCandidateImage(nodeId, ref, platform);
+        if (resolution.kind === 'candidate') return { kind: 'candidate', resolution };
+        if (resolution.kind === 'unresolved') return { kind: 'unresolved', resolution };
+        return { kind: 'installed', why: resolution.why };
+    };
+
+    for (const ref of imageRefs) {
+        if (!services) {
+            plan.set(ref, await resolveEntry(ref));
+            continue;
+        }
+        const declared = services.filter((spec) => spec.declaredImage === ref);
+        if (declared.length === 0) {
+            // The reference came from Compose's own image list, so it is an image
+            // this operation can install. Resolve it rather than assume otherwise.
+            plan.set(ref, await resolveEntry(ref));
+            continue;
+        }
+        if (declared.every((spec) => spec.hasBuild)) {
+            // The image does not exist until the operation builds it, so the
+            // registry has nothing to resolve. Recorded as installed, explicitly.
+            plan.set(ref, { kind: 'installed', why: 'build' });
+            continue;
+        }
+        const pulls = mode === 'registry'
+            ? declared.some((spec) => !spec.hasBuild)
+            : declared.some((spec) => pullPolicyPullsOnUp(spec.pullPolicy));
+        const present = pulls ? false : await localImageExists(nodeId, ref);
+        if (pulls || !present) {
+            plan.set(ref, await resolveEntry(ref));
+            continue;
+        }
+        // Compose will not fetch this image, so the node's own image is what runs.
+        plan.set(ref, { kind: 'installed', why: 'not_pulled' });
+    }
+    return plan;
+}
 
 interface ImageRiskEvaluation {
     /** Policy inputs that matched for this image. Those also listed in `unverified` were assumed or matched only provisionally. */
@@ -780,7 +925,24 @@ async function evaluatePreDeploy(
         };
     }
 
-    return evaluateImageRefs(stackName, nodeId, imageRefs, opts, policy);
+    return evaluateImageRefs(stackName, nodeId, imageRefs, opts, policy, false, await candidateModelFor(nodeId, stackName, opts));
+}
+
+/**
+ * The per-service model the candidate plan reads, or null when this gate call is
+ * not in a pulling mode.
+ *
+ * A render failure is reported as an unrenderable model rather than thrown: the
+ * plan then treats every reference as a candidate, which is the stricter reading
+ * and never the silent one.
+ */
+async function candidateModelFor(
+    nodeId: number,
+    stackName: string,
+    opts: PolicyEnforcementOptions,
+): Promise<Awaited<ReturnType<typeof buildEffectiveServiceModel>> | null> {
+    if ((opts.imageSource ?? 'installed') === 'installed') return null;
+    return buildEffectiveServiceModel(nodeId, stackName);
 }
 
 export async function enforcePolicyForImageRefs(
@@ -808,6 +970,7 @@ async function evaluateImageRefs(
     opts: PolicyEnforcementOptions,
     matchedPolicy?: ScanPolicy,
     failClosedInvalidRefs = false,
+    candidateModel: Awaited<ReturnType<typeof buildEffectiveServiceModel>> | null = null,
 ): Promise<PolicyEnforcementResult> {
     const db = DatabaseService.getInstance();
     const policy = matchedPolicy ?? db.getMatchingPolicy(nodeId, stackName, FleetSyncService.getSelfIdentity());
@@ -840,6 +1003,13 @@ async function evaluateImageRefs(
     const suppressionPasses: SuppressionPass[] = [];
     const evidenceRecords: SecurityEvidenceRecord[] = [];
     const evidenceApplications: EvidenceRuleApplication[] = [];
+    const imageSource = opts.imageSource ?? 'installed';
+    // Resolved once, before the loop: one registry probe per candidate and one
+    // platform read per gate call, not one per image.
+    const candidatePlan = imageSource === 'installed'
+        ? null
+        : await planCandidates(nodeId, imageRefs, imageSource, candidateModel);
+    const evaluatedCandidates: EvaluatedCandidate[] = [];
     for (const imageRef of imageRefs) {
         if (!validateImageRef(imageRef)) {
             // A reference that cannot be parsed is not an image, so the scanner
@@ -860,8 +1030,51 @@ async function evaluateImageRefs(
             continue;
         }
         let scan: VulnerabilityScan;
+        const planned = candidatePlan?.get(imageRef);
+        if (planned?.kind === 'unresolved') {
+            // The image this operation would pull could not be resolved, so the
+            // installed image is NOT scanned in its place: it is not what will
+            // run, and a clean result about it would be a false assurance.
+            const { state, reason, failureClass } = planned.resolution;
+            evidenceRecords.push({
+                source: 'vulnerability_scan',
+                state,
+                target: imageRef,
+                collectedAt: null,
+                subject: 'candidate',
+                reason,
+            });
+            const rule = failureRule(evidencePolicy, opts);
+            evidenceApplications.push({
+                source: 'vulnerability_scan',
+                state,
+                outcome: rule.outcome,
+                rule: ruleClause(rule.key, rule.outcome),
+                target: imageRef,
+            });
+            if (rule.outcome === 'warn' && opts.recordAllowedEvidence !== false) {
+                notifyEvidenceWarningOnce(
+                    nodeId, stackName, rule.key,
+                    `the image ${imageRef} would install could not be resolved (${failureClass})`,
+                );
+            }
+            if (rule.outcome === 'block') {
+                violations.push(unavailableViolation(
+                    imageRef,
+                    `The image this operation would pull could not be resolved: ${reason}`,
+                ));
+            }
+            continue;
+        }
+        const candidate = planned?.kind === 'candidate' ? planned.resolution : null;
+        const subject: 'installed' | 'candidate' = candidate || opts.pulledCandidate === true ? 'candidate' : 'installed';
         try {
-            scan = await svc.scanImagePreflight(imageRef, nodeId, stackName);
+            scan = await svc.scanImagePreflight(
+                imageRef,
+                nodeId,
+                stackName,
+                candidate ? { scanRef: candidate.scanRef, digest: candidate.indexDigest } : undefined,
+            );
         } catch (err) {
             const message = getErrorMessage(err, 'pre-flight scan failed');
             console.error(`[Policy] scanImagePreflight failed for ${imageRef}:`, message);
@@ -877,26 +1090,36 @@ async function evaluateImageRefs(
                 state: classification.state,
                 target: imageRef,
                 collectedAt: null,
+                // The resolver already named the exact image, so a failed scan
+                // still says which one it could not prove.
+                ...(candidate
+                    ? {
+                        subject: 'candidate' as const,
+                        digest: candidate.indexDigest,
+                        platformDigest: candidate.platformDigest,
+                        platform: candidate.platform,
+                    }
+                    : { subject }),
                 reason: classification.reason,
             });
-            const outcome = evidencePolicy.scanFailure;
+            const rule = failureRule(evidencePolicy, opts);
             evidenceApplications.push({
                 source: 'vulnerability_scan',
                 state: classification.state,
-                outcome,
-                rule: ruleClause('security_scan_failure', outcome),
+                outcome: rule.outcome,
+                rule: ruleClause(rule.key, rule.outcome),
                 target: imageRef,
             });
             // allow and warn both let the deploy through; warn additionally says
             // so out loud, which is the only thing distinguishing it from allow
             // at the call site. Neither is silent.
-            if (outcome === 'warn' && opts.recordAllowedEvidence !== false) {
+            if (rule.outcome === 'warn' && opts.recordAllowedEvidence !== false) {
                 notifyEvidenceWarningOnce(
-                    nodeId, stackName, 'security_scan_failure',
+                    nodeId, stackName, rule.key,
                     `the scan of ${imageRef} did not complete`,
                 );
             }
-            if (outcome !== 'block') {
+            if (rule.outcome !== 'block') {
                 continue;
             }
             violations.push(unavailableViolation(imageRef, `Pre-flight scan failed: ${message}`));
@@ -914,12 +1137,28 @@ async function evaluateImageRefs(
             collectedAt: scan.scanned_at,
             freshnessThresholdMs: null,
         });
+        const candidateFields: Pick<SecurityEvidenceRecord, 'subject' | 'platformDigest' | 'platform' | 'databaseUpdatedAt'> = candidate
+            ? {
+                subject: 'candidate',
+                platformDigest: candidate.platformDigest,
+                platform: candidate.platform,
+                databaseUpdatedAt: scan.vuln_db_updated_at ?? null,
+            }
+            : { subject };
+        if (candidate) {
+            evaluatedCandidates.push({
+                ref: imageRef,
+                indexDigest: candidate.indexDigest,
+                platformDigest: candidate.platformDigest,
+            });
+        }
         evidenceRecords.push({
             source: 'vulnerability_scan',
             state: scanEvidence.state,
             target: imageRef,
             collectedAt: scan.scanned_at,
             digest: scan.image_digest ?? null,
+            ...candidateFields,
             ...(scanEvidence.reason ? { reason: scanEvidence.reason } : {}),
         });
         try {
@@ -943,6 +1182,7 @@ async function evaluateImageRefs(
                     target: imageRef,
                     collectedAt: scan.scanned_at,
                     digest: scan.image_digest ?? null,
+                    ...candidateFields,
                     reason: evaluated.partialEvidenceReason,
                 });
                 // Deliberately a record and not an application. `outcome` reports
@@ -988,6 +1228,7 @@ async function evaluateImageRefs(
                 target: imageRef,
                 collectedAt: scan.scanned_at,
                 digest: scan.image_digest ?? null,
+                ...candidateFields,
                 reason: `Policy evaluation failed: ${message}`,
             });
             violations.push({
@@ -1025,7 +1266,10 @@ async function evaluateImageRefs(
         if (suppressionPasses.length > 0 && opts.recordAllowedEvidence !== false) {
             recordSuppressionPassAudit(stackName, nodeId, policy, suppressionPasses, opts);
         }
-        return { ok: true, bypassed: false, policy, violations: [], evidence };
+        return {
+            ok: true, bypassed: false, policy, violations: [], evidence,
+            ...(evaluatedCandidates.length > 0 ? { evaluatedCandidates } : {}),
+        };
     }
 
     if (opts.bypass) {
@@ -1036,7 +1280,10 @@ async function evaluateImageRefs(
                 sanitizeForLog(stackName), violations.length,
             );
         }
-        return { ok: true, bypassed: true, policy, violations, evidence };
+        return {
+            ok: true, bypassed: true, policy, violations, evidence,
+            ...(evaluatedCandidates.length > 0 ? { evaluatedCandidates } : {}),
+        };
     }
 
     // Three causes, each logged as what it is. `error`: the image could not be
@@ -1068,7 +1315,62 @@ async function evaluateImageRefs(
             unevaluated.map((v) => `${logEntry(v.imageRef)}: ${logEntry(v.error ?? '')}`).join('; '),
         );
     }
-    return { ok: false, bypassed: false, policy, violations, evidence };
+    return {
+        ok: false, bypassed: false, policy, violations, evidence,
+        ...(evaluatedCandidates.length > 0 ? { evaluatedCandidates } : {}),
+    };
+}
+
+/**
+ * Decide what a hub-driven unattended update means for a remote node whose build
+ * evaluates the installed image instead of the image the update would pull.
+ *
+ * Only a matching enabled blocking policy makes this a decision at all: with no
+ * policy there is nothing to enforce, and the update proceeds exactly as before.
+ * The record says `unsupported`, which is the truth about that node (it cannot
+ * evaluate a candidate), and the Candidate not evaluated rule says what to do
+ * about it. Nothing is probed here; the caller has already established that the
+ * node does not advertise the capability.
+ */
+export function evaluateRemoteCandidateSupport(
+    stackName: string,
+    nodeId: number,
+    opts: PolicyEnforcementOptions,
+): PolicyEnforcementResult {
+    const db = DatabaseService.getInstance();
+    const policy = db.getMatchingPolicy(nodeId, stackName, FleetSyncService.getSelfIdentity());
+    if (!policy || !policy.enabled || !policy.block_on_deploy) {
+        return { ok: true, bypassed: false, policy: policy ?? undefined, violations: [] };
+    }
+    const { evidencePolicy } = loadGateSettings();
+    const outcome = evidencePolicy.candidateUnproven;
+    const reason = 'This node\'s version checks the image already installed, not the image this update would pull';
+    const decision = decideEvidenceGate(
+        [{
+            source: 'vulnerability_scan',
+            state: 'unsupported',
+            target: NODE_WIDE_EVIDENCE_TARGET,
+            collectedAt: null,
+            subject: 'candidate',
+            reason,
+        }],
+        [{
+            source: 'vulnerability_scan',
+            state: 'unsupported',
+            outcome,
+            rule: ruleClause('security_candidate_unproven', outcome),
+        }],
+    );
+    if (outcome === 'warn' && opts.recordAllowedEvidence !== false) {
+        notifyEvidenceWarningOnce(
+            nodeId, stackName, 'security_candidate_unproven',
+            'this node checks the image already installed, not the image an update would pull',
+        );
+    }
+    const result: PolicyEnforcementResult = outcome === 'block'
+        ? { ok: false, bypassed: false, policy, violations: [unavailableViolation('(node)', reason)], evidence: decision }
+        : { ok: true, bypassed: false, policy, violations: [], evidence: decision };
+    return retainAllowedDecision(result, stackName, nodeId, opts);
 }
 
 /**
@@ -1086,6 +1388,11 @@ export async function evaluateCandidatePolicy(
 ): Promise<CandidatePolicyEvaluation> {
     const result = await evaluateImageRefs(stackName, nodeId, imageRefs, {
         ...opts,
+        // The candidate is a registry image the source will pull, and nobody is
+        // at the keyboard to answer for it, so it is resolved and scanned by
+        // digest and held under the Candidate not evaluated rule when unproven.
+        imageSource: 'registry',
+        unattended: true,
         // Undefaulted, these attribute the audit row to a deploy path
         // (the evaluator's own default), which never happened
         // for a pre-acceptance candidate.
@@ -1202,12 +1509,22 @@ function withCandidateRuleApplied(
             ? { source: basis.source, state: basis.state }
             : { source: 'vulnerability_scan', state: 'not_evaluated' };
     };
-    const added: EvidenceRuleApplication[] = targets.map((target) => ({
-        ...basisFor(target),
-        outcome,
-        rule: ruleClause('security_candidate_unproven', outcome),
-        target,
-    }));
+    const added: EvidenceRuleApplication[] = targets
+        // The evaluator now records the candidate rule itself for an unattended
+        // pulling path, so a target it already covers is not recorded twice: one
+        // image, one application. A node-wide application (the scanner gap)
+        // covers every target in this decision, because the cause is the node,
+        // not the image; a per-image one covers only its own target.
+        .filter((target) => !decision.applications.some(
+            (a) => a.rule.startsWith('security_candidate_unproven=')
+                && (a.target === undefined || a.target === target),
+        ))
+        .map((target) => ({
+            ...basisFor(target),
+            outcome,
+            rule: ruleClause('security_candidate_unproven', outcome),
+            target,
+        }));
     return {
         ...decision,
         applications: [...decision.applications, ...added],

@@ -13,7 +13,12 @@ import { safeRemoteFetch } from '../utils/outboundTarget';
 import { getErrorMessage } from '../utils/errors';
 import { redactSensitiveText } from '../utils/safeLog';
 import { isValidStackName } from '../utils/validation';
-import { assertPolicyGateAllows, buildSystemPolicyGateOptions } from '../helpers/policyGate';
+import {
+    assertPolicyGateAllows,
+    buildSystemPolicyGateOptions,
+    remoteCandidateGateRefusal,
+    verifyPulledCandidates,
+} from '../helpers/policyGate';
 import { probeRemoteCapability } from '../helpers/remoteCapabilities';
 import { SENCHO_LABEL_POLICY_CAPABILITY, SENCHO_UPDATE_LABEL } from '../helpers/senchoLabels';
 import {
@@ -207,7 +212,12 @@ export class WebhookService {
                             await assertPolicyGateAllows(
                                 stackName,
                                 nodeId,
-                                buildSystemPolicyGateOptions('webhook', { auditPath: `/api/webhooks/${webhookId}/execute` }),
+                                // A webhook deploy is a plain `up`: it pulls only
+                                // what Compose's own pull policy makes it pull.
+                                buildSystemPolicyGateOptions('webhook', {
+                                    auditPath: `/api/webhooks/${webhookId}/execute`,
+                                    imageSource: 'compose',
+                                }),
                             );
                             const deployResult = await compose.deployStack(
                                 stackName,
@@ -240,14 +250,24 @@ export class WebhookService {
                                 policySkipNote = describePolicySkip(updatePolicy);
                                 break;
                             }
-                            await assertPolicyGateAllows(
+                            const webhookGate = await assertPolicyGateAllows(
                                 stackName,
                                 nodeId,
-                                buildSystemPolicyGateOptions('webhook', { auditPath: `/api/webhooks/${webhookId}/execute` }),
+                                buildSystemPolicyGateOptions('webhook', {
+                                    auditPath: `/api/webhooks/${webhookId}/execute`,
+                                    imageSource: 'registry',
+                                }),
                             );
                             const orchResult = await StackUpdateOrchestrator.getInstance().execute(
                                 { nodeId, stackName, target: { scope: 'stack' }, trigger: 'webhook', actor: 'system:webhook', policy: updatePolicy },
-                                { atomic: atomic ?? false, terminalWs: null },
+                                {
+                                    atomic: atomic ?? false,
+                                    terminalWs: null,
+                                    verifyPulled: () => verifyPulledCandidates(
+                                        stackName, nodeId, webhookGate.evaluatedCandidates,
+                                        buildSystemPolicyGateOptions('webhook'),
+                                    ),
+                                },
                             );
                             const healthGateId = HealthGateService.getInstance().beginStack(nodeId, stackName, 'update', 'system:webhook', { deployedGenerationId: orchResult.kind === 'stack_compose_done' ? orchResult.deployedGenerationId : null });
                             const recoveryId = orchResult.kind === 'stack_compose_done' ? orchResult.recoveryId : null;
@@ -331,6 +351,26 @@ export class WebhookService {
                     const durationMs = Date.now() - startTime;
                     this.recordExecution(webhookId, action, 'failure', triggerSource, durationMs, refusal);
                     return { success: false, error: refusal, duration_ms: durationMs };
+                }
+            }
+            // Any forwarded action that can install an image: a node whose build
+            // evaluates the installed image cannot see the image this operation
+            // would pull. When a blocking policy matches, the Candidate not
+            // evaluated rule holds it here, on the hub, before anything is
+            // forwarded. A restart, stop or start installs nothing and is not
+            // held.
+            if (action === 'pull' || action === 'deploy') {
+                const candidateRefusal = await remoteCandidateGateRefusal(
+                    nodeId,
+                    stackName,
+                    buildSystemPolicyGateOptions('webhook', {
+                        auditPath: `/api/webhooks/${webhookId}/execute`,
+                    }),
+                );
+                if (candidateRefusal) {
+                    const durationMs = Date.now() - startTime;
+                    this.recordExecution(webhookId, action, 'failure', triggerSource, durationMs, candidateRefusal);
+                    return { success: false, error: candidateRefusal, duration_ms: durationMs };
                 }
             }
             const endpoint = action === 'git-pull'

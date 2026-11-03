@@ -3283,6 +3283,9 @@ export class MeshService extends EventEmitter implements MeshForwarderHost {
                 nodeId,
                 buildSystemPolicyGateOptions(actor, {
                     auditPath: `/api/mesh/nodes/${nodeId}/stacks/${stackName}/redeploy`,
+                    // A mesh redeploy is a plain `up` nobody is watching.
+                    imageSource: 'compose',
+                    unattended: true,
                 }),
             );
             const lock = await StackOpLockService.getInstance().runExclusive(

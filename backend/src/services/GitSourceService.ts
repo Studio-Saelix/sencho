@@ -44,6 +44,7 @@ import {
     acceptanceAuthorityForWebhook,
     coalesceKey,
     deliveryKey,
+    isAutomatedReconcileTrigger,
     type ReconcileRequest,
     type ReconcileTrigger,
 } from './gitops/triggers';
@@ -4741,6 +4742,11 @@ export class GitSourceService {
                         bypass: false,
                         auditPath: `/api/stacks/${stackName}/git-source/apply`,
                         onAllowed,
+                        imageSource: 'compose',
+                        // A resume or retry is a person's own action; an
+                        // automated trigger has nobody to answer, so unproven
+                        // candidate evidence is held there.
+                        unattended: isAutomatedReconcileTrigger(envelope.trigger as ReconcileTrigger),
                     }),
                 );
                 const autoDeploy = await (async () => {
@@ -6210,6 +6216,13 @@ export class GitSourceService {
                         bypass: args.bypassPolicy === true,
                         auditPath: `/api/stacks/${stackName}/git-source/apply`,
                         onAllowed: args.onAllowed,
+                        // A GitOps deploy is a plain `up`: it pulls only what
+                        // Compose's own pull policy makes it pull.
+                        imageSource: 'compose',
+                        // An operator's own apply is attended; every automated
+                        // trigger has nobody to ask, so unproven candidate
+                        // evidence is held by Candidate not evaluated.
+                        unattended: isAutomatedReconcileTrigger(args.reconcileTrigger),
                     }),
                 );
                 if (recoveryId) {
