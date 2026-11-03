@@ -114,6 +114,31 @@ vi.mock('../helpers/policyGate', async () => {
   return { ...actual, triggerPostDeployScan: mockTriggerPostDeployScan };
 });
 
+/**
+ * A GitOps apply gates the images its `up` would run. These suites are about the
+ * policy and lifecycle around that, not registry transport, so resolution is
+ * deterministic and offline: every reference resolves to a candidate whose scan
+ * the test stubs.
+ */
+vi.mock('../services/candidateImage', async () => {
+  const { createHash } = await import('node:crypto');
+  const digestOf = (ref: string): string => `sha256:${createHash('sha256').update(ref).digest('hex')}`;
+  return {
+    nodePlatformFor: async () => ({ os: 'linux', architecture: 'amd64' }),
+    localImageExists: async () => true,
+    pullPolicyPullsOnUp: () => false,
+    resolveCandidateImage: async (_nodeId: number, ref: string) => ({
+      kind: 'candidate',
+      ref,
+      scanRef: `registry-1.docker.io/library/${ref}@${digestOf(ref)}`,
+      indexDigest: digestOf(ref),
+      platformDigest: digestOf(ref),
+      platform: 'linux/amd64',
+      qualification: 'exact',
+    }),
+  };
+});
+
 vi.mock('../services/gitops/artifactResolve', async () => {
   const actual = await vi.importActual<typeof import('../services/gitops/artifactResolve')>(
     '../services/gitops/artifactResolve',
