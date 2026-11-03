@@ -332,6 +332,12 @@ export function CloudBackupSection() {
             setProvider(data.provider);
             setEncryptArchives(data.encrypt_archives === true);
             setPassphraseSaved(data.archive_passphrase === '***');
+            // A stored passphrase settles a pending enable; otherwise the
+            // operator is still mid-way and can retry the save.
+            if (data.archive_passphrase === '***') {
+                setPendingEnable(false);
+                setPassphraseDraft('');
+            }
         } catch {
             setLoadFailed(true);
             setProvider(confirmedRef.current.provider);
