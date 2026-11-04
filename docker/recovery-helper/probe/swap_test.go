@@ -244,6 +244,11 @@ func TestCleanupKeepsTheJournalUntilTheBulkIsGone(t *testing.T) {
 	if _, err := os.Stat(planPath); err != nil {
 		t.Fatalf("the journal went before the work was done: %v", err)
 	}
+	// Whoever resumes asks for the status first, and a committed swap whose
+	// originals are partly gone is still `swapped`, not `inconsistent`.
+	if report, err := swapStatus(request); err != nil || report.Status != statusSwapped {
+		t.Fatalf("status after the interrupted clean-up = %+v, %v; want swapped", report, err)
+	}
 
 	// Repeated, it finishes instead of parking.
 	removeAll = real
@@ -252,6 +257,23 @@ func TestCleanupKeepsTheJournalUntilTheBulkIsGone(t *testing.T) {
 	}
 	if _, err := os.Stat(workDir); !os.IsNotExist(err) {
 		t.Fatalf("work directory survived the repeated cleanup: %v", err)
+	}
+}
+
+// Before the commit is recorded, a missing original is still a foreign change.
+func TestStatusStaysInconsistentForAMissingOriginalBeforeTheCommit(t *testing.T) {
+	request := setupVolume(t,
+		map[string]string{"db.bin": "original", "conf/keep.txt": "original-config"},
+		map[string]string{"db.bin": "restored"},
+	)
+	if _, err := swapPrepare(request); err != nil {
+		t.Fatalf("prepare: %v", err)
+	}
+	if err := os.RemoveAll(filepath.Join(request.Root, "conf")); err != nil {
+		t.Fatal(err)
+	}
+	if report, err := swapStatus(request); err != nil || report.Status != statusInconsistent {
+		t.Fatalf("status = %+v, %v; want inconsistent", report, err)
 	}
 }
 

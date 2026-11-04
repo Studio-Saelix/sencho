@@ -173,9 +173,10 @@ var setTimes = os.Chtimes
 // order, so one RemoveAll could take plan.json first and then die with the
 // originals still on disk, leaving a work directory no journal explains. Deleting
 // the bulk first keeps the journal until nothing it describes is left, so an
-// interrupted clean-up is repeated rather than parked. Rollback does not use it:
-// a rollback decides what to move from the restored copy, so that copy has to
-// outlive the journal's last use, and its own plain removal is safe to repeat.
+// interrupted clean-up is repeated rather than parked (`computeStatus` keeps
+// answering `swapped` while the journal says so). Rollback does not use it: a
+// rollback decides what to move from the restored copy, so that copy has to
+// outlive the journal's last use.
 func removeWorkDir(workDir string) error {
 	for _, dir := range []string{
 		filepath.Join(workDir, originalDirName),
@@ -365,6 +366,12 @@ func computeStatus(request swapRequest, plan swapPlan) (string, error) {
 			originalsMoved++
 		case exists(filepath.Join(request.Root, name)):
 			// Not moved yet.
+		case plan.Status == statusSwapped:
+			// The commit is recorded, so the originals are only waiting to be
+			// deleted, and a clean-up that was interrupted has already deleted
+			// some. That is progress, not a foreign change: answering
+			// `inconsistent` would park a committed restore whose clean-up only
+			// needs repeating.
 		default:
 			return statusInconsistent, nil
 		}
@@ -716,7 +723,7 @@ func swapCleanup(request swapRequest) (swapReport, error) {
 	// application has since written to alone. The journal is gone by now, so a
 	// failure of this last step cannot be retried, and it is not worth failing a
 	// committed, cleaned volume for: it is reported on stderr and only the mtime
-	// is lost (the rollback path above says the same).
+	// is lost.
 	mtime := time.Unix(0, plan.Root.Mtime)
 	if err := setTimes(request.Root, mtime, mtime); err != nil {
 		fmt.Fprintf(os.Stderr, "warning: the root modification time was not restored: %v\n", err)
