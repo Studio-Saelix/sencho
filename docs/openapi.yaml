@@ -1631,6 +1631,9 @@ components:
             isCurrentGeneration: { type: boolean }
         node:
           type: object
+          description: >-
+            The node the restore targets, as the hub the caller addressed knows it. Called
+            directly on a remote instance with no hub in front, it names that instance itself.
           required: [id, name, transport]
           properties:
             id: { type: integer }
@@ -6453,7 +6456,11 @@ paths:
         running. The operation is asynchronous: read it with `GET /api/recovery/operations/{id}`,
         whose `result.restore` carries the intent id, phase, fence state and outcome class. A
         state that cannot be proven ends `completion_unknown` and is settled with
-        `POST /api/recovery/restores/{intentId}/resolve`.
+        `POST /api/recovery/restores/{intentId}/resolve`. When Sencho restarts mid-restore, startup
+        settles the operation with the restore: `failed` with `errorClass: interrupted` after a
+        rollback, `succeeded` after a roll forward, and `partial` while a clean-up or a fence
+        release is owed. Each releases the volume's storage lock; only a restore that could not be
+        proven keeps `completion_unknown` and a stale lock.
 
         Request errors: `409 precondition_failed` with `reason: generation_changed` or
         `reason: confirmation_mismatch` (the token is not the one the current state gives; preview again),
@@ -6550,7 +6557,9 @@ paths:
       description: |
         The operator's answer to an overwrite that did not settle. `retry` runs the
         reconciliation again and is safe to repeat; it removes a leftover staging volume,
-        finishes a clean-up, and releases a fence that could not be released. `release_fence`
+        finishes a clean-up, and releases a fence that could not be released. When it proves the
+        restore, the restore's operation settles and releases the volume's storage lock, as startup does.
+        `release_fence`
         accepts the volume as it now is: it restores every recorded restart policy and starts
         nothing. When the journal proves the swap committed, it removes the hidden directory
         that holds the originals and settles the restore `committed`; if that removal fails,

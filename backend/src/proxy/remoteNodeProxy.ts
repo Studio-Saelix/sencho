@@ -31,6 +31,9 @@ import {
   PROXY_DEPLOY_ACTOR_HEADER,
   PROXY_SCOPED_STACK_NAME_HEADER,
   PROXY_SCOPED_STACK_ACTIONS_HEADER,
+  PROXY_HUB_NODE_ID_HEADER,
+  PROXY_HUB_NODE_NAME_HEADER,
+  hubNodeHeaderValues,
 } from '../services/license-headers';
 import { LicenseService } from '../services/LicenseService';
 import { isProxyExemptPath } from '../helpers/proxyExemptPaths';
@@ -375,6 +378,17 @@ export function createRemoteProxyMiddleware(): RequestHandler {
       proxyReq.setHeader(PROXY_DEPLOY_SOURCE_HEADER, 'manual');
       if (req.user?.username) {
         proxyReq.setHeader(PROXY_DEPLOY_ACTOR_HEADER, req.user.username);
+      }
+      // The node as this hub knows it: always strip client-supplied values, then
+      // set from the registry, so a remote that names its node in a response (the
+      // overwrite preview) names the hub's record rather than its own `Local`.
+      proxyReq.removeHeader(PROXY_HUB_NODE_ID_HEADER);
+      proxyReq.removeHeader(PROXY_HUB_NODE_NAME_HEADER);
+      const hubRecord = typeof req.nodeId === 'number' ? NodeRegistry.getInstance().getNode(req.nodeId) : undefined;
+      if (hubRecord) {
+        const values = hubNodeHeaderValues(hubRecord);
+        proxyReq.setHeader(PROXY_HUB_NODE_ID_HEADER, values.id);
+        proxyReq.setHeader(PROXY_HUB_NODE_NAME_HEADER, values.name);
       }
       // Scoped stack evidence: always strip client-supplied values, then
       // attach hub-built evidence when the gate stashed elevation for this hop.

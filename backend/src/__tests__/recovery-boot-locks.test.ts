@@ -12,6 +12,7 @@
 import { describe, it, expect, beforeAll, afterAll, beforeEach, afterEach, vi } from 'vitest';
 import type Docker from 'dockerode';
 import { setupTestDb, cleanupTestDb } from './helpers/setupTestDb';
+import { scriptedHelper } from './__helpers__/overwriteFixture';
 
 let tmpDir: string;
 let runner: typeof import('../services/recovery/operationRunner');
@@ -19,6 +20,8 @@ let operations: typeof import('../services/recovery/operations');
 let repositoryStore: typeof import('../services/recovery/repositories');
 let identityStore: typeof import('../services/recovery/storageIdentity');
 let recoveryDbModule: typeof import('../services/recovery/recoveryDb');
+let pointsModule: typeof import('../services/recovery/recoveryPoints');
+let intentsModule: typeof import('../services/recovery/restoreIntents');
 let DockerController: typeof import('../services/DockerController').default;
 let nodeId: number;
 
@@ -72,6 +75,8 @@ beforeAll(async () => {
   repositoryStore = await import('../services/recovery/repositories');
   identityStore = await import('../services/recovery/storageIdentity');
   recoveryDbModule = await import('../services/recovery/recoveryDb');
+  pointsModule = await import('../services/recovery/recoveryPoints');
+  intentsModule = await import('../services/recovery/restoreIntents');
   DockerController = (await import('../services/DockerController')).default;
   nodeId = (await import('../services/DatabaseService')).DatabaseService.getInstance().getDefaultNode()?.id ?? 1;
   const fs = await import('fs');
@@ -97,7 +102,7 @@ beforeEach(() => {
   (operations.RecoveryOperationStore.getInstance() as unknown as { reconciled: boolean }).reconciled = false;
   const db = recoveryDbModule.recoveryDb();
   for (const table of [
-    'recovery_restore_intents', 'recovery_repository_checks', 'recovery_locks', 'recovery_operations',
+    'recovery_restore_fence_members', 'recovery_restore_intents', 'recovery_repository_checks', 'recovery_locks', 'recovery_operations',
     'recovery_point_verifications', 'recovery_points', 'recovery_repositories',
     'recovery_storage_dependents', 'recovery_storage_identities',
   ]) {
@@ -240,17 +245,97 @@ describe('boot with an interrupted capture', () => {
 });
 
 describe('the storage lock of an interrupted overwrite', () => {
-  // The operator page tells an operator that a restore settled `rolled_back` at
-  // boot still leaves the volume's storage lock stale, and that a new overwrite
-  // answers `lock_stale` until it is released. This is the behavior that sentence
-  // describes: boot settles the restore, not the lock.
-  it('stays stale after boot, refuses the next restore of the volume, and opens on a reviewed release', async () => {
+  /** A staged overwrite the dead process left in `phase`, on the operation `seedInterrupted` made. */
+  function seedOverwriteIntent(seeded: ReturnType<typeof seedInterrupted>, phase: 'staging' | 'completion_unknown'): string {
+    const pointStore = pointsModule.RecoveryPointStore.getInstance();
+    const point = pointStore.begin({
+      kind: 'root', storageId: seeded.storageId, expectedGenerationToken: 't1', repositoryId: seeded.repositoryId,
+      trigger: 'manual', actor: 'admin', sourceOperationId: 'op-src', sourceNodeKey: ENGINE_KEY, engineId: 'restic',
+    });
+    pointStore.finalize(point.id, {
+      status: 'succeeded',
+      evidence: {
+        snapshotId: 'snap-1', capture: { fileCount: 1, byteCount: 1, skippedCount: 0 },
+        exclusions: [], consistency: 'crash_consistent_live',
+      },
+    });
+    const intents = intentsModule.RestoreIntentStore.getInstance();
+    const intent = intents.recordOverwrite({
+      operationId: seeded.operationId, pointId: point.id, targetVolume: 'interrupted_data', actor: 'admin',
+      processEpoch: 'dead-epoch', expectedGenerationToken: 't1',
+      stagingVolume: `sencho-recovery-staging-${seeded.operationId}`,
+    });
+    if (phase === 'completion_unknown') intents.advance(intent.id, 'completion_unknown', { outcomeClass: 'identity_unknown' });
+    return intent.id;
+  }
+
+  it('reads failed/interrupted and frees the storage once boot rolled the restore back', async () => {
+    const seeded = seedInterrupted('restore', { storageLock: true });
+    const intentId = seedOverwriteIntent(seeded, 'staging');
+    await boot(0);
+
+    expect(intentsModule.RestoreIntentStore.getInstance().get(intentId)?.phase).toBe('rolled_back');
+    const store = operations.RecoveryOperationStore.getInstance();
+    expect(store.get(seeded.operationId)).toMatchObject({ state: 'failed', errorClass: 'interrupted' });
+    expect(store.getLock('storage', seeded.storageKey)).toBeNull();
+
+    // The volume is usable again: a capture of it is admitted, not refused as stale.
+    runner.RecoveryEngineService.setEngineFactoryForTests(() => ({
+      engineId: 'fake', contractVersion: 1 as const, storageKinds: ['named_volume'] as const,
+      probe: async () => ({ engineId: 'fake', build: 'test', usable: true }),
+      createPoint: async () => ({
+        ok: true as const,
+        evidence: { snapshotId: 'snap', capture: { fileCount: 1, byteCount: 1, skippedCount: 0 }, exclusions: [], consistency: 'crash_consistent_stopped' },
+      }),
+      verifyPoint: async () => ({ ok: true as const, evidence: { result: 'verified' } }),
+      restore: async () => ({ ok: false as const, errorClass: 'internal' }),
+    }) as never);
+    const admitted = await runner.RecoveryEngineService.getInstance(nodeId).admitCreatePoint({
+      nodeId, volumeName: 'interrupted_data', actor: 'alice', idempotencyKey: 'after-boot',
+      requestDigest: runner.sha256Digest(['create_point', 'interrupted_data']), transport: 'local', authorize: () => true,
+    });
+    expect(admitted.replayed).toBe(false);
+  });
+
+  it('keeps completion_unknown and the stale lock for a restore boot could not prove', async () => {
+    const seeded = seedInterrupted('restore', { storageLock: true });
+    const intentId = seedOverwriteIntent(seeded, 'completion_unknown');
+    await boot(0);
+
+    expect(intentsModule.RestoreIntentStore.getInstance().get(intentId)?.phase).toBe('completion_unknown');
+    const store = operations.RecoveryOperationStore.getInstance();
+    expect(store.get(seeded.operationId)).toMatchObject({ state: 'completion_unknown', errorClass: 'interrupted' });
+    expect(store.getLock('storage', seeded.storageKey)?.staleSince).not.toBeNull();
+  });
+
+  it('settles the operation and frees the storage when a retry proves the swap committed', async () => {
+    const seeded = seedInterrupted('restore', { storageLock: true });
+    const intentId = seedOverwriteIntent(seeded, 'completion_unknown');
+    await boot(0);
+    const store = operations.RecoveryOperationStore.getInstance();
+    expect(store.getLock('storage', seeded.storageKey)?.staleSince).not.toBeNull();
+
+    const service = runner.RecoveryEngineService.getInstance(nodeId);
+    service.setHelperRunnerForTests(scriptedHelper({ swapAnswers: [
+      { action: 'status', exitCode: 0, status: 'swapped' },
+      { action: 'commit', exitCode: 0, status: 'swapped' },
+      { action: 'cleanup', exitCode: 0, status: 'cleaned' },
+    ] }).helper);
+    const resolved = await service.resolveOverwrite({
+      intentId, action: 'retry', actor: 'admin', authorizeStack: () => true, authorizeGlobal: () => true,
+    });
+
+    expect(resolved).toEqual({ outcome: 'committed' });
+    expect(store.get(seeded.operationId)).toMatchObject({ state: 'succeeded', errorClass: null });
+    expect(store.getLock('storage', seeded.storageKey)).toBeNull();
+  });
+
+  it('keeps the lock of an interrupted restore that has no overwrite intent, until a reviewed release', async () => {
     const { storageKey, storageId } = seedInterrupted('restore', { storageLock: true });
     await boot(0);
     const store = operations.RecoveryOperationStore.getInstance();
     expect(store.getLock('storage', storageKey)?.staleSince).not.toBeNull();
 
-    // The next overwrite is an operation of this process asking for the same lock.
     const next = store.start({
       idempotencyKey: 'next-overwrite', kind: 'restore', storageId,
       actor: 'admin', transport: 'local', requestDigest: 'b'.repeat(64),

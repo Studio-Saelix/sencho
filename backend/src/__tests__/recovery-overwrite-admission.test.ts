@@ -197,6 +197,16 @@ describe('preview', () => {
     expect(preview.swap.reason).toBeTruthy();
   });
 
+  it('names the hub\'s node for a relayed request, and this instance\'s own for a direct one', async () => {
+    const fake = fakeDocker({ volumes: [{ name: VOLUME }], containers: [mountingContainer()] });
+    const seeded = seed({ createdAt: fake.volumes.get(VOLUME)?.createdAt ?? '' });
+    const relayed = await overwrite.previewOverwrite(
+      { ...deps(fake.docker, scriptedHelper()), transport: 'pilot_tunnel', hubNode: { id: 12, name: 'sencho-test-02' } },
+      seeded.pointId,
+    );
+    expect(relayed.node).toEqual({ id: 12, name: 'sencho-test-02', transport: 'pilot_tunnel' });
+  });
+
   it('reports a volume recreated since the point as a different generation', async () => {
     const fake = fakeDocker({ volumes: [{ name: VOLUME }], containers: [mountingContainer()] });
     const seeded = seed({ createdAt: '2020-01-01T00:00:00.000Z' });

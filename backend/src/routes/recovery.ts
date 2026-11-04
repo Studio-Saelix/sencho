@@ -638,6 +638,8 @@ recoveryRouter.post('/points/:pointId/overwrite/preview', handle(async (req, res
     pointId: paramOf(req, 'pointId'),
     actor: actorOf(req),
     transport: req.machineAuthScope ?? 'local',
+    // A hub names the node it knows; a direct caller gets this instance's own.
+    hubNode: req.hubNode,
     authorizeStack: (stackName) => checkPermission(req, RECOVERY_ACCESS_ACTION.restore, 'stack', stackName),
     authorizeGlobal: () => authorizeNodeWide(req, 'restore'),
   });

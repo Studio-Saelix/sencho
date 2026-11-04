@@ -18,6 +18,7 @@ let points: typeof import('../services/recovery/recoveryPoints');
 let intents: typeof import('../services/recovery/restoreIntents');
 let fence: typeof import('../services/recovery/restoreFence');
 let overwrite: typeof import('../services/recovery/overwriteRestore');
+let operationStore: typeof import('../services/recovery/operations');
 let DockerController: typeof import('../services/DockerController').default;
 
 let tmpDir: string;
@@ -33,6 +34,7 @@ beforeAll(async () => {
   intents = await import('../services/recovery/restoreIntents');
   fence = await import('../services/recovery/restoreFence');
   overwrite = await import('../services/recovery/overwriteRestore');
+  operationStore = await import('../services/recovery/operations');
   DockerController = (await import('../services/DockerController')).default;
 });
 
@@ -59,6 +61,8 @@ interface Seeded {
   pointId: string;
   generationToken: string;
   containerId: string;
+  operationId: string;
+  storageKey: string;
 }
 
 async function seed(input: {
@@ -107,6 +111,11 @@ async function seed(input: {
   recoveryDbModule.recoveryDb().prepare(`INSERT INTO recovery_operations (id, idempotency_key, kind, storage_id, point_id, actor, transport, state, process_epoch, created_at, updated_at)
     VALUES (?, ?, 'restore', ?, ?, 'admin', 'local', 'completion_unknown', 'old', 1, 1)`)
     .run(operationId, randomUUID(), storage.id, point.id);
+  // What boot reconciliation leaves for a restore whose process died: the operation
+  // parked as interrupted, and the storage it held turned stale.
+  recoveryDbModule.recoveryDb().prepare("UPDATE recovery_operations SET error_class = 'interrupted' WHERE id = ?").run(operationId);
+  recoveryDbModule.recoveryDb().prepare(`INSERT OR IGNORE INTO recovery_locks (scope, resource_key, owner_operation_id, process_epoch, acquired_at, stale_since)
+    VALUES ('storage', ?, ?, 'old', 1, 2)`).run(storage.storageKey, operationId);
   const intent = intents.RestoreIntentStore.getInstance().recordOverwrite({
     operationId,
     pointId: point.id,
@@ -137,7 +146,7 @@ async function seed(input: {
     store.advance(intent.id, step);
     if (step === input.phase) break;
   }
-  return { seeded: { intentId: intent.id, pointId: point.id, generationToken, containerId: 'c1' }, fake };
+  return { seeded: { intentId: intent.id, pointId: point.id, generationToken, containerId: 'c1', operationId, storageKey: storage.storageKey }, fake };
 }
 
 function deps(fake: ReturnType<typeof fakeDocker>, helper: ReturnType<typeof scriptedHelper>) {
@@ -486,5 +495,136 @@ describe('startup reconciliation', () => {
     const result = await overwrite.reconcileOverwriteIntentsAtStartup(deps(fake, helper));
     expect(result.rolledBack).toBe(1);
     expect(intents.RestoreIntentStore.getInstance().listUnsettled('staged_overwrite')).toHaveLength(0);
+  });
+});
+
+describe('the operation of a reconciled overwrite', () => {
+  const settle = (intentId?: string) => overwrite.settleInterruptedOverwriteOperations(
+    intents.RestoreIntentStore.getInstance(), operationStore.RecoveryOperationStore.getInstance(), intentId,
+  );
+  const operation = (id: string) => operationStore.RecoveryOperationStore.getInstance().get(id);
+  const lock = (key: string) => operationStore.RecoveryOperationStore.getInstance().getLock('storage', key);
+
+  it('reads failed/interrupted and frees the storage once startup proves the volume original', async () => {
+    const { seeded, fake } = await seed({ phase: 'swapping', createdAt: new Date().toISOString(), fenced: true });
+    // The journal says the swap never committed.
+    const helper = scriptedHelper({ swapAnswers: [
+      { action: 'status', exitCode: 0, status: 'planned' },
+      { action: 'rollback', exitCode: 0, status: 'rolled_back' },
+    ] });
+    await overwrite.reconcileOverwriteIntentsAtStartup(deps(fake, helper));
+    expect(intents.RestoreIntentStore.getInstance().get(seeded.intentId)?.phase).toBe('rolled_back');
+
+    expect(settle()).toBe(1);
+    expect(operation(seeded.operationId)).toMatchObject({ state: 'failed', errorClass: 'interrupted' });
+    expect(lock(seeded.storageKey)).toBeNull();
+  });
+
+  it('reads succeeded and frees the storage once startup rolls the swap forward', async () => {
+    const { seeded, fake } = await seed({ phase: 'swapping', createdAt: new Date().toISOString(), fenced: true });
+    await overwrite.reconcileOverwriteIntentsAtStartup(deps(fake, answers()));
+    expect(intents.RestoreIntentStore.getInstance().get(seeded.intentId)?.phase).toBe('committed');
+
+    settle();
+    expect(operation(seeded.operationId)).toMatchObject({ state: 'succeeded', errorClass: null });
+    expect(lock(seeded.storageKey)).toBeNull();
+  });
+
+  it('settles the operation of a committed swap whose journal was already cleaned', async () => {
+    const { seeded, fake } = await seed({ phase: 'swapped', createdAt: new Date().toISOString(), fenced: true });
+    await overwrite.reconcileOverwriteIntentsAtStartup(deps(fake, scriptedHelper({
+      swapAnswers: [{ action: 'status', exitCode: 0, status: 'absent' }],
+    })));
+    settle();
+    expect(operation(seeded.operationId)).toMatchObject({ state: 'succeeded' });
+    expect(lock(seeded.storageKey)).toBeNull();
+  });
+
+  it('settles the operation of a restore that startup rolled back before the fence', async () => {
+    const { seeded, fake } = await seed({ phase: 'staged_verified', createdAt: new Date().toISOString(), fenced: false });
+    await overwrite.reconcileOverwriteIntentsAtStartup(deps(fake, answers()));
+    settle();
+    expect(operation(seeded.operationId)).toMatchObject({ state: 'failed', errorClass: 'interrupted' });
+    expect(lock(seeded.storageKey)).toBeNull();
+  });
+
+  it('keeps completion_unknown and the stale lock while the volume is not proven', async () => {
+    const { seeded, fake } = await seed({ phase: 'swapping', createdAt: new Date().toISOString(), fenced: true });
+    await overwrite.reconcileOverwriteIntentsAtStartup(deps(fake, scriptedHelper({
+      swapAnswers: [{ action: 'status', exitCode: 0, status: 'inconsistent' }],
+    })));
+    expect(intents.RestoreIntentStore.getInstance().get(seeded.intentId)?.phase).toBe('completion_unknown');
+
+    expect(settle()).toBe(0);
+    expect(operation(seeded.operationId)).toMatchObject({ state: 'completion_unknown', errorClass: 'interrupted' });
+    expect(lock(seeded.storageKey)?.staleSince).not.toBeNull();
+  });
+
+  it('keeps completion_unknown while a rolled back volume is still fenced, and settles once the fence is released', async () => {
+    const { seeded, fake } = await seed({ phase: 'fenced', createdAt: new Date().toISOString(), fenced: true });
+    // The workloads cannot be started again, so the restart policies stay pinned.
+    fake.failOn = (call) => (call === 'update:c1' ? new Error('daemon refused') : null);
+    await overwrite.reconcileOverwriteIntentsAtStartup(deps(fake, answers()));
+    expect(intents.RestoreIntentStore.getInstance().get(seeded.intentId)?.outcomeClass).toBe('fence_unavailable');
+
+    expect(settle()).toBe(0);
+    expect(operation(seeded.operationId)).toMatchObject({ state: 'completion_unknown' });
+    expect(lock(seeded.storageKey)?.staleSince).not.toBeNull();
+
+    // The next start releases the fence, and the operation follows.
+    fake.failOn = undefined;
+    await overwrite.reconcileOverwriteIntentsAtStartup(deps(fake, answers()));
+    expect(settle()).toBe(1);
+    expect(operation(seeded.operationId)).toMatchObject({ state: 'failed', errorClass: 'interrupted' });
+    expect(lock(seeded.storageKey)).toBeNull();
+  });
+
+  it('settles it on a retry that proves a parked restore, and not on a release_fence that proves nothing', async () => {
+    const { seeded, fake } = await seed({ phase: 'swapping', createdAt: new Date().toISOString(), fenced: true });
+    intents.RestoreIntentStore.getInstance().advance(seeded.intentId, 'completion_unknown', { outcomeClass: 'identity_unknown' });
+    await overwrite.resolveOverwriteIntent(deps(fake, scriptedHelper({ swapAnswers: [{ action: 'status', exitCode: 1 }] })), {
+      intentId: seeded.intentId, action: 'release_fence',
+    });
+    settle(seeded.intentId);
+    expect(operation(seeded.operationId)).toMatchObject({ state: 'completion_unknown' });
+    expect(lock(seeded.storageKey)?.staleSince).not.toBeNull();
+  });
+
+  it('settles it on a retry once the journal proves the swap committed', async () => {
+    const { seeded, fake } = await seed({ phase: 'swapping', createdAt: new Date().toISOString(), fenced: true });
+    intents.RestoreIntentStore.getInstance().advance(seeded.intentId, 'completion_unknown', { outcomeClass: 'identity_unknown' });
+    const result = await overwrite.resolveOverwriteIntent(deps(fake, answers()), { intentId: seeded.intentId, action: 'retry' });
+    expect(result.outcome).toBe('committed');
+    settle(seeded.intentId);
+    expect(operation(seeded.operationId)).toMatchObject({ state: 'succeeded' });
+    expect(lock(seeded.storageKey)).toBeNull();
+  });
+
+  it('reports partial/cleanup_failed for a committed swap whose originals could not be removed', async () => {
+    const { seeded, fake } = await seed({ phase: 'swapped', createdAt: new Date().toISOString(), fenced: true });
+    await overwrite.resolveOverwriteIntent(deps(fake, scriptedHelper({ swapAnswers: [
+      { action: 'status', exitCode: 0, status: 'swapped' },
+      { action: 'cleanup', exitCode: 1, stderr: 'helper image missing' },
+    ] })), { intentId: seeded.intentId, action: 'release_fence' });
+    settle(seeded.intentId);
+    expect(operation(seeded.operationId)).toMatchObject({ state: 'partial', errorClass: 'cleanup_failed' });
+    expect(lock(seeded.storageKey)).toBeNull();
+  });
+
+  it('never rewrites an ending a live process reported', async () => {
+    const { seeded, fake } = await seed({ phase: 'staged_verified', createdAt: new Date().toISOString(), fenced: false });
+    await overwrite.reconcileOverwriteIntentsAtStartup(deps(fake, answers()));
+    recoveryDbModule.recoveryDb().prepare("UPDATE recovery_operations SET state = 'cancelled', error_class = NULL WHERE id = ?")
+      .run(seeded.operationId);
+    expect(settle(seeded.intentId)).toBe(0);
+    expect(operation(seeded.operationId)).toMatchObject({ state: 'cancelled' });
+  });
+
+  it('is idempotent', async () => {
+    const { seeded, fake } = await seed({ phase: 'swapping', createdAt: new Date().toISOString(), fenced: true });
+    await overwrite.reconcileOverwriteIntentsAtStartup(deps(fake, answers()));
+    expect(settle()).toBe(1);
+    expect(settle()).toBe(0);
+    expect(operation(seeded.operationId)).toMatchObject({ state: 'succeeded' });
   });
 });

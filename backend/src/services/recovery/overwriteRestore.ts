@@ -31,6 +31,7 @@ import {
 } from './volumeSources';
 import { runSwapStep, swapIncomingDir, type SwapStatus } from './volumeSwap';
 import type { RecoveryHelperRunner } from './restic/helperRunner';
+import type { RecoveryOperationStore } from './operations';
 import type { RecoveryPointStore } from './recoveryPoints';
 import type { RecoveryRepositoryStore } from './repositories';
 import type {
@@ -130,6 +131,8 @@ export interface OverwritePreview {
 export interface OverwriteDeps {
   nodeId: number;
   nodeName: string;
+  /** The forwarding hub's id and name for this node, when a hub sent them; the preview names it. */
+  hubNode?: { id: number; name: string };
   transport: string;
   docker: Docker;
   runner: () => RecoveryHelperRunner;
@@ -415,7 +418,7 @@ export async function previewOverwrite(deps: OverwriteDeps, pointId: string): Pr
       generation: observed.storage.generation,
       isCurrentGeneration: observed.isCurrentGeneration,
     },
-    node: { id: deps.nodeId, name: deps.nodeName, transport: deps.transport },
+    node: { id: deps.hubNode?.id ?? deps.nodeId, name: deps.hubNode?.name ?? deps.nodeName, transport: deps.transport },
     target: {
       volumeName: observed.volumeName,
       storageKey: observed.storage.storageKey,
@@ -1496,6 +1499,59 @@ function settleProven(
   deps.intents.advance(intent.id, phase, { outcomeClass: released ? null : 'fence_unavailable' }, now);
   releaseHolds(deps, intent.id);
   return phase;
+}
+
+/**
+ * How the operation of an overwrite that a previous process left open ends, once
+ * the intent's own reconciliation has proven the data. `null` while the data is
+ * not proven or the fence is still held over a rolled back volume: the operation
+ * then keeps reading `completion_unknown` and its lock stays stale.
+ *
+ * The endings are the ones the live pipeline reports for the same state: a
+ * committed swap is `succeeded`, or `partial` while its clean-up or fence release
+ * is owed; a rollback is `failed`, which here can only mean the process was
+ * interrupted.
+ */
+export function overwriteEndingFor(
+  intent: Pick<RestoreIntentRecord, 'phase' | 'outcomeClass'>,
+): Exclude<OperationFinish, { state: 'completion_unknown' }> | null {
+  const fenceOwed = intent.outcomeClass === 'fence_unavailable';
+  switch (intent.phase) {
+    case 'committed':
+      return fenceOwed ? { state: 'partial', errorClass: 'fence_unavailable' } : { state: 'succeeded' };
+    case 'rolled_back':
+      return fenceOwed ? null : { state: 'failed', errorClass: 'interrupted' };
+    case 'swapped':
+      // The journal proved the swap committed; only a clean-up or a release is owed.
+      if (intent.outcomeClass === 'cleanup_failed') return { state: 'partial', errorClass: 'cleanup_failed' };
+      return fenceOwed ? { state: 'partial', errorClass: 'fence_unavailable' } : null;
+    default:
+      return null;
+  }
+}
+
+/**
+ * Bring the operation of every overwrite that an interruption parked as
+ * `completion_unknown` in line with what its intent has proven since. Idempotent,
+ * and a no-op for an intent that is still open.
+ */
+export function settleInterruptedOverwriteOperations(
+  intents: Pick<RestoreIntentStore, 'listWithInterruptedOperation' | 'get'>,
+  operations: Pick<RecoveryOperationStore, 'settleReconciled'>,
+  intentId?: string,
+): number {
+  let settled = 0;
+  const candidates = intentId
+    ? [intents.get(intentId)].filter((intent): intent is RestoreIntentRecord => intent !== null)
+    : intents.listWithInterruptedOperation('staged_overwrite');
+  for (const intent of candidates) {
+    if (!intent.operationId) continue;
+    const ending = overwriteEndingFor(intent);
+    if (!ending) continue;
+    const stored = operations.settleReconciled(intent.operationId, ending);
+    if (stored.state === ending.state) settled += 1;
+  }
+  return settled;
 }
 
 export type ResolveAction = 'retry' | 'release_fence';

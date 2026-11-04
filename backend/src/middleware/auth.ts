@@ -15,7 +15,10 @@ import {
   PROXY_DEPLOY_ACTOR_HEADER,
   PROXY_SCOPED_STACK_NAME_HEADER,
   PROXY_SCOPED_STACK_ACTIONS_HEADER,
+  PROXY_HUB_NODE_ID_HEADER,
+  PROXY_HUB_NODE_NAME_HEADER,
   isDeploySourceHeader,
+  parseHubNodeHeaders,
 } from '../services/license-headers';
 import type { DeployInvocationContext } from '../services/network/missingExternalNetworksError';
 import { isLicenseTier, normalizeTier } from '../services/license-normalize';
@@ -136,6 +139,9 @@ export const authMiddleware: RequestHandler = async (req: Request, res: Response
       }
       req.user = { username: 'node-proxy', role, userId: 0 };
       req.machineAuthScope = decoded.scope;
+      // How the forwarding hub knows this node, for responses that name it.
+      const hubNode = parseHubNodeHeaders(req.headers[PROXY_HUB_NODE_ID_HEADER], req.headers[PROXY_HUB_NODE_NAME_HEADER]);
+      if (hubNode) req.hubNode = hubNode;
 
       // Distributed License Enforcement: trust tier headers only from authenticated node proxy requests.
       // Browser sessions and API tokens cannot set these; only a valid node_proxy JWT (signed with

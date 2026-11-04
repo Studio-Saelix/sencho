@@ -234,6 +234,8 @@ curl -X POST https://your-sencho-instance:1852/api/recovery/points/5b1c8b7e-2f60
   -d '{}'
 ```
 
+`node` is the node the restore targets, as the control instance knows it: its id and name in the control instance's node list, and the transport (`local`, `node_proxy` or `pilot_tunnel`). Through a hub, a remote node's preview names that node, not the control instance. Called directly on the remote instance with no hub in front, it names the instance itself.
+
 An answer looks like this, shortened:
 
 ```json
@@ -308,7 +310,7 @@ Startup settles every overwrite a previous process left open, and the operation 
 | the swap completed | rolled forward, cleaned up, restarted |
 | the journal or the volume cannot be read | left unsettled, fence kept held, `completion_unknown` |
 
-Startup settling a restore does not release the volume's storage lock. Every lock a previous process held turns stale, and only a reviewed release clears a storage lock. A restore that startup rolled back, or rolled forward to `committed`, has therefore put the data in a proven state and restarted the workloads, but the volume's next overwrite answers `409 lock_stale` until you release that lock with [Release a stale lock](#release-a-stale-lock) (`scope: "storage"`, with the volume's storage key). A preview still works. Review the operation first, as for any stale lock.
+Startup settles the operation together with the restore. A restore it rolled back reads `failed` with `errorClass: "interrupted"`, one it rolled forward reads `succeeded`, and both release the volume's storage lock, so the volume can be captured or restored again at once. A restore it rolled forward whose clean-up or fence release is still owed reads `partial` with `cleanup_failed` or `fence_unavailable`, which is the ending a live restore reports for the same state. A restore it could not prove keeps reading `completion_unknown`, and its storage lock stays stale (`409 lock_stale` for a capture or another overwrite) until a `retry` proves it or you release the lock with [Release a stale lock](#release-a-stale-lock). A restore that rolled back but whose fence could not be released is not proven either: it keeps `completion_unknown` until the next start of Sencho or a `retry` releases the fence.
 
 An operation that ends `completion_unknown` keeps its restart policies pinned and its points held. Nothing starts until you decide; startup releases the fence only of a restore that has settled. When the data is proven but the restart policies cannot be restored, the restore settles `committed` or `rolled_back` with `outcomeClass: "fence_unavailable"`, keeps the volume reserved, and the next start of Sencho or a `retry` releases the fence and clears the class.
 
@@ -316,7 +318,7 @@ An operation that ends `completion_unknown` keeps its restart policies pinned an
 
 Two actions, both explicit and both recorded in the audit log:
 
-- `retry` runs the same reconciliation again. It is safe to repeat, and it is what you use after fixing whatever blocked it, such as a Docker daemon that was not reachable, a staging volume that was still in use, or a fence that could not be released.
+- `retry` runs the same reconciliation again. It is safe to repeat, and it is what you use after fixing whatever blocked it, such as a Docker daemon that was not reachable, a staging volume that was still in use, or a fence that could not be released. When it proves the restore, the operation reads its real ending and the storage lock is released, exactly as after a start of Sencho.
 - `release_fence` accepts the volume as it now is. It restores every recorded restart policy and starts nothing. When the journal proves the swap committed and the restore had reached that point, Sencho first removes the hidden directory that holds the originals, then settles the restore `committed`. If that removal fails, the fence is still released but the restore stays open with `outcomeClass: "cleanup_failed"` and keeps the volume reserved; `retry`, or the next start of Sencho, removes the directory and settles it. In every other case the operation is left `completion_unknown`, because accepting the fence does not prove what the data is. A restore that never stopped a container has no fence to release, so it answers `400 invalid_request` with `reason: "no_fence"`; use `retry` for it.
 
 ```bash

@@ -386,6 +386,21 @@ export class RestoreIntentStore {
     return rows.map(toRecord);
   }
 
+  /**
+   * Intents of one mode whose operation was parked as `completion_unknown` by an
+   * interruption. The operation says nothing about how the restore ended until
+   * the intent's own reconciliation has run, so these are the ones to compare.
+   */
+  listWithInterruptedOperation(targetMode: RestoreIntentTargetMode): RestoreIntentRecord[] {
+    const rows = recoveryDb().prepare(`
+      SELECT i.* FROM recovery_restore_intents i
+      JOIN recovery_operations o ON o.id = i.operation_id
+      WHERE i.target_mode = ? AND o.state = 'completion_unknown' AND o.error_class = 'interrupted'
+      ORDER BY i.created_at, i.id
+    `).all(targetMode) as IntentRow[];
+    return rows.map(toRecord);
+  }
+
   /** Intents of one mode that have not reached a terminal phase. */
   listUnsettled(targetMode?: RestoreIntentTargetMode): RestoreIntentRecord[] {
     const rows = targetMode

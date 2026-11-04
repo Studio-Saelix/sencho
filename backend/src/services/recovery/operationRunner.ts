@@ -40,6 +40,7 @@ import {
   overwriteIntentScope,
   recordOverwriteIntent,
   reconcileOverwriteIntentsAtStartup,
+  settleInterruptedOverwriteOperations,
   resolveOverwriteIntent,
   runOverwritePipeline,
   type OverwriteDeps,
@@ -377,6 +378,15 @@ export class RecoveryEngineService {
       } catch (err) {
         console.warn('[Recovery] Overwrite reconciliation could not finish:', errorMessageForLog(err));
       }
+      // Whatever the reconciler proved, even when it stopped part way, the
+      // operation says the same: an operation parked as `completion_unknown` for
+      // a restore that has since settled would keep its storage lock stale.
+      try {
+        const settled = settleInterruptedOverwriteOperations(this.intents, this.operations);
+        if (settled > 0) console.log('[Recovery] Settled %d overwrite operations the reconciler proved', settled);
+      } catch (err) {
+        console.warn('[Recovery] Overwrite operations could not be settled:', errorMessageForLog(err));
+      }
       await this.refreshHealth();
     } catch (err) {
       // Boot problems never stop Sencho; they keep recovery closed, which is the
@@ -681,6 +691,7 @@ export class RecoveryEngineService {
     pointId: string;
     actor: string;
     transport: RecoveryOperation['transport'];
+    hubNode?: { id: number; name: string };
     authorizeStack: (stackName: string) => boolean;
     authorizeGlobal: () => boolean;
   }): Promise<OverwritePreview> {
@@ -688,7 +699,7 @@ export class RecoveryEngineService {
     // while the engine is still starting.
     await this.requireStorageAccessForIntent(input.pointId, input);
     this.requireReady();
-    return buildOverwritePreview(await this.overwriteDeps(input), input.pointId);
+    return buildOverwritePreview({ ...(await this.overwriteDeps(input)), hubNode: input.hubNode }, input.pointId);
   }
 
   /**
@@ -837,10 +848,17 @@ export class RecoveryEngineService {
     if (operation && (operation.state === 'queued' || operation.state === 'running')) {
       throw new RecoveryError('lock_held');
     }
-    return resolveOverwriteIntent(await this.overwriteDeps(input), {
-      intentId: input.intentId,
-      action: input.action,
-    });
+    try {
+      return await resolveOverwriteIntent(await this.overwriteDeps(input), {
+        intentId: input.intentId,
+        action: input.action,
+      });
+    } finally {
+      // The restore may have settled even when the answer is a refusal (a retry
+      // that proved the data and then could not release the fence): its
+      // operation, parked by the interruption, follows what is proven.
+      settleInterruptedOverwriteOperations(this.intents, this.operations, input.intentId);
+    }
   }
 
   /** The deps every overwrite entry point needs, so the three cannot drift. */

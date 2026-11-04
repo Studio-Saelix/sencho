@@ -70,16 +70,19 @@ describe('the operator page on a restore that a crash interrupted', () => {
     return operatorPage.slice(start, next === -1 ? undefined : next);
   };
 
-  it('says a rolled back restore leaves the storage lock stale until it is released', () => {
+  it('says a restart settles the operation with the restore and releases the storage lock of a proven one', () => {
     const afterCrash = section('After a crash');
-    expect(afterCrash).toMatch(/storage lock/);
-    expect(afterCrash).toMatch(/stale/);
-    expect(afterCrash).toContain('`409 lock_stale`');
-    expect(afterCrash).toContain('(#release-a-stale-lock)');
+    expect(afterCrash).toMatch(/Startup settles the operation together with the restore/);
+    expect(afterCrash).toContain('`failed` with `errorClass: "interrupted"`');
+    expect(afterCrash).toContain('`succeeded`');
+    expect(afterCrash).toMatch(/release the volume's storage lock/);
   });
 
-  it('says a restart\'s settling, rolled back or forward, leaves the storage lock stale', () => {
-    expect(section('After a crash')).toMatch(/rolled back, or rolled forward to `committed`/);
+  it('says a restore that could not be proven keeps completion_unknown and a stale lock until a retry or a reviewed release', () => {
+    const afterCrash = section('After a crash');
+    expect(afterCrash).toMatch(/keeps reading `completion_unknown`, and its storage lock stays stale/);
+    expect(afterCrash).toContain('`409 lock_stale`');
+    expect(afterCrash).toContain('(#release-a-stale-lock)');
   });
 
   it('says cancel ends `cancelled` only before the swap, and how a request that was not served is worded', () => {
