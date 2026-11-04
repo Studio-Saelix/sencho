@@ -490,6 +490,9 @@ describe('GET /api/recovery/operations/:id', () => {
     expect(res.status).toBe(409);
     expect(res.body.errorClass).toBe('not_cancellable');
     expect(res.body.code).toBe('NOT_CANCELLABLE');
+    // A repository operation is not a restore, and the answer must not say it is.
+    expect(res.body.error).toMatch(/repository provisioning/i);
+    expect(res.body.error).not.toMatch(/restore/i);
   });
 });
 
@@ -1183,9 +1186,47 @@ describe('audit summaries', () => {
     expect(getAuditSummary('POST', 'recovery/storage/points')).toBe('Created a recovery point');
     expect(getAuditSummary('POST', 'recovery/points/abc/verify')).toBe('Verified recovery point: abc');
     expect(getAuditSummary('POST', 'recovery/points/abc/restore')).toBe('Restored recovery point: abc');
-    expect(getAuditSummary('POST', 'recovery/points/abc/overwrite')).toBe('Restored over the existing volume: abc');
-    expect(getAuditSummary('POST', 'recovery/restores/intent-1/resolve')).toBe('Resolved a restore over the existing volume: intent-1');
+    expect(getAuditSummary('POST', 'recovery/points/abc/overwrite')).toBe('Started a restore over the existing volume: abc');
     expect(getAuditSummary('POST', 'recovery/locks/release')).toBe('Released a stale recovery lock');
+  });
+
+  it('records a preview as a preview, not as a restore', async () => {
+    // The overwrite pattern is a path prefix, so the preview route matched it and
+    // the log showed a restore for every look at the preview.
+    const { getAuditSummary } = await import('../utils/audit-summaries');
+    expect(getAuditSummary('POST', 'recovery/points/abc/overwrite/preview', 200))
+      .toBe('Previewed a restore over the existing volume: abc');
+    expect(getAuditSummary('POST', 'recovery/points/abc/overwrite/preview', 403))
+      .toBe('Preview of a restore over the existing volume failed (403): abc');
+  });
+
+  it('tells retry from release_fence, and a refusal from an action', async () => {
+    const { getAuditSummary } = await import('../utils/audit-summaries');
+    const retry = getAuditSummary('POST', 'recovery/restores/intent-1/resolve', 200, { action: 'retry' });
+    const release = getAuditSummary('POST', 'recovery/restores/intent-1/resolve', 200, { action: 'release_fence' });
+    expect(retry).toBe('Retried a restore over the existing volume: intent-1');
+    expect(release).toBe('Released the fence of a restore over the existing volume: intent-1');
+    expect(retry).not.toBe(release);
+    expect(getAuditSummary('POST', 'recovery/restores/intent-1/resolve', 409, { action: 'release_fence' }))
+      .toBe('Release of a restore fence refused (409): intent-1');
+    expect(getAuditSummary('POST', 'recovery/restores/intent-1/resolve', 409, { action: 'retry' }))
+      .toBe('Retry of a restore over the existing volume refused (409): intent-1');
+    // A body without a known action (a refused 400, or a proxied request whose
+    // body this process never parsed) still words the route without claiming one.
+    expect(getAuditSummary('POST', 'recovery/restores/intent-1/resolve', 400, { action: 'other' }))
+      .toBe('Resolve of a restore over the existing volume refused (400): intent-1');
+    expect(getAuditSummary('POST', 'recovery/restores/intent-1/resolve', 200))
+      .toBe('Resolved a restore over the existing volume: intent-1');
+    expect(getAuditSummary('POST', 'recovery/restores/intent-1/resolve', 200, { action: '__proto__' }))
+      .toBe('Resolved a restore over the existing volume: intent-1');
+  });
+
+  it('does not word a refused overwrite as a restore', async () => {
+    const { getAuditSummary } = await import('../utils/audit-summaries');
+    expect(getAuditSummary('POST', 'recovery/points/abc/overwrite', 409))
+      .toBe('Restore over the existing volume refused (409): abc');
+    expect(getAuditSummary('POST', 'recovery/points/abc/overwrite', 202))
+      .toBe('Started a restore over the existing volume: abc');
   });
 });
 
@@ -1372,5 +1413,16 @@ describe('an overwrite is authorized against the stacks its fence stopped', () =
     const both = await userEditing('edits-both-cancel', ['alpha', 'beta']);
     const allowed = await request(app).post(`/api/recovery/operations/${operationId}/cancel`).set('Cookie', both);
     expect(allowed.status).not.toBe(403);
+  });
+
+  it('refuses to cancel a restore whose swap started, saying it is about the restore', async () => {
+    const { operationId, intentId } = await seedStoppedStacks();
+    for (const phase of ['swapping', 'swapped']) {
+      recoveryDbModule.recoveryDb().prepare('UPDATE recovery_restore_intents SET phase = ? WHERE id = ?').run(phase, intentId);
+      const res = await request(app).post(`/api/recovery/operations/${operationId}/cancel`).set('Cookie', adminCookie);
+      expect(res.status, phase).toBe(409);
+      expect(res.body.errorClass, phase).toBe('not_cancellable');
+      expect(res.body.error, phase).toMatch(/This restore has passed the point/);
+    }
   });
 });

@@ -212,7 +212,7 @@ export const RECOVERY_REFUSAL_REASONS = [
   'repository_replaced',
   'wrong_route',
   'generation_changed',
-  'dependents_changed',
+  'confirmation_mismatch',
   'no_fence',
   'fence_released',
 ] as const;

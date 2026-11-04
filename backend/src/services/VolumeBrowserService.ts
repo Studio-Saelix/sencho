@@ -541,7 +541,7 @@ export class VolumeBrowserService {
     // every workload off it, so the whole surface is refused, not only writes.
     const { RestoreFenceStore } = await import('./recovery/restoreFence');
     if (RestoreFenceStore.getInstance().isVolumeFenced(volumeName)) {
-      throw new DataRestoreFenceError(volumeName);
+      throw new DataRestoreFenceError(volumeName, 'browse');
     }
     const docker = DockerController.getInstance(this.nodeId).getDocker();
     try {
@@ -641,7 +641,7 @@ export class VolumeBrowserService {
       // once an overwrite fences the volume, and waited for if it was already
       // on its way when the fence went up.
       const { startUnderFence } = await import('./recovery/restoreFence');
-      await startUnderFence([volumeName], () => container.start());
+      await startUnderFence([volumeName], () => container.start(), 'browse');
       if (wantStdin && opts.stdin) {
         // Feed the file content to the container's stdin, then close it so the
         // helper's `cat > file` sees EOF and exits.

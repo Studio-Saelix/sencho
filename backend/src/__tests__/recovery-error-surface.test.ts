@@ -61,3 +61,25 @@ describe('recovery refusal reasons', () => {
     expect([...listed].sort()).toEqual([...RECOVERY_REFUSAL_REASONS].sort());
   });
 });
+
+describe('the operator page on a restore that a crash interrupted', () => {
+  const section = (title: string): string => {
+    const start = operatorPage.indexOf(`### ${title}`);
+    expect(start, title).toBeGreaterThanOrEqual(0);
+    const next = operatorPage.indexOf('\n### ', start + 1);
+    return operatorPage.slice(start, next === -1 ? undefined : next);
+  };
+
+  it('says a rolled back restore leaves the storage lock stale until it is released', () => {
+    const afterCrash = section('After a crash');
+    expect(afterCrash).toMatch(/storage lock/);
+    expect(afterCrash).toMatch(/stale/);
+    expect(afterCrash).toContain('`409 lock_stale`');
+    expect(afterCrash).toContain('(#release-a-stale-lock)');
+  });
+
+  it('says cancel ends `cancelled` only before the swap, and that a refused request is worded as one', () => {
+    expect(operatorPage).toMatch(/`cancelled` only before the swap starts/);
+    expect(section('Resolve a restore that did not settle')).toContain('a refused request says it was refused');
+  });
+});

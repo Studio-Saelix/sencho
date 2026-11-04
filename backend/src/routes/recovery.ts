@@ -736,7 +736,7 @@ recoveryRouter.post('/operations/:id/cancel', handle(async (req, res) => {
   if (operation.kind === 'repository_init') {
     // A half-provisioned repository is settled by the next provision attempt, not
     // by an abort in the middle of volume creation.
-    sendRecoveryError(res, 'not_cancellable');
+    sendRecoveryError(res, 'not_cancellable', {}, 'A repository provisioning operation cannot be cancelled once it has started. The next provision request settles it.');
     return;
   }
   if (operation.kind === 'restore') {
@@ -746,7 +746,7 @@ recoveryRouter.post('/operations/:id/cancel', handle(async (req, res) => {
     const intent = RestoreIntentStore.getInstance().getByOperation(operation.id);
     if (intent && intent.targetMode === 'staged_overwrite'
       && (intent.phase === 'swapping' || intent.phase === 'swapped')) {
-      sendRecoveryError(res, 'not_cancellable');
+      sendRecoveryError(res, 'not_cancellable', {}, 'This restore has passed the point where it can be rolled back safely and cannot be cancelled.');
       return;
     }
   }

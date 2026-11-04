@@ -2,6 +2,7 @@ import {
   HELPER_RESTORE_MOUNT,
   RecoveryHelperRunner,
   resticCommand,
+  type HelperProfile,
   type HelperRunSpec,
 } from './helperRunner';
 import {
@@ -9,9 +10,11 @@ import {
   applyRestoreLine,
   classifyBackupRun,
   classifyRestoreRun,
+  helperFailureNote,
   newBackupAccumulator,
   newRestoreAccumulator,
 } from './resticOutput';
+import { sanitizeForLog } from '../../../utils/safeLog';
 import { consistencyFromObservations, type InUseObservation } from '../volumeSources';
 import { RECOVERY_CONTRACT_VERSION } from '../types';
 import type {
@@ -115,7 +118,16 @@ export class ResticEngine implements BackupEngine {
       stderrTail: helperResult.stderrTail,
     });
     if (outcome.status === 'cancelled') return { ok: false, errorClass: 'interrupted' };
-    if (outcome.status === 'failed') return { ok: false, errorClass: outcome.errorClass };
+    if (outcome.status === 'failed') {
+      console.warn(
+        '[Recovery] Backup helper for operation %s failed with %s, exit %s: %s',
+        sanitizeForLog(ctx.operationId),
+        outcome.errorClass,
+        helperResult.exitCode ?? 'none',
+        helperFailureNote(helperResult.stderrTail, []),
+      );
+      return { ok: false, errorClass: outcome.errorClass };
+    }
 
     // The generation token is re-read after the capture: a volume recreated
     // while it was being read gives a point that describes bytes that no longer
@@ -166,6 +178,7 @@ export class ResticEngine implements BackupEngine {
     if (!intent.snapshotId) return { ok: false, errorClass: 'invalid_request' };
 
     let args: string[];
+    let profile: HelperProfile = 'restore';
     if (intent.target.mode === 'new_volume') {
       // `snapshot:/data` puts the captured root's contents at the target root,
       // which is the right shape for a volume Sencho created.
@@ -179,13 +192,15 @@ export class ResticEngine implements BackupEngine {
         return { ok: false, errorClass: 'invalid_request' };
       }
       args = ['restore', intent.snapshotId, '--target', `${HELPER_RESTORE_MOUNT}/${workDir}`];
+      // The live root may belong to the application, which a plain root cannot write.
+      profile = 'materialize';
     } else {
       return { ok: false, errorClass: 'invalid_request' };
     }
 
     const accumulator = newRestoreAccumulator();
     const spec: HelperRunSpec = {
-      profile: 'restore',
+      profile,
       operationId: ctx.operationId,
       // `--no-lock`: the repository mount is read-only and Sencho's repository
       // lock is the mutual exclusion, so restic must not try to write a lock.
@@ -214,7 +229,19 @@ export class ResticEngine implements BackupEngine {
       stderrTail: result.stderrTail,
     });
     if (outcome.status === 'cancelled') return { ok: false, errorClass: 'interrupted' };
-    if (outcome.status === 'failed') return { ok: false, errorClass: outcome.errorClass };
+    if (outcome.status === 'failed') {
+      // The helper container is removed when it exits and the API answers the
+      // class only, so this line is the one place the cause survives.
+      console.warn(
+        '[Recovery] Restore helper (%s) for operation %s failed with %s, exit %s: %s',
+        profile,
+        sanitizeForLog(ctx.operationId),
+        outcome.errorClass,
+        result.exitCode ?? 'none',
+        helperFailureNote(result.stderrTail, accumulator.sampleErrors),
+      );
+      return { ok: false, errorClass: outcome.errorClass };
+    }
     return {
       ok: true,
       evidence: {

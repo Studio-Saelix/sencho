@@ -1564,8 +1564,9 @@ components:
             (`503 repository_unavailable`). The overwrite routes add
             `wrong_route` (a `staged_overwrite` or `new_path` mode asked for on the new-volume
             route), `generation_changed` (the volume's generation moved since the preview),
-            `dependents_changed` (a stack or container started using the volume after the
-            preview), `no_fence` (`release_fence` on a restore that never stopped a workload),
+            `confirmation_mismatch` (the confirmation token does not match the volume as it is
+            now: it came from another preview, or a container, stack, repository or point
+            changed since the preview), `no_fence` (`release_fence` on a restore that never stopped a workload),
             and `fence_released` (`release_fence` on a restore whose fence is already released).
 
     RecoveryOperation:
@@ -6455,7 +6456,7 @@ paths:
         `POST /api/recovery/restores/{intentId}/resolve`.
 
         Request errors: `409 precondition_failed` with `reason: generation_changed` or
-        `reason: dependents_changed` (the state moved since the preview; preview again),
+        `reason: confirmation_mismatch` (the token is not the one the current state gives; preview again),
         `409 lock_held` (another restore holds the volume or its fence), and
         `507 insufficient_space`. Errors found after admission answer `202` and show up on
         `GET /api/recovery/operations/{id}`, where the operation ends `failed`, `partial` (the

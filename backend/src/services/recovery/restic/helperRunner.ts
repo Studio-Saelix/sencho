@@ -37,7 +37,7 @@ export const HELPER_SOURCE_MOUNT = '/data';
 /** Where the restore target is mounted. */
 export const HELPER_RESTORE_MOUNT = '/restore';
 
-export type HelperProfile = 'probe' | 'config' | 'init' | 'backup' | 'check' | 'restore' | 'unlock' | 'swap';
+export type HelperProfile = 'probe' | 'config' | 'init' | 'backup' | 'check' | 'restore' | 'unlock' | 'materialize' | 'swap';
 
 /**
  * What a profile allows. `source`/`target` name the extra mount a profile
@@ -167,6 +167,24 @@ export const HELPER_PROFILES: Readonly<Record<HelperProfile, HelperProfileSpec>>
     pidsLimit: 256,
     memoryBytes: GIB,
     timeoutMs: 120_000,
+  },
+  // The restore step of a staged overwrite. It writes the point into a work
+  // directory inside the live volume, whose root belongs to the application
+  // (postgres, mariadb and redis chown it to their own user and close it to
+  // everyone else), so creating that directory needs DAC_OVERRIDE on top of
+  // what the restore profile has. The restore profile stays without it: a restore
+  // into a new volume writes a root Sencho created itself.
+  materialize: {
+    user: '0:0',
+    capAdd: ['CHOWN', 'FOWNER', 'FSETID', 'DAC_OVERRIDE', 'DAC_READ_SEARCH'],
+    repositoryReadOnly: true,
+    needsRepository: true,
+    source: null,
+    target: 'read_write',
+    tmpfs: { '/tmp': 'size=64m,mode=1777' },
+    pidsLimit: 256,
+    memoryBytes: GIB,
+    timeoutMs: null,
   },
   // The journaled rename swap. It renames entries in a root the application
   // owns and deletes the work directory afterwards, so it needs the ownership

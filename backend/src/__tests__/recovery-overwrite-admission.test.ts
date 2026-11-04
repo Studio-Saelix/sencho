@@ -235,8 +235,21 @@ describe('admission', () => {
     const fake = fakeDocker({ volumes: [{ name: VOLUME }], containers: [mountingContainer()] });
     const seeded = seed({ createdAt: fake.volumes.get(VOLUME)?.createdAt ?? '' });
     await expect(confirm(fake, seeded.pointId, { token: 'f'.repeat(64) }))
-      .rejects.toMatchObject({ errorClass: 'precondition_failed', reason: 'dependents_changed' });
+      .rejects.toMatchObject({ errorClass: 'precondition_failed', reason: 'confirmation_mismatch' });
     expect(intents.RestoreIntentStore.getInstance().listUnsettled()).toHaveLength(0);
+  });
+
+  it('does not say a container or stack changed when nothing did', async () => {
+    // A token that matches nothing (here, all zeros) says only that it is not the
+    // one the current state gives. Naming the dependents would claim a change that
+    // never happened, and the token cannot say which fact moved.
+    const fake = fakeDocker({ volumes: [{ name: VOLUME }], containers: [mountingContainer()] });
+    const seeded = seed({ createdAt: fake.volumes.get(VOLUME)?.createdAt ?? '' });
+    const refusal = await confirm(fake, seeded.pointId, { token: '0'.repeat(64) }).catch((err: unknown) => err);
+    expect(refusal).toMatchObject({ errorClass: 'precondition_failed', reason: 'confirmation_mismatch' });
+    const detail = (refusal as { detail: string }).detail;
+    expect(detail).not.toMatch(/container|stack/i);
+    expect(detail).toMatch(/does not match/);
   });
 
   it('refuses a token minted before a container appeared', async () => {
@@ -250,7 +263,7 @@ describe('admission', () => {
       pointId: seeded.pointId,
       confirmationToken: preview.confirmation.token,
       confirmVolumeName: VOLUME,
-    })).rejects.toMatchObject({ errorClass: 'precondition_failed', reason: 'dependents_changed' });
+    })).rejects.toMatchObject({ errorClass: 'precondition_failed', reason: 'confirmation_mismatch' });
   });
 
   it('refuses a typed name that is not the target', async () => {
@@ -394,7 +407,7 @@ describe('admission', () => {
       pointId: seeded.pointId,
       confirmationToken: preview.confirmation.token,
       confirmVolumeName: VOLUME,
-    })).rejects.toMatchObject({ errorClass: 'precondition_failed', reason: 'dependents_changed' });
+    })).rejects.toMatchObject({ errorClass: 'precondition_failed', reason: 'confirmation_mismatch' });
   });
 
   it('refuses a volume recreated after the point was taken', async () => {

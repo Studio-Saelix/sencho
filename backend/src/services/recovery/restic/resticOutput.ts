@@ -1,6 +1,7 @@
 import path from 'path';
 import { canonicalizePathScope } from '../recoveryPoints';
 import { HELPER_SOURCE_MOUNT } from './helperRunner';
+import { redactSensitiveText } from '../../../utils/safeLog';
 import type { ExclusionReason, PointExclusion } from '../types';
 
 /**
@@ -339,6 +340,16 @@ export function parseRepositoryConfig(stdout: string): { id: string } | null {
 export function trimForLog(text: string, max = 200): string {
   const oneLine = text.replace(/[\r\n]+/g, ' ').trim();
   return oneLine.length > max ? `${oneLine.slice(0, max)}…` : oneLine;
+}
+
+/**
+ * What a failed restore said, for the node-local log only: restic's own error
+ * items, then the last two lines of its stderr, which is where a fatal error that
+ * is not an item (it could not create its target) lands. Never sent to a client.
+ */
+export function helperFailureNote(stderrTail: string, sampleErrors: readonly string[]): string {
+  const tail = stderrTail.split('\n').filter((line) => line.trim() !== '').slice(-2);
+  return redactSensitiveText(trimForLog([...sampleErrors, ...tail].join(' | '), 400));
 }
 
 /** The default ordering of exclusion paths, for stable evidence. */

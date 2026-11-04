@@ -496,8 +496,11 @@ export async function prepareOverwriteAdmission(deps: OverwriteDeps, input: {
   });
   if (expected !== input.confirmationToken) {
     throw new RecoveryError('precondition_failed', {
-      reason: 'dependents_changed',
-      detail: 'A container or stack using this volume changed since the preview. Ask for a new preview and confirm again.',
+      reason: 'confirmation_mismatch',
+      // The token is a digest, so a mismatch cannot say which fact moved: it may
+      // be a token from another preview or another point, or a container, stack,
+      // repository or generation that changed since this one was issued.
+      detail: 'The confirmation token does not match this volume as it is now: it came from another preview, or something changed since the preview. Ask for a new preview and confirm again.',
     });
   }
 
@@ -589,7 +592,17 @@ interface PipelineState {
  * the operation exactly once; a thrown error is the last resort and leaves the
  * intent where it is for reconciliation, which is the truthful state.
  */
-export async function runOverwritePipeline(ctx: OverwriteRunContext): Promise<void> {
+export async function runOverwritePipeline(input: OverwriteRunContext): Promise<void> {
+  // Every exit settles through `finish`, so this is the one place that records
+  // why an overwrite did not succeed. The API answers a class only and the helper
+  // container is gone by then.
+  const ctx: OverwriteRunContext = {
+    ...input,
+    finish: (outcome) => {
+      logOverwriteOutcome(input.deps, input.intentId, outcome);
+      input.finish(outcome);
+    },
+  };
   const deps = ctx.deps;
   const intent = deps.intents.get(ctx.intentId);
   if (!intent || intent.targetMode !== 'staged_overwrite' || !intent.targetVolume) {
@@ -617,6 +630,19 @@ export async function runOverwritePipeline(ctx: OverwriteRunContext): Promise<vo
   await swapAndCleanup(ctx, state);
 }
 
+function logOverwriteOutcome(deps: OverwriteDeps, intentId: string, outcome: OperationFinish): void {
+  if (outcome.state === 'succeeded' || outcome.state === 'cancelled') return;
+  const intent = deps.intents.get(intentId);
+  console.warn(
+    '[Recovery] Overwrite %s ended %s%s (phase %s, fence %s)',
+    sanitizeForLog(intentId),
+    outcome.state,
+    'errorClass' in outcome ? ` with ${outcome.errorClass}` : '',
+    intent?.phase ?? 'unknown',
+    intent?.fenceState ?? 'unknown',
+  );
+}
+
 /**
  * Stage and verify the point in the separate volume. A wrong key, a missing or
  * corrupt pack, a full disk and unverified metadata all fail here, with the live
@@ -634,6 +660,7 @@ async function stagePoint(ctx: OverwriteRunContext, state: PipelineState): Promi
   try {
     created = await createLabelledVolume(deps.docker, stagingVolume, state.intent.id);
   } catch (err) {
+    console.warn('[Recovery] Could not create the staging volume for %s:', sanitizeForLog(state.intent.id), errorMessageForLog(err));
     // A create that failed after Docker made the volume (its answer was lost, or
     // the read-back failed) leaves a volume behind, so it is cleaned up like any
     // other staging failure.
@@ -812,6 +839,7 @@ async function fenceWorkloads(ctx: OverwriteRunContext, state: PipelineState): P
   try {
     await applyRestoreFence(state.intent.id, deps.docker, state.members);
   } catch (err) {
+    console.warn('[Recovery] Could not fence the workloads for %s:', sanitizeForLog(state.intent.id), errorMessageForLog(err));
     await settleRollback(ctx, state, classifyRecoveryError(err));
     return false;
   }
@@ -848,11 +876,22 @@ async function takePreRestorePoint(ctx: OverwriteRunContext, state: PipelineStat
   }
   if (!result.ok) {
     settleFailedPoint(deps, point.id, result.errorClass);
-    await settleRollback(ctx, state, 'pre_restore_failed');
+    // An operator's cancel aborts this capture. That is a stop, not a point that
+    // came out incomplete, so it ends `cancelled` like a cancel at any other step.
+    if (result.errorClass !== 'interrupted') {
+      console.warn('[Recovery] The pre-restore point for %s failed with %s.', sanitizeForLog(state.intent.id), result.errorClass);
+    }
+    await settleRollback(ctx, state, result.errorClass === 'interrupted' ? 'interrupted' : 'pre_restore_failed');
     return false;
   }
   const finalized = deps.points.finalize(point.id, { status: 'succeeded', evidence: result.evidence });
   if (finalized.status !== 'succeeded' || result.evidence.capture.skippedCount > 0) {
+    console.warn(
+      '[Recovery] The pre-restore point for %s was not complete (status %s, %d skipped).',
+      sanitizeForLog(state.intent.id),
+      finalized.status,
+      result.evidence.capture.skippedCount,
+    );
     await settleRollback(ctx, state, 'pre_restore_failed');
     return false;
   }

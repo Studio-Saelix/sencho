@@ -683,5 +683,13 @@ func swapCleanup(request swapRequest) (swapReport, error) {
 	if err := syncDir(request.Root); err != nil {
 		return swapReport{}, err
 	}
+	// Removing the work directory changed the root's mtime, so the captured one
+	// the commit applied is set again. Only a run that removed the directory
+	// gets here: a repeated cleanup answers above and leaves a root the
+	// application has since written to alone.
+	mtime := time.Unix(0, plan.Root.Mtime)
+	if err := os.Chtimes(request.Root, mtime, mtime); err != nil {
+		return swapReport{}, err
+	}
 	return swapReport{Status: statusCleaned, Originals: plan.Originals, Incoming: plan.Incoming}, nil
 }

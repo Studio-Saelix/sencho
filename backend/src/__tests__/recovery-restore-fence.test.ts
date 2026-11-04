@@ -271,6 +271,20 @@ describe('what the fence closes', () => {
     await expect(browser.listDir(VOLUME, '')).rejects.toMatchObject({ code: 'data_restore' });
   });
 
+  it('words the browser refusal about opening the volume, not about starting a container', async () => {
+    const intentId = seedIntent('fenced');
+    const fake = fakeDocker({ volumes: [{ name: VOLUME }] });
+    vi.spyOn(DockerController.prototype, 'getDocker').mockReturnValue(fake.docker);
+    fence.RestoreFenceStore.getInstance().recordMembers(intentId, [member()]);
+    fence.RestoreFenceStore.getInstance().setFenceState(intentId, 'held');
+    const browser = VolumeBrowserService.VolumeBrowserService.getInstance(1);
+    const refusal = await browser.listDir(VOLUME, '').then(() => new Error('not refused'), (err: Error) => err);
+    expect(refusal).toMatchObject({ code: 'data_restore' });
+    expect(refusal.message).toContain(VOLUME);
+    expect(refusal.message).toMatch(/will not open it/);
+    expect(refusal.message).not.toMatch(/container|start/i);
+  });
+
   it('fails open with one warning when the store cannot be read', () => {
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
     const spy = vi.spyOn(recoveryDbModule, 'recoveryDb').mockImplementation(() => {
@@ -377,7 +391,12 @@ describe('a start that races the fence', () => {
     vi.spyOn(fence.RestoreFenceStore.prototype, 'isVolumeFenced').mockReturnValue(false);
 
     const browser = VolumeBrowserService.VolumeBrowserService.getInstance(1);
-    await expect(browser.listDir(VOLUME, '')).rejects.toMatchObject({ code: 'data_restore' });
+    // The helper container is the browser's own, so this refusal is worded like the
+    // up-front one, not as a container the operator started.
+    const refusal = await browser.listDir(VOLUME, '').then(() => new Error('not refused'), (err: Error) => err);
+    expect(refusal).toMatchObject({ code: 'data_restore' });
+    expect(refusal.message).toMatch(/will not open it/);
+    expect(refusal.message).not.toMatch(/container|start/i);
     expect(started).not.toHaveBeenCalled();
     // The helper container that was created is not left behind.
     expect(removed).toEqual(['helper']);
@@ -516,7 +535,9 @@ describe('fence identity', () => {
   it('names only the volume in the refusal, and tags a created volume with the intent', () => {
     const err = new DataRestoreFenceError(VOLUME);
     expect(err.message).toContain(VOLUME);
+    expect(err.message).toMatch(/Sencho will not start it/);
     expect(err.code).toBe('data_restore');
+    expect(new DataRestoreFenceError(VOLUME, 'browse').message).toMatch(/Sencho will not open it/);
     expect(intentLabels('intent-1')).toEqual({ 'dev.sencho.recovery.restore-intent': 'intent-1' });
   });
 });

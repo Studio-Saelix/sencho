@@ -111,9 +111,10 @@ afterEach(() => {
 });
 
 /** An active repository, a stored volume, and an operation of `kind` a dead process left holding locks. */
-function seedInterrupted(kind: 'create_point' | 'verify_point' | 'restore' | 'repository_init'): {
+function seedInterrupted(kind: 'create_point' | 'verify_point' | 'restore' | 'repository_init', options: { storageLock?: boolean } = {}): {
   repositoryId: string;
   storageKey: string;
+  storageId: string;
   operationId: string;
 } {
   const repository = repositoryStore.RecoveryRepositoryStore.getInstance().register({
@@ -134,12 +135,12 @@ function seedInterrupted(kind: 'create_point' | 'verify_point' | 'restore' | 're
   }).operation;
   store.markRunning(operation.id);
   store.acquireLock('repository', repository.id, operation.id);
-  if (kind === 'create_point') store.acquireLock('storage', storage.storageKey, operation.id);
+  if (kind === 'create_point' || options.storageLock) store.acquireLock('storage', storage.storageKey, operation.id);
   // The process that owned them is gone: the rows carry another epoch.
   const db = recoveryDbModule.recoveryDb();
   db.prepare("UPDATE recovery_operations SET process_epoch = 'dead-epoch' WHERE id = ?").run(operation.id);
   db.prepare("UPDATE recovery_locks SET process_epoch = 'dead-epoch' WHERE owner_operation_id = ?").run(operation.id);
-  return { repositoryId: repository.id, storageKey: storage.storageKey, operationId: operation.id };
+  return { repositoryId: repository.id, storageKey: storage.storageKey, storageId: storage.id, operationId: operation.id };
 }
 
 async function boot(unlockExit: number, remainingHelpers = 0): Promise<{ unlocks: string[] }> {
@@ -235,6 +236,36 @@ describe('boot with an interrupted capture', () => {
       nodeId, volumeName: 'interrupted_data', actor: 'alice', idempotencyKey: 'same-volume',
       requestDigest: runner.sha256Digest(['create_point', 'interrupted_data']), transport: 'local', authorize: () => true,
     })).rejects.toMatchObject({ errorClass: 'lock_stale' });
+  });
+});
+
+describe('the storage lock of an interrupted overwrite', () => {
+  // The operator page tells an operator that a restore settled `rolled_back` at
+  // boot still leaves the volume's storage lock stale, and that a new overwrite
+  // answers `lock_stale` until it is released. This is the behavior that sentence
+  // describes: boot settles the restore, not the lock.
+  it('stays stale after boot, refuses the next restore of the volume, and opens on a reviewed release', async () => {
+    const { storageKey, storageId } = seedInterrupted('restore', { storageLock: true });
+    await boot(0);
+    const store = operations.RecoveryOperationStore.getInstance();
+    expect(store.getLock('storage', storageKey)?.staleSince).not.toBeNull();
+
+    // The next overwrite is an operation of this process asking for the same lock.
+    const next = store.start({
+      idempotencyKey: 'next-overwrite', kind: 'restore', storageId,
+      actor: 'admin', transport: 'local', requestDigest: 'b'.repeat(64),
+    }).operation;
+    let refusal: unknown;
+    try {
+      store.acquireLock('storage', storageKey, next.id);
+    } catch (err) {
+      refusal = err;
+    }
+    expect(refusal).toMatchObject({ errorClass: 'lock_stale' });
+
+    store.releaseStaleLock('storage', storageKey, 'admin');
+    expect(store.getLock('storage', storageKey)).toBeNull();
+    expect(() => store.acquireLock('storage', storageKey, next.id)).not.toThrow();
   });
 });
 

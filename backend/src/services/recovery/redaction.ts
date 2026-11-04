@@ -45,8 +45,7 @@ const ERROR_DETAIL: Record<RecoveryErrorClass, string> = {
     'There is not enough free space to restore this point next to the existing data.',
   cleanup_failed:
     'The restored data is in place, but the temporary restore directory could not be removed. The workloads stay stopped until this is resolved.',
-  not_cancellable:
-    'This restore has passed the point where it can be rolled back safely and cannot be cancelled.',
+  not_cancellable: 'This operation can no longer be cancelled.',
 };
 
 export function errorDetailFor(errorClass: RecoveryErrorClass): string {

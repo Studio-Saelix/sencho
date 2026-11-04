@@ -8,6 +8,7 @@
  */
 import { describe, it, expect, beforeAll, afterAll, beforeEach, vi } from 'vitest';
 import { randomUUID } from 'crypto';
+import { format } from 'util';
 import { setupTestDb, cleanupTestDb } from './helpers/setupTestDb';
 import {
   container,
@@ -383,6 +384,156 @@ describe('cancellation', () => {
     expect(outcomes).toEqual([{ state: 'cancelled' }]);
     expect(fake.calls.some((call) => call.startsWith('stop:') || call.startsWith('update:'))).toBe(false);
     expect(intents.RestoreIntentStore.getInstance().get(seeded.intentId)?.phase).toBe('rolled_back');
+  });
+});
+
+describe('cancelling after the fence is applied', () => {
+  // A cancel aborts whichever helper is running. Every step after the fence ended
+  // the operation `failed / pre_restore_failed` when the pre-restore capture was
+  // the one aborted, which told the operator their point was bad.
+  function twoContainers() {
+    const member = container({ Id: 'c1', State: 'running', Mounts: [{ Type: 'volume', Name: VOLUME }] });
+    const fake = fakeDocker({ volumes: [{ name: VOLUME }], containers: [member] });
+    const seeded = seed({ createdAt: fake.volumes.get(VOLUME)?.createdAt ?? '', members: [member] });
+    return { fake, seeded };
+  }
+
+  it('ends cancelled, not pre_restore_failed, when the pre-restore capture is the step aborted', async () => {
+    const { fake, seeded } = twoContainers();
+    const engine = scriptedEngine({
+      createPoint: async () => ({ ok: false as const, errorClass: 'interrupted' as const }),
+    });
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    const { outcomes } = await run({ fake, helper: successHelper(), engine, seeded });
+
+    expect(outcomes).toEqual([{ state: 'cancelled' }]);
+    // The workloads were stopped by the fence and come back, on the original data.
+    expect(fake.calls).toContain('stop:c1');
+    expect(fake.calls).toContain('start:c1');
+    expect(fake.containers.get('c1')?.State).toBe('running');
+    const intent = intents.RestoreIntentStore.getInstance().get(seeded.intentId);
+    expect(intent?.phase).toBe('rolled_back');
+    expect(intent?.fenceState).toBe('released');
+    expect(intent?.outcomeClass).toBeNull();
+    // The point taken for the cancelled run is not left looking complete.
+    const preRestore = points.RecoveryPointStore.getInstance().get(intent?.preRestorePointId ?? '');
+    expect(preRestore?.status).toBe('failed');
+    // A stop the operator asked for is not logged as a failure.
+    expect(warn).not.toHaveBeenCalled();
+  });
+
+  it('ends cancelled when the copy inside the volume is the step aborted', async () => {
+    const { fake, seeded } = twoContainers();
+    const engine = scriptedEngine({
+      restores: [
+        async () => ({ ok: true as const, evidence: { filesRestored: 4, bytesRestored: 400, verified: true } }),
+        async () => ({ ok: false as const, errorClass: 'interrupted' as const }),
+      ],
+    });
+    const { outcomes } = await run({ fake, helper: successHelper(), engine, seeded });
+
+    expect(outcomes).toEqual([{ state: 'cancelled' }]);
+    expect(fake.containers.get('c1')?.State).toBe('running');
+    expect(intents.RestoreIntentStore.getInstance().get(seeded.intentId)?.phase).toBe('rolled_back');
+  });
+
+  it('still ends pre_restore_failed when the capture really failed', async () => {
+    const { fake, seeded } = twoContainers();
+    const engine = scriptedEngine({
+      createPoint: async () => ({ ok: false as const, errorClass: 'node_error' as const }),
+    });
+    const { outcomes } = await run({ fake, helper: successHelper(), engine, seeded });
+    expect(outcomes).toEqual([{ state: 'failed', errorClass: 'pre_restore_failed' }]);
+  });
+});
+
+describe('a failed overwrite says why in the node log', () => {
+  // The API answers a class only and the helper container is removed when it
+  // exits, so the log is the only place an operator can learn the cause.
+  function seededOne() {
+    const member = container({ Id: 'c1', State: 'running', Mounts: [{ Type: 'volume', Name: VOLUME }] });
+    const fake = fakeDocker({ volumes: [{ name: VOLUME }], containers: [member] });
+    const seeded = seed({ createdAt: fake.volumes.get(VOLUME)?.createdAt ?? '', members: [member] });
+    return { fake, seeded };
+  }
+
+  async function warnings(work: () => Promise<unknown>): Promise<string[]> {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    await work();
+    return warn.mock.calls.map((call) => format(...call));
+  }
+
+  it('names the restore, its class and where it stopped when the copy inside the volume fails', async () => {
+    const { fake, seeded } = seededOne();
+    const engine = scriptedEngine({
+      restores: [
+        async () => ({ ok: true as const, evidence: { filesRestored: 4, bytesRestored: 400, verified: true } }),
+        async () => ({ ok: false as const, errorClass: 'node_error' as const }),
+      ],
+    });
+    const lines = await warnings(() => run({ fake, helper: successHelper(), engine, seeded }));
+    const line = lines.find((text) => text.includes('Overwrite') && text.includes(seeded.intentId));
+    expect(line).toBeDefined();
+    expect(line).toContain('failed with node_error');
+    expect(line).toContain('phase rolled_back');
+  });
+
+  it('names a pre-restore capture that failed', async () => {
+    const { fake, seeded } = seededOne();
+    const engine = scriptedEngine({
+      createPoint: async () => ({ ok: false as const, errorClass: 'node_error' as const }),
+    });
+    const lines = await warnings(() => run({ fake, helper: successHelper(), engine, seeded }));
+    expect(lines.some((text) => text.includes('pre-restore point') && text.includes('node_error'))).toBe(true);
+    expect(lines.some((text) => text.includes('failed with pre_restore_failed'))).toBe(true);
+  });
+
+  it('names a staging failure, which settles before anything is fenced', async () => {
+    const { fake, seeded } = seededOne();
+    const engine = scriptedEngine({
+      restores: [async () => ({ ok: false as const, errorClass: 'repository_unavailable' as const })],
+    });
+    const lines = await warnings(() => run({ fake, helper: successHelper(), engine, seeded }));
+    expect(lines.some((text) => text.includes(seeded.intentId) && text.includes('failed with repository_unavailable'))).toBe(true);
+  });
+
+  it('names a swap that left the volume unproven, and a clean-up that failed', async () => {
+    const unknown = seededOne();
+    const unknownLines = await warnings(() => run({
+      fake: unknown.fake,
+      helper: scriptedHelper({
+        swapAnswers: [
+          { action: 'prepare', exitCode: 0, status: 'planned' },
+          { action: 'commit', exitCode: 1 },
+          { action: 'status', exitCode: 0, status: 'inconsistent' },
+        ],
+      }),
+      engine: scriptedEngine(),
+      seeded: unknown.seeded,
+    }));
+    expect(unknownLines.some((text) => text.includes('ended completion_unknown'))).toBe(true);
+
+    const cleanup = seededOne();
+    const cleanupLines = await warnings(() => run({
+      fake: cleanup.fake,
+      helper: scriptedHelper({
+        swapAnswers: [
+          { action: 'prepare', exitCode: 0, status: 'planned' },
+          { action: 'commit', exitCode: 0, status: 'swapped' },
+          { action: 'status', exitCode: 0, status: 'swapped' },
+          { action: 'cleanup', exitCode: 1, status: 'inconsistent' },
+        ],
+      }),
+      engine: scriptedEngine(),
+      seeded: cleanup.seeded,
+    }));
+    expect(cleanupLines.some((text) => text.includes('ended partial with cleanup_failed'))).toBe(true);
+  });
+
+  it('logs nothing when the overwrite succeeds', async () => {
+    const { fake, seeded } = seededOne();
+    const lines = await warnings(() => run({ fake, helper: successHelper(), engine: scriptedEngine(), seeded }));
+    expect(lines.filter((text) => text.includes('Overwrite'))).toEqual([]);
   });
 });
 

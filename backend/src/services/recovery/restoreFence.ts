@@ -423,10 +423,14 @@ export function setStartDrainTimeoutForTests(ms: number, hungAfterMs = 10 * 60_0
  * release and the recovery helper's containers start without it on purpose, and
  * a Compose lifecycle is held by the stack lock instead.
  */
-export function startUnderFence<T>(volumeNames: readonly string[], start: () => Promise<T>): Promise<T> {
+export function startUnderFence<T>(
+  volumeNames: readonly string[],
+  start: () => Promise<T>,
+  subject: 'container' | 'browse' = 'container',
+): Promise<T> {
   const fenced = RestoreFenceStore.getInstance().liveFencedVolumeNames();
   const hit = volumeNames.find((name) => fenced.includes(name));
-  if (hit) return Promise.reject(new DataRestoreFenceError(hit));
+  if (hit) return Promise.reject(new DataRestoreFenceError(hit, subject));
   let run: Promise<T>;
   try {
     run = start();

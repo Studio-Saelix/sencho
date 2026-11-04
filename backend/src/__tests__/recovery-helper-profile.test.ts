@@ -93,11 +93,30 @@ describe('recovery helper profiles', () => {
     expect(HELPER_PROFILES.backup.capAdd).toEqual(['DAC_READ_SEARCH']);
     // --verify reads restored files back after their ownership is applied.
     expect(HELPER_PROFILES.restore.capAdd).toEqual(['CHOWN', 'FOWNER', 'FSETID', 'DAC_READ_SEARCH']);
+    // The in-volume copy of an overwrite creates its work directory in a root an
+    // application may own and close to everyone else (a database data directory),
+    // which uid 0 can only write with DAC_OVERRIDE. Only this profile has it
+    // beside the restore's set, so a restore into a new volume stays narrower.
+    expect(HELPER_PROFILES.materialize.capAdd).toEqual(['CHOWN', 'FOWNER', 'FSETID', 'DAC_OVERRIDE', 'DAC_READ_SEARCH']);
+    expect(HELPER_PROFILES.restore.capAdd).not.toContain('DAC_OVERRIDE');
     // The rename swap moves entries in a root the application owns and deletes
     // the work directory afterwards, so it needs the same ownership override the
     // restore has plus DAC_OVERRIDE. It is the widest profile, and it is confined
     // to one application volume with no repository mount and no network.
     expect(HELPER_PROFILES.swap.capAdd).toEqual(['CHOWN', 'FOWNER', 'DAC_OVERRIDE', 'DAC_READ_SEARCH']);
+  });
+
+  it('gives the materialize profile the restore profile\'s shape: the repository read-only and one writable target', () => {
+    const { capAdd, ...rest } = HELPER_PROFILES.materialize;
+    const { capAdd: restoreCaps, ...restoreRest } = HELPER_PROFILES.restore;
+    expect(rest).toEqual(restoreRest);
+    expect(capAdd).toEqual([...restoreCaps.slice(0, 3), 'DAC_OVERRIDE', 'DAC_READ_SEARCH']);
+    const { hostConfig } = specFor('materialize');
+    expect(hostConfig.Mounts).toEqual([
+      { Type: 'volume', Source: 'repo-vol', Target: HELPER_REPOSITORY_MOUNT, ReadOnly: true, VolumeOptions: { NoCopy: true } },
+      { Type: 'volume', Source: 'dst-vol', Target: HELPER_RESTORE_MOUNT, ReadOnly: false, VolumeOptions: { NoCopy: true } },
+    ]);
+    expect(hostConfig.CapAdd).toEqual(capAdd);
   });
 
   it('gives the swap profile exactly one writable mount and no repository', () => {

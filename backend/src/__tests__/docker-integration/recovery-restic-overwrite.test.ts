@@ -339,6 +339,83 @@ describeIf('staged overwrite against real Docker', () => {
     }
   }, 300_000);
 
+  // The layout of the volumes this feature exists for: the root belongs to the
+  // application user and is closed to everyone else, so root without
+  // DAC_OVERRIDE cannot create the work directory in it. Both cases failed the
+  // copy before the `materialize` profile existed.
+  for (const live of [
+    { name: 'postgres-style 999:999 0700', chown: '999:999', mode: '700' },
+    { name: 'mariadb-style 77:77 2750', chown: '77:77', mode: '2750' },
+  ]) {
+    it(`overwrites a volume whose root is owned by an application user (${live.name}) and keeps the captured root mtime`, async () => {
+      const source = volumeName('sencho-it-own-src');
+      const target = volumeName('sencho-it-own-dst');
+      const intentId = randomUUID();
+      try {
+        createVolume(source);
+        populateSource(source);
+        runInVolume(source, 'touch -d "2021-03-04 05:06:07" /data');
+        const before = runInVolume(source, MANIFEST_SCRIPT);
+        const capturedMtime = runInVolume(source, 'stat -c %Y /data').trim();
+        const point = await capture(source);
+
+        createVolume(target);
+        runInVolume(target, [
+          'set -e',
+          'printf "old" > a.txt',
+          'mkdir -p conf',
+          'printf "old" > conf/keep',
+          `chown ${live.chown} /data a.txt conf conf/keep`,
+          `chmod ${live.mode} /data`,
+        ].join('\n'));
+
+        const materialize = await engine().restore(
+          {
+            id: intentId,
+            operationId: 'integration-owned-root',
+            pointId: 'integration-point',
+            repositoryId,
+            snapshotId: point.snapshotId,
+            target: {
+              mode: 'staged_overwrite',
+              storageId: 'storage',
+              expectedGenerationToken: point.token,
+              workDir: swapIncomingDir(intentId),
+              volumeName: target,
+            },
+            pathScope: null,
+            phase: 'materializing',
+            actor: 'integration',
+            createdAt: Date.now(),
+          },
+          context('integration-owned-root'),
+        );
+        expect(materialize.ok).toBe(true);
+        if (!materialize.ok) return;
+        expect(materialize.evidence.verified).toBe(true);
+        expect(runInVolume(target, 'cat a.txt')).toBe('old');
+
+        for (const action of ['prepare', 'commit', 'cleanup'] as const) {
+          const step = await runSwapStep({
+            runner: runner(),
+            operationId: 'integration-owned-root',
+            volumeName: target,
+            intentId,
+            action,
+          });
+          expect(step.ok, action).toBe(true);
+        }
+        expect(runInVolume(target, MANIFEST_SCRIPT)).toBe(before);
+        // The clean-up removed the work directory, which moves the root's mtime;
+        // the captured one has to be what the operator is left with.
+        expect(runInVolume(target, 'stat -c %Y /data').trim()).toBe(capturedMtime);
+      } finally {
+        removeVolume(source);
+        removeVolume(target);
+      }
+    }, 300_000);
+  }
+
   it('fails the copy when repository data is missing, with the live volume unchanged', async () => {
     const source = volumeName('sencho-it-dmg-src');
     const target = volumeName('sencho-it-dmg-dst');

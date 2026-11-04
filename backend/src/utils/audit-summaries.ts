@@ -180,8 +180,8 @@ export const AUDIT_ROUTE_SUMMARIES: Record<string, string> = {
   'POST /recovery/storage/points': 'Created a recovery point',
   'POST /recovery/points/*/verify': 'Verified recovery point',
   'POST /recovery/points/*/restore': 'Restored recovery point',
-  'POST /recovery/points/*/overwrite': 'Restored over the existing volume',
-  'POST /recovery/restores/*/resolve': 'Resolved a restore over the existing volume',
+  // The three routes of a restore over an existing volume are worded by
+  // `overwriteRouteSummary`, which reads the status and the body.
   'POST /recovery/operations/*/cancel': 'Cancelled recovery operation',
   'POST /recovery/locks/release': 'Released a stale recovery lock',
 };
@@ -190,6 +190,45 @@ export const AUDIT_ROUTE_SUMMARIES: Record<string, string> = {
 const SORTED_PATTERNS = Object.entries(AUDIT_ROUTE_SUMMARIES)
   .sort((a, b) => b[0].split('/').length - a[0].split('/').length);
 
+const RESOLVE_ACTION_SUMMARIES: Readonly<Record<string, { done: string; refused: string }>> = {
+  retry: {
+    done: 'Retried a restore over the existing volume',
+    refused: 'Retry of a restore over the existing volume refused',
+  },
+  release_fence: {
+    done: 'Released the fence of a restore over the existing volume',
+    refused: 'Release of a restore fence refused',
+  },
+};
+
+/**
+ * The three routes of a restore over an existing volume, worded by what the
+ * request did. A refusal does not claim the action, and a resolve names its
+ * action, because the log is how an operator reviews who accepted an unproven
+ * volume. Null for every other route, which uses the table below.
+ */
+function overwriteRouteSummary(normalized: string, statusCode: number | undefined, body: unknown): string | null {
+  const refusedWith = typeof statusCode === 'number' && statusCode >= 400 ? ` (${statusCode})` : '';
+  const point = /^recovery\/points\/([^/]+)\/overwrite(\/preview)?$/.exec(normalized);
+  if (point) {
+    const done = point[2] ? 'Previewed a restore over the existing volume' : 'Started a restore over the existing volume';
+    const refused = point[2] ? 'Preview of a restore over the existing volume failed' : 'Restore over the existing volume refused';
+    return `${refusedWith ? refused + refusedWith : done}: ${decodeURIComponent(point[1])}`;
+  }
+  const resolve = /^recovery\/restores\/([^/]+)\/resolve$/.exec(normalized);
+  if (resolve) {
+    const action = body && typeof body === 'object' ? (body as { action?: unknown }).action : undefined;
+    const known = typeof action === 'string' && Object.hasOwn(RESOLVE_ACTION_SUMMARIES, action)
+      ? RESOLVE_ACTION_SUMMARIES[action]
+      : null;
+    const summary = refusedWith
+      ? `${known?.refused ?? 'Resolve of a restore over the existing volume refused'}${refusedWith}`
+      : known?.done ?? 'Resolved a restore over the existing volume';
+    return `${summary}: ${decodeURIComponent(resolve[1])}`;
+  }
+  return null;
+}
+
 /**
  * Resolve a human-readable summary for an audit log entry.
  *
@@ -197,8 +236,10 @@ const SORTED_PATTERNS = Object.entries(AUDIT_ROUTE_SUMMARIES)
  * falls back to prefix matching. Returns a generic method+path string
  * if no pattern matches.
  */
-export function getAuditSummary(method: string, apiPath: string, statusCode?: number): string {
+export function getAuditSummary(method: string, apiPath: string, statusCode?: number, body?: unknown): string {
   const normalized = apiPath.replace(/^\//, '');
+  const overwrite = method === 'POST' ? overwriteRouteSummary(normalized, statusCode, body) : null;
+  if (overwrite) return overwrite;
   // Do not claim a successful action when the request was rejected, blocked,
   // or conflict-resolved. Per-user preference writes carry machine codes in
   // the response body, so the status code is the only honest signal here.

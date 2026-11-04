@@ -145,6 +145,55 @@ func TestPrepareCommitAndCleanup(t *testing.T) {
 	}
 }
 
+// The captured root's modification time is part of what the operator is told is
+// restored. Removing the work directory moves the root's mtime, so cleanup has to
+// set it again, and a repeated cleanup must not, because the application may have
+// written to the root by then.
+func TestCleanupKeepsTheCapturedRootMtime(t *testing.T) {
+	request := setupVolume(t,
+		map[string]string{"db.bin": "original"},
+		map[string]string{"db.bin": "restored"},
+	)
+	snapshot := filepath.Join(request.Root, workDirPrefix+testIntent, incomingDirName, snapshotRootName)
+	captured := time.Date(2021, 3, 4, 5, 6, 7, 0, time.UTC)
+	if err := os.Chtimes(snapshot, captured, captured); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := swapPrepare(request); err != nil {
+		t.Fatalf("prepare: %v", err)
+	}
+	if _, err := swapCommit(request); err != nil {
+		t.Fatalf("commit: %v", err)
+	}
+	if _, err := swapCleanup(request); err != nil {
+		t.Fatalf("cleanup: %v", err)
+	}
+	info, err := os.Stat(request.Root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !info.ModTime().Equal(captured) {
+		t.Fatalf("root mtime after cleanup = %s, want the captured %s", info.ModTime(), captured)
+	}
+
+	// The application writes to the root after the restart; a second cleanup
+	// answers `cleaned` and leaves that alone.
+	written := time.Date(2026, 11, 3, 12, 0, 0, 0, time.UTC)
+	if err := os.Chtimes(request.Root, written, written); err != nil {
+		t.Fatal(err)
+	}
+	if report, err := swapCleanup(request); err != nil || report.Status != statusCleaned {
+		t.Fatalf("second cleanup = %+v, %v", report, err)
+	}
+	info, err = os.Stat(request.Root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !info.ModTime().Equal(written) {
+		t.Fatalf("a repeated cleanup moved the root mtime to %s", info.ModTime())
+	}
+}
+
 // interruptAt stops a commit after `budget` renames, then resumes it or rolls
 // it back. Every resume must end in exactly one of the two proven states.
 func TestInterruptedCommitResumesInBothDirections(t *testing.T) {
