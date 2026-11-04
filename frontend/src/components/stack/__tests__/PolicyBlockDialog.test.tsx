@@ -558,6 +558,27 @@ describe('PolicyBlockDialog candidate image', () => {
     expect(screen.getByText(/· linux\/amd64/)).toBeInTheDocument();
   });
 
+  it('shows the digest the tag points to, not the scanned platform manifest, for a multi-arch tag', () => {
+    const indexDigest = 'sha256:451eee8bedcb0000000000000000000000000000000000000000000000000000';
+    const platformDigest = 'sha256:f73072b1a9d20000000000000000000000000000000000000000000000000000';
+    const multiArch: PolicyBlockPayload = {
+      ...candidatePayload,
+      evidence: {
+        ...candidatePayload.evidence!,
+        records: (candidatePayload.evidence?.records ?? []).map((r) => ({ ...r, digest: indexDigest, platformDigest, platform: 'linux/arm64' })),
+      },
+    };
+    render(<PolicyBlockDialog open payload={multiArch} stackName="web" action="update" onOpenSettings={vi.fn(() => true)} canBypass={false} canEditSettings={false} bypassing={false} onClose={vi.fn()} onBypass={vi.fn()} />);
+    expect(screen.getByText(/New image 451eee8bedcb · linux\/arm64/)).toBeInTheDocument();
+    expect(screen.queryByText(/f73072b1a9d2/)).toBeNull();
+  });
+
+  it('shows the same line for a deploy that would pull, not only for an update', () => {
+    render(<PolicyBlockDialog open payload={candidatePayload} stackName="web" action="deploy" onOpenSettings={vi.fn(() => true)} canBypass={false} canEditSettings={false} bypassing={false} onClose={vi.fn()} onBypass={vi.fn()} />);
+    expect(screen.getByText(/New image 4f2a1c9d8e7b/)).toBeInTheDocument();
+    expect(screen.getByText(/· linux\/amd64/)).toBeInTheDocument();
+  });
+
   it('says why an unresolvable candidate could not be evaluated', () => {
     const unresolved: PolicyBlockPayload = {
       ...candidatePayload,
