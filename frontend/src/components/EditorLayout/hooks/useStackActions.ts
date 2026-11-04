@@ -170,6 +170,8 @@ interface UseStackActionsOptions {
   refreshReapplyEligibility?: () => Promise<{
     canReapply: boolean;
     reason: import('@/components/FleetView/types').ReapplyUnavailableReason | null;
+    /** False when the re-read failed; canReapply/reason are then the previous answer. */
+    proven?: boolean;
   } | null>;
 }
 

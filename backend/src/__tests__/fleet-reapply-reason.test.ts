@@ -10,6 +10,7 @@ import jwt from 'jsonwebtoken';
 import axios from 'axios';
 import { setupTestDb, cleanupTestDb, TEST_USERNAME, TEST_JWT_SECRET } from './helpers/setupTestDb';
 import { OFFLINE_META } from '../services/CapabilityRegistry';
+import { FleetUpdateTrackerService } from '../services/FleetUpdateTrackerService';
 
 let tmpDir: string;
 let app: import('express').Express;
@@ -370,6 +371,12 @@ describe('POST /fleet/nodes/:id/reapply-compose refusal', () => {
       reason: 'compose_cli_unavailable',
       nodeName: 'nas-proxy',
     });
+    // The reserved Fleet row ends failed with the sentence the operator saw (not
+    // the node's own wording), and does not block the next attempt.
+    const tracker = FleetUpdateTrackerService.getInstance().get(proxyNodeId);
+    expect(tracker?.status).toBe('failed');
+    expect(tracker?.error).toBe(res.body.error);
+    expect(tracker?.error).not.toMatch(/must be deployed/i);
   });
 
   it('keeps a node refusal without a bounded reason a plain 502', async () => {

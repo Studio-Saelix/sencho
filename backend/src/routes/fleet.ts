@@ -1322,13 +1322,17 @@ function buildReapplyEligibility(
  * client that acted on a stale "eligible" answer can say why instead of showing
  * a generic failure. `error` is the plain-text fallback for API callers.
  */
+function reapplyUnavailableMessage(nodeName: string, reason: ReapplyUnavailableReason): string {
+  return `Compose reapply is unavailable on ${nodeName}: ${reason}.`;
+}
+
 function respondReapplyUnavailable(
   res: Response,
   nodeName: string,
   reason: ReapplyUnavailableReason,
 ): void {
   res.status(503).json({
-    error: `Compose reapply is unavailable on ${nodeName}: ${reason}.`,
+    error: reapplyUnavailableMessage(nodeName, reason),
     code: REAPPLY_UNAVAILABLE_CODE,
     reason,
     nodeName,
@@ -2206,16 +2210,18 @@ fleetRouter.post('/nodes/:nodeId/reapply-compose', authMiddleware, async (req: R
       if (!response.ok) {
         const body = await response.json().catch(() => null);
         const failure = parseRemoteUpdateFailure(body);
-        failOwnedTracker(failure.error, failure.code, meta.version, meta.startedAt);
         // The node lost eligibility after the hub read its meta: it says so with
         // its own reason, which this hub names the same way as a refusal above.
         const reason = failure.code === REAPPLY_UNAVAILABLE_CODE
           ? parseSelfUpdateUnavailableCode((body as Record<string, unknown>).reason)
           : null;
         if (reason) {
+          // The Fleet row records the same sentence the operator sees.
+          failOwnedTracker(reapplyUnavailableMessage(node.name, reason), failure.code, meta.version, meta.startedAt);
           respondReapplyUnavailable(res, node.name, reason);
           return;
         }
+        failOwnedTracker(failure.error, failure.code, meta.version, meta.startedAt);
         res.status(502).json(failure);
         return;
       }

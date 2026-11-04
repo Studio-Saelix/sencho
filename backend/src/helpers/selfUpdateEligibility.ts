@@ -28,6 +28,7 @@ export type ReapplyUnavailableReason = SelfUpdateUnavailableCode | 'node_unreach
  * body also carries the bounded `reason`, so a client names the node and the
  * cause instead of showing the transport's generic failure.
  */
+// The frontend matches this string literally (useComposeReapplyAction.ts).
 export const REAPPLY_UNAVAILABLE_CODE = 'REAPPLY_UNAVAILABLE';
 
 /**

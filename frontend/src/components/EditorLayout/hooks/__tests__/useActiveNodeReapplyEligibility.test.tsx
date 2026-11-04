@@ -92,7 +92,7 @@ describe('useActiveNodeReapplyEligibility', () => {
       snapshot = await result.current.refresh();
     });
 
-    expect(snapshot).toEqual({ canReapply: true, reason: null });
+    expect(snapshot).toEqual({ canReapply: true, reason: null, proven: true });
     expect(result.current.canReapply).toBe(true);
     expect(result.current.reason).toBeNull();
   });
@@ -119,7 +119,7 @@ describe('useActiveNodeReapplyEligibility', () => {
     await act(async () => {
       pending[1](okJson({ nodes: [{ nodeId: 1, canReapplyCompose: true }] }));
     });
-    expect(await newer).toEqual({ canReapply: true, reason: null });
+    expect(await newer).toEqual({ canReapply: true, reason: null, proven: true });
 
     await act(async () => {
       pending[0](okJson({
@@ -166,5 +166,36 @@ describe('useActiveNodeReapplyEligibility', () => {
     // Node 2 keeps its own answer; node 1's late eligibility never lands here.
     expect(result.current.canReapply).toBe(false);
     expect(result.current.reason).toBe('not_compose_managed');
+  });
+  it.each([
+    ['a non-ok response', () => Promise.resolve(new Response('{}', { status: 502 }))],
+    ['a thrown request', () => Promise.reject(new Error('network down'))],
+  ])('refresh() keeps an eligible node eligible when the re-read fails with %s', async (_label, failure) => {
+    apiFetchMock.mockResolvedValueOnce(okJson({ nodes: [{ nodeId: 1, canReapplyCompose: true }] }));
+    const { result } = renderHook(() => useActiveNodeReapplyEligibility(1));
+    await waitFor(() => expect(result.current.canReapply).toBe(true));
+
+    apiFetchMock.mockImplementationOnce(failure);
+    let snapshot: Awaited<ReturnType<typeof result.current.refresh>> = null;
+    await act(async () => { snapshot = await result.current.refresh(); });
+
+    expect(snapshot).toEqual({ canReapply: true, reason: null, proven: false });
+    // A blip never wipes the cached answer, so the Reapply affordances stay.
+    expect(result.current.canReapply).toBe(true);
+  });
+
+  it('refresh() keeps the last known reason of an ineligible node when the re-read fails', async () => {
+    apiFetchMock.mockResolvedValueOnce(okJson({
+      nodes: [{ nodeId: 1, canReapplyCompose: false, reapplyUnavailableReason: 'docker_unreachable' }],
+    }));
+    const { result } = renderHook(() => useActiveNodeReapplyEligibility(1));
+    await waitFor(() => expect(result.current.reason).toBe('docker_unreachable'));
+
+    apiFetchMock.mockResolvedValueOnce(new Response('{}', { status: 500 }));
+    let snapshot: Awaited<ReturnType<typeof result.current.refresh>> = null;
+    await act(async () => { snapshot = await result.current.refresh(); });
+
+    expect(snapshot).toEqual({ canReapply: false, reason: 'docker_unreachable', proven: false });
+    expect(result.current.reason).toBe('docker_unreachable');
   });
 });

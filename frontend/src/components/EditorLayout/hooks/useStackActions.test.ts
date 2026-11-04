@@ -3502,6 +3502,27 @@ describe('useStackActions overlapping reapply eligibility reads', () => {
     expect(result.current.eligibility.canReapply).toBe(false);
   });
 
+  it('still opens the Reapply confirmation when the click-time read fails on a node cached as eligible', async () => {
+    const { result, overlayState, pending } = setupOverlap();
+
+    await vi.waitFor(() => expect(pending).toHaveLength(1));
+    await act(async () => { pending[0](eligible()); });
+    await vi.waitFor(() => expect(result.current.eligibility.canReapply).toBe(true));
+
+    let deploy!: Promise<void>;
+    act(() => { deploy = result.current.actions.deployStack(click()); });
+    await vi.waitFor(() => expect(pending).toHaveLength(2));
+    await act(async () => {
+      pending[1](new Response('{}', { status: 502 }));
+      await deploy;
+    });
+
+    // The reapply route stays the authority: it names any real refusal.
+    expect(overlayState.openSelfStackProtected).not.toHaveBeenCalled();
+    expect(overlayState.setComposeReapplyCapture).toHaveBeenCalledTimes(1);
+    expect(result.current.eligibility.canReapply).toBe(true);
+  });
+
   it.each([
     { label: 'both reads recover, superseded read lands second', order: [1, 0] as const, verdicts: ['eligible', 'eligible'] as const, outcome: 'confirmation' as const },
     { label: 'both reads recover, superseded read lands first', order: [0, 1] as const, verdicts: ['eligible', 'eligible'] as const, outcome: 'confirmation' as const },

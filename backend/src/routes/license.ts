@@ -192,10 +192,11 @@ systemUpdateRouter.post('/reapply-compose', async (req: Request, res: Response):
   if (!requirePermission(req, res, 'system:license')) return;
   const selfUpdate = SelfUpdateService.getInstance();
   if (!selfUpdate.isAvailable()) {
+    const reason = selfUpdate.getUnavailableCode() ?? 'detecting';
     res.status(503).json({
-      error: 'Compose reapply unavailable. Sencho must be deployed via Docker Compose.',
+      error: `Compose reapply is unavailable on this node: ${reason}.`,
       code: REAPPLY_UNAVAILABLE_CODE,
-      reason: selfUpdate.getUnavailableCode() ?? 'detecting',
+      reason,
     });
     return;
   }

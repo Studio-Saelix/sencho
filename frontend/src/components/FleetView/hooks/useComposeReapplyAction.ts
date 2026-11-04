@@ -17,6 +17,8 @@ function parseReapplyError(err: Record<string, unknown>, fallback: string, nodeN
     // The node cannot reapply right now (the editor or sheet acted on an answer
     // that went stale): say which node and why, in the same words as the
     // dialog that refuses up front, not the transport's generic failure.
+    // 'REAPPLY_UNAVAILABLE' mirrors REAPPLY_UNAVAILABLE_CODE in the backend's
+    // helpers/selfUpdateEligibility.ts; both sides are pinned by a test.
     if (err?.code === 'REAPPLY_UNAVAILABLE' && isReapplyUnavailableReason(err.reason)) {
         return reapplyUnavailableSentence(err.reason, nodeName);
     }

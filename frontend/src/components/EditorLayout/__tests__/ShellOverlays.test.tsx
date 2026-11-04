@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { render, screen, fireEvent } from '@testing-library/react';
+import { render, screen, fireEvent, act } from '@testing-library/react';
 import * as toastStore from '@/components/ui/toast-store';
 
 beforeEach(() => {
@@ -291,6 +291,8 @@ describe('ShellOverlays self-stack Reapply confirmation', () => {
     );
     fireEvent.click(screen.getByRole('button', { name: 'self-reapply' }));
     await vi.waitFor(() => expect(verifyReapplyEligibility).toHaveBeenCalledTimes(1));
+    // Let the handler run past its await before asserting what it did not do.
+    await act(async () => { await Promise.resolve(); });
     expect(setOpen).not.toHaveBeenCalled();
     expect(runReapply).not.toHaveBeenCalled();
   });
