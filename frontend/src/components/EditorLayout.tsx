@@ -244,7 +244,11 @@ export default function EditorLayout() {
     createDialogOpen, setCreateDialogOpen,
   } = overlayState;
 
-  const { canReapply: canReapplyCompose } = useActiveNodeReapplyEligibility(activeNode?.id);
+  const {
+    canReapply: canReapplyCompose,
+    reason: reapplyUnavailableReason,
+    refresh: refreshReapplyEligibility,
+  } = useActiveNodeReapplyEligibility(activeNode?.id);
   const composeReapply = useComposeReapplyAction();
   const isSelfStackSelected = selectedFile ? stackSelfFlags[selectedFile] === true : false;
   // Save & Reapply needs both the self identity AND current status evidence:
@@ -435,6 +439,8 @@ export default function EditorLayout() {
     removeNotificationsForStack,
     isAdmin,
     canReapplyCompose,
+    reapplyUnavailableReason,
+    refreshReapplyEligibility,
   });
 
   // Close the loop opened above: the debounced GitOps refresh now has something

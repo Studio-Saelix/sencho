@@ -158,6 +158,18 @@ interface UseStackActionsOptions {
   isAdmin?: boolean;
   /** Authoritative canReapplyCompose === true for the active node. */
   canReapplyCompose?: boolean;
+  /** Why Reapply is unavailable on the active node, from the same read as
+   *  canReapplyCompose. Null/absent when the node is (or may be) eligible. */
+  reapplyUnavailableReason?: import('@/components/FleetView/types').ReapplyUnavailableReason | null;
+  /**
+   * Re-read eligibility for the node that is active at click time. Returns null
+   * when the answer no longer describes the current node (a switch landed
+   * mid-read), so a stale answer is never applied to another node.
+   */
+  refreshReapplyEligibility?: () => Promise<{
+    canReapply: boolean;
+    reason: import('@/components/FleetView/types').ReapplyUnavailableReason | null;
+  } | null>;
 }
 
 const PRE_DEPLOY_SUMMARY_TIMEOUT_MS = 5000;
@@ -354,6 +366,8 @@ export function useStackActions(options: UseStackActionsOptions) {
     removeNotificationsForStack,
     isAdmin = false,
     canReapplyCompose = false,
+    reapplyUnavailableReason = null,
+    refreshReapplyEligibility,
   } = options;
 
   const pendingStackLoadRef = useRef<string | null>(null);
@@ -1945,13 +1959,33 @@ export function useStackActions(options: UseStackActionsOptions) {
 
     const stackFile = stackListState.selectedFile;
     if (isSelfStackFile(stackFile)) {
-      if (isAdmin && canReapplyCompose && activeNode) {
-        overlayState.setComposeReapplyCapture({
-          nodeId: activeNode.id,
-          nodeType: activeNode.type === 'local' ? 'local' : 'remote',
-          nodeName: activeNode.name,
-          stackFile,
-        });
+      const node = activeNode ?? null;
+      if (isAdmin && node) {
+        const nodeId = node.id;
+        let eligible = canReapplyCompose === true;
+        let reason = reapplyUnavailableReason;
+        // A cached false can be stale: the node may have recovered its Docker
+        // connection or finished retrying self-update detection since the editor
+        // loaded. Re-read once at the click before refusing the operator.
+        if (!eligible && refreshReapplyEligibility) {
+          const fresh = await refreshReapplyEligibility();
+          // A node switch mid-read must not retarget the decision or the dialog.
+          if ((activeNodeIdRef.current ?? null) !== nodeId) return;
+          if (fresh) {
+            eligible = fresh.canReapply;
+            reason = fresh.reason;
+          }
+        }
+        if (eligible) {
+          overlayState.setComposeReapplyCapture({
+            nodeId: node.id,
+            nodeType: node.type === 'local' ? 'local' : 'remote',
+            nodeName: node.name,
+            stackFile,
+          });
+          return;
+        }
+        overlayState.openSelfStackProtected({ nodeName: node.name, reason });
         return;
       }
       overlayState.openSelfStackProtected();

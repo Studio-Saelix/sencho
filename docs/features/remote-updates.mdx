@@ -70,6 +70,8 @@ Eligible admins can also run the same procedure from the Compose editor: on Senc
 
 Update and Reapply recreate only the Sencho service (`docker compose up -d --no-deps --force-recreate`). Other services in Sencho's Compose project, including the ones it lists in `depends_on`, keep running as they are.
 
+Reapply needs a node to know its own Compose project, which Sencho works out when the node starts. A node cannot reapply while it is not running in a container, when its own container cannot be identified, when its Docker endpoint is not answering, when the container has no Compose labels, when the Docker Compose CLI is missing from the image, or when its image name cannot be read. The editor and the Node updates sheet name the node and the specific reason instead of leaving Reapply grayed out with no explanation. When the cause is temporary, such as a socket proxy that was not answering yet, the node retries on its own and Reapply becomes available without a restart; the next Save & Deploy in an open editor re-checks eligibility before it decides.
+
 ## Recreating the Docker endpoint
 
 When Sencho reaches Docker through a socket proxy that is a service of Sencho's own Compose project (`DOCKER_HOST` points at it), that proxy carries Sencho's Docker connection, and ordinary stack operations refuse to stop or recreate it (see [Self-Hosting: Updating the proxy](/operations/self-hosting#updating-the-proxy)). Update and Reapply are the way to apply a change to it: the confirmation dialog for that node names the proxy and offers **Also recreate the Docker endpoint** (Update), or a **Recreates** choice (Reapply) between Sencho alone, Sencho and the endpoint, and the endpoint alone. The choice starts on Sencho alone.

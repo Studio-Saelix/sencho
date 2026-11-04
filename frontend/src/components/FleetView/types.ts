@@ -51,6 +51,22 @@ export type ImagePinKind = 'floating' | 'semver' | 'digest' | 'unknown';
 export const PINNED_UPDATE_BLOCKED_FALLBACK =
     'This node cannot be updated automatically while its image is pinned this way.';
 
+/** Bounded reason a node cannot recreate its own Compose configuration. Mirrors
+ *  the backend enum; `node_unreachable` and `node_outdated` are hub-only. */
+export type SelfUpdateUnavailableCode =
+    | 'not_in_container'
+    | 'container_unidentified'
+    | 'docker_unreachable'
+    | 'not_compose_managed'
+    | 'compose_cli_unavailable'
+    | 'image_unknown'
+    | 'detecting';
+
+export type ReapplyUnavailableReason =
+    | SelfUpdateUnavailableCode
+    | 'node_unreachable'
+    | 'node_outdated';
+
 export interface NodeUpdateStatus {
     nodeId: number;
     name: string;
@@ -82,6 +98,9 @@ export interface NodeUpdateStatus {
     operationKind?: 'update' | 'reapply_configuration' | null;
     /** True when this Compose-managed node can reapply its on-disk configuration. */
     canReapplyCompose?: boolean;
+    /** Why Reapply is unavailable on this node. Null exactly when canReapplyCompose
+     *  is true; absent on a hub that predates the field. */
+    reapplyUnavailableReason?: ReapplyUnavailableReason | null;
     /** True when the compose-declared image is any reference to the sencho-dev
      *  repository, including digest pins and dev-<sha>. Reflects what compose
      *  DECLARES, not necessarily what the container is currently running if

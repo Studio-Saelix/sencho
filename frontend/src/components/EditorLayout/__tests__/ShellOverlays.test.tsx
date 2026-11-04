@@ -84,6 +84,8 @@ function makeOverlay(over: Partial<OverlayState> = {}): OverlayState {
     preDeployAdvisory: null,
     setPreDeployAdvisory: vi.fn(),
     openSelfStackProtected: vi.fn(),
+    closeSelfStackProtected: vi.fn(),
+    selfStackProtectedContext: null,
     dockerEndpointProtected: null,
     setDockerEndpointProtected: vi.fn(),
     openDockerEndpointProtected: vi.fn(),
@@ -109,6 +111,7 @@ function shellElement(
     reapplySelfTarget?: { nodeId: number; type: 'local' | 'remote'; name: string } | null;
     composeReapply?: { dispatching: boolean; reconnecting?: boolean; runReapply: () => void };
     onOpenPolicySettings?: (nodeId: number | null) => boolean;
+    activeNodeId?: number;
   } = {},
 ) {
   return (
@@ -122,7 +125,7 @@ function shellElement(
       can={() => false}
       selectedFile="web.yml"
       stackName="web"
-      activeNodeId={1}
+      activeNodeId={over.activeNodeId ?? 1}
       gitSourceOpen={false}
       setGitSourceOpen={() => {}}
       canSelfUpdate={false}
@@ -242,7 +245,7 @@ describe('ShellOverlays self-stack Reapply confirmation', () => {
   const target = { nodeId: 1, type: 'local' as const, name: 'Local' };
 
   it('offers no Reapply to a caller without a reapply target', () => {
-    renderShell(makeOverlay({ selfStackProtectedOpen: true, setSelfStackProtectedOpen: vi.fn() }), {});
+    renderShell(makeOverlay({ selfStackProtectedOpen: true, closeSelfStackProtected: vi.fn() }), {});
     expect(screen.getByText('self-info-only')).toBeInTheDocument();
   });
 
@@ -251,7 +254,7 @@ describe('ShellOverlays self-stack Reapply confirmation', () => {
     const setOpen = vi.fn();
     const toastError = vi.spyOn(toastStore.toast, 'error').mockImplementation(() => '' as never);
     renderShell(
-      makeOverlay({ selfStackProtectedOpen: true, setSelfStackProtectedOpen: setOpen }),
+      makeOverlay({ selfStackProtectedOpen: true, closeSelfStackProtected: setOpen }),
       {},
       { reapplySelfTarget: target, composeReapply: { dispatching: false, runReapply }, hydrationReady: () => false },
     );
@@ -265,37 +268,53 @@ describe('ShellOverlays self-stack Reapply confirmation', () => {
     const runReapply = vi.fn();
     const setOpen = vi.fn();
     renderShell(
-      makeOverlay({ selfStackProtectedOpen: true, setSelfStackProtectedOpen: setOpen }),
+      makeOverlay({ selfStackProtectedOpen: true, closeSelfStackProtected: setOpen }),
       {},
       { reapplySelfTarget: target, composeReapply: { dispatching: false, runReapply }, hydrationReady: () => true },
     );
     fireEvent.click(screen.getByRole('button', { name: 'self-reapply' }));
-    expect(setOpen).toHaveBeenCalledWith(false);
+    expect(setOpen).toHaveBeenCalled();
     expect(runReapply).toHaveBeenCalledWith(target);
   });
 
   it('closes the dialog when the active node changes, so Reapply never targets a different Sencho', () => {
     const setOpen = vi.fn();
-    const overlay = makeOverlay({ selfStackProtectedOpen: true, setSelfStackProtectedOpen: setOpen });
+    const overlay = makeOverlay({ selfStackProtectedOpen: true, closeSelfStackProtected: setOpen });
     const composeReapply = { dispatching: false, runReapply: vi.fn() };
     const { rerender } = renderShell(overlay, {}, { reapplySelfTarget: target, composeReapply, hydrationReady: () => true });
     expect(setOpen).not.toHaveBeenCalled();
 
     rerender(shellElement(overlay, {}, { reapplySelfTarget: { ...target, nodeId: 2, name: 'Remote' }, composeReapply, hydrationReady: () => true }));
 
-    expect(setOpen).toHaveBeenCalledWith(false);
+    expect(setOpen).toHaveBeenCalled();
+  });
+
+  it('closes the protected dialog when the active node changes', () => {
+    const close = vi.fn();
+    const overlay = makeOverlay({
+      selfStackProtectedOpen: true,
+      closeSelfStackProtected: close,
+      selfStackProtectedContext: { nodeName: 'Remote A', reason: 'detecting' },
+    });
+    const { rerender } = renderShell(overlay, {}, { reapplySelfTarget: null, activeNodeId: 1 });
+    expect(close).not.toHaveBeenCalled();
+
+    rerender(shellElement(overlay, {}, { reapplySelfTarget: null, activeNodeId: 2 }));
+
+    // The copy names Remote A, so it must not stay up for node 2.
+    expect(close).toHaveBeenCalled();
   });
 
   it('closes the dialog without starting a second reapply while one is in flight', () => {
     const runReapply = vi.fn();
     const setOpen = vi.fn();
     renderShell(
-      makeOverlay({ selfStackProtectedOpen: true, setSelfStackProtectedOpen: setOpen }),
+      makeOverlay({ selfStackProtectedOpen: true, closeSelfStackProtected: setOpen }),
       {},
       { reapplySelfTarget: target, composeReapply: { dispatching: true, runReapply }, hydrationReady: () => true },
     );
     fireEvent.click(screen.getByRole('button', { name: 'self-reapply' }));
-    expect(setOpen).toHaveBeenCalledWith(false);
+    expect(setOpen).toHaveBeenCalled();
     expect(runReapply).not.toHaveBeenCalled();
   });
 });
