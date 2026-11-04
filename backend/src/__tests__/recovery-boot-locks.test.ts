@@ -186,7 +186,7 @@ describe('boot with an interrupted capture', () => {
     expect(store.get(operationId)).toMatchObject({ state: 'completion_unknown', errorClass: 'interrupted' });
     expect(store.getLock('repository', repositoryId)).toBeNull();
     // The interrupted volume itself still waits for a reviewed release.
-    expect(store.getLock('storage', storageKey)?.staleSince).not.toBeNull();
+    expect(store.getLock('storage', storageKey)).toMatchObject({ staleSince: expect.any(Number) });
 
     const admitted = await captureOtherVolume();
     expect(admitted.replayed).toBe(false);
@@ -199,7 +199,7 @@ describe('boot with an interrupted capture', () => {
     await boot(1);
 
     const store = operations.RecoveryOperationStore.getInstance();
-    expect(store.getLock('repository', repositoryId)?.staleSince).not.toBeNull();
+    expect(store.getLock('repository', repositoryId)).toMatchObject({ staleSince: expect.any(Number) });
     await expect(captureOtherVolume()).rejects.toMatchObject({ errorClass: 'lock_stale' });
   });
 
@@ -207,7 +207,7 @@ describe('boot with an interrupted capture', () => {
     const { repositoryId } = seedInterrupted('create_point');
     await boot(0, 1);
 
-    expect(operations.RecoveryOperationStore.getInstance().getLock('repository', repositoryId)?.staleSince).not.toBeNull();
+    expect(operations.RecoveryOperationStore.getInstance().getLock('repository', repositoryId)).toMatchObject({ staleSince: expect.any(Number) });
     await expect(captureOtherVolume()).rejects.toMatchObject({ errorClass: 'lock_stale' });
   });
 
@@ -230,7 +230,7 @@ describe('boot with an interrupted capture', () => {
     await boot(0);
 
     expect(store.getLock('repository', repositoryId)).toBeNull();
-    expect(store.getLock('repository', other.id)?.staleSince).not.toBeNull();
+    expect(store.getLock('repository', other.id)).toMatchObject({ staleSince: expect.any(Number) });
   });
 
   it('keeps the storage lock of the interrupted volume closed to a new capture', async () => {
@@ -422,7 +422,7 @@ describe('which interrupted work releases its repository lock', () => {
   it('keeps an interrupted provisioning locked while a helper of the dead process remains', async () => {
     const { repositoryId } = seedInterrupted('repository_init');
     await boot(0, 1);
-    expect(operations.RecoveryOperationStore.getInstance().getLock('repository', repositoryId)?.staleSince)
-      .not.toBeNull();
+    expect(operations.RecoveryOperationStore.getInstance().getLock('repository', repositoryId))
+      .toMatchObject({ staleSince: expect.any(Number) });
   });
 });

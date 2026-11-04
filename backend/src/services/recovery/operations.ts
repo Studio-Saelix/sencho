@@ -358,9 +358,11 @@ export class RecoveryOperationStore {
    * the same); any other ending stands. The caller passes an ending it has
    * proven, never `completion_unknown`.
    *
-   * The repository lock is not released here. Boot decides it once the dead
+   * The repository lock is not released here. Boot decides it once the previous
    * process's helpers are gone and restic is unlocked, and a restore proven in
-   * the volume says nothing about a helper that may still write to the repository.
+   * the volume says nothing about a helper that may still write to the
+   * repository. One left by a restore a running process ended unproven therefore
+   * waits for the next start or a reviewed release.
    */
   settleReconciled(id: string, outcome: OperationFinish, now = Date.now()): RecoveryOperation {
     if (!isTerminal(outcome.state) || outcome.state === 'completion_unknown') {

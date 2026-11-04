@@ -148,6 +148,32 @@ describe('a node whose name sits on a character boundary', () => {
   });
 });
 
+describe('a node whose name cannot be sent', () => {
+  it('is still reached, with no pair sent and a forged one stripped', async () => {
+    const { NodeRegistry } = await import('../services/NodeRegistry');
+    const registry = NodeRegistry.getInstance();
+    const real = registry.getNode.bind(registry);
+    vi.spyOn(registry, 'getNode').mockImplementation((nid: number) => {
+      const node = real(nid);
+      return node && nid === proxyNodeId ? { ...node, name: `${'d'.repeat(127)}\uD83D` } : node;
+    });
+    try {
+      const res = await request(app)
+        .post('/api/recovery/points/p1/overwrite/preview')
+        .set('Authorization', adminBearer)
+        .set('x-node-id', String(proxyNodeId))
+        .set(PROXY_HUB_NODE_ID_HEADER, '1')
+        .set(PROXY_HUB_NODE_NAME_HEADER, 'Local')
+        .send({});
+      expect(res.status).toBe(200);
+      expect(captured?.[PROXY_HUB_NODE_ID_HEADER]).toBeUndefined();
+      expect(captured?.[PROXY_HUB_NODE_NAME_HEADER]).toBeUndefined();
+    } finally {
+      vi.mocked(registry.getNode).mockRestore();
+    }
+  });
+});
+
 describe('what the remote does with it', () => {
   const machineToken = (scope: 'node_proxy' | 'pilot_tunnel') =>
     jwt.sign({ scope }, TEST_JWT_SECRET, { expiresIn: '1m' });
