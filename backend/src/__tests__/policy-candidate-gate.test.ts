@@ -74,7 +74,8 @@ vi.mock('../services/candidateImage', async () => {
   return {
     ...actual,
     nodePlatformFor: async () => candidates.platform,
-    localImageExists: (nodeId: number, ref: string) => candidates.localImageExists(nodeId, ref),
+    localImageExists: (nodeId: number, ref: string, platform?: { os: string; architecture: string } | null) =>
+      candidates.localImageExists(nodeId, ref, platform),
     localImageLastTagTime: (nodeId: number, ref: string) => candidates.lastTagTime(nodeId, ref),
     resolveCandidateImage: (nodeId: number, ref: string, platform: unknown) =>
       candidates.resolve(nodeId, ref, platform),
@@ -571,6 +572,147 @@ describe('compose mode (a plain up)', () => {
       PLATFORM_DIGEST,
     ].sort());
     expect(result.pullServices).toEqual(['web', 'tools']);
+  });
+
+  it('evaluates the platform child Compose would fetch when the local copy is another platform', async () => {
+    // F5: the ref is on the node as the arm64 child only, and the service asks
+    // for amd64. Compose fetches the amd64 child at `up`, so the gate must
+    // evaluate that child instead of treating the present arm64 copy as
+    // installed and letting the fetch happen behind the gate.
+    candidates.platform = { os: 'linux', architecture: 'arm64' };
+    candidates.localImageExists.mockImplementation(async (
+      _nodeId: number,
+      _ref: string,
+      platform?: { os: string; architecture: string } | null,
+    ) => platform === undefined || platform?.architecture === 'arm64');
+    candidates.resolve.mockImplementation(async (_nodeId: number, _ref: string, platform: { architecture: string }) => (
+      platform.architecture === 'amd64'
+        ? {
+            ...CANDIDATE_RESOLUTION,
+            scanRef: `registry.example.com/web@${OTHER_DIGEST}`,
+            platform: 'linux/amd64',
+            platformDigest: OTHER_DIGEST,
+          }
+        : {
+            ...CANDIDATE_RESOLUTION,
+            scanRef: `registry.example.com/web@${PLATFORM_DIGEST}`,
+            platform: 'linux/arm64',
+            platformDigest: PLATFORM_DIGEST,
+          }
+    ));
+    modelWith([{ name: 'web', declaredImage: 'registry.example.com/web:latest', hasBuild: false, pullPolicy: null, platform: 'linux/amd64', expectedReplicas: 1, dependsOn: [], hasHealthcheck: false }]);
+
+    const result = await enforcePolicyPreDeploy('web', 1, { bypass: false, actor: 'u', imageSource: 'compose' });
+
+    expect(result.ok).toBe(true);
+    expect(candidates.resolve).toHaveBeenCalledWith(
+      1, 'registry.example.com/web:latest', { os: 'linux', architecture: 'amd64' },
+    );
+    expect(result.evaluatedCandidates).toEqual([{
+      ref: 'registry.example.com/web:latest',
+      indexDigest: INDEX,
+      platformDigest: OTHER_DIGEST,
+      services: ['web'],
+    }]);
+    // The boundary pulls this service before `up --pull never`, so the child
+    // the gate scanned is the one that lands.
+    expect(result.pullServices).toEqual(['web']);
+    expect(trivyStub.scanImagePreflight.mock.calls[0][3]).toMatchObject({
+      scanRef: `registry.example.com/web@${OTHER_DIGEST}`,
+    });
+  });
+
+  it.each([
+    ['the default', null],
+    ['missing', 'missing'],
+    ['a daily interval', 'daily'],
+  ] as const)('applies the per-platform presence check to %s pull policy', async (_label, pullPolicy) => {
+    candidates.platform = { os: 'linux', architecture: 'arm64' };
+    candidates.localImageExists.mockImplementation(async (
+      _nodeId: number,
+      _ref: string,
+      platform?: { os: string; architecture: string } | null,
+    ) => platform === undefined || platform?.architecture === 'arm64');
+    candidates.resolve.mockResolvedValue({
+      ...CANDIDATE_RESOLUTION,
+      scanRef: `registry.example.com/web@${OTHER_DIGEST}`,
+      platform: 'linux/amd64',
+      platformDigest: OTHER_DIGEST,
+    });
+    candidates.lastTagTime.mockResolvedValue(Date.now());
+    modelWith([{ name: 'web', declaredImage: 'registry.example.com/web:latest', hasBuild: false, pullPolicy, platform: 'linux/amd64', expectedReplicas: 1, dependsOn: [], hasHealthcheck: false }]);
+
+    const result = await enforcePolicyPreDeploy('web', 1, { bypass: false, actor: 'u', imageSource: 'compose' });
+
+    expect(result.evaluatedCandidates).toHaveLength(1);
+    expect(result.pullServices).toEqual(['web']);
+  });
+
+  it('checks presence per platform when services share a reference', async () => {
+    // The local arm64 child satisfies the arm64 service, but not the amd64 one,
+    // so only the amd64 service is a candidate and only it is pulled.
+    candidates.platform = { os: 'linux', architecture: 'arm64' };
+    candidates.localImageExists.mockImplementation(async (
+      _nodeId: number,
+      _ref: string,
+      platform?: { os: string; architecture: string } | null,
+    ) => platform === undefined || platform?.architecture === 'arm64');
+    candidates.resolve.mockImplementation(async (_nodeId: number, _ref: string, platform: { architecture: string }) => ({
+      ...CANDIDATE_RESOLUTION,
+      scanRef: `registry.example.com/web@${OTHER_DIGEST}`,
+      platform: `linux/${platform.architecture}`,
+      platformDigest: OTHER_DIGEST,
+    }));
+    modelWith([
+      { name: 'web', declaredImage: 'registry.example.com/web:latest', hasBuild: false, pullPolicy: null, platform: 'linux/amd64', expectedReplicas: 1, dependsOn: [], hasHealthcheck: false },
+      { name: 'tools', declaredImage: 'registry.example.com/web:latest', hasBuild: false, pullPolicy: null, platform: 'linux/arm64', expectedReplicas: 1, dependsOn: [], hasHealthcheck: false },
+    ]);
+
+    const result = await enforcePolicyPreDeploy('web', 1, { bypass: false, actor: 'u', imageSource: 'compose' });
+
+    expect(candidates.resolve).toHaveBeenCalledTimes(1);
+    expect(candidates.resolve).toHaveBeenCalledWith(
+      1, 'registry.example.com/web:latest', { os: 'linux', architecture: 'amd64' },
+    );
+    expect(result.evaluatedCandidates).toEqual([{
+      ref: 'registry.example.com/web:latest',
+      indexDigest: INDEX,
+      platformDigest: OTHER_DIGEST,
+      services: ['web'],
+    }]);
+    expect(result.pullServices).toEqual(['web']);
+  });
+
+  it('keeps one violation and one evidence record per platform variant', async () => {
+    // F6's backend half: the dialog can only label each row with its own
+    // platform when the row and the record carry it.
+    candidates.platform = { os: 'linux', architecture: 'arm64' };
+    candidates.resolve.mockImplementation(async (_nodeId: number, _ref: string, platform: { architecture: string }) => ({
+      ...CANDIDATE_RESOLUTION,
+      scanRef: `registry.example.com/web@${platform.architecture === 'amd64' ? OTHER_DIGEST : PLATFORM_DIGEST}`,
+      platform: `linux/${platform.architecture}`,
+      platformDigest: platform.architecture === 'amd64' ? OTHER_DIGEST : PLATFORM_DIGEST,
+    }));
+    trivyStub.scanImagePreflight.mockImplementation(async (
+      _ref: string,
+      _nodeId: number,
+      _stack: string,
+      opts?: { scanRef?: string },
+    ) => (opts?.scanRef?.includes(OTHER_DIGEST)
+      ? mkScan({ id: 11, highest_severity: 'CRITICAL', critical_count: 1, total_vulnerabilities: 1 })
+      : mkScan({ id: 12, highest_severity: 'CRITICAL', critical_count: 1, total_vulnerabilities: 1 })));
+    modelWith([
+      { name: 'web', declaredImage: 'registry.example.com/web:latest', hasBuild: false, pullPolicy: 'always', platform: 'linux/amd64', expectedReplicas: 1, dependsOn: [], hasHealthcheck: false },
+      { name: 'tools', declaredImage: 'registry.example.com/web:latest', hasBuild: false, pullPolicy: 'always', platform: 'linux/arm64', expectedReplicas: 1, dependsOn: [], hasHealthcheck: false },
+    ]);
+
+    const result = await enforcePolicyPreDeploy('web', 1, { bypass: false, actor: 'u', imageSource: 'compose' });
+
+    expect(result.ok).toBe(false);
+    expect(result.violations.map((v) => v.platform).sort()).toEqual(['linux/amd64', 'linux/arm64']);
+    const candidateRecords = (result.evidence?.records ?? []).filter((r) => r.subject === 'candidate');
+    expect(candidateRecords.map((r) => r.platform).sort()).toEqual(['linux/amd64', 'linux/arm64']);
+    expect(candidateRecords.map((r) => r.platformDigest).sort()).toEqual([OTHER_DIGEST, PLATFORM_DIGEST].sort());
   });
 
   it('refuses a service platform override it cannot read instead of scanning the node child', async () => {

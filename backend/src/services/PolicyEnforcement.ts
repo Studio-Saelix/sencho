@@ -76,6 +76,13 @@ export interface PolicyViolation {
     reasons: PolicyBlockReason[];
     scanId: number;
     /**
+     * The platform variant this row is about, when the gate resolved a registry
+     * candidate. A ref shared by services with different `platform:` overrides
+     * produces one row per variant, so the dialog pairs each row with its own
+     * evidence rather than the first record for the ref.
+     */
+    platform?: string | null;
+    /**
      * Why the block is unactionable by policy: set when the gate blocked because
      * the image could not be scanned or evaluated (compose parse error, scan
      * failure, evaluation error), not because a policy input matched. Absent for
@@ -312,7 +319,11 @@ function ruleClause(key: string, outcome: EvidenceAvailabilityOutcome): string {
 }
 
 /** One synthetic violation standing in for "the evidence could not be obtained". */
-function unavailableViolation(imageRef: string, message: string): PolicyViolation {
+function unavailableViolation(
+    imageRef: string,
+    message: string,
+    platform?: string | null,
+): PolicyViolation {
     return {
         imageRef,
         severity: 'UNKNOWN',
@@ -322,6 +333,7 @@ function unavailableViolation(imageRef: string, message: string): PolicyViolatio
         fixableCount: 0,
         reasons: [],
         scanId: 0,
+        ...(platform ? { platform } : {}),
         error: message,
     };
 }
@@ -437,7 +449,12 @@ type CandidatePlanEntry =
         /** Compose services this operation will fetch this ref through. */
         services: string[];
     }
-    | { kind: 'unresolved'; resolution: CandidateResolution & { kind: 'unresolved' } };
+    | {
+        kind: 'unresolved';
+        resolution: CandidateResolution & { kind: 'unresolved' };
+        /** The platform variant the gate could not resolve, when it asked for one. */
+        platform?: string | null;
+    };
 
 /**
  * The build service whose image Compose generates for `ref`, if any.
@@ -605,48 +622,22 @@ async function planCandidates(
         if (!registryMode && policies.some(isInterval)) noPullOnUp = true;
         // Only ask the daemon when the answer changes the decision. `always`
         // and an explicit refresh never need the local copy.
-        const needsPresence = policies.some((policy) => {
+        const needsPresence = (policy: string): boolean => {
             if (policy === 'always' || policy === 'never' || policy === 'build') return false;
             if (registryMode) return policy === 'missing' || policy === 'if_not_present';
             return true;
-        });
-        const present = needsPresence ? await localImageExists(nodeId, ref) : false;
-        const lastTagTime = !registryMode && present && policies.some(isInterval)
-            ? await localImageLastTagTime(nodeId, ref)
-            : null;
-        const pullsFor = (spec: EffectiveServiceSpec): boolean => {
-            const policy = normalizedPullPolicy(spec.pullPolicy);
-            if (policy === 'never' || policy === 'build') return false;
-            if (registryMode) {
-                if (spec.hasBuild) return false;
-                if (policy === '') return true;
-                if (policy === 'always') return true;
-                if (policy === 'missing' || policy === 'if_not_present') {
-                    return !present || isLatestImageTag(ref);
-                }
-                return true;
-            }
-            if (policy === '') return !present;
-            if (policy === 'always') return true;
-            if (policy === 'missing' || policy === 'if_not_present') return !present;
-            if (isInterval(policy)) return !present || pullPolicyRefreshDue(policy, lastTagTime);
-            return true;
         };
-        const pulling = runnable.filter(pullsFor);
-        if (pulling.length === 0) {
-            // Compose will not fetch this image, so the node's own image is what runs.
-            plan.set(ref, [{ kind: 'installed', why: 'not_pulled' }]);
-            continue;
-        }
         // Compose resolves the index for each service's own platform, so a ref
         // shared by services with different overrides has more than one image to
-        // prove. Resolve every distinct platform, not just the node's.
+        // prove. Presence is a per-platform fact too: a local copy of another
+        // platform's child does not stop Compose from fetching this one, so a
+        // present ref is not the same as a present image for the service.
         const byPlatform = new Map<string, {
             platform: { os: string; architecture: string } | null;
             invalid?: string;
-            services: string[];
+            services: EffectiveServiceSpec[];
         }>();
-        for (const spec of pulling) {
+        for (const spec of runnable) {
             const effective = effectiveServicePlatform(spec.platform, nodePlatform);
             const key = effective.ok
                 ? (effective.platform ? `${effective.platform.os}/${effective.platform.architecture}` : 'platform-unknown')
@@ -656,11 +647,65 @@ async function planCandidates(
                 ...(effective.ok ? {} : { invalid: effective.reason }),
                 services: [],
             };
-            group.services.push(spec.name);
+            group.services.push(spec);
             byPlatform.set(key, group);
         }
+        const presentByPlatform = new Map<string, boolean>();
+        const presenceFor = async (
+            key: string,
+            group: { platform: { os: string; architecture: string } | null; invalid?: string },
+        ): Promise<boolean> => {
+            const known = presentByPlatform.get(key);
+            if (known !== undefined) return known;
+            // An override this build cannot read is resolved as unresolved when
+            // it pulls; presence is moot there and must not read as installed.
+            const present = group.invalid || !group.platform
+                ? false
+                : await localImageExists(nodeId, ref, group.platform);
+            presentByPlatform.set(key, present);
+            return present;
+        };
+        let lastTagTime: number | null = null;
+        let lastTagTimeRead = false;
+        const lastTagTimeFor = async (): Promise<number | null> => {
+            if (!lastTagTimeRead) {
+                lastTagTime = await localImageLastTagTime(nodeId, ref);
+                lastTagTimeRead = true;
+            }
+            return lastTagTime;
+        };
         const entries: CandidatePlanEntry[] = [];
-        for (const group of byPlatform.values()) {
+        for (const [key, group] of byPlatform) {
+            const needsLocalCopy = group.services.some(
+                (spec) => needsPresence(normalizedPullPolicy(spec.pullPolicy)),
+            );
+            const present = needsLocalCopy ? await presenceFor(key, group) : false;
+            // The tag time is per reference, not per platform, so one read
+            // serves every group that has a present image and an interval.
+            const intervalTagTime = !registryMode && present
+                && group.services.some((spec) => isInterval(normalizedPullPolicy(spec.pullPolicy)))
+                ? await lastTagTimeFor()
+                : null;
+            const pullsFor = (spec: EffectiveServiceSpec): boolean => {
+                const policy = normalizedPullPolicy(spec.pullPolicy);
+                if (policy === 'never' || policy === 'build') return false;
+                if (registryMode) {
+                    if (spec.hasBuild) return false;
+                    if (policy === '') return true;
+                    if (policy === 'always') return true;
+                    if (policy === 'missing' || policy === 'if_not_present') {
+                        return !present || isLatestImageTag(ref);
+                    }
+                    return true;
+                }
+                if (policy === '') return !present;
+                if (policy === 'always') return true;
+                if (policy === 'missing' || policy === 'if_not_present') return !present;
+                if (isInterval(policy)) return !present || pullPolicyRefreshDue(policy, intervalTagTime);
+                return true;
+            };
+            const pulling = group.services.filter(pullsFor);
+            if (pulling.length === 0) continue;
             if (group.invalid) {
                 entries.push({
                     kind: 'unresolved',
@@ -674,9 +719,22 @@ async function planCandidates(
                 });
                 continue;
             }
-            entries.push(await resolveEntry(ref, group.services, group.platform));
+            const entry = await resolveEntry(ref, pulling.map((spec) => spec.name), group.platform);
+            // A resolution failure still belongs to the platform it was asked
+            // for, so the record can name the variant the gate could not prove.
+            entries.push(entry.kind === 'unresolved'
+                ? {
+                    ...entry,
+                    platform: group.platform ? `${group.platform.os}/${group.platform.architecture}` : null,
+                }
+                : entry);
         }
-        plan.set(ref, entries);
+        if (entries.length === 0) {
+            // Compose will not fetch this image, so the node's own image is what runs.
+            plan.set(ref, [{ kind: 'installed', why: 'not_pulled' }]);
+        } else {
+            plan.set(ref, entries);
+        }
     }
     return { plan, pullServices, noPullOnUp };
 }
@@ -1271,12 +1329,14 @@ async function evaluateImageRefs(
             // installed image is NOT scanned in its place: it is not what will
             // run, and a clean result about it would be a false assurance.
             const { state, reason, failureClass } = planned.resolution;
+            const unresolvedPlatform = planned.platform ?? null;
             evidenceRecords.push({
                 source: 'vulnerability_scan',
                 state,
                 target: imageRef,
                 collectedAt: null,
                 subject: 'candidate',
+                ...(unresolvedPlatform ? { platform: unresolvedPlatform } : {}),
                 reason,
             });
             const rule = failureRule(evidencePolicy, opts);
@@ -1286,6 +1346,7 @@ async function evaluateImageRefs(
                 outcome: rule.outcome,
                 rule: ruleClause(rule.key, rule.outcome),
                 target: imageRef,
+                ...(unresolvedPlatform ? { platform: unresolvedPlatform } : {}),
             });
             if (rule.outcome === 'warn' && opts.recordAllowedEvidence !== false) {
                 notifyEvidenceWarningOnce(
@@ -1297,6 +1358,7 @@ async function evaluateImageRefs(
                 violations.push(unavailableViolation(
                     imageRef,
                     `The image this operation would pull could not be resolved: ${reason}`,
+                    unresolvedPlatform,
                 ));
             }
             continue;
@@ -1345,6 +1407,7 @@ async function evaluateImageRefs(
                 outcome: rule.outcome,
                 rule: ruleClause(rule.key, rule.outcome),
                 target: imageRef,
+                ...(candidate ? { platform: candidate.platform } : {}),
             });
             // allow and warn both let the deploy through; warn additionally says
             // so out loud, which is the only thing distinguishing it from allow
@@ -1358,7 +1421,11 @@ async function evaluateImageRefs(
             if (rule.outcome !== 'block') {
                 continue;
             }
-            violations.push(unavailableViolation(imageRef, `Pre-flight scan failed: ${message}`));
+            violations.push(unavailableViolation(
+                imageRef,
+                `Pre-flight scan failed: ${message}`,
+                candidate?.platform ?? null,
+            ));
             continue;
         }
 
@@ -1441,6 +1508,10 @@ async function evaluateImageRefs(
                     fixableCount: evaluated.fixableCount,
                     reasons: evaluated.reasons,
                     scanId: scan.id,
+                    // A ref shared by services with different overrides has one
+                    // row per platform; the row carries its own variant so the
+                    // dialog can pair it with the evidence for that variant.
+                    ...(candidate ? { platform: candidate.platform } : {}),
                 };
                 violations.push(violation);
                 if (evaluated.unverified) unverifiedByViolation.set(violation, evaluated.unverified);
@@ -1479,6 +1550,7 @@ async function evaluateImageRefs(
                 // The scan completed; only evaluation failed, so the real scan
                 // id is kept (the other failure sites have no scan and use 0).
                 scanId: scan.id,
+                ...(candidate ? { platform: candidate.platform } : {}),
                 error: `Policy evaluation failed: ${message}`,
             });
         }

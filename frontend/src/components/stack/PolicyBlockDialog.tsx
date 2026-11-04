@@ -23,6 +23,12 @@ export interface PolicyBlockViolation {
   /** Which inputs matched (empty when the image could not be evaluated). */
   reasons: PolicyBlockReason[];
   scanId: number;
+  /**
+   * The platform variant this row is about, when the gate resolved a registry
+   * candidate. One ref shared by services with different `platform:` overrides
+   * has one row per variant, so the row pairs with its own evidence record.
+   */
+  platform?: string | null;
   /** Set when the gate blocked because the image could not be evaluated, which
    *  covers a scan or parse failure and an evaluation that threw. The message
    *  names which, so the row's subtitle does not have to distinguish them. */
@@ -37,6 +43,8 @@ export interface PolicyBlockEvidenceApplication {
   rule: string;
   /** Present when the application is about one image rather than the whole node. */
   target?: string;
+  /** The platform variant of `target`, when one ref has several. */
+  platform?: string | null;
 }
 
 /** One piece of evidence the gate obtained, or failed to. */
@@ -225,10 +233,10 @@ export function PolicyBlockDialog({
               // The image this operation would pull, when the gate resolved it.
               // Shown under the authored tag so the operator can see which new
               // image was evaluated instead of the one already on the node.
-              const candidate = candidateEvidenceFor(payload?.evidence, v.imageRef);
+              const candidate = candidateEvidenceFor(payload?.evidence, v.imageRef, v.platform);
               const candidateDigest = shortDigest(candidate?.digest);
               return (
-              <div key={`${v.imageRef}-${v.scanId}`} className="px-4 py-3 flex items-center justify-between gap-4">
+              <div key={`${v.imageRef}-${v.platform ?? ''}-${v.scanId}`} className="px-4 py-3 flex items-center justify-between gap-4">
                 <div className="min-w-0">
                   <div className="font-mono text-sm truncate">{v.imageRef}</div>
                   {candidateDigest && (

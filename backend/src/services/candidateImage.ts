@@ -189,11 +189,34 @@ export function effectiveServicePlatform(
   return { ok: true, platform };
 }
 
-/** Whether the node already holds this reference, so `compose up` will not pull it. */
-export async function localImageExists(nodeId: number, ref: string): Promise<boolean> {
+/**
+ * Whether the node already holds this reference for `platform`, so `compose up`
+ * will not pull it.
+ *
+ * The ref alone is not enough: a multi-arch ref can be present as another
+ * platform's child, and Compose still fetches the child the service asks for.
+ * Comparing the local image's own OS and architecture is what makes a present
+ * foreign child count as absent. An image whose platform the daemon did not
+ * report counts as absent too, the fail-closed reading, because the gate cannot
+ * prove it is the child Compose will run.
+ */
+export async function localImageExists(
+  nodeId: number,
+  ref: string,
+  platform: NodePlatform | null = null,
+): Promise<boolean> {
   try {
-    await DockerController.getInstance(nodeId).getDocker().getImage(ref).inspect();
-    return true;
+    const info = await DockerController.getInstance(nodeId).getDocker().getImage(ref).inspect() as {
+      Os?: string;
+      Architecture?: string;
+    };
+    if (!platform) return true;
+    const local = canonicalNodePlatform({
+      os: typeof info.Os === 'string' ? info.Os : '',
+      architecture: typeof info.Architecture === 'string' ? info.Architecture : '',
+    });
+    if (!local.os || !local.architecture) return false;
+    return local.os === platform.os && local.architecture === platform.architecture;
   } catch {
     return false;
   }

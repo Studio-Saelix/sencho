@@ -573,6 +573,31 @@ describe('PolicyBlockDialog candidate image', () => {
     expect(screen.queryByText(/f73072b1a9d2/)).toBeNull();
   });
 
+  it('labels each row of a multi-platform ref with its own platform', () => {
+    // F6: one ref shared by services at two platforms has one row and one
+    // evidence record per platform. Looking up the first record for the ref
+    // labelled both rows with linux/amd64.
+    const indexDigest = 'sha256:451eee8bedcb0000000000000000000000000000000000000000000000000000';
+    const baseRecord = candidatePayload.evidence!.records![0];
+    const multiPlatform: PolicyBlockPayload = {
+      ...candidatePayload,
+      violations: [
+        { ...candidatePayload.violations[0], platform: 'linux/amd64', scanId: 7 },
+        { ...candidatePayload.violations[0], platform: 'linux/arm64', scanId: 8 },
+      ],
+      evidence: {
+        ...candidatePayload.evidence!,
+        records: [
+          { ...baseRecord, digest: indexDigest, platformDigest: 'sha256:aaaa000000000000000000000000000000000000000000000000000000000000', platform: 'linux/amd64' },
+          { ...baseRecord, digest: indexDigest, platformDigest: 'sha256:bbbb000000000000000000000000000000000000000000000000000000000000', platform: 'linux/arm64' },
+        ],
+      },
+    };
+    render(<PolicyBlockDialog open payload={multiPlatform} stackName="web" action="deploy" onOpenSettings={vi.fn(() => true)} canBypass={false} canEditSettings={false} bypassing={false} onClose={vi.fn()} onBypass={vi.fn()} />);
+    expect(screen.getByText(/New image 451eee8bedcb · linux\/amd64/)).toBeInTheDocument();
+    expect(screen.getByText(/New image 451eee8bedcb · linux\/arm64/)).toBeInTheDocument();
+  });
+
   it('shows the same line for a deploy that would pull, not only for an update', () => {
     render(<PolicyBlockDialog open payload={candidatePayload} stackName="web" action="deploy" onOpenSettings={vi.fn(() => true)} canBypass={false} canEditSettings={false} bypassing={false} onClose={vi.fn()} onBypass={vi.fn()} />);
     expect(screen.getByText(/New image 4f2a1c9d8e7b/)).toBeInTheDocument();

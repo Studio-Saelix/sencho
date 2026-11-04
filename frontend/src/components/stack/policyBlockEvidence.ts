@@ -143,6 +143,15 @@ function describeTarget(target: string): string {
 }
 
 /**
+ * Identity of one evidence variant. A ref shared by services with different
+ * `platform:` overrides has one record and one application per platform, so the
+ * target alone no longer names a single row.
+ */
+function evidenceVariant(target: string | undefined, platform: string | null | undefined): string {
+  return `${target ?? ''}:${platform ?? ''}`;
+}
+
+/**
  * Turn the decision record into one sentence per piece of evidence that was not
  * usable, preferring the rule application (which names the setting that acted)
  * and falling back to the record's own reason for a state no setting governs.
@@ -165,14 +174,15 @@ export function buildEvidenceLines(evidence: PolicyBlockPayload['evidence']): Ev
     if (a.state === 'current') continue;
     const who = a.target ? ` for ${describeTarget(a.target)}` : '';
     lines.push({
-      key: `app:${a.source}:${a.state}:${a.target ?? ''}`,
+      key: `app:${a.source}:${a.state}:${evidenceVariant(a.target, a.platform)}`,
       text: `${describeSource(a.source)}${who}: ${describeState(a.state, { target: a.target, rule: a.rule })}, ${describeOutcome(a.outcome)} by ${describeRule(a.rule)}.`,
     });
     // Keyed by state as well as target: one image can legitimately have two
     // distinct problems (a stale scan whose finding rows were also truncated),
-    // and collapsing them would drop the second explanation.
+    // and collapsing them would drop the second explanation. Platform is part of
+    // the key for the same reason: one ref can have several variants.
     for (const target of a.target ? [a.target] : NODE_WIDE_TARGETS) {
-      explained.add(`${a.source}:${a.state}:${target}`);
+      explained.add(`${a.source}:${a.state}:${evidenceVariant(target, a.platform)}`);
     }
   }
 
@@ -180,9 +190,9 @@ export function buildEvidenceLines(evidence: PolicyBlockPayload['evidence']): Ev
     if (r.state === 'current') continue;
     // Skip a record already described by an application, so the same evidence is
     // not explained twice in one dialog.
-    if (explained.has(`${r.source}:${r.state}:${r.target}`)) continue;
+    if (explained.has(`${r.source}:${r.state}:${evidenceVariant(r.target, r.platform)}`)) continue;
     lines.push({
-      key: `rec:${r.source}:${r.state}:${r.target}`,
+      key: `rec:${r.source}:${r.state}:${evidenceVariant(r.target, r.platform)}`,
       text: `${describeSource(r.source)} for ${describeTarget(r.target)}: ${describeState(r.state, { target: r.target, reason: r.reason })}.${r.reason ? ` ${sentence(r.reason)}` : ''}`,
     });
   }
@@ -198,16 +208,26 @@ export function shortDigest(digest: string | null | undefined): string | null {
 }
 
 /**
- * The candidate evidence for one image, when the gate resolved the image the
- * operation would pull. Only a record that named a digest is worth showing: the
- * point of the line is which new image will run.
+ * The candidate evidence for one image variant, when the gate resolved the image
+ * the operation would pull. Only a record that named a digest is worth showing:
+ * the point of the line is which new image will run.
+ *
+ * A ref shared by services with different `platform:` overrides has one record
+ * per variant, so the row's own platform selects the record. The first record is
+ * the fallback only when the row does not name a platform (an older control).
+ * A named platform with no matching record means this variant produced no
+ * candidate digest, so showing another variant's digest would mislabel the row.
  */
 export function candidateEvidenceFor(
   evidence: PolicyBlockPayload['evidence'],
   imageRef: string,
+  platform?: string | null,
 ): PolicyBlockEvidenceRecord | null {
-  const record = (evidence?.records ?? []).find(
+  const records = (evidence?.records ?? []).filter(
     (r) => r.subject === 'candidate' && r.target === imageRef && typeof r.digest === 'string',
   );
-  return record ?? null;
+  if (typeof platform === 'string' && platform !== '') {
+    return records.find((r) => r.platform === platform) ?? null;
+  }
+  return records[0] ?? null;
 }
