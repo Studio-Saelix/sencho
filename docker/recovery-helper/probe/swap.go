@@ -161,6 +161,33 @@ func paths(request swapRequest) (workDir, incomingRoot, originalDir, planPath st
 	return
 }
 
+// removeAll is a seam: a test replaces it to stop a removal part way, which is
+// what a crash during clean-up looks like.
+var removeAll = os.RemoveAll
+
+// setTimes is a seam for the same reason, for the last step of a clean-up.
+var setTimes = os.Chtimes
+
+// removeWorkDir deletes a committed swap's work directory with the journal last.
+// The journal lives inside the directory and RemoveAll deletes in directory
+// order, so one RemoveAll could take plan.json first and then die with the
+// originals still on disk, leaving a work directory no journal explains. Deleting
+// the bulk first keeps the journal until nothing it describes is left, so an
+// interrupted clean-up is repeated rather than parked. Rollback does not use it:
+// a rollback decides what to move from the restored copy, so that copy has to
+// outlive the journal's last use, and its own plain removal is safe to repeat.
+func removeWorkDir(workDir string) error {
+	for _, dir := range []string{
+		filepath.Join(workDir, originalDirName),
+		filepath.Join(workDir, incomingDirName),
+	} {
+		if err := removeAll(dir); err != nil {
+			return err
+		}
+	}
+	return removeAll(workDir)
+}
+
 func listNames(dir string) ([]string, error) {
 	entries, err := os.ReadDir(dir)
 	if err != nil {
@@ -677,7 +704,7 @@ func swapCleanup(request swapRequest) (swapReport, error) {
 	if plan.Status != statusSwapped {
 		return swapReport{}, errors.New("the swap is not complete")
 	}
-	if err := os.RemoveAll(workDir); err != nil {
+	if err := removeWorkDir(workDir); err != nil {
 		return swapReport{}, err
 	}
 	if err := syncDir(request.Root); err != nil {
@@ -686,10 +713,13 @@ func swapCleanup(request swapRequest) (swapReport, error) {
 	// Removing the work directory changed the root's mtime, so the captured one
 	// the commit applied is set again. Only a run that removed the directory
 	// gets here: a repeated cleanup answers above and leaves a root the
-	// application has since written to alone.
+	// application has since written to alone. The journal is gone by now, so a
+	// failure of this last step cannot be retried, and it is not worth failing a
+	// committed, cleaned volume for: it is reported on stderr and only the mtime
+	// is lost (the rollback path above says the same).
 	mtime := time.Unix(0, plan.Root.Mtime)
-	if err := os.Chtimes(request.Root, mtime, mtime); err != nil {
-		return swapReport{}, err
+	if err := setTimes(request.Root, mtime, mtime); err != nil {
+		fmt.Fprintf(os.Stderr, "warning: the root modification time was not restored: %v\n", err)
 	}
 	return swapReport{Status: statusCleaned, Originals: plan.Originals, Incoming: plan.Incoming}, nil
 }

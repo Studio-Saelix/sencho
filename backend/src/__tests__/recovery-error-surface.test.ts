@@ -78,8 +78,20 @@ describe('the operator page on a restore that a crash interrupted', () => {
     expect(afterCrash).toContain('(#release-a-stale-lock)');
   });
 
-  it('says cancel ends `cancelled` only before the swap, and that a refused request is worded as one', () => {
+  it('says a restart\'s settling, rolled back or forward, leaves the storage lock stale', () => {
+    expect(section('After a crash')).toMatch(/rolled back, or rolled forward to `committed`/);
+  });
+
+  it('says cancel ends `cancelled` only before the swap, and how a request that was not served is worded', () => {
     expect(operatorPage).toMatch(/`cancelled` only before the swap starts/);
-    expect(section('Resolve a restore that did not settle')).toContain('a refused request says it was refused');
+    const resolve = section('Resolve a restore that did not settle');
+    expect(resolve).toContain('`refused` for a 4xx and `failed` for a 5xx');
+    expect(resolve).toContain('hub forwards a request to a remote node without reading its body');
+  });
+
+  it('says where the cause of a failed overwrite is logged', () => {
+    const result = section('Operation result');
+    expect(result).toMatch(/cause is in the node's Sencho log/);
+    expect(result).toContain('the step it was in');
   });
 });

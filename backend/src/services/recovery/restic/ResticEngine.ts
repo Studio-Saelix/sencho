@@ -124,7 +124,7 @@ export class ResticEngine implements BackupEngine {
         sanitizeForLog(ctx.operationId),
         outcome.errorClass,
         helperResult.exitCode ?? 'none',
-        helperFailureNote(helperResult.stderrTail, []),
+        helperFailureNote(helperResult.stderrTail, [], [this.deps.secret]),
       );
       return { ok: false, errorClass: outcome.errorClass };
     }
@@ -178,7 +178,7 @@ export class ResticEngine implements BackupEngine {
     if (!intent.snapshotId) return { ok: false, errorClass: 'invalid_request' };
 
     let args: string[];
-    let profile: HelperProfile = 'restore';
+    let profile: Extract<HelperProfile, 'restore' | 'materialize'> = 'restore';
     if (intent.target.mode === 'new_volume') {
       // `snapshot:/data` puts the captured root's contents at the target root,
       // which is the right shape for a volume Sencho created.
@@ -238,7 +238,7 @@ export class ResticEngine implements BackupEngine {
         sanitizeForLog(ctx.operationId),
         outcome.errorClass,
         result.exitCode ?? 'none',
-        helperFailureNote(result.stderrTail, accumulator.sampleErrors),
+        helperFailureNote(result.stderrTail, accumulator.sampleErrors, [this.deps.secret]),
       );
       return { ok: false, errorClass: outcome.errorClass };
     }

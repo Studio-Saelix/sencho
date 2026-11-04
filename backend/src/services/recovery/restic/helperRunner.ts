@@ -170,8 +170,8 @@ export const HELPER_PROFILES: Readonly<Record<HelperProfile, HelperProfileSpec>>
   },
   // The restore step of a staged overwrite. It writes the point into a work
   // directory inside the live volume, whose root belongs to the application
-  // (postgres, mariadb and redis chown it to their own user and close it to
-  // everyone else), so creating that directory needs DAC_OVERRIDE on top of
+  // (postgres, mariadb and redis chown it to their own user and leave it
+  // unwritable by anyone else), so creating that directory needs DAC_OVERRIDE on top of
   // what the restore profile has. The restore profile stays without it: a restore
   // into a new volume writes a root Sencho created itself.
   materialize: {

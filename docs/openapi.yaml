@@ -1565,8 +1565,8 @@ components:
             `wrong_route` (a `staged_overwrite` or `new_path` mode asked for on the new-volume
             route), `generation_changed` (the volume's generation moved since the preview),
             `confirmation_mismatch` (the confirmation token does not match the volume as it is
-            now: it came from another preview, or a container, stack, repository or point
-            changed since the preview), `no_fence` (`release_fence` on a restore that never stopped a workload),
+            now: it came from another preview, or the containers or the repository changed
+            since the preview), `no_fence` (`release_fence` on a restore that never stopped a workload),
             and `fence_released` (`release_fence` on a restore whose fence is already released).
 
     RecoveryOperation:

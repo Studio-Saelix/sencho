@@ -498,8 +498,9 @@ export async function prepareOverwriteAdmission(deps: OverwriteDeps, input: {
     throw new RecoveryError('precondition_failed', {
       reason: 'confirmation_mismatch',
       // The token is a digest, so a mismatch cannot say which fact moved: it may
-      // be a token from another preview or another point, or a container, stack,
-      // repository or generation that changed since this one was issued.
+      // be a token from another preview, or the containers or the repository may
+      // have changed since this one was issued (a recreated volume was refused
+      // above, as `generation_changed`).
       detail: 'The confirmation token does not match this volume as it is now: it came from another preview, or something changed since the preview. Ask for a new preview and confirm again.',
     });
   }
@@ -593,13 +594,19 @@ interface PipelineState {
  * intent where it is for reconciliation, which is the truthful state.
  */
 export async function runOverwritePipeline(input: OverwriteRunContext): Promise<void> {
-  // Every exit settles through `finish`, so this is the one place that records
-  // why an overwrite did not succeed. The API answers a class only and the helper
-  // container is gone by then.
+  // Every exit settles through `finish`, so this is where a run that ends in this
+  // process says why it did not succeed (a restart's reconciliation logs its own
+  // result). The API answers a class only and the helper container is gone by
+  // then. The line is written first and must never stop the operation settling.
+  let step = 'starting';
   const ctx: OverwriteRunContext = {
     ...input,
     finish: (outcome) => {
-      logOverwriteOutcome(input.deps, input.intentId, outcome);
+      try {
+        logOverwriteOutcome(input.deps, input.intentId, step, outcome, input.context.signal);
+      } catch (err) {
+        console.warn('[Recovery] Could not log the end of overwrite %s:', sanitizeForLog(input.intentId), errorMessageForLog(err));
+      }
       input.finish(outcome);
     },
   };
@@ -622,25 +629,46 @@ export async function runOverwritePipeline(input: OverwriteRunContext): Promise<
     workDir: swapIncomingDir(intent.id),
   };
 
+  step = 'staging the point';
   if (!await stagePoint(ctx, state)) return;
+  step = 'removing the staging volume';
   if (!await removeStaging(ctx, state)) return;
+  step = 'fencing the workloads';
   if (!await fenceWorkloads(ctx, state)) return;
+  step = 'taking the pre-restore point';
   if (!await takePreRestorePoint(ctx, state)) return;
+  step = 'copying the point into the volume';
   if (!await materializePoint(ctx, state)) return;
+  step = 'swapping';
   await swapAndCleanup(ctx, state);
 }
 
-function logOverwriteOutcome(deps: OverwriteDeps, intentId: string, outcome: OperationFinish): void {
-  if (outcome.state === 'succeeded' || outcome.state === 'cancelled') return;
+function logOverwriteOutcome(
+  deps: OverwriteDeps,
+  intentId: string,
+  step: string,
+  outcome: OperationFinish,
+  signal: AbortSignal,
+): void {
+  if (outcome.state === 'succeeded') return;
+  // A stop the operator asked for is not a failure. One nobody asked for (the
+  // helper was signalled from outside) is worth a line.
+  if (outcome.state === 'cancelled' && signal.aborted) return;
   const intent = deps.intents.get(intentId);
   console.warn(
-    '[Recovery] Overwrite %s ended %s%s (phase %s, fence %s)',
+    '[Recovery] Overwrite %s ended %s%s while %s (intent now %s, fence %s)',
     sanitizeForLog(intentId),
     outcome.state,
     'errorClass' in outcome ? ` with ${outcome.errorClass}` : '',
+    step,
     intent?.phase ?? 'unknown',
     intent?.fenceState ?? 'unknown',
   );
+}
+
+/** An engine call that threw (a helper that could not start, say) keeps its cause in the log. */
+function logEngineThrow(state: PipelineState, what: string, err: unknown): void {
+  console.warn('[Recovery] %s for %s failed:', what, sanitizeForLog(state.intent.id), errorMessageForLog(err));
 }
 
 /**
@@ -701,6 +729,7 @@ async function stagePoint(ctx: OverwriteRunContext, state: PipelineState): Promi
       ctx.context,
     );
   } catch (err) {
+    logEngineThrow(state, 'Restoring the point into the staging volume', err);
     result = { ok: false as const, errorClass: classifyRecoveryError(err) };
   }
   if (!result.ok) {
@@ -872,6 +901,7 @@ async function takePreRestorePoint(ctx: OverwriteRunContext, state: PipelineStat
       { ...ctx.context, pointId: point.id },
     );
   } catch (err) {
+    logEngineThrow(state, 'Taking the pre-restore point', err);
     result = { ok: false as const, errorClass: classifyRecoveryError(err) };
   }
   if (!result.ok) {
@@ -939,6 +969,7 @@ async function materializePoint(ctx: OverwriteRunContext, state: PipelineState):
       ctx.context,
     );
   } catch (err) {
+    logEngineThrow(state, 'Copying the point into the volume', err);
     result = { ok: false as const, errorClass: classifyRecoveryError(err) };
   }
   if (!result.ok) {

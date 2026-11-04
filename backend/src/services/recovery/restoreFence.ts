@@ -1,6 +1,6 @@
 import type Docker from 'dockerode';
 import { errorMessageForLog, sanitizeForLog } from '../../utils/safeLog';
-import { DataRestoreFenceError } from '../../helpers/dataRestoreFenceError';
+import { DataRestoreFenceError, type FenceSubject } from '../../helpers/dataRestoreFenceError';
 import { recoveryDb } from './recoveryDb';
 import { RecoveryError } from './redaction';
 import type { RestoreFenceState } from './restoreIntents';
@@ -419,14 +419,15 @@ export function setStartDrainTimeoutForTests(ms: number, hungAfterMs = 10 * 60_0
  * either sees the fence and is refused, or is registered before the fence exists
  * and is waited for by `applyRestoreFence`. There is no third order. It guards the
  * starts Sencho makes of a single container (the start and restart of
- * `DockerController`) and the Files & Volumes helper container. A fence's own
+ * `DockerController`) and the Files & Volumes helper container; `subject` words
+ * the refusal for whichever asked. A fence's own
  * release and the recovery helper's containers start without it on purpose, and
  * a Compose lifecycle is held by the stack lock instead.
  */
 export function startUnderFence<T>(
   volumeNames: readonly string[],
   start: () => Promise<T>,
-  subject: 'container' | 'browse' = 'container',
+  subject: FenceSubject = 'container',
 ): Promise<T> {
   const fenced = RestoreFenceStore.getInstance().liveFencedVolumeNames();
   const hit = volumeNames.find((name) => fenced.includes(name));

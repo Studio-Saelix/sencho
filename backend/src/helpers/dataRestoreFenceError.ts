@@ -1,6 +1,6 @@
 /**
- * The refusal a container start or restart gets while a volume it mounts is
- * fenced by a staged overwrite.
+ * The refusal a container start or restart, or the Files & Volumes browser, gets
+ * while the volume it mounts or opens is fenced by a staged overwrite.
  *
  * It lives in its own module so the Docker controller, the Files & Volumes
  * browser and the routes can all name it without importing the recovery engine
@@ -8,14 +8,16 @@
  */
 export const DATA_RESTORE_FENCE_CODE = 'data_restore';
 
+/** Who was refused, which decides the wording: a container is started, a volume is opened. */
+export type FenceSubject = 'container' | 'browse';
+
 export class DataRestoreFenceError extends Error {
   readonly code = DATA_RESTORE_FENCE_CODE;
   /**
-   * `container` for a container start or restart; `browse` for the Files &
-   * Volumes browser, which opens the volume and starts no container of the
-   * operator's, so it must not say a container will not start.
+   * `browse` is the Files & Volumes browser, which opens the volume and starts no
+   * container of the operator's, so it must not say a container will not start.
    */
-  constructor(readonly volumeName: string, subject: 'container' | 'browse' = 'container') {
+  constructor(readonly volumeName: string, subject: FenceSubject = 'container') {
     super(
       subject === 'browse'
         ? `The volume "${volumeName}" is being overwritten by a data restore. `

@@ -153,7 +153,16 @@ export interface HelperRunRecord {
  * third succeed.
  */
 export function scriptedHelper(input: {
-  swapAnswers?: Array<{ action: string; exitCode: number; status?: string; stderr?: string }>;
+  swapAnswers?: Array<{
+    action: string;
+    exitCode: number;
+    status?: string;
+    stderr?: string;
+    /** The step was aborted by a cancel. */
+    aborted?: boolean;
+    /** A raw first stdout line, such as the probe's `{"error": ...}` refusal. */
+    stdoutLine?: string;
+  }>;
   dev?: number;
   ino?: number;
   free?: number;
@@ -183,11 +192,12 @@ export function scriptedHelper(input: {
       if (spec.profile === 'swap') {
         const action = spec.cmd[2] ?? '';
         const answer = answers.find((item) => item.action === action) ?? { action, exitCode: 1, stderr: 'unscripted' };
+        if (answer.stdoutLine !== undefined) spec.onStdoutLine?.(answer.stdoutLine);
         if (answer.status !== undefined) {
           const report: Record<string, unknown> = { status: answer.status, moved: 0 };
           spec.onStdoutLine?.(JSON.stringify(report));
         }
-        return { exitCode: answer.exitCode, stderrTail: answer.stderr ?? '', aborted: false, killed: false };
+        return { exitCode: answer.exitCode, stderrTail: answer.stderr ?? '', aborted: answer.aborted === true, killed: false };
       }
       return { exitCode: 1, stderrTail: 'unexpected helper run', aborted: false, killed: false };
     },

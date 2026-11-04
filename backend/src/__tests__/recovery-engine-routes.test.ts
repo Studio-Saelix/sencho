@@ -1191,13 +1191,12 @@ describe('audit summaries', () => {
   });
 
   it('records a preview as a preview, not as a restore', async () => {
-    // The overwrite pattern is a path prefix, so the preview route matched it and
-    // the log showed a restore for every look at the preview.
+    // A preview changes nothing, so it is never worded as a restore.
     const { getAuditSummary } = await import('../utils/audit-summaries');
     expect(getAuditSummary('POST', 'recovery/points/abc/overwrite/preview', 200))
       .toBe('Previewed a restore over the existing volume: abc');
     expect(getAuditSummary('POST', 'recovery/points/abc/overwrite/preview', 403))
-      .toBe('Preview of a restore over the existing volume failed (403): abc');
+      .toBe('Preview of a restore over the existing volume refused (403): abc');
   });
 
   it('tells retry from release_fence, and a refusal from an action', async () => {
@@ -1211,25 +1210,70 @@ describe('audit summaries', () => {
       .toBe('Release of a restore fence refused (409): intent-1');
     expect(getAuditSummary('POST', 'recovery/restores/intent-1/resolve', 409, { action: 'retry' }))
       .toBe('Retry of a restore over the existing volume refused (409): intent-1');
-    // A body without a known action (a refused 400, or a proxied request whose
-    // body this process never parsed) still words the route without claiming one.
+    // A body without a known action (a refused 400, or a request a hub forwarded
+    // to a remote node without reading it) still words the route without claiming one.
     expect(getAuditSummary('POST', 'recovery/restores/intent-1/resolve', 400, { action: 'other' }))
       .toBe('Resolve of a restore over the existing volume refused (400): intent-1');
     expect(getAuditSummary('POST', 'recovery/restores/intent-1/resolve', 200))
       .toBe('Resolved a restore over the existing volume: intent-1');
     expect(getAuditSummary('POST', 'recovery/restores/intent-1/resolve', 200, { action: '__proto__' }))
       .toBe('Resolved a restore over the existing volume: intent-1');
+    expect(getAuditSummary('POST', 'recovery/restores/intent-1/resolve', 200, [{ action: 'retry' }]))
+      .toBe('Resolved a restore over the existing volume: intent-1');
   });
 
-  it('does not word a refused overwrite as a restore', async () => {
+  it('does not word a request that was not served as a restore', async () => {
     const { getAuditSummary } = await import('../utils/audit-summaries');
     expect(getAuditSummary('POST', 'recovery/points/abc/overwrite', 409))
       .toBe('Restore over the existing volume refused (409): abc');
+    // A server error is a failure, not a refusal.
+    expect(getAuditSummary('POST', 'recovery/points/abc/overwrite', 503))
+      .toBe('Restore over the existing volume failed (503): abc');
+    expect(getAuditSummary('POST', 'recovery/restores/intent-1/resolve', 500, { action: 'retry' }))
+      .toBe('Retry of a restore over the existing volume failed (500): intent-1');
     expect(getAuditSummary('POST', 'recovery/points/abc/overwrite', 202))
       .toBe('Started a restore over the existing volume: abc');
   });
+
+  it('words a trailing slash and a malformed escape like the route the router served', async () => {
+    // Express serves `/overwrite/` as `/overwrite`, and a path segment that does
+    // not decode must not drop the audit row.
+    const { getAuditSummary } = await import('../utils/audit-summaries');
+    expect(getAuditSummary('POST', 'recovery/points/abc/overwrite/', 202))
+      .toBe('Started a restore over the existing volume: abc');
+    expect(getAuditSummary('POST', 'recovery/points/abc/overwrite/preview/', 200))
+      .toBe('Previewed a restore over the existing volume: abc');
+    expect(getAuditSummary('POST', 'recovery/restores/intent-1/resolve/', 200, { action: 'retry' }))
+      .toBe('Retried a restore over the existing volume: intent-1');
+    expect(getAuditSummary('POST', 'recovery/points/%E0%A4%A/overwrite', 202))
+      .toBe('Started a restore over the existing volume: %E0%A4%A');
+  });
 });
 
+describe('the audit log row of a restore resolve', () => {
+  // The unit tests above call the summary directly. This one goes through the
+  // real middleware, so a body that never reaches the summary fails here. An
+  // unknown intent answers 400, so the rows are the refused wording of each action.
+  async function auditRowFor(action: string): Promise<{ intentId: string; summary: string | undefined }> {
+    service().markReadyForTests();
+    const intentId = randomUUID();
+    const res = await request(app).post(`/api/recovery/restores/${intentId}/resolve`).set('Cookie', adminCookie).send({ action });
+    expect(res.status).toBe(400);
+    const { DatabaseService } = await import('../services/DatabaseService');
+    const { entries } = DatabaseService.getInstance().getAuditLogs({ search: intentId });
+    return {
+      intentId,
+      summary: entries.find((entry) => entry.path === `/api/recovery/restores/${intentId}/resolve`)?.summary,
+    };
+  }
+
+  it('names the action the request carried, so a retry and a release_fence read differently', async () => {
+    const retry = await auditRowFor('retry');
+    const release = await auditRowFor('release_fence');
+    expect(retry.summary).toBe(`Retry of a restore over the existing volume refused (400): ${retry.intentId}`);
+    expect(release.summary).toBe(`Release of a restore fence refused (400): ${release.intentId}`);
+  });
+});
 
 describe('restore over the existing volume', () => {
   const token = 'a'.repeat(64);

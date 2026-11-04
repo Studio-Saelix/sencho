@@ -1,15 +1,16 @@
 import path from 'path';
 import { canonicalizePathScope } from '../recoveryPoints';
 import { HELPER_SOURCE_MOUNT } from './helperRunner';
-import { redactSensitiveText } from '../../../utils/safeLog';
+import { sanitizeForLog } from '../../../utils/safeLog';
+import { redactRecoveryLogText } from '../redaction';
 import type { ExclusionReason, PointExclusion } from '../types';
 
 /**
  * restic's reported results, mapped to Sencho's vocabulary.
  *
  * Pure: every function here takes text or an exit code and answers with a
- * status, a count or a class. Nothing is logged and nothing is stored, so the
- * mapping table can be read and tested without a daemon.
+ * status, a count, a class or (for the log) a redacted note. Nothing is logged and
+ * nothing is stored, so the mapping table can be read and tested without a daemon.
  *
  * Exit codes are restic's own contract:
  *   0  success
@@ -336,20 +337,28 @@ export function parseRepositoryConfig(stdout: string): { id: string } | null {
   return { id: id.toLowerCase() };
 }
 
-/** A file name restic printed, made safe for a node-local log line. */
+/** Text restic printed (a file name, a stderr line) on one line and shortened; strip control characters with `sanitizeForLog` first. */
 export function trimForLog(text: string, max = 200): string {
   const oneLine = text.replace(/[\r\n]+/g, ' ').trim();
   return oneLine.length > max ? `${oneLine.slice(0, max)}…` : oneLine;
 }
 
 /**
- * What a failed restore said, for the node-local log only: restic's own error
- * items, then the last two lines of its stderr, which is where a fatal error that
- * is not an item (it could not create its target) lands. Never sent to a client.
+ * What a failed helper said, for the node-local log only: the last two lines of
+ * its stderr, which is where a fatal error that is not an item lands (restic could
+ * not create its target), then restic's own error items. Known secrets and
+ * credential shapes are redacted and control characters stripped before the text
+ * is shortened, so a cut cannot split a token past the redactor. Never sent to a
+ * client.
  */
-export function helperFailureNote(stderrTail: string, sampleErrors: readonly string[]): string {
+export function helperFailureNote(
+  stderrTail: string,
+  sampleErrors: readonly string[],
+  knownSecrets: readonly string[] = [],
+): string {
   const tail = stderrTail.split('\n').filter((line) => line.trim() !== '').slice(-2);
-  return redactSensitiveText(trimForLog([...sampleErrors, ...tail].join(' | '), 400));
+  const text = sanitizeForLog(redactRecoveryLogText([...tail, ...sampleErrors].join(' | '), knownSecrets));
+  return trimForLog(text, 400);
 }
 
 /** The default ordering of exclusion paths, for stable evidence. */

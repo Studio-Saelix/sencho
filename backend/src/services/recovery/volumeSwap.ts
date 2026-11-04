@@ -3,6 +3,7 @@ import { RecoveryError } from './redaction';
 import { RECOVERY_WORK_DIR_PREFIX } from './restoreIntents';
 import type { RecoveryHelperRunner } from './restic/helperRunner';
 import { RECOVERY_HELPER_PROBE_PATH } from './restic/helperImage';
+import { helperFailureNote } from './restic/resticOutput';
 
 /**
  * The typed wrapper over the helper probe's `swap` subcommands.
@@ -82,6 +83,22 @@ function stringArray(value: unknown): string[] {
   return value.filter((item): item is string => typeof item === 'string');
 }
 
+/**
+ * The probe reports a refusal as `{"error": ...}` on stdout, with nothing on
+ * stderr, so the log reads it from the same first line the status comes from.
+ */
+function reportedError(line: string | undefined): string[] {
+  const trimmed = (line ?? '').trim();
+  if (!trimmed.startsWith('{')) return [];
+  try {
+    const parsed: unknown = JSON.parse(trimmed);
+    const message = parsed && typeof parsed === 'object' ? (parsed as { error?: unknown }).error : undefined;
+    return typeof message === 'string' ? [message] : [];
+  } catch {
+    return [];
+  }
+}
+
 export interface SwapRunResult {
   /** True when the helper exited 0 and answered a status. */
   ok: boolean;
@@ -146,7 +163,7 @@ export async function runSwapStep(input: {
       input.action,
       sanitizeForLog(input.intentId),
       result.exitCode,
-      sanitizeForLog(result.stderrTail ?? ''),
+      helperFailureNote(result.stderrTail ?? '', reportedError(lines[0])),
     );
     return { ok: false, report, errorClass: null };
   }

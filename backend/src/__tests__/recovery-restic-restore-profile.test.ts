@@ -120,6 +120,46 @@ describe('a failed restore helper', () => {
     expect(line).not.toContain('sentinel-password');
   });
 
+  it('redacts the repository password and strips control characters from what restic printed', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    const { engine } = engineWith(async (spec) => {
+      // A file name a workload wrote can carry control bytes, and a misbehaving
+      // build could echo the password it read from stdin.
+      spec.onStderrLine?.(JSON.stringify({
+        message_type: 'error',
+        item: '/restore/evil\u001b[2Jname\tfile',
+        error: { message: 'unable to write: password sentinel-password was rejected' },
+      }));
+      return {
+        exitCode: 1,
+        stderrTail: 'Fatal: repository password sentinel-password\u0000 is wrong\n',
+        aborted: false,
+        killed: false,
+      };
+    });
+    await engine.restore(intent(STAGED), context());
+    const line = warn.mock.calls.map((call) => format(...call)).find((text) => text.includes('Restore helper'));
+    expect(line).toBeDefined();
+    expect(line).not.toContain('sentinel-password');
+    expect(line).toContain('[redacted]');
+    expect(line).not.toMatch(/[\u0000-\u0008\u000b-\u001f]/);
+  });
+
+  it('keeps the end of stderr, where a fatal error lands, when restic reported many items', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    const { engine } = engineWith(async (spec) => {
+      for (let i = 0; i < 5; i += 1) {
+        spec.onStderrLine?.(JSON.stringify({
+          message_type: 'error', item: `/restore/file-${i}`, error: { message: 'x'.repeat(190) },
+        }));
+      }
+      return { exitCode: 1, stderrTail: 'Fatal: the fatal line\n', aborted: false, killed: false };
+    });
+    await engine.restore(intent(STAGED), context());
+    const line = warn.mock.calls.map((call) => format(...call)).find((text) => text.includes('Restore helper'));
+    expect(line).toContain('the fatal line');
+  });
+
   it('logs a restore into a new volume the same way', async () => {
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
     const { engine } = engineWith(async () => ({

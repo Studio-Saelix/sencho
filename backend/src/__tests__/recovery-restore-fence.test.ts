@@ -255,6 +255,9 @@ describe('what the fence closes', () => {
     const controller = DockerController.getInstance(1);
     await expect(controller.startContainer('c1')).rejects.toMatchObject({ code: 'data_restore' });
     await expect(controller.restartContainer('c1')).rejects.toMatchObject({ code: 'data_restore' });
+    // A container start is worded as one, not as the browser's refusal.
+    await expect(controller.startContainer('c1')).rejects.toThrow(/Sencho will not start it/);
+    await expect(controller.restartContainer('c1')).rejects.toThrow(/Sencho will not start it/);
     await expect(controller.startContainer('c2')).resolves.toBeUndefined();
     // The fenced container was never started; the ordinary one was.
     expect(fake.calls.filter((call) => call.endsWith(':c1'))).toEqual([]);

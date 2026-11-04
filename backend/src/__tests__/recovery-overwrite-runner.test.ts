@@ -388,9 +388,9 @@ describe('cancellation', () => {
 });
 
 describe('cancelling after the fence is applied', () => {
-  // A cancel aborts whichever helper is running. Every step after the fence ended
-  // the operation `failed / pre_restore_failed` when the pre-restore capture was
-  // the one aborted, which told the operator their point was bad.
+  // A cancel aborts whichever helper is running. Whichever step it lands on, the
+  // operation ends `cancelled` and the workloads come back, and an aborted
+  // pre-restore capture is a stop, not a point that came out incomplete.
   function twoContainers() {
     const member = container({ Id: 'c1', State: 'running', Mounts: [{ Type: 'volume', Name: VOLUME }] });
     const fake = fakeDocker({ volumes: [{ name: VOLUME }], containers: [member] });
@@ -404,7 +404,9 @@ describe('cancelling after the fence is applied', () => {
       createPoint: async () => ({ ok: false as const, errorClass: 'interrupted' as const }),
     });
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
-    const { outcomes } = await run({ fake, helper: successHelper(), engine, seeded });
+    const cancel = new AbortController();
+    cancel.abort();
+    const { outcomes } = await run({ fake, helper: successHelper(), engine, seeded, signal: cancel.signal });
 
     expect(outcomes).toEqual([{ state: 'cancelled' }]);
     // The workloads were stopped by the fence and come back, on the original data.
@@ -435,6 +437,38 @@ describe('cancelling after the fence is applied', () => {
     expect(outcomes).toEqual([{ state: 'cancelled' }]);
     expect(fake.containers.get('c1')?.State).toBe('running');
     expect(intents.RestoreIntentStore.getInstance().get(seeded.intentId)?.phase).toBe('rolled_back');
+  });
+
+  it('ends cancelled when the swap preparation is the step aborted, and restarts the workloads', async () => {
+    const { fake, seeded } = twoContainers();
+    const helper = scriptedHelper({
+      swapAnswers: [
+        { action: 'prepare', exitCode: 1, aborted: true },
+        { action: 'rollback', exitCode: 0, status: 'rolled_back' },
+      ],
+    });
+    const cancel = new AbortController();
+    cancel.abort();
+    const { outcomes } = await run({ fake, helper, engine: scriptedEngine(), seeded, signal: cancel.signal });
+
+    expect(outcomes).toEqual([{ state: 'cancelled' }]);
+    expect(fake.containers.get('c1')?.State).toBe('running');
+    const intent = intents.RestoreIntentStore.getInstance().get(seeded.intentId);
+    expect(intent?.phase).toBe('rolled_back');
+    expect(intent?.fenceState).toBe('released');
+  });
+
+  it('logs a stop nobody asked for, such as a helper signalled from outside', async () => {
+    const { fake, seeded } = twoContainers();
+    const engine = scriptedEngine({
+      createPoint: async () => ({ ok: false as const, errorClass: 'interrupted' as const }),
+    });
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    const { outcomes } = await run({ fake, helper: successHelper(), engine, seeded });
+
+    expect(outcomes).toEqual([{ state: 'cancelled' }]);
+    expect(warn.mock.calls.map((call) => format(...call)).some((line) =>
+      line.includes('ended cancelled while taking the pre-restore point'))).toBe(true);
   });
 
   it('still ends pre_restore_failed when the capture really failed', async () => {
@@ -475,7 +509,8 @@ describe('a failed overwrite says why in the node log', () => {
     const line = lines.find((text) => text.includes('Overwrite') && text.includes(seeded.intentId));
     expect(line).toBeDefined();
     expect(line).toContain('failed with node_error');
-    expect(line).toContain('phase rolled_back');
+    expect(line).toContain('while copying the point into the volume');
+    expect(line).toContain('intent now rolled_back');
   });
 
   it('names a pre-restore capture that failed', async () => {
@@ -528,6 +563,44 @@ describe('a failed overwrite says why in the node log', () => {
       seeded: cleanup.seeded,
     }));
     expect(cleanupLines.some((text) => text.includes('ended partial with cleanup_failed'))).toBe(true);
+  });
+
+  it('names the step for a failure that is not a helper failure, such as a container that appeared', async () => {
+    const { fake, seeded } = seededOne();
+    // A second container mounts the volume once the fence is about to be applied.
+    fake.containers.set('c2', container({ Id: 'c2', State: 'running', Mounts: [{ Type: 'volume', Name: VOLUME }] }));
+    const lines = await warnings(() => run({ fake, helper: successHelper(), engine: scriptedEngine(), seeded }));
+    expect(lines.some((text) => text.includes('failed with dependents_changed while fencing the workloads'))).toBe(true);
+  });
+
+  it('keeps the cause of an engine call that threw, which the class alone loses', async () => {
+    const { fake, seeded } = seededOne();
+    const engine = scriptedEngine({
+      restores: [
+        async () => ({ ok: true as const, evidence: { filesRestored: 4, bytesRestored: 400, verified: true } }),
+        async () => { throw new Error('helper image is missing'); },
+      ],
+    });
+    const lines = await warnings(() => run({ fake, helper: successHelper(), engine, seeded }));
+    expect(lines.some((text) => text.includes('Copying the point into the volume') && text.includes('helper image is missing'))).toBe(true);
+  });
+
+  it('still settles the operation when writing the line fails', async () => {
+    const { fake, seeded } = seededOne();
+    const engine = scriptedEngine({
+      createPoint: async () => ({ ok: false as const, errorClass: 'node_error' as const }),
+    });
+    const seen: string[] = [];
+    vi.spyOn(console, 'warn').mockImplementation((...args: unknown[]) => {
+      const line = format(...(args as [string, ...unknown[]]));
+      seen.push(line);
+      // The line that ends the overwrite cannot be written; every other one can.
+      if (line.startsWith('[Recovery] Overwrite ')) throw new Error('log sink is closed');
+    });
+    const { outcomes } = await run({ fake, helper: successHelper(), engine, seeded });
+
+    expect(outcomes).toEqual([{ state: 'failed', errorClass: 'pre_restore_failed' }]);
+    expect(seen.some((line) => line.includes('Could not log the end of overwrite'))).toBe(true);
   });
 
   it('logs nothing when the overwrite succeeds', async () => {

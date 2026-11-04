@@ -190,51 +190,67 @@ export const AUDIT_ROUTE_SUMMARIES: Record<string, string> = {
 const SORTED_PATTERNS = Object.entries(AUDIT_ROUTE_SUMMARIES)
   .sort((a, b) => b[0].split('/').length - a[0].split('/').length);
 
-const RESOLVE_ACTION_SUMMARIES: Readonly<Record<string, { done: string; refused: string }>> = {
-  retry: {
-    done: 'Retried a restore over the existing volume',
-    refused: 'Retry of a restore over the existing volume refused',
-  },
-  release_fence: {
-    done: 'Released the fence of a restore over the existing volume',
-    refused: 'Release of a restore fence refused',
-  },
-};
+/** What a restore over an existing volume's routes are called, by what the request did. */
+const OVERWRITE_ROUTE_WORDING = {
+  preview: { done: 'Previewed a restore over the existing volume', not: 'Preview of a restore over the existing volume' },
+  overwrite: { done: 'Started a restore over the existing volume', not: 'Restore over the existing volume' },
+  // A resolve is worded by its action, because `release_fence` accepts an
+  // unproven volume and the log is how that is reviewed; it must not read like a
+  // retry. An action the body does not carry (a refused request, or one a hub
+  // forwarded to a remote node without reading it) gets the neutral wording.
+  retry: { done: 'Retried a restore over the existing volume', not: 'Retry of a restore over the existing volume' },
+  release_fence: { done: 'Released the fence of a restore over the existing volume', not: 'Release of a restore fence' },
+  resolve: { done: 'Resolved a restore over the existing volume', not: 'Resolve of a restore over the existing volume' },
+} as const;
+
+function safeDecode(segment: string): string {
+  try {
+    return decodeURIComponent(segment);
+  } catch {
+    return segment;
+  }
+}
 
 /**
  * The three routes of a restore over an existing volume, worded by what the
- * request did. A refusal does not claim the action, and a resolve names its
- * action, because the log is how an operator reviews who accepted an unproven
- * volume. Null for every other route, which uses the table below.
+ * request did: a preview changes nothing, an admitted overwrite has started but
+ * not finished, and a request that was not served says so with its status
+ * (`refused` for a 4xx, `failed` for a 5xx) instead of claiming the action. A
+ * trailing slash is the same route to the router, so it is the same here. Null for
+ * every other route, which uses the table above.
  */
 function overwriteRouteSummary(normalized: string, statusCode: number | undefined, body: unknown): string | null {
-  const refusedWith = typeof statusCode === 'number' && statusCode >= 400 ? ` (${statusCode})` : '';
-  const point = /^recovery\/points\/([^/]+)\/overwrite(\/preview)?$/.exec(normalized);
+  let wording: (typeof OVERWRITE_ROUTE_WORDING)[keyof typeof OVERWRITE_ROUTE_WORDING];
+  let id: string;
+  const point = /^recovery\/points\/([^/]+)\/overwrite(\/preview)?\/?$/.exec(normalized);
+  const resolve = /^recovery\/restores\/([^/]+)\/resolve\/?$/.exec(normalized);
   if (point) {
-    const done = point[2] ? 'Previewed a restore over the existing volume' : 'Started a restore over the existing volume';
-    const refused = point[2] ? 'Preview of a restore over the existing volume failed' : 'Restore over the existing volume refused';
-    return `${refusedWith ? refused + refusedWith : done}: ${decodeURIComponent(point[1])}`;
-  }
-  const resolve = /^recovery\/restores\/([^/]+)\/resolve$/.exec(normalized);
-  if (resolve) {
+    wording = point[2] ? OVERWRITE_ROUTE_WORDING.preview : OVERWRITE_ROUTE_WORDING.overwrite;
+    id = point[1];
+  } else if (resolve) {
     const action = body && typeof body === 'object' ? (body as { action?: unknown }).action : undefined;
-    const known = typeof action === 'string' && Object.hasOwn(RESOLVE_ACTION_SUMMARIES, action)
-      ? RESOLVE_ACTION_SUMMARIES[action]
-      : null;
-    const summary = refusedWith
-      ? `${known?.refused ?? 'Resolve of a restore over the existing volume refused'}${refusedWith}`
-      : known?.done ?? 'Resolved a restore over the existing volume';
-    return `${summary}: ${decodeURIComponent(resolve[1])}`;
+    wording = typeof action === 'string' && (action === 'retry' || action === 'release_fence')
+      ? OVERWRITE_ROUTE_WORDING[action]
+      : OVERWRITE_ROUTE_WORDING.resolve;
+    id = resolve[1];
+  } else {
+    return null;
   }
-  return null;
+  const summary = typeof statusCode === 'number' && statusCode >= 400
+    ? `${wording.not} ${statusCode >= 500 ? 'failed' : 'refused'} (${statusCode})`
+    : wording.done;
+  return `${summary}: ${safeDecode(id)}`;
 }
 
 /**
  * Resolve a human-readable summary for an audit log entry.
  *
- * Tries wildcard patterns first (most specific by segment count), then
- * falls back to prefix matching. Returns a generic method+path string
- * if no pattern matches.
+ * The routes of a restore over an existing volume are worded first, from the
+ * status and the request body (`overwriteRouteSummary`). Every other route tries
+ * wildcard patterns (most specific by segment count), then falls back to prefix
+ * matching, and returns a generic method+path string if nothing matches. `body`
+ * is whatever the request parsed to; it is undefined for a request a hub
+ * forwarded to a remote node without reading it.
  */
 export function getAuditSummary(method: string, apiPath: string, statusCode?: number, body?: unknown): string {
   const normalized = apiPath.replace(/^\//, '');

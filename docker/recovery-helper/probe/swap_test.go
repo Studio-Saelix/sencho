@@ -7,6 +7,7 @@ package main
 // followed, and the root's own owner and mode are the snapshot's.
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"syscall"
@@ -165,6 +166,15 @@ func TestCleanupKeepsTheCapturedRootMtime(t *testing.T) {
 	if _, err := swapCommit(request); err != nil {
 		t.Fatalf("commit: %v", err)
 	}
+	// The commit applies it too, so a cleanup that sets it again cannot hide a
+	// commit that stopped doing so.
+	committed, err := os.Stat(request.Root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !committed.ModTime().Equal(captured) {
+		t.Fatalf("root mtime after commit = %s, want the captured %s", committed.ModTime(), captured)
+	}
 	if _, err := swapCleanup(request); err != nil {
 		t.Fatalf("cleanup: %v", err)
 	}
@@ -191,6 +201,86 @@ func TestCleanupKeepsTheCapturedRootMtime(t *testing.T) {
 	}
 	if !info.ModTime().Equal(written) {
 		t.Fatalf("a repeated cleanup moved the root mtime to %s", info.ModTime())
+	}
+}
+
+// The journal lives inside the work directory, so a clean-up that dies part way
+// must not have deleted it while the originals are still on disk: with no journal
+// the directory is unexplained, `cleanup` refuses it and `status` calls it
+// inconsistent, and the operator's only way out restarts workloads next to it.
+func TestCleanupKeepsTheJournalUntilTheBulkIsGone(t *testing.T) {
+	request := setupVolume(t,
+		map[string]string{"db.bin": "original", "conf/keep.txt": "original-config"},
+		map[string]string{"db.bin": "restored"},
+	)
+	if _, err := swapPrepare(request); err != nil {
+		t.Fatalf("prepare: %v", err)
+	}
+	if _, err := swapCommit(request); err != nil {
+		t.Fatalf("commit: %v", err)
+	}
+	workDir, _, originalDir, planPath := paths(request)
+
+	real := removeAll
+	defer func() { removeAll = real }()
+	var removed []string
+	removeAll = func(path string) error {
+		removed = append(removed, path)
+		// The process dies before the last removal: the journal's own directory.
+		if path == workDir {
+			return errors.New("simulated crash")
+		}
+		return real(path)
+	}
+	if _, err := swapCleanup(request); err == nil {
+		t.Fatal("cleanup survived a failed removal of the work directory")
+	}
+	if len(removed) != 3 || removed[2] != workDir {
+		t.Fatalf("removal order = %v, want the originals and the incoming copy before the work directory", removed)
+	}
+	if _, err := os.Stat(originalDir); !os.IsNotExist(err) {
+		t.Fatalf("the originals are still on disk: %v", err)
+	}
+	if _, err := os.Stat(planPath); err != nil {
+		t.Fatalf("the journal went before the work was done: %v", err)
+	}
+
+	// Repeated, it finishes instead of parking.
+	removeAll = real
+	if report, err := swapCleanup(request); err != nil || report.Status != statusCleaned {
+		t.Fatalf("repeated cleanup = %+v, %v", report, err)
+	}
+	if _, err := os.Stat(workDir); !os.IsNotExist(err) {
+		t.Fatalf("work directory survived the repeated cleanup: %v", err)
+	}
+}
+
+// The mtime is cosmetic and is set after the journal is gone, so failing to set
+// it must not turn a committed, cleaned volume into a failure that cannot be
+// retried.
+func TestCleanupSucceedsWhenTheRootMtimeCannotBeSet(t *testing.T) {
+	request := setupVolume(t,
+		map[string]string{"db.bin": "original"},
+		map[string]string{"db.bin": "restored"},
+	)
+	if _, err := swapPrepare(request); err != nil {
+		t.Fatalf("prepare: %v", err)
+	}
+	if _, err := swapCommit(request); err != nil {
+		t.Fatalf("commit: %v", err)
+	}
+	real := setTimes
+	defer func() { setTimes = real }()
+	setTimes = func(string, time.Time, time.Time) error { return errors.New("simulated failure") }
+	report, err := swapCleanup(request)
+	if err != nil || report.Status != statusCleaned {
+		t.Fatalf("cleanup = %+v, %v; want cleaned", report, err)
+	}
+	if _, err := os.Stat(filepath.Join(request.Root, workDirPrefix+testIntent)); !os.IsNotExist(err) {
+		t.Fatalf("work directory survived: %v", err)
+	}
+	if got := readFile(t, filepath.Join(request.Root, "db.bin")); got != "restored" {
+		t.Fatalf("db.bin = %q", got)
 	}
 }
 
