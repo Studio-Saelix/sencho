@@ -1,6 +1,7 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { renderHook, waitFor, act } from '@testing-library/react';
 import { useActiveNodeReapplyEligibility } from '../useActiveNodeReapplyEligibility';
+import type { ReapplyEligibilitySnapshot } from '../useActiveNodeReapplyEligibility';
 
 const apiFetchMock = vi.fn();
 
@@ -92,6 +93,41 @@ describe('useActiveNodeReapplyEligibility', () => {
     });
 
     expect(snapshot).toEqual({ canReapply: true, reason: null });
+    expect(result.current.canReapply).toBe(true);
+    expect(result.current.reason).toBeNull();
+  });
+
+  it('refresh() returns null when a newer read for the same node supersedes it', async () => {
+    apiFetchMock.mockResolvedValue(okJson({
+      nodes: [{ nodeId: 1, canReapplyCompose: false, reapplyUnavailableReason: 'detecting' }],
+    }));
+    const { result } = renderHook(() => useActiveNodeReapplyEligibility(1));
+    await waitFor(() => expect(result.current.reason).toBe('detecting'));
+
+    const pending: Array<(value: Response) => void> = [];
+    apiFetchMock.mockImplementation(() => new Promise<Response>((resolve) => {
+      pending.push(resolve);
+    }));
+
+    let older!: Promise<ReapplyEligibilitySnapshot | null>;
+    let newer!: Promise<ReapplyEligibilitySnapshot | null>;
+    act(() => { older = result.current.refresh(); });
+    await waitFor(() => expect(pending).toHaveLength(1));
+    act(() => { newer = result.current.refresh(); });
+    await waitFor(() => expect(pending).toHaveLength(2));
+
+    await act(async () => {
+      pending[1](okJson({ nodes: [{ nodeId: 1, canReapplyCompose: true }] }));
+    });
+    expect(await newer).toEqual({ canReapply: true, reason: null });
+
+    await act(async () => {
+      pending[0](okJson({
+        nodes: [{ nodeId: 1, canReapplyCompose: false, reapplyUnavailableReason: 'docker_unreachable' }],
+      }));
+    });
+    expect(await older).toBeNull();
+    // The superseded answer never replaces the newer one.
     expect(result.current.canReapply).toBe(true);
     expect(result.current.reason).toBeNull();
   });

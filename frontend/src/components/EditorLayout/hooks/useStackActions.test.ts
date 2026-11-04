@@ -3368,9 +3368,11 @@ describe('useStackActions overlapping reapply eligibility reads', () => {
   });
 
   it.each([
-    ['the superseded read lands second', [1, 0] as const],
-    ['the superseded read lands first', [0, 1] as const],
-  ])('opens exactly one confirmation when %s', async (_label, order) => {
+    { label: 'both reads recover, superseded read lands second', order: [1, 0] as const, verdicts: ['eligible', 'eligible'] as const, outcome: 'confirmation' as const },
+    { label: 'both reads recover, superseded read lands first', order: [0, 1] as const, verdicts: ['eligible', 'eligible'] as const, outcome: 'confirmation' as const },
+    { label: 'older read recovers but the newer refuses, superseded read lands second', order: [1, 0] as const, verdicts: ['eligible', 'ineligible'] as const, outcome: 'refusal' as const },
+    { label: 'older read recovers but the newer refuses, superseded read lands first', order: [0, 1] as const, verdicts: ['eligible', 'ineligible'] as const, outcome: 'refusal' as const },
+  ])('keeps the newest decision when $label', async ({ order, verdicts, outcome }) => {
     const { result, overlayState, pending } = setupOverlap();
 
     // Settle the initial effect read on a cached false.
@@ -3386,9 +3388,10 @@ describe('useStackActions overlapping reapply eligibility reads', () => {
     act(() => { newer = result.current.actions.deployStack(click()); });
     await vi.waitFor(() => expect(pending).toHaveLength(3));
 
+    const responses = { eligible, ineligible };
     const decisions = [
-      { response: eligible, done: older },
-      { response: eligible, done: newer },
+      { response: responses[verdicts[0]], done: older },
+      { response: responses[verdicts[1]], done: newer },
     ];
     for (const index of order) {
       const decision = decisions[index];
@@ -3398,11 +3401,21 @@ describe('useStackActions overlapping reapply eligibility reads', () => {
       });
     }
 
-    expect(overlayState.setComposeReapplyCapture).toHaveBeenCalledTimes(1);
-    expect(overlayState.setComposeReapplyCapture).toHaveBeenCalledWith({
-      nodeId: 7, nodeType: 'remote', nodeName: 'Remote A', stackFile: 'sencho.yml',
-    });
-    expect(overlayState.openSelfStackProtected).not.toHaveBeenCalled();
+    // Only the newer read owns the decision, so the older click never opens a
+    // dialog of its own: the newer verdict alone decides which one appears.
+    if (outcome === 'confirmation') {
+      expect(overlayState.setComposeReapplyCapture).toHaveBeenCalledTimes(1);
+      expect(overlayState.setComposeReapplyCapture).toHaveBeenCalledWith({
+        nodeId: 7, nodeType: 'remote', nodeName: 'Remote A', stackFile: 'sencho.yml',
+      });
+      expect(overlayState.openSelfStackProtected).not.toHaveBeenCalled();
+    } else {
+      expect(overlayState.setComposeReapplyCapture).not.toHaveBeenCalled();
+      expect(overlayState.openSelfStackProtected).toHaveBeenCalledTimes(1);
+      expect(overlayState.openSelfStackProtected).toHaveBeenCalledWith({
+        nodeName: 'Remote A', reason: 'detecting',
+      });
+    }
   });
 });
 

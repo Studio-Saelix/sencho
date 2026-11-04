@@ -163,9 +163,9 @@ interface UseStackActionsOptions {
   reapplyUnavailableReason?: import('@/components/FleetView/types').ReapplyUnavailableReason | null;
   /**
    * Re-read eligibility for the node that is active at click time. Returns null
-   * when the answer no longer describes the current request: the node changed
-   * mid-read, or a newer read superseded this one. A null result cancels the
-   * continuation that asked for it.
+   * when this read no longer owns the decision: the active node changed
+   * mid-read, a newer read superseded it, or no node was active. A null result
+   * cancels the continuation that asked for it.
    */
   refreshReapplyEligibility?: () => Promise<{
     canReapply: boolean;
@@ -1970,12 +1970,13 @@ export function useStackActions(options: UseStackActionsOptions) {
         // loaded. Re-read once at the click before refusing the operator.
         if (!eligible && refreshReapplyEligibility) {
           const fresh = await refreshReapplyEligibility();
-          // A node switch mid-read must not retarget the decision or the dialog.
+          // The hook already returns null on a switch; keep the explicit check
+          // so a different implementation cannot retarget the decision or dialog.
           if ((activeNodeIdRef.current ?? null) !== nodeId) return;
           // A null result means a newer read superseded this one (or the node
           // changed). This request is discarded: continuing with the captured
-          // false would open the protection dialog beside the confirmation the
-          // current request is about to show.
+          // false would open a second dialog from this request while the newer
+          // one decides for itself.
           if (!fresh) return;
           eligible = fresh.canReapply;
           reason = fresh.reason;

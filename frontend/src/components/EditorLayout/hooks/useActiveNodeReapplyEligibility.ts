@@ -8,7 +8,7 @@ type OwnedEligibility = {
     reason: ReapplyUnavailableReason | null;
 };
 
-/** What a click-time re-read found, bound to the node it was read for. */
+/** What a click-time re-read found for the node that was current when it returned. */
 export type ReapplyEligibilitySnapshot = {
     canReapply: boolean;
     reason: ReapplyUnavailableReason | null;
@@ -76,6 +76,8 @@ export function useActiveNodeReapplyEligibility(activeNodeId: number | null | un
         };
     }, [activeNodeId]);
 
+    // Resolves null when this read is dropped (a newer read or a node change),
+    // so a caller must not continue with a cached answer.
     const refresh = useCallback(async (): Promise<ReapplyEligibilitySnapshot | null> => {
         const nodeId = activeNodeIdRef.current;
         if (nodeId == null) return null;
