@@ -334,6 +334,30 @@ describe('secret-safe serialization', () => {
     expect(finding.identity.basis).toBe('structured');
   });
 
+  it.each([
+    ['a percent-encoded user name', 'user%40x:SECRETQ6@host/app:latest', 'SECRETQ6'],
+    ['a literal @ in the password', 'u:p@SECRETQ7@host/app', 'SECRETQ7'],
+  ])('redacts a legacy stored image row holding %s', (_variant, image, secret) => {
+    const row: PreflightFindingRow = {
+      id: 'row-legacy',
+      run_id: 'run-1',
+      rule_id: 'image-latest',
+      severity: 'medium',
+      title: 'Image uses a moving tag',
+      message: `Service "web" uses "${image}", which resolves to a moving latest tag.`,
+      source_path: 'web',
+      remediation: `Pin ${image} to a version tag.`,
+      service: 'web',
+      created_at: 1,
+      rule_version: 1,
+      subject_kind: 'image',
+      subject_key: image,
+    };
+    const serialized = JSON.stringify(serializeFinding(normalizeStoredFinding(row, 1, STACK)));
+    expect(serialized).not.toContain(secret);
+    expect(serialized).toContain('[redacted]@host/app');
+  });
+
   describe('a credential in every free-text field of a hit', () => {
     const URL = 'https://admin:hunter2pass@cfg.example.com/app.env';
     const credentialHit = () => hit('env-file-missing', {

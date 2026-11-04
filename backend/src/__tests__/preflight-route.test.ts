@@ -197,6 +197,30 @@ describe('preflight responses redact credentials in findings and acknowledgement
     expect(run.body.findings).toEqual(read.body.findings);
   });
 
+  // A scheme-less userinfo that is not a plain name:password pair. Both leaked
+  // through the run response and the later read until the image rule learned them.
+  it.each([
+    ['a percent-encoded user name', 'user%40x:SECRETQ6@host/app:latest', 'SECRETQ6'],
+    ['a literal @ in the password', 'u:p@SECRETQ7@host/app', 'SECRETQ7'],
+    ['both', 'user%40x:p@SECRETQ8@host:5000/app', 'SECRETQ8'],
+  ])('redacts %s in the run response, the later read, and the stored row', async (_variant, image, secret) => {
+    vi.restoreAllMocks();
+    stub(image);
+    fs.writeFileSync(path.join(stackDir, 'compose.yaml'), `services:\n  web:\n    image: "${image}"\n`);
+
+    const run = await request(app).post(`/api/stacks/${STACK}/preflight/run`).set('Authorization', authHeader);
+    expect(run.status).toBe(200);
+    const imageFinding = run.body.findings.find((f: { ruleId: string }) => f.ruleId === 'image-latest');
+    expect(imageFinding.message).toContain('[redacted]@host');
+
+    const read = await get(`/api/stacks/${STACK}/preflight`);
+    const { DatabaseService } = await import('../services/DatabaseService');
+    const rows = DatabaseService.getInstance().getDb()
+      .prepare('SELECT title, message, source_path, remediation, subject_key FROM preflight_findings').all();
+    for (const body of [run.body, read.body, rows]) expect(JSON.stringify(body)).not.toContain(secret);
+    expect(run.body.findings).toEqual(read.body.findings);
+  });
+
   it('stores the redacted copy, not the credential', async () => {
     await request(app).post(`/api/stacks/${STACK}/preflight/run`).set('Authorization', authHeader);
     const { DatabaseService } = await import('../services/DatabaseService');

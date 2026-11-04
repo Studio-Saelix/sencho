@@ -145,6 +145,29 @@ describe('redactSensitiveText', () => {
     expect(text).toContain('[redacted]@[::1]:5000/team/app:1.0');
   });
 
+  it.each([
+    ['a percent-encoded user name', 'service "a6" uses "user%40x:SECRETQ6@host/app:latest"', 'SECRETQ6', '"[redacted]@host/app:latest"'],
+    ['a literal @ in the password', 'service "a7" uses "u:p@SECRETQ7@host/app"', 'SECRETQ7', '"[redacted]@host/app"'],
+    ['two literal @ in the password', 'pull failed for u:a@b@SECRETQ9@host:5000/app', 'SECRETQ9', '[redacted]@host:5000/app'],
+    ['an encoded user name and a literal @', 'image=user%40x:p@SECRETQ8@reg.invalid/app:1', 'SECRETQ8', 'image=[redacted]@reg.invalid/app:1'],
+    ['a user name with sub-delimiters', 'pull failed for ci+bot~1:SECRETQ10@reg.invalid/app', 'SECRETQ10', '[redacted]@reg.invalid/app'],
+    ['a literal @ before a bracketed IPv6 host', 'pull failed for u:p@SECRETQ11@[::1]:5000/app', 'SECRETQ11', '[redacted]@[::1]:5000/app'],
+  ])('redacts a scheme-less image credential with %s', (_variant, input, secret, expected) => {
+    const text = redactSensitiveText(input);
+    expect(text).not.toContain(secret);
+    expect(text).toContain(expected);
+  });
+
+  it('keeps the image tail when a literal @ password is redacted', () => {
+    expect(redactSensitiveText('uses u:p@SECRETQ7@host/team/app:1.0 and then nginx:latest'))
+      .toBe('uses [redacted]@host/team/app:1.0 and then nginx:latest');
+  });
+
+  it('leaves a digest pin intact next to a credential-free percent-encoded text', () => {
+    const text = redactSensitiveText('50%25:done registry:5000/team/app:1.0@sha256:abc123 ok');
+    expect(text).toBe('50%25:done registry:5000/team/app:1.0@sha256:abc123 ok');
+  });
+
   it('leaves a digest-pinned image reference intact', () => {
     const text = redactSensitiveText('pinned ghcr.io/studio-saelix/sencho:0.97.1@sha256:1a2b3c4d5e6f failed to pull');
 

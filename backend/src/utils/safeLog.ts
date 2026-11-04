@@ -37,14 +37,16 @@ export function redactSensitiveText(value: unknown): string {
     // never by a `/`. Without it every digest pin loses its repository and tag,
     // which is the text a GitOps diagnosis is built from. The first keeps a URL
     // path that merely contains `a:b@c/` from being read as a credential.
+    // The user is any RFC 3986 userinfo character, so a percent-encoded name
+    // (user%40corp) is caught, and the password runs to the last `@` that still
+    // leads to a host and a path, so a raw `@` inside it leaves no tail behind.
     // The narrowing has a known cost: a credential with no path after the host
-    // is not caught, and neither is a password containing `@`, which an image
-    // reference cannot carry unencoded anyway. The rule also over-matches text
-    // shaped like a time and a host, "10:30@host/a", which is indistinguishable
-    // from a numeric user and password. That direction is deliberate: an
-    // over-redacted log line costs a word, an under-redacted one leaks.
+    // is not caught. The rule also over-matches text shaped like a time and a
+    // host, "10:30@host/a", which is indistinguishable from a numeric user and
+    // password. That direction is deliberate: an over-redacted log line costs a
+    // word, an under-redacted one leaks.
     .replace(
-      /(^|[\s"'=,(])[A-Za-z0-9._-]+:[^/\s@]+@(\[[^\]\s]+\]|[A-Za-z0-9.-]+(?::\d+)?\/)/g,
+      /(^|[\s"'=,(])[A-Za-z0-9._~%!$&*+;-]+:[^/\s]+@(\[[^\]\s]+\]|[A-Za-z0-9.-]+(?::\d+)?\/)/g,
       (_match, lead: string, host: string) => `${lead}[redacted]@${host}`,
     )
     // Keyword-led secrets, tolerating a JSON/YAML quoting boundary between the
