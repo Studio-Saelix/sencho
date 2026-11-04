@@ -794,6 +794,63 @@ func TestAFailedJournalWriteLeavesTheJournalAlone(t *testing.T) {
 	}
 }
 
+// A close that fails on the write or sync path is reported with the failure
+// that precedes it, so a handle that could not flush is never mistaken for a
+// clean refusal. Both paths must still refuse to replace the journal.
+func TestACloseErrorIsReportedWithTheFailureBeforeIt(t *testing.T) {
+	writeErr := errors.New("write failed")
+	syncErr := errors.New("sync failed")
+	closeErr := errors.New("close failed")
+	cases := []struct {
+		name string
+		file *failingJournalFile
+		want error
+	}{
+		{name: "write", file: &failingJournalFile{err: writeErr, closeErr: closeErr}, want: writeErr},
+		{name: "sync", file: &failingJournalFile{sync: syncErr, closeErr: closeErr}, want: syncErr},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			journal := filepath.Join(dir, planFileName)
+			if err := os.WriteFile(journal, []byte("original"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			opened := openJournalTemp
+			t.Cleanup(func() { openJournalTemp = opened })
+			openJournalTemp = func(string) (journalFile, error) { return tc.file, nil }
+			err := writePlan(journal, swapPlan{})
+			if !errors.Is(err, tc.want) {
+				t.Fatalf("writePlan error = %v, want it to carry %v", err, tc.want)
+			}
+			if !errors.Is(err, closeErr) {
+				t.Fatalf("writePlan error = %v, want it to carry the close error %v", err, closeErr)
+			}
+			if got := readFile(t, journal); got != "original" {
+				t.Fatalf("journal = %q after a failed %s, want the original", got, tc.name)
+			}
+		})
+	}
+}
+
+// failingJournalFile fails one step and then the close, which is the sequence a
+// short write or a refused flush leaves behind.
+type failingJournalFile struct {
+	err      error
+	sync     error
+	closeErr error
+}
+
+func (f *failingJournalFile) Write(p []byte) (int, error) {
+	if f.err != nil {
+		return 0, f.err
+	}
+	return len(p), nil
+}
+
+func (f *failingJournalFile) Sync() error { return f.sync }
+func (f *failingJournalFile) Close() error { return f.closeErr }
+
 func TestCommitIntoAnEmptyVolume(t *testing.T) {
 	request := setupVolume(t, map[string]string{}, map[string]string{"new.txt": "restored"})
 	if _, err := swapPrepare(request); err != nil {

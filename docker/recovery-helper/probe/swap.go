@@ -315,13 +315,27 @@ func readPlan(path string) (swapPlan, error) {
 	return plan, nil
 }
 
+// openJournalTemp is a variable so a test can hand writePlan a handle whose
+// Close fails: no filesystem offers that on demand, and a close that loses
+// buffered data is exactly what the error joins below exist for.
+var openJournalTemp = func(path string) (journalFile, error) {
+	return os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o600)
+}
+
+// journalFile is the handle writePlan writes the journal through.
+type journalFile interface {
+	Write([]byte) (int, error)
+	Sync() error
+	Close() error
+}
+
 func writePlan(path string, plan swapPlan) error {
 	data, err := json.Marshal(plan)
 	if err != nil {
 		return err
 	}
 	temp := path + ".tmp"
-	file, err := os.OpenFile(temp, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o600)
+	file, err := openJournalTemp(temp)
 	if err != nil {
 		return err
 	}
