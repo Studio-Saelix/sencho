@@ -6195,9 +6195,11 @@ paths:
         only one capture, verification, restore, or repository replacement runs at a time on it. A node with no
         repository answers `503 capability_unavailable` with reason `repository_not_initialized`.
         The capture runs in the background and is followed by a repository-wide metadata
-        check before the operation ends. A volume whose overwrite restore has not settled,
-        or whose fence is still held, answers `409 lock_held`: the restore's hidden working
-        copy is still inside the volume and a point would include it.
+        check before the operation ends. A volume with an overwrite restore that is open
+        (any phase before it settles), or whose fence is held or failed to release, answers
+        `409 lock_held`: the restore's hidden working copy may still be inside the volume
+        and a point would include it. A restore parked as `completion_unknown` answers
+        `409 lock_stale` through its storage lock instead.
         Only a Full Admin API token may call it; any other scope is refused with `403 SCOPE_DENIED`.
       parameters:
         - $ref: "#/components/parameters/nodeId"
@@ -6563,8 +6565,10 @@ paths:
         finishes a clean-up, and releases a fence that could not be released. When it proves the
         restore, the restore's operation settles and releases the volume's storage lock, as startup does;
         so does `release_fence` when the journal proves the swap committed. Once the fence is
-        released the workloads may be running, so `retry` then only removes the hidden directory
-        of a swap the journal proves committed, and otherwise answers `unknown` and moves nothing.
+        released the workloads may be running, so `retry` then moves no data and applies no
+        metadata: it removes the hidden directory of a swap the journal proves committed,
+        settles a restore that stopped before the swap once its journal is gone, and
+        otherwise answers `unknown`.
         `release_fence`
         accepts the volume as it now is: it restores every recorded restart policy and starts
         nothing. When the journal proves the swap committed, it removes the hidden directory

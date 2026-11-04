@@ -442,7 +442,8 @@ describe('a capture while an overwrite of the volume is open', () => {
   async function seedOpenOverwrite(
     seeded: Awaited<ReturnType<typeof seedProtectableVolume>>,
     phase: 'swapped' | 'committed' | 'rolled_back' | 'completion_unknown',
-    fenceState: 'held' | 'released',
+    fenceState: 'held' | 'released' | 'release_failed',
+    volume = VOLUME,
   ) {
     const point = points.RecoveryPointStore.getInstance().begin({
       kind: 'root',
@@ -464,7 +465,7 @@ describe('a capture while an overwrite of the volume is open', () => {
         consistency: 'crash_consistent_live',
       },
     });
-    const operationId = `op-restore-${phase}-${fenceState}`;
+    const operationId = `op-restore-${phase}-${fenceState}-${volume}`;
     const db = recoveryDbModule.recoveryDb();
     db.prepare(`INSERT INTO recovery_operations (id, idempotency_key, kind, storage_id, point_id, actor, transport, state, error_class, process_epoch, created_at, updated_at)
       VALUES (?, ?, 'restore', ?, ?, 'alice', 'local', 'partial', 'cleanup_failed', 'old', 1, 1)`)
@@ -472,7 +473,7 @@ describe('a capture while an overwrite of the volume is open', () => {
     const intent = intents.RestoreIntentStore.getInstance().recordOverwrite({
       operationId,
       pointId: point.id,
-      targetVolume: VOLUME,
+      targetVolume: volume,
       actor: 'alice',
       processEpoch: 'old',
       stagingVolume: 'sencho-recovery-stage-test',
@@ -491,8 +492,11 @@ describe('a capture while an overwrite of the volume is open', () => {
     ['swapped', 'held'],
     ['swapped', 'released'],
     ['committed', 'held'],
+    ['committed', 'release_failed'],
+    ['rolled_back', 'release_failed'],
+    ['completion_unknown', 'held'],
   ] as const) {
-    it(`refuses a capture while a restore at ${phase} with its fence ${fenceState} owes its clean-up, and leaves nothing behind`, async () => {
+    it(`refuses a capture while a restore at ${phase} still has its fence ${fenceState}, and leaves nothing behind`, async () => {
       stubDocker(fakeDocker({ volumes: [{ name: VOLUME, labels: {} }] }));
       const seeded = await seedProtectableVolume();
       await seedOpenOverwrite(seeded, phase, fenceState);
@@ -538,13 +542,24 @@ describe('a capture while an overwrite of the volume is open', () => {
     expect(replay.operation.id).toBe(first.operation.id);
   });
 
-  it('does not refuse a capture for a restore that settled and released its fence, or one whose state is unproven', async () => {
+  it('does not refuse a capture for a restore that settled and released its fence', async () => {
     stubDocker(fakeDocker({ volumes: [{ name: VOLUME, labels: {} }] }));
     const seeded = await seedProtectableVolume();
     await seedOpenOverwrite(seeded, 'rolled_back', 'released');
     runner.RecoveryEngineService.setEngineFactoryForTests(() => engineReturning({}) as never);
     service().markReadyForTests();
     const admitted = await service().admitCreatePoint(captureRequest('key-settled'));
+    expect(admitted.replayed).toBe(false);
+    await service().whenIdleForTests();
+  });
+
+  it('does not refuse a capture for an open restore of another volume', async () => {
+    stubDocker(fakeDocker({ volumes: [{ name: VOLUME, labels: {} }] }));
+    const seeded = await seedProtectableVolume();
+    await seedOpenOverwrite(seeded, 'swapped', 'held', 'other_volume');
+    runner.RecoveryEngineService.setEngineFactoryForTests(() => engineReturning({}) as never);
+    service().markReadyForTests();
+    const admitted = await service().admitCreatePoint(captureRequest('key-other'));
     expect(admitted.replayed).toBe(false);
     await service().whenIdleForTests();
   });

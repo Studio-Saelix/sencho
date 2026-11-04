@@ -647,6 +647,9 @@ describe('the operation of a reconciled overwrite', () => {
       fake.containers.get('c1')!.State = 'running';
       return { seeded, fake, before: fake.calls.length };
     };
+    // A workload is not started, stopped or reconfigured: the volume calls (a staging volume removed) are not the point.
+    const containerCalls = (fake: ReturnType<typeof fakeDocker>, from: number) => fake.calls.slice(from)
+      .filter((call) => /^(start|stop|update):/.test(call));
     const swapSteps = (helper: ReturnType<typeof scriptedHelper>) => helper.runs
       .filter((run) => run.profile === 'swap').map((run) => run.cmd[2]);
 
@@ -658,7 +661,7 @@ describe('the operation of a reconciled overwrite', () => {
         const result = await overwrite.resolveOverwriteIntent(deps(fake, helper), { intentId: seeded.intentId, action: 'retry' });
         expect(result.outcome).toBe('unknown');
         expect(swapSteps(helper)).toEqual(['status']);
-        expect(fake.calls.slice(before)).toEqual([]);
+        expect(containerCalls(fake, before)).toEqual([]);
         expect(intents.RestoreIntentStore.getInstance().get(seeded.intentId)).toMatchObject({
           phase: open?.phase, fenceState: 'released', outcomeClass: open?.outcomeClass,
         });
@@ -692,7 +695,7 @@ describe('the operation of a reconciled overwrite', () => {
       const result = await overwrite.resolveOverwriteIntent(deps(fake, helper), { intentId: seeded.intentId, action: 'retry' });
       expect(result.outcome).toBe('committed');
       expect(swapSteps(helper)).toEqual(['status', 'cleanup']);
-      expect(fake.calls.slice(before)).toEqual([]);
+      expect(containerCalls(fake, before)).toEqual([]);
       expect(intents.RestoreIntentStore.getInstance().get(seeded.intentId)).toMatchObject({ phase: 'committed', fenceState: 'released' });
     });
 
@@ -705,25 +708,78 @@ describe('the operation of a reconciled overwrite', () => {
       expect(swapSteps(helper)).toEqual(['status', 'cleanup']);
     });
 
-    it('does not roll back a restore parked before the swap whose fence was released', async () => {
+    it('settles a restore parked before the swap whose fence was released and whose journal is gone, without a data step', async () => {
       const { seeded, fake, before } = await released('fenced');
-      const helper = answers();
+      const helper = scriptedHelper({ swapAnswers: [{ action: 'status', exitCode: 0, status: 'absent' }] });
       const result = await overwrite.resolveOverwriteIntent(deps(fake, helper), { intentId: seeded.intentId, action: 'retry' });
-      expect(result.outcome).toBe('unknown');
-      expect(swapSteps(helper)).toEqual([]);
-      expect(fake.calls.slice(before)).toEqual([]);
+      expect(result.outcome).toBe('rolled_back');
+      expect(swapSteps(helper)).toEqual(['status']);
+      expect(containerCalls(fake, before)).toEqual([]);
+      expect(intents.RestoreIntentStore.getInstance().get(seeded.intentId)).toMatchObject({ phase: 'rolled_back', fenceState: 'released' });
+      // The volume is free again: nothing owns it.
+      expect(fence.RestoreFenceStore.getInstance().liveIntentForVolume(VOLUME)).toBeNull();
     });
 
-    it('is left alone by the start of Sencho too: no rollback under workloads the operator started', async () => {
+    it('parks such a restore as unknown, and frees the volume of its phase, when a journal is still there', async () => {
+      const { seeded, fake, before } = await released('fenced');
+      const helper = scriptedHelper({ swapAnswers: [{ action: 'status', exitCode: 0, status: 'planned' }] });
+      const result = await overwrite.resolveOverwriteIntent(deps(fake, helper), { intentId: seeded.intentId, action: 'retry' });
+      expect(result.outcome).toBe('unknown');
+      expect(swapSteps(helper)).toEqual(['status']);
+      expect(containerCalls(fake, before)).toEqual([]);
+      expect(intents.RestoreIntentStore.getInstance().get(seeded.intentId)?.phase).toBe('completion_unknown');
+      expect(fence.RestoreFenceStore.getInstance().liveIntentForVolume(VOLUME)).toBeNull();
+    });
+
+    it('treats a release that failed part way like a released fence', async () => {
+      const { seeded, fake, before } = await released('swapping');
+      recoveryDbModule.recoveryDb().prepare("UPDATE recovery_restore_intents SET fence_state = 'release_failed' WHERE id = ?").run(seeded.intentId);
+      const helper = scriptedHelper({ swapAnswers: [{ action: 'status', exitCode: 0, status: 'planned' }] });
+      const result = await overwrite.resolveOverwriteIntent(deps(fake, helper), { intentId: seeded.intentId, action: 'retry' });
+      expect(result.outcome).toBe('unknown');
+      expect(swapSteps(helper)).toEqual(['status']);
+      expect(containerCalls(fake, before)).toEqual([]);
+    });
+
+    for (const status of ['inconsistent', null] as const) {
+      it(`keeps a committed swap's phase and class when its status reads ${status ?? 'unanswered'} (a workload wrote to the volume)`, async () => {
+        const { seeded, fake } = await released('swapped', true);
+        const helper = scriptedHelper({ swapAnswers: [status
+          ? { action: 'status', exitCode: 0, status }
+          : { action: 'status', exitCode: 1 }] });
+        const result = await overwrite.resolveOverwriteIntent(deps(fake, helper), { intentId: seeded.intentId, action: 'retry' });
+        expect(result.outcome).toBe('unknown');
+        expect(swapSteps(helper)).toEqual(['status']);
+        expect(intents.RestoreIntentStore.getInstance().get(seeded.intentId)).toMatchObject({
+          phase: 'swapped', outcomeClass: 'cleanup_failed', fenceState: 'released',
+        });
+        // It still owns the volume, so a capture cannot take the hidden directory with it.
+        expect(fence.RestoreFenceStore.getInstance().liveIntentForVolume(VOLUME)).toBe(seeded.intentId);
+        settle(seeded.intentId);
+        expect(operation(seeded.operationId)).toMatchObject({ state: 'partial', errorClass: 'cleanup_failed' });
+      });
+    }
+
+    it('is settled by the start of Sencho without a rollback under workloads the operator started', async () => {
       // Boot visits the phases that are not `completion_unknown`: here the one a rollback
       // that released its fence left behind when the process died before it settled.
       const { seeded, fake, before } = await released('fenced');
-      const helper = answers();
+      const helper = scriptedHelper({ swapAnswers: [{ action: 'status', exitCode: 0, status: 'absent' }] });
+      const outcome = await overwrite.reconcileOverwriteIntentsAtStartup(deps(fake, helper));
+      expect(outcome).toEqual({ rolledBack: 1, committed: 0, unknown: 0 });
+      expect(swapSteps(helper)).toEqual(['status']);
+      expect(containerCalls(fake, before)).toEqual([]);
+      expect(intents.RestoreIntentStore.getInstance().get(seeded.intentId)?.phase).toBe('rolled_back');
+    });
+
+    it('does not roll back at the start of Sencho when the journal of such a restore is still there', async () => {
+      const { seeded, fake, before } = await released('fenced');
+      const helper = scriptedHelper({ swapAnswers: [{ action: 'status', exitCode: 0, status: 'planned' }] });
       const outcome = await overwrite.reconcileOverwriteIntentsAtStartup(deps(fake, helper));
       expect(outcome).toEqual({ rolledBack: 0, committed: 0, unknown: 1 });
-      expect(swapSteps(helper)).toEqual([]);
-      expect(fake.calls.slice(before)).toEqual([]);
-      expect(intents.RestoreIntentStore.getInstance().get(seeded.intentId)?.phase).toBe('fenced');
+      expect(swapSteps(helper)).toEqual(['status']);
+      expect(containerCalls(fake, before)).toEqual([]);
+      expect(intents.RestoreIntentStore.getInstance().get(seeded.intentId)?.phase).toBe('completion_unknown');
     });
   });
 

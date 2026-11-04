@@ -546,7 +546,7 @@ export class RecoveryEngineService {
         // answered before it and the check cannot race a restore being admitted.
         if (RestoreFenceStore.getInstance().liveIntentForVolume(input.volumeName)) {
           throw new RecoveryError('lock_held', {
-            detail: 'A restore of this volume has not finished, and its working copy is still in the volume. Resolve the restore, then capture again.',
+            detail: 'A restore of this volume has not finished or still holds its fence, and its working copy may still be in the volume. Resolve the restore, then capture again.',
           });
         }
         return this.points.begin({

@@ -1144,7 +1144,11 @@ describe('a staging volume that cannot be removed', () => {
     expect(fake.containers.get('c1')?.State).toBe('running');
 
     refuse.value = false;
-    const second = await overwrite.reconcileOverwriteIntentsAtStartup(pipelineDeps(fake, successHelper()));
+    // The rollback finished before the fence was released, so its journal is gone and
+    // the workloads that restarted are not touched by this pass.
+    const second = await overwrite.reconcileOverwriteIntentsAtStartup(
+      pipelineDeps(fake, scriptedHelper({ swapAnswers: [{ action: 'status', exitCode: 0, status: 'absent' }] })),
+    );
     expect(second.rolledBack).toBe(1);
     expect(intents.RestoreIntentStore.getInstance().get(seeded.intentId)?.phase).toBe('rolled_back');
   });

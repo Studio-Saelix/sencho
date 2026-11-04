@@ -1373,13 +1373,15 @@ export async function reconcileOverwriteIntentsAtStartup(
 /**
  * One intent. Idempotent: the resolve route re-runs exactly this.
  *
- * Once the fence is `released` the workloads may be running again (the operator
- * starts them after `release_fence`, and boot runs with whatever they started), so
- * no step here may move data under them: a rollback would take their writes back
- * out of the volume, and a commit would apply the root metadata over theirs. What
- * the journal already proves committed is still finished (the originals are
- * removed, which no workload can see), and everything else answers `unknown` and
- * leaves the intent as it is.
+ * Once the fence has been released (or its release failed part way) the workloads
+ * may be running again: the operator starts them after `release_fence`, and boot
+ * runs with whatever they started. No step here may then move data under them. A
+ * rollback would take their writes back out of the volume and apply the old root
+ * metadata over theirs, and a commit would write the new root metadata over theirs.
+ * What the journal already proves committed is still finished (the hidden work
+ * directory, which no workload depends on, is removed), a restore parked before
+ * the swap whose journal is gone is settled without a data step, and everything
+ * else answers `unknown` without moving data or applying metadata.
  */
 export async function reconcileOverwriteIntent(
   deps: OverwriteDeps,
@@ -1412,21 +1414,38 @@ export async function reconcileOverwriteIntent(
     return settleProven(deps, intent, 'rolled_back', released, now);
   }
 
-  const workloadsMayRun = intent.fenceState === 'released';
-
   if (FENCED_PHASES.includes(intent.phase)) {
-    if (workloadsMayRun) return refuseUnderWorkloads(intent, 'roll back');
     // The workloads are stopped and nothing was renamed yet.
-    const rollback = await runClosingSwapStep({
-      runner: deps.runner(),
-      operationId: `overwrite-reconcile-${intent.id}`,
-      volumeName,
-      intentId: intent.id,
-      action: 'rollback',
-    });
-    if (!rollback.ok) {
-      markUnknown(deps, intent, 'identity_unknown', now);
-      return 'unknown';
+    if (workloadsMayRunNow(deps, intent)) {
+      // A rollback that released its fence and did not settle (its staging volume was
+      // still in use, or the process died): the workloads may be running, so the
+      // journal is only read. With it gone the rollback finished and nothing in the
+      // live volume ever moved; with it still there nothing may move now, and the
+      // intent is parked so the volume is not held by a phase nobody visits.
+      const read = await runSwapStep({
+        runner: deps.runner(),
+        operationId: `overwrite-reconcile-${intent.id}`,
+        volumeName,
+        intentId: intent.id,
+        action: 'status',
+      });
+      if (read.report?.status !== 'absent') {
+        refuseUnderWorkloads(intent, 'roll back');
+        markUnknown(deps, intent, 'identity_unknown', now);
+        return 'unknown';
+      }
+    } else {
+      const rollback = await runClosingSwapStep({
+        runner: deps.runner(),
+        operationId: `overwrite-reconcile-${intent.id}`,
+        volumeName,
+        intentId: intent.id,
+        action: 'rollback',
+      });
+      if (!rollback.ok) {
+        markUnknown(deps, intent, 'identity_unknown', now);
+        return 'unknown';
+      }
     }
     const stagingGone = await stagingVolumeGone(deps, intent);
     const released = await releaseFence(deps, intent.id, true);
@@ -1446,6 +1465,8 @@ export async function reconcileOverwriteIntent(
     action: 'status',
   });
   const swapStatus = status.report?.status ?? null;
+  // Read after the helper answered: a `release_fence` that landed meanwhile counts.
+  const workloadsMayRun = workloadsMayRunNow(deps, intent);
   if (swapStatus === 'absent' && intent.phase === 'swapped') {
     // Cleanup only removes the work directory after the journal says the swap
     // committed, so an absent journal on a `swapped` intent means the clean-up
@@ -1455,19 +1476,23 @@ export async function reconcileOverwriteIntent(
     return settleProven(deps, intent, 'committed', released, now);
   }
   if (swapStatus === null || swapStatus === 'inconsistent' || swapStatus === 'absent') {
+    // A `swapped` phase was reached on the journal's commit marker, and a volume a
+    // workload has written to since (or a helper that cannot answer) does not undo
+    // that. The intent keeps its phase and class, so it still owns the volume and
+    // the originals it has left are still owed.
+    if (intent.phase === 'swapped') return 'unknown';
     markUnknown(deps, intent, 'identity_unknown', now);
     return 'unknown';
   }
   if (swapStatus === 'swapped' || swapStatus === 'metadata_pending') {
-    // Roll forward: apply the root metadata again (idempotent), delete the work
-    // directory, then release the fence and restart what was running. A pending
-    // commit is not a committed swap, but the entries have all moved, so forward
-    // is the only direction that cannot lose them.
-    // The commit is idempotent, so it finishes a `metadata_pending` journal by
-    // applying the root metadata and writing the marker.
-    // A `swapped` journal under a released fence has its root metadata applied
-    // already, and applying it again would write over whatever a running workload
-    // set since; a `metadata_pending` one cannot be finished without that write.
+    // Roll forward: finish the commit (idempotent: it applies the root metadata and
+    // writes the marker), delete the work directory, then release the fence and
+    // restart what was running. A pending commit is not a committed swap, but the
+    // entries have all moved, so forward is the only direction that cannot lose
+    // them. With workloads possibly running the commit is not run: a `swapped`
+    // journal has its marker and the helper's commit would change nothing, and a
+    // `metadata_pending` one cannot be finished without writing the root metadata
+    // over what the workloads set.
     if (workloadsMayRun && swapStatus === 'metadata_pending') return refuseUnderWorkloads(intent, 'finish committing');
     const commit = workloadsMayRun
       ? { ok: true }
@@ -1526,6 +1551,16 @@ export async function reconcileOverwriteIntent(
   }
   const released = await releaseFence(deps, intent.id, true);
   return settleProven(deps, intent, 'rolled_back', released, now);
+}
+
+/**
+ * Whether the workloads may be running: the fence was released, or its release
+ * started and did not finish. Read from the row, not from the caller's snapshot,
+ * so a `release_fence` that landed while a helper step was running counts.
+ */
+function workloadsMayRunNow(deps: OverwriteDeps, intent: RestoreIntentRecord): boolean {
+  const state = (deps.intents.get(intent.id) ?? intent).fenceState;
+  return state === 'released' || state === 'release_failed';
 }
 
 /** A step that would move data refuses when the workloads may be running: the intent stays as it is. */
@@ -1626,8 +1661,8 @@ export type ResolveAction = 'retry' | 'release_fence';
 /**
  * The operator's answer to an overwrite that did not settle.
  *
- * `retry` re-runs the reconciler, which is idempotent, and after `release_fence`
- * only finishes what the journal already proves committed. `release_fence` is the
+ * `retry` re-runs the reconciler, which is idempotent; once the fence is released
+ * it only finishes a swap the journal proves committed. `release_fence` is the
  * explicit acceptance of the volume as it now is: it restores the recorded
  * restart policies, starts nothing, and leaves the intent `completion_unknown`
  * unless the journal proves the data committed.
