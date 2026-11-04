@@ -9,6 +9,7 @@
  */
 import { describe, it, expect, vi } from 'vitest';
 import {
+  effectiveServicePlatform,
   isLatestImageTag,
   pullPolicyPullsOnUp,
   pullPolicyRefreshAfterMs,
@@ -132,6 +133,35 @@ describe('resolveCandidateImage', () => {
     const result = await resolveCandidateImage(1, INDEX, PLATFORM, deps({ resolveDigest }));
     expect(result).toMatchObject({ kind: 'unresolved', state: 'unsupported', failureClass: 'unsupported_registry' });
     expect(resolveDigest).not.toHaveBeenCalled();
+  });
+});
+
+describe('effectiveServicePlatform', () => {
+  it('uses the service override instead of the node platform', () => {
+    expect(effectiveServicePlatform('linux/amd64', { os: 'linux', architecture: 'arm64' }))
+      .toEqual({ ok: true, platform: { os: 'linux', architecture: 'amd64' } });
+  });
+
+  it('canonicalizes a docker-info architecture and accepts a bare architecture', () => {
+    expect(effectiveServicePlatform('linux/x86_64', PLATFORM))
+      .toEqual({ ok: true, platform: { os: 'linux', architecture: 'amd64' } });
+    expect(effectiveServicePlatform('arm64', PLATFORM))
+      .toEqual({ ok: true, platform: { os: 'linux', architecture: 'arm64' } });
+    // A lone OS name means that OS at the node's architecture, as Compose reads it.
+    expect(effectiveServicePlatform('linux', PLATFORM))
+      .toEqual({ ok: true, platform: { os: 'linux', architecture: 'amd64' } });
+    expect(effectiveServicePlatform('linux/arm64/v8', PLATFORM))
+      .toEqual({ ok: true, platform: { os: 'linux', architecture: 'arm64' } });
+  });
+
+  it('falls back to the node platform when the service declares none', () => {
+    expect(effectiveServicePlatform(null, PLATFORM)).toEqual({ ok: true, platform: PLATFORM });
+    expect(effectiveServicePlatform('  ', PLATFORM)).toEqual({ ok: true, platform: PLATFORM });
+  });
+
+  it('rejects an override it cannot read instead of falling back to the node', () => {
+    expect(effectiveServicePlatform('linux/amd64/arm/v7/extra', PLATFORM).ok).toBe(false);
+    expect(effectiveServicePlatform('/', PLATFORM).ok).toBe(false);
   });
 });
 

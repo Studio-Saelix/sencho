@@ -1773,13 +1773,16 @@ export class ComposeService {
             // touched. A verification with no services and no verifier exists to
             // keep `up` from fetching an image the gate did not clear, such as a
             // not-yet-due interval image or one behind an unrenderable model.
+            // No `--ignore-buildable`: a service that declares both `image:` and
+            // `build:` is only in this list when its pull policy makes Compose
+            // fetch the image, and the boundary must fetch exactly that.
             if (verification.pullServices.length > 0) {
               sendOutput('=== Pulling registry images ===\n');
               await this.execute(
                 'docker',
                 await this.authoredComposeArgs(
                   stackName,
-                  ['pull', '--ignore-buildable', ...verification.pullServices],
+                  ['pull', ...verification.pullServices],
                   stackDir,
                 ),
                 stackDir, ws, true, env, getComposeStallTimeoutMs(),
@@ -2788,6 +2791,11 @@ export class ComposeService {
               stackDir, ws, true, env, getComposeStallTimeoutMs(),
             );
             sendOutput('=== Pulling registry images ===\n');
+            // Unlike the plain-up boundary, a registry update builds every
+            // build-backed service first and this pull skips them, so a
+            // service with both `image:` and `build:` runs the build. The `up`
+            // below uses `--pull never`, so it cannot fetch the registry image
+            // over that build.
             await this.execute(
               'docker',
               await this.authoredComposeArgs(stackName, ['pull', '--ignore-buildable']),
@@ -2856,7 +2864,11 @@ export class ComposeService {
       gitopsDeploy = this.beginGitOpsDeploy(stackName);
       await this.withRegistryAuth(async (env) => {
         sendOutput('=== Recreating containers ===\n');
-        const args = await this.authoredComposeArgs(stackName, ['up', '-d', '--remove-orphans']);
+        // The pulls this update needs already ran above, and a build-backed
+        // service runs the image it just built. `up` must not fetch again:
+        // `pull_policy: always` would otherwise pull a registry image over the
+        // built one, after the gate proved the installed image.
+        const args = await this.authoredComposeArgs(stackName, ['up', '-d', '--remove-orphans', '--pull', 'never']);
         // Before the gates are superseded: a crash inside this bounded,
         // best-effort check must not leave a running workload with its gate
         // already retired.
@@ -3093,7 +3105,10 @@ export class ComposeService {
       // The policy was evaluated before the pull, so it is confirmed once more
       // against a fresh render immediately before the container is recreated.
       if (beforeUp) await beforeUp();
-      await this.execute('docker', await this.authoredComposeArgs(stackName, ['up', '-d', '--no-deps', '--force-recreate', serviceName]), stackDir, ws, true, env, getComposeStallTimeoutMs());
+      // The pull or build this update needs already ran above. A `pull_policy:
+      // always` service would otherwise fetch again here, after the gate checked
+      // the image that pull or build produced.
+      await this.execute('docker', await this.authoredComposeArgs(stackName, ['up', '-d', '--no-deps', '--force-recreate', '--pull', 'never', serviceName]), stackDir, ws, true, env, getComposeStallTimeoutMs());
     }, sendOutput);
   }
 

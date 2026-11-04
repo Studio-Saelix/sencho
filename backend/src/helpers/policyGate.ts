@@ -281,6 +281,12 @@ export class PulledCandidateBlockedError extends Error {
  * yet running, so it is re-evaluated as an installed image: a block throws before
  * `up`, and the previous workload is untouched. A matching digest costs one
  * inspect per ref and no scan.
+ *
+ * The platform child is chosen before the pull, from each service's own
+ * `platform:` override rather than the node's, so the variant Compose resolves is
+ * the one the gate scanned. That is the only reliable boundary: after a pull the
+ * image store can hold several children of one index, and it does not record
+ * which one Compose will select.
  */
 export async function verifyPulledCandidates(
   stackName: string,
@@ -307,11 +313,12 @@ export async function verifyPulledCandidates(
     if (!digests.some((digest) => expected.has(digest.toLowerCase()))) moved.push(candidate.ref);
   }
   if (moved.length === 0) return;
+  const movedRefs = [...new Set(moved)];
   console.warn(
     '[Policy] Pulled image digest differs from the evaluated candidate for %s; re-evaluating the pulled image(s): %s',
-    sanitizeForLog(stackName), sanitizeForLog(moved.join(', ')),
+    sanitizeForLog(stackName), sanitizeForLog(movedRefs.join(', ')),
   );
-  const gate = await enforcePolicyForImageRefs(stackName, nodeId, moved, {
+  const gate = await enforcePolicyForImageRefs(stackName, nodeId, movedRefs, {
     ...options,
     // It lives on the node now, so it is scanned as one; `pulledCandidate` keeps
     // the candidate vocabulary, so an unattended update is still held by the

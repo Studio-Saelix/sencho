@@ -36,6 +36,12 @@ export interface EffectiveServiceSpec {
    * default (`missing`), which pulls only when the image is not on the node.
    */
   pullPolicy?: string | null;
+  /**
+   * The service-level `platform` override, when declared. Compose resolves the
+   * registry image and runs the container for this platform, which can differ
+   * from the node's own, so the gate must resolve the same variant Compose will.
+   */
+  platform?: string | null;
   /** May be 0 (explicit `scale: 0` or `deploy.replicas: 0`); defaults to 1 when neither is set, matching Compose's own default. */
   expectedReplicas: number;
   dependsOn: string[];
@@ -99,6 +105,7 @@ function parseServiceSpec(name: string, raw: unknown): EffectiveServiceSpec {
     declaredImage: asString(svc.image) ?? null,
     hasBuild: !!svc.build && typeof svc.build === 'object',
     pullPolicy: asString(svc.pull_policy) ?? null,
+    platform: asString(svc.platform) ?? null,
     expectedReplicas: expectedReplicasOf(svc, deploy),
     dependsOn: dependsOnNames(svc.depends_on),
     hasHealthcheck,

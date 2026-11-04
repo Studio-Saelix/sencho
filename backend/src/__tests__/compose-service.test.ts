@@ -1484,7 +1484,7 @@ describe('ComposeService - deployStack', () => {
     const order: string[] = [];
     const base = mockSpawn.getMockImplementation()!;
     mockSpawn.mockImplementation((command: string, args: string[], opts: { cwd?: string }) => {
-      if (args.includes('pull') && args.includes('--ignore-buildable')) order.push('pull');
+      if (args.includes('pull') && !args.includes('--ignore-buildable')) order.push('pull');
       if (args.includes('up') && args.includes('--remove-orphans')) order.push('up');
       return base(command, args, opts);
     });
@@ -1503,8 +1503,11 @@ describe('ComposeService - deployStack', () => {
     // fetch again behind its back.
     expect(order).toEqual(['pull', 'verify', 'up']);
     const spawnArgs = mockSpawn.mock.calls.map((call) => call[1] as string[]);
-    const pullArgs = spawnArgs.find((args) => args.includes('pull') && args.includes('--ignore-buildable'));
+    const pullArgs = spawnArgs.find((args) => args.includes('pull') && !args.includes('--ignore-buildable'));
     expect(pullArgs).toContain('web');
+    // A build-backed service is only in the candidate list when its pull policy
+    // makes Compose fetch it, so the boundary must not skip it as buildable.
+    expect(pullArgs).not.toContain('--ignore-buildable');
     const upArgs = spawnArgs.find((args) => args.includes('up') && args.includes('--remove-orphans'));
     expect(upArgs).toEqual(expect.arrayContaining(['--pull', 'never']));
   });
@@ -1548,7 +1551,7 @@ describe('ComposeService - deployStack', () => {
     const order: string[] = [];
     const base = mockSpawn.getMockImplementation()!;
     mockSpawn.mockImplementation((command: string, args: string[], opts: { cwd?: string }) => {
-      if (args.includes('pull') && args.includes('--ignore-buildable')) order.push('pull');
+      if (args.includes('pull') && !args.includes('--ignore-buildable')) order.push('pull');
       if (args.includes('up') && args.includes('--remove-orphans')) order.push('up');
       return base(command, args, opts);
     });
@@ -2411,7 +2414,8 @@ describe('ComposeService - updateStack build-aware', () => {
     const spawnArgs = mockSpawn.mock.calls.map(c => c[1] as string[]);
     expect(spawnArgs.some(args => args.includes('build') && args.includes('--pull'))).toBe(true);
     expect(spawnArgs.some(args => args.includes('pull') && args.includes('--ignore-buildable'))).toBe(true);
-    expect(spawnArgs.some(args => args.includes('up') && args.includes('-d'))).toBe(true);
+    const upArgs = spawnArgs.find(args => args.includes('up') && args.includes('-d'));
+    expect(upArgs).toEqual(expect.arrayContaining(['up', '-d', '--pull', 'never']));
   });
 
   it('runs plain pull + up when no build services exist', async () => {
@@ -2427,6 +2431,33 @@ describe('ComposeService - updateStack build-aware', () => {
     const spawnArgs = mockSpawn.mock.calls.map(c => c[1] as string[]);
     expect(spawnArgs.some(args => args.includes('build'))).toBe(false);
     expect(spawnArgs.some(args => args.includes('pull') && !args.includes('--ignore-buildable'))).toBe(true);
+    const upArgs = spawnArgs.find(args => args.includes('up') && args.includes('-d'));
+    expect(upArgs).toEqual(expect.arrayContaining(['up', '-d', '--pull', 'never']));
+  });
+
+  it('recreates a build-backed service without pulling over the build', async () => {
+    // `pull_policy: always` on a service that also builds would make `up` fetch
+    // the registry image after the build, behind the gate that evaluated the
+    // installed image.
+    setupAutoCloseSpawn();
+
+    await ComposeService.getInstance(1).updateService('my-stack', 'app', true);
+
+    const spawnArgs = mockSpawn.mock.calls.map(c => c[1] as string[]);
+    expect(spawnArgs.some(args => args.includes('build') && args.includes('app'))).toBe(true);
+    const upArgs = spawnArgs.find(args => args.includes('up'));
+    expect(upArgs).toEqual(expect.arrayContaining(['up', '-d', '--pull', 'never', 'app']));
+  });
+
+  it('recreates a pulled service without pulling it again', async () => {
+    setupAutoCloseSpawn();
+
+    await ComposeService.getInstance(1).updateService('my-stack', 'web', false);
+
+    const spawnArgs = mockSpawn.mock.calls.map(c => c[1] as string[]);
+    expect(spawnArgs.some(args => args.includes('pull') && args.includes('web'))).toBe(true);
+    const upArgs = spawnArgs.find(args => args.includes('up'));
+    expect(upArgs).toEqual(expect.arrayContaining(['up', '-d', '--pull', 'never', 'web']));
   });
 
   it('abandons recovery and leaves runtime untouched when acquire fails before handoff', async () => {

@@ -256,9 +256,9 @@ describe('registry mode (an update that pulls)', () => {
     expect(result.evaluatedCandidates).toBeUndefined();
   });
 
-  it('keeps a build-backed service on the installed image, without asking the registry', async () => {
+  it('keeps a build-backed service on the installed image, because a registry update builds it first', async () => {
     composeStub.listStackImages.mockResolvedValue(['web:latest']);
-    modelWith([{ name: 'web', declaredImage: 'web:latest', hasBuild: true, pullPolicy: null, expectedReplicas: 1, dependsOn: [], hasHealthcheck: false }]);
+    modelWith([{ name: 'web', declaredImage: 'web:latest', hasBuild: true, pullPolicy: 'always', expectedReplicas: 1, dependsOn: [], hasHealthcheck: false }]);
 
     const result = await enforcePolicyPreDeploy('web', 1, { bypass: false, actor: 'u', imageSource: 'registry' });
 
@@ -337,6 +337,27 @@ describe('registry mode (an update that pulls)', () => {
     expect(result.evaluatedCandidates).toBeUndefined();
   });
 
+  it('resolves the service platform override for an update that pulls', async () => {
+    candidates.platform = { os: 'linux', architecture: 'arm64' };
+    candidates.resolve.mockImplementation(async (_nodeId: number, _ref: string, platform: { architecture: string }) => (
+      platform.architecture === 'amd64'
+        ? { ...CANDIDATE_RESOLUTION, platform: 'linux/amd64', platformDigest: OTHER_DIGEST }
+        : CANDIDATE_RESOLUTION
+    ));
+    modelWith([{ name: 'web', declaredImage: 'registry.example.com/web:latest', hasBuild: false, pullPolicy: null, platform: 'linux/amd64', expectedReplicas: 1, dependsOn: [], hasHealthcheck: false }]);
+
+    const result = await enforcePolicyPreDeploy('web', 1, { bypass: false, actor: 'u', imageSource: 'registry' });
+
+    expect(result.ok).toBe(true);
+    expect(candidates.resolve).toHaveBeenCalledWith(
+      1, 'registry.example.com/web:latest', { os: 'linux', architecture: 'amd64' },
+    );
+    expect(result.evaluatedCandidates?.[0]).toMatchObject({
+      ref: 'registry.example.com/web:latest',
+      platformDigest: OTHER_DIGEST,
+    });
+  });
+
   it('keeps resolving references when the model will not render in registry mode', async () => {
     // A registry update's own `compose pull` is what fetches, and an
     // unrenderable model cannot say which reference it skips, so nothing it
@@ -385,6 +406,188 @@ describe('compose mode (a plain up)', () => {
 
     expect(candidates.resolve).toHaveBeenCalledTimes(1);
     expect(result.pullServices).toEqual(['web']);
+  });
+
+  it('evaluates the registry image for a build-backed service whose pull policy pulls on up', async () => {
+    // `image` + `build` is not build-only: Compose tries the registry image
+    // under `always` (or a due interval), and a successful pull runs it instead
+    // of building. Skipping it let a blocked registry image deploy.
+    modelWith([{ name: 'web', declaredImage: 'registry.example.com/web:latest', hasBuild: true, pullPolicy: 'always', expectedReplicas: 1, dependsOn: [], hasHealthcheck: false }]);
+
+    const result = await enforcePolicyPreDeploy('web', 1, { bypass: false, actor: 'u', imageSource: 'compose' });
+
+    expect(result.ok).toBe(true);
+    expect(candidates.resolve).toHaveBeenCalledTimes(1);
+    expect(result.evaluatedCandidates?.[0]).toMatchObject({
+      ref: 'registry.example.com/web:latest',
+      platformDigest: PLATFORM_DIGEST,
+      services: ['web'],
+    });
+    expect(result.pullServices).toEqual(['web']);
+  });
+
+  it('refuses a blocked registry image for a build-backed service with pull_policy always', async () => {
+    modelWith([{ name: 'web', declaredImage: 'registry.example.com/web:latest', hasBuild: true, pullPolicy: 'always', expectedReplicas: 1, dependsOn: [], hasHealthcheck: false }]);
+    trivyStub.scanImagePreflight.mockResolvedValue(mkScan({
+      highest_severity: 'CRITICAL',
+      critical_count: 1,
+      total_vulnerabilities: 1,
+    }));
+
+    const result = await enforcePolicyPreDeploy('web', 1, { bypass: false, actor: 'u', imageSource: 'compose' });
+
+    expect(result.ok).toBe(false);
+    expect(result.violations[0]).toMatchObject({ imageRef: 'registry.example.com/web:latest', severity: 'CRITICAL' });
+    expect(trivyStub.scanImagePreflight).toHaveBeenCalledTimes(1);
+  });
+
+  it('evaluates a build-backed default policy only when the image is missing', async () => {
+    modelWith([{ name: 'web', declaredImage: 'registry.example.com/web:latest', hasBuild: true, pullPolicy: null, expectedReplicas: 1, dependsOn: [], hasHealthcheck: false }]);
+
+    candidates.localImageExists.mockResolvedValue(true);
+    const present = await enforcePolicyPreDeploy('web', 1, { bypass: false, actor: 'u', imageSource: 'compose' });
+    expect(present.ok).toBe(true);
+    expect(candidates.resolve).not.toHaveBeenCalled();
+    expect(present.evidence?.records[0]).toMatchObject({ subject: 'installed' });
+
+    candidates.localImageExists.mockResolvedValue(false);
+    const absent = await enforcePolicyPreDeploy('web', 1, { bypass: false, actor: 'u', imageSource: 'compose' });
+    expect(absent.ok).toBe(true);
+    expect(candidates.resolve).toHaveBeenCalledTimes(1);
+    expect(absent.pullServices).toEqual(['web']);
+  });
+
+  it('applies interval timing to a build-backed service', async () => {
+    modelWith([{ name: 'web', declaredImage: 'registry.example.com/web:latest', hasBuild: true, pullPolicy: 'daily', expectedReplicas: 1, dependsOn: [], hasHealthcheck: false }]);
+    candidates.localImageExists.mockResolvedValue(true);
+
+    candidates.lastTagTime.mockResolvedValue(Date.now() - 25 * 60 * 60 * 1000);
+    const due = await enforcePolicyPreDeploy('web', 1, { bypass: false, actor: 'u', imageSource: 'compose' });
+    expect(due.ok).toBe(true);
+    expect(candidates.resolve).toHaveBeenCalledTimes(1);
+    expect(due.pullServices).toEqual(['web']);
+
+    candidates.lastTagTime.mockResolvedValue(Date.now());
+    const notDue = await enforcePolicyPreDeploy('web', 1, { bypass: false, actor: 'u', imageSource: 'compose' });
+    expect(notDue.ok).toBe(true);
+    expect(candidates.resolve).toHaveBeenCalledTimes(1);
+    expect(notDue.pullServices).toBeUndefined();
+    // `up` must not start the refresh if the window elapses before it runs.
+    expect(notDue.noPullOnUp).toBe(true);
+  });
+
+  it('keeps a build-backed service on its build for pull_policy build and never', async () => {
+    for (const pullPolicy of ['build', 'never']) {
+      vi.clearAllMocks();
+      dbStub.getMatchingPolicy.mockReturnValue(mkPolicy());
+      dbStub.getGlobalSettings.mockReturnValue({});
+      dbStub.getCveIntel.mockReturnValue(new Map());
+      dbStub.getCveSuppressions.mockReturnValue([]);
+      dbStub.getAllVulnerabilityDetails.mockReturnValue([]);
+      trivyStub.isTrivyAvailable.mockReturnValue(true);
+      trivyStub.scanImagePreflight.mockResolvedValue(mkScan());
+      composeStub.listStackImages.mockResolvedValue(['registry.example.com/web:latest']);
+      candidates.localImageExists.mockResolvedValue(false);
+      candidates.resolve.mockResolvedValue(CANDIDATE_RESOLUTION);
+      modelWith([{ name: 'web', declaredImage: 'registry.example.com/web:latest', hasBuild: true, pullPolicy, expectedReplicas: 1, dependsOn: [], hasHealthcheck: false }]);
+
+      const result = await enforcePolicyPreDeploy('web', 1, { bypass: false, actor: 'u', imageSource: 'compose' });
+
+      expect(result.ok).toBe(true);
+      expect(candidates.resolve).not.toHaveBeenCalled();
+      expect(result.evidence?.records[0]).toMatchObject({ subject: 'installed' });
+    }
+  });
+
+  it('resolves the service platform override, not the node platform, for a plain up', async () => {
+    // The node is arm64 and its arm64 child is clean, but the service asks for
+    // the amd64 child, which is the image Compose pulls and runs. Evaluating the
+    // node's child proved the wrong image.
+    candidates.platform = { os: 'linux', architecture: 'arm64' };
+    candidates.resolve.mockImplementation(async (_nodeId: number, _ref: string, platform: { architecture: string }) => (
+      platform.architecture === 'amd64'
+        ? {
+            ...CANDIDATE_RESOLUTION,
+            scanRef: `registry.example.com/web@${OTHER_DIGEST}`,
+            platform: 'linux/amd64',
+            platformDigest: OTHER_DIGEST,
+          }
+        : CANDIDATE_RESOLUTION
+    ));
+    trivyStub.scanImagePreflight.mockImplementation(async (
+      _ref: string,
+      _nodeId: number,
+      _stack: string,
+      opts?: { scanRef?: string },
+    ) => (opts?.scanRef?.includes(OTHER_DIGEST)
+      ? mkScan({ highest_severity: 'CRITICAL', critical_count: 1, total_vulnerabilities: 1 })
+      : mkScan()));
+    modelWith([{ name: 'web', declaredImage: 'registry.example.com/web:latest', hasBuild: false, pullPolicy: 'always', platform: 'linux/amd64', expectedReplicas: 1, dependsOn: [], hasHealthcheck: false }]);
+
+    const result = await enforcePolicyPreDeploy('web', 1, { bypass: false, actor: 'u', imageSource: 'compose' });
+
+    expect(candidates.resolve).toHaveBeenCalledWith(
+      1, 'registry.example.com/web:latest', { os: 'linux', architecture: 'amd64' },
+    );
+    expect(trivyStub.scanImagePreflight).toHaveBeenCalledTimes(1);
+    expect(trivyStub.scanImagePreflight.mock.calls[0][3]).toMatchObject({
+      scanRef: `registry.example.com/web@${OTHER_DIGEST}`,
+    });
+    expect(result.ok).toBe(false);
+    expect(result.violations[0]).toMatchObject({ imageRef: 'registry.example.com/web:latest', severity: 'CRITICAL' });
+  });
+
+  it('resolves every platform a shared reference is used at', async () => {
+    candidates.platform = { os: 'linux', architecture: 'arm64' };
+    candidates.resolve.mockImplementation(async (_nodeId: number, _ref: string, platform: { architecture: string }) => (
+      platform.architecture === 'amd64'
+        ? {
+            ...CANDIDATE_RESOLUTION,
+            scanRef: `registry.example.com/web@${OTHER_DIGEST}`,
+            platform: 'linux/amd64',
+            platformDigest: OTHER_DIGEST,
+          }
+        : {
+            ...CANDIDATE_RESOLUTION,
+            scanRef: `registry.example.com/web@${PLATFORM_DIGEST}`,
+            platform: 'linux/arm64',
+            platformDigest: PLATFORM_DIGEST,
+          }
+    ));
+    modelWith([
+      { name: 'web', declaredImage: 'registry.example.com/web:latest', hasBuild: false, pullPolicy: 'always', platform: 'linux/amd64', expectedReplicas: 1, dependsOn: [], hasHealthcheck: false },
+      { name: 'tools', declaredImage: 'registry.example.com/web:latest', hasBuild: false, pullPolicy: 'always', platform: 'linux/arm64', expectedReplicas: 1, dependsOn: [], hasHealthcheck: false },
+    ]);
+
+    const result = await enforcePolicyPreDeploy('web', 1, { bypass: false, actor: 'u', imageSource: 'compose' });
+
+    expect(result.ok).toBe(true);
+    expect(candidates.resolve.mock.calls.map((call) => call[2])).toEqual([
+      { os: 'linux', architecture: 'amd64' },
+      { os: 'linux', architecture: 'arm64' },
+    ]);
+    expect(result.evaluatedCandidates?.map((candidate) => candidate.platformDigest).sort()).toEqual([
+      OTHER_DIGEST,
+      PLATFORM_DIGEST,
+    ].sort());
+    expect(result.pullServices).toEqual(['web', 'tools']);
+  });
+
+  it('refuses a service platform override it cannot read instead of scanning the node child', async () => {
+    modelWith([{ name: 'web', declaredImage: 'registry.example.com/web:latest', hasBuild: false, pullPolicy: 'always', platform: 'linux/amd64/arm/v7/extra', expectedReplicas: 1, dependsOn: [], hasHealthcheck: false }]);
+
+    const result = await enforcePolicyPreDeploy('web', 1, { bypass: false, actor: 'u', imageSource: 'compose' });
+
+    expect(candidates.resolve).not.toHaveBeenCalled();
+    expect(result.ok).toBe(false);
+    expect(result.violations[0]).toMatchObject({
+      imageRef: 'registry.example.com/web:latest',
+      error: expect.stringContaining('platform'),
+    });
+    expect(result.evidence?.records[0]).toMatchObject({
+      subject: 'candidate',
+      state: 'unknown',
+    });
   });
 
   it('keeps a build-only service on the image Compose generates, not a registry candidate', async () => {

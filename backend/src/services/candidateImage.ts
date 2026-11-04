@@ -23,6 +23,7 @@ import { parseImageRef, resolveRegistryImageDigestForPlatform, type RegistryCred
 import { mapRegistryFailure } from './gitops/registryFailure';
 import { evidenceStateForFailureClass } from './securityEvidence';
 import { readNodePlatform, type NodePlatform } from './gitops/effectiveArtifactContext';
+import { canonicalNodePlatform } from './gitops/platformNames';
 import type { ArtifactServiceFailureClass } from './gitops/json';
 
 /**
@@ -146,6 +147,46 @@ export async function resolveCandidateImage(
 /** The platform this node runs, or null when its daemon did not answer. */
 export async function nodePlatformFor(nodeId: number): Promise<NodePlatform | null> {
   return readNodePlatform(nodeId);
+}
+
+const PLATFORM_OS_NAMES: ReadonlySet<string> = new Set(['linux', 'windows', 'darwin', 'freebsd']);
+
+/**
+ * The platform Compose will run a service as.
+ *
+ * A service-level `platform` override wins over the node's own platform: Compose
+ * resolves the registry index and pulls the child for the service platform, so
+ * evaluating the node's child would prove a different image than the one that
+ * runs. An absent or empty override falls back to the node platform. An override
+ * this build cannot read is reported as invalid rather than silently falling
+ * back, because the fallback is exactly the mismatch this exists to prevent.
+ */
+export function effectiveServicePlatform(
+  raw: string | null | undefined,
+  nodePlatform: NodePlatform | null,
+): { ok: true; platform: NodePlatform | null } | { ok: false; reason: string } {
+  const value = typeof raw === 'string' ? raw.trim() : '';
+  if (value === '') return { ok: true, platform: nodePlatform };
+  const parts = value.split('/').filter((part) => part !== '');
+  if (parts.length === 0 || parts.length > 3) {
+    return { ok: false, reason: `the service platform "${value}" is not a valid os/architecture label` };
+  }
+  // Compose accepts both `os[/arch[/variant]]` and a bare architecture. A lone
+  // segment that names an operating system is the former with the node's
+  // architecture, not an architecture called "linux".
+  const [os, architecture] = parts.length === 1
+    ? (PLATFORM_OS_NAMES.has(parts[0].toLowerCase())
+      ? [parts[0], nodePlatform?.architecture ?? '']
+      : [nodePlatform?.os ?? 'linux', parts[0]])
+    : [parts[0], parts[1]];
+  if (!os || !architecture) {
+    return { ok: false, reason: `the service platform "${value}" has no operating system or architecture` };
+  }
+  const platform = canonicalNodePlatform({ os, architecture });
+  if (!platform.os || !platform.architecture) {
+    return { ok: false, reason: `the service platform "${value}" has no operating system or architecture` };
+  }
+  return { ok: true, platform };
 }
 
 /** Whether the node already holds this reference, so `compose up` will not pull it. */
