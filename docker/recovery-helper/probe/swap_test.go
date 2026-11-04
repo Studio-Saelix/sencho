@@ -7,6 +7,7 @@ package main
 // followed, and the root's own owner and mode are the snapshot's.
 
 import (
+	"bytes"
 	"errors"
 	"os"
 	"path/filepath"
@@ -745,6 +746,51 @@ func TestRollbackWithoutAnOriginalRootLeavesTheRootAlone(t *testing.T) {
 	}
 	if got := st.Mode & 0o7777; got != 0o711 {
 		t.Fatalf("root mode = %o, want 711", got)
+	}
+}
+
+// A journal write that cannot complete must not replace the journal: the
+// original stays exactly as it was. /dev/full is the one way to make the write
+// itself fail without a seam in the helper.
+func TestAFailedJournalWriteLeavesTheJournalAlone(t *testing.T) {
+	if _, err := os.Stat("/dev/full"); err != nil {
+		t.Skip("/dev/full is not available")
+	}
+	request := setupVolume(t, map[string]string{"db.bin": "original"}, map[string]string{"new.txt": "restored"})
+	if _, err := swapPrepare(request); err != nil {
+		t.Fatalf("prepare: %v", err)
+	}
+	planPath := filepath.Join(request.Root, workDirPrefix+testIntent, planFileName)
+	before, err := os.ReadFile(planPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink("/dev/full", planPath+".tmp"); err != nil {
+		t.Fatal(err)
+	}
+	plan, err := readPlan(planPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	plan.Status = statusSwapped
+	if err := writePlan(planPath, plan); err == nil {
+		t.Fatal("writePlan reported success after a write that could not complete")
+	}
+	info, err := os.Lstat(planPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// A journal that was renamed into place is the /dev/full symlink, not a
+	// regular file, and reading it would never end.
+	if !info.Mode().IsRegular() {
+		t.Fatal("writePlan replaced the journal after a failed write")
+	}
+	after, err := os.ReadFile(planPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(before, after) {
+		t.Fatal("writePlan replaced the journal after a failed write")
 	}
 }
 

@@ -800,14 +800,14 @@ async function stagingVolumeGone(
     console.warn(
       '[Recovery] Left %s alone: it does not carry the label of restore %s.',
       sanitizeForLog(intent.stagingVolume),
-      intent.id,
+      sanitizeForLog(intent.id),
     );
     return true;
   }
   console.warn(
     '[Recovery] The staging volume %s of restore %s was not removed (%s). It stays until a retry removes it.',
     sanitizeForLog(intent.stagingVolume),
-    intent.id,
+    sanitizeForLog(intent.id),
     removed,
   );
   return false;
@@ -845,7 +845,7 @@ async function fenceWorkloads(ctx: OverwriteRunContext, state: PipelineState): P
   // policies and start members an operator stopped since, or fail on a member
   // that no longer exists and leave the volume fenced for good.
   if (!drained) {
-    console.warn('[Recovery] A container start is still unanswered; refusing the fence on %s.', state.intent.id);
+    console.warn('[Recovery] A container start is still unanswered; refusing the fence on %s.', sanitizeForLog(state.intent.id));
     deps.fence.setFenceState(state.intent.id, 'none');
     await settleRollback(ctx, state, 'fence_unavailable');
     return false;
@@ -1215,7 +1215,7 @@ export async function rollbackIntent(deps: OverwriteDeps, intentId: string): Pro
     deps.intents.advance(intentId, 'rolled_back', { outcomeClass: released ? null : 'fence_unavailable' });
   } catch (err) {
     // A phase that already settled is not an error on a retry.
-    console.warn('[Recovery] Restore intent %s could not settle rolled_back:', intentId, errorMessageForLog(err));
+    console.warn('[Recovery] Restore intent %s could not settle rolled_back:', sanitizeForLog(intentId), errorMessageForLog(err));
   }
   releaseHolds(deps, intentId);
   return released ? 'rolled_back' : 'unknown';
@@ -1241,7 +1241,7 @@ async function releaseFence(deps: OverwriteDeps, intentId: string, restart: bool
     await releaseRestoreFence(intentId, deps.docker, members, { restart });
     return true;
   } catch (err) {
-    console.warn('[Recovery] Could not release the restore fence on intent %s:', intentId, errorMessageForLog(err));
+    console.warn('[Recovery] Could not release the restore fence on intent %s:', sanitizeForLog(intentId), errorMessageForLog(err));
     return false;
   }
 }
@@ -1260,7 +1260,7 @@ function releaseHolds(deps: OverwriteDeps, intentId: string): void {
       deps.points.removeHold({ pointId: intent.preRestorePointId, holderKind: 'restore_intent', holderRef: intentId });
     }
   } catch (err) {
-    console.warn('[Recovery] Could not release the restore holds on %s:', intentId, errorMessageForLog(err));
+    console.warn('[Recovery] Could not release the restore holds on %s:', sanitizeForLog(intentId), errorMessageForLog(err));
   }
 }
 
@@ -1571,7 +1571,7 @@ function workloadsMayRunNow(deps: OverwriteDeps, intent: RestoreIntentRecord): b
 function refuseUnderWorkloads(intent: RestoreIntentRecord, step: string): 'unknown' {
   console.warn(
     '[Recovery] Restore %s will not %s: its fence is released, so its workloads may be running. Restore again from a point to replace the volume.',
-    intent.id,
+    sanitizeForLog(intent.id),
     step,
   );
   return 'unknown';
@@ -1654,7 +1654,7 @@ export function settleInterruptedOverwriteOperations(
       const stored = operations.settleReconciled(intent.operationId, ending);
       if (stored.state === ending.state) settled += 1;
     } catch (err) {
-      console.warn('[Recovery] Could not settle the operation of restore %s:', intent.id, errorMessageForLog(err));
+      console.warn('[Recovery] Could not settle the operation of restore %s:', sanitizeForLog(intent.id), errorMessageForLog(err));
     }
   }
   return settled;
@@ -1746,7 +1746,7 @@ export async function resolveOverwriteIntent(
     if (!cleaned.ok) {
       console.warn(
         '[Recovery] Fence released on %s, but the originals could not be removed (%s); retry the restore to finish.',
-        intent.id,
+        sanitizeForLog(intent.id),
         cleaned.errorClass ?? 'helper_failed',
       );
       deps.intents.update(intent.id, { outcomeClass: 'cleanup_failed' });

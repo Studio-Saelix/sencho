@@ -4,7 +4,7 @@
  * fence would move live data with the workloads still running, and one that left
  * a terminal phase would be reconciled twice.
  */
-import { describe, it, expect, beforeAll, afterAll, beforeEach } from 'vitest';
+import { describe, it, expect, beforeAll, afterAll, beforeEach, vi } from 'vitest';
 import { randomUUID } from 'crypto';
 import { setupTestDb, cleanupTestDb } from './helpers/setupTestDb';
 
@@ -122,6 +122,26 @@ describe('the staged-overwrite phase table', () => {
     store.advance(id, 'staged_verified');
     store.advance(id, 'committed');
     expect(store.get(id)?.phase).toBe('committed');
+  });
+
+  it('keeps an intent id that carries control characters to one log line', () => {
+    const id = overwriteIntent();
+    const crafted = `intent\nfake\tentry\u001b[31m`;
+    recoveryDbModule.recoveryDb().prepare('UPDATE recovery_restore_intents SET id = ? WHERE id = ?').run(crafted, id);
+    const store = intents.RestoreIntentStore.getInstance();
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    try {
+      expect(refuses(() => store.advance(crafted, 'swapped'))).toBe('invalid_request');
+      const line = warn.mock.calls.map((args) => args.map(String).join(' '))
+        .find((entry) => entry.includes('Refused restore intent'));
+      expect(line).toBeDefined();
+      // The newline and tab would forge a second log entry, and the escape
+      // would reach the terminal.
+      expect(line).not.toMatch(/[\r\n\t\x00-\x1F\x7F]/);
+      expect(line).toContain('intentfakeentry[31m');
+    } finally {
+      warn.mockRestore();
+    }
   });
 
   it('records the staging volume, generation token and the failure class with the phase', () => {

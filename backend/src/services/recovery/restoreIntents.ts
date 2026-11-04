@@ -277,7 +277,7 @@ export class RestoreIntentStore {
     return db.transaction((): RestoreIntentRecord => {
       const current = this.require(id);
       if (!ALLOWED_TRANSITIONS[current.phase].includes(phase)) {
-        console.warn('[Recovery] Refused restore intent %s transition %s -> %s', id, current.phase, phase);
+        console.warn('[Recovery] Refused restore intent %s transition %s -> %s', sanitizeForLog(id), current.phase, phase);
         throw new RecoveryError('invalid_request');
       }
       if (current.targetMode !== 'staged_overwrite' && OVERWRITE_ONLY_PHASES.has(phase)) {
