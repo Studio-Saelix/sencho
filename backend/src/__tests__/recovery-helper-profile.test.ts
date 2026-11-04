@@ -95,14 +95,16 @@ describe('recovery helper profiles', () => {
     expect(HELPER_PROFILES.restore.capAdd).toEqual(['CHOWN', 'FOWNER', 'FSETID', 'DAC_READ_SEARCH']);
     // The in-volume copy of an overwrite creates its work directory in a root an
     // application may own and close to everyone else (a database data directory),
-    // which uid 0 can only write with DAC_OVERRIDE. Only this profile has it
-    // beside the restore's set, so a restore into a new volume stays narrower.
+    // which uid 0 can only write with DAC_OVERRIDE. Only this profile and the
+    // swap have it beside the restore's set, so a restore into a new volume stays
+    // narrower.
     expect(HELPER_PROFILES.materialize.capAdd).toEqual(['CHOWN', 'FOWNER', 'FSETID', 'DAC_OVERRIDE', 'DAC_READ_SEARCH']);
     expect(HELPER_PROFILES.restore.capAdd).not.toContain('DAC_OVERRIDE');
     // The rename swap moves entries in a root the application owns and deletes
-    // the work directory afterwards, so it needs the same ownership override the
-    // restore has plus DAC_OVERRIDE. It is the widest profile, and it is confined
-    // to one application volume with no repository mount and no network.
+    // the work directory afterwards, so it needs the restore's ownership and
+    // permission overrides plus DAC_OVERRIDE. That is the materialize profile's
+    // set, and it is confined to one application volume with no repository mount
+    // and no network.
     expect(HELPER_PROFILES.swap.capAdd).toEqual(['CHOWN', 'FOWNER', 'FSETID', 'DAC_OVERRIDE', 'DAC_READ_SEARCH']);
   });
 
@@ -118,6 +120,7 @@ describe('recovery helper profiles', () => {
     expect(writers).toEqual(['materialize', 'restore', 'swap']);
     for (const name of writers) {
       expect(HELPER_PROFILES[name as keyof typeof HELPER_PROFILES].capAdd, name).toContain('FSETID');
+      expect(specFor(name as HelperProfile).hostConfig.CapAdd, name).toContain('FSETID');
     }
   });
 

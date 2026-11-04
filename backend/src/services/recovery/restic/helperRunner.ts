@@ -189,9 +189,10 @@ export const HELPER_PROFILES: Readonly<Record<HelperProfile, HelperProfileSpec>>
   // The journaled rename swap. It renames entries in a root the application
   // owns and deletes the work directory afterwards, so it needs the ownership
   // and permission overrides the restore profile has plus DAC_OVERRIDE. FSETID
-  // is what keeps the setgid bit of the captured root: without it the kernel
-  // clears that bit on the chmod that applies the root's mode whenever the root's
-  // group is not the helper's own (group 0). No repository is mounted and the
+  // is what keeps the setgid bit of the root, the captured one on a commit and
+  // the original one on a rollback: without it the kernel clears that bit on the
+  // chmod that applies the root's mode whenever the root's group is not the
+  // helper's own (group 0). No repository is mounted and the
   // target is the only writable mount, so the extra privilege stays inside one
   // application volume.
   swap: {

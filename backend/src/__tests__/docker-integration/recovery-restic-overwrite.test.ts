@@ -376,17 +376,20 @@ describeIf('staged overwrite against real Docker', () => {
   // application user and is closed to everyone else, so root without
   // DAC_OVERRIDE cannot create the work directory in it. The first two failed
   // the copy before the `materialize` profile existed. The last two capture a
-  // root with the setgid bit (and the sticky bit) for a group that is not the
-  // helper's own group 0, which the kernel strips from the chmod that applies the
-  // root's mode unless the swap helper holds FSETID; a root-owned root with group
-  // 0 keeps the bit either way, which is why it never showed.
+  // root with the setgid bit for a group other than the helper's own group 0 (the
+  // second also carries the sticky bit, which the kernel never strips). The
+  // kernel clears the setgid bit from the chmod that applies the root's mode
+  // unless the swap helper holds FSETID; a captured root with group 0 keeps the
+  // bit either way, which is why root-owned fixtures never showed it. The live
+  // root of the last case is root-owned only so that nothing but FSETID is under
+  // test.
   for (const live of [
     { name: 'postgres-style 999:999 0700', chown: '999:999', mode: '700', captured: null },
     { name: 'mariadb-style 77:77 2750', chown: '77:77', mode: '2750', captured: null },
     { name: 'a setgid captured root 999:999 2750 over a postgres-style 70:70 0700 root', chown: '70:70', mode: '700', captured: { chown: '999:999', mode: '2750' } },
     { name: 'a setgid and sticky captured root 70:70 3770 over a root-owned root', chown: '0:0', mode: '755', captured: { chown: '70:70', mode: '3770' } },
   ]) {
-    it(`overwrites a volume whose root is owned by an application user (${live.name}) and keeps the captured root mtime, owner and mode`, async () => {
+    it(`overwrites a volume whose live or captured root is owned by an application user (${live.name}) and keeps the captured root mtime, owner and mode`, async () => {
       const source = volumeName('sencho-it-own-src');
       const target = volumeName('sencho-it-own-dst');
       const intentId = randomUUID();
@@ -468,8 +471,10 @@ describeIf('staged overwrite against real Docker', () => {
           action,
         });
         expect(step.ok, action).toBe(true);
+        if (action === 'rollback') expect(step.report?.status).toBe('rolled_back');
       }
       expect(runInVolume(target, MANIFEST_SCRIPT)).toBe(before);
+      expect(runInVolume(target, 'ls -A | grep -c sencho-restore || true').trim()).toBe('0');
     } finally {
       removeVolume(source);
       removeVolume(target);
