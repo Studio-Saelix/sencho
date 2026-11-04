@@ -1374,13 +1374,15 @@ async function evaluateImageRefs(
     const noPullOnUp = planned?.noPullOnUp === true;
     const evaluatedCandidates: EvaluatedCandidate[] = [];
     // A ref shared by services with different platform overrides has one plan
-    // entry per pulling platform, plus an installed entry for each child a
-    // group that does not pull will run: the named platform for a service that
-    // declared one, and the local image's own child for a service that
-    // declared none (a group can contribute both). Invalid references are
-    // recorded before the scan loop, as before; every other target pairs a ref
-    // with one image (a candidate or the installed child) that service will
-    // run.
+    // entry per pulling platform, plus an installed entry for each child that
+    // a successful pull will not replace: the named platform for a service
+    // that declared one, and the local image's own child for a service that
+    // declared none (a group can contribute both). An unreadable override, or
+    // a pull whose resolution fails, leaves the group's non-pulling services
+    // on their installed child, so those entries sit beside the unresolved
+    // record. Invalid references are recorded before the scan loop, as before;
+    // every other target pairs a ref with one image (a candidate or the
+    // installed child) that service will run.
     const targets: Array<{ imageRef: string; planned: CandidatePlanEntry | null }> = [];
     for (const imageRef of imageRefs) {
         if (!validateImageRef(imageRef)) {
