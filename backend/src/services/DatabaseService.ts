@@ -3463,8 +3463,9 @@ stmt.run('gitops_schema_version', '1');
 
     /**
      * The platform of the image a scan read. Rows written before this column
-     * existed have no platform, so the deploy gate's platform-keyed cache
-     * misses them once and a fresh scan records one.
+     * existed have no platform, so a platform-keyed lookup misses them; a
+     * successful fresh scan records one, while a caller that cannot name the
+     * child still matches the old row.
      */
     private migrateScanPlatformColumn(): void {
         this.tryAddColumn('vulnerability_scans', 'platform', 'TEXT');
@@ -8968,9 +8969,9 @@ stmt.run('gitops_schema_version', '1');
      * whose image it read.
      *
      * A multi-arch reference stores every child under the same index digest.
-     * The deploy gate passes the platform so one child's row cannot answer for
-     * another; every other caller omits it and keeps the historical digest-only
-     * lookup.
+     * The gate and every scan of a local image pass the platform so one child's
+     * row cannot answer for another; only a caller that cannot name the child
+     * omits it and keeps the historical digest-only lookup.
      */
     public getLatestScanByDigest(
         digest: string,

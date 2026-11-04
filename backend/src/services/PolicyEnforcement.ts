@@ -442,7 +442,17 @@ function failureRule(
 
 /** One reference's role for this gate call. */
 type CandidatePlanEntry =
-    | { kind: 'installed'; why: 'digest_pinned' | 'not_pulled' | 'build' }
+    | {
+        kind: 'installed';
+        why: 'digest_pinned' | 'not_pulled' | 'build';
+        /**
+         * The platform of the installed child this entry must evaluate, when
+         * the group named one. On a multi-platform image store the tag can hold
+         * more than one child, so a single ref-level scan would read the
+         * daemon's default child and miss the one this group runs.
+         */
+        platform?: string | null;
+    }
     | {
         kind: 'candidate';
         resolution: CandidateResolution & { kind: 'candidate' };
@@ -678,18 +688,17 @@ async function planCandidates(
             return lastTagTime;
         };
         const entries: CandidatePlanEntry[] = [];
-        // A ref can be shared by services that pull at one platform and run the
-        // installed image at another. The installed image is what the
-        // non-pulling services will run, so it is evaluated alongside the
-        // candidate; dropping it let a policy-blocked child run because another
-        // platform's child was clean. One entry covers every non-pulling group:
-        // there is only one local image behind a reference.
-        let installedRecorded = false;
-        const recordInstalled = (): void => {
-            if (installedRecorded) return;
-            installedRecorded = true;
-            entries.push({ kind: 'installed', why: 'not_pulled' });
-        };
+        // A ref can be shared by groups that pull at one platform and run the
+        // installed image at another. Every non-pulling group is evaluated as
+        // the installed child it will run; dropping those entries let a
+        // policy-blocked child run because another platform's child was clean.
+        // The group's platform is kept because a multi-platform image store can
+        // hold more than one child under one tag.
+        const nonPullingPlatforms = new Set<string>();
+        const platformKey = (platform: { os: string; architecture: string; variant?: string } | null): string =>
+            platform
+                ? `${platform.os}/${platform.architecture}${platform.variant ? `/${platform.variant}` : ''}`
+                : '';
         for (const [key, group] of byPlatform) {
             const needsLocalCopy = group.services.some(
                 (spec) => needsPresence(normalizedPullPolicy(spec.pullPolicy)),
@@ -721,7 +730,7 @@ async function planCandidates(
             };
             const pulling = group.services.filter(pullsFor);
             if (pulling.length === 0) {
-                recordInstalled();
+                nonPullingPlatforms.add(platformKey(group.platform));
                 continue;
             }
             if (group.invalid) {
@@ -743,17 +752,26 @@ async function planCandidates(
             entries.push(entry.kind === 'unresolved'
                 ? {
                     ...entry,
-                    platform: group.platform
-                        ? `${group.platform.os}/${group.platform.architecture}${group.platform.variant ? `/${group.platform.variant}` : ''}`
-                        : null,
+                    platform: group.platform ? platformKey(group.platform) : null,
                 }
                 : entry);
         }
         if (entries.length === 0) {
-            // Compose will not fetch this image, so the node's own image is what runs.
-            recordInstalled();
+            // No group pulls, so one installed scan of the tag covers the image
+            // the node runs.
+            plan.set(ref, [{ kind: 'installed', why: 'not_pulled' }]);
+        } else {
+            // One entry per platform group Compose will not fetch, so each
+            // child that group runs is evaluated beside the candidates.
+            for (const platform of nonPullingPlatforms) {
+                entries.push({
+                    kind: 'installed',
+                    why: 'not_pulled',
+                    ...(platform ? { platform } : {}),
+                });
+            }
+            plan.set(ref, entries);
         }
-        plan.set(ref, entries);
     }
     return { plan, pullServices, noPullOnUp };
 }
@@ -1311,9 +1329,10 @@ async function evaluateImageRefs(
     const noPullOnUp = planned?.noPullOnUp === true;
     const evaluatedCandidates: EvaluatedCandidate[] = [];
     // A ref shared by services with different platform overrides has one plan
-    // entry per platform Compose will resolve. Invalid references are recorded
-    // before the scan loop, as before; every other target pairs a ref with the
-    // one image (or the installed image) that service will run.
+    // entry per pulling platform, plus one installed entry per platform group
+    // Compose will not fetch. Invalid references are recorded before the scan
+    // loop, as before; every other target pairs a ref with one image (a
+    // candidate or the installed child) that service will run.
     const targets: Array<{ imageRef: string; planned: CandidatePlanEntry | null }> = [];
     for (const imageRef of imageRefs) {
         if (!validateImageRef(imageRef)) {
@@ -1384,6 +1403,11 @@ async function evaluateImageRefs(
         }
         const candidateEntry = planned?.kind === 'candidate' ? planned : null;
         const candidate = candidateEntry?.resolution ?? null;
+        // A non-pulling platform group names the installed child it runs; the
+        // scan must read that child, not the daemon's default one. Without a
+        // plan (installed mode, a digest pin, an unrenderable model) the scanner
+        // reads the platform of the local image itself.
+        const installedPlatform = planned?.kind === 'installed' ? planned.platform ?? null : null;
         const subject: 'installed' | 'candidate' = candidate || opts.pulledCandidate === true ? 'candidate' : 'installed';
         try {
             scan = await svc.scanImagePreflight(
@@ -1404,7 +1428,9 @@ async function evaluateImageRefs(
                         platform: candidate.platform,
                         ...(candidate.qualification === 'qualified' ? { useCache: false } : {}),
                     }
-                    : undefined,
+                    : installedPlatform
+                        ? { platform: installedPlatform }
+                        : undefined,
             );
         } catch (err) {
             const message = getErrorMessage(err, 'pre-flight scan failed');

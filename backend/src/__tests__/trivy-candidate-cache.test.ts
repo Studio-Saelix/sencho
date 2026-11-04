@@ -187,6 +187,18 @@ describe('the cache key includes the platform child', () => {
     expect(result.imageDigest).toBe(DIGEST);
   });
 
+  it('misses rather than reusing a row when the local platform cannot be read', async () => {
+    seedScan({ vulnDbUpdatedAt: DB_BUILD, platform: 'linux/amd64' });
+    stubLocalImage({ digest: DIGEST });
+    vi.spyOn(svc(), 'getImagePlatform').mockResolvedValue(null);
+
+    // Without the platform the gate cannot prove which child a row describes,
+    // so it scans instead of taking the same-digest row.
+    await expect(svc().scanImage('registry.example.com/web:latest', 1, {
+      scanners: ['vuln'], cacheRule: 'database',
+    })).rejects.toThrow();
+  });
+
   it('records the platform a candidate scan resolved', async () => {
     const scanImage = vi.spyOn(svc(), 'scanImage').mockResolvedValue({
       imageRef: 'registry.example.com/web:latest',

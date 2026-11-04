@@ -22,7 +22,7 @@ import { isDebugEnabled } from '../utils/debug';
 import { SEVERITY_ORDER } from '../utils/severity';
 import { isSenchoRollbackHoldRef } from '../utils/senchoRollbackHold';
 import type { PolicyBlockReason } from '../utils/policy-risk';
-import { imagePlatformLabel } from './gitops/platformNames';
+import { imagePlatformLabel, platformCacheKey } from './gitops/platformNames';
 
 const execFileAsync = promisify(execFile);
 
@@ -78,10 +78,11 @@ export interface ImageScanOptions {
     scanRef?: string;
     /**
      * Cache reuse rule. `digest` (the default, and every path except the deploy
-     * gate) reuses any completed row for the digest inside the TTL. `database`
-     * additionally requires the row to have come from the current, not-yet-due
-     * vulnerability database, because findings from an older database can miss a
-     * CVE the operator's policy would have blocked.
+     * gate) reuses a completed row for the digest and, when the platform is
+     * known, that child, inside the TTL. `database` additionally requires the
+     * row to have come from the current, not-yet-due vulnerability database,
+     * because findings from an older database can miss a CVE the operator's
+     * policy would have blocked.
      */
     cacheRule?: 'digest' | 'database';
 }
@@ -664,9 +665,10 @@ class TrivyService {
 
     /**
      * The platform of the image Docker holds for `imageRef`, or null when the
-     * daemon did not report it. Used to key the deploy gate's scan cache: a
-     * multi-arch reference stores every child under one index digest, so the
-     * digest alone cannot say which image a row describes.
+     * daemon did not report it. Used to key any scan of a local image (and to
+     * select the child `trivy image` reads): a multi-arch reference stores every
+     * child under one index digest, so the digest alone cannot say which image a
+     * row describes.
      */
     async getImagePlatform(imageRef: string, nodeId: number): Promise<string | null> {
         try {
@@ -811,17 +813,21 @@ class TrivyService {
             const platform = options.platform ?? (
                 localDigest ? await this.getImagePlatform(imageRef, nodeId) : null
             );
+            // The row and its lookup use the canonical cache key, so an explicit
+            // default variant and the installed read of the same child meet.
+            const cachePlatform = platform ? platformCacheKey(platform) : null;
             // The deploy gate fails closed when it cannot read the platform; the
-            // plain digest cache keeps its historical digest-only lookup.
+            // plain digest cache also narrows by platform when it is known and
+            // falls back to digest-only when it is not.
             const cacheable = options.useCache !== false && digest !== null
-                && (options.cacheRule !== 'database' || platform !== null);
-            diag(`scanImage: digest=${digest ?? 'null'} platform=${platform ?? 'null'} for ${imageRef}`);
+                && (options.cacheRule !== 'database' || cachePlatform !== null);
+            diag(`scanImage: digest=${digest ?? 'null'} platform=${cachePlatform ?? 'null'} for ${imageRef}`);
 
             if (cacheable) {
                 const cached = DatabaseService.getInstance().getLatestScanByDigest(
                     digest,
                     scannersUsed,
-                    platform ?? undefined,
+                    cachePlatform ?? undefined,
                 );
                 if (cached && (await this.canReuseCachedScan(cached, options.cacheRule ?? 'digest', startedAt))) {
                     diag(
@@ -839,7 +845,7 @@ class TrivyService {
                     return {
                         imageRef,
                         imageDigest: digest,
-                        platform: cached.platform ?? platform,
+                        platform: cached.platform ?? cachePlatform,
                         fromCache: true,
                         databaseUpdatedAt: cached.vuln_db_updated_at ?? null,
                         scannedAt: cached.scanned_at,
@@ -901,6 +907,10 @@ class TrivyService {
                     '--no-progress',
                     '--scanners',
                     scannersUsed,
+                    // A ref-based scan of a local image names the child to read.
+                    // A candidate is already addressed by its manifest digest
+                    // (`scanRef`), so it needs no platform selector.
+                    ...(platform && !options.scanRef ? ['--platform', platform] : []),
                     options.scanRef ?? imageRef,
                 ];
                 const execStart = Date.now();
@@ -946,7 +956,7 @@ class TrivyService {
                 return {
                     imageRef,
                     imageDigest: digest,
-                    platform,
+                    platform: cachePlatform,
                     scannedAt: Date.now(),
                     totalVulnerabilities: vulnerabilities.length,
                     criticalCount: critical,
@@ -1154,19 +1164,21 @@ class TrivyService {
     /**
      * Scan a single image for the pre-deploy policy gate.
      *
-     * Reuses the 24h digest cache (useCache=true) so repeat deploys of a
-     * known-safe image do not pay full scan cost. A caller turns it off for a
-     * multi-platform index, whose children share the persisted index digest and
-     * would otherwise answer for each other. Only runs the vulnerability
-     * scanner (secrets/misconfig are irrelevant to the gate and add latency).
-     * The scan is persisted as a normal row with triggered_by=deploy-preflight
-     * so the history and compare views continue to work unchanged.
+     * Reuses the 24h cache (useCache=true) so repeat deploys of a known-safe
+     * image do not pay full scan cost. The row is keyed by digest and the
+     * platform it read, so one child of a multi-platform index cannot answer
+     * for another; a qualified child still turns reuse off entirely. Only runs
+     * the vulnerability scanner (secrets/misconfig are irrelevant to the gate
+     * and add latency). The scan is persisted as a normal row with
+     * triggered_by=deploy-preflight so the history and compare views continue to
+     * work unchanged.
      *
      * `scanRef` and `digest` are how the gate evaluates the image an update will
      * install: Trivy is pointed at `repo@sha256:<platform digest>`, the row keeps
-     * the authored tag, and the digest it stores is the registry index digest, so
-     * the post-update scan of the installed image hits the same row. The database
-     * cache rule applies here and only here.
+     * the authored tag, and the digest it stores is the registry index digest.
+     * The post-update scan of the installed image reuses that row when its own
+     * platform read matches the candidate's; a different child gets its own
+     * row. The database cache rule applies here and only here.
      */
     async scanImagePreflight(
         imageRef: string,
@@ -1448,15 +1460,20 @@ class TrivyService {
             onProgress?.(`scanning ${ref}`);
             try {
                 const digest = await this.getImageDigest(ref, nodeId);
+                const platform = digest ? await this.getImagePlatform(ref, nodeId) : null;
+                const identity = `${digest ?? ''}:${platform ?? ''}`;
                 if (digest) {
-                    if (countedDigests.has(digest)) continue;
-                    const cached =
-                        DatabaseService.getInstance().getLatestScanByDigest(digest, scannersUsed);
+                    if (countedDigests.has(identity)) continue;
+                    // The row may answer only for the image it scanned: a
+                    // multi-arch tag's children share the index digest.
+                    const cached = platform
+                        ? DatabaseService.getInstance().getLatestScanByDigest(digest, scannersUsed, platform)
+                        : DatabaseService.getInstance().getLatestScanByDigest(digest, scannersUsed);
                     if (cached && Date.now() - cached.scanned_at < DIGEST_CACHE_TTL_MS) {
                         skipped++;
                         addSeverity(cached);
                         collectViolation(cached);
-                        countedDigests.add(digest);
+                        countedDigests.add(identity);
                         onProgress?.(`${ref}: cached (${cached.critical_count}C ${cached.high_count}H)`);
                         continue;
                     }
@@ -1465,7 +1482,7 @@ class TrivyService {
                 addSeverity(fresh);
                 collectViolation(fresh);
                 scanned++;
-                if (digest) countedDigests.add(digest);
+                if (digest) countedDigests.add(identity);
                 onProgress?.(`${ref}: ${fresh.critical_count}C ${fresh.high_count}H${fresh.secret_count ? ` ${fresh.secret_count} secret` : ''}`);
             } catch (err) {
                 failed++;

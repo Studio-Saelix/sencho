@@ -69,13 +69,29 @@ export const DEFAULT_ARCHITECTURE_VARIANT: Readonly<Record<string, string>> = {
 };
 
 /**
- * The platform label of an image Docker holds locally, in the registry
- * resolver's vocabulary.
+ * The cache-key form of a platform label.
  *
- * The default variant for an architecture is dropped, because the resolver
- * labels a child `linux/arm64` when the service did not ask for a variant. If
- * the local read kept Docker's `v8`, the post-update installed scan could not
- * reuse the candidate row for the same child and would always rescan it.
+ * Canonicalized like the resolver's labels, with the architecture's default
+ * variant dropped: `linux/arm64/v8` and `linux/arm64` name the same child, so a
+ * candidate that asked for the default variant and the installed image's own
+ * read must share a row. A non-default variant (`linux/arm/v6`) is kept because
+ * it is a different child.
+ */
+export function platformCacheKey(label: string): string | null {
+  const [os, architecture, ...rest] = label.split('/');
+  if (!os || !architecture) return null;
+  const platform = canonicalNodePlatform({ os, architecture, variant: rest[0] ?? '' });
+  if (!platform.os || !platform.architecture) return null;
+  const variant = platform.variant && platform.variant !== DEFAULT_ARCHITECTURE_VARIANT[platform.architecture]
+    ? platform.variant
+    : '';
+  return `${platform.os}/${platform.architecture}${variant ? `/${variant}` : ''}`;
+}
+
+/**
+ * The platform label of an image Docker holds locally, in the registry
+ * resolver's vocabulary (and in the cache-key form above).
+ *
  * An image whose platform the daemon did not report returns null.
  */
 export function imagePlatformLabel(info: {
@@ -89,8 +105,7 @@ export function imagePlatformLabel(info: {
     variant: typeof info.Variant === 'string' ? info.Variant : '',
   });
   if (!platform.os || !platform.architecture) return null;
-  const variant = platform.variant && platform.variant !== DEFAULT_ARCHITECTURE_VARIANT[platform.architecture]
-    ? platform.variant
-    : '';
-  return `${platform.os}/${platform.architecture}${variant ? `/${variant}` : ''}`;
+  return platformCacheKey(
+    `${platform.os}/${platform.architecture}${platform.variant ? `/${platform.variant}` : ''}`,
+  );
 }

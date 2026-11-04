@@ -532,7 +532,13 @@ async function runPostDeployScan(
       try {
         const digest = await svc.getImageDigest(imageRef, nodeId);
         if (digest) {
-          const cached = db.getLatestScanByDigest(digest, 'vuln');
+          // Keyed by the image the row read too: a multi-arch ref's children
+          // share the index digest, and the post-deploy scan is of the local
+          // child.
+          const platform = await svc.getImagePlatform(imageRef, nodeId);
+          const cached = platform
+            ? db.getLatestScanByDigest(digest, 'vuln', platform)
+            : db.getLatestScanByDigest(digest, 'vuln');
           if (cached && Date.now() - cached.scanned_at < DIGEST_CACHE_TTL_MS) {
             imageSuccesses += 1;
             continue;

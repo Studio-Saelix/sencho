@@ -84,8 +84,17 @@ describe('getLatestScanByDigest platform scoping', () => {
 
         expect(db.getLatestScanByDigest(digest, 'vuln', 'linux/arm64')).toBeNull();
         expect(db.getLatestScanByDigest(digest, 'vuln', 'linux/amd64')?.id).toBe(amd);
-        // Callers that do not name a platform (every non-gate path) keep the
-        // historical digest-only lookup.
+        // Callers that do not name a platform keep the historical digest-only
+        // lookup.
         expect(db.getLatestScanByDigest(digest, 'vuln')?.id).toBe(amd);
+    });
+
+    it('does not match a pre-migration row that has no platform', () => {
+        const db = DatabaseService.getInstance();
+        const digest = 'sha256:legacyplatform';
+        const legacy = seedScan({ digest });
+
+        expect(db.getLatestScanByDigest(digest, 'vuln', 'linux/amd64')).toBeNull();
+        expect(db.getLatestScanByDigest(digest, 'vuln')?.id).toBe(legacy);
     });
 });

@@ -755,8 +755,11 @@ describe('compose mode (a plain up)', () => {
           platform: 'linux/amd64',
         }),
       );
-      // The installed scan is the image already on the node, not a candidate.
-      expect(trivyStub.scanImagePreflight).toHaveBeenCalledWith(ref, 1, 'web', undefined);
+      // The installed scan is the image already on the node, not a candidate,
+      // and it targets the non-pulling group's own platform child.
+      expect(trivyStub.scanImagePreflight).toHaveBeenCalledWith(
+        ref, 1, 'web', { platform: 'linux/arm64' },
+      );
       expect(result.ok).toBe(false);
       expect(result.violations).toHaveLength(1);
       expect(result.violations[0]).toMatchObject({ scanId: 22, criticalCount: 1, severity: 'CRITICAL' });
@@ -770,6 +773,47 @@ describe('compose mode (a plain up)', () => {
       expect(result.pullServices).toEqual(['web']);
     },
   );
+
+  it('evaluates every non-pulling platform group when a shared ref also pulls', async () => {
+    // A multi-platform image store can hold more than one child under one tag.
+    // Each non-pulling group must be scanned for its own platform child, not
+    // collapsed into one ref-level installed scan.
+    candidates.platform = { os: 'linux', architecture: 'arm64' };
+    candidates.resolve.mockResolvedValue({
+      ...CANDIDATE_RESOLUTION,
+      scanRef: `registry.example.com/web@${OTHER_DIGEST}`,
+      platform: 'linux/amd64',
+      platformDigest: OTHER_DIGEST,
+    });
+    trivyStub.scanImagePreflight.mockImplementation(async (
+      _ref: string,
+      _nodeId: number,
+      _stack: string,
+      opts?: { scanRef?: string },
+    ) => (opts?.scanRef?.includes(OTHER_DIGEST)
+      ? mkScan({ id: 31 })
+      : mkScan({ id: 32, highest_severity: 'CRITICAL', critical_count: 1, total_vulnerabilities: 1 })));
+    modelWith([
+      { name: 'web', declaredImage: 'registry.example.com/web:latest', hasBuild: false, pullPolicy: 'always', platform: 'linux/amd64', expectedReplicas: 1, dependsOn: [], hasHealthcheck: false },
+      { name: 'tools', declaredImage: 'registry.example.com/web:latest', hasBuild: false, pullPolicy: 'never', platform: 'linux/arm64', expectedReplicas: 1, dependsOn: [], hasHealthcheck: false },
+      { name: 'util', declaredImage: 'registry.example.com/web:latest', hasBuild: false, pullPolicy: 'never', platform: 'linux/arm/v7', expectedReplicas: 1, dependsOn: [], hasHealthcheck: false },
+    ]);
+
+    const result = await enforcePolicyPreDeploy('web', 1, { bypass: false, actor: 'u', imageSource: 'compose' });
+
+    expect(candidates.resolve).toHaveBeenCalledTimes(1);
+    expect(trivyStub.scanImagePreflight).toHaveBeenCalledTimes(3);
+    const installedPlatforms = trivyStub.scanImagePreflight.mock.calls
+      .map((call) => call[3] as { platform?: string; scanRef?: string } | undefined)
+      .filter((opts): opts is { platform: string; scanRef?: string } =>
+        opts !== undefined && opts.scanRef === undefined && typeof opts.platform === 'string')
+      .map((opts) => opts.platform)
+      .sort();
+    expect(installedPlatforms).toEqual(['linux/arm/v7', 'linux/arm64']);
+    expect(result.ok).toBe(false);
+    expect(result.violations).toHaveLength(2);
+    expect(result.pullServices).toEqual(['web']);
+  });
 
   it('keeps one violation and one evidence record per platform variant', async () => {
     // F6's backend half: the dialog can only label each row with its own
