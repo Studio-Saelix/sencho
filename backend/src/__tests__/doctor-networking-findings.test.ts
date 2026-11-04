@@ -20,6 +20,7 @@ function stubReport(overrides: Partial<PreflightReport> & { findings: PreflightR
     status: 'high',
     highestSeverity: 'high',
     sourceHash: 'h', renderedHash: 'h',
+    coverage: { state: 'complete', evaluated: 0, notApplicable: 0, skipped: [] },
     activeStatus: 'high', activeHighestSeverity: 'high', activeCount: overrides.findings.length, acknowledgedCount: 0,
     ...overrides,
   };

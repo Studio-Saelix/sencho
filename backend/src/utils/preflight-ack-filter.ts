@@ -12,11 +12,12 @@ export interface PreflightAcknowledgementDecision {
     acknowledgementId?: number;
     acknowledgementReason?: string;
     acknowledgementExpiry?: PreflightAckExpiryMode;
+    acknowledgementExpiresAt?: number;
 }
 
 export interface PreflightAckFilterContext {
     renderedHash: string | null;
-    /** Parsed service name to image ref from the latest stored run. */
+    /** Parsed service name to image ref of the run the findings come from. */
     serviceImages: Record<string, string>;
 }
 
@@ -118,6 +119,7 @@ export function applyPreflightAcknowledgements<T extends PreflightFinding>(
             acknowledgementId: match.id,
             acknowledgementReason: match.reason,
             acknowledgementExpiry: match.expiry_mode,
+            ...(match.expires_at !== null ? { acknowledgementExpiresAt: match.expires_at } : {}),
         };
     });
 }

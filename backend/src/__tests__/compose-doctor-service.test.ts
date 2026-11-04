@@ -12,6 +12,46 @@ import { setupTestDb, cleanupTestDb } from './helpers/setupTestDb';
 import DockerController from '../services/DockerController';
 import { ComposeService } from '../services/ComposeService';
 
+/**
+ * Toggle for an env-context failure. The service imports the resolver directly,
+ * so the only way to make that one collection step fail is to wrap the module;
+ * the wrapper delegates unless `fail` is set (it then throws), and `rewrite`,
+ * when set, edits the resolved sources before the service sees them. Tests reset
+ * both.
+ */
+const envSourceFailure = vi.hoisted(() => ({
+  fail: false,
+  /** Rewrites the resolved sources, to stand in for a file whose existence cannot be checked. */
+  rewrite: null as null | ((sources: unknown) => unknown),
+}));
+vi.mock('../helpers/envFileResolution', async (importOriginal) => {
+  const original = await importOriginal<typeof import('../helpers/envFileResolution')>();
+  return {
+    ...original,
+    resolveStackEnvSources: async (...args: Parameters<typeof original.resolveStackEnvSources>) => {
+      if (envSourceFailure.fail) throw new Error('env sources unreadable');
+      const sources = await original.resolveStackEnvSources(...args);
+      return (envSourceFailure.rewrite ? envSourceFailure.rewrite(sources) : sources) as typeof sources;
+    },
+  };
+});
+
+/**
+ * Extra rule hits appended to a run, to stand in for a rule that emits several
+ * hits for one service without a subject. Tests clear it in a `finally`.
+ */
+const injectedHits = vi.hoisted(() => ({ extra: [] as unknown[] }));
+vi.mock('../services/assurance/coverage', async (importOriginal) => {
+  const original = await importOriginal<typeof import('../services/assurance/coverage')>();
+  return {
+    ...original,
+    runAssuranceRules: (...args: Parameters<typeof original.runAssuranceRules>) => {
+      const run = original.runAssuranceRules(...args);
+      return { ...run, findings: [...run.findings, ...(injectedHits.extra as typeof run.findings)] };
+    },
+  };
+});
+
 const SECRET = 'pw-7Q2x-never-store';
 
 let tmpDir: string;
@@ -427,6 +467,7 @@ describe('getLatest', () => {
     expect(r.status).toBe('never-run');
     expect(r.ranAt).toBeNull();
     expect(r.findings).toEqual([]);
+    expect(r.coverage.state).toBe('unrecorded');
   });
 });
 
@@ -461,6 +502,92 @@ describe('preflight acknowledgements', () => {
     expect(latest.activeCount).toBe(latest.findings.length - 1);
     expect(latest.status).toBe('high');
     expect(latest.activeStatus).not.toBe('high');
+  });
+
+  describe('on a fresh run', () => {
+    const ack = (over: Record<string, unknown>) => ({
+      node_id: nodeId, stack_name: STACK, rule_id: 'port-exposed-all-interfaces', service: 'web', reason: 'intentional',
+      expiry_mode: 'forever' as const, expires_at: null, anchor_rendered_hash: null, anchor_image_ref: null,
+      created_by: 'tester', created_at: Date.now(), ...over,
+    });
+    const model = (image: string) => ({
+      name: STACK,
+      services: { web: { image, ports: [{ target: 80, published: '8080', protocol: 'tcp' }], restart: 'always', healthcheck: { test: ['CMD', 'x'] } } },
+      networks: {}, volumes: {},
+    });
+    afterEach(() => {
+      db().getDb().prepare('DELETE FROM preflight_acknowledgements WHERE node_id = ? AND stack_name = ?').run(nodeId, STACK);
+    });
+
+    it('returns the same decisions as a later read of the stored run', async () => {
+      stubDocker(model('nginx:1.27'));
+      await doctor().runPreflight(nodeId, STACK, 'tester');
+      db().upsertPreflightAcknowledgement(ack({ reason: 'Bind publicly on purpose' }));
+      const fresh = await doctor().runPreflight(nodeId, STACK, 'tester');
+      expect(fresh.acknowledgedCount).toBe(1);
+      expect(fresh.findings.filter(finding => finding.acknowledged).map(finding => finding.ruleId))
+        .toEqual(['port-exposed-all-interfaces']);
+      const stored = doctor().getLatest(nodeId, STACK);
+      expect(stored.findings).toEqual(fresh.findings);
+      expect(stored.activeStatus).toBe(fresh.activeStatus);
+      expect(stored.activeCount).toBe(fresh.activeCount);
+    });
+
+    it('applies a time-boxed acknowledgement on a fresh run only while it is live', async () => {
+      stubDocker(model('nginx:1.27'));
+      db().upsertPreflightAcknowledgement(ack({ expiry_mode: 'days', expires_at: Date.now() - 1000 }));
+      expect((await doctor().runPreflight(nodeId, STACK, 'tester')).acknowledgedCount).toBe(0);
+      db().upsertPreflightAcknowledgement(ack({ expiry_mode: 'days', expires_at: Date.now() + 3_600_000 }));
+      const live = await doctor().runPreflight(nodeId, STACK, 'tester');
+      expect(live.acknowledgedCount).toBe(1);
+      expect(live.findings.find(finding => finding.acknowledged)?.acknowledgementExpiry).toBe('days');
+    });
+
+    it('reads the compose hash of this run, not of the last stored one, when the run cannot be stored', async () => {
+      stubDocker(model('nginx:1.27'));
+      const first = await doctor().runPreflight(nodeId, STACK, 'tester');
+      db().upsertPreflightAcknowledgement(ack({ expiry_mode: 'until_compose_change', anchor_rendered_hash: first.renderedHash }));
+      expect((await doctor().runPreflight(nodeId, STACK, 'tester')).acknowledgedCount).toBe(1);
+
+      // The file changed and storing the new run fails: the stored run still holds
+      // the anchored hash, which must not keep the acknowledgement alive.
+      writeStack(STACK, 'services:\n  web:\n    image: nginx:latest\n    ports:\n      - "9090:80"\n');
+      vi.spyOn(console, 'error').mockImplementation(() => {});
+      vi.spyOn(db(), 'replacePreflightRun').mockImplementation(() => { throw new Error('disk full'); });
+      const changed = await doctor().runPreflight(nodeId, STACK, 'tester');
+      expect(changed.renderedHash).not.toBe(first.renderedHash);
+      expect(changed.acknowledgedCount).toBe(0);
+    });
+
+    it('does not apply a compose-anchored acknowledgement when the source cannot be read', async () => {
+      stubDocker(model('nginx:1.27'));
+      // The stored run holds the anchored hash; an unreadable source must not
+      // fall back to it.
+      const first = await doctor().runPreflight(nodeId, STACK, 'tester');
+      db().upsertPreflightAcknowledgement(ack({ expiry_mode: 'until_compose_change', anchor_rendered_hash: first.renderedHash }));
+      expect((await doctor().runPreflight(nodeId, STACK, 'tester')).acknowledgedCount).toBe(1);
+      fs.rmSync(path.join(process.env.COMPOSE_DIR as string, STACK, 'compose.yaml'));
+      vi.spyOn(console, 'warn').mockImplementation(() => {});
+      const fresh = await doctor().runPreflight(nodeId, STACK, 'tester');
+      expect(fresh.renderedHash).toBeNull();
+      expect(fresh.acknowledgedCount).toBe(0);
+    });
+
+    it('reads the images of this run, not of the last stored one, when the run cannot be stored', async () => {
+      stubDocker(model('nginx:1.27'));
+      await doctor().runPreflight(nodeId, STACK, 'tester');
+      db().upsertPreflightAcknowledgement(ack({ expiry_mode: 'until_image_change', anchor_image_ref: 'nginx:1.27' }));
+      expect(doctor().getLatest(nodeId, STACK).acknowledgedCount).toBe(1);
+
+      // The image changed, and storing the new run fails: the stored run still
+      // records the old image, which must not keep the acknowledgement alive.
+      vi.spyOn(console, 'error').mockImplementation(() => {});
+      vi.spyOn(db(), 'replacePreflightRun').mockImplementation(() => { throw new Error('disk full'); });
+      stubDocker(model('nginx:1.28'));
+      const fresh = await doctor().runPreflight(nodeId, STACK, 'tester');
+      expect(fresh.acknowledgedCount).toBe(0);
+      expect(fresh.findings.find(finding => finding.ruleId === 'port-exposed-all-interfaces')?.acknowledged).toBe(false);
+    });
   });
 });
 
@@ -615,5 +742,356 @@ describe('Compose version mismatch note', () => {
     expect(report.renderable).toBe(true);
     expect(report.findings.some(f => f.ruleId === 'compose-version-mismatch')).toBe(false);
     expect(warn.mock.calls.some(call => String(call[0]).includes('Compose version check unavailable'))).toBe(true);
+  });
+});
+
+describe('Compose Assurance contract persistence', () => {
+  const STACK = 'assurance-run';
+  const cleanModel = () => ({
+    name: STACK,
+    services: {
+      web: { image: 'nginx:1.27', restart: 'unless-stopped', healthcheck: { test: ['CMD', 'true'] } },
+    },
+    networks: {},
+    volumes: {},
+  });
+
+  beforeEach(() => { writeStack(STACK); });
+  afterEach(() => {
+    envSourceFailure.fail = false;
+    envSourceFailure.rewrite = null;
+    db().setStackProjectEnvFiles(nodeId, STACK, []);
+    fs.rmSync(path.join(process.env.COMPOSE_DIR as string, STACK), { recursive: true, force: true });
+    db().replacePreflightRun(
+      { id: 'cleanup', node_id: nodeId, stack_name: 'assurance-legacy', source_hash: null, rendered_hash: null, service_images: null, status: 'pass', highest_severity: null, created_at: 1, created_by: null },
+      [],
+    );
+    db().deleteNode(987655);
+  });
+
+  it('persists rule versions, subjects, and coverage', async () => {
+    stubDocker(cleanModel());
+    const report = await doctor().runPreflight(nodeId, STACK, 'tester');
+    expect(report.coverage.state).toBe('complete');
+
+    const run = db().getLatestPreflightRun(nodeId, STACK);
+    expect(run?.coverage).toBeTruthy();
+    const stored = JSON.parse(run!.coverage!) as { state: string; evaluated: number };
+    expect(stored.state).toBe('complete');
+    expect(stored.evaluated).toBeGreaterThan(0);
+
+    const rows = db().getPreflightFindings(run!.id);
+    for (const row of rows) {
+      expect(row.rule_version).not.toBeNull();
+      expect(typeof row.subject_kind).toBe('string');
+      expect(typeof row.subject_key).toBe('string');
+    }
+    const normalized = doctor().getLatestAssurance(nodeId, STACK);
+    expect(normalized.coverage.state).toBe('complete');
+    expect(normalized.findings.every(finding => finding.identity.basis === 'structured')).toBe(true);
+  });
+
+  it('reads a legacy row as unrecorded coverage, a legacy identity, and redacted text', () => {
+    const legacy = 'assurance-legacy';
+    db().replacePreflightRun(
+      { id: 'legacy-run', node_id: nodeId, stack_name: legacy, source_hash: null, rendered_hash: null, service_images: null, status: 'high', highest_severity: 'high', created_at: 2, created_by: 'tester' },
+      [{
+        id: 'legacy-finding',
+        run_id: 'legacy-run',
+        rule_id: 'privileged',
+        severity: 'high',
+        title: 'Privileged container',
+        message: 'The stack references https://user:pass@host/x.env',
+        source_path: 'https://user:pass@host/x.env',
+        remediation: null,
+        service: 'web',
+        created_at: 2,
+      }],
+    );
+
+    const report = doctor().getLatest(nodeId, legacy);
+    expect(report.coverage.state).toBe('unrecorded');
+    expect(report.findings[0].message).not.toContain('user:pass');
+    expect(report.findings[0].sourcePath).not.toContain('user:pass');
+
+    const normalized = doctor().getLatestAssurance(nodeId, legacy);
+    expect(normalized.coverage.state).toBe('unrecorded');
+    expect(normalized.findings[0].identity.basis).toBe('legacy');
+    expect(normalized.findings[0].ruleVersion).toBeNull();
+  });
+
+  it('does not throw on a stored rule id that is no longer registered', () => {
+    const legacy = 'assurance-retired';
+    db().replacePreflightRun(
+      { id: 'retired-run', node_id: nodeId, stack_name: legacy, source_hash: null, rendered_hash: null, service_images: null, status: 'warning', highest_severity: 'warning', created_at: 2, created_by: 'tester', coverage: null },
+      [{
+        id: 'retired-finding', run_id: 'retired-run', rule_id: 'a-retired-rule', severity: 'warning',
+        title: 'Old rule', message: 'Old message', source_path: null, remediation: null, service: null,
+        created_at: 2, rule_version: null, subject_kind: null, subject_key: null,
+      }],
+    );
+    const normalized = doctor().getLatestAssurance(nodeId, legacy);
+    expect(normalized.findings[0].ruleId).toBe('a-retired-rule');
+    expect(normalized.findings[0].findingClass).toBe('information');
+    expect(normalized.findings[0].ruleVersion).toBeNull();
+  });
+
+  describe('acknowledgement decisions on normalized findings', () => {
+    const stack = 'assurance-acks';
+    const row = (id: string, ruleId: string, severity: string, service: string) => ({
+      id, run_id: 'ack-run', rule_id: ruleId, severity, title: ruleId, message: 'm',
+      source_path: null, remediation: null, service, created_at: 2,
+      rule_version: 1, subject_kind: 'service', subject_key: service,
+    });
+    const ack = (ruleId: string, service: string | null, over: Record<string, unknown> = {}) => ({
+      node_id: nodeId, stack_name: stack, rule_id: ruleId, service, reason: `${ruleId} ${service ?? 'any'}`,
+      expiry_mode: 'forever' as const, expires_at: null, anchor_rendered_hash: null, anchor_image_ref: null,
+      created_by: 'tester', created_at: Date.now(), ...over,
+    });
+    const decidedPairs = () => doctor().getLatestAssurance(nodeId, stack).findings
+      .filter(finding => finding.decision)
+      .map(finding => [finding.ruleId, finding.scope.service, finding.decision?.expiry.mode]);
+
+    beforeEach(() => {
+      // Stored in an order that differs from the severity-then-registry order the
+      // read path returns.
+      db().replacePreflightRun(
+        { id: 'ack-run', node_id: nodeId, stack_name: stack, source_hash: null, rendered_hash: 'hash-1', service_images: null, status: 'high', highest_severity: 'high', created_at: 2, created_by: 'tester', coverage: null },
+        [
+          row('f-web', 'privileged', 'high', 'web'),
+          row('f-info', 'healthcheck-inherited', 'info', 'db'),
+          row('f-db', 'privileged', 'high', 'db'),
+          row('f-warn', 'no-restart-policy', 'warning', 'web'),
+        ],
+      );
+    });
+    afterEach(() => {
+      db().getDb().prepare('DELETE FROM preflight_acknowledgements WHERE node_id = ? AND stack_name = ?').run(nodeId, stack);
+      db().replacePreflightRun(
+        { id: 'cleanup-acks', node_id: nodeId, stack_name: stack, source_hash: null, rendered_hash: null, service_images: null, status: 'pass', highest_severity: null, created_at: 1, created_by: null },
+        [],
+      );
+    });
+
+    it('attaches a decision only to the finding it was matched for', () => {
+      db().upsertPreflightAcknowledgement(ack('privileged', 'db'));
+      const { findings } = doctor().getLatestAssurance(nodeId, stack);
+      expect(findings).toHaveLength(4);
+      expect(decidedPairs()).toEqual([['privileged', 'db', 'forever']]);
+      expect(findings.find(finding => finding.decision)?.decision?.reason).toBe('privileged db');
+      // The wire report agrees finding for finding.
+      expect(doctor().getLatest(nodeId, stack).findings.filter(finding => finding.acknowledged)
+        .map(finding => [finding.ruleId, finding.service])).toEqual([['privileged', 'db']]);
+    });
+
+    it('applies a stack-wide acknowledgement anchored to the stored rendered hash', () => {
+      db().upsertPreflightAcknowledgement(ack('no-restart-policy', null, { expiry_mode: 'until_compose_change', anchor_rendered_hash: 'hash-1' }));
+      expect(decidedPairs()).toEqual([['no-restart-policy', 'web', 'until_compose_change']]);
+      // An anchor from a different Compose version no longer applies.
+      db().upsertPreflightAcknowledgement(ack('no-restart-policy', null, { expiry_mode: 'until_compose_change', anchor_rendered_hash: 'hash-0' }));
+      expect(decidedPairs()).toEqual([]);
+    });
+
+    it('does not apply an expired acknowledgement or one for another rule', () => {
+      db().upsertPreflightAcknowledgement(ack('privileged', 'web', { expiry_mode: 'days', expires_at: Date.now() - 1000 }));
+      db().upsertPreflightAcknowledgement(ack('image-latest', 'web'));
+      expect(decidedPairs()).toEqual([]);
+    });
+
+    it('lands each decision on its finding whatever order the rows are stored in', () => {
+      db().upsertPreflightAcknowledgement(ack('privileged', 'db'));
+      db().upsertPreflightAcknowledgement(ack('no-restart-policy', 'web'));
+      const stored = [
+        row('f-web', 'privileged', 'high', 'web'),
+        row('f-info', 'healthcheck-inherited', 'info', 'db'),
+        row('f-db', 'privileged', 'high', 'db'),
+        row('f-warn', 'no-restart-policy', 'warning', 'web'),
+      ];
+      const run = { id: 'ack-run', node_id: nodeId, stack_name: stack, source_hash: null, rendered_hash: 'hash-1', service_images: null, status: 'high', highest_severity: 'high', created_at: 2, created_by: 'tester', coverage: null };
+      const outcomes = [stored, [...stored].reverse(), [stored[2], stored[3], stored[0], stored[1]]].map(rows => {
+        db().replacePreflightRun(run, rows);
+        return {
+          normalized: decidedPairs(),
+          wire: doctor().getLatest(nodeId, stack).findings
+            .filter(finding => finding.acknowledged).map(finding => [finding.ruleId, finding.service]),
+        };
+      });
+      for (const outcome of outcomes) {
+        expect(outcome.normalized.map(pair => pair.slice(0, 2))).toEqual([['privileged', 'db'], ['no-restart-policy', 'web']]);
+        expect(outcome.wire).toEqual([['privileged', 'db'], ['no-restart-policy', 'web']]);
+      }
+    });
+
+    it('carries every acknowledgement field to the wire exactly as the normalized read decided it', () => {
+      const soon = Date.now() + 86_400_000;
+      db().replacePreflightRun(
+        { id: 'ack-run', node_id: nodeId, stack_name: stack, source_hash: null, rendered_hash: 'hash-1', service_images: JSON.stringify({ db: 'postgres:16' }), status: 'high', highest_severity: 'high', created_at: 2, created_by: 'tester', coverage: null },
+        [
+          row('f-web', 'privileged', 'high', 'web'),
+          row('f-info', 'healthcheck-inherited', 'info', 'db'),
+          row('f-db', 'privileged', 'high', 'db'),
+          row('f-warn', 'no-restart-policy', 'warning', 'web'),
+          row('f-img', 'image-latest', 'warning', 'db'),
+        ],
+      );
+      db().upsertPreflightAcknowledgement(ack('privileged', 'web'));
+      db().upsertPreflightAcknowledgement(ack('privileged', 'db', { expiry_mode: 'days', expires_at: soon }));
+      db().upsertPreflightAcknowledgement(ack('no-restart-policy', 'web', { expiry_mode: 'until_compose_change', anchor_rendered_hash: 'hash-1' }));
+      db().upsertPreflightAcknowledgement(ack('image-latest', 'db', { expiry_mode: 'until_image_change', anchor_image_ref: 'postgres:16' }));
+
+      const wire = doctor().getLatest(nodeId, stack).findings;
+      const { findings } = doctor().getLatestAssurance(nodeId, stack);
+      expect(wire).toHaveLength(findings.length);
+      // Finding for finding, in the same order, the wire fields are the decision's.
+      findings.forEach((finding, index) => {
+        const projected = wire[index];
+        expect([projected.ruleId, projected.service]).toEqual([finding.ruleId, finding.scope.service]);
+        expect(projected.acknowledged).toBe(finding.decision !== undefined);
+        expect(projected.acknowledgementId).toBe(finding.decision?.id);
+        expect(projected.acknowledgementReason).toBe(finding.decision?.reason);
+        expect(projected.acknowledgementExpiry).toBe(finding.decision?.expiry.mode);
+        expect(projected.acknowledgementExpiresAt).toBe(finding.decision?.expiry.expiresAt);
+      });
+      // Stated outright, so a regression made on both sides still fails.
+      const summary = wire.filter(finding => finding.acknowledged)
+        .map(finding => [finding.ruleId, finding.service, finding.acknowledgementReason, finding.acknowledgementExpiry, finding.acknowledgementExpiresAt]);
+      expect(summary).toEqual(expect.arrayContaining([
+        ['privileged', 'web', 'privileged web', 'forever', undefined],
+        ['privileged', 'db', 'privileged db', 'days', soon],
+        ['no-restart-policy', 'web', 'no-restart-policy web', 'until_compose_change', undefined],
+        ['image-latest', 'db', 'image-latest db', 'until_image_change', undefined],
+      ]));
+      expect(summary).toHaveLength(4);
+      expect(wire.filter(finding => !finding.acknowledged).every(finding => finding.acknowledgementId === undefined)).toBe(true);
+    });
+  });
+
+  it('names the rule when two findings share a fingerprint, and keeps both', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    stubDocker(cleanModel());
+    const duplicate = { ruleId: 'privileged', severity: 'high', title: 'Privileged container', message: 'm', service: 'web' };
+    injectedHits.extra = [duplicate, { ...duplicate, message: 'again' }];
+    try {
+      const report = await doctor().runPreflight(nodeId, STACK, 'tester');
+      expect(report.findings.filter(finding => finding.ruleId === 'privileged')).toHaveLength(2);
+      const logged = warn.mock.calls.map(call => call.map(String).join(' '));
+      expect(logged.some(line => line.includes('share a fingerprint') && line.includes('privileged'))).toBe(true);
+    } finally {
+      injectedHits.extra = [];
+    }
+  });
+
+  it('stays quiet when every finding has its own fingerprint', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    stubDocker(cleanModel());
+    await doctor().runPreflight(nodeId, STACK, 'tester');
+    expect(warn.mock.calls.some(call => call.map(String).join(' ').includes('share a fingerprint'))).toBe(false);
+  });
+
+  it('records an env-source failure as partial coverage instead of a silent pass', async () => {
+    envSourceFailure.fail = true;
+    try {
+      // Compose still reports an unset name, so the raw-stderr fallback warning
+      // is the one env finding that survives an unreadable env context.
+      stubDocker(cleanModel(), 'WARN The "MISSING" variable is not set. Defaulting to a blank string.');
+      const report = await doctor().runPreflight(nodeId, STACK, 'tester');
+      expect(report.renderable).toBe(true);
+      expect(report.coverage.state).toBe('partial');
+      const skipped = report.coverage.skipped.map(entry => entry.ruleId);
+      expect(skipped).toEqual(expect.arrayContaining(['env-unset', 'env-file-missing']));
+      expect(skipped).not.toContain('env-literal-dollar');
+      expect(report.coverage.skipped.find(entry => entry.ruleId === 'env-unset')?.missing).toEqual(['env-context']);
+      // The fallback warning is still reported, exactly as before the contract.
+      expect(report.findings.map(finding => finding.ruleId)).toContain('env-literal-dollar');
+
+      const run = db().getLatestPreflightRun(nodeId, STACK);
+      expect((JSON.parse(run!.coverage!) as { state: string }).state).toBe('partial');
+      expect(doctor().getLatest(nodeId, STACK).coverage.state).toBe('partial');
+    } finally {
+      envSourceFailure.fail = false;
+    }
+  });
+
+  it('redacts a credential in the render error on the run and on a later read', async () => {
+    vi.spyOn(ComposeService, 'getInstance').mockReturnValue({
+      renderConfig: vi.fn().mockRejectedValue(new Error('cannot start postgres://bob:s3cretPASS@db/x')),
+      composeVersion: vi.fn().mockResolvedValue(null),
+    } as unknown as ComposeService);
+    vi.spyOn(DockerController, 'getInstance').mockReturnValue({
+      getDependencySnapshot: vi.fn().mockResolvedValue({ containers: [], networks: [], volumes: [] }),
+      getDocker: vi.fn(() => ({ listContainers: vi.fn().mockResolvedValue([]) })),
+    } as unknown as DockerController);
+    const run = await doctor().runPreflight(nodeId, STACK, 'tester');
+    const read = doctor().getLatest(nodeId, STACK);
+    expect(run.renderable).toBe(false);
+    expect(JSON.stringify(run)).not.toContain('s3cretPASS');
+    expect(JSON.stringify(read)).not.toContain('s3cretPASS');
+    expect(run.renderError).toBe(read.renderError);
+  });
+
+  describe('an env file that cannot be read', () => {
+    const stackDir = () => path.join(process.env.COMPOSE_DIR as string, STACK);
+    const UNSET = 'WARN The "PORT" variable is not set. Defaulting to a blank string.';
+    const expectPartialOnEnvContext = async () => {
+      stubDocker(cleanModel(), UNSET);
+      const report = await doctor().runPreflight(nodeId, STACK, 'tester');
+      expect(report.renderable).toBe(true);
+      expect(report.coverage.state).toBe('partial');
+      const envSkips = report.coverage.skipped.filter(entry => entry.missing.includes('env-context'));
+      expect(envSkips.map(entry => entry.ruleId)).toEqual(expect.arrayContaining(['env-unset', 'env-file-missing']));
+      // The same on a later read of the stored run.
+      expect(doctor().getLatest(nodeId, STACK).coverage).toEqual(report.coverage);
+      return report;
+    };
+
+    it('records the project .env being a directory as partial coverage', async () => {
+      fs.mkdirSync(path.join(stackDir(), '.env'));
+      await expectPartialOnEnvContext();
+    });
+
+    it('records a configured project env file being a directory as partial coverage', async () => {
+      fs.mkdirSync(path.join(stackDir(), 'prod.env'));
+      db().setStackProjectEnvFiles(nodeId, STACK, ['prod.env']);
+      await expectPartialOnEnvContext();
+    });
+
+    it('records a declared env_file being a directory as partial coverage', async () => {
+      writeStack(STACK, 'services:\n  web:\n    image: nginx:1.27\n    env_file: app.env\n');
+      fs.mkdirSync(path.join(stackDir(), 'app.env'));
+      await expectPartialOnEnvContext();
+    });
+
+    it('records a configured project env file outside the compose base directory as partial coverage', async () => {
+      db().setStackProjectEnvFiles(nodeId, STACK, ['../../outside.env']);
+      await expectPartialOnEnvContext();
+    });
+
+    it('records a file whose existence cannot be checked as partial coverage', async () => {
+      // Readable, so only the existence guard can make this partial.
+      fs.writeFileSync(path.join(stackDir(), '.env'), 'PORT=1\n');
+      envSourceFailure.rewrite = (sources) => {
+        const resolved = sources as { envFiles: { existence: string }[] };
+        return { ...resolved, envFiles: resolved.envFiles.map(file => ({ ...file, existence: 'unverifiable' })) };
+      };
+      await expectPartialOnEnvContext();
+    });
+
+    it('does not report the raw stderr name as an unset variable while the env context is missing', async () => {
+      fs.mkdirSync(path.join(stackDir(), '.env'));
+      const report = await expectPartialOnEnvContext();
+      expect(report.findings.map(finding => finding.ruleId)).not.toContain('env-unset');
+    });
+
+    it.each([
+      ['an absent project .env', () => undefined],
+      ['an absent configured project env file', () => db().setStackProjectEnvFiles(nodeId, STACK, ['absent.env'])],
+      ['a readable project .env', () => fs.writeFileSync(path.join(stackDir(), '.env'), 'PORT=8080\n')],
+    ])('stays complete with %s', async (_label, arrange) => {
+      arrange();
+      stubDocker(cleanModel());
+      const report = await doctor().runPreflight(nodeId, STACK, 'tester');
+      expect(report.coverage.state).toBe('complete');
+      expect(report.coverage.skipped.filter(entry => entry.missing.includes('env-context'))).toEqual([]);
+    });
   });
 });

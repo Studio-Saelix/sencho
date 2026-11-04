@@ -15,6 +15,7 @@ import { Label } from '@/components/ui/label';
 import { Combobox, type ComboboxOption } from '@/components/ui/combobox';
 import { Modal, ModalHeader, ModalBody, ModalFooter, ConfirmModal } from '@/components/ui/modal';
 import { isPreflightNoteFinding } from '@/lib/preflightNotes';
+import { coverageGapLine, type AssuranceCoverage } from '@/lib/coverageGaps';
 
 type PreflightSeverity = 'blocker' | 'high' | 'warning' | 'info';
 type PreflightStatus = 'never-run' | 'pass' | 'unrenderable' | PreflightSeverity;
@@ -47,6 +48,7 @@ interface PreflightReport {
   activeCount: number;
   acknowledgedCount: number;
   findings: PreflightFinding[];
+  coverage?: AssuranceCoverage;
 }
 
 const LABEL_CLASS = 'font-mono text-[10px] uppercase tracking-[0.18em] text-stat-subtitle';
@@ -71,6 +73,11 @@ const EXPIRY_LABELS: Record<PreflightAckExpiryMode, string> = {
   until_image_change: 'Until image changes',
 };
 
+const NEUTRAL_SUMMARY = {
+  icon: Info,
+  tone: 'border-muted bg-card/40 text-stat-subtitle',
+} as const;
+
 function summaryMeta(
   report: PreflightReport,
   activeFindings: PreflightFinding[],
@@ -84,6 +91,26 @@ function summaryMeta(
     };
   }
   if (report.activeCount === 0) {
+    // A clean result only reads as "all clear" when every verdict-affecting
+    // check ran. Unrecorded coverage (an older run or an older node) and a run
+    // with skipped checks are reported as what they are: not a clean bill.
+    if (!report.coverage || report.coverage.state === 'unrecorded') {
+      return {
+        label: `${report.activeStatus} · coverage not recorded`,
+        icon: NEUTRAL_SUMMARY.icon,
+        tone: NEUTRAL_SUMMARY.tone,
+        line: 'Run preflight again to confirm every check ran.',
+      };
+    }
+    const gap = coverageGapLine(report.coverage);
+    if (gap) {
+      return {
+        label: 'partial check',
+        icon: NEUTRAL_SUMMARY.icon,
+        tone: NEUTRAL_SUMMARY.tone,
+        line: `No issues in the checks that ran. ${gap}`,
+      };
+    }
     const acknowledgedOnly = report.acknowledgedCount > 0;
     return {
       label: acknowledgedOnly ? 'all clear · findings acknowledged' : 'all clear',

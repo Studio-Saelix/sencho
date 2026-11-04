@@ -40,6 +40,7 @@ function ctx(over: Partial<PreflightContext> = {}): PreflightContext {
     existingContainers: [], nodeStateAvailable: true, bindChecks: [],
     stackIntent: null, serviceIntents: {}, accessUrlPorts: new Set(), hasAccessUrls: false,
     exposureAvailable: true,
+    envContextAvailable: true,
     isSelfStack: false,
     meshManaged: false,
     healthchecks: {},
@@ -640,6 +641,17 @@ describe('hygiene rules', () => {
     expect(ids(runRules(ctx({ model: model([svc({ image: 'nginx:1.27' })]) })), 'image-latest')).toHaveLength(0);
     expect(ids(runRules(ctx({ model: model([svc({ image: 'nginx@sha256:abc' })]) })), 'image-latest')).toHaveLength(0);
   });
+  it.each([
+    'https://SECRETD1tok@host/app:latest',
+    'ghp_SECRETD8@ghcr.io/x/app:latest',
+    '//u:SECRETD2@host/app:latest',
+    'user:SECRETA8 @host/app:latest',
+  ])('does not quote the credential of %s in the image-latest finding', image => {
+    const hits = ids(runRules(ctx({ model: model([svc({ image })]) })), 'image-latest');
+    expect(hits).toHaveLength(1);
+    expect(JSON.stringify(hits)).not.toMatch(/SECRET/);
+    expect(hits[0].message).toContain('[redacted]@');
+  });
   it('flags a missing restart policy and healthcheck', () => {
     const bare = model([svc({ restart: undefined, hasHealthcheck: false })]);
     const restartFindings = ids(runRules(ctx({ model: bare })), 'no-restart-policy');
@@ -882,6 +894,13 @@ describe('exposure-intent rules', () => {
     ]);
     const documentedFindings = runRules(ctx({ model: documented })).filter(f => f.ruleId === 'reverse-proxy-undocumented');
     expect(documentedFindings.map(f => f.service)).toEqual(['api']);
+  });
+  it('does not quote the credential of a sensitive image in the exposure finding', () => {
+    const m = model([svc({ name: 'db', image: 'ghp_SECRETD8@reg.invalid/postgres:16', ports: [{ startPort: 5432, endPort: 5432, hostIp: '0.0.0.0', protocol: 'tcp' }] })]);
+    const hits = ids(runRules(ctx({ model: m })), 'sensitive-service-broad-exposure');
+    expect(hits).toHaveLength(1);
+    expect(JSON.stringify(hits)).not.toContain('SECRETD8');
+    expect(hits[0].message).toContain('[redacted]@reg.invalid/postgres:16');
   });
   it('flags a sensitive image exposed on all interfaces', () => {
     const m = model([svc({ name: 'db', image: 'postgres:16', ports: [{ startPort: 5432, endPort: 5432, hostIp: '0.0.0.0', protocol: 'tcp' }] })]);

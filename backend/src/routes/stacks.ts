@@ -63,7 +63,7 @@ import { MAX_TARGET_COUNT, readDismissalMode } from '../helpers/dismissalMode';
 import { ComposeDoctorService } from '../services/ComposeDoctorService';
 import { RULE_IDS, isPreflightNoteFinding } from '../services/preflight/rules';
 import { parseServiceImages, isPreflightAckActive } from '../utils/preflight-ack-filter';
-import type { PreflightAckExpiryMode } from '../services/DatabaseService';
+import type { PreflightAckExpiryMode, PreflightAcknowledgement } from '../services/DatabaseService';
 import { buildStackNetworkFacts } from '../services/network/composeNetworkInspector';
 import { buildStorageInventory } from '../services/storage/inventory';
 import { probeComposeDiscovery } from '../services/ComposeDiscoveryService';
@@ -87,7 +87,7 @@ import { isPathWithinBase, isValidGitSourcePath, isValidStackName, isValidServic
 import { normalizeBulkPaths, destWithinAnySource } from '../utils/bulkPaths';
 import { getErrorMessage } from '../utils/errors';
 import { isDebugEnabled } from '../utils/debug';
-import { errorMessageForLog, sanitizeForLog } from '../utils/safeLog';
+import { errorMessageForLog, redactImageReference, redactSensitiveText, sanitizeForLog } from '../utils/safeLog';
 import { logDebugTiming } from '../utils/requestTiming';
 import { sendGitSourceError } from '../utils/gitSourceHttp';
 import { allowedPolicyEvidence, buildPolicyGateOptions, type AllowedPolicyEvidence, policyBlockPayload, policyEvidenceFor, runPolicyGate, triggerPostDeployScan, describePolicyBlock, isPostDeployScanRunning } from '../helpers/policyGate';
@@ -1944,7 +1944,19 @@ stacksRouter.post('/:stackName/preflight/run', async (req: Request, res: Respons
 const PREFLIGHT_ACK_EXPIRY_MODES = new Set<PreflightAckExpiryMode>([
   'forever', 'until_compose_change', 'days', 'until_image_change',
 ]);
-const PREFLIGHT_RULE_ID_SET = new Set(RULE_IDS);
+const PREFLIGHT_RULE_ID_SET: ReadonlySet<string> = new Set(RULE_IDS);
+
+/** An acknowledgement as the API returns it. The reason is operator-entered free
+ *  text and the image anchor is copied from the rendered model, which inlines a
+ *  registry credential, so both are redacted in every response, the same as on the
+ *  Doctor report. The stored anchor stays raw: expiry compares against it. */
+function acknowledgementForWire(ack: PreflightAcknowledgement): PreflightAcknowledgement {
+  return {
+    ...ack,
+    reason: redactSensitiveText(ack.reason),
+    anchor_image_ref: ack.anchor_image_ref === null ? null : redactImageReference(ack.anchor_image_ref),
+  };
+}
 
 stacksRouter.get('/:stackName/preflight/acknowledgements', async (req: Request, res: Response) => {
   const stackName = req.params.stackName as string;
@@ -1958,7 +1970,7 @@ stacksRouter.get('/:stackName/preflight/acknowledgements', async (req: Request, 
     };
     const now = Date.now();
     const rows = DatabaseService.getInstance().getPreflightAcknowledgements(req.nodeId, stackName).map((ack) => ({
-      ...ack,
+      ...acknowledgementForWire(ack),
       active: isPreflightAckActive(ack, ctx, now),
     }));
     res.json(rows);
@@ -2052,7 +2064,7 @@ stacksRouter.post('/:stackName/preflight/acknowledgements', async (req: Request,
     });
     // Networking lists Doctor findings under "dismissed" once acknowledged; drop its memo so that shows now.
     invalidateNodeNetworkingAggregate(req.nodeId);
-    res.status(201).json(ack);
+    res.status(201).json(acknowledgementForWire(ack));
   } catch (error) {
     console.error('[Stacks] Failed to create preflight acknowledgement for %s:', sanitizeForLog(stackName),
       sanitizeForLog(inspect(error, { depth: 4 })));

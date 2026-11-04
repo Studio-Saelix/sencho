@@ -38,6 +38,12 @@ interface Report {
   activeCount: number;
   acknowledgedCount: number;
   findings: Finding[];
+  coverage?: {
+    state: 'complete' | 'partial' | 'unrecorded';
+    evaluated: number;
+    notApplicable: number;
+    skipped: { ruleId: string; missing: string[]; affectsVerdict: boolean }[];
+  };
 }
 
 function report(partial: Partial<Report>): Report {
@@ -48,6 +54,7 @@ function report(partial: Partial<Report>): Report {
     activeStatus: 'pass', activeHighestSeverity: null,
     activeCount: 0, acknowledgedCount: 0,
     findings: [],
+    coverage: { state: 'complete', evaluated: 42, notApplicable: 0, skipped: [] },
   };
   const merged = { ...base, ...partial };
   // Derive activeStatus/activeHighestSeverity/activeCount from the old
@@ -84,6 +91,88 @@ describe('PreflightPanel', () => {
     expect(status).toHaveTextContent('all clear');
     expect(status).not.toHaveTextContent(/findings acknowledged/i);
     expect(status).toHaveTextContent('No issues found in the effective model.');
+  });
+
+  it('reads a clean run with skipped verdict checks as a partial check', async () => {
+    vi.mocked(apiFetch).mockResolvedValue(jsonRes(report({
+      coverage: {
+        state: 'partial', evaluated: 37, notApplicable: 0,
+        skipped: [
+          { ruleId: 'port-conflict-node', missing: ['node-state'], affectsVerdict: true },
+          { ruleId: 'new-network', missing: ['node-state'], affectsVerdict: true },
+          { ruleId: 'compose-version-mismatch', missing: ['node-state', 'compose-version'], affectsVerdict: false },
+        ],
+      },
+    })));
+    render(<PreflightPanel stackName="web" />);
+    const status = await screen.findByTestId('preflight-status');
+    expect(status).toHaveTextContent('partial check');
+    expect(status).not.toHaveTextContent(/all clear/i);
+    expect(status).toHaveTextContent(
+      'No issues in the checks that ran. 2 checks could not run: node state unavailable.',
+    );
+  });
+
+  it('names the count alone when a skipped check reports an unknown evidence source', async () => {
+    vi.mocked(apiFetch).mockResolvedValue(jsonRes(report({
+      coverage: {
+        state: 'partial', evaluated: 40, notApplicable: 0,
+        skipped: [{ ruleId: 'some-future-rule', missing: ['a-source-this-build-does-not-know'], affectsVerdict: true }],
+      },
+    })));
+    render(<PreflightPanel stackName="web" />);
+    const status = await screen.findByTestId('preflight-status');
+    expect(status).toHaveTextContent('partial check');
+    expect(status).toHaveTextContent('No issues in the checks that ran. 1 check could not run.');
+  });
+
+  it('does not claim all clear on a partial run whose skipped list names no verdict check', async () => {
+    vi.mocked(apiFetch).mockResolvedValue(jsonRes(report({
+      coverage: { state: 'partial', evaluated: 40, notApplicable: 0, skipped: [] },
+    })));
+    render(<PreflightPanel stackName="web" />);
+    const status = await screen.findByTestId('preflight-status');
+    expect(status).toHaveTextContent('partial check');
+    expect(status).toHaveTextContent('No issues in the checks that ran. 1 or more checks could not run.');
+    expect(status).not.toHaveTextContent(/all clear/i);
+  });
+
+  it('does not claim all clear when coverage was not recorded', async () => {    vi.mocked(apiFetch).mockResolvedValue(jsonRes(report({
+      coverage: { state: 'unrecorded', evaluated: 0, notApplicable: 0, skipped: [] },
+    })));
+    render(<PreflightPanel stackName="web" />);
+    const status = await screen.findByTestId('preflight-status');
+    expect(status).toHaveTextContent('pass · coverage not recorded');
+    expect(status).toHaveTextContent('Run preflight again to confirm every check ran.');
+    expect(status).not.toHaveTextContent(/all clear/i);
+  });
+
+  it('treats a report with no coverage field from an older node as unrecorded', async () => {
+    const payload = report({ status: 'info', activeStatus: 'info' });
+    delete payload.coverage;
+    vi.mocked(apiFetch).mockResolvedValue(jsonRes(payload));
+    render(<PreflightPanel stackName="web" />);
+    const status = await screen.findByTestId('preflight-status');
+    expect(status).toHaveTextContent('info · coverage not recorded');
+    expect(status).not.toHaveTextContent(/all clear/i);
+  });
+
+  it('keeps the severity summary on a partial run with active findings', async () => {
+    vi.mocked(apiFetch).mockResolvedValue(jsonRes(report({
+      status: 'high',
+      highestSeverity: 'high',
+      findings: [{ ruleId: 'privileged', severity: 'high', title: 'Privileged container', message: 'runs privileged', service: 'web' }],
+      coverage: {
+        state: 'partial', evaluated: 30, notApplicable: 0,
+        skipped: [{ ruleId: 'port-conflict-node', missing: ['node-state'], affectsVerdict: true }],
+      },
+    })));
+    render(<PreflightPanel stackName="web" />);
+    const status = await screen.findByTestId('preflight-status');
+    expect(status).toHaveAttribute('data-status', 'high');
+    expect(status).toHaveTextContent('high risk');
+    expect(status).not.toHaveTextContent(/partial check/i);
+    expect(status).toHaveTextContent('1 high risk');
   });
 
   it('renders all-clear · findings acknowledged when every finding is acknowledged', async () => {

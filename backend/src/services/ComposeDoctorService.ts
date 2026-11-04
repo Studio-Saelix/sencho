@@ -5,26 +5,34 @@ import { randomUUID } from 'crypto';
 import DockerController from './DockerController';
 import { ComposeService } from './ComposeService';
 import { FileSystemService } from './FileSystemService';
-import { DatabaseService } from './DatabaseService';
+import { DatabaseService, type PreflightAcknowledgement, type PreflightRunRow } from './DatabaseService';
 import { computeStackHashes } from './DriftLedgerService';
 import { parseComposeDependencies } from '../helpers/composeDependencyParse';
 import { parseEffectiveModel, type EffectiveModel } from './preflight/effectiveModel';
 import { getExposureContext } from './network/exposureContext';
 import { isStackMeshManaged } from './network/managedMeshAttachment';
 import type { ExposureIntent } from './network/types';
-import { runRules, SEVERITY_RANK, RULE_IDS, RENDER_FAILED_RULE_ID, isPreflightNoteFinding } from './preflight/rules';
+import { SEVERITY_RANK, RENDER_FAILED_RULE_ID, isPreflightNoteFinding } from './preflight/rules';
 import type {
   BindCheck, NodePortBinding, PreflightContext, PreflightFinding, PreflightReport, PreflightSeverity, PreflightStatus, MissingEnvFile,
   ServiceHealthcheckEvidence,
 } from './preflight/types';
+import type { AssuranceCoverage } from './assurance/types';
+import { runAssuranceRules, parseCoverage, unrecordedCoverage } from './assurance/coverage';
+import {
+  findFingerprintCollisions, normalizeDoctorHit, normalizeStoredFinding, withDecision, type AssuranceFinding,
+} from './assurance/finding';
+import { assuranceRuleOrder, getAssuranceRule } from './assurance/ruleRegistry';
 import { collectServiceHealthcheckEvidence } from './healthcheck/collectServiceHealthcheckEvidence';
-import { applyPreflightAcknowledgements, parseServiceImages } from '../utils/preflight-ack-filter';
+import {
+  applyPreflightAcknowledgements, parseServiceImages, type PreflightAckFilterContext,
+} from '../utils/preflight-ack-filter';
 
 import { isPathWithinBase } from '../utils/validation';
 import { getErrorMessage } from '../utils/errors';
 import { redactSensitiveText, sanitizeForLog } from '../utils/safeLog';
 import { parseUnsetEnvVars, parseMissingRequiredVars, readEnvFileKeys } from '../helpers/envVarParse';
-import { resolveStackEnvSources } from '../helpers/envFileResolution';
+import { resolveStackEnvSources, type StackEnvSources } from '../helpers/envFileResolution';
 import { isSelfStack } from '../helpers/selfStackGuard';
 import { classifyUnsetEnvVars, type LiteralDollarWarning } from '../helpers/unsetEnvClassification';
 import { listNodeContainers } from '../helpers/dockerEndpointGuard';
@@ -38,12 +46,66 @@ import { withTimeout } from '../utils/withTimeout';
 
 const MAX_RENDER_ERROR = 600; // chars kept from a (redacted) render error
 
-const ruleOrder = new Map(RULE_IDS.map((id, i) => [id, i]));
 /** Severity descending, then registry order, so output is deterministic. */
-function sortFindings(findings: PreflightFinding[]): PreflightFinding[] {
-  return [...findings].sort((a, b) =>
-    (SEVERITY_RANK[b.severity] - SEVERITY_RANK[a.severity]) ||
-    ((ruleOrder.get(a.ruleId) ?? 0) - (ruleOrder.get(b.ruleId) ?? 0)));
+function compareFindings(
+  a: { severity: PreflightSeverity; ruleId: string },
+  b: { severity: PreflightSeverity; ruleId: string },
+): number {
+  return (SEVERITY_RANK[b.severity] - SEVERITY_RANK[a.severity])
+    || (assuranceRuleOrder(a.ruleId) - assuranceRuleOrder(b.ruleId));
+}
+
+function sortNormalized(findings: AssuranceFinding[]): AssuranceFinding[] {
+  return [...findings].sort(compareFindings);
+}
+
+/** Project one finding onto the Doctor wire shape, without a decision. The wire
+ *  type predates the contract and stays additive: a finding's subject and
+ *  identity are backend internals until a normalized wire format exists. */
+function projectFinding(finding: AssuranceFinding): PreflightFinding {
+  return {
+    ruleId: finding.ruleId,
+    severity: finding.severity,
+    title: finding.title,
+    message: finding.message,
+    ...(finding.location?.path !== undefined ? { sourcePath: finding.location.path } : {}),
+    ...(finding.remediation !== undefined ? { remediation: finding.remediation } : {}),
+    ...(finding.scope.service !== undefined ? { service: finding.scope.service } : {}),
+  };
+}
+
+/** The wire finding of a decided finding: the acknowledgement fields are read
+ *  off the finding's own decision, so the wire and the contract cannot disagree. */
+function projectDecided(finding: AssuranceFinding): PreflightFinding {
+  const wire = projectFinding(finding);
+  const decision = finding.decision;
+  if (!decision) return { ...wire, acknowledged: false };
+  return {
+    ...wire,
+    acknowledged: true,
+    acknowledgementId: decision.id,
+    acknowledgementReason: decision.reason,
+    acknowledgementExpiry: decision.expiry.mode,
+    ...(decision.expiry.expiresAt !== undefined ? { acknowledgementExpiresAt: decision.expiry.expiresAt } : {}),
+  };
+}
+
+/**
+ * Attach each finding's acknowledgement decision. Every finding is matched on
+ * its own projection, so nothing pairs two sequences by position and a later
+ * sort or filter cannot move a decision onto another finding. `now` is read once
+ * by the caller, so every finding of one report sees the same clock.
+ */
+function decideFindings(
+  findings: readonly AssuranceFinding[],
+  ackCtx: PreflightAckFilterContext,
+  acks: PreflightAcknowledgement[],
+  now: number,
+): AssuranceFinding[] {
+  return findings.map(finding => {
+    const [decided] = applyPreflightAcknowledgements([projectFinding(finding)], ackCtx, acks, now);
+    return withDecision(finding, decided);
+  });
 }
 
 function highestOf(findings: PreflightFinding[]): PreflightSeverity | null {
@@ -84,25 +146,16 @@ function buildServiceImages(model: EffectiveModel | null): string | null {
   return Object.keys(map).length > 0 ? JSON.stringify(map) : null;
 }
 
-function enrichReport(
+/** The acknowledgements of a stack plus the stored context their expiry reads. */
+function loadAcknowledgementInputs(
   nodeId: number,
   stackName: string,
-  report: Omit<PreflightReport, 'activeStatus' | 'activeHighestSeverity' | 'activeCount' | 'acknowledgedCount'>,
-): PreflightReport {
-  const db = DatabaseService.getInstance();
-  const acks = db.getPreflightAcknowledgements(nodeId, stackName);
-  const serviceImages = parseServiceImages(
-    db.getLatestPreflightRun(nodeId, stackName)?.service_images ?? null,
-  );
-  const findings = applyPreflightAcknowledgements(
-    report.findings,
-    { renderedHash: report.renderedHash, serviceImages },
-    acks,
-  );
+  renderedHash: string | null,
+  serviceImagesJson: string | null,
+): { acks: PreflightAcknowledgement[]; ackCtx: PreflightAckFilterContext } {
   return {
-    ...report,
-    findings,
-    ...activeFields(report.renderable, findings),
+    acks: DatabaseService.getInstance().getPreflightAcknowledgements(nodeId, stackName),
+    ackCtx: { renderedHash, serviceImages: parseServiceImages(serviceImagesJson) },
   };
 }
 
@@ -144,55 +197,94 @@ export class ComposeDoctorService {
     const sourceServiceNames = source !== null ? parseComposeDependencies(source).services.map(s => s.name) : [];
 
     const ctx = await this.buildContext(nodeId, stackName, sourceServiceNames, sourceReadable);
-    const findings = sortFindings(runRules(ctx));
+    const { findings: hits, coverage } = runAssuranceRules(ctx);
+    const normalized = sortNormalized(hits.map(hit => {
+      const rule = getAssuranceRule(hit.ruleId);
+      if (!rule) throw new Error(`Compose Doctor rule "${hit.ruleId}" is missing from the assurance registry`);
+      return normalizeDoctorHit(nodeId, stackName, hit, rule);
+    }));
+    const collisions = findFingerprintCollisions(normalized);
+    if (collisions.length > 0) {
+      // Different findings under one identity mean a rule emitted several hits
+      // without a distinct subject. They are all kept (the wire report is
+      // unchanged), and the rule ids are named here so the rule gets its subject.
+      console.warn('[ComposeDoctor] Findings share a fingerprint for rule(s) %s in %s on node %d',
+        sanitizeForLog(collisions.join(', ')), sanitizeForLog(stackName), nodeId);
+    }
+    const serviceImages = buildServiceImages(ctx.model);
+    // The decisions use the hashes and images this run stores, not whatever run
+    // is stored last, so a failed persist cannot pair them with an older run.
+    const { acks, ackCtx } = loadAcknowledgementInputs(nodeId, stackName, hashes.renderedHash, serviceImages);
+    const findings = decideFindings(normalized, ackCtx, acks, Date.now()).map(projectDecided);
     const highestSeverity = highestOf(findings);
     const status: PreflightStatus = !ctx.renderable ? 'unrenderable' : (highestSeverity ?? 'pass');
-    const serviceImages = buildServiceImages(ctx.model);
 
     const report: PreflightReport = {
       stack: stackName,
       ranAt: Date.now(),
       ranBy,
       renderable: ctx.renderable,
-      renderError: ctx.renderError,
+      renderError: ctx.renderError === null ? null : redactSensitiveText(ctx.renderError),
       status,
       highestSeverity,
       sourceHash: hashes.sourceHash,
       renderedHash: hashes.renderedHash,
       findings,
-      activeStatus: status,
-      activeHighestSeverity: highestSeverity,
-      activeCount: findings.length,
-      acknowledgedCount: 0,
+      coverage,
+      ...activeFields(ctx.renderable, findings),
     };
-    this.persist(nodeId, report, serviceImages);
-    return enrichReport(nodeId, stackName, report);
+    this.persist(nodeId, report, serviceImages, normalized);
+    return report;
+  }
+
+  /**
+   * The latest stored run row, its normalized findings (an acknowledged one
+   * carries its read-time decision), and its coverage. `getLatest` is a
+   * projection of this, and the Doctor tab's GET route, update readiness, and the
+   * networking findings all read `getLatest`, so the contract is on the hot path
+   * rather than a parallel model. A fresh `runPreflight` decides its findings the
+   * same way (`decideFindings`).
+   */
+  getLatestAssurance(nodeId: number, stackName: string): {
+    run: PreflightRunRow | null;
+    findings: AssuranceFinding[];
+    coverage: AssuranceCoverage;
+  } {
+    const run = DatabaseService.getInstance().getLatestPreflightRun(nodeId, stackName);
+    if (!run) return { run: null, findings: [], coverage: unrecordedCoverage() };
+    const { acks, ackCtx } = loadAcknowledgementInputs(nodeId, stackName, run.rendered_hash, run.service_images);
+    return {
+      run,
+      // One clock reading for the whole read.
+      findings: decideFindings(this.readNormalized(nodeId, stackName, run.id), ackCtx, acks, Date.now()),
+      coverage: parseCoverage(run.coverage),
+    };
+  }
+
+  /** Read stored rows through the contract: redacted, sorted, legacy-aware. */
+  private readNormalized(nodeId: number, stackName: string, runId: string): AssuranceFinding[] {
+    return sortNormalized(
+      DatabaseService.getInstance().getPreflightFindings(runId)
+        .map(row => normalizeStoredFinding(row, nodeId, stackName)),
+    );
   }
 
   /** Read the last stored run for a stack, mapped to the report shape. */
   getLatest(nodeId: number, stackName: string): PreflightReport {
-    const db = DatabaseService.getInstance();
-    const run = db.getLatestPreflightRun(nodeId, stackName);
+    const { run, findings: decided, coverage } = this.getLatestAssurance(nodeId, stackName);
     if (!run) {
       return {
         stack: stackName, ranAt: null, ranBy: null, renderable: true, renderError: null,
         status: 'never-run', highestSeverity: null, sourceHash: null, renderedHash: null, findings: [],
+        coverage,
         activeStatus: 'never-run', activeHighestSeverity: null, activeCount: 0, acknowledgedCount: 0,
       };
     }
-    const findings = sortFindings(db.getPreflightFindings(run.id).map(r => ({
-      ruleId: r.rule_id,
-      severity: r.severity as PreflightSeverity,
-      title: r.title,
-      message: r.message,
-      sourcePath: r.source_path ?? undefined,
-      remediation: r.remediation ?? undefined,
-      service: r.service ?? undefined,
-    })));
+    const findings = decided.map(projectDecided);
     const renderable = run.status !== 'unrenderable';
     // The render error is carried by the render-failed finding, not a column.
     const renderError = renderable ? null : (findings.find(f => f.ruleId === RENDER_FAILED_RULE_ID)?.message ?? null);
-    const base: Omit<PreflightReport, 'activeStatus' | 'activeHighestSeverity' | 'activeCount' | 'acknowledgedCount'> = {
+    return {
       stack: stackName,
       ranAt: run.created_at,
       ranBy: run.created_by,
@@ -203,8 +295,9 @@ export class ComposeDoctorService {
       sourceHash: run.source_hash,
       renderedHash: run.rendered_hash,
       findings,
+      coverage,
+      ...activeFields(renderable, findings),
     };
-    return enrichReport(nodeId, stackName, base);
   }
 
   private async buildContext(nodeId: number, stackName: string, sourceServiceNames: string[], sourceReadable: boolean): Promise<PreflightContext> {
@@ -218,16 +311,28 @@ export class ComposeDoctorService {
     let literalDollarWarnings: LiteralDollarWarning[] = [];
     let missingEnvFiles: MissingEnvFile[] = [];
 
-    let envSources: Awaited<ReturnType<typeof resolveStackEnvSources>> | null = null;
+    // The env context is the resolved env sources plus the key names of every
+    // env file that is present. It is null when resolution failed or when a file
+    // Compose would read cannot be read, so the env rules are reported as
+    // skipped (partial coverage) instead of quietly returning nothing.
+    let envContext: { sources: StackEnvSources; fileKeys: string[] } | null = null;
     try {
-      envSources = await resolveStackEnvSources(nodeId, stackName);
-      missingEnvFiles = envSources.envFiles
+      const sources = await resolveStackEnvSources(nodeId, stackName);
+      missingEnvFiles = sources.envFiles
         .filter(f => f.isInjectionSource && f.required && f.existence === 'missing')
         .map(f => ({ rawPath: f.rawPaths[0], services: f.declaringServices }));
+      const fileKeys = await this.collectEnvFileKeys(sources, baseDir);
+      if (fileKeys === null) {
+        console.warn('[ComposeDoctor] An env file for %s cannot be read; env checks skipped',
+          sanitizeForLog(stackName));
+      } else {
+        envContext = { sources, fileKeys };
+      }
     } catch (err) {
       console.warn('[ComposeDoctor] env-file resolution failed for %s:',
         sanitizeForLog(stackName), sanitizeForLog(getErrorMessage(err, 'unknown')));
     }
+    const envContextAvailable = envContext !== null;
 
     try {
       const result = await ComposeService.getInstance(nodeId).renderConfig(stackName);
@@ -236,14 +341,8 @@ export class ComposeDoctorService {
         // model parsing, so capture them before attempting the parse, so a parse
         // failure does not also suppress the env-unset findings.
         const rawUnset = parseUnsetEnvVars(result.stderr);
-        if (envSources) {
-          const envFileKeys: string[] = [];
-          for (const file of envSources.envFiles) {
-            if (!file.resolvedPath || file.existence !== 'present') continue;
-            const { keys, unverifiable } = await readEnvFileKeys(file.resolvedPath, baseDir);
-            if (!unverifiable) envFileKeys.push(...keys);
-          }
-          const classified = classifyUnsetEnvVars(rawUnset, envSources, envFileKeys);
+        if (envContext) {
+          const classified = classifyUnsetEnvVars(rawUnset, envContext.sources, envContext.fileKeys);
           unsetEnvVars = classified.intentional;
           literalDollarWarnings = classified.literalDollar;
         } else {
@@ -312,11 +411,34 @@ export class ComposeDoctorService {
       accessUrlPorts,
       hasAccessUrls,
       exposureAvailable,
+      envContextAvailable,
       isSelfStack: selfStack,
       meshManaged,
       healthchecks,
       composeVersionSkew,
     };
+  }
+
+  /**
+   * The key names of every env file Sencho can resolve, or null when one of
+   * them cannot be read: a file whose existence could not be checked (an access
+   * error, a configured project file outside the compose directory), or one that
+   * is present but cannot be opened as a file (a directory, a permission error).
+   * An absent file is not an unreadable one: it contributes no keys, and
+   * `env-file-missing` reports it when it is required. An `env_file` path that is
+   * interpolated or leaves the stack directory has no resolved path, cannot be
+   * known ahead of Compose, and is not read.
+   */
+  private async collectEnvFileKeys(sources: StackEnvSources, baseDir: string): Promise<string[] | null> {
+    const keys: string[] = [];
+    for (const file of sources.envFiles) {
+      if (!file.resolvedPath || file.existence === 'missing') continue;
+      if (file.existence === 'unverifiable') return null;
+      const read = await readEnvFileKeys(file.resolvedPath, baseDir);
+      if (read.unverifiable) return null;
+      keys.push(...read.keys);
+    }
+    return keys;
   }
 
   /**
@@ -428,7 +550,12 @@ export class ComposeDoctorService {
   }
 
   /** Persist the run, replacing any prior run for this stack. Best-effort. */
-  private persist(nodeId: number, report: PreflightReport, serviceImages: string | null): void {
+  private persist(
+    nodeId: number,
+    report: PreflightReport,
+    serviceImages: string | null,
+    normalized: readonly AssuranceFinding[],
+  ): void {
     if (report.ranAt === null) return;
     try {
       const runId = randomUUID();
@@ -444,17 +571,21 @@ export class ComposeDoctorService {
           highest_severity: report.highestSeverity,
           created_at: report.ranAt,
           created_by: report.ranBy,
+          coverage: JSON.stringify(report.coverage),
         },
-        report.findings.map(f => ({
+        normalized.map(finding => ({
           id: randomUUID(),
           run_id: runId,
-          rule_id: f.ruleId,
-          severity: f.severity,
-          title: f.title,
-          message: f.message,
-          source_path: f.sourcePath ?? null,
-          remediation: f.remediation ?? null,
-          service: f.service ?? null,
+          rule_id: finding.ruleId,
+          severity: finding.severity,
+          title: finding.title,
+          message: finding.message,
+          source_path: finding.location?.path ?? null,
+          remediation: finding.remediation ?? null,
+          service: finding.scope.service ?? null,
+          rule_version: finding.ruleVersion,
+          subject_kind: finding.subject.kind,
+          subject_key: finding.subject.key,
           created_at: report.ranAt!,
         })),
       );

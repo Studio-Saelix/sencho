@@ -19,10 +19,10 @@ let authHeader: string;
 
 const STACK = 'preflightroute';
 
-function stub() {
+function stub(image = 'nginx:latest') {
   vi.spyOn(ComposeService, 'getInstance').mockReturnValue({
     renderConfig: vi.fn().mockResolvedValue({
-      rendered: JSON.stringify({ name: STACK, services: { web: { image: 'nginx:latest', ports: [{ target: 80, published: '8080', protocol: 'tcp' }] } }, networks: {}, volumes: {} }),
+      rendered: JSON.stringify({ name: STACK, services: { web: { image, ports: [{ target: 80, published: '8080', protocol: 'tcp' }] } }, networks: {}, volumes: {} }),
       stderr: '', code: 0, timedOut: false,
     }),
     composeVersion: vi.fn().mockResolvedValue('5.6.0'),
@@ -155,5 +155,210 @@ describe('preflight acknowledgement routes', () => {
       .send({ ruleId: 'healthcheck-inherited', service: 'web', expiryMode: 'forever' });
     expect(res.status).toBe(400);
     expect(res.body.error).toMatch(/notes cannot be acknowledged/i);
+  });
+});
+
+describe('preflight responses redact credentials in findings and acknowledgements', () => {
+  const CREDENTIAL_IMAGE = 'user:p4ssw0rdXYZ@registry.example.com/app';
+  const NOTE = 'see postgres://bob:s3cretPASS@host/db and token=abcd1234efgh';
+  const LEAKED = ['p4ssw0rdXYZ', 's3cretPASS', 'abcd1234efgh'];
+  let stackDir: string;
+  const get = (url: string) => request(app).get(url).set('Authorization', authHeader);
+  const expectNoSecret = (body: unknown) => {
+    const text = JSON.stringify(body);
+    for (const secret of LEAKED) expect(text).not.toContain(secret);
+  };
+
+  beforeEach(async () => {
+    // Earlier describes leave acknowledgements for this stack behind.
+    const { DatabaseService } = await import('../services/DatabaseService');
+    DatabaseService.getInstance().getDb().prepare('DELETE FROM preflight_acknowledgements WHERE stack_name = ?').run(STACK);
+    stackDir = path.join(process.env.COMPOSE_DIR as string, STACK);
+    fs.mkdirSync(stackDir, { recursive: true });
+    fs.writeFileSync(path.join(stackDir, 'compose.yaml'), `services:\n  web:\n    image: ${CREDENTIAL_IMAGE}\n`);
+    stub(CREDENTIAL_IMAGE);
+  });
+  afterEach(async () => {
+    vi.restoreAllMocks();
+    fs.rmSync(stackDir, { recursive: true, force: true });
+    const { DatabaseService } = await import('../services/DatabaseService');
+    DatabaseService.getInstance().getDb().prepare('DELETE FROM preflight_acknowledgements WHERE stack_name = ?').run(STACK);
+  });
+
+  it('returns the same redacted report from a run as from a later read', async () => {
+    const run = await request(app).post(`/api/stacks/${STACK}/preflight/run`).set('Authorization', authHeader);
+    expect(run.status).toBe(200);
+    const imageFinding = run.body.findings.find((f: { ruleId: string }) => f.ruleId === 'image-latest');
+    expect(imageFinding.message).toContain('[redacted]@registry.example.com/app');
+    expectNoSecret(run.body);
+
+    const read = await get(`/api/stacks/${STACK}/preflight`);
+    expectNoSecret(read.body);
+    expect(run.body.findings).toEqual(read.body.findings);
+  });
+
+  // A scheme-less userinfo that is not a plain name:password pair. Both leaked
+  // through the run response and the later read until the image rule learned them.
+  it.each([
+    ['a percent-encoded user name', 'user%40x:SECRETQ6@host/app:latest', 'SECRETQ6'],
+    ['a literal @ in the password', 'u:p@SECRETQ7@host/app', 'SECRETQ7'],
+    ['both', 'user%40x:p@SECRETQ8@host:5000/app', 'SECRETQ8'],
+  ])('redacts %s in the run response, the later read, and the stored row', async (_variant, image, secret) => {
+    vi.restoreAllMocks();
+    stub(image);
+    fs.writeFileSync(path.join(stackDir, 'compose.yaml'), `services:\n  web:\n    image: "${image}"\n`);
+
+    const run = await request(app).post(`/api/stacks/${STACK}/preflight/run`).set('Authorization', authHeader);
+    expect(run.status).toBe(200);
+    const imageFinding = run.body.findings.find((f: { ruleId: string }) => f.ruleId === 'image-latest');
+    expect(imageFinding.message).toContain('[redacted]@host');
+
+    const read = await get(`/api/stacks/${STACK}/preflight`);
+    const { DatabaseService } = await import('../services/DatabaseService');
+    const rows = DatabaseService.getInstance().getDb()
+      .prepare('SELECT title, message, source_path, remediation, subject_key FROM preflight_findings').all();
+    for (const body of [run.body, read.body, rows]) expect(JSON.stringify(body)).not.toContain(secret);
+    expect(run.body.findings).toEqual(read.body.findings);
+  });
+
+  // A credential with no password part, a protocol-relative authority, and
+  // shapes a URL parser would not call userinfo. The image rule quotes the value
+  // from its own grammar, so none of them depends on the text heuristics.
+  it.each([
+    ['a token-only URL userinfo', 'https://SECRETD1tok@host/app:latest', 'SECRETD1tok', '[redacted]@host/app:latest'],
+    ['a token-only registry login', 'ghp_SECRETD8@ghcr.io/x/app:latest', 'SECRETD8', '[redacted]@ghcr.io/x/app:latest'],
+    ['a protocol-relative authority', '//u:SECRETD2@host/app:latest', 'SECRETD2', '[redacted]@host/app:latest'],
+    ['a space in the password', 'user:SECRETA8 @host/app:latest', 'SECRETA8', '[redacted]@host/app:latest'],
+    ['a slash in the password', 'https://u:p/SECRETA1w@host/app:latest', 'SECRETA1w', '[redacted]@host/app:latest'],
+  ])('redacts %s in the run response, the later read, and the stored row', async (_variant, image, secret, expected) => {
+    vi.restoreAllMocks();
+    stub(image);
+    fs.writeFileSync(path.join(stackDir, 'compose.yaml'), `services:\n  web:\n    image: "${image}"\n`);
+
+    const run = await request(app).post(`/api/stacks/${STACK}/preflight/run`).set('Authorization', authHeader);
+    expect(run.status).toBe(200);
+    const imageFinding = run.body.findings.find((f: { ruleId: string }) => f.ruleId === 'image-latest');
+    expect(imageFinding).toBeDefined();
+    expect(imageFinding.message).toContain(expected);
+
+    const read = await get(`/api/stacks/${STACK}/preflight`);
+    const { DatabaseService } = await import('../services/DatabaseService');
+    const rows = DatabaseService.getInstance().getDb()
+      .prepare('SELECT title, message, source_path, remediation, subject_key FROM preflight_findings').all();
+    for (const body of [run.body, read.body, rows]) expect(JSON.stringify(body)).not.toContain(secret);
+    expect(run.body.findings).toEqual(read.body.findings);
+  });
+
+  it('stores the redacted copy, not the credential', async () => {
+    await request(app).post(`/api/stacks/${STACK}/preflight/run`).set('Authorization', authHeader);
+    const { DatabaseService } = await import('../services/DatabaseService');
+    const rows = DatabaseService.getInstance().getDb()
+      .prepare('SELECT title, message, source_path, remediation, subject_key FROM preflight_findings').all();
+    expect(rows.length).toBeGreaterThan(0);
+    expectNoSecret(rows);
+  });
+
+  it('redacts the acknowledgement reason on the run, the read, the list, and the create response', async () => {
+    const run = await request(app).post(`/api/stacks/${STACK}/preflight/run`).set('Authorization', authHeader);
+    const target = run.body.findings.find((f: { ruleId: string }) => f.ruleId === 'image-latest');
+    const created = await request(app)
+      .post(`/api/stacks/${STACK}/preflight/acknowledgements`)
+      .set('Authorization', authHeader)
+      .send({ ruleId: target.ruleId, service: target.service, reason: NOTE, expiryMode: 'forever' });
+    expect(created.status).toBe(201);
+    expectNoSecret(created.body);
+    expect(created.body.reason).toContain('[redacted]');
+
+    const read = await get(`/api/stacks/${STACK}/preflight`);
+    const list = await get(`/api/stacks/${STACK}/preflight/acknowledgements`);
+    const rerun = await request(app).post(`/api/stacks/${STACK}/preflight/run`).set('Authorization', authHeader);
+    for (const body of [read.body, list.body, rerun.body]) expectNoSecret(body);
+    const decided = (report: { findings: { ruleId: string; acknowledgementReason?: string }[] }) =>
+      report.findings.find(f => f.ruleId === 'image-latest')?.acknowledgementReason;
+    expect(decided(read.body)).toContain('[redacted]');
+    expect(decided(rerun.body)).toBe(decided(read.body));
+    expect(list.body[0].reason).toBe(created.body.reason);
+  });
+
+  it('redacts the image anchor of an until_image_change acknowledgement, and still matches on the raw anchor', async () => {
+    const run = await request(app).post(`/api/stacks/${STACK}/preflight/run`).set('Authorization', authHeader);
+    const target = run.body.findings.find((f: { ruleId: string }) => f.ruleId === 'image-latest');
+    const created = await request(app)
+      .post(`/api/stacks/${STACK}/preflight/acknowledgements`)
+      .set('Authorization', authHeader)
+      .send({ ruleId: target.ruleId, service: target.service, reason: 'ok', expiryMode: 'until_image_change' });
+    expect(created.status).toBe(201);
+    expectNoSecret(created.body);
+    expect(created.body.anchor_image_ref).toContain('[redacted]@registry.example.com/app');
+
+    const list = await get(`/api/stacks/${STACK}/preflight/acknowledgements`);
+    expectNoSecret(list.body);
+    expect(list.body[0].active).toBe(true);
+    // The stored anchor is raw: the expiry check compares against it.
+    const read = await get(`/api/stacks/${STACK}/preflight`);
+    expect(read.body.findings.find((f: { ruleId: string }) => f.ruleId === 'image-latest').acknowledged).toBe(true);
+  });
+
+  it.each([
+    ['a percent-encoded user name', 'user%40x:SECRETQ6@host/app', 'SECRETQ6'],
+    ['a literal @ in the password', 'u:p@SECRETQ7@host/app', 'SECRETQ7'],
+    ['a token-only userinfo', 'https://SECRETD1tok@host/app', 'SECRETD1tok'],
+    ['a protocol-relative authority', '//u:SECRETD2@host/app', 'SECRETD2'],
+  ])('redacts the image anchor of an until_image_change acknowledgement for %s, and still matches on the raw anchor', async (_variant, image, secret) => {
+    vi.restoreAllMocks();
+    stub(image);
+    fs.writeFileSync(path.join(stackDir, 'compose.yaml'), `services:\n  web:\n    image: "${image}"\n`);
+    const run = await request(app).post(`/api/stacks/${STACK}/preflight/run`).set('Authorization', authHeader);
+    const target = run.body.findings.find((f: { ruleId: string }) => f.ruleId === 'image-latest');
+    const created = await request(app)
+      .post(`/api/stacks/${STACK}/preflight/acknowledgements`)
+      .set('Authorization', authHeader)
+      .send({ ruleId: target.ruleId, service: target.service, reason: `pulled with ${image}`, expiryMode: 'until_image_change' });
+    expect(created.status).toBe(201);
+    expect(created.body.anchor_image_ref).toContain('[redacted]@host/app');
+
+    const list = await get(`/api/stacks/${STACK}/preflight/acknowledgements`);
+    const read = await get(`/api/stacks/${STACK}/preflight`);
+    const rerun = await request(app).post(`/api/stacks/${STACK}/preflight/run`).set('Authorization', authHeader);
+    for (const body of [created.body, list.body, read.body, rerun.body]) expect(JSON.stringify(body)).not.toContain(secret);
+    expect(list.body[0].active).toBe(true);
+    expect(read.body.findings.find((f: { ruleId: string }) => f.ruleId === 'image-latest').acknowledged).toBe(true);
+  });
+
+  // The anchor is quoted from the image's own grammar, so a password with a
+  // slash or a space is dropped from it. The reason is operator text and stays
+  // on the text rules, so it names no credential here.
+  it.each([
+    ['a slash in the password', 'https://u:p/SECRETA1w@host/app', 'SECRETA1w'],
+    ['a space in the password', 'user:SECRETA8 @host/app', 'SECRETA8'],
+  ])('redacts the image anchor of an until_image_change acknowledgement for %s', async (_variant, image, secret) => {
+    vi.restoreAllMocks();
+    stub(image);
+    fs.writeFileSync(path.join(stackDir, 'compose.yaml'), `services:\n  web:\n    image: "${image}"\n`);
+    const run = await request(app).post(`/api/stacks/${STACK}/preflight/run`).set('Authorization', authHeader);
+    const target = run.body.findings.find((f: { ruleId: string }) => f.ruleId === 'image-latest');
+    const created = await request(app)
+      .post(`/api/stacks/${STACK}/preflight/acknowledgements`)
+      .set('Authorization', authHeader)
+      .send({ ruleId: target.ruleId, service: target.service, reason: 'ok', expiryMode: 'until_image_change' });
+    expect(created.status).toBe(201);
+    expect(created.body.anchor_image_ref).toBe('[redacted]@host/app');
+
+    const list = await get(`/api/stacks/${STACK}/preflight/acknowledgements`);
+    const read = await get(`/api/stacks/${STACK}/preflight`);
+    for (const body of [created.body, list.body, read.body]) expect(JSON.stringify(body)).not.toContain(secret);
+    expect(list.body[0].active).toBe(true);
+  });
+
+  it('keeps an ordinary note readable', async () => {
+    const run = await request(app).post(`/api/stacks/${STACK}/preflight/run`).set('Authorization', authHeader);
+    const target = run.body.findings.find((f: { ruleId: string }) => f.ruleId === 'image-latest');
+    await request(app)
+      .post(`/api/stacks/${STACK}/preflight/acknowledgements`)
+      .set('Authorization', authHeader)
+      .send({ ruleId: target.ruleId, service: target.service, reason: 'pinned by the platform team', expiryMode: 'forever' });
+    const read = await get(`/api/stacks/${STACK}/preflight`);
+    expect(read.body.findings.find((f: { ruleId: string }) => f.ruleId === 'image-latest').acknowledgementReason)
+      .toBe('pinned by the platform team');
   });
 });

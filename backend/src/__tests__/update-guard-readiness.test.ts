@@ -12,6 +12,23 @@ import {
   composeVersionSignal,
 } from '../services/updateGuard/readiness';
 import type { ContainerProbe, ReadinessSignal } from '../services/updateGuard/types';
+import type { AssuranceCoverage } from '../services/assurance/types';
+import { parseCoverage } from '../services/assurance/coverage';
+
+/** A run where every verdict-affecting check ran. */
+const COMPLETE: AssuranceCoverage = { state: 'complete', evaluated: 42, notApplicable: 0, skipped: [] };
+
+/** A run that skipped two port/network checks because the node snapshot failed. */
+const PARTIAL: AssuranceCoverage = {
+  state: 'partial', evaluated: 40, notApplicable: 0,
+  skipped: [
+    { ruleId: 'port-conflict-node', missing: ['node-state'], affectsVerdict: true },
+    { ruleId: 'new-network', missing: ['node-state'], affectsVerdict: true },
+    { ruleId: 'compose-version-mismatch', missing: ['node-state', 'compose-version'], affectsVerdict: false },
+  ],
+};
+
+const UNRECORDED: AssuranceCoverage = { state: 'unrecorded', evaluated: 0, notApplicable: 0, skipped: [] };
 import type { UpdatePreviewImage, UpdatePreviewSummary } from '../services/UpdatePreviewService';
 
 const NOW = 1_750_000_000_000;
@@ -59,7 +76,7 @@ describe('preflightSignal', () => {
   ] as const;
 
   it.each(cases)('maps preflight activeStatus $activeStatus to $expected', ({ activeStatus, expected, affects }) => {
-    const signal = preflightSignal({ activeStatus });
+    const signal = preflightSignal({ activeStatus, coverage: COMPLETE });
     expect(signal.status).toBe(expected);
     expect(signal.affectsVerdict).toBe(affects);
   });
@@ -68,6 +85,52 @@ describe('preflightSignal', () => {
     const signal = preflightSignal('error');
     expect(signal.status).toBe('unknown');
     expect(signal.affectsVerdict).toBe(false);
+  });
+
+  it('does not report a partial clean run as passed', () => {
+    const signal = preflightSignal({ activeStatus: 'pass', coverage: PARTIAL });
+    expect(signal.status).toBe('unknown');
+    expect(signal.affectsVerdict).toBe(false);
+    expect(signal.detail).toContain('2 checks could not run: node state unavailable');
+  });
+
+  it('does not report a partial run as passed when its skipped list names no readable check', () => {
+    const stored = (skipped: unknown[]) => parseCoverage(JSON.stringify({ state: 'partial', evaluated: 9, notApplicable: 0, skipped }));
+    const malformed = [
+      { ruleId: 'privileged', missing: ['node-state'], affectsVerdict: 'true' },
+      { ruleId: 'privileged', missing: 'node-state', affectsVerdict: true },
+    ];
+    for (const coverage of [stored([]), stored(malformed)]) {
+      expect(coverage.state).toBe('partial');
+      const signal = preflightSignal({ activeStatus: 'pass', coverage });
+      expect(signal.status).toBe('unknown');
+      expect(signal.affectsVerdict).toBe(false);
+      expect(signal.detail).toContain('1 or more checks could not run');
+    }
+  });
+
+  it('does not report an unrecorded run as passed', () => {
+    for (const activeStatus of ['pass', 'info'] as const) {
+      const signal = preflightSignal({ activeStatus, coverage: UNRECORDED });
+      expect(signal.status).toBe('unknown');
+      expect(signal.affectsVerdict).toBe(false);
+      expect(signal.detail).toContain('coverage was not recorded');
+    }
+  });
+
+  it('treats a report with no coverage field as unrecorded', () => {
+    const signal = preflightSignal({ activeStatus: 'pass' });
+    expect(signal.status).toBe('unknown');
+    expect(signal.affectsVerdict).toBe(false);
+  });
+
+  it('leaves finding-derived statuses unchanged by coverage', () => {
+    expect(preflightSignal({ activeStatus: 'blocker', coverage: PARTIAL }).status).toBe('blocked');
+    const high = preflightSignal({ activeStatus: 'high', coverage: PARTIAL });
+    expect(high.status).toBe('attention');
+    expect(high.affectsVerdict).toBe(true);
+    expect(preflightSignal({ activeStatus: 'warning', coverage: UNRECORDED }).status).toBe('warning');
+    expect(preflightSignal({ activeStatus: 'unrenderable', coverage: PARTIAL }).status).toBe('attention');
   });
 });
 
@@ -235,8 +298,8 @@ describe('aggregateVerdict', () => {
     expect(aggregateVerdict([preflightSignal({ activeStatus: 'blocker' }), driftSignal(0)])).toBe('blocked');
     expect(aggregateVerdict([preflightSignal({ activeStatus: 'high' }), driftSignal(0)])).toBe('review_required');
     expect(aggregateVerdict([containersSignal('error'), driftSignal(0)])).toBe('unknown');
-    expect(aggregateVerdict([driftSignal(1), preflightSignal({ activeStatus: 'pass' })])).toBe('ready_with_warnings');
-    expect(aggregateVerdict([driftSignal(0), preflightSignal({ activeStatus: 'pass' }), healthchecksSignal([probe()])])).toBe('ready');
+    expect(aggregateVerdict([driftSignal(1), preflightSignal({ activeStatus: 'pass', coverage: COMPLETE })])).toBe('ready_with_warnings');
+    expect(aggregateVerdict([driftSignal(0), preflightSignal({ activeStatus: 'pass', coverage: COMPLETE }), healthchecksSignal([probe()])])).toBe('ready');
   });
 });
 

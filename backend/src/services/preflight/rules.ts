@@ -1,4 +1,6 @@
-import type { PreflightContext, PreflightFinding, PreflightSeverity, NodePortBinding } from './types';
+import type { PreflightContext, RuleHit, PreflightSeverity, NodePortBinding } from './types';
+import type { CanonicalRuleId } from '../assurance/types';
+import { PREFLIGHT_NOTE_RULES } from '../assurance/ruleRegistry';
 import type { EffService, EffPortSpec, EffectiveModel } from './effectiveModel';
 import type { ExposureIntent } from '../network/types';
 import { isLoopback, runtimeResourceName } from '../network/normalize';
@@ -11,6 +13,7 @@ import {
   tunnelExposureByService,
   type TunnelConnector,
 } from '../network/tunnelDetection';
+import { redactImageReference } from '../../utils/safeLog';
 import { describeComposeVersionSkew } from '../../helpers/composeVersionSkew';
 
 /** Higher number = more severe. Used to derive a run's overall status. */
@@ -19,13 +22,12 @@ export const SEVERITY_RANK: Record<PreflightSeverity, number> = { info: 0, warni
 /**
  * Rule IDs that are informational notes, not issue findings. They appear in the
  * report for context but do not affect All Clear, active severity, or Update Guard.
+ * Derived from the canonical registry (`affectsVerdict: false`), so a rule cannot
+ * be a note in one surface and an issue in another.
  */
-export const PREFLIGHT_NOTE_RULE_IDS: ReadonlySet<string> = new Set([
-  'healthcheck-inherited',
-  'docker-socket-proxy-client',
-  'tunnel-exposure',
-  'compose-version-mismatch',
-]);
+export const PREFLIGHT_NOTE_RULE_IDS: ReadonlySet<string> = new Set(
+  PREFLIGHT_NOTE_RULES.map(rule => rule.id),
+);
 
 export function isPreflightNoteFinding(ruleId: string): boolean {
   return PREFLIGHT_NOTE_RULE_IDS.has(ruleId);
@@ -33,11 +35,11 @@ export function isPreflightNoteFinding(ruleId: string): boolean {
 
 /** The one rule whose message doubles as the report's render error. Shared so the
  *  service that reconstructs renderError from it cannot drift from the rule id. */
-export const RENDER_FAILED_RULE_ID = 'render-failed';
+export const RENDER_FAILED_RULE_ID: CanonicalRuleId = 'render-failed';
 
 export interface PreflightRule {
-  id: string;
-  run(ctx: PreflightContext): PreflightFinding[];
+  id: CanonicalRuleId;
+  run(ctx: PreflightContext): RuleHit[];
 }
 
 // ----- shared helpers -------------------------------------------------------
@@ -258,7 +260,7 @@ const portConflictNode: PreflightRule = {
       const list = byPort.get(b.publishedPort);
       if (list) list.push(b); else byPort.set(b.publishedPort, [b]);
     }
-    const findings: PreflightFinding[] = [];
+    const findings: RuleHit[] = [];
     for (const svc of ctx.model.services) {
       for (const spec of svc.ports) {
         for (const port of portsOf(spec)) {
@@ -273,6 +275,7 @@ const portConflictNode: PreflightRule = {
             message: `Service "${svc.name}" publishes ${port}/${spec.protocol}, but ${owner} already binds that port on this node. The deploy will fail.`,
             sourcePath: svc.name,
             service: svc.name,
+            subject: { kind: 'port', key: `${port}/${spec.protocol}` },
             remediation: 'Stop the conflicting workload or publish a different host port.',
           });
           break; // one finding per service+spec is enough
@@ -298,7 +301,7 @@ const portConflictInternal: PreflightRule = {
         }
       }
     }
-    const findings: PreflightFinding[] = [];
+    const findings: RuleHit[] = [];
     for (const [key, list] of claims) {
       const services = [...new Set(list.map(c => c.service))];
       if (services.length < 2) continue;
@@ -309,6 +312,7 @@ const portConflictInternal: PreflightRule = {
         severity: 'blocker',
         title: `Two services publish ${key}`,
         message: `Services ${services.map(s => `"${s}"`).join(' and ')} both publish host port ${key}. Only one can bind it, so the deploy will fail.`,
+        subject: { kind: 'port', key },
         remediation: 'Give each service a distinct host port.',
       });
     }
@@ -320,7 +324,7 @@ const portExposedAllInterfaces: PreflightRule = {
   id: 'port-exposed-all-interfaces',
   run(ctx) {
     if (!ctx.model) return [];
-    const findings: PreflightFinding[] = [];
+    const findings: RuleHit[] = [];
     for (const svc of ctx.model.services) {
       const dynamicSeen = new Set<string>();
       for (const spec of svc.ports) {
@@ -339,6 +343,7 @@ const portExposedAllInterfaces: PreflightRule = {
           message: `Service "${svc.name}" publishes ${spec.dynamic ? `${specLabel(spec)} (${spec.protocol})` : `${specLabel(spec)}/${spec.protocol}`} on all interfaces (0.0.0.0), so it is reachable from every network the host is attached to.`,
           sourcePath: svc.name,
           service: svc.name,
+          subject: { kind: 'port', key: `${spec.dynamic ? 'dynamic' : (spec.startPort === spec.endPort ? `${spec.startPort}` : `${spec.startPort}-${spec.endPort}`)}/${spec.protocol}` },
           remediation: `Bind to a specific interface, e.g. ${spec.dynamic ? '127.0.0.1::<container port>' : `127.0.0.1:${spec.startPort}`}, if this should not be public.`,
         });
       }
@@ -359,6 +364,7 @@ const bindPathMissing: PreflightRule = {
         message: `The host path "${b.source}" for service "${b.service}" does not exist. Docker will create it as a root-owned directory on deploy, which often leaves the container unable to write to it.`,
         sourcePath: b.source,
         service: b.service,
+        subject: { kind: 'bind', key: b.target },
         remediation: 'Create the directory with the ownership the container expects before deploying.',
       }));
   },
@@ -369,7 +375,7 @@ const bindPathPermission: PreflightRule = {
   run(ctx) {
     if (!ctx.model || ctx.platform === 'win32') return [];
     const svcByName = new Map(ctx.model.services.map(s => [s.name, s]));
-    const findings: PreflightFinding[] = [];
+    const findings: RuleHit[] = [];
     for (const b of ctx.bindChecks) {
       if (!b.withinBase || !b.exists || b.ownerUid !== 0) continue;
       const svc = svcByName.get(b.service);
@@ -381,6 +387,7 @@ const bindPathPermission: PreflightRule = {
         message: `The host path "${b.source}" is owned by root, but service "${b.service}" runs as a non-root user. It may not be able to write there.`,
         sourcePath: b.source,
         service: b.service,
+        subject: { kind: 'bind', key: b.target },
         remediation: 'chown the path to the UID/GID the container runs as.',
       });
     }
@@ -599,17 +606,20 @@ const imageLatest: PreflightRule = {
   id: 'image-latest',
   run(ctx) {
     if (!ctx.model) return [];
-    return ctx.model.services
-      .filter(s => s.image !== undefined && usesLatestTag(s.image))
-      .map(s => ({
+    const hits: RuleHit[] = [];
+    for (const s of ctx.model.services) {
+      if (s.image === undefined || !usesLatestTag(s.image)) continue;
+      hits.push({
         ruleId: 'image-latest',
-        severity: 'warning' as const,
+        severity: 'warning',
         title: 'Image uses a moving tag',
-        message: `Service "${s.name}" uses "${s.image}", which resolves to a moving latest tag. Deploys are not reproducible and can change under you.`,
+        message: `Service "${s.name}" uses "${redactImageReference(s.image)}", which resolves to a moving latest tag. Deploys are not reproducible and can change under you.`,
         sourcePath: s.name,
         service: s.name,
         remediation: 'Pin a specific version tag.',
-      }));
+      });
+    }
+    return hits;
   },
 };
 
@@ -743,7 +753,7 @@ const deploySwarmOnly: PreflightRule = {
   id: 'deploy-swarm-only',
   run(ctx) {
     if (!ctx.model) return [];
-    const findings: PreflightFinding[] = [];
+    const findings: RuleHit[] = [];
     for (const s of ctx.model.services) {
       if (!s.deploy) continue;
       const present = SWARM_ONLY_DEPLOY_KEYS.filter(k => s.deploy?.[k] !== undefined);
@@ -823,6 +833,7 @@ const externalNetworkMissing: PreflightRule = {
           title: 'External network not found',
           message: `The model requires the external network "${group.name}" (Compose keys: ${group.keys.join(', ')}), which does not exist on this node. The deploy will fail.`,
           sourcePath: keysLabel,
+          subject: { kind: 'network', key: group.name },
           remediation: `Create it with: docker network create ${group.name}`,
         };
       }
@@ -842,6 +853,7 @@ const externalNetworkMissing: PreflightRule = {
         title: 'External network not found',
         message: `The model requires the external network "${group.name}" (Compose keys: ${group.keys.join(', ')}), which does not exist on this node. Sencho cannot create it automatically (${reasons}).`,
         sourcePath: keysLabel,
+        subject: { kind: 'network', key: group.name },
         remediation: 'Create this network outside Sencho with the required driver and options, or simplify the Compose declaration to a plain external bridge network.',
       };
     });
@@ -852,7 +864,7 @@ const externalVolumeMissing: PreflightRule = {
   id: 'external-volume-missing',
   run(ctx) {
     if (!ctx.model || !ctx.nodeStateAvailable) return [];
-    const findings: PreflightFinding[] = [];
+    const findings: RuleHit[] = [];
     for (const [key, vol] of Object.entries(ctx.model.volumes)) {
       if (!vol.external || ctx.existingVolumeNames.has(vol.name)) continue;
       findings.push({
@@ -861,6 +873,7 @@ const externalVolumeMissing: PreflightRule = {
         title: 'External volume not found',
         message: `The model requires the external volume "${vol.name}", which does not exist on this node. The deploy will fail.`,
         sourcePath: `volumes.${key}`,
+        subject: { kind: 'volume', key: vol.name },
         remediation: `Create it with: docker volume create ${vol.name}`,
       });
     }
@@ -872,7 +885,7 @@ const newNetwork: PreflightRule = {
   id: 'new-network',
   run(ctx) {
     if (!ctx.model || !ctx.nodeStateAvailable) return [];
-    const findings: PreflightFinding[] = [];
+    const findings: RuleHit[] = [];
     for (const [key, net] of Object.entries(ctx.model.networks)) {
       if (net.external || key === 'default') continue;
       const expected = runtimeResourceName(ctx.model.projectName, key, net.name);
@@ -883,6 +896,7 @@ const newNetwork: PreflightRule = {
         title: 'New network will be created',
         message: `Deploying will create the network "${expected}".`,
         sourcePath: `networks.${key}`,
+        subject: { kind: 'network', key: expected },
       });
     }
     return findings;
@@ -893,7 +907,7 @@ const newVolume: PreflightRule = {
   id: 'new-volume',
   run(ctx) {
     if (!ctx.model || !ctx.nodeStateAvailable) return [];
-    const findings: PreflightFinding[] = [];
+    const findings: RuleHit[] = [];
     for (const [key, vol] of Object.entries(ctx.model.volumes)) {
       if (vol.external) continue;
       const expected = runtimeResourceName(ctx.model.projectName, key, vol.name);
@@ -904,6 +918,7 @@ const newVolume: PreflightRule = {
         title: 'New volume will be created',
         message: `Deploying will create the named volume "${expected}".`,
         sourcePath: `volumes.${key}`,
+        subject: { kind: 'volume', key: expected },
       });
     }
     return findings;
@@ -914,7 +929,7 @@ const anonymousVolume: PreflightRule = {
   id: 'anonymous-volume',
   run(ctx) {
     if (!ctx.model) return [];
-    const findings: PreflightFinding[] = [];
+    const findings: RuleHit[] = [];
     for (const svc of ctx.model.services) {
       const anon = (svc.storageMounts ?? []).filter(m => m.type === 'anonymous');
       if (anon.length === 0) continue;
@@ -943,7 +958,7 @@ const containerNameInternalDup: PreflightRule = {
       const list = byName.get(s.containerName);
       if (list) list.push(s.name); else byName.set(s.containerName, [s.name]);
     }
-    const findings: PreflightFinding[] = [];
+    const findings: RuleHit[] = [];
     for (const [name, services] of byName) {
       if (services.length < 2) continue;
       findings.push({
@@ -951,6 +966,7 @@ const containerNameInternalDup: PreflightRule = {
         severity: 'blocker',
         title: 'Duplicate container_name',
         message: `Services ${services.map(s => `"${s}"`).join(' and ')} both set container_name "${name}". Docker requires unique names, so the deploy will fail.`,
+        subject: { kind: 'container-name', key: name },
         remediation: 'Give each service a unique container_name, or remove it and let Compose name them.',
       });
     }
@@ -962,7 +978,7 @@ const containerNameCollision: PreflightRule = {
   id: 'container-name-collision',
   run(ctx) {
     if (!ctx.model || !ctx.nodeStateAvailable) return [];
-    const findings: PreflightFinding[] = [];
+    const findings: RuleHit[] = [];
     for (const s of ctx.model.services) {
       if (!s.containerName) continue;
       const clash = ctx.existingContainers.find(c => c.name === s.containerName && c.stack !== ctx.stackName);
@@ -1039,7 +1055,7 @@ const exposureInternalPublished: PreflightRule = {
   id: 'exposure-internal-published',
   run(ctx) {
     if (!ctx.model) return [];
-    const findings: PreflightFinding[] = [];
+    const findings: RuleHit[] = [];
     for (const svc of ctx.model.services) {
       const intent = effectiveIntent(ctx, svc.name);
       if (intent !== 'internal' && intent !== 'same-node') continue;
@@ -1079,7 +1095,7 @@ const exposureInternalTunneled: PreflightRule = {
   id: 'exposure-internal-tunneled',
   run(ctx) {
     if (!ctx.model) return [];
-    const findings: PreflightFinding[] = [];
+    const findings: RuleHit[] = [];
     for (const [service, tunnel] of tunnelExposureByService(tunnelsOf(ctx))) {
       const intent = effectiveIntent(ctx, service);
       if (intent !== 'internal' && intent !== 'same-node') continue;
@@ -1112,7 +1128,7 @@ const tunnelExposure: PreflightRule = {
   id: 'tunnel-exposure',
   run(ctx) {
     if (!ctx.model) return [];
-    return tunnelsOf(ctx).map((connector): PreflightFinding => {
+    return tunnelsOf(ctx).map((connector): RuleHit => {
       const { title, message } = describeTunnelConnector(connector);
       return {
         ruleId: 'tunnel-exposure',
@@ -1167,7 +1183,7 @@ const exposurePortVsDossier: PreflightRule = {
   id: 'exposure-port-vs-dossier',
   run(ctx) {
     if (!ctx.model || !ctx.hasAccessUrls) return [];
-    const findings: PreflightFinding[] = [];
+    const findings: RuleHit[] = [];
     for (const svc of ctx.model.services) {
       const undocumented = [...new Set(svc.ports.flatMap(portsOf).filter(p => !ctx.accessUrlPorts.has(p)))];
       if (undocumented.length === 0) continue;
@@ -1194,7 +1210,7 @@ const reverseProxyUndocumented: PreflightRule = {
     if (!ctx.exposureAvailable) return [];
     // Already documented or intentionally reverse-proxied at the stack level.
     if (ctx.hasAccessUrls || ctx.stackIntent === 'reverse-proxy') return [];
-    const findings: PreflightFinding[] = [];
+    const findings: RuleHit[] = [];
     for (const svc of ctx.model.services) {
       if (effectiveIntent(ctx, svc.name) === 'reverse-proxy') continue;
       if (svc.hasServiceUrl) continue;
@@ -1221,7 +1237,7 @@ const sensitiveServiceBroadExposure: PreflightRule = {
   id: 'sensitive-service-broad-exposure',
   run(ctx) {
     if (!ctx.model) return [];
-    const findings: PreflightFinding[] = [];
+    const findings: RuleHit[] = [];
     for (const svc of ctx.model.services) {
       if (svc.image === undefined) continue;
       const image = svc.image.toLowerCase();
@@ -1232,7 +1248,7 @@ const sensitiveServiceBroadExposure: PreflightRule = {
         ruleId: 'sensitive-service-broad-exposure',
         severity: 'high',
         title: `Sensitive service "${svc.name}" is exposed on all interfaces`,
-        message: `Service "${svc.name}" looks like a database or admin service (${svc.image}) and publishes ${specLabels(broad)} on all interfaces. Broadly exposing it is a common source of compromise.`,
+        message: `Service "${svc.name}" looks like a database or admin service (${redactImageReference(svc.image)}) and publishes ${specLabels(broad)} on all interfaces. Broadly exposing it is a common source of compromise.`,
         sourcePath: svc.name,
         service: svc.name,
         remediation: 'Bind it to a specific interface such as 127.0.0.1, or keep it on an internal network only.',
@@ -1291,9 +1307,9 @@ export const PREFLIGHT_RULES: PreflightRule[] = [
   selfManagedStack,
 ];
 
-export const RULE_IDS: readonly string[] = PREFLIGHT_RULES.map(r => r.id);
+export const RULE_IDS: readonly CanonicalRuleId[] = PREFLIGHT_RULES.map(r => r.id);
 
 /** Run every rule and concatenate findings. */
-export function runRules(ctx: PreflightContext): PreflightFinding[] {
+export function runRules(ctx: PreflightContext): RuleHit[] {
   return PREFLIGHT_RULES.flatMap(rule => rule.run(ctx));
 }

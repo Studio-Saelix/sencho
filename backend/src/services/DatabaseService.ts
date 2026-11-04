@@ -339,6 +339,8 @@ export interface PreflightRunRow {
     highest_severity: string | null;
     created_at: number;
     created_by: string | null;
+    /** JSON AssuranceCoverage. Null on rows stored before coverage existed. */
+    coverage?: string | null;
 }
 
 /** Per-stack per-service Compose exposure descriptor (one row per node+stack). */
@@ -473,6 +475,10 @@ export interface PreflightFindingRow {
     remediation: string | null;
     service: string | null;
     created_at: number;
+    /** Assurance rule version that produced the row. Null on legacy rows. */
+    rule_version?: number | null;
+    subject_kind?: string | null;
+    subject_key?: string | null;
 }
 
 export type PreflightAckExpiryMode = 'forever' | 'until_compose_change' | 'days' | 'until_image_change';
@@ -2480,6 +2486,12 @@ export class DatabaseService {
         maybeAddCol('cve_suppressions', 'justification', 'TEXT');
 
         maybeAddCol('preflight_runs', 'service_images', 'TEXT');
+        // Compose Assurance: additive columns. Legacy rows keep NULL, which the
+        // read path treats as an unrecorded coverage / legacy finding identity.
+        maybeAddCol('preflight_runs', 'coverage', 'TEXT');
+        maybeAddCol('preflight_findings', 'rule_version', 'INTEGER');
+        maybeAddCol('preflight_findings', 'subject_kind', 'TEXT');
+        maybeAddCol('preflight_findings', 'subject_key', 'TEXT');
 
         // Scheduled operations migrations
         maybeAddCol('scheduled_task_runs', 'triggered_by', "TEXT NOT NULL DEFAULT 'scheduler'");
@@ -4988,19 +5000,23 @@ stmt.run('gitops_schema_version', '1');
             this.db.prepare('DELETE FROM preflight_runs WHERE node_id = ? AND stack_name = ?').run(run.node_id, run.stack_name);
             this.db.prepare(
                 `INSERT INTO preflight_runs
-                    (id, node_id, stack_name, source_hash, rendered_hash, service_images, status, highest_severity, created_at, created_by)
-                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+                    (id, node_id, stack_name, source_hash, rendered_hash, service_images, status, highest_severity, created_at, created_by, coverage)
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
             ).run(
                 run.id, run.node_id, run.stack_name, run.source_hash, run.rendered_hash,
                 run.service_images ?? null, run.status, run.highest_severity, run.created_at, run.created_by,
+                run.coverage ?? null,
             );
             const insert = this.db.prepare(
                 `INSERT INTO preflight_findings
-                    (id, run_id, rule_id, severity, title, message, source_path, remediation, service, created_at)
-                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+                    (id, run_id, rule_id, severity, title, message, source_path, remediation, service, created_at, rule_version, subject_kind, subject_key)
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
             );
             for (const f of findings) {
-                insert.run(f.id, f.run_id, f.rule_id, f.severity, f.title, f.message, f.source_path, f.remediation, f.service, f.created_at);
+                insert.run(
+                    f.id, f.run_id, f.rule_id, f.severity, f.title, f.message, f.source_path, f.remediation, f.service, f.created_at,
+                    f.rule_version ?? null, f.subject_kind ?? null, f.subject_key ?? null,
+                );
             }
         });
     }
