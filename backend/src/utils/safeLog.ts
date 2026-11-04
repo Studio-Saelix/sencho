@@ -23,8 +23,11 @@ export function redactSensitiveText(value: unknown): string {
     .replace(/Basic\s+[A-Za-z0-9+/=]+/gi, 'Basic [redacted]')
     .replace(/[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}/g, '[redacted-jwt]')
     // Any URL scheme, since a credential rides in postgres://, redis://, and
-    // amqp:// strings as readily as in http(s) ones.
-    .replace(/\b([a-z][a-z0-9+.-]*):\/\/[^/\s:@]+:[^/\s@]+@/gi, '$1://[redacted]@')
+    // amqp:// strings as readily as in http(s) ones. The user may be empty
+    // (redis://:pw@host), and the password runs to the last `@` of the authority,
+    // so a raw `@` inside it does not leave its tail behind. The scheme length is
+    // bounded to keep a long dotted run from backtracking quadratically.
+    .replace(/\b([a-z][a-z0-9+.-]{0,31}):\/\/[^/\s:@]*:[^/\s]+@/gi, '$1://[redacted]@')
     // Scheme-less registry credentials, which lead an image reference
     // (user:password@registry.example.com/repo/image:tag). Compose echoes the
     // reference back in its own errors. Two constraints keep this narrow:

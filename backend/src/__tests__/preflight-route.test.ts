@@ -158,7 +158,7 @@ describe('preflight acknowledgement routes', () => {
   });
 });
 
-describe('preflight responses never expose a secret', () => {
+describe('preflight responses redact credentials in findings and acknowledgements', () => {
   const CREDENTIAL_IMAGE = 'user:p4ssw0rdXYZ@registry.example.com/app';
   const NOTE = 'see postgres://bob:s3cretPASS@host/db and token=abcd1234efgh';
   const LEAKED = ['p4ssw0rdXYZ', 's3cretPASS', 'abcd1234efgh'];
@@ -175,9 +175,11 @@ describe('preflight responses never expose a secret', () => {
     fs.writeFileSync(path.join(stackDir, 'compose.yaml'), `services:\n  web:\n    image: ${CREDENTIAL_IMAGE}\n`);
     stub(CREDENTIAL_IMAGE);
   });
-  afterEach(() => {
+  afterEach(async () => {
     vi.restoreAllMocks();
     fs.rmSync(stackDir, { recursive: true, force: true });
+    const { DatabaseService } = await import('../services/DatabaseService');
+    DatabaseService.getInstance().getDb().prepare('DELETE FROM preflight_acknowledgements WHERE stack_name = ?').run(STACK);
   });
 
   it('returns the same redacted report from a run as from a later read', async () => {
@@ -221,6 +223,25 @@ describe('preflight responses never expose a secret', () => {
     expect(decided(read.body)).toContain('[redacted]');
     expect(decided(rerun.body)).toBe(decided(read.body));
     expect(list.body[0].reason).toBe(created.body.reason);
+  });
+
+  it('redacts the image anchor of an until_image_change acknowledgement, and still expires on it', async () => {
+    const run = await request(app).post(`/api/stacks/${STACK}/preflight/run`).set('Authorization', authHeader);
+    const target = run.body.findings.find((f: { ruleId: string }) => f.ruleId === 'image-latest');
+    const created = await request(app)
+      .post(`/api/stacks/${STACK}/preflight/acknowledgements`)
+      .set('Authorization', authHeader)
+      .send({ ruleId: target.ruleId, service: target.service, reason: 'ok', expiryMode: 'until_image_change' });
+    expect(created.status).toBe(201);
+    expectNoSecret(created.body);
+    expect(created.body.anchor_image_ref).toContain('[redacted]@registry.example.com/app');
+
+    const list = await get(`/api/stacks/${STACK}/preflight/acknowledgements`);
+    expectNoSecret(list.body);
+    expect(list.body[0].active).toBe(true);
+    // The stored anchor is raw: the expiry check compares against it.
+    const read = await get(`/api/stacks/${STACK}/preflight`);
+    expect(read.body.findings.find((f: { ruleId: string }) => f.ruleId === 'image-latest').acknowledged).toBe(true);
   });
 
   it('keeps an ordinary note readable', async () => {

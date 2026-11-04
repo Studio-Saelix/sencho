@@ -64,7 +64,7 @@ The summary card at the top of the Doctor tab reflects the overall outcome of th
 | **Coverage not recorded** | The stored run was made before Sencho recorded which checks ran, or came from a node running an older version | Muted card with "pass · coverage not recorded" and "Run preflight again to confirm every check ran." |
 | **All clear · findings acknowledged** | Model rendered; every finding from the last run has been acknowledged | Green card with "No active findings remain. One or more detected issues were reviewed and acknowledged by an authorized operator." |
 
-**All clear** appears only when every check that affects the result ran. A `.env` or `env_file` that Sencho cannot read (for example, a directory where the file should be, or a file it lacks permission to open) counts as a check that could not run, and the env checks are reported as "env files unreadable". A run that skipped a check reports a **partial check** instead, and a run stored before coverage was recorded reports **coverage not recorded**. Both still list any findings they did produce; the difference is that a clean result from an incomplete run is not presented as a clean bill of health.
+**All clear** appears only when every check that affects the result ran. A `.env` or `env_file` that Sencho tries to read and cannot (for example, a directory where the file should be, or a file it lacks permission to open) counts as a check that could not run, and the env checks are reported as "env files unreadable". An `env_file` path built from a variable, or one that points outside the stack folder, is not read at all and does not change the result. A run that skipped a check reports a **partial check** instead, and a run stored before coverage was recorded reports **coverage not recorded**. Both still list any findings they did produce; the difference is that a clean result from an incomplete run is not presented as a clean bill of health.
 
 The summary card also shows when the run happened and who triggered it: "ran 5 minutes ago by admin". When active findings remain alongside acknowledgements, the line adds a count: "3 active (1 blocker · 2 warning) · 2 acknowledged".
 
@@ -263,7 +263,7 @@ When a finding is valid in general but intentional for your stack, you can ackno
 
 1. Open the **Doctor** tab and run preflight if you have not already.
 2. On any active finding row, click **acknowledge**.
-3. Optionally add a note explaining why the finding is acceptable. Sencho masks anything in a note that looks like a credential (a password inside a URL, a `token=` value) whenever it shows or returns the note, so do not rely on the note to store a secret.
+3. Optionally add a note explaining why the finding is acceptable. Sencho stores the note as you typed it and masks common credential shapes (a password inside a URL, a `token=` value, a bearer token) whenever it shows or returns it, so do not put a secret in a note.
 4. Choose when Sencho should show the finding again:
    - **Forever** until you clear the acknowledgement manually.
    - **Until Compose changes** when the stack's compose fingerprint changes (for example after you edit `compose.yaml`).

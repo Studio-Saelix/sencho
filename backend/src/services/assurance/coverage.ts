@@ -3,7 +3,7 @@
  *
  * Every registry entry declares the evidence it needs. The runner checks the
  * declarations before calling a rule and records each skip with the missing
- * evidence, so a run that could not read the node snapshot, the env context, or
+ * evidence, so a run that could not read the node snapshot, the env files, or
  * the exposure intent reports partial coverage instead of a clean pass.
  *
  * Rules keep their own internal guards (defense in depth). A test drops each

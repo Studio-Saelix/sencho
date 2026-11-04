@@ -295,6 +295,9 @@ describe('acknowledgements stay scoped to one rule', () => {
 
     // The decision rides on the finding it belongs to, and nowhere else.
     expect(withDecision(privileged, acked[0]).decision?.reason).toBe('intentional');
+    // The decision itself carries the redacted copy, not only the serializer.
+    const noted = withDecision(privileged, { ...acked[0], acknowledgementReason: 'see postgres://bob:s3cretPASS@host/db' });
+    expect(noted.decision?.reason).not.toContain('s3cretPASS');
     expect(withDecision(socketMount, acked[1]).decision).toBeUndefined();
   });
 });
@@ -329,6 +332,52 @@ describe('secret-safe serialization', () => {
     expect(serialized).not.toContain('user:pass');
     expect(serialized).not.toContain('hunter2');
     expect(finding.identity.basis).toBe('structured');
+  });
+
+  describe('a credential in every free-text field of a hit', () => {
+    const URL = 'https://admin:hunter2pass@cfg.example.com/app.env';
+    const credentialHit = () => hit('env-file-missing', {
+      service: 'web',
+      title: `Missing ${URL}`,
+      message: `The file ${URL} is absent`,
+      remediation: `Create ${URL}`,
+      sourcePath: URL,
+      subject: { kind: 'env-file', key: URL },
+    });
+    const everyField = (finding: AssuranceFinding) => JSON.stringify([
+      finding.title, finding.message, finding.remediation, finding.location, finding.subject,
+    ]);
+
+    it('is redacted when a run normalizes the hit', () => {
+      const finding = normalize(credentialHit());
+      expect(everyField(finding)).not.toContain('hunter2pass');
+      expect(finding.subject.key).toContain('[redacted]');
+    });
+
+    it('is redacted again when a stored row is read, and the identity does not move', () => {
+      const live = normalize(credentialHit());
+      const stored = (key: string) => normalizeStoredFinding({
+        id: 'row', run_id: 'run', rule_id: live.ruleId, severity: live.severity, title: live.title,
+        message: live.message, source_path: live.location?.path ?? null, remediation: live.remediation ?? null,
+        service: 'web', created_at: 1, rule_version: live.ruleVersion, subject_kind: 'env-file', subject_key: key,
+      }, 1, STACK);
+      const fromRedacted = stored(live.subject.key);
+      expect(fromRedacted.identity).toEqual(live.identity);
+      // A row written by an older build can hold the raw key.
+      const fromRaw = stored(URL);
+      expect(everyField(fromRaw)).not.toContain('hunter2pass');
+      expect(fromRaw.identity).toEqual(live.identity);
+    });
+
+    it('leaves an ordinary path, key, and message as they were', () => {
+      const finding = normalize(hit('env-file-missing', {
+        service: 'web', sourcePath: './app.env', subject: { kind: 'env-file', key: './app.env' },
+        message: 'The file ./app.env is absent',
+      }));
+      expect(finding.location?.path).toBe('./app.env');
+      expect(finding.subject.key).toBe('./app.env');
+      expect(finding.message).toBe('The file ./app.env is absent');
+    });
   });
 
   it('redacts the acknowledgement reason, which is operator-entered free text', () => {

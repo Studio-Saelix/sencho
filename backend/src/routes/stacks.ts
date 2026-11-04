@@ -63,7 +63,7 @@ import { MAX_TARGET_COUNT, readDismissalMode } from '../helpers/dismissalMode';
 import { ComposeDoctorService } from '../services/ComposeDoctorService';
 import { RULE_IDS, isPreflightNoteFinding } from '../services/preflight/rules';
 import { parseServiceImages, isPreflightAckActive } from '../utils/preflight-ack-filter';
-import type { PreflightAckExpiryMode } from '../services/DatabaseService';
+import type { PreflightAckExpiryMode, PreflightAcknowledgement } from '../services/DatabaseService';
 import { buildStackNetworkFacts } from '../services/network/composeNetworkInspector';
 import { buildStorageInventory } from '../services/storage/inventory';
 import { probeComposeDiscovery } from '../services/ComposeDiscoveryService';
@@ -1947,9 +1947,15 @@ const PREFLIGHT_ACK_EXPIRY_MODES = new Set<PreflightAckExpiryMode>([
 const PREFLIGHT_RULE_ID_SET: ReadonlySet<string> = new Set(RULE_IDS);
 
 /** An acknowledgement as the API returns it. The reason is operator-entered free
- *  text, so it is redacted on every read, the same as on the Doctor report. */
-function acknowledgementForWire<T extends { reason: string }>(ack: T): T {
-  return { ...ack, reason: redactSensitiveText(ack.reason) };
+ *  text and the image anchor is copied from the rendered model, which inlines a
+ *  registry credential, so both are redacted on every read, the same as on the
+ *  Doctor report. The stored anchor stays raw: expiry compares against it. */
+function acknowledgementForWire(ack: PreflightAcknowledgement): PreflightAcknowledgement {
+  return {
+    ...ack,
+    reason: redactSensitiveText(ack.reason),
+    anchor_image_ref: ack.anchor_image_ref === null ? null : redactSensitiveText(ack.anchor_image_ref),
+  };
 }
 
 stacksRouter.get('/:stackName/preflight/acknowledgements', async (req: Request, res: Response) => {

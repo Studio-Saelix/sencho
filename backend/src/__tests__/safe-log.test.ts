@@ -20,12 +20,31 @@ describe('redactSensitiveText', () => {
   it.each([
     ['postgres', 'see postgres://bob:s3cretPASS@host/db', 'postgres://[redacted]@host/db'],
     ['redis', 'redis://default:hunter2@cache:6379/0 refused', 'redis://[redacted]@cache:6379/0 refused'],
-    ['amqp+tls', 'amqps://u:p4ss@mq.example.invalid/vhost', 'amqps://[redacted]@mq.example.invalid/vhost'],
+    ['amqps', 'amqps://u:p4ss@mq.example.invalid/vhost', 'amqps://[redacted]@mq.example.invalid/vhost'],
     ['http', 'http://u:p4ss@example.invalid/x', 'http://[redacted]@example.invalid/x'],
+    ['redis with an empty user', 'redis://:p4ss@cache:6379/0', 'redis://[redacted]@cache:6379/0'],
+    ['a password holding a raw @', 'postgres://bob:p4ss@word@host/db', 'postgres://[redacted]@host/db'],
   ])('redacts a %s URL credential', (_scheme, input, expected) => {
     const text = redactSensitiveText(input);
     expect(text).toContain(expected);
     expect(text).not.toMatch(/s3cretPASS|hunter2|p4ss/);
+  });
+
+  it.each([
+    'https://example.com:8443/x',
+    'ssh://host:22',
+    'ssh://git@github.com/org/repo.git',
+    'registry:5000/team/app@sha256:0123456789abcdef',
+    'docker://registry:5000/team/app:1.0',
+    'mailto:bob@example.com',
+  ])('leaves %s as it is', input => {
+    expect(redactSensitiveText(input)).toBe(input);
+  });
+
+  it('redacts a long dotted run without backtracking', () => {
+    const started = Date.now();
+    redactSensitiveText('a.'.repeat(100_000));
+    expect(Date.now() - started).toBeLessThan(1000);
   });
 
   it('strips Linux-style homedir usernames while keeping the /home/ prefix', () => {

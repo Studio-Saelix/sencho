@@ -15,8 +15,9 @@ import { ComposeService } from '../services/ComposeService';
 /**
  * Toggle for an env-context failure. The service imports the resolver directly,
  * so the only way to make that one collection step fail is to wrap the module;
- * the wrapper delegates unless this flag is set, and tests reset it in a
- * `finally`.
+ * the wrapper delegates unless `fail` is set (it then throws), and `rewrite`,
+ * when set, edits the resolved sources before the service sees them. Tests reset
+ * both.
  */
 const envSourceFailure = vi.hoisted(() => ({
   fail: false,
@@ -1011,6 +1012,23 @@ describe('Compose Assurance contract persistence', () => {
     }
   });
 
+  it('redacts a credential in the render error on the run and on a later read', async () => {
+    vi.spyOn(ComposeService, 'getInstance').mockReturnValue({
+      renderConfig: vi.fn().mockRejectedValue(new Error('cannot start postgres://bob:s3cretPASS@db/x')),
+      composeVersion: vi.fn().mockResolvedValue(null),
+    } as unknown as ComposeService);
+    vi.spyOn(DockerController, 'getInstance').mockReturnValue({
+      getDependencySnapshot: vi.fn().mockResolvedValue({ containers: [], networks: [], volumes: [] }),
+      getDocker: vi.fn(() => ({ listContainers: vi.fn().mockResolvedValue([]) })),
+    } as unknown as DockerController);
+    const run = await doctor().runPreflight(nodeId, STACK, 'tester');
+    const read = doctor().getLatest(nodeId, STACK);
+    expect(run.renderable).toBe(false);
+    expect(JSON.stringify(run)).not.toContain('s3cretPASS');
+    expect(JSON.stringify(read)).not.toContain('s3cretPASS');
+    expect(run.renderError).toBe(read.renderError);
+  });
+
   describe('an env file that cannot be read', () => {
     const stackDir = () => path.join(process.env.COMPOSE_DIR as string, STACK);
     const UNSET = 'WARN The "PORT" variable is not set. Defaulting to a blank string.';
@@ -1021,7 +1039,7 @@ describe('Compose Assurance contract persistence', () => {
       expect(report.coverage.state).toBe('partial');
       const envSkips = report.coverage.skipped.filter(entry => entry.missing.includes('env-context'));
       expect(envSkips.map(entry => entry.ruleId)).toEqual(expect.arrayContaining(['env-unset', 'env-file-missing']));
-      // The same on a later read of the stored run, so every surface agrees.
+      // The same on a later read of the stored run.
       expect(doctor().getLatest(nodeId, STACK).coverage).toEqual(report.coverage);
       return report;
     };
@@ -1043,7 +1061,14 @@ describe('Compose Assurance contract persistence', () => {
       await expectPartialOnEnvContext();
     });
 
+    it('records a configured project env file outside the compose base directory as partial coverage', async () => {
+      db().setStackProjectEnvFiles(nodeId, STACK, ['../../outside.env']);
+      await expectPartialOnEnvContext();
+    });
+
     it('records a file whose existence cannot be checked as partial coverage', async () => {
+      // Readable, so only the existence guard can make this partial.
+      fs.writeFileSync(path.join(stackDir(), '.env'), 'PORT=1\n');
       envSourceFailure.rewrite = (sources) => {
         const resolved = sources as { envFiles: { existence: string }[] };
         return { ...resolved, envFiles: resolved.envFiles.map(file => ({ ...file, existence: 'unverifiable' })) };
@@ -1059,6 +1084,7 @@ describe('Compose Assurance contract persistence', () => {
 
     it.each([
       ['an absent project .env', () => undefined],
+      ['an absent configured project env file', () => db().setStackProjectEnvFiles(nodeId, STACK, ['absent.env'])],
       ['a readable project .env', () => fs.writeFileSync(path.join(stackDir(), '.env'), 'PORT=8080\n')],
     ])('stays complete with %s', async (_label, arrange) => {
       arrange();

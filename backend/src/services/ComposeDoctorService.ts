@@ -420,14 +420,14 @@ export class ComposeDoctorService {
   }
 
   /**
-   * The key names of every env file Compose would read, or null when one of
-   * them cannot be read: a file whose existence could not be checked, or one
-   * that is present but cannot be opened as a file (a directory, a permission
-   * error, a configured project file outside the compose directory). A file that
-   * is simply absent is not a failure; Compose treats it as empty, and
+   * The key names of every env file Sencho can resolve, or null when one of
+   * them cannot be read: a file whose existence could not be checked (an access
+   * error, a configured project file outside the compose directory), or one that
+   * is present but cannot be opened as a file (a directory, a permission error).
+   * An absent file is not an unreadable one: it contributes no keys, and
    * `env-file-missing` reports it when it is required. An `env_file` path that is
-   * interpolated or leaves the stack directory has no resolved path and is not
-   * read.
+   * interpolated or leaves the stack directory has no resolved path, cannot be
+   * known ahead of Compose, and is not read.
    */
   private async collectEnvFileKeys(sources: StackEnvSources, baseDir: string): Promise<string[] | null> {
     const keys: string[] = [];

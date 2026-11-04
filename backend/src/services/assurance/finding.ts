@@ -74,7 +74,9 @@ export interface AssuranceFinding {
   identity: { fingerprint: string; subjectKey: string; basis: IdentityBasis };
   location?: AssuranceLocation;
   evidence: readonly AssuranceEvidenceRef[];
-  /** Secret-free copy. Redacted again on read. */
+  /** Free-text fields (title, message, remediation, location.path, subject.key,
+   *  decision.reason) are redacted when a run normalizes a hit and again when a
+   *  stored row is read, so every copy is secret-free. */
   title: string;
   message: string;
   remediation?: string;
