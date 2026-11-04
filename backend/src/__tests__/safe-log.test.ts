@@ -150,7 +150,7 @@ describe('redactSensitiveText', () => {
     ['a literal @ in the password', 'service "a7" uses "u:p@SECRETQ7@host/app"', 'SECRETQ7', '"[redacted]@host/app"'],
     ['two literal @ in the password', 'pull failed for u:a@b@SECRETQ9@host:5000/app', 'SECRETQ9', '[redacted]@host:5000/app'],
     ['an encoded user name and a literal @', 'image=user%40x:p@SECRETQ8@reg.invalid/app:1', 'SECRETQ8', 'image=[redacted]@reg.invalid/app:1'],
-    ['a user name with sub-delimiters', 'pull failed for ci+bot~1:SECRETQ10@reg.invalid/app', 'SECRETQ10', '[redacted]@reg.invalid/app'],
+    ['a user name with + and ~', 'pull failed for ci+bot~1:SECRETQ10@reg.invalid/app', 'SECRETQ10', '[redacted]@reg.invalid/app'],
     ['a literal @ before a bracketed IPv6 host', 'pull failed for u:p@SECRETQ11@[::1]:5000/app', 'SECRETQ11', '[redacted]@[::1]:5000/app'],
   ])('redacts a scheme-less image credential with %s', (_variant, input, secret, expected) => {
     const text = redactSensitiveText(input);
@@ -163,9 +163,33 @@ describe('redactSensitiveText', () => {
       .toBe('uses [redacted]@host/team/app:1.0 and then nginx:latest');
   });
 
-  it('leaves a digest pin intact next to a credential-free percent-encoded text', () => {
-    const text = redactSensitiveText('50%25:done registry:5000/team/app:1.0@sha256:abc123 ok');
-    expect(text).toBe('50%25:done registry:5000/team/app:1.0@sha256:abc123 ok');
+  // The password may now hold an @, so it must not run across the quote or the
+  // comma that ends one image reference and carry a digest pin into the next
+  // credential-shaped text.
+  it.each([
+    ['a quote', '{"image":"app:1@sha256:abc","owner":"ops@corp.example/team"}'],
+    ['a single quote', "['app:1.0@sha256:abc', 'mail@host/x']"],
+  ])('leaves a digest pin intact before %s and a later address', (_variant, input) => {
+    expect(redactSensitiveText(input)).toBe(input);
+  });
+
+  it.each([
+    ['a comma-led run of credential shapes', ',a:b@'.repeat(20_000)],
+    ['a comma-led run with no @', ',a:'.repeat(33_000)],
+    ['a long password with many @', `x:${'p@'.repeat(50_000)}`],
+  ])('redacts %s in bounded time', (_shape, input) => {
+    const started = Date.now();
+    redactSensitiveText(input);
+    expect(Date.now() - started).toBeLessThan(1000);
+  });
+
+  it.each([
+    'service "a6" uses "user%40x:SECRETQ6@host/app:latest"',
+    'service "a7" uses "u:p@SECRETQ7@host/app"',
+    'pull failed for user%40x:p@SECRETQ8@host:5000/app',
+  ])('is idempotent on %s, since a hub redacts text a node already redacted', input => {
+    const once = redactSensitiveText(input);
+    expect(redactSensitiveText(once)).toBe(once);
   });
 
   it('leaves a digest-pinned image reference intact', () => {

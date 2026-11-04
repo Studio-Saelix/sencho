@@ -37,16 +37,22 @@ export function redactSensitiveText(value: unknown): string {
     // never by a `/`. Without it every digest pin loses its repository and tag,
     // which is the text a GitOps diagnosis is built from. The first keeps a URL
     // path that merely contains `a:b@c/` from being read as a credential.
-    // The user is any RFC 3986 userinfo character, so a percent-encoded name
-    // (user%40corp) is caught, and the password runs to the last `@` that still
-    // leads to a host and a path, so a raw `@` inside it leaves no tail behind.
+    // The user takes unreserved characters, `%`, and the sub-delimiters that do
+    // not open a token (`'(),=` do, so a match starts after them), so a
+    // percent-encoded name (user%40corp) is caught. The password runs to the
+    // last `@` before the first `/` that still leads to a host and a path, so a
+    // raw `@` inside it leaves no tail behind. It stops at a quote, which ends an
+    // image reference in YAML and JSON, so a digest pin before a quote keeps its
+    // text, and it is capped at 1024 characters, which keeps the backtracking
+    // over its `@` runs linear in the input.
     // The narrowing has a known cost: a credential with no path after the host
-    // is not caught. The rule also over-matches text shaped like a time and a
-    // host, "10:30@host/a", which is indistinguishable from a numeric user and
+    // is not caught, and neither is one whose password contains a `/`. The rule
+    // also over-matches text shaped like a time and a host, "10:30@host/a", or a
+    // query pair, "a&b:c@d/e", which is indistinguishable from a user and
     // password. That direction is deliberate: an over-redacted log line costs a
     // word, an under-redacted one leaks.
     .replace(
-      /(^|[\s"'=,(])[A-Za-z0-9._~%!$&*+;-]+:[^/\s]+@(\[[^\]\s]+\]|[A-Za-z0-9.-]+(?::\d+)?\/)/g,
+      /(^|[\s"'=,(])[A-Za-z0-9._~%!$&*+;-]+:[^/\s"']{1,1024}@(\[[^\]\s]+\]|[A-Za-z0-9.-]+(?::\d+)?\/)/g,
       (_match, lead: string, host: string) => `${lead}[redacted]@${host}`,
     )
     // Keyword-led secrets, tolerating a JSON/YAML quoting boundary between the

@@ -271,6 +271,30 @@ describe('preflight responses redact credentials in findings and acknowledgement
     expect(read.body.findings.find((f: { ruleId: string }) => f.ruleId === 'image-latest').acknowledged).toBe(true);
   });
 
+  it.each([
+    ['a percent-encoded user name', 'user%40x:SECRETQ6@host/app', 'SECRETQ6'],
+    ['a literal @ in the password', 'u:p@SECRETQ7@host/app', 'SECRETQ7'],
+  ])('redacts the image anchor of an until_image_change acknowledgement for %s, and still matches on the raw anchor', async (_variant, image, secret) => {
+    vi.restoreAllMocks();
+    stub(image);
+    fs.writeFileSync(path.join(stackDir, 'compose.yaml'), `services:\n  web:\n    image: "${image}"\n`);
+    const run = await request(app).post(`/api/stacks/${STACK}/preflight/run`).set('Authorization', authHeader);
+    const target = run.body.findings.find((f: { ruleId: string }) => f.ruleId === 'image-latest');
+    const created = await request(app)
+      .post(`/api/stacks/${STACK}/preflight/acknowledgements`)
+      .set('Authorization', authHeader)
+      .send({ ruleId: target.ruleId, service: target.service, reason: `pulled with ${image}`, expiryMode: 'until_image_change' });
+    expect(created.status).toBe(201);
+    expect(created.body.anchor_image_ref).toContain('[redacted]@host/app');
+
+    const list = await get(`/api/stacks/${STACK}/preflight/acknowledgements`);
+    const read = await get(`/api/stacks/${STACK}/preflight`);
+    const rerun = await request(app).post(`/api/stacks/${STACK}/preflight/run`).set('Authorization', authHeader);
+    for (const body of [created.body, list.body, read.body, rerun.body]) expect(JSON.stringify(body)).not.toContain(secret);
+    expect(list.body[0].active).toBe(true);
+    expect(read.body.findings.find((f: { ruleId: string }) => f.ruleId === 'image-latest').acknowledged).toBe(true);
+  });
+
   it('keeps an ordinary note readable', async () => {
     const run = await request(app).post(`/api/stacks/${STACK}/preflight/run`).set('Authorization', authHeader);
     const target = run.body.findings.find((f: { ruleId: string }) => f.ruleId === 'image-latest');
