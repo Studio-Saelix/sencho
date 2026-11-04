@@ -422,7 +422,9 @@ describe('the resolve route decisions', () => {
     const retry = answers();
     const settled = await overwrite.resolveOverwriteIntent(deps(fake, retry), { intentId: seeded.intentId, action: 'retry' });
     expect(settled.outcome).toBe('committed');
-    expect(retry.runs.filter((run) => run.profile === 'swap').map((run) => run.cmd[2])).toEqual(['status', 'commit', 'cleanup']);
+    // The fence is released, so the workloads may run: the journal already says
+    // `swapped`, and the root metadata is not applied over theirs a second time.
+    expect(retry.runs.filter((run) => run.profile === 'swap').map((run) => run.cmd[2])).toEqual(['status', 'cleanup']);
   });
 
   it('refuses to resolve a committed intent', async () => {
@@ -621,6 +623,110 @@ describe('the operation of a reconciled overwrite', () => {
       .toThrowError(expect.objectContaining({ errorClass: 'lock_stale' }));
   });
 
+  // After `release_fence` the operator may start the workloads, so a retry or a boot
+  // must not move data under them: it finishes only what the journal proves committed.
+  describe('a restore whose fence was released', () => {
+    const released = async (phase: 'swapping' | 'swapped' | 'fenced', cleanupFailed = false) => {
+      const { seeded, fake } = await seed({ phase, createdAt: new Date().toISOString(), fenced: true });
+      const store = intents.RestoreIntentStore.getInstance();
+      if (phase === 'fenced') {
+        // The window where a rollback released the fence and the process died before it settled.
+        await overwrite.resolveOverwriteIntent(deps(fake, scriptedHelper({ swapAnswers: [{ action: 'status', exitCode: 1 }] })), {
+          intentId: seeded.intentId, action: 'release_fence',
+        });
+        recoveryDbModule.recoveryDb().prepare("UPDATE recovery_restore_intents SET phase = 'fenced' WHERE id = ?").run(seeded.intentId);
+      } else {
+        if (phase === 'swapping') store.advance(seeded.intentId, 'completion_unknown', { outcomeClass: 'identity_unknown' });
+        await overwrite.resolveOverwriteIntent(deps(fake, scriptedHelper({ swapAnswers: [
+          { action: 'status', exitCode: cleanupFailed ? 0 : 1, status: 'swapped' },
+          { action: 'cleanup', exitCode: 1, stderr: 'helper image missing' },
+        ] })), { intentId: seeded.intentId, action: 'release_fence' });
+      }
+      expect(store.get(seeded.intentId)?.fenceState).toBe('released');
+      // The operator starts the workloads by hand.
+      fake.containers.get('c1')!.State = 'running';
+      return { seeded, fake, before: fake.calls.length };
+    };
+    const swapSteps = (helper: ReturnType<typeof scriptedHelper>) => helper.runs
+      .filter((run) => run.profile === 'swap').map((run) => run.cmd[2]);
+
+    for (const status of ['planned', 'moving_originals', 'moving_incoming'] as const) {
+      it(`never rolls back a ${status} journal under the workloads on retry, and changes nothing`, async () => {
+        const { seeded, fake, before } = await released('swapping');
+        const open = intents.RestoreIntentStore.getInstance().get(seeded.intentId);
+        const helper = scriptedHelper({ swapAnswers: [{ action: 'status', exitCode: 0, status }] });
+        const result = await overwrite.resolveOverwriteIntent(deps(fake, helper), { intentId: seeded.intentId, action: 'retry' });
+        expect(result.outcome).toBe('unknown');
+        expect(swapSteps(helper)).toEqual(['status']);
+        expect(fake.calls.slice(before)).toEqual([]);
+        expect(intents.RestoreIntentStore.getInstance().get(seeded.intentId)).toMatchObject({
+          phase: open?.phase, fenceState: 'released', outcomeClass: open?.outcomeClass,
+        });
+        settle(seeded.intentId);
+        expect(operation(seeded.operationId)).toMatchObject({ state: 'completion_unknown' });
+      });
+    }
+
+    it('answers unknown again on every retry, and moves nothing', async () => {
+      const { seeded, fake } = await released('swapping');
+      const helper = scriptedHelper({ swapAnswers: [{ action: 'status', exitCode: 0, status: 'planned' }] });
+      for (let i = 0; i < 2; i += 1) {
+        const result = await overwrite.resolveOverwriteIntent(deps(fake, helper), { intentId: seeded.intentId, action: 'retry' });
+        expect(result.outcome).toBe('unknown');
+      }
+      expect(swapSteps(helper)).toEqual(['status', 'status']);
+    });
+
+    it('does not finish a pending commit under the workloads', async () => {
+      const { seeded, fake } = await released('swapping');
+      const helper = scriptedHelper({ swapAnswers: [{ action: 'status', exitCode: 0, status: 'metadata_pending' }] });
+      const result = await overwrite.resolveOverwriteIntent(deps(fake, helper), { intentId: seeded.intentId, action: 'retry' });
+      expect(result.outcome).toBe('unknown');
+      expect(swapSteps(helper)).toEqual(['status']);
+      expect(intents.RestoreIntentStore.getInstance().get(seeded.intentId)?.phase).toBe('completion_unknown');
+    });
+
+    it('removes the originals of a swap the journal proves, without applying the root metadata again', async () => {
+      const { seeded, fake, before } = await released('swapping');
+      const helper = answers();
+      const result = await overwrite.resolveOverwriteIntent(deps(fake, helper), { intentId: seeded.intentId, action: 'retry' });
+      expect(result.outcome).toBe('committed');
+      expect(swapSteps(helper)).toEqual(['status', 'cleanup']);
+      expect(fake.calls.slice(before)).toEqual([]);
+      expect(intents.RestoreIntentStore.getInstance().get(seeded.intentId)).toMatchObject({ phase: 'committed', fenceState: 'released' });
+    });
+
+    it('finishes a failed clean-up of a committed swap on retry, the other way a released fence stays open', async () => {
+      const { seeded, fake } = await released('swapped', true);
+      expect(intents.RestoreIntentStore.getInstance().get(seeded.intentId)).toMatchObject({ phase: 'swapped', outcomeClass: 'cleanup_failed' });
+      const helper = answers();
+      const result = await overwrite.resolveOverwriteIntent(deps(fake, helper), { intentId: seeded.intentId, action: 'retry' });
+      expect(result.outcome).toBe('committed');
+      expect(swapSteps(helper)).toEqual(['status', 'cleanup']);
+    });
+
+    it('does not roll back a restore parked before the swap whose fence was released', async () => {
+      const { seeded, fake, before } = await released('fenced');
+      const helper = answers();
+      const result = await overwrite.resolveOverwriteIntent(deps(fake, helper), { intentId: seeded.intentId, action: 'retry' });
+      expect(result.outcome).toBe('unknown');
+      expect(swapSteps(helper)).toEqual([]);
+      expect(fake.calls.slice(before)).toEqual([]);
+    });
+
+    it('is left alone by the start of Sencho too: no rollback under workloads the operator started', async () => {
+      // Boot visits the phases that are not `completion_unknown`: here the one a rollback
+      // that released its fence left behind when the process died before it settled.
+      const { seeded, fake, before } = await released('fenced');
+      const helper = answers();
+      const outcome = await overwrite.reconcileOverwriteIntentsAtStartup(deps(fake, helper));
+      expect(outcome).toEqual({ rolledBack: 0, committed: 0, unknown: 1 });
+      expect(swapSteps(helper)).toEqual([]);
+      expect(fake.calls.slice(before)).toEqual([]);
+      expect(intents.RestoreIntentStore.getInstance().get(seeded.intentId)?.phase).toBe('fenced');
+    });
+  });
+
   // The helper removes the work directory before its closing syncs, so a rollback
   // or a clean-up can fail with the volume already whole and the journal gone.
   describe('a step that failed after it removed the work directory', () => {
@@ -638,8 +744,8 @@ describe('the operation of a reconciled overwrite', () => {
       return { seeded, fake };
     };
 
-    it('settles a retry after release_fence as rolled back, and frees the operation and its lock', async () => {
-      const { seeded, fake } = await parked('swapping', true);
+    it('settles a retry of a parked restore as rolled back, and frees the operation and its lock', async () => {
+      const { seeded, fake } = await parked('swapping', false);
       const result = await overwrite.resolveOverwriteIntent(deps(fake, scriptedHelper({ swapAnswers: [
         { action: 'status', exitCode: 0, status: 'planned', once: true },
         { action: 'rollback', exitCode: 1, stderr: 'sync failed' },
@@ -654,13 +760,14 @@ describe('the operation of a reconciled overwrite', () => {
 
     it('settles a retry after release_fence as committed when the clean-up failed after the removal', async () => {
       const { seeded, fake } = await parked('swapping', true);
-      const result = await overwrite.resolveOverwriteIntent(deps(fake, scriptedHelper({ swapAnswers: [
+      const helper = scriptedHelper({ swapAnswers: [
         { action: 'status', exitCode: 0, status: 'swapped', once: true },
-        { action: 'commit', exitCode: 0, status: 'swapped' },
         { action: 'cleanup', exitCode: 1, stderr: 'sync failed' },
         { action: 'status', exitCode: 0, status: 'absent' },
-      ] })), { intentId: seeded.intentId, action: 'retry' });
+      ] });
+      const result = await overwrite.resolveOverwriteIntent(deps(fake, helper), { intentId: seeded.intentId, action: 'retry' });
       expect(result.outcome).toBe('committed');
+      expect(helper.runs.filter((run) => run.profile === 'swap').map((run) => run.cmd[2])).not.toContain('commit');
       settle(seeded.intentId);
       expect(operation(seeded.operationId)).toMatchObject({ state: 'succeeded' });
       expect(lock(seeded.storageKey)).toBeNull();
@@ -698,7 +805,7 @@ describe('the operation of a reconciled overwrite', () => {
     });
 
     it('keeps the failure when the journal is still there', async () => {
-      const { seeded, fake } = await parked('swapping', true);
+      const { seeded, fake } = await parked('swapping', false);
       const result = await overwrite.resolveOverwriteIntent(deps(fake, scriptedHelper({ swapAnswers: [
         { action: 'status', exitCode: 0, status: 'planned' },
         { action: 'rollback', exitCode: 1, stderr: 'rename failed' },
@@ -711,7 +818,7 @@ describe('the operation of a reconciled overwrite', () => {
     });
 
     it('keeps the failure when the status cannot be read either', async () => {
-      const { seeded, fake } = await parked('swapping', true);
+      const { seeded, fake } = await parked('swapping', false);
       const result = await overwrite.resolveOverwriteIntent(deps(fake, scriptedHelper({ swapAnswers: [
         { action: 'status', exitCode: 0, status: 'planned', once: true },
         { action: 'rollback', exitCode: 1, stderr: 'helper died' },

@@ -6195,7 +6195,9 @@ paths:
         only one capture, verification, restore, or repository replacement runs at a time on it. A node with no
         repository answers `503 capability_unavailable` with reason `repository_not_initialized`.
         The capture runs in the background and is followed by a repository-wide metadata
-        check before the operation ends.
+        check before the operation ends. A volume whose overwrite restore has not settled,
+        or whose fence is still held, answers `409 lock_held`: the restore's hidden working
+        copy is still inside the volume and a point would include it.
         Only a Full Admin API token may call it; any other scope is refused with `403 SCOPE_DENIED`.
       parameters:
         - $ref: "#/components/parameters/nodeId"
@@ -6560,7 +6562,9 @@ paths:
         reconciliation again and is safe to repeat; it removes a leftover staging volume,
         finishes a clean-up, and releases a fence that could not be released. When it proves the
         restore, the restore's operation settles and releases the volume's storage lock, as startup does;
-        so does `release_fence` when the journal proves the swap committed.
+        so does `release_fence` when the journal proves the swap committed. Once the fence is
+        released the workloads may be running, so `retry` then only removes the hidden directory
+        of a swap the journal proves committed, and otherwise answers `unknown` and moves nothing.
         `release_fence`
         accepts the volume as it now is: it restores every recorded restart policy and starts
         nothing. When the journal proves the swap committed, it removes the hidden directory

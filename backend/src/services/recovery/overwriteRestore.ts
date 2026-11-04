@@ -1370,7 +1370,17 @@ export async function reconcileOverwriteIntentsAtStartup(
   return result;
 }
 
-/** One intent. Idempotent: the resolve route re-runs exactly this. */
+/**
+ * One intent. Idempotent: the resolve route re-runs exactly this.
+ *
+ * Once the fence is `released` the workloads may be running again (the operator
+ * starts them after `release_fence`, and boot runs with whatever they started), so
+ * no step here may move data under them: a rollback would take their writes back
+ * out of the volume, and a commit would apply the root metadata over theirs. What
+ * the journal already proves committed is still finished (the originals are
+ * removed, which no workload can see), and everything else answers `unknown` and
+ * leaves the intent as it is.
+ */
 export async function reconcileOverwriteIntent(
   deps: OverwriteDeps,
   intent: RestoreIntentRecord,
@@ -1402,7 +1412,10 @@ export async function reconcileOverwriteIntent(
     return settleProven(deps, intent, 'rolled_back', released, now);
   }
 
+  const workloadsMayRun = intent.fenceState === 'released';
+
   if (FENCED_PHASES.includes(intent.phase)) {
+    if (workloadsMayRun) return refuseUnderWorkloads(intent, 'roll back');
     // The workloads are stopped and nothing was renamed yet.
     const rollback = await runClosingSwapStep({
       runner: deps.runner(),
@@ -1452,13 +1465,19 @@ export async function reconcileOverwriteIntent(
     // is the only direction that cannot lose them.
     // The commit is idempotent, so it finishes a `metadata_pending` journal by
     // applying the root metadata and writing the marker.
-    const commit = await runSwapStep({
-      runner: deps.runner(),
-      operationId: `overwrite-reconcile-${intent.id}`,
-      volumeName,
-      intentId: intent.id,
-      action: 'commit',
-    });
+    // A `swapped` journal under a released fence has its root metadata applied
+    // already, and applying it again would write over whatever a running workload
+    // set since; a `metadata_pending` one cannot be finished without that write.
+    if (workloadsMayRun && swapStatus === 'metadata_pending') return refuseUnderWorkloads(intent, 'finish committing');
+    const commit = workloadsMayRun
+      ? { ok: true }
+      : await runSwapStep({
+        runner: deps.runner(),
+        operationId: `overwrite-reconcile-${intent.id}`,
+        volumeName,
+        intentId: intent.id,
+        action: 'commit',
+      });
     if (!commit.ok) {
       markUnknown(deps, intent, 'integrity_mismatch', now);
       return 'unknown';
@@ -1493,6 +1512,7 @@ export async function reconcileOverwriteIntent(
   }
 
   // The journal says the swap did not commit. Roll the originals back.
+  if (workloadsMayRun) return refuseUnderWorkloads(intent, 'roll back');
   const rollback = await runClosingSwapStep({
     runner: deps.runner(),
     operationId: `overwrite-reconcile-${intent.id}`,
@@ -1506,6 +1526,16 @@ export async function reconcileOverwriteIntent(
   }
   const released = await releaseFence(deps, intent.id, true);
   return settleProven(deps, intent, 'rolled_back', released, now);
+}
+
+/** A step that would move data refuses when the workloads may be running: the intent stays as it is. */
+function refuseUnderWorkloads(intent: RestoreIntentRecord, step: string): 'unknown' {
+  console.warn(
+    '[Recovery] Restore %s will not %s: its fence is released, so its workloads may be running. Restore again from a point to replace the volume.',
+    intent.id,
+    step,
+  );
+  return 'unknown';
 }
 
 /**
@@ -1596,7 +1626,8 @@ export type ResolveAction = 'retry' | 'release_fence';
 /**
  * The operator's answer to an overwrite that did not settle.
  *
- * `retry` re-runs the reconciler, which is idempotent. `release_fence` is the
+ * `retry` re-runs the reconciler, which is idempotent, and after `release_fence`
+ * only finishes what the journal already proves committed. `release_fence` is the
  * explicit acceptance of the volume as it now is: it restores the recorded
  * restart policies, starts nothing, and leaves the intent `completion_unknown`
  * unless the journal proves the data committed.

@@ -537,17 +537,30 @@ export class RecoveryEngineService {
         { scope: 'storage', resourceKey: observed.storageKey },
         { scope: 'repository', resourceKey: repository.id },
       ],
-      (operation) => this.points.begin({
-        kind: 'root',
-        storageId: observed.id,
-        expectedGenerationToken: generationToken,
-        repositoryId: repository.id,
-        trigger: 'manual',
-        actor: input.actor,
-        sourceOperationId: operation.id,
-        sourceNodeKey: ownerNodeKey,
-        engineId: RESTIC_ENGINE_ID,
-      }),
+      (operation) => {
+        // An overwrite that has not settled, or whose fence is still held, may have
+        // its hidden work directory (a full copy of the replaced data, and the
+        // journal) in this volume, and a capture would take it into the point. Its
+        // storage lock is not enough: a restore that ended `partial` has released
+        // it. This runs inside the admission, so a replay of an earlier request is
+        // answered before it and the check cannot race a restore being admitted.
+        if (RestoreFenceStore.getInstance().liveIntentForVolume(input.volumeName)) {
+          throw new RecoveryError('lock_held', {
+            detail: 'A restore of this volume has not finished, and its working copy is still in the volume. Resolve the restore, then capture again.',
+          });
+        }
+        return this.points.begin({
+          kind: 'root',
+          storageId: observed.id,
+          expectedGenerationToken: generationToken,
+          repositoryId: repository.id,
+          trigger: 'manual',
+          actor: input.actor,
+          sourceOperationId: operation.id,
+          sourceNodeKey: ownerNodeKey,
+          engineId: RESTIC_ENGINE_ID,
+        });
+      },
     );
     if (started.replayed || !started.setup) return { operation: started.operation, replayed: true };
 
