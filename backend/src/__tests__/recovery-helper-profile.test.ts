@@ -103,7 +103,22 @@ describe('recovery helper profiles', () => {
     // the work directory afterwards, so it needs the same ownership override the
     // restore has plus DAC_OVERRIDE. It is the widest profile, and it is confined
     // to one application volume with no repository mount and no network.
-    expect(HELPER_PROFILES.swap.capAdd).toEqual(['CHOWN', 'FOWNER', 'DAC_OVERRIDE', 'DAC_READ_SEARCH']);
+    expect(HELPER_PROFILES.swap.capAdd).toEqual(['CHOWN', 'FOWNER', 'FSETID', 'DAC_OVERRIDE', 'DAC_READ_SEARCH']);
+  });
+
+  // The kernel clears the setgid bit on a chmod by a process that is not in the
+  // file's group and lacks FSETID. Every profile that writes mode bits onto a
+  // volume (the restore, the in-volume copy and the swap's root metadata) has to
+  // carry it, so a restored setgid directory or root keeps group inheritance.
+  it('gives every profile that writes into a volume FSETID, so a setgid mode survives', () => {
+    const writers = Object.entries(HELPER_PROFILES)
+      .filter(([, profile]) => profile.target === 'read_write')
+      .map(([name]) => name)
+      .sort();
+    expect(writers).toEqual(['materialize', 'restore', 'swap']);
+    for (const name of writers) {
+      expect(HELPER_PROFILES[name as keyof typeof HELPER_PROFILES].capAdd, name).toContain('FSETID');
+    }
   });
 
   it('gives the materialize profile the restore profile\'s shape: the repository read-only and one writable target', () => {
@@ -122,7 +137,7 @@ describe('recovery helper profiles', () => {
   it('gives the swap profile exactly one writable mount and no repository', () => {
     expect(HELPER_PROFILES.swap).toEqual({
       user: '0:0',
-      capAdd: ['CHOWN', 'FOWNER', 'DAC_OVERRIDE', 'DAC_READ_SEARCH'],
+      capAdd: ['CHOWN', 'FOWNER', 'FSETID', 'DAC_OVERRIDE', 'DAC_READ_SEARCH'],
       repositoryReadOnly: true,
       needsRepository: false,
       source: null,

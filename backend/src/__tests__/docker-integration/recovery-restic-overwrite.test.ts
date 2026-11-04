@@ -339,23 +339,64 @@ describeIf('staged overwrite against real Docker', () => {
     }
   }, 300_000);
 
+  // The in-volume copy of an overwrite, as the engine runs it.
+  async function materializeInto(
+    target: string,
+    point: { snapshotId: string; token: string },
+    intentId: string,
+    operationId: string,
+  ): Promise<void> {
+    const materialize = await engine().restore(
+      {
+        id: intentId,
+        operationId,
+        pointId: 'integration-point',
+        repositoryId,
+        snapshotId: point.snapshotId,
+        target: {
+          mode: 'staged_overwrite',
+          storageId: 'storage',
+          expectedGenerationToken: point.token,
+          workDir: swapIncomingDir(intentId),
+          volumeName: target,
+        },
+        pathScope: null,
+        phase: 'materializing',
+        actor: 'integration',
+        createdAt: Date.now(),
+      },
+      context(operationId),
+    );
+    expect(materialize.ok).toBe(true);
+    if (!materialize.ok) return;
+    expect(materialize.evidence.verified).toBe(true);
+  }
+
   // The layout of the volumes this feature exists for: the root belongs to the
   // application user and is closed to everyone else, so root without
-  // DAC_OVERRIDE cannot create the work directory in it. Both cases failed the
-  // copy before the `materialize` profile existed.
+  // DAC_OVERRIDE cannot create the work directory in it. The first two failed
+  // the copy before the `materialize` profile existed. The last two capture a
+  // root with the setgid bit (and the sticky bit) for a group that is not the
+  // helper's own group 0, which the kernel strips from the chmod that applies the
+  // root's mode unless the swap helper holds FSETID; a root-owned root with group
+  // 0 keeps the bit either way, which is why it never showed.
   for (const live of [
-    { name: 'postgres-style 999:999 0700', chown: '999:999', mode: '700' },
-    { name: 'mariadb-style 77:77 2750', chown: '77:77', mode: '2750' },
+    { name: 'postgres-style 999:999 0700', chown: '999:999', mode: '700', captured: null },
+    { name: 'mariadb-style 77:77 2750', chown: '77:77', mode: '2750', captured: null },
+    { name: 'a setgid captured root 999:999 2750 over a postgres-style 70:70 0700 root', chown: '70:70', mode: '700', captured: { chown: '999:999', mode: '2750' } },
+    { name: 'a setgid and sticky captured root 70:70 3770 over a root-owned root', chown: '0:0', mode: '755', captured: { chown: '70:70', mode: '3770' } },
   ]) {
-    it(`overwrites a volume whose root is owned by an application user (${live.name}) and keeps the captured root mtime`, async () => {
+    it(`overwrites a volume whose root is owned by an application user (${live.name}) and keeps the captured root mtime, owner and mode`, async () => {
       const source = volumeName('sencho-it-own-src');
       const target = volumeName('sencho-it-own-dst');
       const intentId = randomUUID();
       try {
         createVolume(source);
         populateSource(source);
+        if (live.captured) runInVolume(source, `chown ${live.captured.chown} /data && chmod ${live.captured.mode} /data`);
         runInVolume(source, 'touch -d "2021-03-04 05:06:07" /data');
         const before = runInVolume(source, MANIFEST_SCRIPT);
+        if (live.captured) expect(before).toContain(`ROOT ${live.captured.chown} ${live.captured.mode}\n`);
         const capturedMtime = runInVolume(source, 'stat -c %Y /data').trim();
         const point = await capture(source);
 
@@ -369,30 +410,7 @@ describeIf('staged overwrite against real Docker', () => {
           `chmod ${live.mode} /data`,
         ].join('\n'));
 
-        const materialize = await engine().restore(
-          {
-            id: intentId,
-            operationId: 'integration-owned-root',
-            pointId: 'integration-point',
-            repositoryId,
-            snapshotId: point.snapshotId,
-            target: {
-              mode: 'staged_overwrite',
-              storageId: 'storage',
-              expectedGenerationToken: point.token,
-              workDir: swapIncomingDir(intentId),
-              volumeName: target,
-            },
-            pathScope: null,
-            phase: 'materializing',
-            actor: 'integration',
-            createdAt: Date.now(),
-          },
-          context('integration-owned-root'),
-        );
-        expect(materialize.ok).toBe(true);
-        if (!materialize.ok) return;
-        expect(materialize.evidence.verified).toBe(true);
+        await materializeInto(target, point, intentId, 'integration-owned-root');
         expect(runInVolume(target, 'cat a.txt')).toBe('old');
 
         for (const action of ['prepare', 'commit', 'cleanup'] as const) {
@@ -415,6 +433,48 @@ describeIf('staged overwrite against real Docker', () => {
       }
     }, 300_000);
   }
+
+  // The rollback puts the original root's owner and mode back through the same
+  // chmod the commit uses, so a live root with the setgid bit and a group that is
+  // not the helper's loses it there too without FSETID.
+  it('rolls an uncommitted swap back to the live root with its owner and setgid mode', async () => {
+    const source = volumeName('sencho-it-rb-src');
+    const target = volumeName('sencho-it-rb-dst');
+    const intentId = randomUUID();
+    try {
+      createVolume(source);
+      populateSource(source);
+      const point = await capture(source);
+
+      createVolume(target);
+      runInVolume(target, [
+        'set -e',
+        'printf "old" > a.txt',
+        'mkdir -p conf',
+        'printf "old" > conf/keep',
+        'chown 77:77 /data a.txt conf conf/keep',
+        'chmod 2750 /data',
+      ].join('\n'));
+      const before = runInVolume(target, MANIFEST_SCRIPT);
+      expect(before).toContain('ROOT 77:77 2750\n');
+
+      await materializeInto(target, point, intentId, 'integration-rollback');
+      for (const action of ['prepare', 'rollback'] as const) {
+        const step = await runSwapStep({
+          runner: runner(),
+          operationId: 'integration-rollback',
+          volumeName: target,
+          intentId,
+          action,
+        });
+        expect(step.ok, action).toBe(true);
+      }
+      expect(runInVolume(target, MANIFEST_SCRIPT)).toBe(before);
+    } finally {
+      removeVolume(source);
+      removeVolume(target);
+    }
+  }, 300_000);
 
   it('fails the copy when repository data is missing, with the live volume unchanged', async () => {
     const source = volumeName('sencho-it-dmg-src');
