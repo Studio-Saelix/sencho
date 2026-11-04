@@ -27,14 +27,14 @@ export function redactSensitiveText(value: unknown): string {
     // (redis://:pw@host), and the password runs to the last `@` of the authority,
     // so a raw `@` inside it does not leave its tail behind. The userinfo may
     // also be a lone token with no colon (https://ghp_token@host), which is how a
-    // Git provider token is written, so that form is redacted too. Its token
-    // stops at a quote or a comma, which end a URL in JSON and YAML, so it cannot
-    // run on into the next value. The scheme length is bounded to keep a long
-    // dotted run from backtracking quadratically.
-    // An ssh URL's lone user (ssh://git@host) is a login name, not a secret, so
-    // only a password after it is redacted there.
+    // Git provider token is written, so that form is redacted too. Only that
+    // token form stops at a quote or a comma, which end a URL in JSON and YAML,
+    // so it cannot run on into the next value. The scheme length is bounded to
+    // keep a long dotted run from backtracking quadratically.
+    // A lone user after ssh:// or sftp:// (or a +ssh form such as git+ssh://) is
+    // a login name, not a secret, so only a password after it is redacted there.
     .replace(
-      /([a-z][a-z0-9+.-]{0,31}):\/\/(?:([^/\s:@]*:[^/\s]+)|[^/\s:@"',]+)@/gi,
+      /([a-z][a-z0-9+.-]{0,31}):\/\/(?:([^/\s:@]*:[^/\s]+)|[^/\s:"',]+)@/gi,
       (match, scheme: string, withPassword: string | undefined) =>
         withPassword === undefined && /(?:^|\+)(?:ssh|sftp)$/i.test(scheme) ? match : `${scheme}://[redacted]@`,
     )
@@ -48,19 +48,23 @@ export function redactSensitiveText(value: unknown): string {
     // which is the text a GitOps diagnosis is built from. The first keeps a URL
     // path that merely contains `a:b@c/` from being read as a credential.
     // The credential may also lead a protocol-relative reference (//user:pw@host/x),
-    // where the `//` is what precedes it (and no scheme's colon does, which
-    // keeps ssh://git@host/x intact), and its password may be absent
-    // (ghp_token@ghcr.io/x/app), as in a token-only registry login.
-    // The user takes unreserved characters, `%`, and the sub-delimiters that do
-    // not open a token (`'(),=` do, so a match starts after them), so a
-    // percent-encoded name (user%40corp) is caught. The password runs to the
+    // where the `//` is what precedes it. A `//` right after a `:` is a scheme
+    // separator, not a protocol-relative authority, so the `(?<!:)` skips it and
+    // the scheme rule above decides (which keeps ssh://git@host/x intact). Its
+    // password may be absent (ghp_token@ghcr.io/x/app), as in a token-only
+    // registry login.
+    // The user takes unreserved characters, `%`, a raw `@` (so a lone token that
+    // holds one leaves no tail), and the sub-delimiters that do not open a token
+    // (`'(),=` do, so a match starts after them), so a percent-encoded name
+    // (user%40corp) is caught. The password runs to the
     // last `@` before the first `/` that still leads to a host and a path, so a
     // raw `@` inside it leaves no tail behind. It stops at a quote, which ends an
     // image reference in YAML and JSON, so a digest pin before a quote keeps its
     // text, and it is capped at 1024 characters, which keeps the backtracking
     // over its `@` runs linear in the input.
     // A lone token is indistinguishable from an address with a path
-    // (ops@corp.example/team), which is redacted as well.
+    // (ops@corp.example/team) or a package reference (lodash@4.17.21/dist), which
+    // are redacted as well.
     // The narrowing has a known cost: a credential with no path after the host
     // is not caught, and neither is one whose password contains a `/`, a quote,
     // or more than 1024 characters (an unencoded quote or a kilobyte of password
@@ -70,7 +74,7 @@ export function redactSensitiveText(value: unknown): string {
     // password. That direction is deliberate: an over-redacted log line costs a
     // word, an under-redacted one leaks.
     .replace(
-      /(^|[\s"'=,(]|(?<!:)\/\/)[A-Za-z0-9._~%!$&*+;-]+(?::[^/\s"']{1,1024})?@(\[[^\]\s]+\]|[A-Za-z0-9.-]+(?::\d+)?\/)/g,
+      /(^|[\s"'=,()]|(?<!:)\/\/)[A-Za-z0-9._~%!$&*+;@-]+(?::[^/\s"']{1,1024})?@(\[[^\]\s]+\]|[A-Za-z0-9.-]+(?::\d+)?\/)/g,
       (_match, lead: string, host: string) => `${lead}[redacted]@${host}`,
     )
     // Keyword-led secrets, tolerating a JSON/YAML quoting boundary between the

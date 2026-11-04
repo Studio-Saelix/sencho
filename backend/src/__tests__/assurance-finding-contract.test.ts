@@ -361,6 +361,51 @@ describe('secret-safe serialization', () => {
     expect(serialized).toContain('[redacted]@host/app');
   });
 
+  // Rows an older build stored: the image sits raw in the message, the subject is
+  // the service, and nothing else quotes it. Shapes the text pass cannot see
+  // (no path after the host, a space or a slash in the password) are cleaned by
+  // the reference's own grammar.
+  it.each([
+    ['image-latest', 'a token login to an image with no path', 'ghp_SECRETL3@nginx:latest', 'SECRETL3'],
+    ['image-latest', 'a space in the password', 'u:SECRETL4 x@host/app:latest', 'SECRETL4'],
+    ['image-latest', 'a slash in the password', 'https://u:p/SECRETL5@host/app:latest', 'SECRETL5'],
+    ['image-latest', 'a host with no path', 'u:SECRETL6@host:latest', 'SECRETL6'],
+    ['sensitive-service-broad-exposure', 'a token login to an image with no path', 'ghp_SECRETL7@postgres:16', 'SECRETL7'],
+    ['sensitive-service-broad-exposure', 'a slash in the password', 'https://u:p/SECRETL8@host/postgres:16', 'SECRETL8'],
+  ])('redacts the %s message of a stored row from an older build holding %s', (ruleId, _variant, image, secret) => {
+    const message = ruleId === 'image-latest'
+      ? `Service "web" uses "${image}", which resolves to a moving latest tag. Deploys are not reproducible and can change under you.`
+      : `Service "web" looks like a database or admin service (${image}) and publishes 5432 on all interfaces. Broadly exposing it is a common source of compromise.`;
+    const row: PreflightFindingRow = {
+      id: 'row-older',
+      run_id: 'run-1',
+      rule_id: ruleId,
+      severity: 'medium',
+      title: 'Stored title',
+      message,
+      source_path: 'web',
+      remediation: 'Pin a specific version tag.',
+      service: 'web',
+      created_at: 1,
+      rule_version: null,
+      subject_kind: null,
+      subject_key: null,
+    };
+    const finding = serializeFinding(normalizeStoredFinding(row, 1, STACK));
+    expect(JSON.stringify(finding)).not.toContain(secret);
+    expect(finding.message).toContain('[redacted]@');
+    expect(finding.message).toMatch(ruleId === 'image-latest' ? /moving latest tag\. Deploys/ : /and publishes 5432 on all interfaces/);
+  });
+
+  it.each(['constructor', 'toString', '__proto__'])('reads a stored row whose rule id is %s without throwing', ruleId => {
+    const row: PreflightFindingRow = {
+      id: 'row-odd', run_id: 'run-1', rule_id: ruleId, severity: 'low', title: 't', message: 'm',
+      source_path: null, remediation: null, service: null, created_at: 1,
+      rule_version: null, subject_kind: null, subject_key: null,
+    };
+    expect(() => normalizeStoredFinding(row, 1, STACK)).not.toThrow();
+  });
+
   describe('a credential in every free-text field of a hit', () => {
     const URL = 'https://admin:hunter2pass@cfg.example.com/app.env';
     const credentialHit = () => hit('env-file-missing', {

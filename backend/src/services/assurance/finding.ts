@@ -26,7 +26,7 @@ import type {
   AliasRelation, AssuranceRule, AssuranceSeverity, CanonicalRuleId, EvidenceLayer, ExternalRuleId,
   FindingClass, FindingConfidence, IdentityBasis, SubjectKind,
 } from './types';
-import { redactSensitiveText } from '../../utils/safeLog';
+import { redactImageReference, redactSensitiveText } from '../../utils/safeLog';
 
 export interface AssuranceScope {
   nodeId: number;
@@ -327,6 +327,22 @@ function storedSubjectKind(value: string | null | undefined): SubjectKind | unde
 }
 
 /**
+ * The message shapes of the two rules that quote a Compose `image` value. A row
+ * an older build stored carries the image raw, in these templates, so the quoted
+ * value is cleaned by the reference's own grammar before the generic text pass,
+ * which cannot see a credential with a space, a slash, or no path after the host.
+ */
+const QUOTED_IMAGE_MESSAGES: ReadonlyMap<string, RegExp> = new Map([
+  ['image-latest', /^(Service "[^"]*" uses ")(.*)(", which resolves to a moving latest tag\..*)$/s],
+  ['sensitive-service-broad-exposure', /^(Service "[^"]*" looks like a database or admin service \()(.*)(\) and publishes .*)$/s],
+]);
+
+function redactQuotedImage(ruleId: string, message: string): string {
+  const match = QUOTED_IMAGE_MESSAGES.get(ruleId)?.exec(message);
+  return match === null || match === undefined ? message : `${match[1]}${redactImageReference(match[2])}${match[3]}`;
+}
+
+/**
  * Read a stored row through the contract. Legacy rows (no rule version, no
  * subject columns) get `basis: 'legacy'`; a stored rule id that is no longer in
  * the registry maps to the information class instead of throwing. Every free
@@ -364,7 +380,7 @@ export function normalizeStoredFinding(row: PreflightFindingRow, nodeId: number,
     ...(sourcePath !== undefined ? { location: { path: sourcePath } } : {}),
     evidence: storedEvidenceLayers(rule).map(layer => ({ layer, provider: 'compose-doctor' as const })),
     title: redactSensitiveText(row.title),
-    message: redactSensitiveText(row.message),
+    message: redactSensitiveText(redactQuotedImage(row.rule_id, row.message)),
     ...(row.remediation !== null ? { remediation: redactSensitiveText(row.remediation) } : {}),
     confidence: structured ? (rule?.defaultConfidence ?? 'unverified') : 'unverified',
     completeness: structured ? 'complete' : 'partial',

@@ -325,6 +325,31 @@ describe('preflight responses redact credentials in findings and acknowledgement
     expect(read.body.findings.find((f: { ruleId: string }) => f.ruleId === 'image-latest').acknowledged).toBe(true);
   });
 
+  // The anchor is quoted from the image's own grammar, so a password with a
+  // slash or a space is dropped from it. The reason is operator text and stays
+  // on the text rules, so it names no credential here.
+  it.each([
+    ['a slash in the password', 'https://u:p/SECRETA1w@host/app', 'SECRETA1w'],
+    ['a space in the password', 'user:SECRETA8 @host/app', 'SECRETA8'],
+  ])('redacts the image anchor of an until_image_change acknowledgement for %s', async (_variant, image, secret) => {
+    vi.restoreAllMocks();
+    stub(image);
+    fs.writeFileSync(path.join(stackDir, 'compose.yaml'), `services:\n  web:\n    image: "${image}"\n`);
+    const run = await request(app).post(`/api/stacks/${STACK}/preflight/run`).set('Authorization', authHeader);
+    const target = run.body.findings.find((f: { ruleId: string }) => f.ruleId === 'image-latest');
+    const created = await request(app)
+      .post(`/api/stacks/${STACK}/preflight/acknowledgements`)
+      .set('Authorization', authHeader)
+      .send({ ruleId: target.ruleId, service: target.service, reason: 'ok', expiryMode: 'until_image_change' });
+    expect(created.status).toBe(201);
+    expect(created.body.anchor_image_ref).toBe('[redacted]@host/app');
+
+    const list = await get(`/api/stacks/${STACK}/preflight/acknowledgements`);
+    const read = await get(`/api/stacks/${STACK}/preflight`);
+    for (const body of [created.body, list.body, read.body]) expect(JSON.stringify(body)).not.toContain(secret);
+    expect(list.body[0].active).toBe(true);
+  });
+
   it('keeps an ordinary note readable', async () => {
     const run = await request(app).post(`/api/stacks/${STACK}/preflight/run`).set('Authorization', authHeader);
     const target = run.body.findings.find((f: { ruleId: string }) => f.ruleId === 'image-latest');

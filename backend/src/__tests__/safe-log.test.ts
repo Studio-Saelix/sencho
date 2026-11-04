@@ -173,9 +173,32 @@ describe('redactSensitiveText', () => {
     expect(text).toContain(expected);
   });
 
-  it('keeps the next value when a token-only URL credential is redacted in JSON', () => {
+  // The lone-token form stops at a quote or a comma, so a URL with no userinfo
+  // does not take the next value's @ as its own.
+  it.each([
+    ['a JSON array', '["https://github.com","ops@corp.example"]'],
+    ['a comma list', 'a=https://github.com,b=ops@corp.example'],
+    ['a quoted pair', "'https://github.com' 'ops@corp.example'"],
+  ])('does not run a URL with no credential into the next value in %s', (_shape, input) => {
+    expect(redactSensitiveText(input)).toBe(input);
+  });
+
+  it('redacts a token-only URL credential in JSON without touching the next value', () => {
     expect(redactSensitiveText('["https://SECRETD6tok@host/app","ops@corp.example"]'))
       .toBe('["https://[redacted]@host/app","ops@corp.example"]');
+  });
+
+  it.each([
+    ['a URL', 'cloning http://SECRETD10a@SECRETD10b@host/x failed', 'SECRETD10', 'http://[redacted]@host/x failed'],
+    ['a scheme-less token', 'uses SECRETD11a@SECRETD11b@host/x:1', 'SECRETD11', 'uses [redacted]@host/x:1'],
+  ])('leaves no tail when a lone token holds a raw @ in %s', (_shape, input, secret, expected) => {
+    const text = redactSensitiveText(input);
+    expect(text).not.toContain(secret);
+    expect(text).toContain(expected);
+  });
+
+  it('redacts a credential that follows a closing parenthesis', () => {
+    expect(redactSensitiveText('see (a)user:SECRETD12@host/app')).toBe('see (a)[redacted]@host/app');
   });
 
   it.each([
@@ -212,6 +235,13 @@ describe('redactSensitiveText', () => {
     expect(out).not.toMatch(/SECRET|u:p/);
   });
 
+  // A digest shorter than any algorithm's output is not one, so the text before
+  // its @ is read as a credential: the safe direction, and the reference's
+  // repository is lost. Compose never prints one.
+  it('redactImageReference reads a digest shorter than 32 hex characters as a credential', () => {
+    expect(redactImageReference('app@sha256:abc')).toBe('[redacted]@sha256:abc');
+  });
+
   it('redactImageReference is idempotent', () => {
     const once = redactImageReference('ghp_SECRETD8@ghcr.io/x/app:latest');
     expect(redactImageReference(once)).toBe(once);
@@ -245,9 +275,25 @@ describe('redactSensitiveText', () => {
   });
 
   it.each([
+    'sftp://deploy@host:2222/srv',
+    'SSH://git@github.com/org/repo.git',
+    'ssh://git@10.0.0.5:2222/srv/repo.git',
+  ])('keeps the lone login user of %s', input => {
+    expect(redactSensitiveText(input)).toBe(input);
+  });
+
+  it('still redacts a lone token behind a scheme that merely ends in ssh', () => {
+    expect(redactSensitiveText('xssh://SECRETD13tok@host/x')).toBe('xssh://[redacted]@host/x');
+  });
+
+  it.each([
     ['a comma-led run of credential shapes', ',a:b@'.repeat(20_000)],
     ['a comma-led run with no @', ',a:'.repeat(33_000)],
     ['a long password with many @', `x:${'p@'.repeat(50_000)}`],
+    ['a comma-led run of lone tokens', ',a@'.repeat(50_000)],
+    ['a run of lone tokens after //', '//a@'.repeat(50_000)],
+    ['a long scheme userinfo with no @', `https://${'a!'.repeat(50_000)}`],
+    ['a long run of @ in one token', ` ${'a@'.repeat(100_000)}`],
   ])('redacts %s in bounded time', (_shape, input) => {
     const started = Date.now();
     redactSensitiveText(input);
