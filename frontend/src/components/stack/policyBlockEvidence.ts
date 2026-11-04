@@ -198,8 +198,8 @@ export function shortDigest(digest: string | null | undefined): string | null {
 }
 
 /**
- * The candidate evidence for one image, when the gate resolved the image an
- * update would install. Only a record that named a digest is worth showing: the
+ * The candidate evidence for one image, when the gate resolved the image the
+ * operation would pull. Only a record that named a digest is worth showing: the
  * point of the line is which new image will run.
  */
 export function candidateEvidenceFor(

@@ -55,7 +55,7 @@ This tutorial covers one block-on-deploy policy scoped to a single stack pattern
     This is a hard gate, not an advisory: the stack has no running containers and stays that way until the image clears the policy or an admin overrides it.
 
     <Note>
-      When the operation would pull a new image, which is any **Update** and a deploy of an image the node does not have yet, the row also shows the digest the tag points to in the registry, as `New image <digest> · <platform>`. That is the image that was evaluated for that platform; the tag above it is the one you authored.
+      When the operation would pull a new image, which is any **Update** and a deploy of an image the node does not have yet, the row also shows the digest the tag points to in the registry, as `New image <digest> · <platform>`. The scan ran on that image for that platform; the tag above it is the one you authored.
     </Note>
   </Step>
   <Step title="Bypass the block as admin">

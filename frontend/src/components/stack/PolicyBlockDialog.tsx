@@ -50,7 +50,7 @@ export interface PolicyBlockEvidenceRecord {
   digest?: string | null;
   /**
    * Which image the evidence describes. `candidate` is the registry image an
-   * update would install, resolved before anything is pulled; `installed` is the
+   * update or first deploy would pull, resolved before anything is pulled; `installed` is the
    * one already on the node. Absent on older payloads, which only ever described
    * the installed image.
    */
@@ -222,11 +222,11 @@ export function PolicyBlockDialog({
             </div>
           ) : (
             violations.map((v) => {
-              // The image this update would install, when the gate resolved it.
+              // The image this operation would pull, when the gate resolved it.
               // Shown under the authored tag so the operator can see which new
               // image was evaluated instead of the one already on the node.
               const candidate = candidateEvidenceFor(payload?.evidence, v.imageRef);
-              const candidateDigest = shortDigest(candidate?.digest ?? candidate?.platformDigest);
+              const candidateDigest = shortDigest(candidate?.digest);
               return (
               <div key={`${v.imageRef}-${v.scanId}`} className="px-4 py-3 flex items-center justify-between gap-4">
                 <div className="min-w-0">
