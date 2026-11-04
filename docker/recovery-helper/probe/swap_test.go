@@ -306,6 +306,37 @@ func TestCleanupSucceedsWhenTheRootMtimeCannotBeSet(t *testing.T) {
 	}
 }
 
+// The mtime is cosmetic and is set after the journal is gone, so a rollback that
+// cannot set it must still answer rolled back: failing it would leave a volume
+// with its originals back, no journal, and no answer a retry could ever prove.
+func TestRollbackSucceedsWhenTheRootMtimeCannotBeSet(t *testing.T) {
+	request := setupVolume(t,
+		map[string]string{"db.bin": "original"},
+		map[string]string{"db.bin": "restored"},
+	)
+	if _, err := swapPrepare(request); err != nil {
+		t.Fatalf("prepare: %v", err)
+	}
+	moveBudgetForTests = 1
+	if _, err := swapCommit(request); err != nil {
+		t.Fatalf("commit: %v", err)
+	}
+	moveBudgetForTests = -1
+	real := setTimes
+	defer func() { setTimes = real }()
+	setTimes = func(string, time.Time, time.Time) error { return errors.New("simulated failure") }
+	report, err := swapRollback(request)
+	if err != nil || report.Status != statusRolledBack {
+		t.Fatalf("rollback = %+v, %v; want rolled_back", report, err)
+	}
+	if _, err := os.Stat(filepath.Join(request.Root, workDirPrefix+testIntent)); !os.IsNotExist(err) {
+		t.Fatalf("work directory survived: %v", err)
+	}
+	if got := readFile(t, filepath.Join(request.Root, "db.bin")); got != "original" {
+		t.Fatalf("db.bin = %q, want the original bytes", got)
+	}
+}
+
 // interruptAt stops a commit after `budget` renames, then resumes it or rolls
 // it back. Every resume must end in exactly one of the two proven states.
 func TestInterruptedCommitResumesInBothDirections(t *testing.T) {

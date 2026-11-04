@@ -600,6 +600,114 @@ describe('the operation of a reconciled overwrite', () => {
     expect(lock(seeded.storageKey)).toBeNull();
   });
 
+  it('refuses another restore with lock_held while the unproven fence is held, and with lock_stale once it is released', async () => {
+    const { seeded, fake } = await seed({ phase: 'swapping', createdAt: new Date().toISOString(), fenced: true });
+    await overwrite.reconcileOverwriteIntentsAtStartup(deps(fake, scriptedHelper({
+      swapAnswers: [{ action: 'status', exitCode: 0, status: 'inconsistent' }],
+    })));
+    const store = fence.RestoreFenceStore.getInstance();
+    const second = randomUUID();
+    recoveryDbModule.recoveryDb().prepare(`INSERT INTO recovery_operations (id, idempotency_key, kind, storage_id, point_id, actor, transport, state, process_epoch, created_at, updated_at)
+      SELECT ?, ?, 'restore', storage_id, point_id, 'admin', 'local', 'queued', 'new', 3, 3 FROM recovery_operations WHERE id = ?`)
+      .run(second, randomUUID(), seeded.operationId);
+    // Admission answers `lock_held` for a volume with a live fence, before it asks for the lock.
+    expect(store.liveIntentForVolume(VOLUME)).toBeTruthy();
+
+    await overwrite.resolveOverwriteIntent(deps(fake, scriptedHelper({ swapAnswers: [{ action: 'status', exitCode: 1 }] })), {
+      intentId: seeded.intentId, action: 'release_fence',
+    });
+    expect(store.liveIntentForVolume(VOLUME)).toBeFalsy();
+    expect(() => operationStore.RecoveryOperationStore.getInstance().acquireLock('storage', seeded.storageKey, second))
+      .toThrowError(expect.objectContaining({ errorClass: 'lock_stale' }));
+  });
+
+  // The helper removes the work directory before its closing syncs, so a rollback
+  // or a clean-up can fail with the volume already whole and the journal gone.
+  describe('a step that failed after it removed the work directory', () => {
+    const parked = async (phase: 'swapping' | 'swapped' | 'fenced', release: boolean) => {
+      const { seeded, fake } = await seed({ phase, createdAt: new Date().toISOString(), fenced: true });
+      intents.RestoreIntentStore.getInstance().advance(seeded.intentId, 'completion_unknown', { outcomeClass: 'identity_unknown' });
+      if (release) {
+        await overwrite.resolveOverwriteIntent(deps(fake, scriptedHelper({ swapAnswers: [{ action: 'status', exitCode: 1 }] })), {
+          intentId: seeded.intentId, action: 'release_fence',
+        });
+        expect(intents.RestoreIntentStore.getInstance().get(seeded.intentId)).toMatchObject({
+          phase: 'completion_unknown', fenceState: 'released',
+        });
+      }
+      return { seeded, fake };
+    };
+
+    it('settles a retry after release_fence as rolled back, and frees the operation and its lock', async () => {
+      const { seeded, fake } = await parked('swapping', true);
+      const result = await overwrite.resolveOverwriteIntent(deps(fake, scriptedHelper({ swapAnswers: [
+        { action: 'status', exitCode: 0, status: 'planned', once: true },
+        { action: 'rollback', exitCode: 1, stderr: 'sync failed' },
+        { action: 'status', exitCode: 0, status: 'absent' },
+      ] })), { intentId: seeded.intentId, action: 'retry' });
+      expect(result.outcome).toBe('rolled_back');
+      expect(intents.RestoreIntentStore.getInstance().get(seeded.intentId)).toMatchObject({ phase: 'rolled_back', fenceState: 'released' });
+      settle(seeded.intentId);
+      expect(operation(seeded.operationId)).toMatchObject({ state: 'failed', errorClass: 'interrupted' });
+      expect(lock(seeded.storageKey)).toBeNull();
+    });
+
+    it('settles a retry after release_fence as committed when the clean-up failed after the removal', async () => {
+      const { seeded, fake } = await parked('swapping', true);
+      const result = await overwrite.resolveOverwriteIntent(deps(fake, scriptedHelper({ swapAnswers: [
+        { action: 'status', exitCode: 0, status: 'swapped', once: true },
+        { action: 'commit', exitCode: 0, status: 'swapped' },
+        { action: 'cleanup', exitCode: 1, stderr: 'sync failed' },
+        { action: 'status', exitCode: 0, status: 'absent' },
+      ] })), { intentId: seeded.intentId, action: 'retry' });
+      expect(result.outcome).toBe('committed');
+      settle(seeded.intentId);
+      expect(operation(seeded.operationId)).toMatchObject({ state: 'succeeded' });
+      expect(lock(seeded.storageKey)).toBeNull();
+    });
+
+    it('settles a restart that rolls back a fenced restore whose rollback failed after the removal', async () => {
+      const { seeded, fake } = await seed({ phase: 'fenced', createdAt: new Date().toISOString(), fenced: true });
+      const outcome = await overwrite.reconcileOverwriteIntentsAtStartup(deps(fake, scriptedHelper({ swapAnswers: [
+        { action: 'rollback', exitCode: 1, stderr: 'sync failed' },
+        { action: 'status', exitCode: 0, status: 'absent' },
+      ] })));
+      expect(outcome).toMatchObject({ rolledBack: 1, unknown: 0 });
+      expect(intents.RestoreIntentStore.getInstance().get(seeded.intentId)?.phase).toBe('rolled_back');
+    });
+
+    it('settles the rollback of a live pipeline that failed after the removal', async () => {
+      const { seeded, fake } = await seed({ phase: 'swapping', createdAt: new Date().toISOString(), fenced: true });
+      const outcome = await overwrite.rollbackIntent(deps(fake, scriptedHelper({ swapAnswers: [
+        { action: 'rollback', exitCode: 1, stderr: 'sync failed' },
+        { action: 'status', exitCode: 0, status: 'absent' },
+      ] })), seeded.intentId);
+      expect(outcome).toBe('rolled_back');
+    });
+
+    it('keeps the failure when the journal is still there', async () => {
+      const { seeded, fake } = await parked('swapping', true);
+      const result = await overwrite.resolveOverwriteIntent(deps(fake, scriptedHelper({ swapAnswers: [
+        { action: 'status', exitCode: 0, status: 'planned' },
+        { action: 'rollback', exitCode: 1, stderr: 'rename failed' },
+      ] })), { intentId: seeded.intentId, action: 'retry' });
+      expect(result.outcome).toBe('unknown');
+      expect(intents.RestoreIntentStore.getInstance().get(seeded.intentId)).toMatchObject({ phase: 'completion_unknown', outcomeClass: 'identity_unknown' });
+      settle(seeded.intentId);
+      expect(operation(seeded.operationId)).toMatchObject({ state: 'completion_unknown' });
+      expect(lock(seeded.storageKey)).toMatchObject({ staleSince: expect.any(Number) });
+    });
+
+    it('keeps the failure when the status cannot be read either', async () => {
+      const { seeded, fake } = await parked('swapping', true);
+      const result = await overwrite.resolveOverwriteIntent(deps(fake, scriptedHelper({ swapAnswers: [
+        { action: 'status', exitCode: 0, status: 'planned', once: true },
+        { action: 'rollback', exitCode: 1, stderr: 'helper died' },
+      ] })), { intentId: seeded.intentId, action: 'retry' });
+      expect(result.outcome).toBe('unknown');
+    });
+  });
+
   it('reports partial/cleanup_failed for a committed swap whose originals could not be removed', async () => {
     const { seeded, fake } = await seed({ phase: 'swapped', createdAt: new Date().toISOString(), fenced: true });
     await overwrite.resolveOverwriteIntent(deps(fake, scriptedHelper({ swapAnswers: [

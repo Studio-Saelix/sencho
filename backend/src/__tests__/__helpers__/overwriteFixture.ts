@@ -162,6 +162,8 @@ export function scriptedHelper(input: {
     aborted?: boolean;
     /** A raw first stdout line, such as the probe's `{"error": ...}` refusal. */
     stdoutLine?: string;
+    /** Answer one call, then fall through to the next answer for the action. */
+    once?: boolean;
   }>;
   dev?: number;
   ino?: number;
@@ -191,7 +193,9 @@ export function scriptedHelper(input: {
       }
       if (spec.profile === 'swap') {
         const action = spec.cmd[2] ?? '';
-        const answer = answers.find((item) => item.action === action) ?? { action, exitCode: 1, stderr: 'unscripted' };
+        const index = answers.findIndex((item) => item.action === action);
+        const answer = answers[index] ?? { action, exitCode: 1, stderr: 'unscripted' };
+        if (answer.once) answers.splice(index, 1);
         if (answer.stdoutLine !== undefined) spec.onStdoutLine?.(answer.stdoutLine);
         if (answer.status !== undefined) {
           const report: Record<string, unknown> = { status: answer.status, moved: 0 };

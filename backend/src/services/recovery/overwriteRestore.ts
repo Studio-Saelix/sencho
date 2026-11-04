@@ -29,7 +29,7 @@ import {
   probeVolumeReport,
   resolveVolumeDependents,
 } from './volumeSources';
-import { runSwapStep, swapIncomingDir, type SwapStatus } from './volumeSwap';
+import { runSwapStep, swapIncomingDir, type SwapRunResult, type SwapStatus } from './volumeSwap';
 import type { RecoveryHelperRunner } from './restic/helperRunner';
 import type { RecoveryOperationStore } from './operations';
 import type { RecoveryPointStore } from './recoveryPoints';
@@ -1148,6 +1148,25 @@ function markUnknown(
   deps.intents.advance(intent.id, 'completion_unknown', { outcomeClass }, now);
 }
 
+/**
+ * Run `rollback` or `cleanup`, the two steps that end by removing the work
+ * directory and its journal. The helper removes it before its closing syncs, so
+ * a step that reports a failure may already have done all of its work, and with
+ * the journal gone nothing could ever prove the volume again: an intent parked
+ * `completion_unknown` would read an absent journal as unproven on every retry.
+ * An absent journal after a failed step is that step having finished, so it is
+ * taken as done. Any other answer keeps the failure.
+ */
+async function runClosingSwapStep(
+  input: Parameters<typeof runSwapStep>[0] & { action: 'rollback' | 'cleanup' },
+): Promise<SwapRunResult> {
+  const result = await runSwapStep(input);
+  if (result.ok) return result;
+  const after = await runSwapStep({ ...input, action: 'status' });
+  if (after.ok && after.report?.status === 'absent') return { ...result, ok: true };
+  return result;
+}
+
 /** `cleanup_pending`: rolled back, but the staging volume is still on disk, so the intent stays open. */
 type RollbackOutcome = 'rolled_back' | 'unknown' | 'cleanup_pending';
 
@@ -1161,7 +1180,7 @@ export async function rollbackIntent(deps: OverwriteDeps, intentId: string): Pro
     || intent.phase === 'swapping'
     || intent.phase === 'swapped';
   if (swapMayHaveRun) {
-    const swap = await runSwapStep({
+    const swap = await runClosingSwapStep({
       runner: deps.runner(),
       operationId: `overwrite-rollback-${intentId}`,
       volumeName: intent.targetVolume,
@@ -1377,7 +1396,7 @@ export async function reconcileOverwriteIntent(
 
   if (FENCED_PHASES.includes(intent.phase)) {
     // The workloads are stopped and nothing was renamed yet.
-    const rollback = await runSwapStep({
+    const rollback = await runClosingSwapStep({
       runner: deps.runner(),
       operationId: `overwrite-reconcile-${intent.id}`,
       volumeName,
@@ -1437,7 +1456,7 @@ export async function reconcileOverwriteIntent(
       return 'unknown';
     }
     if (intent.phase === 'swapping') deps.intents.advance(intent.id, 'swapped', {}, now);
-    const cleaned = await runSwapStep({
+    const cleaned = await runClosingSwapStep({
       runner: deps.runner(),
       operationId: `overwrite-reconcile-${intent.id}`,
       volumeName,
@@ -1466,7 +1485,7 @@ export async function reconcileOverwriteIntent(
   }
 
   // The journal says the swap did not commit. Roll the originals back.
-  const rollback = await runSwapStep({
+  const rollback = await runClosingSwapStep({
     runner: deps.runner(),
     operationId: `overwrite-reconcile-${intent.id}`,
     volumeName,

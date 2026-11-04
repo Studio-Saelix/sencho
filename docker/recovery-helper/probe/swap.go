@@ -165,7 +165,7 @@ func paths(request swapRequest) (workDir, incomingRoot, originalDir, planPath st
 // what a crash during clean-up looks like.
 var removeAll = os.RemoveAll
 
-// setTimes is a seam for the same reason, for the last step of a clean-up.
+// setTimes is a seam for the same reason, for the last step of a clean-up or a rollback.
 var setTimes = os.Chtimes
 
 // removeWorkDir deletes a committed swap's work directory with the journal last.
@@ -678,10 +678,14 @@ func swapRollback(request swapRequest) (swapReport, error) {
 		return swapReport{}, err
 	}
 	// The renames and the removal above moved the root's mtime, so it is set last.
+	// The journal is gone by now, so a failure here cannot be retried, and it is
+	// not worth failing a rolled back volume for: it is reported on stderr and only
+	// the mtime is lost, as in `cleanup`. An error would leave the caller with no
+	// journal and no answer.
 	if plan.OriginalRoot != nil {
 		mtime := time.Unix(0, plan.OriginalRoot.Mtime)
-		if err := os.Chtimes(request.Root, mtime, mtime); err != nil {
-			return swapReport{}, err
+		if err := setTimes(request.Root, mtime, mtime); err != nil {
+			fmt.Fprintf(os.Stderr, "warning: the root modification time was not restored: %v\n", err)
 		}
 	}
 	return swapReport{Status: statusRolledBack, Originals: plan.Originals, Incoming: plan.Incoming}, nil
