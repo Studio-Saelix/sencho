@@ -46,7 +46,9 @@ export function redactSensitiveText(value: unknown): string {
     // text, and it is capped at 1024 characters, which keeps the backtracking
     // over its `@` runs linear in the input.
     // The narrowing has a known cost: a credential with no path after the host
-    // is not caught, and neither is one whose password contains a `/`. The rule
+    // is not caught, and neither is one whose password contains a `/`, a quote,
+    // or more than 1024 characters (an unencoded quote or a kilobyte of password
+    // is not a credential an image reference carries). The rule
     // also over-matches text shaped like a time and a host, "10:30@host/a", or a
     // query pair, "a&b:c@d/e", which is indistinguishable from a user and
     // password. That direction is deliberate: an over-redacted log line costs a
