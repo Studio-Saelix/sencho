@@ -142,6 +142,11 @@ function describeTarget(target: string): string {
   return target;
 }
 
+/** A target with its platform variant, when one ref has several. */
+function describeEvidenceTarget(target: string, platform?: string | null): string {
+  return `${describeTarget(target)}${platform ? ` (${platform})` : ''}`;
+}
+
 /**
  * Identity of one evidence variant. A ref shared by services with different
  * `platform:` overrides has one record and one application per platform, so the
@@ -172,7 +177,7 @@ export function buildEvidenceLines(evidence: PolicyBlockPayload['evidence']): Ev
 
   for (const a of evidence.applications ?? []) {
     if (a.state === 'current') continue;
-    const who = a.target ? ` for ${describeTarget(a.target)}` : '';
+    const who = a.target ? ` for ${describeEvidenceTarget(a.target, a.platform)}` : '';
     lines.push({
       key: `app:${a.source}:${a.state}:${evidenceVariant(a.target, a.platform)}`,
       text: `${describeSource(a.source)}${who}: ${describeState(a.state, { target: a.target, rule: a.rule })}, ${describeOutcome(a.outcome)} by ${describeRule(a.rule)}.`,
@@ -193,7 +198,7 @@ export function buildEvidenceLines(evidence: PolicyBlockPayload['evidence']): Ev
     if (explained.has(`${r.source}:${r.state}:${evidenceVariant(r.target, r.platform)}`)) continue;
     lines.push({
       key: `rec:${r.source}:${r.state}:${evidenceVariant(r.target, r.platform)}`,
-      text: `${describeSource(r.source)} for ${describeTarget(r.target)}: ${describeState(r.state, { target: r.target, reason: r.reason })}.${r.reason ? ` ${sentence(r.reason)}` : ''}`,
+      text: `${describeSource(r.source)} for ${describeEvidenceTarget(r.target, r.platform)}: ${describeState(r.state, { target: r.target, reason: r.reason })}.${r.reason ? ` ${sentence(r.reason)}` : ''}`,
     });
   }
 

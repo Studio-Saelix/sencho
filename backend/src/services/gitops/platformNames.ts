@@ -41,12 +41,18 @@ export function canonicalPlatformLabel(label: string): string {
   return [os.trim().toLowerCase(), toOciArchitecture(architecture), ...rest].join('/');
 }
 
-/** Canonicalize a node's OS/architecture read into the same label vocabulary. */
+/**
+ * Canonicalize a node's OS/architecture read into the same label vocabulary.
+ * An optional variant is kept when one is supplied, because two children of the
+ * same OS and architecture (arm/v6 and arm/v7) are different images.
+ */
 export function canonicalNodePlatform(
-  platform: { os: string; architecture: string },
-): { os: string; architecture: string } {
+  platform: { os: string; architecture: string; variant?: string },
+): { os: string; architecture: string; variant?: string } {
+  const variant = typeof platform.variant === 'string' ? platform.variant.trim().toLowerCase() : '';
   return {
     os: platform.os.trim().toLowerCase(),
     architecture: toOciArchitecture(platform.architecture),
+    ...(variant ? { variant } : {}),
   };
 }

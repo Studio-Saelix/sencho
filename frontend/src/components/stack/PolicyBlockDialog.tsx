@@ -24,9 +24,10 @@ export interface PolicyBlockViolation {
   reasons: PolicyBlockReason[];
   scanId: number;
   /**
-   * The platform variant this row is about, when the gate resolved a registry
-   * candidate. One ref shared by services with different `platform:` overrides
-   * has one row per variant, so the row pairs with its own evidence record.
+   * The platform variant this row is about, when the gate resolved or tried to
+   * resolve a registry candidate. One ref shared by services with different
+   * `platform:` overrides has one row per variant, so the row pairs with its own
+   * evidence record.
    */
   platform?: string | null;
   /** Set when the gate blocked because the image could not be evaluated, which
@@ -233,10 +234,15 @@ export function PolicyBlockDialog({
               // The image this operation would pull, when the gate resolved it.
               // Shown under the authored tag so the operator can see which new
               // image was evaluated instead of the one already on the node.
-              const candidate = candidateEvidenceFor(payload?.evidence, v.imageRef, v.platform);
+              // An error row with no platform could not name a variant (an
+              // invalid or unknown override). Falling back to another variant's
+              // record would label it with an image it never evaluated.
+              const candidate = v.error && !v.platform
+                ? null
+                : candidateEvidenceFor(payload?.evidence, v.imageRef, v.platform);
               const candidateDigest = shortDigest(candidate?.digest);
               return (
-              <div key={`${v.imageRef}-${v.platform ?? ''}-${v.scanId}`} className="px-4 py-3 flex items-center justify-between gap-4">
+              <div key={`${v.imageRef}-${v.platform ?? ''}-${v.scanId}-${v.error ?? ''}`} className="px-4 py-3 flex items-center justify-between gap-4">
                 <div className="min-w-0">
                   <div className="font-mono text-sm truncate">{v.imageRef}</div>
                   {candidateDigest && (

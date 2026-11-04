@@ -144,8 +144,9 @@ export interface EvidenceRuleApplication {
     target?: string;
     /**
      * The platform variant of `target` this application is about, when the gate
-     * resolved a registry candidate. One ref can be evaluated at several
-     * platforms; without it two variants of one ref read as the same row.
+     * resolved or tried to resolve a registry candidate. One ref can be
+     * evaluated at several platforms; without it two variants of one ref read as
+     * the same row.
      */
     platform?: string | null;
 }

@@ -337,7 +337,8 @@ describe('buildEvidenceLines', () => {
 
   it('gives one ref a distinct evidence line per platform', () => {
     // One ref can have one record per platform variant; keying only on the
-    // source, state and target collapsed them into duplicate React keys.
+    // source, state and target collapsed them into duplicate React keys, and
+    // the text alone could not tell the variants apart.
     const lines = buildEvidenceLines({
       outcome: 'block',
       records: [
@@ -349,6 +350,28 @@ describe('buildEvidenceLines', () => {
     });
     expect(lines).toHaveLength(2);
     expect(new Set(lines.map((line) => line.key)).size).toBe(2);
+    expect(lines[0].text).toContain('app:latest (linux/amd64)');
+    expect(lines[1].text).toContain('app:latest (linux/arm64)');
+  });
+
+  it('keys applications per platform and does not let one variant suppress another', () => {
+    // Two unresolved variants produce applications with the same source, state
+    // and target. Target-only keys duplicated the React key and the explained
+    // set let the amd64 application hide the arm64 record.
+    const lines = buildEvidenceLines({
+      outcome: 'block',
+      records: [
+        { source: 'vulnerability_scan', state: 'unavailable', target: 'app:latest', platform: 'linux/amd64', reason: 'registry 503' },
+        { source: 'vulnerability_scan', state: 'unavailable', target: 'app:latest', platform: 'linux/arm64', reason: 'registry 503' },
+      ],
+      applications: [
+        { source: 'vulnerability_scan', state: 'unavailable', outcome: 'block', rule: 'security_scan_failure=block', target: 'app:latest', platform: 'linux/amd64' },
+      ],
+      summary: '',
+    });
+    expect(new Set(lines.map((line) => line.key)).size).toBe(lines.length);
+    // The amd64 application explains its own record; the arm64 record remains.
+    expect(lines.some((line) => line.text.includes('app:latest (linux/arm64)'))).toBe(true);
   });
 });
 

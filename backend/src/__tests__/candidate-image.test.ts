@@ -151,7 +151,14 @@ describe('effectiveServicePlatform', () => {
     expect(effectiveServicePlatform('linux', PLATFORM))
       .toEqual({ ok: true, platform: { os: 'linux', architecture: 'amd64' } });
     expect(effectiveServicePlatform('linux/arm64/v8', PLATFORM))
-      .toEqual({ ok: true, platform: { os: 'linux', architecture: 'arm64' } });
+      .toEqual({ ok: true, platform: { os: 'linux', architecture: 'arm64', variant: 'v8' } });
+  });
+
+  it('keeps a variant segment, because two variants are different children', () => {
+    expect(effectiveServicePlatform('linux/arm/v7', PLATFORM))
+      .toEqual({ ok: true, platform: { os: 'linux', architecture: 'arm', variant: 'v7' } });
+    expect(effectiveServicePlatform('linux/arm/v6', PLATFORM))
+      .not.toEqual(effectiveServicePlatform('linux/arm/v7', PLATFORM));
   });
 
   it('falls back to the node platform when the service declares none', () => {

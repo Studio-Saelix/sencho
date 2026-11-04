@@ -7,7 +7,12 @@ import { buildEffectiveServiceModel, type EffectiveServiceSpec } from '../effect
 import DockerController from '../DockerController';
 import { canonicalNodePlatform } from './platformNames';
 
-export type NodePlatform = { os: string; architecture: string };
+/**
+ * A platform label. `variant` is present only when an override names one (for
+ * example `linux/arm/v7`); a node read does not report a variant, and the
+ * registry resolver compares OS and architecture.
+ */
+export type NodePlatform = { os: string; architecture: string; variant?: string };
 
 export type EffectiveArtifactContext =
   | {
@@ -45,7 +50,8 @@ export async function readNodePlatform(nodeId: number): Promise<NodePlatform | n
 }
 
 export function platformLabelOf(platform: NodePlatform | null): string | null {
-  return platform ? `${platform.os}/${platform.architecture}` : null;
+  if (!platform) return null;
+  return `${platform.os}/${platform.architecture}${platform.variant ? `/${platform.variant}` : ''}`;
 }
 
 /** Render the stack on this node and read this node's Docker platform. */

@@ -1103,7 +1103,9 @@ class TrivyService {
      * Scan a single image for the pre-deploy policy gate.
      *
      * Reuses the 24h digest cache (useCache=true) so repeat deploys of a
-     * known-safe image do not pay full scan cost. Only runs the vulnerability
+     * known-safe image do not pay full scan cost. A caller turns it off for a
+     * multi-platform index, whose children share the persisted index digest and
+     * would otherwise answer for each other. Only runs the vulnerability
      * scanner (secrets/misconfig are irrelevant to the gate and add latency).
      * The scan is persisted as a normal row with triggered_by=deploy-preflight
      * so the history and compare views continue to work unchanged.
@@ -1118,7 +1120,7 @@ class TrivyService {
         imageRef: string,
         nodeId: number,
         stackName: string | null,
-        opts: { scanRef?: string; digest?: string | null } = {},
+        opts: { scanRef?: string; digest?: string | null; useCache?: boolean } = {},
     ): Promise<VulnerabilityScan> {
         return this.runScanAndPersist(
             imageRef,
@@ -1126,7 +1128,11 @@ class TrivyService {
             'deploy-preflight',
             stackName,
             {
-                useCache: true,
+                // A multi-platform ref stores one row per index digest, so two
+                // platform children would share a cache entry. The gate turns
+                // reuse off for that case rather than let one child's findings
+                // answer for the other.
+                useCache: opts.useCache ?? true,
                 scanners: ['vuln'],
                 cacheRule: 'database',
                 ...(opts.scanRef ? { scanRef: opts.scanRef } : {}),

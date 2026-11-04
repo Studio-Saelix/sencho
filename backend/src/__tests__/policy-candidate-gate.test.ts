@@ -584,7 +584,7 @@ describe('compose mode (a plain up)', () => {
       _nodeId: number,
       _ref: string,
       platform?: { os: string; architecture: string } | null,
-    ) => platform === undefined || platform?.architecture === 'arm64');
+    ) => platform == null || platform?.architecture === 'arm64');
     candidates.resolve.mockImplementation(async (_nodeId: number, _ref: string, platform: { architecture: string }) => (
       platform.architecture === 'amd64'
         ? {
@@ -632,7 +632,7 @@ describe('compose mode (a plain up)', () => {
       _nodeId: number,
       _ref: string,
       platform?: { os: string; architecture: string } | null,
-    ) => platform === undefined || platform?.architecture === 'arm64');
+    ) => platform == null || platform?.architecture === 'arm64');
     candidates.resolve.mockResolvedValue({
       ...CANDIDATE_RESOLUTION,
       scanRef: `registry.example.com/web@${OTHER_DIGEST}`,
@@ -656,7 +656,7 @@ describe('compose mode (a plain up)', () => {
       _nodeId: number,
       _ref: string,
       platform?: { os: string; architecture: string } | null,
-    ) => platform === undefined || platform?.architecture === 'arm64');
+    ) => platform == null || platform?.architecture === 'arm64');
     candidates.resolve.mockImplementation(async (_nodeId: number, _ref: string, platform: { architecture: string }) => ({
       ...CANDIDATE_RESOLUTION,
       scanRef: `registry.example.com/web@${OTHER_DIGEST}`,
@@ -713,6 +713,168 @@ describe('compose mode (a plain up)', () => {
     const candidateRecords = (result.evidence?.records ?? []).filter((r) => r.subject === 'candidate');
     expect(candidateRecords.map((r) => r.platform).sort()).toEqual(['linux/amd64', 'linux/arm64']);
     expect(candidateRecords.map((r) => r.platformDigest).sort()).toEqual([OTHER_DIGEST, PLATFORM_DIGEST].sort());
+    // The scan cache is keyed by the persisted digest, which is the shared
+    // index for both children. Reuse would answer the second child with the
+    // first child's findings.
+    expect(trivyStub.scanImagePreflight.mock.calls.map((call) => call[3])).toEqual([
+      expect.objectContaining({ useCache: false }),
+      expect.objectContaining({ useCache: false }),
+    ]);
+  });
+
+  it('distinguishes variants of one architecture when checking the local copy', async () => {
+    // linux/arm/v6 and linux/arm/v7 are different children of one index. A
+    // presence check on OS and architecture alone reads the v6 child as
+    // installed for a v7 service, and Compose fetches v7 behind the gate.
+    candidates.platform = { os: 'linux', architecture: 'arm64' };
+    candidates.localImageExists.mockImplementation(async (
+      _nodeId: number,
+      _ref: string,
+      platform?: { os: string; architecture: string; variant?: string } | null,
+    ) => platform == null
+      || (platform.architecture === 'arm' && platform.variant === 'v6'));
+    candidates.resolve.mockResolvedValue({
+      ...CANDIDATE_RESOLUTION,
+      scanRef: `registry.example.com/web@${OTHER_DIGEST}`,
+      platform: 'linux/arm',
+      platformDigest: OTHER_DIGEST,
+    });
+    modelWith([{ name: 'web', declaredImage: 'registry.example.com/web:latest', hasBuild: false, pullPolicy: null, platform: 'linux/arm/v7', expectedReplicas: 1, dependsOn: [], hasHealthcheck: false }]);
+
+    const result = await enforcePolicyPreDeploy('web', 1, { bypass: false, actor: 'u', imageSource: 'compose' });
+
+    expect(candidates.resolve).toHaveBeenCalledWith(
+      1, 'registry.example.com/web:latest', { os: 'linux', architecture: 'arm', variant: 'v7' },
+    );
+    expect(result.evaluatedCandidates).toHaveLength(1);
+    expect(result.pullServices).toEqual(['web']);
+  });
+
+  it('checks presence per platform on a registry update with a missing policy', async () => {
+    // The update's own `compose pull` fetches the service's platform child, so
+    // a ref present only as another child is still a candidate.
+    candidates.platform = { os: 'linux', architecture: 'arm64' };
+    candidates.localImageExists.mockImplementation(async (
+      _nodeId: number,
+      _ref: string,
+      platform?: { os: string; architecture: string } | null,
+    ) => platform == null || platform.architecture === 'arm64');
+    candidates.resolve.mockResolvedValue({
+      ...CANDIDATE_RESOLUTION,
+      scanRef: `registry.example.com/web@${OTHER_DIGEST}`,
+      platform: 'linux/amd64',
+      platformDigest: OTHER_DIGEST,
+    });
+    modelWith([{ name: 'web', declaredImage: 'registry.example.com/web:latest', hasBuild: false, pullPolicy: 'missing', platform: 'linux/amd64', expectedReplicas: 1, dependsOn: [], hasHealthcheck: false }]);
+
+    const result = await enforcePolicyPreDeploy('web', 1, { bypass: false, actor: 'u', imageSource: 'registry' });
+
+    expect(candidates.resolve).toHaveBeenCalledWith(
+      1, 'registry.example.com/web:latest', { os: 'linux', architecture: 'amd64' },
+    );
+    expect(result.evaluatedCandidates).toHaveLength(1);
+  });
+
+  it('keeps a missing-policy service installed when the local child matches its platform', async () => {
+    candidates.platform = { os: 'linux', architecture: 'arm64' };
+    candidates.localImageExists.mockImplementation(async (
+      _nodeId: number,
+      _ref: string,
+      platform?: { os: string; architecture: string } | null,
+    ) => platform == null || platform.architecture === 'arm64');
+    modelWith([{ name: 'web', declaredImage: 'registry.example.com/web:latest', hasBuild: false, pullPolicy: 'missing', platform: 'linux/arm64', expectedReplicas: 1, dependsOn: [], hasHealthcheck: false }]);
+
+    const result = await enforcePolicyPreDeploy('web', 1, { bypass: false, actor: 'u', imageSource: 'compose' });
+
+    expect(candidates.resolve).not.toHaveBeenCalled();
+    expect(result.evaluatedCandidates).toBeUndefined();
+    expect(result.evidence?.records[0]).toMatchObject({ subject: 'installed' });
+  });
+
+  it('treats an invalid override as unresolved under the default policy', async () => {
+    // The presence guard must not read an unreadable override as installed just
+    // because a local copy of the ref exists.
+    candidates.localImageExists.mockResolvedValue(true);
+    modelWith([{ name: 'web', declaredImage: 'registry.example.com/web:latest', hasBuild: false, pullPolicy: null, platform: 'linux/amd64/arm/v7/extra', expectedReplicas: 1, dependsOn: [], hasHealthcheck: false }]);
+
+    const result = await enforcePolicyPreDeploy('web', 1, { bypass: false, actor: 'u', imageSource: 'compose' });
+
+    expect(candidates.resolve).not.toHaveBeenCalled();
+    expect(result.ok).toBe(false);
+    expect(result.violations[0]).toMatchObject({
+      imageRef: 'registry.example.com/web:latest',
+      error: expect.stringContaining('platform'),
+    });
+    expect(result.violations[0].platform).toBeUndefined();
+    expect(result.evidence?.records[0]).toMatchObject({ subject: 'candidate', state: 'unknown' });
+    expect(result.evidence?.records[0].platform).toBeUndefined();
+  });
+
+  it('carries the platform on a resolution failure for a known variant', async () => {
+    candidates.platform = { os: 'linux', architecture: 'arm64' };
+    candidates.resolve.mockImplementation(async (_nodeId: number, _ref: string, platform: { architecture: string }) => (
+      platform.architecture === 'amd64'
+        ? { ...CANDIDATE_RESOLUTION, platform: 'linux/amd64', platformDigest: OTHER_DIGEST }
+        : {
+            kind: 'unresolved' as const,
+            ref: 'registry.example.com/web:latest',
+            state: 'unavailable' as const,
+            failureClass: 'registry_unavailable' as const,
+            reason: 'Registry error (503)',
+          }
+    ));
+    trivyStub.scanImagePreflight.mockResolvedValue(mkScan());
+    modelWith([
+      { name: 'web', declaredImage: 'registry.example.com/web:latest', hasBuild: false, pullPolicy: 'always', platform: 'linux/amd64', expectedReplicas: 1, dependsOn: [], hasHealthcheck: false },
+      { name: 'tools', declaredImage: 'registry.example.com/web:latest', hasBuild: false, pullPolicy: 'always', platform: 'linux/arm64', expectedReplicas: 1, dependsOn: [], hasHealthcheck: false },
+    ]);
+
+    const result = await enforcePolicyPreDeploy('web', 1, { bypass: false, actor: 'u', imageSource: 'compose' });
+
+    const unresolved = result.violations.find((v) => v.error);
+    expect(unresolved).toMatchObject({ platform: 'linux/arm64' });
+    expect(result.evidence?.records.find((r) => r.state === 'unavailable')).toMatchObject({
+      subject: 'candidate',
+      platform: 'linux/arm64',
+    });
+    expect(result.evidence?.applications.find((a) => a.state === 'unavailable')).toMatchObject({
+      platform: 'linux/arm64',
+    });
+  });
+
+  it('carries the platform on a scan failure for a known variant', async () => {
+    candidates.platform = { os: 'linux', architecture: 'arm64' };
+    candidates.resolve.mockImplementation(async (_nodeId: number, _ref: string, platform: { architecture: string }) => ({
+      ...CANDIDATE_RESOLUTION,
+      scanRef: `registry.example.com/web@${platform.architecture === 'amd64' ? OTHER_DIGEST : PLATFORM_DIGEST}`,
+      platform: `linux/${platform.architecture}`,
+      platformDigest: platform.architecture === 'amd64' ? OTHER_DIGEST : PLATFORM_DIGEST,
+    }));
+    trivyStub.scanImagePreflight.mockImplementation(async (
+      _ref: string,
+      _nodeId: number,
+      _stack: string,
+      opts?: { scanRef?: string },
+    ) => {
+      if (opts?.scanRef?.includes(OTHER_DIGEST)) throw new Error('trivy crashed');
+      return mkScan();
+    });
+    modelWith([
+      { name: 'web', declaredImage: 'registry.example.com/web:latest', hasBuild: false, pullPolicy: 'always', platform: 'linux/amd64', expectedReplicas: 1, dependsOn: [], hasHealthcheck: false },
+      { name: 'tools', declaredImage: 'registry.example.com/web:latest', hasBuild: false, pullPolicy: 'always', platform: 'linux/arm64', expectedReplicas: 1, dependsOn: [], hasHealthcheck: false },
+    ]);
+
+    const result = await enforcePolicyPreDeploy('web', 1, { bypass: false, actor: 'u', imageSource: 'compose' });
+
+    const failed = result.violations.find((v) => v.error);
+    expect(failed).toMatchObject({ platform: 'linux/amd64' });
+    expect(result.evidence?.records.find((r) => r.state === 'failed')).toMatchObject({
+      subject: 'candidate',
+      platform: 'linux/amd64',
+    });
+    expect(result.evidence?.applications.find((a) => a.state === 'failed')).toMatchObject({
+      platform: 'linux/amd64',
+    });
   });
 
   it('refuses a service platform override it cannot read instead of scanning the node child', async () => {

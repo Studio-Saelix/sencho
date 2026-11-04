@@ -194,8 +194,30 @@ describe('recording the database revision', () => {
       expect.objectContaining({
         scanRef: `registry.example.com/web@${DIGEST}`,
         digest: DIGEST,
+        useCache: true,
         cacheRule: 'database',
       }),
+    );
+  });
+
+  it('forwards an explicit cache bypass for a multi-platform index', async () => {
+    const scanImage = vi.spyOn(svc(), 'scanImage').mockResolvedValue({
+      imageRef: 'registry.example.com/web:latest',
+      imageDigest: DIGEST,
+      scannedAt: Date.now(),
+      totalVulnerabilities: 0, criticalCount: 0, highCount: 0, mediumCount: 0, lowCount: 0,
+      unknownCount: 0, fixableCount: 0, secretCount: 0, scannersUsed: 'vuln', highestSeverity: null,
+      vulnerabilities: [], secrets: [],
+      metadata: { os: null, trivyVersion: '0.50.0', scanDurationMs: 5 },
+    });
+    await svc().scanImagePreflight('registry.example.com/web:latest', 1, 'web', {
+      scanRef: `registry.example.com/web@${DIGEST}`,
+      digest: DIGEST,
+      useCache: false,
+    });
+    expect(scanImage).toHaveBeenCalledWith(
+      'registry.example.com/web:latest', 1,
+      expect.objectContaining({ useCache: false }),
     );
   });
 });

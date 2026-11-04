@@ -160,6 +160,10 @@ const PLATFORM_OS_NAMES: ReadonlySet<string> = new Set(['linux', 'windows', 'dar
  * runs. An absent or empty override falls back to the node platform. An override
  * this build cannot read is reported as invalid rather than silently falling
  * back, because the fallback is exactly the mismatch this exists to prevent.
+ *
+ * A third `variant` segment is kept rather than dropped: `linux/arm/v6` and
+ * `linux/arm/v7` are different children of one index, and treating them as the
+ * same platform would let the wrong local child read as installed.
  */
 export function effectiveServicePlatform(
   raw: string | null | undefined,
@@ -174,15 +178,15 @@ export function effectiveServicePlatform(
   // Compose accepts both `os[/arch[/variant]]` and a bare architecture. A lone
   // segment that names an operating system is the former with the node's
   // architecture, not an architecture called "linux".
-  const [os, architecture] = parts.length === 1
+  const [os, architecture, variant] = parts.length === 1
     ? (PLATFORM_OS_NAMES.has(parts[0].toLowerCase())
       ? [parts[0], nodePlatform?.architecture ?? '']
       : [nodePlatform?.os ?? 'linux', parts[0]])
-    : [parts[0], parts[1]];
+    : [parts[0], parts[1], parts[2]];
   if (!os || !architecture) {
     return { ok: false, reason: `the service platform "${value}" has no operating system or architecture` };
   }
-  const platform = canonicalNodePlatform({ os, architecture });
+  const platform = canonicalNodePlatform({ os, architecture, ...(variant ? { variant } : {}) });
   if (!platform.os || !platform.architecture) {
     return { ok: false, reason: `the service platform "${value}" has no operating system or architecture` };
   }
@@ -195,10 +199,12 @@ export function effectiveServicePlatform(
  *
  * The ref alone is not enough: a multi-arch ref can be present as another
  * platform's child, and Compose still fetches the child the service asks for.
- * Comparing the local image's own OS and architecture is what makes a present
- * foreign child count as absent. An image whose platform the daemon did not
- * report counts as absent too, the fail-closed reading, because the gate cannot
- * prove it is the child Compose will run.
+ * Comparing the local image's own OS, architecture and (when the override names
+ * one) variant is what makes a present foreign child count as absent. An image
+ * whose platform the daemon did not report counts as absent too, the fail-closed
+ * reading, because the gate cannot prove it is the child Compose will run. With
+ * no platform argument the older ref-level question is answered: whether any
+ * local copy exists.
  */
 export async function localImageExists(
   nodeId: number,
@@ -209,14 +215,20 @@ export async function localImageExists(
     const info = await DockerController.getInstance(nodeId).getDocker().getImage(ref).inspect() as {
       Os?: string;
       Architecture?: string;
+      Variant?: string;
     };
     if (!platform) return true;
     const local = canonicalNodePlatform({
       os: typeof info.Os === 'string' ? info.Os : '',
       architecture: typeof info.Architecture === 'string' ? info.Architecture : '',
+      variant: typeof info.Variant === 'string' ? info.Variant : '',
     });
     if (!local.os || !local.architecture) return false;
-    return local.os === platform.os && local.architecture === platform.architecture;
+    if (local.os !== platform.os || local.architecture !== platform.architecture) return false;
+    // A variant-bearing override can only be satisfied by the matching child. A
+    // local image that does not report a variant cannot prove it is that child.
+    if (platform.variant) return local.variant === platform.variant;
+    return true;
   } catch {
     return false;
   }

@@ -1,5 +1,5 @@
 import { describe, it, expect, vi } from 'vitest';
-import { render, screen } from '@testing-library/react';
+import { render, screen, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { SENCHO_NAVIGATE_EVENT } from '@/lib/events';
 import { PolicyBlockDialog, type PolicyBlockPayload } from '../PolicyBlockDialog';
@@ -582,8 +582,8 @@ describe('PolicyBlockDialog candidate image', () => {
     const multiPlatform: PolicyBlockPayload = {
       ...candidatePayload,
       violations: [
-        { ...candidatePayload.violations[0], platform: 'linux/amd64', scanId: 7 },
-        { ...candidatePayload.violations[0], platform: 'linux/arm64', scanId: 8 },
+        { ...candidatePayload.violations[0], platform: 'linux/amd64', scanId: 7, criticalCount: 1 },
+        { ...candidatePayload.violations[0], platform: 'linux/arm64', scanId: 8, criticalCount: 2 },
       ],
       evidence: {
         ...candidatePayload.evidence!,
@@ -594,8 +594,48 @@ describe('PolicyBlockDialog candidate image', () => {
       },
     };
     render(<PolicyBlockDialog open payload={multiPlatform} stackName="web" action="deploy" onOpenSettings={vi.fn(() => true)} canBypass={false} canEditSettings={false} bypassing={false} onClose={vi.fn()} onBypass={vi.fn()} />);
-    expect(screen.getByText(/New image 451eee8bedcb · linux\/amd64/)).toBeInTheDocument();
-    expect(screen.getByText(/New image 451eee8bedcb · linux\/arm64/)).toBeInTheDocument();
+    // Tie each label to its own row, so a zip-by-index or swapped pairing fails.
+    const amd64Row = screen.getByText(/1 critical/).parentElement?.parentElement as HTMLElement;
+    const arm64Row = screen.getByText(/2 critical/).parentElement?.parentElement as HTMLElement;
+    expect(within(amd64Row).getByText(/New image 451eee8bedcb · linux\/amd64/)).toBeInTheDocument();
+    expect(within(arm64Row).getByText(/New image 451eee8bedcb · linux\/arm64/)).toBeInTheDocument();
+  });
+
+  it('does not borrow another variant\'s image line for an unplatformed error row', () => {
+    // An invalid or unknown platform has no candidate record of its own. The
+    // fallback to the first record for the ref would label it with an image it
+    // never evaluated.
+    const mixed: PolicyBlockPayload = {
+      ...candidatePayload,
+      violations: [
+        { ...candidatePayload.violations[0], platform: 'linux/amd64', scanId: 7 },
+        {
+          imageRef: 'app:latest', severity: 'UNKNOWN', criticalCount: 0, highCount: 0, kevCount: 0, fixableCount: 0,
+          reasons: [], scanId: 0, error: 'The image could not be resolved because the service platform "linux/amd64/arm/v7/extra" is not a valid os/architecture label',
+        },
+      ],
+    };
+    render(<PolicyBlockDialog open payload={mixed} stackName="web" action="deploy" onOpenSettings={vi.fn(() => true)} canBypass={false} canEditSettings={false} bypassing={false} onClose={vi.fn()} onBypass={vi.fn()} />);
+    expect(screen.getAllByText(/New image/)).toHaveLength(1);
+    expect(screen.getByText(/not a valid os\/architecture label/)).toBeInTheDocument();
+  });
+
+  it('gives two unplatformed error rows distinct keys', () => {
+    const errors: PolicyBlockPayload = {
+      ...candidatePayload,
+      violations: [
+        { imageRef: 'app:latest', severity: 'UNKNOWN', criticalCount: 0, highCount: 0, kevCount: 0, fixableCount: 0, reasons: [], scanId: 0, error: 'platform "a" is not valid' },
+        { imageRef: 'app:latest', severity: 'UNKNOWN', criticalCount: 0, highCount: 0, kevCount: 0, fixableCount: 0, reasons: [], scanId: 0, error: 'platform "b" is not valid' },
+      ],
+    };
+    const errSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    try {
+      render(<PolicyBlockDialog open payload={errors} stackName="web" action="deploy" onOpenSettings={vi.fn(() => true)} canBypass={false} canEditSettings={false} bypassing={false} onClose={vi.fn()} onBypass={vi.fn()} />);
+      const keyWarnings = errSpy.mock.calls.filter((args) => /same key|duplicate key/i.test(String(args[0])));
+      expect(keyWarnings).toEqual([]);
+    } finally {
+      errSpy.mockRestore();
+    }
   });
 
   it('shows the same line for a deploy that would pull, not only for an update', () => {

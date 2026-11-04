@@ -76,10 +76,10 @@ export interface PolicyViolation {
     reasons: PolicyBlockReason[];
     scanId: number;
     /**
-     * The platform variant this row is about, when the gate resolved a registry
-     * candidate. A ref shared by services with different `platform:` overrides
-     * produces one row per variant, so the dialog pairs each row with its own
-     * evidence rather than the first record for the ref.
+     * The platform variant this row is about, when the gate resolved or tried
+     * to resolve a registry candidate. A ref shared by services with different
+     * `platform:` overrides produces one row per variant, so the dialog pairs
+     * each row with its own evidence rather than the first record for the ref.
      */
     platform?: string | null;
     /**
@@ -621,9 +621,10 @@ async function planCandidates(
         // fetching the image the gate did not evaluate as a candidate.
         if (!registryMode && policies.some(isInterval)) noPullOnUp = true;
         // Only ask the daemon when the answer changes the decision. `always`
-        // and an explicit refresh never need the local copy.
+        // and `refresh` always fetch, and `never` and `build` never do, so none
+        // of them needs the local copy.
         const needsPresence = (policy: string): boolean => {
-            if (policy === 'always' || policy === 'never' || policy === 'build') return false;
+            if (policy === 'always' || policy === 'refresh' || policy === 'never' || policy === 'build') return false;
             if (registryMode) return policy === 'missing' || policy === 'if_not_present';
             return true;
         };
@@ -633,14 +634,16 @@ async function planCandidates(
         // platform's child does not stop Compose from fetching this one, so a
         // present ref is not the same as a present image for the service.
         const byPlatform = new Map<string, {
-            platform: { os: string; architecture: string } | null;
+            platform: { os: string; architecture: string; variant?: string } | null;
             invalid?: string;
             services: EffectiveServiceSpec[];
         }>();
         for (const spec of runnable) {
             const effective = effectiveServicePlatform(spec.platform, nodePlatform);
             const key = effective.ok
-                ? (effective.platform ? `${effective.platform.os}/${effective.platform.architecture}` : 'platform-unknown')
+                ? (effective.platform
+                    ? `${effective.platform.os}/${effective.platform.architecture}${effective.platform.variant ? `/${effective.platform.variant}` : ''}`
+                    : 'platform-unknown')
                 : `invalid:${effective.reason}`;
             const group = byPlatform.get(key) ?? {
                 platform: effective.ok ? effective.platform : null,
@@ -653,7 +656,7 @@ async function planCandidates(
         const presentByPlatform = new Map<string, boolean>();
         const presenceFor = async (
             key: string,
-            group: { platform: { os: string; architecture: string } | null; invalid?: string },
+            group: { platform: { os: string; architecture: string; variant?: string } | null; invalid?: string },
         ): Promise<boolean> => {
             const known = presentByPlatform.get(key);
             if (known !== undefined) return known;
@@ -725,7 +728,9 @@ async function planCandidates(
             entries.push(entry.kind === 'unresolved'
                 ? {
                     ...entry,
-                    platform: group.platform ? `${group.platform.os}/${group.platform.architecture}` : null,
+                    platform: group.platform
+                        ? `${group.platform.os}/${group.platform.architecture}${group.platform.variant ? `/${group.platform.variant}` : ''}`
+                        : null,
                 }
                 : entry);
         }
@@ -1322,6 +1327,18 @@ async function evaluateImageRefs(
             targets.push({ imageRef, planned: null });
         }
     }
+    // A multi-arch ref resolves to one index digest with a different platform
+    // child per service. The scan row is keyed by the digest the gate persists
+    // (the index), so a cache hit for the second child would return the first
+    // child's findings. Disable reuse for every child of such an index.
+    const platformDigestsByIndex = new Map<string, Set<string>>();
+    for (const { planned } of targets) {
+        if (planned?.kind !== 'candidate') continue;
+        const { indexDigest, platformDigest } = planned.resolution;
+        const digests = platformDigestsByIndex.get(indexDigest) ?? new Set<string>();
+        digests.add(platformDigest);
+        platformDigestsByIndex.set(indexDigest, digests);
+    }
     for (const { imageRef, planned } of targets) {
         let scan: VulnerabilityScan;
         if (planned?.kind === 'unresolved') {
@@ -1371,7 +1388,15 @@ async function evaluateImageRefs(
                 imageRef,
                 nodeId,
                 stackName,
-                candidate ? { scanRef: candidate.scanRef, digest: candidate.indexDigest } : undefined,
+                candidate
+                    ? {
+                        scanRef: candidate.scanRef,
+                        digest: candidate.indexDigest,
+                        ...((platformDigestsByIndex.get(candidate.indexDigest)?.size ?? 0) > 1
+                            ? { useCache: false }
+                            : {}),
+                    }
+                    : undefined,
             );
         } catch (err) {
             const message = getErrorMessage(err, 'pre-flight scan failed');
