@@ -146,10 +146,6 @@ func TestPrepareCommitAndCleanup(t *testing.T) {
 	}
 }
 
-// The captured root's modification time is part of what the operator is told is
-// restored. Removing the work directory moves the root's mtime, so cleanup has to
-// set it again, and a repeated cleanup must not, because the application may have
-// written to the root by then.
 // After the commit the workloads run: a new root entry, or a restored entry they
 // renamed or removed, is their progress. The committed journal still proves the
 // swap, so status stays `swapped` and cleanup removes the originals and leaves
@@ -204,6 +200,10 @@ func TestTheSameChangesBeforeTheCommitStayInconsistent(t *testing.T) {
 	}
 }
 
+// The captured root's modification time is part of what the operator is told is
+// restored. Removing the work directory moves the root's mtime, so cleanup has to
+// set it again, and a repeated cleanup must not, because the application may have
+// written to the root by then.
 func TestCleanupKeepsTheCapturedRootMtime(t *testing.T) {
 	request := setupVolume(t,
 		map[string]string{"db.bin": "original"},

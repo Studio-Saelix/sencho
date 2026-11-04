@@ -430,7 +430,6 @@ describe('the resolve route decisions', () => {
   for (const answer of [{ exitCode: 1 }, { exitCode: 0, status: 'inconsistent' }]) {
     it(`keeps a committed swap's phase and class when release_fence cannot read its status (${answer.status ?? 'no answer'})`, async () => {
       const { seeded, fake } = await seed({ phase: 'swapped', createdAt: new Date().toISOString(), fenced: true });
-      intents.RestoreIntentStore.getInstance().update(seeded.intentId, { outcomeClass: 'cleanup_failed' });
       const result = await overwrite.resolveOverwriteIntent(
         deps(fake, scriptedHelper({ swapAnswers: [{ action: 'status', ...answer }] })),
         { intentId: seeded.intentId, action: 'release_fence' },
@@ -441,6 +440,12 @@ describe('the resolve route decisions', () => {
       });
       // The originals are still in the volume, so the restore still owns it.
       expect(fence.RestoreFenceStore.getInstance().liveIntentForVolume(VOLUME)).toBe(seeded.intentId);
+      // A second release points at `retry`, which is what finishes it, and the operation reads partial.
+      await expect(overwrite.resolveOverwriteIntent(deps(fake, answers()), {
+        intentId: seeded.intentId, action: 'release_fence',
+      })).rejects.toMatchObject({ reason: 'fence_released', detail: expect.stringContaining('Retry') });
+      const retried = await overwrite.resolveOverwriteIntent(deps(fake, answers()), { intentId: seeded.intentId, action: 'retry' });
+      expect(retried.outcome).toBe('committed');
     });
   }
 

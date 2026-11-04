@@ -1760,7 +1760,9 @@ export async function resolveOverwriteIntent(
     // The phase was reached on the journal's commit marker, and an answer that is
     // not `swapped` (a helper that could not answer, a missing image) does not undo
     // it. It keeps its phase and class, so it still owns the volume and the
-    // originals it owes are removed by the next `retry` or start.
+    // originals it owes are removed by the next `retry` or start. The class says so,
+    // which is what points the operator at `retry` and ends the operation `partial`.
+    deps.intents.update(intent.id, { outcomeClass: intent.outcomeClass ?? 'cleanup_failed' });
   } else if (intent.phase !== 'completion_unknown') {
     deps.intents.advance(intent.id, 'completion_unknown', { outcomeClass: intent.outcomeClass ?? null });
   } else {
