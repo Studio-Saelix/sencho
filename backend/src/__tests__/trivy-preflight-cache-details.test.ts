@@ -35,7 +35,7 @@ function db() {
 /** Seed a consistent cached vuln scan: total_vulnerabilities matches its detail rows. */
 function seedCachedScan(): number {
   const scanId = db().createVulnerabilityScan({
-    node_id: 1, image_ref: 'big:1', image_digest: DIGEST, scanned_at: Date.now(),
+    node_id: 1, image_ref: 'big:1', image_digest: DIGEST, platform: 'linux/amd64', scanned_at: Date.now(),
     total_vulnerabilities: TOTAL, critical_count: TOTAL, high_count: 0, medium_count: 0, low_count: 0,
     unknown_count: 0, fixable_count: 0, secret_count: 0, misconfig_count: 0, scanners_used: 'vuln',
     highest_severity: 'CRITICAL', os_info: null, trivy_version: null, scan_duration_ms: null,
@@ -78,8 +78,10 @@ describe('TrivyService cache-hit detail copy', () => {
 
   it('persists a preflight scan whose stored detail count matches its total (no false-block mismatch)', async () => {
     seedCachedScan();
-    // scanImagePreflight resolves the digest itself; the cache hit then reuses it.
+    // scanImagePreflight resolves the digest and platform itself; the cache hit
+    // then reuses the row for that child.
     vi.spyOn(svc(), 'getImageDigest').mockResolvedValue(DIGEST);
+    vi.spyOn(svc(), 'getImagePlatform').mockResolvedValue('linux/amd64');
 
     const persisted = await svc().scanImagePreflight('big:1', 1, 'web');
 

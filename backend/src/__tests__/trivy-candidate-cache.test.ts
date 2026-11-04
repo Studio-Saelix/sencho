@@ -10,11 +10,13 @@
 import { describe, it, expect, beforeAll, afterAll, beforeEach, vi } from 'vitest';
 import { setupTestDb, cleanupTestDb } from './helpers/setupTestDb';
 import { DatabaseService } from '../services/DatabaseService';
+import DockerController from '../services/DockerController';
 
 let tmpDir: string;
 let TrivyService: typeof import('../services/TrivyService').default;
 
 const DIGEST = `sha256:${'d'.repeat(64)}`;
+const PLATFORM = 'linux/amd64';
 const DB_BUILD = Date.UTC(2026, 0, 10, 6, 0, 0);
 const NEXT_UPDATE = DB_BUILD + 6 * 60 * 60 * 1000;
 
@@ -29,11 +31,16 @@ const svc = () => TrivyService.getInstance();
 const db = () => DatabaseService.getInstance();
 
 /** Seed a completed scan row; `vulnDbUpdatedAt` undefined means a pre-change row. */
-function seedScan(options: { scannedAt?: number; vulnDbUpdatedAt?: number | null } = {}): number {
+function seedScan(options: {
+  scannedAt?: number;
+  vulnDbUpdatedAt?: number | null;
+  platform?: string | null;
+} = {}): number {
   return db().createVulnerabilityScan({
     node_id: 1,
     image_ref: 'registry.example.com/web:latest',
     image_digest: DIGEST,
+    platform: options.platform === undefined ? PLATFORM : options.platform,
     scanned_at: options.scannedAt ?? Date.now(),
     total_vulnerabilities: 0,
     critical_count: 0,
@@ -58,10 +65,11 @@ function seedScan(options: { scannedAt?: number; vulnDbUpdatedAt?: number | null
 }
 
 /** A cache hit resolves; a miss reaches the (deliberately absent) binary and throws. */
-async function cacheHit(): Promise<boolean> {
+async function cacheHit(platform: string = PLATFORM): Promise<boolean> {
   try {
     await svc().scanImage('registry.example.com/web:latest', 1, {
       digest: DIGEST,
+      platform,
       scanners: ['vuln'],
       cacheRule: 'database',
     });
@@ -69,6 +77,22 @@ async function cacheHit(): Promise<boolean> {
   } catch {
     return false;
   }
+}
+
+/** A local image as the Docker daemon reports it. */
+function stubLocalImage(options: { digest?: string | null; os?: string; architecture?: string; variant?: string } = {}) {
+  const inspect = vi.fn().mockResolvedValue({
+    RepoDigests: options.digest === null
+      ? []
+      : [`registry.example.com/web@${options.digest ?? DIGEST}`],
+    Os: options.os ?? 'linux',
+    Architecture: options.architecture ?? 'amd64',
+    ...(options.variant ? { Variant: options.variant } : {}),
+  });
+  vi.spyOn(DockerController, 'getInstance').mockReturnValue({
+    getDocker: () => ({ getImage: () => ({ inspect }) }),
+  } as unknown as DockerController);
+  return inspect;
 }
 
 beforeEach(() => {
@@ -121,6 +145,72 @@ describe('the preflight cache rule', () => {
     await expect(svc().scanImage('registry.example.com/web:latest', 1, {
       digest: DIGEST, scanners: ['vuln'], cacheRule: 'digest',
     })).resolves.toBeDefined();
+  });
+});
+
+describe('the cache key includes the platform child', () => {
+  it('does not let one platform child\'s row answer for another', async () => {
+    seedScan({ vulnDbUpdatedAt: DB_BUILD, platform: 'linux/amd64' });
+
+    expect(await cacheHit('linux/arm64')).toBe(false);
+    expect(db().getLatestScanByDigest(DIGEST, 'vuln', 'linux/arm64')).toBeNull();
+    expect(db().getLatestScanByDigest(DIGEST, 'vuln', 'linux/amd64')?.id).toBeGreaterThan(0);
+  });
+
+  it('keys a plain-digest scan of the local image by its platform too', async () => {
+    seedScan({ platform: 'linux/amd64' });
+    stubLocalImage({ os: 'linux', architecture: 'arm64' });
+
+    // A manual or scheduled scan of the local image must not take a candidate
+    // row for another platform child of the same index digest.
+    await expect(svc().scanImage('registry.example.com/web:latest', 1, {
+      scanners: ['vuln'],
+    })).rejects.toThrow();
+  });
+
+  it('keys an installed scan by the local image platform', async () => {
+    seedScan({ vulnDbUpdatedAt: DB_BUILD, platform: 'linux/amd64' });
+    stubLocalImage({ os: 'linux', architecture: 'arm64', variant: 'v8' });
+
+    // The amd64 candidate row must not answer the arm64 installed scan.
+    await expect(svc().scanImage('registry.example.com/web:latest', 1, {
+      scanners: ['vuln'], cacheRule: 'database',
+    })).rejects.toThrow();
+
+    // With an arm64 row present, the same installed scan does reuse it.
+    seedScan({ vulnDbUpdatedAt: DB_BUILD, platform: 'linux/arm64' });
+    const result = await svc().scanImage('registry.example.com/web:latest', 1, {
+      scanners: ['vuln'], cacheRule: 'database',
+    });
+    expect(result.fromCache).toBe(true);
+    expect(result.platform).toBe('linux/arm64');
+    expect(result.imageDigest).toBe(DIGEST);
+  });
+
+  it('records the platform a candidate scan resolved', async () => {
+    const scanImage = vi.spyOn(svc(), 'scanImage').mockResolvedValue({
+      imageRef: 'registry.example.com/web:latest',
+      imageDigest: DIGEST,
+      platform: PLATFORM,
+      scannedAt: Date.now(),
+      totalVulnerabilities: 0, criticalCount: 0, highCount: 0, mediumCount: 0, lowCount: 0,
+      unknownCount: 0, fixableCount: 0, secretCount: 0, scannersUsed: 'vuln', highestSeverity: null,
+      vulnerabilities: [], secrets: [],
+      metadata: { os: null, trivyVersion: '0.50.0', scanDurationMs: 5 },
+    });
+
+    const stored = await svc().scanImagePreflight('registry.example.com/web:latest', 1, 'web', {
+      scanRef: `registry.example.com/web@${DIGEST}`,
+      digest: DIGEST,
+      platform: PLATFORM,
+      useCache: false,
+    });
+
+    expect(scanImage).toHaveBeenCalledWith(
+      'registry.example.com/web:latest', 1,
+      expect.objectContaining({ platform: PLATFORM }),
+    );
+    expect(stored.platform).toBe(PLATFORM);
   });
 });
 

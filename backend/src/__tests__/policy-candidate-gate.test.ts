@@ -182,8 +182,14 @@ describe('registry mode (an update that pulls)', () => {
     expect(trivyStub.scanImagePreflight).toHaveBeenCalledWith(
       'registry.example.com/web:latest', 1, 'web',
       // A qualified child shares its index digest with the other children, so
-      // the gate scans it fresh instead of reusing another child's cached row.
-      { scanRef: `registry.example.com/web@${PLATFORM_DIGEST}`, digest: INDEX, useCache: false },
+      // the gate scans it fresh instead of reusing another child's cached row,
+      // and names the platform so the row cannot answer for another child later.
+      {
+        scanRef: `registry.example.com/web@${PLATFORM_DIGEST}`,
+        digest: INDEX,
+        platform: 'linux/amd64',
+        useCache: false,
+      },
     );
     // The installed image is not scanned in addition: it is not what will run.
     expect(trivyStub.scanImagePreflight).toHaveBeenCalledTimes(1);
@@ -684,6 +690,86 @@ describe('compose mode (a plain up)', () => {
     }]);
     expect(result.pullServices).toEqual(['web']);
   });
+
+  it.each([
+    ['compose', ''],
+    ['compose', 'never'],
+    ['compose', 'missing'],
+    ['compose', 'daily'],
+    ['compose', 'build'],
+    ['registry', 'never'],
+    ['registry', 'missing'],
+    ['registry', 'build'],
+  ] as const)(
+    'evaluates the installed child of a group that does not pull (%s mode, pull_policy %s)',
+    async (imageSource, nonPullingPolicy) => {
+      // F7: the node holds the arm64 child; `web` asks for amd64 and pulls,
+      // while `tools` runs the installed arm64 child because its own policy
+      // will not fetch one. Dropping the non-pulling group's installed entry
+      // let the arm64 child run without ever being evaluated.
+      candidates.platform = { os: 'linux', architecture: 'arm64' };
+      candidates.localImageExists.mockImplementation(async (
+        _nodeId: number,
+        _ref: string,
+        platform?: { os: string; architecture: string } | null,
+      ) => platform == null || platform.architecture === 'arm64');
+      candidates.lastTagTime.mockResolvedValue(Date.now());
+      candidates.resolve.mockResolvedValue({
+        ...CANDIDATE_RESOLUTION,
+        scanRef: `registry.example.com/web@${OTHER_DIGEST}`,
+        platform: 'linux/amd64',
+        platformDigest: OTHER_DIGEST,
+      });
+      // `missing` only skips a present non-latest tag; an explicit pull always
+      // refreshes `latest`.
+      const ref = nonPullingPolicy === 'missing'
+        ? 'registry.example.com/web:1.2'
+        : 'registry.example.com/web:latest';
+      composeStub.listStackImages.mockResolvedValue([ref]);
+      trivyStub.scanImagePreflight.mockImplementation(async (
+        _ref: string,
+        _nodeId: number,
+        _stack: string,
+        opts?: { scanRef?: string },
+      ) => (opts?.scanRef?.includes(OTHER_DIGEST)
+        ? mkScan({ id: 21 })
+        : mkScan({ id: 22, highest_severity: 'CRITICAL', critical_count: 1, total_vulnerabilities: 1 })));
+      modelWith([
+        { name: 'web', declaredImage: ref, hasBuild: false, pullPolicy: null, platform: 'linux/amd64', expectedReplicas: 1, dependsOn: [], hasHealthcheck: false },
+        { name: 'tools', declaredImage: ref, hasBuild: false, pullPolicy: nonPullingPolicy, platform: 'linux/arm64', expectedReplicas: 1, dependsOn: [], hasHealthcheck: false },
+      ]);
+
+      const result = await enforcePolicyPreDeploy('web', 1, { bypass: false, actor: 'u', imageSource });
+
+      // Only the amd64 group pulls; the arm64 group's installed image is
+      // scanned as itself, and its CRITICAL finding blocks the deploy.
+      expect(candidates.resolve).toHaveBeenCalledTimes(1);
+      expect(candidates.resolve).toHaveBeenCalledWith(
+        1, ref, { os: 'linux', architecture: 'amd64' },
+      );
+      expect(trivyStub.scanImagePreflight).toHaveBeenCalledTimes(2);
+      expect(trivyStub.scanImagePreflight).toHaveBeenCalledWith(
+        ref, 1, 'web',
+        expect.objectContaining({
+          scanRef: `registry.example.com/web@${OTHER_DIGEST}`,
+          platform: 'linux/amd64',
+        }),
+      );
+      // The installed scan is the image already on the node, not a candidate.
+      expect(trivyStub.scanImagePreflight).toHaveBeenCalledWith(ref, 1, 'web', undefined);
+      expect(result.ok).toBe(false);
+      expect(result.violations).toHaveLength(1);
+      expect(result.violations[0]).toMatchObject({ scanId: 22, criticalCount: 1, severity: 'CRITICAL' });
+      expect(result.violations[0].platform).toBeUndefined();
+      expect(result.evaluatedCandidates).toEqual([{
+        ref,
+        indexDigest: INDEX,
+        platformDigest: OTHER_DIGEST,
+        services: ['web'],
+      }]);
+      expect(result.pullServices).toEqual(['web']);
+    },
+  );
 
   it('keeps one violation and one evidence record per platform variant', async () => {
     // F6's backend half: the dialog can only label each row with its own

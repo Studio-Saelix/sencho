@@ -23,7 +23,7 @@ import { parseImageRef, resolveRegistryImageDigestForPlatform, type RegistryCred
 import { mapRegistryFailure } from './gitops/registryFailure';
 import { evidenceStateForFailureClass } from './securityEvidence';
 import { readNodePlatform, type NodePlatform } from './gitops/effectiveArtifactContext';
-import { canonicalNodePlatform } from './gitops/platformNames';
+import { canonicalNodePlatform, DEFAULT_ARCHITECTURE_VARIANT } from './gitops/platformNames';
 import type { ArtifactServiceFailureClass } from './gitops/json';
 
 /**
@@ -152,17 +152,6 @@ export async function nodePlatformFor(nodeId: number): Promise<NodePlatform | nu
 }
 
 const PLATFORM_OS_NAMES: ReadonlySet<string> = new Set(['linux', 'windows', 'darwin', 'freebsd']);
-
-/**
- * The variant Compose selects when an override names only an architecture that
- * has variants. A local image that reports a different variant is not the child
- * the operation will run.
- */
-const DEFAULT_ARCHITECTURE_VARIANT: Readonly<Record<string, string>> = {
-  arm: 'v7',
-  arm64: 'v8',
-  amd64: 'v1',
-};
 
 /**
  * The platform Compose will run a service as.

@@ -678,6 +678,18 @@ async function planCandidates(
             return lastTagTime;
         };
         const entries: CandidatePlanEntry[] = [];
+        // A ref can be shared by services that pull at one platform and run the
+        // installed image at another. The installed image is what the
+        // non-pulling services will run, so it is evaluated alongside the
+        // candidate; dropping it let a policy-blocked child run because another
+        // platform's child was clean. One entry covers every non-pulling group:
+        // there is only one local image behind a reference.
+        let installedRecorded = false;
+        const recordInstalled = (): void => {
+            if (installedRecorded) return;
+            installedRecorded = true;
+            entries.push({ kind: 'installed', why: 'not_pulled' });
+        };
         for (const [key, group] of byPlatform) {
             const needsLocalCopy = group.services.some(
                 (spec) => needsPresence(normalizedPullPolicy(spec.pullPolicy)),
@@ -708,7 +720,10 @@ async function planCandidates(
                 return true;
             };
             const pulling = group.services.filter(pullsFor);
-            if (pulling.length === 0) continue;
+            if (pulling.length === 0) {
+                recordInstalled();
+                continue;
+            }
             if (group.invalid) {
                 entries.push({
                     kind: 'unresolved',
@@ -736,10 +751,9 @@ async function planCandidates(
         }
         if (entries.length === 0) {
             // Compose will not fetch this image, so the node's own image is what runs.
-            plan.set(ref, [{ kind: 'installed', why: 'not_pulled' }]);
-        } else {
-            plan.set(ref, entries);
+            recordInstalled();
         }
+        plan.set(ref, entries);
     }
     return { plan, pullServices, noPullOnUp };
 }
@@ -1381,10 +1395,13 @@ async function evaluateImageRefs(
                         scanRef: candidate.scanRef,
                         digest: candidate.indexDigest,
                         // The scan row is keyed by the persisted digest, which is
-                        // the index for a multi-arch tag. A cached row for the
-                        // same index can belong to another platform child, so a
-                        // qualified child is always scanned fresh. An exact
-                        // manifest is its own digest and keeps cache reuse.
+                        // the index for a multi-arch tag, with the platform this
+                        // child was resolved for. A cached row may answer only
+                        // for the image it scanned, so the platform is part of
+                        // the key; a qualified child is also always scanned
+                        // fresh. An exact manifest is its own digest and keeps
+                        // cache reuse for the same platform.
+                        platform: candidate.platform,
                         ...(candidate.qualification === 'qualified' ? { useCache: false } : {}),
                     }
                     : undefined,

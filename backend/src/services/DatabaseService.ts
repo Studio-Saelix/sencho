@@ -1115,6 +1115,15 @@ export interface VulnerabilityScan {
     node_id: number;
     image_ref: string;
     image_digest: string | null;
+    /**
+     * The platform of the image this scan read (`linux/amd64`,
+     * `linux/arm/v7`, ...), or null when the path did not record one.
+     *
+     * A multi-arch reference stores its children under one index digest, so
+     * the deploy gate's cache lookup keys on this too: a cached row may only
+     * answer for the image it scanned.
+     */
+    platform?: string | null;
     scanned_at: number;
     total_vulnerabilities: number;
     critical_count: number;
@@ -1382,6 +1391,7 @@ export class DatabaseService {
         this.migrateAgentsAndNotificationsNodeId();
         this.migratePolicyEvaluationColumn();
         this.migrateVulnDbUpdatedAtColumn();
+        this.migrateScanPlatformColumn();
         this.migrateNotificationCategory();
         this.migrateNotificationActor();
         this.migrateNotificationGitOpsDedupe();
@@ -1758,6 +1768,7 @@ export class DatabaseService {
         node_id INTEGER NOT NULL,
         image_ref TEXT NOT NULL,
         image_digest TEXT,
+        platform TEXT,
         scanned_at INTEGER NOT NULL,
         total_vulnerabilities INTEGER NOT NULL DEFAULT 0,
         critical_count INTEGER NOT NULL DEFAULT 0,
@@ -3448,6 +3459,15 @@ stmt.run('gitops_schema_version', '1');
      */
     private migrateVulnDbUpdatedAtColumn(): void {
         this.tryAddColumn('vulnerability_scans', 'vuln_db_updated_at', 'INTEGER');
+    }
+
+    /**
+     * The platform of the image a scan read. Rows written before this column
+     * existed have no platform, so the deploy gate's platform-keyed cache
+     * misses them once and a fresh scan records one.
+     */
+    private migrateScanPlatformColumn(): void {
+        this.tryAddColumn('vulnerability_scans', 'platform', 'TEXT');
     }
 
     private migrateNotificationCategory(): void {
@@ -8607,19 +8627,20 @@ stmt.run('gitops_schema_version', '1');
     ): number {
         const stmt = this.db.prepare(
             `INSERT INTO vulnerability_scans (
-                node_id, image_ref, image_digest, scanned_at,
+                node_id, image_ref, image_digest, platform, scanned_at,
                 total_vulnerabilities, critical_count, high_count, medium_count,
                 low_count, unknown_count, fixable_count,
                 secret_count, misconfig_count, scanners_used,
                 highest_severity, os_info, trivy_version, scan_duration_ms,
                 triggered_by, status, error, stack_context, policy_evaluation,
                 vuln_db_updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         );
         const result = stmt.run(
             scan.node_id,
             scan.image_ref,
             scan.image_digest,
+            scan.platform ?? null,
             scan.scanned_at,
             scan.total_vulnerabilities,
             scan.critical_count,
@@ -8650,7 +8671,7 @@ stmt.run('gitops_schema_version', '1');
         updates: Partial<Omit<VulnerabilityScan, 'id'>>,
     ): void {
         const ALLOWED_COLUMNS = new Set([
-            'node_id', 'image_ref', 'image_digest', 'scanned_at',
+            'node_id', 'image_ref', 'image_digest', 'platform', 'scanned_at',
             'total_vulnerabilities', 'critical_count', 'high_count',
             'medium_count', 'low_count', 'unknown_count', 'fixable_count',
             'secret_count', 'misconfig_count', 'scanners_used',
@@ -8942,23 +8963,37 @@ stmt.run('gitops_schema_version', '1');
         return summary;
     }
 
-    public getLatestScanByDigest(digest: string, scannersUsed?: string): VulnerabilityScan | null {
+    /**
+     * Latest completed scan for a digest, optionally restricted to the platform
+     * whose image it read.
+     *
+     * A multi-arch reference stores every child under the same index digest.
+     * The deploy gate passes the platform so one child's row cannot answer for
+     * another; every other caller omits it and keeps the historical digest-only
+     * lookup.
+     */
+    public getLatestScanByDigest(
+        digest: string,
+        scannersUsed?: string,
+        platform?: string,
+    ): VulnerabilityScan | null {
         if (!digest) return null;
+        const clauses = ["image_digest = ?", "status = 'completed'"];
+        const params: unknown[] = [digest];
         if (scannersUsed) {
-            return (
-                (this.db
-                    .prepare(
-                        "SELECT * FROM vulnerability_scans WHERE image_digest = ? AND scanners_used = ? AND status = 'completed' ORDER BY scanned_at DESC LIMIT 1",
-                    )
-                    .get(digest, scannersUsed) as VulnerabilityScan | undefined) ?? null
-            );
+            clauses.push('scanners_used = ?');
+            params.push(scannersUsed);
+        }
+        if (platform) {
+            clauses.push('platform = ?');
+            params.push(platform);
         }
         return (
             (this.db
                 .prepare(
-                    "SELECT * FROM vulnerability_scans WHERE image_digest = ? AND status = 'completed' ORDER BY scanned_at DESC LIMIT 1",
+                    `SELECT * FROM vulnerability_scans WHERE ${clauses.join(' AND ')} ORDER BY scanned_at DESC LIMIT 1`,
                 )
-                .get(digest) as VulnerabilityScan | undefined) ?? null
+                .get(...(params as never[])) as VulnerabilityScan | undefined) ?? null
         );
     }
 

@@ -19,12 +19,13 @@ afterAll(() => {
     cleanupTestDb(tmpDir);
 });
 
-function seedScan(overrides: Partial<{ scanners_used: string; scanned_at: number }> = {}): number {
+function seedScan(overrides: Partial<{ scanners_used: string; scanned_at: number; platform: string; digest: string }> = {}): number {
     const db = DatabaseService.getInstance();
     return db.createVulnerabilityScan({
         node_id: 1,
         image_ref: 'alpine:3.19',
-        image_digest: 'sha256:deadbeef',
+        image_digest: overrides.digest ?? 'sha256:deadbeef',
+        platform: overrides.platform,
         scanned_at: overrides.scanned_at ?? Date.now(),
         total_vulnerabilities: 0,
         critical_count: 0,
@@ -72,5 +73,19 @@ describe('getLatestScanByDigest scanners scoping', () => {
     it('returns null for digest with no completed scans', () => {
         const db = DatabaseService.getInstance();
         expect(db.getLatestScanByDigest('sha256:notreal', 'vuln')).toBeNull();
+    });
+});
+
+describe('getLatestScanByDigest platform scoping', () => {
+    it('does not return a row for another platform child of the same index digest', () => {
+        const db = DatabaseService.getInstance();
+        const digest = 'sha256:platformchildren';
+        const amd = seedScan({ digest, platform: 'linux/amd64' });
+
+        expect(db.getLatestScanByDigest(digest, 'vuln', 'linux/arm64')).toBeNull();
+        expect(db.getLatestScanByDigest(digest, 'vuln', 'linux/amd64')?.id).toBe(amd);
+        // Callers that do not name a platform (every non-gate path) keep the
+        // historical digest-only lookup.
+        expect(db.getLatestScanByDigest(digest, 'vuln')?.id).toBe(amd);
     });
 });

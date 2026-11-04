@@ -22,6 +22,7 @@ import { isDebugEnabled } from '../utils/debug';
 import { SEVERITY_ORDER } from '../utils/severity';
 import { isSenchoRollbackHoldRef } from '../utils/senchoRollbackHold';
 import type { PolicyBlockReason } from '../utils/policy-risk';
+import { imagePlatformLabel } from './gitops/platformNames';
 
 const execFileAsync = promisify(execFile);
 
@@ -63,6 +64,15 @@ export interface VulnerabilityDbInfo {
 export interface ImageScanOptions {
     useCache?: boolean;
     digest?: string | null;
+    /**
+     * The platform of the image being scanned (`linux/amd64`, ...), when the
+     * caller already resolved it. The deploy gate's cache is keyed by digest and
+     * platform, so a multi-arch ref's children cannot answer for each other. An
+     * installed scan leaves this unset and the service reads the platform of the
+     * local image; when that cannot be read, the gate's cache is bypassed rather
+     * than letting an unqualified row answer.
+     */
+    platform?: string | null;
     scanners?: readonly TrivyScanner[];
     /** The exact reference handed to `trivy image`; defaults to `imageRef`. */
     scanRef?: string;
@@ -273,6 +283,8 @@ export type TrivyScanner = 'vuln' | 'secret';
 export interface TrivyScanResult {
     imageRef: string;
     imageDigest: string | null;
+    /** The platform of the image these findings describe, when known. */
+    platform?: string | null;
     scannedAt: number;
     totalVulnerabilities: number;
     criticalCount: number;
@@ -650,6 +662,26 @@ class TrivyService {
         }
     }
 
+    /**
+     * The platform of the image Docker holds for `imageRef`, or null when the
+     * daemon did not report it. Used to key the deploy gate's scan cache: a
+     * multi-arch reference stores every child under one index digest, so the
+     * digest alone cannot say which image a row describes.
+     */
+    async getImagePlatform(imageRef: string, nodeId: number): Promise<string | null> {
+        try {
+            const docker = DockerController.getInstance(nodeId).getDocker();
+            const info = (await docker.getImage(imageRef).inspect()) as {
+                Os?: unknown;
+                Architecture?: unknown;
+                Variant?: unknown;
+            };
+            return imagePlatformLabel(info);
+        } catch {
+            return null;
+        }
+    }
+
     private scanKey(nodeId: number, imageRef: string): string {
         return `${nodeId}:${imageRef}`;
     }
@@ -768,13 +800,28 @@ class TrivyService {
         );
 
         try {
+            const localDigest = options.digest === undefined || options.digest === null;
             const digest = options.digest ?? (await this.getImageDigest(imageRef, nodeId));
-            diag(`scanImage: digest=${digest ?? 'null'} for ${imageRef}`);
+            // The cache is keyed by digest and platform: an index digest is
+            // shared by every platform child, so without the platform one
+            // child's row could answer for another. A candidate supplies the
+            // platform it resolved; a scan of the image on the node reads the
+            // local image's own platform, so a manual or scheduled scan cannot
+            // borrow a candidate child's findings either.
+            const platform = options.platform ?? (
+                localDigest ? await this.getImagePlatform(imageRef, nodeId) : null
+            );
+            // The deploy gate fails closed when it cannot read the platform; the
+            // plain digest cache keeps its historical digest-only lookup.
+            const cacheable = options.useCache !== false && digest !== null
+                && (options.cacheRule !== 'database' || platform !== null);
+            diag(`scanImage: digest=${digest ?? 'null'} platform=${platform ?? 'null'} for ${imageRef}`);
 
-            if (options.useCache !== false && digest) {
+            if (cacheable) {
                 const cached = DatabaseService.getInstance().getLatestScanByDigest(
                     digest,
                     scannersUsed,
+                    platform ?? undefined,
                 );
                 if (cached && (await this.canReuseCachedScan(cached, options.cacheRule ?? 'digest', startedAt))) {
                     diag(
@@ -792,6 +839,7 @@ class TrivyService {
                     return {
                         imageRef,
                         imageDigest: digest,
+                        platform: cached.platform ?? platform,
                         fromCache: true,
                         databaseUpdatedAt: cached.vuln_db_updated_at ?? null,
                         scannedAt: cached.scanned_at,
@@ -898,6 +946,7 @@ class TrivyService {
                 return {
                     imageRef,
                     imageDigest: digest,
+                    platform,
                     scannedAt: Date.now(),
                     totalVulnerabilities: vulnerabilities.length,
                     criticalCount: critical,
@@ -987,8 +1036,10 @@ class TrivyService {
                 useCache: opts.useCache,
                 scanners: opts.scanners,
                 // A candidate scan persists the digest it actually scanned, and
-                // keeps the authored tag as the row's identity.
+                // keeps the authored tag as the row's identity. A candidate also
+                // names its platform; an installed scan resolves the local one.
                 digest: opts.digest,
+                platform: opts.platform,
                 scanRef: opts.scanRef,
                 cacheRule: opts.cacheRule,
             });
@@ -998,6 +1049,7 @@ class TrivyService {
             const dbInfo = result.fromCache ? null : await this.getVulnerabilityDbInfo({ refresh: true });
             db.updateVulnerabilityScan(scanId, {
                 image_digest: result.imageDigest,
+                platform: result.platform ?? null,
                 scanned_at: result.scannedAt,
                 total_vulnerabilities: result.totalVulnerabilities,
                 critical_count: result.criticalCount,
@@ -1120,7 +1172,7 @@ class TrivyService {
         imageRef: string,
         nodeId: number,
         stackName: string | null,
-        opts: { scanRef?: string; digest?: string | null; useCache?: boolean } = {},
+        opts: { scanRef?: string; digest?: string | null; platform?: string | null; useCache?: boolean } = {},
     ): Promise<VulnerabilityScan> {
         return this.runScanAndPersist(
             imageRef,
@@ -1129,14 +1181,16 @@ class TrivyService {
             stackName,
             {
                 // A multi-platform ref stores one row per index digest, so two
-                // platform children would share a cache entry. The gate turns
-                // reuse off for that case rather than let one child's findings
-                // answer for the other.
+                // platform children would share a cache entry. The row records
+                // the platform it scanned and the lookup requires it, so one
+                // child's findings cannot answer for the other; a qualified
+                // child additionally turns reuse off entirely.
                 useCache: opts.useCache ?? true,
                 scanners: ['vuln'],
                 cacheRule: 'database',
                 ...(opts.scanRef ? { scanRef: opts.scanRef } : {}),
                 ...(opts.digest ? { digest: opts.digest } : {}),
+                ...(opts.platform ? { platform: opts.platform } : {}),
             },
         );
     }

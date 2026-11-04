@@ -56,3 +56,41 @@ export function canonicalNodePlatform(
     ...(variant ? { variant } : {}),
   };
 }
+
+/**
+ * The variant Compose selects when an override names only an architecture that
+ * has variants. A local image that reports a different variant is not the child
+ * the operation will run.
+ */
+export const DEFAULT_ARCHITECTURE_VARIANT: Readonly<Record<string, string>> = {
+  arm: 'v7',
+  arm64: 'v8',
+  amd64: 'v1',
+};
+
+/**
+ * The platform label of an image Docker holds locally, in the registry
+ * resolver's vocabulary.
+ *
+ * The default variant for an architecture is dropped, because the resolver
+ * labels a child `linux/arm64` when the service did not ask for a variant. If
+ * the local read kept Docker's `v8`, the post-update installed scan could not
+ * reuse the candidate row for the same child and would always rescan it.
+ * An image whose platform the daemon did not report returns null.
+ */
+export function imagePlatformLabel(info: {
+  Os?: unknown;
+  Architecture?: unknown;
+  Variant?: unknown;
+}): string | null {
+  const platform = canonicalNodePlatform({
+    os: typeof info.Os === 'string' ? info.Os : '',
+    architecture: typeof info.Architecture === 'string' ? info.Architecture : '',
+    variant: typeof info.Variant === 'string' ? info.Variant : '',
+  });
+  if (!platform.os || !platform.architecture) return null;
+  const variant = platform.variant && platform.variant !== DEFAULT_ARCHITECTURE_VARIANT[platform.architecture]
+    ? platform.variant
+    : '';
+  return `${platform.os}/${platform.architecture}${variant ? `/${variant}` : ''}`;
+}
