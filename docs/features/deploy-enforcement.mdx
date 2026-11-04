@@ -72,15 +72,15 @@ Pre-flight scans are cached by digest for 24 hours, so the second deploy of the 
 
 Every path that pulls is evaluated on the image it will pull:
 
-- **Update**, from the stack page or the bulk and label actions, pulls every pullable service, so it evaluates the registry image for each of them.
-- **Single-service update** evaluates that service's registry image, unless the service builds its own image, in which case there is no registry image to evaluate.
+- **Update**, from the stack page or the bulk and label actions, pulls every pullable service, so it evaluates the registry image for each of them. A service with `pull_policy: never` is not pulled and is evaluated as the image already installed.
+- **Single-service update** evaluates that service's registry image, unless the service builds its own image or its `pull_policy: never` keeps the pull from fetching it.
 - **Auto-Update**, a **scheduled auto-update**, and a **webhook pull** evaluate the registry image, and hold it under [Candidate not evaluated](#evidence-availability) when it cannot be proven.
-- A plain **deploy**, **scheduled auto-start**, **webhook deploy**, **Git source apply**, **Blueprint apply**, and **mesh redeploy** run `docker compose up`, which pulls only what the service's own `pull_policy` makes it pull (`always`, `daily`, `weekly`, `every_*`) or what is missing from the node. Those services are evaluated as registry images; every other service is evaluated as the image already installed.
+- A plain **deploy**, **scheduled auto-start**, **webhook deploy**, **Git source apply**, **Blueprint apply**, and **mesh redeploy** run `docker compose up`, which would pull only what the service's own `pull_policy` makes it pull (`always`, `daily`, `weekly`, `every_*`) or what is missing from the node. When any service is such a candidate, Sencho performs that pull first, checks the digest, and then runs `up` with pulls disabled, so Compose cannot fetch a different image behind the check. Those services are evaluated as registry images; every other service, including one whose `pull_policy: never` makes Compose skip it, is evaluated as the image already installed.
 - **Rollback** and **service restore** run the images the node already holds, so they evaluate those, exactly as before.
 
 Nothing is pulled, tagged, or retagged to evaluate an image. The tag on the node is untouched until the operation's own pull, so a refused update leaves the node exactly as it was.
 
-After the pull and before `docker compose up`, Sencho compares the digest that was evaluated with the digest that actually landed. A tag can move between the two, so if they differ the pulled image (local by then, and not yet running) is evaluated on its own merits. A block at that point stops the update with the previous containers still running.
+After that pull and before the containers are replaced, Sencho compares the digest that was evaluated with the digest that actually landed. A tag can move between the two, so if they differ the pulled image (local by then, and not yet running) is evaluated on its own merits. A block at that point stops the operation with the previous containers still running.
 
 ## Evidence availability
 

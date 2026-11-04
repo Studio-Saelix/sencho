@@ -287,4 +287,51 @@ describe('buildEvidenceLines', () => {
     });
     expect(lines[0].text).toContain('for node');
   });
+
+  it('reads an unsupported image reference as unresolved, not as an older node version', () => {
+    // `unsupported` also covers a reference no build can resolve. Only the
+    // node-wide record may say the cause is the node's version.
+    const lines = buildEvidenceLines({
+      outcome: 'block',
+      records: [{
+        source: 'vulnerability_scan',
+        state: 'unsupported',
+        target: 'not a valid ref',
+        collectedAt: null,
+        reason: 'The image reference could not be parsed, so the registry image could not be resolved',
+      }],
+      applications: [{
+        source: 'vulnerability_scan',
+        state: 'unsupported',
+        outcome: 'block',
+        rule: 'security_scan_failure=block',
+        target: 'not a valid ref',
+      }],
+      summary: '',
+    });
+    const text = lines.map((line) => line.text).join(' ');
+    expect(text).toContain('not supported');
+    expect(text).not.toContain('node version');
+  });
+
+  it('keeps the node-version wording for a node that cannot evaluate a candidate', () => {
+    const lines = buildEvidenceLines({
+      outcome: 'block',
+      records: [{
+        source: 'vulnerability_scan',
+        state: 'unsupported',
+        target: '(node)',
+        collectedAt: null,
+        reason: "This node's version checks the image already installed, not the image this update would pull",
+      }],
+      applications: [{
+        source: 'vulnerability_scan',
+        state: 'unsupported',
+        outcome: 'block',
+        rule: 'security_candidate_unproven=block',
+      }],
+      summary: '',
+    });
+    expect(lines.map((line) => line.text).join(' ')).toContain('not evaluated on this node version');
+  });
 });

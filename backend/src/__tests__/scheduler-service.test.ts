@@ -2075,7 +2075,7 @@ describe('SchedulerService - lifecycle actions', () => {
     expect(mockDeployStack).toHaveBeenCalledWith('my-stack', undefined, undefined, {
       source: 'scheduler',
       actor: 'system:scheduler',
-    });
+    }, undefined);
     expect(mockUpdateScheduledTaskRun).toHaveBeenCalledWith(1, expect.objectContaining({ status: 'success' }));
   });
 

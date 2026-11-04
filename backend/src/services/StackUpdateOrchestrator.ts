@@ -315,6 +315,10 @@ export class StackUpdateOrchestrator {
         spec.declaredImage ? [spec.declaredImage] : [],
         { ...options.policyOptions, imageSource: spec.hasBuild ? 'installed' : 'registry' },
         'update',
+        undefined,
+        // The service update pulls with its own pull policy, so the gate needs
+        // the same per-service model the stack-level paths render.
+        { renderable: true, services },
       );
       if (!gate.ok) return gate.failure;
       const evaluatedCandidates = gate.candidates;
@@ -650,12 +654,15 @@ export class StackUpdateOrchestrator {
     policyOptions: PolicyEnforcementOptions,
     action: 'update' | 'rollback',
     recoveryId?: string | null,
+    candidateModel: Awaited<ReturnType<typeof buildEffectiveServiceModel>> | null = null,
   ): Promise<
     | { ok: true; candidates: EvaluatedCandidate[] }
     | { ok: false; failure: Extract<OrchestratorResult, { kind: 'service_failed' }> }
   > {
     if (refs.length === 0) return { ok: true, candidates: [] };
-    const gate = await enforcePolicyForImageRefs(stackName, nodeId, refs, policyOptions);
+    const gate = await enforcePolicyForImageRefs(
+      stackName, nodeId, refs, policyOptions, undefined, false, candidateModel,
+    );
     if (gate.ok || gate.bypassed) return { ok: true, candidates: gate.evaluatedCandidates ?? [] };
     return {
       ok: false,

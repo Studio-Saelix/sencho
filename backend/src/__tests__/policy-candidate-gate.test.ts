@@ -79,7 +79,7 @@ vi.mock('../services/candidateImage', async () => {
   };
 });
 
-import { enforcePolicyPreDeploy } from '../services/PolicyEnforcement';
+import { enforcePolicyForImageRefs, enforcePolicyPreDeploy } from '../services/PolicyEnforcement';
 
 function mkPolicy(overrides: Partial<ScanPolicy> = {}): ScanPolicy {
   return {
@@ -196,6 +196,8 @@ describe('registry mode (an update that pulls)', () => {
         ref: 'registry.example.com/web:latest',
         indexDigest: INDEX,
         platformDigest: PLATFORM_DIGEST,
+        // The deploy boundary pulls exactly this service before `up`.
+        services: ['web'],
       },
     ]);
   });
@@ -262,6 +264,64 @@ describe('registry mode (an update that pulls)', () => {
     expect(trivyStub.scanImagePreflight).toHaveBeenCalledWith('web:latest', 1, 'web', undefined);
     expect(result.evidence?.records[0]).toMatchObject({ subject: 'installed' });
   });
+
+  it('keeps a pull_policy: never service on the installed image, which its pull never replaces', async () => {
+    modelWith([{ name: 'web', declaredImage: 'registry.example.com/web:latest', hasBuild: false, pullPolicy: 'never', expectedReplicas: 1, dependsOn: [], hasHealthcheck: false }]);
+
+    const result = await enforcePolicyPreDeploy('web', 1, { bypass: false, actor: 'u', imageSource: 'registry' });
+
+    expect(result.ok).toBe(true);
+    expect(candidates.resolve).not.toHaveBeenCalled();
+    expect(trivyStub.scanImagePreflight).toHaveBeenCalledWith(
+      'registry.example.com/web:latest', 1, 'web', undefined,
+    );
+    expect(result.evaluatedCandidates).toBeUndefined();
+    expect(result.evidence?.records[0]).toMatchObject({ subject: 'installed' });
+  });
+
+  it('keeps a missing pull_policy on the installed image when Compose skips the present image', async () => {
+    modelWith([{ name: 'web', declaredImage: 'registry.example.com/web:latest', hasBuild: false, pullPolicy: 'missing', expectedReplicas: 1, dependsOn: [], hasHealthcheck: false }]);
+    candidates.localImageExists.mockResolvedValue(true);
+
+    const result = await enforcePolicyPreDeploy('web', 1, { bypass: false, actor: 'u', imageSource: 'registry' });
+
+    expect(result.ok).toBe(true);
+    expect(candidates.resolve).not.toHaveBeenCalled();
+    expect(result.evaluatedCandidates).toBeUndefined();
+  });
+
+  it('evaluates a missing pull_policy when the image is absent, because the pull fetches it', async () => {
+    modelWith([{ name: 'web', declaredImage: 'registry.example.com/web:latest', hasBuild: false, pullPolicy: 'missing', expectedReplicas: 1, dependsOn: [], hasHealthcheck: false }]);
+    candidates.localImageExists.mockResolvedValue(false);
+
+    const result = await enforcePolicyPreDeploy('web', 1, { bypass: false, actor: 'u', imageSource: 'registry' });
+
+    expect(candidates.resolve).toHaveBeenCalledTimes(1);
+    expect(result.evaluatedCandidates).toHaveLength(1);
+  });
+
+  it('applies the same pull-policy decision on the service-scoped path with its rendered model', async () => {
+    // A single-service update supplies one ref and the service's own model; it
+    // must not treat a pull_policy: never service as a registry candidate.
+    const result = await enforcePolicyForImageRefs(
+      'web',
+      1,
+      ['registry.example.com/web:latest'],
+      { bypass: false, actor: 'u', imageSource: 'registry' },
+      undefined,
+      false,
+      {
+        renderable: true,
+        services: [
+          { name: 'web', declaredImage: 'registry.example.com/web:latest', hasBuild: false, pullPolicy: 'never', expectedReplicas: 1, dependsOn: [], hasHealthcheck: false },
+        ],
+      },
+    );
+
+    expect(result.ok).toBe(true);
+    expect(candidates.resolve).not.toHaveBeenCalled();
+    expect(result.evaluatedCandidates).toBeUndefined();
+  });
 });
 
 describe('compose mode (a plain up)', () => {
@@ -290,9 +350,30 @@ describe('compose mode (a plain up)', () => {
     modelWith([{ name: 'web', declaredImage: 'registry.example.com/web:latest', hasBuild: false, pullPolicy: 'missing', expectedReplicas: 1, dependsOn: [], hasHealthcheck: false }]);
     candidates.localImageExists.mockResolvedValue(false);
 
-    await enforcePolicyPreDeploy('web', 1, { bypass: false, actor: 'u', imageSource: 'compose' });
+    const result = await enforcePolicyPreDeploy('web', 1, { bypass: false, actor: 'u', imageSource: 'compose' });
 
     expect(candidates.resolve).toHaveBeenCalledTimes(1);
+    expect(result.pullServices).toEqual(['web']);
+  });
+
+  it('does not fetch a service Compose skips, and does name a digest pin it must fetch', async () => {
+    const pinned = `registry.example.com/web@${PLATFORM_DIGEST}`;
+    composeStub.listStackImages.mockResolvedValue(['registry.example.com/web:latest', pinned]);
+    modelWith([
+      { name: 'web', declaredImage: 'registry.example.com/web:latest', hasBuild: false, pullPolicy: null, expectedReplicas: 1, dependsOn: [], hasHealthcheck: false },
+      { name: 'pinned', declaredImage: pinned, hasBuild: false, pullPolicy: null, expectedReplicas: 1, dependsOn: [], hasHealthcheck: false },
+    ]);
+    candidates.localImageExists.mockImplementation(async (_nodeId: number, ref: string) => ref !== pinned);
+    candidates.resolve.mockResolvedValue({
+      kind: 'installed', ref: pinned, why: 'digest_pinned',
+    });
+
+    const result = await enforcePolicyPreDeploy('web', 1, { bypass: false, actor: 'u', imageSource: 'compose' });
+
+    // The ordinary present image is not fetched (`up` would skip it), while the
+    // absent digest pin is, so the boundary pulls only what `up` would have.
+    expect(result.pullServices).toEqual(['pinned']);
+    expect(result.evaluatedCandidates).toBeUndefined();
   });
 });
 

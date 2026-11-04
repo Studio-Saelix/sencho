@@ -16,6 +16,7 @@ import { isValidStackName } from '../utils/validation';
 import {
     assertPolicyGateAllows,
     buildSystemPolicyGateOptions,
+    evaluatedDeployCandidateVerification,
     remoteCandidateGateRefusal,
     verifyPulledCandidates,
 } from '../helpers/policyGate';
@@ -209,21 +210,22 @@ export class WebhookService {
                 async () => {
                     switch (action) {
                         case 'deploy': {
-                            await assertPolicyGateAllows(
-                                stackName,
-                                nodeId,
-                                // A webhook deploy is a plain `up`: it pulls only
-                                // what Compose's own pull policy makes it pull.
-                                buildSystemPolicyGateOptions('webhook', {
-                                    auditPath: `/api/webhooks/${webhookId}/execute`,
-                                    imageSource: 'compose',
-                                }),
-                            );
+                            // A webhook deploy is a plain `up`: it pulls only
+                            // what Compose's own pull policy makes it pull.
+                            const deployPolicyOptions = buildSystemPolicyGateOptions('webhook', {
+                                auditPath: `/api/webhooks/${webhookId}/execute`,
+                                imageSource: 'compose',
+                            });
+                            const deployGate = await assertPolicyGateAllows(stackName, nodeId, deployPolicyOptions);
                             const deployResult = await compose.deployStack(
                                 stackName,
                                 undefined,
                                 atomic,
                                 { source: 'webhook', actor: 'system:webhook' },
+                                evaluatedDeployCandidateVerification(
+                                    stackName, nodeId, deployGate.evaluatedCandidates,
+                                    deployPolicyOptions, deployGate.pullServices,
+                                ),
                             );
                             const healthGateId = HealthGateService.getInstance().beginStack(nodeId, stackName, 'deploy', 'system:webhook', { deployedGenerationId: deployResult.deployedGenerationId });
                             if (deployResult.recoveryId) {

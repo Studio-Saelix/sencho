@@ -29,9 +29,10 @@ import type { ArtifactServiceFailureClass } from './gitops/json';
  * Which image an operation will run.
  *
  * `installed` is what the node holds now: a rollback, a restore, a digest pin, or
- * a deploy Compose will not pull. `registry` is an update that pulls every
- * pullable ref. `compose` is a plain `up`, which pulls only what Compose's own
- * `pull_policy` (or a missing local image) makes it pull.
+ * a deploy Compose will not pull. `registry` is an update that runs an explicit
+ * `docker compose pull`; `compose` is a plain `up`. Both fetch only what each
+ * service's own `pull_policy` (or a missing local image) makes them fetch, so
+ * both use the same per-service decision.
  */
 export type ImageSource = 'installed' | 'registry' | 'compose';
 
@@ -158,10 +159,10 @@ export async function localImageExists(nodeId: number, ref: string): Promise<boo
 }
 
 /**
- * Compose pull policies that fetch on every `up`. `missing` and `build` are
- * excluded: `missing` pulls only when the image is absent (checked separately)
- * and `build` builds from a Dockerfile, so neither turns an already-present image
- * into a candidate.
+ * Compose pull policies that fetch on every `up` or `pull`. `missing` and
+ * `build` are excluded: `missing` pulls only when the image is absent (checked
+ * separately) and `build` builds from a Dockerfile, so neither turns an
+ * already-present image into a candidate.
  *
  * Duration policies are matched by prefix rather than enumerated: Compose accepts
  * `every_<number><unit>` for any unit it understands, and an unrecognised policy
@@ -170,7 +171,7 @@ export async function localImageExists(nodeId: number, ref: string): Promise<boo
  */
 const PULLING_POLICIES: ReadonlySet<string> = new Set(['always', 'refresh', 'daily', 'weekly']);
 
-/** Whether a Compose `pull_policy` makes `up` fetch this image. */
+/** Whether a Compose `pull_policy` makes `up` or `pull` fetch this image. */
 export function pullPolicyPullsOnUp(pullPolicy: string | null | undefined): boolean {
   if (typeof pullPolicy !== 'string') return false;
   const value = pullPolicy.trim().toLowerCase();
@@ -180,4 +181,13 @@ export function pullPolicyPullsOnUp(pullPolicy: string | null | undefined): bool
   // `never`, `missing` and `build` are the three that do not fetch a present
   // image; anything else is unknown, and unknown is treated as pulling.
   return value !== 'never' && value !== 'missing' && value !== 'build';
+}
+
+/**
+ * Whether Compose skips this service even when the image is absent. `pull` and
+ * `up` honour `never`, so a missing image under it fails the operation instead
+ * of fetching one the gate would have to treat as a candidate.
+ */
+export function pullPolicyNever(pullPolicy: string | null | undefined): boolean {
+  return typeof pullPolicy === 'string' && pullPolicy.trim().toLowerCase() === 'never';
 }

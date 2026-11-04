@@ -122,7 +122,7 @@ describe('Stack Labels bulk actions', () => {
     expect(deployStack).toHaveBeenCalledWith('alpha', undefined, false, {
       source: 'labels',
       actor: TEST_USERNAME,
-    });
+    }, undefined);
     expect(invalidateNodeCaches).toHaveBeenCalledWith(label.node_id);
   });
 
@@ -275,7 +275,7 @@ describe('Stack Labels bulk actions', () => {
     expect(deployStack).toHaveBeenCalledWith('beta', undefined, false, {
       source: 'labels',
       actor: TEST_USERNAME,
-    });
+    }, undefined);
   });
 
   it('dry-run deploy runs the policy gate and reports blocked stacks honestly', async () => {

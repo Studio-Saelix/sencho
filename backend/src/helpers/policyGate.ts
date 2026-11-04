@@ -216,7 +216,11 @@ export async function assertPolicyGateAllows(
   stackName: string,
   nodeId: number,
   options: PolicyEnforcementOptions,
-): Promise<{ policyEvidence?: AllowedPolicyEvidence; evaluatedCandidates?: EvaluatedCandidate[] }> {
+): Promise<{
+  policyEvidence?: AllowedPolicyEvidence;
+  evaluatedCandidates?: EvaluatedCandidate[];
+  pullServices?: string[];
+}> {
   const gate = await enforcePolicyPreDeploy(stackName, nodeId, options);
   if (!gate.ok) {
     throw new Error(describePolicyBlock(gate.policy, gate.violations, 'deploy', gate.evidence));
@@ -224,6 +228,7 @@ export async function assertPolicyGateAllows(
   return {
     ...allowedPolicyEvidence(gate),
     ...(gate.evaluatedCandidates ? { evaluatedCandidates: gate.evaluatedCandidates } : {}),
+    ...(gate.pullServices ? { pullServices: gate.pullServices } : {}),
   };
 }
 
@@ -253,6 +258,7 @@ export async function runPolicyGate(
     return false;
   }
   if (gate.evaluatedCandidates) res.locals.evaluatedCandidates = gate.evaluatedCandidates;
+  if (gate.pullServices) res.locals.pullServices = gate.pullServices;
   return true;
 }
 
@@ -314,6 +320,56 @@ export async function verifyPulledCandidates(
 }
 
 /**
+ * The post-pull verifier for the candidates one gate decision evaluated, for
+ * callers that hold the decision directly rather than on a request. Returns
+ * undefined when the operation pulls nothing, so a caller can pass it straight
+ * through to the update executor without adding a pointless check.
+ */
+export function evaluatedCandidateVerifier(
+  stackName: string,
+  nodeId: number,
+  candidates: readonly EvaluatedCandidate[] | undefined,
+  options: PolicyEnforcementOptions,
+): (() => Promise<void>) | undefined {
+  if (!candidates || candidates.length === 0) return undefined;
+  return () => verifyPulledCandidates(stackName, nodeId, candidates, options);
+}
+
+/**
+ * The pull boundary a plain `up` deploy needs: the services to pull first and
+ * the verifier to run on what landed. Undefined when the gate evaluated no
+ * candidate, or when it had no rendered model to name the services (a deploy
+ * whose model will not render cannot run `up` either).
+ */
+export interface DeployCandidateVerification {
+  pullServices: string[];
+  verifyPulled: () => Promise<void>;
+}
+
+export function evaluatedDeployCandidateVerification(
+  stackName: string,
+  nodeId: number,
+  candidates: readonly EvaluatedCandidate[] | undefined,
+  options: PolicyEnforcementOptions,
+  evaluatedPullServices?: readonly string[],
+): DeployCandidateVerification | undefined {
+  const verifyPulled = evaluatedCandidateVerifier(stackName, nodeId, candidates, options);
+  if (!verifyPulled || !candidates) return undefined;
+  // Every candidate must name the Compose service that fetches it. A ref the
+  // rendered model could not attribute (or a bare-ref decision) cannot be
+  // pulled by name, so the deploy keeps its ordinary `up` rather than disabling
+  // pulls for an image the boundary cannot fetch.
+  if (candidates.some((candidate) => !candidate.services || candidate.services.length === 0)) return undefined;
+  const pullServices = [...new Set(
+    evaluatedPullServices && evaluatedPullServices.length > 0
+      ? evaluatedPullServices
+      : candidates.flatMap((candidate) => candidate.services ?? []),
+  )];
+  if (pullServices.length === 0) return undefined;
+  return { pullServices, verifyPulled };
+}
+
+/**
  * The post-pull verifier for a request that already ran `runPolicyGate`.
  * `runPolicyGate` keeps the evaluated candidates on `res.locals`; this closes
  * over the same request so the re-gate honors the same bypass.
@@ -325,8 +381,21 @@ export function pulledCandidateVerifier(
   nodeId: number,
 ): (() => Promise<void>) | undefined {
   const candidates = res.locals.evaluatedCandidates as EvaluatedCandidate[] | undefined;
-  if (!candidates || candidates.length === 0) return undefined;
-  return () => verifyPulledCandidates(stackName, nodeId, candidates, buildPolicyGateOptions(req));
+  return evaluatedCandidateVerifier(stackName, nodeId, candidates, buildPolicyGateOptions(req));
+}
+
+/** The plain-up pull boundary for a request that already ran `runPolicyGate`. */
+export function pulledDeployCandidateVerification(
+  req: Request,
+  res: Response,
+  stackName: string,
+  nodeId: number,
+): DeployCandidateVerification | undefined {
+  const candidates = res.locals.evaluatedCandidates as EvaluatedCandidate[] | undefined;
+  const pullServices = res.locals.pullServices as string[] | undefined;
+  return evaluatedDeployCandidateVerification(
+    stackName, nodeId, candidates, buildPolicyGateOptions(req), pullServices,
+  );
 }
 
 /**

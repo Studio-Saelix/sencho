@@ -5415,6 +5415,7 @@ describe('GitSourceService.apply', () => {
                         // reports its own fixed id.
                         gitopsDeployOperationId: expect.stringMatching(/^[0-9a-f-]{36}$/),
                     },
+                    undefined,
                 );
                 const deployCtx = deploySpy.mock.calls[0]![3]!;
                 // The journaled intent names the exact id the deploy received.
@@ -8716,7 +8717,7 @@ describe('GitSourceService.apply', () => {
                         source: 'git_apply',
                         actor: 'tester',
                         gitopsDeployOperationId: intent.deployOperationId,
-                    }));
+                    }), undefined);
                 // The deploy failed again, so no health gate was opened.
                 expect(beginSpy).not.toHaveBeenCalled();
                 // The attempt is durably recorded and settled, carrying the
@@ -9647,7 +9648,7 @@ describe('GitSourceService.apply', () => {
             expect(deploySpy).toHaveBeenCalledWith('apply-deploy-gate', undefined, undefined, {
                 source: 'git_apply',
                 actor: 'system:git-source',
-            });
+            }, undefined);
             expect(beginSpy).toHaveBeenCalledWith(nodeId, 'apply-deploy-gate', 'deploy', 'system:git-source', { deployedGenerationId: null });
             expect(mockRecoveryLinkGateOrRetain).toHaveBeenCalledWith('rec-test-1', 'gate-git');
         } finally {

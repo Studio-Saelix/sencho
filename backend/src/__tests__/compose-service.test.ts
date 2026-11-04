@@ -1478,6 +1478,75 @@ describe('ComposeService - deployStack', () => {
     );
   });
 
+  it('pulls and verifies a plain-up candidate before a pull-disabled up', async () => {
+    setupAutoCloseSpawn();
+    mockListContainers.mockResolvedValue([]);
+    const order: string[] = [];
+    const base = mockSpawn.getMockImplementation()!;
+    mockSpawn.mockImplementation((command: string, args: string[], opts: { cwd?: string }) => {
+      if (args.includes('pull') && args.includes('--ignore-buildable')) order.push('pull');
+      if (args.includes('up') && args.includes('--remove-orphans')) order.push('up');
+      return base(command, args, opts);
+    });
+    const verifyPulled = vi.fn(async () => { order.push('verify'); });
+
+    const promise = ComposeService.getInstance(1)
+      .deployStack('my-stack', undefined, false, undefined, {
+        pullServices: ['web'],
+        verifyPulled,
+      });
+    await vi.advanceTimersByTimeAsync(3100);
+    await promise;
+
+    // The fetch happens first, the verifier sees what landed, and up cannot
+    // fetch again behind its back.
+    expect(order).toEqual(['pull', 'verify', 'up']);
+    const spawnArgs = mockSpawn.mock.calls.map((call) => call[1] as string[]);
+    const pullArgs = spawnArgs.find((args) => args.includes('pull') && args.includes('--ignore-buildable'));
+    expect(pullArgs).toContain('web');
+    const upArgs = spawnArgs.find((args) => args.includes('up') && args.includes('--remove-orphans'));
+    expect(upArgs).toEqual(expect.arrayContaining(['--pull', 'never']));
+  });
+
+  it('never runs up when the pulled image fails verification', async () => {
+    setupAutoCloseSpawn();
+    mockListContainers.mockResolvedValue([]);
+    const order: string[] = [];
+    const base = mockSpawn.getMockImplementation()!;
+    mockSpawn.mockImplementation((command: string, args: string[], opts: { cwd?: string }) => {
+      if (args.includes('pull') && args.includes('--ignore-buildable')) order.push('pull');
+      if (args.includes('up') && args.includes('--remove-orphans')) order.push('up');
+      return base(command, args, opts);
+    });
+    const verifyPulled = vi.fn(async () => { throw new Error('candidate moved'); });
+
+    const error = await ComposeService.getInstance(1)
+      .deployStack('my-stack', undefined, false, undefined, {
+        pullServices: ['web'],
+        verifyPulled,
+      })
+      .then(() => null, (e: Error) => e);
+
+    expect(error?.message).toBe('candidate moved');
+    // The block lands before any container is replaced.
+    expect(order).toEqual(['pull']);
+  });
+
+  it('abandons the atomic generation on a candidate block instead of compensating a runtime nothing replaced', async () => {
+    setupAutoCloseSpawn();
+    mockListContainers.mockResolvedValue([]);
+    const verifyPulled = vi.fn(async () => {
+      throw Object.assign(new Error('candidate moved'), { name: 'PulledCandidateBlockedError' });
+    });
+
+    await expect(ComposeService.getInstance(1)
+      .deployStack('my-stack', undefined, true, undefined, { pullServices: ['web'], verifyPulled }))
+      .rejects.toThrow('candidate moved');
+
+    expect(mockAbandon).toHaveBeenCalledWith('recovery-1');
+    expect(mockCompensateWithCandidate).not.toHaveBeenCalled();
+  });
+
   it('captures recovery generation when atomic=true', async () => {
     setupAutoCloseSpawn();
     mockListContainers.mockResolvedValue([]);

@@ -17,7 +17,7 @@ import { awaitHubPostUpdateVerification } from './hubPostUpdateVerification';
 import { safeAxiosTransport } from '../utils/outboundTarget';
 import { PROXY_TIER_HEADER, deployProvenanceHeaders } from './license-headers';
 import { LicenseService } from './LicenseService';
-import { assertPolicyGateAllows, buildSystemPolicyGateOptions, describePolicyBlock, triggerPostDeployScan } from '../helpers/policyGate';
+import { assertPolicyGateAllows, buildSystemPolicyGateOptions, describePolicyBlock, evaluatedDeployCandidateVerification, triggerPostDeployScan } from '../helpers/policyGate';
 import {
     appendRegistryDeliveryCode,
     prepareOutboundRegistryDeliveryBody,
@@ -1656,17 +1656,15 @@ export class BlueprintService {
                             throw new DigestPinsMismatchError();
                         }
                     }
-                    ({ policyEvidence } = await assertPolicyGateAllows(
-                        stackName,
-                        nodeId,
-                        buildSystemPolicyGateOptions('blueprint', {
-                            auditPath,
-                            // A blueprint applies its content with a plain `up`,
-                            // unless digest pins turn it into `--pull never`.
-                            imageSource: options.digestPins ? 'installed' : 'compose',
-                            unattended: true,
-                        }),
-                    ));
+                    const applyPolicyOptions = buildSystemPolicyGateOptions('blueprint', {
+                        auditPath,
+                        // A blueprint applies its content with a plain `up`,
+                        // unless digest pins turn it into `--pull never`.
+                        imageSource: options.digestPins ? 'installed' : 'compose',
+                        unattended: true,
+                    });
+                    const applyGate = await assertPolicyGateAllows(stackName, nodeId, applyPolicyOptions);
+                    ({ policyEvidence } = applyGate);
                     await ComposeService.getInstance(nodeId).deployStack(
                         stackName,
                         undefined,
@@ -1676,6 +1674,13 @@ export class BlueprintService {
                             actor: 'system:blueprint',
                             digestPins: options.digestPins,
                         },
+                        evaluatedDeployCandidateVerification(
+                            stackName,
+                            nodeId,
+                            applyGate.evaluatedCandidates,
+                            applyPolicyOptions,
+                            applyGate.pullServices,
+                        ),
                     );
                     if (recoveryId !== null) {
                         const { StackUpdateRecoveryService } = await import('./StackUpdateRecoveryService');

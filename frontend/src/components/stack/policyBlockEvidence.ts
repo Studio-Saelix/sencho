@@ -28,10 +28,10 @@ const EVIDENCE_STATE_LABEL: Record<string, string> = {
   unavailable: 'unavailable',
   failed: 'failed',
   partial: 'incomplete',
-  // The one `unsupported` the dialog meets today is a node whose build cannot
-  // evaluate a candidate image, so the wording says that rather than the generic
-  // "not supported".
-  unsupported: 'not evaluated on this node version',
+  // `unsupported` is not a single cause: an older node cannot evaluate a
+  // candidate at all, while an unparseable reference cannot be resolved on any
+  // node. `describeState` picks the wording from the record's target and reason.
+  unsupported: 'not supported',
   not_evaluated: 'never evaluated',
   unknown: 'indeterminate',
 };
@@ -52,7 +52,34 @@ function describeSource(source: string): string {
   return spaced.charAt(0).toUpperCase() + spaced.slice(1);
 }
 
-function describeState(state: string): string {
+/** What the dialog knows about the evidence a state came from. */
+interface StateContext {
+  target?: string;
+  reason?: string | null;
+  rule?: string;
+}
+
+/**
+ * True when an `unsupported` record describes an older node rather than an
+ * image that cannot be resolved. A node-wide record carries the `(node)`
+ * sentinel, and the remote-support refusal's application carries no target and
+ * fires the Candidate not evaluated rule. An unparseable reference names an
+ * image with a resolution reason, so it must not borrow the node-version
+ * sentence.
+ */
+function isNodeVersionUnsupported(context: StateContext | undefined): boolean {
+  if (!context) return false;
+  if (context.target === '(node)') return true;
+  if (typeof context.reason === 'string' && /node(?:'s)? version/i.test(context.reason)) return true;
+  return context.target === undefined
+    && typeof context.rule === 'string'
+    && context.rule.startsWith('security_candidate_unproven=');
+}
+
+function describeState(state: string, context?: StateContext): string {
+  if (state === 'unsupported') {
+    return isNodeVersionUnsupported(context) ? 'not evaluated on this node version' : 'not supported';
+  }
   return Object.hasOwn(EVIDENCE_STATE_LABEL, state) ? EVIDENCE_STATE_LABEL[state] : state.replace(/_/g, ' ');
 }
 
@@ -139,7 +166,7 @@ export function buildEvidenceLines(evidence: PolicyBlockPayload['evidence']): Ev
     const who = a.target ? ` for ${describeTarget(a.target)}` : '';
     lines.push({
       key: `app:${a.source}:${a.state}:${a.target ?? ''}`,
-      text: `${describeSource(a.source)}${who}: ${describeState(a.state)}, ${describeOutcome(a.outcome)} by ${describeRule(a.rule)}.`,
+      text: `${describeSource(a.source)}${who}: ${describeState(a.state, { target: a.target, rule: a.rule })}, ${describeOutcome(a.outcome)} by ${describeRule(a.rule)}.`,
     });
     // Keyed by state as well as target: one image can legitimately have two
     // distinct problems (a stale scan whose finding rows were also truncated),
@@ -156,7 +183,7 @@ export function buildEvidenceLines(evidence: PolicyBlockPayload['evidence']): Ev
     if (explained.has(`${r.source}:${r.state}:${r.target}`)) continue;
     lines.push({
       key: `rec:${r.source}:${r.state}:${r.target}`,
-      text: `${describeSource(r.source)} for ${describeTarget(r.target)}: ${describeState(r.state)}.${r.reason ? ` ${sentence(r.reason)}` : ''}`,
+      text: `${describeSource(r.source)} for ${describeTarget(r.target)}: ${describeState(r.state, { target: r.target, reason: r.reason })}.${r.reason ? ` ${sentence(r.reason)}` : ''}`,
     });
   }
 

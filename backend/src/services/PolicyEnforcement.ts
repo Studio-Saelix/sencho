@@ -47,6 +47,7 @@ import {
 import {
     localImageExists,
     nodePlatformFor,
+    pullPolicyNever,
     pullPolicyPullsOnUp,
     resolveCandidateImage,
     type CandidateResolution,
@@ -160,6 +161,12 @@ export interface PolicyEnforcementResult {
      * pull, and the image that lands must be the image that was proven.
      */
     evaluatedCandidates?: EvaluatedCandidate[];
+    /**
+     * Compose services the operation will fetch, including a service whose
+     * digest-pinned image Compose fetches by digest. A plain-up deploy pulls
+     * these before running `up` with pulls disabled.
+     */
+    pullServices?: string[];
 }
 
 /** One registry candidate a gate decision covered. */
@@ -169,6 +176,12 @@ export interface EvaluatedCandidate {
     indexDigest: string;
     /** The platform child digest that was scanned. */
     platformDigest: string;
+    /**
+     * Compose services this operation will fetch the ref through. A plain-up
+     * deploy pulls exactly these services before it runs `up` with pulls
+     * disabled; empty when the caller supplied bare refs (GitOps acceptance).
+     */
+    services?: string[];
 }
 
 /**
@@ -404,7 +417,12 @@ function failureRule(
 /** One reference's role for this gate call. */
 type CandidatePlanEntry =
     | { kind: 'installed'; why: 'digest_pinned' | 'not_pulled' | 'build' }
-    | { kind: 'candidate'; resolution: CandidateResolution & { kind: 'candidate' } }
+    | {
+        kind: 'candidate';
+        resolution: CandidateResolution & { kind: 'candidate' };
+        /** Compose services this operation will fetch this ref through. */
+        services: string[];
+    }
     | { kind: 'unresolved'; resolution: CandidateResolution & { kind: 'unresolved' } };
 
 /**
@@ -412,27 +430,40 @@ type CandidatePlanEntry =
  * or the one already on the node, and resolve the registry image.
  *
  * The plan is per service, from the fully rendered model, because `build`
- * services have no registry image and a Compose `pull_policy` decides whether a
- * plain `up` fetches. When the model cannot be rendered (or the caller supplied
- * bare references, as the GitOps candidate path does), every reference is
- * treated as a candidate: the stricter reading, because nothing then proves the
- * operation will not pull it.
+ * services have no registry image and a Compose `pull_policy` decides whether an
+ * update's `pull` or a plain `up` fetches. When the model cannot be rendered (or
+ * the caller supplied bare references, as the GitOps candidate path does), every
+ * reference is treated as a candidate: the stricter reading, because nothing
+ * then proves the operation will not pull it.
  */
 async function planCandidates(
     nodeId: number,
     imageRefs: readonly string[],
     mode: Exclude<ImageSource, 'installed'>,
     modelServices: Awaited<ReturnType<typeof buildEffectiveServiceModel>> | null,
-): Promise<Map<string, CandidatePlanEntry>> {
+): Promise<{ plan: Map<string, CandidatePlanEntry>; pullServices: Set<string> }> {
     const plan = new Map<string, CandidatePlanEntry>();
-    if (imageRefs.length === 0) return plan;
+    // Every service the operation will fetch, including a digest pin Compose
+    // fetches by its pinned digest. The deploy executor pulls exactly these
+    // before it runs `up` with pulls disabled.
+    const pullServices = new Set<string>();
+    if (imageRefs.length === 0) return { plan, pullServices };
     const services = modelServices && modelServices.renderable ? modelServices.services : null;
     const platform = await nodePlatformFor(nodeId);
 
-    const resolveEntry = async (ref: string): Promise<CandidatePlanEntry> => {
+    const resolveEntry = async (ref: string, serviceNames: string[] = []): Promise<CandidatePlanEntry> => {
         const resolution = await resolveCandidateImage(nodeId, ref, platform);
-        if (resolution.kind === 'candidate') return { kind: 'candidate', resolution };
+        if (resolution.kind === 'candidate') {
+            for (const name of serviceNames) pullServices.add(name);
+            return { kind: 'candidate', resolution, services: serviceNames };
+        }
         if (resolution.kind === 'unresolved') return { kind: 'unresolved', resolution };
+        // A digest pin is exact, so it is already the image the gate will run.
+        // Compose may still fetch it when the local copy is missing; that fetch
+        // belongs in the same pull boundary.
+        if (resolution.why === 'digest_pinned') {
+            for (const name of serviceNames) pullServices.add(name);
+        }
         return { kind: 'installed', why: resolution.why };
     };
 
@@ -454,18 +485,38 @@ async function planCandidates(
             plan.set(ref, { kind: 'installed', why: 'build' });
             continue;
         }
-        const pulls = mode === 'registry'
-            ? declared.some((spec) => !spec.hasBuild)
-            : declared.some((spec) => pullPolicyPullsOnUp(spec.pullPolicy));
+        // Both an update's `docker compose pull` and a plain `up` skip
+        // `pull_policy: never`, even when the image is absent, so that service
+        // never runs a registry image this gate could block on. `missing` skips
+        // a present image in both modes, handled by the presence check below.
+        // An explicit `pull` (registry mode) fetches a service with no policy,
+        // while `up` (compose mode) uses Compose's `missing` default there.
+        // An unknown policy is treated as pulling (fail-closed).
+        const runnable = declared.filter((spec) => !spec.hasBuild);
+        if (runnable.length === 0 || runnable.every((spec) => pullPolicyNever(spec.pullPolicy))) {
+            plan.set(ref, { kind: 'installed', why: 'not_pulled' });
+            continue;
+        }
+        const pulls = runnable.some((spec) => (
+            mode === 'registry' && (typeof spec.pullPolicy !== 'string' || spec.pullPolicy.trim() === '')
+                ? true
+                : pullPolicyPullsOnUp(spec.pullPolicy)
+        ));
         const present = pulls ? false : await localImageExists(nodeId, ref);
         if (pulls || !present) {
-            plan.set(ref, await resolveEntry(ref));
+            // The services that make this ref a candidate are the ones Compose
+            // will fetch it through, so a plain-up deploy can pull exactly those
+            // before it replaces anything.
+            plan.set(ref, await resolveEntry(
+                ref,
+                runnable.filter((spec) => !pullPolicyNever(spec.pullPolicy)).map((spec) => spec.name),
+            ));
             continue;
         }
         // Compose will not fetch this image, so the node's own image is what runs.
         plan.set(ref, { kind: 'installed', why: 'not_pulled' });
     }
-    return plan;
+    return { plan, pullServices };
 }
 
 interface ImageRiskEvaluation {
@@ -952,8 +1003,11 @@ export async function enforcePolicyForImageRefs(
     opts: PolicyEnforcementOptions,
     matchedPolicy?: ScanPolicy,
     failClosedInvalidRefs = false,
+    candidateModel: Awaited<ReturnType<typeof buildEffectiveServiceModel>> | null = null,
 ): Promise<PolicyEnforcementResult> {
-    const result = await evaluateImageRefs(stackName, nodeId, imageRefs, opts, matchedPolicy, failClosedInvalidRefs);
+    const result = await evaluateImageRefs(
+        stackName, nodeId, imageRefs, opts, matchedPolicy, failClosedInvalidRefs, candidateModel,
+    );
     return retainAllowedDecision(result, stackName, nodeId, opts);
 }
 
@@ -1006,9 +1060,13 @@ async function evaluateImageRefs(
     const imageSource = opts.imageSource ?? 'installed';
     // Resolved once, before the loop: one registry probe per candidate and one
     // platform read per gate call, not one per image.
-    const candidatePlan = imageSource === 'installed'
+    const planned = imageSource === 'installed'
         ? null
         : await planCandidates(nodeId, imageRefs, imageSource, candidateModel);
+    const candidatePlan = planned?.plan ?? null;
+    const plannedPullServices = planned && planned.pullServices.size > 0
+        ? [...planned.pullServices]
+        : undefined;
     const evaluatedCandidates: EvaluatedCandidate[] = [];
     for (const imageRef of imageRefs) {
         if (!validateImageRef(imageRef)) {
@@ -1066,7 +1124,8 @@ async function evaluateImageRefs(
             }
             continue;
         }
-        const candidate = planned?.kind === 'candidate' ? planned.resolution : null;
+        const candidateEntry = planned?.kind === 'candidate' ? planned : null;
+        const candidate = candidateEntry?.resolution ?? null;
         const subject: 'installed' | 'candidate' = candidate || opts.pulledCandidate === true ? 'candidate' : 'installed';
         try {
             scan = await svc.scanImagePreflight(
@@ -1150,6 +1209,7 @@ async function evaluateImageRefs(
                 ref: imageRef,
                 indexDigest: candidate.indexDigest,
                 platformDigest: candidate.platformDigest,
+                ...(candidateEntry && candidateEntry.services.length > 0 ? { services: candidateEntry.services } : {}),
             });
         }
         evidenceRecords.push({
@@ -1269,6 +1329,7 @@ async function evaluateImageRefs(
         return {
             ok: true, bypassed: false, policy, violations: [], evidence,
             ...(evaluatedCandidates.length > 0 ? { evaluatedCandidates } : {}),
+            ...(plannedPullServices ? { pullServices: plannedPullServices } : {}),
         };
     }
 
@@ -1283,6 +1344,7 @@ async function evaluateImageRefs(
         return {
             ok: true, bypassed: true, policy, violations, evidence,
             ...(evaluatedCandidates.length > 0 ? { evaluatedCandidates } : {}),
+            ...(plannedPullServices ? { pullServices: plannedPullServices } : {}),
         };
     }
 
@@ -1318,6 +1380,7 @@ async function evaluateImageRefs(
     return {
         ok: false, bypassed: false, policy, violations, evidence,
         ...(evaluatedCandidates.length > 0 ? { evaluatedCandidates } : {}),
+        ...(plannedPullServices ? { pullServices: plannedPullServices } : {}),
     };
 }
 

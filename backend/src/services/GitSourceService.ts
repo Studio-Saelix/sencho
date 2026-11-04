@@ -11,7 +11,7 @@ import { ComposeService } from './ComposeService';
 import { StackOpLockService } from './StackOpLockService';
 import { HealthGateService } from './HealthGateService';
 import { NodeRegistry } from './NodeRegistry';
-import { assertPolicyGateAllows, buildSystemPolicyGateOptions, triggerPostDeployScan } from '../helpers/policyGate';
+import { assertPolicyGateAllows, buildSystemPolicyGateOptions, evaluatedDeployCandidateVerification, triggerPostDeployScan } from '../helpers/policyGate';
 import type { DeployInvocationContext } from './network/missingExternalNetworksError';
 import { invalidateNodeCaches } from '../helpers/cacheInvalidation';
 import { isDebugEnabled } from '../utils/debug';
@@ -4735,20 +4735,17 @@ export class GitSourceService {
                 // evidence the operator must see against the applied
                 // files, not a pre-work refusal, so it settles
                 // recovery_required under the same deploy-failure wording.
-                await assertPolicyGateAllows(
-                    stackName,
-                    nodeId,
-                    buildSystemPolicyGateOptions(actor, {
-                        bypass: false,
-                        auditPath: `/api/stacks/${stackName}/git-source/apply`,
-                        onAllowed,
-                        imageSource: 'compose',
-                        // A resume or retry is a person's own action; an
-                        // automated trigger has nobody to answer, so unproven
-                        // candidate evidence is held there.
-                        unattended: isAutomatedReconcileTrigger(envelope.trigger as ReconcileTrigger),
-                    }),
-                );
+                const deployPolicyOptions = buildSystemPolicyGateOptions(actor, {
+                    bypass: false,
+                    auditPath: `/api/stacks/${stackName}/git-source/apply`,
+                    onAllowed,
+                    imageSource: 'compose',
+                    // A resume or retry is a person's own action; an
+                    // automated trigger has nobody to answer, so unproven
+                    // candidate evidence is held there.
+                    unattended: isAutomatedReconcileTrigger(envelope.trigger as ReconcileTrigger),
+                });
+                const deployGate = await assertPolicyGateAllows(stackName, nodeId, deployPolicyOptions);
                 const autoDeploy = await (async () => {
                     const manifestRead = await (async () => {
                         const onDisk = await GitProjectManifestService.getInstance().readManifest(
@@ -4787,6 +4784,13 @@ export class GitSourceService {
                             undefined,
                             undefined,
                             ctx,
+                            evaluatedDeployCandidateVerification(
+                                stackName,
+                                nodeId,
+                                deployGate.evaluatedCandidates,
+                                deployPolicyOptions,
+                                deployGate.pullServices,
+                            ),
                         );
                     } finally {
                         await destroyOverlay();
@@ -6209,22 +6213,19 @@ export class GitSourceService {
                 if (deployOpIntent === null) {
                     return { applied: true, deployed: false, deployIntentUnavailable: true, recoveryId };
                 }
-                await assertPolicyGateAllows(
-                    stackName,
-                    nodeId,
-                    buildSystemPolicyGateOptions(captureActor, {
-                        bypass: args.bypassPolicy === true,
-                        auditPath: `/api/stacks/${stackName}/git-source/apply`,
-                        onAllowed: args.onAllowed,
-                        // A GitOps deploy is a plain `up`: it pulls only what
-                        // Compose's own pull policy makes it pull.
-                        imageSource: 'compose',
-                        // An operator's own apply is attended; every automated
-                        // trigger has nobody to ask, so unproven candidate
-                        // evidence is held by Candidate not evaluated.
-                        unattended: isAutomatedReconcileTrigger(args.reconcileTrigger),
-                    }),
-                );
+                const applyPolicyOptions = buildSystemPolicyGateOptions(captureActor, {
+                    bypass: args.bypassPolicy === true,
+                    auditPath: `/api/stacks/${stackName}/git-source/apply`,
+                    onAllowed: args.onAllowed,
+                    // A GitOps deploy is a plain `up`: it pulls only what
+                    // Compose's own pull policy makes it pull.
+                    imageSource: 'compose',
+                    // An operator's own apply is attended; every automated
+                    // trigger has nobody to ask, so unproven candidate
+                    // evidence is held by Candidate not evaluated.
+                    unattended: isAutomatedReconcileTrigger(args.reconcileTrigger),
+                });
+                const applyGate = await assertPolicyGateAllows(stackName, nodeId, applyPolicyOptions);
                 if (recoveryId) {
                     await finalizeRecoveryCurrent(recoveryId, false);
                 }
@@ -6247,6 +6248,13 @@ export class GitSourceService {
                             undefined,
                             undefined,
                             ctx,
+                            evaluatedDeployCandidateVerification(
+                                stackName,
+                                nodeId,
+                                applyGate.evaluatedCandidates,
+                                applyPolicyOptions,
+                                applyGate.pullServices,
+                            ),
                         );
                     } finally {
                         await destroyOverlay();

@@ -94,8 +94,10 @@ vi.mock('../services/StackOpLockService', () => ({
 }));
 
 vi.mock('../helpers/policyGate', () => ({
-  assertPolicyGateAllows: vi.fn().mockResolvedValue(undefined),
+  assertPolicyGateAllows: vi.fn().mockResolvedValue({ evaluatedCandidates: [], pullServices: [] }),
   buildSystemPolicyGateOptions: vi.fn().mockReturnValue({}),
+  evaluatedDeployCandidateVerification: vi.fn().mockReturnValue(undefined),
+  triggerPostDeployScan: vi.fn(),
 }));
 
 vi.mock('../services/HealthGateService', () => ({

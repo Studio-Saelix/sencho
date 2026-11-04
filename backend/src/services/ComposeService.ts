@@ -90,6 +90,7 @@ import {
 } from '../helpers/composeVersionSkew';
 import { withTimeout } from '../utils/withTimeout';
 import type { NotificationCategory } from './NotificationService';
+import type { DeployCandidateVerification } from '../helpers/policyGate';
 
 /** True when a generation capture recorded an invocation object (prefix may be empty). */
 function hasUsableCapturedInvocation(
@@ -1651,6 +1652,14 @@ export class ComposeService {
     ws?: WebSocket,
     atomic?: boolean,
     ctx?: DeployInvocationContext,
+    /**
+     * Confirms the images a plain `up` would fetch are the ones the gate
+     * evaluated. When set, the deploy pulls those services first, verifies the
+     * digests, and then runs `up --pull never`, so no fetch can land between the
+     * check and the container replacement. Undefined when the gate evaluated no
+     * candidate or named no service, which keeps a non-pulling deploy identical.
+     */
+    verification?: DeployCandidateVerification,
   ): Promise<{ recoveryId: string | null; deployedGenerationId: string | null; gitopsOperationId: string | null }> {
     if (ctx?.overlayDir) {
       assertGitOverlaySource(ctx.source);
@@ -1660,7 +1669,7 @@ export class ComposeService {
       if (!decryptedComposeOutputWithheld()) {
         return runWithDecryptedComposeOutput(
           { stackName, nodeId: this.nodeId },
-          () => this.deployStack(stackName, ws, atomic, ctx),
+          () => this.deployStack(stackName, ws, atomic, ctx, verification),
         );
       }
     }
@@ -1742,6 +1751,11 @@ export class ComposeService {
         let overlayDir: string | null = null;
         try {
           const upAction = ['up', '-d', '--remove-orphans'];
+          // The verified candidates were just pulled by the boundary below;
+          // letting `up` fetch again would reopen the window the verification
+          // closed. Only services the gate evaluated as candidates are pulled,
+          // so a service with no pull_policy is not re-fetched here.
+          if (verification) upAction.push('--pull', 'never');
           let args: string[];
           if (digestPins && Object.keys(digestPins).length > 0) {
             const pinned = await this.withDigestPinOverlay(
@@ -1759,6 +1773,24 @@ export class ComposeService {
           // bounded, best-effort check must not leave a running workload with its
           // gate already retired.
           await this.noteComposeVersionSkew(stackName, 'deploy', sendOutput);
+          if (verification) {
+            // `up` would fetch these images itself, inside the same command that
+            // replaces the containers. Pulling the exact services first creates
+            // the boundary the update paths already have: the verifier sees what
+            // actually landed, and a block throws here, before any container is
+            // touched.
+            sendOutput('=== Pulling registry images ===\n');
+            await this.execute(
+              'docker',
+              await this.authoredComposeArgs(
+                stackName,
+                ['pull', '--ignore-buildable', ...verification.pullServices],
+                stackDir,
+              ),
+              stackDir, ws, true, env, getComposeStallTimeoutMs(),
+            );
+            await verification.verifyPulled();
+          }
           // End the gates from any earlier run here, after the arguments and the
           // registry auth have resolved and immediately before the compose up
           // replaces the containers they are observing, so neither a refused
@@ -1821,6 +1853,17 @@ export class ComposeService {
       // stampGitOpsDeployId).
       if (gitopsDeploy) {
         this.stampGitOpsDeployId(deployError, gitopsDeploy.gitopsOperationId);
+      }
+      // A policy refusal from the pre-up verification is not a failed deploy:
+      // the pull changed only the local image store and no container was
+      // replaced. Abandon the captured generation instead of compensating a
+      // runtime that is still the one it captured, so a block cannot recreate
+      // running containers.
+      if (deployError instanceof Error && deployError.name === 'PulledCandidateBlockedError') {
+        if (atomic && recoverySvc && recoveryId) {
+          await recoverySvc.abandon(recoveryId);
+        }
+        throw deployError;
       }
       if (atomic && recoverySvc && handedOff && recoveryId) {
         sendOutput('\n=== Deployment failed - restoring previous runtime from recovery generation ===\n');

@@ -38,7 +38,11 @@ vi.mock('../services/DatabaseService', () => ({
   },
 }));
 
-import { PulledCandidateBlockedError, verifyPulledCandidates } from '../helpers/policyGate';
+import {
+  evaluatedDeployCandidateVerification,
+  PulledCandidateBlockedError,
+  verifyPulledCandidates,
+} from '../helpers/policyGate';
 
 const CANDIDATES = [{
   ref: 'registry.example.com/web:latest',
@@ -122,5 +126,26 @@ describe('verifyPulledCandidates', () => {
   it('does nothing when the gate evaluated no candidate', async () => {
     await verifyPulledCandidates('web', 1, undefined, OPTIONS);
     expect(enforcement.enforcePolicyForImageRefs).not.toHaveBeenCalled();
+  });
+});
+
+describe('evaluatedDeployCandidateVerification', () => {
+  it('names the services a plain up must pull before it can be verified', () => {
+    const verification = evaluatedDeployCandidateVerification('web', 1, [
+      { ...CANDIDATES[0], services: ['web', 'worker'] },
+      { ...CANDIDATES[0], ref: 'registry.example.com/worker:latest', services: ['worker'] },
+    ], OPTIONS);
+    expect(verification?.pullServices).toEqual(['web', 'worker']);
+    expect(verification?.verifyPulled).toBeTypeOf('function');
+  });
+
+  it('does not open a pull boundary when the gate named no service', () => {
+    // Bare refs (GitOps candidate acceptance) have no rendered model, so a
+    // deploy cannot know which service to pull; its `up` would fail to render.
+    expect(evaluatedDeployCandidateVerification('web', 1, [CANDIDATES[0]], OPTIONS)).toBeUndefined();
+  });
+
+  it('does not open a pull boundary when nothing was evaluated', () => {
+    expect(evaluatedDeployCandidateVerification('web', 1, undefined, OPTIONS)).toBeUndefined();
   });
 });

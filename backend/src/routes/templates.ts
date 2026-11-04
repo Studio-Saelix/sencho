@@ -16,7 +16,7 @@ import { isValidStackName, isPathWithinBase } from '../utils/validation';
 import { isDebugEnabled } from '../utils/debug';
 import { getErrorMessage } from '../utils/errors';
 import { sanitizeForLog } from '../utils/safeLog';
-import { policyEvidenceFor, runPolicyGate, triggerPostDeployScan } from '../helpers/policyGate';
+import { policyEvidenceFor, pulledDeployCandidateVerification, runPolicyGate, triggerPostDeployScan } from '../helpers/policyGate';
 import { invalidateNodeCaches } from '../helpers/cacheInvalidation';
 import { getRegistryDeliveryContext, getRegistryDeliveryLockContext } from '../helpers/registryDeliveryContext';
 import { materializePreparedSourceToStack } from '../helpers/registryDeliveryMaterialize';
@@ -195,6 +195,7 @@ templatesRouter.post('/deploy', authMiddleware, async (req: Request, res: Respon
         getTerminalWs(req.get(DEPLOY_SESSION_HEADER)),
         atomic,
         req.deployContext ?? { source: 'template', actor: req.user?.username ?? null },
+        pulledDeployCandidateVerification(req, res, stackName, req.nodeId),
       );
       invalidateNodeCaches(req.nodeId);
       console.log(`[Templates] Deploy completed: ${stackName}`);

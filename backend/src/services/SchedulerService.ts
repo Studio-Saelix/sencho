@@ -40,7 +40,7 @@ import TrivyService from './TrivyService';
 import type { ScanAllNodeImagesResult } from './TrivyService';
 import TrivyInstaller from './TrivyInstaller';
 import { CloudBackupService } from './CloudBackupService';
-import { buildSystemPolicyGateOptions, remoteCandidateGateRefusal, verifyPulledCandidates } from '../helpers/policyGate';
+import { buildSystemPolicyGateOptions, evaluatedDeployCandidateVerification, remoteCandidateGateRefusal, verifyPulledCandidates } from '../helpers/policyGate';
 import {
     appendRegistryDeliveryCode,
     prepareOutboundRegistryDeliveryBody,
@@ -49,7 +49,7 @@ import {
 } from '../helpers/registryDeliveryOutbound';
 import { filterContainersByComposeService } from '../helpers/composeServiceMatch';
 import { excludeSelfContainers } from '../helpers/excludeSelfContainers';
-import { enforcePolicyPreDeploy, type EvaluatedCandidate } from './PolicyEnforcement';
+import { enforcePolicyPreDeploy, type EvaluatedCandidate, type PolicyEnforcementOptions } from './PolicyEnforcement';
 import { summarizeBlockReasons } from '../utils/policy-risk';
 import { describePolicyBlock } from '../helpers/policyGate';
 import { resolveTaskPermissionScope, type BackendScheduledAction, type TargetType } from './scheduledActionRegistry';
@@ -244,21 +244,24 @@ export class SchedulerService {
         nodeId: number,
         action: 'Auto-start' | 'Auto-update',
         auditPath: string,
-    ): Promise<{ evaluatedCandidates?: EvaluatedCandidate[] }> {
+    ): Promise<{
+        evaluatedCandidates?: EvaluatedCandidate[];
+        pullServices?: string[];
+        options: PolicyEnforcementOptions;
+    }> {
         const actor = action === 'Auto-start' ? 'scheduler:auto-start' : 'scheduler:auto-update';
-        const gate = await enforcePolicyPreDeploy(
-            stackName,
-            nodeId,
-            buildSystemPolicyGateOptions(actor, {
-                auditPath,
-                // A scheduled run has nobody at the keyboard. An auto-update
-                // pulls every pullable service, while an auto-start is a plain
-                // `up` that pulls only what Compose's own pull policy makes it.
-                imageSource: action === 'Auto-update' ? 'registry' : 'compose',
-                unattended: true,
-            }),
-        );
-        if (gate.ok) return { evaluatedCandidates: gate.evaluatedCandidates };
+        const options = buildSystemPolicyGateOptions(actor, {
+            auditPath,
+            // A scheduled run has nobody at the keyboard. An auto-update
+            // pulls every pullable service, while an auto-start is a plain
+            // `up` that pulls only what Compose's own pull policy makes it.
+            imageSource: action === 'Auto-update' ? 'registry' : 'compose',
+            unattended: true,
+        });
+        const gate = await enforcePolicyPreDeploy(stackName, nodeId, options);
+        if (gate.ok) {
+            return { evaluatedCandidates: gate.evaluatedCandidates, pullServices: gate.pullServices, options };
+        }
         // describePolicyBlock distinguishes a matched finding from missing
         // evidence. Composing the sentence here instead reported a scanner
         // outage as a policy match on the unattended path.
@@ -707,7 +710,7 @@ export class SchedulerService {
             );
             return `Started stack "${task.target_id}" on remote node`;
         }
-        await this.enforceSchedulerPolicyGate(
+        const startGate = await this.enforceSchedulerPolicyGate(
             task.target_id,
             task.node_id,
             'Auto-start',
@@ -721,6 +724,13 @@ export class SchedulerService {
                 undefined,
                 undefined,
                 { source: 'scheduler', actor: 'system:scheduler' },
+                evaluatedDeployCandidateVerification(
+                    task.target_id,
+                    localNodeId,
+                    startGate.evaluatedCandidates,
+                    startGate.options,
+                    startGate.pullServices,
+                ),
             ),
         );
         if (!lock.ran) throw new Error(skipMessage(task.target_id, lock.existing.action));
@@ -1449,7 +1459,7 @@ export class SchedulerService {
                         atomic,
                         terminalWs: null,
                         verifyPulled: () => verifyPulledCandidates(
-                            stackName, nodeId, schedulerGate.evaluatedCandidates, buildSystemPolicyGateOptions('system:scheduler'),
+                            stackName, nodeId, schedulerGate.evaluatedCandidates, schedulerGate.options,
                         ),
                     },
                 );
