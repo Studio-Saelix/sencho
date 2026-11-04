@@ -260,7 +260,7 @@ describe('registry mode (an update that pulls)', () => {
 
     expect(result.ok).toBe(true);
     expect(trivyStub.scanImagePreflight).toHaveBeenCalledWith(
-      `registry.example.com/web@${PLATFORM_DIGEST}`, 1, 'web', undefined,
+      `registry.example.com/web@${PLATFORM_DIGEST}`, 1, 'web', { platform: 'linux/amd64' },
     );
     expect(result.evaluatedCandidates).toBeUndefined();
   });
@@ -285,7 +285,7 @@ describe('registry mode (an update that pulls)', () => {
     expect(result.ok).toBe(true);
     expect(candidates.resolve).not.toHaveBeenCalled();
     expect(trivyStub.scanImagePreflight).toHaveBeenCalledWith(
-      'registry.example.com/web:latest', 1, 'web', undefined,
+      'registry.example.com/web:latest', 1, 'web', { platform: 'linux/amd64' },
     );
     expect(result.evaluatedCandidates).toBeUndefined();
     expect(result.evidence?.records[0]).toMatchObject({ subject: 'installed' });
@@ -404,7 +404,9 @@ describe('compose mode (a plain up)', () => {
 
     expect(result.ok).toBe(true);
     expect(candidates.resolve).not.toHaveBeenCalled();
-    expect(trivyStub.scanImagePreflight).toHaveBeenCalledWith('registry.example.com/web:latest', 1, 'web', undefined);
+    expect(trivyStub.scanImagePreflight).toHaveBeenCalledWith(
+      'registry.example.com/web:latest', 1, 'web', { platform: 'linux/amd64' },
+    );
   });
 
   it('evaluates the registry image when Compose would pull because the image is missing', async () => {
@@ -813,6 +815,62 @@ describe('compose mode (a plain up)', () => {
     expect(result.ok).toBe(false);
     expect(result.violations).toHaveLength(2);
     expect(result.pullServices).toEqual(['web']);
+  });
+
+  it('evaluates every non-pulling platform group when no group pulls', async () => {
+    // The same gap as the mixed case, with no candidate beside it: two
+    // groups, two children, both must be read.
+    candidates.platform = { os: 'linux', architecture: 'arm64' };
+    trivyStub.scanImagePreflight.mockImplementation(async (
+      _ref: string,
+      _nodeId: number,
+      _stack: string,
+      _opts?: { platform?: string },
+    ) => mkScan({ id: 41, highest_severity: 'CRITICAL', critical_count: 1, total_vulnerabilities: 1 }));
+    modelWith([
+      { name: 'tools', declaredImage: 'registry.example.com/web:latest', hasBuild: false, pullPolicy: 'never', platform: 'linux/arm64', expectedReplicas: 1, dependsOn: [], hasHealthcheck: false },
+      { name: 'util', declaredImage: 'registry.example.com/web:latest', hasBuild: false, pullPolicy: 'never', platform: 'linux/arm/v7', expectedReplicas: 1, dependsOn: [], hasHealthcheck: false },
+    ]);
+
+    const result = await enforcePolicyPreDeploy('web', 1, { bypass: false, actor: 'u', imageSource: 'compose' });
+
+    expect(candidates.resolve).not.toHaveBeenCalled();
+    expect(trivyStub.scanImagePreflight).toHaveBeenCalledTimes(2);
+    expect(trivyStub.scanImagePreflight.mock.calls.map((call) => call[3])).toEqual([
+      { platform: 'linux/arm64' },
+      { platform: 'linux/arm/v7' },
+    ]);
+    expect(result.ok).toBe(false);
+    expect(result.violations).toHaveLength(2);
+    expect(result.evaluatedCandidates).toBeUndefined();
+    expect(result.pullServices).toBeUndefined();
+  });
+
+  it('evaluates a digest-pinned ref for each platform group that uses it', async () => {
+    // A digest pin can name a multi-arch index. Each group runs its own child,
+    // so the pin keeps the group platform rather than one ref-level scan.
+    candidates.platform = { os: 'linux', architecture: 'arm64' };
+    const pinned = `registry.example.com/web@${PLATFORM_DIGEST}`;
+    composeStub.listStackImages.mockResolvedValue([pinned]);
+    candidates.localImageExists.mockResolvedValue(false);
+    candidates.resolve.mockResolvedValue({
+      kind: 'installed', ref: pinned, why: 'digest_pinned',
+    });
+    modelWith([
+      { name: 'web', declaredImage: pinned, hasBuild: false, pullPolicy: null, platform: 'linux/amd64', expectedReplicas: 1, dependsOn: [], hasHealthcheck: false },
+      { name: 'tools', declaredImage: pinned, hasBuild: false, pullPolicy: null, platform: 'linux/arm64', expectedReplicas: 1, dependsOn: [], hasHealthcheck: false },
+    ]);
+
+    const result = await enforcePolicyPreDeploy('web', 1, { bypass: false, actor: 'u', imageSource: 'compose' });
+
+    expect(candidates.resolve).toHaveBeenCalledTimes(2);
+    expect(result.pullServices).toEqual(['web', 'tools']);
+    expect(trivyStub.scanImagePreflight).toHaveBeenCalledTimes(2);
+    expect(trivyStub.scanImagePreflight.mock.calls.map((call) => call[3])).toEqual([
+      { platform: 'linux/amd64' },
+      { platform: 'linux/arm64' },
+    ]);
+    expect(result.evaluatedCandidates).toBeUndefined();
   });
 
   it('keeps one violation and one evidence record per platform variant', async () => {

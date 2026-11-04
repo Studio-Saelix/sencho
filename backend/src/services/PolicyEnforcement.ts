@@ -749,20 +749,25 @@ async function planCandidates(
             const entry = await resolveEntry(ref, pulling.map((spec) => spec.name), group.platform);
             // A resolution failure still belongs to the platform it was asked
             // for, so the record can name the variant the gate could not prove.
-            entries.push(entry.kind === 'unresolved'
+            // An installed result (a digest pin) keeps the group platform too:
+            // a pin can name a multi-arch index, and each group runs its own
+            // child.
+            const withPlatform: CandidatePlanEntry = entry.kind === 'installed' && group.platform
+                ? { ...entry, platform: platformKey(group.platform) }
+                : entry;
+            entries.push(withPlatform.kind === 'unresolved'
                 ? {
-                    ...entry,
+                    ...withPlatform,
                     platform: group.platform ? platformKey(group.platform) : null,
                 }
-                : entry);
+                : withPlatform);
         }
-        if (entries.length === 0) {
-            // No group pulls, so one installed scan of the tag covers the image
-            // the node runs.
+        // One installed entry per platform group Compose will not fetch, so
+        // every child those services run is evaluated. This holds when no group
+        // pulls at all as well as when some other group is a candidate.
+        if (entries.length === 0 && nonPullingPlatforms.size === 0) {
             plan.set(ref, [{ kind: 'installed', why: 'not_pulled' }]);
         } else {
-            // One entry per platform group Compose will not fetch, so each
-            // child that group runs is evaluated beside the candidates.
             for (const platform of nonPullingPlatforms) {
                 entries.push({
                     kind: 'installed',
