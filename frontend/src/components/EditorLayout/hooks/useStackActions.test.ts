@@ -3162,9 +3162,9 @@ describe('useStackActions.getStackMenuVisibility', () => {
     expect(overlayState.openSelfStackProtected).not.toHaveBeenCalled();
   });
 
-  it('does not re-read eligibility when the cached answer already allows reapply', async () => {
+  it('re-reads a cached eligible answer at the click and opens the Reapply confirmation when it still holds', async () => {
     vi.mocked(apiFetch).mockReset();
-    const refresh = vi.fn();
+    const refresh = vi.fn().mockResolvedValue({ canReapply: true, reason: null });
     const { result, overlayState } = setup({
       isAdmin: true,
       canReapplyCompose: true,
@@ -3176,8 +3176,116 @@ describe('useStackActions.getStackMenuVisibility', () => {
       },
     });
     await act(async () => { await result.current.deployStack({ preventDefault: vi.fn(), stopPropagation: vi.fn() } as unknown as React.MouseEvent); });
-    expect(refresh).not.toHaveBeenCalled();
+    expect(refresh).toHaveBeenCalledTimes(1);
+    expect(overlayState.setComposeReapplyCapture).toHaveBeenCalledWith({
+      nodeId: 7, nodeType: 'remote', nodeName: 'Remote A', stackFile: 'sencho.yml',
+    });
+    expect(overlayState.openSelfStackProtected).not.toHaveBeenCalled();
+  });
+
+  it('names the node and the reason when a cached eligible answer went stale', async () => {
+    vi.mocked(apiFetch).mockReset();
+    const refresh = vi.fn().mockResolvedValue({ canReapply: false, reason: 'compose_cli_unavailable' });
+    const { result, overlayState } = setup({
+      isAdmin: true,
+      canReapplyCompose: true,
+      refreshReapplyEligibility: refresh,
+      activeNode: { id: 7, name: 'Remote A', type: 'remote' } as ActiveNode,
+      stackList: {
+        selectedFile: 'sencho.yml',
+        stackSelfFlags: { 'sencho.yml': true },
+      },
+    });
+    await act(async () => { await result.current.deployStack({ preventDefault: vi.fn(), stopPropagation: vi.fn() } as unknown as React.MouseEvent); });
+    expect(overlayState.openSelfStackProtected).toHaveBeenCalledWith({
+      nodeName: 'Remote A', reason: 'compose_cli_unavailable',
+    });
+    expect(overlayState.setComposeReapplyCapture).not.toHaveBeenCalled();
+  });
+
+  it('shows nothing when the click-time read of a cached eligible answer is superseded', async () => {
+    vi.mocked(apiFetch).mockReset();
+    const refresh = vi.fn().mockResolvedValue(null);
+    const { result, overlayState } = setup({
+      isAdmin: true,
+      canReapplyCompose: true,
+      refreshReapplyEligibility: refresh,
+      activeNode: { id: 7, name: 'Remote A', type: 'remote' } as ActiveNode,
+      stackList: {
+        selectedFile: 'sencho.yml',
+        stackSelfFlags: { 'sencho.yml': true },
+      },
+    });
+    await act(async () => { await result.current.deployStack({ preventDefault: vi.fn(), stopPropagation: vi.fn() } as unknown as React.MouseEvent); });
+    expect(overlayState.setComposeReapplyCapture).not.toHaveBeenCalled();
+    expect(overlayState.openSelfStackProtected).not.toHaveBeenCalled();
+  });
+
+  it('keeps the cached answer when no re-read is wired', async () => {
+    vi.mocked(apiFetch).mockReset();
+    const { result, overlayState } = setup({
+      isAdmin: true,
+      canReapplyCompose: true,
+      activeNode: { id: 7, name: 'Remote A', type: 'remote' } as ActiveNode,
+      stackList: {
+        selectedFile: 'sencho.yml',
+        stackSelfFlags: { 'sencho.yml': true },
+      },
+    });
+    await act(async () => { await result.current.deployStack({ preventDefault: vi.fn(), stopPropagation: vi.fn() } as unknown as React.MouseEvent); });
     expect(overlayState.setComposeReapplyCapture).toHaveBeenCalled();
+  });
+
+  describe('verifyReapplyEligibility (the endpoint-only and confirm-dialog entry points)', () => {
+    const selfStack = { selectedFile: 'sencho.yml', stackSelfFlags: { 'sencho.yml': true } };
+    const remote = { id: 7, name: 'Remote A', type: 'remote' } as ActiveNode;
+
+    it('is true and shows nothing when the fresh read is eligible', async () => {
+      const refresh = vi.fn().mockResolvedValue({ canReapply: true, reason: null });
+      const { result, overlayState } = setup({
+        isAdmin: true, canReapplyCompose: true, refreshReapplyEligibility: refresh, activeNode: remote, stackList: selfStack,
+      });
+      let ok: boolean | undefined;
+      await act(async () => { ok = await result.current.verifyReapplyEligibility(); });
+      expect(ok).toBe(true);
+      expect(overlayState.openSelfStackProtected).not.toHaveBeenCalled();
+    });
+
+    it('is false and names the node and reason when the fresh read refuses', async () => {
+      const refresh = vi.fn().mockResolvedValue({ canReapply: false, reason: 'compose_cli_unavailable' });
+      const { result, overlayState } = setup({
+        isAdmin: true, canReapplyCompose: true, refreshReapplyEligibility: refresh, activeNode: remote, stackList: selfStack,
+      });
+      let ok: boolean | undefined;
+      await act(async () => { ok = await result.current.verifyReapplyEligibility(); });
+      expect(ok).toBe(false);
+      expect(overlayState.openSelfStackProtected).toHaveBeenCalledWith({
+        nodeName: 'Remote A', reason: 'compose_cli_unavailable',
+      });
+    });
+
+    it('is false and silent when the read was superseded', async () => {
+      const refresh = vi.fn().mockResolvedValue(null);
+      const { result, overlayState } = setup({
+        isAdmin: true, canReapplyCompose: true, refreshReapplyEligibility: refresh, activeNode: remote, stackList: selfStack,
+      });
+      let ok: boolean | undefined;
+      await act(async () => { ok = await result.current.verifyReapplyEligibility(); });
+      expect(ok).toBe(false);
+      expect(overlayState.openSelfStackProtected).not.toHaveBeenCalled();
+    });
+
+    it('is false for a non-admin without reading', async () => {
+      const refresh = vi.fn();
+      const { result, overlayState } = setup({
+        isAdmin: false, canReapplyCompose: true, refreshReapplyEligibility: refresh, activeNode: remote, stackList: selfStack,
+      });
+      let ok: boolean | undefined;
+      await act(async () => { ok = await result.current.verifyReapplyEligibility(); });
+      expect(ok).toBe(false);
+      expect(refresh).not.toHaveBeenCalled();
+      expect(overlayState.openSelfStackProtected).not.toHaveBeenCalled();
+    });
   });
 
   it('opens protected dialog for non-admin even when canReapplyCompose is true', async () => {
@@ -3365,6 +3473,33 @@ describe('useStackActions overlapping reapply eligibility reads', () => {
   const eligible = () => okJson({ nodes: [{ nodeId: 7, canReapplyCompose: true }] });
   const ineligible = () => okJson({
     nodes: [{ nodeId: 7, canReapplyCompose: false, reapplyUnavailableReason: 'detecting' }],
+  });
+
+  it('names the node and the reason when the node lost eligibility after the editor loaded as eligible', async () => {
+    const { result, overlayState, pending } = setupOverlap();
+
+    // The editor loads on an eligible answer, so the button reads Save & Reapply.
+    await vi.waitFor(() => expect(pending).toHaveLength(1));
+    await act(async () => { pending[0](eligible()); });
+    await vi.waitFor(() => expect(result.current.eligibility.canReapply).toBe(true));
+
+    // The node then loses its Compose CLI; the click reads that, not the cache.
+    let deploy!: Promise<void>;
+    act(() => { deploy = result.current.actions.deployStack(click()); });
+    await vi.waitFor(() => expect(pending).toHaveLength(2));
+    await act(async () => {
+      pending[1](okJson({
+        nodes: [{ nodeId: 7, canReapplyCompose: false, reapplyUnavailableReason: 'compose_cli_unavailable' }],
+      }));
+      await deploy;
+    });
+
+    expect(overlayState.setComposeReapplyCapture).not.toHaveBeenCalled();
+    expect(overlayState.openSelfStackProtected).toHaveBeenCalledTimes(1);
+    expect(overlayState.openSelfStackProtected).toHaveBeenCalledWith({
+      nodeName: 'Remote A', reason: 'compose_cli_unavailable',
+    });
+    expect(result.current.eligibility.canReapply).toBe(false);
   });
 
   it.each([

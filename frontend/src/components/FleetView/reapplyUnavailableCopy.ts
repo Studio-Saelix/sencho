@@ -39,3 +39,8 @@ export function reapplyUnavailableSentence(
   const node = nodeName?.trim() || 'This node';
   return SENTENCES[reason](node);
 }
+
+/** Narrow an arbitrary response field to the bounded reason vocabulary. */
+export function isReapplyUnavailableReason(value: unknown): value is ReapplyUnavailableReason {
+  return typeof value === 'string' && Object.prototype.hasOwnProperty.call(SENTENCES, value);
+}

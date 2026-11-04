@@ -264,17 +264,35 @@ describe('ShellOverlays self-stack Reapply confirmation', () => {
     expect(runReapply).not.toHaveBeenCalled();
   });
 
-  it('closes the dialog and reapplies once the node is ready', () => {
+  it('closes the dialog and reapplies once the node is ready', async () => {
     const runReapply = vi.fn();
     const setOpen = vi.fn();
+    const verifyReapplyEligibility = vi.fn().mockResolvedValue(true);
     renderShell(
       makeOverlay({ selfStackProtectedOpen: true, closeSelfStackProtected: setOpen }),
-      {},
+      { verifyReapplyEligibility },
       { reapplySelfTarget: target, composeReapply: { dispatching: false, runReapply }, hydrationReady: () => true },
     );
     fireEvent.click(screen.getByRole('button', { name: 'self-reapply' }));
+    await vi.waitFor(() => expect(runReapply).toHaveBeenCalledWith(target));
+    expect(verifyReapplyEligibility).toHaveBeenCalledTimes(1);
     expect(setOpen).toHaveBeenCalled();
-    expect(runReapply).toHaveBeenCalledWith(target);
+  });
+
+  it('sends nothing and keeps the dialog open when the node lost eligibility since it opened', async () => {
+    const runReapply = vi.fn();
+    const setOpen = vi.fn();
+    // The real action opens the named refusal in place when it returns false.
+    const verifyReapplyEligibility = vi.fn().mockResolvedValue(false);
+    renderShell(
+      makeOverlay({ selfStackProtectedOpen: true, closeSelfStackProtected: setOpen }),
+      { verifyReapplyEligibility },
+      { reapplySelfTarget: target, composeReapply: { dispatching: false, runReapply }, hydrationReady: () => true },
+    );
+    fireEvent.click(screen.getByRole('button', { name: 'self-reapply' }));
+    await vi.waitFor(() => expect(verifyReapplyEligibility).toHaveBeenCalledTimes(1));
+    expect(setOpen).not.toHaveBeenCalled();
+    expect(runReapply).not.toHaveBeenCalled();
   });
 
   it('closes the dialog when the active node changes, so Reapply never targets a different Sencho', () => {
@@ -305,16 +323,16 @@ describe('ShellOverlays self-stack Reapply confirmation', () => {
     expect(close).toHaveBeenCalled();
   });
 
-  it('closes the dialog without starting a second reapply while one is in flight', () => {
+  it('closes the dialog without starting a second reapply while one is in flight', async () => {
     const runReapply = vi.fn();
     const setOpen = vi.fn();
     renderShell(
       makeOverlay({ selfStackProtectedOpen: true, closeSelfStackProtected: setOpen }),
-      {},
+      { verifyReapplyEligibility: vi.fn().mockResolvedValue(true) },
       { reapplySelfTarget: target, composeReapply: { dispatching: true, runReapply }, hydrationReady: () => true },
     );
     fireEvent.click(screen.getByRole('button', { name: 'self-reapply' }));
-    expect(setOpen).toHaveBeenCalled();
+    await vi.waitFor(() => expect(setOpen).toHaveBeenCalled());
     expect(runReapply).not.toHaveBeenCalled();
   });
 });
@@ -322,7 +340,7 @@ describe('ShellOverlays self-stack Reapply confirmation', () => {
 describe('ShellOverlays Docker endpoint refusal handoff', () => {
   const target = { nodeId: 1, type: 'local' as const, name: 'Local' };
 
-  it('opens the endpoint preview for the active node and preselects endpoint-only', () => {
+  it('opens the endpoint preview for the active node and preselects endpoint-only', async () => {
     const setCapture = vi.fn();
     const setProtected = vi.fn();
     renderShell(
@@ -331,19 +349,38 @@ describe('ShellOverlays Docker endpoint refusal handoff', () => {
         setDockerEndpointProtected: setProtected,
         setComposeReapplyCapture: setCapture,
       }),
-      {},
+      { verifyReapplyEligibility: vi.fn().mockResolvedValue(true) },
       { reapplySelfTarget: target, composeReapply: { dispatching: false, runReapply: vi.fn() }, hydrationReady: () => true },
     );
     expect(screen.getByText('endpoint-protected:eligible')).toBeInTheDocument();
     fireEvent.click(screen.getByRole('button', { name: 'recreate-endpoint' }));
-    expect(setProtected).toHaveBeenCalledWith(null);
-    expect(setCapture).toHaveBeenCalledWith({
+    await vi.waitFor(() => expect(setCapture).toHaveBeenCalledWith({
       nodeId: 1,
       nodeType: 'local',
       nodeName: 'Local',
       stackFile: 'web.yml',
       initialScope: 'only',
-    });
+    }));
+    expect(setProtected).toHaveBeenCalledWith(null);
+  });
+
+  it('opens no endpoint preview when the node lost eligibility since the refusal', async () => {
+    const setCapture = vi.fn();
+    const setProtected = vi.fn();
+    const verifyReapplyEligibility = vi.fn().mockResolvedValue(false);
+    renderShell(
+      makeOverlay({
+        dockerEndpointProtected: { message: 'This deploy would recreate socket-proxy.', reason: 'provider', service: 'socket-proxy', nodeId: 1, nodeName: 'Local', nodeType: 'local', stackFile: 'web.yml' },
+        setDockerEndpointProtected: setProtected,
+        setComposeReapplyCapture: setCapture,
+      }),
+      { verifyReapplyEligibility },
+      { reapplySelfTarget: target, composeReapply: { dispatching: false, runReapply: vi.fn() }, hydrationReady: () => true },
+    );
+    fireEvent.click(screen.getByRole('button', { name: 'recreate-endpoint' }));
+    await vi.waitFor(() => expect(verifyReapplyEligibility).toHaveBeenCalledTimes(1));
+    expect(setProtected).toHaveBeenCalledWith(null);
+    expect(setCapture).not.toHaveBeenCalled();
   });
 
   it('offers no replacement to a caller who cannot reapply the node', () => {

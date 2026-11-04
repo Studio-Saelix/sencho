@@ -24,6 +24,13 @@ export type SelfUpdateUnavailableCode = (typeof SELF_UPDATE_UNAVAILABLE_CODES)[n
 export type ReapplyUnavailableReason = SelfUpdateUnavailableCode | 'node_unreachable' | 'node_outdated';
 
 /**
+ * Error `code` of a reapply refused because the node cannot recreate itself. The
+ * body also carries the bounded `reason`, so a client names the node and the
+ * cause instead of showing the transport's generic failure.
+ */
+export const REAPPLY_UNAVAILABLE_CODE = 'REAPPLY_UNAVAILABLE';
+
+/**
  * Codes worth retrying: Docker was not answering yet, the identity probe could
  * not settle, or the Compose CLI check failed. Every other code is a property
  * of the install that a retry cannot change.

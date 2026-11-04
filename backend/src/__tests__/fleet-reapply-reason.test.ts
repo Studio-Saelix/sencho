@@ -276,3 +276,126 @@ describe('remote rows', () => {
     }
   });
 });
+
+describe('POST /fleet/nodes/:id/reapply-compose refusal', () => {
+  function reapply(nodeId: number) {
+    return request(app).post(`/api/fleet/nodes/${nodeId}/reapply-compose`).set('Authorization', authHeader);
+  }
+
+  it('names the local node and the reason when the local node is ineligible', async () => {
+    localEligibility(false, 'compose_cli_unavailable');
+
+    const res = await reapply(localNodeId);
+
+    expect(res.status).toBe(503);
+    expect(res.body.code).toBe('REAPPLY_UNAVAILABLE');
+    expect(res.body.reason).toBe('compose_cli_unavailable');
+    expect(res.body.nodeName).toEqual(expect.any(String));
+    expect(res.body.error).toContain(res.body.nodeName);
+    expect(res.body.error).not.toMatch(/does not support/i);
+  });
+
+  it('falls back to detecting when the local node has no code yet', async () => {
+    localEligibility(false, null);
+
+    const res = await reapply(localNodeId);
+
+    expect(res.status).toBe(503);
+    expect(res.body.reason).toBe('detecting');
+  });
+
+  it.each([
+    ['proxy', () => proxyNodeId, PROXY_URL, 'nas-proxy'],
+    ['Pilot', () => pilotNodeId, PILOT_URL, 'pilot-agent'],
+  ])('names the %s node and the reason it reported when it lost eligibility', async (_label, id, url, name) => {
+    localEligibility(true, null);
+    mockTargets();
+    mockMeta({ [`${url}/api/meta`]: metaBody({ selfUpdateUnavailable: 'compose_cli_unavailable' }) });
+
+    const res = await reapply(id());
+
+    expect(res.status).toBe(503);
+    expect(res.body).toMatchObject({
+      code: 'REAPPLY_UNAVAILABLE',
+      reason: 'compose_cli_unavailable',
+      nodeName: name,
+    });
+    expect(res.body.error).toContain(name);
+    expect(res.body.error).not.toMatch(/does not support/i);
+  });
+
+  it('names node_outdated for a remote that reports no reason', async () => {
+    localEligibility(true, null);
+    mockTargets();
+    mockMeta({ [`${PROXY_URL}/api/meta`]: metaBody() });
+
+    const res = await reapply(proxyNodeId);
+
+    expect(res.status).toBe(503);
+    expect(res.body).toMatchObject({ code: 'REAPPLY_UNAVAILABLE', reason: 'node_outdated', nodeName: 'nas-proxy' });
+  });
+
+  it('names node_unreachable for a remote that does not answer', async () => {
+    localEligibility(true, null);
+    mockTargets();
+    mockMeta({ [`${PROXY_URL}/api/meta`]: new Error('connect ECONNREFUSED') });
+
+    const res = await reapply(proxyNodeId);
+
+    expect(res.status).toBe(503);
+    expect(res.body).toMatchObject({ code: 'REAPPLY_UNAVAILABLE', reason: 'node_unreachable', nodeName: 'nas-proxy' });
+  });
+
+  it('names the node and reason when the node refuses after the hub saw it eligible', async () => {
+    localEligibility(true, null);
+    mockTargets();
+    mockMeta({ [`${PROXY_URL}/api/meta`]: metaBody({ capabilities: ['stacks', 'self-update'] }) });
+    const realFetch = globalThis.fetch;
+    vi.spyOn(globalThis, 'fetch').mockImplementation(async (input, init) => {
+      if (String(input).includes('/api/system/reapply-compose')) {
+        return new Response(JSON.stringify({
+          error: 'Compose reapply unavailable. Sencho must be deployed via Docker Compose.',
+          code: 'REAPPLY_UNAVAILABLE',
+          reason: 'compose_cli_unavailable',
+        }), { status: 503, headers: { 'content-type': 'application/json' } });
+      }
+      return realFetch(input, init);
+    });
+
+    const res = await reapply(proxyNodeId);
+
+    expect(res.status).toBe(503);
+    expect(res.body).toMatchObject({
+      code: 'REAPPLY_UNAVAILABLE',
+      reason: 'compose_cli_unavailable',
+      nodeName: 'nas-proxy',
+    });
+  });
+
+  it('keeps a node refusal without a bounded reason a plain 502', async () => {
+    localEligibility(true, null);
+    mockTargets();
+    mockMeta({ [`${PROXY_URL}/api/meta`]: metaBody({ capabilities: ['stacks', 'self-update'] }) });
+    vi.spyOn(globalThis, 'fetch').mockImplementation(async () => new Response(
+      JSON.stringify({ error: 'boom', code: 'REAPPLY_UNAVAILABLE', reason: '/srv/secret/path' }),
+      { status: 503, headers: { 'content-type': 'application/json' } },
+    ));
+
+    const res = await reapply(proxyNodeId);
+
+    expect(res.status).toBe(502);
+    expect(res.body.reason).toBeUndefined();
+  });
+});
+
+describe('POST /system/reapply-compose on the node', () => {
+  it('carries the bounded reason and code when the node cannot reapply', async () => {
+    localEligibility(false, 'docker_unreachable');
+
+    const res = await request(app).post('/api/system/reapply-compose').set('Authorization', authHeader);
+
+    expect(res.status).toBe(503);
+    expect(res.body.code).toBe('REAPPLY_UNAVAILABLE');
+    expect(res.body.reason).toBe('docker_unreachable');
+  });
+});

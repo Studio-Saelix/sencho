@@ -1282,7 +1282,9 @@ export default function EditorLayout() {
       isSelfStack={isSelfStackSelected}
       actionsReady={actionsReady}
       canSaveAndReapply={canSaveAndReapply}
-      onRecreateDockerEndpoint={canRecreateDockerEndpoint && selectedFile && reapplySelfTarget ? () => {
+      onRecreateDockerEndpoint={canRecreateDockerEndpoint && selectedFile && reapplySelfTarget ? async () => {
+        // The offer was computed from a cached answer; confirm it at the click.
+        if (!(await stackActions.verifyReapplyEligibility())) return;
         overlayState.setComposeReapplyCapture({
           nodeId: reapplySelfTarget.nodeId,
           nodeType: reapplySelfTarget.type,

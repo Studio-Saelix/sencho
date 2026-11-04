@@ -175,6 +175,9 @@ export function ShellOverlays({
             toast.error('Status data unavailable. Refresh and try again.');
             return;
           }
+          // This dialog can have been open on an answer that has since gone
+          // stale. A refusal flips it to the named one in place.
+          if (!(await stackActions.verifyReapplyEligibility())) return;
           closeSelfStackProtected();
           if (composeReapply.dispatching) return;
           void composeReapply.runReapply(reapplySelfTarget);
@@ -220,7 +223,7 @@ export function ShellOverlays({
         canRecreate={refusalContextCurrent}
         isSelfStackSelected={isSelfStackSelected}
         contextMoved={refusalContextStale}
-        onRecreate={() => {
+        onRecreate={async () => {
           const refusal = dockerEndpointProtected;
           if (!refusal || refusal.nodeId === null || !refusal.stackFile) return;
           if (!hydrationReady()) {
@@ -228,7 +231,9 @@ export function ShellOverlays({
             return;
           }
           if (composeReapply.dispatching) return;
+          const eligible = await stackActions.verifyReapplyEligibility();
           setDockerEndpointProtected(null);
+          if (!eligible) return;
           // Open the same preview the editor uses, for the node and stack that
           // were refused, with endpoint-only preselected.
           setComposeReapplyCapture({

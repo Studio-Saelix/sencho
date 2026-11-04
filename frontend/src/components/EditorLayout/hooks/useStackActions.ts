@@ -509,6 +509,39 @@ export function useStackActions(options: UseStackActionsOptions) {
     return true;
   };
 
+  /**
+   * Decide at the click whether the active node can reapply Sencho. The cached
+   * answer may be stale in either direction (the node recovered, or lost its
+   * Compose CLI or Docker connection after the editor loaded), so a reapply
+   * confirmation only opens on a fresh read. Returns true when the node is
+   * eligible. Otherwise it returns false: either the read no longer owns the
+   * decision (a node switch or a newer read, nothing is shown), or the node is
+   * ineligible and the protected dialog names it and the reason.
+   */
+  const verifyReapplyEligibility = async (): Promise<boolean> => {
+    const node = activeNode ?? null;
+    if (!isAdmin || !node) return false;
+    const nodeId = node.id;
+    let eligible = canReapplyCompose === true;
+    let reason = reapplyUnavailableReason;
+    if (refreshReapplyEligibility) {
+      const fresh = await refreshReapplyEligibility();
+      // The hook already returns null on a switch; keep the explicit check
+      // so a different implementation cannot retarget the decision or dialog.
+      if ((activeNodeIdRef.current ?? null) !== nodeId) return false;
+      // A null result means a newer read superseded this one (or the node
+      // changed). This request is discarded: continuing with the captured
+      // answer would open a second dialog from this request while the newer
+      // one decides for itself.
+      if (!fresh) return false;
+      eligible = fresh.canReapply;
+      reason = fresh.reason;
+    }
+    if (eligible) return true;
+    overlayState.openSelfStackProtected({ nodeName: node.name, reason: reason ?? null });
+    return false;
+  };
+
   const openSelfStackProtectedIfNeeded = (file: string | null | undefined): boolean => {
     // Without authoritative self identity the frontend must not guess: block
     // without opening the self-stack modal (which would falsely identify an
@@ -1962,35 +1995,13 @@ export function useStackActions(options: UseStackActionsOptions) {
     if (isSelfStackFile(stackFile)) {
       const node = activeNode ?? null;
       if (isAdmin && node) {
-        const nodeId = node.id;
-        let eligible = canReapplyCompose === true;
-        let reason = reapplyUnavailableReason;
-        // A cached false can be stale: the node may have recovered its Docker
-        // connection or finished retrying self-update detection since the editor
-        // loaded. Re-read once at the click before refusing the operator.
-        if (!eligible && refreshReapplyEligibility) {
-          const fresh = await refreshReapplyEligibility();
-          // The hook already returns null on a switch; keep the explicit check
-          // so a different implementation cannot retarget the decision or dialog.
-          if ((activeNodeIdRef.current ?? null) !== nodeId) return;
-          // A null result means a newer read superseded this one (or the node
-          // changed). This request is discarded: continuing with the captured
-          // false would open a second dialog from this request while the newer
-          // one decides for itself.
-          if (!fresh) return;
-          eligible = fresh.canReapply;
-          reason = fresh.reason;
-        }
-        if (eligible) {
-          overlayState.setComposeReapplyCapture({
-            nodeId: node.id,
-            nodeType: node.type === 'local' ? 'local' : 'remote',
-            nodeName: node.name,
-            stackFile,
-          });
-          return;
-        }
-        overlayState.openSelfStackProtected({ nodeName: node.name, reason });
+        if (!(await verifyReapplyEligibility())) return;
+        overlayState.setComposeReapplyCapture({
+          nodeId: node.id,
+          nodeType: node.type === 'local' ? 'local' : 'remote',
+          nodeName: node.name,
+          stackFile,
+        });
         return;
       }
       overlayState.openSelfStackProtected();
@@ -3131,6 +3142,7 @@ export function useStackActions(options: UseStackActionsOptions) {
     openInspectImage,
     isSelfStackFile,
     openSelfStackProtectedIfNeeded,
+    verifyReapplyEligibility,
   };
 }
 

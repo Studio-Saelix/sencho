@@ -17,7 +17,12 @@ import { FileSystemService } from '../services/FileSystemService';
 import { ComposeService } from '../services/ComposeService';
 import { StackOpLockService } from '../services/StackOpLockService';
 import SelfUpdateService, { type EndpointProviderOption, type PinInfo } from '../services/SelfUpdateService';
-import type { ReapplyUnavailableReason, SelfUpdateUnavailableCode } from '../helpers/selfUpdateEligibility';
+import {
+  REAPPLY_UNAVAILABLE_CODE,
+  parseSelfUpdateUnavailableCode,
+  type ReapplyUnavailableReason,
+  type SelfUpdateUnavailableCode,
+} from '../helpers/selfUpdateEligibility';
 import { MonitorService } from '../services/MonitorService';
 import { getSenchoVersion, isValidVersion, HOST_USAGE_UNKNOWN_HEADER, HOST_USAGE_UNKNOWN_HEADER_VALUE } from '../services/CapabilityRegistry';
 import { authMiddleware } from '../middleware/auth';
@@ -1311,6 +1316,25 @@ function buildReapplyEligibility(
   };
 }
 
+/**
+ * Refusal for a reapply that cannot run because the node is ineligible. It names
+ * the node and the bounded reason (the same vocabulary as the Fleet row), so a
+ * client that acted on a stale "eligible" answer can say why instead of showing
+ * a generic failure. `error` is the plain-text fallback for API callers.
+ */
+function respondReapplyUnavailable(
+  res: Response,
+  nodeName: string,
+  reason: ReapplyUnavailableReason,
+): void {
+  res.status(503).json({
+    error: `Compose reapply is unavailable on ${nodeName}: ${reason}.`,
+    code: REAPPLY_UNAVAILABLE_CODE,
+    reason,
+    nodeName,
+  });
+}
+
 fleetRouter.get('/update-status', authMiddleware, async (req: Request, res: Response): Promise<void> => {
   if (!requirePermission(req, res, 'node:read')) return;
   try {
@@ -2088,7 +2112,7 @@ fleetRouter.post('/nodes/:nodeId/reapply-compose', authMiddleware, async (req: R
     if (node.type === 'local') {
       const selfUpdate = SelfUpdateService.getInstance();
       if (!selfUpdate.isAvailable()) {
-        res.status(503).json({ error: 'Compose reapply unavailable on the local node.' });
+        respondReapplyUnavailable(res, node.name, selfUpdate.getUnavailableCode() ?? 'detecting');
         return;
       }
       const claim = await ImageOperationService.getInstance().claimComposeReapply(endpointProvider);
@@ -2145,13 +2169,12 @@ fleetRouter.post('/nodes/:nodeId/reapply-compose', authMiddleware, async (req: R
 
       const meta = await NodeRegistry.getInstance().fetchMetaForNode(node.id);
       if (!meta.online) {
-        const error = 'Remote node is unreachable. Verify the node is running and the API URL is correct.';
-        res.status(503).json({ error });
+        respondReapplyUnavailable(res, node.name, 'node_unreachable');
         return;
       }
       if (!meta.capabilities.includes('self-update')) {
-        const error = 'Remote node does not support compose reapply. It may need to be updated manually first.';
-        res.status(503).json({ error });
+        // The same reason the Fleet row would show for this node right now.
+        respondReapplyUnavailable(res, node.name, meta.selfUpdateUnavailable ?? 'node_outdated');
         return;
       }
       if (refuseUnsupportedEndpointProvider(res, meta.capabilities, replaceEndpointProvider)) return;
@@ -2181,8 +2204,18 @@ fleetRouter.post('/nodes/:nodeId/reapply-compose', authMiddleware, async (req: R
       const response = await postSystemReapplyCompose(target, endpointProvider);
 
       if (!response.ok) {
-        const failure = parseRemoteUpdateFailure(await response.json().catch(() => null));
+        const body = await response.json().catch(() => null);
+        const failure = parseRemoteUpdateFailure(body);
         failOwnedTracker(failure.error, failure.code, meta.version, meta.startedAt);
+        // The node lost eligibility after the hub read its meta: it says so with
+        // its own reason, which this hub names the same way as a refusal above.
+        const reason = failure.code === REAPPLY_UNAVAILABLE_CODE
+          ? parseSelfUpdateUnavailableCode((body as Record<string, unknown>).reason)
+          : null;
+        if (reason) {
+          respondReapplyUnavailable(res, node.name, reason);
+          return;
+        }
         res.status(502).json(failure);
         return;
       }
