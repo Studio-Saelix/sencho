@@ -1542,10 +1542,14 @@ export function settleInterruptedOverwriteOperations(
   operations: Pick<RecoveryOperationStore, 'settleReconciled'>,
   intentId?: string,
 ): number {
+  let candidates: RestoreIntentRecord[];
+  if (intentId) {
+    const intent = intents.get(intentId);
+    candidates = intent ? [intent] : [];
+  } else {
+    candidates = intents.listWithInterruptedOperation('staged_overwrite');
+  }
   let settled = 0;
-  const candidates = intentId
-    ? [intents.get(intentId)].filter((intent): intent is RestoreIntentRecord => intent !== null)
-    : intents.listWithInterruptedOperation('staged_overwrite');
   for (const intent of candidates) {
     if (!intent.operationId) continue;
     const ending = overwriteEndingFor(intent);
