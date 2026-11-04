@@ -278,6 +278,8 @@ describe('registry mode (an update that pulls)', () => {
   });
 
   it('keeps a pull_policy: never service on the installed image, which its pull never replaces', async () => {
+    // No platform override: Compose runs whatever child the daemon holds, so
+    // the scanner reads the local image rather than a registry child.
     modelWith([{ name: 'web', declaredImage: 'registry.example.com/web:latest', hasBuild: false, pullPolicy: 'never', expectedReplicas: 1, dependsOn: [], hasHealthcheck: false }]);
 
     const result = await enforcePolicyPreDeploy('web', 1, { bypass: false, actor: 'u', imageSource: 'registry' });
@@ -285,7 +287,7 @@ describe('registry mode (an update that pulls)', () => {
     expect(result.ok).toBe(true);
     expect(candidates.resolve).not.toHaveBeenCalled();
     expect(trivyStub.scanImagePreflight).toHaveBeenCalledWith(
-      'registry.example.com/web:latest', 1, 'web', { platform: 'linux/amd64' },
+      'registry.example.com/web:latest', 1, 'web', undefined,
     );
     expect(result.evaluatedCandidates).toBeUndefined();
     expect(result.evidence?.records[0]).toMatchObject({ subject: 'installed' });
@@ -397,6 +399,8 @@ describe('compose mode (a plain up)', () => {
   });
 
   it('keeps the installed image when the policy is the default and the image is present', async () => {
+    // No platform override means the local child is what runs; the scanner
+    // reads it instead of the registry's node-platform child.
     modelWith([{ name: 'web', declaredImage: 'registry.example.com/web:latest', hasBuild: false, pullPolicy: null, expectedReplicas: 1, dependsOn: [], hasHealthcheck: false }]);
     candidates.localImageExists.mockResolvedValue(true);
 
@@ -405,7 +409,7 @@ describe('compose mode (a plain up)', () => {
     expect(result.ok).toBe(true);
     expect(candidates.resolve).not.toHaveBeenCalled();
     expect(trivyStub.scanImagePreflight).toHaveBeenCalledWith(
-      'registry.example.com/web:latest', 1, 'web', { platform: 'linux/amd64' },
+      'registry.example.com/web:latest', 1, 'web', undefined,
     );
   });
 
@@ -850,6 +854,24 @@ describe('compose mode (a plain up)', () => {
     expect(result.pullServices).toBeUndefined();
   });
 
+  it('reads the local child when a non-pulling service names no platform', async () => {
+    // No `platform:` override: Compose starts whatever child the daemon holds,
+    // so the scanner must read the local image, not the registry's node-platform
+    // child (which would prove a different image).
+    candidates.platform = { os: 'linux', architecture: 'arm64' };
+    modelWith([
+      { name: 'tools', declaredImage: 'registry.example.com/web:latest', hasBuild: false, pullPolicy: 'never', platform: null, expectedReplicas: 1, dependsOn: [], hasHealthcheck: false },
+    ]);
+
+    const result = await enforcePolicyPreDeploy('web', 1, { bypass: false, actor: 'u', imageSource: 'compose' });
+
+    expect(trivyStub.scanImagePreflight).toHaveBeenCalledWith(
+      'registry.example.com/web:latest', 1, 'web', undefined,
+    );
+    expect(result.ok).toBe(true);
+    expect(result.evidence?.records[0]?.platform).toBeUndefined();
+  });
+
   it('fails closed and names the platform when the installed child cannot be read', async () => {
     // The scanner refuses a report that describes another child; the gate must
     // surface that as an unresolved platform, not a clean row for the ref.
@@ -877,6 +899,33 @@ describe('compose mode (a plain up)', () => {
       state: 'failed',
     });
     expect(result.evidence?.applications[0]).toMatchObject({ platform: 'linux/amd64' });
+  });
+
+  it('names the installed platform when policy evaluation fails', async () => {
+    candidates.platform = { os: 'linux', architecture: 'arm64' };
+    dbStub.getMatchingPolicy.mockReturnValue(mkPolicy({ block_on_kev: 1, max_severity: 'CRITICAL' }));
+    dbStub.getCveIntel.mockImplementation(() => {
+      throw new Error('intel read failed');
+    });
+    trivyStub.scanImagePreflight.mockResolvedValue(mkScan({
+      total_vulnerabilities: 0,
+      critical_count: 0,
+      highest_severity: 'LOW',
+    }));
+    modelWith([
+      { name: 'tools', declaredImage: 'registry.example.com/web:latest', hasBuild: false, pullPolicy: 'never', platform: 'linux/amd64', expectedReplicas: 1, dependsOn: [], hasHealthcheck: false },
+    ]);
+
+    const result = await enforcePolicyPreDeploy('web', 1, { bypass: false, actor: 'u', imageSource: 'compose' });
+
+    expect(result.ok).toBe(false);
+    expect(result.violations[0]).toMatchObject({
+      platform: 'linux/amd64',
+      error: expect.stringContaining('Policy evaluation failed'),
+    });
+    expect(result.evidence?.records.find(
+      (record) => record.state === 'failed' && record.reason?.includes('Policy evaluation failed'),
+    )).toMatchObject({ platform: 'linux/amd64' });
   });
 
   it('evaluates a digest-pinned ref for each platform group that uses it', async () => {

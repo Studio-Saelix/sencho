@@ -722,9 +722,9 @@ class TrivyService {
      * ID: only a RepoDigest names content a registry can resolve, which is what
      * a platform child scan needs. Every repo digest is offered to
      * {@link selectLocalRepoDigests}, so an unrelated repository's leftover
-     * digest is never used. The first matching digest is taken; if it names a
-     * stale child, the scan's platform check refuses the report rather than
-     * filing it under the requested platform.
+     * digest is never used. The first matching digest is taken; a caller keys
+     * the row and addresses the scan by this same digest, so the two cannot
+     * describe different repositories even when Docker lists a stale entry.
      */
     async getRepoDigestRef(imageRef: string, nodeId: number): Promise<string | null> {
         try {
@@ -917,15 +917,16 @@ class TrivyService {
                 && (options.digest === undefined || options.digest === null)
                 && requestedKey !== null;
             const scanFromRegistry = installedPlatformScan && requestedKey !== localKey;
-            // One filtered repo digest serves both the row identity and the
-            // registry target for an installed platform scan, so an unrelated
-            // repository's leftover digest cannot key the row.
+            // For an installed platform scan the same filtered repo digest
+            // supplies the row identity and the registry target when one exists,
+            // so the two cannot describe different repositories. A local build
+            // with no matching repo digest falls back to the daemon's identity.
             const repoDigestRef = installedPlatformScan && !pinnedDigest
                 ? await this.getRepoDigestRef(imageRef, nodeId)
                 : null;
             // The pin's own digest is the image identity when the reference
-            // carries one; otherwise the local image's repo digest, and only a
-            // last fallback for a local build is the daemon's image ID.
+            // carries one; otherwise the local image's matching repo digest, and
+            // only a local build with none falls back to the daemon's image ID.
             const digest = options.digest ?? pinnedDigest ?? repoDigestRef?.split('@')[1]
                 ?? (await this.getImageDigest(imageRef, nodeId));
             // The deploy gate fails closed when it cannot read the platform; the

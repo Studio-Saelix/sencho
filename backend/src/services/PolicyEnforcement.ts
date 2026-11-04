@@ -648,6 +648,13 @@ async function planCandidates(
         const byPlatform = new Map<string, {
             platform: { os: string; architecture: string; variant?: string } | null;
             invalid?: string;
+            /** The group has a service that declares `platform:`. */
+            named: boolean;
+            /**
+             * The group has a service that declares no `platform:`, so Compose
+             * runs whatever child the daemon holds for the reference.
+             */
+            implicit: boolean;
             services: EffectiveServiceSpec[];
         }>();
         for (const spec of runnable) {
@@ -657,11 +664,16 @@ async function planCandidates(
                     ? `${effective.platform.os}/${effective.platform.architecture}${effective.platform.variant ? `/${effective.platform.variant}` : ''}`
                     : 'platform-unknown')
                 : `invalid:${effective.reason}`;
+            const declared = typeof spec.platform === 'string' && spec.platform.trim() !== '';
             const group = byPlatform.get(key) ?? {
                 platform: effective.ok ? effective.platform : null,
                 ...(effective.ok ? {} : { invalid: effective.reason }),
+                named: false,
+                implicit: false,
                 services: [],
             };
+            group.named = group.named || declared;
+            group.implicit = group.implicit || !declared;
             group.services.push(spec);
             byPlatform.set(key, group);
         }
@@ -694,8 +706,10 @@ async function planCandidates(
         // installed image at another. Every non-pulling group is evaluated as
         // the installed child it will run; dropping those entries let a
         // policy-blocked child run because another platform's child was clean.
-        // The group's platform is kept because a multi-platform image store can
-        // hold more than one child under one tag.
+        // The group's platform is kept when a service declared it, because a
+        // multi-platform image store can hold more than one child under one
+        // tag. The empty string is the no-platform entry: the service declared
+        // no override, so the local image's own child is what it runs.
         const nonPullingPlatforms = new Set<string>();
         const platformKey = (platform: { os: string; architecture: string; variant?: string } | null): string =>
             platform
@@ -731,10 +745,20 @@ async function planCandidates(
                 return true;
             };
             const pulling = group.services.filter(pullsFor);
-            if (pulling.length === 0) {
-                nonPullingPlatforms.add(platformKey(group.platform));
-                continue;
+            const pullingSet = new Set(pulling);
+            const notPulling = group.services.filter((spec) => !pullingSet.has(spec));
+            // Every service that does not pull runs the image already on the
+            // node. A service that declared `platform:` names the child it
+            // runs, so that child is evaluated. A service with no override
+            // runs whatever child the daemon holds, so no platform is named
+            // and the scanner reads the local image itself; scanning the
+            // registry child for the node platform would prove a different
+            // image than the one `up` starts.
+            if (notPulling.length > 0) {
+                if (group.named && group.platform) nonPullingPlatforms.add(platformKey(group.platform));
+                if (group.implicit || !group.platform) nonPullingPlatforms.add('');
             }
+            if (pulling.length === 0) continue;
             if (group.invalid) {
                 entries.push({
                     kind: 'unresolved',

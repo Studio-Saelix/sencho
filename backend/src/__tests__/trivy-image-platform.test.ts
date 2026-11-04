@@ -310,6 +310,39 @@ describe('trivy image platform selection', () => {
     expect(result.platform).toBe('linux/arm');
   });
 
+  it('refuses a reported non-default variant when a bare architecture asks for the default', async () => {
+    // A service with no platform override asks for the node platform, which is
+    // the architecture's default variant (arm is v7). A v6 report is another
+    // child even though the requested label has no variant segment.
+    state.forcedReadArchitecture = 'arm';
+    state.forcedReadVariant = 'v6';
+
+    await expect(
+      TrivyService.getInstance().scanImage('registry.example.com/web:1.2', 1, {
+        platform: 'linux/arm',
+      }),
+    ).rejects.toThrow(/scanned linux\/arm\/v6 .* not linux\/arm/);
+  });
+
+  it('keys a local-match installed scan by the matching repo digest, not a leftover one', async () => {
+    state.local = {
+      RepoDigests: [
+        `other.example.com/other@${OTHER_DIGEST}`,
+        `registry.example.com/web@${INDEX_DIGEST}`,
+      ],
+      Os: 'linux',
+      Architecture: 'arm64',
+    };
+
+    const result = await TrivyService.getInstance().scanImage('registry.example.com/web:1.2', 1, {
+      platform: 'linux/arm64',
+    });
+
+    expect(state.calls).toHaveLength(1);
+    expect(state.calls[0].args).not.toContain('--image-src');
+    expect(result.imageDigest).toBe(INDEX_DIGEST);
+  });
+
   it('refuses a platform-qualified scan whose report names no platform', async () => {
     state.omitImageConfig = true;
 

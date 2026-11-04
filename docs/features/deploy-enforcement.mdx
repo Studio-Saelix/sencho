@@ -171,7 +171,7 @@ Neither drift mechanism blocks, stops, or quarantines a running stack automatica
 
 <AccordionGroup>
   <Accordion title="CI pipelines feel slower after I enabled a block policy">
-    Only the first deploy of a new image pays the full Trivy runtime. Sencho caches scan results by image digest and platform for 24 hours, so repeat deploys of the same image hit the cache in under a second (a multi-arch child resolved from a service override is scanned fresh). For greenfield CI where every deploy ships a new image tag, budget 30 to 120 seconds per image on the first deploy depending on image size and whether Trivy's vulnerability database is already seeded on the node.
+    Only the first deploy of a new image pays the full Trivy runtime. Sencho caches scan results by image digest and platform for 24 hours, so repeat deploys of the same image hit the cache in under a second (a multi-arch child resolved from a service override, and any installed entry that names a platform, are scanned fresh). For greenfield CI where every deploy ships a new image tag, budget 30 to 120 seconds per image on the first deploy depending on image size and whether Trivy's vulnerability database is already seeded on the node.
   </Accordion>
   <Accordion title="The gate let a deploy through even though I have a block policy">
     Check the following in order:
