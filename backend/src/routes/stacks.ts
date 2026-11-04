@@ -1469,6 +1469,7 @@ stacksRouter.post('/from-git', async (req: Request, res: Response) => {
               gate.evaluatedCandidates,
               buildPolicyGateOptions(req, { imageSource: 'compose' }),
               gate.pullServices,
+              gate.noPullOnUp,
             ),
           );
           deployed = true;

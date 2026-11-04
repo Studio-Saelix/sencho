@@ -1680,6 +1680,7 @@ export class BlueprintService {
                             applyGate.evaluatedCandidates,
                             applyPolicyOptions,
                             applyGate.pullServices,
+                            applyGate.noPullOnUp,
                         ),
                     );
                     if (recoveryId !== null) {

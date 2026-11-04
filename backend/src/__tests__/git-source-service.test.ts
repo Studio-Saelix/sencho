@@ -121,9 +121,11 @@ vi.mock('../helpers/policyGate', async () => {
  * the test stubs.
  */
 vi.mock('../services/candidateImage', async () => {
+  const actual = await vi.importActual<typeof import('../services/candidateImage')>('../services/candidateImage');
   const { createHash } = await import('node:crypto');
   const digestOf = (ref: string): string => `sha256:${createHash('sha256').update(ref).digest('hex')}`;
   return {
+    ...actual,
     nodePlatformFor: async () => ({ os: 'linux', architecture: 'amd64' }),
     localImageExists: async () => true,
     pullPolicyPullsOnUp: () => false,

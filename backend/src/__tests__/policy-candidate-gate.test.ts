@@ -44,6 +44,7 @@ const notificationStub = { dispatchAlert: vi.fn() };
 const candidates = vi.hoisted(() => ({
   resolve: vi.fn(),
   localImageExists: vi.fn(),
+  lastTagTime: vi.fn(),
   platform: { os: 'linux', architecture: 'amd64' } as { os: string; architecture: string } | null,
 }));
 /** Injected effective model, changed per test. */
@@ -74,6 +75,7 @@ vi.mock('../services/candidateImage', async () => {
     ...actual,
     nodePlatformFor: async () => candidates.platform,
     localImageExists: (nodeId: number, ref: string) => candidates.localImageExists(nodeId, ref),
+    localImageLastTagTime: (nodeId: number, ref: string) => candidates.lastTagTime(nodeId, ref),
     resolveCandidateImage: (nodeId: number, ref: string, platform: unknown) =>
       candidates.resolve(nodeId, ref, platform),
   };
@@ -141,7 +143,7 @@ const CANDIDATE_RESOLUTION = {
 };
 
 function modelWith(services: Array<Record<string, unknown>>) {
-  models.build.mockResolvedValue({ renderable: true, services });
+  models.build.mockResolvedValue({ renderable: true, services, projectName: 'my-stack' });
 }
 
 beforeEach(() => {
@@ -156,6 +158,7 @@ beforeEach(() => {
   composeStub.listStackImages.mockResolvedValue(['registry.example.com/web:latest']);
   candidates.platform = { os: 'linux', architecture: 'amd64' };
   candidates.localImageExists.mockResolvedValue(true);
+  candidates.lastTagTime.mockResolvedValue(Date.now());
   candidates.resolve.mockResolvedValue(CANDIDATE_RESOLUTION);
   models.build.mockResolvedValue({
     renderable: true,
@@ -279,8 +282,9 @@ describe('registry mode (an update that pulls)', () => {
     expect(result.evidence?.records[0]).toMatchObject({ subject: 'installed' });
   });
 
-  it('keeps a missing pull_policy on the installed image when Compose skips the present image', async () => {
-    modelWith([{ name: 'web', declaredImage: 'registry.example.com/web:latest', hasBuild: false, pullPolicy: 'missing', expectedReplicas: 1, dependsOn: [], hasHealthcheck: false }]);
+  it('keeps a missing pull_policy on the installed image when Compose skips the present non-latest image', async () => {
+    modelWith([{ name: 'web', declaredImage: 'registry.example.com/web:1.2', hasBuild: false, pullPolicy: 'missing', expectedReplicas: 1, dependsOn: [], hasHealthcheck: false }]);
+    composeStub.listStackImages.mockResolvedValue(['registry.example.com/web:1.2']);
     candidates.localImageExists.mockResolvedValue(true);
 
     const result = await enforcePolicyPreDeploy('web', 1, { bypass: false, actor: 'u', imageSource: 'registry' });
@@ -288,6 +292,16 @@ describe('registry mode (an update that pulls)', () => {
     expect(result.ok).toBe(true);
     expect(candidates.resolve).not.toHaveBeenCalled();
     expect(result.evaluatedCandidates).toBeUndefined();
+  });
+
+  it('treats a present latest tag under missing as a candidate, because an explicit pull refreshes it', async () => {
+    modelWith([{ name: 'web', declaredImage: 'registry.example.com/web:latest', hasBuild: false, pullPolicy: 'missing', expectedReplicas: 1, dependsOn: [], hasHealthcheck: false }]);
+    candidates.localImageExists.mockResolvedValue(true);
+
+    const result = await enforcePolicyPreDeploy('web', 1, { bypass: false, actor: 'u', imageSource: 'registry' });
+
+    expect(candidates.resolve).toHaveBeenCalledTimes(1);
+    expect(result.evaluatedCandidates).toHaveLength(1);
   });
 
   it('evaluates a missing pull_policy when the image is absent, because the pull fetches it', async () => {
@@ -349,6 +363,51 @@ describe('compose mode (a plain up)', () => {
   it('evaluates the registry image when Compose would pull because the image is missing', async () => {
     modelWith([{ name: 'web', declaredImage: 'registry.example.com/web:latest', hasBuild: false, pullPolicy: 'missing', expectedReplicas: 1, dependsOn: [], hasHealthcheck: false }]);
     candidates.localImageExists.mockResolvedValue(false);
+
+    const result = await enforcePolicyPreDeploy('web', 1, { bypass: false, actor: 'u', imageSource: 'compose' });
+
+    expect(candidates.resolve).toHaveBeenCalledTimes(1);
+    expect(result.pullServices).toEqual(['web']);
+  });
+
+  it('keeps a build-only service on the image Compose generates, not a registry candidate', async () => {
+    composeStub.listStackImages.mockResolvedValue(['registry.example.com/web:latest', 'my-stack-built']);
+    modelWith([
+      { name: 'web', declaredImage: 'registry.example.com/web:latest', hasBuild: false, pullPolicy: null, expectedReplicas: 1, dependsOn: [], hasHealthcheck: false },
+      { name: 'built', declaredImage: null, hasBuild: true, pullPolicy: null, expectedReplicas: 1, dependsOn: [], hasHealthcheck: false },
+    ]);
+
+    const result = await enforcePolicyPreDeploy('web', 1, { bypass: false, actor: 'u', imageSource: 'compose' });
+
+    // `config --images` names the generated image, but no service declares it,
+    // and it does not exist until the build.
+    expect(candidates.resolve).not.toHaveBeenCalled();
+    expect(result.evaluatedCandidates).toBeUndefined();
+    expect(result.pullServices).toBeUndefined();
+    expect(trivyStub.scanImagePreflight).toHaveBeenCalledWith(
+      'my-stack-built', 1, 'web', undefined,
+    );
+  });
+
+  it('leaves a daily policy on the installed image while its window has not elapsed', async () => {
+    modelWith([{ name: 'web', declaredImage: 'registry.example.com/web:latest', hasBuild: false, pullPolicy: 'daily', expectedReplicas: 1, dependsOn: [], hasHealthcheck: false }]);
+    candidates.localImageExists.mockResolvedValue(true);
+    candidates.lastTagTime.mockResolvedValue(Date.now() - 60 * 60 * 1000);
+
+    const result = await enforcePolicyPreDeploy('web', 1, { bypass: false, actor: 'u', imageSource: 'compose' });
+
+    expect(candidates.resolve).not.toHaveBeenCalled();
+    expect(result.evaluatedCandidates).toBeUndefined();
+    // The deploy boundary must not force the refresh `up` would skip, but `up`
+    // must not be free to start one if the window elapses before it runs.
+    expect(result.pullServices).toBeUndefined();
+    expect(result.noPullOnUp).toBe(true);
+  });
+
+  it('evaluates a daily policy once its window has elapsed', async () => {
+    modelWith([{ name: 'web', declaredImage: 'registry.example.com/web:latest', hasBuild: false, pullPolicy: 'daily', expectedReplicas: 1, dependsOn: [], hasHealthcheck: false }]);
+    candidates.localImageExists.mockResolvedValue(true);
+    candidates.lastTagTime.mockResolvedValue(Date.now() - 25 * 60 * 60 * 1000);
 
     const result = await enforcePolicyPreDeploy('web', 1, { bypass: false, actor: 'u', imageSource: 'compose' });
 

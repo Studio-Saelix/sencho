@@ -262,7 +262,8 @@ labelsRouter.post('/:id/action', authMiddleware, async (req: Request, res: Respo
                 false,
                 req.deployContext ?? { source: 'labels', actor: req.user?.username ?? null },
                 evaluatedDeployCandidateVerification(
-                  stackName, req.nodeId, gate.evaluatedCandidates, policyOptions, gate.pullServices,
+                  stackName, req.nodeId, gate.evaluatedCandidates, policyOptions,
+                  gate.pullServices, gate.noPullOnUp,
                 ),
               ),
             );

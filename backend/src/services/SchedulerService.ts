@@ -247,6 +247,7 @@ export class SchedulerService {
     ): Promise<{
         evaluatedCandidates?: EvaluatedCandidate[];
         pullServices?: string[];
+        noPullOnUp?: boolean;
         options: PolicyEnforcementOptions;
     }> {
         const actor = action === 'Auto-start' ? 'scheduler:auto-start' : 'scheduler:auto-update';
@@ -260,7 +261,12 @@ export class SchedulerService {
         });
         const gate = await enforcePolicyPreDeploy(stackName, nodeId, options);
         if (gate.ok) {
-            return { evaluatedCandidates: gate.evaluatedCandidates, pullServices: gate.pullServices, options };
+            return {
+                evaluatedCandidates: gate.evaluatedCandidates,
+                pullServices: gate.pullServices,
+                noPullOnUp: gate.noPullOnUp,
+                options,
+            };
         }
         // describePolicyBlock distinguishes a matched finding from missing
         // evidence. Composing the sentence here instead reported a scanner
@@ -730,6 +736,7 @@ export class SchedulerService {
                     startGate.evaluatedCandidates,
                     startGate.options,
                     startGate.pullServices,
+                    startGate.noPullOnUp,
                 ),
             ),
         );

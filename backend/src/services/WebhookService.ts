@@ -224,7 +224,7 @@ export class WebhookService {
                                 { source: 'webhook', actor: 'system:webhook' },
                                 evaluatedDeployCandidateVerification(
                                     stackName, nodeId, deployGate.evaluatedCandidates,
-                                    deployPolicyOptions, deployGate.pullServices,
+                                    deployPolicyOptions, deployGate.pullServices, deployGate.noPullOnUp,
                                 ),
                             );
                             const healthGateId = HealthGateService.getInstance().beginStack(nodeId, stackName, 'deploy', 'system:webhook', { deployedGenerationId: deployResult.deployedGenerationId });

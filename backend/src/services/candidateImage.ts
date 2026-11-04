@@ -159,6 +159,26 @@ export async function localImageExists(nodeId: number, ref: string): Promise<boo
 }
 
 /**
+ * When Docker last tagged this reference locally, in epoch ms, or null when the
+ * image is absent or the daemon did not report it. Compose's interval policies
+ * compare this against `now` to decide whether `up` refreshes the image, so the
+ * gate uses the same fact rather than assuming every interval is due.
+ */
+export async function localImageLastTagTime(nodeId: number, ref: string): Promise<number | null> {
+  try {
+    const info = await DockerController.getInstance(nodeId).getDocker().getImage(ref).inspect() as {
+      Metadata?: { LastTagTime?: string };
+    };
+    const raw = info.Metadata?.LastTagTime;
+    if (typeof raw !== 'string') return null;
+    const parsed = Date.parse(raw);
+    return Number.isFinite(parsed) ? parsed : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
  * Compose pull policies that fetch on every `up` or `pull`. `missing` and
  * `build` are excluded: `missing` pulls only when the image is absent (checked
  * separately) and `build` builds from a Dockerfile, so neither turns an
@@ -171,7 +191,11 @@ export async function localImageExists(nodeId: number, ref: string): Promise<boo
  */
 const PULLING_POLICIES: ReadonlySet<string> = new Set(['always', 'refresh', 'daily', 'weekly']);
 
-/** Whether a Compose `pull_policy` makes `up` or `pull` fetch this image. */
+/**
+ * Whether a Compose policy can fetch a present image. Interval policies are
+ * included; a caller that needs the exact `up` decision must also compare
+ * `pullPolicyRefreshDue` against the local last tag time.
+ */
 export function pullPolicyPullsOnUp(pullPolicy: string | null | undefined): boolean {
   if (typeof pullPolicy !== 'string') return false;
   const value = pullPolicy.trim().toLowerCase();
@@ -190,4 +214,68 @@ export function pullPolicyPullsOnUp(pullPolicy: string | null | undefined): bool
  */
 export function pullPolicyNever(pullPolicy: string | null | undefined): boolean {
   return typeof pullPolicy === 'string' && pullPolicy.trim().toLowerCase() === 'never';
+}
+
+/** Normalised policy text, empty when the service declares none. */
+export function normalizedPullPolicy(pullPolicy: string | null | undefined): string {
+  return typeof pullPolicy === 'string' ? pullPolicy.trim().toLowerCase() : '';
+}
+
+/**
+ * How long an interval policy waits before `up` refreshes the image, in ms.
+ * Null means this is not an interval policy (or is an `every_` value this build
+ * cannot parse, which callers treat as due: an unknown interval must not let a
+ * stale image through).
+ */
+export function pullPolicyRefreshAfterMs(pullPolicy: string | null | undefined): number | null {
+  const value = normalizedPullPolicy(pullPolicy);
+  if (value === 'refresh') return 0;
+  if (value === 'daily') return 24 * 60 * 60 * 1000;
+  if (value === 'weekly') return 7 * 24 * 60 * 60 * 1000;
+  if (!value.startsWith('every_')) return null;
+  const body = value.slice('every_'.length);
+  if (body === '') return null;
+  const units: Record<string, number> = {
+    ms: 1,
+    s: 1000,
+    m: 60 * 1000,
+    h: 60 * 60 * 1000,
+    d: 24 * 60 * 60 * 1000,
+    w: 7 * 24 * 60 * 60 * 1000,
+  };
+  let total = 0;
+  let consumed = 0;
+  const part = /(\d+(?:\.\d+)?)(ms|s|m|h|d|w)/g;
+  for (let match = part.exec(body); match !== null; match = part.exec(body)) {
+    if (match.index !== consumed) return null;
+    total += Number(match[1]) * units[match[2]];
+    consumed = match.index + match[0].length;
+  }
+  return consumed === body.length && total > 0 ? total : null;
+}
+
+/**
+ * Whether an interval policy is due to refresh at `now`. A missing or
+ * unreadable tag time is due, matching Compose's zero LastTagTime. An interval
+ * value this build cannot parse is also due, the fail-closed reading.
+ */
+export function pullPolicyRefreshDue(
+  pullPolicy: string | null | undefined,
+  lastTagTimeMs: number | null,
+  now = Date.now(),
+): boolean {
+  const interval = pullPolicyRefreshAfterMs(pullPolicy);
+  if (interval === null) return true;
+  if (lastTagTimeMs === null) return true;
+  return now >= lastTagTimeMs + interval;
+}
+
+/**
+ * Whether a reference names the floating `latest` tag. Compose's explicit
+ * `pull` refreshes a present `latest` even under `pull_policy: missing`, because
+ * the tag is expected to move.
+ */
+export function isLatestImageTag(ref: string): boolean {
+  const parsed = parseImageRef(ref);
+  return parsed !== null && parsed.tag === 'latest';
 }

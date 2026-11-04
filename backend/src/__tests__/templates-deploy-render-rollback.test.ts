@@ -119,6 +119,34 @@ describe('POST /api/templates/deploy refused by the external-network gate', () =
   });
 });
 
+describe('POST /api/templates/deploy refused after the candidate pull', () => {
+  it('answers with the policy block and never takes down a runtime it did not replace', async () => {
+    const { PulledCandidateBlockedError } = await import('../helpers/policyGate');
+    const downStack = vi.spyOn(ComposeService.prototype, 'downStack').mockResolvedValue(undefined);
+    vi.spyOn(ComposeService.prototype, 'deployStack').mockRejectedValue(new PulledCandidateBlockedError({
+      policy: { id: 1, name: 'prod-gate' } as never,
+      violations: [{
+        imageRef: 'nginx:alpine', severity: 'CRITICAL', criticalCount: 1, highCount: 0,
+        kevCount: 0, fixableCount: 0, reasons: ['severity'], scanId: 9,
+      }],
+      evidence: { outcome: 'block', records: [], applications: [], summary: 'Proven by severity' },
+    }));
+
+    const res = await request(app)
+      .post('/api/templates/deploy')
+      .set('Authorization', `Bearer ${adminToken}`)
+      .send({ stackName: 'candidate-block', template: minimalTemplate });
+
+    expect(res.status).toBe(409);
+    expect(res.body.code).toBe('policy_blocked');
+    expect(res.body.policy.name).toBe('prod-gate');
+    expect(downStack).not.toHaveBeenCalled();
+    // The half-created stack is removed, so the same name can be retried.
+    const { FileSystemService } = await import('../services/FileSystemService');
+    expect(await FileSystemService.getInstance().getStacks()).not.toContain('candidate-block');
+  });
+});
+
 describe('POST /api/templates/deploy rolled back through the real teardown', () => {
   it('still removes the files of a stack Compose cannot render, taking it down without volumes, so the same name can be retried', async () => {
     vi.restoreAllMocks();

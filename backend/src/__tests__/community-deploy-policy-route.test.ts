@@ -29,9 +29,11 @@ vi.mock('../services/FileSystemService', () => ({
  * deterministic and offline here.
  */
 vi.mock('../services/candidateImage', async () => {
+  const actual = await vi.importActual<typeof import('../services/candidateImage')>('../services/candidateImage');
   const { createHash } = await import('node:crypto');
   const digestOf = (ref: string): string => `sha256:${createHash('sha256').update(ref).digest('hex')}`;
   return {
+    ...actual,
     nodePlatformFor: async () => ({ os: 'linux', architecture: 'amd64' }),
     // Nothing is on the node, so Compose would pull it.
     localImageExists: async () => false,

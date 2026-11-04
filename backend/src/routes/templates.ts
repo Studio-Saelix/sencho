@@ -16,7 +16,7 @@ import { isValidStackName, isPathWithinBase } from '../utils/validation';
 import { isDebugEnabled } from '../utils/debug';
 import { getErrorMessage } from '../utils/errors';
 import { sanitizeForLog } from '../utils/safeLog';
-import { policyEvidenceFor, pulledDeployCandidateVerification, runPolicyGate, triggerPostDeployScan } from '../helpers/policyGate';
+import { policyBlockPayload, policyEvidenceFor, PulledCandidateBlockedError, pulledDeployCandidateVerification, runPolicyGate, triggerPostDeployScan } from '../helpers/policyGate';
 import { invalidateNodeCaches } from '../helpers/cacheInvalidation';
 import { getRegistryDeliveryContext, getRegistryDeliveryLockContext } from '../helpers/registryDeliveryContext';
 import { materializePreparedSourceToStack } from '../helpers/registryDeliveryMaterialize';
@@ -209,6 +209,25 @@ templatesRouter.post('/deploy', authMiddleware, async (req: Request, res: Respon
     } catch (deployError: unknown) {
       const rawError = getErrorMessage(deployError, String(deployError));
       console.error(`[Templates] Deploy failed: ${stackName} -`, rawError);
+      if (deployError instanceof PulledCandidateBlockedError) {
+        // The pulled image was refused before Compose ran, so there is no
+        // runtime to take down. Remove the stack this request just created,
+        // exactly as a pre-flight block does, and answer like every other
+        // policy block so the same dialog opens.
+        try {
+          await fsService.deleteStack(stackName);
+        } catch (cleanupErr) {
+          console.error(`[Templates] Cleanup after policy block failed for ${stackName}:`, cleanupErr);
+        }
+        if (!res.headersSent) {
+          res.status(409).json({
+            error: deployError.message,
+            code: 'policy_blocked',
+            ...policyBlockPayload(deployError.gate.policy, deployError.gate.violations, deployError.gate.evidence),
+          });
+        }
+        return;
+      }
       // A pre-flight refusal already carries a specific, actionable diagnosis
       // and nothing was ever started, so it always rolls back. Matching its
       // text against the generic rules would both suppress the rollback and

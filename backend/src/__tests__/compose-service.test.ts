@@ -1493,6 +1493,7 @@ describe('ComposeService - deployStack', () => {
     const promise = ComposeService.getInstance(1)
       .deployStack('my-stack', undefined, false, undefined, {
         pullServices: ['web'],
+        pullRefs: [],
         verifyPulled,
       });
     await vi.advanceTimersByTimeAsync(3100);
@@ -1506,6 +1507,39 @@ describe('ComposeService - deployStack', () => {
     expect(pullArgs).toContain('web');
     const upArgs = spawnArgs.find((args) => args.includes('up') && args.includes('--remove-orphans'));
     expect(upArgs).toEqual(expect.arrayContaining(['--pull', 'never']));
+  });
+
+  it('runs up with pulls disabled when an interval policy is not due yet', async () => {
+    setupAutoCloseSpawn();
+    mockListContainers.mockResolvedValue([]);
+
+    const promise = ComposeService.getInstance(1)
+      .deployStack('my-stack', undefined, false, undefined, { pullServices: [], pullRefs: [] });
+    await vi.advanceTimersByTimeAsync(3100);
+    await promise;
+
+    const spawnArgs = mockSpawn.mock.calls.map((call) => call[1] as string[]);
+    expect(spawnArgs.some((args) => args[1] === 'pull')).toBe(false);
+    const upArgs = spawnArgs.find((args) => args.includes('up') && args.includes('--remove-orphans'));
+    expect(upArgs).toEqual(expect.arrayContaining(['--pull', 'never']));
+  });
+
+  it('pulls an unattributed candidate by ref instead of refreshing the whole project', async () => {
+    setupAutoCloseSpawn();
+    mockListContainers.mockResolvedValue([]);
+
+    const promise = ComposeService.getInstance(1)
+      .deployStack('my-stack', undefined, false, undefined, {
+        pullServices: [],
+        pullRefs: ['registry.example.com/hook:1'],
+        verifyPulled: vi.fn(async () => undefined),
+      });
+    await vi.advanceTimersByTimeAsync(3100);
+    await promise;
+
+    const commands = mockSpawn.mock.calls.map((call) => call[1] as string[]);
+    expect(commands.some((args) => args.includes('compose') && args.includes('pull'))).toBe(false);
+    expect(commands).toContainEqual(['pull', 'registry.example.com/hook:1']);
   });
 
   it('never runs up when the pulled image fails verification', async () => {
@@ -1523,13 +1557,16 @@ describe('ComposeService - deployStack', () => {
     const error = await ComposeService.getInstance(1)
       .deployStack('my-stack', undefined, false, undefined, {
         pullServices: ['web'],
+        pullRefs: [],
         verifyPulled,
       })
       .then(() => null, (e: Error) => e);
 
     expect(error?.message).toBe('candidate moved');
-    // The block lands before any container is replaced.
+    // The block lands before any container is replaced, and before legacy
+    // orphans are removed.
     expect(order).toEqual(['pull']);
+    expect(mockGetLegacyOrphanContainersByStack).not.toHaveBeenCalled();
   });
 
   it('abandons the atomic generation on a candidate block instead of compensating a runtime nothing replaced', async () => {
@@ -1540,7 +1577,9 @@ describe('ComposeService - deployStack', () => {
     });
 
     await expect(ComposeService.getInstance(1)
-      .deployStack('my-stack', undefined, true, undefined, { pullServices: ['web'], verifyPulled }))
+      .deployStack('my-stack', undefined, true, undefined, {
+        pullServices: ['web'], pullRefs: [], verifyPulled,
+      }))
       .rejects.toThrow('candidate moved');
 
     expect(mockAbandon).toHaveBeenCalledWith('recovery-1');

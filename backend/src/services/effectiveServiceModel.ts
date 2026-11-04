@@ -43,7 +43,16 @@ export interface EffectiveServiceSpec {
 }
 
 export type EffectiveServiceModelResult =
-  | { renderable: true; services: EffectiveServiceSpec[] }
+  | {
+      renderable: true;
+      services: EffectiveServiceSpec[];
+      /**
+       * Compose's project name from the rendered model. A build-only service
+       * runs an image Compose generates as `<project>-<service>`, which is what
+       * `config --images` names without any service declaring it.
+       */
+      projectName?: string | null;
+    }
   | { renderable: false; code: 'effective_model_render_failed'; error: string };
 
 function asString(v: unknown): string | undefined {
@@ -105,6 +114,12 @@ function parseEffectiveServices(parsed: unknown): EffectiveServiceSpec[] {
   return Object.entries(rawServices).map(([name, svc]) => parseServiceSpec(name, svc));
 }
 
+/** Compose's project name from the rendered model, when it states one. */
+function parseProjectName(parsed: unknown): string | null {
+  const root = (parsed && typeof parsed === 'object') ? parsed as Record<string, unknown> : {};
+  return typeof root.name === 'string' && root.name !== '' ? root.name : null;
+}
+
 /**
  * Render the fully-merged effective Compose model for a stack and extract the
  * per-service specs service-scoped update/restore key off of. Mirrors the
@@ -119,7 +134,12 @@ export async function buildEffectiveServiceModel(nodeId: number, stackName: stri
     const result = await ComposeService.getInstance(nodeId).renderConfig(stackName);
     if (result.rendered !== null) {
       try {
-        return { renderable: true, services: parseEffectiveServices(JSON.parse(result.rendered)) };
+        const parsed: unknown = JSON.parse(result.rendered);
+        return {
+          renderable: true,
+          services: parseEffectiveServices(parsed),
+          projectName: parseProjectName(parsed),
+        };
       } catch (parseErr) {
         // JSON.parse errors carry no file content, so the message is safe to log.
         console.warn('[EffectiveServiceModel] Effective model parse failed for %s:',

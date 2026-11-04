@@ -3293,7 +3293,8 @@ export class MeshService extends EventEmitter implements MeshForwarderHost {
                     undefined,
                     { source: 'mesh_redeploy', actor: 'system:mesh' },
                     evaluatedDeployCandidateVerification(
-                        stackName, nodeId, gate.evaluatedCandidates, policyOptions, gate.pullServices,
+                        stackName, nodeId, gate.evaluatedCandidates, policyOptions,
+                        gate.pullServices, gate.noPullOnUp,
                     ),
                 ),
             );

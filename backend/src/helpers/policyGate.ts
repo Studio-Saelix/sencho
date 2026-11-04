@@ -220,6 +220,7 @@ export async function assertPolicyGateAllows(
   policyEvidence?: AllowedPolicyEvidence;
   evaluatedCandidates?: EvaluatedCandidate[];
   pullServices?: string[];
+  noPullOnUp?: boolean;
 }> {
   const gate = await enforcePolicyPreDeploy(stackName, nodeId, options);
   if (!gate.ok) {
@@ -229,6 +230,7 @@ export async function assertPolicyGateAllows(
     ...allowedPolicyEvidence(gate),
     ...(gate.evaluatedCandidates ? { evaluatedCandidates: gate.evaluatedCandidates } : {}),
     ...(gate.pullServices ? { pullServices: gate.pullServices } : {}),
+    ...(gate.noPullOnUp ? { noPullOnUp: true } : {}),
   };
 }
 
@@ -259,6 +261,7 @@ export async function runPolicyGate(
   }
   if (gate.evaluatedCandidates) res.locals.evaluatedCandidates = gate.evaluatedCandidates;
   if (gate.pullServices) res.locals.pullServices = gate.pullServices;
+  if (gate.noPullOnUp) res.locals.noPullOnUp = true;
   return true;
 }
 
@@ -336,14 +339,21 @@ export function evaluatedCandidateVerifier(
 }
 
 /**
- * The pull boundary a plain `up` deploy needs: the services to pull first and
- * the verifier to run on what landed. Undefined when the gate evaluated no
- * candidate, or when it had no rendered model to name the services (a deploy
- * whose model will not render cannot run `up` either).
+ * The pull boundary a plain `up` deploy needs: the services and bare refs to
+ * pull first and the verifier to run on what landed. Undefined when the gate
+ * evaluated no candidate and no interval policy needs a no-pull guard, so a
+ * non-pulling deploy keeps its ordinary `up`.
  */
 export interface DeployCandidateVerification {
   pullServices: string[];
-  verifyPulled: () => Promise<void>;
+  /**
+   * Candidate refs no Compose service declares, such as a pre-start hook image
+   * or a generated image the model could not attribute. They are pulled by ref
+   * so the boundary never refreshes an unrelated service.
+   */
+  pullRefs: string[];
+  /** Absent when the boundary exists only to keep `up` from fetching. */
+  verifyPulled?: () => Promise<void>;
 }
 
 export function evaluatedDeployCandidateVerification(
@@ -352,21 +362,21 @@ export function evaluatedDeployCandidateVerification(
   candidates: readonly EvaluatedCandidate[] | undefined,
   options: PolicyEnforcementOptions,
   evaluatedPullServices?: readonly string[],
+  noPullOnUp = false,
 ): DeployCandidateVerification | undefined {
   const verifyPulled = evaluatedCandidateVerifier(stackName, nodeId, candidates, options);
-  if (!verifyPulled || !candidates) return undefined;
-  // Every candidate must name the Compose service that fetches it. A ref the
-  // rendered model could not attribute (or a bare-ref decision) cannot be
-  // pulled by name, so the deploy keeps its ordinary `up` rather than disabling
-  // pulls for an image the boundary cannot fetch.
-  if (candidates.some((candidate) => !candidate.services || candidate.services.length === 0)) return undefined;
+  if (!verifyPulled && !noPullOnUp) return undefined;
   const pullServices = [...new Set(
     evaluatedPullServices && evaluatedPullServices.length > 0
       ? evaluatedPullServices
-      : candidates.flatMap((candidate) => candidate.services ?? []),
+      : (candidates ?? []).flatMap((candidate) => candidate.services ?? []),
   )];
-  if (pullServices.length === 0) return undefined;
-  return { pullServices, verifyPulled };
+  const pullRefs = [...new Set(
+    (candidates ?? [])
+      .filter((candidate) => !candidate.services || candidate.services.length === 0)
+      .map((candidate) => candidate.ref),
+  )];
+  return { pullServices, pullRefs, ...(verifyPulled ? { verifyPulled } : {}) };
 }
 
 /**
@@ -395,6 +405,7 @@ export function pulledDeployCandidateVerification(
   const pullServices = res.locals.pullServices as string[] | undefined;
   return evaluatedDeployCandidateVerification(
     stackName, nodeId, candidates, buildPolicyGateOptions(req), pullServices,
+    res.locals.noPullOnUp === true,
   );
 }
 

@@ -4790,6 +4790,7 @@ export class GitSourceService {
                                 deployGate.evaluatedCandidates,
                                 deployPolicyOptions,
                                 deployGate.pullServices,
+                                deployGate.noPullOnUp,
                             ),
                         );
                     } finally {
@@ -6254,6 +6255,7 @@ export class GitSourceService {
                                 applyGate.evaluatedCandidates,
                                 applyPolicyOptions,
                                 applyGate.pullServices,
+                                applyGate.noPullOnUp,
                             ),
                         );
                     } finally {

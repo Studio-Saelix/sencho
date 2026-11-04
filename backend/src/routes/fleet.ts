@@ -3836,6 +3836,7 @@ fleetRouter.post('/snapshots/:id/restore-all', authMiddleware, async (req: Reque
               gate.evaluatedCandidates,
               policyOptions,
               gate.pullServices,
+              gate.noPullOnUp,
             );
           }
           try {

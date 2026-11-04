@@ -136,16 +136,30 @@ describe('evaluatedDeployCandidateVerification', () => {
       { ...CANDIDATES[0], ref: 'registry.example.com/worker:latest', services: ['worker'] },
     ], OPTIONS);
     expect(verification?.pullServices).toEqual(['web', 'worker']);
+    expect(verification?.pullRefs).toEqual([]);
     expect(verification?.verifyPulled).toBeTypeOf('function');
   });
 
-  it('does not open a pull boundary when the gate named no service', () => {
-    // Bare refs (GitOps candidate acceptance) have no rendered model, so a
-    // deploy cannot know which service to pull; its `up` would fail to render.
-    expect(evaluatedDeployCandidateVerification('web', 1, [CANDIDATES[0]], OPTIONS)).toBeUndefined();
+  it('keeps the boundary when the gate named no service, so the deploy pulls the whole project', () => {
+    // A candidate the model could not attribute still must be fetched before
+    // `up`. The deploy pulls the project; it never falls back to an unverified
+    // ordinary `up`.
+    const verification = evaluatedDeployCandidateVerification('web', 1, [CANDIDATES[0]], OPTIONS);
+    expect(verification?.pullServices).toEqual([]);
+    expect(verification?.pullRefs).toEqual(['registry.example.com/web:latest']);
+    expect(verification?.verifyPulled).toBeTypeOf('function');
   });
 
   it('does not open a pull boundary when nothing was evaluated', () => {
     expect(evaluatedDeployCandidateVerification('web', 1, undefined, OPTIONS)).toBeUndefined();
+  });
+
+  it('opens a no-pull boundary without verifying when an interval policy is not due', () => {
+    // The gate evaluated the installed image, so there is no candidate to
+    // verify; `up` still must not fetch if the interval expires before it runs.
+    const verification = evaluatedDeployCandidateVerification(
+      'web', 1, undefined, OPTIONS, undefined, true,
+    );
+    expect(verification).toEqual({ pullServices: [], pullRefs: [] });
   });
 });

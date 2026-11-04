@@ -9,7 +9,10 @@
  */
 import { describe, it, expect, vi } from 'vitest';
 import {
+  isLatestImageTag,
   pullPolicyPullsOnUp,
+  pullPolicyRefreshAfterMs,
+  pullPolicyRefreshDue,
   resolveCandidateImage,
   type CandidateDeps,
 } from '../services/candidateImage';
@@ -133,13 +136,13 @@ describe('resolveCandidateImage', () => {
 });
 
 describe('pullPolicyPullsOnUp', () => {
-  it('is true for every Compose policy that fetches on up', () => {
+  it('is true for every Compose policy that can fetch a present image', () => {
     for (const policy of ['always', 'refresh', 'daily', 'weekly', 'every_12h', 'every_5m', 'EVERY_1H', 'ALWAYS']) {
       expect(pullPolicyPullsOnUp(policy)).toBe(true);
     }
   });
 
-  it('is false only for the policies that do not fetch a present image', () => {
+  it('is false only for the policies that never fetch a present image', () => {
     for (const policy of [null, undefined, 'missing', 'build', 'never', '']) {
       expect(pullPolicyPullsOnUp(policy)).toBe(false);
     }
@@ -149,5 +152,33 @@ describe('pullPolicyPullsOnUp', () => {
     // A policy this build does not know could still fetch on a newer Compose;
     // reading it as "will not pull" would let that image pass unexamined.
     expect(pullPolicyPullsOnUp('sometimes')).toBe(true);
+  });
+});
+
+describe('pull policy intervals', () => {
+  it('parses the windows Compose compares against the image last tag time', () => {
+    expect(pullPolicyRefreshAfterMs('refresh')).toBe(0);
+    expect(pullPolicyRefreshAfterMs('daily')).toBe(24 * 60 * 60 * 1000);
+    expect(pullPolicyRefreshAfterMs('weekly')).toBe(7 * 24 * 60 * 60 * 1000);
+    expect(pullPolicyRefreshAfterMs('every_1h30m')).toBe(90 * 60 * 1000);
+    expect(pullPolicyRefreshAfterMs('always')).toBeNull();
+    expect(pullPolicyRefreshAfterMs('every_nonsense')).toBeNull();
+  });
+
+  it('is due only after the window, and treats an unknown or missing time as due', () => {
+    const now = Date.UTC(2026, 0, 2);
+    expect(pullPolicyRefreshDue('daily', now - 60 * 60 * 1000, now)).toBe(false);
+    expect(pullPolicyRefreshDue('daily', now - 25 * 60 * 60 * 1000, now)).toBe(true);
+    expect(pullPolicyRefreshDue('refresh', now, now)).toBe(true);
+    expect(pullPolicyRefreshDue('daily', null, now)).toBe(true);
+    expect(pullPolicyRefreshDue('every_nonsense', now, now)).toBe(true);
+  });
+
+  it('recognises a bare or explicit latest tag', () => {
+    expect(isLatestImageTag('nginx')).toBe(true);
+    expect(isLatestImageTag('nginx:latest')).toBe(true);
+    expect(isLatestImageTag('registry.example.com:5000/web:latest')).toBe(true);
+    expect(isLatestImageTag('nginx:1.27')).toBe(false);
+    expect(isLatestImageTag('registry.example.com/web@sha256:abc')).toBe(true);
   });
 });

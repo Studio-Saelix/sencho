@@ -1654,10 +1654,11 @@ export class ComposeService {
     ctx?: DeployInvocationContext,
     /**
      * Confirms the images a plain `up` would fetch are the ones the gate
-     * evaluated. When set, the deploy pulls those services first, verifies the
-     * digests, and then runs `up --pull never`, so no fetch can land between the
-     * check and the container replacement. Undefined when the gate evaluated no
-     * candidate or named no service, which keeps a non-pulling deploy identical.
+     * evaluated. When set, the deploy pulls those services first (the whole
+     * project when the gate could not name them), verifies the digests, and then
+     * runs `up --pull never`, so no fetch can land between the check and the
+     * container replacement. Undefined when the gate evaluated no candidate,
+     * which keeps a non-pulling deploy identical.
      */
     verification?: DeployCandidateVerification,
   ): Promise<{ recoveryId: string | null; deployedGenerationId: string | null; gitopsOperationId: string | null }> {
@@ -1735,17 +1736,6 @@ export class ComposeService {
     let composeHandedOff = false;
 
     try {
-      try {
-        const dockerController = DockerController.getInstance(this.nodeId);
-        const legacyOrphans = await dockerController.getLegacyOrphanContainersByStack(stackName);
-        if (legacyOrphans.length > 0) {
-          sendOutput(`=== Cleaning up legacy orphan containers before deployment ===\n`);
-          await dockerController.removeContainers(legacyOrphans.map((c) => c.Id));
-        }
-      } catch (e) {
-        console.warn('Failed to clean up legacy containers for %s:', sanitizeForLog(stackName), e);
-      }
-
       await this.withRegistryAuth(async (env) => {
         const digestPins = ctx?.digestPins;
         let overlayDir: string | null = null;
@@ -1778,18 +1768,39 @@ export class ComposeService {
             // replaces the containers. Pulling the exact services first creates
             // the boundary the update paths already have: the verifier sees what
             // actually landed, and a block throws here, before any container is
-            // touched.
-            sendOutput('=== Pulling registry images ===\n');
-            await this.execute(
-              'docker',
-              await this.authoredComposeArgs(
-                stackName,
-                ['pull', '--ignore-buildable', ...verification.pullServices],
-                stackDir,
-              ),
-              stackDir, ws, true, env, getComposeStallTimeoutMs(),
-            );
-            await verification.verifyPulled();
+            // touched. A verification with no services and no verifier exists
+            // only to keep `up` from fetching a not-yet-due interval image.
+            if (verification.pullServices.length > 0) {
+              sendOutput('=== Pulling registry images ===\n');
+              await this.execute(
+                'docker',
+                await this.authoredComposeArgs(
+                  stackName,
+                  ['pull', '--ignore-buildable', ...verification.pullServices],
+                  stackDir,
+                ),
+                stackDir, ws, true, env, getComposeStallTimeoutMs(),
+              );
+            }
+            for (const ref of verification.pullRefs) {
+              sendOutput(`=== Pulling ${ref} ===\n`);
+              await this.execute(
+                'docker', ['pull', ref], stackDir, ws, true, env, getComposeStallTimeoutMs(),
+              );
+            }
+            if (verification.verifyPulled) await verification.verifyPulled();
+          }
+          // Legacy orphans are removed only once the candidate check has passed,
+          // so a refused image leaves the running containers it found untouched.
+          try {
+            const dockerController = DockerController.getInstance(this.nodeId);
+            const legacyOrphans = await dockerController.getLegacyOrphanContainersByStack(stackName);
+            if (legacyOrphans.length > 0) {
+              sendOutput(`=== Cleaning up legacy orphan containers before deployment ===\n`);
+              await dockerController.removeContainers(legacyOrphans.map((c) => c.Id));
+            }
+          } catch (e) {
+            console.warn('Failed to clean up legacy containers for %s:', sanitizeForLog(stackName), e);
           }
           // End the gates from any earlier run here, after the arguments and the
           // registry auth have resolved and immediately before the compose up

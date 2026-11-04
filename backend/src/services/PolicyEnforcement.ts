@@ -45,10 +45,14 @@ import {
     type SecurityEvidenceState,
 } from './securityEvidence';
 import {
+    isLatestImageTag,
     localImageExists,
+    localImageLastTagTime,
     nodePlatformFor,
+    normalizedPullPolicy,
     pullPolicyNever,
-    pullPolicyPullsOnUp,
+    pullPolicyRefreshAfterMs,
+    pullPolicyRefreshDue,
     resolveCandidateImage,
     type CandidateResolution,
     type ImageSource,
@@ -167,6 +171,12 @@ export interface PolicyEnforcementResult {
      * these before running `up` with pulls disabled.
      */
     pullServices?: string[];
+    /**
+     * A plain `up` must not fetch on its own. Set when an interval policy is not
+     * due yet: the gate evaluated the installed image, and Compose must not pull
+     * a different one if the interval expires before `up` starts.
+     */
+    noPullOnUp?: boolean;
 }
 
 /** One registry candidate a gate decision covered. */
@@ -441,14 +451,16 @@ async function planCandidates(
     imageRefs: readonly string[],
     mode: Exclude<ImageSource, 'installed'>,
     modelServices: Awaited<ReturnType<typeof buildEffectiveServiceModel>> | null,
-): Promise<{ plan: Map<string, CandidatePlanEntry>; pullServices: Set<string> }> {
+): Promise<{ plan: Map<string, CandidatePlanEntry>; pullServices: Set<string>; noPullOnUp: boolean }> {
     const plan = new Map<string, CandidatePlanEntry>();
     // Every service the operation will fetch, including a digest pin Compose
     // fetches by its pinned digest. The deploy executor pulls exactly these
     // before it runs `up` with pulls disabled.
     const pullServices = new Set<string>();
-    if (imageRefs.length === 0) return { plan, pullServices };
+    let noPullOnUp = false;
+    if (imageRefs.length === 0) return { plan, pullServices, noPullOnUp };
     const services = modelServices && modelServices.renderable ? modelServices.services : null;
+    const projectName = modelServices && modelServices.renderable ? modelServices.projectName ?? null : null;
     const platform = await nodePlatformFor(nodeId);
 
     const resolveEntry = async (ref: string, serviceNames: string[] = []): Promise<CandidatePlanEntry> => {
@@ -474,8 +486,20 @@ async function planCandidates(
         }
         const declared = services.filter((spec) => spec.declaredImage === ref);
         if (declared.length === 0) {
-            // The reference came from Compose's own image list, so it is an image
-            // this operation can install. Resolve it rather than assume otherwise.
+            // A build-only service declares no image; Compose names the image it
+            // builds `<project>-<service>` and `config --images` reports it. That
+            // image does not exist until the build, so it is not a registry
+            // candidate even though no service declares the reference.
+            const generatedBuild = projectName !== null
+                ? services.find((spec) => spec.hasBuild && ref === `${projectName}-${spec.name}`)
+                : undefined;
+            if (generatedBuild) {
+                plan.set(ref, { kind: 'installed', why: 'build' });
+                continue;
+            }
+            // Any other reference came from Compose's own image list, so it is an
+            // image this operation can install. Resolve it rather than assume
+            // otherwise.
             plan.set(ref, await resolveEntry(ref));
             continue;
         }
@@ -488,21 +512,51 @@ async function planCandidates(
         // Both an update's `docker compose pull` and a plain `up` skip
         // `pull_policy: never`, even when the image is absent, so that service
         // never runs a registry image this gate could block on. `missing` skips
-        // a present image in both modes, handled by the presence check below.
-        // An explicit `pull` (registry mode) fetches a service with no policy,
-        // while `up` (compose mode) uses Compose's `missing` default there.
-        // An unknown policy is treated as pulling (fail-closed).
+        // a present non-latest image in both modes, while an explicit `pull`
+        // still refreshes a present `latest` and treats interval policies as
+        // due. `up` uses the `missing` default for a service with no policy and
+        // only refreshes an interval policy once its window has elapsed. An
+        // unknown policy is treated as pulling (fail-closed).
         const runnable = declared.filter((spec) => !spec.hasBuild);
         if (runnable.length === 0 || runnable.every((spec) => pullPolicyNever(spec.pullPolicy))) {
             plan.set(ref, { kind: 'installed', why: 'not_pulled' });
             continue;
         }
-        const pulls = runnable.some((spec) => (
-            mode === 'registry' && (typeof spec.pullPolicy !== 'string' || spec.pullPolicy.trim() === '')
-                ? true
-                : pullPolicyPullsOnUp(spec.pullPolicy)
-        ));
-        const present = pulls ? false : await localImageExists(nodeId, ref);
+        const policies = runnable.map((spec) => normalizedPullPolicy(spec.pullPolicy));
+        const isInterval = (policy: string): boolean =>
+            pullPolicyRefreshAfterMs(policy) !== null || policy.startsWith('every_');
+        const registryMode = mode === 'registry';
+        // An interval policy that is not due now can become due while the scan
+        // and deploy preparation run. The deploy must then keep `up` from
+        // fetching the image the gate did not evaluate as a candidate.
+        if (!registryMode && policies.some(isInterval)) noPullOnUp = true;
+        // Only ask the daemon when the answer changes the decision. `always`
+        // and an explicit refresh never need the local copy.
+        const needsPresence = policies.some((policy) => {
+            if (policy === 'always' || policy === 'never' || policy === 'build') return false;
+            if (registryMode) return policy === 'missing' || policy === 'if_not_present';
+            return true;
+        });
+        const present = needsPresence ? await localImageExists(nodeId, ref) : false;
+        const lastTagTime = !registryMode && present && policies.some(isInterval)
+            ? await localImageLastTagTime(nodeId, ref)
+            : null;
+        const pulls = policies.some((policy) => {
+            if (policy === 'never' || policy === 'build') return false;
+            if (registryMode) {
+                if (policy === '') return true;
+                if (policy === 'always') return true;
+                if (policy === 'missing' || policy === 'if_not_present') {
+                    return !present || isLatestImageTag(ref);
+                }
+                return true;
+            }
+            if (policy === '') return !present;
+            if (policy === 'always') return true;
+            if (policy === 'missing' || policy === 'if_not_present') return !present;
+            if (isInterval(policy)) return !present || pullPolicyRefreshDue(policy, lastTagTime);
+            return true;
+        });
         if (pulls || !present) {
             // The services that make this ref a candidate are the ones Compose
             // will fetch it through, so a plain-up deploy can pull exactly those
@@ -516,7 +570,7 @@ async function planCandidates(
         // Compose will not fetch this image, so the node's own image is what runs.
         plan.set(ref, { kind: 'installed', why: 'not_pulled' });
     }
-    return { plan, pullServices };
+    return { plan, pullServices, noPullOnUp };
 }
 
 interface ImageRiskEvaluation {
@@ -1067,6 +1121,7 @@ async function evaluateImageRefs(
     const plannedPullServices = planned && planned.pullServices.size > 0
         ? [...planned.pullServices]
         : undefined;
+    const noPullOnUp = planned?.noPullOnUp === true;
     const evaluatedCandidates: EvaluatedCandidate[] = [];
     for (const imageRef of imageRefs) {
         if (!validateImageRef(imageRef)) {
@@ -1330,6 +1385,7 @@ async function evaluateImageRefs(
             ok: true, bypassed: false, policy, violations: [], evidence,
             ...(evaluatedCandidates.length > 0 ? { evaluatedCandidates } : {}),
             ...(plannedPullServices ? { pullServices: plannedPullServices } : {}),
+            ...(noPullOnUp ? { noPullOnUp: true } : {}),
         };
     }
 
@@ -1345,6 +1401,7 @@ async function evaluateImageRefs(
             ok: true, bypassed: true, policy, violations, evidence,
             ...(evaluatedCandidates.length > 0 ? { evaluatedCandidates } : {}),
             ...(plannedPullServices ? { pullServices: plannedPullServices } : {}),
+            ...(noPullOnUp ? { noPullOnUp: true } : {}),
         };
     }
 
@@ -1381,6 +1438,7 @@ async function evaluateImageRefs(
         ok: false, bypassed: false, policy, violations, evidence,
         ...(evaluatedCandidates.length > 0 ? { evaluatedCandidates } : {}),
         ...(plannedPullServices ? { pullServices: plannedPullServices } : {}),
+        ...(noPullOnUp ? { noPullOnUp: true } : {}),
     };
 }
 
