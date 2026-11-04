@@ -409,10 +409,10 @@ describe('compose mode (a plain up)', () => {
   it('recognizes a generated build image when the rendered model names no project', async () => {
     // Compose omits `name` only in unusual renders, but the generated image is
     // still a bare repository ending in `-<service>`. A registry-qualified
-    // reference or a digest pin that happens to end the same way is not one.
+    // reference ending the same way, and a digest pin, are not generated names.
     composeStub.listStackImages.mockResolvedValue([
       'my-stack-built',
-      'registry.example.com/acme/built:latest',
+      'registry.example.com/acme/x-built:latest',
       `my-stack-built@${PLATFORM_DIGEST}`,
     ]);
     models.build.mockResolvedValue({
@@ -427,7 +427,7 @@ describe('compose mode (a plain up)', () => {
 
     expect(result.ok).toBe(true);
     expect(candidates.resolve.mock.calls.map((call) => call[1])).toEqual([
-      'registry.example.com/acme/built:latest',
+      'registry.example.com/acme/x-built:latest',
       `my-stack-built@${PLATFORM_DIGEST}`,
     ]);
     expect(result.evaluatedCandidates).toHaveLength(2);
@@ -452,7 +452,7 @@ describe('compose mode (a plain up)', () => {
     // The model failed, so no reference can be attributed to the service that
     // owns it, and `config --images` still lists the image Compose generates for
     // a build-only service next to ordinary registry images. Pulling any of them
-    // by bare name would be a fetch the gate could not attribute, so the
+    // by reference would be a fetch the gate could not attribute, so the
     // boundary keeps `up --pull never` and the gate evaluates the installed
     // image for every reference.
     composeStub.listStackImages.mockResolvedValue(['my-stack-built', 'registry.example.com/web:latest']);

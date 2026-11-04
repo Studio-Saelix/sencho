@@ -192,7 +192,8 @@ export interface EvaluatedCandidate {
     /**
      * Compose services this operation will fetch the ref through. A plain-up
      * deploy pulls exactly these services before it runs `up` with pulls
-     * disabled; empty when the caller supplied bare refs (GitOps acceptance).
+     * disabled; empty when the caller supplied references without a model
+     * (Blueprint preflight, GitOps acceptance).
      */
     services?: string[];
 }
