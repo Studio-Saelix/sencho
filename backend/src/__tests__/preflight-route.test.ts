@@ -169,7 +169,10 @@ describe('preflight responses redact credentials in findings and acknowledgement
     for (const secret of LEAKED) expect(text).not.toContain(secret);
   };
 
-  beforeEach(() => {
+  beforeEach(async () => {
+    // Earlier describes leave acknowledgements for this stack behind.
+    const { DatabaseService } = await import('../services/DatabaseService');
+    DatabaseService.getInstance().getDb().prepare('DELETE FROM preflight_acknowledgements WHERE stack_name = ?').run(STACK);
     stackDir = path.join(process.env.COMPOSE_DIR as string, STACK);
     fs.mkdirSync(stackDir, { recursive: true });
     fs.writeFileSync(path.join(stackDir, 'compose.yaml'), `services:\n  web:\n    image: ${CREDENTIAL_IMAGE}\n`);
@@ -225,7 +228,7 @@ describe('preflight responses redact credentials in findings and acknowledgement
     expect(list.body[0].reason).toBe(created.body.reason);
   });
 
-  it('redacts the image anchor of an until_image_change acknowledgement, and still expires on it', async () => {
+  it('redacts the image anchor of an until_image_change acknowledgement, and still matches on the raw anchor', async () => {
     const run = await request(app).post(`/api/stacks/${STACK}/preflight/run`).set('Authorization', authHeader);
     const target = run.body.findings.find((f: { ruleId: string }) => f.ruleId === 'image-latest');
     const created = await request(app)

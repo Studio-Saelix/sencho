@@ -41,7 +41,11 @@ describe('redactSensitiveText', () => {
     expect(redactSensitiveText(input)).toBe(input);
   });
 
-  it('redacts a long dotted run without backtracking', () => {
+  it('redacts a credential behind a scheme longer than the usual bound', () => {
+    expect(redactSensitiveText(`${'a'.repeat(40)}://u:pw@h/x`)).not.toContain('pw@');
+  });
+
+  it('redacts a long dotted run in linear time', () => {
     const started = Date.now();
     redactSensitiveText('a.'.repeat(100_000));
     expect(Date.now() - started).toBeLessThan(1000);

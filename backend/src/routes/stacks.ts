@@ -1948,7 +1948,7 @@ const PREFLIGHT_RULE_ID_SET: ReadonlySet<string> = new Set(RULE_IDS);
 
 /** An acknowledgement as the API returns it. The reason is operator-entered free
  *  text and the image anchor is copied from the rendered model, which inlines a
- *  registry credential, so both are redacted on every read, the same as on the
+ *  registry credential, so both are redacted in every response, the same as on the
  *  Doctor report. The stored anchor stays raw: expiry compares against it. */
 function acknowledgementForWire(ack: PreflightAcknowledgement): PreflightAcknowledgement {
   return {

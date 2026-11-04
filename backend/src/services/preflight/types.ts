@@ -188,7 +188,7 @@ export interface PreflightContext {
    *  transient read failure does not fabricate unclassified/undocumented findings. */
   exposureAvailable: boolean;
   /** True when the authored env context (env files, interpolation refs) was
-   *  resolved and every env file Compose would read could be read. False when
+   *  resolved and every env file Sencho could resolve was read. False when
    *  resolution failed or a file is unreadable; it gates the env rules so the
    *  gap is reported as partial coverage instead of a silent pass. */
   envContextAvailable: boolean;
