@@ -221,6 +221,34 @@ describe('preflight responses redact credentials in findings and acknowledgement
     expect(run.body.findings).toEqual(read.body.findings);
   });
 
+  // A credential with no password part, a protocol-relative authority, and
+  // shapes a URL parser would not call userinfo. The image rule quotes the value
+  // from its own grammar, so none of them depends on the text heuristics.
+  it.each([
+    ['a token-only URL userinfo', 'https://SECRETD1tok@host/app:latest', 'SECRETD1tok', '[redacted]@host/app:latest'],
+    ['a token-only registry login', 'ghp_SECRETD8@ghcr.io/x/app:latest', 'SECRETD8', '[redacted]@ghcr.io/x/app:latest'],
+    ['a protocol-relative authority', '//u:SECRETD2@host/app:latest', 'SECRETD2', '[redacted]@host/app:latest'],
+    ['a space in the password', 'user:SECRETA8 @host/app:latest', 'SECRETA8', '[redacted]@host/app:latest'],
+    ['a slash in the password', 'https://u:p/SECRETA1w@host/app:latest', 'SECRETA1w', '[redacted]@host/app:latest'],
+  ])('redacts %s in the run response, the later read, and the stored row', async (_variant, image, secret, expected) => {
+    vi.restoreAllMocks();
+    stub(image);
+    fs.writeFileSync(path.join(stackDir, 'compose.yaml'), `services:\n  web:\n    image: "${image}"\n`);
+
+    const run = await request(app).post(`/api/stacks/${STACK}/preflight/run`).set('Authorization', authHeader);
+    expect(run.status).toBe(200);
+    const imageFinding = run.body.findings.find((f: { ruleId: string }) => f.ruleId === 'image-latest');
+    expect(imageFinding).toBeDefined();
+    expect(imageFinding.message).toContain(expected);
+
+    const read = await get(`/api/stacks/${STACK}/preflight`);
+    const { DatabaseService } = await import('../services/DatabaseService');
+    const rows = DatabaseService.getInstance().getDb()
+      .prepare('SELECT title, message, source_path, remediation, subject_key FROM preflight_findings').all();
+    for (const body of [run.body, read.body, rows]) expect(JSON.stringify(body)).not.toContain(secret);
+    expect(run.body.findings).toEqual(read.body.findings);
+  });
+
   it('stores the redacted copy, not the credential', async () => {
     await request(app).post(`/api/stacks/${STACK}/preflight/run`).set('Authorization', authHeader);
     const { DatabaseService } = await import('../services/DatabaseService');
@@ -274,6 +302,8 @@ describe('preflight responses redact credentials in findings and acknowledgement
   it.each([
     ['a percent-encoded user name', 'user%40x:SECRETQ6@host/app', 'SECRETQ6'],
     ['a literal @ in the password', 'u:p@SECRETQ7@host/app', 'SECRETQ7'],
+    ['a token-only userinfo', 'https://SECRETD1tok@host/app', 'SECRETD1tok'],
+    ['a protocol-relative authority', '//u:SECRETD2@host/app', 'SECRETD2'],
   ])('redacts the image anchor of an until_image_change acknowledgement for %s, and still matches on the raw anchor', async (_variant, image, secret) => {
     vi.restoreAllMocks();
     stub(image);

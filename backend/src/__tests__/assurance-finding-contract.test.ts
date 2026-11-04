@@ -337,6 +337,9 @@ describe('secret-safe serialization', () => {
   it.each([
     ['a percent-encoded user name', 'user%40x:SECRETQ6@host/app:latest', 'SECRETQ6'],
     ['a literal @ in the password', 'u:p@SECRETQ7@host/app', 'SECRETQ7'],
+    ['a token-only URL userinfo', 'https://SECRETD1tok@host/app:latest', 'SECRETD1tok'],
+    ['a token-only login', 'ghp_SECRETD8@host/app:latest', 'SECRETD8'],
+    ['a protocol-relative authority', '//u:SECRETD2@host/app:latest', 'SECRETD2'],
   ])('redacts a legacy stored image row holding %s', (_variant, image, secret) => {
     const row: PreflightFindingRow = {
       id: 'row-legacy',

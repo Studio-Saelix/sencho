@@ -13,6 +13,7 @@ import {
   tunnelExposureByService,
   type TunnelConnector,
 } from '../network/tunnelDetection';
+import { redactImageReference } from '../../utils/safeLog';
 import { describeComposeVersionSkew } from '../../helpers/composeVersionSkew';
 
 /** Higher number = more severe. Used to derive a run's overall status. */
@@ -605,17 +606,20 @@ const imageLatest: PreflightRule = {
   id: 'image-latest',
   run(ctx) {
     if (!ctx.model) return [];
-    return ctx.model.services
-      .filter(s => s.image !== undefined && usesLatestTag(s.image))
-      .map(s => ({
+    const hits: RuleHit[] = [];
+    for (const s of ctx.model.services) {
+      if (s.image === undefined || !usesLatestTag(s.image)) continue;
+      hits.push({
         ruleId: 'image-latest',
-        severity: 'warning' as const,
+        severity: 'warning',
         title: 'Image uses a moving tag',
-        message: `Service "${s.name}" uses "${s.image}", which resolves to a moving latest tag. Deploys are not reproducible and can change under you.`,
+        message: `Service "${s.name}" uses "${redactImageReference(s.image)}", which resolves to a moving latest tag. Deploys are not reproducible and can change under you.`,
         sourcePath: s.name,
         service: s.name,
         remediation: 'Pin a specific version tag.',
-      }));
+      });
+    }
+    return hits;
   },
 };
 
@@ -1244,7 +1248,7 @@ const sensitiveServiceBroadExposure: PreflightRule = {
         ruleId: 'sensitive-service-broad-exposure',
         severity: 'high',
         title: `Sensitive service "${svc.name}" is exposed on all interfaces`,
-        message: `Service "${svc.name}" looks like a database or admin service (${svc.image}) and publishes ${specLabels(broad)} on all interfaces. Broadly exposing it is a common source of compromise.`,
+        message: `Service "${svc.name}" looks like a database or admin service (${redactImageReference(svc.image)}) and publishes ${specLabels(broad)} on all interfaces. Broadly exposing it is a common source of compromise.`,
         sourcePath: svc.name,
         service: svc.name,
         remediation: 'Bind it to a specific interface such as 127.0.0.1, or keep it on an internal network only.',

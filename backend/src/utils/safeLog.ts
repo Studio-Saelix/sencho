@@ -25,9 +25,19 @@ export function redactSensitiveText(value: unknown): string {
     // Any URL scheme, since a credential rides in postgres://, redis://, and
     // amqp:// strings as readily as in http(s) ones. The user may be empty
     // (redis://:pw@host), and the password runs to the last `@` of the authority,
-    // so a raw `@` inside it does not leave its tail behind. The scheme length is
-    // bounded to keep a long dotted run from backtracking quadratically.
-    .replace(/([a-z][a-z0-9+.-]{0,31}):\/\/[^/\s:@]*:[^/\s]+@/gi, '$1://[redacted]@')
+    // so a raw `@` inside it does not leave its tail behind. The userinfo may
+    // also be a lone token with no colon (https://ghp_token@host), which is how a
+    // Git provider token is written, so that form is redacted too. Its token
+    // stops at a quote or a comma, which end a URL in JSON and YAML, so it cannot
+    // run on into the next value. The scheme length is bounded to keep a long
+    // dotted run from backtracking quadratically.
+    // An ssh URL's lone user (ssh://git@host) is a login name, not a secret, so
+    // only a password after it is redacted there.
+    .replace(
+      /([a-z][a-z0-9+.-]{0,31}):\/\/(?:([^/\s:@]*:[^/\s]+)|[^/\s:@"',]+)@/gi,
+      (match, scheme: string, withPassword: string | undefined) =>
+        withPassword === undefined && /(?:^|\+)(?:ssh|sftp)$/i.test(scheme) ? match : `${scheme}://[redacted]@`,
+    )
     // Scheme-less registry credentials, which lead an image reference
     // (user:password@registry.example.com/repo/image:tag). Compose echoes the
     // reference back in its own errors. Two constraints keep this narrow:
@@ -37,6 +47,10 @@ export function redactSensitiveText(value: unknown): string {
     // never by a `/`. Without it every digest pin loses its repository and tag,
     // which is the text a GitOps diagnosis is built from. The first keeps a URL
     // path that merely contains `a:b@c/` from being read as a credential.
+    // The credential may also lead a protocol-relative reference (//user:pw@host/x),
+    // where the `//` is what precedes it (and no scheme's colon does, which
+    // keeps ssh://git@host/x intact), and its password may be absent
+    // (ghp_token@ghcr.io/x/app), as in a token-only registry login.
     // The user takes unreserved characters, `%`, and the sub-delimiters that do
     // not open a token (`'(),=` do, so a match starts after them), so a
     // percent-encoded name (user%40corp) is caught. The password runs to the
@@ -45,6 +59,8 @@ export function redactSensitiveText(value: unknown): string {
     // image reference in YAML and JSON, so a digest pin before a quote keeps its
     // text, and it is capped at 1024 characters, which keeps the backtracking
     // over its `@` runs linear in the input.
+    // A lone token is indistinguishable from an address with a path
+    // (ops@corp.example/team), which is redacted as well.
     // The narrowing has a known cost: a credential with no path after the host
     // is not caught, and neither is one whose password contains a `/`, a quote,
     // or more than 1024 characters (an unencoded quote or a kilobyte of password
@@ -54,7 +70,7 @@ export function redactSensitiveText(value: unknown): string {
     // password. That direction is deliberate: an over-redacted log line costs a
     // word, an under-redacted one leaks.
     .replace(
-      /(^|[\s"'=,(])[A-Za-z0-9._~%!$&*+;-]+:[^/\s"']{1,1024}@(\[[^\]\s]+\]|[A-Za-z0-9.-]+(?::\d+)?\/)/g,
+      /(^|[\s"'=,(]|(?<!:)\/\/)[A-Za-z0-9._~%!$&*+;-]+(?::[^/\s"']{1,1024})?@(\[[^\]\s]+\]|[A-Za-z0-9.-]+(?::\d+)?\/)/g,
       (_match, lead: string, host: string) => `${lead}[redacted]@${host}`,
     )
     // Keyword-led secrets, tolerating a JSON/YAML quoting boundary between the
@@ -67,6 +83,27 @@ export function redactSensitiveText(value: unknown): string {
     .replace(/\/home\/[^/\s'"]+/g, '/home/<user>')
     .replace(/\/Users\/[^/\s'"]+/g, '/Users/<user>')
     .replace(/([A-Za-z]):\\Users\\[^\\/\s'"]+/g, '$1:\\Users\\<user>');
+}
+
+// The digest a reference may end in: @algorithm:hex, such as @sha256:1a2b...
+const IMAGE_DIGEST_TAIL = /@[A-Za-z][A-Za-z0-9]*(?:[+._-][A-Za-z][A-Za-z0-9]*)*:[0-9A-Fa-f]{32,}$/;
+
+/**
+ * An image reference with any credential removed. A Compose `image` value has
+ * no userinfo, so an `@` that is not the digest separator can only open a
+ * credential, and everything before the last one is dropped. This follows the
+ * reference's own grammar instead of the text-shape heuristics of
+ * `redactSensitiveText`, so it holds for a password with a space, a `/`, a
+ * quote, or any length, and for a host with no path. Use it wherever an `image`
+ * value is quoted or stored for display; free text that merely contains an
+ * image still goes through `redactSensitiveText`.
+ */
+export function redactImageReference(image: string): string {
+  const digest = IMAGE_DIGEST_TAIL.exec(image);
+  const head = digest === null ? image : image.slice(0, digest.index);
+  const at = head.lastIndexOf('@');
+  if (at === -1) return image;
+  return `[redacted]@${head.slice(at + 1)}${digest === null ? '' : digest[0]}`;
 }
 
 /** How many `cause` links to fold into a log message before giving up on it. */

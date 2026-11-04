@@ -87,7 +87,7 @@ import { isPathWithinBase, isValidGitSourcePath, isValidStackName, isValidServic
 import { normalizeBulkPaths, destWithinAnySource } from '../utils/bulkPaths';
 import { getErrorMessage } from '../utils/errors';
 import { isDebugEnabled } from '../utils/debug';
-import { errorMessageForLog, redactSensitiveText, sanitizeForLog } from '../utils/safeLog';
+import { errorMessageForLog, redactImageReference, redactSensitiveText, sanitizeForLog } from '../utils/safeLog';
 import { logDebugTiming } from '../utils/requestTiming';
 import { sendGitSourceError } from '../utils/gitSourceHttp';
 import { allowedPolicyEvidence, buildPolicyGateOptions, type AllowedPolicyEvidence, policyBlockPayload, policyEvidenceFor, runPolicyGate, triggerPostDeployScan, describePolicyBlock, isPostDeployScanRunning } from '../helpers/policyGate';
@@ -1954,7 +1954,7 @@ function acknowledgementForWire(ack: PreflightAcknowledgement): PreflightAcknowl
   return {
     ...ack,
     reason: redactSensitiveText(ack.reason),
-    anchor_image_ref: ack.anchor_image_ref === null ? null : redactSensitiveText(ack.anchor_image_ref),
+    anchor_image_ref: ack.anchor_image_ref === null ? null : redactImageReference(ack.anchor_image_ref),
   };
 }
 
