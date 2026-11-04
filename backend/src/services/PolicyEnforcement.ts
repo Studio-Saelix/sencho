@@ -691,18 +691,40 @@ async function planCandidates(
         };
         const entries: CandidatePlanEntry[] = [];
         // A ref can be shared by groups that pull at one platform and run the
-        // installed image at another. Every non-pulling group is evaluated as
-        // the installed child it will run; dropping those entries let a
-        // policy-blocked child run because another platform's child was clean.
-        // The group's platform is kept when a service declared it, because a
-        // multi-platform image store can hold more than one child under one
-        // tag. The empty string is the no-platform entry: the service declared
-        // no override, so the local image's own child is what it runs.
+        // installed image at another. Every service in a group that does not
+        // pull is evaluated as the installed child it runs; dropping those
+        // entries let a policy-blocked child run because another platform's
+        // child was clean. The group's platform is kept when a service
+        // declared it, because a multi-platform image store can hold more than
+        // one child under one tag. The empty string is the no-platform entry:
+        // the service declared no override (or it cannot be read), so the
+        // local image's own child is what it runs.
         const nonPullingPlatforms = new Set<string>();
         const platformKey = (platform: { os: string; architecture: string; variant?: string } | null): string =>
             platform
                 ? `${platform.os}/${platform.architecture}${platform.variant ? `/${platform.variant}` : ''}`
                 : '';
+        const declaresPlatform = (spec: EffectiveServiceSpec): boolean =>
+            typeof spec.platform === 'string' && spec.platform.trim() !== '';
+        /**
+         * Add the installed entries for services in `group` that will not be
+         * replaced by a pull. A service that declared `platform:` runs that
+         * child; a service that declared none (or whose override cannot be
+         * read) runs whatever child the daemon holds, so no platform is named
+         * and the scanner reads the local image itself.
+         */
+        const addInstalledEntries = (
+            group: { platform: { os: string; architecture: string; variant?: string } | null },
+            services: readonly EffectiveServiceSpec[],
+        ): void => {
+            if (services.length === 0) return;
+            if (group.platform && services.some(declaresPlatform)) {
+                nonPullingPlatforms.add(platformKey(group.platform));
+            }
+            if (!group.platform || services.some((spec) => !declaresPlatform(spec))) {
+                nonPullingPlatforms.add('');
+            }
+        };
         for (const [key, group] of byPlatform) {
             const needsLocalCopy = group.services.some(
                 (spec) => needsPresence(normalizedPullPolicy(spec.pullPolicy)),
@@ -734,26 +756,15 @@ async function planCandidates(
             };
             const pulling = group.services.filter(pullsFor);
             if (pulling.length === 0) {
-                // No service in this group pulls, so each runs the image on
-                // the node. A service that declared `platform:` names the
-                // child it runs, so that child is evaluated. A service with no
-                // override runs whatever child the daemon holds, so no
-                // platform is named and the scanner reads the local image
-                // itself; scanning the registry child for the node platform
-                // would prove a different image than the one `up` starts. An
-                // override this build cannot read also falls into the
-                // no-platform entry, because no child can be named for it.
-                const declaresPlatform = (spec: EffectiveServiceSpec): boolean =>
-                    typeof spec.platform === 'string' && spec.platform.trim() !== '';
-                if (group.services.some(declaresPlatform) && group.platform) {
-                    nonPullingPlatforms.add(platformKey(group.platform));
-                }
-                if (!group.platform || group.services.some((spec) => !declaresPlatform(spec))) {
-                    nonPullingPlatforms.add('');
-                }
+                addInstalledEntries(group, group.services);
                 continue;
             }
+            const pullingSet = new Set(pulling);
+            const notPulling = group.services.filter((spec) => !pullingSet.has(spec));
             if (group.invalid) {
+                // Nothing can be pulled through an unreadable override; the
+                // non-pulling siblings still run their local child.
+                addInstalledEntries(group, notPulling);
                 entries.push({
                     kind: 'unresolved',
                     resolution: {
@@ -775,6 +786,11 @@ async function planCandidates(
             const withPlatform: CandidatePlanEntry = entry.kind === 'installed' && group.platform
                 ? { ...entry, platform: platformKey(group.platform) }
                 : entry;
+            if (withPlatform.kind === 'unresolved') {
+                // The pull will not happen, so nothing replaces the tag: the
+                // non-pulling siblings still run their old local child.
+                addInstalledEntries(group, notPulling);
+            }
             entries.push(withPlatform.kind === 'unresolved'
                 ? {
                     ...withPlatform,
@@ -782,11 +798,13 @@ async function planCandidates(
                 }
                 : withPlatform);
         }
-        // Every service Compose will not fetch is evaluated as the installed
-        // child it runs: the named platform for a service that declared one,
-        // and the local image's own child for a service that declared none.
-        // This holds when no group pulls at all as well as when another
-        // platform group is a candidate.
+        // A service in a group that does not pull is evaluated as the
+        // installed child it runs: the named platform for a service that
+        // declared one, and the local image's own child for a service that
+        // declared none (or whose override cannot be read). When a group pulls
+        // and the pull succeeds, its remaining services run the pulled child;
+        // when the resolution fails and nothing is pulled, their installed
+        // child is added here too.
         if (entries.length === 0 && nonPullingPlatforms.size === 0) {
             plan.set(ref, [{ kind: 'installed', why: 'not_pulled' }]);
         } else {
@@ -1356,11 +1374,13 @@ async function evaluateImageRefs(
     const noPullOnUp = planned?.noPullOnUp === true;
     const evaluatedCandidates: EvaluatedCandidate[] = [];
     // A ref shared by services with different platform overrides has one plan
-    // entry per pulling platform, plus the installed child for every group
-    // Compose will not fetch (the named platform, or the local image's own
-    // child when a service declared none). Invalid references are recorded
-    // before the scan loop, as before; every other target pairs a ref with one
-    // image (a candidate or the installed child) that service will run.
+    // entry per pulling platform, plus an installed entry for each child a
+    // group that does not pull will run: the named platform for a service that
+    // declared one, and the local image's own child for a service that
+    // declared none (a group can contribute both). Invalid references are
+    // recorded before the scan loop, as before; every other target pairs a ref
+    // with one image (a candidate or the installed child) that service will
+    // run.
     const targets: Array<{ imageRef: string; planned: CandidatePlanEntry | null }> = [];
     for (const imageRef of imageRefs) {
         if (!validateImageRef(imageRef)) {

@@ -925,6 +925,36 @@ describe('compose mode (a plain up)', () => {
     });
   });
 
+  it('evaluates the non-pulling sibling when the group pull cannot be resolved', async () => {
+    // The pull never happens when resolution fails, so nothing replaces the
+    // shared tag: the sibling's old local child still runs and must be read.
+    candidates.platform = { os: 'linux', architecture: 'arm64' };
+    candidates.localImageExists.mockResolvedValue(true);
+    candidates.lastTagTime.mockResolvedValue(Date.now() - 25 * 60 * 60 * 1000);
+    candidates.resolve.mockResolvedValue({
+      kind: 'unresolved' as const,
+      ref: 'registry.example.com/web:latest',
+      state: 'unavailable' as const,
+      failureClass: 'registry_unavailable' as const,
+      reason: 'Registry error (503)',
+    });
+    dbStub.getGlobalSettings.mockReturnValue({
+      security_scan_failure: 'warn',
+      security_candidate_unproven: 'warn',
+    });
+    modelWith([
+      { name: 'web', declaredImage: 'registry.example.com/web:latest', hasBuild: false, pullPolicy: 'daily', platform: 'linux/arm64', expectedReplicas: 1, dependsOn: [], hasHealthcheck: false },
+      { name: 'tools', declaredImage: 'registry.example.com/web:latest', hasBuild: false, pullPolicy: 'never', platform: 'linux/arm64', expectedReplicas: 1, dependsOn: [], hasHealthcheck: false },
+    ]);
+
+    const result = await enforcePolicyPreDeploy('web', 1, { bypass: false, actor: 'u', imageSource: 'compose' });
+
+    expect(result.noPullOnUp).toBe(true);
+    expect(trivyStub.scanImagePreflight).toHaveBeenCalledWith(
+      'registry.example.com/web:latest', 1, 'web', { platform: 'linux/arm64' },
+    );
+  });
+
   it('fails closed and names the platform when the installed child cannot be read', async () => {
     // The scanner refuses a report that describes another child; the gate must
     // surface that as an unresolved platform, not a clean row for the ref.
