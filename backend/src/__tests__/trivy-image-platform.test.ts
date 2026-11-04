@@ -18,6 +18,7 @@ interface ExecFileCall {
 const INDEX_DIGEST = `sha256:${'1'.repeat(64)}`;
 const CHILD_DIGEST = `sha256:${'2'.repeat(64)}`;
 const PINNED_DIGEST = `sha256:${'3'.repeat(64)}`;
+const OTHER_DIGEST = `sha256:${'4'.repeat(64)}`;
 
 const state = vi.hoisted(() => ({
   calls: [] as ExecFileCall[],
@@ -25,13 +26,16 @@ const state = vi.hoisted(() => ({
     RepoDigests?: string[];
     Os?: string;
     Architecture?: string;
+    Variant?: string;
     Id?: string;
   },
   /** Force the platform the fake Trivy report claims, regardless of the selector. */
   forcedReadArchitecture: null as string | null,
+  /** Force the variant in the fake report; null omits it, as Trivy often does. */
+  forcedReadVariant: null as string | null,
   /** Omit ImageConfig entirely, as a report that names no image platform would. */
   omitImageConfig: false,
-  cached: null as null | { id: number; platform: string | null; scanned_at: number },
+  cached: null as null | Record<string, unknown>,
   cacheLookups: 0,
 }));
 
@@ -41,7 +45,12 @@ vi.mock('child_process', () => {
     Symbol.for('nodejs.util.promisify.custom')
   ] = async (file: string, args: string[]) => {
     state.calls.push({ file, args });
-    const platformIndex = args.indexOf('--platform');
+    // The real Docker source ignores --platform. Only the remote source honours
+    // it, so the fake must too: a local scan that wrongly passed the selector
+    // would otherwise look like it read the requested child.
+    const sourceIndex = args.indexOf('--image-src');
+    const usesRemote = sourceIndex >= 0 && args[sourceIndex + 1] === 'remote';
+    const platformIndex = usesRemote ? args.indexOf('--platform') : -1;
     const selected = platformIndex >= 0 ? args[platformIndex + 1].split('/')[1] : null;
     const architecture = state.forcedReadArchitecture
       ?? selected
@@ -51,7 +60,15 @@ vi.mock('child_process', () => {
       stdout: JSON.stringify({
         ...(state.omitImageConfig
           ? {}
-          : { Metadata: { ImageConfig: { os: 'linux', architecture } } }),
+          : {
+              Metadata: {
+                ImageConfig: {
+                  os: 'linux',
+                  architecture,
+                  ...(state.forcedReadVariant ? { variant: state.forcedReadVariant } : {}),
+                },
+              },
+            }),
         Results: [],
       }),
       stderr: '',
@@ -83,6 +100,8 @@ vi.mock('../services/DatabaseService', () => ({
         state.cacheLookups += 1;
         return state.cached;
       },
+      getAllVulnerabilityDetails: () => [],
+      getSecretFindings: () => ({ items: [] }),
     }),
   },
 }));
@@ -108,6 +127,7 @@ beforeEach(() => {
     Architecture: 'arm64',
   };
   state.forcedReadArchitecture = null;
+  state.forcedReadVariant = null;
   state.omitImageConfig = false;
   state.cached = null;
   state.cacheLookups = 0;
@@ -126,7 +146,40 @@ describe('trivy image platform selection', () => {
     expect(call.args).not.toContain('--image-src');
     expect(lastArg(call)).toBe('registry.example.com/web:1.2');
     expect(result.platform).toBe('linux/arm64');
-    expect(state.cacheLookups).toBe(1);
+    // An installed entry that names a platform is scanned fresh: a row under
+    // this digest and platform may have been written for another child before
+    // the local ref could select one.
+    expect(state.cacheLookups).toBe(0);
+  });
+
+  it('does not let a cached row answer an installed platform scan', async () => {
+    state.cached = {
+      id: 99,
+      platform: 'linux/arm64',
+      scanned_at: Date.now(),
+      total_vulnerabilities: 0,
+      critical_count: 0,
+      high_count: 0,
+      medium_count: 0,
+      low_count: 0,
+      unknown_count: 0,
+      fixable_count: 0,
+      secret_count: 0,
+      scanners_used: 'vuln',
+      highest_severity: 'LOW',
+      os_info: 'alpine 3.20.10',
+      trivy_version: '0.76.1',
+      scan_duration_ms: 10,
+      vuln_db_updated_at: null,
+    };
+
+    const result = await TrivyService.getInstance().scanImage('registry.example.com/web:1.2', 1, {
+      platform: 'linux/arm64',
+    });
+
+    expect(state.cacheLookups).toBe(0);
+    expect(result.fromCache).toBeUndefined();
+    expect(state.calls).toHaveLength(1);
   });
 
   it('reads the requested child from the registry when the daemon default is another platform', async () => {
@@ -148,6 +201,25 @@ describe('trivy image platform selection', () => {
     // A row under this key may predate the fix and describe the default child,
     // so a registry-addressed child scan never answers from the cache.
     expect(state.cacheLookups).toBe(0);
+  });
+
+  it('uses the repo digest that belongs to this reference, not one left from a retag', async () => {
+    state.local = {
+      RepoDigests: [
+        `other.example.com/other@${OTHER_DIGEST}`,
+        `registry.example.com/web@${INDEX_DIGEST}`,
+      ],
+      Os: 'linux',
+      Architecture: 'arm64',
+    };
+
+    const result = await TrivyService.getInstance().scanImage('registry.example.com/web:1.2', 1, {
+      platform: 'linux/amd64',
+    });
+
+    expect(state.calls).toHaveLength(1);
+    expect(lastArg(state.calls[0])).toBe(`registry.example.com/web@${INDEX_DIGEST}`);
+    expect(result.imageDigest).toBe(INDEX_DIGEST);
   });
 
   it('addresses a digest pin directly when the node holds no child for it', async () => {
@@ -181,6 +253,31 @@ describe('trivy image platform selection', () => {
     expect(result.platform).toBe('linux/arm');
   });
 
+  it('treats a local variant as a different child', async () => {
+    state.local = {
+      RepoDigests: [`registry.example.com/web@${INDEX_DIGEST}`],
+      Os: 'linux',
+      Architecture: 'arm',
+      Variant: 'v6',
+    };
+
+    // The daemon holds v6; asking for v7 must read the registry child.
+    const nonDefault = await TrivyService.getInstance().scanImage('registry.example.com/web:1.2', 1, {
+      platform: 'linux/arm/v7',
+    });
+    expect(state.calls).toHaveLength(1);
+    expect(state.calls[0].args[state.calls[0].args.indexOf('--image-src') + 1]).toBe('remote');
+    expect(nonDefault.platform).toBe('linux/arm');
+
+    // Asking for the child the daemon holds stays local.
+    state.calls.length = 0;
+    await TrivyService.getInstance().scanImage('registry.example.com/web:1.2', 1, {
+      platform: 'linux/arm/v6',
+    });
+    expect(state.calls).toHaveLength(1);
+    expect(state.calls[0].args).not.toContain('--image-src');
+  });
+
   it('refuses a scan that read another child instead of filing it under the requested platform', async () => {
     state.forcedReadArchitecture = 'arm64';
 
@@ -189,6 +286,28 @@ describe('trivy image platform selection', () => {
         platform: 'linux/amd64',
       }),
     ).rejects.toThrow(/scanned linux\/arm64 .* not linux\/amd64/);
+  });
+
+  it('refuses a report that names a different variant', async () => {
+    state.forcedReadArchitecture = 'arm';
+    state.forcedReadVariant = 'v6';
+
+    await expect(
+      TrivyService.getInstance().scanImage('registry.example.com/web:1.2', 1, {
+        platform: 'linux/arm/v7',
+      }),
+    ).rejects.toThrow(/scanned linux\/arm\/v6 .* not linux\/arm\/v7/);
+  });
+
+  it('accepts a report that names the requested variant', async () => {
+    state.forcedReadArchitecture = 'arm';
+    state.forcedReadVariant = 'v7';
+
+    const result = await TrivyService.getInstance().scanImage('registry.example.com/web:1.2', 1, {
+      platform: 'linux/arm/v7',
+    });
+
+    expect(result.platform).toBe('linux/arm');
   });
 
   it('refuses a platform-qualified scan whose report names no platform', async () => {

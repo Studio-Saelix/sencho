@@ -77,10 +77,11 @@ export interface PolicyViolation {
     scanId: number;
     /**
      * The platform variant this row is about, when the gate resolved or tried
-     * to resolve a registry candidate or named the installed child a
-     * non-pulling service runs. A ref shared by services with different
-     * `platform:` overrides produces one row per variant, so the dialog pairs
-     * each row with its own evidence rather than the first record for the ref.
+     * to resolve a registry candidate, or any installed plan entry named a
+     * platform (a non-pulling service group, or a digest pin of an index). A
+     * ref shared by services with different `platform:` overrides produces one
+     * row per variant, so the dialog pairs each row with its own evidence
+     * rather than the first record for the ref.
      */
     platform?: string | null;
     /**

@@ -768,6 +768,8 @@ describe('compose mode (a plain up)', () => {
       // The installed child is labelled with the platform it was scanned for,
       // so the dialog pairs it with the right evidence.
       expect(result.violations[0].platform).toBe('linux/arm64');
+      expect(result.evidence?.records.find((record) => record.subject === 'installed'))
+        .toMatchObject({ platform: 'linux/arm64' });
       expect(result.evaluatedCandidates).toEqual([{
         ref,
         indexDigest: INDEX,

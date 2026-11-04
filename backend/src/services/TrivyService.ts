@@ -22,7 +22,12 @@ import { isDebugEnabled } from '../utils/debug';
 import { SEVERITY_ORDER } from '../utils/severity';
 import { isSenchoRollbackHoldRef } from '../utils/senchoRollbackHold';
 import type { PolicyBlockReason } from '../utils/policy-risk';
-import { canonicalPlatformLabel, imagePlatformLabel, platformCacheKey } from './gitops/platformNames';
+import {
+    canonicalPlatformLabel,
+    DEFAULT_ARCHITECTURE_VARIANT,
+    imagePlatformLabel,
+    platformCacheKey,
+} from './gitops/platformNames';
 import { parseImageRef, selectLocalRepoDigests } from './registry-api';
 
 const execFileAsync = promisify(execFile);
@@ -69,9 +74,9 @@ export interface ImageScanOptions {
      * The platform of the image being scanned (`linux/amd64`, ...), when the
      * caller already resolved it. The deploy gate's cache is keyed by digest and
      * platform, so a multi-arch ref's children cannot answer for each other. An
-     * installed scan leaves this unset and the service reads the platform of the
-     * local image; when that cannot be read, the gate's cache is bypassed rather
-     * than letting an unqualified row answer.
+     * installed scan that names no child leaves this unset and the service reads
+     * the platform of the local image; when that cannot be read, the gate's cache
+     * is bypassed rather than letting an unqualified row answer.
      *
      * When it is set for an installed reference (`scanRef` and `digest` absent),
      * the platform is a promise about the child the operation will run: the scan
@@ -526,8 +531,11 @@ function scanReadPlatformMatches(requested: string, read: string): boolean {
     const [requestedOs, requestedArchitecture, requestedVariant] = canonicalPlatformLabel(requested).split('/');
     const [readOs, readArchitecture, readVariant] = canonicalPlatformLabel(read).split('/');
     if (requestedOs !== readOs || requestedArchitecture !== readArchitecture) return false;
-    if (!requestedVariant || !readVariant) return true;
-    return requestedVariant === readVariant;
+    // A bare architecture asks for Compose's default variant (`arm` is v7,
+    // `amd64` is v1), so a report naming another variant is a different child.
+    const expectedVariant = requestedVariant ?? DEFAULT_ARCHITECTURE_VARIANT[requestedArchitecture];
+    if (!readVariant) return true;
+    return expectedVariant === undefined || expectedVariant === readVariant;
 }
 
 class TrivyService {
@@ -714,7 +722,9 @@ class TrivyService {
      * ID: only a RepoDigest names content a registry can resolve, which is what
      * a platform child scan needs. Every repo digest is offered to
      * {@link selectLocalRepoDigests}, so an unrelated repository's leftover
-     * digest is never used.
+     * digest is never used. The first matching digest is taken; if it names a
+     * stale child, the scan's platform check refuses the report rather than
+     * filing it under the requested platform.
      */
     async getRepoDigestRef(imageRef: string, nodeId: number): Promise<string | null> {
         try {
@@ -727,17 +737,20 @@ class TrivyService {
                 : [];
             const digest = selectLocalRepoDigests(repoDigests, parsed)[0];
             return digest ? `${parsed.registry}/${parsed.repo}@${digest}` : null;
-        } catch {
+        } catch (err) {
+            diag(`getRepoDigestRef: read failed for ${imageRef}: ${getErrorMessage(err, 'unknown')}`);
             return null;
         }
     }
 
     /**
      * The platform of the image Docker holds for `imageRef`, or null when the
-     * daemon did not report it. Used to key any scan of a local image (and to
-     * select the child `trivy image` reads): a multi-arch reference stores every
-     * child under one index digest, so the digest alone cannot say which image a
-     * row describes.
+     * daemon did not report it. Used to key a scan of a local image and to
+     * decide whether the daemon's child is the platform an installed entry
+     * names: a local ref scan reads that child, and a different requested child
+     * is read from the registry instead. A multi-arch reference stores every
+     * child under one index digest, so the digest alone cannot say which image
+     * a row describes.
      */
     async getImagePlatform(imageRef: string, nodeId: number): Promise<string | null> {
         try {
@@ -875,9 +888,6 @@ class TrivyService {
             const pinnedDigest = imageRef.includes('@')
                 ? imageRef.slice(imageRef.lastIndexOf('@') + 1)
                 : null;
-            // The pin's own digest is the image identity when the reference
-            // carries one; the daemon's repo digest is the identity for a tag.
-            const digest = options.digest ?? pinnedDigest ?? (await this.getImageDigest(imageRef, nodeId));
             // The cache is keyed by digest and platform: an index digest is
             // shared by every platform child, so without the platform one
             // child's row could answer for another. A candidate supplies the
@@ -898,23 +908,35 @@ class TrivyService {
             // different platform: `trivy image`'s Docker source ignores
             // `--platform` and always reads the default child. Only a local scan
             // whose own platform is the requested one is exact; otherwise the
-            // child is read from the registry by the image's own digest, the
-            // same way a candidate is addressed. A caller that supplies an
-            // explicit digest (the candidate path) has already named the image,
-            // so it is not an installed ref.
+            // child is read from the registry by the image's own digest with the
+            // platform selector (a candidate is instead addressed by the child
+            // manifest digest). A caller that supplies an explicit digest (the
+            // candidate path) has already named the image, so it is not an
+            // installed ref.
             const installedPlatformScan = options.scanRef === undefined
                 && (options.digest === undefined || options.digest === null)
                 && requestedKey !== null;
             const scanFromRegistry = installedPlatformScan && requestedKey !== localKey;
+            // One filtered repo digest serves both the row identity and the
+            // registry target for an installed platform scan, so an unrelated
+            // repository's leftover digest cannot key the row.
+            const repoDigestRef = installedPlatformScan && !pinnedDigest
+                ? await this.getRepoDigestRef(imageRef, nodeId)
+                : null;
+            // The pin's own digest is the image identity when the reference
+            // carries one; otherwise the local image's repo digest, and only a
+            // last fallback for a local build is the daemon's image ID.
+            const digest = options.digest ?? pinnedDigest ?? repoDigestRef?.split('@')[1]
+                ?? (await this.getImageDigest(imageRef, nodeId));
             // The deploy gate fails closed when it cannot read the platform; the
             // plain digest cache also narrows by platform when it is known and
-            // falls back to digest-only when it is not. A registry-addressed
-            // installed scan never reuses a row: the same digest+platform key
-            // could hold a row written when the daemon's default child was
-            // mistaken for the requested one, and this registry read is what
-            // proves the child, so it runs fresh.
+            // falls back to digest-only when it is not. An installed entry that
+            // names a platform never reuses a row: the same digest+platform key
+            // can hold a row written when the daemon's default child was
+            // mistaken for the requested one, and there is no marker on the row
+            // to tell them apart. It therefore runs fresh every deploy.
             const cacheable = options.useCache !== false && digest !== null
-                && !scanFromRegistry
+                && !installedPlatformScan
                 && (options.cacheRule !== 'database' || cachePlatform !== null);
             diag(
                 `scanImage: digest=${digest ?? 'null'} platform=${cachePlatform ?? 'null'} `
@@ -1004,15 +1026,13 @@ class TrivyService {
             if (scanFromRegistry) {
                 if (pinnedDigest) {
                     scanTarget = imageRef;
-                } else {
-                    const repoDigestRef = await this.getRepoDigestRef(imageRef, nodeId);
-                    if (!repoDigestRef) {
-                        throw new Error(
-                            `The image ${imageRef} has no registry digest, so its ${requestedPlatform} child `
-                            + 'cannot be read; the daemon only exposes its default platform child',
-                        );
-                    }
+                } else if (repoDigestRef) {
                     scanTarget = repoDigestRef;
+                } else {
+                    throw new Error(
+                        `The image ${imageRef} has no registry digest, so its ${requestedPlatform} child `
+                        + 'cannot be read; the daemon only exposes its default platform child',
+                    );
                 }
             }
             const { env, cleanup } = await this.buildEnv();
@@ -1308,9 +1328,11 @@ class TrivyService {
      * Reuses the 24h cache (useCache=true) so repeat deploys of a known-safe
      * image do not pay full scan cost. The row is keyed by digest and the
      * platform it read, so one child of a multi-platform index cannot answer
-     * for another; a qualified child still turns reuse off entirely. Only runs
-     * the vulnerability scanner (secrets/misconfig are irrelevant to the gate
-     * and add latency). The scan is persisted as a normal row with
+     * for another; a qualified candidate child and any installed entry that
+     * names a platform still turn reuse off entirely, because a row written
+     * before the platform was actually selected may describe another child.
+     * Only runs the vulnerability scanner (secrets/misconfig are irrelevant to
+     * the gate and add latency). The scan is persisted as a normal row with
      * triggered_by=deploy-preflight so the history and compare views continue to
      * work unchanged.
      *
