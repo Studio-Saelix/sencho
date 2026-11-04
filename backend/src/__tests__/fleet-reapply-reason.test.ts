@@ -371,7 +371,7 @@ describe('POST /fleet/nodes/:id/reapply-compose refusal', () => {
       reason: 'compose_cli_unavailable',
       nodeName: 'nas-proxy',
     });
-    // The reserved Fleet row ends failed with the sentence the operator saw (not
+    // The reserved Fleet row ends failed with the text the response carried (not
     // the node's own wording), and does not block the next attempt.
     const tracker = FleetUpdateTrackerService.getInstance().get(proxyNodeId);
     expect(tracker?.status).toBe('failed');

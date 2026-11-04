@@ -2216,7 +2216,7 @@ fleetRouter.post('/nodes/:nodeId/reapply-compose', authMiddleware, async (req: R
           ? parseSelfUpdateUnavailableCode((body as Record<string, unknown>).reason)
           : null;
         if (reason) {
-          // The Fleet row records the same sentence the operator sees.
+          // The Fleet row records the same text the response carries.
           failOwnedTracker(reapplyUnavailableMessage(node.name, reason), failure.code, meta.version, meta.startedAt);
           respondReapplyUnavailable(res, node.name, reason);
           return;
