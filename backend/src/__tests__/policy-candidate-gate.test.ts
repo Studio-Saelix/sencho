@@ -872,6 +872,59 @@ describe('compose mode (a plain up)', () => {
     expect(result.evidence?.records[0]?.platform).toBeUndefined();
   });
 
+  it('evaluates both the named and the local child when a non-pulling group mixes them', async () => {
+    candidates.platform = { os: 'linux', architecture: 'arm64' };
+    modelWith([
+      { name: 'named', declaredImage: 'registry.example.com/web:latest', hasBuild: false, pullPolicy: 'never', platform: 'linux/arm64', expectedReplicas: 1, dependsOn: [], hasHealthcheck: false },
+      { name: 'implicit', declaredImage: 'registry.example.com/web:latest', hasBuild: false, pullPolicy: 'never', platform: null, expectedReplicas: 1, dependsOn: [], hasHealthcheck: false },
+    ]);
+
+    await enforcePolicyPreDeploy('web', 1, { bypass: false, actor: 'u', imageSource: 'compose' });
+
+    const options = trivyStub.scanImagePreflight.mock.calls.map((call) => call[3]);
+    expect(options).toEqual([{ platform: 'linux/arm64' }, undefined]);
+  });
+
+  it('evaluates the local child of an implicit non-pulling group beside a platform that pulls', async () => {
+    candidates.platform = { os: 'linux', architecture: 'arm64' };
+    candidates.resolve.mockResolvedValue(CANDIDATE_RESOLUTION);
+    modelWith([
+      { name: 'web', declaredImage: 'registry.example.com/web:latest', hasBuild: false, pullPolicy: 'always', platform: 'linux/amd64', expectedReplicas: 1, dependsOn: [], hasHealthcheck: false },
+      { name: 'tools', declaredImage: 'registry.example.com/web:latest', hasBuild: false, pullPolicy: 'never', platform: null, expectedReplicas: 1, dependsOn: [], hasHealthcheck: false },
+    ]);
+
+    await enforcePolicyPreDeploy('web', 1, { bypass: false, actor: 'u', imageSource: 'compose' });
+
+    expect(trivyStub.scanImagePreflight).toHaveBeenCalledTimes(2);
+    const options = trivyStub.scanImagePreflight.mock.calls.map((call) => call[3]) as Array<
+      { scanRef?: string; platform?: string } | undefined
+    >;
+    expect(options[0]).toMatchObject({ scanRef: `registry.example.com/web@${PLATFORM_DIGEST}` });
+    expect(options[1]).toBeUndefined();
+  });
+
+  it('does not scan an installed child for a service whose platform group pulls', async () => {
+    // The pull replaces the shared tag's child on this platform before `up`,
+    // so the non-pulling sibling runs the pulled child, not the old local one.
+    candidates.platform = { os: 'linux', architecture: 'arm64' };
+    candidates.resolve.mockResolvedValue({
+      ...CANDIDATE_RESOLUTION,
+      platform: 'linux/arm64',
+      platformDigest: PLATFORM_DIGEST,
+    });
+    modelWith([
+      { name: 'web', declaredImage: 'registry.example.com/web:latest', hasBuild: false, pullPolicy: 'always', platform: 'linux/arm64', expectedReplicas: 1, dependsOn: [], hasHealthcheck: false },
+      { name: 'tools', declaredImage: 'registry.example.com/web:latest', hasBuild: false, pullPolicy: 'never', platform: 'linux/arm64', expectedReplicas: 1, dependsOn: [], hasHealthcheck: false },
+    ]);
+
+    await enforcePolicyPreDeploy('web', 1, { bypass: false, actor: 'u', imageSource: 'compose' });
+
+    expect(trivyStub.scanImagePreflight).toHaveBeenCalledTimes(1);
+    expect(trivyStub.scanImagePreflight.mock.calls[0][3]).toMatchObject({
+      scanRef: `registry.example.com/web@${PLATFORM_DIGEST}`,
+    });
+  });
+
   it('fails closed and names the platform when the installed child cannot be read', async () => {
     // The scanner refuses a report that describes another child; the gate must
     // surface that as an unresolved platform, not a clean row for the ref.
