@@ -1,6 +1,7 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { renderHook, act } from '@testing-library/react';
 import { useStackActions } from './useStackActions';
+import { useActiveNodeReapplyEligibility } from './useActiveNodeReapplyEligibility';
 import type { useEditorViewState } from './useEditorViewState';
 import type { useStackListState } from './useStackListState';
 import type { useViewNavigationState } from './useViewNavigationState';
@@ -3311,6 +3312,97 @@ describe('useStackActions.getStackMenuVisibility', () => {
     // The request carries the node captured at call time, so a switch before the
     // refusal arrives cannot make the dialog describe another node.
     expect(apiFetch).toHaveBeenCalledWith('/stacks/web/services/web/stop', { method: 'POST', nodeId: 1 });
+  });
+});
+
+describe('useStackActions overlapping reapply eligibility reads', () => {
+  beforeEach(() => {
+    vi.mocked(apiFetch).mockReset();
+  });
+
+  // Wires the production eligibility hook to the production action hook, the way
+  // EditorLayout does, so the generation bookkeeping that returns null on a
+  // superseded read is the code under test rather than a stub.
+  function setupOverlap() {
+    const editorState = makeEditorState();
+    const stackListState = makeStackListState({
+      selectedFile: 'sencho.yml',
+      stackSelfFlags: { 'sencho.yml': true },
+    });
+    const navState = { activeView: 'editor', setActiveView: vi.fn() } as unknown as NavState;
+    const overlayState = makeOverlay();
+    const pending: Array<(value: Response) => void> = [];
+    vi.mocked(apiFetch).mockImplementation(() => new Promise<Response>((resolve) => {
+      pending.push(resolve);
+    }));
+    const activeNode = { id: 7, name: 'Remote A', type: 'remote' } as NonNullable<ActiveNode>;
+    const { result } = renderHook(() => {
+      const eligibility = useActiveNodeReapplyEligibility(activeNode.id);
+      const actions = useStackActions({
+        editorState,
+        stackListState,
+        navState,
+        overlayState,
+        activeNode,
+        setActiveNode: vi.fn(),
+        nodes: [],
+        runWithLog,
+        getLastDeployOutputLine: () => undefined,
+        diffPreviewEnabled: false,
+        canEditStack: () => true,
+        onDeletedOpenStack: vi.fn(),
+        isAdmin: true,
+        canReapplyCompose: eligibility.canReapply,
+        reapplyUnavailableReason: eligibility.reason,
+        refreshReapplyEligibility: eligibility.refresh,
+      });
+      return { eligibility, actions };
+    });
+    return { result, overlayState, pending };
+  }
+
+  const click = () => ({ preventDefault: vi.fn(), stopPropagation: vi.fn() } as unknown as React.MouseEvent);
+  const eligible = () => okJson({ nodes: [{ nodeId: 7, canReapplyCompose: true }] });
+  const ineligible = () => okJson({
+    nodes: [{ nodeId: 7, canReapplyCompose: false, reapplyUnavailableReason: 'detecting' }],
+  });
+
+  it.each([
+    ['the superseded read lands second', [1, 0] as const],
+    ['the superseded read lands first', [0, 1] as const],
+  ])('opens exactly one confirmation when %s', async (_label, order) => {
+    const { result, overlayState, pending } = setupOverlap();
+
+    // Settle the initial effect read on a cached false.
+    await vi.waitFor(() => expect(pending).toHaveLength(1));
+    await act(async () => { pending[0](ineligible()); });
+    await vi.waitFor(() => expect(result.current.eligibility.reason).toBe('detecting'));
+
+    // Two decisions for the same node start before either click-time read lands.
+    let older!: Promise<void>;
+    let newer!: Promise<void>;
+    act(() => { older = result.current.actions.deployStack(click()); });
+    await vi.waitFor(() => expect(pending).toHaveLength(2));
+    act(() => { newer = result.current.actions.deployStack(click()); });
+    await vi.waitFor(() => expect(pending).toHaveLength(3));
+
+    const decisions = [
+      { response: eligible, done: older },
+      { response: eligible, done: newer },
+    ];
+    for (const index of order) {
+      const decision = decisions[index];
+      await act(async () => {
+        pending[index + 1](decision.response());
+        await decision.done;
+      });
+    }
+
+    expect(overlayState.setComposeReapplyCapture).toHaveBeenCalledTimes(1);
+    expect(overlayState.setComposeReapplyCapture).toHaveBeenCalledWith({
+      nodeId: 7, nodeType: 'remote', nodeName: 'Remote A', stackFile: 'sencho.yml',
+    });
+    expect(overlayState.openSelfStackProtected).not.toHaveBeenCalled();
   });
 });
 
