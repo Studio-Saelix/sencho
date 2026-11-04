@@ -841,10 +841,12 @@ function authorizeOperation(req: Request, operation: RecoveryOperation, access: 
  * Release a stale lock after review.
  *
  * A stale lock means an interrupted operation may have left a restore half
- * written. Releasing it is a reviewed act, so it is never automatic for a storage
- * lock (boot releases the repository lock of interrupted work once the previous
- * helpers are gone), and a live lock belongs to its owner and cannot be released here. The storage key resolves
- * to its dependents, so the same access that could restore is the access that may
+ * written. Releasing it is a reviewed act, so it is not automatic for a storage
+ * lock, except that a restore over an existing volume releases its own once its
+ * reconciliation has proven the volume (boot releases the repository lock of
+ * interrupted work once the previous helpers are gone). A live lock belongs to
+ * its owner and cannot be released here. The storage key resolves to its
+ * dependents, so the same access that could restore is the access that may
  * reopen the storage.
  */
 recoveryRouter.post('/locks/release', handle(async (req, res) => {

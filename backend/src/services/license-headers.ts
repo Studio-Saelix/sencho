@@ -48,12 +48,22 @@ export const PROXY_SCOPED_STACK_ACTIONS_HEADER = 'x-sencho-scoped-stack-actions'
 export const PROXY_HUB_NODE_ID_HEADER = 'x-sencho-hub-node-id';
 export const PROXY_HUB_NODE_NAME_HEADER = 'x-sencho-hub-node-name';
 
-/** Longest node name a remote will accept from the hub header. */
+/** Longest node name, in characters, a hub sends and a remote accepts. */
 const HUB_NODE_NAME_MAX = 128;
 
-/** The pair of header values for one hub node record. */
-export function hubNodeHeaderValues(node: { id: number; name: string }): { id: string; name: string } {
-  return { id: String(node.id), name: encodeURIComponent(node.name.slice(0, HUB_NODE_NAME_MAX)) };
+/**
+ * The pair of header values for one hub node record, or null when the name cannot
+ * be sent (a lone surrogate, which no URL encoding represents). The name is cut by
+ * character, not by UTF-16 unit, so an emoji at the boundary is kept whole or
+ * dropped whole. Null means no header: the remote then names itself, and the
+ * request itself is never refused for the name of its node.
+ */
+export function hubNodeHeaderValues(node: { id: number; name: string }): { id: string; name: string } | null {
+  try {
+    return { id: String(node.id), name: encodeURIComponent(Array.from(node.name).slice(0, HUB_NODE_NAME_MAX).join('')) };
+  } catch {
+    return null;
+  }
 }
 
 /**
@@ -70,7 +80,7 @@ export function parseHubNodeHeaders(idRaw: unknown, nameRaw: unknown): { id: num
   } catch {
     return null;
   }
-  if (name.length === 0 || name.length > HUB_NODE_NAME_MAX) return null;
+  if (name.length === 0 || Array.from(name).length > HUB_NODE_NAME_MAX) return null;
   return { id: Number(idRaw), name };
 }
 

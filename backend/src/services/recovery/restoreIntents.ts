@@ -387,9 +387,11 @@ export class RestoreIntentStore {
   }
 
   /**
-   * Intents of one mode whose operation was parked as `completion_unknown` by an
-   * interruption. The operation says nothing about how the restore ended until
-   * the intent's own reconciliation has run, so these are the ones to compare.
+   * Intents of one mode whose operation reads `completion_unknown` with the class
+   * `interrupted`, which is how boot parks an operation and how the live pipeline
+   * ends one it could not prove. The operation says nothing about how the restore
+   * ended until the intent's own reconciliation has run, so these are the ones to
+   * compare.
    */
   listWithInterruptedOperation(targetMode: RestoreIntentTargetMode): RestoreIntentRecord[] {
     const rows = recoveryDb().prepare(`

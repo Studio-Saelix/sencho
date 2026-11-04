@@ -557,7 +557,7 @@ describe('the operation of a reconciled overwrite', () => {
 
     expect(settle()).toBe(0);
     expect(operation(seeded.operationId)).toMatchObject({ state: 'completion_unknown', errorClass: 'interrupted' });
-    expect(lock(seeded.storageKey)?.staleSince).not.toBeNull();
+    expect(lock(seeded.storageKey)).toMatchObject({ staleSince: expect.any(Number) });
   });
 
   it('keeps completion_unknown while a rolled back volume is still fenced, and settles once the fence is released', async () => {
@@ -569,7 +569,7 @@ describe('the operation of a reconciled overwrite', () => {
 
     expect(settle()).toBe(0);
     expect(operation(seeded.operationId)).toMatchObject({ state: 'completion_unknown' });
-    expect(lock(seeded.storageKey)?.staleSince).not.toBeNull();
+    expect(lock(seeded.storageKey)).toMatchObject({ staleSince: expect.any(Number) });
 
     // The next start releases the fence, and the operation follows.
     fake.failOn = undefined;
@@ -579,7 +579,7 @@ describe('the operation of a reconciled overwrite', () => {
     expect(lock(seeded.storageKey)).toBeNull();
   });
 
-  it('settles it on a retry that proves a parked restore, and not on a release_fence that proves nothing', async () => {
+  it('keeps completion_unknown and the stale lock after a release_fence that proves nothing', async () => {
     const { seeded, fake } = await seed({ phase: 'swapping', createdAt: new Date().toISOString(), fenced: true });
     intents.RestoreIntentStore.getInstance().advance(seeded.intentId, 'completion_unknown', { outcomeClass: 'identity_unknown' });
     await overwrite.resolveOverwriteIntent(deps(fake, scriptedHelper({ swapAnswers: [{ action: 'status', exitCode: 1 }] })), {
@@ -587,7 +587,7 @@ describe('the operation of a reconciled overwrite', () => {
     });
     settle(seeded.intentId);
     expect(operation(seeded.operationId)).toMatchObject({ state: 'completion_unknown' });
-    expect(lock(seeded.storageKey)?.staleSince).not.toBeNull();
+    expect(lock(seeded.storageKey)).toMatchObject({ staleSince: expect.any(Number) });
   });
 
   it('settles it on a retry once the journal proves the swap committed', async () => {
@@ -618,6 +618,38 @@ describe('the operation of a reconciled overwrite', () => {
       .run(seeded.operationId);
     expect(settle(seeded.intentId)).toBe(0);
     expect(operation(seeded.operationId)).toMatchObject({ state: 'cancelled' });
+  });
+
+  it.each([
+    ['committed', null, { state: 'succeeded' }],
+    ['committed', 'fence_unavailable', { state: 'partial', errorClass: 'fence_unavailable' }],
+    ['rolled_back', null, { state: 'failed', errorClass: 'interrupted' }],
+    ['rolled_back', 'fence_unavailable', null],
+    ['swapped', 'cleanup_failed', { state: 'partial', errorClass: 'cleanup_failed' }],
+    ['swapped', 'fence_unavailable', { state: 'partial', errorClass: 'fence_unavailable' }],
+    ['swapped', null, null],
+    ['swapping', null, null],
+    ['completion_unknown', 'identity_unknown', null],
+    ['staging', null, null],
+  ] as const)('maps a %s intent with class %s to %j', (phase, outcomeClass, ending) => {
+    expect(overwrite.overwriteEndingFor({ phase, outcomeClass })).toEqual(ending);
+  });
+
+  it('does not stop at an intent whose operation cannot be settled', async () => {
+    const first = await seed({ phase: 'staged_verified', createdAt: new Date().toISOString(), fenced: false });
+    await overwrite.reconcileOverwriteIntentsAtStartup(deps(first.fake, answers()));
+    const second = await seed({ phase: 'staged_verified', createdAt: new Date().toISOString(), fenced: false });
+    await overwrite.reconcileOverwriteIntentsAtStartup(deps(second.fake, answers()));
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const real = operationStore.RecoveryOperationStore.getInstance();
+    let calls = 0;
+    const settled = overwrite.settleInterruptedOverwriteOperations(
+      intents.RestoreIntentStore.getInstance(),
+      { settleReconciled: (id, ending) => { calls += 1; if (calls === 1) throw new Error('database is locked'); return real.settleReconciled(id, ending); } },
+    );
+    expect(calls).toBe(2);
+    expect(settled).toBe(1);
+    expect(warn).toHaveBeenCalled();
   });
 
   it('is idempotent', async () => {

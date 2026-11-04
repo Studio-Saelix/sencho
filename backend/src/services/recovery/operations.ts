@@ -345,17 +345,22 @@ export class RecoveryOperationStore {
   }
 
   /**
-   * Replace the `completion_unknown` ending of an interrupted operation with the
-   * ending its owner has since proven, and release the locks it held.
+   * Replace the `completion_unknown` ending of an operation with the ending its
+   * owner has since proven, and release its storage lock.
    *
    * Boot reconciliation cannot know how an interrupted restore ended, so it
    * parks the operation as `completion_unknown` and turns its locks stale. The
    * restore's own reconciler later proves the data (original or fully swapped)
    * and restarts the workloads; the operation must then say so, or the storage
    * stays closed behind a lock nobody can usefully review. Only an operation
-   * that is `completion_unknown` with the class `interrupted` can be settled
-   * this way: a terminal ending that was reported by a live process stands. The
-   * caller passes an ending it has proven, never `completion_unknown`.
+   * reading `completion_unknown` with the class `interrupted` is settled this
+   * way, whether boot parked it or the live pipeline ended it so (the class is
+   * the same); any other ending stands. The caller passes an ending it has
+   * proven, never `completion_unknown`.
+   *
+   * The repository lock is not released here. Boot decides it once the dead
+   * process's helpers are gone and restic is unlocked, and a restore proven in
+   * the volume says nothing about a helper that may still write to the repository.
    */
   settleReconciled(id: string, outcome: OperationFinish, now = Date.now()): RecoveryOperation {
     if (!isTerminal(outcome.state) || outcome.state === 'completion_unknown') {
@@ -374,7 +379,7 @@ export class RecoveryOperationStore {
         UPDATE recovery_operations SET state = ?, error_class = ?, updated_at = ?, completed_at = ?
         WHERE id = ? AND state = 'completion_unknown' AND error_class = 'interrupted'
       `).run(outcome.state, errorClass, now, now, id);
-      db.prepare('DELETE FROM recovery_locks WHERE owner_operation_id = ?').run(id);
+      db.prepare("DELETE FROM recovery_locks WHERE owner_operation_id = ? AND scope = 'storage'").run(id);
       return this.require(id);
     }).immediate();
   }

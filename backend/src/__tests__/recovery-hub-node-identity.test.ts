@@ -85,9 +85,23 @@ beforeEach(() => {
 
 describe('the header pair', () => {
   it('round-trips an id and a name that is not a header-safe string', () => {
-    const values = hubNodeHeaderValues({ id: 12, name: 'node 12 "é"\r\nx' });
+    const values = hubNodeHeaderValues({ id: 12, name: 'node 12 "é"\r\nx' })!;
     expect(values.name).not.toMatch(/[\r\n ]/);
     expect(parseHubNodeHeaders(values.id, values.name)).toEqual({ id: 12, name: 'node 12 "é"\r\nx' });
+  });
+
+  it('cuts a long name by character, so an emoji at the boundary is kept whole or dropped whole', () => {
+    const name = `${'a'.repeat(127)}\u{1F600}tail`;
+    const values = hubNodeHeaderValues({ id: 3, name });
+    expect(values).not.toBeNull();
+    const parsed = parseHubNodeHeaders(values!.id, values!.name);
+    expect(Array.from(parsed!.name)).toHaveLength(128);
+    expect(parsed!.name.endsWith('\u{1F600}')).toBe(true);
+  });
+
+  it('sends no pair, and does not throw, for a name no URL encoding can carry', () => {
+    expect(hubNodeHeaderValues({ id: 3, name: `a\uD800b` })).toBeNull();
+    expect(hubNodeHeaderValues({ id: 3, name: '\uDFFF' })).toBeNull();
   });
 
   it.each([
@@ -112,6 +126,24 @@ describe('what the hub forwards', () => {
       .send({});
     expect(res.status).toBe(200);
     expect(captured?.[PROXY_HUB_NODE_ID_HEADER]).toBe(String(nodeId()));
+    expect(decodeURIComponent(String(captured?.[PROXY_HUB_NODE_NAME_HEADER]))).toBe(name);
+  });
+});
+
+describe('a node whose name sits on a character boundary', () => {
+  it('still answers through the hub, with the name kept whole, instead of failing the hop', async () => {
+    const { DatabaseService } = await import('../services/DatabaseService');
+    const name = `${'b'.repeat(127)}\u{1F600}`;
+    const nodeId = DatabaseService.getInstance().addNode({
+      name, type: 'remote', mode: 'proxy', compose_dir: '/tmp', is_default: false,
+      api_url: `http://127.0.0.1:${(server.address() as import('net').AddressInfo).port}`, api_token: 't',
+    });
+    const res = await request(app)
+      .post('/api/recovery/points/p1/overwrite/preview')
+      .set('Authorization', adminBearer)
+      .set('x-node-id', String(nodeId))
+      .send({});
+    expect(res.status).toBe(200);
     expect(decodeURIComponent(String(captured?.[PROXY_HUB_NODE_NAME_HEADER]))).toBe(name);
   });
 });

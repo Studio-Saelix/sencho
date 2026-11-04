@@ -385,10 +385,10 @@ export function createRemoteProxyMiddleware(): RequestHandler {
       proxyReq.removeHeader(PROXY_HUB_NODE_ID_HEADER);
       proxyReq.removeHeader(PROXY_HUB_NODE_NAME_HEADER);
       const hubRecord = typeof req.nodeId === 'number' ? NodeRegistry.getInstance().getNode(req.nodeId) : undefined;
-      if (hubRecord) {
-        const values = hubNodeHeaderValues(hubRecord);
-        proxyReq.setHeader(PROXY_HUB_NODE_ID_HEADER, values.id);
-        proxyReq.setHeader(PROXY_HUB_NODE_NAME_HEADER, values.name);
+      const hubValues = hubRecord ? hubNodeHeaderValues(hubRecord) : null;
+      if (hubValues) {
+        proxyReq.setHeader(PROXY_HUB_NODE_ID_HEADER, hubValues.id);
+        proxyReq.setHeader(PROXY_HUB_NODE_NAME_HEADER, hubValues.name);
       }
       // Scoped stack evidence: always strip client-supplied values, then
       // attach hub-built evidence when the gate stashed elevation for this hop.

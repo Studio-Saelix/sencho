@@ -1632,8 +1632,9 @@ components:
         node:
           type: object
           description: >-
-            The node the restore targets, as the hub the caller addressed knows it. Called
-            directly on a remote instance with no hub in front, it names that instance itself.
+            The node the restore targets, as the hub the caller addressed knows it (names
+            are cut to 128 characters). Called directly on a remote instance with no hub in
+            front, or through a hub that predates this field, it names that instance itself.
           required: [id, name, transport]
           properties:
             id: { type: integer }
@@ -6558,7 +6559,8 @@ paths:
         The operator's answer to an overwrite that did not settle. `retry` runs the
         reconciliation again and is safe to repeat; it removes a leftover staging volume,
         finishes a clean-up, and releases a fence that could not be released. When it proves the
-        restore, the restore's operation settles and releases the volume's storage lock, as startup does.
+        restore, the restore's operation settles and releases the volume's storage lock, as startup does;
+        so does `release_fence` when the journal proves the swap committed.
         `release_fence`
         accepts the volume as it now is: it restores every recorded restart policy and starts
         nothing. When the journal proves the swap committed, it removes the hidden directory

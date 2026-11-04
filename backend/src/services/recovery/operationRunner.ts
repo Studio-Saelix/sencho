@@ -856,8 +856,13 @@ export class RecoveryEngineService {
     } finally {
       // The restore may have settled even when the answer is a refusal (a retry
       // that proved the data and then could not release the fence): its
-      // operation, parked by the interruption, follows what is proven.
-      settleInterruptedOverwriteOperations(this.intents, this.operations, input.intentId);
+      // operation follows what is proven. This never replaces the answer; an
+      // operation left behind is settled by the next retry or start.
+      try {
+        settleInterruptedOverwriteOperations(this.intents, this.operations, input.intentId);
+      } catch (err) {
+        console.warn('[Recovery] Could not settle the operation of restore %s:', input.intentId, errorMessageForLog(err));
+      }
     }
   }
 

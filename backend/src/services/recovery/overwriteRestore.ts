@@ -1502,15 +1502,16 @@ function settleProven(
 }
 
 /**
- * How the operation of an overwrite that a previous process left open ends, once
- * the intent's own reconciliation has proven the data. `null` while the data is
- * not proven or the fence is still held over a rolled back volume: the operation
- * then keeps reading `completion_unknown` and its lock stays stale.
+ * How the operation of an overwrite that reads `completion_unknown` ends, once the
+ * intent's own reconciliation has proven the data. `null` while the data is not
+ * proven or the fence is still held over a rolled back volume: the operation then
+ * keeps reading `completion_unknown` and its lock stays stale.
  *
- * The endings are the ones the live pipeline reports for the same state: a
- * committed swap is `succeeded`, or `partial` while its clean-up or fence release
- * is owed; a rollback is `failed`, which here can only mean the process was
- * interrupted.
+ * A committed swap is `succeeded`, or `partial` while its clean-up or fence
+ * release is owed, as the live pipeline reports it. A rollback is `failed` with
+ * the class `interrupted` in every case, because the operation lost the process
+ * that would have named a real class (the live pipeline reports `cancelled` or the
+ * failing class for a rollback it ran itself, and that ending is never rewritten).
  */
 export function overwriteEndingFor(
   intent: Pick<RestoreIntentRecord, 'phase' | 'outcomeClass'>,
@@ -1531,9 +1532,10 @@ export function overwriteEndingFor(
 }
 
 /**
- * Bring the operation of every overwrite that an interruption parked as
- * `completion_unknown` in line with what its intent has proven since. Idempotent,
- * and a no-op for an intent that is still open.
+ * Bring the operation of every overwrite that reads `completion_unknown` (parked
+ * by boot, or ended so by the live pipeline) in line with what its intent has
+ * proven since. Idempotent, and a no-op for an intent that is still open. One
+ * intent that cannot be settled is logged and does not stop the others.
  */
 export function settleInterruptedOverwriteOperations(
   intents: Pick<RestoreIntentStore, 'listWithInterruptedOperation' | 'get'>,
@@ -1548,8 +1550,12 @@ export function settleInterruptedOverwriteOperations(
     if (!intent.operationId) continue;
     const ending = overwriteEndingFor(intent);
     if (!ending) continue;
-    const stored = operations.settleReconciled(intent.operationId, ending);
-    if (stored.state === ending.state) settled += 1;
+    try {
+      const stored = operations.settleReconciled(intent.operationId, ending);
+      if (stored.state === ending.state) settled += 1;
+    } catch (err) {
+      console.warn('[Recovery] Could not settle the operation of restore %s:', intent.id, errorMessageForLog(err));
+    }
   }
   return settled;
 }

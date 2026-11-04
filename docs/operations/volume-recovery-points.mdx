@@ -234,7 +234,7 @@ curl -X POST https://your-sencho-instance:1852/api/recovery/points/5b1c8b7e-2f60
   -d '{}'
 ```
 
-`node` is the node the restore targets, as the control instance knows it: its id and name in the control instance's node list, and the transport (`local`, `node_proxy` or `pilot_tunnel`). Through a hub, a remote node's preview names that node, not the control instance. Called directly on the remote instance with no hub in front, it names the instance itself.
+`node` is the node the restore targets, as the control instance knows it: its id and name in the control instance's node list, and the transport (`local`, `node_proxy` or `pilot_tunnel`). Through a hub, a remote node's preview names that node, not the control instance. Called directly on the remote instance with no hub in front, or through a hub that predates this field, it names the instance itself. A node name longer than 128 characters is cut to 128 in the preview.
 
 An answer looks like this, shortened:
 
@@ -318,7 +318,7 @@ An operation that ends `completion_unknown` keeps its restart policies pinned an
 
 Two actions, both explicit and both recorded in the audit log:
 
-- `retry` runs the same reconciliation again. It is safe to repeat, and it is what you use after fixing whatever blocked it, such as a Docker daemon that was not reachable, a staging volume that was still in use, or a fence that could not be released. When it proves the restore, the operation reads its real ending and the storage lock is released, exactly as after a start of Sencho.
+- `retry` runs the same reconciliation again. It is safe to repeat, and it is what you use after fixing whatever blocked it, such as a Docker daemon that was not reachable, a staging volume that was still in use, or a fence that could not be released. When it proves the restore, the operation reads its real ending and the storage lock is released, exactly as after a start of Sencho. The same holds for `release_fence` when the journal proves the swap committed: the operation reads `succeeded`, or `partial` with `cleanup_failed` while the originals are still to be removed, and the storage lock is released. An operation that already reads `partial` keeps that ending after a later `retry` finishes its clean-up.
 - `release_fence` accepts the volume as it now is. It restores every recorded restart policy and starts nothing. When the journal proves the swap committed and the restore had reached that point, Sencho first removes the hidden directory that holds the originals, then settles the restore `committed`. If that removal fails, the fence is still released but the restore stays open with `outcomeClass: "cleanup_failed"` and keeps the volume reserved; `retry`, or the next start of Sencho, removes the directory and settles it. In every other case the operation is left `completion_unknown`, because accepting the fence does not prove what the data is. A restore that never stopped a container has no fence to release, so it answers `400 invalid_request` with `reason: "no_fence"`; use `retry` for it.
 
 ```bash
@@ -339,7 +339,7 @@ The volume belongs to the restore until it settles. While the operation runs, a 
 - every Compose lifecycle action on a stack that mounts the volume is refused with `409` and the conflict action is `data_restore`;
 - a container that mounts the volume cannot be started or restarted, including by auto-heal and by the scheduler. The single-container, stack and service routes answer `409` with `code: "data_restore"` (a stack route answers `stack_op_in_progress` instead while the restore holds the stack's lock), and a bulk row carries the same code;
 - the Files & Volumes browser refuses the volume, for reading as well as writing;
-- a second restore into the same volume is refused with `lock_held`, and a capture of it is refused by the storage lock. The refusal lasts until the restore has settled and its fence is released, so a restore that committed but could not release the fence (`partial` with `errorClass: "fence_unavailable"`) still holds the volume; `retry`, or the next start of Sencho, releases it;
+- a second restore into the same volume is refused with `lock_held`, and a capture of it is refused by the storage lock while the restore runs or its ending is unproven. A restore that committed but could not release the fence (`partial` with `errorClass: "fence_unavailable"`) has ended and no longer holds the storage lock, but its fence still keeps the workloads and a second restore off the volume; `retry`, or the next start of Sencho, releases it;
 - a container start that Sencho began just before the fence was recorded is waited for, for up to two minutes, before Sencho looks at the containers and stops them. A container that is one of the recorded dependents is then stopped like the others, and one that appeared in the meantime aborts the restore with `dependents_changed`, with nothing stopped. A start that has not answered by then aborts the restore with `fence_unavailable`, also with nothing stopped. A start that has already been pending for more than ten minutes is treated as a hung Docker call: it is not waited for, and the restore is refused with `fence_unavailable` at once, because that start may still land. This is not limited to containers on this volume, because a start registers before Sencho knows what it mounts, so any container start pending that long refuses every overwrite on the node. The refusal lasts until that call answers; restarting Sencho clears it.
 
 Deploying to a dependent stack during the overwrite is refused rather than queued. Wait for the operation to settle, or resolve it.
@@ -580,7 +580,7 @@ curl https://your-sencho-instance:1852/api/recovery/storage/d0b4e4c2-6a2e-4d31-9
 
 ### Release a stale lock
 
-A stale lock means an interrupted operation may have left a restore half written. Releasing a storage lock is a reviewed act, so it is never automatic. Startup releases the repository lock of interrupted work, as described below. A live lock belongs to its owner and cannot be released here.
+A stale lock means an interrupted operation may have left a restore half written. Releasing a storage lock is a reviewed act, so it is not automatic, with one exception: when a restore over an existing volume has proven the volume (see [After a crash](#after-a-crash)), its operation settles and releases the storage lock itself. Startup releases the repository lock of interrupted work, as described below. A live lock belongs to its owner and cannot be released here.
 
 ```bash
 curl -X POST https://your-sencho-instance:1852/api/recovery/locks/release \

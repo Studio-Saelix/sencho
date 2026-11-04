@@ -205,6 +205,11 @@ describe('preview', () => {
       seeded.pointId,
     );
     expect(relayed.node).toEqual({ id: 12, name: 'sencho-test-02', transport: 'pilot_tunnel' });
+    const direct = await overwrite.previewOverwrite(
+      { ...deps(fake.docker, scriptedHelper()), transport: 'pilot_tunnel' },
+      seeded.pointId,
+    );
+    expect(direct.node).toEqual({ id: 1, name: 'node-one', transport: 'pilot_tunnel' });
   });
 
   it('reports a volume recreated since the point as a different generation', async () => {

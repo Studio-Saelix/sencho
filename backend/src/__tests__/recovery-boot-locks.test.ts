@@ -305,7 +305,7 @@ describe('the storage lock of an interrupted overwrite', () => {
     expect(intentsModule.RestoreIntentStore.getInstance().get(intentId)?.phase).toBe('completion_unknown');
     const store = operations.RecoveryOperationStore.getInstance();
     expect(store.get(seeded.operationId)).toMatchObject({ state: 'completion_unknown', errorClass: 'interrupted' });
-    expect(store.getLock('storage', seeded.storageKey)?.staleSince).not.toBeNull();
+    expect(store.getLock('storage', seeded.storageKey)).toMatchObject({ staleSince: expect.any(Number) });
   });
 
   it('settles the operation and frees the storage when a retry proves the swap committed', async () => {
@@ -313,7 +313,7 @@ describe('the storage lock of an interrupted overwrite', () => {
     const intentId = seedOverwriteIntent(seeded, 'completion_unknown');
     await boot(0);
     const store = operations.RecoveryOperationStore.getInstance();
-    expect(store.getLock('storage', seeded.storageKey)?.staleSince).not.toBeNull();
+    expect(store.getLock('storage', seeded.storageKey)).toMatchObject({ staleSince: expect.any(Number) });
 
     const service = runner.RecoveryEngineService.getInstance(nodeId);
     service.setHelperRunnerForTests(scriptedHelper({ swapAnswers: [
@@ -330,11 +330,55 @@ describe('the storage lock of an interrupted overwrite', () => {
     expect(store.getLock('storage', seeded.storageKey)).toBeNull();
   });
 
+  it.each([
+    ['restic could not be unlocked', 1, 0],
+    ['a helper of the dead process is still there', 0, 1],
+  ])('settles the operation and frees the storage, but leaves the repository lock stale when %s', async (_label, unlockExit, remaining) => {
+    const seeded = seedInterrupted('restore', { storageLock: true });
+    const intentId = seedOverwriteIntent(seeded, 'staging');
+    await boot(unlockExit, remaining);
+
+    expect(intentsModule.RestoreIntentStore.getInstance().get(intentId)?.phase).toBe('rolled_back');
+    const store = operations.RecoveryOperationStore.getInstance();
+    expect(store.get(seeded.operationId)).toMatchObject({ state: 'failed', errorClass: 'interrupted' });
+    expect(store.getLock('storage', seeded.storageKey)).toBeNull();
+    // A helper that may still write to the repository keeps it closed, whatever the volume proved.
+    expect(store.getLock('repository', seeded.repositoryId)).toMatchObject({ staleSince: expect.any(Number) });
+    await expect(captureOtherVolume()).rejects.toMatchObject({ errorClass: 'lock_stale' });
+  });
+
+  it('settles the operation even when the retry that proves the data cannot release the fence', async () => {
+    const seeded = seedInterrupted('restore', { storageLock: true });
+    const intentId = seedOverwriteIntent(seeded, 'completion_unknown');
+    await boot(0);
+    const store = operations.RecoveryOperationStore.getInstance();
+    expect(store.get(seeded.operationId)?.state).toBe('completion_unknown');
+
+    // The data is committed, but the fence it still holds names a container the
+    // daemon no longer knows, so the release the retry attempts fails and throws.
+    const fenceStore = (await import('../services/recovery/restoreFence')).RestoreFenceStore.getInstance();
+    fenceStore.recordMembers(intentId, [{
+      containerId: 'gone', containerName: 'stack-dir-web-1', stackName: 'stack-dir', projectName: 'stack-dir',
+      restartPolicy: { Name: 'always' }, wasRunning: true,
+    }]);
+    recoveryDbModule.recoveryDb().prepare(
+      "UPDATE recovery_restore_intents SET phase = 'committed', outcome_class = 'fence_unavailable', fence_state = 'held' WHERE id = ?",
+    ).run(intentId);
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const service = runner.RecoveryEngineService.getInstance(nodeId);
+    await expect(service.resolveOverwrite({
+      intentId, action: 'retry', actor: 'admin', authorizeStack: () => true, authorizeGlobal: () => true,
+    })).rejects.toMatchObject({ errorClass: 'fence_unavailable' });
+
+    expect(store.get(seeded.operationId)).toMatchObject({ state: 'partial', errorClass: 'fence_unavailable' });
+    expect(store.getLock('storage', seeded.storageKey)).toBeNull();
+  });
+
   it('keeps the lock of an interrupted restore that has no overwrite intent, until a reviewed release', async () => {
     const { storageKey, storageId } = seedInterrupted('restore', { storageLock: true });
     await boot(0);
     const store = operations.RecoveryOperationStore.getInstance();
-    expect(store.getLock('storage', storageKey)?.staleSince).not.toBeNull();
+    expect(store.getLock('storage', storageKey)).toMatchObject({ staleSince: expect.any(Number) });
 
     const next = store.start({
       idempotencyKey: 'next-overwrite', kind: 'restore', storageId,
