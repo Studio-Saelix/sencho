@@ -874,7 +874,7 @@ export class RecoveryEngineService {
       try {
         settleInterruptedOverwriteOperations(this.intents, this.operations, input.intentId);
       } catch (err) {
-        console.warn('[Recovery] Could not settle the operation of restore %s:', input.intentId, errorMessageForLog(err));
+        console.warn('[Recovery] Could not settle the operation of restore %s:', sanitizeForLog(input.intentId), errorMessageForLog(err));
       }
     }
   }

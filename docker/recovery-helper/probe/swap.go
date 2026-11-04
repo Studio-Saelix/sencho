@@ -326,11 +326,15 @@ func writePlan(path string, plan swapPlan) error {
 		return err
 	}
 	if _, err := file.Write(data); err != nil {
-		file.Close()
+		if cerr := file.Close(); cerr != nil {
+			return errors.Join(err, cerr)
+		}
 		return err
 	}
 	if err := file.Sync(); err != nil {
-		file.Close()
+		if cerr := file.Close(); cerr != nil {
+			return errors.Join(err, cerr)
+		}
 		return err
 	}
 	if err := file.Close(); err != nil {
