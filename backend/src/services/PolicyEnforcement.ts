@@ -1327,18 +1327,6 @@ async function evaluateImageRefs(
             targets.push({ imageRef, planned: null });
         }
     }
-    // A multi-arch ref resolves to one index digest with a different platform
-    // child per service. The scan row is keyed by the digest the gate persists
-    // (the index), so a cache hit for the second child would return the first
-    // child's findings. Disable reuse for every child of such an index.
-    const platformDigestsByIndex = new Map<string, Set<string>>();
-    for (const { planned } of targets) {
-        if (planned?.kind !== 'candidate') continue;
-        const { indexDigest, platformDigest } = planned.resolution;
-        const digests = platformDigestsByIndex.get(indexDigest) ?? new Set<string>();
-        digests.add(platformDigest);
-        platformDigestsByIndex.set(indexDigest, digests);
-    }
     for (const { imageRef, planned } of targets) {
         let scan: VulnerabilityScan;
         if (planned?.kind === 'unresolved') {
@@ -1392,9 +1380,12 @@ async function evaluateImageRefs(
                     ? {
                         scanRef: candidate.scanRef,
                         digest: candidate.indexDigest,
-                        ...((platformDigestsByIndex.get(candidate.indexDigest)?.size ?? 0) > 1
-                            ? { useCache: false }
-                            : {}),
+                        // The scan row is keyed by the persisted digest, which is
+                        // the index for a multi-arch tag. A cached row for the
+                        // same index can belong to another platform child, so a
+                        // qualified child is always scanned fresh. An exact
+                        // manifest is its own digest and keeps cache reuse.
+                        ...(candidate.qualification === 'qualified' ? { useCache: false } : {}),
                     }
                     : undefined,
             );

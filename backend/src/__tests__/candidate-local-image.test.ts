@@ -68,6 +68,16 @@ describe('localImageExists', () => {
     expect(await localImageExists(1, 'alpine:3.20', { os: 'linux', architecture: 'arm', variant: 'v7' })).toBe(false);
   });
 
+  it('compares a bare architecture against the default variant Compose selects', async () => {
+    // `platform: arm` is the default arm variant (v7), so a local v6 child is
+    // not the image the operation will run.
+    dockerStub.inspect.mockResolvedValue({ Os: 'linux', Architecture: 'arm', Variant: 'v6' });
+    expect(await localImageExists(1, 'alpine:3.20', { os: 'linux', architecture: 'arm' })).toBe(false);
+
+    dockerStub.inspect.mockResolvedValue({ Os: 'linux', Architecture: 'arm', Variant: 'v7' });
+    expect(await localImageExists(1, 'alpine:3.20', { os: 'linux', architecture: 'arm' })).toBe(true);
+  });
+
   it('keeps the ref-level answer when no platform is asked for', async () => {
     dockerStub.inspect.mockResolvedValue({ Os: 'linux', Architecture: 'arm64' });
 

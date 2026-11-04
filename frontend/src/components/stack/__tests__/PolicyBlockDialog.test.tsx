@@ -601,6 +601,20 @@ describe('PolicyBlockDialog candidate image', () => {
     expect(within(arm64Row).getByText(/New image 451eee8bedcb · linux\/arm64/)).toBeInTheDocument();
   });
 
+  it('keeps the image line for an error row that names its platform', () => {
+    // The suppression is only for an error row that cannot name a variant; an
+    // evaluation failure at a known platform still shows what was evaluated.
+    const evaluationFailed: PolicyBlockPayload = {
+      ...candidatePayload,
+      violations: [
+        { ...candidatePayload.violations[0], platform: 'linux/amd64', error: 'Policy evaluation failed: boom' },
+      ],
+    };
+    render(<PolicyBlockDialog open payload={evaluationFailed} stackName="web" action="deploy" onOpenSettings={vi.fn(() => true)} canBypass={false} canEditSettings={false} bypassing={false} onClose={vi.fn()} onBypass={vi.fn()} />);
+    expect(screen.getByText(/New image 4f2a1c9d8e7b · linux\/amd64/)).toBeInTheDocument();
+    expect(screen.getByText('Policy evaluation failed: boom')).toBeInTheDocument();
+  });
+
   it('does not borrow another variant\'s image line for an unplatformed error row', () => {
     // An invalid or unknown platform has no candidate record of its own. The
     // fallback to the first record for the ref would label it with an image it

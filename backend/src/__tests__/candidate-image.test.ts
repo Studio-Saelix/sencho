@@ -69,6 +69,24 @@ describe('resolveCandidateImage', () => {
     });
   });
 
+  it('names the requested variant in the candidate platform label', async () => {
+    const result = await resolveCandidateImage(
+      1,
+      'registry.example.com/app:1',
+      { os: 'linux', architecture: 'arm', variant: 'v7' },
+      deps({
+        resolveDigest: async () => ({
+          ok: true,
+          indexDigest: INDEX,
+          platformDigest: AMD64,
+          platformLabel: 'linux/arm',
+          qualification: 'qualified',
+        }),
+      }),
+    );
+    expect(result).toMatchObject({ kind: 'candidate', platform: 'linux/arm/v7' });
+  });
+
   it('passes the node platform and the registry credentials to the resolver', async () => {
     const resolveDigest = vi.fn().mockResolvedValue({
       ok: true,

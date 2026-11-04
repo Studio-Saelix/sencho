@@ -354,10 +354,27 @@ describe('buildEvidenceLines', () => {
     expect(lines[1].text).toContain('app:latest (linux/arm64)');
   });
 
-  it('keys applications per platform and does not let one variant suppress another', () => {
+  it('keys applications per platform', () => {
     // Two unresolved variants produce applications with the same source, state
-    // and target. Target-only keys duplicated the React key and the explained
-    // set let the amd64 application hide the arm64 record.
+    // and target. Target-only keys duplicated the React key.
+    const lines = buildEvidenceLines({
+      outcome: 'block',
+      records: [],
+      applications: [
+        { source: 'vulnerability_scan', state: 'unavailable', outcome: 'block', rule: 'security_scan_failure=block', target: 'app:latest', platform: 'linux/amd64' },
+        { source: 'vulnerability_scan', state: 'unavailable', outcome: 'block', rule: 'security_scan_failure=block', target: 'app:latest', platform: 'linux/arm64' },
+      ],
+      summary: '',
+    });
+    expect(lines).toHaveLength(2);
+    expect(new Set(lines.map((line) => line.key)).size).toBe(2);
+    expect(lines[0].text).toContain('app:latest (linux/amd64)');
+    expect(lines[1].text).toContain('app:latest (linux/arm64)');
+  });
+
+  it('does not let one variant\'s application suppress another variant\'s record', () => {
+    // The explained set is keyed by platform, so the amd64 application hides
+    // only the amd64 record; the arm64 record remains.
     const lines = buildEvidenceLines({
       outcome: 'block',
       records: [
@@ -370,7 +387,6 @@ describe('buildEvidenceLines', () => {
       summary: '',
     });
     expect(new Set(lines.map((line) => line.key)).size).toBe(lines.length);
-    // The amd64 application explains its own record; the arm64 record remains.
     expect(lines.some((line) => line.text.includes('app:latest (linux/arm64)'))).toBe(true);
   });
 });

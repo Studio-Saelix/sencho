@@ -139,7 +139,9 @@ export async function resolveCandidateImage(
     scanRef: `${parsed.registry}/${parsed.repo}@${remote.platformDigest}`,
     indexDigest: remote.indexDigest,
     platformDigest: remote.platformDigest,
-    platform: remote.platformLabel,
+    // The resolver names the OS and architecture it matched; an explicit
+    // variant belongs in the label the evidence and the block dialog show.
+    platform: platform.variant ? `${remote.platformLabel}/${platform.variant}` : remote.platformLabel,
     qualification: remote.qualification,
   };
 }
@@ -150,6 +152,17 @@ export async function nodePlatformFor(nodeId: number): Promise<NodePlatform | nu
 }
 
 const PLATFORM_OS_NAMES: ReadonlySet<string> = new Set(['linux', 'windows', 'darwin', 'freebsd']);
+
+/**
+ * The variant Compose selects when an override names only an architecture that
+ * has variants. A local image that reports a different variant is not the child
+ * the operation will run.
+ */
+const DEFAULT_ARCHITECTURE_VARIANT: Readonly<Record<string, string>> = {
+  arm: 'v7',
+  arm64: 'v8',
+  amd64: 'v1',
+};
 
 /**
  * The platform Compose will run a service as.
@@ -199,12 +212,13 @@ export function effectiveServicePlatform(
  *
  * The ref alone is not enough: a multi-arch ref can be present as another
  * platform's child, and Compose still fetches the child the service asks for.
- * Comparing the local image's own OS, architecture and (when the override names
- * one) variant is what makes a present foreign child count as absent. An image
- * whose platform the daemon did not report counts as absent too, the fail-closed
- * reading, because the gate cannot prove it is the child Compose will run. With
- * no platform argument the older ref-level question is answered: whether any
- * local copy exists.
+ * Comparing the local image's own OS, architecture and variant is what makes a
+ * present foreign child count as absent. A bare architecture that has variants
+ * is compared against the default variant Compose selects (`arm` is v7, `arm64`
+ * is v8, `amd64` is v1). An image whose platform the daemon did not report
+ * counts as absent too, the fail-closed reading, because the gate cannot prove
+ * it is the child Compose will run. With no platform argument the older
+ * ref-level question is answered: whether any local copy exists.
  */
 export async function localImageExists(
   nodeId: number,
@@ -225,10 +239,15 @@ export async function localImageExists(
     });
     if (!local.os || !local.architecture) return false;
     if (local.os !== platform.os || local.architecture !== platform.architecture) return false;
-    // A variant-bearing override can only be satisfied by the matching child. A
-    // local image that does not report a variant cannot prove it is that child.
-    if (platform.variant) return local.variant === platform.variant;
-    return true;
+    const requestedVariant = platform.variant ?? DEFAULT_ARCHITECTURE_VARIANT[platform.architecture];
+    if (local.variant) {
+      // A bare architecture asks for Compose's default variant; an explicit one
+      // asks for exactly that child.
+      return requestedVariant === undefined || local.variant === requestedVariant;
+    }
+    // A local image that reports no variant cannot prove it is the child an
+    // explicit variant asks for. A bare architecture is the default child.
+    return platform.variant === undefined;
   } catch {
     return false;
   }

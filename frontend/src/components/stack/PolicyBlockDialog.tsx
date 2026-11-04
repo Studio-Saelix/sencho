@@ -44,7 +44,7 @@ export interface PolicyBlockEvidenceApplication {
   rule: string;
   /** Present when the application is about one image rather than the whole node. */
   target?: string;
-  /** The platform variant of `target`, when one ref has several. */
+  /** The platform variant of `target` the application is about, when known. */
   platform?: string | null;
 }
 
