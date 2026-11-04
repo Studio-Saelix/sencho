@@ -336,6 +336,23 @@ describe('registry mode (an update that pulls)', () => {
     expect(candidates.resolve).not.toHaveBeenCalled();
     expect(result.evaluatedCandidates).toBeUndefined();
   });
+
+  it('keeps resolving references when the model will not render in registry mode', async () => {
+    // A registry update's own `compose pull` is what fetches, and an
+    // unrenderable model cannot say which reference it skips, so nothing it
+    // fetches may run unevaluated.
+    models.build.mockResolvedValue({
+      renderable: false,
+      code: 'effective_model_render_failed',
+      error: 'Sencho could not render the effective Compose model.',
+    });
+
+    const result = await enforcePolicyPreDeploy('web', 1, { bypass: false, actor: 'u', imageSource: 'registry' });
+
+    expect(result.ok).toBe(true);
+    expect(candidates.resolve).toHaveBeenCalledTimes(1);
+    expect(result.evaluatedCandidates).toHaveLength(1);
+  });
 });
 
 describe('compose mode (a plain up)', () => {
@@ -387,6 +404,66 @@ describe('compose mode (a plain up)', () => {
     expect(trivyStub.scanImagePreflight).toHaveBeenCalledWith(
       'my-stack-built', 1, 'web', undefined,
     );
+  });
+
+  it('recognizes a generated build image when the rendered model names no project', async () => {
+    // Compose omits `name` only in unusual renders, but the generated image is
+    // still a bare repository ending in `-<service>`. Treating it as a registry
+    // candidate would make the boundary pull a name that does not exist.
+    composeStub.listStackImages.mockResolvedValue(['my-stack-built']);
+    models.build.mockResolvedValue({
+      renderable: true,
+      services: [
+        { name: 'built', declaredImage: null, hasBuild: true, pullPolicy: null, expectedReplicas: 1, dependsOn: [], hasHealthcheck: false },
+      ],
+    });
+
+    const result = await enforcePolicyPreDeploy('web', 1, { bypass: false, actor: 'u', imageSource: 'compose' });
+
+    expect(result.ok).toBe(true);
+    expect(candidates.resolve).not.toHaveBeenCalled();
+    expect(result.evaluatedCandidates).toBeUndefined();
+    expect(trivyStub.scanImagePreflight).toHaveBeenCalledWith('my-stack-built', 1, 'web', undefined);
+  });
+
+  it('does not pull a generated build image by reference when the model will not render', async () => {
+    // The model failed, so no reference can be attributed to the service that
+    // owns it, and `config --images` still names the image Compose generates for
+    // a build-only service. Pulling that name would fail and abort a deploy
+    // Compose can complete by building, so the boundary keeps `up --pull never`
+    // and the gate evaluates the installed image instead.
+    composeStub.listStackImages.mockResolvedValue(['my-stack-built']);
+    models.build.mockResolvedValue({
+      renderable: false,
+      code: 'effective_model_render_failed',
+      error: 'Sencho could not render the effective Compose model.',
+    });
+
+    const result = await enforcePolicyPreDeploy('web', 1, { bypass: false, actor: 'u', imageSource: 'compose' });
+
+    expect(result.ok).toBe(true);
+    expect(candidates.resolve).not.toHaveBeenCalled();
+    expect(result.evaluatedCandidates).toBeUndefined();
+    expect(result.pullServices).toBeUndefined();
+    expect(result.noPullOnUp).toBe(true);
+    expect(trivyStub.scanImagePreflight).toHaveBeenCalledWith('my-stack-built', 1, 'web', undefined);
+  });
+
+  it('still resolves bare references when no model was requested', async () => {
+    // Blueprint preflight and rollback eligibility hand the gate their own
+    // references and no model. They are not a plain `up` of a rendered stack, so
+    // the no-model case keeps the candidate reading instead of treating every
+    // reference as installed.
+    const result = await enforcePolicyForImageRefs(
+      'web',
+      1,
+      ['registry.example.com/web:latest'],
+      { bypass: false, actor: 'u', imageSource: 'compose' },
+    );
+
+    expect(result.ok).toBe(true);
+    expect(candidates.resolve).toHaveBeenCalledTimes(1);
+    expect(result.evaluatedCandidates).toHaveLength(1);
   });
 
   it('leaves a daily policy on the installed image while its window has not elapsed', async () => {

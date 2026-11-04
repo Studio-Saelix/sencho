@@ -57,7 +57,7 @@ import {
     type CandidateResolution,
     type ImageSource,
 } from './candidateImage';
-import { buildEffectiveServiceModel } from './effectiveServiceModel';
+import { buildEffectiveServiceModel, type EffectiveServiceSpec } from './effectiveServiceModel';
 import {
     resolveSecurityEvidencePolicy,
     type SecurityEvidencePolicy,
@@ -436,15 +436,43 @@ type CandidatePlanEntry =
     | { kind: 'unresolved'; resolution: CandidateResolution & { kind: 'unresolved' } };
 
 /**
+ * The build service whose image Compose generates for `ref`, if any.
+ *
+ * A build-only service declares no image; Compose names the image it builds
+ * `<project>-<service>` and `config --images` reports it. The rendered model
+ * normally states the project name. When it does not, a generated name is still
+ * a bare repository (no registry host or tag) ending in `-<service>`, and no
+ * service declares it, so it cannot be a registry image this operation pulls.
+ */
+function generatedBuildServiceFor(
+    ref: string,
+    services: readonly EffectiveServiceSpec[],
+    projectName: string | null,
+): EffectiveServiceSpec | undefined {
+    if (projectName !== null) {
+        return services.find((spec) => spec.hasBuild && ref === `${projectName}-${spec.name}`);
+    }
+    // A registry-qualified reference or a digest pin cannot be a generated name,
+    // which is always a bare repository (`<project>-<service>`, optionally tagged).
+    if (ref.includes('/') || ref.includes('@')) return undefined;
+    const repository = ref.split(':')[0];
+    return services.find((spec) => spec.hasBuild && repository.endsWith(`-${spec.name}`));
+}
+
+/**
  * Decide, for each reference, whether this operation will run the registry image
  * or the one already on the node, and resolve the registry image.
  *
  * The plan is per service, from the fully rendered model, because `build`
  * services have no registry image and a Compose `pull_policy` decides whether an
- * update's `pull` or a plain `up` fetches. When the model cannot be rendered (or
- * the caller supplied bare references, as the GitOps candidate path does), every
- * reference is treated as a candidate: the stricter reading, because nothing
- * then proves the operation will not pull it.
+ * update's `pull` or a plain `up` fetches. When the caller supplied bare
+ * references, as the GitOps candidate path does, every reference is treated as a
+ * candidate: the stricter reading, because nothing then proves the operation
+ * will not pull it. When the model was requested but could not be rendered, no
+ * reference can be attributed to a service: a plain `up` keeps `up --pull never`
+ * and evaluates the installed image, so a build-generated name is never fetched
+ * by bare reference, while a registry update still resolves every reference
+ * because its own pull is what could fetch one.
  */
 async function planCandidates(
     nodeId: number,
@@ -481,6 +509,28 @@ async function planCandidates(
 
     for (const ref of imageRefs) {
         if (!services) {
+            if (modelServices === null) {
+                // A caller supplied bare references (GitOps acceptance, rollback
+                // eligibility): there is no model to attribute them, and no plain
+                // `up` boundary to fetch them, so each is resolved as a candidate.
+                plan.set(ref, await resolveEntry(ref));
+                continue;
+            }
+            if (mode === 'compose') {
+                // The effective model did not render, so no service can be named
+                // for a targeted pull and one of these references may be the
+                // image Compose generates for a build-only service
+                // (`<project>-<service>`). Pulling that by bare reference would
+                // fail and abort a deploy Compose can complete by building. Keep
+                // `up --pull never` instead: the installed image is then the only
+                // one the deploy can run, so evaluate that.
+                noPullOnUp = true;
+                plan.set(ref, { kind: 'installed', why: 'not_pulled' });
+                continue;
+            }
+            // Registry mode: the update's own `compose pull` fetches these, and
+            // the model cannot say which one it skips. Resolve each as a
+            // candidate so nothing the pull fetches runs unevaluated.
             plan.set(ref, await resolveEntry(ref));
             continue;
         }
@@ -490,9 +540,7 @@ async function planCandidates(
             // builds `<project>-<service>` and `config --images` reports it. That
             // image does not exist until the build, so it is not a registry
             // candidate even though no service declares the reference.
-            const generatedBuild = projectName !== null
-                ? services.find((spec) => spec.hasBuild && ref === `${projectName}-${spec.name}`)
-                : undefined;
+            const generatedBuild = generatedBuildServiceFor(ref, services, projectName);
             if (generatedBuild) {
                 plan.set(ref, { kind: 'installed', why: 'build' });
                 continue;

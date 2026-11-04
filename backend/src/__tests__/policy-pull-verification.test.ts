@@ -140,10 +140,10 @@ describe('evaluatedDeployCandidateVerification', () => {
     expect(verification?.verifyPulled).toBeTypeOf('function');
   });
 
-  it('keeps the boundary when the gate named no service, so the deploy pulls the whole project', () => {
-    // A candidate the model could not attribute still must be fetched before
-    // `up`. The deploy pulls the project; it never falls back to an unverified
-    // ordinary `up`.
+  it('keeps the boundary when the gate named no service, pulling the candidate by its reference', () => {
+    // A candidate no service could be named for still must be fetched before
+    // `up`. The deploy pulls that reference; it never falls back to an
+    // unverified ordinary `up`.
     const verification = evaluatedDeployCandidateVerification('web', 1, [CANDIDATES[0]], OPTIONS);
     expect(verification?.pullServices).toEqual([]);
     expect(verification?.pullRefs).toEqual(['registry.example.com/web:latest']);

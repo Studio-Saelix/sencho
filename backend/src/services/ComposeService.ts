@@ -1654,11 +1654,12 @@ export class ComposeService {
     ctx?: DeployInvocationContext,
     /**
      * Confirms the images a plain `up` would fetch are the ones the gate
-     * evaluated. When set, the deploy pulls those services first (the whole
-     * project when the gate could not name them), verifies the digests, and then
-     * runs `up --pull never`, so no fetch can land between the check and the
-     * container replacement. Undefined when the gate evaluated no candidate,
-     * which keeps a non-pulling deploy identical.
+     * evaluated. When set, the deploy pulls the candidate services first, and
+     * any candidate no service could be named for by its own reference, verifies
+     * the digests, and then runs `up --pull never`, so no fetch can land between
+     * the check and the container replacement. A boundary with no candidates
+     * exists only to keep `up` from fetching an interval image that was not due
+     * at gate time; undefined keeps a non-pulling deploy identical.
      */
     verification?: DeployCandidateVerification,
   ): Promise<{ recoveryId: string | null; deployedGenerationId: string | null; gitopsOperationId: string | null }> {
