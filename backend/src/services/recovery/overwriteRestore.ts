@@ -908,10 +908,12 @@ async function takePreRestorePoint(ctx: OverwriteRunContext, state: PipelineStat
     settleFailedPoint(deps, point.id, result.errorClass);
     // An operator's cancel aborts this capture. That is a stop, not a point that
     // came out incomplete, so it ends `cancelled` like a cancel at any other step.
-    if (result.errorClass !== 'interrupted') {
+    if (result.errorClass === 'interrupted') {
+      await settleRollback(ctx, state, 'interrupted');
+    } else {
       console.warn('[Recovery] The pre-restore point for %s failed with %s.', sanitizeForLog(state.intent.id), result.errorClass);
+      await settleRollback(ctx, state, 'pre_restore_failed');
     }
-    await settleRollback(ctx, state, result.errorClass === 'interrupted' ? 'interrupted' : 'pre_restore_failed');
     return false;
   }
   const finalized = deps.points.finalize(point.id, { status: 'succeeded', evidence: result.evidence });

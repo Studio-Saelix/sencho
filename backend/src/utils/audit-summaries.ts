@@ -220,7 +220,7 @@ function safeDecode(segment: string): string {
  * every other route, which uses the table above.
  */
 function overwriteRouteSummary(normalized: string, statusCode: number | undefined, body: unknown): string | null {
-  let wording: (typeof OVERWRITE_ROUTE_WORDING)[keyof typeof OVERWRITE_ROUTE_WORDING];
+  let wording: { done: string; not: string };
   let id: string;
   const point = /^recovery\/points\/([^/]+)\/overwrite(\/preview)?\/?$/.exec(normalized);
   const resolve = /^recovery\/restores\/([^/]+)\/resolve\/?$/.exec(normalized);
@@ -229,16 +229,18 @@ function overwriteRouteSummary(normalized: string, statusCode: number | undefine
     id = point[1];
   } else if (resolve) {
     const action = body && typeof body === 'object' ? (body as { action?: unknown }).action : undefined;
-    wording = typeof action === 'string' && (action === 'retry' || action === 'release_fence')
+    wording = action === 'retry' || action === 'release_fence'
       ? OVERWRITE_ROUTE_WORDING[action]
       : OVERWRITE_ROUTE_WORDING.resolve;
     id = resolve[1];
   } else {
     return null;
   }
-  const summary = typeof statusCode === 'number' && statusCode >= 400
-    ? `${wording.not} ${statusCode >= 500 ? 'failed' : 'refused'} (${statusCode})`
-    : wording.done;
+  let summary = wording.done;
+  if (typeof statusCode === 'number' && statusCode >= 400) {
+    const verdict = statusCode >= 500 ? 'failed' : 'refused';
+    summary = `${wording.not} ${verdict} (${statusCode})`;
+  }
   return `${summary}: ${safeDecode(id)}`;
 }
 
