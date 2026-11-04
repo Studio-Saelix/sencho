@@ -22,7 +22,8 @@ import { isDebugEnabled } from '../utils/debug';
 import { SEVERITY_ORDER } from '../utils/severity';
 import { isSenchoRollbackHoldRef } from '../utils/senchoRollbackHold';
 import type { PolicyBlockReason } from '../utils/policy-risk';
-import { imagePlatformLabel, platformCacheKey } from './gitops/platformNames';
+import { canonicalPlatformLabel, imagePlatformLabel, platformCacheKey } from './gitops/platformNames';
+import { parseImageRef, selectLocalRepoDigests } from './registry-api';
 
 const execFileAsync = promisify(execFile);
 
@@ -71,6 +72,11 @@ export interface ImageScanOptions {
      * installed scan leaves this unset and the service reads the platform of the
      * local image; when that cannot be read, the gate's cache is bypassed rather
      * than letting an unqualified row answer.
+     *
+     * When it is set for an installed reference (`scanRef` and `digest` absent),
+     * the platform is a promise about the child the operation will run: the scan
+     * reads that child or fails, and the row is never written under a platform
+     * the scan did not report.
      */
     platform?: string | null;
     scanners?: readonly TrivyScanner[];
@@ -176,6 +182,15 @@ interface TrivyRawOutput {
         OS?: { Family?: string; Name?: string };
         ImageID?: string;
         RepoDigests?: string[];
+        /**
+         * The image config Trivy actually analysed. Its `os` and `architecture`
+         * are the platform the findings describe, whichever source Trivy used.
+         */
+        ImageConfig?: {
+            os?: unknown;
+            architecture?: unknown;
+            variant?: unknown;
+        };
     };
     Results?: TrivyRawResult[];
 }
@@ -408,6 +423,13 @@ export function parseTrivyOutput(raw: string): {
     secrets: TrivySecret[];
     misconfigs: TrivyMisconfig[];
     os: string | null;
+    /**
+     * The platform the analysed image actually is, from its config. Null for a
+     * report that does not describe an image config (a filesystem or misconfig
+     * scan), so callers that promised a platform can tell "not reported" from
+     * "reported something else".
+     */
+    imagePlatform: string | null;
 } {
     let parsed: TrivyRawOutput;
     try {
@@ -485,7 +507,27 @@ export function parseTrivyOutput(raw: string): {
             ? `${osFamily} ${osName}`
             : osFamily
         : null;
-    return { vulnerabilities, secrets, misconfigs, os: osInfo };
+    const imageConfig = parsed.Metadata?.ImageConfig;
+    const imagePlatform = imagePlatformLabel({
+        Os: imageConfig?.os,
+        Architecture: imageConfig?.architecture,
+        Variant: imageConfig?.variant,
+    });
+    return { vulnerabilities, secrets, misconfigs, os: osInfo, imagePlatform };
+}
+
+/**
+ * Whether a report whose image config says `read` describes the platform the
+ * caller asked for. Trivy omits the variant for many images (an arm/v7 child
+ * reports `linux/arm`), so a missing read variant is not a contradiction; a
+ * reported, different one is.
+ */
+function scanReadPlatformMatches(requested: string, read: string): boolean {
+    const [requestedOs, requestedArchitecture, requestedVariant] = canonicalPlatformLabel(requested).split('/');
+    const [readOs, readArchitecture, readVariant] = canonicalPlatformLabel(read).split('/');
+    if (requestedOs !== readOs || requestedArchitecture !== readArchitecture) return false;
+    if (!requestedVariant || !readVariant) return true;
+    return requestedVariant === readVariant;
 }
 
 class TrivyService {
@@ -664,6 +706,33 @@ class TrivyService {
     }
 
     /**
+     * The local image's own registry-addressed digest (`repo@sha256:...`), or
+     * null when Docker holds no digest for this reference (a local build, or a
+     * retag whose RepoDigests name another repository).
+     *
+     * Unlike {@link getImageDigest} this never falls back to the image config
+     * ID: only a RepoDigest names content a registry can resolve, which is what
+     * a platform child scan needs. Every repo digest is offered to
+     * {@link selectLocalRepoDigests}, so an unrelated repository's leftover
+     * digest is never used.
+     */
+    async getRepoDigestRef(imageRef: string, nodeId: number): Promise<string | null> {
+        try {
+            const parsed = parseImageRef(imageRef);
+            if (!parsed) return null;
+            const docker = DockerController.getInstance(nodeId).getDocker();
+            const info = (await docker.getImage(imageRef).inspect()) as { RepoDigests?: unknown };
+            const repoDigests = Array.isArray(info.RepoDigests)
+                ? info.RepoDigests.filter((entry): entry is string => typeof entry === 'string')
+                : [];
+            const digest = selectLocalRepoDigests(repoDigests, parsed)[0];
+            return digest ? `${parsed.registry}/${parsed.repo}@${digest}` : null;
+        } catch {
+            return null;
+        }
+    }
+
+    /**
      * The platform of the image Docker holds for `imageRef`, or null when the
      * daemon did not report it. Used to key any scan of a local image (and to
      * select the child `trivy image` reads): a multi-arch reference stores every
@@ -803,25 +872,54 @@ class TrivyService {
 
         try {
             const localDigest = options.digest === undefined || options.digest === null;
-            const digest = options.digest ?? (await this.getImageDigest(imageRef, nodeId));
+            const pinnedDigest = imageRef.includes('@')
+                ? imageRef.slice(imageRef.lastIndexOf('@') + 1)
+                : null;
+            // The pin's own digest is the image identity when the reference
+            // carries one; the daemon's repo digest is the identity for a tag.
+            const digest = options.digest ?? pinnedDigest ?? (await this.getImageDigest(imageRef, nodeId));
             // The cache is keyed by digest and platform: an index digest is
             // shared by every platform child, so without the platform one
             // child's row could answer for another. A candidate supplies the
             // platform it resolved; a scan of the image on the node reads the
             // local image's own platform, so a manual or scheduled scan cannot
             // borrow a candidate child's findings either.
-            const platform = options.platform ?? (
-                localDigest ? await this.getImagePlatform(imageRef, nodeId) : null
-            );
+            const localPlatform = localDigest ? await this.getImagePlatform(imageRef, nodeId) : null;
+            const platform = options.platform ?? localPlatform;
             // The row and its lookup use the canonical cache key, so an explicit
             // default variant and the installed read of the same child meet.
             const cachePlatform = platform ? platformCacheKey(platform) : null;
+            const requestedPlatform = options.platform ?? null;
+            const requestedKey = requestedPlatform ? platformCacheKey(requestedPlatform) : null;
+            const localKey = localPlatform ? platformCacheKey(localPlatform) : null;
+            // An installed reference that names a child (a service platform
+            // override, a non-pulling group, a digest pin of an index) cannot be
+            // read through the daemon when the daemon's default child is a
+            // different platform: `trivy image`'s Docker source ignores
+            // `--platform` and always reads the default child. Only a local scan
+            // whose own platform is the requested one is exact; otherwise the
+            // child is read from the registry by the image's own digest, the
+            // same way a candidate is addressed. A caller that supplies an
+            // explicit digest (the candidate path) has already named the image,
+            // so it is not an installed ref.
+            const installedPlatformScan = options.scanRef === undefined
+                && (options.digest === undefined || options.digest === null)
+                && requestedKey !== null;
+            const scanFromRegistry = installedPlatformScan && requestedKey !== localKey;
             // The deploy gate fails closed when it cannot read the platform; the
             // plain digest cache also narrows by platform when it is known and
-            // falls back to digest-only when it is not.
+            // falls back to digest-only when it is not. A registry-addressed
+            // installed scan never reuses a row: the same digest+platform key
+            // could hold a row written when the daemon's default child was
+            // mistaken for the requested one, and this registry read is what
+            // proves the child, so it runs fresh.
             const cacheable = options.useCache !== false && digest !== null
+                && !scanFromRegistry
                 && (options.cacheRule !== 'database' || cachePlatform !== null);
-            diag(`scanImage: digest=${digest ?? 'null'} platform=${cachePlatform ?? 'null'} for ${imageRef}`);
+            diag(
+                `scanImage: digest=${digest ?? 'null'} platform=${cachePlatform ?? 'null'} `
+                + `local=${localKey ?? 'null'} registryChild=${scanFromRegistry} for ${imageRef}`,
+            );
 
             if (cacheable) {
                 const cached = DatabaseService.getInstance().getLatestScanByDigest(
@@ -897,6 +995,26 @@ class TrivyService {
             }
 
             diag(`scanImage: cache miss; invoking trivy for ${imageRef}`);
+            // A registry-addressed installed scan needs a reference the remote
+            // source can resolve: the pin itself, or the local image's own repo
+            // digest for a tag. Without one the requested child cannot be
+            // proven, and the scan fails rather than reading the daemon's
+            // default child under the requested platform's name.
+            let scanTarget = options.scanRef ?? imageRef;
+            if (scanFromRegistry) {
+                if (pinnedDigest) {
+                    scanTarget = imageRef;
+                } else {
+                    const repoDigestRef = await this.getRepoDigestRef(imageRef, nodeId);
+                    if (!repoDigestRef) {
+                        throw new Error(
+                            `The image ${imageRef} has no registry digest, so its ${requestedPlatform} child `
+                            + 'cannot be read; the daemon only exposes its default platform child',
+                        );
+                    }
+                    scanTarget = repoDigestRef;
+                }
+            }
             const { env, cleanup } = await this.buildEnv();
             try {
                 const args = [
@@ -907,11 +1025,15 @@ class TrivyService {
                     '--no-progress',
                     '--scanners',
                     scannersUsed,
-                    // A ref-based scan of a local image names the child to read.
-                    // A candidate is already addressed by its manifest digest
-                    // (`scanRef`), so it needs no platform selector.
-                    ...(platform && !options.scanRef ? ['--platform', platform] : []),
-                    options.scanRef ?? imageRef,
+                    // The remote source honours the platform selector; the
+                    // Docker source ignores it and reads the daemon's default
+                    // child, so a local scan never passes it. A candidate is
+                    // already addressed by its own manifest digest (`scanRef`)
+                    // and needs no selector either.
+                    ...(scanFromRegistry && requestedPlatform
+                        ? ['--image-src', 'remote', '--platform', requestedPlatform]
+                        : []),
+                    scanTarget,
                 ];
                 const execStart = Date.now();
                 const { stdout } = await execFileAsync(binary, args, {
@@ -922,9 +1044,28 @@ class TrivyService {
                 diag(
                     `scanImage: trivy exited after ${Date.now() - execStart}ms, output=${stdout.length} bytes`,
                 );
-                const { vulnerabilities, secrets, os: osInfo } = parseTrivyOutput(stdout);
+                const { vulnerabilities, secrets, os: osInfo, imagePlatform } = parseTrivyOutput(stdout);
+                // The row, its cache key and its evidence will carry the
+                // requested platform. Refuse to write findings that describe
+                // another child: a missing report is "cannot prove", not a
+                // match.
+                if (requestedPlatform && requestedKey) {
+                    if (!imagePlatform) {
+                        throw new Error(
+                            `Trivy did not report the platform it scanned for ${imageRef}; `
+                            + `refusing to file the findings under ${requestedPlatform}`,
+                        );
+                    }
+                    if (!scanReadPlatformMatches(requestedPlatform, imagePlatform)) {
+                        throw new Error(
+                            `Trivy scanned ${imagePlatform} for ${imageRef}, not ${requestedPlatform}; `
+                            + 'refusing to file the findings under a platform they do not describe',
+                        );
+                    }
+                }
                 diag(
-                    `scanImage: parsed ${vulnerabilities.length} unique vulns, ${secrets.length} secrets (os=${osInfo ?? 'unknown'})`,
+                    `scanImage: parsed ${vulnerabilities.length} unique vulns, ${secrets.length} secrets `
+                    + `(os=${osInfo ?? 'unknown'} platform=${imagePlatform ?? 'unknown'})`,
                 );
 
                 let critical = 0,

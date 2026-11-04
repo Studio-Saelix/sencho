@@ -765,7 +765,9 @@ describe('compose mode (a plain up)', () => {
       expect(result.ok).toBe(false);
       expect(result.violations).toHaveLength(1);
       expect(result.violations[0]).toMatchObject({ scanId: 22, criticalCount: 1, severity: 'CRITICAL' });
-      expect(result.violations[0].platform).toBeUndefined();
+      // The installed child is labelled with the platform it was scanned for,
+      // so the dialog pairs it with the right evidence.
+      expect(result.violations[0].platform).toBe('linux/arm64');
       expect(result.evaluatedCandidates).toEqual([{
         ref,
         indexDigest: INDEX,
@@ -844,6 +846,35 @@ describe('compose mode (a plain up)', () => {
     expect(result.violations).toHaveLength(2);
     expect(result.evaluatedCandidates).toBeUndefined();
     expect(result.pullServices).toBeUndefined();
+  });
+
+  it('fails closed and names the platform when the installed child cannot be read', async () => {
+    // The scanner refuses a report that describes another child; the gate must
+    // surface that as an unresolved platform, not a clean row for the ref.
+    candidates.platform = { os: 'linux', architecture: 'arm64' };
+    trivyStub.scanImagePreflight.mockRejectedValue(
+      new Error('Trivy scanned linux/arm64 for registry.example.com/web:latest, not linux/amd64'),
+    );
+    modelWith([
+      { name: 'tools', declaredImage: 'registry.example.com/web:latest', hasBuild: false, pullPolicy: 'never', platform: 'linux/amd64', expectedReplicas: 1, dependsOn: [], hasHealthcheck: false },
+    ]);
+
+    const result = await enforcePolicyPreDeploy('web', 1, { bypass: false, actor: 'u', imageSource: 'compose' });
+
+    expect(trivyStub.scanImagePreflight).toHaveBeenCalledWith(
+      'registry.example.com/web:latest', 1, 'web', { platform: 'linux/amd64' },
+    );
+    expect(result.ok).toBe(false);
+    expect(result.violations[0]).toMatchObject({
+      platform: 'linux/amd64',
+      error: expect.stringContaining('Pre-flight scan failed'),
+    });
+    expect(result.evidence?.records[0]).toMatchObject({
+      subject: 'installed',
+      platform: 'linux/amd64',
+      state: 'failed',
+    });
+    expect(result.evidence?.applications[0]).toMatchObject({ platform: 'linux/amd64' });
   });
 
   it('evaluates a digest-pinned ref for each platform group that uses it', async () => {

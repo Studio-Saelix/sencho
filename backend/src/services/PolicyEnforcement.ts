@@ -77,7 +77,8 @@ export interface PolicyViolation {
     scanId: number;
     /**
      * The platform variant this row is about, when the gate resolved or tried
-     * to resolve a registry candidate. A ref shared by services with different
+     * to resolve a registry candidate or named the installed child a
+     * non-pulling service runs. A ref shared by services with different
      * `platform:` overrides produces one row per variant, so the dialog pairs
      * each row with its own evidence rather than the first record for the ref.
      */
@@ -1409,9 +1410,12 @@ async function evaluateImageRefs(
         const candidateEntry = planned?.kind === 'candidate' ? planned : null;
         const candidate = candidateEntry?.resolution ?? null;
         // A non-pulling platform group names the installed child it runs; the
-        // scan must read that child, not the daemon's default one. Without a
-        // plan (installed mode, a digest pin, an unrenderable model) the scanner
-        // reads the platform of the local image itself.
+        // scan must read that child, not the daemon's default one. The scanner
+        // reads the local child when the daemon exposes the requested platform,
+        // and otherwise reads it from the registry by the image's own digest and
+        // fails rather than filing another child's findings under this one.
+        // Without a plan (installed mode, an unrenderable model) no child is
+        // named and the scanner reads the local image's own platform.
         const installedPlatform = planned?.kind === 'installed' ? planned.platform ?? null : null;
         const subject: 'installed' | 'candidate' = candidate || opts.pulledCandidate === true ? 'candidate' : 'installed';
         try {
@@ -1461,17 +1465,21 @@ async function evaluateImageRefs(
                         platformDigest: candidate.platformDigest,
                         platform: candidate.platform,
                     }
-                    : { subject }),
+                    : {
+                        subject,
+                        ...(installedPlatform ? { platform: installedPlatform } : {}),
+                    }),
                 reason: classification.reason,
             });
             const rule = failureRule(evidencePolicy, opts);
+            const failedPlatform = candidate?.platform ?? installedPlatform ?? null;
             evidenceApplications.push({
                 source: 'vulnerability_scan',
                 state: classification.state,
                 outcome: rule.outcome,
                 rule: ruleClause(rule.key, rule.outcome),
                 target: imageRef,
-                ...(candidate ? { platform: candidate.platform } : {}),
+                ...(failedPlatform ? { platform: failedPlatform } : {}),
             });
             // allow and warn both let the deploy through; warn additionally says
             // so out loud, which is the only thing distinguishing it from allow
@@ -1488,7 +1496,7 @@ async function evaluateImageRefs(
             violations.push(unavailableViolation(
                 imageRef,
                 `Pre-flight scan failed: ${message}`,
-                candidate?.platform ?? null,
+                failedPlatform,
             ));
             continue;
         }
@@ -1511,7 +1519,10 @@ async function evaluateImageRefs(
                 platform: candidate.platform,
                 databaseUpdatedAt: scan.vuln_db_updated_at ?? null,
             }
-            : { subject };
+            : {
+                subject,
+                ...(installedPlatform ? { platform: installedPlatform } : {}),
+            };
         if (candidate) {
             evaluatedCandidates.push({
                 ref: imageRef,
@@ -1575,7 +1586,11 @@ async function evaluateImageRefs(
                     // A ref shared by services with different overrides has one
                     // row per platform; the row carries its own variant so the
                     // dialog can pair it with the evidence for that variant.
-                    ...(candidate ? { platform: candidate.platform } : {}),
+                    ...(candidate
+                        ? { platform: candidate.platform }
+                        : installedPlatform
+                            ? { platform: installedPlatform }
+                            : {}),
                 };
                 violations.push(violation);
                 if (evaluated.unverified) unverifiedByViolation.set(violation, evaluated.unverified);
@@ -1614,7 +1629,11 @@ async function evaluateImageRefs(
                 // The scan completed; only evaluation failed, so the real scan
                 // id is kept (the other failure sites have no scan and use 0).
                 scanId: scan.id,
-                ...(candidate ? { platform: candidate.platform } : {}),
+                ...(candidate
+                    ? { platform: candidate.platform }
+                    : installedPlatform
+                        ? { platform: installedPlatform }
+                        : {}),
                 error: `Policy evaluation failed: ${message}`,
             });
         }
