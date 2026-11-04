@@ -18,14 +18,19 @@ import { ComposeService } from '../services/ComposeService';
  * the wrapper delegates unless this flag is set, and tests reset it in a
  * `finally`.
  */
-const envSourceFailure = vi.hoisted(() => ({ fail: false }));
+const envSourceFailure = vi.hoisted(() => ({
+  fail: false,
+  /** Rewrites the resolved sources, to stand in for a file whose existence cannot be checked. */
+  rewrite: null as null | ((sources: unknown) => unknown),
+}));
 vi.mock('../helpers/envFileResolution', async (importOriginal) => {
   const original = await importOriginal<typeof import('../helpers/envFileResolution')>();
   return {
     ...original,
     resolveStackEnvSources: async (...args: Parameters<typeof original.resolveStackEnvSources>) => {
       if (envSourceFailure.fail) throw new Error('env sources unreadable');
-      return original.resolveStackEnvSources(...args);
+      const sources = await original.resolveStackEnvSources(...args);
+      return (envSourceFailure.rewrite ? envSourceFailure.rewrite(sources) : sources) as typeof sources;
     },
   };
 });
@@ -753,6 +758,8 @@ describe('Compose Assurance contract persistence', () => {
   beforeEach(() => { writeStack(STACK); });
   afterEach(() => {
     envSourceFailure.fail = false;
+    envSourceFailure.rewrite = null;
+    db().setStackProjectEnvFiles(nodeId, STACK, []);
     fs.rmSync(path.join(process.env.COMPOSE_DIR as string, STACK), { recursive: true, force: true });
     db().replacePreflightRun(
       { id: 'cleanup', node_id: nodeId, stack_name: 'assurance-legacy', source_hash: null, rendered_hash: null, service_images: null, status: 'pass', highest_severity: null, created_at: 1, created_by: null },
@@ -1002,5 +1009,63 @@ describe('Compose Assurance contract persistence', () => {
     } finally {
       envSourceFailure.fail = false;
     }
+  });
+
+  describe('an env file that cannot be read', () => {
+    const stackDir = () => path.join(process.env.COMPOSE_DIR as string, STACK);
+    const UNSET = 'WARN The "PORT" variable is not set. Defaulting to a blank string.';
+    const expectPartialOnEnvContext = async () => {
+      stubDocker(cleanModel(), UNSET);
+      const report = await doctor().runPreflight(nodeId, STACK, 'tester');
+      expect(report.renderable).toBe(true);
+      expect(report.coverage.state).toBe('partial');
+      const envSkips = report.coverage.skipped.filter(entry => entry.missing.includes('env-context'));
+      expect(envSkips.map(entry => entry.ruleId)).toEqual(expect.arrayContaining(['env-unset', 'env-file-missing']));
+      // The same on a later read of the stored run, so every surface agrees.
+      expect(doctor().getLatest(nodeId, STACK).coverage).toEqual(report.coverage);
+      return report;
+    };
+
+    it('records the project .env being a directory as partial coverage', async () => {
+      fs.mkdirSync(path.join(stackDir(), '.env'));
+      await expectPartialOnEnvContext();
+    });
+
+    it('records a configured project env file being a directory as partial coverage', async () => {
+      fs.mkdirSync(path.join(stackDir(), 'prod.env'));
+      db().setStackProjectEnvFiles(nodeId, STACK, ['prod.env']);
+      await expectPartialOnEnvContext();
+    });
+
+    it('records a declared env_file being a directory as partial coverage', async () => {
+      writeStack(STACK, 'services:\n  web:\n    image: nginx:1.27\n    env_file: app.env\n');
+      fs.mkdirSync(path.join(stackDir(), 'app.env'));
+      await expectPartialOnEnvContext();
+    });
+
+    it('records a file whose existence cannot be checked as partial coverage', async () => {
+      envSourceFailure.rewrite = (sources) => {
+        const resolved = sources as { envFiles: { existence: string }[] };
+        return { ...resolved, envFiles: resolved.envFiles.map(file => ({ ...file, existence: 'unverifiable' })) };
+      };
+      await expectPartialOnEnvContext();
+    });
+
+    it('does not report the raw stderr name as an unset variable while the env context is missing', async () => {
+      fs.mkdirSync(path.join(stackDir(), '.env'));
+      const report = await expectPartialOnEnvContext();
+      expect(report.findings.map(finding => finding.ruleId)).not.toContain('env-unset');
+    });
+
+    it.each([
+      ['an absent project .env', () => undefined],
+      ['a readable project .env', () => fs.writeFileSync(path.join(stackDir(), '.env'), 'PORT=8080\n')],
+    ])('stays complete with %s', async (_label, arrange) => {
+      arrange();
+      stubDocker(cleanModel());
+      const report = await doctor().runPreflight(nodeId, STACK, 'tester');
+      expect(report.coverage.state).toBe('complete');
+      expect(report.coverage.skipped.filter(entry => entry.missing.includes('env-context'))).toEqual([]);
+    });
   });
 });

@@ -19,10 +19,10 @@ let authHeader: string;
 
 const STACK = 'preflightroute';
 
-function stub() {
+function stub(image = 'nginx:latest') {
   vi.spyOn(ComposeService, 'getInstance').mockReturnValue({
     renderConfig: vi.fn().mockResolvedValue({
-      rendered: JSON.stringify({ name: STACK, services: { web: { image: 'nginx:latest', ports: [{ target: 80, published: '8080', protocol: 'tcp' }] } }, networks: {}, volumes: {} }),
+      rendered: JSON.stringify({ name: STACK, services: { web: { image, ports: [{ target: 80, published: '8080', protocol: 'tcp' }] } }, networks: {}, volumes: {} }),
       stderr: '', code: 0, timedOut: false,
     }),
     composeVersion: vi.fn().mockResolvedValue('5.6.0'),
@@ -155,5 +155,83 @@ describe('preflight acknowledgement routes', () => {
       .send({ ruleId: 'healthcheck-inherited', service: 'web', expiryMode: 'forever' });
     expect(res.status).toBe(400);
     expect(res.body.error).toMatch(/notes cannot be acknowledged/i);
+  });
+});
+
+describe('preflight responses never expose a secret', () => {
+  const CREDENTIAL_IMAGE = 'user:p4ssw0rdXYZ@registry.example.com/app';
+  const NOTE = 'see postgres://bob:s3cretPASS@host/db and token=abcd1234efgh';
+  const LEAKED = ['p4ssw0rdXYZ', 's3cretPASS', 'abcd1234efgh'];
+  let stackDir: string;
+  const get = (url: string) => request(app).get(url).set('Authorization', authHeader);
+  const expectNoSecret = (body: unknown) => {
+    const text = JSON.stringify(body);
+    for (const secret of LEAKED) expect(text).not.toContain(secret);
+  };
+
+  beforeEach(() => {
+    stackDir = path.join(process.env.COMPOSE_DIR as string, STACK);
+    fs.mkdirSync(stackDir, { recursive: true });
+    fs.writeFileSync(path.join(stackDir, 'compose.yaml'), `services:\n  web:\n    image: ${CREDENTIAL_IMAGE}\n`);
+    stub(CREDENTIAL_IMAGE);
+  });
+  afterEach(() => {
+    vi.restoreAllMocks();
+    fs.rmSync(stackDir, { recursive: true, force: true });
+  });
+
+  it('returns the same redacted report from a run as from a later read', async () => {
+    const run = await request(app).post(`/api/stacks/${STACK}/preflight/run`).set('Authorization', authHeader);
+    expect(run.status).toBe(200);
+    const imageFinding = run.body.findings.find((f: { ruleId: string }) => f.ruleId === 'image-latest');
+    expect(imageFinding.message).toContain('[redacted]@registry.example.com/app');
+    expectNoSecret(run.body);
+
+    const read = await get(`/api/stacks/${STACK}/preflight`);
+    expectNoSecret(read.body);
+    expect(run.body.findings).toEqual(read.body.findings);
+  });
+
+  it('stores the redacted copy, not the credential', async () => {
+    await request(app).post(`/api/stacks/${STACK}/preflight/run`).set('Authorization', authHeader);
+    const { DatabaseService } = await import('../services/DatabaseService');
+    const rows = DatabaseService.getInstance().getDb()
+      .prepare('SELECT title, message, source_path, remediation, subject_key FROM preflight_findings').all();
+    expect(rows.length).toBeGreaterThan(0);
+    expectNoSecret(rows);
+  });
+
+  it('redacts the acknowledgement reason on the run, the read, the list, and the create response', async () => {
+    const run = await request(app).post(`/api/stacks/${STACK}/preflight/run`).set('Authorization', authHeader);
+    const target = run.body.findings.find((f: { ruleId: string }) => f.ruleId === 'image-latest');
+    const created = await request(app)
+      .post(`/api/stacks/${STACK}/preflight/acknowledgements`)
+      .set('Authorization', authHeader)
+      .send({ ruleId: target.ruleId, service: target.service, reason: NOTE, expiryMode: 'forever' });
+    expect(created.status).toBe(201);
+    expectNoSecret(created.body);
+    expect(created.body.reason).toContain('[redacted]');
+
+    const read = await get(`/api/stacks/${STACK}/preflight`);
+    const list = await get(`/api/stacks/${STACK}/preflight/acknowledgements`);
+    const rerun = await request(app).post(`/api/stacks/${STACK}/preflight/run`).set('Authorization', authHeader);
+    for (const body of [read.body, list.body, rerun.body]) expectNoSecret(body);
+    const decided = (report: { findings: { ruleId: string; acknowledgementReason?: string }[] }) =>
+      report.findings.find(f => f.ruleId === 'image-latest')?.acknowledgementReason;
+    expect(decided(read.body)).toContain('[redacted]');
+    expect(decided(rerun.body)).toBe(decided(read.body));
+    expect(list.body[0].reason).toBe(created.body.reason);
+  });
+
+  it('keeps an ordinary note readable', async () => {
+    const run = await request(app).post(`/api/stacks/${STACK}/preflight/run`).set('Authorization', authHeader);
+    const target = run.body.findings.find((f: { ruleId: string }) => f.ruleId === 'image-latest');
+    await request(app)
+      .post(`/api/stacks/${STACK}/preflight/acknowledgements`)
+      .set('Authorization', authHeader)
+      .send({ ruleId: target.ruleId, service: target.service, reason: 'pinned by the platform team', expiryMode: 'forever' });
+    const read = await get(`/api/stacks/${STACK}/preflight`);
+    expect(read.body.findings.find((f: { ruleId: string }) => f.ruleId === 'image-latest').acknowledgementReason)
+      .toBe('pinned by the platform team');
   });
 });

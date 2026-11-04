@@ -87,7 +87,7 @@ import { isPathWithinBase, isValidGitSourcePath, isValidStackName, isValidServic
 import { normalizeBulkPaths, destWithinAnySource } from '../utils/bulkPaths';
 import { getErrorMessage } from '../utils/errors';
 import { isDebugEnabled } from '../utils/debug';
-import { errorMessageForLog, sanitizeForLog } from '../utils/safeLog';
+import { errorMessageForLog, redactSensitiveText, sanitizeForLog } from '../utils/safeLog';
 import { logDebugTiming } from '../utils/requestTiming';
 import { sendGitSourceError } from '../utils/gitSourceHttp';
 import { allowedPolicyEvidence, buildPolicyGateOptions, type AllowedPolicyEvidence, policyBlockPayload, policyEvidenceFor, runPolicyGate, triggerPostDeployScan, describePolicyBlock, isPostDeployScanRunning } from '../helpers/policyGate';
@@ -1946,6 +1946,12 @@ const PREFLIGHT_ACK_EXPIRY_MODES = new Set<PreflightAckExpiryMode>([
 ]);
 const PREFLIGHT_RULE_ID_SET: ReadonlySet<string> = new Set(RULE_IDS);
 
+/** An acknowledgement as the API returns it. The reason is operator-entered free
+ *  text, so it is redacted on every read, the same as on the Doctor report. */
+function acknowledgementForWire<T extends { reason: string }>(ack: T): T {
+  return { ...ack, reason: redactSensitiveText(ack.reason) };
+}
+
 stacksRouter.get('/:stackName/preflight/acknowledgements', async (req: Request, res: Response) => {
   const stackName = req.params.stackName as string;
   if (!requirePermission(req, res, 'stack:read', 'stack', stackName)) return;
@@ -1958,7 +1964,7 @@ stacksRouter.get('/:stackName/preflight/acknowledgements', async (req: Request, 
     };
     const now = Date.now();
     const rows = DatabaseService.getInstance().getPreflightAcknowledgements(req.nodeId, stackName).map((ack) => ({
-      ...ack,
+      ...acknowledgementForWire(ack),
       active: isPreflightAckActive(ack, ctx, now),
     }));
     res.json(rows);
@@ -2052,7 +2058,7 @@ stacksRouter.post('/:stackName/preflight/acknowledgements', async (req: Request,
     });
     // Networking lists Doctor findings under "dismissed" once acknowledged; drop its memo so that shows now.
     invalidateNodeNetworkingAggregate(req.nodeId);
-    res.status(201).json(ack);
+    res.status(201).json(acknowledgementForWire(ack));
   } catch (error) {
     console.error('[Stacks] Failed to create preflight acknowledgement for %s:', sanitizeForLog(stackName),
       sanitizeForLog(inspect(error, { depth: 4 })));

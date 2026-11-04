@@ -243,7 +243,14 @@ export function subjectForHit(rule: AssuranceRule, stackName: string, hit: RuleH
   return { kind: rule.subject, key: hit.sourcePath ?? hit.service ?? stackName };
 }
 
-/** Normalize one runner hit into the contract. */
+/**
+ * Normalize one runner hit into the contract. Every free-text field is
+ * redacted here, so the copy a run returns, the copy it stores, and the copy a
+ * later read returns are one and the same: a rule that echoes an image
+ * reference or a path cannot put a URL credential on the wire, whichever
+ * endpoint carries it. The subject is derived from the redacted hit, so the
+ * identity a run computes is the identity a read of its stored row computes.
+ */
 export function normalizeDoctorHit(
   nodeId: number,
   stackName: string,
@@ -255,7 +262,9 @@ export function normalizeDoctorHit(
     stack: stackName,
     ...(hit.service !== undefined ? { service: hit.service } : {}),
   };
-  const subject = subjectForHit(rule, stackName, hit);
+  const sourcePath = hit.sourcePath === undefined ? undefined : redactSensitiveText(hit.sourcePath);
+  const hitSubject = subjectForHit(rule, stackName, { ...hit, sourcePath });
+  const subject: AssuranceSubject = { kind: hitSubject.kind, key: redactSensitiveText(hitSubject.key) };
   return {
     ruleId: rule.id,
     ruleVersion: rule.version,
@@ -269,11 +278,11 @@ export function normalizeDoctorHit(
       subjectKey: findingSubjectKey(scope, subject),
       basis: 'structured',
     },
-    ...(hit.sourcePath !== undefined ? { location: { path: hit.sourcePath } } : {}),
+    ...(sourcePath !== undefined ? { location: { path: sourcePath } } : {}),
     evidence: rule.evidenceLayers.map(layer => ({ layer, provider: 'compose-doctor' as const })),
-    title: hit.title,
-    message: hit.message,
-    ...(hit.remediation !== undefined ? { remediation: hit.remediation } : {}),
+    title: redactSensitiveText(hit.title),
+    message: redactSensitiveText(hit.message),
+    ...(hit.remediation !== undefined ? { remediation: redactSensitiveText(hit.remediation) } : {}),
     confidence: rule.defaultConfidence,
     completeness: 'complete',
   };
@@ -283,7 +292,9 @@ function storedEvidenceLayers(rule: AssuranceRule | undefined): readonly Evidenc
   return rule?.evidenceLayers ?? ['authored'];
 }
 
-/** Attach the read-time acknowledgement decision to a normalized finding. */
+/** Attach the read-time acknowledgement decision to a normalized finding. The
+ *  reason is operator-entered free text, so it is redacted here: every wire
+ *  field built from the decision carries the redacted copy. */
 export function withDecision(finding: AssuranceFinding, projected: PreflightFinding): AssuranceFinding {
   if (projected.acknowledged !== true || typeof projected.acknowledgementId !== 'number') return finding;
   return {
@@ -291,7 +302,7 @@ export function withDecision(finding: AssuranceFinding, projected: PreflightFind
     decision: {
       kind: 'acknowledged',
       id: projected.acknowledgementId,
-      reason: projected.acknowledgementReason ?? '',
+      reason: redactSensitiveText(projected.acknowledgementReason ?? ''),
       expiry: {
         mode: projected.acknowledgementExpiry ?? 'forever',
         ...(projected.acknowledgementExpiresAt !== undefined
@@ -324,7 +335,7 @@ export function normalizeStoredFinding(row: PreflightFindingRow, nodeId: number,
   const sourcePath = row.source_path === null ? undefined : redactSensitiveText(row.source_path);
   const service = row.service ?? undefined;
   const subjectKind = storedSubjectKind(row.subject_kind) ?? rule?.subject ?? 'stack';
-  const subjectKey = row.subject_key ?? sourcePath ?? service ?? stackName;
+  const subjectKey = row.subject_key === null ? (sourcePath ?? service ?? stackName) : redactSensitiveText(row.subject_key);
   const subject: AssuranceSubject = { kind: subjectKind, key: subjectKey };
   const scope: AssuranceScope = {
     nodeId,

@@ -17,6 +17,17 @@ describe('redactSensitiveText', () => {
     expect(text).not.toContain('hunter2');
   });
 
+  it.each([
+    ['postgres', 'see postgres://bob:s3cretPASS@host/db', 'postgres://[redacted]@host/db'],
+    ['redis', 'redis://default:hunter2@cache:6379/0 refused', 'redis://[redacted]@cache:6379/0 refused'],
+    ['amqp+tls', 'amqps://u:p4ss@mq.example.invalid/vhost', 'amqps://[redacted]@mq.example.invalid/vhost'],
+    ['http', 'http://u:p4ss@example.invalid/x', 'http://[redacted]@example.invalid/x'],
+  ])('redacts a %s URL credential', (_scheme, input, expected) => {
+    const text = redactSensitiveText(input);
+    expect(text).toContain(expected);
+    expect(text).not.toMatch(/s3cretPASS|hunter2|p4ss/);
+  });
+
   it('strips Linux-style homedir usernames while keeping the /home/ prefix', () => {
     const text = redactSensitiveText('compose error reading /home/user-linux/docker/compose.yaml');
 

@@ -32,7 +32,7 @@ import { isPathWithinBase } from '../utils/validation';
 import { getErrorMessage } from '../utils/errors';
 import { redactSensitiveText, sanitizeForLog } from '../utils/safeLog';
 import { parseUnsetEnvVars, parseMissingRequiredVars, readEnvFileKeys } from '../helpers/envVarParse';
-import { resolveStackEnvSources } from '../helpers/envFileResolution';
+import { resolveStackEnvSources, type StackEnvSources } from '../helpers/envFileResolution';
 import { isSelfStack } from '../helpers/selfStackGuard';
 import { classifyUnsetEnvVars, type LiteralDollarWarning } from '../helpers/unsetEnvClassification';
 import { listNodeContainers } from '../helpers/dockerEndpointGuard';
@@ -224,7 +224,7 @@ export class ComposeDoctorService {
       ranAt: Date.now(),
       ranBy,
       renderable: ctx.renderable,
-      renderError: ctx.renderError,
+      renderError: ctx.renderError === null ? null : redactSensitiveText(ctx.renderError),
       status,
       highestSeverity,
       sourceHash: hashes.sourceHash,
@@ -311,19 +311,28 @@ export class ComposeDoctorService {
     let literalDollarWarnings: LiteralDollarWarning[] = [];
     let missingEnvFiles: MissingEnvFile[] = [];
 
-    let envSources: Awaited<ReturnType<typeof resolveStackEnvSources>> | null = null;
+    // The env context is the resolved env sources plus the key names of every
+    // env file that is present. It is null when resolution failed or when a file
+    // Compose would read cannot be read, so the env rules are reported as
+    // skipped (partial coverage) instead of quietly returning nothing.
+    let envContext: { sources: StackEnvSources; fileKeys: string[] } | null = null;
     try {
-      envSources = await resolveStackEnvSources(nodeId, stackName);
-      missingEnvFiles = envSources.envFiles
+      const sources = await resolveStackEnvSources(nodeId, stackName);
+      missingEnvFiles = sources.envFiles
         .filter(f => f.isInjectionSource && f.required && f.existence === 'missing')
         .map(f => ({ rawPath: f.rawPaths[0], services: f.declaringServices }));
+      const fileKeys = await this.collectEnvFileKeys(sources, baseDir);
+      if (fileKeys === null) {
+        console.warn('[ComposeDoctor] An env file for %s cannot be read; env checks skipped',
+          sanitizeForLog(stackName));
+      } else {
+        envContext = { sources, fileKeys };
+      }
     } catch (err) {
       console.warn('[ComposeDoctor] env-file resolution failed for %s:',
         sanitizeForLog(stackName), sanitizeForLog(getErrorMessage(err, 'unknown')));
     }
-    // A resolution failure is recorded as missing evidence, so the env rules are
-    // reported as skipped instead of quietly returning nothing.
-    const envContextAvailable = envSources !== null;
+    const envContextAvailable = envContext !== null;
 
     try {
       const result = await ComposeService.getInstance(nodeId).renderConfig(stackName);
@@ -332,14 +341,8 @@ export class ComposeDoctorService {
         // model parsing, so capture them before attempting the parse, so a parse
         // failure does not also suppress the env-unset findings.
         const rawUnset = parseUnsetEnvVars(result.stderr);
-        if (envSources) {
-          const envFileKeys: string[] = [];
-          for (const file of envSources.envFiles) {
-            if (!file.resolvedPath || file.existence !== 'present') continue;
-            const { keys, unverifiable } = await readEnvFileKeys(file.resolvedPath, baseDir);
-            if (!unverifiable) envFileKeys.push(...keys);
-          }
-          const classified = classifyUnsetEnvVars(rawUnset, envSources, envFileKeys);
+        if (envContext) {
+          const classified = classifyUnsetEnvVars(rawUnset, envContext.sources, envContext.fileKeys);
           unsetEnvVars = classified.intentional;
           literalDollarWarnings = classified.literalDollar;
         } else {
@@ -414,6 +417,28 @@ export class ComposeDoctorService {
       healthchecks,
       composeVersionSkew,
     };
+  }
+
+  /**
+   * The key names of every env file Compose would read, or null when one of
+   * them cannot be read: a file whose existence could not be checked, or one
+   * that is present but cannot be opened as a file (a directory, a permission
+   * error, a configured project file outside the compose directory). A file that
+   * is simply absent is not a failure; Compose treats it as empty, and
+   * `env-file-missing` reports it when it is required. An `env_file` path that is
+   * interpolated or leaves the stack directory has no resolved path and is not
+   * read.
+   */
+  private async collectEnvFileKeys(sources: StackEnvSources, baseDir: string): Promise<string[] | null> {
+    const keys: string[] = [];
+    for (const file of sources.envFiles) {
+      if (!file.resolvedPath || file.existence === 'missing') continue;
+      if (file.existence === 'unverifiable') return null;
+      const read = await readEnvFileKeys(file.resolvedPath, baseDir);
+      if (read.unverifiable) return null;
+      keys.push(...read.keys);
+    }
+    return keys;
   }
 
   /**
