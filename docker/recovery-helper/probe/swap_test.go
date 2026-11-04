@@ -150,6 +150,60 @@ func TestPrepareCommitAndCleanup(t *testing.T) {
 // restored. Removing the work directory moves the root's mtime, so cleanup has to
 // set it again, and a repeated cleanup must not, because the application may have
 // written to the root by then.
+// After the commit the workloads run: a new root entry, or a restored entry they
+// renamed or removed, is their progress. The committed journal still proves the
+// swap, so status stays `swapped` and cleanup removes the originals and leaves
+// the workloads' entries alone.
+func TestACommittedSwapStaysCommittedWhenAWorkloadChangesTheRoot(t *testing.T) {
+	request := setupVolume(t,
+		map[string]string{"db.bin": "original", "conf/keep.txt": "original-config"},
+		map[string]string{"db.bin": "restored", "new.txt": "restored-new"},
+	)
+	if _, err := swapPrepare(request); err != nil {
+		t.Fatalf("prepare: %v", err)
+	}
+	if _, err := swapCommit(request); err != nil {
+		t.Fatalf("commit: %v", err)
+	}
+	writeFile(t, filepath.Join(request.Root, "postmaster.pid"), "123")
+	if err := os.Remove(filepath.Join(request.Root, "new.txt")); err != nil {
+		t.Fatal(err)
+	}
+	if report, err := swapStatus(request); err != nil || report.Status != statusSwapped {
+		t.Fatalf("status = %+v, %v; want swapped", report, err)
+	}
+	if report, err := swapCommit(request); err != nil || report.Status != statusSwapped {
+		t.Fatalf("commit again = %+v, %v; want swapped", report, err)
+	}
+	if report, err := swapCleanup(request); err != nil || report.Status != statusCleaned {
+		t.Fatalf("cleanup = %+v, %v", report, err)
+	}
+	if _, err := os.Stat(filepath.Join(request.Root, workDirPrefix+testIntent)); !os.IsNotExist(err) {
+		t.Fatalf("work directory survived: %v", err)
+	}
+	if got := readFile(t, filepath.Join(request.Root, "postmaster.pid")); got != "123" {
+		t.Fatalf("the workload's entry = %q", got)
+	}
+	if got := readFile(t, filepath.Join(request.Root, "db.bin")); got != "restored" {
+		t.Fatalf("db.bin = %q", got)
+	}
+}
+
+// Only the commit marker proves the swap: the same changes before it are foreign.
+func TestTheSameChangesBeforeTheCommitStayInconsistent(t *testing.T) {
+	request := setupVolume(t,
+		map[string]string{"db.bin": "original"},
+		map[string]string{"new.txt": "restored"},
+	)
+	if _, err := swapPrepare(request); err != nil {
+		t.Fatal(err)
+	}
+	writeFile(t, filepath.Join(request.Root, "postmaster.pid"), "123")
+	if report, err := swapStatus(request); err != nil || report.Status != statusInconsistent {
+		t.Fatalf("status = %+v, %v; want inconsistent", report, err)
+	}
+}
+
 func TestCleanupKeepsTheCapturedRootMtime(t *testing.T) {
 	request := setupVolume(t,
 		map[string]string{"db.bin": "original"},

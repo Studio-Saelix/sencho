@@ -1379,7 +1379,7 @@ export async function reconcileOverwriteIntentsAtStartup(
  * rollback would take their writes back out of the volume and apply the old root
  * metadata over theirs, and a commit would write the new root metadata over theirs.
  * What the journal already proves committed is still finished (the hidden work
- * directory, which no workload depends on, is removed), a restore parked before
+ * directory, which no workload depends on, is removed), a restore stopped before
  * the swap whose journal is gone is settled without a data step, and everything
  * else answers `unknown` without moving data or applying metadata.
  */
@@ -1415,7 +1415,7 @@ export async function reconcileOverwriteIntent(
   }
 
   if (FENCED_PHASES.includes(intent.phase)) {
-    // The workloads are stopped and nothing was renamed yet.
+    // Nothing was renamed yet.
     if (workloadsMayRunNow(deps, intent)) {
       // A rollback that released its fence and did not settle (its staging volume was
       // still in use, or the process died): the workloads may be running, so the
@@ -1429,12 +1429,16 @@ export async function reconcileOverwriteIntent(
         intentId: intent.id,
         action: 'status',
       });
-      if (read.report?.status !== 'absent') {
+      // A helper that cannot answer proves nothing either way: the intent is left as it
+      // is for the next pass, and only a journal that is really there parks it.
+      if (!read.report) return 'unknown';
+      if (read.report.status !== 'absent') {
         refuseUnderWorkloads(intent, 'roll back');
         markUnknown(deps, intent, 'identity_unknown', now);
         return 'unknown';
       }
     } else {
+      // The workloads are stopped.
       const rollback = await runClosingSwapStep({
         runner: deps.runner(),
         operationId: `overwrite-reconcile-${intent.id}`,
@@ -1752,7 +1756,12 @@ export async function resolveOverwriteIntent(
     releaseHolds(deps, intent.id);
     return { outcome: 'committed' };
   }
-  if (intent.phase !== 'completion_unknown') {
+  if (intent.phase === 'swapped') {
+    // The phase was reached on the journal's commit marker, and an answer that is
+    // not `swapped` (a helper that could not answer, a missing image) does not undo
+    // it. It keeps its phase and class, so it still owns the volume and the
+    // originals it owes are removed by the next `retry` or start.
+  } else if (intent.phase !== 'completion_unknown') {
     deps.intents.advance(intent.id, 'completion_unknown', { outcomeClass: intent.outcomeClass ?? null });
   } else {
     deps.intents.update(intent.id, { outcomeClass: intent.outcomeClass ?? undefined });

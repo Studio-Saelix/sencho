@@ -358,6 +358,15 @@ func syncDir(path string) error {
  * `inconsistent`, which the caller reports and never resumes from.
  */
 func computeStatus(request swapRequest, plan swapPlan) (string, error) {
+	// The journal is the commit point: once commit has applied the root metadata
+	// and written `swapped`, the swap is complete. From then on the workloads may
+	// run, so a new root entry, or an entry of the restored set they renamed or
+	// removed, is their progress and not evidence against the commit; reading it as
+	// `inconsistent` would leave the originals in the volume with no way to remove
+	// them. The originals waiting for (or half through) their clean-up are progress too.
+	if plan.Status == statusSwapped {
+		return statusSwapped, nil
+	}
 	_, incomingRoot, originalDir, _ := paths(request)
 	originalsMoved := 0
 	for _, name := range plan.Originals {
@@ -366,12 +375,6 @@ func computeStatus(request swapRequest, plan swapPlan) (string, error) {
 			originalsMoved++
 		case exists(filepath.Join(request.Root, name)):
 			// Not moved yet.
-		case plan.Status == statusSwapped:
-			// The commit is recorded, so the originals are only waiting to be
-			// deleted, and a clean-up that was interrupted has already deleted
-			// some. That is progress, not a foreign change: answering
-			// `inconsistent` would park a committed restore whose clean-up only
-			// needs repeating.
 		default:
 			return statusInconsistent, nil
 		}
@@ -410,12 +413,6 @@ func computeStatus(request swapRequest, plan swapPlan) (string, error) {
 		}
 	}
 
-	// The journal is the commit point: once commit has applied the root metadata
-	// and written `swapped`, the swap is complete even when the volume held no
-	// entries at all.
-	if plan.Status == statusSwapped {
-		return statusSwapped, nil
-	}
 	switch {
 	case originalsMoved == 0 && incomingMoved == 0:
 		return statusPlanned, nil
