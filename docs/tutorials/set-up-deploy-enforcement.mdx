@@ -49,7 +49,7 @@ This tutorial covers one block-on-deploy policy scoped to a single stack pattern
     Instead of a running container, a **Deploy blocked by security policy** dialog appears, naming the policy and every condition it blocks on. The violation row shows `nginx:1.14` with its finding counts and a **Severity**, **KEV**, and **Fixable** badge, each matching a condition the image tripped.
 
     <Frame>
-      <img src="/images/tutorials/set-up-deploy-enforcement/deploy-blocked-dialog.png" alt="Deploy blocked by security policy dialog for prod-web, naming policy Production block on critical, with a violation row for nginx:1.14 showing 31 CRITICAL, 82 HIGH, 1 KEV, 77 FIXABLE, Severity/KEV/Fixable badges, a CRITICAL chip, and Close and Deploy anyway buttons." />
+      <img src="/images/tutorials/set-up-deploy-enforcement/deploy-blocked-dialog.png" alt="Deploy blocked by security policy dialog for prod-web, naming policy Production block on critical, with a violation row for nginx:1.14 showing a New image digest and platform line, 31 CRITICAL, 82 HIGH, 1 KEV, 77 FIXABLE, Severity/KEV/Fixable badges, a CRITICAL chip, and Close and Deploy anyway buttons." />
     </Frame>
 
     This is a hard gate, not an advisory: the stack has no running containers and stays that way until the image clears the policy or an admin overrides it.

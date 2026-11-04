@@ -111,7 +111,7 @@ Changing any of these takes effect on the next deploy. The gate is the same for 
 This is a hard gate: the deploy is rejected and cannot proceed without an admin bypass. It is a different dialog from the optional [pre-deploy scan advisory](/features/vulnerability-scanning#pre-deploy-scan-advisory), which only shows scan results for review on a manual deploy and never blocks.
 
 <Frame>
-  <img src="/images/deploy-enforcement/block-dialog.png" alt="Deploy blocked dialog with kicker PROFILARR · SCAN POLICY · BLOCKED, title 'Deploy blocked by security policy', a description naming the policy and block conditions, a violation row for santiagosayshey/profilarr:latest with 20 CRITICAL · 150 HIGH · 73 FIXABLE counts and Severity and Fixable reason badges and a CRITICAL severity chip, and Close and Deploy anyway buttons." />
+  <img src="/images/deploy-enforcement/block-dialog.png" alt="Deploy blocked dialog with kicker PROFILARR · SCAN POLICY · BLOCKED, title 'Deploy blocked by security policy', a description naming the policy and block conditions, a violation row for santiagosayshey/profilarr:latest with a New image digest and platform line, 24 CRITICAL · 602 HIGH · 2 KEV · 543 FIXABLE counts and Severity, KEV and Fixable reason badges and a CRITICAL severity chip, and Close and Deploy anyway buttons." />
 </Frame>
 
 The dialog is the same for an update, a single-service update and a rollback that the gate blocks; it names the operation that was blocked. The title reads **Update blocked by security policy** or **Rollback blocked by security policy**, the explanations say "update" or "rollback", and the bypass button reads **Update anyway** or **Roll back anyway**. This page describes the deploy wording.
