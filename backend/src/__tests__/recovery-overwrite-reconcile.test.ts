@@ -600,7 +600,7 @@ describe('the operation of a reconciled overwrite', () => {
     expect(lock(seeded.storageKey)).toBeNull();
   });
 
-  it('refuses another restore with lock_held while the unproven fence is held, and with lock_stale once it is released', async () => {
+  it('keeps the unproven restore\'s fence live until it is released, and its stale lock then refuses another restore', async () => {
     const { seeded, fake } = await seed({ phase: 'swapping', createdAt: new Date().toISOString(), fenced: true });
     await overwrite.reconcileOverwriteIntentsAtStartup(deps(fake, scriptedHelper({
       swapAnswers: [{ action: 'status', exitCode: 0, status: 'inconsistent' }],
@@ -610,7 +610,7 @@ describe('the operation of a reconciled overwrite', () => {
     recoveryDbModule.recoveryDb().prepare(`INSERT INTO recovery_operations (id, idempotency_key, kind, storage_id, point_id, actor, transport, state, process_epoch, created_at, updated_at)
       SELECT ?, ?, 'restore', storage_id, point_id, 'admin', 'local', 'queued', 'new', 3, 3 FROM recovery_operations WHERE id = ?`)
       .run(second, randomUUID(), seeded.operationId);
-    // Admission answers `lock_held` for a volume with a live fence, before it asks for the lock.
+    // Admission answers `lock_held` for a volume with a live fence (pinned in the admission tests), before it asks for the lock.
     expect(store.liveIntentForVolume(VOLUME)).toBeTruthy();
 
     await overwrite.resolveOverwriteIntent(deps(fake, scriptedHelper({ swapAnswers: [{ action: 'status', exitCode: 1 }] })), {
@@ -683,6 +683,18 @@ describe('the operation of a reconciled overwrite', () => {
         { action: 'status', exitCode: 0, status: 'absent' },
       ] })), seeded.intentId);
       expect(outcome).toBe('rolled_back');
+      expect(intents.RestoreIntentStore.getInstance().get(seeded.intentId)).toMatchObject({ phase: 'rolled_back', fenceState: 'released' });
+    });
+
+    it('commits a release_fence whose clean-up failed after the removal', async () => {
+      const { seeded, fake } = await seed({ phase: 'swapped', createdAt: new Date().toISOString(), fenced: true });
+      const result = await overwrite.resolveOverwriteIntent(deps(fake, scriptedHelper({ swapAnswers: [
+        { action: 'status', exitCode: 0, status: 'swapped', once: true },
+        { action: 'cleanup', exitCode: 1, stderr: 'sync failed' },
+        { action: 'status', exitCode: 0, status: 'absent' },
+      ] })), { intentId: seeded.intentId, action: 'release_fence' });
+      expect(result.outcome).toBe('committed');
+      expect(intents.RestoreIntentStore.getInstance().get(seeded.intentId)?.phase).toBe('committed');
     });
 
     it('keeps the failure when the journal is still there', async () => {

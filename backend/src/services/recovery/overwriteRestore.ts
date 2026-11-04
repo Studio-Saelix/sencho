@@ -1053,7 +1053,7 @@ async function swapAndCleanup(ctx: OverwriteRunContext, state: PipelineState): P
 
   // The originals are deleted before any workload restarts: some engines treat
   // an unknown directory in their data root as data.
-  const cleaned = await runSwapStep({
+  const cleaned = await runClosingSwapStep({
     runner: deps.runner(),
     operationId: ctx.operationId,
     volumeName,
@@ -1155,7 +1155,8 @@ function markUnknown(
  * the journal gone nothing could ever prove the volume again: an intent parked
  * `completion_unknown` would read an absent journal as unproven on every retry.
  * An absent journal after a failed step is that step having finished, so it is
- * taken as done. Any other answer keeps the failure.
+ * taken as done and the answer is the status read, not the failed run's. Any
+ * other answer keeps the failure.
  */
 async function runClosingSwapStep(
   input: Parameters<typeof runSwapStep>[0] & { action: 'rollback' | 'cleanup' },
@@ -1163,7 +1164,14 @@ async function runClosingSwapStep(
   const result = await runSwapStep(input);
   if (result.ok) return result;
   const after = await runSwapStep({ ...input, action: 'status' });
-  if (after.ok && after.report?.status === 'absent') return { ...result, ok: true };
+  if (after.ok && after.report?.status === 'absent') {
+    console.warn(
+      '[Recovery] Swap helper %s for %s reported a failure after it removed the work directory; taking it as done.',
+      input.action,
+      sanitizeForLog(input.intentId),
+    );
+    return after;
+  }
   return result;
 }
 
@@ -1658,7 +1666,7 @@ export async function resolveOverwriteIntent(
     // the fence still stands, but the intent stays `swapped` with the class set,
     // so the next boot or a `retry` finishes the clean-up and the volume stays
     // reserved until then.
-    const cleaned = await runSwapStep({
+    const cleaned = await runClosingSwapStep({
       runner: deps.runner(),
       operationId: `overwrite-resolve-${intent.id}`,
       volumeName: intent.targetVolume,

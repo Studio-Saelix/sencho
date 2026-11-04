@@ -148,9 +148,10 @@ export interface HelperRunRecord {
 
 /**
  * A helper that answers the generation probe and every swap action from a
- * scripted table. `swapAnswers` is keyed by action (`prepare`, `commit`, ...)
- * and is consumed in order, so a case can fail the second `status` and the
- * third succeed.
+ * scripted table. `swapAnswers` is keyed by action (`prepare`, `commit`, ...).
+ * The first entry for an action answers every call to it, unless it is marked
+ * `once`: that entry is removed after one call and the next entry for the action
+ * answers. An action with no entry left fails with exit 1 and `unscripted`.
  */
 export function scriptedHelper(input: {
   swapAnswers?: Array<{
@@ -162,7 +163,7 @@ export function scriptedHelper(input: {
     aborted?: boolean;
     /** A raw first stdout line, such as the probe's `{"error": ...}` refusal. */
     stdoutLine?: string;
-    /** Answer one call, then fall through to the next answer for the action. */
+    /** Answer one call, then fall through to the next entry for the action, or to the unscripted failure. */
     once?: boolean;
   }>;
   dev?: number;

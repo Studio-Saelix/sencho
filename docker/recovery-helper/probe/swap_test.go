@@ -324,10 +324,20 @@ func TestRollbackSucceedsWhenTheRootMtimeCannotBeSet(t *testing.T) {
 	moveBudgetForTests = -1
 	real := setTimes
 	defer func() { setTimes = real }()
-	setTimes = func(string, time.Time, time.Time) error { return errors.New("simulated failure") }
+	calls := 0
+	setTimes = func(name string, _, _ time.Time) error {
+		calls++
+		if name != request.Root {
+			t.Fatalf("setTimes(%q), want the volume root", name)
+		}
+		return errors.New("simulated failure")
+	}
 	report, err := swapRollback(request)
 	if err != nil || report.Status != statusRolledBack {
 		t.Fatalf("rollback = %+v, %v; want rolled_back", report, err)
+	}
+	if calls != 1 {
+		t.Fatalf("setTimes called %d times, want once", calls)
 	}
 	if _, err := os.Stat(filepath.Join(request.Root, workDirPrefix+testIntent)); !os.IsNotExist(err) {
 		t.Fatalf("work directory survived: %v", err)

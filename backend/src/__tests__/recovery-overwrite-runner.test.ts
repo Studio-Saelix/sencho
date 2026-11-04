@@ -344,6 +344,25 @@ describe('a staged overwrite that fails before anything live moves', () => {
 });
 
 describe('a staged overwrite that fails after the commit', () => {
+  it('ends succeeded when the clean-up failed after it had removed the work directory', async () => {
+    const member = container({ Id: 'c1', State: 'running', Mounts: [{ Type: 'volume', Name: VOLUME }] });
+    const fake = fakeDocker({ volumes: [{ name: VOLUME }], containers: [member] });
+    const seeded = seed({ createdAt: fake.volumes.get(VOLUME)?.createdAt ?? '', members: [member] });
+    const helper = scriptedHelper({
+      swapAnswers: [
+        { action: 'prepare', exitCode: 0, status: 'planned' },
+        { action: 'commit', exitCode: 0, status: 'swapped' },
+        { action: 'status', exitCode: 0, status: 'swapped', once: true },
+        { action: 'cleanup', exitCode: 1, stderr: 'sync failed' },
+        { action: 'status', exitCode: 0, status: 'absent' },
+      ],
+    });
+    const { outcomes } = await run({ fake, helper, engine: scriptedEngine(), seeded });
+
+    expect(outcomes).toEqual([{ state: 'succeeded' }]);
+    expect(intents.RestoreIntentStore.getInstance().get(seeded.intentId)?.phase).toBe('committed');
+  });
+
   it('reports cleanup_failed, keeps the fence held and starts nothing', async () => {
     const member = container({ Id: 'c1', State: 'running', Mounts: [{ Type: 'volume', Name: VOLUME }] });
     const fake = fakeDocker({ volumes: [{ name: VOLUME }], containers: [member] });
