@@ -341,15 +341,16 @@ export function evaluatedCandidateVerifier(
 /**
  * The pull boundary a plain `up` deploy needs: the services and bare refs to
  * pull first and the verifier to run on what landed. Undefined when the gate
- * evaluated no candidate and no interval policy needs a no-pull guard, so a
- * non-pulling deploy keeps its ordinary `up`.
+ * evaluated no candidate and no no-pull guard is needed, so a non-pulling deploy
+ * keeps its ordinary `up`. A no-pull guard without candidates covers a
+ * not-yet-due interval policy and a model that would not render in compose mode.
  */
 export interface DeployCandidateVerification {
   pullServices: string[];
   /**
-   * Candidate refs no Compose service declares, such as a pre-start hook image
-   * or a generated image the model could not attribute. They are pulled by ref
-   * so the boundary never refreshes an unrelated service.
+   * Candidate refs no Compose service declares, such as an image a pre-start
+   * hook references. They are pulled by ref so the boundary never refreshes an
+   * unrelated service.
    */
   pullRefs: string[];
   /** Absent when the boundary exists only to keep `up` from fetching. */

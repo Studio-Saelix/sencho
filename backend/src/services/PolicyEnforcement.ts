@@ -92,8 +92,9 @@ export interface PolicyEnforcementOptions {
     /**
      * Which image the operation will run. Defaults to `installed`, which is what
      * the node holds now and what every path evaluated before candidate
-     * resolution existed. A path that pulls sets `registry` or `compose` and the
-     * gate evaluates the registry image instead.
+     * resolution existed. A path that pulls sets `registry` or `compose`, and
+     * the gate decides per service whether the operation fetches the registry
+     * image or runs the installed one.
      */
     imageSource?: ImageSource;
     /**
@@ -174,7 +175,9 @@ export interface PolicyEnforcementResult {
     /**
      * A plain `up` must not fetch on its own. Set when an interval policy is not
      * due yet: the gate evaluated the installed image, and Compose must not pull
-     * a different one if the interval expires before `up` starts.
+     * a different one if the interval expires before `up` starts. Also set when
+     * the effective model did not render in compose mode, where no reference can
+     * be attributed to a service for a targeted pull.
      */
     noPullOnUp?: boolean;
 }
@@ -439,24 +442,28 @@ type CandidatePlanEntry =
  * The build service whose image Compose generates for `ref`, if any.
  *
  * A build-only service declares no image; Compose names the image it builds
- * `<project>-<service>` and `config --images` reports it. The rendered model
- * normally states the project name. When it does not, a generated name is still
- * a bare repository (no registry host or tag) ending in `-<service>`, and no
- * service declares it, so it cannot be a registry image this operation pulls.
+ * `<project>-<service>` and `config --images` reports it. That name is not a
+ * registry reference the operation may fetch: pulling it would either fail or
+ * install an unrelated public image from the default registry. The rendered
+ * model normally states the project name. When it does not, the generated name
+ * is still a bare repository ending in `-<service>`, and no service declares it,
+ * so the suffix identifies the build service that produced it.
  */
 function generatedBuildServiceFor(
     ref: string,
     services: readonly EffectiveServiceSpec[],
     projectName: string | null,
 ): EffectiveServiceSpec | undefined {
-    if (projectName !== null) {
-        return services.find((spec) => spec.hasBuild && ref === `${projectName}-${spec.name}`);
-    }
-    // A registry-qualified reference or a digest pin cannot be a generated name,
-    // which is always a bare repository (`<project>-<service>`, optionally tagged).
+    // A generated name is always a bare repository (`<project>-<service>`,
+    // optionally tagged). A registry-qualified reference or a digest pin cannot
+    // be one.
     if (ref.includes('/') || ref.includes('@')) return undefined;
     const repository = ref.split(':')[0];
-    return services.find((spec) => spec.hasBuild && repository.endsWith(`-${spec.name}`));
+    return services.find((spec) => spec.hasBuild && (
+        projectName !== null
+            ? repository === `${projectName}-${spec.name}`
+            : repository.endsWith(`-${spec.name}`)
+    ));
 }
 
 /**
@@ -465,14 +472,15 @@ function generatedBuildServiceFor(
  *
  * The plan is per service, from the fully rendered model, because `build`
  * services have no registry image and a Compose `pull_policy` decides whether an
- * update's `pull` or a plain `up` fetches. When the caller supplied bare
- * references, as the GitOps candidate path does, every reference is treated as a
- * candidate: the stricter reading, because nothing then proves the operation
- * will not pull it. When the model was requested but could not be rendered, no
- * reference can be attributed to a service: a plain `up` keeps `up --pull never`
- * and evaluates the installed image, so a build-generated name is never fetched
- * by bare reference, while a registry update still resolves every reference
- * because its own pull is what could fetch one.
+ * update's `pull` or a plain `up` fetches. When the caller supplied references
+ * without a model, as the Blueprint preflight and GitOps acceptance do, every
+ * reference is treated as a candidate: the stricter reading, because nothing
+ * then proves the operation will not pull it. When the model was requested but
+ * could not be rendered, no reference can be attributed to a service: a plain
+ * `up` keeps `up --pull never` and evaluates the installed image, so a
+ * build-generated name is never fetched by bare reference, while a registry
+ * update still resolves every reference because its own pull is what could fetch
+ * one.
  */
 async function planCandidates(
     nodeId: number,
@@ -510,20 +518,21 @@ async function planCandidates(
     for (const ref of imageRefs) {
         if (!services) {
             if (modelServices === null) {
-                // A caller supplied bare references (GitOps acceptance, rollback
-                // eligibility): there is no model to attribute them, and no plain
-                // `up` boundary to fetch them, so each is resolved as a candidate.
+                // The caller supplied references without a model (Blueprint
+                // preflight, GitOps acceptance): there is no plain `up` boundary
+                // to fetch them, so each is resolved as the caller asked.
                 plan.set(ref, await resolveEntry(ref));
                 continue;
             }
             if (mode === 'compose') {
-                // The effective model did not render, so no service can be named
-                // for a targeted pull and one of these references may be the
-                // image Compose generates for a build-only service
-                // (`<project>-<service>`). Pulling that by bare reference would
-                // fail and abort a deploy Compose can complete by building. Keep
-                // `up --pull never` instead: the installed image is then the only
-                // one the deploy can run, so evaluate that.
+                // The effective model did not render, so no reference can be
+                // attributed to a service for a targeted pull, and one of them
+                // may be the image Compose generates for a build-only service
+                // (`<project>-<service>`). Pulling that name would either fail or
+                // install an unrelated public image from the default registry.
+                // Keep `up --pull never` instead and evaluate the installed image;
+                // a build may still fetch its own base images, but Compose cannot
+                // fetch a service image behind the gate.
                 noPullOnUp = true;
                 plan.set(ref, { kind: 'installed', why: 'not_pulled' });
                 continue;
@@ -1085,9 +1094,11 @@ async function evaluatePreDeploy(
  * The per-service model the candidate plan reads, or null when this gate call is
  * not in a pulling mode.
  *
- * A render failure is reported as an unrenderable model rather than thrown: the
- * plan then treats every reference as a candidate, which is the stricter reading
- * and never the silent one.
+ * A render failure is reported as an unrenderable model rather than thrown. A
+ * registry update then resolves every reference as a candidate, the stricter
+ * reading, because its own `compose pull` is what could fetch one. A plain `up`
+ * cannot attribute any reference to a service, so it evaluates the installed
+ * image and keeps `up --pull never` instead.
  */
 async function candidateModelFor(
     nodeId: number,

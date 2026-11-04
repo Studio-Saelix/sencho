@@ -1656,10 +1656,11 @@ export class ComposeService {
      * Confirms the images a plain `up` would fetch are the ones the gate
      * evaluated. When set, the deploy pulls the candidate services first, and
      * any candidate no service could be named for by its own reference, verifies
-     * the digests, and then runs `up --pull never`, so no fetch can land between
-     * the check and the container replacement. A boundary with no candidates
-     * exists only to keep `up` from fetching an interval image that was not due
-     * at gate time; undefined keeps a non-pulling deploy identical.
+     * the digests, and then runs `up --pull never`, so Compose cannot fetch a
+     * service image between the check and the container replacement. A boundary
+     * with no candidates exists when the gate must prevent a fetch it did not
+     * clear, such as a not-yet-due interval policy or a model that would not
+     * render; undefined keeps a non-pulling deploy identical.
      */
     verification?: DeployCandidateVerification,
   ): Promise<{ recoveryId: string | null; deployedGenerationId: string | null; gitopsOperationId: string | null }> {
@@ -1769,8 +1770,9 @@ export class ComposeService {
             // replaces the containers. Pulling the exact services first creates
             // the boundary the update paths already have: the verifier sees what
             // actually landed, and a block throws here, before any container is
-            // touched. A verification with no services and no verifier exists
-            // only to keep `up` from fetching a not-yet-due interval image.
+            // touched. A verification with no services and no verifier exists to
+            // keep `up` from fetching an image the gate did not clear, such as a
+            // not-yet-due interval image or one behind an unrenderable model.
             if (verification.pullServices.length > 0) {
               sendOutput('=== Pulling registry images ===\n');
               await this.execute(

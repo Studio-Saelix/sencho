@@ -408,11 +408,16 @@ describe('compose mode (a plain up)', () => {
 
   it('recognizes a generated build image when the rendered model names no project', async () => {
     // Compose omits `name` only in unusual renders, but the generated image is
-    // still a bare repository ending in `-<service>`. Treating it as a registry
-    // candidate would make the boundary pull a name that does not exist.
-    composeStub.listStackImages.mockResolvedValue(['my-stack-built']);
+    // still a bare repository ending in `-<service>`. A registry-qualified
+    // reference or a digest pin that happens to end the same way is not one.
+    composeStub.listStackImages.mockResolvedValue([
+      'my-stack-built',
+      'registry.example.com/acme/built:latest',
+      `my-stack-built@${PLATFORM_DIGEST}`,
+    ]);
     models.build.mockResolvedValue({
       renderable: true,
+      projectName: null,
       services: [
         { name: 'built', declaredImage: null, hasBuild: true, pullPolicy: null, expectedReplicas: 1, dependsOn: [], hasHealthcheck: false },
       ],
@@ -421,18 +426,36 @@ describe('compose mode (a plain up)', () => {
     const result = await enforcePolicyPreDeploy('web', 1, { bypass: false, actor: 'u', imageSource: 'compose' });
 
     expect(result.ok).toBe(true);
-    expect(candidates.resolve).not.toHaveBeenCalled();
-    expect(result.evaluatedCandidates).toBeUndefined();
+    expect(candidates.resolve.mock.calls.map((call) => call[1])).toEqual([
+      'registry.example.com/acme/built:latest',
+      `my-stack-built@${PLATFORM_DIGEST}`,
+    ]);
+    expect(result.evaluatedCandidates).toHaveLength(2);
     expect(trivyStub.scanImagePreflight).toHaveBeenCalledWith('my-stack-built', 1, 'web', undefined);
   });
 
-  it('does not pull a generated build image by reference when the model will not render', async () => {
+  it('recognizes a tagged generated build image when the project name is known', async () => {
+    composeStub.listStackImages.mockResolvedValue(['my-stack-built:latest']);
+    modelWith([
+      { name: 'built', declaredImage: null, hasBuild: true, pullPolicy: null, expectedReplicas: 1, dependsOn: [], hasHealthcheck: false },
+    ]);
+
+    const result = await enforcePolicyPreDeploy('web', 1, { bypass: false, actor: 'u', imageSource: 'compose' });
+
+    expect(result.ok).toBe(true);
+    expect(candidates.resolve).not.toHaveBeenCalled();
+    expect(result.evaluatedCandidates).toBeUndefined();
+    expect(result.pullServices).toBeUndefined();
+  });
+
+  it('does not pull any reference by name when the model will not render', async () => {
     // The model failed, so no reference can be attributed to the service that
-    // owns it, and `config --images` still names the image Compose generates for
-    // a build-only service. Pulling that name would fail and abort a deploy
-    // Compose can complete by building, so the boundary keeps `up --pull never`
-    // and the gate evaluates the installed image instead.
-    composeStub.listStackImages.mockResolvedValue(['my-stack-built']);
+    // owns it, and `config --images` still lists the image Compose generates for
+    // a build-only service next to ordinary registry images. Pulling any of them
+    // by bare name would be a fetch the gate could not attribute, so the
+    // boundary keeps `up --pull never` and the gate evaluates the installed
+    // image for every reference.
+    composeStub.listStackImages.mockResolvedValue(['my-stack-built', 'registry.example.com/web:latest']);
     models.build.mockResolvedValue({
       renderable: false,
       code: 'effective_model_render_failed',
@@ -446,18 +469,20 @@ describe('compose mode (a plain up)', () => {
     expect(result.evaluatedCandidates).toBeUndefined();
     expect(result.pullServices).toBeUndefined();
     expect(result.noPullOnUp).toBe(true);
+    expect(trivyStub.scanImagePreflight).toHaveBeenCalledTimes(2);
     expect(trivyStub.scanImagePreflight).toHaveBeenCalledWith('my-stack-built', 1, 'web', undefined);
+    expect(trivyStub.scanImagePreflight).toHaveBeenCalledWith('registry.example.com/web:latest', 1, 'web', undefined);
   });
 
-  it('still resolves bare references when no model was requested', async () => {
-    // Blueprint preflight and rollback eligibility hand the gate their own
+  it('still resolves references supplied without a model', async () => {
+    // Blueprint preflight and GitOps acceptance hand the gate their own
     // references and no model. They are not a plain `up` of a rendered stack, so
-    // the no-model case keeps the candidate reading instead of treating every
-    // reference as installed.
+    // the no-model case keeps the candidate reading instead of applying the
+    // generated-name heuristic to a bare name.
     const result = await enforcePolicyForImageRefs(
       'web',
       1,
-      ['registry.example.com/web:latest'],
+      ['my-stack-built'],
       { bypass: false, actor: 'u', imageSource: 'compose' },
     );
 
