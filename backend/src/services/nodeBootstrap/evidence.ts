@@ -10,6 +10,7 @@ import type {
   BootstrapCheck,
   BootstrapFacts,
   ComposeDirObservation,
+  DockerPackage,
   PathObservation,
 } from './types';
 
@@ -85,18 +86,27 @@ function fmtBytes(bytes: number | null): string {
   return `${Math.round(bytes / 1024 ** 2)} MiB`;
 }
 
-function dockerAndComposeWork(facts: BootstrapFacts): boolean {
+/** Shared with the plan builder so the evidence and the plan agree on what is preserved. */
+export function dockerAndComposeWork(facts: BootstrapFacts): boolean {
   return facts.docker.cliInstalled
     && facts.docker.serverVersion !== null
     && facts.docker.composeVersion !== null;
 }
 
-function repoVerified(facts: BootstrapFacts): boolean {
+export function repoVerified(facts: BootstrapFacts): boolean {
   return facts.repo.dockerSourceConfigured
     && facts.repo.keyringPresent
     && facts.repo.sourceVerified === true
     && facts.repo.keyringVerified === true
     && facts.repo.candidateSourceVerified !== false;
+}
+
+/** Packages without an installed version, plus the Compose plugin when Compose does not answer. */
+export function missingDockerPackages(facts: BootstrapFacts): DockerPackage[] {
+  const composePluginMissing = facts.docker.composeVersion === null;
+  return facts.packages.filter((pkg) => (
+    pkg.installedVersion === null || (composePluginMissing && pkg.name === 'docker-compose-plugin')
+  ));
 }
 
 function isDeniedFilesystem(type: string | null | undefined): boolean {
@@ -691,50 +701,40 @@ export function buildBootstrapEvidence(input: { facts: BootstrapFacts; nodeNameT
   const osSupported = osReleaseSupported === null
     ? null
     : osReleaseSupported ? (facts.os?.codename ? true : null) : false;
+  const osCheck = { id: 'os_supported', category: 'host', label: 'Operating system' } as const;
   checks.push(osSupported === null ? {
-    id: 'os_supported',
-    category: 'host',
-    label: 'Operating system',
+    ...osCheck,
     status: 'unknown',
     summary: osReleaseSupported ? 'The Ubuntu release codename could not be read.' : 'The operating system could not be read.',
     remediation: osReleaseSupported
       ? 'Confirm /etc/os-release contains VERSION_CODENAME, then run the preflight again.'
       : 'Confirm the host runs Ubuntu 22.04 or 24.04, then run the preflight again.',
   } : osSupported ? {
-    id: 'os_supported',
-    category: 'host',
-    label: 'Operating system',
+    ...osCheck,
     status: 'pass',
     summary: `${facts.os?.prettyName || facts.os?.id} is supported.`,
     observed: `${facts.os?.id} ${facts.os?.versionId}`,
   } : {
-    id: 'os_supported',
-    category: 'host',
-    label: 'Operating system',
+    ...osCheck,
     status: 'blocked',
     summary: `${facts.os?.prettyName || facts.os?.id} is not supported by this release.`,
     observed: `${facts.os?.id} ${facts.os?.versionId}`,
     remediation: 'Use Ubuntu 22.04 or 24.04, or enroll the node manually.',
   });
 
+  const archCheck = { id: 'arch_supported', category: 'host', label: 'Architecture' } as const;
   checks.push(facts.os === null || facts.os.arch === '' ? {
-    id: 'arch_supported',
-    category: 'host',
-    label: 'Architecture',
+    ...archCheck,
     status: 'unknown',
     summary: 'The architecture could not be read.',
     remediation: 'Confirm the host is x86_64, then run the preflight again.',
   } : facts.os.arch === 'x86_64' ? {
-    id: 'arch_supported',
-    category: 'host',
-    label: 'Architecture',
+    ...archCheck,
     status: 'pass',
     summary: 'x86_64 is supported.',
     observed: facts.os.arch,
   } : {
-    id: 'arch_supported',
-    category: 'host',
-    label: 'Architecture',
+    ...archCheck,
     status: 'blocked',
     summary: `${facts.os.arch} is not supported by this release.`,
     observed: facts.os.arch,
@@ -742,32 +742,25 @@ export function buildBootstrapEvidence(input: { facts: BootstrapFacts; nodeNameT
   });
 
   const skew = facts.clockSkewMs;
+  const clockCheck = { id: 'clock_skew', category: 'host', label: 'Clock skew' } as const;
   checks.push(skew === null ? {
-    id: 'clock_skew',
-    category: 'host',
-    label: 'Clock skew',
+    ...clockCheck,
     status: 'unknown',
     summary: 'The host clock could not be read.',
     remediation: 'Confirm the host clock is synchronized, then run the preflight again.',
   } : skew <= 60_000 ? {
-    id: 'clock_skew',
-    category: 'host',
-    label: 'Clock skew',
+    ...clockCheck,
     status: 'pass',
     summary: 'The host clock is within a minute of this instance.',
     observed: `${Math.round(skew / 1000)}s`,
   } : skew <= 5 * 60_000 ? {
-    id: 'clock_skew',
-    category: 'host',
-    label: 'Clock skew',
+    ...clockCheck,
     status: 'warn',
     summary: 'The host clock is more than a minute off, which can break token validation.',
     observed: `${Math.round(skew / 1000)}s`,
     remediation: 'Synchronize the host clock before enrollment, then run the preflight again.',
   } : {
-    id: 'clock_skew',
-    category: 'host',
-    label: 'Clock skew',
+    ...clockCheck,
     status: 'blocked',
     summary: 'The host clock is more than five minutes off.',
     observed: `${Math.round(skew / 1000)}s`,
@@ -776,10 +769,7 @@ export function buildBootstrapEvidence(input: { facts: BootstrapFacts; nodeNameT
 
   const dockerWorking = dockerAndComposeWork(facts);
   const repoConfigured = repoVerified(facts);
-  const composePluginMissing = facts.docker.composeVersion === null;
-  const missingPackages = facts.packages.some((pkg) => (
-    pkg.installedVersion === null || (composePluginMissing && pkg.name === 'docker-compose-plugin')
-  ));
+  const missingPackages = missingDockerPackages(facts).length > 0;
   // A working Docker and Compose installation is preserved as-is, so a missing
   // official package record is not a reason to install or elevate.
   const willInstallPackages = !dockerWorking && missingPackages;
@@ -792,38 +782,31 @@ export function buildBootstrapEvidence(input: { facts: BootstrapFacts; nodeNameT
     || serviceNeedsChange
     || (facts.paths.composeDir.exists === false && facts.paths.composeDir.parentWritableByUser === false)
     || (facts.paths.agentDir.exists === false && facts.paths.agentDir.parentWritableByUser === false);
+  const sudoCheck = { id: 'sudo', category: 'privileges', label: 'Privilege' } as const;
   if (!facts.user) {
     checks.push({
-      id: 'sudo',
-      category: 'privileges',
-      label: 'Privilege',
+      ...sudoCheck,
       status: 'unknown',
       summary: 'The SSH user could not be read.',
       remediation: 'Confirm the SSH user exists and has the access you expect, then run the preflight again.',
     });
   } else if (facts.user.sudoNonInteractive === null && !facts.user.isRoot && needsSudo) {
     checks.push({
-      id: 'sudo',
-      category: 'privileges',
-      label: 'Privilege',
+      ...sudoCheck,
       status: 'unknown',
       summary: 'The sudo check timed out or failed to run, and this plan needs administrator privileges.',
       remediation: 'Confirm `sudo -n true` works for the SSH user on the host, then run the preflight again.',
     });
   } else if (facts.user.isRoot || facts.user.sudoNonInteractive) {
     checks.push({
-      id: 'sudo',
-      category: 'privileges',
-      label: 'Privilege',
+      ...sudoCheck,
       status: 'pass',
       summary: facts.user.isRoot ? 'The SSH user is root.' : 'Non-interactive sudo is available.',
       observed: facts.user.isRoot ? 'root' : `${facts.user.name} via sudo -n`,
     });
   } else {
     checks.push({
-      id: 'sudo',
-      category: 'privileges',
-      label: 'Privilege',
+      ...sudoCheck,
       status: needsSudo ? 'blocked' : 'pass',
       summary: needsSudo
         ? 'This plan needs administrator privileges, and non-interactive sudo is not available.'
@@ -835,62 +818,50 @@ export function buildBootstrapEvidence(input: { facts: BootstrapFacts; nodeNameT
     } as BootstrapCheck);
   }
 
+  const cliCheck = { id: 'docker_cli', category: 'docker', label: 'Docker CLI' } as const;
   checks.push(facts.docker.cliProbeUnknown ? {
-    id: 'docker_cli',
-    category: 'docker',
-    label: 'Docker CLI',
+    ...cliCheck,
     status: 'unknown',
     summary: 'The Docker CLI probe did not complete, so the installed version cannot be established.',
     remediation: 'Confirm the Docker CLI on the host, then run the preflight again.',
   } : !facts.docker.cliInstalled ? {
-    id: 'docker_cli',
-    category: 'docker',
-    label: 'Docker CLI',
+    ...cliCheck,
     status: 'warn',
     summary: 'Docker is not installed; the plan installs it from the official repository.',
     observed: 'command -v docker returned nothing',
     remediation: 'No action is needed if the host is Ubuntu 22.04 or 24.04 with network access to download.docker.com.',
   } : {
-    id: 'docker_cli',
-    category: 'docker',
-    label: 'Docker CLI',
+    ...cliCheck,
     status: 'pass',
     summary: 'The Docker CLI is installed.',
     observed: facts.docker.serverVersion ?? 'installed',
   });
 
+  const daemonCheck = { id: 'docker_daemon', category: 'docker', label: 'Docker daemon' } as const;
   if (facts.docker.cliProbeUnknown) {
     checks.push({
-      id: 'docker_daemon',
-      category: 'docker',
-      label: 'Docker daemon',
+      ...daemonCheck,
       status: 'unknown',
       summary: 'The Docker CLI probe did not complete, so the daemon cannot be classified.',
       remediation: 'Confirm Docker is installed and running on the host, then run the preflight again.',
     });
   } else if (!facts.docker.cliInstalled) {
     checks.push({
-      id: 'docker_daemon',
-      category: 'docker',
-      label: 'Docker daemon',
+      ...daemonCheck,
       status: 'warn',
       summary: 'Docker is not installed, so the daemon cannot be reached yet. The plan installs and starts it.',
       remediation: 'No action is needed if the official Docker repository is reachable from the host.',
     });
   } else if (facts.docker.socketAccess === 'unknown') {
     checks.push({
-      id: 'docker_daemon',
-      category: 'docker',
-      label: 'Docker daemon',
+      ...daemonCheck,
       status: 'unknown',
       summary: 'A Docker daemon query timed out or failed to run, so the daemon cannot be classified.',
       remediation: 'Confirm Docker answers on the host (docker info), then run the preflight again.',
     });
   } else if (facts.docker.serverVersion) {
     checks.push({
-      id: 'docker_daemon',
-      category: 'docker',
-      label: 'Docker daemon',
+      ...daemonCheck,
       status: facts.docker.socketAccess === 'sudo' ? 'warn' : 'pass',
       summary: facts.docker.socketAccess === 'sudo'
         ? `The Docker daemon answers only through sudo (${facts.docker.serverVersion}).`
@@ -902,95 +873,75 @@ export function buildBootstrapEvidence(input: { facts: BootstrapFacts; nodeNameT
     } as BootstrapCheck);
   } else if (facts.docker.serviceActive === false) {
     checks.push({
-      id: 'docker_daemon',
-      category: 'docker',
-      label: 'Docker daemon',
+      ...daemonCheck,
       status: 'blocked',
       summary: 'Docker is installed but not running. Existing containers and volumes cannot be inventoried while the daemon is stopped.',
       remediation: 'Start the Docker service on the host (for example sudo systemctl start docker), then run the preflight again.',
     });
   } else {
     checks.push({
-      id: 'docker_daemon',
-      category: 'docker',
-      label: 'Docker daemon',
+      ...daemonCheck,
       status: 'blocked',
       summary: 'Docker is installed but the daemon at the host local socket cannot be reached, directly or through sudo.',
       remediation: 'Start the Docker service and grant the SSH user access to /var/run/docker.sock, then run the preflight again. Rootless or remote Docker sockets are not supported by this release.',
     });
   }
 
+  const composePluginCheck = { id: 'compose_plugin', category: 'docker', label: 'Docker Compose' } as const;
   checks.push(facts.docker.cliProbeUnknown ? {
-    id: 'compose_plugin',
-    category: 'docker',
-    label: 'Docker Compose',
+    ...composePluginCheck,
     status: 'unknown',
     summary: 'The Docker CLI probe did not complete, so the Compose plugin cannot be classified.',
     remediation: 'Confirm docker compose works on the host, then run the preflight again.',
   } : facts.docker.composeProbeUnknown ? {
-    id: 'compose_plugin',
-    category: 'docker',
-    label: 'Docker Compose',
+    ...composePluginCheck,
     status: 'unknown',
     summary: 'The Compose version query timed out or failed to run, so the Compose plugin cannot be classified.',
     remediation: 'Confirm docker compose version works on the host, then run the preflight again.',
   } : facts.docker.composeVersion ? {
-    id: 'compose_plugin',
-    category: 'docker',
-    label: 'Docker Compose',
+    ...composePluginCheck,
     status: 'pass',
     summary: `The Compose plugin is available (${facts.docker.composeVersion}).`,
     observed: facts.docker.composeVersion,
   } : {
-    id: 'compose_plugin',
-    category: 'docker',
-    label: 'Docker Compose',
+    ...composePluginCheck,
     status: 'warn',
     summary: 'The Docker Compose plugin is missing. The plan installs it.',
     remediation: 'No action is needed if the official Docker repository is reachable from the host.',
   });
 
+  const socketCheck = { id: 'docker_socket', category: 'docker', label: 'Docker socket access' } as const;
   if (facts.docker.cliProbeUnknown) {
     checks.push({
-      id: 'docker_socket',
-      category: 'docker',
-      label: 'Docker socket access',
+      ...socketCheck,
       status: 'unknown',
       summary: 'The Docker CLI probe did not complete, so socket access cannot be established.',
       remediation: 'Confirm Docker is installed and the SSH user can reach /var/run/docker.sock, then run the preflight again.',
     });
   } else if (!facts.docker.cliInstalled) {
     checks.push({
-      id: 'docker_socket',
-      category: 'docker',
-      label: 'Docker socket access',
+      ...socketCheck,
       status: 'warn',
       summary: 'Docker is not installed, so socket access cannot be checked yet.',
       remediation: 'No action is needed; the plan installs Docker and starts the agent as root through the socket.',
     });
   } else if (facts.docker.socketAccess === 'unknown') {
     checks.push({
-      id: 'docker_socket',
-      category: 'docker',
-      label: 'Docker socket access',
+      ...socketCheck,
       status: 'unknown',
       summary: 'A Docker daemon query timed out or failed to run, so socket access cannot be established.',
       remediation: 'Confirm the SSH user can reach /var/run/docker.sock, then run the preflight again.',
     });
   } else if (facts.docker.socketAccess === 'user') {
     checks.push({
-      id: 'docker_socket',
-      category: 'docker',
-      label: 'Docker socket access',
+      ...socketCheck,
       status: 'pass',
       summary: 'The SSH user can use the Docker socket directly.',
       observed: 'user',
     });
   } else if (facts.docker.socketAccess === 'sudo') {
     checks.push({
-      id: 'docker_socket',
-      category: 'docker',
-      label: 'Docker socket access',
+      ...socketCheck,
       status: 'warn',
       summary: 'The Docker socket is reachable only through sudo.',
       observed: 'sudo',
@@ -998,9 +949,7 @@ export function buildBootstrapEvidence(input: { facts: BootstrapFacts; nodeNameT
     });
   } else {
     checks.push({
-      id: 'docker_socket',
-      category: 'docker',
-      label: 'Docker socket access',
+      ...socketCheck,
       status: 'blocked',
       summary: 'The Docker local socket is not accessible directly or through sudo.',
       remediation: 'Grant the SSH user access to /var/run/docker.sock, then run the preflight again. Rootless or remote Docker sockets are not supported by this release.',
@@ -1014,18 +963,15 @@ export function buildBootstrapEvidence(input: { facts: BootstrapFacts; nodeNameT
   const repoContradicted = (facts.repo.dockerSourceConfigured && facts.repo.sourceVerified === false)
     || (facts.repo.keyringPresent && facts.repo.keyringVerified === false)
     || facts.repo.candidateSourceVerified === false;
+  const aptSourceCheck = { id: 'apt_source', category: 'docker', label: 'Docker package source' } as const;
   checks.push((!facts.repo.probeComplete || !facts.packagesComplete) && !dockerWorking ? {
-    id: 'apt_source',
-    category: 'docker',
-    label: 'Docker package source',
+    ...aptSourceCheck,
     status: 'unknown',
     summary: 'The Docker package source could not be inspected, so the plan cannot decide whether to configure it.',
     observed: facts.repo.problem ?? (facts.repo.probeComplete ? 'apt-cache policy did not complete' : 'repository probe did not complete'),
     remediation: 'Read /etc/apt/sources.list.d and /etc/apt/keyrings on the host, then run the preflight again.',
-  } : repoVerified(facts) ? {
-    id: 'apt_source',
-    category: 'docker',
-    label: 'Docker package source',
+  } : repoConfigured ? {
+    ...aptSourceCheck,
     status: 'pass',
     // The probe reads the source entry and the first bytes of the keyring, not
     // the key's fingerprint, so the claim stops at what was read.
@@ -1034,9 +980,7 @@ export function buildBootstrapEvidence(input: { facts: BootstrapFacts; nodeNameT
       : 'The Docker source points at the official repository and names an installed OpenPGP keyring.',
     observed: `${facts.repo.sourceVerified ? 'source verified' : 'source'} / ${facts.repo.keyringVerified ? 'keyring verified' : 'keyring'}${facts.repo.candidateSourceVerified === true ? ' / candidate verified' : ''}`,
   } : dockerWorking ? {
-    id: 'apt_source',
-    category: 'docker',
-    label: 'Docker package source',
+    ...aptSourceCheck,
     status: 'warn',
     summary: 'Docker and Compose already work; the plan preserves the existing installation and does not use or replace the Docker apt repository.',
     observed: repoPresent
@@ -1044,25 +988,19 @@ export function buildBootstrapEvidence(input: { facts: BootstrapFacts; nodeNameT
       : 'no official Docker repository configured',
     remediation: 'No action is needed. The plan does not install or replace Docker packages on this host.',
   } : repoPresent && repoUnverified ? {
-    id: 'apt_source',
-    category: 'docker',
-    label: 'Docker package source',
+    ...aptSourceCheck,
     status: 'unknown',
     summary: 'A Docker source or keyring file exists but could not be verified.',
     observed: facts.repo.problem ?? 'unreadable Docker repository configuration',
     remediation: 'Read the source and keyring on the host, or remove them and let the plan configure the official repository, then run the preflight again.',
   } : repoPresent && repoContradicted ? {
-    id: 'apt_source',
-    category: 'docker',
-    label: 'Docker package source',
+    ...aptSourceCheck,
     status: 'blocked',
     summary: 'A Docker source or keyring file exists but does not point at the official Docker repository.',
     observed: facts.repo.problem ?? 'the Docker repository configuration did not verify',
     remediation: 'Review or remove the misleading Docker apt source and keyring on the host, then run the preflight again.',
   } : {
-    id: 'apt_source',
-    category: 'docker',
-    label: 'Docker package source',
+    ...aptSourceCheck,
     status: 'warn',
     summary: 'The official Docker repository is not configured. The plan adds and verifies it.',
     remediation: 'No action is needed if the host can reach download.docker.com.',
@@ -1076,17 +1014,14 @@ export function buildBootstrapEvidence(input: { facts: BootstrapFacts; nodeNameT
   const resolvedCompose = facts.paths.composeDir.realPath ?? facts.paths.composeDir.normalized;
   const resolvedAgent = facts.paths.agentDir.realPath ?? facts.paths.agentDir.normalized;
   const separation = arePathsDisjoint(resolvedCompose, resolvedAgent);
+  const separationCheck = { id: 'path_separation', category: 'paths', label: 'Directory separation' } as const;
   checks.push(separation.ok ? {
-    id: 'path_separation',
-    category: 'paths',
-    label: 'Directory separation',
+    ...separationCheck,
     status: 'pass',
     summary: 'The two directories are separate paths.',
     observed: `${resolvedCompose} / ${resolvedAgent}`,
   } : {
-    id: 'path_separation',
-    category: 'paths',
-    label: 'Directory separation',
+    ...separationCheck,
     status: 'blocked',
     summary: separation.reason === 'equal'
       ? 'The two directories are the same path.'
@@ -1099,120 +1034,94 @@ export function buildBootstrapEvidence(input: { facts: BootstrapFacts; nodeNameT
 
   checks.push(agentConflictCheck(facts));
 
+  const workloadsCheck = { id: 'existing_workloads', category: 'conflicts', label: 'Existing workloads' } as const;
   checks.push(facts.docker.cliProbeUnknown ? {
-    id: 'existing_workloads',
-    category: 'conflicts',
-    label: 'Existing workloads',
+    ...workloadsCheck,
     status: 'unknown',
     summary: 'The Docker CLI probe did not complete, so existing containers cannot be inventoried.',
     remediation: 'Confirm the Docker container list on the host, then run the preflight again.',
   } : !facts.docker.cliInstalled ? {
-    id: 'existing_workloads',
-    category: 'conflicts',
-    label: 'Existing workloads',
+    ...workloadsCheck,
     status: 'pass',
     summary: 'Docker is not installed, so no existing containers can be affected.',
     observed: 'no Docker CLI',
   } : !facts.containers.complete ? {
-    id: 'existing_workloads',
-    category: 'conflicts',
-    label: 'Existing workloads',
+    ...workloadsCheck,
     status: 'unknown',
     summary: `The container inventory could not be completed (${facts.containers.error ?? 'unknown error'}).`,
     observed: facts.containers.error ?? 'container inventory incomplete',
     remediation: 'Confirm the Docker container list on the host, then run the preflight again.',
   } : {
-    id: 'existing_workloads',
-    category: 'conflicts',
-    label: 'Existing workloads',
+    ...workloadsCheck,
     status: 'pass',
     summary: `${facts.containers.total} existing container${facts.containers.total === 1 ? '' : 's'} will be left untouched.`,
     observed: facts.containers.sample.slice(0, 5).map((row) => row.name).join(', ') || 'none',
   });
 
+  const nodeNameCheck = { id: 'node_name', category: 'network', label: 'Node name' } as const;
   checks.push(input.nodeNameTaken ? {
-    id: 'node_name',
-    category: 'network',
-    label: 'Node name',
+    ...nodeNameCheck,
     status: 'blocked',
     summary: `A node named ${input.targetName} already exists in this console.`,
     remediation: 'Choose a different node name, or edit the existing node instead.',
   } : {
-    id: 'node_name',
-    category: 'network',
-    label: 'Node name',
+    ...nodeNameCheck,
     status: 'pass',
     summary: 'The node name is available.',
   });
 
   const hubUrl = validateHubUrl(facts.hub.url);
+  const hubUrlCheck = { id: 'hub_url', category: 'network', label: 'Hub URL' } as const;
   checks.push(!hubUrl.ok ? {
-    id: 'hub_url',
-    category: 'network',
-    label: 'Hub URL',
+    ...hubUrlCheck,
     status: 'blocked',
     summary: hubUrl.reason ?? 'The hub URL is not valid.',
     observed: facts.hub.url,
     remediation: 'Set SENCHO_PUBLIC_URL to the URL the target can reach, then run the preflight again.',
   } : hubUrl.loopback ? {
-    id: 'hub_url',
-    category: 'network',
-    label: 'Hub URL',
+    ...hubUrlCheck,
     status: 'blocked',
     summary: 'The hub URL points at loopback, which the target cannot reach.',
     observed: facts.hub.url,
     remediation: 'Set SENCHO_PUBLIC_URL to this instance\'s reachable LAN or public URL, then run the preflight again.',
   } : facts.hub.url.startsWith('http://') ? {
-    id: 'hub_url',
-    category: 'network',
-    label: 'Hub URL',
+    ...hubUrlCheck,
     status: 'warn',
     summary: 'The hub URL uses plain HTTP, so the node token and tunnel are not encrypted in transit.',
     observed: facts.hub.url,
     remediation: 'Serve Sencho over HTTPS, or keep the target and the hub on a trusted private network.',
   } : {
-    id: 'hub_url',
-    category: 'network',
-    label: 'Hub URL',
+    ...hubUrlCheck,
     status: 'pass',
     summary: 'The hub URL is a valid HTTPS address.',
     observed: facts.hub.url,
   });
 
+  const hubReachableCheck = { id: 'hub_reachable', category: 'network', label: 'Hub reachability' } as const;
   checks.push(facts.hub.reachable === null ? {
-    id: 'hub_reachable',
-    category: 'network',
-    label: 'Hub reachability',
+    ...hubReachableCheck,
     status: 'unknown',
     summary: 'Hub reachability could not be measured from the target (curl is unavailable, failed to run or timed out).',
     remediation: 'Confirm the target can reach the hub URL over HTTPS, then run the preflight again.',
   } : facts.hub.tlsTrusted === false ? {
-    id: 'hub_reachable',
-    category: 'network',
-    label: 'Hub reachability',
+    ...hubReachableCheck,
     status: 'warn',
     summary: 'The target reached the hub, but does not trust its TLS certificate.',
     observed: `HTTP ${facts.hub.statusCode ?? 'unavailable'}`,
     remediation: 'The Pilot uses the hub CA written next to its compose file. If you use a private CA, confirm the certificate chain.',
   } : facts.hub.reachable && (facts.hub.statusCode ?? 0) >= 400 ? {
-    id: 'hub_reachable',
-    category: 'network',
-    label: 'Hub reachability',
+    ...hubReachableCheck,
     status: 'warn',
     summary: `The target reached a server at the hub URL, but /api/health answered HTTP ${facts.hub.statusCode}.`,
     observed: `HTTP ${facts.hub.statusCode}`,
     remediation: 'Confirm the hub URL points at this Sencho instance and not a proxy or captive portal, then run the preflight again.',
   } : facts.hub.reachable ? {
-    id: 'hub_reachable',
-    category: 'network',
-    label: 'Hub reachability',
+    ...hubReachableCheck,
     status: 'pass',
     summary: `The target reached the hub (HTTP ${facts.hub.statusCode}).`,
     observed: `HTTP ${facts.hub.statusCode}`,
   } : {
-    id: 'hub_reachable',
-    category: 'network',
-    label: 'Hub reachability',
+    ...hubReachableCheck,
     status: 'blocked',
     summary: 'The target could not reach the hub URL.',
     remediation: 'Open outbound HTTPS from the target to the hub, or set SENCHO_PUBLIC_URL to an address the target can reach.',

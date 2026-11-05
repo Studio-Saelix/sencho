@@ -65,6 +65,11 @@ function toFieldError(error: unknown): BootstrapFieldError | null {
   return null;
 }
 
+function stringDetail(error: BootstrapApiError, key: string): string | null {
+  const value = error.details[key];
+  return typeof value === 'string' ? value : null;
+}
+
 export function useNodeBootstrap({ open, api }: UseNodeBootstrapOptions) {
   const client = api ?? {
     capabilities: fetchBootstrapCapabilities,
@@ -311,15 +316,9 @@ export function useNodeBootstrap({ open, api }: UseNodeBootstrapOptions) {
         // The pin or the live key changed underneath the keyscan. Keep the
         // identity the server reported, show the pin, and require an explicit
         // replacement confirmation before another run.
-        const pinned = typeof caught.details.pinnedFingerprint === 'string'
-          ? caught.details.pinnedFingerprint
-          : null;
-        const observed = typeof caught.details.observedFingerprint === 'string'
-          ? caught.details.observedFingerprint
-          : null;
-        const observedAlgorithm = typeof caught.details.observedAlgorithm === 'string'
-          ? caught.details.observedAlgorithm
-          : null;
+        const pinned = stringDetail(caught, 'pinnedFingerprint');
+        const observed = stringDetail(caught, 'observedFingerprint');
+        const observedAlgorithm = stringDetail(caught, 'observedAlgorithm');
         // Drop a previous inspection so the dialog shows the live observation,
         // not the key from the earlier run.
         setResult(null);

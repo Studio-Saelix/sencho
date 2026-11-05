@@ -64,6 +64,11 @@ export class SshTransportError extends Error {
   }
 }
 
+/** The caller went away before the request finished. */
+export function cancelledError(): SshTransportError {
+  return new SshTransportError('SSH_UNREACHABLE', 'The request was cancelled.');
+}
+
 export interface BootstrapTransport {
   captureHostKey(target: SshTarget, options?: { timeoutMs?: number; signal?: AbortSignal }): Promise<HostKeyObservation>;
   runCommands(
@@ -270,10 +275,8 @@ function execOne(
       channel.on('data', (chunk: Buffer) => collect(chunk, stdout));
       channel.stderr.on('data', (chunk: Buffer) => collect(chunk, stderr));
       channel.on('close', (code: number | null) => {
-        if (settled) return;
-        settled = true;
-        clearTimeout(timer);
-        resolve(snapshot(typeof code === 'number' ? code : null, typeof code === 'number' ? null : 'COMMAND_ERROR'));
+        if (typeof code === 'number') settle(code, null);
+        else settle(null, 'COMMAND_ERROR');
       });
       channel.on('error', () => settle(null, 'COMMAND_ERROR'));
     });
@@ -307,7 +310,7 @@ function captureHostKeyFrom(
     // ssh2's readyTimeout only covers the handshake; this timer also bounds a
     // peer that stalls elsewhere, and the caller's deadline caps both.
     const timer = setTimeout(() => settle(new Error('The target did not answer in time (timeout).')), budgetMs);
-    const onAbort = () => settle(new SshTransportError('SSH_UNREACHABLE', 'The request was cancelled.'));
+    const onAbort = () => settle(cancelledError());
     const settle = (error?: Error) => {
       if (done) return;
       done = true;
@@ -382,14 +385,14 @@ function runSession(
         watchdog = null;
       }
     };
-    const timeoutResult = (command: SshCommand, error: string): SshCommandResult => ({
+    const timeoutResult = (command: SshCommand): SshCommandResult => ({
       id: command.id,
       stdout: '',
       stderr: '',
       exitCode: null,
       truncated: false,
       timedOut: true,
-      error,
+      error: 'PREFLIGHT_TIMEOUT',
     });
 
     const fail = (error: unknown) => {
@@ -412,7 +415,7 @@ function runSession(
       }
       reject(mapped);
     };
-    const onAbort = () => fail(new SshTransportError('SSH_UNREACHABLE', 'The request was cancelled.'));
+    const onAbort = () => fail(cancelledError());
 
     const finish = () => {
       if (finished) return;
@@ -432,7 +435,7 @@ function runSession(
       // destroy() also tears down a connect that has not completed, which end() cannot.
       conn.destroy();
       for (let index = completed; index < commands.length; index += 1) {
-        results.push(timeoutResult(commands[index], 'PREFLIGHT_TIMEOUT'));
+        results.push(timeoutResult(commands[index]));
       }
       finish();
     }, options.totalMs);
@@ -458,7 +461,7 @@ function runSession(
             if (finished) return;
             const remainingMs = deadline - Date.now();
             if (remainingMs <= 0) {
-              results.push(timeoutResult(command, 'PREFLIGHT_TIMEOUT'));
+              results.push(timeoutResult(command));
               completed += 1;
               continue;
             }

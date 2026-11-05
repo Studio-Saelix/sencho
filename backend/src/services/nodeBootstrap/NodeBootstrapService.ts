@@ -1,6 +1,6 @@
 import { loadNativeTlsMaterial } from '../../helpers/nativeTls';
 import { sanitizeForLog } from '../../utils/safeLog';
-import { DatabaseService } from '../DatabaseService';
+import { DatabaseService, type NodeBootstrapTrust } from '../DatabaseService';
 import { buildBootstrapEvidence } from './evidence';
 import {
   DEFAULT_AGENT_DIR,
@@ -15,6 +15,7 @@ import { buildBootstrapPlan } from './planBuilder';
 import {
   assembleFacts,
   buildProbeCatalog,
+  isCompleteResult,
   parseFstabMountPoints,
   validateHubUrl,
 } from './probes';
@@ -30,10 +31,11 @@ import {
 import {
   SSH_TOTAL_TIMEOUT_MS,
   SshTransportError,
+  cancelledError,
+  sshProbeClient,
   type BootstrapTransport,
   type SshCommandResult,
 } from './sshProbeClient';
-import { sshProbeClient } from './sshProbeClient';
 import {
   resolveTargetAddresses,
   validateTarget,
@@ -153,15 +155,10 @@ export function validateInstallPaths(composeDirRaw: string, agentDirRaw: string)
 }
 
 
-function cancelledError(): SshTransportError {
-  return new SshTransportError('SSH_UNREACHABLE', 'The request was cancelled.');
-}
-
 /** Mount points from a completed fstab probe; null when the probe did not complete. */
 function fstabMountPoints(results: SshCommandResult[]): string[] | null {
   const result = results.find((entry) => entry.id === 'fstab');
-  if (!result || result.timedOut || result.truncated || result.error || result.exitCode !== 0) return null;
-  return parseFstabMountPoints(result.stdout);
+  return isCompleteResult(result) ? parseFstabMountPoints(result.stdout) : null;
 }
 
 export class NodeBootstrapService {
@@ -299,7 +296,7 @@ export class NodeBootstrapService {
     const passphrase = input.passphrase ?? null;
     let hostKey: HostKeyObservation | null = null;
     let dialed = '';
-    let pin: import('../DatabaseService').NodeBootstrapTrust | undefined;
+    let pin: NodeBootstrapTrust | undefined;
 
     // The pin is read, validated and written under the same per-target lock as
     // the probe run and DNS resolution. A concurrent preflight can therefore
@@ -546,7 +543,7 @@ export class NodeBootstrapService {
   /** Validate the request against the pin observed at the start of the locked run. */
   private assertPinnedTrust(
     target: BootstrapTargetInput,
-    pin: import('../DatabaseService').NodeBootstrapTrust | undefined,
+    pin: NodeBootstrapTrust | undefined,
     expectedFingerprint: string | null,
     replacePinnedFingerprint: string | null,
     audit: AuditContext,
@@ -586,43 +583,32 @@ export class NodeBootstrapService {
     target: BootstrapTargetInput,
     hostKey: HostKeyObservation,
     context: AuditContext,
-    initialPin: import('../DatabaseService').NodeBootstrapTrust | undefined,
+    initialPin: NodeBootstrapTrust | undefined,
     expectedFingerprint: string | null,
     replacePinnedFingerprint: string | null,
   ): void {
     if (!hostKey.fingerprint) return;
     const current = this.deps.db.getNodeBootstrapTrust(target.host, target.port);
-    if ((current?.fingerprint ?? null) !== (initialPin?.fingerprint ?? null)) {
-      this.recordAudit(context, 'bootstrap.trust.mismatch', {
-        target: target.targetName,
-        host: target.host,
-        port: target.port,
-        pinned: current?.fingerprint ?? null,
-        expected: expectedFingerprint,
-        observed: hostKey.fingerprint,
-      }, 409);
-      throw new BootstrapError(
-        409,
-        'HOST_KEY_MISMATCH',
-        'The pinned key changed while the preflight was running. Confirm the replacement and run it again.',
-        { details: { pinnedFingerprint: current?.fingerprint ?? null, expectedFingerprint } },
-      );
-    }
+    const pinned = current?.fingerprint ?? null;
+    const pinChanged = pinned !== (initialPin?.fingerprint ?? null);
     const replaced = replacePinnedFingerprint !== null && replacePinnedFingerprint === expectedFingerprint;
-    if (current && current.fingerprint !== hostKey.fingerprint && !replaced) {
+    const keyChanged = pinned !== null && pinned !== hostKey.fingerprint && !replaced;
+    if (pinChanged || keyChanged) {
       this.recordAudit(context, 'bootstrap.trust.mismatch', {
         target: target.targetName,
         host: target.host,
         port: target.port,
-        pinned: current.fingerprint,
+        pinned,
         expected: expectedFingerprint,
         observed: hostKey.fingerprint,
       }, 409);
       throw new BootstrapError(
         409,
         'HOST_KEY_MISMATCH',
-        'The host key does not match the pinned key. Confirm the replacement to continue.',
-        { details: { pinnedFingerprint: current.fingerprint, expectedFingerprint } },
+        pinChanged
+          ? 'The pinned key changed while the preflight was running. Confirm the replacement and run it again.'
+          : 'The host key does not match the pinned key. Confirm the replacement to continue.',
+        { details: { pinnedFingerprint: pinned, expectedFingerprint } },
       );
     }
     const now = this.deps.now();

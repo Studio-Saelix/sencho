@@ -9,6 +9,7 @@ import type {
   DockerPackageName,
   HostKeyObservation,
   PathObservation,
+  RepositoryObservation,
 } from './types';
 import type { SshCommand, SshCommandResult } from './sshProbeClient';
 
@@ -41,6 +42,9 @@ export const DOCKER_LOCAL_ASSIGNMENTS = `DOCKER_CONTEXT=default DOCKER_HOST=${DO
 export const DOCKER_LOCAL_ENV_ARGS = `${DOCKER_LOCAL_UNSET_ARGS} ${DOCKER_LOCAL_ASSIGNMENTS}`;
 export const DOCKER_LOCAL_ENV = `env ${DOCKER_LOCAL_ENV_ARGS}`;
 export const DOCKER_LOCAL_COMMAND = `${DOCKER_LOCAL_ENV} docker`;
+const DOCKER_LOCAL_SUDO_COMMAND = `sudo -n ${DOCKER_LOCAL_COMMAND}`;
+const DOCKER_INFO_ARGS = `info --format '{{.ServerVersion}}|{{.DockerRootDir}}' 2>/dev/null`;
+const DOCKER_PS_ARGS = `ps -a --format '{{.Names}}\\t{{.Image}}\\t{{.Label "com.docker.compose.project"}}\\t{{.Label "com.docker.compose.project.working_dir"}}\\t{{.Status}}' 2>/dev/null`;
 
 /** Canonical Compose volume name: <project>_<volume key>. */
 export const PILOT_DATA_VOLUME_CANONICAL = 'sencho-agent_sencho-agent-data';
@@ -63,7 +67,7 @@ function volumeProbeScript(dockerPrefix: string): string {
   ].join('\n');
 }
 const DOCKER_VOLUME_PROBE = volumeProbeScript(DOCKER_LOCAL_COMMAND);
-const DOCKER_VOLUME_PROBE_SUDO = volumeProbeScript(`sudo -n ${DOCKER_LOCAL_ENV} docker`);
+const DOCKER_VOLUME_PROBE_SUDO = volumeProbeScript(DOCKER_LOCAL_SUDO_COMMAND);
 
 /**
  * Inventory scripts resolve the path first and refuse a denied real path before
@@ -127,7 +131,7 @@ export const PATH_FACTS_SCRIPT = [
 
 export const DOCKER_ROOT_DISK_SCRIPT = [
   `root=$(${DOCKER_LOCAL_COMMAND} info --format "{{.DockerRootDir}}" 2>/dev/null)`,
-  `[ -n "$root" ] || root=$(sudo -n ${DOCKER_LOCAL_ENV} docker info --format "{{.DockerRootDir}}" 2>/dev/null)`,
+  `[ -n "$root" ] || root=$(${DOCKER_LOCAL_SUDO_COMMAND} info --format "{{.DockerRootDir}}" 2>/dev/null)`,
   '[ -n "$root" ] || root=/var/lib/docker',
   'd="$root"',
   'while [ ! -e "$d" ] && [ "$d" != "/" ]; do d=$(dirname -- "$d"); done',
@@ -151,10 +155,10 @@ export function buildProbeCatalog(input: ProbeCatalogInput): ProbeDefinition[] {
     { id: 'user', command: `id -un; id -u; id -gn` },
     { id: 'sudo', command: `sudo -n true` },
     { id: 'docker_cli', command: `command -v docker` },
-    { id: 'docker_info', command: `${DOCKER_LOCAL_COMMAND} info --format '{{.ServerVersion}}|{{.DockerRootDir}}' 2>/dev/null` },
-    { id: 'docker_info_sudo', command: `sudo -n ${DOCKER_LOCAL_ENV} docker info --format '{{.ServerVersion}}|{{.DockerRootDir}}' 2>/dev/null` },
+    { id: 'docker_info', command: `${DOCKER_LOCAL_COMMAND} ${DOCKER_INFO_ARGS}` },
+    { id: 'docker_info_sudo', command: `${DOCKER_LOCAL_SUDO_COMMAND} ${DOCKER_INFO_ARGS}` },
     { id: 'compose_version', command: `${DOCKER_LOCAL_COMMAND} compose version --short 2>/dev/null` },
-    { id: 'compose_version_sudo', command: `sudo -n ${DOCKER_LOCAL_ENV} docker compose version --short 2>/dev/null` },
+    { id: 'compose_version_sudo', command: `${DOCKER_LOCAL_SUDO_COMMAND} compose version --short 2>/dev/null` },
     { id: 'docker_service_active', command: `systemctl is-active docker 2>/dev/null` },
     { id: 'docker_service_enabled', command: `systemctl is-enabled docker 2>/dev/null` },
     {
@@ -181,14 +185,8 @@ export function buildProbeCatalog(input: ProbeCatalogInput): ProbeDefinition[] {
       id: 'apt_policy',
       command: `apt-cache policy docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin 2>/dev/null`,
     },
-    {
-      id: 'containers',
-      command: `${DOCKER_LOCAL_COMMAND} ps -a --format '{{.Names}}\\t{{.Image}}\\t{{.Label "com.docker.compose.project"}}\\t{{.Label "com.docker.compose.project.working_dir"}}\\t{{.Status}}' 2>/dev/null`,
-    },
-    {
-      id: 'containers_sudo',
-      command: `sudo -n ${DOCKER_LOCAL_ENV} docker ps -a --format '{{.Names}}\\t{{.Image}}\\t{{.Label "com.docker.compose.project"}}\\t{{.Label "com.docker.compose.project.working_dir"}}\\t{{.Status}}' 2>/dev/null`,
-    },
+    { id: 'containers', command: `${DOCKER_LOCAL_COMMAND} ${DOCKER_PS_ARGS}` },
+    { id: 'containers_sudo', command: `${DOCKER_LOCAL_SUDO_COMMAND} ${DOCKER_PS_ARGS}` },
     { id: 'agent_volume', command: `sh -c ${shellQuote(DOCKER_VOLUME_PROBE)}` },
     { id: 'agent_volume_sudo', command: `sh -c ${shellQuote(DOCKER_VOLUME_PROBE_SUDO)}` },
     { id: 'clock', command: `date +%s` },
@@ -337,13 +335,8 @@ export function parseRepoProbeOutput(text: string): RepoProbeOutput {
   const keyFiles = parseDelimitedBlocks(text, 'KEY_BEGIN', 'KEY_END', 'KEY_UNREADABLE=1');
   const keys = keyFiles.map((file) => {
     const raw = file.content.trim();
-    if (!file.readable || !raw) return { path: file.path, bytes: null };
-    if (raw === 'KEY_UNREADABLE=1') return { path: file.path, bytes: null };
-    try {
-      return { path: file.path, bytes: Buffer.from(raw, 'base64') };
-    } catch {
-      return { path: file.path, bytes: null };
-    }
+    const unreadable = !file.readable || !raw || raw === 'KEY_UNREADABLE=1';
+    return { path: file.path, bytes: unreadable ? null : Buffer.from(raw, 'base64') };
   });
   return { sources, keys };
 }
@@ -445,7 +438,7 @@ function keyLooksValid(path: string, bytes: Buffer | null): boolean {
  * docker.list with an arbitrary URL is not the official repository, and an
  * unreadable file is unknown, never a pass.
  */
-export function parseDockerRepo(text: string, codename = ''): import('./types').RepositoryObservation {
+export function parseDockerRepo(text: string, codename = ''): RepositoryObservation {
   const parsed = parseRepoProbeOutput(text);
   const verifiedKeys = parsed.keys.filter((key) => keyLooksValid(key.path, key.bytes));
   const keyPaths = new Set(verifiedKeys.map((key) => key.path));
@@ -592,8 +585,18 @@ export interface HubHealthObservation {
   tlsTrusted: boolean | null;
 }
 
+/** The command ran to its end: no timeout, no truncation and no transport error. */
+function ranToEnd(result: SshCommandResult): boolean {
+  return !result.timedOut && !result.truncated && !result.error;
+}
+
+/** A command that ran to its end and exited 0. */
+export function isCompleteResult(result: SshCommandResult | undefined): result is SshCommandResult {
+  return result !== undefined && ranToEnd(result) && result.exitCode === 0;
+}
+
 export function parseHubHealth(result: SshCommandResult): HubHealthObservation {
-  if (result.timedOut || result.truncated || result.error) {
+  if (!ranToEnd(result)) {
     return { reachable: null, statusCode: null, tlsTrusted: null };
   }
   const code = Number(result.stdout.trim());
@@ -783,23 +786,28 @@ function resultMap(results: SshCommandResult[]): Map<string, SshCommandResult> {
 
 function stdoutOf(map: Map<string, SshCommandResult>, id: string): string {
   const result = map.get(id);
-  if (!result || result.timedOut || result.truncated || result.error) return '';
-  return result.stdout;
+  return result && ranToEnd(result) ? result.stdout : '';
 }
 
 function succeeded(map: Map<string, SshCommandResult>, id: string): boolean {
-  const result = map.get(id);
-  return Boolean(result && !result.timedOut && !result.truncated && !result.error && result.exitCode === 0);
+  return isCompleteResult(map.get(id));
 }
 
 /** Output of a command that ran to a normal exit; anything else reads as empty. */
 function completeStdout(map: Map<string, SshCommandResult>, id: string): string {
-  return succeeded(map, id) ? (map.get(id) as SshCommandResult).stdout : '';
+  const result = map.get(id);
+  return isCompleteResult(result) ? result.stdout : '';
 }
 
 function isProbeUnknown(map: Map<string, SshCommandResult>, id: string): boolean {
   const result = map.get(id);
-  return !result || result.timedOut || result.truncated || Boolean(result.error);
+  return !result || !ranToEnd(result);
+}
+
+/** True when observed; otherwise null when the probe did not complete, false when it did. */
+function observedOrUnknown(observed: boolean, map: Map<string, SshCommandResult>, id: string): boolean | null {
+  if (observed) return true;
+  return isProbeUnknown(map, id) ? null : false;
 }
 
 interface InventoryOutcome {
@@ -809,8 +817,11 @@ interface InventoryOutcome {
   truncated: boolean;
 }
 
-function isCompleteResult(result: SshCommandResult | undefined): result is SshCommandResult {
-  return Boolean(result && !result.timedOut && !result.truncated && !result.error && result.exitCode === 0);
+function failureReason(result: SshCommandResult): string {
+  if (result.timedOut) return 'timed out';
+  if (result.truncated) return 'output truncated';
+  if (result.error) return result.error;
+  return `exited ${result.exitCode ?? 'without a status'}`;
 }
 
 /**
@@ -831,31 +842,12 @@ function inventoryOutcome(
   const partial = candidates
     .filter((result) => !result.timedOut || result.truncated)
     .sort((a, b) => b.stdout.length - a.stdout.length)[0];
-  const reasons = candidates.map((result) => (
-    result.timedOut ? 'timed out' : result.truncated ? 'output truncated' : result.error ? result.error : `exited ${result.exitCode ?? 'without a status'}`
-  ));
-  if (reasons.length === 0) reasons.push('not run');
   return {
     text: partial?.stdout ?? '',
     complete: false,
-    error: reasons.join('; '),
+    error: candidates.length > 0 ? candidates.map(failureReason).join('; ') : 'not run',
     truncated: partial?.truncated === true,
   };
-}
-
-function firstComplete(
-  map: Map<string, SshCommandResult>,
-  directId: string,
-  sudoId: string,
-): { result: SshCommandResult | null; error: string | null } {
-  const candidates = [map.get(directId), map.get(sudoId)].filter((entry): entry is SshCommandResult => Boolean(entry));
-  const complete = candidates.find(isCompleteResult);
-  if (complete) return { result: complete, error: null };
-  const reasons = candidates.map((result) => (
-    result.timedOut ? 'timed out' : result.truncated ? 'output truncated' : result.error ? result.error : `exited ${result.exitCode ?? 'without a status'}`
-  ));
-  if (reasons.length === 0) reasons.push('not run');
-  return { result: null, error: reasons.join('; ') };
 }
 
 function isUnderAnyMount(path: string, mountPoints: string[]): boolean {
@@ -889,8 +881,7 @@ export function assembleFacts(input: AssembleFactsInput): BootstrapFacts {
   const composeProbeUnknown = composeVersion === null
     && (isProbeUnknown(map, 'compose_version') || isProbeUnknown(map, 'compose_version_sudo'));
   const repoProbe = map.get('docker_repo');
-  const repoBase = repoProbe && !repoProbe.timedOut && !repoProbe.truncated
-    && !repoProbe.error && repoProbe.exitCode === 0
+  const repoBase = isCompleteResult(repoProbe)
     ? parseDockerRepo(repoProbe.stdout, osBase?.codename ?? '')
     : {
       probeComplete: false,
@@ -907,17 +898,18 @@ export function assembleFacts(input: AssembleFactsInput): BootstrapFacts {
   const candidateSourceVerified = candidatesWithSource.length === 0
     || candidatesWithSource.every((pkg) => !pkg.candidateSource)
     ? null
-    : candidatesWithSource.every((pkg) => isOfficialDockerArchive(pkg.candidateSource)) ? true : false;
+    : candidatesWithSource.every((pkg) => isOfficialDockerArchive(pkg.candidateSource));
   const repo: BootstrapFacts['repo'] = { ...repoBase, candidateSourceVerified };
 
   const containerOutcome = inventoryOutcome(map, 'containers', 'containers_sudo');
   const containerInventory = parseContainers(containerOutcome.text, containerOutcome.truncated);
   const containersComplete = containerOutcome.complete;
-  const volumeOutcome = firstComplete(map, 'agent_volume', 'agent_volume_sudo');
-  const volumeNames = volumeOutcome.result ? parseVolumeNames(volumeOutcome.result.stdout) : [];
+  const volumeOutcome = inventoryOutcome(map, 'agent_volume', 'agent_volume_sudo');
+  const volumeNames = volumeOutcome.complete ? parseVolumeNames(volumeOutcome.text) : [];
   const clockMs = parseEpochSeconds(stdoutOf(map, 'clock'));
-  const hubHealth = map.get('hub_health')
-    ? parseHubHealth(map.get('hub_health') as SshCommandResult)
+  const hubResult = map.get('hub_health');
+  const hubHealth = hubResult
+    ? parseHubHealth(hubResult)
     : { reachable: null, statusCode: null, tlsTrusted: null };
 
   const composeFacts = parsePathFacts(stdoutOf(map, 'path_compose'), input.composeDir, 'Compose directory');
@@ -942,7 +934,7 @@ export function assembleFacts(input: AssembleFactsInput): BootstrapFacts {
       ? isUnderAnyMount(composeBase.filesystem.mountPoint, input.fstabMountPoints)
       : null,
     stackCount: composeBase.exists && composeOutcome.complete ? composeInventory.stackCount : null,
-    stackNames: composeBase.exists ? composeInventory.stackNames : [],
+    stackNames: composeInventory.stackNames,
     inventoryTruncated: composeInventory.truncated,
     inventoryError: composeBase.exists ? composeOutcome.error : null,
     rootComposeFile: composeInventory.rootComposeFile,
@@ -973,7 +965,7 @@ export function assembleFacts(input: AssembleFactsInput): BootstrapFacts {
       status: row.status,
     })),
     dataVolumeExists: dockerInfo
-      ? volumeOutcome.result ? volumeNames.length > 0 : null
+      ? volumeOutcome.complete ? volumeNames.length > 0 : null
       : cliProbeUnknown || cliInstalled ? null : false,
     dataVolumeNames: volumeNames,
     defaultDirHasComposeFile: succeeded(map, 'default_agent_path')
@@ -988,7 +980,7 @@ export function assembleFacts(input: AssembleFactsInput): BootstrapFacts {
     hostKey: input.hostKey,
     os: osBase ? { ...osBase, arch: uname.arch, kernel: uname.kernel } : null,
     user: userBase
-      ? { ...userBase, sudoNonInteractive: sudoAvailable ? true : isProbeUnknown(map, 'sudo') ? null : false }
+      ? { ...userBase, sudoNonInteractive: observedOrUnknown(sudoAvailable, map, 'sudo') }
       : null,
     docker: {
       cliInstalled,
@@ -996,12 +988,16 @@ export function assembleFacts(input: AssembleFactsInput): BootstrapFacts {
       serverVersion: dockerInfo?.serverVersion ?? null,
       composeVersion,
       composeProbeUnknown,
-      serviceActive: stdoutOf(map, 'docker_service_active').trim() === 'active'
-        ? true
-        : isProbeUnknown(map, 'docker_service_active') ? null : false,
-      serviceEnabled: ['enabled', 'enabled-runtime'].includes(stdoutOf(map, 'docker_service_enabled').trim())
-        ? true
-        : isProbeUnknown(map, 'docker_service_enabled') ? null : false,
+      serviceActive: observedOrUnknown(
+        stdoutOf(map, 'docker_service_active').trim() === 'active',
+        map,
+        'docker_service_active',
+      ),
+      serviceEnabled: observedOrUnknown(
+        ['enabled', 'enabled-runtime'].includes(stdoutOf(map, 'docker_service_enabled').trim()),
+        map,
+        'docker_service_enabled',
+      ),
       socketAccess,
       rootDir: dockerInfo?.rootDir ?? null,
       endpoint: DOCKER_LOCAL_ENDPOINT,

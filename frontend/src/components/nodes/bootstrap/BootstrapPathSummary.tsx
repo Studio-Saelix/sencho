@@ -8,8 +8,7 @@ import type { AgentDirFacts, ComposeDirFacts, PathFacts } from './types';
 
 function pathState(path: PathFacts, created: boolean): { word: string; detail: string | null } {
   if (path.probeError) return { word: 'Unknown', detail: null };
-  if (created) return { word: 'Will be created', detail: null };
-  if (!path.exists) return { word: 'Will be created', detail: null };
+  if (created || !path.exists) return { word: 'Will be created', detail: null };
   return { word: 'Existing', detail: null };
 }
 
@@ -53,20 +52,22 @@ export function BootstrapPathSummary({
   composeDir: ComposeDirFacts;
   agentDir: AgentDirFacts;
 }) {
-  const stackDetail = composeDir.probeError
-    ? 'inspection failed'
-    : composeDir.exists
-      ? composeDir.inventoryError
-        ? 'stack count unknown'
-        : `${composeDir.stackCount ?? 0} stack${composeDir.stackCount === 1 ? '' : 's'}${composeDir.inventoryTruncated ? ' (truncated)' : ''}`
-      : null;
-  const agentDetail = agentDir.probeError
-    ? 'inspection failed'
-    : agentDir.exists
-      ? agentDir.inventoryError
-        ? 'contents unknown'
-        : `${agentDir.entries.length}${agentDir.entriesTruncated ? '+' : ''} entr${agentDir.entries.length === 1 ? 'y' : 'ies'}`
-      : null;
+  let stackDetail: string | null = null;
+  if (composeDir.probeError) {
+    stackDetail = 'inspection failed';
+  } else if (composeDir.exists && composeDir.inventoryError) {
+    stackDetail = 'stack count unknown';
+  } else if (composeDir.exists) {
+    stackDetail = `${composeDir.stackCount ?? 0} stack${composeDir.stackCount === 1 ? '' : 's'}${composeDir.inventoryTruncated ? ' (truncated)' : ''}`;
+  }
+  let agentDetail: string | null = null;
+  if (agentDir.probeError) {
+    agentDetail = 'inspection failed';
+  } else if (agentDir.exists && agentDir.inventoryError) {
+    agentDetail = 'contents unknown';
+  } else if (agentDir.exists) {
+    agentDetail = `${agentDir.entries.length}${agentDir.entriesTruncated ? '+' : ''} entr${agentDir.entries.length === 1 ? 'y' : 'ies'}`;
+  }
   return (
     <div data-testid="bootstrap-path-summary" className="rounded-lg border border-muted bg-card/40 px-3 py-1">
       <PathRow label="Compose stacks directory" path={composeDir} created={!composeDir.exists} extra={stackDetail} />

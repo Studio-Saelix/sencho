@@ -98,11 +98,14 @@ export function BootstrapPreflightStep({
   // An unknown fact can withhold the plan on its own, so a blocked result with
   // no blockers must still show which facts could not be established.
   const unknownChecks = inspection.checks.filter((check) => check.status === 'unknown');
-  const answers = blocked
-    ? inspection.blockers > 0
-      ? `${inspection.blockers} blocker${inspection.blockers === 1 ? '' : 's'} must be resolved before a plan can be generated.`
-      : `${unknownChecks.length} check${unknownChecks.length === 1 ? '' : 's'} could not be established, so no plan can be generated.`
-    : `The host can be prepared. ${inspection.warnings} warning${inspection.warnings === 1 ? '' : 's'} will be carried into the plan.`;
+  let answers: string;
+  if (!blocked) {
+    answers = `The host can be prepared. ${inspection.warnings} warning${inspection.warnings === 1 ? '' : 's'} will be carried into the plan.`;
+  } else if (inspection.blockers > 0) {
+    answers = `${inspection.blockers} blocker${inspection.blockers === 1 ? '' : 's'} must be resolved before a plan can be generated.`;
+  } else {
+    answers = `${unknownChecks.length} check${unknownChecks.length === 1 ? '' : 's'} could not be established, so no plan can be generated.`;
+  }
 
   return (
     <div className="space-y-4">

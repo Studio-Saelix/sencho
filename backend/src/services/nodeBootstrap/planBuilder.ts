@@ -1,5 +1,6 @@
 import crypto from 'crypto';
 import { buildPilotEnrollmentCompose } from '../../helpers/pilotEnrollmentCompose';
+import { dockerAndComposeWork, missingDockerPackages, repoVerified } from './evidence';
 import { DOCKER_LOCAL_ASSIGNMENTS, DOCKER_LOCAL_UNSET_ARGS } from './probes';
 import {
   BOOTSTRAP_MARKER_FILENAME,
@@ -62,13 +63,12 @@ export function evidenceDigestOf(facts: BootstrapFacts): string {
   return sha256Hex(canonicalJson(facts));
 }
 
-function installDirCommand(path: string, mode: string, owner: string, group: string, sudo: boolean): string {
-  const base = `install -d -m ${mode} -o ${shellQuote(owner)} -g ${shellQuote(group)} -- ${shellQuote(path)}`;
-  return sudo ? `sudo -n ${base}` : base;
-}
-
 function sudoCommand(command: string, sudo: boolean): string {
   return sudo ? `sudo -n ${command}` : command;
+}
+
+function installDirCommand(path: string, mode: string, owner: string, group: string, sudo: boolean): string {
+  return sudoCommand(`install -d -m ${mode} -o ${shellQuote(owner)} -g ${shellQuote(group)} -- ${shellQuote(path)}`, sudo);
 }
 
 function startCommand(agentDir: string, sudo: boolean): string {
@@ -84,7 +84,7 @@ function startCommand(agentDir: string, sudo: boolean): string {
     `-f ${shellQuote(compose)}`,
     'up -d',
   ].join(' ');
-  return sudo ? `sudo -n ${base}` : base;
+  return sudoCommand(base, sudo);
 }
 
 function packageInstallCommand(packages: DockerPackage[], resolved: boolean): string {
@@ -190,8 +190,6 @@ function agentProjectSteps(
     ? facts.paths.agentDir.writableByUser
     : facts.paths.agentDir.parentWritableByUser === true;
   const filePrivilege: BootstrapPlanStep['privilege'] = dirWritableByUser || facts.user?.isRoot === true ? 'user' : 'sudo';
-  const fileOwner = owner;
-  const fileGroup = group;
   const marker = {
     schemaVersion: BOOTSTRAP_MARKER_SCHEMA_VERSION,
     project: PILOT_PROJECT_NAME,
@@ -215,7 +213,7 @@ function agentProjectSteps(
       effect: 'file-write',
       privilege: filePrivilege,
       command: null,
-      target: { path: `${agentDir}/${BOOTSTRAP_MARKER_FILENAME}`, mode: MARKER_MODE, owner: fileOwner, group: fileGroup, preserveExisting: previousAttempt },
+      target: { path: `${agentDir}/${BOOTSTRAP_MARKER_FILENAME}`, mode: MARKER_MODE, owner, group, preserveExisting: previousAttempt },
       file: {
         path: `${agentDir}/${BOOTSTRAP_MARKER_FILENAME}`,
         mode: MARKER_MODE,
@@ -234,7 +232,7 @@ function agentProjectSteps(
       effect: 'file-write',
       privilege: filePrivilege,
       command: null,
-      target: { path: `${agentDir}/compose.yaml`, mode: COMPOSE_FILE_MODE, owner: fileOwner, group: fileGroup, preserveExisting: previousAttempt },
+      target: { path: `${agentDir}/compose.yaml`, mode: COMPOSE_FILE_MODE, owner, group, preserveExisting: previousAttempt },
       file: {
         path: `${agentDir}/compose.yaml`,
         mode: COMPOSE_FILE_MODE,
@@ -255,7 +253,7 @@ function agentProjectSteps(
       effect: 'file-write',
       privilege: filePrivilege,
       command: null,
-      target: { path: `${agentDir}/sencho-hub-ca.pem`, mode: CA_FILE_MODE, owner: fileOwner, group: fileGroup, preserveExisting: true },
+      target: { path: `${agentDir}/sencho-hub-ca.pem`, mode: CA_FILE_MODE, owner, group, preserveExisting: true },
       file: {
         path: `${agentDir}/sencho-hub-ca.pem`,
         mode: CA_FILE_MODE,
@@ -283,8 +281,7 @@ export function buildBootstrapPlan(input: PlanBuildInput): BootstrapPlan {
     || facts.paths.composeDir.inventoryError || facts.paths.agentDir.inventoryError) {
     throw new Error('The plan cannot be built while a directory could not be inspected.');
   }
-  if ((!facts.repo.probeComplete || !facts.packagesComplete)
-    && !(facts.docker.cliInstalled && facts.docker.serverVersion && facts.docker.composeVersion)) {
+  if ((!facts.repo.probeComplete || !facts.packagesComplete) && !dockerAndComposeWork(facts)) {
     throw new Error('The plan cannot be built while the Docker package source could not be inspected.');
   }
   if ((facts.docker.cliInstalled && facts.docker.socketAccess === 'unknown') || facts.docker.composeProbeUnknown) {
@@ -296,27 +293,18 @@ export function buildBootstrapPlan(input: PlanBuildInput): BootstrapPlan {
   if (facts.agent.defaultDirHasComposeFile === null) {
     throw new Error('The plan requires the default Pilot directory to be checked.');
   }
-  const owner = facts.user?.name ?? facts.target.username;
-  const group = facts.user?.group ?? owner;
-  const root = facts.user?.isRoot === true;
-  const sudoAvailable = root || facts.user?.sudoNonInteractive === true;
+  const owner = facts.user.name;
+  const group = facts.user.group;
+  const root = facts.user.isRoot;
+  const sudoAvailable = root || facts.user.sudoNonInteractive === true;
   const sudoDocker = facts.docker.socketAccess === 'sudo';
   const stages: BootstrapPlan['stages'] = [];
   const skipped: BootstrapPlan['skipped'] = [];
   const notices: string[] = ['No changes have been made on this server.'];
 
-  const dockerWorking = facts.docker.cliInstalled
-    && facts.docker.serverVersion !== null
-    && facts.docker.composeVersion !== null;
-  const repoConfigured = facts.repo.dockerSourceConfigured
-    && facts.repo.keyringPresent
-    && facts.repo.sourceVerified === true
-    && facts.repo.keyringVerified === true
-    && facts.repo.candidateSourceVerified !== false;
-  const composePluginMissing = facts.docker.composeVersion === null;
-  const missingPackages = facts.packages.filter((pkg) => (
-    pkg.installedVersion === null || (composePluginMissing && pkg.name === 'docker-compose-plugin')
-  ));
+  const dockerWorking = dockerAndComposeWork(facts);
+  const repoConfigured = repoVerified(facts);
+  const missingPackages = missingDockerPackages(facts);
   const needsRepo = !dockerWorking && !repoConfigured;
   const needsMetadataRefresh = !dockerWorking && !needsRepo && missingPackages.length > 0;
 
@@ -361,7 +349,7 @@ export function buildBootstrapPlan(input: PlanBuildInput): BootstrapPlan {
         rationale: 'The Pilot runs Docker Compose on this host.',
         effect: 'package-install',
         privilege: root ? 'user' : 'sudo',
-        command: `${sudoAvailable && !root ? 'sudo -n ' : ''}${packageInstallCommand(missingPackages, versionsKnown)}`,
+        command: sudoCommand(packageInstallCommand(missingPackages, versionsKnown), sudoAvailable && !root),
         disruptive: true,
         reversible: 'yes',
         pointOfNoReturn: false,
@@ -384,7 +372,7 @@ export function buildBootstrapPlan(input: PlanBuildInput): BootstrapPlan {
         rationale: 'The agent must come back after a host reboot.',
         effect: 'service-change',
         privilege: root ? 'user' : 'sudo',
-        command: `${root ? '' : 'sudo -n '}systemctl enable docker`,
+        command: sudoCommand('systemctl enable docker', !root),
         disruptive: true,
         reversible: 'yes',
         pointOfNoReturn: false,
@@ -401,7 +389,7 @@ export function buildBootstrapPlan(input: PlanBuildInput): BootstrapPlan {
         rationale: 'The agent needs a running Docker daemon, and it must survive a reboot.',
         effect: 'service-change',
         privilege: root ? 'user' : 'sudo',
-        command: `${root ? '' : 'sudo -n '}systemctl enable --now docker`,
+        command: sudoCommand('systemctl enable --now docker', !root),
         disruptive: true,
         reversible: 'yes',
         pointOfNoReturn: false,
