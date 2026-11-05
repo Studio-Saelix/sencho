@@ -95,8 +95,11 @@ export function BootstrapPreflightStep({
   const tone: StatusTone = blocked ? 'destructive' : 'success';
   const stages = stagesFromChecks(inspection.checks);
   const blockers = inspection.checks.filter((check) => check.status === 'blocked');
+  const unknownRequired = inspection.checks.filter((check) => check.status === 'unknown').length;
   const answers = blocked
-    ? `${inspection.blockers} blocker${inspection.blockers === 1 ? '' : 's'} must be resolved before a plan can be generated.`
+    ? inspection.blockers > 0
+      ? `${inspection.blockers} blocker${inspection.blockers === 1 ? '' : 's'} must be resolved before a plan can be generated.`
+      : `${unknownRequired} required check${unknownRequired === 1 ? '' : 's'} could not be established, so no plan can be generated.`
     : `The host can be prepared. ${inspection.warnings} warning${inspection.warnings === 1 ? '' : 's'} will be carried into the plan.`;
 
   return (

@@ -136,6 +136,7 @@ export function makeFacts(overrides: FactsOverrides = {}): BootstrapFacts {
       ...overrides.docker,
     },
     repo: {
+      probeComplete: true,
       dockerSourceConfigured: true,
       keyringPresent: true,
       sourceVerified: true,

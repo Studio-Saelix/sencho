@@ -112,7 +112,7 @@ interface BootstrapDeps {
   now: () => number;
   resolveAddresses: AddressResolver;
   caPem: () => string | null;
-  /** Request-wide SSH budget; the default is the advertised 90 seconds. */
+  /** Preflight request budget, including DNS; default is the advertised 90 seconds. */
   requestBudgetMs: number;
 }
 
@@ -327,6 +327,7 @@ export class NodeBootstrapService {
           if (error instanceof SshTransportError && error.code === 'HOST_KEY_UNTRUSTED') {
             // A live key that changes between capture and connection is a trust
             // event, not a generic transport failure. Keep both identities.
+            const observedFingerprint = hostKey?.fingerprint ?? null;
             this.recordAudit(context.audit, 'bootstrap.trust.mismatch', {
               target: targetInput.targetName,
               host: targetInput.host,
@@ -334,9 +335,15 @@ export class NodeBootstrapService {
               address,
               pinned: pin?.fingerprint ?? null,
               expected: expectedFingerprint,
-              observed: hostKey?.fingerprint ?? null,
+              observed: observedFingerprint,
             }, 409);
-            throw error;
+            throw new BootstrapError(409, 'HOST_KEY_UNTRUSTED', error.message, {
+              details: {
+                pinnedFingerprint: pin?.fingerprint ?? null,
+                expectedFingerprint,
+                observedFingerprint,
+              },
+            });
           }
           lastError = error;
         }

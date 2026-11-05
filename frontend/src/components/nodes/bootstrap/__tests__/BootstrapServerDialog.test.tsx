@@ -3,6 +3,7 @@ import { render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { BootstrapServerDialog } from '../BootstrapServerDialog';
 import {
+  BootstrapApiError,
   FALLBACK_CAPABILITIES,
   checkBootstrapHostKey,
   fetchBootstrapCapabilities,
@@ -80,6 +81,35 @@ beforeEach(() => {
   vi.mocked(fetchBootstrapCapabilities).mockResolvedValue(FALLBACK_CAPABILITIES);
   vi.mocked(checkBootstrapHostKey).mockResolvedValue(CHANGED_KEY);
   vi.mocked(runBootstrapPreflight).mockResolvedValue(BLOCKED_RESULT);
+});
+
+describe('BootstrapServerDialog live host-key mismatch', () => {
+  it('shows the pin and observed key and requires confirmation before another run', async () => {
+    vi.mocked(checkBootstrapHostKey).mockResolvedValue({ ...CHANGED_KEY, trust: 'trusted', pinnedFingerprint: CHANGED_KEY.fingerprint });
+    vi.mocked(runBootstrapPreflight).mockRejectedValueOnce(new BootstrapApiError(
+      'The host key changed before the preflight connected.',
+      'HOST_KEY_UNTRUSTED',
+      null,
+      {
+        pinnedFingerprint: CHANGED_KEY.fingerprint,
+        expectedFingerprint: CHANGED_KEY.fingerprint,
+        observedFingerprint: 'SHA256:livechangedkey0000000000000000000000000',
+      },
+    ));
+    render(<BootstrapServerDialog open onOpenChange={() => {}} />);
+    const user = await fillTarget();
+    await user.click(screen.getByRole('button', { name: 'Check host key' }));
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Run preflight' })).toBeEnabled());
+    await user.click(screen.getByRole('button', { name: 'Run preflight' }));
+
+    await waitFor(() => expect(screen.getByText(/The host key changed before the preflight connected/)).toBeInTheDocument());
+    expect(screen.getAllByText(new RegExp(CHANGED_KEY.fingerprint)).length).toBeGreaterThan(0);
+    expect(screen.getAllByText(/SHA256:livechangedkey/).length).toBeGreaterThan(0);
+    const run = screen.getByRole('button', { name: 'Run preflight' });
+    expect(run).toBeDisabled();
+    await user.click(screen.getByLabelText(/I understand this replaces the pinned key/));
+    expect(run).toBeEnabled();
+  });
 });
 
 describe('BootstrapServerDialog changed host key', () => {

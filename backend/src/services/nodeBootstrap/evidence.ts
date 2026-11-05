@@ -74,7 +74,7 @@ export interface EvidenceResult {
   checks: BootstrapCheck[];
   blockers: number;
   warnings: number;
-  /** True when an unknown path fact makes a planned write unprovable. */
+  /** True when any required fact is unknown, or a required check is missing. */
   planSuppressed: boolean;
 }
 
@@ -92,7 +92,9 @@ function dockerAndComposeWork(facts: BootstrapFacts): boolean {
 }
 
 function repoVerified(facts: BootstrapFacts): boolean {
-  return facts.repo.sourceVerified === true
+  return facts.repo.dockerSourceConfigured
+    && facts.repo.keyringPresent
+    && facts.repo.sourceVerified === true
     && facts.repo.keyringVerified === true
     && facts.repo.candidateSourceVerified !== false;
 }
@@ -241,15 +243,6 @@ function composeDirCheck(
       remediation: 'Fix the directory ownership or permissions on the host, or choose another directory. Existing stacks are never chowned by this workflow.',
     };
   }
-  if (path.hasSymlinkAncestor) {
-    return {
-      ...base,
-      status: 'warn',
-      summary: `${path.input} is reached through a symlinked directory and resolves to ${path.realPath ?? 'another path'}. ${keepAndDescribe}`,
-      observed: describePath(path),
-      remediation: 'The resolved path is recorded in the plan digest. Confirm it is still the directory you mean before approving execution.',
-    };
-  }
   if (path.inventoryError) {
     return {
       ...base,
@@ -257,6 +250,15 @@ function composeDirCheck(
       summary: `The existing stacks in ${path.input} could not be inventoried (${path.inventoryError}). ${keepAndDescribe}`,
       observed: path.inventoryError,
       remediation: 'Confirm the directory contents manually over SSH, or grant the SSH user read and traverse access, then run the preflight again.',
+    };
+  }
+  if (path.hasSymlinkAncestor) {
+    return {
+      ...base,
+      status: 'warn',
+      summary: `${path.input} is reached through a symlinked directory and resolves to ${path.realPath ?? 'another path'}. ${keepAndDescribe}`,
+      observed: describePath(path),
+      remediation: 'The resolved path is recorded in the plan digest. Confirm it is still the directory you mean before approving execution.',
     };
   }
   if (path.rootComposeFile) {
@@ -654,7 +656,7 @@ export function buildBootstrapEvidence(input: { facts: BootstrapFacts; nodeNameT
   });
 
   const osSupported = facts.os
-    ? facts.os.id === 'ubuntu' && ['22.04', '24.04'].includes(facts.os.versionId)
+    ? facts.os.id === 'ubuntu' && ['22.04', '24.04'].includes(facts.os.versionId) && Boolean(facts.os.codename)
     : null;
   checks.push(osSupported === null ? {
     id: 'os_supported',
@@ -739,7 +741,10 @@ export function buildBootstrapEvidence(input: { facts: BootstrapFacts; nodeNameT
 
   const dockerWorking = dockerAndComposeWork(facts);
   const repoConfigured = repoVerified(facts);
-  const missingPackages = facts.packages.some((pkg) => pkg.installedVersion === null);
+  const composePluginMissing = facts.docker.composeVersion === null;
+  const missingPackages = facts.packages.some((pkg) => (
+    pkg.installedVersion === null || (composePluginMissing && pkg.name === 'docker-compose-plugin')
+  ));
   // A working Docker and Compose installation is preserved as-is, so a missing
   // official package record is not a reason to install or elevate.
   const willInstallPackages = !dockerWorking && missingPackages;
@@ -905,13 +910,23 @@ export function buildBootstrapEvidence(input: { facts: BootstrapFacts; nodeNameT
   const repoContradicted = facts.repo.sourceVerified === false
     || facts.repo.keyringVerified === false
     || facts.repo.candidateSourceVerified === false;
-  checks.push(repoVerified(facts) ? {
+  checks.push(!facts.repo.probeComplete && !dockerWorking ? {
+    id: 'apt_source',
+    category: 'docker',
+    label: 'Docker package source',
+    status: 'unknown',
+    summary: 'The Docker package source could not be inspected, so the plan cannot decide whether to configure it.',
+    observed: facts.repo.problem ?? 'repository probe did not complete',
+    remediation: 'Read /etc/apt/sources.list.d and /etc/apt/keyrings on the host, then run the preflight again.',
+  } : repoVerified(facts) ? {
     id: 'apt_source',
     category: 'docker',
     label: 'Docker package source',
     status: 'pass',
-    summary: 'The official Docker repository, keyring and candidate provenance are verified.',
-    observed: `${facts.repo.sourceVerified ? 'source verified' : 'source'} / ${facts.repo.keyringVerified ? 'keyring verified' : 'keyring'}`,
+    summary: facts.repo.candidateSourceVerified === true
+      ? 'The official Docker repository, keyring and candidate provenance are verified.'
+      : 'The official Docker repository and keyring are verified.',
+    observed: `${facts.repo.sourceVerified ? 'source verified' : 'source'} / ${facts.repo.keyringVerified ? 'keyring verified' : 'keyring'}${facts.repo.candidateSourceVerified === true ? ' / candidate verified' : ''}`,
   } : dockerWorking ? {
     id: 'apt_source',
     category: 'docker',

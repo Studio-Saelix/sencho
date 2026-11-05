@@ -294,13 +294,24 @@ export function useNodeBootstrap({ open, api }: UseNodeBootstrapOptions) {
       if (targetGenerationRef.current !== generation) return;
       const fieldError = toFieldError(caught);
       if (fieldError) setFieldErrors([fieldError]);
-      if (caught instanceof BootstrapApiError && caught.code === 'HOST_KEY_MISMATCH') {
-        // The pin changed underneath the keyscan. Keep the observed key, show
-        // the pin the server reported, and require an explicit confirmation.
+      if (caught instanceof BootstrapApiError
+        && (caught.code === 'HOST_KEY_MISMATCH' || caught.code === 'HOST_KEY_UNTRUSTED')) {
+        // The pin or the live key changed underneath the keyscan. Keep the
+        // identity the server reported, show the pin, and require an explicit
+        // replacement confirmation before another run.
         const pinned = typeof caught.details.pinnedFingerprint === 'string'
           ? caught.details.pinnedFingerprint
           : null;
-        setHostKey((current) => (current ? { ...current, trust: 'changed', pinnedFingerprint: pinned } : current));
+        const observed = typeof caught.details.observedFingerprint === 'string'
+          ? caught.details.observedFingerprint
+          : null;
+        setHostKey((current) => {
+          if (!current) return current;
+          if (caught.code === 'HOST_KEY_UNTRUSTED' && observed) {
+            return { ...current, fingerprint: observed, trust: 'changed', pinnedFingerprint: pinned };
+          }
+          return { ...current, trust: 'changed', pinnedFingerprint: pinned };
+        });
         setReplacing(false);
         setTrusted(false);
       }

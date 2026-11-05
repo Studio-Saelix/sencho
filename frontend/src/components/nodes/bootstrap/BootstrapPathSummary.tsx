@@ -52,12 +52,15 @@ export function BootstrapPathSummary({
   composeDir: ComposeDirFacts;
   agentDir: AgentDirFacts;
 }) {
-  const stackCount = composeDir.stackCount ?? 0;
   const stackDetail = composeDir.exists
-    ? `${stackCount} stack${stackCount === 1 ? '' : 's'}${composeDir.inventoryTruncated ? ' (truncated)' : ''}`
+    ? composeDir.inventoryError
+      ? 'stack count unknown'
+      : `${composeDir.stackCount ?? 0} stack${composeDir.stackCount === 1 ? '' : 's'}${composeDir.inventoryTruncated ? ' (truncated)' : ''}`
     : null;
   const agentDetail = agentDir.exists
-    ? `${agentDir.entries.length} entr${agentDir.entries.length === 1 ? 'y' : 'ies'}`
+    ? agentDir.inventoryError
+      ? 'contents unknown'
+      : `${agentDir.entries.length}${agentDir.entriesTruncated ? '+' : ''} entr${agentDir.entries.length === 1 ? 'y' : 'ies'}`
     : null;
   return (
     <div data-testid="bootstrap-path-summary" className="rounded-lg border border-muted bg-card/40 px-3 py-1">

@@ -384,3 +384,82 @@ describe('bootstrap evidence: working Docker and repository provenance', () => {
     expect(row?.observed).toBe('sencho-agent_sencho-agent-data');
   });
 });
+
+describe('bootstrap evidence: fresh hosts and repository probe completeness', () => {
+  const missingPackages: BootstrapFacts['packages'] = [
+    { name: 'docker-ce', installedVersion: null, candidateVersion: null },
+    { name: 'docker-ce-cli', installedVersion: null, candidateVersion: null },
+    { name: 'containerd.io', installedVersion: null, candidateVersion: null },
+    { name: 'docker-buildx-plugin', installedVersion: null, candidateVersion: null },
+    { name: 'docker-compose-plugin', installedVersion: null, candidateVersion: null },
+  ];
+
+  it('does not suppress the plan on a fresh host with no Docker and no Docker volume', () => {
+    const result = evidence(makeFacts({
+      docker: {
+        cliInstalled: false,
+        serverVersion: null,
+        composeVersion: null,
+        serviceActive: false,
+        serviceEnabled: false,
+        socketAccess: 'none',
+      },
+      packages: missingPackages,
+      repo: {
+        probeComplete: true,
+        dockerSourceConfigured: false,
+        keyringPresent: false,
+        sourceVerified: false,
+        keyringVerified: false,
+        candidateSourceVerified: null,
+        problem: null,
+      },
+      agent: { dataVolumeExists: false },
+    }));
+    expect(result.checks.find((entry) => entry.id === 'agent_conflict')?.status).toBe('pass');
+    expect(result.planSuppressed).toBe(false);
+  });
+
+  it('suppresses a plan when the repository probe did not complete', () => {
+    const result = evidence(makeFacts({
+      docker: { cliInstalled: false, serverVersion: null, composeVersion: null, socketAccess: 'none' },
+      packages: missingPackages,
+      repo: {
+        probeComplete: false,
+        dockerSourceConfigured: false,
+        keyringPresent: false,
+        sourceVerified: null,
+        keyringVerified: null,
+        candidateSourceVerified: null,
+        problem: 'the repository probe did not complete',
+      },
+    }));
+    expect(result.checks.find((entry) => entry.id === 'apt_source')?.status).toBe('unknown');
+    expect(result.planSuppressed).toBe(true);
+  });
+
+  it('reports a symlinked directory with a failed inventory as unknown, not a warning', () => {
+    const result = evidence(makeFacts({
+      composeDir: { hasSymlinkAncestor: true, inventoryError: 'exited 1' },
+    }));
+    expect(result.checks.find((entry) => entry.id === 'compose_dir')?.status).toBe('unknown');
+    expect(result.planSuppressed).toBe(true);
+  });
+
+  it('does not claim candidate provenance when none was observed', () => {
+    const result = evidence(makeFacts({
+      repo: {
+        probeComplete: true,
+        dockerSourceConfigured: true,
+        keyringPresent: true,
+        sourceVerified: true,
+        keyringVerified: true,
+        candidateSourceVerified: null,
+        problem: null,
+      },
+    }));
+    const row = result.checks.find((entry) => entry.id === 'apt_source');
+    expect(row?.status).toBe('pass');
+    expect(row?.summary).not.toMatch(/candidate provenance/i);
+  });
+});

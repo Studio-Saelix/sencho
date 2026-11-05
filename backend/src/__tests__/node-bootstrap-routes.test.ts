@@ -694,8 +694,12 @@ describe('bootstrap service trust serialization', () => {
     await expect(svc.preflight(
       { ...baseRequest, host, expectedFingerprint: pinned },
       { hubUrl: 'https://sencho.example.com', audit },
-    )).rejects.toMatchObject({ code: 'HOST_KEY_UNTRUSTED' });
+    )).rejects.toMatchObject({
+      code: 'HOST_KEY_UNTRUSTED',
+      details: { pinnedFingerprint: pinned, expectedFingerprint: pinned, observedFingerprint: observed },
+    });
     expect(executed).toBe(1);
+    expect(db.getNodeBootstrapTrust(host, 22)?.fingerprint).toBe(pinned);
     const { entries } = db.getAuditLogs({ search: 'bootstrap.trust.mismatch', limit: 50 });
     const row = entries.find((entry) => entry.summary.includes(`host=${host}`));
     expect(row?.summary).toContain(`pinned=${pinned}`);

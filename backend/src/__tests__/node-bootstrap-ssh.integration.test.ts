@@ -37,6 +37,7 @@ interface FixtureOptions {
   delayExecCommand?: string;
   largeOutput?: boolean;
   largeStderr?: boolean;
+  mixedOutput?: boolean;
   closeAfterFirstCommand?: boolean;
   closeDuringCommand?: string;
   responses?: Record<string, string>;
@@ -95,6 +96,13 @@ async function startServer(options: FixtureOptions = {}): Promise<Fixture> {
           }
           if (options.largeStderr) {
             stream.stderr.write('y'.repeat(100 * 1024));
+            stream.exit(0);
+            stream.end();
+            return;
+          }
+          if (options.mixedOutput) {
+            stream.write('x'.repeat(40 * 1024));
+            stream.stderr.write('y'.repeat(40 * 1024));
             stream.exit(0);
             stream.end();
             return;
@@ -333,6 +341,18 @@ describe('bootstrap SSH transport deadlines and byte budgets', () => {
     expect(Buffer.byteLength(results[0].stdout)).toBeLessThanOrEqual(64 * 1024);
   });
 
+  it('counts mixed stdout and stderr against one per-command budget', async () => {
+    const fixture = await startServer({ mixedOutput: true });
+    const results = await client.runCommands(
+      { host: 'fixture.local', address: '127.0.0.1', port: fixture.port, username: 'ubuntu', privateKey: USER_KEY },
+      [{ id: 'mixed', command: 'cat both-streams' }],
+      {},
+    );
+    expect(results[0].truncated).toBe(true);
+    const retained = Buffer.byteLength(results[0].stdout) + Buffer.byteLength(results[0].stderr);
+    expect(retained).toBeLessThanOrEqual(64 * 1024);
+  });
+
   it('shares one raw-byte budget across every command in the session', async () => {
     const fixture = await startServer({ largeOutput: true });
     const commands = Array.from({ length: 10 }, (_, index) => ({ id: `big-${index}`, command: `cat file-${index}` }));
@@ -342,8 +362,10 @@ describe('bootstrap SSH transport deadlines and byte budgets', () => {
       { perCommandMs: 2_000, totalMs: 20_000 },
     );
     expect(results).toHaveLength(10);
-    expect(results[8].truncated).toBe(true);
+    expect(results[7].stdout.length).toBeGreaterThan(0);
+    expect(results[8].error).toBe('OUTPUT_CAP');
     expect(results[9].error).toBe('OUTPUT_CAP');
+    expect(results[9].stdout).toBe('');
     const total = results.reduce((sum, result) => sum + Buffer.byteLength(result.stdout) + Buffer.byteLength(result.stderr), 0);
     expect(total).toBeLessThanOrEqual(512 * 1024);
   });

@@ -95,7 +95,8 @@ function packageInstallCommand(packages: DockerPackage[], resolved: boolean): st
 }
 
 function repoSteps(facts: BootstrapFacts, sudo: boolean): BootstrapPlanStep[] {
-  const codename = facts.os?.codename || 'jammy';
+  const codename = facts.os?.codename;
+  if (!codename) throw new Error('The plan requires a known Ubuntu codename.');
   const arch = facts.os?.arch === 'x86_64' ? 'amd64' : (facts.os?.arch || 'amd64');
   const sourcesLine = `deb [arch=${arch} signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/ubuntu ${codename} stable`;
   return [
@@ -273,8 +274,12 @@ export function buildBootstrapPlan(input: PlanBuildInput): BootstrapPlan {
   // default distribution, user or filesystem.
   if (!facts.os) throw new Error('The plan requires a known operating system.');
   if (!facts.user) throw new Error('The plan requires a known SSH user.');
-  if (facts.paths.composeDir.probeError || facts.paths.agentDir.probeError) {
+  if (facts.paths.composeDir.probeError || facts.paths.agentDir.probeError
+    || facts.paths.composeDir.inventoryError || facts.paths.agentDir.inventoryError) {
     throw new Error('The plan cannot be built while a directory could not be inspected.');
+  }
+  if (!facts.repo.probeComplete && !(facts.docker.cliInstalled && facts.docker.serverVersion && facts.docker.composeVersion)) {
+    throw new Error('The plan cannot be built while the Docker package source could not be inspected.');
   }
   const owner = facts.user?.name ?? facts.target.username;
   const group = facts.user?.group ?? owner;
@@ -288,11 +293,16 @@ export function buildBootstrapPlan(input: PlanBuildInput): BootstrapPlan {
   const dockerWorking = facts.docker.cliInstalled
     && facts.docker.serverVersion !== null
     && facts.docker.composeVersion !== null;
-  const repoConfigured = facts.repo.sourceVerified === true
+  const repoConfigured = facts.repo.dockerSourceConfigured
+    && facts.repo.keyringPresent
+    && facts.repo.sourceVerified === true
     && facts.repo.keyringVerified === true
     && facts.repo.candidateSourceVerified !== false;
-  const missingPackages = facts.packages.filter((pkg) => pkg.installedVersion === null);
-  const needsRepo = !dockerWorking && (!repoConfigured || missingPackages.length > 0);
+  const composePluginMissing = facts.docker.composeVersion === null;
+  const missingPackages = facts.packages.filter((pkg) => (
+    pkg.installedVersion === null || (composePluginMissing && pkg.name === 'docker-compose-plugin')
+  ));
+  const needsRepo = !dockerWorking && !repoConfigured;
 
   if (needsRepo) {
     stages.push({
@@ -380,9 +390,12 @@ export function buildBootstrapPlan(input: PlanBuildInput): BootstrapPlan {
 
   const composeDir = facts.paths.composeDir;
   if (composeDir.exists) {
+    const stackDetail = composeDir.stackCount === null
+      ? 'stack count unknown'
+      : `${composeDir.stackCount} stack${composeDir.stackCount === 1 ? '' : 's'} found`;
     skipped.push({
       id: 'compose_dir',
-      reason: `Existing directory preserved; ${composeDir.stackCount ?? 0} stack${composeDir.stackCount === 1 ? '' : 's'} found; ownership and mode unchanged.`,
+      reason: `Existing directory preserved; ${stackDetail}; ownership and mode unchanged.`,
     });
   } else {
     stages.push({

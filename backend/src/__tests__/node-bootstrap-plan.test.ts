@@ -326,6 +326,24 @@ describe('bootstrap plan privileges and working installations', () => {
     ]));
   });
 
+  it('reinstalls the Compose plugin when the CLI reports no Compose despite an installed package record', () => {
+    const plan = planFor(makeFacts({
+      docker: { composeVersion: null },
+      repo: {
+        probeComplete: true,
+        dockerSourceConfigured: true,
+        keyringPresent: true,
+        sourceVerified: true,
+        keyringVerified: true,
+        candidateSourceVerified: null,
+        problem: null,
+      },
+    }));
+    const packages = allSteps(plan).find((entry) => entry.id === 'install-docker-packages');
+    expect(packages?.command).toContain('docker-compose-plugin');
+    expect(plan.stages.map((stage) => stage.id)).toContain('docker_packages');
+  });
+
   it('names the retained canonical Compose volume in the plan notice', () => {
     const plan = planFor(makeFacts({
       agent: { dataVolumeExists: true, dataVolumeNames: ['sencho-agent_sencho-agent-data'] },
@@ -346,12 +364,15 @@ describe('bootstrap plan export completeness', () => {
     expect(text).toContain(`Evidence digest: sha256:${plan.evidenceDigest}`);
     expect(text).toContain(`Plan digest: sha256:${plan.digest}`);
     expect(text).toContain('Not changed:');
-    expect(text).toContain('docker_service');
-    expect(text).toContain('compose_dir');
+    for (const id of ['docker_repository', 'docker_packages', 'docker_service', 'compose_dir']) {
+      expect(text, id).toContain(id);
+    }
     expect(text).toContain('file: /opt/sencho-agent/compose.yaml (0600) [redacted]');
+    expect(text).toContain('file: /opt/sencho-agent/sencho-bootstrap.json (0600)');
     expect(text).toContain('content:');
     expect(text).toContain('{{SENCHO_ENROLL_TOKEN}}');
-    expect(text).toMatch(/## 1\. .*\n[\s\S]*## 2\. /);
+    expect(text).toContain('"project": "sencho-agent"');
+    expect(text).toMatch(/## 1\. .*\n[\s\S]*## 2\. [\s\S]*## 3\. /);
     expect(text).toContain('Evidence digest');
   });
 });
@@ -361,5 +382,19 @@ describe('bootstrap plan prerequisites', () => {
     expect(() => planFor(makeFacts({ os: null }))).toThrow(/operating system/i);
     expect(() => planFor(makeFacts({ user: null }))).toThrow(/SSH user/i);
     expect(() => planFor(makeFacts({ composeDir: { probeError: 'stat failed' } }))).toThrow(/could not be inspected/i);
+    expect(() => planFor(makeFacts({ agentDir: { probeError: 'stat failed' } }))).toThrow(/could not be inspected/i);
+    expect(() => planFor(makeFacts({ composeDir: { inventoryError: 'exited 1' } }))).toThrow(/could not be inspected/i);
+    expect(() => planFor(makeFacts({
+      docker: { cliInstalled: false, serverVersion: null, composeVersion: null, socketAccess: 'none' },
+      repo: {
+        probeComplete: false,
+        dockerSourceConfigured: false,
+        keyringPresent: false,
+        sourceVerified: null,
+        keyringVerified: null,
+        candidateSourceVerified: null,
+        problem: 'probe failed',
+      },
+    }))).toThrow(/package source could not be inspected/i);
   });
 });

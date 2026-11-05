@@ -125,9 +125,12 @@ describe('BootstrapPlanStep', () => {
 
   it('shows stages in execution order and every no-change row', () => {
     render(<BootstrapPlanStep plan={plan} inspection={inspection} />);
-    expect(screen.getByText('1. Pilot Agent installation directory')).toBeInTheDocument();
-    expect(screen.getByText('2. Agent files')).toBeInTheDocument();
-    expect(screen.getByText('3. Start the Pilot agent')).toBeInTheDocument();
+    const headings = screen.getAllByRole('heading', { level: 4 }).map((heading) => heading.textContent);
+    expect(headings.slice(0, 3)).toEqual([
+      '1. Pilot Agent installation directory',
+      '2. Agent files',
+      '3. Start the Pilot agent',
+    ]);
     expect(screen.getByText(/install -d -m 0700/)).toBeInTheDocument();
     expect(screen.getByText(/mode 0700/)).toBeInTheDocument();
     expect(screen.getByText('user · mode 0700 · ubuntu:ubuntu')).toBeInTheDocument();
@@ -172,6 +175,7 @@ describe('BootstrapPlanStep', () => {
     expect(text).toContain(`Evidence digest: sha256:${plan.evidenceDigest}`);
     expect(text).toContain('Not changed:');
     expect(text).toContain('The Docker service is active and enabled at boot.');
+    expect(text).toContain('Existing directory preserved; 3 stacks found; ownership and mode unchanged.');
     expect(text).toContain('name: sencho-agent');
   });
 });

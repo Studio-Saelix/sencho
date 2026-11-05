@@ -112,6 +112,9 @@ describe('bootstrap probe parsers', () => {
 
     const failed = parsePathFacts('', '/opt/sencho-agent');
     expect(failed.probeError).toMatch(/no facts/i);
+
+    const denied = parsePathFacts('P_EXISTS=0\nP_ERROR=stat:stat: cannot statx: Permission denied', '/opt/sencho-agent');
+    expect(denied.probeError).toMatch(/Permission denied/i);
   });
 
   it('reads a truncated inventory as a lower bound', () => {
@@ -180,6 +183,7 @@ describe('bootstrap probe parsers', () => {
     expect(packages.find((pkg) => pkg.name === 'docker-compose-plugin')?.installedVersion).toBe('2.29.7-1~ubuntu.24.04~noble');
 
     expect(parseDockerRepo('')).toEqual({
+      probeComplete: true,
       dockerSourceConfigured: false,
       keyringPresent: false,
       sourceVerified: false,
@@ -420,7 +424,15 @@ describe('bootstrap Docker endpoint pinning', () => {
       const command = catalog.find((entry) => entry.id === id)?.command ?? '';
       expect(command, id).toContain(`DOCKER_HOST=${DOCKER_LOCAL_ENDPOINT}`);
       expect(command, id).toContain('DOCKER_CONTEXT=default');
+      expect(command, id).toContain('-u DOCKER_HOST');
+      expect(command, id).toContain('-u DOCKER_CONTEXT');
+      expect(command, id).toContain('-u DOCKER_CONFIG');
+      if (id.endsWith('_sudo')) expect(command, id).toContain('sudo -n env ');
+      else expect(command, id).toContain('env -u DOCKER_HOST');
     }
+    const volume = catalog.find((entry) => entry.id === 'agent_volume')?.command ?? '';
+    expect(volume).toContain('[ "$ok" = 1 ]');
+    expect(volume).not.toContain('|| true');
   });
 
   it('reports an unsearchable path as an inspection error, not a missing directory', () => {
@@ -448,12 +460,54 @@ describe('bootstrap Docker endpoint pinning', () => {
       const output = execFileSync('sh', ['-c', PATH_FACTS_SCRIPT, 'sencho-probe', missing], { encoding: 'utf8' });
       expect(output).toContain('P_EXISTS=0');
       expect(output).toContain(`P_NEAREST=${dir}`);
+      expect(parsePathFacts(output, missing).probeError).toBeNull();
       expect(output).toMatch(/P_FSTYPE=\S+/);
       expect(output).toMatch(/P_FSTARGET=\S+/);
       expect(output).toMatch(/P_DF=\S+\s+\d+\s+\d+\s+\d+/);
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
+  });
+});
+
+describe('bootstrap volume and no-Docker facts', () => {
+  it('uses the sudo volume inventory when direct Docker access is denied', () => {
+    const facts = minimalAssembly([
+      probe('docker_cli', '/usr/bin/docker'),
+      probe('docker_info_sudo', '27.3.1|/var/lib/docker'),
+      probe('agent_volume', '', { exitCode: 1 }),
+      probe('agent_volume_sudo', PILOT_DATA_VOLUME_CANONICAL),
+    ]);
+    expect(facts.docker.socketAccess).toBe('sudo');
+    expect(facts.agent.dataVolumeExists).toBe(true);
+    expect(facts.agent.dataVolumeNames).toEqual([PILOT_DATA_VOLUME_CANONICAL]);
+  });
+
+  it('knows a host without Docker has no Docker volume', () => {
+    const facts = minimalAssembly([
+      probe('docker_cli', '', { exitCode: 1 }),
+      probe('agent_volume', '', { exitCode: 1 }),
+    ]);
+    expect(facts.docker.cliInstalled).toBe(false);
+    expect(facts.agent.dataVolumeExists).toBe(false);
+  });
+
+  it('marks an absent inventory probe as not run', () => {
+    const pathFacts = [
+      'P_EXISTS=1', 'P_ISDIR=1', 'P_REAL=/opt/docker/sencho', 'P_FSTYPE=ext4', 'P_FSTARGET=/',
+      'P_USER_R=1', 'P_USER_W=1', 'P_PARENT_W=1',
+    ].join('\n');
+    const facts = minimalAssembly([probe('path_compose', pathFacts)]);
+    expect(facts.paths.composeDir.inventoryError).toMatch(/not run/i);
+    expect(facts.paths.composeDir.stackCount).toBeNull();
+  });
+
+  it('marks a truncated repository probe incomplete', () => {
+    const facts = minimalAssembly([
+      probe('docker_repo', 'SOURCE_BEGIN=/etc/apt/sources.list.d/docker.list\n', { truncated: true }),
+    ]);
+    expect(facts.repo.probeComplete).toBe(false);
+    expect(facts.repo.sourceVerified).toBeNull();
   });
 });
 
@@ -529,7 +583,7 @@ describe('bootstrap Docker repository provenance', () => {
       'KEY_END=/etc/apt/keyrings/docker.asc',
     ].join('\n'), 'noble');
     expect(badKey.keyringVerified).toBe(false);
-    expect(badKey.keyringPresent).toBe(false);
+    expect(badKey.keyringPresent).toBe(true);
   });
 
   it('records which archive serves the candidate version', () => {
@@ -543,5 +597,26 @@ describe('bootstrap Docker repository provenance', () => {
     ].join('\n'));
     expect(packages.find((pkg) => pkg.name === 'docker-ce')?.candidateSource)
       .toBe('https://download.docker.com/linux/ubuntu');
+  });
+});
+
+describe('bootstrap repository signed-by verification', () => {
+  it('rejects a source whose signed-by key is invalid even when another keyring is valid', () => {
+    const goodKey = Buffer.from('-----BEGIN PGP PUBLIC KEY BLOCK-----\ngood\n-----END PGP PUBLIC KEY BLOCK-----\n');
+    const output = [
+      'SOURCE_BEGIN=/etc/apt/sources.list.d/docker.list',
+      'deb [arch=amd64 signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/ubuntu noble stable',
+      'SOURCE_END=/etc/apt/sources.list.d/docker.list',
+      'KEY_BEGIN=/etc/apt/keyrings/docker.asc',
+      Buffer.from('not a pgp key').toString('base64'),
+      'KEY_END=/etc/apt/keyrings/docker.asc',
+      'KEY_BEGIN=/usr/share/keyrings/docker-archive-keyring.gpg',
+      goodKey.toString('base64'),
+      'KEY_END=/usr/share/keyrings/docker-archive-keyring.gpg',
+    ].join('\n');
+    const result = parseDockerRepo(output, 'noble');
+    expect(result.keyringPresent).toBe(true);
+    expect(result.keyringVerified).toBe(true);
+    expect(result.sourceVerified).toBe(false);
   });
 });

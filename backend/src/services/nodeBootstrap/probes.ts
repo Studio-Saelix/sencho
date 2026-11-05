@@ -44,18 +44,24 @@ export const DOCKER_LOCAL_COMMAND = `${DOCKER_LOCAL_ENV} docker`;
 export const PILOT_DATA_VOLUME_CANONICAL = 'sencho-agent_sencho-agent-data';
 export const PILOT_DATA_VOLUME_NAMES = ['sencho-agent-data', PILOT_DATA_VOLUME_CANONICAL] as const;
 
-const DOCKER_VOLUME_PROBE = [
-  `for v in ${PILOT_DATA_VOLUME_NAMES.join(' ')}; do`,
-  `  ${DOCKER_LOCAL_COMMAND} volume inspect "$v" --format '{{.Name}}' 2>/dev/null || true`,
-  'done',
-  `${DOCKER_LOCAL_COMMAND} volume ls --filter label=com.docker.compose.project=sencho-agent --format '{{.Name}}' 2>/dev/null || true`,
-].join('\n');
-const DOCKER_VOLUME_PROBE_SUDO = [
-  `for v in ${PILOT_DATA_VOLUME_NAMES.join(' ')}; do`,
-  `  sudo -n ${DOCKER_LOCAL_ENV} docker volume inspect "$v" --format '{{.Name}}' 2>/dev/null || true`,
-  'done',
-  `sudo -n ${DOCKER_LOCAL_ENV} docker volume ls --filter label=com.docker.compose.project=sencho-agent --format '{{.Name}}' 2>/dev/null || true`,
-].join('\n');
+function volumeProbeScript(dockerPrefix: string): string {
+  return [
+    'ok=0',
+    `for v in ${PILOT_DATA_VOLUME_NAMES.join(' ')}; do`,
+    `  if out=$(${dockerPrefix} volume inspect "$v" --format '{{.Name}}' 2>/dev/null); then`,
+    '    ok=1',
+    '    [ -n "$out" ] && printf \'%s\\n\' "$out"',
+    '  fi',
+    'done',
+    `if out=$(${dockerPrefix} volume ls --filter label=com.docker.compose.project=sencho-agent --format '{{.Name}}' 2>/dev/null); then`,
+    '  ok=1',
+    '  [ -n "$out" ] && printf \'%s\\n\' "$out"',
+    'fi',
+    '[ "$ok" = 1 ]',
+  ].join('\n');
+}
+const DOCKER_VOLUME_PROBE = volumeProbeScript(DOCKER_LOCAL_COMMAND);
+const DOCKER_VOLUME_PROBE_SUDO = volumeProbeScript(`sudo -n ${DOCKER_LOCAL_ENV} docker`);
 
 /**
  * Inventory scripts resolve the path first and refuse a denied real path before
@@ -83,7 +89,10 @@ export const PATH_FACTS_SCRIPT = [
   `printf 'P_INPUT=%s\\n' "$p"`,
   `if [ -e "$p" ] || [ -L "$p" ]; then printf 'P_EXISTS=1\\n'; else`,
   `  err=$(stat -L -- "$p" 2>&1 >/dev/null)`,
-  `  if [ -n "$err" ]; then printf 'P_ERROR=stat:%s\\n' "$err"; fi`,
+  `  case "$err" in`,
+  `    ""|*"No such file or directory"*|*ENOENT*) ;;`,
+  `    *) printf 'P_ERROR=stat:%s\\n' "$err" ;;`,
+  `  esac`,
   `  printf 'P_EXISTS=0\\n'`,
   `fi`,
   `if [ -d "$p" ]; then printf 'P_ISDIR=1\\n'; else printf 'P_ISDIR=0\\n'; fi`,
@@ -441,8 +450,8 @@ function keyLooksValid(path: string, bytes: Buffer | null): boolean {
  */
 export function parseDockerRepo(text: string, codename = ''): import('./types').RepositoryObservation {
   const parsed = parseRepoProbeOutput(text);
-  const keyPaths = new Set(parsed.keys.map((key) => key.path));
   const verifiedKeys = parsed.keys.filter((key) => keyLooksValid(key.path, key.bytes));
+  const keyPaths = new Set(verifiedKeys.map((key) => key.path));
   const keyringVerified = verifiedKeys.length > 0
     ? true
     : parsed.keys.length > 0
@@ -473,8 +482,9 @@ export function parseDockerRepo(text: string, codename = ''): import('./types').
       : allReadableVerified;
 
   return {
+    probeComplete: true,
     dockerSourceConfigured: parsed.sources.length > 0,
-    keyringPresent: verifiedKeys.length > 0,
+    keyringPresent: parsed.keys.length > 0,
     sourceVerified,
     keyringVerified,
     candidateSourceVerified: null,
@@ -835,6 +845,7 @@ export function assembleFacts(input: AssembleFactsInput): BootstrapFacts {
   const uname = parseUname(stdoutOf(map, 'uname'));
   const userBase = parseUser(stdoutOf(map, 'user'));
   const sudoAvailable = succeeded(map, 'sudo');
+  const cliInstalled = succeeded(map, 'docker_cli');
 
   const directDocker = parseDockerInfo(stdoutOf(map, 'docker_info'));
   const sudoDocker = parseDockerInfo(stdoutOf(map, 'docker_info_sudo'));
@@ -851,6 +862,7 @@ export function assembleFacts(input: AssembleFactsInput): BootstrapFacts {
   const repoBase = repoProbe && !repoProbe.timedOut && !repoProbe.truncated
     ? parseDockerRepo(repoProbe.stdout, osBase?.codename ?? '')
     : {
+      probeComplete: false,
       dockerSourceConfigured: false,
       keyringPresent: false,
       sourceVerified: null,
@@ -917,7 +929,7 @@ export function assembleFacts(input: AssembleFactsInput): BootstrapFacts {
     })),
     dataVolumeExists: dockerInfo
       ? volumeOutcome.result ? volumeNames.length > 0 : null
-      : null,
+      : cliInstalled ? null : false,
     dataVolumeNames: volumeNames,
     defaultDirHasComposeFile: stdoutOf(map, 'default_agent_path').trim() === 'yes',
   };
@@ -930,7 +942,7 @@ export function assembleFacts(input: AssembleFactsInput): BootstrapFacts {
     os: osBase ? { ...osBase, arch: uname.arch, kernel: uname.kernel } : null,
     user: userBase ? { ...userBase, sudoNonInteractive: sudoAvailable } : null,
     docker: {
-      cliInstalled: succeeded(map, 'docker_cli'),
+      cliInstalled,
       serverVersion: dockerInfo?.serverVersion ?? null,
       composeVersion,
       serviceActive: stdoutOf(map, 'docker_service_active').trim() === 'active'

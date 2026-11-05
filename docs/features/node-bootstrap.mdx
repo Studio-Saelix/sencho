@@ -67,7 +67,7 @@ ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub
 - **Known host:** a key that matches the pin proceeds without a prompt.
 - **Changed key:** Sencho blocks the preflight and shows both fingerprints. Replacing the pin is a separate, explicit action, and both fingerprints are recorded in the audit log.
 
-Once trusted, select **Run preflight**. Sencho opens one SSH connection and runs the fixed read-only catalog. The request is bounded: 15 seconds to connect, 10 seconds per command, 90 seconds overall, with output caps. A command that exceeds its limit degrades the dependent check to `unknown` instead of reporting a pass.
+Once trusted, select **Run preflight**. Sencho opens one SSH connection and runs the fixed read-only catalog. The request is bounded: 15 seconds to connect, 10 seconds per command, 90 seconds overall, with output caps. A fact from a timed-out or truncated command is treated as `unknown` or `blocked`; it never becomes a clean pass.
 
 The result has four verdicts:
 
@@ -97,7 +97,7 @@ When there are no blockers, Sencho builds the plan. It contains:
 - A SHA-256 digest over the plan, and a digest over the evidence it was built from.
 
 <Frame>
-  <img src="/images/node-bootstrap/03-plan-filesystem.png" alt="Bootstrap dialog on the Plan step: the two paths, the Filesystem changes group with the agent directory install command and its 0700 mode and owner, the compose file write at 0600, and the preserved Compose directory row." />
+  <img src="/images/node-bootstrap/03-plan-filesystem.png" alt="Bootstrap dialog on the Plan step: the two paths, numbered execution stages with the agent directory install command and its 0700 mode and owner, the compose file write at 0600, and the Not changed block listing the preserved Compose directory." />
 </Frame>
 
 The plan reads **No changes have been made on this server.** Use **Copy plan** or **Download** to keep it for review. The digest is what a later approval binds to, so a plan that changes is a plan that must be approved again.
@@ -147,7 +147,7 @@ The Agent installation directory has no settings field. It is chosen only here.
 - Ubuntu 22.04 and 24.04 on x86_64 only.
 - IPv6 targets, SSH agent forwarding, password authentication and passworded sudo are not supported in this release.
 - The preflight never changes firewall, SSH server, Docker daemon, user or group configuration.
-- The plan previews the official Docker repository only. When that repository is not configured yet, package versions are shown as unresolved and are resolved from the official repository at execution time.
+- The plan previews the official Docker repository only. When that repository is not configured yet, package versions are shown as unresolved and are resolved from the official repository at execution time. On a host where Docker and Compose already work, the plan preserves that installation and does not install or replace Docker packages.
 
 ## Troubleshooting
 

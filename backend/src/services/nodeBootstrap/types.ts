@@ -136,6 +136,8 @@ export interface BootstrapPaths {
 }
 
 export interface RepositoryObservation {
+  /** False when the repository probe did not run to completion. */
+  probeComplete: boolean;
   /** A Docker source file exists. Existence alone proves nothing about its provenance. */
   dockerSourceConfigured: boolean;
   /** A Docker keyring file exists and parses as a public key. */
