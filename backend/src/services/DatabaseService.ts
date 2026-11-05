@@ -9967,13 +9967,19 @@ stmt.run('gitops_schema_version', '1');
      * The result is informational. `violated=false` means a policy matched
      * but the scan was within limits; the UI surfaces a banner only when
      * `violated=true`. Blocking enforcement lives in the pre-deploy gate.
+     *
+     * `stackContext` defaults to the stack the row was written for. A scan row
+     * is shared by every stack that deploys the same image on the node, so a
+     * reader asking about one particular stack (the stack whose deploy cited
+     * the row) passes that stack to get the verdict of its own policy.
      */
     public evaluateScanAgainstPolicies(
         nodeId: number,
         scan: VulnerabilityScan,
         selfIdentity: string,
+        stackContext: string | null = scan.stack_context,
     ): PolicyEvaluation | null {
-        const policy = this.getMatchingPolicy(nodeId, scan.stack_context, selfIdentity);
+        const policy = this.getMatchingPolicy(nodeId, stackContext, selfIdentity);
         if (!policy) return null;
         const inputs = policyInputs(policy);
         // The pre-deploy gate filters suppressed findings when this setting is on,

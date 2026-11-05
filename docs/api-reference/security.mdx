@@ -244,6 +244,21 @@ curl -H "Authorization: Bearer YOUR_API_TOKEN" \
   "https://your-sencho-instance:1852/api/security/scans?imageRefLike=nginx&limit=20"
 ```
 
+### Get a scan
+
+**`GET /api/security/scans/{scanId}`**
+
+**License:** Community
+
+Returns one scan with its `policy_evaluation` banner, recomputed against the current policies. Sencho reuses a stored scan for an image it scanned in the last 24 hours, so one row can be cited by several stacks and keeps the `stack_context` of the stack that first scanned it. Pass `?stack=<stackName>` to evaluate the banner against the policy of the stack whose deploy cited the scan. The caller needs read access to that stack. Without it, the banner follows the row's own `stack_context`.
+
+```bash
+curl -H "Authorization: Bearer YOUR_API_TOKEN" \
+  "https://your-sencho-instance:1852/api/security/scans/142?stack=myapp"
+```
+
+**Errors:** `400 Invalid stack name`, `404 Scan not found`.
+
 ## Stack deploy with policy
 
 Every stack deploy endpoint evaluates the scan policy gate before `docker compose up` runs. When a policy blocks the deploy, the endpoint returns HTTP 409.
@@ -280,6 +295,8 @@ HTTP 409 Conflict. The response body is parseable JSON so CI pipelines can branc
   ]
 }
 ```
+
+A violation's `scanId` can name a scan another stack wrote first, because Sencho reuses a recent scan of the same image. Read it with [`?stack=<stackName>`](#get-a-scan) to see the verdict of the policy that blocked your stack.
 
 ### Bypassing a block
 

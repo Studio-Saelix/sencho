@@ -159,19 +159,33 @@ function shapeScanForResponse(scan: VulnerabilityScan): Omit<VulnerabilityScan, 
  * suppression lifecycle. evaluateScanAgainstPolicies reads the honor-suppressions
  * setting itself, so this is correct whether or not suppressions are honored, and
  * returns null when no policy matches (the banner clears, matching a passing gate).
+ *
+ * A scan row is shared by every stack that deploys the image on the node, and
+ * keeps the stack it was first written for. `forStack` names the stack that is
+ * asking (the one whose blocked deploy cited the row), so the banner shows the
+ * verdict of that stack's policy instead of the first stack's.
  */
 function resolveBannerEvaluation(
   db: DatabaseService,
   scan: VulnerabilityScan,
+  forStack?: string,
 ): ReturnType<typeof parsePolicyEvaluation> {
   try {
-    return db.evaluateScanAgainstPolicies(scan.node_id, scan, FleetSyncService.getSelfIdentity());
+    return db.evaluateScanAgainstPolicies(
+      scan.node_id,
+      scan,
+      FleetSyncService.getSelfIdentity(),
+      forStack ?? scan.stack_context,
+    );
   } catch (err) {
     // The banner is informational and the deploy gate is authoritative, so a
     // recompute failure must degrade to the stored snapshot rather than 500 the
     // scan detail. The recompute is synchronous DB reads that should not throw,
     // so surface it at error level if it ever does.
     console.error('[Security] banner re-evaluation failed for scanId=%s node=%s:', scan.id, scan.node_id, getErrorMessage(err, 'unknown'));
+    // The snapshot describes the row's own stack, so it answers a request for
+    // another stack with the wrong policy; show no banner instead.
+    if (forStack !== undefined && forStack !== scan.stack_context) return null;
     return parsePolicyEvaluation(scan.policy_evaluation);
   }
 }
@@ -704,6 +718,15 @@ securityRouter.get('/scans/:scanId', authMiddleware, (req: Request, res: Respons
   if (!Number.isFinite(scanId)) {
     res.status(400).json({ error: 'Invalid scan id' }); return;
   }
+  // `?stack=` asks for the banner of one stack's policy: the stack whose deploy
+  // cited this scan, which may differ from the stack the shared row was written for.
+  const stackParam = optionalTrimmedQuery(req.query.stack);
+  if (stackParam !== undefined) {
+    if (!isValidStackName(stackParam)) {
+      res.status(400).json({ error: 'Invalid stack name' }); return;
+    }
+    if (!requirePermission(req, res, 'stack:read', 'stack', stackParam)) return;
+  }
   const db = DatabaseService.getInstance();
   const scan = db.getVulnerabilityScan(scanId);
   if (!scan || scan.node_id !== req.nodeId) {
@@ -717,7 +740,7 @@ securityRouter.get('/scans/:scanId', authMiddleware, (req: Request, res: Respons
   // matches the deploy gate; the list endpoint keeps the stored snapshot.
   res.json({
     ...shapeScanForResponse(scan),
-    policy_evaluation: resolveBannerEvaluation(db, scan),
+    policy_evaluation: resolveBannerEvaluation(db, scan, stackParam),
     publicly_exposed: publiclyExposed,
   });
 });
