@@ -30,12 +30,13 @@ vi.mock('@/context/NodeContext', () => ({
 }));
 
 import { apiFetch } from '@/lib/api';
+import { toast } from '@/components/ui/toast-store';
 import { DURATION_BASE_MS } from '@/hooks/useVisualBusy';
 import AutoUpdateReadinessView from '../AutoUpdateReadinessView';
 
 const mockedFetch = apiFetch as unknown as ReturnType<typeof vi.fn>;
 
-type JsonResponse = { ok: true; json: () => Promise<unknown> };
+type JsonResponse = { ok: boolean; json: () => Promise<unknown> };
 
 function deferred() {
   let resolve!: (value: JsonResponse) => void;
@@ -186,8 +187,9 @@ describe('AutoUpdateReadinessView loading and recheck feedback', () => {
     await settle(DURATION_BASE_MS);
     expect(icon).toHaveClass('animate-spin');
 
-    await act(async () => { refresh.resolve({ ok: false } as unknown as JsonResponse); });
+    await act(async () => { refresh.resolve({ ok: false, json: async () => ({}) }); });
     await settle();
+    expect(toast.error).toHaveBeenCalledWith('Failed to trigger refresh');
     expect(recheck).not.toBeDisabled();
     expect(recheck).not.toHaveAttribute('aria-busy');
     expect(icon).not.toHaveClass('animate-spin');
@@ -226,6 +228,8 @@ describe('AutoUpdateReadinessView loading and recheck feedback', () => {
       await act(async () => { fireEvent.click(recheck); });
       expect(recheck).toBeDisabled();
       expect(icon).not.toHaveClass('animate-spin');
+      expect(screen.getByText('Recheck')).not.toHaveClass('invisible');
+      expect(screen.getByText('Rechecking...')).toHaveClass('invisible');
 
       await settle(DURATION_BASE_MS);
       expect(icon).toHaveClass('animate-spin');
