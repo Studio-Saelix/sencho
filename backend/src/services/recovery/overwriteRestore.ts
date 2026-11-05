@@ -944,11 +944,6 @@ async function takePreRestorePoint(ctx: OverwriteRunContext, state: PipelineStat
     await settleRollback(ctx, state, classifyRecoveryError(err));
     return false;
   }
-  if (!point) {
-    await settleRollback(ctx, state, 'internal');
-    return false;
-  }
-
   let result;
   try {
     result = await ctx.engine.createPoint(
@@ -1018,23 +1013,13 @@ async function takePreRestorePoint(ctx: OverwriteRunContext, state: PipelineStat
     await settleRollback(ctx, state, 'pre_restore_failed');
     return false;
   }
-  let finalized: RecoveryPoint;
   try {
-    finalized = deps.points.finalize(point.id, { status: 'succeeded', evidence: result.evidence });
+    deps.points.finalize(point.id, { status: 'succeeded', evidence: result.evidence });
   } catch (err) {
     // The store refused the terminal write. The fence is already held, so the
     // restore is rolled back here rather than left for reconciliation.
     logEngineThrow(state, 'Finalizing the pre-restore point', err);
     settleFailedPoint(deps, point.id, 'pre_restore_failed');
-    await settleRollback(ctx, state, 'pre_restore_failed');
-    return false;
-  }
-  if (finalized.status !== 'succeeded') {
-    console.warn(
-      '[Recovery] The pre-restore point for %s was not complete (status %s).',
-      sanitizeForLog(state.intent.id),
-      finalized.status,
-    );
     await settleRollback(ctx, state, 'pre_restore_failed');
     return false;
   }
