@@ -602,9 +602,10 @@ function RecheckButton({
 }
 
 /**
- * First-load placeholder sized like the loaded board (the table with its real
- * column heads, the node card grid, or the phone cards) so nothing shifts when
- * the data lands. Rendered only after the visual-busy delay.
+ * First-load placeholder that mirrors the loaded board's structure (the table's
+ * column heads, the node card grid, or the phone cards) to limit layout shift.
+ * Callers mount it only after the visual-busy delay. Keep the column heads in
+ * sync with the readiness table head.
  */
 function ReadinessLoadingSkeleton({ layout }: { layout: 'table' | 'cards' | 'phone' }) {
   const label = 'Loading readiness';
@@ -1598,7 +1599,7 @@ function AutoUpdateReadinessContent({ headerActions }: AutoUpdateReadinessProps)
   }, [loadReadiness, loadCadence]);
 
   const { mode: viewMode, setMode: setViewMode } = useReadinessViewMode();
-  // A fast first answer never flashes the skeleton; the pane just holds its height.
+  // A fast first answer never flashes the skeleton; the min-h wrapper holds the pane open until the data lands.
   const firstLoad = loading && groups.length === 0;
   const { showBusy: showSkeleton } = useVisualBusy(firstLoad);
 
