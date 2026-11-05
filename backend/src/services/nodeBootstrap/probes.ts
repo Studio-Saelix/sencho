@@ -173,15 +173,16 @@ export const DEFAULT_AGENT_COMPOSE = `${DEFAULT_AGENT_DIR}/compose.yaml`;
  * from an inspection that could not be made: a denied ancestor makes a plain
  * `test -f` read as absent, so the failure text of `stat` decides. `LC_ALL=C`
  * is set inside the script because `sudo` may reset the caller's environment.
- * A found file is followed by the real directory that holds it, so a chosen
- * directory that is the same place under another name is recognized.
+ * A found file is followed by the real path of the directory it was looked for
+ * in, so a chosen directory that is the same place under another name is
+ * recognized.
  */
 export const DEFAULT_AGENT_PATH_SCRIPT = [
   'p="$1"',
   'if [ -f "$p" ]; then',
   '  printf \'yes\\n\'',
-  '  r=$(readlink -f -- "$p" 2>/dev/null)',
-  '  printf \'real=%s\\n\' "${r%/*}"',
+  '  r=$(readlink -f -- "${p%/*}" 2>/dev/null)',
+  '  printf \'real=%s\\n\' "$r"',
   'else',
   '  err=$(LC_ALL=C stat -L -- "$p" 2>&1 >/dev/null)',
   '  case "$err" in',
@@ -397,6 +398,8 @@ function parseDelimitedBlocks(text: string, begin: string, end: string, unreadab
   for (const line of text.split('\n')) {
     const beginMatch = new RegExp(`^${begin}=(.+)$`).exec(line);
     if (beginMatch) {
+      // A new block while one is open: the open one never ended.
+      if (current) files.push({ path: current.path, content: '', readable: false });
       current = { path: beginMatch[1], lines: [], unreadable: false };
       continue;
     }
@@ -1155,7 +1158,15 @@ export function assembleFacts(input: AssembleFactsInput): BootstrapFacts {
   const packagesComplete = succeeded(map, 'apt_policy');
   const packages = parseAptPolicy(completeStdout(map, 'apt_policy'));
   const candidateSourceVerified = candidateProvenance(packages, osBase?.codename ?? '');
-  const repo: BootstrapFacts['repo'] = { ...repoBase, candidateSourceVerified };
+  const candidatesUnattributed = candidateSourceVerified === null
+    && packages.some((pkg) => pkg.candidateVersion !== null)
+    && repoBase.sourceVerified === true
+    && repoBase.keyringVerified === true;
+  const repo: BootstrapFacts['repo'] = {
+    ...repoBase,
+    candidateSourceVerified,
+    problem: repoBase.problem ?? (candidatesUnattributed ? 'apt does not show which archive serves the Docker packages' : null),
+  };
 
   const containerOutcome = inventoryOutcome(map, 'containers', 'containers_sudo');
   const containerInventory = parseContainers(containerOutcome.text, containerOutcome.truncated);

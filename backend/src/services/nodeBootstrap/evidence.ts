@@ -963,7 +963,7 @@ export function buildBootstrapEvidence(input: { facts: BootstrapFacts; nodeNameT
   } : unsupportedComposeAddition(facts) ? {
     ...composePluginCheck,
     status: 'blocked',
-    summary: 'Docker runs on this host without Compose, and Docker\'s own packages did not install it. Adding Docker\'s Compose package could replace the running engine, so the plan stops here.',
+    summary: 'Docker runs on this host without Compose, and Docker\'s engine packages (docker-ce, docker-ce-cli and containerd.io) are not all installed. Adding Docker\'s Compose package could replace the running engine, so the plan stops here.',
     observed: `docker ${facts.docker.serverVersion ?? 'installed'} without the Compose plugin`,
     remediation: 'Install the Compose plugin from the source that provided this Docker (docker-compose-v2 for the Ubuntu docker.io package), or enroll the node manually, then run the preflight again.',
   } : {
@@ -1028,6 +1028,12 @@ export function buildBootstrapEvidence(input: { facts: BootstrapFacts; nodeNameT
   const repoContradicted = (facts.repo.dockerSourceConfigured && facts.repo.sourceVerified === false)
     || (facts.repo.keyringPresent && facts.repo.keyringVerified === false)
     || facts.repo.candidateSourceVerified === false;
+  // Source and keyring verified, candidates listed, archive not established.
+  const repoUnattributed = facts.packagesComplete
+    && facts.repo.sourceVerified === true
+    && facts.repo.keyringVerified === true
+    && facts.repo.candidateSourceVerified === null
+    && facts.packages.some((pkg) => pkg.candidateVersion !== null);
   const aptSourceCheck = { id: 'apt_source', category: 'docker', label: 'Docker package source' } as const;
   checks.push((!facts.repo.probeComplete || !facts.packagesComplete) && !dockerWorking ? {
     ...aptSourceCheck,
@@ -1052,6 +1058,12 @@ export function buildBootstrapEvidence(input: { facts: BootstrapFacts; nodeNameT
       ? (facts.repo.problem ?? 'an existing source or keyring does not match the official repository')
       : 'no official Docker repository configured',
     remediation: 'No action is needed. The plan does not install or replace Docker packages on this host.',
+  } : repoUnattributed ? {
+    ...aptSourceCheck,
+    status: 'unknown',
+    summary: 'The Docker source and keyring verify, but apt does not show which archive serves the Docker packages.',
+    observed: facts.repo.problem ?? 'candidate archive unknown',
+    remediation: 'Run apt-get update on the host and read apt-cache policy docker-ce, then run the preflight again.',
   } : repoPresent && repoUnverified ? {
     ...aptSourceCheck,
     status: 'unknown',

@@ -1010,3 +1010,66 @@ describe('review follow-ups on the corrected probes', () => {
     });
   });
 });
+
+describe('round 1 follow-ups', () => {
+  const OFFICIAL = 'https://download.docker.com/linux/ubuntu';
+  const listFile = '/etc/apt/sources.list.d/docker.list';
+  const osRelease = probe('os_release', 'ID=ubuntu\nVERSION_ID="24.04"\nVERSION_CODENAME=noble');
+  const unknownArchive = ['docker-ce:', '  Installed: (none)', '  Candidate: 1.0', '  Version table:', ' *** 1.0 100', '        100 /var/lib/dpkg/status'].join('\n');
+  const verifiedRepo = [
+    `SOURCE_BEGIN=${listFile}`,
+    `deb [arch=amd64 signed-by=${DOCKER_ASC_PATH}] ${OFFICIAL} noble stable`,
+    `SOURCE_END=${listFile}`,
+    dockerAscBlock(),
+  ].join('\n');
+
+  describe('candidates whose archive apt does not show', () => {
+    const fresh = { cliInstalled: false, serverVersion: null, composeVersion: null, socketAccess: 'none' as const };
+
+    it('make the package source unknown and withhold the plan, with the reason', () => {
+      const facts = makeFacts({
+        docker: fresh,
+        packages: parseAptPolicy(unknownArchive),
+        repo: assemble([osRelease, probe('docker_repo', verifiedRepo), probe('apt_policy', unknownArchive)]).repo,
+      });
+      const row = check(facts, 'apt_source');
+      expect(row.status).toBe('unknown');
+      expect(row.observed).toMatch(/which archive serves/);
+      expect(evidence(facts).planSuppressed).toBe(true);
+    });
+
+    it('are reported on a working installation instead of calling the source missing', () => {
+      const facts = makeFacts({
+        packages: parseAptPolicy(unknownArchive),
+        repo: assemble([osRelease, probe('docker_repo', verifiedRepo), probe('apt_policy', unknownArchive)]).repo,
+      });
+      const row = check(facts, 'apt_source');
+      expect(row.status).toBe('warn');
+      expect(row.observed).toMatch(/which archive serves/);
+    });
+  });
+
+  describe('the default directory behind a symlinked Compose file', () => {
+    it('names the directory that was looked in, not the file\'s target directory', () => {
+      const dir = mkdtempSync(path.join(os.tmpdir(), 'sencho-default-filelink-'));
+      try {
+        mkdirSync(path.join(dir, 'default'));
+        mkdirSync(path.join(dir, 'elsewhere'));
+        writeFileSync(path.join(dir, 'elsewhere', 'compose.yaml'), 'services: {}\n');
+        symlinkSync(path.join(dir, 'elsewhere', 'compose.yaml'), path.join(dir, 'default', 'compose.yaml'));
+        const out = execFileSync('sh', ['-c', DEFAULT_AGENT_PATH_SCRIPT, 'sencho-probe', path.join(dir, 'default', 'compose.yaml')], { encoding: 'utf8' }).trim();
+        expect(out).toBe(`yes\nreal=${realpathSync(path.join(dir, 'default'))}`);
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+      }
+    });
+  });
+
+  it('reads a block opened inside another block as an unreadable file', () => {
+    const parsed = parseRepoProbeOutput(`SOURCE_BEGIN=${listFile}\nSOURCE_BEGIN=/etc/apt/sources.list.d/docker.sources\nTypes: deb\nSOURCE_END=/etc/apt/sources.list.d/docker.sources`);
+    expect(parsed.sources.map((source) => [source.path, source.readable])).toEqual([
+      [listFile, false],
+      ['/etc/apt/sources.list.d/docker.sources', true],
+    ]);
+  });
+});
