@@ -64,10 +64,28 @@ beforeEach(async () => {
   const { LicenseService } = await import('../services/LicenseService');
   vi.spyOn(LicenseService.getInstance(), 'getTier').mockReturnValue('paid');
   const { DatabaseService } = await import('../services/DatabaseService');
-  DatabaseService.getInstance().updateGlobalSettings({ security_scanner_unavailable: 'allow' });
+  // A blueprint apply has no person in the loop, so it is decided by Candidate
+  // not evaluated. This suite is about the response and the audit row for an
+  // allowed decision, so that row is set to allow here; the shipped default is
+  // covered below.
+  DatabaseService.getInstance().updateGlobalSettings({
+    security_scanner_unavailable: 'allow',
+    security_candidate_unproven: 'allow',
+  });
 });
 
 describe('POST /api/blueprints/apply-local', () => {
+  it('holds a blueprint apply on a missing scanner at the shipped defaults', async () => {
+    trivyAvailableSpy.mockReturnValue(false);
+    const { DatabaseService } = await import('../services/DatabaseService');
+    DatabaseService.getInstance().updateGlobalSettings({ security_candidate_unproven: 'block' });
+
+    const res = await request(app).post('/api/blueprints/apply-local').set('Cookie', authCookie).send(body('evidence-bp-default'));
+
+    expect(res.status).not.toBe(200);
+    expect(JSON.stringify(res.body)).toMatch(/candidate|evidence|scanner/i);
+  });
+
   it('reports the decision when the scanner is missing and that is allowed, with one audit row', async () => {
     trivyAvailableSpy.mockReturnValue(false);
 

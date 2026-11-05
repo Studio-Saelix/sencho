@@ -1,5 +1,5 @@
 import { enforcePolicyPreDeploy, type PolicyEnforcementOptions } from './PolicyEnforcement';
-import { describePolicyBlock } from '../helpers/policyGate';
+import { describePolicyBlock, verifyPulledCandidates } from '../helpers/policyGate';
 import { StackOpLockService, stackOpSkipMessage } from './StackOpLockService';
 import { StackUpdateOrchestrator } from './StackUpdateOrchestrator';
 import { ComposeService } from './ComposeService';
@@ -67,7 +67,15 @@ export async function applyAutomaticStackUpdate(input: AutomaticStackUpdateInput
         };
       }
       await input.observation?.verify();
-      const policy = await enforcePolicyPreDeploy(stackName, nodeId, { ...input.policyOptions, bypass: false });
+      // An automatic update runs without a person present and pulls every
+      // pullable service, so the gate evaluates the registry image and holds it
+      // under the Candidate not evaluated rule when it cannot be proven.
+      const policy = await enforcePolicyPreDeploy(stackName, nodeId, {
+        ...input.policyOptions,
+        bypass: false,
+        imageSource: 'registry',
+        unattended: true,
+      });
       if (!policy.ok) {
         // Same wording as every other path, so a scanner outage is not reported
         // as a matched finding on an unattended update.
@@ -96,7 +104,11 @@ export async function applyAutomaticStackUpdate(input: AutomaticStackUpdateInput
       await input.observation?.consume();
       const mutation = await StackUpdateOrchestrator.getInstance().execute(
         { nodeId, stackName, target: { scope: 'stack' }, trigger, actor: input.policyOptions.actor, policy: updatePolicy },
-        { atomic: true, terminalWs: null },
+        {
+          atomic: true,
+          terminalWs: null,
+          verifyPulled: () => verifyPulledCandidates(stackName, nodeId, policy.evaluatedCandidates, input.policyOptions),
+        },
       );
       const healthGateId = HealthGateService.getInstance().beginStack(nodeId, stackName, 'update', input.policyOptions.actor, {
         deployedGenerationId: mutation && mutation.kind === 'stack_compose_done' ? mutation.deployedGenerationId : null,

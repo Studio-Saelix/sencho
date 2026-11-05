@@ -96,6 +96,24 @@ export interface SecurityEvidenceRecord {
     target: string;
     /** Epoch ms the evidence was produced, or null when nothing was produced. */
     collectedAt: number | null;
+    /**
+     * Which image the evidence describes. An update evaluates the image it will
+     * pull (`candidate`); every installed-image path evaluates what the node
+     * already holds (`installed`). Absent on records persisted before this field
+     * existed, which are read as installed: that is what they described.
+     */
+    subject?: 'installed' | 'candidate';
+    /**
+     * The exact manifest the findings came from. A multi-arch index resolves to
+     * one platform child, and that child, not the index, is what was scanned.
+     */
+    platformDigest?: string | null;
+    /**
+     * Trivy vulnerability database build time the findings came from. A cached
+     * row older than the current database is not reused by the deploy gate, and
+     * recording the revision is what makes that check possible after the fact.
+     */
+    databaseUpdatedAt?: number | null;
     /** The image digest this evidence is bound to, when it is digest-scoped. */
     digest?: string | null;
     /** The platform this evidence was produced for, when platform-scoped. */
@@ -124,6 +142,13 @@ export interface EvidenceRuleApplication {
      * Absent for a node-wide source such as scanner availability.
      */
     target?: string;
+    /**
+     * The platform variant of `target` this application is about, when the gate
+     * resolved or tried to resolve a registry candidate. One ref can be
+     * evaluated at several platforms; without it two variants of one ref read as
+     * the same row.
+     */
+    platform?: string | null;
 }
 
 /**
@@ -358,9 +383,23 @@ export const LEGACY_VOCABULARY_MAPPINGS: readonly LegacyVocabularyMapping[] = [
     },
 ];
 
+/**
+ * The evidence state an artifact-resolution failure class means.
+ *
+ * Derived from the table above rather than restated, so a class added there
+ * cannot mean one thing to GitOps and another to the deploy gate. A class the
+ * table does not name is `unknown`: an unrecognised reason to distrust the
+ * resolution must never resolve to `current`.
+ */
+export function evidenceStateForFailureClass(failureClass: string): SecurityEvidenceState {
+    const row = LEGACY_VOCABULARY_MAPPINGS.find(
+        (mapping) => mapping.vocabulary === 'ArtifactServiceFailureClass (GitOps artifact resolution)',
+    );
+    return (row && Object.hasOwn(row.values, failureClass) ? row.values[failureClass] : 'unknown');
+}
+
 /** Operator-facing name of each evidence source; the identifier stays in the record. */
-const EVIDENCE_SOURCE_LABEL: Readonly<Record<SecurityEvidenceSource, string>> = {
-    scanner_availability: 'Scanner availability',
+const EVIDENCE_SOURCE_LABEL: Readonly<Record<SecurityEvidenceSource, string>> = {    scanner_availability: 'Scanner availability',
     vulnerability_scan: 'Vulnerability scan',
     vulnerability_database: 'Vulnerability database',
     exploit_intelligence: 'Exploit intelligence',

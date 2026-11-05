@@ -7,7 +7,8 @@
  * gate across the full lifecycle: creating, deleting, editing, or expiring a
  * suppression, and enabling, disabling, or tightening a policy, with
  * honor-suppressions both on and off. These tests pin that agreement; the stored
- * snapshot is used only as a fallback if the recompute throws.
+ * snapshot is used only as a fallback if the recompute throws for the row's own
+ * stack (a request for another stack fails instead, see the `?stack=` block).
  */
 import { describe, it, expect, beforeAll, afterAll, beforeEach, vi } from 'vitest';
 import request from 'supertest';
@@ -195,5 +196,107 @@ describe('GET /api/security/scans/:scanId banner vs deploy gate', () => {
     // Tightening the threshold to HIGH makes the gate block; the banner must follow.
     db.updateScanPolicy(policy.id, { max_severity: 'HIGH' });
     expect(await bannerViolated(scanId)).toBe(true);
+  });
+});
+
+/**
+ * A cache hit reuses the stored scan row, which keeps the stack it was first
+ * written for. The scan a blocked deploy cites is that shared row, so the
+ * detail route accepts `?stack=` to evaluate the banner against the stack that
+ * was blocked rather than the first stack that scanned the image.
+ */
+describe('GET /api/security/scans/:scanId?stack= banner for the citing stack', () => {
+  // Severity-only policy scored from the row's aggregate, not per-finding reads.
+  beforeEach(() => DatabaseService.getInstance().updateGlobalSetting('deploy_block_honor_suppressions', '0'));
+
+  function seedSharedRow(stackContext: string | null): number {
+    const db = DatabaseService.getInstance();
+    db.createScanPolicy({
+      name: 'qa-block', node_id: null, node_identity: '', stack_pattern: 'qa-*',
+      max_severity: 'HIGH', block_on_deploy: 1, enabled: 1,
+      block_on_severity: 1, block_on_kev: 0, block_on_fixable: 0, replicated_from_control: 0,
+    });
+    const scanId = db.createVulnerabilityScan({
+      node_id: 1, image_ref: 'alpine:3.10', image_digest: null, scanned_at: Date.now(),
+      total_vulnerabilities: 1, critical_count: 1, high_count: 0, medium_count: 0, low_count: 0,
+      unknown_count: 0, fixable_count: 0, secret_count: 0, misconfig_count: 0, scanners_used: 'vuln',
+      highest_severity: 'CRITICAL', os_info: null, trivy_version: '0.50.0', scan_duration_ms: null,
+      triggered_by: 'deploy-preflight', status: 'completed', error: null, stack_context: stackContext,
+    });
+    return scanId;
+  }
+
+  async function detail(scanId: number, stack?: string) {
+    const url = stack === undefined
+      ? `/api/security/scans/${scanId}`
+      : `/api/security/scans/${scanId}?stack=${encodeURIComponent(stack)}`;
+    return request(app).get(url).set('Cookie', adminCookie);
+  }
+
+  it('evaluates the policy of the citing stack, not the stack the row was written for', async () => {
+    const scanId = seedSharedRow('other-stack');
+    const own = await detail(scanId);
+    expect(own.status).toBe(200);
+    expect(own.body.policy_evaluation).toBeNull();
+    expect(own.body.stack_context).toBe('other-stack');
+
+    const citing = await detail(scanId, 'qa-a');
+    expect(citing.status).toBe(200);
+    expect(citing.body.policy_evaluation?.violated).toBe(true);
+    expect(citing.body.policy_evaluation?.policyName).toBe('qa-block');
+    // The row's own attribution is reported as it is; only the banner follows the asker.
+    expect(citing.body.stack_context).toBe('other-stack');
+  });
+
+  it('applies to a row with no stack context (manual scan) as well', async () => {
+    const scanId = seedSharedRow(null);
+    expect((await detail(scanId)).body.policy_evaluation).toBeNull();
+    expect((await detail(scanId, 'qa-a')).body.policy_evaluation?.violated).toBe(true);
+  });
+
+  it('shows no banner for a citing stack the policy does not match', async () => {
+    const scanId = seedSharedRow('qa-first');
+    expect((await detail(scanId)).body.policy_evaluation?.violated).toBe(true);
+    expect((await detail(scanId, 'unrelated')).body.policy_evaluation).toBeNull();
+  });
+
+  it('rejects an invalid, empty or repeated stack name instead of ignoring it', async () => {
+    const scanId = seedSharedRow('other-stack');
+    for (const query of ['stack=../etc', 'stack=', 'stack=%20', 'stack=qa-a&stack=qa-b']) {
+      const res = await request(app).get(`/api/security/scans/${scanId}?${query}`).set('Cookie', adminCookie);
+      expect(res.status, query).toBe(400);
+      expect(res.body.error).toBe('Invalid stack name');
+    }
+  });
+
+  it('still scopes the row to the node when a stack is named', async () => {
+    const scanId = seedSharedRow('qa-first');
+    const db = DatabaseService.getInstance();
+    db.getDb().prepare('UPDATE vulnerability_scans SET node_id = 99 WHERE id = ?').run(scanId);
+    expect((await detail(scanId, 'qa-a')).status).toBe(404);
+  });
+
+  it('fails the request, not a null banner or the first stack\'s snapshot, when the recompute throws for another stack', async () => {
+    const scanId = seedSharedRow('qa-first');
+    const db = DatabaseService.getInstance();
+    db.setScanPolicyEvaluation(scanId, {
+      policyId: 1, policyName: 'qa-block', maxSeverity: 'HIGH', reasons: ['severity'], violated: true, evaluatedAt: Date.now(),
+    });
+    const spy = vi.spyOn(db, 'evaluateScanAgainstPolicies').mockImplementation(() => { throw new Error('boom'); });
+    const errSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    try {
+      const other = await detail(scanId, 'qa-other');
+      expect(other.status).toBe(500);
+      expect(other.body.policy_evaluation).toBeUndefined();
+      // The row's own stack (named or implied) still degrades to its snapshot.
+      for (const stack of [undefined, 'qa-first']) {
+        const own = await detail(scanId, stack);
+        expect(own.status).toBe(200);
+        expect(own.body.policy_evaluation?.violated).toBe(true);
+      }
+    } finally {
+      spy.mockRestore();
+      errSpy.mockRestore();
+    }
   });
 });

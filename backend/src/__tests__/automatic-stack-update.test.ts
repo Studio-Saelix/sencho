@@ -73,7 +73,12 @@ describe('automatic stack apply pipeline', () => {
     expect(order).toEqual(['verify', 'policy', 'consume', 'mutate']);
     expect(result).toMatchObject({ applied: true, healthGateId: 'health', result: 'applied' });
     expect(mocks.recheck).not.toHaveBeenCalled();
-    expect(mocks.execute).toHaveBeenCalledWith(expect.objectContaining({ trigger: 'automatic' }), { atomic: true, terminalWs: null });
+    // The candidate verifier rides along: the update proves it installed the
+    // image the gate evaluated before recreating anything.
+    expect(mocks.execute).toHaveBeenCalledWith(
+      expect.objectContaining({ trigger: 'automatic' }),
+      expect.objectContaining({ atomic: true, terminalWs: null, verifyPulled: expect.any(Function) }),
+    );
     expect(mocks.link).toHaveBeenCalledWith('recovery', 'health');
   });
 
@@ -82,7 +87,14 @@ describe('automatic stack apply pipeline', () => {
     await applyAutomaticStackUpdate({
       ...input, policyOptions: { ...input.policyOptions, onAllowed }, verificationOwner: 'hub_authority',
     });
-    expect(mocks.policy).toHaveBeenCalledWith('web', 1, expect.objectContaining({ onAllowed, bypass: false }));
+    expect(mocks.policy).toHaveBeenCalledWith('web', 1, expect.objectContaining({
+      onAllowed,
+      bypass: false,
+      // An automatic update pulls, and nobody is there to answer: the gate
+      // evaluates the registry image and holds it under Candidate not evaluated.
+      imageSource: 'registry',
+      unattended: true,
+    }));
   });
 
   it('retains local verification and keeps successful mutation on recheck failure', async () => {
@@ -180,7 +192,7 @@ describe('update policy in the automatic pipeline', () => {
 
     expect(mocks.execute).toHaveBeenCalledWith(
       expect.objectContaining({ trigger: 'scheduled', actor: 'automatic:test' }),
-      { atomic: true, terminalWs: null },
+      expect.objectContaining({ atomic: true, terminalWs: null }),
     );
   });
 

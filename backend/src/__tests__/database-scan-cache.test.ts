@@ -19,12 +19,13 @@ afterAll(() => {
     cleanupTestDb(tmpDir);
 });
 
-function seedScan(overrides: Partial<{ scanners_used: string; scanned_at: number }> = {}): number {
+function seedScan(overrides: Partial<{ scanners_used: string; scanned_at: number; platform: string; digest: string; node_id: number }> = {}): number {
     const db = DatabaseService.getInstance();
     return db.createVulnerabilityScan({
-        node_id: 1,
+        node_id: overrides.node_id ?? 1,
         image_ref: 'alpine:3.19',
-        image_digest: 'sha256:deadbeef',
+        image_digest: overrides.digest ?? 'sha256:deadbeef',
+        platform: overrides.platform,
         scanned_at: overrides.scanned_at ?? Date.now(),
         total_vulnerabilities: 0,
         critical_count: 0,
@@ -72,5 +73,51 @@ describe('getLatestScanByDigest scanners scoping', () => {
     it('returns null for digest with no completed scans', () => {
         const db = DatabaseService.getInstance();
         expect(db.getLatestScanByDigest('sha256:notreal', 'vuln')).toBeNull();
+    });
+});
+
+describe('getLatestScanByDigest platform scoping', () => {
+    it('does not return a row for another platform child of the same index digest', () => {
+        const db = DatabaseService.getInstance();
+        const digest = 'sha256:platformchildren';
+        const amd = seedScan({ digest, platform: 'linux/amd64' });
+
+        expect(db.getLatestScanByDigest(digest, 'vuln', 'linux/arm64')).toBeNull();
+        expect(db.getLatestScanByDigest(digest, 'vuln', 'linux/amd64')?.id).toBe(amd);
+        // Callers that do not name a platform keep the historical digest-only
+        // lookup.
+        expect(db.getLatestScanByDigest(digest, 'vuln')?.id).toBe(amd);
+    });
+
+    it('does not match a pre-migration row that has no platform', () => {
+        const db = DatabaseService.getInstance();
+        const digest = 'sha256:legacyplatform';
+        const legacy = seedScan({ digest });
+
+        expect(db.getLatestScanByDigest(digest, 'vuln', 'linux/amd64')).toBeNull();
+        expect(db.getLatestScanByDigest(digest, 'vuln')?.id).toBe(legacy);
+    });
+});
+
+describe('getLatestScanByDigest node scoping', () => {
+    it('never answers a node lookup with another node\'s row', () => {
+        const db = DatabaseService.getInstance();
+        const digest = 'sha256:nodescoped01';
+        seedScan({ digest, node_id: 2, scanned_at: Date.now() + 10 });
+
+        expect(db.getLatestScanByDigestForNode(digest, 1, 'vuln')).toBeNull();
+        expect(db.getLatestScanByDigestForNode(digest, 2, 'vuln')).not.toBeNull();
+    });
+
+    it('returns the local row even when another node has a newer one', () => {
+        const db = DatabaseService.getInstance();
+        const digest = 'sha256:nodescoped02';
+        const local = seedScan({ digest, node_id: 1, scanned_at: 1000 });
+        seedScan({ digest, node_id: 2, scanned_at: 2000 });
+
+        expect(db.getLatestScanByDigestForNode(digest, 1, 'vuln')?.id).toBe(local);
+        // The historical all-nodes lookup stays available for callers that
+        // deliberately want it.
+        expect(db.getLatestScanByDigest(digest, 'vuln')?.id).not.toBe(local);
     });
 });

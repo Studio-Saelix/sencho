@@ -47,12 +47,18 @@ type SchedulerGate = { enforceSchedulerPolicyGate: (s: string, n: number, a: 'Au
 beforeEach(() => {
   insertAuditLog.mockReset();
   dispatchAlert.mockReset();
+  // safeDispatch attaches a .catch to the returned promise.
+  dispatchAlert.mockReturnValue(Promise.resolve());
   _resetTrivyMissingNotificationStateForTests();
   settings.current = { security_scanner_unavailable: 'allow' };
 });
 
 describe('unattended operations allowed on a missing scanner', () => {
   it('leaves an audit row attributed to the scheduled task', async () => {
+    // A scheduled auto-update pulls without a person present, so the Candidate
+    // not evaluated rule decides it. Set to allow, the decision is recorded like
+    // any other allow-on-incomplete-evidence.
+    settings.current = { security_scanner_unavailable: 'allow', security_candidate_unproven: 'allow' };
     const svc = SchedulerService.getInstance() as unknown as SchedulerGate;
     await svc.enforceSchedulerPolicyGate('web', 1, 'Auto-update', '/api/schedules/7/run');
 
@@ -62,7 +68,21 @@ describe('unattended operations allowed on a missing scanner', () => {
     expect(entry.path).toBe('/api/schedules/7/run');
     expect(entry.summary).toContain('policy.evidence_allowed');
     expect(entry.summary).toContain('scanner_availability:unavailable');
-    expect(entry.summary).toContain('security_scanner_unavailable=allow');
+    expect(entry.summary).toContain('security_candidate_unproven=allow');
+  });
+
+  it('holds a scheduled auto-update on a missing scanner at the shipped defaults', async () => {
+    // The documented behavior change: a scheduled run has nobody to ask, so a
+    // scanner it cannot use leaves the image unproven and the run is held, even
+    // though Scanner unavailable alone would have allowed it.
+    const svc = SchedulerService.getInstance() as unknown as SchedulerGate;
+    await expect(
+      svc.enforceSchedulerPolicyGate('web', 1, 'Auto-update', '/api/schedules/7/run'),
+    ).rejects.toThrow(/Candidate not evaluated/);
+    expect(insertAuditLog).not.toHaveBeenCalled();
+    expect(dispatchAlert).toHaveBeenCalledWith(
+      'warning', 'scan_finding', expect.stringContaining('Auto-update blocked for "web"'), expect.anything(),
+    );
   });
 
   it('hands the decision back from the shared helper, and the audit row is written either way', async () => {

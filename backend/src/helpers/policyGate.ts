@@ -1,6 +1,9 @@
 import type { Request, Response } from 'express';
 import {
+  enforcePolicyForImageRefs,
   enforcePolicyPreDeploy,
+  evaluateRemoteCandidateSupport,
+  type EvaluatedCandidate,
   type PolicyEnforcementOptions,
   type PolicyViolation,
 } from '../services/PolicyEnforcement';
@@ -10,6 +13,9 @@ import { DatabaseService } from '../services/DatabaseService';
 import type { ScanPolicy } from '../services/DatabaseService';
 import { NotificationService } from '../services/NotificationService';
 import TrivyService, { DIGEST_CACHE_TTL_MS } from '../services/TrivyService';
+import { configIdForLocalBuild, parseImageRef, selectLocalRepoDigests } from '../services/registry-api';
+import { probeRemoteCapability } from './remoteCapabilities';
+import { CANDIDATE_IMAGE_GATE_CAPABILITY } from '../services/CapabilityRegistry';
 import { getErrorMessage } from '../utils/errors';
 import { sanitizeForLog } from '../utils/safeLog';
 import { summarizeBlockReasons } from '../utils/policy-risk';
@@ -142,7 +148,14 @@ export function describePolicyBlock(
 // role has that permission for day-to-day deploys.
 export function buildPolicyGateOptions(
   req: Request,
-  overrides: { bypass?: boolean; actor?: string } = {},
+  overrides: {
+    bypass?: boolean;
+    actor?: string;
+    /** Which image this operation will run. Defaults to the installed one. */
+    imageSource?: PolicyEnforcementOptions['imageSource'];
+    /** True when no person is in the loop for this operation. */
+    unattended?: boolean;
+  } = {},
 ): PolicyEnforcementOptions {
   const defaultBypass = req.query.ignorePolicy === 'true' && req.user?.role === 'admin';
   return {
@@ -151,6 +164,8 @@ export function buildPolicyGateOptions(
     ip: (req.ip ?? req.socket.remoteAddress ?? '') as string,
     auditMethod: req.method,
     auditPath: req.originalUrl || req.url,
+    ...(overrides.imageSource ? { imageSource: overrides.imageSource } : {}),
+    ...(overrides.unattended === undefined ? {} : { unattended: overrides.unattended }),
     // Put the decision on the response when the gate is reached through a service
     // several calls deep; `policyEvidenceFor(res)` then reads it at the success
     // response. `req.res` is absent only for a request built outside Express.
@@ -160,9 +175,16 @@ export function buildPolicyGateOptions(
   };
 }
 
+/**
+ * Build the gate options for an unattended operation (scheduler, auto-update,
+ * webhook, Git source, mesh). `unattended: true` by default because every caller
+ * of this builder runs without a person present; a caller that is actually
+ * attended passes `unattended: false`.
+ */
 export function buildSystemPolicyGateOptions(
   actor: string,
-  overrides: Partial<Pick<PolicyEnforcementOptions, 'bypass' | 'auditPath' | 'auditMethod' | 'onAllowed'>> = {},
+  overrides: Partial<Pick<PolicyEnforcementOptions,
+    'bypass' | 'auditPath' | 'auditMethod' | 'onAllowed' | 'imageSource' | 'unattended'>> = {},
 ): PolicyEnforcementOptions {
   return {
     bypass: overrides.bypass ?? false,
@@ -170,6 +192,8 @@ export function buildSystemPolicyGateOptions(
     auditMethod: overrides.auditMethod ?? 'POST',
     auditPath: overrides.auditPath,
     onAllowed: overrides.onAllowed,
+    unattended: overrides.unattended ?? true,
+    ...(overrides.imageSource ? { imageSource: overrides.imageSource } : {}),
   };
 }
 
@@ -185,33 +209,49 @@ export function policyEvidenceFor(res: Response): { policyEvidence?: AllowedPoli
 /**
  * Throws when the gate blocks. Returns what the operation was allowed on, for
  * callers that report it; the unattended ones rely on the audit row the gate
- * writes and may ignore the return value.
+ * writes and may ignore the return value. `evaluatedCandidates` is what the
+ * pull executor compares its fetched digests against.
  */
 export async function assertPolicyGateAllows(
   stackName: string,
   nodeId: number,
   options: PolicyEnforcementOptions,
-): Promise<{ policyEvidence?: AllowedPolicyEvidence }> {
+): Promise<{
+  policyEvidence?: AllowedPolicyEvidence;
+  evaluatedCandidates?: EvaluatedCandidate[];
+  pullServices?: string[];
+  noPullOnUp?: boolean;
+}> {
   const gate = await enforcePolicyPreDeploy(stackName, nodeId, options);
   if (!gate.ok) {
     throw new Error(describePolicyBlock(gate.policy, gate.violations, 'deploy', gate.evidence));
   }
-  return allowedPolicyEvidence(gate);
+  return {
+    ...allowedPolicyEvidence(gate),
+    ...(gate.evaluatedCandidates ? { evaluatedCandidates: gate.evaluatedCandidates } : {}),
+    ...(gate.pullServices ? { pullServices: gate.pullServices } : {}),
+    ...(gate.noPullOnUp ? { noPullOnUp: true } : {}),
+  };
 }
 
 /**
  * Returns true if the deploy may proceed. Returns false after sending a 409,
  * in which case the caller must return immediately. When it proceeds on
  * incomplete evidence the decision is kept on `res.locals` for
- * `policyEvidenceFor` to add to the success response.
+ * `policyEvidenceFor` to add to the success response, and the candidates it
+ * evaluated are kept there for `pulledCandidateVerifier`.
  */
 export async function runPolicyGate(
   req: Request,
   res: Response,
   stackName: string,
   nodeId: number,
+  overrides: {
+    imageSource?: PolicyEnforcementOptions['imageSource'];
+    unattended?: boolean;
+  } = {},
 ): Promise<boolean> {
-  const gate = await enforcePolicyPreDeploy(stackName, nodeId, buildPolicyGateOptions(req));
+  const gate = await enforcePolicyPreDeploy(stackName, nodeId, buildPolicyGateOptions(req, overrides));
   if (!gate.ok) {
     res.status(409).json({
       error: describePolicyBlock(gate.policy, gate.violations, 'deploy', gate.evidence),
@@ -219,7 +259,200 @@ export async function runPolicyGate(
     });
     return false;
   }
+  if (gate.evaluatedCandidates) res.locals.evaluatedCandidates = gate.evaluatedCandidates;
+  if (gate.pullServices) res.locals.pullServices = gate.pullServices;
+  if (gate.noPullOnUp) res.locals.noPullOnUp = true;
   return true;
+}
+
+/** Thrown when the image the pull actually fetched is not the one the gate proved. */
+export class PulledCandidateBlockedError extends Error {
+  public constructor(public readonly gate: { policy?: ScanPolicy; violations: PolicyViolation[]; evidence?: EvidenceGateDecision }) {
+    super(describePolicyBlock(gate.policy, gate.violations, 'update', gate.evidence));
+    this.name = 'PulledCandidateBlockedError';
+  }
+}
+
+/**
+ * Confirm that the pull installed the image the gate evaluated.
+ *
+ * A tag can move between the gate and the pull, so the digest that was proven and
+ * the digest that landed can differ. The pulled image is local by then and not
+ * yet running, so it is re-evaluated as an installed image: a block throws before
+ * `up`, and the previous workload is untouched. A matching digest costs one
+ * inspect per ref and no scan.
+ *
+ * The platform child is chosen before the pull, from each service's own
+ * `platform:` override rather than the node's, so the variant Compose resolves is
+ * the one the gate scanned. That is the only reliable boundary: after a pull the
+ * image store can hold several children of one index, and it does not record
+ * which one Compose will select.
+ */
+export async function verifyPulledCandidates(
+  stackName: string,
+  nodeId: number,
+  candidates: readonly EvaluatedCandidate[] | undefined,
+  options: PolicyEnforcementOptions,
+): Promise<void> {
+  if (!candidates || candidates.length === 0) return;
+  const docker = DockerController.getInstance(nodeId).getDocker();
+  const moved: string[] = [];
+  for (const candidate of candidates) {
+    const parsed = parseImageRef(candidate.ref);
+    if (!parsed) continue;
+    let digests: string[] = [];
+    try {
+      const info = (await docker.getImage(candidate.ref).inspect()) as {
+        RepoDigests?: string[];
+        Id?: string;
+        Identity?: unknown;
+        Descriptor?: unknown;
+        Parent?: unknown;
+      };
+      digests = selectLocalRepoDigests(info.RepoDigests ?? [], parsed, configIdForLocalBuild(info));
+    } catch {
+      // The image is not on the node after a pull that was supposed to fetch it,
+      // so it certainly is not provably the one that was scanned.
+      digests = [];
+    }
+    const expected = new Set([candidate.indexDigest.toLowerCase(), candidate.platformDigest.toLowerCase()]);
+    if (!digests.some((digest) => expected.has(digest.toLowerCase()))) moved.push(candidate.ref);
+  }
+  if (moved.length === 0) return;
+  const movedRefs = [...new Set(moved)];
+  console.warn(
+    '[Policy] Pulled image digest differs from the evaluated candidate for %s; re-evaluating the pulled image(s): %s',
+    sanitizeForLog(stackName), sanitizeForLog(movedRefs.join(', ')),
+  );
+  const gate = await enforcePolicyForImageRefs(stackName, nodeId, movedRefs, {
+    ...options,
+    // It lives on the node now, so it is scanned as one; `pulledCandidate` keeps
+    // the candidate vocabulary, so an unattended update is still held by the
+    // rule that governs unattended evidence.
+    imageSource: 'installed',
+    pulledCandidate: true,
+  });
+  if (!gate.ok) throw new PulledCandidateBlockedError(gate);
+}
+
+/**
+ * The post-pull verifier for the candidates one gate decision evaluated, for
+ * callers that hold the decision directly rather than on a request. Returns
+ * undefined when the operation pulls nothing, so a caller can pass it straight
+ * through to the update executor without adding a pointless check.
+ */
+export function evaluatedCandidateVerifier(
+  stackName: string,
+  nodeId: number,
+  candidates: readonly EvaluatedCandidate[] | undefined,
+  options: PolicyEnforcementOptions,
+): (() => Promise<void>) | undefined {
+  if (!candidates || candidates.length === 0) return undefined;
+  return () => verifyPulledCandidates(stackName, nodeId, candidates, options);
+}
+
+/**
+ * The pull boundary a plain `up` deploy needs: the services and references to
+ * pull first and the verifier to run on what landed. Undefined when the gate
+ * evaluated no candidate and no pull-disabling guard is needed, so a non-pulling
+ * deploy keeps its ordinary `up`. A no-pull guard without candidates covers a
+ * not-yet-due interval policy and a model that would not render in compose mode.
+ */
+export interface DeployCandidateVerification {
+  pullServices: string[];
+  /**
+   * Candidate refs no Compose service declares, such as an image a pre-start
+   * hook references. They are pulled by ref so the boundary never refreshes an
+   * unrelated service.
+   */
+  pullRefs: string[];
+  /** Absent when the boundary exists only to keep `up` from fetching. */
+  verifyPulled?: () => Promise<void>;
+}
+
+export function evaluatedDeployCandidateVerification(
+  stackName: string,
+  nodeId: number,
+  candidates: readonly EvaluatedCandidate[] | undefined,
+  options: PolicyEnforcementOptions,
+  evaluatedPullServices?: readonly string[],
+  noPullOnUp = false,
+): DeployCandidateVerification | undefined {
+  const verifyPulled = evaluatedCandidateVerifier(stackName, nodeId, candidates, options);
+  if (!verifyPulled && !noPullOnUp) return undefined;
+  const pullServices = [...new Set(
+    evaluatedPullServices && evaluatedPullServices.length > 0
+      ? evaluatedPullServices
+      : (candidates ?? []).flatMap((candidate) => candidate.services ?? []),
+  )];
+  const pullRefs = [...new Set(
+    (candidates ?? [])
+      .filter((candidate) => !candidate.services || candidate.services.length === 0)
+      .map((candidate) => candidate.ref),
+  )];
+  return { pullServices, pullRefs, ...(verifyPulled ? { verifyPulled } : {}) };
+}
+
+/**
+ * The post-pull verifier for a request that already ran `runPolicyGate`.
+ * `runPolicyGate` keeps the evaluated candidates on `res.locals`; this closes
+ * over the same request so the re-gate honors the same bypass.
+ */
+export function pulledCandidateVerifier(
+  req: Request,
+  res: Response,
+  stackName: string,
+  nodeId: number,
+): (() => Promise<void>) | undefined {
+  const candidates = res.locals.evaluatedCandidates as EvaluatedCandidate[] | undefined;
+  return evaluatedCandidateVerifier(stackName, nodeId, candidates, buildPolicyGateOptions(req));
+}
+
+/** The plain-up pull boundary for a request that already ran `runPolicyGate`. */
+export function pulledDeployCandidateVerification(
+  req: Request,
+  res: Response,
+  stackName: string,
+  nodeId: number,
+): DeployCandidateVerification | undefined {
+  const candidates = res.locals.evaluatedCandidates as EvaluatedCandidate[] | undefined;
+  const pullServices = res.locals.pullServices as string[] | undefined;
+  return evaluatedDeployCandidateVerification(
+    stackName, nodeId, candidates, buildPolicyGateOptions(req), pullServices,
+    res.locals.noPullOnUp === true,
+  );
+}
+
+/**
+ * What a hub-driven unattended update should do about a remote node that
+ * evaluates the installed image rather than the image an update would pull.
+ *
+ * Returns false when the configured Candidate not evaluated rule holds the
+ * update, after dispatching the shared `scan_finding` alert. A node that cannot
+ * be reached is not this function's business: the forward attempt fails on its
+ * own, exactly as before.
+ */
+export async function remoteCandidateGateRefusal(
+  nodeId: number,
+  stackName: string,
+  options: PolicyEnforcementOptions,
+): Promise<string | null> {
+  const probe = await probeRemoteCapability(nodeId, CANDIDATE_IMAGE_GATE_CAPABILITY);
+  if (probe.kind !== 'unsupported') return null;
+  const gate = evaluateRemoteCandidateSupport(stackName, nodeId, options);
+  if (gate.ok) return null;
+  // The shared sentence names the rule and the source; this clause says what the
+  // unsupported state actually means for the update, because on an unattended
+  // path this sentence is all the operator gets.
+  const message = `${describePolicyBlock(gate.policy, gate.violations, 'update', gate.evidence)}`
+    + ' This node\'s version checks the image already installed, not the image this update would pull.';
+  NotificationService.getInstance().dispatchAlert(
+    'warning',
+    'scan_finding',
+    `Update blocked for "${stackName}": ${message}`,
+    { stackName, actor: 'system:policy' },
+  );
+  return message;
 }
 
 /**
@@ -305,7 +538,13 @@ async function runPostDeployScan(
       try {
         const digest = await svc.getImageDigest(imageRef, nodeId);
         if (digest) {
-          const cached = db.getLatestScanByDigest(digest, 'vuln');
+          // Keyed by the image the row read too: a multi-arch ref's children
+          // share the index digest, and the post-deploy scan is of the local
+          // child.
+          const platform = await svc.getImagePlatform(imageRef, nodeId);
+          const cached = platform
+            ? db.getLatestScanByDigestForNode(digest, nodeId, 'vuln', platform)
+            : db.getLatestScanByDigestForNode(digest, nodeId, 'vuln');
           if (cached && Date.now() - cached.scanned_at < DIGEST_CACHE_TTL_MS) {
             imageSuccesses += 1;
             continue;

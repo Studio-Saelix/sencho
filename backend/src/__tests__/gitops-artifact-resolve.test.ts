@@ -459,6 +459,10 @@ describe('gitops artifact resolve', () => {
     }]);
     mockContainerInspect.mockResolvedValue({ Image: `sha256:${'2'.repeat(64)}` });
     mockImageInspect.mockResolvedValue({
+      // An engine before Identity (API 1.53) still reports the index digest as
+      // the image Id, and the descriptor names that same target.
+      Id: indexDigest,
+      Descriptor: { digest: indexDigest, mediaType: 'application/vnd.oci.image.index.v1+json' },
       Os: 'linux',
       Architecture: 'amd64',
       RepoDigests: [`nginx@${indexDigest}`],

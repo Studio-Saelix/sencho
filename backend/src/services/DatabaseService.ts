@@ -1121,6 +1121,15 @@ export interface VulnerabilityScan {
     node_id: number;
     image_ref: string;
     image_digest: string | null;
+    /**
+     * The platform of the image this scan read (`linux/amd64`,
+     * `linux/arm/v7`, ...), or null when the path did not record one.
+     *
+     * A multi-arch reference stores its children under one index digest, so
+     * the deploy gate's cache lookup keys on this too: a cached row may only
+     * answer for the image it scanned.
+     */
+    platform?: string | null;
     scanned_at: number;
     total_vulnerabilities: number;
     critical_count: number;
@@ -1142,6 +1151,14 @@ export interface VulnerabilityScan {
     stack_context: string | null;
     // JSON-encoded PolicyEvaluation; null if never evaluated.
     policy_evaluation: string | null;
+    /**
+     * Epoch ms of the Trivy vulnerability-database build these findings came
+     * from, or null for a row written before revisions were recorded. The deploy
+     * gate reuses a cached scan only when this matches the database Trivy holds.
+     * Optional on the type because rows read back from SQLite always carry it
+     * (null when unset), while a fixture may describe a scan without one.
+     */
+    vuln_db_updated_at?: number | null;
 }
 
 // Fail-closed allowlist of the scanners_used values that ran the vulnerability
@@ -1379,6 +1396,8 @@ export class DatabaseService {
         this.migrateSecretMisconfigColumns();
         this.migrateAgentsAndNotificationsNodeId();
         this.migratePolicyEvaluationColumn();
+        this.migrateVulnDbUpdatedAtColumn();
+        this.migrateScanPlatformColumn();
         this.migrateNotificationCategory();
         this.migrateNotificationActor();
         this.migrateNotificationGitOpsDedupe();
@@ -1755,6 +1774,7 @@ export class DatabaseService {
         node_id INTEGER NOT NULL,
         image_ref TEXT NOT NULL,
         image_digest TEXT,
+        platform TEXT,
         scanned_at INTEGER NOT NULL,
         total_vulnerabilities INTEGER NOT NULL DEFAULT 0,
         critical_count INTEGER NOT NULL DEFAULT 0,
@@ -1773,7 +1793,8 @@ export class DatabaseService {
         triggered_by TEXT NOT NULL DEFAULT 'manual',
         status TEXT NOT NULL DEFAULT 'completed',
         error TEXT,
-        stack_context TEXT
+        stack_context TEXT,
+        vuln_db_updated_at INTEGER
       );
 
       CREATE INDEX IF NOT EXISTS idx_vuln_scans_node_image ON vulnerability_scans(node_id, image_ref);
@@ -3439,6 +3460,27 @@ stmt.run('gitops_schema_version', '1');
         } catch {
             /* column already present */
         }
+    }
+
+    /**
+     * The Trivy vulnerability-database build a scan's findings came from.
+     *
+     * Nullable on purpose: rows written before this column existed have no
+     * revision, and the deploy gate's cache rule reads null as "cannot prove this
+     * row is current", so each such row misses once and a fresh scan records one.
+     */
+    private migrateVulnDbUpdatedAtColumn(): void {
+        this.tryAddColumn('vulnerability_scans', 'vuln_db_updated_at', 'INTEGER');
+    }
+
+    /**
+     * The platform of the image a scan read. Rows written before this column
+     * existed have no platform, so a platform-keyed lookup misses them; a
+     * successful fresh scan records one, while a caller that cannot name the
+     * child still matches the old row.
+     */
+    private migrateScanPlatformColumn(): void {
+        this.tryAddColumn('vulnerability_scans', 'platform', 'TEXT');
     }
 
     private migrateNotificationCategory(): void {
@@ -8594,24 +8636,28 @@ stmt.run('gitops_schema_version', '1');
     // --- Vulnerability Scans ---
 
     public createVulnerabilityScan(
-        scan: Omit<VulnerabilityScan, 'id' | 'policy_evaluation'> & {
+        scan: Omit<VulnerabilityScan, 'id' | 'policy_evaluation' | 'vuln_db_updated_at'> & {
             policy_evaluation?: string | null;
+            /** Optional: a row starts in progress and the revision is written when it completes. */
+            vuln_db_updated_at?: number | null;
         },
     ): number {
         const stmt = this.db.prepare(
             `INSERT INTO vulnerability_scans (
-                node_id, image_ref, image_digest, scanned_at,
+                node_id, image_ref, image_digest, platform, scanned_at,
                 total_vulnerabilities, critical_count, high_count, medium_count,
                 low_count, unknown_count, fixable_count,
                 secret_count, misconfig_count, scanners_used,
                 highest_severity, os_info, trivy_version, scan_duration_ms,
-                triggered_by, status, error, stack_context, policy_evaluation
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+                triggered_by, status, error, stack_context, policy_evaluation,
+                vuln_db_updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         );
         const result = stmt.run(
             scan.node_id,
             scan.image_ref,
             scan.image_digest,
+            scan.platform ?? null,
             scan.scanned_at,
             scan.total_vulnerabilities,
             scan.critical_count,
@@ -8632,6 +8678,7 @@ stmt.run('gitops_schema_version', '1');
             scan.error,
             scan.stack_context,
             scan.policy_evaluation ?? null,
+            scan.vuln_db_updated_at ?? null,
         );
         return result.lastInsertRowid as number;
     }
@@ -8641,12 +8688,13 @@ stmt.run('gitops_schema_version', '1');
         updates: Partial<Omit<VulnerabilityScan, 'id'>>,
     ): void {
         const ALLOWED_COLUMNS = new Set([
-            'node_id', 'image_ref', 'image_digest', 'scanned_at',
+            'node_id', 'image_ref', 'image_digest', 'platform', 'scanned_at',
             'total_vulnerabilities', 'critical_count', 'high_count',
             'medium_count', 'low_count', 'unknown_count', 'fixable_count',
             'secret_count', 'misconfig_count', 'scanners_used',
             'highest_severity', 'os_info', 'trivy_version', 'scan_duration_ms',
             'triggered_by', 'status', 'error', 'stack_context', 'policy_evaluation',
+            'vuln_db_updated_at',
         ]);
         const fields: string[] = [];
         const values: unknown[] = [];
@@ -8932,23 +8980,73 @@ stmt.run('gitops_schema_version', '1');
         return summary;
     }
 
-    public getLatestScanByDigest(digest: string, scannersUsed?: string): VulnerabilityScan | null {
+    /**
+     * Latest completed scan for a digest, optionally restricted to the platform
+     * whose image it read.
+     *
+     * A multi-arch reference stores every child under the same index digest.
+     * The gate and every scan of a local image pass the platform so one child's
+     * row cannot answer for another; only a caller that cannot name the child
+     * omits it and keeps the historical digest-only lookup.
+     */
+    public getLatestScanByDigest(
+        digest: string,
+        scannersUsed?: string,
+        platform?: string,
+    ): VulnerabilityScan | null {
         if (!digest) return null;
+        const clauses = ["image_digest = ?", "status = 'completed'"];
+        const params: unknown[] = [digest];
         if (scannersUsed) {
-            return (
-                (this.db
-                    .prepare(
-                        "SELECT * FROM vulnerability_scans WHERE image_digest = ? AND scanners_used = ? AND status = 'completed' ORDER BY scanned_at DESC LIMIT 1",
-                    )
-                    .get(digest, scannersUsed) as VulnerabilityScan | undefined) ?? null
-            );
+            clauses.push('scanners_used = ?');
+            params.push(scannersUsed);
+        }
+        if (platform) {
+            clauses.push('platform = ?');
+            params.push(platform);
         }
         return (
             (this.db
                 .prepare(
-                    "SELECT * FROM vulnerability_scans WHERE image_digest = ? AND status = 'completed' ORDER BY scanned_at DESC LIMIT 1",
+                    `SELECT * FROM vulnerability_scans WHERE ${clauses.join(' AND ')} ORDER BY scanned_at DESC LIMIT 1`,
                 )
-                .get(digest) as VulnerabilityScan | undefined) ?? null
+                .get(...(params as never[])) as VulnerabilityScan | undefined) ?? null
+        );
+    }
+
+    /**
+     * Latest completed scan for a digest on one node.
+     *
+     * Scan rows are per node; a cache lookup that ignores `node_id` can answer
+     * with another node's row. The scan detail routes reject such a row
+     * (`scan.node_id !== req.nodeId`), so a manual scan that reused it would
+     * hand the client a 404. The gate also must not let one node's scan stand in
+     * for another node's image/platform. Callers that deliberately want the
+     * historical all-nodes lookup keep `getLatestScanByDigest`.
+     */
+    public getLatestScanByDigestForNode(
+        digest: string,
+        nodeId: number,
+        scannersUsed?: string,
+        platform?: string,
+    ): VulnerabilityScan | null {
+        if (!digest) return null;
+        const clauses = ["image_digest = ?", "node_id = ?", "status = 'completed'"];
+        const params: unknown[] = [digest, nodeId];
+        if (scannersUsed) {
+            clauses.push('scanners_used = ?');
+            params.push(scannersUsed);
+        }
+        if (platform) {
+            clauses.push('platform = ?');
+            params.push(platform);
+        }
+        return (
+            (this.db
+                .prepare(
+                    `SELECT * FROM vulnerability_scans WHERE ${clauses.join(' AND ')} ORDER BY scanned_at DESC LIMIT 1`,
+                )
+                .get(...(params as never[])) as VulnerabilityScan | undefined) ?? null
         );
     }
 
@@ -8970,6 +9068,25 @@ stmt.run('gitops_schema_version', '1');
                 )
                 .get(digest, nodeId, ...VULN_BEARING_SCANNER_SETS) as VulnerabilityScan | undefined) ?? null
         );
+    }
+
+    /**
+     * Delete one scan and its child findings. Used to discard the placeholder
+     * row a caller opened before discovering the scan is served from cache: the
+     * cached row is the history entry, and a placeholder left behind would
+     * duplicate the same image, digest and timestamp. Idempotent (0 when the row
+     * is already gone).
+     */
+    public deleteVulnerabilityScan(id: number): number {
+        const deleteChild = (table: string) =>
+            this.db.prepare(`DELETE FROM ${table} WHERE scan_id = ?`).run(id);
+        const txn = this.db.transaction(() => {
+            deleteChild('vulnerability_details');
+            deleteChild('secret_findings');
+            deleteChild('misconfig_findings');
+            return this.db.prepare('DELETE FROM vulnerability_scans WHERE id = ?').run(id).changes;
+        });
+        return txn();
     }
 
     public deleteOldScans(olderThanMs: number): number {
@@ -9866,13 +9983,19 @@ stmt.run('gitops_schema_version', '1');
      * The result is informational. `violated=false` means a policy matched
      * but the scan was within limits; the UI surfaces a banner only when
      * `violated=true`. Blocking enforcement lives in the pre-deploy gate.
+     *
+     * `stackContext` defaults to the stack the row was written for. A scan row
+     * is shared by every stack that deploys the same image on the node, so a
+     * reader asking about one particular stack (the stack whose deploy cited
+     * the row) passes that stack to get the verdict of its own policy.
      */
     public evaluateScanAgainstPolicies(
         nodeId: number,
         scan: VulnerabilityScan,
         selfIdentity: string,
+        stackContext: string | null = scan.stack_context,
     ): PolicyEvaluation | null {
-        const policy = this.getMatchingPolicy(nodeId, scan.stack_context, selfIdentity);
+        const policy = this.getMatchingPolicy(nodeId, stackContext, selfIdentity);
         if (!policy) return null;
         const inputs = policyInputs(policy);
         // The pre-deploy gate filters suppressed findings when this setting is on,

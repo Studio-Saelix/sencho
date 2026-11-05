@@ -40,7 +40,7 @@ import {
   readSettledExposures,
   type PackagedImageExposureContexts,
 } from '../services/securityExposureTargets';
-import { sanitizeForLog } from '../utils/safeLog';
+import { errorMessageForLog, sanitizeForLog } from '../utils/safeLog';
 import { getErrorMessage } from '../utils/errors';
 import { isDebugEnabled } from '../utils/debug';
 import { blockIfReplica } from '../middleware/fleetSyncGuards';
@@ -159,19 +159,41 @@ function shapeScanForResponse(scan: VulnerabilityScan): Omit<VulnerabilityScan, 
  * suppression lifecycle. evaluateScanAgainstPolicies reads the honor-suppressions
  * setting itself, so this is correct whether or not suppressions are honored, and
  * returns null when no policy matches (the banner clears, matching a passing gate).
+ *
+ * A scan row is shared by every stack that deploys the image on the node, and
+ * keeps the stack it was first written for. `forStack` names the stack that is
+ * asking (the one whose blocked deploy cited the row), so the banner shows the
+ * verdict of that stack's policy instead of the first stack's.
  */
 function resolveBannerEvaluation(
   db: DatabaseService,
   scan: VulnerabilityScan,
+  forStack?: string,
 ): ReturnType<typeof parsePolicyEvaluation> {
   try {
-    return db.evaluateScanAgainstPolicies(scan.node_id, scan, FleetSyncService.getSelfIdentity());
+    return db.evaluateScanAgainstPolicies(
+      scan.node_id,
+      scan,
+      FleetSyncService.getSelfIdentity(),
+      forStack ?? scan.stack_context,
+    );
   } catch (err) {
     // The banner is informational and the deploy gate is authoritative, so a
     // recompute failure must degrade to the stored snapshot rather than 500 the
     // scan detail. The recompute is synchronous DB reads that should not throw,
     // so surface it at error level if it ever does.
-    console.error('[Security] banner re-evaluation failed for scanId=%s node=%s:', scan.id, scan.node_id, getErrorMessage(err, 'unknown'));
+    console.error(
+      '[Security] banner re-evaluation failed for scanId=%s node=%s stack=%s:',
+      scan.id,
+      scan.node_id,
+      sanitizeForLog(forStack ?? scan.stack_context),
+      errorMessageForLog(err),
+    );
+    // The snapshot describes the row's own stack, so it would answer a request
+    // for another stack with the wrong policy. A null banner would read as "no
+    // policy matched" for a stack the caller asked about by name, so the request
+    // fails instead of stating a verdict that does not exist.
+    if (forStack !== undefined && forStack !== scan.stack_context) throw err;
     return parsePolicyEvaluation(scan.policy_evaluation);
   }
 }
@@ -502,7 +524,7 @@ securityRouter.get('/stacks/:stackName/pre-deploy-summary', authMiddleware, asyn
   }
 });
 
-securityRouter.post('/scan', authMiddleware, (req: Request, res: Response): void => {
+securityRouter.post('/scan', authMiddleware, async (req: Request, res: Response): Promise<void> => {
   if (!requirePermission(req, res, 'stack:deploy')) return;
   const svc = TrivyService.getInstance();
   if (!svc.isTrivyAvailable()) {
@@ -535,10 +557,41 @@ securityRouter.post('/scan', authMiddleware, (req: Request, res: Response): void
     res.status(409).json({ error: 'Already scanning this image' });
     return;
   }
+  // A non-forced scan may be served from a stored row. Answer with that row's
+  // id before opening a placeholder: the cached row is already `completed`, so
+  // the client's first poll sees a finished scan, and no second history entry
+  // is written for the same image, digest and timestamp.
+  if (!force) {
+    try {
+      const reusable = await svc.findReusableScan(imageRef, nodeId, { useCache: true, scanners });
+      if (reusable) {
+        res.status(202).json({ scanId: reusable.id });
+        return;
+      }
+    } catch (err) {
+      // A cache check is an optimisation; if it cannot answer, start the scan
+      // and let the normal failure path report why.
+      console.warn(
+        '[Security] Scan cache check failed for %s:',
+        sanitizeForLog(imageRef),
+        sanitizeForLog(getErrorMessage(err, 'unknown error')),
+      );
+    }
+  }
+  // The cache lookup awaited above, so another request can have started this
+  // image's scan in the meantime; re-check the lock before opening a row.
+  if (svc.isScanning(nodeId, imageRef)) {
+    res.status(409).json({ error: 'Already scanning this image' });
+    return;
+  }
   const scanId = svc.beginScan(imageRef, nodeId, 'manual', stackContext, scanners);
   res.status(202).json({ scanId });
 
-  svc.finishScan(scanId, imageRef, nodeId, { useCache: !force, scanners }).catch((err) => {
+  // A non-forced scan already checked the cache above; force bypasses it. In
+  // both cases the scan that fills this row must run: `useCache: false` keeps
+  // it from hitting a row that appeared since and deleting the id the client
+  // is now polling.
+  svc.finishScan(scanId, imageRef, nodeId, { useCache: false, scanners }).catch((err) => {
     console.error('[Security] Scan failed for %s:', sanitizeForLog(imageRef), sanitizeForLog((err as Error).message));
   });
 });
@@ -673,6 +726,20 @@ securityRouter.get('/scans/:scanId', authMiddleware, (req: Request, res: Respons
   if (!Number.isFinite(scanId)) {
     res.status(400).json({ error: 'Invalid scan id' }); return;
   }
+  // `?stack=` asks for the banner of one stack's policy: the stack whose deploy
+  // cited this scan, which may differ from the stack the shared row was written for.
+  // A present parameter that is not one usable name (empty or repeated) is
+  // refused, never read as absent: that would answer for the row's own stack and
+  // look like a verdict for the stack the caller named.
+  const rawStack = req.query.stack;
+  let stackParam: string | undefined;
+  if (rawStack !== undefined) {
+    stackParam = typeof rawStack === 'string' ? rawStack.trim() : '';
+    if (!isValidStackName(stackParam)) {
+      res.status(400).json({ error: 'Invalid stack name' }); return;
+    }
+    if (!requirePermission(req, res, 'stack:read', 'stack', stackParam)) return;
+  }
   const db = DatabaseService.getInstance();
   const scan = db.getVulnerabilityScan(scanId);
   if (!scan || scan.node_id !== req.nodeId) {
@@ -684,9 +751,16 @@ securityRouter.get('/scans/:scanId', authMiddleware, (req: Request, res: Respons
   const publiclyExposed = exposedMap.get(scan.image_ref) ?? null;
   // The banner verdict is recomputed against current policies/suppressions so it
   // matches the deploy gate; the list endpoint keeps the stored snapshot.
+  let banner: ReturnType<typeof parsePolicyEvaluation>;
+  try {
+    banner = resolveBannerEvaluation(db, scan, stackParam);
+  } catch {
+    // Already logged by resolveBannerEvaluation.
+    res.status(500).json({ error: 'Failed to evaluate the policy banner for this stack' }); return;
+  }
   res.json({
     ...shapeScanForResponse(scan),
-    policy_evaluation: resolveBannerEvaluation(db, scan),
+    policy_evaluation: banner,
     publicly_exposed: publiclyExposed,
   });
 });

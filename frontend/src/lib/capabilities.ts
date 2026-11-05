@@ -55,6 +55,7 @@ export const CAPABILITIES = [
   'fleet-readiness-v1',
   'blueprint-digest-pins-v1',
   'health-gate-observation-v1',
+  'candidate-image-gate-v1',
   // A node that can create and restore volume points. The hub reads the recovery
   // descriptor for the detail; this flag keeps the shared registry identical on
   // both sides so a gate can be expressed at all.
@@ -76,6 +77,14 @@ export const STACK_DELETE_PRUNE_VOLUMES_CAPABILITY = 'stack-delete-prune-volumes
 export const GUIDED_EXTERNAL_NETWORK_PREFLIGHT_CAPABILITY = 'guided-external-network-preflight' as const satisfies Capability;
 export const SERVICE_SCOPED_UPDATE_CAPABILITY = 'service-scoped-update' as const satisfies Capability;
 export const SERVICE_SCOPED_STACK_ALERT_CAPABILITY = 'service-scoped-stack-alert' as const satisfies Capability;
+
+/**
+ * The node evaluates the image an update would pull (resolved by digest for its
+ * own platform) instead of the image it already holds. Without it, a hub-driven
+ * unattended update is held by the Candidate not evaluated rule when a blocking
+ * policy matches, and a manual update says so in the stack's update banner.
+ */
+export const CANDIDATE_IMAGE_GATE_CAPABILITY = 'candidate-image-gate-v1' as const satisfies Capability;
 
 /** The node resolves the `io.sencho.*` label contract. */
 export const SENCHO_LABELS_V1_CAPABILITY = 'sencho-labels-v1' as const satisfies Capability;

@@ -85,6 +85,7 @@ vi.mock('../services/TrivyService', async () => {
       getInstance: () => ({
         isTrivyAvailable: mockIsTrivyAvailable,
         getImageDigest: mockGetImageDigest,
+        getImagePlatform: async () => null,
         runScanAndPersist: mockRunScanAndPersist,
       }),
     },

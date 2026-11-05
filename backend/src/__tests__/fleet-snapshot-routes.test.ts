@@ -630,7 +630,7 @@ describe('Single-stack snapshot restore (behavior lock)', () => {
         expect(deploySpy).toHaveBeenCalledWith('redeploy-web', undefined, undefined, {
             source: 'fleet_snapshot',
             actor: 'system:fleet-snapshot',
-        });
+        }, undefined);
     });
 });
 
@@ -1078,7 +1078,7 @@ describe('Restore-all', () => {
         expect(deploySpy).toHaveBeenCalledWith('healthy', undefined, undefined, {
             source: 'fleet_snapshot',
             actor: 'system:fleet-snapshot',
-        });
+        }, undefined);
         expect(deploySpy.mock.calls.every(call => call[0] !== 'corrupt')).toBe(true);
     });
 
@@ -1136,7 +1136,7 @@ describe('Restore-all', () => {
         expect(deploySpy).toHaveBeenCalledWith('redeploy-all-web', undefined, undefined, {
             source: 'fleet_snapshot',
             actor: 'system:fleet-snapshot',
-        });
+        }, undefined);
     });
 
     it('records a policy-blocked redeploy as a per-stack failure and still restores the rest', async () => {
@@ -1166,7 +1166,7 @@ describe('Restore-all', () => {
         expect(deploySpy).toHaveBeenCalledWith('ok-web', undefined, undefined, {
             source: 'fleet_snapshot',
             actor: 'system:fleet-snapshot',
-        });
+        }, undefined);
         expect(deploySpy.mock.calls.map((c) => c[0])).not.toContain('blocked-web');
     });
 });
@@ -2292,7 +2292,7 @@ describe('Imported snapshot node mapping', () => {
     expect(deploySpy).toHaveBeenCalledWith('mapped-redeploy', undefined, undefined, {
       source: 'fleet_snapshot',
       actor: 'system:fleet-snapshot',
-    });
+    }, undefined);
   });
 
   it('sends mapped bulk files and notes to the mapped remote node', async () => {

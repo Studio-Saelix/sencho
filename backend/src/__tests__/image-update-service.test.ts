@@ -186,8 +186,12 @@ describe('ImageUpdateService - image ref parsing (via checkImage)', () => {
     service = ImageUpdateService.getInstance();
   });
 
-  function makeMockDocker(repoDigests: string[] = []) {
-    const inspectFn = vi.fn().mockResolvedValue({ RepoDigests: repoDigests });
+  function makeMockDocker(repoDigests: string[] = [], id?: string, identity?: unknown) {
+    const inspectFn = vi.fn().mockResolvedValue({
+      RepoDigests: repoDigests,
+      ...(id ? { Id: id } : {}),
+      ...(identity !== undefined ? { Identity: identity } : {}),
+    });
     return {
       getDocker: () => ({
         getImage: () => ({ inspect: inspectFn }),
@@ -257,6 +261,23 @@ describe('ImageUpdateService - image ref parsing (via checkImage)', () => {
     expect(result.hasUpdate).toBe(false);
     expect(result.notCheckable).toBeUndefined();
     expect(result.error).toContain('Could not resolve a local registry digest');
+  });
+
+  it('treats a local build self-referential config-ID RepoDigest as not checkable', async () => {
+    // A local build on the containerd image store records its own config ID as
+    // a RepoDigest. It names no registry content, so update status does not
+    // apply; it is not an ambiguous local digest.
+    const configId = `sha256:${'d'.repeat(64)}`;
+    const docker = makeMockDocker(
+      [`registry-1.docker.io/library/nginx@${configId}`],
+      configId,
+      { Build: [{ Ref: 'buildkit-ref' }] },
+    );
+    const result = await service.checkImage(docker, 'nginx:latest');
+    expect(result.hasUpdate).toBe(false);
+    expect(result.notCheckable).toBe(true);
+    expect(result.error).toBeUndefined();
+    expect(mockCompareLocalToRemoteTag).not.toHaveBeenCalled();
   });
 });
 

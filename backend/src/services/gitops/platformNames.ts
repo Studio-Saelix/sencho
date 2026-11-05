@@ -41,12 +41,71 @@ export function canonicalPlatformLabel(label: string): string {
   return [os.trim().toLowerCase(), toOciArchitecture(architecture), ...rest].join('/');
 }
 
-/** Canonicalize a node's OS/architecture read into the same label vocabulary. */
+/**
+ * Canonicalize a node's OS/architecture read into the same label vocabulary.
+ * An optional variant is kept when one is supplied, because two children of the
+ * same OS and architecture (arm/v6 and arm/v7) are different images.
+ */
 export function canonicalNodePlatform(
-  platform: { os: string; architecture: string },
-): { os: string; architecture: string } {
+  platform: { os: string; architecture: string; variant?: string },
+): { os: string; architecture: string; variant?: string } {
+  const variant = typeof platform.variant === 'string' ? platform.variant.trim().toLowerCase() : '';
   return {
     os: platform.os.trim().toLowerCase(),
     architecture: toOciArchitecture(platform.architecture),
+    ...(variant ? { variant } : {}),
   };
+}
+
+/**
+ * The variant Compose selects when an override names only an architecture that
+ * has variants. A local image that reports a different variant is not the child
+ * the operation will run.
+ */
+export const DEFAULT_ARCHITECTURE_VARIANT: Readonly<Record<string, string>> = {
+  arm: 'v7',
+  arm64: 'v8',
+  amd64: 'v1',
+};
+
+/**
+ * The cache-key form of a platform label.
+ *
+ * Canonicalized like the resolver's labels, with the architecture's default
+ * variant dropped: `linux/arm64/v8` and `linux/arm64` name the same child, so a
+ * candidate that asked for the default variant and the installed image's own
+ * read must share a row. A non-default variant (`linux/arm/v6`) is kept because
+ * it is a different child.
+ */
+export function platformCacheKey(label: string): string | null {
+  const [os, architecture, ...rest] = label.split('/');
+  if (!os || !architecture) return null;
+  const platform = canonicalNodePlatform({ os, architecture, variant: rest[0] ?? '' });
+  if (!platform.os || !platform.architecture) return null;
+  const variant = platform.variant && platform.variant !== DEFAULT_ARCHITECTURE_VARIANT[platform.architecture]
+    ? platform.variant
+    : '';
+  return `${platform.os}/${platform.architecture}${variant ? `/${variant}` : ''}`;
+}
+
+/**
+ * The platform label of an image Docker holds locally, in the registry
+ * resolver's vocabulary (and in the cache-key form above).
+ *
+ * An image whose platform the daemon did not report returns null.
+ */
+export function imagePlatformLabel(info: {
+  Os?: unknown;
+  Architecture?: unknown;
+  Variant?: unknown;
+}): string | null {
+  const platform = canonicalNodePlatform({
+    os: typeof info.Os === 'string' ? info.Os : '',
+    architecture: typeof info.Architecture === 'string' ? info.Architecture : '',
+    variant: typeof info.Variant === 'string' ? info.Variant : '',
+  });
+  if (!platform.os || !platform.architecture) return null;
+  return platformCacheKey(
+    `${platform.os}/${platform.architecture}${platform.variant ? `/${platform.variant}` : ''}`,
+  );
 }

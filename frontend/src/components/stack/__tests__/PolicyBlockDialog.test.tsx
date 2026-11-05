@@ -1,5 +1,5 @@
 import { describe, it, expect, vi } from 'vitest';
-import { render, screen } from '@testing-library/react';
+import { render, screen, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { SENCHO_NAVIGATE_EVENT } from '@/lib/events';
 import { PolicyBlockDialog, type PolicyBlockPayload } from '../PolicyBlockDialog';
@@ -521,5 +521,194 @@ describe('PolicyBlockDialog lead sentence', () => {
     const lead = [...document.body.querySelectorAll('p')].find((el) => el.textContent?.startsWith('Policy prod-gate') && el.querySelector('span'));
     expect(lead).toBeDefined();
     expect(lead?.textContent).toMatch(new RegExp(`^Policy prod-gate blocks ${plural} on `));
+  });
+});
+
+describe('PolicyBlockDialog candidate image', () => {
+  const candidatePayload: PolicyBlockPayload = {
+    error: 'blocked',
+    policy: { id: 1, name: 'prod-gate', maxSeverity: 'HIGH', blockOnSeverity: 1, blockOnKev: 0, blockOnFixable: 0 },
+    violations: [
+      { imageRef: 'app:latest', severity: 'CRITICAL', criticalCount: 1, highCount: 0, kevCount: 0, fixableCount: 0, reasons: ['severity'], scanId: 7 },
+    ],
+    evidence: {
+      outcome: 'block',
+      summary: 'Vulnerability scan: current, blocked by the Scan failed setting, set to block',
+      records: [
+        {
+          source: 'vulnerability_scan',
+          state: 'current',
+          target: 'app:latest',
+          subject: 'candidate',
+          digest: 'sha256:4f2a1c9d8e7b0000000000000000000000000000000000000000000000000000',
+          platformDigest: 'sha256:4f2a1c9d8e7b0000000000000000000000000000000000000000000000000000',
+          platform: 'linux/amd64',
+          collectedAt: Date.now(),
+        },
+      ],
+      applications: [
+        { source: 'vulnerability_scan', state: 'current', outcome: 'block', rule: 'security_scan_failure=block', target: 'app:latest' },
+      ],
+    },
+  };
+
+  it('names the image the update would install, and its platform', () => {
+    render(<PolicyBlockDialog open payload={candidatePayload} stackName="web" action="update" onOpenSettings={vi.fn(() => true)} canBypass={false} canEditSettings={false} bypassing={false} onClose={vi.fn()} onBypass={vi.fn()} />);
+    expect(screen.getByText(/New image 4f2a1c9d8e7b/)).toBeInTheDocument();
+    expect(screen.getByText(/· linux\/amd64/)).toBeInTheDocument();
+  });
+
+  it('shows the digest the tag points to, not the scanned platform manifest, for a multi-arch tag', () => {
+    const indexDigest = 'sha256:451eee8bedcb0000000000000000000000000000000000000000000000000000';
+    const platformDigest = 'sha256:f73072b1a9d20000000000000000000000000000000000000000000000000000';
+    const multiArch: PolicyBlockPayload = {
+      ...candidatePayload,
+      evidence: {
+        ...candidatePayload.evidence!,
+        records: (candidatePayload.evidence?.records ?? []).map((r) => ({ ...r, digest: indexDigest, platformDigest, platform: 'linux/arm64' })),
+      },
+    };
+    render(<PolicyBlockDialog open payload={multiArch} stackName="web" action="update" onOpenSettings={vi.fn(() => true)} canBypass={false} canEditSettings={false} bypassing={false} onClose={vi.fn()} onBypass={vi.fn()} />);
+    expect(screen.getByText(/New image 451eee8bedcb · linux\/arm64/)).toBeInTheDocument();
+    expect(screen.queryByText(/f73072b1a9d2/)).toBeNull();
+  });
+
+  it('labels each row of a multi-platform ref with its own platform', () => {
+    // F6: one ref shared by services at two platforms has one row and one
+    // evidence record per platform. Looking up the first record for the ref
+    // labelled both rows with linux/amd64.
+    const indexDigest = 'sha256:451eee8bedcb0000000000000000000000000000000000000000000000000000';
+    const baseRecord = candidatePayload.evidence!.records![0];
+    const multiPlatform: PolicyBlockPayload = {
+      ...candidatePayload,
+      violations: [
+        { ...candidatePayload.violations[0], platform: 'linux/amd64', scanId: 7, criticalCount: 1 },
+        { ...candidatePayload.violations[0], platform: 'linux/arm64', scanId: 8, criticalCount: 2 },
+      ],
+      evidence: {
+        ...candidatePayload.evidence!,
+        records: [
+          { ...baseRecord, digest: indexDigest, platformDigest: 'sha256:aaaa000000000000000000000000000000000000000000000000000000000000', platform: 'linux/amd64' },
+          { ...baseRecord, digest: indexDigest, platformDigest: 'sha256:bbbb000000000000000000000000000000000000000000000000000000000000', platform: 'linux/arm64' },
+        ],
+      },
+    };
+    render(<PolicyBlockDialog open payload={multiPlatform} stackName="web" action="deploy" onOpenSettings={vi.fn(() => true)} canBypass={false} canEditSettings={false} bypassing={false} onClose={vi.fn()} onBypass={vi.fn()} />);
+    // Tie each label to its own row, so a zip-by-index or swapped pairing fails.
+    const amd64Row = screen.getByText(/1 critical/).parentElement?.parentElement as HTMLElement;
+    const arm64Row = screen.getByText(/2 critical/).parentElement?.parentElement as HTMLElement;
+    expect(within(amd64Row).getByText(/New image 451eee8bedcb · linux\/amd64/)).toBeInTheDocument();
+    expect(within(arm64Row).getByText(/New image 451eee8bedcb · linux\/arm64/)).toBeInTheDocument();
+  });
+
+  it('keeps the image line for an error row that names its platform', () => {
+    // The suppression is only for an error row that cannot name a variant; an
+    // evaluation failure at a known platform still shows what was evaluated.
+    const evaluationFailed: PolicyBlockPayload = {
+      ...candidatePayload,
+      violations: [
+        { ...candidatePayload.violations[0], platform: 'linux/amd64', error: 'Policy evaluation failed: boom' },
+      ],
+    };
+    render(<PolicyBlockDialog open payload={evaluationFailed} stackName="web" action="deploy" onOpenSettings={vi.fn(() => true)} canBypass={false} canEditSettings={false} bypassing={false} onClose={vi.fn()} onBypass={vi.fn()} />);
+    expect(screen.getByText(/New image 4f2a1c9d8e7b · linux\/amd64/)).toBeInTheDocument();
+    expect(screen.getByText('Policy evaluation failed: boom')).toBeInTheDocument();
+  });
+
+  it('does not borrow another variant\'s image line for an unplatformed error row', () => {
+    // An invalid or unknown platform has no candidate record of its own. The
+    // fallback to the first record for the ref would label it with an image it
+    // never evaluated.
+    const mixed: PolicyBlockPayload = {
+      ...candidatePayload,
+      violations: [
+        { ...candidatePayload.violations[0], platform: 'linux/amd64', scanId: 7 },
+        {
+          imageRef: 'app:latest', severity: 'UNKNOWN', criticalCount: 0, highCount: 0, kevCount: 0, fixableCount: 0,
+          reasons: [], scanId: 0, error: 'The image could not be resolved because the service platform "linux/amd64/arm/v7/extra" is not a valid os/architecture label',
+        },
+      ],
+    };
+    render(<PolicyBlockDialog open payload={mixed} stackName="web" action="deploy" onOpenSettings={vi.fn(() => true)} canBypass={false} canEditSettings={false} bypassing={false} onClose={vi.fn()} onBypass={vi.fn()} />);
+    expect(screen.getAllByText(/New image/)).toHaveLength(1);
+    expect(screen.getByText(/not a valid os\/architecture label/)).toBeInTheDocument();
+  });
+
+  it('gives two unplatformed error rows distinct keys', () => {
+    const errors: PolicyBlockPayload = {
+      ...candidatePayload,
+      violations: [
+        { imageRef: 'app:latest', severity: 'UNKNOWN', criticalCount: 0, highCount: 0, kevCount: 0, fixableCount: 0, reasons: [], scanId: 0, error: 'platform "a" is not valid' },
+        { imageRef: 'app:latest', severity: 'UNKNOWN', criticalCount: 0, highCount: 0, kevCount: 0, fixableCount: 0, reasons: [], scanId: 0, error: 'platform "b" is not valid' },
+      ],
+    };
+    const errSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    try {
+      render(<PolicyBlockDialog open payload={errors} stackName="web" action="deploy" onOpenSettings={vi.fn(() => true)} canBypass={false} canEditSettings={false} bypassing={false} onClose={vi.fn()} onBypass={vi.fn()} />);
+      const keyWarnings = errSpy.mock.calls.filter((args) => /same key|duplicate key/i.test(String(args[0])));
+      expect(keyWarnings).toEqual([]);
+    } finally {
+      errSpy.mockRestore();
+    }
+  });
+
+  it('shows the same line for a deploy that would pull, not only for an update', () => {
+    render(<PolicyBlockDialog open payload={candidatePayload} stackName="web" action="deploy" onOpenSettings={vi.fn(() => true)} canBypass={false} canEditSettings={false} bypassing={false} onClose={vi.fn()} onBypass={vi.fn()} />);
+    expect(screen.getByText(/New image 4f2a1c9d8e7b/)).toBeInTheDocument();
+    expect(screen.getByText(/· linux\/amd64/)).toBeInTheDocument();
+  });
+
+  it('says why an unresolvable candidate could not be evaluated', () => {
+    const unresolved: PolicyBlockPayload = {
+      ...candidatePayload,
+      // No candidate was resolved, so there is no record naming one.
+      evidence: {
+        outcome: 'block',
+        summary: 'Vulnerability scan: unavailable, blocked by the Scan failed setting, set to block',
+        records: [{ source: 'vulnerability_scan', state: 'unavailable', target: 'app:latest', subject: 'candidate', collectedAt: null, reason: 'The registry image could not be resolved' }],
+        applications: [{ source: 'vulnerability_scan', state: 'unavailable', outcome: 'block', rule: 'security_scan_failure=block', target: 'app:latest' }],
+      },
+      violations: [
+        {
+          imageRef: 'app:latest', severity: 'UNKNOWN', criticalCount: 0, highCount: 0, kevCount: 0, fixableCount: 0, reasons: [], scanId: 0,
+          error: 'The image this operation would pull could not be resolved: The registry image could not be resolved: Registry error (503)',
+        },
+      ],
+    };
+    render(<PolicyBlockDialog open payload={unresolved} stackName="web" action="update" onOpenSettings={vi.fn(() => true)} canBypass={false} canEditSettings={false} bypassing={false} onClose={vi.fn()} onBypass={vi.fn()} />);
+    // Both the image row and the paragraph below it say "could not be evaluated".
+    expect(screen.getAllByText(/could not be evaluated/i).length).toBeGreaterThan(0);
+    expect(screen.getByText(/Registry error \(503\)/)).toBeInTheDocument();
+    // No candidate line: there was no candidate to name.
+    expect(screen.queryByText(/New image/)).toBeNull();
+  });
+
+  it('reads an unsupported node version as "not evaluated on this node version"', () => {
+    const unsupported: PolicyBlockPayload = {
+      error: 'blocked',
+      policy: { id: 1, name: 'prod-gate', maxSeverity: 'HIGH', blockOnSeverity: 1, blockOnKev: 0, blockOnFixable: 0 },
+      violations: [
+        { imageRef: '(node)', severity: 'UNKNOWN', criticalCount: 0, highCount: 0, kevCount: 0, fixableCount: 0, reasons: [], scanId: 0, error: "This node's version checks the image already installed, not the image this update would pull" },
+      ],
+      evidence: {
+        outcome: 'block',
+        summary: 'Vulnerability scan: not supported on this node, blocked by the Candidate not evaluated setting, set to block',
+        records: [
+          { source: 'vulnerability_scan', state: 'unsupported', target: '(node)', collectedAt: null, reason: "This node's version checks the image already installed, not the image this update would pull" },
+        ],
+        applications: [
+          { source: 'vulnerability_scan', state: 'unsupported', outcome: 'block', rule: 'security_candidate_unproven=block' },
+        ],
+      },
+    };
+    render(<PolicyBlockDialog open payload={unsupported} stackName="web" action="update" onOpenSettings={vi.fn(() => true)} canBypass={false} canEditSettings={false} bypassing={false} onClose={vi.fn()} onBypass={vi.fn()} />);
+    const rows = [...document.body.querySelectorAll('li')].map((li) => li.textContent ?? '');
+    expect(rows.some((t) => t.includes('not evaluated on this node version'))).toBe(true);
+  });
+
+  it('renders an older payload exactly as before, with no candidate line', () => {
+    render(<PolicyBlockDialog open payload={publicPayload} stackName="web" action="deploy" onOpenSettings={vi.fn(() => true)} canBypass canEditSettings={false} bypassing={false} onClose={vi.fn()} onBypass={vi.fn()} />);
+    expect(screen.getByText('nginx:1.14')).toBeInTheDocument();
+    expect(screen.queryByText(/New image/)).toBeNull();
   });
 });

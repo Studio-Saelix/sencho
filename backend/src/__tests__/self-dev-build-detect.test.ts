@@ -7,11 +7,21 @@
  */
 import { describe, it, expect, vi } from 'vitest';
 import {
+  defaultInspectImage,
   detectSelfDevBuildUpdate,
   type DetectSelfDevBuildUpdateDeps,
   type SelfDevBuildDetectInput,
 } from '../services/selfDevBuildDetect';
 import type { compareLocalToRemoteTagDetailed } from '../services/registry-api';
+
+const dockerInspect = vi.hoisted(() => vi.fn());
+vi.mock('../services/DockerController', () => ({
+  default: {
+    getInstance: () => ({
+      getDocker: () => ({ getImage: () => ({ inspect: dockerInspect }) }),
+    }),
+  },
+}));
 
 const REGISTRY = 'ghcr.io';
 const REPO = 'studio-saelix/sencho-dev';
@@ -96,6 +106,79 @@ describe('detectSelfDevBuildUpdate', () => {
     expect(compareDetailed).not.toHaveBeenCalled();
   });
 
+  it('treats a RepoDigest that repeats the image config ID as not registry-backed', async () => {
+    // A local build's self-referential RepoDigest is its config ID, not a
+    // registry digest; comparing it to the tracked tag would invent an update.
+    const compareDetailed = vi.fn();
+    const deps: DetectSelfDevBuildUpdateDeps = {
+      inspectImage: vi.fn().mockResolvedValue({
+        Id: LOCAL_DIGEST,
+        Identity: { Build: [{ Ref: 'buildkit-ref' }] },
+        RepoDigests: [LOCAL_REPO_DIGEST],
+        Os: 'linux',
+        Architecture: 'amd64',
+      }),
+      compareDetailed,
+    };
+
+    const result = await detectSelfDevBuildUpdate(INPUT, deps);
+    expect(result.kind).toBe('inconclusive');
+    expect(compareDetailed).not.toHaveBeenCalled();
+  });
+
+  it('still compares a pulled containerd image whose Id equals its RepoDigest', async () => {
+    // The containerd store sets a pulled image's Id to the registry manifest
+    // digest, so equality with the RepoDigest is provenance, not a local build.
+    const compareDetailed = compareReturning({ kind: 'match', primaryDigest: LOCAL_DIGEST });
+    const deps: DetectSelfDevBuildUpdateDeps = {
+      inspectImage: vi.fn().mockResolvedValue({
+        Id: LOCAL_DIGEST,
+        Identity: { Pull: [{ Repository: `${REGISTRY}/${REPO}` }] },
+        RepoDigests: [LOCAL_REPO_DIGEST],
+        Os: 'linux',
+        Architecture: 'amd64',
+      }),
+      compareDetailed,
+    };
+
+    expect(await detectSelfDevBuildUpdate(INPUT, deps)).toEqual({ kind: 'up_to_date' });
+    expect(compareDetailed).toHaveBeenCalledWith(
+      [LOCAL_DIGEST],
+      REGISTRY,
+      REPO,
+      TAG,
+      { os: 'linux', architecture: 'amd64' },
+      null,
+    );
+  });
+
+  it('still compares a pulled containerd image on an engine that reports no Identity', async () => {
+    // API 1.53 added Identity. Before it, the containerd store still reports the
+    // manifest digest as both Id and RepoDigest; the descriptor proves it is
+    // registry content and must not be filtered as a local build.
+    const compareDetailed = compareReturning({ kind: 'match', primaryDigest: LOCAL_DIGEST });
+    const deps: DetectSelfDevBuildUpdateDeps = {
+      inspectImage: vi.fn().mockResolvedValue({
+        Id: LOCAL_DIGEST,
+        Descriptor: { digest: LOCAL_DIGEST, mediaType: 'application/vnd.oci.image.index.v1+json' },
+        RepoDigests: [LOCAL_REPO_DIGEST],
+        Os: 'linux',
+        Architecture: 'amd64',
+      }),
+      compareDetailed,
+    };
+
+    expect(await detectSelfDevBuildUpdate(INPUT, deps)).toEqual({ kind: 'up_to_date' });
+    expect(compareDetailed).toHaveBeenCalledWith(
+      [LOCAL_DIGEST],
+      REGISTRY,
+      REPO,
+      TAG,
+      { os: 'linux', architecture: 'amd64' },
+      null,
+    );
+  });
+
   it('returns inconclusive, not a throw, when inspectImage throws', async () => {
     const deps: DetectSelfDevBuildUpdateDeps = {
       inspectImage: vi.fn().mockRejectedValue(new Error('no such image')),
@@ -144,5 +227,26 @@ describe('detectSelfDevBuildUpdate', () => {
     const result = await detectSelfDevBuildUpdate(INPUT, deps);
     expect(result.kind).toBe('inconclusive');
     expect(compareDetailed).not.toHaveBeenCalled();
+  });
+});
+
+
+describe('defaultInspectImage', () => {
+  it('copies the identity, descriptor and parent used to classify the image', async () => {
+    // The detector's callers inject inspectImage in tests, so this adapter needs
+    // its own guard: dropping provenance here would make every production path
+    // treat a pulled containerd image as a local build again.
+    const inspected = {
+      Id: LOCAL_DIGEST,
+      RepoDigests: [LOCAL_REPO_DIGEST],
+      Os: 'linux',
+      Architecture: 'amd64',
+      Identity: { Pull: [{ Repository: `${REGISTRY}/${REPO}` }] },
+      Descriptor: { digest: LOCAL_DIGEST, mediaType: 'application/vnd.oci.image.index.v1+json' },
+      Parent: `sha256:${'e'.repeat(64)}`,
+    };
+    dockerInspect.mockResolvedValue(inspected);
+
+    await expect(defaultInspectImage('a'.repeat(64))).resolves.toEqual(inspected);
   });
 });

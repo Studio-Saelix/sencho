@@ -289,8 +289,21 @@ const SHA256_DIGEST_RE = /^sha256:[0-9a-f]{64}$/i;
  * as "could not resolve" rather than a guessed match or update. Callers must
  * compare every candidate: Docker can list a stale index digest ahead of the
  * current one on the same image.
+ *
+ * `configId` is the value from {@link configIdForLocalBuild}: the image's `Id`
+ * when the image is a local build, null when it came from a registry. A local
+ * build on the containerd image store records a self-referential RepoDigest
+ * whose digest is that ID; it names no registry content, so it is filtered out
+ * here rather than compared against a tag or addressed as a remote image.
  */
-export function selectLocalRepoDigests(repoDigests: readonly string[], parsed: ParsedRef): string[] {
+export function selectLocalRepoDigests(
+    repoDigests: readonly string[],
+    parsed: ParsedRef,
+    configId?: string | null,
+): string[] {
+    const configDigest = typeof configId === 'string' && configId.trim() !== ''
+        ? configId.trim().toLowerCase()
+        : null;
     const valid = repoDigests
         .map((entry) => {
             const at = entry.indexOf('@');
@@ -302,6 +315,7 @@ export function selectLocalRepoDigests(repoDigests: readonly string[], parsed: P
     const seen = new Set<string>();
     for (const e of valid) {
         if (!repoDigestMatchesRef(e.entry, parsed)) continue;
+        if (configDigest !== null && e.digest.toLowerCase() === configDigest) continue;
         const key = e.digest.toLowerCase();
         if (seen.has(key)) continue;
         seen.add(key);
@@ -315,11 +329,63 @@ export function selectLocalRepoDigests(repoDigests: readonly string[], parsed: P
 }
 
 /**
- * Scalar view of {@link selectLocalRepoDigests}: the first candidate, or null.
- * Prefer the plural form when comparing against a remote tag.
+ * The value to pass as {@link selectLocalRepoDigests}' `configId`, or null when
+ * the image may carry registry content.
+ *
+ * Docker's `Identity` field (Engine 29.2 / API 1.53) is authoritative: `Pull`
+ * means the image came from a registry and `Build` means it was built locally.
+ * Older engines omit it. On the classic image store the image Id is the config
+ * digest, so a RepoDigest equal to it can only be a locally built image's
+ * self-reference. On the containerd image store the Id is the manifest or index
+ * digest, so equality alone proves nothing: a `Descriptor` that names the Id is
+ * registry content, while a classic-builder image that records a `Parent` is a
+ * self-reference. A containerd image on an engine without `Identity` cannot be
+ * told apart from a pulled one; it keeps the digest so a pulled child is not
+ * falsely blocked, and a local image there (a BuildKit build, or a `docker
+ * commit` that records no parent) fails closed when the registry rejects the
+ * address. The same ambiguity remains on a containerd engine older than the
+ * descriptor field.
  */
-export function selectLocalRepoDigest(repoDigests: readonly string[], parsed: ParsedRef): string | null {
-    return selectLocalRepoDigests(repoDigests, parsed)[0] ?? null;
+export interface ImageProvenance {
+    Id?: unknown;
+    Identity?: unknown;
+    Descriptor?: unknown;
+    Parent?: unknown;
+}
+
+export function configIdForLocalBuild(inspect: ImageProvenance): string | null {
+    const id = inspect.Id;
+    if (typeof id !== 'string' || id.trim() === '') return null;
+    const identity = inspect.Identity;
+    if (identity !== null && typeof identity === 'object') {
+        const record = identity as Record<string, unknown>;
+        if (Array.isArray(record.Pull) && record.Pull.length > 0) return null;
+        if (Array.isArray(record.Build) && record.Build.length > 0) return id;
+    }
+    // A locally created image carries its parent; a pulled image does not.
+    if (typeof inspect.Parent === 'string' && inspect.Parent.trim() !== '') return id;
+    const descriptor = inspect.Descriptor;
+    if (descriptor !== null && typeof descriptor === 'object') {
+        const digest = (descriptor as Record<string, unknown>).digest;
+        if (typeof digest === 'string' && digest.toLowerCase() === id.toLowerCase()) {
+            return null;
+        }
+    }
+    return id;
+}
+
+/**
+ * Scalar view of {@link selectLocalRepoDigests}: the first candidate, or null.
+ * Prefer the plural form when comparing against a remote tag. `configId` is
+ * forwarded so a caller that has the image's provenance also rejects a local
+ * build's self-referential RepoDigest instead of taking it for registry content.
+ */
+export function selectLocalRepoDigest(
+    repoDigests: readonly string[],
+    parsed: ParsedRef,
+    configId?: string | null,
+): string | null {
+    return selectLocalRepoDigests(repoDigests, parsed, configId)[0] ?? null;
 }
 
 /** Outcome of a remote-digest lookup: the digest, or a human-readable reason it failed. */

@@ -35,11 +35,14 @@ function db() {
 /** Seed a consistent cached vuln scan: total_vulnerabilities matches its detail rows. */
 function seedCachedScan(): number {
   const scanId = db().createVulnerabilityScan({
-    node_id: 1, image_ref: 'big:1', image_digest: DIGEST, scanned_at: Date.now(),
+    node_id: 1, image_ref: 'big:1', image_digest: DIGEST, platform: 'linux/amd64', scanned_at: Date.now(),
     total_vulnerabilities: TOTAL, critical_count: TOTAL, high_count: 0, medium_count: 0, low_count: 0,
     unknown_count: 0, fixable_count: 0, secret_count: 0, misconfig_count: 0, scanners_used: 'vuln',
     highest_severity: 'CRITICAL', os_info: null, trivy_version: null, scan_duration_ms: null,
     triggered_by: 'manual', status: 'completed', error: null, stack_context: null,
+    // The gate's preflight cache requires the row to come from the database
+    // build Trivy holds now, so a hit for this test needs one recorded.
+    vuln_db_updated_at: Date.UTC(2026, 0, 5),
   });
   const details = Array.from({ length: TOTAL }, (_, i) => ({
     vulnerability_id: `CVE-2024-${i}`, pkg_name: `pkg-${i}`, installed_version: '1', fixed_version: null,
@@ -57,6 +60,12 @@ beforeEach(() => {
   // The cache-hit path returns before invoking the binary; a non-null path is
   // enough to pass the availability guard.
   (svc() as unknown as { binaryPath: string }).binaryPath = '/fake/trivy';
+  // The database revision the row above was produced against.
+  vi.spyOn(svc(), 'getVulnerabilityDbInfo').mockResolvedValue({
+    updatedAt: Date.UTC(2026, 0, 5),
+    nextUpdate: Date.now() + 24 * 60 * 60 * 1000,
+    readAt: Date.now(),
+  });
 });
 
 describe('TrivyService cache-hit detail copy', () => {
@@ -69,8 +78,10 @@ describe('TrivyService cache-hit detail copy', () => {
 
   it('persists a preflight scan whose stored detail count matches its total (no false-block mismatch)', async () => {
     seedCachedScan();
-    // scanImagePreflight resolves the digest itself; the cache hit then reuses it.
+    // scanImagePreflight resolves the digest and platform itself; the cache hit
+    // then reuses the row for that child.
     vi.spyOn(svc(), 'getImageDigest').mockResolvedValue(DIGEST);
+    vi.spyOn(svc(), 'getImagePlatform').mockResolvedValue('linux/amd64');
 
     const persisted = await svc().scanImagePreflight('big:1', 1, 'web');
 

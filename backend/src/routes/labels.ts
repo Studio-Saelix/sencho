@@ -9,7 +9,7 @@ import { enforcePolicyPreDeploy } from '../services/PolicyEnforcement';
 import { authMiddleware } from '../middleware/auth';
 import { checkPermission, requirePermission } from '../middleware/permissions';
 import { requireBody } from '../middleware/tierGates';
-import { allowedPolicyEvidence, buildPolicyGateOptions, describePolicyBlock, type AllowedPolicyEvidence } from '../helpers/policyGate';
+import { allowedPolicyEvidence, buildPolicyGateOptions, describePolicyBlock, evaluatedDeployCandidateVerification, type AllowedPolicyEvidence } from '../helpers/policyGate';
 import { invalidateNodeCaches } from '../helpers/cacheInvalidation';
 import { VALID_LABEL_COLORS, MAX_LABELS_PER_NODE } from '../helpers/constants';
 import { isValidStackName } from '../utils/validation';
@@ -229,12 +229,14 @@ labelsRouter.post('/:id/action', authMiddleware, async (req: Request, res: Respo
             // Policy gate runs for both real and dry-run deploys: a dry-run
             // that omits the policy check would falsely report success for
             // stacks the real deploy would block.
-            const gate = await enforcePolicyPreDeploy(
-              stackName,
-              req.nodeId,
-              // A dry run allows nothing, so it leaves no allowed-evidence row.
-              { ...buildPolicyGateOptions(req), recordAllowedEvidence: !isDryRun },
-            );
+            // A dry run allows nothing, so it leaves no allowed-evidence row.
+            // A labelled deploy is a plain `up`, so the gate evaluates the
+            // registry image only for services Compose will pull.
+            const policyOptions = {
+              ...buildPolicyGateOptions(req, { imageSource: 'compose' }),
+              recordAllowedEvidence: !isDryRun,
+            };
+            const gate = await enforcePolicyPreDeploy(stackName, req.nodeId, policyOptions);
             if (!gate.ok) {
               const blockedMsg = describePolicyBlock(gate.policy, gate.violations, 'deploy', gate.evidence);
               results.push({ stackName, success: false, error: blockedMsg, ...(isDryRun ? { dryRun: true } : {}) });
@@ -259,6 +261,10 @@ labelsRouter.post('/:id/action', authMiddleware, async (req: Request, res: Respo
                 undefined,
                 false,
                 req.deployContext ?? { source: 'labels', actor: req.user?.username ?? null },
+                evaluatedDeployCandidateVerification(
+                  stackName, req.nodeId, gate.evaluatedCandidates, policyOptions,
+                  gate.pullServices, gate.noPullOnUp,
+                ),
               ),
             );
             if (!lock.ran) {

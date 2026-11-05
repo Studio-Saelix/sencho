@@ -93,3 +93,27 @@ export function acceptanceAuthorityForWebhook(
   }
   return 'operator';
 }
+
+/**
+ * Triggers that run with nobody at the keyboard: a poll, a delivery from the
+ * provider, a schedule, a restart, or a configuration change made elsewhere.
+ *
+ * `manual`, `api`, `retry` and `resume` are initiated by a person (an operator
+ * clicking Apply or Retry, or a caller acting for one), so a security decision
+ * about them can be attended: the person reads the refusal and decides. An
+ * unknown trigger is treated as attended, which keeps the behaviour of a caller
+ * that predates this distinction.
+ */
+const AUTOMATED_RECONCILE_TRIGGERS: ReadonlySet<ReconcileTrigger> = new Set<ReconcileTrigger>([
+  'webhook',
+  'poll',
+  'schedule',
+  'provider_event',
+  'config_change',
+  'startup',
+  'binding_change',
+]);
+
+export function isAutomatedReconcileTrigger(trigger: ReconcileTrigger | undefined | null): boolean {
+  return trigger !== undefined && trigger !== null && AUTOMATED_RECONCILE_TRIGGERS.has(trigger);
+}

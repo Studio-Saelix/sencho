@@ -62,6 +62,37 @@ vi.mock('../services/DatabaseService', () => ({
 vi.mock('../services/NotificationService', () => ({
   NotificationService: { getInstance: () => notificationStub },
 }));
+/**
+ * The gate resolves a registry candidate before scanning it. These suites are
+ * about what the gate does with a scan, not about registry transport (which
+ * `candidate-image.test.ts` covers), so every reference resolves to a
+ * deterministic candidate for the node's platform.
+ */
+vi.mock('../services/candidateImage', async () => {
+  const actual = await vi.importActual<typeof import('../services/candidateImage')>('../services/candidateImage');
+  const { createHash } = await import('node:crypto');
+  const digestOf = (ref: string): string =>
+    `sha256:${createHash('sha256').update(ref).digest('hex')}`;
+  return {
+    ...actual,
+    nodePlatformFor: async () => ({ os: 'linux', architecture: 'amd64' }),
+    localImageExists: async () => true,
+    pullPolicyPullsOnUp: () => false,
+    resolveCandidateImage: async (_nodeId: number, ref: string) => {
+      const digest = digestOf(ref);
+      return {
+        kind: 'candidate',
+        ref,
+        scanRef: `registry.example.com/candidate@${digest}`,
+        indexDigest: digest,
+        platformDigest: digest,
+        platform: 'linux/amd64',
+        qualification: 'exact',
+      };
+    },
+  };
+});
+
 vi.mock('../services/FleetSyncService', () => ({
   FleetSyncService: { getSelfIdentity: () => 'self-node' },
 }));
@@ -370,7 +401,9 @@ describe('enforcePolicyPreDeploy', () => {
     expect(result.ok).toBe(true);
     expect(result.violations).toEqual([]);
     expect(trivyStub.scanImagePreflight).toHaveBeenCalledTimes(1);
-    expect(trivyStub.scanImagePreflight).toHaveBeenCalledWith('nginx:1.14', 1, 'web');
+    // An installed-image gate passes no candidate options: the reference handed
+    // to Trivy is the authored tag, exactly as before.
+    expect(trivyStub.scanImagePreflight).toHaveBeenCalledWith('nginx:1.14', 1, 'web', undefined);
   });
 
   it('allows deploy when all scans fall below the policy threshold', async () => {

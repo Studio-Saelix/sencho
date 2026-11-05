@@ -8,6 +8,7 @@ import { getErrorMessage } from '../utils/errors';
 import DockerController from './DockerController';
 import {
     compareLocalToRemoteTagDetailed,
+    configIdForLocalBuild,
     selectLocalRepoDigests,
     type RegistryCredentials,
 } from './registry-api';
@@ -31,6 +32,14 @@ export interface InspectedImage {
     RepoDigests: string[];
     Os: string;
     Architecture: string;
+    /** The image config ID; a local build's RepoDigest can repeat it. */
+    Id?: string;
+    /** Docker's provenance record (`Pull` or `Build`), used to tell them apart. */
+    Identity?: unknown;
+    /** The OCI target descriptor; present on the containerd image store. */
+    Descriptor?: unknown;
+    /** Set on a locally created image; absent on a pulled image. */
+    Parent?: unknown;
 }
 
 /** Bounded read of `docker image inspect` (RepoDigests, OS, architecture) for a
@@ -39,7 +48,16 @@ export interface InspectedImage {
  * captured. */
 export async function defaultInspectImage(imageId: string): Promise<InspectedImage> {
     const inspect = await DockerController.getInstance().getDocker().getImage(`sha256:${imageId}`).inspect();
-    return { RepoDigests: inspect.RepoDigests ?? [], Os: inspect.Os, Architecture: inspect.Architecture };
+    const extra = inspect as { Identity?: unknown; Descriptor?: unknown; Parent?: unknown };
+    return {
+        RepoDigests: inspect.RepoDigests ?? [],
+        Os: inspect.Os,
+        Architecture: inspect.Architecture,
+        ...(typeof inspect.Id === 'string' ? { Id: inspect.Id } : {}),
+        ...(extra.Identity !== undefined ? { Identity: extra.Identity } : {}),
+        ...(extra.Descriptor !== undefined ? { Descriptor: extra.Descriptor } : {}),
+        ...(extra.Parent !== undefined ? { Parent: extra.Parent } : {}),
+    };
 }
 
 export interface DetectSelfDevBuildUpdateDeps {
@@ -66,7 +84,11 @@ export async function detectSelfDevBuildUpdate(
         return { kind: 'inconclusive', reason: 'Running image has no registry digests (not registry-backed or locally built)' };
     }
 
-    const localDigests = selectLocalRepoDigests(inspected.RepoDigests, { registry, repo, tag });
+    const localDigests = selectLocalRepoDigests(
+        inspected.RepoDigests,
+        { registry, repo, tag },
+        configIdForLocalBuild(inspected),
+    );
     if (localDigests.length === 0) {
         return { kind: 'inconclusive', reason: `Running image has no digest matching ${registry}/${repo}:${tag}` };
     }

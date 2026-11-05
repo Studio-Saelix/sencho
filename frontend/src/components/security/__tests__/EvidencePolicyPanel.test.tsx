@@ -103,6 +103,9 @@ it('pushes every row control to the right edge, including one that wraps below i
   // the wrapped case; on one line it is a no-op.
   render(<EvidencePolicyPanel nodeId={1} />);
   await waitFor(() => expect(screen.getByRole('radiogroup', { name: 'Candidate not evaluated' })).toBeInTheDocument());
+  // The row now governs every unattended pulling path, not only a Git source, so
+  // its help text names them.
+  expect(screen.getByText(/automatic update, scheduled run, webhook, or Git-managed source/i)).toBeInTheDocument();
   for (const name of ['Scanner unavailable', 'Scan failed', 'Candidate not evaluated']) {
     expect(screen.getByRole('radiogroup', { name })).toHaveClass('ml-auto');
   }

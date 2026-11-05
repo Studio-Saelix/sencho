@@ -22,6 +22,13 @@ import { isDebugEnabled } from '../utils/debug';
 import { SEVERITY_ORDER } from '../utils/severity';
 import { isSenchoRollbackHoldRef } from '../utils/senchoRollbackHold';
 import type { PolicyBlockReason } from '../utils/policy-risk';
+import {
+    canonicalPlatformLabel,
+    DEFAULT_ARCHITECTURE_VARIANT,
+    imagePlatformLabel,
+    platformCacheKey,
+} from './gitops/platformNames';
+import { configIdForLocalBuild, parseImageRef, selectLocalRepoDigests } from './registry-api';
 
 const execFileAsync = promisify(execFile);
 
@@ -33,6 +40,63 @@ const DEFAULT_SCAN_ALL_MAX_DURATION_MS = 30 * 60 * 1000;
 
 const TRIVY_TEMP_DIR_PREFIX = 'sencho-trivy-';
 const TRIVY_TEMP_DIR_MAX_AGE_MS = 60 * 60 * 1000; // 1 hour
+
+/**
+ * How long a vulnerability-database reading is reused before asking Trivy again.
+ * Short, because the reading only exists to decide whether a cached scan may be
+ * trusted, and a stale reading could authorise a row the current database has
+ * already superseded.
+ */
+const VULN_DB_INFO_TTL_MS = 60 * 1000;
+
+/** The Trivy vulnerability database build the findings were produced against. */
+export interface VulnerabilityDbInfo {
+    /** Epoch ms of the database build (`VulnerabilityDB.UpdatedAt`). */
+    updatedAt: number;
+    /** Epoch ms after which Trivy expects a newer database, or null when it does not say. */
+    nextUpdate: number | null;
+    /** When this reading was taken. */
+    readAt: number;
+}
+
+/**
+ * Options for one image scan.
+ *
+ * `scanRef` decouples the reference handed to Trivy from the reference the scan
+ * row is keyed and displayed by. The deploy gate scans `repo@sha256:<digest>` (the
+ * image that update would install) while the row keeps the authored tag, so
+ * History, compare and per-image retention keep reading one identity per tag.
+ */
+export interface ImageScanOptions {
+    useCache?: boolean;
+    digest?: string | null;
+    /**
+     * The platform of the image being scanned (`linux/amd64`, ...), when the
+     * caller already resolved it. The deploy gate's cache is keyed by digest and
+     * platform, so a multi-arch ref's children cannot answer for each other. An
+     * installed scan that names no child leaves this unset and the service reads
+     * the platform of the local image; when that cannot be read, the gate's cache
+     * is bypassed rather than letting an unqualified row answer.
+     *
+     * When it is set for an installed reference (`scanRef` and `digest` absent),
+     * the platform is a promise about the child the operation will run: the scan
+     * reads that child or fails, and the row is never written under a platform
+     * the scan did not report.
+     */
+    platform?: string | null;
+    scanners?: readonly TrivyScanner[];
+    /** The exact reference handed to `trivy image`; defaults to `imageRef`. */
+    scanRef?: string;
+    /**
+     * Cache reuse rule. `digest` (the default, and every path except the deploy
+     * gate) reuses a completed row for the digest and, when the platform is
+     * known, that child, inside the TTL. `database` additionally requires the
+     * row to have come from the current, not-yet-due vulnerability database,
+     * because findings from an older database can miss a CVE the operator's
+     * policy would have blocked.
+     */
+    cacheRule?: 'digest' | 'database';
+}
 
 /**
  * Sweep leftover sencho-trivy-* temp dirs in the system tmp dir whose mtime
@@ -123,6 +187,15 @@ interface TrivyRawOutput {
         OS?: { Family?: string; Name?: string };
         ImageID?: string;
         RepoDigests?: string[];
+        /**
+         * The image config Trivy actually analysed. Its `os` and `architecture`
+         * are the platform the findings describe, whichever source Trivy used.
+         */
+        ImageConfig?: {
+            os?: unknown;
+            architecture?: unknown;
+            variant?: unknown;
+        };
     };
     Results?: TrivyRawResult[];
 }
@@ -231,6 +304,8 @@ export type TrivyScanner = 'vuln' | 'secret';
 export interface TrivyScanResult {
     imageRef: string;
     imageDigest: string | null;
+    /** The platform of the image these findings describe, when known. */
+    platform?: string | null;
     scannedAt: number;
     totalVulnerabilities: number;
     criticalCount: number;
@@ -249,6 +324,21 @@ export interface TrivyScanResult {
         trivyVersion: string | null;
         scanDurationMs: number;
     };
+    /**
+     * True when these findings came from a stored row rather than a scan that
+     * just ran. The database revision is then the cached row's, never the one
+     * Trivy holds now: the findings predate whatever database was downloaded
+     * since, and stamping the current build on them would claim otherwise.
+     */
+    fromCache?: boolean;
+    /**
+     * The stored row the findings came from when `fromCache` is true. A caller
+     * that made a placeholder row must reuse this row instead of writing the
+     * cached findings into a new identity, which would duplicate history.
+     */
+    cachedScanId?: number;
+    /** The database build the findings came from, when the row recorded one. */
+    databaseUpdatedAt?: number | null;
 }
 
 export interface TrivyComposeScanResult {
@@ -344,6 +434,13 @@ export function parseTrivyOutput(raw: string): {
     secrets: TrivySecret[];
     misconfigs: TrivyMisconfig[];
     os: string | null;
+    /**
+     * The platform the analysed image actually is, from its config. Null for a
+     * report that does not describe an image config (a filesystem or misconfig
+     * scan), so callers that promised a platform can tell "not reported" from
+     * "reported something else".
+     */
+    imagePlatform: string | null;
 } {
     let parsed: TrivyRawOutput;
     try {
@@ -421,7 +518,30 @@ export function parseTrivyOutput(raw: string): {
             ? `${osFamily} ${osName}`
             : osFamily
         : null;
-    return { vulnerabilities, secrets, misconfigs, os: osInfo };
+    const imageConfig = parsed.Metadata?.ImageConfig;
+    const imagePlatform = imagePlatformLabel({
+        Os: imageConfig?.os,
+        Architecture: imageConfig?.architecture,
+        Variant: imageConfig?.variant,
+    });
+    return { vulnerabilities, secrets, misconfigs, os: osInfo, imagePlatform };
+}
+
+/**
+ * Whether a report whose image config says `read` describes the platform the
+ * caller asked for. Trivy omits the variant for many images (an arm/v7 child
+ * reports `linux/arm`), so a missing read variant is not a contradiction; a
+ * reported, different one is.
+ */
+function scanReadPlatformMatches(requested: string, read: string): boolean {
+    const [requestedOs, requestedArchitecture, requestedVariant] = canonicalPlatformLabel(requested).split('/');
+    const [readOs, readArchitecture, readVariant] = canonicalPlatformLabel(read).split('/');
+    if (requestedOs !== readOs || requestedArchitecture !== readArchitecture) return false;
+    // A bare architecture asks for Compose's default variant (`arm` is v7,
+    // `amd64` is v1), so a report naming another variant is a different child.
+    const expectedVariant = requestedVariant ?? DEFAULT_ARCHITECTURE_VARIANT[requestedArchitecture];
+    if (!readVariant) return true;
+    return expectedVariant === undefined || expectedVariant === readVariant;
 }
 
 class TrivyService {
@@ -435,6 +555,8 @@ class TrivyService {
     private scanningNodes: Set<number> = new Set();
     private cacheDirEnsured: string | null = null;
     private detectionTimestamp = 0;
+    /** Last vulnerability-database reading, refreshed after every completed scan. */
+    private vulnDbInfo: VulnerabilityDbInfo | null = null;
 
     public static getInstance(): TrivyService {
         if (!TrivyService.instance) {
@@ -586,12 +708,85 @@ class TrivyService {
             const info = (await docker.getImage(imageRef).inspect()) as {
                 RepoDigests?: string[];
                 Id?: string;
+                Identity?: unknown;
+                Descriptor?: unknown;
+                Parent?: unknown;
             };
+            const configId = configIdForLocalBuild(info)?.toLowerCase() ?? null;
             if (info.RepoDigests && info.RepoDigests.length > 0) {
-                const digest = info.RepoDigests[0].split('@')[1];
-                if (digest) return digest;
+                for (const entry of info.RepoDigests) {
+                    const digest = entry.split('@')[1];
+                    if (!digest) continue;
+                    // A local build's self-referential RepoDigest is its config
+                    // ID, not registry content; the image ID is the honest
+                    // identity for that entry.
+                    if (configId !== null && digest.toLowerCase() === configId) continue;
+                    return digest;
+                }
             }
             return info.Id ?? null;
+        } catch {
+            return null;
+        }
+    }
+
+    /**
+     * The local image's own registry-addressed digest (`repo@sha256:...`), or
+     * null when Docker holds no digest for this reference (a local build, or a
+     * retag whose RepoDigests name another repository).
+     *
+     * Unlike {@link getImageDigest} this never falls back to the image config
+     * ID: only a RepoDigest names content a registry can resolve, which is what
+     * a platform child scan needs. A local build on the containerd image store
+     * records a self-referential RepoDigest whose digest is the config ID; that
+     * is not registry content, so it is rejected while a real repo digest is
+     * still accepted. Every repo digest is offered to
+     * {@link selectLocalRepoDigests}, so an unrelated repository's leftover
+     * digest is never used. The first matching digest is taken; a caller keys
+     * the row and addresses the scan by this same digest, so the two cannot
+     * describe different repositories even when Docker lists a stale entry.
+     */
+    async getRepoDigestRef(imageRef: string, nodeId: number): Promise<string | null> {
+        try {
+            const parsed = parseImageRef(imageRef);
+            if (!parsed) return null;
+            const docker = DockerController.getInstance(nodeId).getDocker();
+            const info = (await docker.getImage(imageRef).inspect()) as {
+                RepoDigests?: unknown;
+                Id?: unknown;
+                Identity?: unknown;
+                Descriptor?: unknown;
+                Parent?: unknown;
+            };
+            const repoDigests = Array.isArray(info.RepoDigests)
+                ? info.RepoDigests.filter((entry): entry is string => typeof entry === 'string')
+                : [];
+            const digest = selectLocalRepoDigests(repoDigests, parsed, configIdForLocalBuild(info))[0];
+            return digest ? `${parsed.registry}/${parsed.repo}@${digest}` : null;
+        } catch (err) {
+            diag(`getRepoDigestRef: read failed for ${imageRef}: ${getErrorMessage(err, 'unknown')}`);
+            return null;
+        }
+    }
+
+    /**
+     * The platform of the image Docker holds for `imageRef`, or null when the
+     * daemon did not report it. Used to key a scan of a local image and to
+     * decide whether the daemon's child is the platform an installed entry
+     * names: a local ref scan reads that child, and a different requested child
+     * is read from the registry instead. A multi-arch reference stores every
+     * child under one index digest, so the digest alone cannot say which image
+     * a row describes.
+     */
+    async getImagePlatform(imageRef: string, nodeId: number): Promise<string | null> {
+        try {
+            const docker = DockerController.getInstance(nodeId).getDocker();
+            const info = (await docker.getImage(imageRef).inspect()) as {
+                Os?: unknown;
+                Architecture?: unknown;
+                Variant?: unknown;
+            };
+            return imagePlatformLabel(info);
         } catch {
             return null;
         }
@@ -613,14 +808,218 @@ class TrivyService {
         return this.scanningImages.has(this.stackScanKey(nodeId, stackName));
     }
 
+    /**
+     * The vulnerability database build Trivy currently holds, read from
+     * `trivy version --format json` with the same cache directory a scan uses.
+     *
+     * Memoized briefly because the deploy gate asks once per candidate, and
+     * refreshed after every completed scan so a database Trivy downloaded during
+     * that scan is what the next cache decision sees. A read that fails returns
+     * null, which the cache rule treats as "cannot prove the row is current", i.e.
+     * a miss rather than a hit.
+     */
+    async getVulnerabilityDbInfo(options: { refresh?: boolean } = {}): Promise<VulnerabilityDbInfo | null> {
+        const now = Date.now();
+        if (!options.refresh && this.vulnDbInfo && now - this.vulnDbInfo.readAt < VULN_DB_INFO_TTL_MS) {
+            return this.vulnDbInfo;
+        }
+        const binary = this.binaryPath;
+        if (!binary) return null;
+        try {
+            const { env, cleanup } = await this.buildEnv();
+            try {
+                const { stdout } = await execFileAsync(
+                    binary,
+                    ['version', '--format', 'json'],
+                    { env, timeout: 30_000, maxBuffer: 8 * 1024 * 1024 },
+                );
+                const parsed = JSON.parse(stdout) as {
+                    VulnerabilityDB?: { UpdatedAt?: unknown; NextUpdate?: unknown };
+                };
+                const db = parsed.VulnerabilityDB;
+                const updatedAt = typeof db?.UpdatedAt === 'string' ? Date.parse(db.UpdatedAt) : NaN;
+                const nextUpdate = typeof db?.NextUpdate === 'string' ? Date.parse(db.NextUpdate) : NaN;
+                if (!Number.isFinite(updatedAt)) {
+                    this.vulnDbInfo = null;
+                    return null;
+                }
+                this.vulnDbInfo = {
+                    updatedAt,
+                    nextUpdate: Number.isFinite(nextUpdate) ? nextUpdate : null,
+                    readAt: now,
+                };
+                return this.vulnDbInfo;
+            } finally {
+                cleanup();
+            }
+        } catch (err) {
+            diag(`getVulnerabilityDbInfo: read failed: ${getErrorMessage(err, 'unknown')}`);
+            this.vulnDbInfo = null;
+            return null;
+        }
+    }
+
+    /**
+     * Whether a cached row may answer this scan.
+     *
+     * The digest rule is the historical one: any completed row for the digest
+     * inside the TTL. The database rule (the deploy gate) additionally requires
+     * the row to have been produced by the database build Trivy holds now, and
+     * that build to still be inside its own `NextUpdate` window. A row written
+     * before database revisions were recorded has no revision, so it misses once
+     * and the fresh scan records one.
+     */
+    private async canReuseCachedScan(
+        cached: VulnerabilityScan,
+        rule: 'digest' | 'database',
+        now: number,
+    ): Promise<boolean> {
+        if (now - cached.scanned_at >= DIGEST_CACHE_TTL_MS) return false;
+        if (rule !== 'database') return true;
+        const info = await this.getVulnerabilityDbInfo();
+        if (!info) return false;
+        // An unknown expiry is not proof the build is still inside its window, so
+        // it is a miss: the gate may only reuse a row it can show is current.
+        if (info.nextUpdate === null || now >= info.nextUpdate) return false;
+        if (cached.vuln_db_updated_at === null || cached.vuln_db_updated_at === undefined) return false;
+        return cached.vuln_db_updated_at === info.updatedAt;
+    }
+
+    /**
+     * Resolve the digest, platform and cache key a scan of `imageRef` would use.
+     *
+     * Shared by `scanImage` and `findReusableScan` so a caller that asks whether
+     * a scan would be served from cache resolves the same digest, platform and
+     * cache key the scan itself would: a second copy of those rules is how a
+     * cache check and the scan it guards drift apart. The row can still be
+     * inserted or pruned between the two calls; `finishScan` handles that.
+     */
+    private async resolveScanRequest(
+        imageRef: string,
+        nodeId: number,
+        options: ImageScanOptions,
+    ): Promise<{
+        pinnedDigest: string | null;
+        cachePlatform: string | null;
+        requestedPlatform: string | null;
+        requestedKey: string | null;
+        localKey: string | null;
+        installedPlatformScan: boolean;
+        scanFromRegistry: boolean;
+        repoDigestRef: string | null;
+        digest: string | null;
+        cacheable: boolean;
+    }> {
+        const localDigest = options.digest === undefined || options.digest === null;
+        const pinnedDigest = imageRef.includes('@')
+            ? imageRef.slice(imageRef.lastIndexOf('@') + 1)
+            : null;
+        // The cache is keyed by digest and platform: an index digest is
+        // shared by every platform child, so without the platform one
+        // child's row could answer for another. A candidate supplies the
+        // platform it resolved; a scan of the image on the node reads the
+        // local image's own platform, so a manual or scheduled scan cannot
+        // borrow a candidate child's findings either.
+        const localPlatform = localDigest ? await this.getImagePlatform(imageRef, nodeId) : null;
+        const platform = options.platform ?? localPlatform;
+        // The row and its lookup use the canonical cache key, so an explicit
+        // default variant and the installed read of the same child meet.
+        const cachePlatform = platform ? platformCacheKey(platform) : null;
+        const requestedPlatform = options.platform ?? null;
+        const requestedKey = requestedPlatform ? platformCacheKey(requestedPlatform) : null;
+        const localKey = localPlatform ? platformCacheKey(localPlatform) : null;
+        // An installed reference that names a child (a service platform
+        // override, a non-pulling group, a digest pin of an index) cannot be
+        // read through the daemon when the daemon's default child is a
+        // different platform: `trivy image`'s Docker source ignores
+        // `--platform` and always reads the default child. Only a local scan
+        // whose own platform is the requested one is exact; otherwise the
+        // child is read from the registry by the image's own digest with the
+        // platform selector (a candidate is instead addressed by the child
+        // manifest digest). A caller that supplies an explicit digest (the
+        // candidate path) has already named the image, so it is not an
+        // installed ref.
+        const installedPlatformScan = options.scanRef === undefined
+            && (options.digest === undefined || options.digest === null)
+            && requestedKey !== null;
+        const scanFromRegistry = installedPlatformScan && requestedKey !== localKey;
+        // For an installed platform scan the same filtered repo digest
+        // supplies the row identity and the registry target when one exists,
+        // so the two cannot describe different repositories. A local build
+        // with no matching repo digest falls back to the daemon's identity.
+        const repoDigestRef = installedPlatformScan && !pinnedDigest
+            ? await this.getRepoDigestRef(imageRef, nodeId)
+            : null;
+        // The pin's own digest is the image identity when the reference
+        // carries one; otherwise the local image's matching repo digest, and
+        // only a local build with none falls back to the daemon's image ID.
+        const digest = options.digest ?? pinnedDigest ?? repoDigestRef?.split('@')[1]
+            ?? (await this.getImageDigest(imageRef, nodeId));
+        // The deploy gate fails closed when it cannot read the platform; the
+        // plain digest cache also narrows by platform when it is known and
+        // falls back to digest-only when it is not. An installed entry that
+        // names a platform never reuses a row: the same digest+platform key
+        // can hold a row written when the daemon's default child was
+        // mistaken for the requested one, and there is no marker on the row
+        // to tell them apart. It therefore runs fresh every deploy.
+        const cacheable = options.useCache !== false && digest !== null
+            && !installedPlatformScan
+            && (options.cacheRule !== 'database' || cachePlatform !== null);
+        return {
+            pinnedDigest,
+            cachePlatform,
+            requestedPlatform,
+            requestedKey,
+            localKey,
+            installedPlatformScan,
+            scanFromRegistry,
+            repoDigestRef,
+            digest,
+            cacheable,
+        };
+    }
+
+    /**
+     * The completed scan row `scanImage` would reuse for this request, or null
+     * when the scan would run fresh.
+     *
+     * Callers that create an `in_progress` row before scanning (the manual scan
+     * route) use this so a cache hit returns the stored row instead of inserting
+     * a duplicate row with the same findings and timestamp. It resolves the same
+     * digest, platform and cache rule as the scan itself, so the check and the
+     * scan agree on the key. A row inserted between the two calls is reused and
+     * the placeholder discarded; a row pruned before reuse triggers a fresh
+     * scan rather than writing stale findings into the placeholder.
+     */
+    async findReusableScan(
+        imageRef: string,
+        nodeId: number,
+        options: ImageScanOptions = {},
+    ): Promise<VulnerabilityScan | null> {
+        if (isSenchoRollbackHoldRef(imageRef)) return null;
+        if (options.useCache === false) return null;
+        const scannersUsed = normalizeScanners(options.scanners).join(',');
+        const request = await this.resolveScanRequest(imageRef, nodeId, options);
+        if (!request.cacheable || request.digest === null) return null;
+        const cached = DatabaseService.getInstance().getLatestScanByDigestForNode(
+            request.digest,
+            nodeId,
+            scannersUsed,
+            request.cachePlatform ?? undefined,
+        );
+        if (!cached) return null;
+        const reusable = await this.canReuseCachedScan(
+            cached,
+            options.cacheRule ?? 'digest',
+            Date.now(),
+        );
+        return reusable ? cached : null;
+    }
+
     async scanImage(
         imageRef: string,
         nodeId: number,
-        options: {
-            useCache?: boolean;
-            digest?: string | null;
-            scanners?: readonly TrivyScanner[];
-        } = {},
+        options: ImageScanOptions = {},
     ): Promise<TrivyScanResult> {
         if (isSenchoRollbackHoldRef(imageRef)) {
             throw new Error('Sencho rollback-hold images are recovery state and cannot be scanned');
@@ -642,15 +1041,31 @@ class TrivyService {
         );
 
         try {
-            const digest = options.digest ?? (await this.getImageDigest(imageRef, nodeId));
-            diag(`scanImage: digest=${digest ?? 'null'} for ${imageRef}`);
+            const request = await this.resolveScanRequest(imageRef, nodeId, options);
+            const {
+                pinnedDigest,
+                cachePlatform,
+                requestedPlatform,
+                requestedKey,
+                localKey,
+                scanFromRegistry,
+                repoDigestRef,
+                digest,
+                cacheable,
+            } = request;
+            diag(
+                `scanImage: digest=${digest ?? 'null'} platform=${cachePlatform ?? 'null'} `
+                + `local=${localKey ?? 'null'} registryChild=${scanFromRegistry} for ${imageRef}`,
+            );
 
-            if (options.useCache !== false && digest) {
-                const cached = DatabaseService.getInstance().getLatestScanByDigest(
+            if (cacheable && digest !== null) {
+                const cached = DatabaseService.getInstance().getLatestScanByDigestForNode(
                     digest,
+                    nodeId,
                     scannersUsed,
+                    cachePlatform ?? undefined,
                 );
-                if (cached && startedAt - cached.scanned_at < DIGEST_CACHE_TTL_MS) {
+                if (cached && (await this.canReuseCachedScan(cached, options.cacheRule ?? 'digest', startedAt))) {
                     diag(
                         `scanImage: cache hit for digest=${digest} scanId=${cached.id} ageMs=${startedAt - cached.scanned_at}`,
                     );
@@ -666,6 +1081,10 @@ class TrivyService {
                     return {
                         imageRef,
                         imageDigest: digest,
+                        platform: cached.platform ?? cachePlatform,
+                        fromCache: true,
+                        cachedScanId: cached.id,
+                        databaseUpdatedAt: cached.vuln_db_updated_at ?? null,
                         scannedAt: cached.scanned_at,
                         totalVulnerabilities: cached.total_vulnerabilities,
                         criticalCount: cached.critical_count,
@@ -715,6 +1134,24 @@ class TrivyService {
             }
 
             diag(`scanImage: cache miss; invoking trivy for ${imageRef}`);
+            // A registry-addressed installed scan needs a reference the remote
+            // source can resolve: the pin itself, or the local image's own repo
+            // digest for a tag. Without one the requested child cannot be
+            // proven, and the scan fails rather than reading the daemon's
+            // default child under the requested platform's name.
+            let scanTarget = options.scanRef ?? imageRef;
+            if (scanFromRegistry) {
+                if (pinnedDigest) {
+                    scanTarget = imageRef;
+                } else if (repoDigestRef) {
+                    scanTarget = repoDigestRef;
+                } else {
+                    throw new Error(
+                        `The image ${imageRef} has no registry digest, so its ${requestedPlatform} child `
+                        + 'cannot be read; the daemon only exposes its default platform child',
+                    );
+                }
+            }
             const { env, cleanup } = await this.buildEnv();
             try {
                 const args = [
@@ -725,7 +1162,15 @@ class TrivyService {
                     '--no-progress',
                     '--scanners',
                     scannersUsed,
-                    imageRef,
+                    // The remote source honours the platform selector; the
+                    // Docker source ignores it and reads the daemon's default
+                    // child, so a local scan never passes it. A candidate is
+                    // already addressed by its own manifest digest (`scanRef`)
+                    // and needs no selector either.
+                    ...(scanFromRegistry && requestedPlatform
+                        ? ['--image-src', 'remote', '--platform', requestedPlatform]
+                        : []),
+                    scanTarget,
                 ];
                 const execStart = Date.now();
                 const { stdout } = await execFileAsync(binary, args, {
@@ -736,9 +1181,28 @@ class TrivyService {
                 diag(
                     `scanImage: trivy exited after ${Date.now() - execStart}ms, output=${stdout.length} bytes`,
                 );
-                const { vulnerabilities, secrets, os: osInfo } = parseTrivyOutput(stdout);
+                const { vulnerabilities, secrets, os: osInfo, imagePlatform } = parseTrivyOutput(stdout);
+                // The row, its cache key and its evidence will carry the
+                // requested platform. Refuse to write findings that describe
+                // another child: a missing report is "cannot prove", not a
+                // match.
+                if (requestedPlatform && requestedKey) {
+                    if (!imagePlatform) {
+                        throw new Error(
+                            `Trivy did not report the platform it scanned for ${imageRef}; `
+                            + `refusing to file the findings under ${requestedPlatform}`,
+                        );
+                    }
+                    if (!scanReadPlatformMatches(requestedPlatform, imagePlatform)) {
+                        throw new Error(
+                            `Trivy scanned ${imagePlatform} for ${imageRef}, not ${requestedPlatform}; `
+                            + 'refusing to file the findings under a platform they do not describe',
+                        );
+                    }
+                }
                 diag(
-                    `scanImage: parsed ${vulnerabilities.length} unique vulns, ${secrets.length} secrets (os=${osInfo ?? 'unknown'})`,
+                    `scanImage: parsed ${vulnerabilities.length} unique vulns, ${secrets.length} secrets `
+                    + `(os=${osInfo ?? 'unknown'} platform=${imagePlatform ?? 'unknown'})`,
                 );
 
                 let critical = 0,
@@ -770,6 +1234,7 @@ class TrivyService {
                 return {
                     imageRef,
                     imageDigest: digest,
+                    platform: cachePlatform,
                     scannedAt: Date.now(),
                     totalVulnerabilities: vulnerabilities.length,
                     criticalCount: critical,
@@ -850,17 +1315,62 @@ class TrivyService {
         scanId: number,
         imageRef: string,
         nodeId: number,
-        opts: { useCache?: boolean; scanners?: readonly TrivyScanner[] } = {},
+        opts: ImageScanOptions = {},
     ): Promise<VulnerabilityScan> {
         const db = DatabaseService.getInstance();
         const startedAt = Date.now();
         try {
-            const result = await this.scanImage(imageRef, nodeId, {
+            let result = await this.scanImage(imageRef, nodeId, {
                 useCache: opts.useCache,
                 scanners: opts.scanners,
+                // A candidate scan persists the digest it actually scanned, and
+                // keeps the authored tag as the row's identity. A candidate also
+                // names its platform; an installed scan resolves the local one.
+                digest: opts.digest,
+                platform: opts.platform,
+                scanRef: opts.scanRef,
+                cacheRule: opts.cacheRule,
             });
+            // A cache hit is the existing row's answer, not a new observation.
+            // The placeholder row the caller opened for progress must not become
+            // a second history entry with the same image, digest and timestamp:
+            // history and per-image retention read row identity. Reuse the stored
+            // row and discard the placeholder.
+            if (result.fromCache && result.cachedScanId !== undefined && result.cachedScanId !== null) {
+                const cached = db.getVulnerabilityScan(result.cachedScanId);
+                if (cached) {
+                    db.deleteVulnerabilityScan(scanId);
+                    diag(
+                        `finishScan: scanId=${scanId} reused cached scanId=${cached.id} for ${imageRef}`,
+                    );
+                    return cached;
+                }
+                // The row was pruned between the scan's lookup and this read
+                // (retention and orphan cleanup run concurrently). Its findings
+                // are a real observation but have no row left to belong to;
+                // copying them into the placeholder under the old timestamp
+                // would recreate the duplicate history entry this method exists
+                // to avoid, possibly with an empty detail set. The placeholder
+                // is the scan that never ran, so run it now.
+                diag(
+                    `finishScan: scanId=${scanId} cached scanId=${result.cachedScanId} vanished; scanning fresh for ${imageRef}`,
+                );
+                result = await this.scanImage(imageRef, nodeId, {
+                    useCache: false,
+                    scanners: opts.scanners,
+                    digest: opts.digest,
+                    platform: opts.platform,
+                    scanRef: opts.scanRef,
+                    cacheRule: opts.cacheRule,
+                });
+            }
+            // Read after a scan that actually ran, so a database Trivy downloaded
+            // during it is what gets recorded. A cache hit kept findings from an
+            // older build, and keeps that build's revision with it.
+            const dbInfo = result.fromCache ? null : await this.getVulnerabilityDbInfo({ refresh: true });
             db.updateVulnerabilityScan(scanId, {
                 image_digest: result.imageDigest,
+                platform: result.platform ?? null,
                 scanned_at: result.scannedAt,
                 total_vulnerabilities: result.totalVulnerabilities,
                 critical_count: result.criticalCount,
@@ -875,6 +1385,7 @@ class TrivyService {
                 os_info: result.metadata.os,
                 trivy_version: result.metadata.trivyVersion,
                 scan_duration_ms: result.metadata.scanDurationMs,
+                vuln_db_updated_at: result.fromCache ? (result.databaseUpdatedAt ?? null) : (dbInfo?.updatedAt ?? null),
                 status: 'completed',
             });
             db.insertVulnerabilityDetails(
@@ -955,8 +1466,19 @@ class TrivyService {
         nodeId: number,
         triggeredBy: VulnScanTrigger,
         stackContext: string | null = null,
-        opts: { useCache?: boolean; scanners?: readonly TrivyScanner[] } = {},
+        opts: ImageScanOptions = {},
     ): Promise<VulnerabilityScan> {
+        // Ask before opening a row: a cache hit is the stored row's answer, and
+        // inserting a placeholder first would either duplicate history or churn
+        // the id for no new observation. `finishScan` still discards a
+        // placeholder if the cache fills between this check and the scan.
+        const cached = await this.findReusableScan(imageRef, nodeId, opts);
+        if (cached) {
+            diag(
+                `runScanAndPersist: reused cached scanId=${cached.id} trigger=${triggeredBy} for ${imageRef}`,
+            );
+            return cached;
+        }
         const scanId = this.beginScan(imageRef, nodeId, triggeredBy, stackContext, opts.scanners);
         return this.finishScan(scanId, imageRef, nodeId, opts);
     }
@@ -964,23 +1486,50 @@ class TrivyService {
     /**
      * Scan a single image for the pre-deploy policy gate.
      *
-     * Reuses the 24h digest cache (useCache=true) so repeat deploys of a
-     * known-safe image do not pay full scan cost. Only runs the vulnerability
-     * scanner (secrets/misconfig are irrelevant to the gate and add latency).
-     * The scan is persisted as a normal row with triggered_by=deploy-preflight
-     * so the history and compare views continue to work unchanged.
+     * Reuses the 24h cache (useCache=true) so repeat deploys of a known-safe
+     * image do not pay full scan cost. The row is keyed by digest and the
+     * platform it read, so one child of a multi-platform index cannot answer
+     * for another; a qualified candidate child and any installed entry that
+     * names a platform still turn reuse off entirely, because a row written
+     * before the platform was actually selected may describe another child.
+     * Only runs the vulnerability scanner (secrets/misconfig are irrelevant to
+     * the gate and add latency). A fresh scan is persisted as a normal row with
+     * triggered_by=deploy-preflight so the history and compare views continue to
+     * work unchanged; a cache hit returns the stored row and keeps that row's
+     * original trigger and stack context, because it is that earlier
+     * observation, not a new one.
+     *
+     * `scanRef` and `digest` are how the gate evaluates the image an update will
+     * install: Trivy is pointed at `repo@sha256:<platform digest>`, the row keeps
+     * the authored tag, and the digest it stores is the registry index digest.
+     * The post-update scan of the installed image reuses that row when its own
+     * platform read matches the candidate's; a different child gets its own
+     * row. The database cache rule applies here and only here.
      */
     async scanImagePreflight(
         imageRef: string,
         nodeId: number,
         stackName: string | null,
+        opts: { scanRef?: string; digest?: string | null; platform?: string | null; useCache?: boolean } = {},
     ): Promise<VulnerabilityScan> {
         return this.runScanAndPersist(
             imageRef,
             nodeId,
             'deploy-preflight',
             stackName,
-            { useCache: true, scanners: ['vuln'] },
+            {
+                // A multi-platform ref stores one row per index digest, so two
+                // platform children would share a cache entry. The row records
+                // the platform it scanned and the lookup requires it, so one
+                // child's findings cannot answer for the other; a qualified
+                // child additionally turns reuse off entirely.
+                useCache: opts.useCache ?? true,
+                scanners: ['vuln'],
+                cacheRule: 'database',
+                ...(opts.scanRef ? { scanRef: opts.scanRef } : {}),
+                ...(opts.digest ? { digest: opts.digest } : {}),
+                ...(opts.platform ? { platform: opts.platform } : {}),
+            },
         );
     }
 
@@ -1237,15 +1786,20 @@ class TrivyService {
             onProgress?.(`scanning ${ref}`);
             try {
                 const digest = await this.getImageDigest(ref, nodeId);
+                const platform = digest ? await this.getImagePlatform(ref, nodeId) : null;
+                const identity = `${digest ?? ''}:${platform ?? ''}`;
                 if (digest) {
-                    if (countedDigests.has(digest)) continue;
-                    const cached =
-                        DatabaseService.getInstance().getLatestScanByDigest(digest, scannersUsed);
+                    if (countedDigests.has(identity)) continue;
+                    // The row may answer only for the image it scanned: a
+                    // multi-arch tag's children share the index digest.
+                    const cached = platform
+                        ? DatabaseService.getInstance().getLatestScanByDigestForNode(digest, nodeId, scannersUsed, platform)
+                        : DatabaseService.getInstance().getLatestScanByDigestForNode(digest, nodeId, scannersUsed);
                     if (cached && Date.now() - cached.scanned_at < DIGEST_CACHE_TTL_MS) {
                         skipped++;
                         addSeverity(cached);
                         collectViolation(cached);
-                        countedDigests.add(digest);
+                        countedDigests.add(identity);
                         onProgress?.(`${ref}: cached (${cached.critical_count}C ${cached.high_count}H)`);
                         continue;
                     }
@@ -1254,7 +1808,7 @@ class TrivyService {
                 addSeverity(fresh);
                 collectViolation(fresh);
                 scanned++;
-                if (digest) countedDigests.add(digest);
+                if (digest) countedDigests.add(identity);
                 onProgress?.(`${ref}: ${fresh.critical_count}C ${fresh.high_count}H${fresh.secret_count ? ` ${fresh.secret_count} secret` : ''}`);
             } catch (err) {
                 failed++;
