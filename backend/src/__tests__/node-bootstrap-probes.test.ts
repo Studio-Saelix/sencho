@@ -17,6 +17,7 @@ import {
   parseContainers,
   parseDfFreeBytes,
   parseDockerInfo,
+  buildDockerRepoScript,
   parseDockerRepo,
   parseFstabMountPoints,
   parseHubHealth,
@@ -86,8 +87,9 @@ describe('bootstrap probe catalog', () => {
   });
 
   it('separates repository file contents from the end marker even without a trailing newline', () => {
-    const command = catalog.find((probe) => probe.id === 'docker_repo')?.command ?? '';
-    expect(command).toContain("printf '\\nSOURCE_END=%s\\n'");
+    const script = buildDockerRepoScript(['/etc/apt/sources.list'], ['/etc/apt/sources.list.d'], []);
+    expect(script).toContain("printf '\\nSOURCE_END=%s\\n'");
+    expect(script).toContain("printf '\\nSOURCE_UNREADABLE=1\\n'");
   });
 
   it('quotes both paths once, into the fixed path script', () => {
@@ -188,7 +190,7 @@ describe('bootstrap probe parsers', () => {
     });
     expect(packages.find((pkg) => pkg.name === 'docker-compose-plugin')?.installedVersion).toBe('2.29.7-1~ubuntu.24.04~noble');
 
-    expect(parseDockerRepo('')).toEqual({
+    expect(parseDockerRepo('', '', '')).toEqual({
       probeComplete: true,
       dockerSourceConfigured: false,
       keyringPresent: false,

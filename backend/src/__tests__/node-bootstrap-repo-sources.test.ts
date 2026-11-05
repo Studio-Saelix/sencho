@@ -20,8 +20,8 @@ import { makeFacts } from './__helpers__/bootstrapFacts';
 import { DOCKER_ASC_PATH, DOCKER_KEY_GPG, dockerAscBlock, keyBlock, unrelatedKeyBinary } from './__helpers__/dockerRepoFixtures';
 
 /**
- * Repository verification must hold for the host's own architecture (S5-A) and
- * for every source apt reads, not two conventional file names (S5-B).
+ * Repository verification must hold for the host's own architecture and for
+ * every source in apt's default source list, not two conventional file names.
  */
 
 const OFFICIAL = 'https://download.docker.com/linux/ubuntu';
@@ -101,7 +101,7 @@ function stageIds(facts: BootstrapFacts): string[] {
   return planFor(facts).stages.map((stage) => stage.id);
 }
 
-describe('S5-A: a source that cannot supply the host architecture', () => {
+describe('a source that cannot supply the host architecture', () => {
   it('maps the machine type to the Debian architecture', () => {
     expect(debianArchitecture('x86_64')).toBe('amd64');
     expect(debianArchitecture('aarch64')).toBe('arm64');
@@ -210,13 +210,17 @@ describe('S5-A: a source that cannot supply the host architecture', () => {
       });
       const step = planFor(facts).stages.flatMap((stage) => stage.steps).find((entry) => entry.id === 'docker-sources');
       expect(step?.file?.content).toContain('arch=amd64');
-      const written = parse('amd64', block(LIST_FILE, step!.file!.content.trim()), dockerAscBlock());
+      expect(step?.file?.path).toBe(LIST_FILE);
+      const key = planFor(facts).stages.flatMap((stage) => stage.steps).find((entry) => entry.id === 'docker-key');
+      expect(key?.command).toContain(DOCKER_ASC_PATH);
+      const written = parse('amd64', block(step!.file!.path, step!.file!.content.trim()), dockerAscBlock());
       expect(written.sourceVerified).toBe(true);
+      expect(written.dockerSourceConfigured).toBe(true);
     });
   });
 });
 
-describe('S5-B: sources outside docker.list and docker.sources', () => {
+describe('sources outside docker.list and docker.sources', () => {
   describe('which files count', () => {
     it.each([
       ['a custom .list', CUSTOM_LIST, deb('arch=amd64 trusted=yes')],
@@ -245,7 +249,7 @@ describe('S5-B: sources outside docker.list and docker.sources', () => {
       expect(parse('amd64', block(CUSTOM_SOURCES, stanza({ URIs: `${OFFICIAL}/` })), dockerAscBlock()).sourceVerified).toBe(true);
     });
 
-    it('recognizes the host in any letter case', () => {
+    it('recognizes the host in upper or lower case', () => {
       const result = parse('amd64', block(CUSTOM_LIST, deb('arch=amd64 trusted=yes', 'https://Download.Docker.com/linux/ubuntu')), dockerAscBlock());
       expect(result.dockerSourceConfigured).toBe(true);
       expect(result.sourceVerified).toBe(false);
@@ -307,7 +311,7 @@ describe('S5-B: sources outside docker.list and docker.sources', () => {
       // Both keyrings hold Docker's key, so only the disagreement is wrong.
       expect(result.keyringVerified).toBe(true);
       expect(result.sourceVerified).toBe(false);
-      expect(result.problem).toMatch(/different keyrings/);
+      expect(result.problem).toMatch(/different Signed-By values/);
     });
 
     it('rejects the same disagreement between the two formats and the main list', () => {
@@ -329,17 +333,101 @@ describe('S5-B: sources outside docker.list and docker.sources', () => {
       expect(result.sourceVerified).toBe(false);
     });
 
-    it('does not mix up a different suite of the same repository', () => {
+    it('keys the conflict by suite, so an entry that lists several suites is compared for each', () => {
       const result = parse(
         'amd64',
         block(LIST_FILE, deb('arch=amd64')),
-        block(CUSTOM_LIST, `deb [arch=amd64 signed-by=${GPG_PATH}] ${OFFICIAL} jammy stable`),
+        block(CUSTOM_SOURCES, stanza({ Suites: 'noble jammy', 'Signed-By': GPG_PATH })),
         dockerAscBlock(),
         keyBlock(GPG_PATH, DOCKER_KEY_GPG),
       );
-      // The jammy entry is wrong for this host on its own account (the suite), not through the keyring conflict.
       expect(result.sourceVerified).toBe(false);
-      expect(result.problem).toContain('suite');
+      expect(result.problem).toMatch(/different Signed-By values for .* noble/);
+    });
+
+    it('rejects a deb-src twin that names another keyring, and a trailing-slash twin', () => {
+      const keys = [dockerAscBlock(), keyBlock(GPG_PATH, DOCKER_KEY_GPG)];
+      const srcTwin = `deb-src [signed-by=${GPG_PATH}] ${OFFICIAL} noble stable`;
+      expect(parse('amd64', block(LIST_FILE, `${deb('arch=amd64')}\n${srcTwin}`), ...keys).sourceVerified).toBe(false);
+      const slashTwin = `deb [arch=amd64 signed-by=${GPG_PATH}] ${OFFICIAL}/ noble stable`;
+      expect(parse('amd64', block(LIST_FILE, deb('arch=amd64')), block(CUSTOM_LIST, slashTwin), ...keys).sourceVerified).toBe(false);
+    });
+
+    it('accepts a deb-src twin that names no keyring', () => {
+      const srcTwin = `deb-src ${OFFICIAL} noble stable`;
+      expect(parse('amd64', block(LIST_FILE, `${deb('arch=amd64')}\n${srcTwin}`), dockerAscBlock()).sourceVerified).toBe(true);
+    });
+
+    it('rejects two entries for one source that disagree on trusted, which apt refuses', () => {
+      expect(parse('amd64', block(LIST_FILE, deb('arch=amd64 trusted=no')), block(CUSTOM_LIST, deb('arch=amd64')), dockerAscBlock()).sourceVerified).toBe(false);
+      const agreeing = parse('amd64', block(LIST_FILE, deb('arch=amd64 trusted=no')), block(CUSTOM_LIST, deb('arch=amd64 trusted=no')), dockerAscBlock());
+      expect(agreeing.sourceVerified).toBe(true);
+    });
+
+    it('requires every Docker entry to include the host architecture, even when another entry covers it', () => {
+      const split = [deb('arch=amd64'), deb('arch=arm64')].join('\n');
+      const result = parse('amd64', block(LIST_FILE, split), dockerAscBlock());
+      expect(result.sourceVerified).toBe(false);
+      expect(result.problem).toContain('amd64 architecture');
+    });
+  });
+
+  describe('sources that are malformed or unusual are never read as absent', () => {
+    const noTypes = 'URIs: https://download.docker.com/linux/ubuntu\nSuites: noble\nComponents: stable';
+    it.each([
+      ['a deb822 stanza with no Types', CUSTOM_SOURCES, noTypes],
+      ['a deb822 stanza with an unknown type', CUSTOM_SOURCES, stanza({ Types: 'rpm' })],
+      ['a deb822 field with no colon', CUSTOM_SOURCES, `Types: deb\nURIs ${OFFICIAL}\nSuites: noble\nComponents: stable`],
+      ['a deb822 URI with a trailing dot on the host', CUSTOM_SOURCES, stanza({ URIs: 'https://download.docker.com./linux/ubuntu' })],
+      ['a one-line entry with an unclosed option bracket', CUSTOM_LIST, `deb [trusted=yes ${OFFICIAL} noble stable`],
+      ['a one-line entry with no URI scheme', MAIN_LIST, 'deb download.docker.com/linux/ubuntu noble stable'],
+      ['a one-line entry with a trailing dot on the host', CUSTOM_LIST, deb('arch=amd64', 'https://download.docker.com./linux/ubuntu')],
+    ])('counts %s as a Docker source that does not verify', (_label, file, content) => {
+      const result = parse('amd64', block(file, content), dockerAscBlock());
+      expect(result.dockerSourceConfigured).toBe(true);
+      expect(result.sourceVerified).toBe(false);
+      expect(result.problem).toContain(file);
+      const facts = freshHost([block(file, content), dockerAscBlock()].join('\n'));
+      expect(planWithheld(facts)).toBe(true);
+    });
+
+    it('still ignores an unrelated stanza or line beside a good Docker entry', () => {
+      const unrelatedList = 'deb http://archive.ubuntu.com/ubuntu noble main universe\n# deb https://download.docker.com/linux/ubuntu old stable';
+      expect(parse('amd64', block(MAIN_LIST, `${unrelatedList}\n${deb('arch=amd64')}`), dockerAscBlock()).sourceVerified).toBe(true);
+      const unrelatedStanza = `Types: deb\nURIs: http://archive.ubuntu.com/ubuntu\nSuites: noble\nComponents: main\n\n${stanza({})}`;
+      expect(parse('amd64', block(CUSTOM_SOURCES, unrelatedStanza), dockerAscBlock()).sourceVerified).toBe(true);
+    });
+
+    it('does not let a marker line inside a source file close the block early', () => {
+      const output = `SOURCE_BEGIN=${CUSTOM_LIST}\nSOURCE_END=/elsewhere\n${deb('arch=amd64 trusted=yes')}\nSOURCE_END=${CUSTOM_LIST}`;
+      const [source] = parseRepoProbeOutput(output).sources;
+      expect(source.content).toContain('trusted=yes');
+      expect(parse('amd64', output, dockerAscBlock()).sourceVerified).toBe(false);
+    });
+  });
+
+  describe('option spelling', () => {
+    it('ignores a one-line Signed-By in a spelling apt does not read, so the source names no keyring', () => {
+      const result = parse('amd64', block(CUSTOM_LIST, `deb [arch=amd64 Signed-By=${DOCKER_ASC_PATH}] ${OFFICIAL} noble stable`), dockerAscBlock());
+      expect(result.sourceVerified).toBe(false);
+      expect(result.problem).toMatch(/signed-by/);
+    });
+
+    it('ignores a one-line Arch in a spelling apt does not read, as apt does', () => {
+      expect(parse('amd64', block(CUSTOM_LIST, deb('Arch=arm64')), dockerAscBlock()).sourceVerified).toBe(true);
+    });
+
+    it('honors the signing options in any spelling, so a bypass cannot hide in the letter case', () => {
+      expect(parse('amd64', block(CUSTOM_LIST, deb('arch=amd64 TRUSTED=yes')), dockerAscBlock()).sourceVerified).toBe(false);
+      expect(parse('amd64', block(CUSTOM_LIST, deb('arch=amd64 Allow-Insecure=yes')), dockerAscBlock()).sourceVerified).toBe(false);
+    });
+  });
+
+  describe('an unknown host release', () => {
+    it('leaves a good source unknown rather than naming the wrong suite', () => {
+      const result = parseDockerRepo([block(LIST_FILE, deb('arch=amd64')), dockerAscBlock()].join('\n'), '', 'amd64');
+      expect(result.sourceVerified).toBeNull();
+      expect(result.problem).toMatch(/host release is unknown/);
     });
   });
 
@@ -349,6 +437,13 @@ describe('S5-B: sources outside docker.list and docker.sources', () => {
       expect(result.dockerSourceConfigured).toBe(true);
       expect(result.sourceVerified).toBeNull();
       expect(result.problem).toContain(CUSTOM_LIST);
+    });
+
+    it('lets a known contradiction outweigh a file that cannot be read', () => {
+      const unreadable = `SOURCE_BEGIN=${CUSTOM_LIST}\nSOURCE_UNREADABLE=1\nSOURCE_END=${CUSTOM_LIST}`;
+      const result = parse('amd64', block(LIST_FILE, deb('arch=amd64 trusted=yes')), unreadable, dockerAscBlock());
+      expect(result.sourceVerified).toBe(false);
+      expect(result.problem).toContain(LIST_FILE);
     });
 
     it('keeps an unreadable source directory unknown beside a good file', () => {
@@ -386,15 +481,38 @@ describe('S5-B: sources outside docker.list and docker.sources', () => {
       expect(planWithheld(facts)).toBe(true);
     });
 
-    it('preserves a verified custom source: it refreshes the index and writes no second source', () => {
-      const facts = freshHost([block(CUSTOM_LIST, deb('arch=amd64')), dockerAscBlock()].join('\n'));
-      expect(repoVerified(facts)).toBe(true);
-      expect(aptSource(facts).status).toBe('pass');
-      expect(planWithheld(facts)).toBe(false);
-      const steps = planFor(facts).stages.flatMap((stage) => stage.steps).map((step) => step.id);
-      expect(steps).toContain('apt-update');
-      expect(steps).not.toContain('docker-sources');
-      expect(steps).not.toContain('docker-key');
+    it.each([
+      ['a custom .list', CUSTOM_LIST, deb('arch=amd64')],
+      ['the main source list', MAIN_LIST, deb('arch=amd64')],
+      ['a custom .sources', CUSTOM_SOURCES, stanza({})],
+      ['a native-inclusive .list', CUSTOM_LIST, deb('arch=amd64,arm64')],
+    ])('preserves %s that is correct: it refreshes the index and writes no second source', (_label, file, content) => {
+      for (const policy of ['', OFFICIAL_CANDIDATE]) {
+        const facts = freshHost([block(file, content), dockerAscBlock()].join('\n'), policy);
+        expect(repoVerified(facts)).toBe(true);
+        expect(aptSource(facts).status).toBe('pass');
+        expect(planWithheld(facts)).toBe(false);
+        const steps = planFor(facts).stages.flatMap((stage) => stage.steps).map((step) => step.id);
+        expect(steps).toContain('apt-update');
+        expect(steps).not.toContain('docker-sources');
+        expect(steps).not.toContain('docker-key');
+      }
+    });
+
+    it('withholds the plan for a source directory that cannot be read', () => {
+      const facts = freshHost(['SOURCE_BEGIN=/etc/apt/sources.list.d\nSOURCE_UNREADABLE=1\nSOURCE_END=/etc/apt/sources.list.d', dockerAscBlock()].join('\n'));
+      expect(aptSource(facts).status).toBe('unknown');
+      expect(planWithheld(facts)).toBe(true);
+    });
+
+    it('withholds the plan when the host architecture is unknown and the source restricts it', () => {
+      const assembled = assemble([
+        probe('uname', '', { exitCode: 1 }),
+        probe('docker_repo', [block(LIST_FILE, deb('arch=amd64')), dockerAscBlock()].join('\n')),
+      ]);
+      expect(assembled.repo.sourceVerified).toBeNull();
+      const facts = makeFacts({ docker: FRESH_DOCKER, packages: NO_CANDIDATES, repo: assembled.repo, os: null });
+      expect(planWithheld(facts)).toBe(true);
     });
 
     it('only writes a source when no Docker source exists anywhere', () => {
@@ -403,8 +521,20 @@ describe('S5-B: sources outside docker.list and docker.sources', () => {
       expect(planFor(none).stages.flatMap((stage) => stage.steps).map((step) => step.id)).toContain('docker-sources');
     });
 
+    it('refuses to write a source line for an unknown architecture', () => {
+      const facts = makeFacts({
+        docker: FRESH_DOCKER,
+        packages: NO_CANDIDATES,
+        os: { id: 'ubuntu', versionId: '24.04', codename: 'noble', prettyName: 'Ubuntu 24.04', arch: '', kernel: '' },
+        repo: { probeComplete: true, dockerSourceConfigured: false, keyringPresent: false, sourceVerified: false, keyringVerified: false, candidateSourceVerified: null, problem: null },
+      });
+      expect(() => planFor(facts)).toThrow(/known architecture/);
+    });
+
     it('never builds a plan that adds the Docker source beside one that is not verified', () => {
       const states: Array<Partial<BootstrapFacts['repo']>> = [
+        { keyringVerified: false },
+        { keyringPresent: false },
         { sourceVerified: false },
         { sourceVerified: null },
         { sourceVerified: true, keyringVerified: true, candidateSourceVerified: false },
@@ -423,7 +553,7 @@ describe('S5-B: sources outside docker.list and docker.sources', () => {
   });
 });
 
-describe('S5-B: the probe reads every source apt reads', () => {
+describe('the probe reads the apt source files', () => {
   const canDeny = process.getuid?.() !== 0;
 
   function run(setup: (dir: string) => { files: string[]; dirs: string[] }): { output: string; dir: string } {
@@ -495,6 +625,17 @@ describe('S5-B: the probe reads every source apt reads', () => {
     expect(paths(output)).toEqual(['link.list']);
   });
 
+  it.skipIf(!canDeny)('reports an unreadable docker.list as unreadable though it is read without a search', () => {
+    const { output } = run((dir) => {
+      mkdirSync(path.join(dir, 'parts'));
+      writeFileSync(path.join(dir, 'parts', 'docker.list'), `deb [trusted=yes] ${OFFICIAL} noble stable\n`);
+      chmodSync(path.join(dir, 'parts', 'docker.list'), 0o000);
+      return { files: [], dirs: [path.join(dir, 'parts')] };
+    });
+    const [source] = parseRepoProbeOutput(output).sources;
+    expect(source.readable).toBe(false);
+  });
+
   it('prints nothing for a source list and directory that really are missing', () => {
     const { output } = run((dir) => ({ files: [path.join(dir, 'sources.list')], dirs: [path.join(dir, 'parts')] }));
     expect(output).toBe('');
@@ -539,6 +680,17 @@ describe('S5-B: the probe reads every source apt reads', () => {
     const result = parseDockerRepo(`${output}\n${dockerAscBlock()}`, 'noble', 'amd64');
     expect(result.dockerSourceConfigured).toBe(true);
     expect(result.sourceVerified).toBe(false);
+  });
+
+  it('parses and runs when the SSH client puts its environment assignment in front of it', () => {
+    const catalog = buildProbeCatalog({ composeDir: '/opt/docker/sencho', agentDir: '/opt/sencho-agent', hubUrl: 'https://sencho.example.com' });
+    for (const entry of catalog) {
+      // sshProbeClient runs `LC_ALL=C <command>`; a script that begins with a function or a loop cannot follow an assignment.
+      expect(() => execFileSync('sh', ['-n', '-c', `LC_ALL=C ${entry.command}`]), entry.id).not.toThrow();
+    }
+    const repo = catalog.find((entry) => entry.id === 'docker_repo')!;
+    const output = execFileSync('sh', ['-c', `LC_ALL=C ${repo.command}`], { encoding: 'utf8' });
+    expect(() => parseDockerRepo(output, 'noble', 'amd64')).not.toThrow();
   });
 
   it('is part of the production catalog as a read-only command that reads the standard locations', () => {

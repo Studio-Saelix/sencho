@@ -119,7 +119,8 @@ function aptUpdateStep(sudo: boolean): BootstrapPlanStep {
 function repoSteps(facts: BootstrapFacts, sudo: boolean): BootstrapPlanStep[] {
   const codename = facts.os?.codename;
   if (!codename) throw new Error('The plan requires a known Ubuntu codename.');
-  const arch = facts.os?.arch ? debianArchitecture(facts.os.arch) : 'amd64';
+  if (!facts.os?.arch) throw new Error('The plan requires a known architecture.');
+  const arch = debianArchitecture(facts.os.arch);
   const sourcesLine = `deb [arch=${arch} signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/ubuntu ${codename} stable`;
   return [
     {
