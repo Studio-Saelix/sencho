@@ -189,6 +189,63 @@ describe('POST /api/security/scan cache reuse', () => {
     }
   });
 
+  it('starts a fresh scan with cache lookup disabled after the pre-check misses', async () => {
+    const { default: TrivyService } = await import('../services/TrivyService');
+    const svc = TrivyService.getInstance();
+    const available = vi.spyOn(svc, 'isTrivyAvailable').mockReturnValue(true);
+    const find = vi.spyOn(svc, 'findReusableScan').mockResolvedValue(null);
+    const begin = vi.spyOn(svc, 'beginScan').mockReturnValue(43);
+    const finish = vi.spyOn(svc, 'finishScan').mockResolvedValue({} as never);
+    try {
+      const res = await request(app)
+        .post('/api/security/scan')
+        .set('Cookie', adminCookie)
+        .send({ imageRef: 'alpine:3.19', scanners: ['vuln'] });
+
+      expect(res.status).toBe(202);
+      expect(res.body.scanId).toBe(43);
+      expect(begin).toHaveBeenCalledTimes(1);
+      // The id the client polls must survive: the scan may not discover a
+      // cache row that appeared after the pre-check and delete the placeholder.
+      expect(finish).toHaveBeenCalledWith(
+        43,
+        'alpine:3.19',
+        expect.any(Number),
+        expect.objectContaining({ useCache: false }),
+      );
+    } finally {
+      finish.mockRestore();
+      begin.mockRestore();
+      find.mockRestore();
+      available.mockRestore();
+    }
+  });
+
+  it('refuses when another request started the scan while the cache check awaited', async () => {
+    const { default: TrivyService } = await import('../services/TrivyService');
+    const svc = TrivyService.getInstance();
+    const available = vi.spyOn(svc, 'isTrivyAvailable').mockReturnValue(true);
+    const find = vi.spyOn(svc, 'findReusableScan').mockResolvedValue(null);
+    const scanning = vi.spyOn(svc, 'isScanning')
+      .mockReturnValueOnce(false)
+      .mockReturnValueOnce(true);
+    const begin = vi.spyOn(svc, 'beginScan');
+    try {
+      const res = await request(app)
+        .post('/api/security/scan')
+        .set('Cookie', adminCookie)
+        .send({ imageRef: 'alpine:3.19', scanners: ['vuln'] });
+
+      expect(res.status).toBe(409);
+      expect(begin).not.toHaveBeenCalled();
+    } finally {
+      begin.mockRestore();
+      scanning.mockRestore();
+      find.mockRestore();
+      available.mockRestore();
+    }
+  });
+
   it('opens a scan row when force bypasses the cache', async () => {
     const { default: TrivyService } = await import('../services/TrivyService');
     const svc = TrivyService.getInstance();

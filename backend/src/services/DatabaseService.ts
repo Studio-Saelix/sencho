@@ -8999,6 +8999,42 @@ stmt.run('gitops_schema_version', '1');
     }
 
     /**
+     * Latest completed scan for a digest on one node.
+     *
+     * Scan rows are per node; a cache lookup that ignores `node_id` can answer
+     * with another node's row. The scan detail routes reject such a row
+     * (`scan.node_id !== req.nodeId`), so a manual scan that reused it would
+     * hand the client a 404. The gate also must not let one node's scan stand in
+     * for another node's image/platform. Callers that deliberately want the
+     * historical all-nodes lookup keep `getLatestScanByDigest`.
+     */
+    public getLatestScanByDigestForNode(
+        digest: string,
+        nodeId: number,
+        scannersUsed?: string,
+        platform?: string,
+    ): VulnerabilityScan | null {
+        if (!digest) return null;
+        const clauses = ["image_digest = ?", "node_id = ?", "status = 'completed'"];
+        const params: unknown[] = [digest, nodeId];
+        if (scannersUsed) {
+            clauses.push('scanners_used = ?');
+            params.push(scannersUsed);
+        }
+        if (platform) {
+            clauses.push('platform = ?');
+            params.push(platform);
+        }
+        return (
+            (this.db
+                .prepare(
+                    `SELECT * FROM vulnerability_scans WHERE ${clauses.join(' AND ')} ORDER BY scanned_at DESC LIMIT 1`,
+                )
+                .get(...(params as never[])) as VulnerabilityScan | undefined) ?? null
+        );
+    }
+
+    /**
      * Latest completed vulnerability-bearing scan for a digest ON A SPECIFIC NODE.
      *
      * Unlike getLatestScanByDigest, this filters by node_id so a read-only

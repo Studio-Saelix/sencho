@@ -35,9 +35,10 @@ function seedScan(options: {
   scannedAt?: number;
   vulnDbUpdatedAt?: number | null;
   platform?: string | null;
+  nodeId?: number;
 } = {}): number {
   return db().createVulnerabilityScan({
-    node_id: 1,
+    node_id: options.nodeId ?? 1,
     image_ref: 'registry.example.com/web:latest',
     image_digest: DIGEST,
     platform: options.platform === undefined ? PLATFORM : options.platform,
@@ -379,6 +380,28 @@ describe('a cached scan reuses its row', () => {
 
     expect(reusable?.id).toBe(seeded);
     expect(scanCount()).toBe(1);
+  });
+
+  it('never reuses another node\'s row for a local scan', async () => {
+    seedScan({ vulnDbUpdatedAt: DB_BUILD, nodeId: 2 });
+
+    const reusable = await svc().findReusableScan('registry.example.com/web:latest', 1, {
+      useCache: true,
+      scanners: ['vuln'],
+      digest: DIGEST,
+      platform: PLATFORM,
+    });
+    expect(reusable).toBeNull();
+
+    // The scan itself applies the same node scope, so it does not return the
+    // other node's cached answer either.
+    await expect(svc().scanImage('registry.example.com/web:latest', 1, {
+      useCache: true,
+      scanners: ['vuln'],
+      digest: DIGEST,
+      platform: PLATFORM,
+      cacheRule: 'database',
+    })).rejects.toThrow();
   });
 
   it('discards a placeholder opened before a cache hit was discovered', async () => {

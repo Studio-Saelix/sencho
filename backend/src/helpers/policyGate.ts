@@ -545,8 +545,8 @@ async function runPostDeployScan(
           // child.
           const platform = await svc.getImagePlatform(imageRef, nodeId);
           const cached = platform
-            ? db.getLatestScanByDigest(digest, 'vuln', platform)
-            : db.getLatestScanByDigest(digest, 'vuln');
+            ? db.getLatestScanByDigestForNode(digest, nodeId, 'vuln', platform)
+            : db.getLatestScanByDigestForNode(digest, nodeId, 'vuln');
           if (cached && Date.now() - cached.scanned_at < DIGEST_CACHE_TTL_MS) {
             imageSuccesses += 1;
             continue;

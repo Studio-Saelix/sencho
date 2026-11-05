@@ -998,8 +998,9 @@ class TrivyService {
         const scannersUsed = normalizeScanners(options.scanners).join(',');
         const request = await this.resolveScanRequest(imageRef, nodeId, options);
         if (!request.cacheable || request.digest === null) return null;
-        const cached = DatabaseService.getInstance().getLatestScanByDigest(
+        const cached = DatabaseService.getInstance().getLatestScanByDigestForNode(
             request.digest,
+            nodeId,
             scannersUsed,
             request.cachePlatform ?? undefined,
         );
@@ -1055,8 +1056,9 @@ class TrivyService {
             );
 
             if (cacheable && digest !== null) {
-                const cached = DatabaseService.getInstance().getLatestScanByDigest(
+                const cached = DatabaseService.getInstance().getLatestScanByDigestForNode(
                     digest,
+                    nodeId,
                     scannersUsed,
                     cachePlatform ?? undefined,
                 );
@@ -1768,8 +1770,8 @@ class TrivyService {
                     // The row may answer only for the image it scanned: a
                     // multi-arch tag's children share the index digest.
                     const cached = platform
-                        ? DatabaseService.getInstance().getLatestScanByDigest(digest, scannersUsed, platform)
-                        : DatabaseService.getInstance().getLatestScanByDigest(digest, scannersUsed);
+                        ? DatabaseService.getInstance().getLatestScanByDigestForNode(digest, nodeId, scannersUsed, platform)
+                        : DatabaseService.getInstance().getLatestScanByDigestForNode(digest, nodeId, scannersUsed);
                     if (cached && Date.now() - cached.scanned_at < DIGEST_CACHE_TTL_MS) {
                         skipped++;
                         addSeverity(cached);

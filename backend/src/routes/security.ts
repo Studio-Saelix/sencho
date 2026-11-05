@@ -556,10 +556,19 @@ securityRouter.post('/scan', authMiddleware, async (req: Request, res: Response)
       );
     }
   }
+  // The cache lookup awaited above, so another request can have started this
+  // image's scan in the meantime; re-check the lock before opening a row.
+  if (svc.isScanning(nodeId, imageRef)) {
+    res.status(409).json({ error: 'Already scanning this image' });
+    return;
+  }
   const scanId = svc.beginScan(imageRef, nodeId, 'manual', stackContext, scanners);
   res.status(202).json({ scanId });
 
-  svc.finishScan(scanId, imageRef, nodeId, { useCache: !force, scanners }).catch((err) => {
+  // The cache was already checked above, so the scan that fills this row must
+  // run: `useCache: false` keeps it from hitting a row that appeared since and
+  // deleting the id the client is now polling.
+  svc.finishScan(scanId, imageRef, nodeId, { useCache: false, scanners }).catch((err) => {
     console.error('[Security] Scan failed for %s:', sanitizeForLog(imageRef), sanitizeForLog((err as Error).message));
   });
 });
