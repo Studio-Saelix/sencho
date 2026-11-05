@@ -60,7 +60,7 @@ networkingRouter.get('/networks/:id', async (req: Request, res: Response): Promi
   if (!requirePermission(req, res, 'node:read')) return;
   const id = req.params.id as string;
   if (!id || (!isValidDockerResourceId(id) && !isValidDockerNetworkName(id))) {
-    res.status(400).json({ error: 'Invalid network ID format' });
+    res.status(400).json({ error: 'Invalid network ID or name format' });
     return;
   }
   try {
