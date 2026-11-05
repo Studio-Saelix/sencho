@@ -212,11 +212,12 @@ export class RecoveryEngineService {
   /** Test seam: put the boot gate in a given state without running the sequence. */
   setBootStateForTests(state: 'settling' | 'failed' | 'idle'): void {
     const now = Date.now();
-    this.boot = state === 'settling'
-      ? { ready: false, startedAt: now, finishedAt: null, reason: 'engine_starting' }
-      : state === 'failed'
-        ? { ready: false, startedAt: now, finishedAt: now, reason: 'engine_starting' }
-        : { ready: false, startedAt: null, finishedAt: null, reason: 'engine_starting' };
+    this.boot = {
+      ready: false,
+      startedAt: state === 'idle' ? null : now,
+      finishedAt: state === 'failed' ? now : null,
+      reason: 'engine_starting',
+    };
   }
 
   // --- Health ---------------------------------------------------------------
