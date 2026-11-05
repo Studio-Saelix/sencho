@@ -22,6 +22,8 @@ export interface FakeContainer {
   Id: string;
   Names: string[];
   State: 'running' | 'exited';
+  /** What Docker's inspect reports as State.StartedAt; a start moves it. */
+  StartedAt: string;
   Labels: Record<string, string>;
   Mounts: Array<{ Type: string; Name: string }>;
   HostConfig: { RestartPolicy: { Name: string; MaximumRetryCount?: number } };
@@ -33,6 +35,7 @@ export function container(
   return {
     Names: [`/${overrides.Id}`],
     State: 'running',
+    StartedAt: new Date('2026-01-01T00:00:00.000Z').toISOString(),
     Labels: {},
     Mounts: [],
     HostConfig: { RestartPolicy: { Name: 'always' } },
@@ -107,7 +110,7 @@ export function fakeDocker(input: {
         return {
           Id: found.Id,
           Name: found.Names[0],
-          State: { Running: found.State === 'running' },
+          State: { Running: found.State === 'running', StartedAt: found.StartedAt },
           HostConfig: found.HostConfig,
           Mounts: found.Mounts,
         };
@@ -131,6 +134,9 @@ export function fakeDocker(input: {
         if (!found) throw Object.assign(new Error('no such container'), { statusCode: 404 });
         if (found.State === 'running') throw Object.assign(new Error('already started'), { statusCode: 304 });
         found.State = 'running';
+        // Docker moves StartedAt on every start, which is what the pipeline uses
+        // to notice a fenced member that was restarted while the point was read.
+        found.StartedAt = new Date(Date.parse(found.StartedAt) + 60_000).toISOString();
       },
     }),
     getImage: () => ({ inspect: async () => ({ Id: 'sha256:helper' }) }),

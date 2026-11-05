@@ -225,6 +225,19 @@ async function inspectContainer(
   }
 }
 
+/** When Docker last started the container, or null when it is gone or reports no start time. */
+async function startedAtFor(deps: OverwriteDeps, containerId: string): Promise<string | null> {
+  try {
+    const inspected = await deps.docker.getContainer(containerId).inspect() as {
+      State?: { StartedAt?: string };
+    };
+    return typeof inspected.State?.StartedAt === 'string' ? inspected.State.StartedAt : null;
+  } catch (err) {
+    if ((err as { statusCode?: number }).statusCode === 404) return null;
+    throw err;
+  }
+}
+
 /** Every container that mounts the volume, with the facts the preview shows. */
 async function listMountingContainers(deps: OverwriteDeps, volumeName: string): Promise<OverwriteContainerFact[]> {
   const listed = await deps.docker.listContainers({ all: true }) as Array<{
@@ -588,6 +601,8 @@ interface PipelineState {
   intent: RestoreIntentRecord;
   storage: StorageIdentity;
   members: FenceMember[];
+  /** The start time each member had when the fence recorded it, to catch a restart before the point is finalised. */
+  memberStartedAt: Map<string, string | null>;
   workDir: string;
 }
 
@@ -629,6 +644,7 @@ export async function runOverwritePipeline(input: OverwriteRunContext): Promise<
     intent,
     storage,
     members: deps.fence.listMembers(intent.id),
+    memberStartedAt: new Map(),
     workDir: swapIncomingDir(intent.id),
   };
 
@@ -875,6 +891,18 @@ async function fenceWorkloads(ctx: OverwriteRunContext, state: PipelineState): P
     await settleRollback(ctx, state, classifyRecoveryError(err));
     return false;
   }
+  // Recorded after the fence stopped them: if a member is started and stopped
+  // again while the point is read, this time moves even though the final state
+  // and the container set look the same.
+  try {
+    for (const member of state.members) {
+      state.memberStartedAt.set(member.containerId, await startedAtFor(deps, member.containerId));
+    }
+  } catch (err) {
+    logEngineThrow(state, 'Reading the start time of the fenced containers', err);
+    await settleRollback(ctx, state, classifyRecoveryError(err));
+    return false;
+  }
   deps.intents.advance(state.intent.id, 'protecting');
   return true;
 }
@@ -884,12 +912,10 @@ async function takePreRestorePoint(ctx: OverwriteRunContext, state: PipelineStat
   const deps = ctx.deps;
   // The fence stopped the set admission recorded. A container or stack that
   // appeared since must abort before a point exists, or the point would describe
-  // a volume a workload was still writing while it was read.
-  const dependency = await recheckDependents(ctx, state, { requireStopped: true });
-  if (dependency !== 'ok') {
-    await settleRollback(ctx, state, dependency === 'changed' ? 'dependents_changed' : 'identity_unknown');
-    return false;
-  }
+  // a volume whose dependents no longer match what the fence stopped.
+  if (!await recheckDependentsOrSettle(
+    ctx, state, { requireStopped: true }, 'Re-checking the dependents before the pre-restore point',
+  )) return false;
   const point = deps.points.begin({
     kind: 'root',
     storageId: state.storage.id,
@@ -927,16 +953,31 @@ async function takePreRestorePoint(ctx: OverwriteRunContext, state: PipelineStat
     }
     return false;
   }
-  // The fence stopped the workloads admission recorded, but a container or stack
-  // that appeared since can still be running while the point is read. The
-  // engine's own before/after observation labels that `crash_consistent_live`;
-  // a point like that is not the stopped copy this step promises, so it is
-  // discarded rather than kept beside a rollback that might need it.
+  // The fence stopped the workloads admission recorded, but a container that
+  // appeared since can still be running while the point is read. The engine's
+  // own before/after observation labels that `crash_consistent_live`, and
+  // `unknown` means it could not make the observation. Anything other than
+  // `crash_consistent_stopped` is not the stopped copy this step promises, so it
+  // is discarded rather than kept beside a rollback that might need it.
   if (result.evidence.consistency !== 'crash_consistent_stopped') {
     console.warn(
-      '[Recovery] The pre-restore point for %s was captured %s, not with the workloads stopped.',
+      '[Recovery] The pre-restore point for %s was not captured with the workloads proven stopped (%s).',
       sanitizeForLog(state.intent.id),
       result.evidence.consistency,
+    );
+    settleFailedPoint(deps, point.id, 'pre_restore_failed');
+    await settleRollback(ctx, state, 'pre_restore_failed');
+    return false;
+  }
+  // A container that started and stopped between the engine's two observations
+  // can be missed by the consistency label. It is still in Docker's container
+  // list while it exists, so the set the fence recorded is compared again after
+  // the read: a new, removed or running container means the point was not taken
+  // with every workload the fence knows about stopped.
+  if (!await containersStillFenced(ctx, state)) {
+    console.warn(
+      '[Recovery] The container set could not be proven unchanged while the pre-restore point for %s was taken; discarding it.',
+      sanitizeForLog(state.intent.id),
     );
     settleFailedPoint(deps, point.id, 'pre_restore_failed');
     await settleRollback(ctx, state, 'pre_restore_failed');
@@ -961,6 +1002,30 @@ function settleFailedPoint(deps: OverwriteDeps, pointId: string, errorClass: Rec
     deps.points.finalize(pointId, { status: 'failed', errorClass });
   } catch (err) {
     console.warn('[Recovery] Could not settle the pre-restore point:', errorMessageForLog(err));
+  }
+}
+
+/**
+ * Whether the container set the fence recorded still mounts the volume, none of
+ * it is running, no member's start time moved, and all of that could be read.
+ * Used after the point is read, where the engine's own observation can miss a
+ * container that started and stopped inside its window but Docker still lists,
+ * or a fenced member that was restarted and stopped again.
+ */
+async function containersStillFenced(ctx: OverwriteRunContext, state: PipelineState): Promise<boolean> {
+  try {
+    const current = await listMountingContainers(ctx.deps, state.intent.targetVolume ?? '');
+    const recorded = new Set(state.members.map((member) => member.containerId));
+    if (current.length !== state.members.length) return false;
+    for (const container of current) {
+      if (!recorded.has(container.id) || container.running) return false;
+      const startedAt = state.memberStartedAt.get(container.id);
+      if (startedAt === undefined || await startedAtFor(ctx.deps, container.id) !== startedAt) return false;
+    }
+    return true;
+  } catch (err) {
+    logEngineThrow(state, 'Re-checking the containers after the pre-restore point', err);
+    return false;
   }
 }
 
@@ -1035,11 +1100,9 @@ async function swapAndCleanup(ctx: OverwriteRunContext, state: PipelineState): P
   }
   deps.intents.advance(state.intent.id, 'swapping');
 
-  const dependency = await recheckDependents(ctx, state, { requireStopped: true });
-  if (dependency !== 'ok') {
-    await settleRollback(ctx, state, dependency === 'changed' ? 'dependents_changed' : 'identity_unknown');
-    return false;
-  }
+  if (!await recheckDependentsOrSettle(
+    ctx, state, { requireStopped: true }, 'Re-checking the dependents before the swap',
+  )) return false;
 
   const committed = await runSwapStep({
     runner: deps.runner(),
@@ -1335,6 +1398,31 @@ async function recheckDependents(
     return 'unknown';
   }
   return 'ok';
+}
+
+/**
+ * The post-fence call sites share one rule: a recheck that cannot answer must
+ * not escape the pipeline with the workloads stopped and the fence held, because
+ * only reconciliation would release them. A throw, a changed set and an unknown
+ * generation all settle the restore the same way an ordinary refusal does.
+ */
+async function recheckDependentsOrSettle(
+  ctx: OverwriteRunContext,
+  state: PipelineState,
+  options: { requireStopped: boolean },
+  step: string,
+): Promise<boolean> {
+  let dependency: 'ok' | 'changed' | 'unknown';
+  try {
+    dependency = await recheckDependents(ctx, state, options);
+  } catch (err) {
+    logEngineThrow(state, step, err);
+    await settleRollback(ctx, state, classifyRecoveryError(err));
+    return false;
+  }
+  if (dependency === 'ok') return true;
+  await settleRollback(ctx, state, dependency === 'changed' ? 'dependents_changed' : 'identity_unknown');
+  return false;
 }
 
 // --- Reconciliation and resolve --------------------------------------------

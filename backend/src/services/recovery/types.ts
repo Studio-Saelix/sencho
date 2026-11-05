@@ -191,7 +191,7 @@ export type RecoveryErrorClass =
   | 'dependents_changed'
   /** The durable restore fence could not be applied or released. */
   | 'fence_unavailable'
-  /** The pre-restore point did not end complete. */
+  /** The pre-restore point did not end complete and stopped. */
   | 'pre_restore_failed'
   /** The target or the helper scratch had no room for the restored data. */
   | 'insufficient_space'
