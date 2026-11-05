@@ -144,7 +144,7 @@ export function makeFacts(overrides: FactsOverrides = {}): BootstrapFacts {
       keyringPresent: true,
       sourceVerified: true,
       keyringVerified: true,
-      candidateSourceVerified: null,
+      candidateSourceVerified: true,
       problem: null,
       ...overrides.repo,
     },
@@ -165,6 +165,7 @@ export function makeFacts(overrides: FactsOverrides = {}): BootstrapFacts {
       dataVolumeExists: false,
       dataVolumeNames: [],
       defaultDirHasComposeFile: false,
+      defaultDirRealPath: null,
       ...overrides.agent,
     },
     dockerRoot: {

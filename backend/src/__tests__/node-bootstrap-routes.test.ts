@@ -293,7 +293,7 @@ describe('bootstrap routes: preflight', () => {
         target: { host: 'server.example.com', port: 22, username: 'ubuntu', address: '192.168.1.50' },
         hostKey: { algorithm: 'ssh-ed25519', fingerprint: 'SHA256:abc', knownHostsLine: 'line' },
         paths: {} as never,
-        agent: { projectContainers: [], dataVolumeExists: false, dataVolumeNames: [], defaultDirHasComposeFile: false },
+        agent: { projectContainers: [], dataVolumeExists: false, dataVolumeNames: [], defaultDirHasComposeFile: false, defaultDirRealPath: null },
         dockerRoot: { path: '/var/lib/docker', freeBytes: 1, filesystemType: 'ext4' },
         checks: [{
           id: 'agent_dir',
@@ -325,7 +325,7 @@ describe('bootstrap routes: preflight', () => {
         target: { host: 'server.example.com', port: 22, username: 'ubuntu', address: '192.168.1.50' },
         hostKey: { algorithm: 'ssh-ed25519', fingerprint: 'SHA256:abc', knownHostsLine: 'line' },
         paths: {} as never,
-        agent: { projectContainers: [], dataVolumeExists: false, dataVolumeNames: [], defaultDirHasComposeFile: false },
+        agent: { projectContainers: [], dataVolumeExists: false, dataVolumeNames: [], defaultDirHasComposeFile: false, defaultDirRealPath: null },
         dockerRoot: { path: null, freeBytes: null, filesystemType: null },
         checks: [],
         blockers: 0,

@@ -114,6 +114,8 @@ export interface AgentInstallObservation {
   dataVolumeNames: string[];
   /** Null when the default directory could not be inspected, directly or through sudo. */
   defaultDirHasComposeFile: boolean | null;
+  /** The real directory holding the default installation's Compose file, when one was found. */
+  defaultDirRealPath: string | null;
 }
 
 export type DockerPackageName =

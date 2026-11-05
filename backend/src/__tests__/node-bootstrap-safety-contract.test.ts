@@ -1,16 +1,18 @@
 import { describe, it, expect } from 'vitest';
 import { execFileSync } from 'child_process';
-import { chmodSync, mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from 'fs';
+import { chmodSync, mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'fs';
 import os from 'os';
 import path from 'path';
 import {
   DEFAULT_AGENT_PATH_SCRIPT,
   DOCKER_ROOT_DISK_SCRIPT,
+  buildDockerRepoScript,
   assembleFacts,
   buildProbeCatalog,
   isReadOnlyProbeCommand,
   parseAptPolicy,
   parseDockerRepo,
+  parseRepoProbeOutput,
   parseDockerRootDisk,
 } from '../services/nodeBootstrap/probes';
 import { buildBootstrapEvidence, repoVerified } from '../services/nodeBootstrap/evidence';
@@ -141,7 +143,7 @@ describe('capacity that cannot be read never ends in a plan (B4-R)', () => {
         const bin = path.join(dir, 'bin');
         mkdirSync(bin);
         // Only the tools the script needs, so a missing `docker` stays missing.
-        for (const tool of ['env', 'df', 'dirname', 'tail']) {
+        for (const tool of ['env', 'df', 'dirname', 'tail', 'stat']) {
           symlinkSync(execFileSync('sh', ['-c', `command -v ${tool}`], { encoding: 'utf8' }).trim(), path.join(bin, tool));
         }
         setup(bin, dir);
@@ -250,9 +252,36 @@ describe('an earlier Pilot installation is never missed (B2-R)', () => {
       const dir = mkdtempSync(path.join(os.tmpdir(), 'sencho-default-path-'));
       try {
         writeFileSync(path.join(dir, 'compose.yaml'), 'services: {}\n');
-        expect(runScript(path.join(dir, 'compose.yaml'))).toBe('yes');
+        expect(runScript(path.join(dir, 'compose.yaml'))).toBe(`yes\nreal=${realpathSync(dir)}`);
         expect(runScript(path.join(dir, 'missing.yaml'))).toBe('no');
         expect(runScript(path.join(dir, 'compose.yaml', 'inside'))).toBe('no');
+        mkdirSync(path.join(dir, 'a-directory'));
+        expect(runScript(path.join(dir, 'a-directory'))).toBe('no');
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+      }
+    });
+
+    it('names the real directory of a Compose file reached through a symlink', () => {
+      const dir = mkdtempSync(path.join(os.tmpdir(), 'sencho-default-link-'));
+      try {
+        mkdirSync(path.join(dir, 'real'));
+        writeFileSync(path.join(dir, 'real', 'compose.yaml'), 'services: {}\n');
+        symlinkSync(path.join(dir, 'real'), path.join(dir, 'link'));
+        expect(runScript(path.join(dir, 'link', 'compose.yaml'))).toBe(`yes\nreal=${realpathSync(path.join(dir, 'real'))}`);
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+      }
+    });
+
+    it('still reports an absence in another language', () => {
+      const dir = mkdtempSync(path.join(os.tmpdir(), 'sencho-default-locale-'));
+      try {
+        const out = execFileSync('sh', ['-c', DEFAULT_AGENT_PATH_SCRIPT, 'sencho-probe', path.join(dir, 'missing.yaml')], {
+          encoding: 'utf8',
+          env: { ...process.env, LC_ALL: 'fr_FR.UTF-8', LANG: 'fr_FR.UTF-8', LANGUAGE: 'fr' },
+        }).trim();
+        expect(out).toBe('no');
       } finally {
         rmSync(dir, { recursive: true, force: true });
       }
@@ -293,14 +322,15 @@ describe('an earlier Pilot installation is never missed (B2-R)', () => {
     const outcome = (...results: SshCommandResult[]) => assemble(results).agent.defaultDirHasComposeFile;
 
     it.each([
-      ['a direct yes', [direct('yes\n')], true],
+      ['a direct yes', [direct('yes\nreal=/opt/sencho-agent\n')], true],
+      ['a direct yes with no real path', [direct('yes\n')], true],
       ['a direct no', [direct('no\n')], false],
       ['a direct no beside a sudo failure', [direct('no\n'), viaSudo('', { exitCode: 1 })], false],
       ['a denied direct attempt and no sudo answer', [direct('error\n')], null],
       ['a denied direct attempt and a failed sudo attempt', [direct('error\n'), viaSudo('', { exitCode: 1 })], null],
-      ['a denied direct attempt and a sudo yes', [direct('error\n'), viaSudo('yes\n')], true],
+      ['a denied direct attempt and a sudo yes', [direct('error\n'), viaSudo('yes\nreal=/opt/sencho-agent\n')], true],
       ['a denied direct attempt and a sudo no', [direct('error\n'), viaSudo('no\n')], false],
-      ['a timed-out direct attempt and a sudo yes', [direct('', { timedOut: true, exitCode: null }), viaSudo('yes\n')], true],
+      ['a timed-out direct attempt and a sudo yes', [direct('', { timedOut: true, exitCode: null }), viaSudo('yes\nreal=/opt/sencho-agent\n')], true],
       ['a timed-out direct attempt alone', [direct('', { timedOut: true, exitCode: null })], null],
       ['output the script never prints', [direct('maybe\n')], null],
       ['no probe at all', [], null],
@@ -425,22 +455,35 @@ describe('a working Docker engine is never replaced (S4-R)', () => {
   });
 
   it('never gives a working engine with workloads a replacement step, in any package state', () => {
-    for (const packages of [NOT_INSTALLED, OFFICIAL_ENGINE_NO_COMPOSE]) {
-      const facts = makeFacts({
-        docker: { composeVersion: null },
-        packages: packages.map((pkg) => ({ ...pkg })),
-        containers: workloads,
-      });
-      let commands: string[] = [];
-      try {
-        commands = planCommands(facts);
-      } catch {
-        // A refused plan has no steps to check.
-      }
-      for (const command of commands.filter((entry) => entry.includes('apt-get install'))) {
-        expect(command).not.toMatch(REPLACEMENT);
-      }
-    }
+    // A distribution engine is refused outright; an official one gets the Compose plugin alone.
+    const distribution = makeFacts({ docker: { composeVersion: null }, packages: NOT_INSTALLED.map((pkg) => ({ ...pkg })), containers: workloads });
+    expect(() => planCommands(distribution)).toThrow(/not installed from Docker packages/);
+    const official = makeFacts({ docker: { composeVersion: null }, packages: OFFICIAL_ENGINE_NO_COMPOSE.map((pkg) => ({ ...pkg })), containers: workloads });
+    const installs = planCommands(official).filter((command) => command.includes('apt-get install'));
+    expect(installs).toHaveLength(1);
+    expect(installs[0]).not.toMatch(REPLACEMENT);
+  });
+
+  it('blocks a distribution engine without Compose even when the Docker repository is configured and verified', () => {
+    // The tempting case: apt has Docker candidates, so replacement packages would be offered.
+    const facts = makeFacts({
+      docker: { composeVersion: null },
+      packages: NOT_INSTALLED.map((pkg) => ({ ...pkg })),
+      containers: workloads,
+    });
+    expect(repoVerified(facts)).toBe(true);
+    expect(check(facts, 'compose_plugin').status).toBe('blocked');
+    expect(() => plan(facts)).toThrow(/not installed from Docker packages/);
+  });
+
+  it.each(['docker-ce', 'docker-ce-cli', 'containerd.io'])('blocks a partial official install that lacks %s and Compose', (missing) => {
+    const facts = makeFacts({
+      docker: { composeVersion: null },
+      packages: OFFICIAL_ENGINE_NO_COMPOSE.map((pkg) => (pkg.name === missing ? { ...pkg, installedVersion: null } : { ...pkg })),
+      containers: workloads,
+    });
+    expect(check(facts, 'compose_plugin').status).toBe('blocked');
+    expect(() => plan(facts)).toThrow();
   });
 
   it('plans the whole set for a fresh host', () => {
@@ -719,5 +762,251 @@ describe('repository provenance (S5-R)', () => {
     ]);
     expect(repoVerified(facts)).toBe(true);
     expect(facts.repo.candidateSourceVerified).toBe(true);
+  });
+});
+
+describe('review follow-ups on the corrected probes', () => {
+  const OFFICIAL = 'https://download.docker.com/linux/ubuntu';
+  const listFile = '/etc/apt/sources.list.d/docker.list';
+  const block = (file: string, content: string) => `SOURCE_BEGIN=${file}\n${content}\nSOURCE_END=${file}`;
+  const deb = (options: string) => `deb [${options} signed-by=${DOCKER_ASC_PATH}] ${OFFICIAL} noble stable`;
+  const parse = (...parts: string[]) => parseDockerRepo(parts.join('\n'), 'noble');
+  const canDeny = process.getuid?.() !== 0;
+
+  describe('the armored key with header lines', () => {
+    const withHeaders = (headers: string[]) => DOCKER_KEY_ASC.replace('-----BEGIN PGP PUBLIC KEY BLOCK-----\n', `-----BEGIN PGP PUBLIC KEY BLOCK-----\n${headers.join('\n')}\n`);
+
+    it.each([
+      ['one Comment header', ['Comment: Docker Release']],
+      ['Version and Comment headers', ['Version: GnuPG v2', 'Comment: exported']],
+    ])('still has Docker\'s fingerprint with %s', (_label, headers) => {
+      const text = withHeaders(headers);
+      expect(text).toContain(headers[0]);
+      expect(primaryKeyFingerprints('/k/docker.asc', Buffer.from(text))).toEqual([DOCKER_RELEASE_KEY_FINGERPRINT]);
+      expect(parse(block(listFile, deb('arch=amd64')), keyBlock(DOCKER_ASC_PATH, Buffer.from(text)))).toMatchObject({ keyringVerified: true, sourceVerified: true });
+    });
+
+    it('rejects an armor body that has no blank line after its headers', () => {
+      const text = DOCKER_KEY_ASC.replace('-----BEGIN PGP PUBLIC KEY BLOCK-----\n\n', '-----BEGIN PGP PUBLIC KEY BLOCK-----\nComment: x\n');
+      expect(primaryKeyFingerprints('/k/docker.asc', Buffer.from(text))).toBeNull();
+    });
+  });
+
+  describe('a repository file that could not be inspected is never absent', () => {
+    function runRepoScript(setup: (dir: string) => { sources: string[]; keys: string[] }): string {
+      const dir = mkdtempSync(path.join(os.tmpdir(), 'sencho-repo-script-'));
+      try {
+        const paths = setup(dir);
+        return execFileSync('sh', ['-c', buildDockerRepoScript(paths.sources, paths.keys)], { encoding: 'utf8' });
+      } finally {
+        try { chmodSync(path.join(dir, 'closed'), 0o700); } catch { /* not created */ }
+        rmSync(dir, { recursive: true, force: true });
+      }
+    }
+
+    it('prints nothing for files that are really missing', () => {
+      const output = runRepoScript((dir) => ({ sources: [path.join(dir, 'docker.list')], keys: [path.join(dir, 'keys', 'docker.asc')] }));
+      expect(output).toBe('');
+      expect(parseRepoProbeOutput(output)).toEqual({ sources: [], keys: [] });
+    });
+
+    it.skipIf(!canDeny)('reports a source and a key behind a closed directory as unreadable', () => {
+      const output = runRepoScript((dir) => {
+        const closed = path.join(dir, 'closed');
+        mkdirSync(closed);
+        writeFileSync(path.join(closed, 'docker.list'), `${deb('arch=amd64 trusted=yes')}\n`);
+        writeFileSync(path.join(closed, 'docker.asc'), DOCKER_KEY_ASC);
+        chmodSync(closed, 0o000);
+        return { sources: [path.join(closed, 'docker.list')], keys: [path.join(closed, 'docker.asc')] };
+      });
+      const parsed = parseRepoProbeOutput(output);
+      expect(parsed.sources).toHaveLength(1);
+      expect(parsed.sources[0].readable).toBe(false);
+      expect(parsed.keys).toHaveLength(1);
+      expect(parsed.keys[0].bytes).toBeNull();
+    });
+
+    it('reads a symlinked keyring in full, by the size of its target', () => {
+      const output = runRepoScript((dir) => {
+        writeFileSync(path.join(dir, 'real.asc'), DOCKER_KEY_ASC);
+        symlinkSync(path.join(dir, 'real.asc'), path.join(dir, 'docker.asc'));
+        return { sources: [], keys: [path.join(dir, 'docker.asc')] };
+      });
+      const [key] = parseRepoProbeOutput(output).keys;
+      expect(key.bytes?.toString('utf8')).toBe(DOCKER_KEY_ASC);
+    });
+
+    it('turns an unreadable file into an unverified repository', () => {
+      const result = parse('SOURCE_BEGIN=/etc/apt/sources.list.d/docker.list\nSOURCE_UNREADABLE=1\nSOURCE_END=/etc/apt/sources.list.d/docker.list');
+      expect(result.sourceVerified).toBeNull();
+      expect(result.probeComplete).toBe(true);
+    });
+  });
+
+  describe('output that stops in the middle of a file', () => {
+    it('reads an unterminated source block as unreadable, not as absent', () => {
+      const result = parse(`SOURCE_BEGIN=${listFile}\n${deb('arch=amd64')}`);
+      expect(result.dockerSourceConfigured).toBe(true);
+      expect(result.sourceVerified).toBeNull();
+    });
+
+    it('reads an unterminated key block as an unreadable keyring', () => {
+      const result = parse(block(listFile, deb('arch=amd64')), `KEY_BEGIN=${DOCKER_ASC_PATH}\nKEY_SIZE=10\nAAAA`);
+      expect(result.keyringPresent).toBe(true);
+      expect(result.keyringVerified).toBeNull();
+    });
+  });
+
+  describe('a source that names a keyring that could not be read', () => {
+    const gpgPath = '/usr/share/keyrings/docker-archive-keyring.gpg';
+
+    it('is unknown, not blocked, when another keyring is valid', () => {
+      const result = parse(
+        block(listFile, deb('arch=amd64')),
+        keyBlock(DOCKER_ASC_PATH, Buffer.from(DOCKER_KEY_ASC).subarray(0, 100), Buffer.from(DOCKER_KEY_ASC).length),
+        keyBlock(gpgPath, DOCKER_KEY_GPG),
+      );
+      expect(result.keyringVerified).toBe(true);
+      expect(result.sourceVerified).toBeNull();
+      const fresh = makeFacts({
+        docker: { cliInstalled: false, serverVersion: null, composeVersion: null, socketAccess: 'none' },
+        packages: [],
+        repo: { ...result, probeComplete: true, candidateSourceVerified: null },
+      });
+      expect(check(fresh, 'apt_source').status).toBe('unknown');
+      expect(evidence(fresh).planSuppressed).toBe(true);
+    });
+
+    it('is still verified when it names the keyring that was read', () => {
+      const source = `deb [arch=amd64 signed-by=${gpgPath}] ${OFFICIAL} noble stable`;
+      const result = parse(
+        block(listFile, source),
+        keyBlock(DOCKER_ASC_PATH, Buffer.from(DOCKER_KEY_ASC).subarray(0, 100), Buffer.from(DOCKER_KEY_ASC).length),
+        keyBlock(gpgPath, DOCKER_KEY_GPG),
+      );
+      expect(result.sourceVerified).toBe(true);
+    });
+
+    it('is still blocked when it names a keyring that does not exist at all', () => {
+      const source = `deb [arch=amd64 signed-by=/etc/apt/keyrings/other.gpg] ${OFFICIAL} noble stable`;
+      expect(parse(block(listFile, source), keyBlock(gpgPath, DOCKER_KEY_GPG)).sourceVerified).toBe(false);
+    });
+  });
+
+  describe('more ways to weaken a source', () => {
+    const sourcesFile = '/etc/apt/sources.list.d/docker.sources';
+    const stanza = (extra: Record<string, string>) => Object.entries({
+      Types: 'deb', URIs: OFFICIAL, Suites: 'noble', Components: 'stable', 'Signed-By': DOCKER_ASC_PATH, ...extra,
+    }).map(([name, value]) => `${name}: ${value}`).join('\n');
+
+    it.each([['trusted=1'], ['trusted=true'], ['allow-downgrade-to-insecure=yes']])('rejects a .list entry with %s', (option) => {
+      expect(parse(block(listFile, deb(`arch=amd64 ${option}`)), dockerAscBlock()).sourceVerified).toBe(false);
+    });
+
+    it.each([['Allow-Downgrade-To-Insecure', 'yes'], ['Allow-Weak', 'yes'], ['Trusted', '1']])('rejects a deb822 stanza with %s: %s', (name, value) => {
+      expect(parse(block(sourcesFile, stanza({ [name]: value })), dockerAscBlock()).sourceVerified).toBe(false);
+    });
+  });
+
+  describe('candidates from several packages', () => {
+    const osRelease = probe('os_release', 'ID=ubuntu\nVERSION_ID="24.04"\nVERSION_CODENAME=noble');
+    const policy = (ce: string[], cli: string[]) => [
+      'docker-ce:', '  Installed: (none)', ...ce,
+      'docker-ce-cli:', '  Installed: (none)', ...cli,
+    ].join('\n');
+    const foreign = ['  Candidate: 1.0', '  Version table:', '     1.0 500', '        500 http://archive.ubuntu.com/ubuntu noble/universe amd64 Packages'];
+    const unknown = ['  Candidate: 1.0', '  Version table:', ' *** 1.0 100', '        100 /var/lib/dpkg/status'];
+    const official = ['  Candidate: 1.0', '  Version table:', '     1.0 500', '        500 https://download.docker.com/linux/ubuntu noble/stable amd64 Packages'];
+
+    it.each([
+      ['a foreign and an unknown archive', foreign, unknown, false],
+      ['an unknown and a foreign archive', unknown, foreign, false],
+      ['an official and a foreign archive', official, foreign, false],
+      ['an official and an unknown archive', official, unknown, null],
+      ['two official archives', official, official, true],
+    ])('reports %s', (_label, first, second, expected) => {
+      expect(assemble([osRelease, probe('apt_policy', policy(first, second))]).repo.candidateSourceVerified).toBe(expected);
+    });
+
+    it('does not count candidates of unknown provenance as a verified repository', () => {
+      const facts = assemble([
+        osRelease,
+        probe('docker_repo', [block(listFile, deb('arch=amd64')), dockerAscBlock()].join('\n')),
+        probe('apt_policy', policy(unknown, unknown)),
+      ]);
+      expect(facts.repo.sourceVerified).toBe(true);
+      expect(facts.repo.keyringVerified).toBe(true);
+      expect(repoVerified(facts)).toBe(false);
+    });
+
+    it('lets the source and keyring decide when no candidate exists yet', () => {
+      const facts = assemble([
+        osRelease,
+        probe('docker_repo', [block(listFile, deb('arch=amd64')), dockerAscBlock()].join('\n')),
+        probe('apt_policy', policy(['  Candidate: (none)'], ['  Candidate: (none)'])),
+      ]);
+      expect(repoVerified(facts)).toBe(true);
+    });
+  });
+
+  describe('a Docker root below a directory that cannot be searched', () => {
+    function runDisk(root: string): string {
+      const dir = mkdtempSync(path.join(os.tmpdir(), 'sencho-root-walk-'));
+      try {
+        const bin = path.join(dir, 'bin');
+        mkdirSync(bin);
+        for (const tool of ['env', 'df', 'dirname', 'tail', 'stat']) {
+          symlinkSync(execFileSync('sh', ['-c', `command -v ${tool}`], { encoding: 'utf8' }).trim(), path.join(bin, tool));
+        }
+        writeFileSync(path.join(bin, 'docker'), `#!/bin/sh\necho ${root.replace('@DIR@', dir)}\n`, { mode: 0o755 });
+        const resolved = root.replace('@DIR@', dir);
+        writeFileSync(path.join(bin, 'docker'), `#!/bin/sh\necho ${resolved}\n`, { mode: 0o755 });
+        writeFileSync(path.join(bin, 'sudo'), '#!/bin/sh\nexit 1\n', { mode: 0o755 });
+        mkdirSync(path.join(dir, 'closed', 'inner'), { recursive: true });
+        if (resolved.includes('/closed/')) chmodSync(path.join(dir, 'closed'), 0o000);
+        return execFileSync('/bin/sh', ['-c', DOCKER_ROOT_DISK_SCRIPT], { encoding: 'utf8', env: { PATH: bin } });
+      } finally {
+        try { chmodSync(path.join(dir, 'closed'), 0o700); } catch { /* not created */ }
+        rmSync(dir, { recursive: true, force: true });
+      }
+    }
+
+    it('measures the nearest existing ancestor of a root that does not exist yet', () => {
+      const parsed = parseDockerRootDisk(runDisk('@DIR@/not/yet/created'));
+      expect(parsed.source).toBe('daemon');
+      expect(parsed.freeBytes).toBeGreaterThan(0);
+    });
+
+    it.skipIf(!canDeny)('reports no measurement instead of an ancestor\'s capacity', () => {
+      const parsed = parseDockerRootDisk(runDisk('@DIR@/closed/inner/docker'));
+      expect(parsed.source).toBe('daemon');
+      expect(parsed.freeBytes).toBeNull();
+    });
+  });
+
+  describe('a default installation reached under another name', () => {
+    const emptyExisting = { exists: true, isDirectory: true, readableByUser: true, writableByUser: true, entries: [] };
+
+    it('is judged by agent_dir when the chosen directory is the real place of /opt/sencho-agent', () => {
+      const facts = makeFacts({
+        agent: { defaultDirHasComposeFile: true, defaultDirRealPath: '/data/agent' },
+        agentDir: { ...emptyExisting, input: '/data/agent', normalized: '/data/agent', realPath: '/data/agent' },
+      });
+      expect(check(facts, 'agent_conflict').status).not.toBe('blocked');
+    });
+
+    it('still conflicts with an unrelated chosen directory', () => {
+      const facts = makeFacts({
+        agent: { defaultDirHasComposeFile: true, defaultDirRealPath: '/data/agent' },
+        agentDir: { ...emptyExisting, input: '/srv/other', normalized: '/srv/other', realPath: '/srv/other' },
+      });
+      expect(check(facts, 'agent_conflict').status).toBe('blocked');
+    });
+
+    it('is read from the probe output by fact assembly', () => {
+      const facts = assemble([probe('default_agent_path', 'yes\nreal=/data/agent\n')]);
+      expect(facts.agent.defaultDirRealPath).toBe('/data/agent');
+      expect(assemble([probe('default_agent_path', 'yes\nreal=relative\n')]).agent.defaultDirRealPath).toBeNull();
+    });
   });
 });

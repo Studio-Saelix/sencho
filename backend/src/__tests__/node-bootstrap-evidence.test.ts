@@ -457,8 +457,12 @@ describe('bootstrap evidence: fresh hosts and repository probe completeness', ()
     expect(result.planSuppressed).toBe(true);
   });
 
-  it('does not claim candidate provenance when none was observed', () => {
+  it('does not claim candidate provenance when no candidate exists yet', () => {
+    const noCandidates = ['docker-ce', 'docker-ce-cli', 'containerd.io', 'docker-buildx-plugin', 'docker-compose-plugin']
+      .map((name) => ({ name: name as 'docker-ce', installedVersion: null, candidateVersion: null }));
     const result = evidence(makeFacts({
+      packages: noCandidates,
+      docker: { cliInstalled: false, serverVersion: null, composeVersion: null, socketAccess: 'none', rootDir: null },
       repo: {
         probeComplete: true,
         dockerSourceConfigured: true,

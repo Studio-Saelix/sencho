@@ -93,12 +93,19 @@ export function dockerAndComposeWork(facts: BootstrapFacts): boolean {
     && facts.docker.composeVersion !== null;
 }
 
+/**
+ * The source and keyring are verified, and apt serves the candidates from that
+ * archive. Candidates whose archive could not be established do not count; with
+ * no candidates at all (an index never refreshed) the source and keyring decide,
+ * and the plan refreshes the index.
+ */
 export function repoVerified(facts: BootstrapFacts): boolean {
+  const hasCandidates = facts.packages.some((pkg) => pkg.candidateVersion !== null);
   return facts.repo.dockerSourceConfigured
     && facts.repo.keyringPresent
     && facts.repo.sourceVerified === true
     && facts.repo.keyringVerified === true
-    && facts.repo.candidateSourceVerified !== false;
+    && (hasCandidates ? facts.repo.candidateSourceVerified === true : facts.repo.candidateSourceVerified !== false);
 }
 
 /** Packages without an installed version, plus the Compose plugin when Compose does not answer. */
@@ -514,7 +521,8 @@ function diskSpaceCheck(facts: BootstrapFacts): BootstrapCheck {
   const shared = compose.filesystem && agent.filesystem
     && compose.filesystem.mountPoint === agent.filesystem.mountPoint;
   // Each severity keeps its own list: a capacity that could not be read stays
-  // unknown whatever the other filesystems report, in either order.
+  // unknown beside a filesystem that is only low, in either order. A shortfall
+  // elsewhere still blocks, since that verdict does not depend on the unknown.
   const blocked: string[] = [];
   const unknown: string[] = [];
   const low: string[] = [];
@@ -682,7 +690,10 @@ function agentConflictCheck(facts: BootstrapFacts): BootstrapCheck {
   // choice leaves the earlier installation in place beside the new one, whether
   // or not the chosen directory exists yet.
   const agentDir = facts.paths.agentDir;
-  const selectsDefaultDir = agentDir.input === DEFAULT_AGENT_DIR || agentDir.realPath === DEFAULT_AGENT_DIR;
+  const defaultRealDir = facts.agent.defaultDirRealPath;
+  const selectsDefaultDir = agentDir.input === DEFAULT_AGENT_DIR
+    || agentDir.realPath === DEFAULT_AGENT_DIR
+    || (defaultRealDir !== null && agentDir.realPath === defaultRealDir);
   if (facts.agent.defaultDirHasComposeFile && !selectsDefaultDir) {
     return {
       ...base,
@@ -952,9 +963,9 @@ export function buildBootstrapEvidence(input: { facts: BootstrapFacts; nodeNameT
   } : unsupportedComposeAddition(facts) ? {
     ...composePluginCheck,
     status: 'blocked',
-    summary: 'Docker runs on this host without Compose, from packages other than Docker\'s own. Adding Docker\'s Compose package could replace the running engine, so the plan stops here.',
+    summary: 'Docker runs on this host without Compose, and Docker\'s own packages did not install it. Adding Docker\'s Compose package could replace the running engine, so the plan stops here.',
     observed: `docker ${facts.docker.serverVersion ?? 'installed'} without the Compose plugin`,
-    remediation: 'Install the Compose plugin from the package source that provided Docker (docker-compose-v2 on Ubuntu), or enroll the node manually, then run the preflight again.',
+    remediation: 'Install the Compose plugin from the source that provided this Docker (docker-compose-v2 for the Ubuntu docker.io package), or enroll the node manually, then run the preflight again.',
   } : {
     ...composePluginCheck,
     status: 'warn',
@@ -1027,11 +1038,11 @@ export function buildBootstrapEvidence(input: { facts: BootstrapFacts; nodeNameT
   } : repoConfigured ? {
     ...aptSourceCheck,
     status: 'pass',
-    // The probe reads the source entry and the first bytes of the keyring, not
-    // the key's fingerprint, so the claim stops at what was read.
+    // The keyring is matched to Docker's release key by fingerprint; the
+    // candidate claim is made only when apt's version table shows the archive.
     summary: facts.repo.candidateSourceVerified === true
-      ? 'The Docker source points at the official repository with an OpenPGP keyring, and apt serves the candidates from it.'
-      : 'The Docker source points at the official repository and names an installed OpenPGP keyring.',
+      ? 'The Docker source points at the official repository with a keyring that holds Docker\'s release key, and apt serves the candidates from it.'
+      : 'The Docker source points at the official repository with a keyring that holds Docker\'s release key.',
     observed: `${facts.repo.sourceVerified ? 'source verified' : 'source'} / ${facts.repo.keyringVerified ? 'keyring verified' : 'keyring'}${facts.repo.candidateSourceVerified === true ? ' / candidate verified' : ''}`,
   } : dockerWorking ? {
     ...aptSourceCheck,

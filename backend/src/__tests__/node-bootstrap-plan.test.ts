@@ -336,7 +336,7 @@ describe('bootstrap plan privileges and working installations', () => {
         keyringPresent: true,
         sourceVerified: true,
         keyringVerified: true,
-        candidateSourceVerified: null,
+        candidateSourceVerified: true,
         problem: null,
       },
     }));

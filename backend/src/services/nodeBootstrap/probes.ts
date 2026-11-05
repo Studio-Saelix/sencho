@@ -153,27 +153,89 @@ export const DOCKER_ROOT_DISK_SCRIPT = [
   '[ "$src" != unavailable ] || exit 0',
   `printf 'D_ROOT=%s\n' "$root"`,
   'd="$root"',
-  'while [ ! -e "$d" ] && [ "$d" != "/" ]; do d=$(dirname -- "$d"); done',
+  // Walk up only past a path that is missing. A path that cannot be inspected
+  // (a closed parent directory) stops the walk, and the failed df then reads as
+  // an unmeasured root, not as the capacity of some ancestor.
+  'while [ "$d" != "/" ]; do',
+  '  err=$(LC_ALL=C stat -L -- "$d" 2>&1 >/dev/null)',
+  '  case "$err" in',
+  '    *"No such file or directory"*|*"Not a directory"*) d=$(dirname -- "$d");;',
+  '    *) break;;',
+  '  esac',
+  'done',
   `printf 'D_DF=%s\n' "$(df -Pk -- "$d" 2>/dev/null | tail -n 1)"`,
 ].join('\n');
+
+export const DEFAULT_AGENT_COMPOSE = `${DEFAULT_AGENT_DIR}/compose.yaml`;
 
 /**
  * Looks for the default installation's Compose file and tells absence apart
  * from an inspection that could not be made: a denied ancestor makes a plain
- * `test -f` read as absent, so the failure text of `stat` decides.
+ * `test -f` read as absent, so the failure text of `stat` decides. `LC_ALL=C`
+ * is set inside the script because `sudo` may reset the caller's environment.
+ * A found file is followed by the real directory that holds it, so a chosen
+ * directory that is the same place under another name is recognized.
  */
-export const DEFAULT_AGENT_COMPOSE = `${DEFAULT_AGENT_DIR}/compose.yaml`;
 export const DEFAULT_AGENT_PATH_SCRIPT = [
   'p="$1"',
-  'if [ -f "$p" ]; then printf \'yes\\n\'',
+  'if [ -f "$p" ]; then',
+  '  printf \'yes\\n\'',
+  '  r=$(readlink -f -- "$p" 2>/dev/null)',
+  '  printf \'real=%s\\n\' "${r%/*}"',
   'else',
-  '  err=$(stat -L -- "$p" 2>&1 >/dev/null)',
+  '  err=$(LC_ALL=C stat -L -- "$p" 2>&1 >/dev/null)',
   '  case "$err" in',
   '    ""|*"No such file or directory"*|*"Not a directory"*) printf \'no\\n\';;',
   '    *) printf \'error\\n\';;',
   '  esac',
   'fi',
 ].join('\n');
+
+const REPO_SOURCE_PATHS = ['/etc/apt/sources.list.d/docker.list', '/etc/apt/sources.list.d/docker.sources'];
+const REPO_KEY_PATHS = ['/etc/apt/keyrings/docker.asc', '/etc/apt/keyrings/docker.gpg', '/usr/share/keyrings/docker-archive-keyring.gpg'];
+
+/**
+ * A file `[ -f ]` does not see is absent only when `stat` says so. Behind a
+ * closed directory the same test also reads false, so that case reports the
+ * file as unreadable rather than letting a wrong or insecure entry go unseen.
+ */
+function repoUnreadableWhenInaccessible(marker: string): string[] {
+  return [
+    '  else',
+    '    err=$(LC_ALL=C stat -L -- "$f" 2>&1 >/dev/null)',
+    '    case "$err" in',
+    '      ""|*"No such file or directory"*|*"Not a directory"*) ;;',
+    `      *) printf '${marker}_BEGIN=%s\\n${marker}_UNREADABLE=1\\n${marker}_END=%s\\n' "$f" "$f";;`,
+    '    esac',
+  ];
+}
+
+/** Reads the Docker apt source files and keyrings in full (up to the key cap). */
+export const buildDockerRepoScript = (sourcePaths: string[], keyPaths: string[]): string => [
+  `for f in ${sourcePaths.join(' ')}; do`,
+  '  if [ -f "$f" ]; then',
+  `    printf 'SOURCE_BEGIN=%s\\n' "$f"`,
+  '    cat "$f" 2>/dev/null || printf \'SOURCE_UNREADABLE=1\\n\'',
+  `    printf '\\nSOURCE_END=%s\\n' "$f"`,
+  ...repoUnreadableWhenInaccessible('SOURCE'),
+  '  fi',
+  'done',
+  `for f in ${keyPaths.join(' ')}; do`,
+  '  if [ -f "$f" ]; then',
+  `    printf 'KEY_BEGIN=%s\\n' "$f"`,
+  // The whole file is read (up to the cap) so the key's identity can be
+  // computed; the size line lets the parser tell a cut-off read from a file.
+  // -L: the size must be the target's, as head reads through a symlink.
+  `    printf 'KEY_SIZE=%s\\n' "$(stat -L -c %s -- "$f" 2>/dev/null)"`,
+  `    head -c ${KEY_READ_BYTES} "$f" 2>/dev/null | base64 -w0 2>/dev/null || printf 'KEY_UNREADABLE=1'`,
+  `    printf '\\nKEY_END=%s\\n' "$f"`,
+  ...repoUnreadableWhenInaccessible('KEY'),
+  '  fi',
+  'done',
+  'true',
+].join('\n');
+
+const DOCKER_REPO_SCRIPT = buildDockerRepoScript(REPO_SOURCE_PATHS, REPO_KEY_PATHS);
 
 /**
  * The whole catalog runs in one session. Sudo variants are always sent: `sudo -n`
@@ -198,29 +260,7 @@ export function buildProbeCatalog(input: ProbeCatalogInput): ProbeDefinition[] {
     { id: 'compose_version_sudo', command: `${DOCKER_LOCAL_SUDO_COMMAND} compose version --short 2>/dev/null` },
     { id: 'docker_service_active', command: `systemctl is-active docker 2>/dev/null` },
     { id: 'docker_service_enabled', command: `systemctl is-enabled docker 2>/dev/null` },
-    {
-      id: 'docker_repo',
-      command: [
-        'for f in /etc/apt/sources.list.d/docker.list /etc/apt/sources.list.d/docker.sources; do',
-        '  if [ -f "$f" ]; then',
-        `    printf 'SOURCE_BEGIN=%s\\n' "$f"`,
-        '    cat "$f" 2>/dev/null || printf \'SOURCE_UNREADABLE=1\\n\'',
-        `    printf '\\nSOURCE_END=%s\\n' "$f"`,
-        '  fi',
-        'done',
-        'for f in /etc/apt/keyrings/docker.asc /etc/apt/keyrings/docker.gpg /usr/share/keyrings/docker-archive-keyring.gpg; do',
-        '  if [ -f "$f" ]; then',
-        `    printf 'KEY_BEGIN=%s\\n' "$f"`,
-        // The whole file is read (up to the cap) so the key's identity can be
-        // computed; the size line lets the parser tell a cut-off read from a file.
-        `    printf 'KEY_SIZE=%s\\n' "$(stat -c %s -- "$f" 2>/dev/null)"`,
-        `    head -c ${KEY_READ_BYTES} "$f" 2>/dev/null | base64 -w0 2>/dev/null || printf 'KEY_UNREADABLE=1'`,
-        `    printf '\\nKEY_END=%s\\n' "$f"`,
-        '  fi',
-        'done',
-        'true',
-      ].join('\n'),
-    },
+    { id: 'docker_repo', command: DOCKER_REPO_SCRIPT },
     {
       id: 'apt_policy',
       command: `apt-cache policy docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin 2>/dev/null`,
@@ -373,6 +413,9 @@ function parseDelimitedBlocks(text: string, begin: string, end: string, unreadab
     }
     current.lines.push(line);
   }
+  // A block with no end marker means the output stopped mid-file: that file is
+  // unreadable, never absent.
+  if (current) files.push({ path: current.path, content: '', readable: false });
   return files;
 }
 
@@ -417,13 +460,31 @@ function insecureOption(get: (name: string) => string | undefined): string | nul
   return INSECURE_SOURCE_OPTIONS.find((name) => weakensSignatures(get(name))) ?? null;
 }
 
-/** Every key a source names must be an installed keyring that holds Docker's key. */
-function namesOnlyVerifiedKeyrings(signedBy: string | undefined, keyPaths: Set<string>): boolean {
+/**
+ * Every key a source names must be an installed keyring that holds Docker's
+ * key. A named keyring that could not be read in full leaves the source
+ * unverifiable, which is not the same as naming a wrong one.
+ */
+function signedByState(
+  signedBy: string | undefined,
+  keys: { verified: Set<string>; unreadable: Set<string> },
+): 'verified' | 'wrong' | 'unreadable' {
   const named = (signedBy ?? '').split(/[,\s]+/).filter(Boolean);
-  return named.length > 0 && named.every((path) => keyPaths.has(path));
+  if (named.length === 0) return 'wrong';
+  if (named.some((path) => !keys.verified.has(path) && !keys.unreadable.has(path))) return 'wrong';
+  return named.every((path) => keys.verified.has(path)) ? 'verified' : 'unreadable';
 }
 
-function verifyListSource(content: string, codename: string, keyPaths: Set<string>): { ok: boolean; reason: string | null } {
+interface SourceVerification {
+  ok: boolean;
+  reason: string | null;
+  /** True when the verdict could not be reached, rather than being negative. */
+  unknown?: boolean;
+}
+
+type KeyringState = { verified: Set<string>; unreadable: Set<string> };
+
+function verifyListSource(content: string, codename: string, keys: KeyringState): SourceVerification {
   const active = content.split('\n')
     .map((line) => line.trim())
     .filter((line) => line && !line.startsWith('#'));
@@ -444,7 +505,9 @@ function verifyListSource(content: string, codename: string, keyPaths: Set<strin
     if (!components.includes('stable')) return { ok: false, reason: 'the source does not enable the stable component' };
     const weakened = insecureOption((name) => options.get(name));
     if (weakened) return { ok: false, reason: `the source sets ${weakened}, which weakens signature checking` };
-    if (!namesOnlyVerifiedKeyrings(options.get('signed-by'), keyPaths)) {
+    const keyring = signedByState(options.get('signed-by'), keys);
+    if (keyring === 'unreadable') return { ok: false, unknown: true, reason: 'a keyring the source names could not be read in full' };
+    if (keyring === 'wrong') {
       return { ok: false, reason: 'the source does not name an installed Docker keyring through signed-by' };
     }
     const arch = options.get('arch');
@@ -480,7 +543,7 @@ function parseDeb822(content: string): Array<Record<string, string>> {
   return paragraphs;
 }
 
-function verifyDeb822Source(content: string, codename: string, keyPaths: Set<string>): { ok: boolean; reason: string | null } {
+function verifyDeb822Source(content: string, codename: string, keys: KeyringState): SourceVerification {
   const paragraphs = parseDeb822(content);
   if (paragraphs.length === 0) return { ok: false, reason: 'the Docker deb822 source is empty' };
   let binaryEntries = 0;
@@ -500,7 +563,9 @@ function verifyDeb822Source(content: string, codename: string, keyPaths: Set<str
     if (!components.includes('stable')) return { ok: false, reason: 'the source does not enable the stable component' };
     const weakened = insecureOption((name) => paragraph[name]);
     if (weakened) return { ok: false, reason: `the source sets ${weakened}, which weakens signature checking` };
-    if (!namesOnlyVerifiedKeyrings(paragraph['signed-by'], keyPaths)) {
+    const keyring = signedByState(paragraph['signed-by'], keys);
+    if (keyring === 'unreadable') return { ok: false, unknown: true, reason: 'a keyring the source names could not be read in full' };
+    if (keyring === 'wrong') {
       return { ok: false, reason: 'the source does not name an installed Docker keyring through Signed-By' };
     }
   }
@@ -517,7 +582,10 @@ function verifyDeb822Source(content: string, codename: string, keyPaths: Set<str
 export function parseDockerRepo(text: string, codename = ''): RepositoryObservation {
   const parsed = parseRepoProbeOutput(text);
   const verifiedKeys = parsed.keys.filter((key) => isDockerReleaseKeyFile(key.path, key.bytes));
-  const keyPaths = new Set(verifiedKeys.map((key) => key.path));
+  const keys: KeyringState = {
+    verified: new Set(verifiedKeys.map((key) => key.path)),
+    unreadable: new Set(parsed.keys.filter((key) => key.bytes === null).map((key) => key.path)),
+  };
   const keyringVerified = verifiedKeys.length > 0
     ? true
     : parsed.keys.length > 0
@@ -539,8 +607,13 @@ export function parseDockerRepo(text: string, codename = ''): RepositoryObservat
       continue;
     }
     const verification = /\.sources$/i.test(source.path)
-      ? verifyDeb822Source(source.content, codename, keyPaths)
-      : verifyListSource(source.content, codename, keyPaths);
+      ? verifyDeb822Source(source.content, codename, keys)
+      : verifyListSource(source.content, codename, keys);
+    if (verification.unknown) {
+      unreadableSource = true;
+      problem ??= `${source.path}: ${verification.reason}`;
+      continue;
+    }
     if (!verification.ok) {
       allReadableVerified = false;
       problem ??= `${source.path}: ${verification.reason ?? 'not the official Docker repository'}`;
@@ -1005,15 +1078,18 @@ function isUnderAnyMount(path: string, mountPoints: string[]): boolean {
  * conclusive; a denied or failed direct attempt falls back to sudo, and when
  * neither answers the default directory is unknown, never absent.
  */
-function defaultDirHasComposeFile(map: Map<string, SshCommandResult>): boolean | null {
+function defaultDirObservation(map: Map<string, SshCommandResult>): { hasComposeFile: boolean | null; realPath: string | null } {
   for (const id of ['default_agent_path', 'default_agent_path_sudo']) {
     const result = map.get(id);
     if (!isCompleteResult(result)) continue;
-    const answer = result.stdout.trim();
-    if (answer === 'yes') return true;
-    if (answer === 'no') return false;
+    const [answer, ...rest] = result.stdout.trim().split('\n').map((line) => line.trim());
+    if (answer === 'yes') {
+      const real = rest.find((line) => line.startsWith('real='))?.slice('real='.length) ?? '';
+      return { hasComposeFile: true, realPath: real.startsWith('/') ? real : null };
+    }
+    if (answer === 'no') return { hasComposeFile: false, realPath: null };
   }
-  return null;
+  return { hasComposeFile: null, realPath: null };
 }
 
 /**
@@ -1136,6 +1212,7 @@ export function assembleFacts(input: AssembleFactsInput): BootstrapFacts {
   const agentContainers = containerInventory.rows.filter((row) => (
     row.project === 'sencho-agent' || row.name === 'sencho-agent'
   ));
+  const defaultDir = defaultDirObservation(map);
   const agentInstall: AgentInstallObservation = {
     projectContainers: agentContainers.map((row) => ({
       name: row.name,
@@ -1148,7 +1225,8 @@ export function assembleFacts(input: AssembleFactsInput): BootstrapFacts {
       ? volumeOutcome.complete ? volumeNames.length > 0 : null
       : cliProbeUnknown || cliInstalled ? null : false,
     dataVolumeNames: volumeNames,
-    defaultDirHasComposeFile: defaultDirHasComposeFile(map),
+    defaultDirHasComposeFile: defaultDir.hasComposeFile,
+    defaultDirRealPath: defaultDir.realPath,
   };
 
   const dockerRoot = dockerRootFacts(map, dockerInfo, cliInstalled, cliProbeUnknown);

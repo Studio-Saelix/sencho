@@ -18,9 +18,10 @@ function dearmor(text: string): Buffer | null {
     if (begin === -1) break;
     const end = rest.indexOf(ARMOR_END, begin);
     if (end === -1) return null;
-    const lines = rest.slice(begin + ARMOR_BEGIN.length, end).split(/\r?\n/);
-    // Armor headers end at the first blank line; the radix-64 body follows and
-    // ends before the "=XXXX" checksum line.
+    // The text after the BEGIN marker starts with the rest of that line.
+    const lines = rest.slice(begin + ARMOR_BEGIN.length, end).split(/\r?\n/).slice(1);
+    // Armor headers (Version:, Comment:, ...) end at the first blank line; the
+    // radix-64 body follows and ends before the "=XXXX" checksum line.
     const bodyStart = lines.findIndex((line) => line.trim() === '');
     const body = (bodyStart === -1 ? [] : lines.slice(bodyStart + 1))
       .map((line) => line.trim())
