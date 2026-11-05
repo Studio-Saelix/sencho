@@ -420,6 +420,14 @@ describe('bootstrap evidence: fresh hosts and repository probe completeness', ()
     expect(result.planSuppressed).toBe(false);
   });
 
+  it('suppresses a plan when the Docker CLI probe did not complete', () => {
+    const result = evidence(makeFacts({ docker: { cliProbeUnknown: true } }));
+    expect(result.checks.find((entry) => entry.id === 'docker_cli')?.status).toBe('unknown');
+    expect(result.checks.find((entry) => entry.id === 'docker_daemon')?.status).toBe('unknown');
+    expect(result.checks.find((entry) => entry.id === 'agent_conflict')?.status).toBe('unknown');
+    expect(result.planSuppressed).toBe(true);
+  });
+
   it('suppresses a plan when the repository probe did not complete', () => {
     const result = evidence(makeFacts({
       docker: { cliInstalled: false, serverVersion: null, composeVersion: null, socketAccess: 'none' },

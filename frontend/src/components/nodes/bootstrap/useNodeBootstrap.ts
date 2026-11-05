@@ -305,6 +305,11 @@ export function useNodeBootstrap({ open, api }: UseNodeBootstrapOptions) {
         const observed = typeof caught.details.observedFingerprint === 'string'
           ? caught.details.observedFingerprint
           : null;
+        // Drop a previous inspection so the dialog shows the live observation,
+        // not the key from the earlier run.
+        setResult(null);
+        setResultRevision(null);
+        setStep('preflight');
         setHostKey((current) => {
           if (!current) return current;
           if (caught.code === 'HOST_KEY_UNTRUSTED' && observed) {

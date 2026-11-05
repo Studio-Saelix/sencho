@@ -140,7 +140,7 @@ export interface RepositoryObservation {
   probeComplete: boolean;
   /** A Docker source file exists. Existence alone proves nothing about its provenance. */
   dockerSourceConfigured: boolean;
-  /** A Docker keyring file exists and parses as a public key. */
+  /** A Docker keyring file exists; whether it parses is keyringVerified. */
   keyringPresent: boolean;
   /** Null when the source exists but could not be read or parsed. */
   sourceVerified: boolean | null;
@@ -157,6 +157,8 @@ export interface BootstrapFacts {
   user: { name: string; uid: number; group: string; isRoot: boolean; sudoNonInteractive: boolean } | null;
   docker: {
     cliInstalled: boolean;
+    /** True when the CLI probe itself timed out, errored or was truncated. */
+    cliProbeUnknown: boolean;
     serverVersion: string | null;
     composeVersion: string | null;
     serviceActive: boolean | null;

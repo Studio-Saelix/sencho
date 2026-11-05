@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import { execFileSync } from 'child_process';
-import { chmodSync, mkdirSync, mkdtempSync, rmSync } from 'fs';
+import { chmodSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'fs';
 import os from 'os';
 import path from 'path';
 import {
@@ -82,6 +82,11 @@ describe('bootstrap probe catalog', () => {
       expect(command, id).toContain('/etc|/etc/*');
       expect(command, id).toContain('/root|/root/*');
     }
+  });
+
+  it('separates repository file contents from the end marker even without a trailing newline', () => {
+    const command = catalog.find((probe) => probe.id === 'docker_repo')?.command ?? '';
+    expect(command).toContain("printf '\\nSOURCE_END=%s\\n'");
   });
 
   it('quotes both paths once, into the fixed path script', () => {
@@ -492,6 +497,14 @@ describe('bootstrap volume and no-Docker facts', () => {
     expect(facts.agent.dataVolumeExists).toBe(false);
   });
 
+  it('does not infer a missing Docker CLI from a failed probe', () => {
+    const facts = minimalAssembly([
+      probe('docker_cli', '', { error: 'COMMAND_ERROR' }),
+    ]);
+    expect(facts.docker.cliProbeUnknown).toBe(true);
+    expect(facts.agent.dataVolumeExists).toBeNull();
+  });
+
   it('marks an absent inventory probe as not run', () => {
     const pathFacts = [
       'P_EXISTS=1', 'P_ISDIR=1', 'P_REAL=/opt/docker/sencho', 'P_FSTYPE=ext4', 'P_FSTARGET=/',
@@ -508,6 +521,37 @@ describe('bootstrap volume and no-Docker facts', () => {
     ]);
     expect(facts.repo.probeComplete).toBe(false);
     expect(facts.repo.sourceVerified).toBeNull();
+  });
+});
+
+describe('bootstrap volume probe execution', () => {
+  function runVolumeProbe(dockerBody: string): void {
+    const dir = mkdtempSync(path.join(os.tmpdir(), 'sencho-volume-probe-'));
+    try {
+      const bin = path.join(dir, 'bin');
+      mkdirSync(bin);
+      writeFileSync(path.join(bin, 'docker'), `#!/bin/sh\n${dockerBody}\n`, { mode: 0o755 });
+      const catalog = buildProbeCatalog({
+        composeDir: '/opt/docker/sencho',
+        agentDir: '/opt/sencho-agent',
+        hubUrl: 'https://sencho.example.com',
+      });
+      const command = catalog.find((probe) => probe.id === 'agent_volume')?.command ?? '';
+      execFileSync('sh', ['-c', command], {
+        encoding: 'utf8',
+        env: { ...process.env, PATH: `${bin}:${process.env.PATH ?? ''}` },
+      });
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }
+
+  it('exits non-zero when Docker cannot be reached', () => {
+    expect(() => runVolumeProbe('exit 1')).toThrow();
+  });
+
+  it('exits zero when the daemon answers even with no matching volume', () => {
+    expect(() => runVolumeProbe('case "$*" in *"volume ls"*) exit 0;; *) exit 1;; esac')).not.toThrow();
   });
 });
 
@@ -584,6 +628,19 @@ describe('bootstrap Docker repository provenance', () => {
     ].join('\n'), 'noble');
     expect(badKey.keyringVerified).toBe(false);
     expect(badKey.keyringPresent).toBe(true);
+  });
+
+  it('rejects a lookalike candidate archive URL', () => {
+    const facts = minimalAssembly([
+      probe('docker_info', '27.3.1|/var/lib/docker'),
+      probe('apt_policy', [
+        'docker-ce:',
+        '  Installed: 5:27.3.1-1',
+        '  Candidate: 5:27.3.1-1\n  Version table:\n     5:27.3.1-1 500',
+        '        500 https://download.docker.com.evil.example/linux/ubuntu noble/stable amd64 Packages',
+      ].join('\n')),
+    ]);
+    expect(facts.repo.candidateSourceVerified).toBe(false);
   });
 
   it('records which archive serves the candidate version', () => {

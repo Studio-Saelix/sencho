@@ -225,6 +225,15 @@ function composeDirCheck(
       remediation: 'Grant the SSH user read and traverse access to this directory, or choose another path.',
     };
   }
+  if (path.inventoryError) {
+    return {
+      ...base,
+      status: 'unknown',
+      summary: `The existing stacks in ${path.input} could not be inventoried (${path.inventoryError}). ${keepAndDescribe}`,
+      observed: path.inventoryError,
+      remediation: 'Confirm the directory contents manually over SSH, or grant the SSH user read and traverse access, then run the preflight again.',
+    };
+  }
   if (!path.writableByUser) {
     if (path.writableBySudo) {
       return {
@@ -241,15 +250,6 @@ function composeDirCheck(
       summary: `${path.input} is not writable by the SSH user or by root.`,
       observed: describePath(path),
       remediation: 'Fix the directory ownership or permissions on the host, or choose another directory. Existing stacks are never chowned by this workflow.',
-    };
-  }
-  if (path.inventoryError) {
-    return {
-      ...base,
-      status: 'unknown',
-      summary: `The existing stacks in ${path.input} could not be inventoried (${path.inventoryError}). ${keepAndDescribe}`,
-      observed: path.inventoryError,
-      remediation: 'Confirm the directory contents manually over SSH, or grant the SSH user read and traverse access, then run the preflight again.',
     };
   }
   if (path.hasSymlinkAncestor) {
@@ -590,6 +590,15 @@ function agentConflictCheck(facts: BootstrapFacts): BootstrapCheck {
       remediation: 'Choose another host, or remove the existing Pilot deliberately before running this workflow. Nothing is replaced automatically.',
     };
   }
+  if (facts.docker.cliProbeUnknown) {
+    return {
+      ...base,
+      status: 'unknown',
+      summary: 'The Docker CLI probe did not complete, so an existing Pilot cannot be ruled out.',
+      observed: 'Docker CLI probe incomplete',
+      remediation: 'Confirm on the host that no sencho-agent container is running, then run the preflight again.',
+    };
+  }
   if (facts.docker.cliInstalled && !facts.containers.complete) {
     return {
       ...base,
@@ -655,16 +664,19 @@ export function buildBootstrapEvidence(input: { facts: BootstrapFacts; nodeNameT
     observed: facts.target.username,
   });
 
-  const osSupported = facts.os
-    ? facts.os.id === 'ubuntu' && ['22.04', '24.04'].includes(facts.os.versionId) && Boolean(facts.os.codename)
+  const osReleaseSupported = facts.os
+    ? facts.os.id === 'ubuntu' && ['22.04', '24.04'].includes(facts.os.versionId)
     : null;
+  const osSupported = osReleaseSupported === null ? null : osReleaseSupported ? Boolean(facts.os?.codename) : false;
   checks.push(osSupported === null ? {
     id: 'os_supported',
     category: 'host',
     label: 'Operating system',
     status: 'unknown',
-    summary: 'The operating system could not be read.',
-    remediation: 'Confirm the host runs Ubuntu 22.04 or 24.04, then run the preflight again.',
+    summary: osReleaseSupported ? 'The Ubuntu release codename could not be read.' : 'The operating system could not be read.',
+    remediation: osReleaseSupported
+      ? 'Confirm /etc/os-release contains VERSION_CODENAME, then run the preflight again.'
+      : 'Confirm the host runs Ubuntu 22.04 or 24.04, then run the preflight again.',
   } : osSupported ? {
     id: 'os_supported',
     category: 'host',
@@ -750,7 +762,8 @@ export function buildBootstrapEvidence(input: { facts: BootstrapFacts; nodeNameT
   const willInstallPackages = !dockerWorking && missingPackages;
   const willConfigureRepo = !dockerWorking && (!repoConfigured || missingPackages);
   const serviceNeedsChange = facts.docker.serviceActive !== true || facts.docker.serviceEnabled !== true;
-  const needsSudo = !facts.docker.cliInstalled
+  const needsSudo = facts.docker.cliProbeUnknown
+    || !facts.docker.cliInstalled
     || willInstallPackages
     || willConfigureRepo
     || serviceNeedsChange
@@ -790,7 +803,14 @@ export function buildBootstrapEvidence(input: { facts: BootstrapFacts; nodeNameT
     } as BootstrapCheck);
   }
 
-  checks.push(!facts.docker.cliInstalled ? {
+  checks.push(facts.docker.cliProbeUnknown ? {
+    id: 'docker_cli',
+    category: 'docker',
+    label: 'Docker CLI',
+    status: 'unknown',
+    summary: 'The Docker CLI probe did not complete, so the installed version cannot be established.',
+    remediation: 'Confirm the Docker CLI on the host, then run the preflight again.',
+  } : !facts.docker.cliInstalled ? {
     id: 'docker_cli',
     category: 'docker',
     label: 'Docker CLI',
@@ -807,7 +827,16 @@ export function buildBootstrapEvidence(input: { facts: BootstrapFacts; nodeNameT
     observed: facts.docker.serverVersion ?? 'installed',
   });
 
-  if (!facts.docker.cliInstalled) {
+  if (facts.docker.cliProbeUnknown) {
+    checks.push({
+      id: 'docker_daemon',
+      category: 'docker',
+      label: 'Docker daemon',
+      status: 'unknown',
+      summary: 'The Docker CLI probe did not complete, so the daemon cannot be classified.',
+      remediation: 'Confirm Docker is installed and running on the host, then run the preflight again.',
+    });
+  } else if (!facts.docker.cliInstalled) {
     checks.push({
       id: 'docker_daemon',
       category: 'docker',
@@ -850,7 +879,14 @@ export function buildBootstrapEvidence(input: { facts: BootstrapFacts; nodeNameT
     });
   }
 
-  checks.push(facts.docker.composeVersion ? {
+  checks.push(facts.docker.cliProbeUnknown ? {
+    id: 'compose_plugin',
+    category: 'docker',
+    label: 'Docker Compose',
+    status: 'unknown',
+    summary: 'The Docker CLI probe did not complete, so the Compose plugin cannot be classified.',
+    remediation: 'Confirm docker compose works on the host, then run the preflight again.',
+  } : facts.docker.composeVersion ? {
     id: 'compose_plugin',
     category: 'docker',
     label: 'Docker Compose',
@@ -866,7 +902,16 @@ export function buildBootstrapEvidence(input: { facts: BootstrapFacts; nodeNameT
     remediation: 'No action is needed if the official Docker repository is reachable from the host.',
   });
 
-  if (!facts.docker.cliInstalled) {
+  if (facts.docker.cliProbeUnknown) {
+    checks.push({
+      id: 'docker_socket',
+      category: 'docker',
+      label: 'Docker socket access',
+      status: 'unknown',
+      summary: 'The Docker CLI probe did not complete, so socket access cannot be established.',
+      remediation: 'Confirm Docker is installed and the SSH user can reach /var/run/docker.sock, then run the preflight again.',
+    });
+  } else if (!facts.docker.cliInstalled) {
     checks.push({
       id: 'docker_socket',
       category: 'docker',
@@ -993,7 +1038,14 @@ export function buildBootstrapEvidence(input: { facts: BootstrapFacts; nodeNameT
 
   checks.push(agentConflictCheck(facts));
 
-  checks.push(!facts.docker.cliInstalled ? {
+  checks.push(facts.docker.cliProbeUnknown ? {
+    id: 'existing_workloads',
+    category: 'conflicts',
+    label: 'Existing workloads',
+    status: 'unknown',
+    summary: 'The Docker CLI probe did not complete, so existing containers cannot be inventoried.',
+    remediation: 'Confirm the Docker container list on the host, then run the preflight again.',
+  } : !facts.docker.cliInstalled ? {
     id: 'existing_workloads',
     category: 'conflicts',
     label: 'Existing workloads',

@@ -183,6 +183,8 @@ interface ExecOutcome {
   timedOut: boolean;
   /** Raw bytes retained before scrubbing, for the session-wide budget. */
   bytes: number;
+  /** Transport-level failure that is neither a timeout nor a normal exit. */
+  error: string | null;
 }
 
 function execOne(
@@ -203,19 +205,20 @@ function execOne(
     let settled = false;
     let stream: ClientChannel | null = null;
 
-    const snapshot = (exitCode: number | null): ExecOutcome => ({
+    const snapshot = (exitCode: number | null, error: string | null): ExecOutcome => ({
       stdout: scrubCommandOutput(Buffer.concat(stdout).toString('utf8')),
       stderr: scrubCommandOutput(Buffer.concat(stderr).toString('utf8')),
       exitCode,
       truncated,
       timedOut,
       bytes,
+      error,
     });
-    const settle = (exitCode: number | null) => {
+    const settle = (exitCode: number | null, error: string | null) => {
       if (settled) return;
       settled = true;
       clearTimeout(timer);
-      resolve(snapshot(exitCode));
+      resolve(snapshot(exitCode, error));
     };
     // Budget both output streams through one raw-byte counter. A peer that
     // writes only stderr must hit the same cap as one that writes stdout.
@@ -241,7 +244,7 @@ function execOne(
       } catch {
         // The channel may already be gone; the session close is the cleanup.
       }
-      settle(null);
+      settle(null, 'COMMAND_TIMEOUT');
     }, timeoutMs);
 
     conn.exec(`LC_ALL=C ${command}`, (err, channel) => {
@@ -266,9 +269,9 @@ function execOne(
         if (settled) return;
         settled = true;
         clearTimeout(timer);
-        resolve(snapshot(typeof code === 'number' ? code : null));
+        resolve(snapshot(typeof code === 'number' ? code : null, typeof code === 'number' ? null : 'COMMAND_ERROR'));
       });
-      channel.on('error', () => settle(null));
+      channel.on('error', () => settle(null, 'COMMAND_ERROR'));
     });
   });
 }
@@ -449,7 +452,7 @@ function runSession(
               exitCode: outcome.exitCode,
               truncated: outcome.truncated,
               timedOut: outcome.timedOut,
-              error: outcome.timedOut ? 'COMMAND_TIMEOUT' : null,
+              error: outcome.timedOut ? 'COMMAND_TIMEOUT' : outcome.error,
             });
             completed += 1;
             if (outcome.timedOut) break;

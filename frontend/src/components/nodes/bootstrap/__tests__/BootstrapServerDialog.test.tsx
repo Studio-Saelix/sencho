@@ -112,6 +112,39 @@ describe('BootstrapServerDialog live host-key mismatch', () => {
   });
 });
 
+describe('BootstrapServerDialog preflight pin mismatch', () => {
+  it('keeps the keyscan fingerprint, shows the pin, and sends the confirmed replacement', async () => {
+    vi.mocked(checkBootstrapHostKey).mockResolvedValue({ ...CHANGED_KEY, trust: 'trusted', pinnedFingerprint: CHANGED_KEY.fingerprint });
+    vi.mocked(runBootstrapPreflight).mockRejectedValueOnce(new BootstrapApiError(
+      'The host key does not match the pinned key.',
+      'HOST_KEY_MISMATCH',
+      null,
+      {
+        pinnedFingerprint: 'SHA256:pinnedchanged0000000000000000000000000',
+        expectedFingerprint: CHANGED_KEY.fingerprint,
+      },
+    ));
+    render(<BootstrapServerDialog open onOpenChange={() => {}} />);
+    const user = await fillTarget();
+    await user.click(screen.getByRole('button', { name: 'Check host key' }));
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Run preflight' })).toBeEnabled());
+    await user.click(screen.getByRole('button', { name: 'Run preflight' }));
+
+    await waitFor(() => expect(screen.getAllByText(/SHA256:pinnedchanged/).length).toBeGreaterThan(0));
+    expect(screen.getAllByText(new RegExp(CHANGED_KEY.fingerprint)).length).toBeGreaterThan(0);
+    const run = screen.getByRole('button', { name: 'Run preflight' });
+    expect(run).toBeDisabled();
+    await user.click(screen.getByLabelText(/I understand this replaces the pinned key/));
+    expect(run).toBeEnabled();
+    await user.click(run);
+    await waitFor(() => expect(runBootstrapPreflight).toHaveBeenCalledTimes(2));
+    expect(vi.mocked(runBootstrapPreflight).mock.calls[1][0]).toMatchObject({
+      expectedFingerprint: CHANGED_KEY.fingerprint,
+      replacePinnedFingerprint: CHANGED_KEY.fingerprint,
+    });
+  });
+});
+
 describe('BootstrapServerDialog changed host key', () => {
   it('shows both fingerprints and requires an explicit replacement before the preflight runs', async () => {
     render(<BootstrapServerDialog open onOpenChange={() => {}} />);

@@ -1,6 +1,6 @@
 import crypto from 'crypto';
 import { buildPilotEnrollmentCompose } from '../../helpers/pilotEnrollmentCompose';
-import { DOCKER_LOCAL_ENV_ARGS } from './probes';
+import { DOCKER_LOCAL_ASSIGNMENTS, DOCKER_LOCAL_UNSET_ARGS } from './probes';
 import {
   BOOTSTRAP_MARKER_FILENAME,
   BOOTSTRAP_MARKER_SCHEMA_VERSION,
@@ -77,7 +77,7 @@ function startCommand(agentDir: string, sudo: boolean): string {
   // context or ambient Compose variable must not change which daemon or project
   // this command starts.
   const base = [
-    `env ${DOCKER_LOCAL_ENV_ARGS} -u COMPOSE_FILE -u COMPOSE_PROJECT_NAME -u COMPOSE_PROFILES`,
+    `env ${DOCKER_LOCAL_UNSET_ARGS} -u COMPOSE_FILE -u COMPOSE_PROJECT_NAME -u COMPOSE_PROFILES ${DOCKER_LOCAL_ASSIGNMENTS}`,
     'docker compose',
     `--project-name ${PILOT_PROJECT_NAME}`,
     `--project-directory ${shellQuote(agentDir)}`,
@@ -92,6 +92,21 @@ function packageInstallCommand(packages: DockerPackage[], resolved: boolean): st
     resolved && pkg.candidateVersion ? `${pkg.name}=${pkg.candidateVersion}` : pkg.name
   ));
   return `apt-get install -y --no-install-recommends ${specs.join(' ')}`;
+}
+
+function aptUpdateStep(sudo: boolean): BootstrapPlanStep {
+  return {
+    id: 'apt-update',
+    title: 'Refresh apt metadata',
+    rationale: 'The Docker repository must be indexed before its packages can be resolved.',
+    effect: 'package-metadata',
+    privilege: sudo ? 'sudo' : 'user',
+    command: sudoCommand('apt-get update', sudo),
+    disruptive: false,
+    reversible: 'yes',
+    pointOfNoReturn: false,
+    timeoutMs: 120_000,
+  };
 }
 
 function repoSteps(facts: BootstrapFacts, sudo: boolean): BootstrapPlanStep[] {
@@ -157,18 +172,7 @@ function repoSteps(facts: BootstrapFacts, sudo: boolean): BootstrapPlanStep[] {
       pointOfNoReturn: false,
       timeoutMs: 10_000,
     },
-    {
-      id: 'apt-update',
-      title: 'Refresh apt metadata',
-      rationale: 'The new repository must be indexed before its packages can be resolved.',
-      effect: 'package-metadata',
-      privilege: sudo ? 'sudo' : 'user',
-      command: sudoCommand('apt-get update', sudo),
-      disruptive: false,
-      reversible: 'yes',
-      pointOfNoReturn: false,
-      timeoutMs: 120_000,
-    },
+    aptUpdateStep(sudo),
   ];
 }
 
@@ -273,6 +277,7 @@ export function buildBootstrapPlan(input: PlanBuildInput): BootstrapPlan {
   // These guards make a direct call fail closed too, rather than inventing a
   // default distribution, user or filesystem.
   if (!facts.os) throw new Error('The plan requires a known operating system.');
+  if (facts.docker.cliProbeUnknown) throw new Error('The plan requires a complete Docker CLI probe.');
   if (!facts.user) throw new Error('The plan requires a known SSH user.');
   if (facts.paths.composeDir.probeError || facts.paths.agentDir.probeError
     || facts.paths.composeDir.inventoryError || facts.paths.agentDir.inventoryError) {
@@ -303,12 +308,19 @@ export function buildBootstrapPlan(input: PlanBuildInput): BootstrapPlan {
     pkg.installedVersion === null || (composePluginMissing && pkg.name === 'docker-compose-plugin')
   ));
   const needsRepo = !dockerWorking && !repoConfigured;
+  const needsMetadataRefresh = !dockerWorking && !needsRepo && missingPackages.length > 0;
 
   if (needsRepo) {
     stages.push({
       id: 'docker_repository',
       title: 'Docker package repository',
       steps: repoSteps(facts, !root),
+    });
+  } else if (needsMetadataRefresh) {
+    stages.push({
+      id: 'docker_repository',
+      title: 'Docker package metadata',
+      steps: [aptUpdateStep(!root)],
     });
   } else if (dockerWorking && !repoConfigured) {
     skipped.push({
@@ -328,7 +340,7 @@ export function buildBootstrapPlan(input: PlanBuildInput): BootstrapPlan {
   } else if (missingPackages.length > 0) {
     const versionsKnown = missingPackages.every((pkg) => pkg.candidateVersion !== null);
     if (!versionsKnown) {
-      notices.push('The Docker repository is not configured yet, so package versions are resolved from the official repository when the plan runs. Execution re-checks the resolved versions before installation.');
+      notices.push('Package versions are not available from the local apt index yet, so they are resolved from the official repository when the plan runs. Execution re-checks the resolved versions before installation.');
     }
     stages.push({
       id: 'docker_packages',

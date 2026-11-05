@@ -1,4 +1,5 @@
 import { describe, it, expect } from 'vitest';
+import { execFileSync } from 'child_process';
 import { parse as parseYaml } from 'yaml';
 import { buildBootstrapPlan, canonicalJson, formatPlanText, planDigest } from '../services/nodeBootstrap/planBuilder';
 import { makeAgentDir, makeComposeDir, makeFacts } from './__helpers__/bootstrapFacts';
@@ -114,7 +115,7 @@ describe('bootstrap plan builder', () => {
     const install = allSteps(bare).find((entry) => entry.id === 'install-docker-packages');
     expect(install?.command).toContain('apt-get install -y --no-install-recommends');
     expect(install?.command).toContain('docker-ce');
-    expect(bare.notices.join(' ')).toContain('package versions are resolved');
+    expect(bare.notices.join(' ')).toContain('resolved from the official repository when the plan runs');
     const service = allSteps(bare).find((entry) => entry.id === 'enable-start-docker');
     expect(service?.command).toContain('systemctl enable --now docker');
   });
@@ -342,6 +343,22 @@ describe('bootstrap plan privileges and working installations', () => {
     const packages = allSteps(plan).find((entry) => entry.id === 'install-docker-packages');
     expect(packages?.command).toContain('docker-compose-plugin');
     expect(plan.stages.map((stage) => stage.id)).toContain('docker_packages');
+    const repository = plan.stages.find((stage) => stage.id === 'docker_repository');
+    expect(repository?.steps.map((step) => step.id)).toEqual(['apt-update']);
+    expect(repository?.steps.some((step) => step.id === 'docker-key')).toBe(false);
+  });
+
+  it('builds a start command whose env options all precede its assignments', () => {
+    const start = allSteps(planFor(makeFacts())).find((entry) => entry.id === 'start-agent');
+    const command = start?.command ?? '';
+    expect(command).toMatch(/^env /);
+    const lastUnset = command.lastIndexOf(' -u ');
+    const firstAssignment = command.indexOf('DOCKER_CONTEXT=default');
+    expect(lastUnset).toBeGreaterThan(0);
+    expect(lastUnset).toBeLessThan(firstAssignment);
+    // Prove the emitted env prefix is accepted by the real env binary.
+    const envPrefix = command.replace(/ docker compose.*$/, '');
+    expect(() => execFileSync('sh', ['-c', `${envPrefix} true`])).not.toThrow();
   });
 
   it('names the retained canonical Compose volume in the plan notice', () => {
@@ -384,6 +401,8 @@ describe('bootstrap plan prerequisites', () => {
     expect(() => planFor(makeFacts({ composeDir: { probeError: 'stat failed' } }))).toThrow(/could not be inspected/i);
     expect(() => planFor(makeFacts({ agentDir: { probeError: 'stat failed' } }))).toThrow(/could not be inspected/i);
     expect(() => planFor(makeFacts({ composeDir: { inventoryError: 'exited 1' } }))).toThrow(/could not be inspected/i);
+    expect(() => planFor(makeFacts({ agentDir: { inventoryError: 'exited 1' } }))).toThrow(/could not be inspected/i);
+    expect(() => planFor(makeFacts({ docker: { cliProbeUnknown: true } }))).toThrow(/Docker CLI probe/i);
     expect(() => planFor(makeFacts({
       docker: { cliInstalled: false, serverVersion: null, composeVersion: null, socketAccess: 'none' },
       repo: {

@@ -67,7 +67,7 @@ ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub
 - **Known host:** a key that matches the pin proceeds without a prompt.
 - **Changed key:** Sencho blocks the preflight and shows both fingerprints. Replacing the pin is a separate, explicit action, and both fingerprints are recorded in the audit log.
 
-Once trusted, select **Run preflight**. Sencho opens one SSH connection and runs the fixed read-only catalog. The request is bounded: 15 seconds to connect, 10 seconds per command, 90 seconds overall, with output caps. A fact from a timed-out or truncated command is treated as `unknown` or `blocked`; it never becomes a clean pass.
+Once trusted, select **Run preflight**. Sencho opens one SSH connection and runs the fixed read-only catalog. The request is bounded: 15 seconds to connect, 10 seconds per command, 90 seconds overall, with output caps. An inventory or identity fact from a timed-out, errored or truncated command is treated as `unknown` or `blocked`; it never becomes a clean pass.
 
 The result has four verdicts:
 

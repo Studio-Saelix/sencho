@@ -36,7 +36,9 @@ const COMPOSE_FILE_NAMES = `\\( -name 'compose.yaml' -o -name 'compose.yml' -o -
  * daemon and the planned start command the same local daemon.
  */
 export const DOCKER_LOCAL_ENDPOINT = 'unix:///var/run/docker.sock';
-export const DOCKER_LOCAL_ENV_ARGS = `-u DOCKER_HOST -u DOCKER_CONTEXT -u DOCKER_CONFIG DOCKER_CONTEXT=default DOCKER_HOST=${DOCKER_LOCAL_ENDPOINT}`;
+export const DOCKER_LOCAL_UNSET_ARGS = '-u DOCKER_HOST -u DOCKER_CONTEXT -u DOCKER_CONFIG';
+export const DOCKER_LOCAL_ASSIGNMENTS = `DOCKER_CONTEXT=default DOCKER_HOST=${DOCKER_LOCAL_ENDPOINT}`;
+export const DOCKER_LOCAL_ENV_ARGS = `${DOCKER_LOCAL_UNSET_ARGS} ${DOCKER_LOCAL_ASSIGNMENTS}`;
 export const DOCKER_LOCAL_ENV = `env ${DOCKER_LOCAL_ENV_ARGS}`;
 export const DOCKER_LOCAL_COMMAND = `${DOCKER_LOCAL_ENV} docker`;
 
@@ -90,7 +92,7 @@ export const PATH_FACTS_SCRIPT = [
   `if [ -e "$p" ] || [ -L "$p" ]; then printf 'P_EXISTS=1\\n'; else`,
   `  err=$(stat -L -- "$p" 2>&1 >/dev/null)`,
   `  case "$err" in`,
-  `    ""|*"No such file or directory"*|*ENOENT*) ;;`,
+  `    ""|*"No such file or directory"*) ;;`,
   `    *) printf 'P_ERROR=stat:%s\\n' "$err" ;;`,
   `  esac`,
   `  printf 'P_EXISTS=0\\n'`,
@@ -162,7 +164,7 @@ export function buildProbeCatalog(input: ProbeCatalogInput): ProbeDefinition[] {
         '  if [ -f "$f" ]; then',
         `    printf 'SOURCE_BEGIN=%s\\n' "$f"`,
         '    cat "$f" 2>/dev/null || printf \'SOURCE_UNREADABLE=1\\n\'',
-        `    printf 'SOURCE_END=%s\\n' "$f"`,
+        `    printf '\\nSOURCE_END=%s\\n' "$f"`,
         '  fi',
         'done',
         'for f in /etc/apt/keyrings/docker.asc /etc/apt/keyrings/docker.gpg /usr/share/keyrings/docker-archive-keyring.gpg; do',
@@ -748,6 +750,16 @@ export function parseDfFreeBytes(text: string): number | null {
   return Number(fields[3]) * 1024;
 }
 
+function isOfficialDockerArchive(source: string | null | undefined): boolean {
+  if (!source) return false;
+  try {
+    const url = new URL(source);
+    return url.origin === 'https://download.docker.com' && url.pathname === '/linux/ubuntu';
+  } catch {
+    return false;
+  }
+}
+
 // --- Fact assembly -------------------------------------------------------
 
 export interface AssembleFactsInput {
@@ -769,18 +781,18 @@ function resultMap(results: SshCommandResult[]): Map<string, SshCommandResult> {
 
 function stdoutOf(map: Map<string, SshCommandResult>, id: string): string {
   const result = map.get(id);
-  if (!result || result.timedOut) return '';
+  if (!result || result.timedOut || result.truncated || result.error) return '';
   return result.stdout;
 }
 
 function succeeded(map: Map<string, SshCommandResult>, id: string): boolean {
   const result = map.get(id);
-  return Boolean(result && !result.timedOut && result.exitCode === 0);
+  return Boolean(result && !result.timedOut && !result.truncated && !result.error && result.exitCode === 0);
 }
 
 function isProbeUnknown(map: Map<string, SshCommandResult>, id: string): boolean {
   const result = map.get(id);
-  return !result || result.timedOut || result.truncated;
+  return !result || result.timedOut || result.truncated || Boolean(result.error);
 }
 
 interface InventoryOutcome {
@@ -791,7 +803,7 @@ interface InventoryOutcome {
 }
 
 function isCompleteResult(result: SshCommandResult | undefined): result is SshCommandResult {
-  return Boolean(result && !result.timedOut && !result.truncated && result.exitCode === 0);
+  return Boolean(result && !result.timedOut && !result.truncated && !result.error && result.exitCode === 0);
 }
 
 /**
@@ -809,7 +821,7 @@ function inventoryOutcome(
   if (complete) return { text: complete.stdout, complete: true, error: null, truncated: false };
   const partial = candidates.find((result) => !result.timedOut || result.truncated);
   const reasons = candidates.map((result) => (
-    result.timedOut ? 'timed out' : result.truncated ? 'output truncated' : `exited ${result.exitCode ?? 'without a status'}`
+    result.timedOut ? 'timed out' : result.truncated ? 'output truncated' : result.error ? result.error : `exited ${result.exitCode ?? 'without a status'}`
   ));
   if (reasons.length === 0) reasons.push('not run');
   return {
@@ -829,7 +841,7 @@ function firstComplete(
   const complete = candidates.find(isCompleteResult);
   if (complete) return { result: complete, error: null };
   const reasons = candidates.map((result) => (
-    result.timedOut ? 'timed out' : result.truncated ? 'output truncated' : `exited ${result.exitCode ?? 'without a status'}`
+    result.timedOut ? 'timed out' : result.truncated ? 'output truncated' : result.error ? result.error : `exited ${result.exitCode ?? 'without a status'}`
   ));
   if (reasons.length === 0) reasons.push('not run');
   return { result: null, error: reasons.join('; ') };
@@ -846,6 +858,7 @@ export function assembleFacts(input: AssembleFactsInput): BootstrapFacts {
   const userBase = parseUser(stdoutOf(map, 'user'));
   const sudoAvailable = succeeded(map, 'sudo');
   const cliInstalled = succeeded(map, 'docker_cli');
+  const cliProbeUnknown = isProbeUnknown(map, 'docker_cli');
 
   const directDocker = parseDockerInfo(stdoutOf(map, 'docker_info'));
   const sudoDocker = parseDockerInfo(stdoutOf(map, 'docker_info_sudo'));
@@ -860,6 +873,7 @@ export function assembleFacts(input: AssembleFactsInput): BootstrapFacts {
     ?? parseComposeVersion(stdoutOf(map, 'compose_version_sudo'));
   const repoProbe = map.get('docker_repo');
   const repoBase = repoProbe && !repoProbe.timedOut && !repoProbe.truncated
+    && !repoProbe.error && repoProbe.exitCode === 0
     ? parseDockerRepo(repoProbe.stdout, osBase?.codename ?? '')
     : {
       probeComplete: false,
@@ -875,7 +889,7 @@ export function assembleFacts(input: AssembleFactsInput): BootstrapFacts {
   const candidateSourceVerified = candidatesWithSource.length === 0
     || candidatesWithSource.every((pkg) => !pkg.candidateSource)
     ? null
-    : candidatesWithSource.every((pkg) => pkg.candidateSource?.includes('download.docker.com')) ? true : false;
+    : candidatesWithSource.every((pkg) => isOfficialDockerArchive(pkg.candidateSource)) ? true : false;
   const repo: BootstrapFacts['repo'] = { ...repoBase, candidateSourceVerified };
 
   const containerOutcome = inventoryOutcome(map, 'containers', 'containers_sudo');
@@ -929,7 +943,7 @@ export function assembleFacts(input: AssembleFactsInput): BootstrapFacts {
     })),
     dataVolumeExists: dockerInfo
       ? volumeOutcome.result ? volumeNames.length > 0 : null
-      : cliInstalled ? null : false,
+      : cliProbeUnknown || cliInstalled ? null : false,
     dataVolumeNames: volumeNames,
     defaultDirHasComposeFile: stdoutOf(map, 'default_agent_path').trim() === 'yes',
   };
@@ -943,6 +957,7 @@ export function assembleFacts(input: AssembleFactsInput): BootstrapFacts {
     user: userBase ? { ...userBase, sudoNonInteractive: sudoAvailable } : null,
     docker: {
       cliInstalled,
+      cliProbeUnknown,
       serverVersion: dockerInfo?.serverVersion ?? null,
       composeVersion,
       serviceActive: stdoutOf(map, 'docker_service_active').trim() === 'active'

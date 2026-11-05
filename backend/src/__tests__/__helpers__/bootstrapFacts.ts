@@ -126,6 +126,7 @@ export function makeFacts(overrides: FactsOverrides = {}): BootstrapFacts {
     } : overrides.user,
     docker: {
       cliInstalled: true,
+      cliProbeUnknown: false,
       serverVersion: '27.3.1',
       composeVersion: '2.29.7',
       serviceActive: true,

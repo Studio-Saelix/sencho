@@ -99,7 +99,7 @@ export function BootstrapPreflightStep({
   const answers = blocked
     ? inspection.blockers > 0
       ? `${inspection.blockers} blocker${inspection.blockers === 1 ? '' : 's'} must be resolved before a plan can be generated.`
-      : `${unknownRequired} required check${unknownRequired === 1 ? '' : 's'} could not be established, so no plan can be generated.`
+      : `${unknownRequired} check${unknownRequired === 1 ? '' : 's'} could not be established, so no plan can be generated.`
     : `The host can be prepared. ${inspection.warnings} warning${inspection.warnings === 1 ? '' : 's'} will be carried into the plan.`;
 
   return (
