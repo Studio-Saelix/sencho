@@ -521,6 +521,7 @@ describe('a staged overwrite that fails before anything live moves', () => {
     expect(outcomes).toEqual([{ state: 'failed', errorClass: 'dependents_changed' }]);
     // No point was created for a volume a new container was using.
     expect(engine.createPointCalls).toBe(0);
+    expect(points.RecoveryPointStore.getInstance().findBySourceOperation(seeded.operationId)).toBeNull();
     const intent = intents.RestoreIntentStore.getInstance().get(seeded.intentId);
     expect(intent?.preRestorePointId).toBeNull();
     expect(intent?.phase).toBe('rolled_back');
@@ -544,6 +545,7 @@ describe('a staged overwrite that fails before anything live moves', () => {
 
     expect(outcomes).toEqual([{ state: 'failed', errorClass: 'dependents_changed' }]);
     expect(engine.createPointCalls).toBe(0);
+    expect(points.RecoveryPointStore.getInstance().findBySourceOperation(seeded.operationId)).toBeNull();
     const intent = intents.RestoreIntentStore.getInstance().get(seeded.intentId);
     expect(intent?.preRestorePointId).toBeNull();
     expect(intent?.phase).toBe('rolled_back');
