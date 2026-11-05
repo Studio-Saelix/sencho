@@ -223,11 +223,31 @@ export async function probeVolumeReport(input: {
     },
   });
   if (result.exitCode !== 0) {
-    throw new RecoveryError(result.exitCode === null ? 'capability_unavailable' : 'identity_unknown');
+    // Keep the probe's own reason as the cause so the node log names the real
+    // failure (a refused directory listing, for instance) instead of only the
+    // class. The cause never reaches an API answer: those carry `errorClass` and
+    // the fixed `detail` sentence.
+    const error = new RecoveryError(result.exitCode === null ? 'capability_unavailable' : 'identity_unknown');
+    const cause = probeFailureCause(lines[0]);
+    if (cause) error.cause = new Error(cause);
+    throw error;
   }
   const report = parseProbeReport(lines[0] ?? '');
   if (!report) throw new RecoveryError('identity_unknown');
   return report;
+}
+
+/** The probe's `{"error": ...}` line, kept for the log only. */
+function probeFailureCause(line: string | undefined): string | null {
+  if (!line) return null;
+  try {
+    const parsed: unknown = JSON.parse(line);
+    if (!parsed || typeof parsed !== 'object') return null;
+    const reason = (parsed as Record<string, unknown>).error;
+    return typeof reason === 'string' && reason.length > 0 ? reason : null;
+  } catch {
+    return null;
+  }
 }
 
 /**

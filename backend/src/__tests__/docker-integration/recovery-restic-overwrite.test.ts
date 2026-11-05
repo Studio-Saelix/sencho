@@ -543,6 +543,36 @@ describeIf('staged overwrite against real Docker', () => {
     }
   }, 300_000);
 
+  it('lists a work directory in a volume root an application user owns and closes to others', async () => {
+    // Postgres and MariaDB chown the volume root to their own user and leave it
+    // 0700 or 2750. The preview must read that root, or it reports the target
+    // eligible and the swap refuses the leftover only after the workloads stopped.
+    for (const mode of ['0700', '2750']) {
+      const source = volumeName(`sencho-it-ow-own-${mode}`);
+      const stale = `.sencho-restore-${randomUUID()}`;
+      try {
+        createVolume(source);
+        runInVolume(source, [
+          'set -e',
+          'printf keep > a.txt',
+          `mkdir -p ${stale}/original`,
+          `printf x > ${stale}/original/b`,
+          `chown 999:999 /data ${stale}`,
+          `chmod ${mode} /data`,
+        ].join('\n'));
+
+        const report = await probeVolumeReport({
+          runner: runner(), operationId: 'integration-probe', volumeName: source, listWorkDirs: true,
+        });
+        expect(report.workDirs, mode).toEqual([stale]);
+        const plain = await probeVolumeReport({ runner: runner(), operationId: 'integration-probe', volumeName: source });
+        expect(plain.workDirs, mode).toBeNull();
+      } finally {
+        removeVolume(source);
+      }
+    }
+  }, 120_000);
+
   it('fails the copy when repository data is missing, with the live volume unchanged', async () => {
     const source = volumeName('sencho-it-dmg-src');
     const target = volumeName('sencho-it-dmg-dst');

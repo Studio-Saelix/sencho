@@ -78,10 +78,13 @@ const BACKUP_SCRATCH = 'size=512m,mode=1777';
 export const HELPER_PROFILES: Readonly<Record<HelperProfile, HelperProfileSpec>> = Object.freeze({
   // Reads one directory's device, inode, owner and mode and its free space, and on
   // request the names of the restore work directories at its root. Only the source
-  // root is mounted, and only read-only.
+  // root is mounted, and only read-only. A root owned by an application user
+  // (Postgres, MariaDB) with mode 0700 or 2750 refuses a plain root's directory
+  // listing, so the listing needs read and traverse like a capture does. The
+  // capability grants no write, and the only mount stays read-only.
   probe: {
     user: '0:0',
-    capAdd: [],
+    capAdd: ['DAC_READ_SEARCH'],
     repositoryReadOnly: true,
     needsRepository: false,
     source: 'read_only',

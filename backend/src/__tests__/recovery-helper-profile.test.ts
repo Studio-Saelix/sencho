@@ -85,7 +85,13 @@ describe('recovery helper profiles', () => {
   });
 
   it('adds exactly the capabilities each profile was justified for', () => {
-    expect(HELPER_PROFILES.probe.capAdd).toEqual([]);
+    // The probe lists the restore work directories at a volume root that an
+    // application user may own with mode 0700 or 2750. A plain root under
+    // CapDrop ALL is refused that listing, which would let an overwrite stop the
+    // workloads and only fail at the swap. DAC_READ_SEARCH is read and traverse
+    // only, and the source mount stays read-only.
+    expect(HELPER_PROFILES.probe.capAdd).toEqual(['DAC_READ_SEARCH']);
+    expect(HELPER_PROFILES.probe.capAdd).not.toContain('DAC_OVERRIDE');
     expect(HELPER_PROFILES.config.capAdd).toEqual([]);
     expect(HELPER_PROFILES.init.capAdd).toEqual([]);
     expect(HELPER_PROFILES.check.capAdd).toEqual([]);
