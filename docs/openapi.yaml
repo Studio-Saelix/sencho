@@ -6414,6 +6414,13 @@ paths:
         `POST /api/recovery/points/{pointId}/overwrite` to run it. The answer names the
         dependents, so it needs the same `restore` access on every dependent stack as the
         overwrite itself, plus the node-wide check when a mounting container belongs to no stack.
+        A restore that did not settle can leave its hidden work directory (`.sencho-restore-<id>`)
+        in the volume, holding the data it replaced. The next swap refuses a volume that holds one,
+        after the containers have already stopped, so the preview reports the volume as not
+        eligible (`target.eligible: false`, `swap.supported: false`) and names the directory in
+        `target.ineligibleReason`; the overwrite is refused with `400 invalid_request` for the same
+        reason. Review the directory, remove it from the volume, and preview again. A point captured
+        from a volume never includes such a directory.
         Only a Full Admin API token may call it; any other scope is refused with `403 SCOPE_DENIED`.
       parameters:
         - name: pointId
@@ -6656,6 +6663,12 @@ paths:
         file and byte counts, and the `outcomeClass` that says why it is not clean
         (`cleanup_failed`, `fence_unavailable`, ...). It never carries a host path. An unknown id answers 403, not 400, to a caller who cannot read every
         kind of operation, so the answer does not reveal which ids exist.
+
+        While the node is starting, an overwrite that the previous process left interrupted is
+        not reported: startup is still proving whether its volume was committed or rolled back,
+        and the ending it holds until then is provisional. The read answers
+        `503 capability_unavailable` with `reason: engine_starting`; read it again, and it shows
+        the ending startup proved, or `completion_unknown` when the volume could not be proven.
       parameters:
         - name: id
           in: path
@@ -6688,6 +6701,8 @@ paths:
           $ref: "#/components/responses/Unauthorized"
         "403":
           $ref: "#/components/responses/RecoveryForbidden"
+        "503":
+          $ref: "#/components/responses/RecoveryUnavailable"
         "500":
           $ref: "#/components/responses/RecoveryInternalError"
 
@@ -6732,6 +6747,8 @@ paths:
           $ref: "#/components/responses/RecoveryForbidden"
         "409":
           $ref: "#/components/responses/RecoveryConflict"
+        "503":
+          $ref: "#/components/responses/RecoveryUnavailable"
         "500":
           $ref: "#/components/responses/RecoveryInternalError"
 
