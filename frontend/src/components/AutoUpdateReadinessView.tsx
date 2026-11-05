@@ -561,22 +561,29 @@ function StackReadinessCard({
 /**
  * Recheck control shared by the desktop hero and the phone toolbar. The click
  * locks at once; the icon turns and the label reads "Rechecking..." only after
- * the visual-busy delay, so a fast answer never flashes busy chrome. Both
- * labels share one grid cell so the button keeps its width.
+ * the visual-busy delay, so a fast answer never flashes busy chrome. The phone
+ * button sits alone at the end of its row and simply grows. In the hero,
+ * `holdBusyWidth` keeps an invisible copy of the busy button in the same grid
+ * cell, so the row does not shift when the label changes while the idle button
+ * keeps its natural size.
  */
 function RecheckButton({
   refreshing,
   onClick,
   disabled = false,
   compact = false,
+  holdBusyWidth = false,
 }: {
   refreshing: boolean;
   onClick: () => void;
   disabled?: boolean;
   compact?: boolean;
+  holdBusyWidth?: boolean;
 }) {
   const { showBusy } = useVisualBusy(refreshing);
-  return (
+  const iconClass = compact ? 'h-3.5 w-3.5' : 'h-4 w-4';
+  const gapClass = compact ? 'gap-1.5' : 'gap-2';
+  const button = (
     <Button
       variant="outline"
       size="sm"
@@ -584,20 +591,29 @@ function RecheckButton({
       disabled={disabled || refreshing}
       aria-busy={refreshing || undefined}
       aria-label="Recheck registries"
-      className={compact ? 'gap-1.5' : 'gap-2'}
+      className={cn(gapClass, holdBusyWidth && 'col-start-1 row-start-1 justify-self-end')}
     >
-      <RefreshCw
-        className={cn(compact ? 'h-3.5 w-3.5' : 'h-4 w-4', showBusy && 'animate-spin')}
-        strokeWidth={1.5}
-        aria-hidden="true"
-      />
-      <span className="inline-grid justify-items-center">
-        <span className={cn('col-start-1 row-start-1', showBusy && 'invisible')}>Recheck</span>
-        <span className={cn('col-start-1 row-start-1', !showBusy && 'invisible')} aria-hidden="true">
-          Rechecking...
-        </span>
-      </span>
+      <RefreshCw className={cn(iconClass, showBusy && 'animate-spin')} strokeWidth={1.5} aria-hidden="true" />
+      {showBusy ? 'Rechecking...' : 'Recheck'}
     </Button>
+  );
+  if (!holdBusyWidth) return button;
+  return (
+    <span className="inline-grid">
+      {button}
+      <Button
+        variant="outline"
+        size="sm"
+        disabled
+        tabIndex={-1}
+        aria-hidden="true"
+        data-testid="recheck-width-holder"
+        className={cn(gapClass, 'invisible pointer-events-none col-start-1 row-start-1')}
+      >
+        <RefreshCw className={iconClass} strokeWidth={1.5} />
+        Rechecking...
+      </Button>
+    </span>
   );
 }
 
@@ -724,7 +740,7 @@ function ReadinessHero({
             </div>
           )}
           {canRefresh && (
-            <RecheckButton refreshing={refreshing} onClick={onRefresh} />
+            <RecheckButton holdBusyWidth refreshing={refreshing} onClick={onRefresh} />
           )}
         </div>
       </div>
@@ -1286,6 +1302,11 @@ function AutoUpdateReadinessContent({ headerActions }: AutoUpdateReadinessProps)
   const [groups, setGroups] = useState<NodeGroup[]>([]);
   const [reachableNodeCount, setReachableNodeCount] = useState<number | null>(null);
   const [loading, setLoading] = useState(true);
+  // True once any load has settled (data or error). The skeleton belongs to the
+  // first load only: a later reload, even over an empty list, keeps what is shown.
+  // The groups check on top covers rows that arrive while the first load is still
+  // fetching their previews.
+  const [hasLoaded, setHasLoaded] = useState(false);
   const [refreshing, setRefreshing] = useState(false);
   const [cadence, setCadence] = useState<ImageUpdateStatus | null>(null);
   // Local-node stacks whose latest check could not determine status. The fleet
@@ -1522,7 +1543,10 @@ function AutoUpdateReadinessContent({ headerActions }: AutoUpdateReadinessProps)
       if (token !== loadTokenRef.current) return;
       toast.error((err as Error)?.message || 'Failed to load readiness');
     } finally {
-      if (token === loadTokenRef.current) setLoading(false);
+      if (token === loadTokenRef.current) {
+        setLoading(false);
+        setHasLoaded(true);
+      }
     }
   }, [localNodeId, refreshNodeMeta]);
 
@@ -1600,7 +1624,7 @@ function AutoUpdateReadinessContent({ headerActions }: AutoUpdateReadinessProps)
 
   const { mode: viewMode, setMode: setViewMode } = useReadinessViewMode();
   // A fast first answer never flashes the skeleton; the min-h wrapper holds the pane open until the data lands.
-  const firstLoad = loading && groups.length === 0;
+  const firstLoad = loading && !hasLoaded && groups.length === 0;
   const { showBusy: showSkeleton } = useVisualBusy(firstLoad);
 
   // Nodes that advertise service-scoped updates, resolved per node (not just
