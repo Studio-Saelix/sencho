@@ -1624,7 +1624,7 @@ export class ImageUpdateService {
         // Get local digests and platform from RepoDigests / Os+Architecture
         let localDigests: string[];
         let platform: { os: string; architecture: string };
-        let repoDigests: string[] = [];
+        let repoDigests: string[];
         let configId: string | null = null;
         try {
             const inspect = await withTimeout(docker.getDocker().getImage(imageRef).inspect(), ImageUpdateService.SOCKET_TIMEOUT_MS, 'inspect');

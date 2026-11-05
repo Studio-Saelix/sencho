@@ -7,11 +7,21 @@
  */
 import { describe, it, expect, vi } from 'vitest';
 import {
+  defaultInspectImage,
   detectSelfDevBuildUpdate,
   type DetectSelfDevBuildUpdateDeps,
   type SelfDevBuildDetectInput,
 } from '../services/selfDevBuildDetect';
 import type { compareLocalToRemoteTagDetailed } from '../services/registry-api';
+
+const dockerInspect = vi.hoisted(() => vi.fn());
+vi.mock('../services/DockerController', () => ({
+  default: {
+    getInstance: () => ({
+      getDocker: () => ({ getImage: () => ({ inspect: dockerInspect }) }),
+    }),
+  },
+}));
 
 const REGISTRY = 'ghcr.io';
 const REPO = 'studio-saelix/sencho-dev';
@@ -217,5 +227,26 @@ describe('detectSelfDevBuildUpdate', () => {
     const result = await detectSelfDevBuildUpdate(INPUT, deps);
     expect(result.kind).toBe('inconclusive');
     expect(compareDetailed).not.toHaveBeenCalled();
+  });
+});
+
+
+describe('defaultInspectImage', () => {
+  it('copies the identity, descriptor and parent used to classify the image', async () => {
+    // The detector's callers inject inspectImage in tests, so this adapter needs
+    // its own guard: dropping provenance here would make every production path
+    // treat a pulled containerd image as a local build again.
+    const inspected = {
+      Id: LOCAL_DIGEST,
+      RepoDigests: [LOCAL_REPO_DIGEST],
+      Os: 'linux',
+      Architecture: 'amd64',
+      Identity: { Pull: [{ Repository: `${REGISTRY}/${REPO}` }] },
+      Descriptor: { digest: LOCAL_DIGEST, mediaType: 'application/vnd.oci.image.index.v1+json' },
+      Parent: `sha256:${'e'.repeat(64)}`,
+    };
+    dockerInspect.mockResolvedValue(inspected);
+
+    await expect(defaultInspectImage('a'.repeat(64))).resolves.toEqual(inspected);
   });
 });

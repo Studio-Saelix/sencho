@@ -439,9 +439,11 @@ describe('trivy image platform selection', () => {
     expect(result.imageDigest).toBe(INDEX_DIGEST);
   });
 
-  it('refuses a locally created containerd image with no Identity and a self-referential digest', async () => {
-    // A classic-builder or committed image carries a Parent but no Identity.
-    // Its RepoDigest repeats the Id, which is not registry content.
+  it('refuses a classic-builder containerd image with no Identity and a self-referential digest', async () => {
+    // A classic-builder image records a Parent but no Identity. Its RepoDigest
+    // repeats the Id, which is not registry content. A `docker commit` records
+    // no parent, so it stays indistinguishable from a pull and is left to fail
+    // closed at the registry instead.
     const configId = `sha256:${'6'.repeat(64)}`;
     state.local = {
       Id: configId,

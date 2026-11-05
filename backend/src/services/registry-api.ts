@@ -338,11 +338,13 @@ export function selectLocalRepoDigests(
  * digest, so a RepoDigest equal to it can only be a locally built image's
  * self-reference. On the containerd image store the Id is the manifest or index
  * digest, so equality alone proves nothing: a `Descriptor` that names the Id is
- * registry content, while a locally created image with a `Parent` is a
+ * registry content, while a classic-builder image that records a `Parent` is a
  * self-reference. A containerd image on an engine without `Identity` cannot be
  * told apart from a pulled one; it keeps the digest so a pulled child is not
- * falsely blocked, and a local build there fails closed when the registry
- * rejects the address.
+ * falsely blocked, and a local image there (a BuildKit build, or a `docker
+ * commit` that records no parent) fails closed when the registry rejects the
+ * address. The same ambiguity remains on a containerd engine older than the
+ * descriptor field.
  */
 export interface ImageProvenance {
     Id?: unknown;
