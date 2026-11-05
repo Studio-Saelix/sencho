@@ -346,7 +346,8 @@ export function buildBootstrapPlan(input: PlanBuildInput): BootstrapPlan {
     });
     notices.push('Docker and Compose already work on this host. The plan does not install or replace Docker packages.');
   } else if (packagesToInstall.length > 0) {
-    if (dockerEngineWorks(facts)) {
+    const composeOnly = dockerEngineWorks(facts);
+    if (composeOnly) {
       notices.push('Docker already runs on this host. Only the Compose plugin is installed; the engine, containerd and every container are left as they are.');
     }
     const versionsKnown = packagesToInstall.every((pkg) => pkg.candidateVersion !== null);
@@ -358,7 +359,7 @@ export function buildBootstrapPlan(input: PlanBuildInput): BootstrapPlan {
       title: 'Docker packages',
       steps: [{
         id: 'install-docker-packages',
-        title: dockerEngineWorks(facts) ? 'Install the Docker Compose plugin' : 'Install the missing Docker packages',
+        title: composeOnly ? 'Install the Docker Compose plugin' : 'Install the missing Docker packages',
         rationale: 'The Pilot runs Docker Compose on this host.',
         effect: 'package-install',
         privilege: root ? 'user' : 'sudo',

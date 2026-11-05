@@ -72,7 +72,7 @@ function readPackets(data: Buffer): Packet[] | null {
       } else {
         const width = 1 << lengthType;
         if (offset + width > data.length) return null;
-        length = width === 1 ? data[offset] : width === 2 ? data.readUInt16BE(offset) : data.readUInt32BE(offset);
+        length = data.readUIntBE(offset, width);
         offset += width;
       }
     }

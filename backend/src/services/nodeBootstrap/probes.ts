@@ -212,29 +212,31 @@ function repoUnreadableWhenInaccessible(marker: string): string[] {
 }
 
 /** Reads the Docker apt source files and keyrings in full (up to the key cap). */
-export const buildDockerRepoScript = (sourcePaths: string[], keyPaths: string[]): string => [
-  `for f in ${sourcePaths.join(' ')}; do`,
-  '  if [ -f "$f" ]; then',
-  `    printf 'SOURCE_BEGIN=%s\\n' "$f"`,
-  '    cat "$f" 2>/dev/null || printf \'SOURCE_UNREADABLE=1\\n\'',
-  `    printf '\\nSOURCE_END=%s\\n' "$f"`,
-  ...repoUnreadableWhenInaccessible('SOURCE'),
-  '  fi',
-  'done',
-  `for f in ${keyPaths.join(' ')}; do`,
-  '  if [ -f "$f" ]; then',
-  `    printf 'KEY_BEGIN=%s\\n' "$f"`,
-  // The whole file is read (up to the cap) so the key's identity can be
-  // computed; the size line lets the parser tell a cut-off read from a file.
-  // -L: the size must be the target's, as head reads through a symlink.
-  `    printf 'KEY_SIZE=%s\\n' "$(stat -L -c %s -- "$f" 2>/dev/null)"`,
-  `    head -c ${KEY_READ_BYTES} "$f" 2>/dev/null | base64 -w0 2>/dev/null || printf 'KEY_UNREADABLE=1'`,
-  `    printf '\\nKEY_END=%s\\n' "$f"`,
-  ...repoUnreadableWhenInaccessible('KEY'),
-  '  fi',
-  'done',
-  'true',
-].join('\n');
+export function buildDockerRepoScript(sourcePaths: string[], keyPaths: string[]): string {
+  return [
+    `for f in ${sourcePaths.join(' ')}; do`,
+    '  if [ -f "$f" ]; then',
+    `    printf 'SOURCE_BEGIN=%s\\n' "$f"`,
+    '    cat "$f" 2>/dev/null || printf \'SOURCE_UNREADABLE=1\\n\'',
+    `    printf '\\nSOURCE_END=%s\\n' "$f"`,
+    ...repoUnreadableWhenInaccessible('SOURCE'),
+    '  fi',
+    'done',
+    `for f in ${keyPaths.join(' ')}; do`,
+    '  if [ -f "$f" ]; then',
+    `    printf 'KEY_BEGIN=%s\\n' "$f"`,
+    // The whole file is read (up to the cap) so the key's identity can be
+    // computed; the size line lets the parser tell a cut-off read from a file.
+    // -L: the size must be the target's, as head reads through a symlink.
+    `    printf 'KEY_SIZE=%s\\n' "$(stat -L -c %s -- "$f" 2>/dev/null)"`,
+    `    head -c ${KEY_READ_BYTES} "$f" 2>/dev/null | base64 -w0 2>/dev/null || printf 'KEY_UNREADABLE=1'`,
+    `    printf '\\nKEY_END=%s\\n' "$f"`,
+    ...repoUnreadableWhenInaccessible('KEY'),
+    '  fi',
+    'done',
+    'true',
+  ].join('\n');
+}
 
 const DOCKER_REPO_SCRIPT = buildDockerRepoScript(REPO_SOURCE_PATHS, REPO_KEY_PATHS);
 
@@ -463,15 +465,14 @@ function insecureOption(get: (name: string) => string | undefined): string | nul
   return INSECURE_SOURCE_OPTIONS.find((name) => weakensSignatures(get(name))) ?? null;
 }
 
+type KeyringState = { verified: Set<string>; unreadable: Set<string> };
+
 /**
  * Every key a source names must be an installed keyring that holds Docker's
  * key. A named keyring that could not be read in full leaves the source
  * unverifiable, which is not the same as naming a wrong one.
  */
-function signedByState(
-  signedBy: string | undefined,
-  keys: { verified: Set<string>; unreadable: Set<string> },
-): 'verified' | 'wrong' | 'unreadable' {
+function signedByState(signedBy: string | undefined, keys: KeyringState): 'verified' | 'wrong' | 'unreadable' {
   const named = (signedBy ?? '').split(/[,\s]+/).filter(Boolean);
   if (named.length === 0) return 'wrong';
   if (named.some((path) => !keys.verified.has(path) && !keys.unreadable.has(path))) return 'wrong';
@@ -484,8 +485,6 @@ interface SourceVerification {
   /** True when the verdict could not be reached, rather than being negative. */
   unknown?: boolean;
 }
-
-type KeyringState = { verified: Set<string>; unreadable: Set<string> };
 
 function verifyListSource(content: string, codename: string, keys: KeyringState): SourceVerification {
   const active = content.split('\n')
@@ -598,11 +597,12 @@ export function parseDockerRepo(text: string, codename = ''): RepositoryObservat
   let unreadableSource = false;
   let allReadableVerified = true;
   // A keyring that is not Docker's is the root cause of any source it was meant to sign.
-  let problem: string | null = !keyringVerified && parsed.keys.length > 0
-    ? keyringVerified === null
-      ? 'a Docker keyring could not be read in full'
-      : 'no Docker keyring holds the Docker release key'
-    : null;
+  let problem: string | null = null;
+  if (keyringVerified === null) {
+    problem = 'a Docker keyring could not be read in full';
+  } else if (keyringVerified === false && parsed.keys.length > 0) {
+    problem = 'no Docker keyring holds the Docker release key';
+  }
   for (const source of parsed.sources) {
     if (!source.readable) {
       unreadableSource = true;
@@ -1275,8 +1275,7 @@ export function assembleFacts(input: AssembleFactsInput): BootstrapFacts {
     paths: { composeDir, agentDir },
     agent: agentInstall,
     dockerRoot: {
-      path: dockerRoot.path,
-      freeBytes: dockerRoot.freeBytes,
+      ...dockerRoot,
       // Only claim a type when the Docker root is the Compose path itself; the
       // df probe does not report the Docker root's own filesystem type.
       filesystemType: dockerInfo?.rootDir && dockerInfo.rootDir === composeFacts.input

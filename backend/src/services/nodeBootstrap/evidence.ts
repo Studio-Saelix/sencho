@@ -93,6 +93,10 @@ export function dockerAndComposeWork(facts: BootstrapFacts): boolean {
     && facts.docker.composeVersion !== null;
 }
 
+function hasCandidateVersions(facts: BootstrapFacts): boolean {
+  return facts.packages.some((pkg) => pkg.candidateVersion !== null);
+}
+
 /**
  * The source and keyring are verified, and apt serves the candidates from that
  * archive. Candidates whose archive could not be established do not count; with
@@ -100,12 +104,13 @@ export function dockerAndComposeWork(facts: BootstrapFacts): boolean {
  * and the plan refreshes the index.
  */
 export function repoVerified(facts: BootstrapFacts): boolean {
-  const hasCandidates = facts.packages.some((pkg) => pkg.candidateVersion !== null);
   return facts.repo.dockerSourceConfigured
     && facts.repo.keyringPresent
     && facts.repo.sourceVerified === true
     && facts.repo.keyringVerified === true
-    && (hasCandidates ? facts.repo.candidateSourceVerified === true : facts.repo.candidateSourceVerified !== false);
+    && (hasCandidateVersions(facts)
+      ? facts.repo.candidateSourceVerified === true
+      : facts.repo.candidateSourceVerified !== false);
 }
 
 /** Packages without an installed version, plus the Compose plugin when Compose does not answer. */
@@ -1033,7 +1038,7 @@ export function buildBootstrapEvidence(input: { facts: BootstrapFacts; nodeNameT
     && facts.repo.sourceVerified === true
     && facts.repo.keyringVerified === true
     && facts.repo.candidateSourceVerified === null
-    && facts.packages.some((pkg) => pkg.candidateVersion !== null);
+    && hasCandidateVersions(facts);
   const aptSourceCheck = { id: 'apt_source', category: 'docker', label: 'Docker package source' } as const;
   checks.push((!facts.repo.probeComplete || !facts.packagesComplete) && !dockerWorking ? {
     ...aptSourceCheck,
