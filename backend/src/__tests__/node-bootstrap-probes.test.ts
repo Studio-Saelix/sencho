@@ -24,6 +24,7 @@ import {
   parseVolumeNames,
 } from '../services/nodeBootstrap/probes';
 import { scrubCommandOutput, type SshCommandResult } from '../services/nodeBootstrap/sshProbeClient';
+import { DOCKER_ASC_PATH, dockerAscBlock, keyBlock as keyBlockOf } from './__helpers__/dockerRepoFixtures';
 
 const PATH_SCRIPT_OUTPUT = [
   'P_INPUT=/opt/docker/sencho',
@@ -261,7 +262,7 @@ describe('bootstrap fact assembly', () => {
         result('agent_inventory', ''),
         result('agent_marker', '', 1),
         result('default_agent_path', 'no'),
-        result('docker_root_disk', '/dev/sda1 1 1 123456789 1% /'),
+        result('docker_root_disk', 'D_SOURCE=daemon\nD_ROOT=/var/lib/docker\nD_DF=/dev/sda1 1 1 123456789 1% /'),
         result('fstab', 'UUID=abc / ext4 defaults 0 1'),
       ],
       fstabMountPoints: ['/'],
@@ -556,12 +557,7 @@ describe('bootstrap volume probe execution', () => {
 });
 
 describe('bootstrap Docker repository provenance', () => {
-  const keyBytes = Buffer.from('-----BEGIN PGP PUBLIC KEY BLOCK-----\nfixture\n-----END PGP PUBLIC KEY BLOCK-----\n');
-  const keyBlock = (keyPath = '/etc/apt/keyrings/docker.asc') => [
-    `KEY_BEGIN=${keyPath}`,
-    keyBytes.toString('base64'),
-    `KEY_END=${keyPath}`,
-  ].join('\n');
+  const keyBlock = (keyPath = DOCKER_ASC_PATH) => dockerAscBlock(keyPath);
   const listBlock = (sourcePath: string, content: string) => [
     `SOURCE_BEGIN=${sourcePath}`,
     content,
@@ -622,9 +618,7 @@ describe('bootstrap Docker repository provenance', () => {
 
     const badKey = parseDockerRepo([
       listBlock('/etc/apt/sources.list.d/docker.list', 'deb [arch=amd64 signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/ubuntu noble stable'),
-      'KEY_BEGIN=/etc/apt/keyrings/docker.asc',
-      Buffer.from('not a pgp key').toString('base64'),
-      'KEY_END=/etc/apt/keyrings/docker.asc',
+      keyBlockOf(DOCKER_ASC_PATH, Buffer.from('not a pgp key')),
     ].join('\n'), 'noble');
     expect(badKey.keyringVerified).toBe(false);
     expect(badKey.keyringPresent).toBe(true);
@@ -652,24 +646,19 @@ describe('bootstrap Docker repository provenance', () => {
       '     5:27.3.1-1 500',
       '        500 https://download.docker.com/linux/ubuntu noble/stable amd64 Packages',
     ].join('\n'));
-    expect(packages.find((pkg) => pkg.name === 'docker-ce')?.candidateSource)
-      .toBe('https://download.docker.com/linux/ubuntu');
+    expect(packages.find((pkg) => pkg.name === 'docker-ce')?.candidateSources)
+      .toEqual([{ uri: 'https://download.docker.com/linux/ubuntu', release: 'noble/stable' }]);
   });
 });
 
 describe('bootstrap repository signed-by verification', () => {
   it('rejects a source whose signed-by key is invalid even when another keyring is valid', () => {
-    const goodKey = Buffer.from('-----BEGIN PGP PUBLIC KEY BLOCK-----\ngood\n-----END PGP PUBLIC KEY BLOCK-----\n');
     const output = [
       'SOURCE_BEGIN=/etc/apt/sources.list.d/docker.list',
       'deb [arch=amd64 signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/ubuntu noble stable',
       'SOURCE_END=/etc/apt/sources.list.d/docker.list',
-      'KEY_BEGIN=/etc/apt/keyrings/docker.asc',
-      Buffer.from('not a pgp key').toString('base64'),
-      'KEY_END=/etc/apt/keyrings/docker.asc',
-      'KEY_BEGIN=/usr/share/keyrings/docker-archive-keyring.gpg',
-      goodKey.toString('base64'),
-      'KEY_END=/usr/share/keyrings/docker-archive-keyring.gpg',
+      keyBlockOf('/etc/apt/keyrings/docker.asc', Buffer.from('not a pgp key')),
+      dockerAscBlock('/usr/share/keyrings/docker-archive-keyring.asc'),
     ].join('\n');
     const result = parseDockerRepo(output, 'noble');
     expect(result.keyringPresent).toBe(true);

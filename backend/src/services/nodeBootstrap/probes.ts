@@ -1,5 +1,5 @@
 import net from 'net';
-import { RESERVED_PATH_PREFIXES, shellQuote } from './pathPolicy';
+import { DEFAULT_AGENT_DIR, RESERVED_PATH_PREFIXES, shellQuote } from './pathPolicy';
 import type {
   AgentDirObservation,
   AgentInstallObservation,
@@ -11,6 +11,7 @@ import type {
   PathObservation,
   RepositoryObservation,
 } from './types';
+import { isDockerReleaseKeyFile } from './openpgpKey';
 import type { SshCommand, SshCommandResult } from './sshProbeClient';
 
 /**
@@ -27,6 +28,12 @@ export interface ProbeCatalogInput {
   agentDir: string;
   hubUrl: string;
 }
+
+/** Where a first Docker install puts its root, used only when no Docker CLI exists. */
+export const DEFAULT_DOCKER_ROOT = '/var/lib/docker';
+
+/** Docker's release key is under 4 KiB; a keyring past this cap is not read as one. */
+const KEY_READ_BYTES = 12_288;
 
 const COMPOSE_FILE_NAMES = `\\( -name 'compose.yaml' -o -name 'compose.yml' -o -name 'docker-compose.yaml' -o -name 'docker-compose.yml' \\)`;
 
@@ -129,13 +136,43 @@ export const PATH_FACTS_SCRIPT = [
   `printf 'P_DF=%s\\n' "$(df -Pk -- "$d" 2>/dev/null | tail -n 1)"`,
 ].join('\n');
 
+/**
+ * Measures the filesystem that holds the Docker root the daemon reports. It
+ * never substitutes a guess for a root it could not read: the default path is
+ * measured only when no Docker CLI exists at all (a fresh install lands there),
+ * and a CLI whose daemon will not answer reports no measurement.
+ */
 export const DOCKER_ROOT_DISK_SCRIPT = [
   `root=$(${DOCKER_LOCAL_COMMAND} info --format "{{.DockerRootDir}}" 2>/dev/null)`,
   `[ -n "$root" ] || root=$(${DOCKER_LOCAL_SUDO_COMMAND} info --format "{{.DockerRootDir}}" 2>/dev/null)`,
-  '[ -n "$root" ] || root=/var/lib/docker',
+  'if [ -n "$root" ]; then src=daemon',
+  'elif ! command -v docker >/dev/null 2>&1; then root=' + DEFAULT_DOCKER_ROOT + '; src=default',
+  'else src=unavailable',
+  'fi',
+  `printf 'D_SOURCE=%s\n' "$src"`,
+  '[ "$src" != unavailable ] || exit 0',
+  `printf 'D_ROOT=%s\n' "$root"`,
   'd="$root"',
   'while [ ! -e "$d" ] && [ "$d" != "/" ]; do d=$(dirname -- "$d"); done',
-  'df -Pk -- "$d" 2>/dev/null | tail -n 1',
+  `printf 'D_DF=%s\n' "$(df -Pk -- "$d" 2>/dev/null | tail -n 1)"`,
+].join('\n');
+
+/**
+ * Looks for the default installation's Compose file and tells absence apart
+ * from an inspection that could not be made: a denied ancestor makes a plain
+ * `test -f` read as absent, so the failure text of `stat` decides.
+ */
+export const DEFAULT_AGENT_COMPOSE = `${DEFAULT_AGENT_DIR}/compose.yaml`;
+export const DEFAULT_AGENT_PATH_SCRIPT = [
+  'p="$1"',
+  'if [ -f "$p" ]; then printf \'yes\\n\'',
+  'else',
+  '  err=$(stat -L -- "$p" 2>&1 >/dev/null)',
+  '  case "$err" in',
+  '    ""|*"No such file or directory"*|*"Not a directory"*) printf \'no\\n\';;',
+  '    *) printf \'error\\n\';;',
+  '  esac',
+  'fi',
 ].join('\n');
 
 /**
@@ -174,7 +211,10 @@ export function buildProbeCatalog(input: ProbeCatalogInput): ProbeDefinition[] {
         'for f in /etc/apt/keyrings/docker.asc /etc/apt/keyrings/docker.gpg /usr/share/keyrings/docker-archive-keyring.gpg; do',
         '  if [ -f "$f" ]; then',
         `    printf 'KEY_BEGIN=%s\\n' "$f"`,
-        '    head -c 128 "$f" 2>/dev/null | base64 -w0 2>/dev/null || printf \'KEY_UNREADABLE=1\'',
+        // The whole file is read (up to the cap) so the key's identity can be
+        // computed; the size line lets the parser tell a cut-off read from a file.
+        `    printf 'KEY_SIZE=%s\\n' "$(stat -c %s -- "$f" 2>/dev/null)"`,
+        `    head -c ${KEY_READ_BYTES} "$f" 2>/dev/null | base64 -w0 2>/dev/null || printf 'KEY_UNREADABLE=1'`,
         `    printf '\\nKEY_END=%s\\n' "$f"`,
         '  fi',
         'done',
@@ -220,7 +260,8 @@ export function buildProbeCatalog(input: ProbeCatalogInput): ProbeDefinition[] {
       id: 'agent_marker_sudo',
       command: `sh -c ${shellQuote(guardedInventoryScript(`sudo -n cat "$p/sencho-bootstrap.json" 2>/dev/null`))} sencho-inventory ${agent}`,
     },
-    { id: 'default_agent_path', command: `test -f /opt/sencho-agent/compose.yaml && echo yes || echo no` },
+    { id: 'default_agent_path', command: `sh -c ${shellQuote(DEFAULT_AGENT_PATH_SCRIPT)} sencho-probe ${shellQuote(DEFAULT_AGENT_COMPOSE)}` },
+    { id: 'default_agent_path_sudo', command: `sudo -n sh -c ${shellQuote(DEFAULT_AGENT_PATH_SCRIPT)} sencho-probe ${shellQuote(DEFAULT_AGENT_COMPOSE)}` },
     { id: 'docker_root_disk', command: `sh -c ${shellQuote(DOCKER_ROOT_DISK_SCRIPT)}` },
     { id: 'fstab', command: `cat /etc/fstab 2>/dev/null` },
   ];
@@ -299,9 +340,15 @@ export interface RepoFileObservation {
   readable: boolean;
 }
 
+export interface RepoKeyObservation {
+  path: string;
+  /** Null when the file could not be read in full. */
+  bytes: Buffer | null;
+}
+
 export interface RepoProbeOutput {
   sources: RepoFileObservation[];
-  keys: Array<{ path: string; bytes: Buffer | null }>;
+  keys: RepoKeyObservation[];
 }
 
 function parseDelimitedBlocks(text: string, begin: string, end: string, unreadable: string): RepoFileObservation[] {
@@ -334,14 +381,27 @@ export function parseRepoProbeOutput(text: string): RepoProbeOutput {
   const sources = parseDelimitedBlocks(text, 'SOURCE_BEGIN', 'SOURCE_END', 'SOURCE_UNREADABLE=1');
   const keyFiles = parseDelimitedBlocks(text, 'KEY_BEGIN', 'KEY_END', 'KEY_UNREADABLE=1');
   const keys = keyFiles.map((file) => {
-    const raw = file.content.trim();
-    const unreadable = !file.readable || !raw || raw === 'KEY_UNREADABLE=1';
-    return { path: file.path, bytes: unreadable ? null : Buffer.from(raw, 'base64') };
+    const lines = file.content.split('\n').map((line) => line.trim());
+    const sizeLine = lines.find((line) => /^KEY_SIZE=/.test(line));
+    const size = sizeLine && /^KEY_SIZE=\d+$/.test(sizeLine) ? Number(sizeLine.slice('KEY_SIZE='.length)) : null;
+    const raw = lines.filter((line) => line && !line.startsWith('KEY_SIZE=')).join('');
+    if (!file.readable || raw === 'KEY_UNREADABLE=1' || size === null) return { path: file.path, bytes: null };
+    const bytes = Buffer.from(raw, 'base64');
+    // A read cut off by the cap is no basis for a verdict on the whole keyring.
+    return { path: file.path, bytes: bytes.length === size ? bytes : null };
   });
   return { sources, keys };
 }
 
 const OFFICIAL_DOCKER_URI = 'https://download.docker.com/linux/ubuntu';
+
+/** apt options that switch off or weaken signature checking for a source. */
+const INSECURE_SOURCE_OPTIONS = ['trusted', 'allow-insecure', 'allow-weak', 'allow-downgrade-to-insecure'];
+const FALSE_OPTION_VALUES = new Set(['no', 'false', 'without', 'off', 'disable', '0']);
+
+function weakensSignatures(value: string | undefined): boolean {
+  return value !== undefined && !FALSE_OPTION_VALUES.has(value.trim().toLowerCase());
+}
 
 function sourceOptions(optionText: string | undefined): Map<string, string> {
   const options = new Map<string, string>();
@@ -353,28 +413,44 @@ function sourceOptions(optionText: string | undefined): Map<string, string> {
   return options;
 }
 
+function insecureOption(get: (name: string) => string | undefined): string | null {
+  return INSECURE_SOURCE_OPTIONS.find((name) => weakensSignatures(get(name))) ?? null;
+}
+
+/** Every key a source names must be an installed keyring that holds Docker's key. */
+function namesOnlyVerifiedKeyrings(signedBy: string | undefined, keyPaths: Set<string>): boolean {
+  const named = (signedBy ?? '').split(/[,\s]+/).filter(Boolean);
+  return named.length > 0 && named.every((path) => keyPaths.has(path));
+}
+
 function verifyListSource(content: string, codename: string, keyPaths: Set<string>): { ok: boolean; reason: string | null } {
   const active = content.split('\n')
     .map((line) => line.trim())
     .filter((line) => line && !line.startsWith('#'));
   if (active.length === 0) return { ok: false, reason: 'the Docker source file is empty' };
+  let binaryEntries = 0;
   for (const line of active) {
-    const match = /^deb\s+(\[[^\]]*\]\s+)?(\S+)\s+(\S+)\s+(.+)$/.exec(line);
+    const match = /^(deb|deb-src)\s+(\[[^\]]*\]\s+)?(\S+)\s+(\S+)\s+(.+)$/.exec(line);
     if (!match) return { ok: false, reason: 'the Docker source line is not a valid apt entry' };
-    const options = sourceOptions(match[1]);
-    const uri = match[2];
-    const suite = match[3];
-    const components = match[4].split(/\s+/);
+    // A deb-src entry cannot supply packages, so it neither helps nor contradicts.
+    if (match[1] === 'deb-src') continue;
+    binaryEntries += 1;
+    const options = sourceOptions(match[2]);
+    const uri = match[3];
+    const suite = match[4];
+    const components = match[5].split(/\s+/);
     if (uri !== OFFICIAL_DOCKER_URI) return { ok: false, reason: `the source points at ${uri}, not ${OFFICIAL_DOCKER_URI}` };
     if (!suite.split(/[,\s]+/).includes(codename)) return { ok: false, reason: `the suite is ${suite}, not ${codename}` };
     if (!components.includes('stable')) return { ok: false, reason: 'the source does not enable the stable component' };
-    const signedBy = options.get('signed-by');
-    if (!signedBy || !keyPaths.has(signedBy)) {
+    const weakened = insecureOption((name) => options.get(name));
+    if (weakened) return { ok: false, reason: `the source sets ${weakened}, which weakens signature checking` };
+    if (!namesOnlyVerifiedKeyrings(options.get('signed-by'), keyPaths)) {
       return { ok: false, reason: 'the source does not name an installed Docker keyring through signed-by' };
     }
     const arch = options.get('arch');
     if (arch && !['amd64', 'arm64'].includes(arch)) return { ok: false, reason: `the source architecture ${arch} is not supported` };
   }
+  if (binaryEntries === 0) return { ok: false, reason: 'the Docker source file has no binary (deb) entry' };
   return { ok: true, reason: null };
 }
 
@@ -407,7 +483,13 @@ function parseDeb822(content: string): Array<Record<string, string>> {
 function verifyDeb822Source(content: string, codename: string, keyPaths: Set<string>): { ok: boolean; reason: string | null } {
   const paragraphs = parseDeb822(content);
   if (paragraphs.length === 0) return { ok: false, reason: 'the Docker deb822 source is empty' };
+  let binaryEntries = 0;
   for (const paragraph of paragraphs) {
+    // A disabled or source-only stanza cannot supply packages to apt.
+    if (paragraph.enabled !== undefined && FALSE_OPTION_VALUES.has(paragraph.enabled.trim().toLowerCase())) continue;
+    const types = (paragraph.types ?? '').toLowerCase().split(/[,\s]+/).filter(Boolean);
+    if (!types.includes('deb')) continue;
+    binaryEntries += 1;
     const uris = (paragraph.uris ?? '').split(/\s+/).filter(Boolean);
     const suites = (paragraph.suites ?? '').split(/[,\s]+/).filter(Boolean);
     const components = (paragraph.components ?? '').split(/[,\s]+/).filter(Boolean);
@@ -416,31 +498,25 @@ function verifyDeb822Source(content: string, codename: string, keyPaths: Set<str
     }
     if (!suites.includes(codename)) return { ok: false, reason: `the suite is ${paragraph.suites ?? 'missing'}, not ${codename}` };
     if (!components.includes('stable')) return { ok: false, reason: 'the source does not enable the stable component' };
-    const signedBy = (paragraph['signed-by'] ?? '').trim();
-    if (!signedBy || !keyPaths.has(signedBy)) {
+    const weakened = insecureOption((name) => paragraph[name]);
+    if (weakened) return { ok: false, reason: `the source sets ${weakened}, which weakens signature checking` };
+    if (!namesOnlyVerifiedKeyrings(paragraph['signed-by'], keyPaths)) {
       return { ok: false, reason: 'the source does not name an installed Docker keyring through Signed-By' };
     }
   }
+  if (binaryEntries === 0) return { ok: false, reason: 'the Docker deb822 source has no enabled binary (deb) entry' };
   return { ok: true, reason: null };
-}
-
-function keyLooksValid(path: string, bytes: Buffer | null): boolean {
-  if (!bytes || bytes.length === 0) return false;
-  const text = bytes.toString('utf8');
-  if (text.includes('-----BEGIN PGP PUBLIC KEY BLOCK-----')) return true;
-  // Binary OpenPGP public-key packet (old-format tag 6).
-  if (bytes[0] === 0x99 || bytes[0] === 0xc6) return true;
-  return /\.gpg$/i.test(path) && bytes[0] === 0x98;
 }
 
 /**
  * Verify what the Docker apt source and keyring actually say. A file named
- * docker.list with an arbitrary URL is not the official repository, and an
- * unreadable file is unknown, never a pass.
+ * docker.list with an arbitrary URL is not the official repository, a keyring
+ * is Docker's only when its fingerprint is, and an unreadable file is unknown,
+ * never a pass.
  */
 export function parseDockerRepo(text: string, codename = ''): RepositoryObservation {
   const parsed = parseRepoProbeOutput(text);
-  const verifiedKeys = parsed.keys.filter((key) => keyLooksValid(key.path, key.bytes));
+  const verifiedKeys = parsed.keys.filter((key) => isDockerReleaseKeyFile(key.path, key.bytes));
   const keyPaths = new Set(verifiedKeys.map((key) => key.path));
   const keyringVerified = verifiedKeys.length > 0
     ? true
@@ -450,7 +526,12 @@ export function parseDockerRepo(text: string, codename = ''): RepositoryObservat
 
   let unreadableSource = false;
   let allReadableVerified = true;
-  let problem: string | null = null;
+  // A keyring that is not Docker's is the root cause of any source it was meant to sign.
+  let problem: string | null = !keyringVerified && parsed.keys.length > 0
+    ? keyringVerified === null
+      ? 'a Docker keyring could not be read in full'
+      : 'no Docker keyring holds the Docker release key'
+    : null;
   for (const source of parsed.sources) {
     if (!source.readable) {
       unreadableSource = true;
@@ -490,41 +571,69 @@ const DOCKER_PACKAGES: DockerPackageName[] = [
   'docker-compose-plugin',
 ];
 
+const NUMERIC = /^-?\d+$/;
+
+/**
+ * Parse `apt-cache policy`. A candidate is attributed to the archives listed
+ * under its own version in the version table, never to the first archive that
+ * follows the Candidate line.
+ */
 export function parseAptPolicy(text: string): DockerPackage[] {
   const packages = new Map<string, DockerPackage>();
-  let current: DockerPackage | null = null;
+  let current: (DockerPackage & { candidateSources: NonNullable<DockerPackage['candidateSources']> }) | null = null;
+  let inVersionTable = false;
+  let tableVersion: string | null = null;
   for (const line of text.split('\n')) {
     const nameMatch = /^([a-z0-9.-]+):\s*$/.exec(line);
     if (nameMatch) {
       const name = nameMatch[1] as DockerPackageName;
+      inVersionTable = false;
+      tableVersion = null;
       if (!DOCKER_PACKAGES.includes(name)) {
         current = null;
         continue;
       }
-      current = { name, installedVersion: null, candidateVersion: null, candidateSource: null };
+      current = { name, installedVersion: null, candidateVersion: null, candidateSources: [] };
       packages.set(name, current);
       continue;
     }
     if (!current) continue;
-    const installed = /^\s+Installed:\s*(\S+)/.exec(line);
-    if (installed) {
-      current.installedVersion = installed[1] === '(none)' ? null : installed[1];
+    if (/^\s+Version table:\s*$/.test(line)) {
+      inVersionTable = true;
+      tableVersion = null;
       continue;
     }
-    const candidate = /^\s+Candidate:\s*(\S+)/.exec(line);
-    if (candidate) {
-      current.candidateVersion = candidate[1] === '(none)' ? null : candidate[1];
+    if (!inVersionTable) {
+      const installed = /^\s+Installed:\s*(\S+)/.exec(line);
+      if (installed) {
+        current.installedVersion = installed[1] === '(none)' ? null : installed[1];
+        continue;
+      }
+      const candidate = /^\s+Candidate:\s*(\S+)/.exec(line);
+      if (candidate) current.candidateVersion = candidate[1] === '(none)' ? null : candidate[1];
       continue;
     }
-    // The version table lists the archive that serves each candidate.
-    const source = /^\s+[\d*\s]+\s+(https?:\/\/\S+)/.exec(line);
-    if (source && current.candidateVersion) current.candidateSource ??= source[1];
+    const tokens = line.trim().split(/\s+/).filter((token) => token && token !== '***');
+    if (tokens.length === 2 && NUMERIC.test(tokens[1])) {
+      // "<version> <priority>" opens a stanza of the version table.
+      tableVersion = tokens[0];
+      continue;
+    }
+    // "<priority> <archive URI or path> [<release> ...]" lists where that version is served.
+    if (tokens.length >= 2 && NUMERIC.test(tokens[0]) && tableVersion !== null) {
+      const location = tokens[1];
+      // The installed-package record is not an archive.
+      if (location === '/var/lib/dpkg/status') continue;
+      if (tableVersion === current.candidateVersion) {
+        current.candidateSources.push({ uri: location, release: tokens[2] ?? null });
+      }
+    }
   }
   return DOCKER_PACKAGES.map((name) => packages.get(name) ?? {
     name,
     installedVersion: null,
     candidateVersion: null,
-    candidateSource: null,
+    candidateSources: [],
   });
 }
 
@@ -754,14 +863,51 @@ export function parseDfFreeBytes(text: string): number | null {
   return Number(fields[3]) * 1024;
 }
 
-function isOfficialDockerArchive(source: string | null | undefined): boolean {
-  if (!source) return false;
+export interface DockerRootDiskObservation {
+  /** How the root was established; null when the script reported nothing usable. */
+  source: 'daemon' | 'default' | 'unavailable' | null;
+  root: string | null;
+  freeBytes: number | null;
+}
+
+export function parseDockerRootDisk(text: string): DockerRootDiskObservation {
+  const raw = new Map<string, string>();
+  for (const line of text.split('\n')) {
+    const match = /^D_([A-Z]+)=(.*)$/.exec(line);
+    if (match) raw.set(match[1], match[2]);
+  }
+  const source = raw.get('SOURCE');
+  return {
+    source: source === 'daemon' || source === 'default' || source === 'unavailable' ? source : null,
+    root: raw.get('ROOT')?.trim() || null,
+    freeBytes: parseDfFreeBytes(raw.get('DF') ?? ''),
+  };
+}
+
+function isOfficialDockerArchive(source: { uri: string; release: string | null }, codename: string): boolean {
   try {
-    const url = new URL(source);
-    return url.origin === 'https://download.docker.com' && url.pathname === '/linux/ubuntu';
+    const url = new URL(source.uri);
+    if (url.origin !== 'https://download.docker.com' || url.pathname !== '/linux/ubuntu') return false;
   } catch {
     return false;
   }
+  return !codename || source.release === `${codename}/stable`;
+}
+
+/**
+ * Whether apt would serve every candidate from the official archive. A
+ * candidate without a known archive is unknown, and one foreign archive makes
+ * the whole answer false.
+ */
+function candidateProvenance(packages: DockerPackage[], codename: string): boolean | null {
+  const perPackage = packages
+    .filter((pkg) => pkg.candidateVersion !== null)
+    .map((pkg) => {
+      const sources = pkg.candidateSources ?? [];
+      return sources.length === 0 ? null : sources.every((source) => isOfficialDockerArchive(source, codename));
+    });
+  if (perPackage.includes(false)) return false;
+  return perPackage.length === 0 || perPackage.includes(null) ? null : true;
 }
 
 // --- Fact assembly -------------------------------------------------------
@@ -854,6 +1000,44 @@ function isUnderAnyMount(path: string, mountPoints: string[]): boolean {
   return mountPoints.some((mount) => mount === path || (mount !== '/' && path.startsWith(`${mount}/`)));
 }
 
+/**
+ * The default installation's Compose file. A direct answer of yes or no is
+ * conclusive; a denied or failed direct attempt falls back to sudo, and when
+ * neither answers the default directory is unknown, never absent.
+ */
+function defaultDirHasComposeFile(map: Map<string, SshCommandResult>): boolean | null {
+  for (const id of ['default_agent_path', 'default_agent_path_sudo']) {
+    const result = map.get(id);
+    if (!isCompleteResult(result)) continue;
+    const answer = result.stdout.trim();
+    if (answer === 'yes') return true;
+    if (answer === 'no') return false;
+  }
+  return null;
+}
+
+/**
+ * Free space of the filesystem under the Docker root. The measurement counts
+ * only for the root the daemon reported (or the default root of a host that has
+ * no Docker CLI at all): another path's capacity is not this root's.
+ */
+function dockerRootFacts(
+  map: Map<string, SshCommandResult>,
+  dockerInfo: { rootDir: string | null } | null,
+  cliInstalled: boolean,
+  cliProbeUnknown: boolean,
+): { path: string | null; freeBytes: number | null } {
+  const disk = parseDockerRootDisk(completeStdout(map, 'docker_root_disk'));
+  if (dockerInfo) {
+    const sameRoot = disk.source === 'daemon' && disk.root !== null && disk.root === dockerInfo.rootDir;
+    return { path: dockerInfo.rootDir, freeBytes: sameRoot ? disk.freeBytes : null };
+  }
+  if (!cliInstalled && !cliProbeUnknown && disk.source === 'default') {
+    return { path: disk.root, freeBytes: disk.freeBytes };
+  }
+  return { path: null, freeBytes: null };
+}
+
 export function assembleFacts(input: AssembleFactsInput): BootstrapFacts {
   const map = resultMap(input.results);
   const osBase = parseOsRelease(stdoutOf(map, 'os_release'));
@@ -894,11 +1078,7 @@ export function assembleFacts(input: AssembleFactsInput): BootstrapFacts {
     };
   const packagesComplete = succeeded(map, 'apt_policy');
   const packages = parseAptPolicy(completeStdout(map, 'apt_policy'));
-  const candidatesWithSource = packages.filter((pkg) => pkg.candidateVersion !== null);
-  const candidateSourceVerified = candidatesWithSource.length === 0
-    || candidatesWithSource.every((pkg) => !pkg.candidateSource)
-    ? null
-    : candidatesWithSource.every((pkg) => isOfficialDockerArchive(pkg.candidateSource));
+  const candidateSourceVerified = candidateProvenance(packages, osBase?.codename ?? '');
   const repo: BootstrapFacts['repo'] = { ...repoBase, candidateSourceVerified };
 
   const containerOutcome = inventoryOutcome(map, 'containers', 'containers_sudo');
@@ -968,12 +1148,10 @@ export function assembleFacts(input: AssembleFactsInput): BootstrapFacts {
       ? volumeOutcome.complete ? volumeNames.length > 0 : null
       : cliProbeUnknown || cliInstalled ? null : false,
     dataVolumeNames: volumeNames,
-    defaultDirHasComposeFile: succeeded(map, 'default_agent_path')
-      ? stdoutOf(map, 'default_agent_path').trim() === 'yes'
-      : null,
+    defaultDirHasComposeFile: defaultDirHasComposeFile(map),
   };
 
-  const dockerRootFreeBytes = parseDfFreeBytes(stdoutOf(map, 'docker_root_disk'));
+  const dockerRoot = dockerRootFacts(map, dockerInfo, cliInstalled, cliProbeUnknown);
 
   return {
     target: input.target,
@@ -1008,8 +1186,8 @@ export function assembleFacts(input: AssembleFactsInput): BootstrapFacts {
     paths: { composeDir, agentDir },
     agent: agentInstall,
     dockerRoot: {
-      path: dockerInfo?.rootDir ?? null,
-      freeBytes: dockerRootFreeBytes,
+      path: dockerRoot.path,
+      freeBytes: dockerRoot.freeBytes,
       // Only claim a type when the Docker root is the Compose path itself; the
       // df probe does not report the Docker root's own filesystem type.
       filesystemType: dockerInfo?.rootDir && dockerInfo.rootDir === composeFacts.input

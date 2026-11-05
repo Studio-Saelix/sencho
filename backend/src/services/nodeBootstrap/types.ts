@@ -112,7 +112,7 @@ export interface AgentInstallObservation {
   }>;
   dataVolumeExists: boolean | null;
   dataVolumeNames: string[];
-  /** Null when the probe did not complete. */
+  /** Null when the default directory could not be inspected, directly or through sudo. */
   defaultDirHasComposeFile: boolean | null;
 }
 
@@ -127,8 +127,8 @@ export interface DockerPackage {
   name: DockerPackageName;
   installedVersion: string | null;
   candidateVersion: string | null;
-  /** Repository URI apt reports for the candidate version, when known. */
-  candidateSource?: string | null;
+  /** Archives apt lists under the candidate version itself; empty when none is known. */
+  candidateSources?: Array<{ uri: string; release: string | null }>;
 }
 
 export interface RepositoryObservation {
@@ -177,6 +177,7 @@ export interface BootstrapFacts {
     agentDir: AgentDirObservation;
   };
   agent: AgentInstallObservation;
+  /** `freeBytes` is null unless it was measured on the filesystem holding `path`. */
   dockerRoot: { path: string | null; freeBytes: number | null; filesystemType: string | null };
   containers: {
     total: number;

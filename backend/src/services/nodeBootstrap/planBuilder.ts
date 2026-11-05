@@ -1,6 +1,13 @@
 import crypto from 'crypto';
 import { buildPilotEnrollmentCompose } from '../../helpers/pilotEnrollmentCompose';
-import { dockerAndComposeWork, missingDockerPackages, repoVerified } from './evidence';
+import {
+  dockerAndComposeWork,
+  dockerEngineWorks,
+  missingDockerPackages,
+  plannedDockerPackages,
+  repoVerified,
+  unsupportedComposeAddition,
+} from './evidence';
 import { DOCKER_LOCAL_ASSIGNMENTS, DOCKER_LOCAL_UNSET_ARGS } from './probes';
 import {
   BOOTSTRAP_MARKER_FILENAME,
@@ -293,6 +300,9 @@ export function buildBootstrapPlan(input: PlanBuildInput): BootstrapPlan {
   if (facts.agent.defaultDirHasComposeFile === null) {
     throw new Error('The plan requires the default Pilot directory to be checked.');
   }
+  if (unsupportedComposeAddition(facts)) {
+    throw new Error('The plan cannot add Compose to a Docker engine that was not installed from Docker packages.');
+  }
   const owner = facts.user.name;
   const group = facts.user.group;
   const root = facts.user.isRoot;
@@ -304,9 +314,9 @@ export function buildBootstrapPlan(input: PlanBuildInput): BootstrapPlan {
 
   const dockerWorking = dockerAndComposeWork(facts);
   const repoConfigured = repoVerified(facts);
-  const missingPackages = missingDockerPackages(facts);
+  const packagesToInstall = plannedDockerPackages(facts);
   const needsRepo = !dockerWorking && !repoConfigured;
-  const needsMetadataRefresh = !dockerWorking && !needsRepo && missingPackages.length > 0;
+  const needsMetadataRefresh = !dockerWorking && !needsRepo && packagesToInstall.length > 0;
 
   if (needsRepo) {
     stages.push({
@@ -329,14 +339,17 @@ export function buildBootstrapPlan(input: PlanBuildInput): BootstrapPlan {
     skipped.push({ id: 'docker_repository', reason: 'The official Docker repository and keyring are already configured.' });
   }
 
-  if (missingPackages.length > 0 && dockerWorking) {
+  if (dockerWorking && missingDockerPackages(facts).length > 0) {
     skipped.push({
       id: 'docker_packages',
       reason: 'Docker and Compose already work; the existing distribution installation is preserved instead of being replaced.',
     });
     notices.push('Docker and Compose already work on this host. The plan does not install or replace Docker packages.');
-  } else if (missingPackages.length > 0) {
-    const versionsKnown = missingPackages.every((pkg) => pkg.candidateVersion !== null);
+  } else if (packagesToInstall.length > 0) {
+    if (dockerEngineWorks(facts)) {
+      notices.push('Docker already runs on this host. Only the Compose plugin is installed; the engine, containerd and every container are left as they are.');
+    }
+    const versionsKnown = packagesToInstall.every((pkg) => pkg.candidateVersion !== null);
     if (!versionsKnown) {
       notices.push('Package versions are not available from the local apt index yet, so they are resolved from the official repository when the plan runs. Execution re-checks the resolved versions before installation.');
     }
@@ -345,11 +358,11 @@ export function buildBootstrapPlan(input: PlanBuildInput): BootstrapPlan {
       title: 'Docker packages',
       steps: [{
         id: 'install-docker-packages',
-        title: 'Install the missing Docker packages',
+        title: dockerEngineWorks(facts) ? 'Install the Docker Compose plugin' : 'Install the missing Docker packages',
         rationale: 'The Pilot runs Docker Compose on this host.',
         effect: 'package-install',
         privilege: root ? 'user' : 'sudo',
-        command: sudoCommand(packageInstallCommand(missingPackages, versionsKnown), sudoAvailable && !root),
+        command: sudoCommand(packageInstallCommand(packagesToInstall, versionsKnown), sudoAvailable && !root),
         disruptive: true,
         reversible: 'yes',
         pointOfNoReturn: false,

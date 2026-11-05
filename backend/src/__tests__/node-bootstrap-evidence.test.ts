@@ -201,7 +201,10 @@ describe('bootstrap evidence: conflicts and network', () => {
       },
     });
     expect(check(project, 'agent_conflict').status).toBe('blocked');
-    expect(check(makeFacts({ agent: { defaultDirHasComposeFile: true } }), 'agent_conflict').status).toBe('blocked');
+    expect(check(makeFacts({
+      agent: { defaultDirHasComposeFile: true },
+      agentDir: { input: '/srv/sencho-agent', normalized: '/srv/sencho-agent', realPath: '/srv/sencho-agent' },
+    }), 'agent_conflict').status).toBe('blocked');
   });
 
   it('warns about a data volume without a project and reports unknown when unreadable', () => {

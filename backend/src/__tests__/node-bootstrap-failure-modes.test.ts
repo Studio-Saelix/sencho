@@ -16,6 +16,7 @@ import { buildBootstrapEvidence } from '../services/nodeBootstrap/evidence';
 import { buildBootstrapPlan } from '../services/nodeBootstrap/planBuilder';
 import type { SshCommandResult } from '../services/nodeBootstrap/sshProbeClient';
 import { makeFacts } from './__helpers__/bootstrapFacts';
+import { DOCKER_ASC_PATH, dockerAscBlock, keyBlock as keyBlockOf } from './__helpers__/dockerRepoFixtures';
 
 /**
  * Failure modes of the Docker, Compose, package and hub probes: a command that
@@ -340,8 +341,7 @@ describe('docker commands under a hostile environment', () => {
 });
 
 describe('docker repository variants', () => {
-  const key = Buffer.from('-----BEGIN PGP PUBLIC KEY BLOCK-----\nfixture\n-----END PGP PUBLIC KEY BLOCK-----\n').toString('base64');
-  const keyBlock = (keyPath = '/etc/apt/keyrings/docker.asc') => `KEY_BEGIN=${keyPath}\n${key}\nKEY_END=${keyPath}`;
+  const keyBlock = (keyPath = DOCKER_ASC_PATH) => dockerAscBlock(keyPath);
   const source = (file: string, content: string) => `SOURCE_BEGIN=${file}\n${content}\nSOURCE_END=${file}`;
   const OFFICIAL = 'https://download.docker.com/linux/ubuntu';
   const deb822 = (fields: Record<string, string>) => Object.entries(fields).map(([name, value]) => `${name}: ${value}`).join('\n');
@@ -381,7 +381,7 @@ describe('docker repository variants', () => {
   it('does not accept a source whose keyring is not a key', () => {
     const parsed = parseDockerRepo([
       source('/etc/apt/sources.list.d/docker.list', `deb [arch=amd64 signed-by=/etc/apt/keyrings/docker.asc] ${OFFICIAL} noble stable`),
-      `KEY_BEGIN=/etc/apt/keyrings/docker.asc\n${Buffer.from('plain text').toString('base64')}\nKEY_END=/etc/apt/keyrings/docker.asc`,
+      keyBlockOf(DOCKER_ASC_PATH, Buffer.from('plain text')),
     ].join('\n'), 'noble');
     expect(parsed.keyringVerified).toBe(false);
   });

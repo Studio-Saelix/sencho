@@ -14,6 +14,7 @@ import {
   type SshCommand,
   type SshCommandResult,
 } from '../services/nodeBootstrap/sshProbeClient';
+import { DOCKER_ASC_PATH, dockerAscBlock } from './__helpers__/dockerRepoFixtures';
 
 const PATH_COMPOSE_OUTPUT = [
   'P_INPUT=/opt/docker/sencho',
@@ -75,7 +76,7 @@ function probeOutputs(): Record<string, string> {
     agent_inventory: '',
     agent_marker: '',
     default_agent_path: 'no',
-    docker_root_disk: '/dev/sda1 1 1 104857600 1% /',
+    docker_root_disk: 'D_SOURCE=daemon\nD_ROOT=/var/lib/docker\nD_DF=/dev/sda1 1 1 104857600 1% /',
     fstab: 'UUID=abc / ext4 defaults 0 1',
   };
 }
@@ -897,6 +898,94 @@ describe('bootstrap service failure handling', () => {
     expect(result.plan).toBeNull();
     const unknown = result.inspection.checks.filter((entry) => entry.status === 'unknown').map((entry) => entry.id);
     expect(unknown).toEqual(expect.arrayContaining(['docker_cli', 'agent_conflict']));
+  });
+
+  describe('issues no plan when a safety fact is unknown or contradicted', () => {
+    async function preflightWith(
+      overrides: Record<string, string>,
+      failing: Record<string, number> = {},
+      extra: Partial<BootstrapPreflightRequest> = {},
+    ) {
+      const outputs = { ...probeOutputs(), ...overrides };
+      const transport: BootstrapTransport = {
+        captureHostKey: async () => ({ algorithm: 'ssh-ed25519', fingerprint: 'SHA256:x', knownHostsLine: 'line' }),
+        runCommands: async (_session, commands, options) => {
+          options?.onHostKey?.({ algorithm: 'ssh-ed25519', fingerprint: base('x').expectedFingerprint as string, knownHostsLine: 'line' });
+          return commands.map((command) => (
+            command.id in failing
+              ? { ...ok(command.id, outputs[command.id] ?? ''), exitCode: failing[command.id] }
+              : ok(command.id, outputs[command.id] ?? '')
+          ));
+        },
+      };
+      return makeService(transport).preflight(base(`safety-${Math.random().toString(36).slice(2)}.example.com`, extra), { hubUrl: hub, audit });
+    }
+    const statusOf = (result: Awaited<ReturnType<typeof preflightWith>>, id: string) => (
+      result.inspection.checks.find((entry) => entry.id === id)?.status
+    );
+
+    it('for a custom Docker root whose capacity could not be read', async () => {
+      const result = await preflightWith({ docker_info: '27.3.1|/data/docker', docker_root_disk: 'D_SOURCE=unavailable' });
+      expect(statusOf(result, 'disk_space')).toBe('unknown');
+      expect(result.blocked).toBe(true);
+      expect(result.plan).toBeNull();
+    });
+
+    it('for the default root measured as if it were a custom root', async () => {
+      const result = await preflightWith({
+        docker_info: '27.3.1|/data/docker',
+        docker_root_disk: 'D_SOURCE=daemon\nD_ROOT=/var/lib/docker\nD_DF=/dev/sda1 1 1 104857600 1% /',
+      });
+      expect(result.inspection.dockerRoot).toMatchObject({ path: '/data/docker', freeBytes: null });
+      expect(result.plan).toBeNull();
+    });
+
+    it('for a default Pilot directory that could not be inspected', async () => {
+      const result = await preflightWith({ default_agent_path: 'error\n' }, { default_agent_path_sudo: 1 });
+      expect(statusOf(result, 'agent_conflict')).toBe('unknown');
+      expect(result.plan).toBeNull();
+    });
+
+    it('for an earlier installation found through sudo beside an existing empty chosen directory', async () => {
+      const emptyAlternate = [
+        'P_INPUT=/srv/agent', 'P_EXISTS=1', 'P_ISDIR=1', 'P_FINAL_LINK=0', 'P_REAL=/srv/agent', 'P_ANCESTOR_LINK=0',
+        'P_OWNER=ubuntu', 'P_GROUP=ubuntu', 'P_MODE=700', 'P_USER_R=1', 'P_USER_W=1', 'P_NEAREST=/srv/agent',
+        'P_PARENT_W=1', 'P_FSTYPE=ext4', 'P_FSSOURCE=/dev/sda1', 'P_FSTARGET=/', 'P_DF=/dev/sda1 1 1 104857600 1% /',
+      ].join('\n');
+      const result = await preflightWith(
+        { path_agent: emptyAlternate, default_agent_path: 'error\n', default_agent_path_sudo: 'yes\n' },
+        {},
+        { agentDir: '/srv/agent' },
+      );
+      expect(statusOf(result, 'agent_conflict')).toBe('blocked');
+      expect(result.plan).toBeNull();
+    });
+
+    it('for a working distribution Docker that only lacks Compose', async () => {
+      const result = await preflightWith({
+        compose_version: '',
+        docker_repo: '',
+        apt_policy: 'docker-ce:\n  Installed: (none)\n  Candidate: (none)',
+        containers: 'web\tnginx\tweb\t/srv/web\tUp',
+      }, { compose_version: 1, compose_version_sudo: 1 });
+      expect(statusOf(result, 'compose_plugin')).toBe('blocked');
+      expect(result.plan).toBeNull();
+    });
+
+    it('for a Docker source that weakens signature checking', async () => {
+      const result = await preflightWith({
+        docker_info: '',
+        docker_cli: '',
+        docker_repo: [
+          'SOURCE_BEGIN=/etc/apt/sources.list.d/docker.list',
+          `deb [arch=amd64 trusted=yes signed-by=${DOCKER_ASC_PATH}] https://download.docker.com/linux/ubuntu noble stable`,
+          'SOURCE_END=/etc/apt/sources.list.d/docker.list',
+          dockerAscBlock(),
+        ].join('\n'),
+      }, { docker_cli: 1, docker_info: 1, docker_info_sudo: 1, compose_version: 1, compose_version_sudo: 1 });
+      expect(statusOf(result, 'apt_source')).toBe('blocked');
+      expect(result.plan).toBeNull();
+    });
   });
 
   it('reports the mount as unknown when /etc/fstab could not be read', async () => {

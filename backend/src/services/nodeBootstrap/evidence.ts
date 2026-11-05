@@ -109,6 +109,41 @@ export function missingDockerPackages(facts: BootstrapFacts): DockerPackage[] {
   ));
 }
 
+/** A Docker CLI whose daemon answers, whoever packaged it. */
+export function dockerEngineWorks(facts: BootstrapFacts): boolean {
+  return facts.docker.cliInstalled && facts.docker.serverVersion !== null;
+}
+
+/** Engine, CLI and containerd all come from Docker's own packages. */
+export function officialEngineInstalled(facts: BootstrapFacts): boolean {
+  return ['docker-ce', 'docker-ce-cli', 'containerd.io'].every((name) => (
+    facts.packages.some((pkg) => pkg.name === name && pkg.installedVersion !== null)
+  ));
+}
+
+/**
+ * A working engine that is missing only Compose, and was not installed from
+ * Docker's packages. Adding Docker's Compose package beside it could pull in or
+ * replace the engine, so the plan stops instead of guessing.
+ */
+export function unsupportedComposeAddition(facts: BootstrapFacts): boolean {
+  return facts.packagesComplete
+    && dockerEngineWorks(facts)
+    && facts.docker.composeVersion === null
+    && !officialEngineInstalled(facts);
+}
+
+/**
+ * The packages the plan installs. A working engine is never reinstalled: when
+ * only Compose is missing, the Compose plugin alone is planned.
+ */
+export function plannedDockerPackages(facts: BootstrapFacts): DockerPackage[] {
+  if (!dockerEngineWorks(facts)) return missingDockerPackages(facts);
+  return facts.docker.composeVersion === null
+    ? facts.packages.filter((pkg) => pkg.name === 'docker-compose-plugin')
+    : [];
+}
+
 function isDeniedFilesystem(type: string | null | undefined): boolean {
   if (!type) return false;
   return DENIED_FILESYSTEMS.some((denied) => {
@@ -478,21 +513,19 @@ function diskSpaceCheck(facts: BootstrapFacts): BootstrapCheck {
   const agent = facts.paths.agentDir;
   const shared = compose.filesystem && agent.filesystem
     && compose.filesystem.mountPoint === agent.filesystem.mountPoint;
-  const problems: string[] = [];
-  let status: BootstrapCheck['status'] = 'pass';
+  // Each severity keeps its own list: a capacity that could not be read stays
+  // unknown whatever the other filesystems report, in either order.
+  const blocked: string[] = [];
+  const unknown: string[] = [];
+  const low: string[] = [];
 
   const evaluate = (name: string, free: number | null, warnAt: number, blockAt: number): void => {
     if (free === null) {
-      if (status === 'pass') status = 'unknown';
-      problems.push(`${name}: unreadable`);
-      return;
-    }
-    if (free < blockAt) {
-      status = 'blocked';
-      problems.push(`${name}: ${fmtBytes(free)} free, under ${fmtBytes(blockAt)}`);
-    } else if (free < warnAt && status !== 'blocked') {
-      status = 'warn';
-      problems.push(`${name}: ${fmtBytes(free)} free, under ${fmtBytes(warnAt)}`);
+      unknown.push(`${name}: unreadable`);
+    } else if (free < blockAt) {
+      blocked.push(`${name}: ${fmtBytes(free)} free, under ${fmtBytes(blockAt)}`);
+    } else if (free < warnAt) {
+      low.push(`${name}: ${fmtBytes(free)} free, under ${fmtBytes(warnAt)}`);
     }
   };
 
@@ -507,40 +540,47 @@ function diskSpaceCheck(facts: BootstrapFacts): BootstrapCheck {
     evaluate('Compose directory', compose.freeBytes, COMPOSE_FREE_WARN_BYTES, COMPOSE_FREE_BLOCK_BYTES);
     evaluate('Agent directory', agent.freeBytes, AGENT_FREE_WARN_BYTES, AGENT_FREE_BLOCK_BYTES);
   }
-  evaluate('Docker root', facts.dockerRoot.freeBytes, DOCKER_ROOT_FREE_WARN_BYTES, DOCKER_ROOT_FREE_BLOCK_BYTES);
+  evaluate(
+    facts.dockerRoot.path ? `Docker root (${facts.dockerRoot.path})` : 'Docker root',
+    facts.dockerRoot.freeBytes,
+    DOCKER_ROOT_FREE_WARN_BYTES,
+    DOCKER_ROOT_FREE_BLOCK_BYTES,
+  );
 
-  if (status === 'pass') {
+  if (blocked.length > 0) {
+    const problems = [...blocked, ...unknown, ...low];
     return {
       ...base,
-      status,
-      summary: 'All related filesystems have enough free space.',
-      observed: `compose=${fmtBytes(compose.freeBytes)} agent=${fmtBytes(agent.freeBytes)} dockerRoot=${fmtBytes(facts.dockerRoot.freeBytes)}`,
-    };
-  }
-  if (status === 'warn') {
-    return {
-      ...base,
-      status,
-      summary: `Free space is below the comfortable level. ${problems.join('; ')}.`,
+      status: 'blocked',
+      summary: `Not enough free space. ${problems.join('; ')}.`,
       observed: problems.join('; '),
-      remediation: 'Free space before approving execution, or choose a directory on a larger filesystem.',
+      remediation: 'Free space on the affected filesystem or choose a directory with at least the required headroom.',
     };
   }
-  if (status === 'unknown') {
+  if (unknown.length > 0) {
+    const problems = [...unknown, ...low];
     return {
       ...base,
-      status,
+      status: 'unknown',
       summary: `Free space could not be read for at least one filesystem. ${problems.join('; ')}.`,
       observed: problems.join('; '),
       remediation: 'Check free space on the host, then run the preflight again.',
     };
   }
+  if (low.length > 0) {
+    return {
+      ...base,
+      status: 'warn',
+      summary: `Free space is below the comfortable level. ${low.join('; ')}.`,
+      observed: low.join('; '),
+      remediation: 'Free space before approving execution, or choose a directory on a larger filesystem.',
+    };
+  }
   return {
     ...base,
-    status,
-    summary: `Not enough free space. ${problems.join('; ')}.`,
-    observed: problems.join('; '),
-    remediation: 'Free space on the affected filesystem or choose a directory with at least the required headroom.',
+    status: 'pass',
+    summary: 'All related filesystems have enough free space.',
+    observed: `compose=${fmtBytes(compose.freeBytes)} agent=${fmtBytes(agent.freeBytes)} dockerRoot=${fmtBytes(facts.dockerRoot.freeBytes)}`,
   };
 }
 
@@ -637,12 +677,18 @@ function agentConflictCheck(facts: BootstrapFacts): BootstrapCheck {
       remediation: `Confirm on the host that ${DEFAULT_AGENT_DIR}/compose.yaml does not exist, then run the preflight again.`,
     };
   }
-  if (facts.agent.defaultDirHasComposeFile && !facts.paths.agentDir.exists) {
+  // The default installation is the selected one only when the chosen directory
+  // is that directory; the agent_dir check then judges its contents. Any other
+  // choice leaves the earlier installation in place beside the new one, whether
+  // or not the chosen directory exists yet.
+  const agentDir = facts.paths.agentDir;
+  const selectsDefaultDir = agentDir.input === DEFAULT_AGENT_DIR || agentDir.realPath === DEFAULT_AGENT_DIR;
+  if (facts.agent.defaultDirHasComposeFile && !selectsDefaultDir) {
     return {
       ...base,
       status: 'blocked',
-      summary: `${DEFAULT_AGENT_DIR} already holds a Pilot compose file from an earlier installation.`,
-      observed: facts.paths.agentDir.input,
+      summary: `${DEFAULT_AGENT_DIR} already holds a Pilot compose file from an earlier installation, separate from ${agentDir.input}.`,
+      observed: agentDir.input,
       remediation: `Remove or move the old installation at ${DEFAULT_AGENT_DIR}, or use manual enrollment for this host.`,
     };
   }
@@ -769,11 +815,11 @@ export function buildBootstrapEvidence(input: { facts: BootstrapFacts; nodeNameT
 
   const dockerWorking = dockerAndComposeWork(facts);
   const repoConfigured = repoVerified(facts);
-  const missingPackages = missingDockerPackages(facts).length > 0;
+  const packagesToInstall = plannedDockerPackages(facts).length > 0;
   // A working Docker and Compose installation is preserved as-is, so a missing
   // official package record is not a reason to install or elevate.
-  const willInstallPackages = !dockerWorking && missingPackages;
-  const willConfigureRepo = !dockerWorking && (!repoConfigured || missingPackages);
+  const willInstallPackages = !dockerWorking && packagesToInstall;
+  const willConfigureRepo = !dockerWorking && (!repoConfigured || packagesToInstall);
   const serviceNeedsChange = facts.docker.serviceActive !== true || facts.docker.serviceEnabled !== true;
   const needsSudo = facts.docker.cliProbeUnknown
     || !facts.docker.cliInstalled
@@ -903,10 +949,18 @@ export function buildBootstrapEvidence(input: { facts: BootstrapFacts; nodeNameT
     status: 'pass',
     summary: `The Compose plugin is available (${facts.docker.composeVersion}).`,
     observed: facts.docker.composeVersion,
+  } : unsupportedComposeAddition(facts) ? {
+    ...composePluginCheck,
+    status: 'blocked',
+    summary: 'Docker runs on this host without Compose, from packages other than Docker\'s own. Adding Docker\'s Compose package could replace the running engine, so the plan stops here.',
+    observed: `docker ${facts.docker.serverVersion ?? 'installed'} without the Compose plugin`,
+    remediation: 'Install the Compose plugin from the package source that provided Docker (docker-compose-v2 on Ubuntu), or enroll the node manually, then run the preflight again.',
   } : {
     ...composePluginCheck,
     status: 'warn',
-    summary: 'The Docker Compose plugin is missing. The plan installs it.',
+    summary: dockerEngineWorks(facts)
+      ? 'The Docker Compose plugin is missing. The plan installs only that plugin and leaves the running engine as it is.'
+      : 'The Docker Compose plugin is missing. The plan installs it.',
     remediation: 'No action is needed if the official Docker repository is reachable from the host.',
   });
 

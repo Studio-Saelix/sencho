@@ -97,7 +97,7 @@ When there are no blockers and every fact the plan depends on was established, S
 - A SHA-256 digest over the plan, and a digest over the evidence it was built from.
 
 <Frame>
-  <img src="/images/node-bootstrap/03-plan-filesystem.png" alt="Bootstrap dialog on the Plan step: the two paths, numbered execution stages with the agent directory install command and its 0700 mode and owner, the compose file write at 0600, and the Not changed block listing the preserved Compose directory." />
+  <img src="/images/node-bootstrap/03-plan-filesystem.png" alt="Bootstrap dialog on the Plan step: the two directories, then three numbered stages in execution order: creating the Agent directory at mode 0700 with its install command, writing the bootstrap marker and the Pilot compose file at mode 0600, and starting the sencho-agent project with the pinned Docker endpoint. Each step shows its privilege, mode and owner." />
 </Frame>
 
 The plan reads **No changes have been made on this server.** Use **Copy plan** or **Download** to keep it for review. Each generated plan has its own digest, because the marker file carries the generation time. A later approval would bind to that digest, so a plan that changes is a plan that must be approved again.
@@ -105,6 +105,8 @@ The plan reads **No changes have been made on this server.** Use **Copy plan** o
 ## Existing content is preserved
 
 **The Compose directory may already hold stacks.** The preflight inventories Compose files at depth one and two, reports the count and up to fifty names, and preserves everything. When the directory exists, the plan records a skipped step with the stack count: no creation, no `chown`, no `chmod`, and no write inside it. A root-level Compose file is reported as a warning because it usually means the operator chose a single project rather than its parent.
+
+**An earlier Pilot installation is never missed.** The preflight looks for `/opt/sencho-agent/compose.yaml` whichever Agent directory you choose. A Compose file there blocks the plan when you chose any other directory, whether or not that directory exists yet. When the default directory cannot be inspected, because a parent directory is closed to the SSH user and sudo is not available, the result is `unknown` and the plan is withheld; it is never read as absent.
 
 **The Agent directory must be dedicated.** It may be missing, empty, or hold a previous bootstrap attempt for the same project and paths, identified by `sencho-bootstrap.json`. Anything else blocks the plan with a remediation. Nothing is deleted or overwritten. A marker for a different project or different directories, a compose file without a marker, or any unrelated entry always blocks.
 
@@ -114,7 +116,7 @@ The plan reads **No changes have been made on this server.** Use **Copy plan** o
 - An existing Compose directory is never chowned or chmodded. If the SSH user cannot write it but root can, the check warns and the plan makes no change. If neither can write it, the preflight blocks.
 - A final path element that is a symlink is blocked, because it can be retargeted between approval and execution. A symlink further up the path is disclosed with the resolved real path, which enters the plan and its digest.
 - Both paths must be on local persistent filesystems. `tmpfs`, `overlay`, network filesystems and similar are blockers, because the agent must come back after a reboot with its stacks and its compose file. A separate local mount that cannot be confirmed in `/etc/fstab` is a warning; a systemd mount unit can be invisible there.
-- Free space is checked on the Compose path, the Agent path and the Docker root. The plan is blocked under the hard floor and warns below the comfortable level. An unreadable figure is `unknown`, never a pass.
+- Free space is checked on the Compose path, the Agent path and the Docker root. The plan is blocked under the hard floor and warns below the comfortable level. An unreadable figure is `unknown`, never a pass, and it stays `unknown` when another filesystem is only low. The Docker root is the directory the daemon reports, measured on its own filesystem; the default `/var/lib/docker` is assumed only on a host that has no Docker CLI at all.
 
 ## Path changes invalidate the plan
 
@@ -148,7 +150,8 @@ The Agent installation directory has no settings field. It is chosen only here.
 - IPv6 targets, SSH agent forwarding, password authentication and passworded sudo are not supported in this release.
 - The preflight never changes firewall, SSH server, Docker daemon, user or group configuration.
 - Only the Docker daemon on the host's own socket (`/var/run/docker.sock`) is inspected, and every Docker command in the preflight and the plan is pinned to it with the default context. Rootless installs, custom sockets and remote Docker contexts are reported as blocked. A host where Docker is installed but stopped is blocked too: containers and volumes cannot be inventoried until the service runs.
-- The plan previews the official Docker repository only. When apt has no candidate for a package yet, because the repository is not configured or its index was never refreshed, package versions are shown as unresolved and are resolved from the official repository at execution time. On a host where Docker and Compose already work, the plan preserves that installation and does not install or replace Docker packages.
+- The Docker repository counts as configured only when its source is Docker's official repository for the host release, is not marked `trusted`, disabled or source-only, names a keyring that holds Docker's release key (checked by fingerprint, not by file name), and apt's candidate for each Docker package comes from that archive. Anything else is reported with the reason and the plan configures the repository itself.
+- The plan previews the official Docker repository only. When apt has no candidate for a package yet, because the repository is not configured or its index was never refreshed, package versions are shown as unresolved and are resolved from the official repository at execution time. On a host where Docker and Compose already work, the plan preserves that installation and does not install or replace Docker packages. When Docker runs without Compose, the plan adds only the Compose plugin and leaves the engine and every container as they are. If that Docker came from the distribution (`docker.io`) rather than Docker's packages, Docker's Compose package could replace the running engine, so the preflight blocks instead; install `docker-compose-v2` from the distribution, or enroll the node manually, and run the preflight again.
 
 ## Troubleshooting
 
