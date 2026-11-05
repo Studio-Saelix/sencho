@@ -158,9 +158,10 @@ export interface ProbeReport {
   /** Bytes available to a write, when the probe reported statfs. */
   free: number | null;
   /**
-   * The restore work directories at the root, when the probe was asked to list
-   * them. `null` means the probe was not asked or did not answer, which is not
-   * the same as an empty volume.
+   * The root entries named like a restore work directory, when the probe was asked
+   * to list them: at most 8, matched by name only (a file with the prefix is listed
+   * too). `null` means the probe was not asked, or answered without the field,
+   * which is not the same as an empty volume.
    */
   workDirs: string[] | null;
 }
@@ -191,7 +192,8 @@ export function parseProbeReport(line: string): ProbeReport | null {
       workDirs: Array.isArray(workDirs) ? (workDirs as string[]) : null,
     };
   } catch {
-    // Anything that is not one JSON object of integers is not a probe report.
+    // Anything that is not one JSON object of integers, with an optional list of
+    // names, is not a probe report.
     return null;
   }
 }

@@ -89,6 +89,9 @@ export class ResticEngine implements BackupEngine {
     // A staged overwrite's work directory holds the replaced data and a copy of the
     // restored data, not the volume's own content. A point that carried one would
     // put it back on restore, and the next overwrite of that volume would refuse it.
+    // The pattern is anchored at the volume root, so a user's nested entry of that
+    // name is captured. Restic does not report an excluded path as a skipped one, so
+    // the preview tells the operator that a point does not carry the directory.
     const args = ['backup', '/data', '--json', '--host', 'sencho', '--exclude', `/data/${RECOVERY_WORK_DIR_PREFIX}*`];
     for (const tag of tags) args.push('--tag', tag);
     const parent = this.deps.parentSnapshot(request.storage, request.repository.id);
@@ -186,7 +189,9 @@ export class ResticEngine implements BackupEngine {
     if (intent.target.mode === 'new_volume') {
       // `snapshot:/data` puts the captured root's contents at the target root,
       // which is the right shape for a volume Sencho created.
-      args = ['restore', `${intent.snapshotId}:/data`, '--target', HELPER_RESTORE_MOUNT];
+      // A point captured before the capture excluded work directories can carry one
+      // at its root, which would make the new volume refuse its first overwrite.
+      args = ['restore', `${intent.snapshotId}:/data`, '--target', HELPER_RESTORE_MOUNT, '--exclude', `/${RECOVERY_WORK_DIR_PREFIX}*`];
     } else if (intent.target.mode === 'staged_overwrite') {
       // The whole snapshot, into a work directory inside the live volume. That
       // gives `.../incoming/data/...`, so the captured root's own owner and mode
@@ -195,7 +200,10 @@ export class ResticEngine implements BackupEngine {
       if (!/^\.sencho-restore-[0-9a-f-]{36}\/incoming$/.test(workDir)) {
         return { ok: false, errorClass: 'invalid_request' };
       }
-      args = ['restore', intent.snapshotId, '--target', `${HELPER_RESTORE_MOUNT}/${workDir}`];
+      args = [
+        'restore', intent.snapshotId, '--target', `${HELPER_RESTORE_MOUNT}/${workDir}`,
+        '--exclude', `/data/${RECOVERY_WORK_DIR_PREFIX}*`,
+      ];
       // The live root may belong to the application, which a plain root cannot write.
       profile = 'materialize';
     } else {

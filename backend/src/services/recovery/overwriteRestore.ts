@@ -82,6 +82,9 @@ const SWAP_WARNINGS: readonly string[] = [
   'A container started outside Sencho after the fence is not stopped by it. The swap re-checks just before it starts and refuses if one is running.',
 ];
 
+const WORK_DIRS_UNCHECKED_WARNING =
+  'Sencho could not check this volume for a work directory left by an earlier restore. If one is there, the swap refuses it after the containers have stopped, and the restore rolls back and starts them again.';
+
 /** Phases in which the live volume has not been touched. */
 const PRE_FENCE_PHASES = ['recorded', 'staging', 'staged_verified'];
 /** Phases whose fence is applied or may have been applied. */
@@ -164,7 +167,12 @@ interface TargetObservation {
   stacks: string[];
   /** Free bytes on the volume's filesystem, or null when the probe could not say. */
   freeBytes: number | null;
+  /** False when the volume root could not be listed for a leftover work directory. */
+  workDirsChecked: boolean;
 }
+
+/** How many work directory names the helper probe reports at most (`maxReportedWorkDirs` in the probe). */
+const MAX_REPORTED_WORK_DIRS = 8;
 
 /**
  * A name at the volume root that the swap would refuse, shown in a sentence. The
@@ -173,8 +181,10 @@ interface TargetObservation {
  */
 function describeWorkDirs(names: readonly string[]): string {
   const shown = names.map((name) => (/^[\x20-\x7e]{1,255}$/.test(name) ? name : `${RECOVERY_WORK_DIR_PREFIX}…`));
-  const label = shown.length === 1 ? `a work directory (${shown[0]})` : `work directories (${shown.join(', ')})`;
-  return `A restore that did not finish left ${label} in this volume, and it may hold the data that restore replaced. Review it and remove it from the volume, then preview again. Until then another overwrite of this volume would stop the containers and fail.`;
+  const label = shown.length === 1
+    ? `a work directory (${shown[0]})`
+    : `work directories (${shown.join(', ')}${names.length >= MAX_REPORTED_WORK_DIRS ? ', and possibly more' : ''})`;
+  return `A restore that did not finish left ${label} in this volume, and it may hold the data that restore replaced. A point of this volume does not include it, so copy out anything you need, remove it from the volume, then preview again. Until then another overwrite of this volume would stop the containers and fail.`;
 }
 
 function requirePoint(deps: OverwriteDeps, pointId: string): TargetObservation["point"] {
@@ -351,27 +361,42 @@ async function observeTarget(deps: OverwriteDeps, pointId: string): Promise<Targ
     if (endpointRefusal) break;
   }
 
+  const probe = (listWorkDirs: boolean) => probeVolumeReport({
+    runner: deps.runner(),
+    operationId: `overwrite-preview-${point.id}`,
+    volumeName: storage.locator,
+    listWorkDirs,
+  });
   let freeBytes: number | null = null;
   let leftoverWorkDirs: string[] = [];
+  let workDirsChecked = true;
   try {
-    const report = await probeVolumeReport({
-      runner: deps.runner(),
-      operationId: `overwrite-preview-${point.id}`,
-      volumeName: storage.locator,
-      listWorkDirs: true,
-    });
+    const report = await probe(true);
     freeBytes = report.free;
-    // The work directory of a restore that is still running is that restore's own;
-    // anything else was left by one that did not settle, and the swap refuses a
-    // volume that holds it after the workloads have already stopped.
-    const live = deps.fence.liveIntentForVolume(storage.locator);
-    leftoverWorkDirs = (report.workDirs ?? []).filter((name) => name !== (live ? swapWorkDir(live) : null));
+    if (report.workDirs === null) {
+      // The probe answered without the list it was asked for: not an empty volume.
+      workDirsChecked = false;
+      console.warn('[Recovery] The probe did not list the work directories of %s', sanitizeForLog(storage.locator));
+    } else {
+      // The work directory of the restore that owns the volume now is its own;
+      // anything else was left by one that did not settle, and the swap refuses a
+      // volume that holds it after the workloads have already stopped.
+      const live = deps.fence.liveIntentForVolume(storage.locator);
+      leftoverWorkDirs = report.workDirs.filter((name) => name !== (live ? swapWorkDir(live) : null));
+    }
   } catch (err) {
-    // The estimate is useful, not required: a probe that cannot run makes the
-    // space answer unknown, and admission checks again only when it has a number.
-    // The same goes for the work directory listing: the swap's own refusal is the
-    // backstop, and it rolls back.
-    console.warn('[Recovery] Could not read free space for %s:', sanitizeForLog(storage.locator), errorMessageForLog(err));
+    // Neither answer is required to describe the volume. The preview says the
+    // listing was not made, and the swap's own refusal is the backstop: it rolls back.
+    workDirsChecked = false;
+    console.warn('[Recovery] Could not list the work directories of %s:', sanitizeForLog(storage.locator), errorMessageForLog(err));
+    try {
+      // The space estimate does not depend on the listing.
+      freeBytes = (await probe(false)).free;
+    } catch (spaceErr) {
+      // A probe that cannot run makes the space answer unknown, and admission
+      // checks again only when it has a number.
+      console.warn('[Recovery] Could not read free space for %s:', sanitizeForLog(storage.locator), errorMessageForLog(spaceErr));
+    }
   }
 
   return {
@@ -392,6 +417,7 @@ async function observeTarget(deps: OverwriteDeps, pointId: string): Promise<Targ
     containers,
     stacks: [...stacks].sort(),
     freeBytes,
+    workDirsChecked,
   };
 }
 
@@ -473,7 +499,7 @@ export async function previewOverwrite(deps: OverwriteDeps, pointId: string): Pr
     },
     space: { requiredBytes, freeBytes: observed.freeBytes, sufficient },
     preRestorePoint: { required: true, consistency: 'crash_consistent_stopped' },
-    warnings: [...SWAP_WARNINGS],
+    warnings: observed.workDirsChecked ? [...SWAP_WARNINGS] : [...SWAP_WARNINGS, WORK_DIRS_UNCHECKED_WARNING],
     confirmation: {
       token: confirmationTokenFor({
         pointId: observed.point.id,

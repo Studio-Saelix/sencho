@@ -202,8 +202,9 @@ func listNames(dir string) ([]string, error) {
 	return names, nil
 }
 
-// listWorkDirNames lists the restore work directories at a volume's root, which
-// is what `prepare` refuses a second of. It stops after maxReportedWorkDirs.
+// listWorkDirNames lists the root entries named like a restore work directory,
+// which is what `prepare` refuses a second of. It reads the whole listing and
+// stops collecting after maxReportedWorkDirs.
 func listWorkDirNames(root string) ([]string, error) {
 	names, err := listNames(root)
 	if err != nil {

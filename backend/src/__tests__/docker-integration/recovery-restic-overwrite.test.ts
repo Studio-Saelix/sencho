@@ -29,7 +29,7 @@ import { StorageIdentityStore } from '../../services/recovery/storageIdentity';
 import { getRecoveryAuthorityId } from '../../services/recovery/recoveryDb';
 import { RestoreFenceStore, applyRestoreFence, releaseRestoreFence } from '../../services/recovery/restoreFence';
 import { runSwapStep, swapIncomingDir } from '../../services/recovery/volumeSwap';
-import { observeVolumeInUse, probeGenerationToken } from '../../services/recovery/volumeSources';
+import { observeVolumeInUse, probeGenerationToken, probeVolumeReport } from '../../services/recovery/volumeSources';
 import DockerController from '../../services/DockerController';
 import type { EngineExecutionContext, StorageIdentity } from '../../services/recovery/types';
 
@@ -478,6 +478,68 @@ describeIf('staged overwrite against real Docker', () => {
     } finally {
       removeVolume(source);
       removeVolume(target);
+    }
+  }, 300_000);
+
+  it('lists a leftover work directory and keeps it out of a capture and out of its restores', async () => {
+    const source = volumeName('sencho-it-ow-left');
+    const fresh = volumeName('sencho-it-ow-left-new');
+    const staged = volumeName('sencho-it-ow-left-stg');
+    const stale = `.sencho-restore-${randomUUID()}`;
+    const intentId = randomUUID();
+    try {
+      createVolume(source);
+      runInVolume(source, [
+        'set -e', 'printf keep > a.txt',
+        `mkdir -p ${stale}/original sub/.sencho-restore-nested`,
+        `printf x > ${stale}/original/b`, 'printf y > sub/.sencho-restore-nested/c',
+      ].join('\n'));
+
+      // The preview's probe names the root directory and not the nested one.
+      const report = await probeVolumeReport({
+        runner: runner(), operationId: 'integration-probe', volumeName: source, listWorkDirs: true,
+      });
+      expect(report.workDirs).toEqual([stale]);
+      const plain = await probeVolumeReport({ runner: runner(), operationId: 'integration-probe', volumeName: source });
+      expect(plain.workDirs).toBeNull();
+
+      // The point does not carry it; the nested entry is the volume's own data and stays.
+      const point = await capture(source);
+      createVolume(fresh);
+      const restored = await engine().restore(
+        {
+          id: randomUUID(), operationId: 'integration-new', pointId: 'integration-point', repositoryId,
+          snapshotId: point.snapshotId, target: { mode: 'new_volume', volumeName: fresh },
+          pathScope: null, phase: 'materializing', actor: 'integration', createdAt: Date.now(),
+        },
+        context('integration-new'),
+      );
+      expect(restored.ok).toBe(true);
+      expect(runInVolume(fresh, 'find . -mindepth 1 | sort').trim().split('\n')).toEqual([
+        './a.txt', './sub', './sub/.sencho-restore-nested', './sub/.sencho-restore-nested/c',
+      ]);
+
+      // The staged copy is the same snapshot, restored whole into a work directory of the volume.
+      createVolume(staged);
+      const materialized = await engine().restore(
+        {
+          id: intentId, operationId: 'integration-staged', pointId: 'integration-point', repositoryId,
+          snapshotId: point.snapshotId,
+          target: {
+            mode: 'staged_overwrite', storageId: 'storage', expectedGenerationToken: point.token,
+            workDir: swapIncomingDir(intentId), volumeName: staged,
+          },
+          pathScope: null, phase: 'materializing', actor: 'integration', createdAt: Date.now(),
+        },
+        context('integration-staged'),
+      );
+      expect(materialized.ok).toBe(true);
+      expect(runInVolume(staged, `ls -A .sencho-restore-${intentId}/incoming/data`).trim().split('\n').sort())
+        .toEqual(['a.txt', 'sub']);
+    } finally {
+      removeVolume(source);
+      removeVolume(fresh);
+      removeVolume(staged);
     }
   }, 300_000);
 

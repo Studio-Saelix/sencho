@@ -306,7 +306,8 @@ describe('the storage lock of an interrupted overwrite', () => {
     vi.spyOn(DockerController.prototype, 'getDocker').mockReturnValue(fakeDocker([OTHER_VOLUME, 'interrupted_data']));
     const service = runner.RecoveryEngineService.getInstance(nodeId);
     const store = operations.RecoveryOperationStore.getInstance();
-    expect(service.isSettlingAtBoot()).toBe(true);
+    // An engine whose boot has not started has nothing to wait for.
+    expect(service.isSettlingAtBoot()).toBe(false);
     const seen: Array<{ settling: boolean; state: string | undefined }> = [];
     const observe = () => seen.push({ settling: service.isSettlingAtBoot(), state: store.get(seeded.operationId)?.state });
     service.setHelperRunnerForTests({

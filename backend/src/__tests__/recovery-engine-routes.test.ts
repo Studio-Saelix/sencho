@@ -1474,18 +1474,19 @@ describe('an overwrite is authorized against the stacks its fence stopped', () =
   // reconciler then proves the volume and the operation takes that ending. Until boot
   // has finished the parked ending is provisional, so a read must not report it.
   describe('an interrupted overwrite whose boot reconciliation has not finished', () => {
-    async function seedParked(): Promise<string> {
-      const { operationId } = await seedStoppedStacks();
+    async function seedParked(overrides: { errorClass?: string } = {}): Promise<{ operationId: string; intentId: string }> {
+      const { operationId, intentId } = await seedStoppedStacks();
       recoveryDbModule.recoveryDb().prepare(
-        "UPDATE recovery_operations SET state = 'completion_unknown', error_class = 'interrupted' WHERE id = ?",
-      ).run(operationId);
-      // A fresh service has not run its boot sequence.
+        "UPDATE recovery_operations SET state = 'completion_unknown', error_class = ? WHERE id = ?",
+      ).run(overrides.errorClass ?? 'interrupted', operationId);
+      // A fresh service that is in the middle of its boot sequence.
       engine.RecoveryEngineService.resetForTests();
-      return operationId;
+      service().setBootStateForTests('settling');
+      return { operationId, intentId };
     }
 
     it('is not reported by a read, or by a cancel that would echo it', async () => {
-      const operationId = await seedParked();
+      const { operationId } = await seedParked();
       const read = await request(app).get(`/api/recovery/operations/${operationId}`).set('Cookie', adminCookie);
       expect(read.status).toBe(503);
       expect(read.body).toMatchObject({ errorClass: 'capability_unavailable', reason: 'engine_starting' });
@@ -1495,8 +1496,16 @@ describe('an overwrite is authorized against the stacks its fence stopped', () =
       expect(JSON.stringify(cancel.body)).not.toContain('completion_unknown');
     });
 
+    it('is held before the phase of the intent is described, so a cancel does not report how far it got', async () => {
+      const { operationId, intentId } = await seedParked();
+      recoveryDbModule.recoveryDb().prepare('UPDATE recovery_restore_intents SET phase = ? WHERE id = ?').run('swapping', intentId);
+      const cancel = await request(app).post(`/api/recovery/operations/${operationId}/cancel`).set('Cookie', adminCookie);
+      expect(cancel.status).toBe(503);
+      expect(cancel.body.errorClass).toBe('capability_unavailable');
+    });
+
     it('is held back for a caller who may read it, and a cancel checks access before it', async () => {
-      const operationId = await seedParked();
+      const { operationId } = await seedParked();
       const viewer = await request(app).get(`/api/recovery/operations/${operationId}`).set('Cookie', viewerCookie);
       expect(viewer.status).toBe(503);
       // Access first: a caller who may not touch the restore is told nothing about its state.
@@ -1506,10 +1515,32 @@ describe('an overwrite is authorized against the stacks its fence stopped', () =
       expect(JSON.stringify(denied.body)).not.toContain('engine_starting');
     });
 
-    it('answers what boot proved once the operation is settled, and as it is once boot has ended', async () => {
-      const operationId = await seedParked();
-      const store = operations.RecoveryOperationStore.getInstance();
-      store.settleReconciled(operationId, { state: 'failed', errorClass: 'interrupted' });
+    it('keeps its stale storage lock until the reconciler has proven the volume', async () => {
+      const { operationId } = await seedParked();
+      const storage = identityStore.StorageIdentityStore.getInstance().getCurrent(
+        (await import('../services/recovery/storageIdentity')).StorageIdentityStore.getInstance()
+          .getById(operations.RecoveryOperationStore.getInstance().get(operationId)!.storageId!)!.storageKey,
+      )!;
+      operations.RecoveryOperationStore.getInstance();
+      recoveryDbModule.recoveryDb().prepare(
+        `INSERT INTO recovery_locks (scope, resource_key, owner_operation_id, process_epoch, acquired_at, stale_since)
+         VALUES ('storage', ?, ?, 'e', 1, 2)`,
+      ).run(storage.storageKey, operationId);
+      const during = await request(app).post('/api/recovery/locks/release').set('Cookie', adminCookie)
+        .send({ scope: 'storage', resourceKey: storage.storageKey });
+      expect(during.status).toBe(503);
+      expect(during.body).toMatchObject({ errorClass: 'capability_unavailable', reason: 'engine_starting' });
+      expect(operations.RecoveryOperationStore.getInstance().getLock('storage', storage.storageKey)).not.toBeNull();
+      // Once boot has ended the reviewed release works as it always did.
+      service().setBootStateForTests('failed');
+      const after = await request(app).post('/api/recovery/locks/release').set('Cookie', adminCookie)
+        .send({ scope: 'storage', resourceKey: storage.storageKey });
+      expect(after.status).toBe(200);
+    });
+
+    it('answers what boot proved once the operation is settled', async () => {
+      const { operationId } = await seedParked();
+      operations.RecoveryOperationStore.getInstance().settleReconciled(operationId, { state: 'failed', errorClass: 'interrupted' });
       service().markReadyForTests();
       const settled = await request(app).get(`/api/recovery/operations/${operationId}`).set('Cookie', adminCookie);
       expect(settled.status).toBe(200);
@@ -1517,14 +1548,42 @@ describe('an overwrite is authorized against the stacks its fence stopped', () =
     });
 
     it('reports an unproven ending once boot has finished and stays unproven', async () => {
-      const operationId = await seedParked();
+      const { operationId } = await seedParked();
       service().markReadyForTests();
       const res = await request(app).get(`/api/recovery/operations/${operationId}`).set('Cookie', adminCookie);
       expect(res.status).toBe(200);
       expect(res.body.operation).toMatchObject({ state: 'completion_unknown', errorClass: 'interrupted' });
     });
 
-    it('does not hold back an interrupted operation that is not an overwrite', async () => {
+    it('reports the parked ending when boot failed before it reached the reconciler, since nothing will settle it', async () => {
+      const { operationId } = await seedParked();
+      service().setBootStateForTests('failed');
+      const res = await request(app).get(`/api/recovery/operations/${operationId}`).set('Cookie', adminCookie);
+      expect(res.status).toBe(200);
+      expect(res.body.operation).toMatchObject({ state: 'completion_unknown', errorClass: 'interrupted' });
+    });
+
+    it('reports it when no boot sequence ever started, since there is nothing to wait for', async () => {
+      const { operationId } = await seedParked();
+      service().setBootStateForTests('idle');
+      const res = await request(app).get(`/api/recovery/operations/${operationId}`).set('Cookie', adminCookie);
+      expect(res.status).toBe(200);
+    });
+
+    it('does not hold back a new-volume restore, whose operation boot never settles later', async () => {
+      const { operationId, intentId } = await seedParked();
+      recoveryDbModule.recoveryDb().prepare("UPDATE recovery_restore_intents SET target_mode = 'new_volume' WHERE id = ?").run(intentId);
+      const res = await request(app).get(`/api/recovery/operations/${operationId}`).set('Cookie', adminCookie);
+      expect(res.status).toBe(200);
+    });
+
+    it('does not hold back an overwrite that ended unproven for a reason other than an interruption', async () => {
+      const { operationId } = await seedParked({ errorClass: 'node_error' });
+      const res = await request(app).get(`/api/recovery/operations/${operationId}`).set('Cookie', adminCookie);
+      expect(res.status).toBe(200);
+    });
+
+    it('does not hold back an interrupted operation that is not a restore', async () => {
       const pointId = await seedPoint();
       const point = points.RecoveryPointStore.getInstance().get(pointId)!;
       const captureId = randomUUID();
@@ -1533,6 +1592,7 @@ describe('an overwrite is authorized against the stacks its fence stopped', () =
         VALUES (?, ?, 'create_point', ?, ?, 'admin', 'local', 'completion_unknown', 'interrupted', 'e', 1, 1)`)
         .run(captureId, randomUUID(), point.storageId, pointId);
       engine.RecoveryEngineService.resetForTests();
+      service().setBootStateForTests('settling');
       const res = await request(app).get(`/api/recovery/operations/${captureId}`).set('Cookie', adminCookie);
       expect(res.status).toBe(200);
       expect(res.body.operation).toMatchObject({ state: 'completion_unknown' });

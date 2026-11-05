@@ -177,6 +177,8 @@ export function scriptedHelper(input: {
   free?: number;
   /** The restore work directories at the volume root, for a probe asked with `--work-dirs`. */
   workDirs?: string[];
+  /** How a probe asked with `--work-dirs` answers: normally, with exit 1 (a helper that predates the flag), or without the list. */
+  workDirsProbe?: 'answers' | 'exits' | 'omits';
 } = {}): {
   helper: RecoveryHelperRunner;
   runs: HelperRunRecord[];
@@ -195,9 +197,14 @@ export function scriptedHelper(input: {
       runs.push({ profile: spec.profile, cmd: spec.cmd, mounts: spec.mounts });
       if (spec.profile === 'probe') {
         probes += 1;
+        const asked = spec.cmd.includes('--work-dirs');
+        if (asked && input.workDirsProbe === 'exits') {
+          spec.onStdoutLine?.(JSON.stringify({ error: 'usage: sencho-recovery-probe <path>' }));
+          return { exitCode: 1, stderrTail: '', aborted: false, killed: false };
+        }
         spec.onStdoutLine?.(JSON.stringify({
           dev: input.dev ?? 63, ino: input.ino ?? 42, uid: 0, gid: 0, mode: 16877, free: input.free ?? 10_000_000,
-          ...(spec.cmd.includes('--work-dirs') ? { work_dirs: input.workDirs ?? [] } : {}),
+          ...(asked && input.workDirsProbe !== 'omits' ? { work_dirs: input.workDirs ?? [] } : {}),
         }));
         return { exitCode: 0, stderrTail: '', aborted: false, killed: false };
       }

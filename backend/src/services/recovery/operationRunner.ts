@@ -198,12 +198,25 @@ export class RecoveryEngineService {
   }
 
   /**
-   * Whether boot has not finished its reconciliation. A boot that ended without
-   * opening the gate has settled what it could, so it is not "settling"; one that
-   * has not started or is still running may yet prove an interrupted overwrite.
+   * Whether a boot sequence is running. One that is running may still prove an
+   * interrupted overwrite and settle its operation. One that ended, with or
+   * without opening the gate, will prove nothing more until the next start, so
+   * what an operation reads then is the answer; and an engine whose boot never
+   * started (no usable recovery schema, no node to run on) has nothing to wait
+   * for either.
    */
   isSettlingAtBoot(): boolean {
-    return this.boot.finishedAt === null;
+    return this.boot.startedAt !== null && this.boot.finishedAt === null;
+  }
+
+  /** Test seam: put the boot gate in a given state without running the sequence. */
+  setBootStateForTests(state: 'settling' | 'failed' | 'idle'): void {
+    const now = Date.now();
+    this.boot = state === 'settling'
+      ? { ready: false, startedAt: now, finishedAt: null, reason: 'engine_starting' }
+      : state === 'failed'
+        ? { ready: false, startedAt: now, finishedAt: now, reason: 'engine_starting' }
+        : { ready: false, startedAt: null, finishedAt: null, reason: 'engine_starting' };
   }
 
   // --- Health ---------------------------------------------------------------
@@ -547,10 +560,11 @@ export class RecoveryEngineService {
         { scope: 'repository', resourceKey: repository.id },
       ],
       (operation) => {
-        // An overwrite that has not settled, or whose fence is still held, may have
-        // its hidden work directory (a full copy of the replaced data, and the
-        // journal) in this volume, and a capture would take it into the point. Its
-        // storage lock is not enough: a restore that ended `partial` has released
+        // An overwrite that has not settled, or whose fence is still held, owns the
+        // volume: its workloads are stopped and the volume may be between states, with
+        // its hidden work directory (a full copy of the replaced data, and the journal)
+        // in it. A capture skips that directory but would record a half-swapped volume.
+        // Its storage lock is not enough: a restore that ended `partial` has released
         // it. This runs inside the admission, so a replay of an earlier request is
         // answered before it and the check cannot race a restore being admitted.
         if (RestoreFenceStore.getInstance().liveIntentForVolume(input.volumeName)) {

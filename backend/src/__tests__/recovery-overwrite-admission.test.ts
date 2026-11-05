@@ -5,7 +5,7 @@
  * describe the exact state, the token must be bound to it, and every refusal
  * must write no row so the same request can be sent again after a new preview.
  */
-import { describe, it, expect, beforeAll, afterAll, beforeEach } from 'vitest';
+import { describe, it, expect, beforeAll, afterAll, beforeEach, vi } from 'vitest';
 import { randomUUID } from 'crypto';
 import { setupTestDb, cleanupTestDb } from './helpers/setupTestDb';
 import { container, fakeDocker, intentLabels, scriptedHelper } from './__helpers__/overwriteFixture';
@@ -201,8 +201,16 @@ describe('preview', () => {
     const fake = fakeDocker({ volumes: [{ name: VOLUME }], containers: [mountingContainer()] });
     const seeded = seed({ createdAt: fake.volumes.get(VOLUME)?.createdAt ?? '' });
     const helper = scriptedHelper();
-    await overwrite.previewOverwrite(deps(fake.docker, helper), seeded.pointId);
+    const base = deps(fake.docker, helper);
+    const preview = await overwrite.previewOverwrite(base, seeded.pointId);
     expect(helper.runs.map((run) => run.cmd)).toContainEqual(expect.arrayContaining(['/data', '--work-dirs']));
+    // The generation probe an admission runs reads metadata only: it never asks for the listing.
+    helper.runs.length = 0;
+    await overwrite.prepareOverwriteAdmission(base, {
+      pointId: seeded.pointId, confirmationToken: preview.confirmation.token, confirmVolumeName: VOLUME,
+    });
+    const admissionProbes = helper.runs.filter((run) => run.profile === 'probe').map((run) => run.cmd);
+    expect(admissionProbes).toContainEqual(expect.not.arrayContaining(['--work-dirs']));
   });
 
   describe('a work directory an earlier restore left in the volume', () => {
@@ -257,6 +265,46 @@ describe('preview', () => {
       expect(preview.target.ineligibleReason).toContain(`.sencho-restore-${intent.id}`);
     });
 
+    it('still names a stale directory beside the work directory of the restore that owns the volume', async () => {
+      const fake = fakeDocker({ volumes: [{ name: VOLUME }], containers: [mountingContainer()] });
+      const seeded = seed({ createdAt: fake.volumes.get(VOLUME)?.createdAt ?? '' });
+      const operationId = randomUUID();
+      recoveryDbModule.recoveryDb().prepare(`INSERT INTO recovery_operations (id, idempotency_key, kind, storage_id, point_id, actor, transport, state, process_epoch, created_at, updated_at)
+        VALUES (?, ?, 'restore', ?, ?, 'admin', 'local', 'running', 'e', 1, 1)`)
+        .run(operationId, randomUUID(), seeded.storageId, seeded.pointId);
+      const store = intents.RestoreIntentStore.getInstance();
+      const intent = store.recordOverwrite({
+        operationId, pointId: seeded.pointId, targetVolume: VOLUME, actor: 'admin', processEpoch: 'e',
+        stagingVolume: 'sencho-recovery-stage-u', expectedGenerationToken: seeded.generationToken,
+      });
+      store.advance(intent.id, 'staging');
+      const helper = scriptedHelper({ workDirs: [`.sencho-restore-${intent.id}`, LEFTOVER] });
+      const preview = await overwrite.previewOverwrite(deps(fake.docker, helper), seeded.pointId);
+      expect(preview.target.eligible).toBe(false);
+      expect(preview.target.ineligibleReason).toContain(LEFTOVER);
+      expect(preview.target.ineligibleReason).not.toContain(intent.id);
+    });
+
+    it('tells the operator that a point does not carry the directory, so it is copied out first', async () => {
+      const fake = fakeDocker({ volumes: [{ name: VOLUME }], containers: [mountingContainer()] });
+      const seeded = seed({ createdAt: fake.volumes.get(VOLUME)?.createdAt ?? '' });
+      const preview = await overwrite.previewOverwrite(
+        deps(fake.docker, scriptedHelper({ workDirs: [LEFTOVER] })), seeded.pointId,
+      );
+      expect(preview.target.ineligibleReason).toMatch(/does not include it/);
+      expect(preview.target.ineligibleReason).toMatch(/copy out/i);
+    });
+
+    it('says when it listed as many as the probe reports at most', async () => {
+      const fake = fakeDocker({ volumes: [{ name: VOLUME }], containers: [mountingContainer()] });
+      const seeded = seed({ createdAt: fake.volumes.get(VOLUME)?.createdAt ?? '' });
+      const names = Array.from({ length: 8 }, (_, i) => `.sencho-restore-${i}`);
+      const preview = await overwrite.previewOverwrite(
+        deps(fake.docker, scriptedHelper({ workDirs: names })), seeded.pointId,
+      );
+      expect(preview.target.ineligibleReason).toContain('and possibly more');
+    });
+
     it('ignores the work directory of the restore that is running now', async () => {
       const fake = fakeDocker({ volumes: [{ name: VOLUME }], containers: [mountingContainer()] });
       const seeded = seed({ createdAt: fake.volumes.get(VOLUME)?.createdAt ?? '' });
@@ -273,6 +321,41 @@ describe('preview', () => {
       const helper = scriptedHelper({ workDirs: [`.sencho-restore-${intent.id}`] });
       const preview = await overwrite.previewOverwrite(deps(fake.docker, helper), seeded.pointId);
       expect(preview.target.eligible).toBe(true);
+    });
+
+    describe('when the volume root cannot be listed', () => {
+      const WARNING = /could not check this volume for a work directory/;
+
+      it('keeps the free space answer and says the check was not made, for a helper that predates the flag', async () => {
+        const fake = fakeDocker({ volumes: [{ name: VOLUME }], containers: [mountingContainer()] });
+        const seeded = seed({ createdAt: fake.volumes.get(VOLUME)?.createdAt ?? '' });
+        const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+        const helper = scriptedHelper({ workDirsProbe: 'exits', free: 12_345 });
+        const preview = await overwrite.previewOverwrite(deps(fake.docker, helper), seeded.pointId);
+        expect(preview.target.eligible).toBe(true);
+        expect(preview.space.freeBytes).toBe(12_345);
+        expect(preview.warnings.some((line) => WARNING.test(line))).toBe(true);
+        expect(warn.mock.calls.map((call) => String(call[0])).join('\n')).toContain('work directories');
+        warn.mockRestore();
+      });
+
+      it('does not read a probe that answered without the list as an empty volume', async () => {
+        const fake = fakeDocker({ volumes: [{ name: VOLUME }], containers: [mountingContainer()] });
+        const seeded = seed({ createdAt: fake.volumes.get(VOLUME)?.createdAt ?? '' });
+        const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+        const preview = await overwrite.previewOverwrite(
+          deps(fake.docker, scriptedHelper({ workDirsProbe: 'omits' })), seeded.pointId,
+        );
+        expect(preview.warnings.some((line) => WARNING.test(line))).toBe(true);
+        warn.mockRestore();
+      });
+
+      it('adds no warning when the listing was made', async () => {
+        const fake = fakeDocker({ volumes: [{ name: VOLUME }], containers: [mountingContainer()] });
+        const seeded = seed({ createdAt: fake.volumes.get(VOLUME)?.createdAt ?? '' });
+        const preview = await overwrite.previewOverwrite(deps(fake.docker, scriptedHelper()), seeded.pointId);
+        expect(preview.warnings.some((line) => WARNING.test(line))).toBe(false);
+      });
     });
 
     it('does not echo a name that is not plain printable text', async () => {

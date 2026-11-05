@@ -203,6 +203,30 @@ describe('a failed restore helper', () => {
   });
 });
 
+describe('what a restore leaves out', () => {
+  // A point captured before the capture skipped work directories can carry one at
+  // its root. Putting it into a new volume would make that volume refuse its first
+  // overwrite, and into the live volume would leave a second work directory there.
+  it('leaves a root work directory out of a restore into a new volume, and only a root one', async () => {
+    const { engine, specs } = engineWith(async () => OK);
+    await engine.restore(intent({ mode: 'new_volume', volumeName: 'fresh' }), context());
+    const args = specs[0].cmd as readonly string[];
+    expect(args).toContain('snap-1:/data');
+    const at = args.indexOf('--exclude');
+    expect(args[at + 1]).toBe('/.sencho-restore-*');
+    expect(args.filter((arg) => arg === '--exclude')).toHaveLength(1);
+  });
+
+  it('leaves a root work directory out of the copy an overwrite restores into the volume', async () => {
+    const { engine, specs } = engineWith(async () => OK);
+    await engine.restore(intent(STAGED), context());
+    const args = specs[0].cmd as readonly string[];
+    const at = args.indexOf('--exclude');
+    expect(args[at + 1]).toBe('/data/.sencho-restore-*');
+    expect(args.filter((arg) => arg === '--exclude')).toHaveLength(1);
+  });
+});
+
 describe('what a capture leaves out', () => {
   const REQUEST = {
     kind: 'root',

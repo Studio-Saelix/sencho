@@ -759,6 +759,7 @@ recoveryRouter.post('/operations/:id/cancel', handle(async (req, res) => {
     sendRecoveryError(res, 'not_cancellable', {}, 'A repository provisioning operation cannot be cancelled once it has started. The next provision request settles it.');
     return;
   }
+  holdProvisionalEnding(req, operation);
   if (operation.kind === 'restore') {
     // An overwrite is cancellable while the live volume has not started to
     // change. From `swapping` on, the originals have begun moving and the only
@@ -770,7 +771,6 @@ recoveryRouter.post('/operations/:id/cancel', handle(async (req, res) => {
       return;
     }
   }
-  holdProvisionalEnding(req, operation);
   engineService(req).cancel(operation.id);
   res.status(202).json({ operation: RecoveryOperationStore.getInstance().get(operation.id) ?? operation });
 }));
@@ -903,6 +903,10 @@ recoveryRouter.post('/locks/release', handle(async (req, res) => {
       return;
     }
   }
+
+  // The lock of an interrupted overwrite is stale only until the reconciler that is
+  // still running proves the volume, and it releases the lock itself when it does.
+  if (engineService(req).isSettlingAtBoot()) throw new RecoveryError('capability_unavailable', { reason: 'engine_starting' });
 
   try {
     const released = RecoveryOperationStore.getInstance().releaseStaleLock(

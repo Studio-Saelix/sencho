@@ -5,15 +5,17 @@
 // Sencho uses it as the generation token of a mounted storage root. Docker's
 // volume CreatedAt has one-second resolution, so a volume removed and recreated
 // inside the same second keeps its timestamp; the root's device and inode do
-// not survive that recreate. The probe reads metadata only, never file content,
-// and it runs inside the recovery helper with the root mounted read-only.
+// not survive that recreate. The probe reads metadata and directory names only,
+// never file content, and it runs inside the recovery helper with the root
+// mounted read-only.
 //
 // Usage: sencho-recovery-probe <path> [--work-dirs]
 //
-// --work-dirs also lists the restore work directories a staged overwrite left at
-// the root (names under the work directory prefix), so a preview can refuse a
-// volume the next swap would refuse. It reads one directory listing, so only the
-// caller that needs it asks.
+// --work-dirs also lists the root entries whose names start with the restore work
+// directory prefix (a file counts as well as a directory, as it does for `swap
+// prepare`), so a preview can refuse a volume the next swap would refuse. It reads
+// and sorts the whole root listing before it caps the answer, so only the caller
+// that needs it asks.
 //
 //	sencho-recovery-probe swap <prepare|commit|status|rollback|cleanup> --root <path> --id <intent>
 //
@@ -39,7 +41,7 @@ type report struct {
 	Free uint64 `json:"free"`
 	// Names at the root under the work directory prefix. Present only with
 	// --work-dirs (a pointer, so an empty answer is `[]` and not absent), so a
-	// plain probe stays a metadata read.
+	// plain probe stays one stat and one statfs.
 	WorkDirs *[]string `json:"work_dirs,omitempty"`
 }
 

@@ -76,8 +76,9 @@ const BACKUP_SCRATCH = 'size=512m,mode=1777';
  * each entry, so any change here is a visible change to the privilege boundary.
  */
 export const HELPER_PROFILES: Readonly<Record<HelperProfile, HelperProfileSpec>> = Object.freeze({
-  // Reads one directory's device, inode, owner and mode. Only the source root is
-  // mounted, and only read-only.
+  // Reads one directory's device, inode, owner and mode and its free space, and on
+  // request the names of the restore work directories at its root. Only the source
+  // root is mounted, and only read-only.
   probe: {
     user: '0:0',
     capAdd: [],

@@ -6419,8 +6419,9 @@ paths:
         after the containers have already stopped, so the preview reports the volume as not
         eligible (`target.eligible: false`, `swap.supported: false`) and names the directory in
         `target.ineligibleReason`; the overwrite is refused with `400 invalid_request` for the same
-        reason. Review the directory, remove it from the volume, and preview again. A point captured
-        from a volume never includes such a directory.
+        reason. A capture skips the directory, so it is not in any point: copy out what you need,
+        remove it from the volume, and preview again. When the preview cannot list the volume
+        root it adds a warning instead, and the swap's own refusal is the backstop.
         Only a Full Admin API token may call it; any other scope is refused with `403 SCOPE_DENIED`.
       parameters:
         - name: pointId
@@ -6664,9 +6665,10 @@ paths:
         (`cleanup_failed`, `fence_unavailable`, ...). It never carries a host path. An unknown id answers 403, not 400, to a caller who cannot read every
         kind of operation, so the answer does not reveal which ids exist.
 
-        While the node is starting, an overwrite that the previous process left interrupted is
-        not reported: startup is still proving whether its volume was committed or rolled back,
-        and the ending it holds until then is provisional. The read answers
+        While the node is starting, a restore over its own volume that the previous process left
+        interrupted (`completion_unknown` with `errorClass: interrupted`) is not reported:
+        startup is still proving whether its volume was committed or rolled back, and the ending
+        it holds until then is provisional. The read answers
         `503 capability_unavailable` with `reason: engine_starting`; read it again, and it shows
         the ending startup proved, or `completion_unknown` when the volume could not be proven.
       parameters:
@@ -6719,7 +6721,9 @@ paths:
         originals have begun to move and the only safe endings are roll forward or
         reconciliation. Access is checked first: a caller who
         may not configure the repository gets 403, and an unknown id answers 403 to a caller
-        who cannot cancel every kind of operation.
+        who cannot cancel every kind of operation. While the node is starting, cancelling an
+        overwrite that the previous process left interrupted answers `503 engine_starting`, as
+        reading it does.
         Only a Full Admin API token may call it; any other scope is refused with `403 SCOPE_DENIED`.
       parameters:
         - name: id
@@ -6765,7 +6769,9 @@ paths:
         and the storage's volume need not exist any more. At startup, once no helper of the
         previous process remains, Sencho releases the repository lock of an interrupted provisioning,
         and, when restic's own locks are cleared, of interrupted captures, checks and restores
-        itself; every storage lock waits for this call.
+        itself; every storage lock waits for this call. While startup is still settling an
+        interrupted overwrite, the call answers `503 engine_starting`: the reconciler releases
+        that lock itself when it has proven the volume.
         Only a Full Admin API token may call it; any other scope is refused with `403 SCOPE_DENIED`.
       parameters:
         - $ref: "#/components/parameters/nodeId"
@@ -6814,5 +6820,7 @@ paths:
           $ref: "#/components/responses/RecoveryForbidden"
         "409":
           $ref: "#/components/responses/RecoveryConflict"
+        "503":
+          $ref: "#/components/responses/RecoveryUnavailable"
         "500":
           $ref: "#/components/responses/RecoveryInternalError"
