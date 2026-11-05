@@ -6421,8 +6421,8 @@ paths:
         `target.ineligibleReason`; the overwrite is refused with `400 invalid_request` for the same
         reason. A capture skips the directory, so it is not in any point: copy out what you need,
         remove it from the volume, and preview again. The listing reads a volume root an
-        application user owns (mode `0700` or `2750`) as well; only a root the helper cannot
-        read at all takes the warning path, where the swap's own refusal is the backstop.
+        application user owns (mode `0700` or `2750`) as well; when the helper cannot complete
+        the listing at all, the preview adds a warning and the swap's own refusal is the backstop.
         Only a Full Admin API token may call it; any other scope is refused with `403 SCOPE_DENIED`.
       parameters:
         - name: pointId
