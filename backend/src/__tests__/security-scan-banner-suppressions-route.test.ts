@@ -7,7 +7,8 @@
  * gate across the full lifecycle: creating, deleting, editing, or expiring a
  * suppression, and enabling, disabling, or tightening a policy, with
  * honor-suppressions both on and off. These tests pin that agreement; the stored
- * snapshot is used only as a fallback if the recompute throws.
+ * snapshot is used only as a fallback if the recompute throws for the row's own
+ * stack (a request for another stack fails instead, see the `?stack=` block).
  */
 import { describe, it, expect, beforeAll, afterAll, beforeEach, vi } from 'vitest';
 import request from 'supertest';
@@ -259,15 +260,23 @@ describe('GET /api/security/scans/:scanId?stack= banner for the citing stack', (
     expect((await detail(scanId, 'unrelated')).body.policy_evaluation).toBeNull();
   });
 
-  it('rejects an invalid stack name and still scopes the row to the node', async () => {
+  it('rejects an invalid, empty or repeated stack name instead of ignoring it', async () => {
+    const scanId = seedSharedRow('other-stack');
+    for (const query of ['stack=../etc', 'stack=', 'stack=%20', 'stack=qa-a&stack=qa-b']) {
+      const res = await request(app).get(`/api/security/scans/${scanId}?${query}`).set('Cookie', adminCookie);
+      expect(res.status, query).toBe(400);
+      expect(res.body.error).toBe('Invalid stack name');
+    }
+  });
+
+  it('still scopes the row to the node when a stack is named', async () => {
     const scanId = seedSharedRow('qa-first');
-    expect((await detail(scanId, '../etc')).status).toBe(400);
     const db = DatabaseService.getInstance();
     db.getDb().prepare('UPDATE vulnerability_scans SET node_id = 99 WHERE id = ?').run(scanId);
     expect((await detail(scanId, 'qa-a')).status).toBe(404);
   });
 
-  it('shows no banner, not the first stack\'s snapshot, when the recompute throws for another stack', async () => {
+  it('fails the request, not a null banner or the first stack\'s snapshot, when the recompute throws for another stack', async () => {
     const scanId = seedSharedRow('qa-first');
     const db = DatabaseService.getInstance();
     db.setScanPolicyEvaluation(scanId, {
@@ -277,11 +286,14 @@ describe('GET /api/security/scans/:scanId?stack= banner for the citing stack', (
     const errSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
     try {
       const other = await detail(scanId, 'qa-other');
-      expect(other.status).toBe(200);
-      expect(other.body.policy_evaluation).toBeNull();
-      const own = await detail(scanId);
-      expect(own.status).toBe(200);
-      expect(own.body.policy_evaluation?.violated).toBe(true);
+      expect(other.status).toBe(500);
+      expect(other.body.policy_evaluation).toBeUndefined();
+      // The row's own stack (named or implied) still degrades to its snapshot.
+      for (const stack of [undefined, 'qa-first']) {
+        const own = await detail(scanId, stack);
+        expect(own.status).toBe(200);
+        expect(own.body.policy_evaluation?.violated).toBe(true);
+      }
     } finally {
       spy.mockRestore();
       errSpy.mockRestore();

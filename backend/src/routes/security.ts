@@ -182,10 +182,12 @@ function resolveBannerEvaluation(
     // recompute failure must degrade to the stored snapshot rather than 500 the
     // scan detail. The recompute is synchronous DB reads that should not throw,
     // so surface it at error level if it ever does.
-    console.error('[Security] banner re-evaluation failed for scanId=%s node=%s:', scan.id, scan.node_id, getErrorMessage(err, 'unknown'));
-    // The snapshot describes the row's own stack, so it answers a request for
-    // another stack with the wrong policy; show no banner instead.
-    if (forStack !== undefined && forStack !== scan.stack_context) return null;
+    console.error('[Security] banner re-evaluation failed for scanId=%s node=%s stack=%s:', scan.id, scan.node_id, forStack ?? scan.stack_context, getErrorMessage(err, 'unknown'));
+    // The snapshot describes the row's own stack, so it would answer a request
+    // for another stack with the wrong policy. A null banner would read as "no
+    // policy matched" for a stack the caller asked about by name, so the request
+    // fails instead of stating a verdict that does not exist.
+    if (forStack !== undefined && forStack !== scan.stack_context) throw err;
     return parsePolicyEvaluation(scan.policy_evaluation);
   }
 }
@@ -720,8 +722,13 @@ securityRouter.get('/scans/:scanId', authMiddleware, (req: Request, res: Respons
   }
   // `?stack=` asks for the banner of one stack's policy: the stack whose deploy
   // cited this scan, which may differ from the stack the shared row was written for.
-  const stackParam = optionalTrimmedQuery(req.query.stack);
-  if (stackParam !== undefined) {
+  // A present parameter that is not one usable name (empty or repeated) is
+  // refused, never read as absent: that would answer for the row's own stack and
+  // look like a verdict for the stack the caller named.
+  const rawStack = req.query.stack;
+  let stackParam: string | undefined;
+  if (rawStack !== undefined) {
+    stackParam = typeof rawStack === 'string' ? rawStack.trim() : '';
     if (!isValidStackName(stackParam)) {
       res.status(400).json({ error: 'Invalid stack name' }); return;
     }
@@ -738,9 +745,16 @@ securityRouter.get('/scans/:scanId', authMiddleware, (req: Request, res: Respons
   const publiclyExposed = exposedMap.get(scan.image_ref) ?? null;
   // The banner verdict is recomputed against current policies/suppressions so it
   // matches the deploy gate; the list endpoint keeps the stored snapshot.
+  let banner: ReturnType<typeof parsePolicyEvaluation>;
+  try {
+    banner = resolveBannerEvaluation(db, scan, stackParam);
+  } catch {
+    // Already logged by resolveBannerEvaluation.
+    res.status(500).json({ error: 'Failed to evaluate the policy banner for this stack' }); return;
+  }
   res.json({
     ...shapeScanForResponse(scan),
-    policy_evaluation: resolveBannerEvaluation(db, scan, stackParam),
+    policy_evaluation: banner,
     publicly_exposed: publiclyExposed,
   });
 });

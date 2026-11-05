@@ -257,7 +257,7 @@ curl -H "Authorization: Bearer YOUR_API_TOKEN" \
   "https://your-sencho-instance:1852/api/security/scans/142?stack=myapp"
 ```
 
-**Errors:** `400 Invalid stack name`, `404 Scan not found`.
+**Errors:** `400 Invalid scan id`, `400 Invalid stack name` (the parameter is present but empty, repeated, or not a stack name), `403` when the caller cannot read the stack, `404 Scan not found`, `500` when the policy banner for the named stack cannot be evaluated.
 
 ## Stack deploy with policy
 
