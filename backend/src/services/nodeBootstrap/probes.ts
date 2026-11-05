@@ -244,13 +244,14 @@ export function buildDockerRepoScript(sourceFiles: string[], sourceDirs: string[
     '      cat "$f" 2>/dev/null || printf \'\\nSOURCE_UNREADABLE=1\\n\'',
     `      printf '\\nSOURCE_END=%s\\n' "$f"`,
     '    fi',
-    ...repoUnreadableWhenInaccessible('SOURCE', '  '),
+    ...repoUnreadableWhenInaccessible('SOURCE'),
     '  fi',
     '}',
     `for f in ${sourceFiles.join(' ')}; do`,
     '  emit_source "$f"',
     'done',
     `for d in ${sourceDirs.join(' ')}; do`,
+    '  f="$d"',
     '  if [ -d "$d" ]; then',
     '    if [ -r "$d" ] && [ -x "$d" ]; then',
     '      for f in "$d"/*.list "$d"/*.sources; do',
@@ -262,13 +263,7 @@ export function buildDockerRepoScript(sourceFiles: string[], sourceDirs: string[
     '    else',
     `      printf 'SOURCE_BEGIN=%s\\nSOURCE_UNREADABLE=1\\nSOURCE_END=%s\\n' "$d" "$d"`,
     '    fi',
-    '  else',
-    '    f="$d"',
-    '    err=$(LC_ALL=C stat -L -- "$f" 2>&1 >/dev/null)',
-    '    case "$err" in',
-    '      ""|*"No such file or directory"*|*"Not a directory"*) ;;',
-    `      *) printf 'SOURCE_BEGIN=%s\\nSOURCE_UNREADABLE=1\\nSOURCE_END=%s\\n' "$f" "$f";;`,
-    '    esac',
+    ...repoUnreadableWhenInaccessible('SOURCE'),
     '  fi',
     'done',
     `for f in ${keyPaths.join(' ')}; do`,
@@ -510,10 +505,6 @@ function weakensSignatures(value: string | undefined): boolean {
   return value !== undefined && !FALSE_OPTION_VALUES.has(value.trim().toLowerCase());
 }
 
-function insecureOption(get: (name: string) => string | undefined): string | null {
-  return INSECURE_SOURCE_OPTIONS.find((name) => weakensSignatures(get(name))) ?? null;
-}
-
 type KeyringState = { verified: Set<string>; unreadable: Set<string> };
 
 /**
@@ -583,16 +574,17 @@ function parseListSource(content: string, conventional: boolean): ParsedSourceFi
     .filter(Boolean);
   const entries: AptSourceEntry[] = [];
   const invalid: string[] = [];
+  const invalidLine = 'the Docker source line is not a valid apt entry';
   for (const line of active) {
     const match = /^(deb|deb-src)\s+(\[[^\]]*\]\s+)?(\S+)\s+(\S+)\s+(.+)$/.exec(line);
     if (!match) {
-      if (conventional || mentionsDockerHost(line)) invalid.push('the Docker source line is not a valid apt entry');
+      if (conventional || mentionsDockerHost(line)) invalid.push(invalidLine);
       continue;
     }
     // A line that names Docker's host but whose URI is not read as that host
     // (a missing bracket, no scheme, a trailing dot) is not one apt will use as written.
     if (mentionsDockerHost(line) && !isDockerHostUri(match[3])) {
-      invalid.push('the Docker source line is not a valid apt entry');
+      invalid.push(invalidLine);
       continue;
     }
     const options = new Map<string, string>();
@@ -720,14 +712,19 @@ type SourceCheck = { kind: 'fail' | 'unknown'; reason: string };
 const fail = (reason: string): SourceCheck => ({ kind: 'fail', reason });
 const unknownCheck = (reason: string): SourceCheck => ({ kind: 'unknown', reason });
 
+function weakenedSigningCheck(options: Map<string, string>): SourceCheck | null {
+  const weakened = INSECURE_SOURCE_OPTIONS.find((name) => weakensSignatures(options.get(name)));
+  return weakened ? fail(`the source sets ${weakened}, which weakens signature checking`) : null;
+}
+
 /** The checks a binary entry of Docker's repository must pass; null when it passes. */
 function checkBinaryEntry(entry: AptSourceEntry, codename: string, arch: string, keys: KeyringState): SourceCheck | null {
   if (entry.uris.length !== 1 || normalizeUri(entry.uris[0]) !== OFFICIAL_DOCKER_URI) {
     return fail(`the source points at ${entry.uris.join(' ') || 'no URI'}, not ${OFFICIAL_DOCKER_URI}`);
   }
   if (!entry.components.includes('stable')) return fail('the source does not enable the stable component');
-  const weakened = insecureOption((name) => entry.options.get(name));
-  if (weakened) return fail(`the source sets ${weakened}, which weakens signature checking`);
+  const weakened = weakenedSigningCheck(entry.options);
+  if (weakened) return weakened;
   const keyring = signedByState(entry.options.get('signed-by'), keys);
   if (keyring === 'unreadable') return unknownCheck('a keyring the source names could not be read in full');
   if (keyring === 'wrong') return fail('the source does not name an installed Docker keyring through signed-by');
@@ -764,16 +761,15 @@ function verifySourceFile(
   keys: KeyringState,
 ): SourceFileVerdict {
   const conventional = CONVENTIONAL_SOURCE_FILE.test(file.path);
-  const parsed = /\.sources$/i.test(file.path)
-    ? parseDeb822Source(file.content)
-    : parseListSource(file.content, conventional);
+  const deb822 = /\.sources$/i.test(file.path);
+  const parsed = deb822 ? parseDeb822Source(file.content) : parseListSource(file.content, conventional);
   const verdict: SourceFileVerdict = { relevant: conventional, problems: [], binaryEntries: 0, signing: [] };
   for (const reason of parsed.invalid) {
     verdict.relevant = true;
     verdict.problems.push(fail(reason));
   }
   if (conventional && parsed.empty) {
-    verdict.problems.push(fail(/\.sources$/i.test(file.path) ? 'the Docker deb822 source is empty' : 'the Docker source file is empty'));
+    verdict.problems.push(fail(deb822 ? 'the Docker deb822 source is empty' : 'the Docker source file is empty'));
   }
   for (const entry of parsed.entries) {
     const dockerEntry = entry.uris.some(isDockerHostUri);
@@ -784,8 +780,8 @@ function verifySourceFile(
     // A deb-src entry cannot supply packages, but apt holds it to the signing
     // options of any entry that shares its URI and suite.
     if (entry.type === 'deb-src') {
-      const weakened = insecureOption((name) => entry.options.get(name));
-      if (weakened) verdict.problems.push(fail(`the source sets ${weakened}, which weakens signature checking`));
+      const weakened = weakenedSigningCheck(entry.options);
+      if (weakened) verdict.problems.push(weakened);
     } else {
       verdict.binaryEntries += 1;
       const check = checkBinaryEntry(entry, codename, arch, keys);
@@ -798,7 +794,9 @@ function verifySourceFile(
         if (signedBy) verdict.signing.push({ path: file.path, target, option: 'signed-by', value: signedBy });
         for (const option of SOURCE_AGREEMENT_OPTIONS) {
           const value = entry.options.get(option)?.trim().toLowerCase();
-          verdict.signing.push({ path: file.path, target, option, value: value === undefined ? 'unset' : option === 'trusted' && weakensSignatures(value) ? 'yes' : value });
+          let compared = value ?? 'unset';
+          if (option === 'trusted' && value !== undefined && weakensSignatures(value)) compared = 'yes';
+          verdict.signing.push({ path: file.path, target, option, value: compared });
         }
       }
     }
@@ -819,10 +817,11 @@ function signingConflict(verdicts: SourceFileVerdict[]): string | null {
     for (const item of verdict.signing) {
       const key = `${item.option} ${item.target}`;
       const earlier = seen.get(key);
-      if (earlier && earlier.value !== item.value) {
+      if (!earlier) {
+        seen.set(key, { path: item.path, value: item.value });
+      } else if (earlier.value !== item.value) {
         return `${earlier.path} and ${item.path} set different ${item.option} values for ${item.target}, which apt rejects`;
       }
-      if (!earlier) seen.set(key, { path: item.path, value: item.value });
     }
   }
   return null;
@@ -851,8 +850,6 @@ export function parseDockerRepo(text: string, codename: string, arch: string): R
       : false;
 
   let sourceConfigured = false;
-  let contradicted = false;
-  let unknown = false;
   // A keyring that is not Docker's is the root cause of any source it was meant to sign.
   let keyringProblem: string | null = null;
   let failureProblem: string | null = null;
@@ -863,13 +860,8 @@ export function parseDockerRepo(text: string, codename: string, arch: string): R
     keyringProblem = 'no Docker keyring holds the Docker release key';
   }
   const note = (check: SourceCheck, path: string) => {
-    if (check.kind === 'fail') {
-      contradicted = true;
-      failureProblem ??= `${path}: ${check.reason}`;
-    } else {
-      unknown = true;
-      unknownProblem ??= `${path}: ${check.reason}`;
-    }
+    if (check.kind === 'fail') failureProblem ??= `${path}: ${check.reason}`;
+    else unknownProblem ??= `${path}: ${check.reason}`;
   };
   const verdicts: SourceFileVerdict[] = [];
   for (const source of parsed.sources) {
@@ -884,17 +876,15 @@ export function parseDockerRepo(text: string, codename: string, arch: string): R
     verdicts.push(verdict);
     for (const check of verdict.problems) note(check, source.path);
   }
-  if (sourceConfigured && !contradicted) {
-    const conflict = signingConflict(verdicts);
-    if (conflict) {
-      contradicted = true;
-      failureProblem ??= conflict;
-    } else if (!unknown && verdicts.every((verdict) => verdict.binaryEntries === 0)) {
-      contradicted = true;
-      failureProblem ??= 'the Docker source files have no enabled binary (deb) entry';
+  if (sourceConfigured && !failureProblem) {
+    failureProblem = signingConflict(verdicts);
+    if (!failureProblem && !unknownProblem && verdicts.every((verdict) => verdict.binaryEntries === 0)) {
+      failureProblem = 'the Docker source files have no enabled binary (deb) entry';
     }
   }
-  const sourceVerified: boolean | null = !sourceConfigured || contradicted ? false : unknown ? null : true;
+  let sourceVerified: boolean | null = true;
+  if (!sourceConfigured || failureProblem) sourceVerified = false;
+  else if (unknownProblem) sourceVerified = null;
 
   return {
     probeComplete: true,
@@ -903,7 +893,7 @@ export function parseDockerRepo(text: string, codename: string, arch: string): R
     sourceVerified,
     keyringVerified,
     candidateSourceVerified: null,
-    problem: keyringProblem ?? (contradicted ? failureProblem : unknownProblem),
+    problem: keyringProblem ?? failureProblem ?? unknownProblem,
   };
 }
 
