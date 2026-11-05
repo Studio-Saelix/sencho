@@ -153,6 +153,10 @@ export function validateInstallPaths(composeDirRaw: string, agentDirRaw: string)
 }
 
 
+function cancelledError(): SshTransportError {
+  return new SshTransportError('SSH_UNREACHABLE', 'The request was cancelled.');
+}
+
 /** Mount points from a completed fstab probe; null when the probe did not complete. */
 function fstabMountPoints(results: SshCommandResult[]): string[] | null {
   const result = results.find((entry) => entry.id === 'fstab');
@@ -225,12 +229,13 @@ export class NodeBootstrapService {
     }
     // DNS and every address attempt share one request budget.
     const deadline = Date.now() + this.deps.requestBudgetMs;
-    const addresses = await this.resolveOrThrow(host, deadline);
+    const addresses = await this.resolveOrThrow(host, deadline, options.signal);
     let dialed = addresses[0];
     const observation = await this.withTargetLock(host, port, async () => {
       let lastError: unknown = null;
       for (const address of addresses) {
         try {
+          if (options.signal?.aborted) throw cancelledError();
           const remaining = deadline - Date.now();
           if (remaining <= 0) throw this.budgetError();
           const captured = await this.deps.transport.captureHostKey(
@@ -245,6 +250,7 @@ export class NodeBootstrapService {
           // different address and hide the change.
           if (error instanceof SshTransportError && error.code === 'HOST_KEY_UNTRUSTED') throw error;
           if (error instanceof SshTransportError && error.code === 'PREFLIGHT_TIMEOUT') throw error;
+          if (options.signal?.aborted) throw error;
           lastError = error;
         }
       }
@@ -302,11 +308,12 @@ export class NodeBootstrapService {
       pin = this.deps.db.getNodeBootstrapTrust(targetInput.host, targetInput.port);
       this.assertPinnedTrust(targetInput, pin, expectedFingerprint, replacePinnedFingerprint, context.audit);
 
-      const addresses = await this.resolveOrThrow(targetInput.host, deadline);
+      const addresses = await this.resolveOrThrow(targetInput.host, deadline, context.signal);
       dialed = addresses[0];
       let lastError: unknown = null;
       for (const address of addresses) {
         try {
+          if (context.signal?.aborted) throw cancelledError();
           const remaining = deadline - Date.now();
           if (remaining <= 0) throw this.budgetError();
           const probeResults = await this.runProbes(
@@ -321,15 +328,17 @@ export class NodeBootstrapService {
             (observation) => { hostKey = observation; },
             context.signal,
           );
-          if (probeResults.some((result) => result.error === 'PREFLIGHT_TIMEOUT')) {
+          if (probeResults.some((result) => result.error === 'PREFLIGHT_TIMEOUT')
+            || (Date.now() >= deadline && probeResults.some((result) => result.timedOut))) {
             throw this.budgetError();
           }
           dialed = address;
-          const observation: HostKeyObservation = hostKey ?? {
-            algorithm: 'unknown',
-            fingerprint: expectedFingerprint ?? '',
-            knownHostsLine: `${targetInput.host} expected ${expectedFingerprint ?? ''}`,
-          };
+          // The transport reports the live key before it authenticates. A run
+          // that never reported one has no key to pin, so it cannot succeed.
+          const observation: HostKeyObservation | null = hostKey;
+          if (!observation) {
+            throw new SshTransportError('HOST_KEY_UNTRUSTED', 'The transport did not report a host key.');
+          }
           this.persistTrust(
             targetInput,
             observation,
@@ -369,6 +378,7 @@ export class NodeBootstrapService {
             && ['SSH_AUTH_FAILED', 'SSH_KEY_INVALID', 'SSH_KEY_PASSPHRASE_REQUIRED', 'PREFLIGHT_TIMEOUT'].includes(error.code)) {
             throw error;
           }
+          if (context.signal?.aborted) throw error;
           lastError = error;
         }
       }
@@ -376,11 +386,8 @@ export class NodeBootstrapService {
     });
 
     const now = this.deps.now();
-    const hostKeyObservation: HostKeyObservation = hostKey ?? {
-      algorithm: 'unknown',
-      fingerprint: expectedFingerprint ?? '',
-      knownHostsLine: `${targetInput.host} expected ${expectedFingerprint ?? ''}`,
-    };
+    // runProbes only returns after the transport reported the live key.
+    const hostKeyObservation = hostKey as unknown as HostKeyObservation;
     const facts = assembleFacts({
       target: {
         host: targetInput.host,
@@ -467,10 +474,12 @@ export class NodeBootstrapService {
     );
   }
 
-  private async resolveOrThrow(host: string, deadline: number): Promise<string[]> {
+  private async resolveOrThrow(host: string, deadline: number, signal?: AbortSignal): Promise<string[]> {
     const remaining = deadline - Date.now();
     if (remaining <= 0) throw this.budgetError();
+    if (signal?.aborted) throw cancelledError();
     let timer: NodeJS.Timeout | null = null;
+    let onAbort: (() => void) | null = null;
     try {
       return await Promise.race([
         this.deps.resolveAddresses(host),
@@ -478,6 +487,10 @@ export class NodeBootstrapService {
           timer = setTimeout(() => {
             reject(this.budgetError());
           }, remaining);
+          if (signal) {
+            onAbort = () => reject(cancelledError());
+            signal.addEventListener('abort', onAbort, { once: true });
+          }
         }),
       ]);
     } catch (error: unknown) {
@@ -490,6 +503,7 @@ export class NodeBootstrapService {
       throw new BootstrapError(400, 'INVALID_TARGET', message);
     } finally {
       if (timer) clearTimeout(timer);
+      if (signal && onAbort) signal.removeEventListener('abort', onAbort);
     }
   }
 

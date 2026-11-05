@@ -561,6 +561,16 @@ function persistenceCheck(facts: BootstrapFacts): BootstrapCheck {
       remediation: 'Confirm both directories are on local persistent storage, then run the preflight again.',
     };
   }
+  const unlisted = [compose, agent].filter((path) => path.mountInFstab === null && path.filesystem?.mountPoint !== '/');
+  if (unlisted.length > 0) {
+    return {
+      ...base,
+      status: 'warn',
+      summary: `/etc/fstab could not be read, so ${unlisted.map((path) => path.input).join(' and ')} cannot be confirmed to be mounted at boot.`,
+      observed: unlisted.map((path) => `${path.input} on ${path.filesystem?.mountPoint}`).join('; '),
+      remediation: 'Confirm the mount is present at boot (fstab or a systemd mount unit), then run the preflight again.',
+    };
+  }
   const separate = [compose, agent].filter((path) => path.mountInFstab === false && path.filesystem?.mountPoint !== '/');
   if (separate.length > 0) {
     return {
@@ -791,6 +801,15 @@ export function buildBootstrapEvidence(input: { facts: BootstrapFacts; nodeNameT
       summary: 'The SSH user could not be read.',
       remediation: 'Confirm the SSH user exists and has the access you expect, then run the preflight again.',
     });
+  } else if (facts.user.sudoNonInteractive === null && !facts.user.isRoot && needsSudo) {
+    checks.push({
+      id: 'sudo',
+      category: 'privileges',
+      label: 'Privilege',
+      status: 'unknown',
+      summary: 'The sudo check timed out or failed to run, and this plan needs administrator privileges.',
+      remediation: 'Confirm `sudo -n true` works for the SSH user on the host, then run the preflight again.',
+    });
   } else if (facts.user.isRoot || facts.user.sudoNonInteractive) {
     checks.push({
       id: 'sudo',
@@ -888,7 +907,7 @@ export function buildBootstrapEvidence(input: { facts: BootstrapFacts; nodeNameT
       label: 'Docker daemon',
       status: 'blocked',
       summary: 'Docker is installed but not running. Existing containers and volumes cannot be inventoried while the daemon is stopped.',
-      remediation: 'Start the Docker service on the host (sudo systemctl start docker), then run the preflight again.',
+      remediation: 'Start the Docker service on the host (for example sudo systemctl start docker), then run the preflight again.',
     });
   } else {
     checks.push({

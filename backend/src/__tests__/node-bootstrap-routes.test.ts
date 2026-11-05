@@ -734,6 +734,7 @@ describe('bootstrap service trust serialization', () => {
       captureHostKey: async () => ({ algorithm: 'ssh-ed25519', fingerprint: 'SHA256:x', knownHostsLine: 'line' }),
       runCommands: async (session, commands, options) => {
         seenTotals.push(options?.totalMs ?? -1);
+        options?.onHostKey?.({ algorithm: 'ssh-ed25519', fingerprint: 'SHA256:fixturefingerprint000000000000000000000000', knownHostsLine: 'line' });
         if (session.address === '192.168.1.10') {
           await new Promise((resolve) => setTimeout(resolve, 40));
           throw new SshTransportError('SSH_UNREACHABLE', 'first address down');
@@ -765,7 +766,8 @@ describe('bootstrap service trust serialization', () => {
     let timedOut = true;
     const transport: BootstrapTransport = {
       captureHostKey: async () => ({ algorithm: 'ssh-ed25519', fingerprint: 'SHA256:t', knownHostsLine: 'line' }),
-      runCommands: async (session, commands) => {
+      runCommands: async (session, commands, options) => {
+        options?.onHostKey?.({ algorithm: 'ssh-ed25519', fingerprint: 'SHA256:t', knownHostsLine: 'line' });
         if (timedOut) {
           return commands.map((command) => ({
             id: command.id, stdout: '', stderr: '', exitCode: null, truncated: false, timedOut: true, error: 'PREFLIGHT_TIMEOUT',
@@ -1042,5 +1044,102 @@ describe('bootstrap routes: client disconnect', () => {
     pending.abort();
     await done;
     await vi.waitFor(() => expect(signal?.aborted).toBe(true));
+  });
+});
+
+describe('bootstrap service cancellation and missing host key', () => {
+  const audit = { username: 'admin', ip: '127.0.0.1', method: 'POST', path: '/api/nodes/bootstrap/preflight' };
+  const hub = 'https://sencho.example.com';
+  const request: BootstrapPreflightRequest = {
+    host: 'cancel.example.com',
+    port: 22,
+    username: 'ubuntu',
+    privateKey: '-----BEGIN OPENSSH PRIVATE KEY-----\nnot-a-real-key\n-----END OPENSSH PRIVATE KEY-----',
+    expectedFingerprint: 'SHA256:fixturefingerprint000000000000000000000000',
+    targetName: 'cancel-server',
+    composeDir: '/opt/docker/sencho',
+    agentDir: '/opt/sencho-agent',
+  };
+  const build = (transport: BootstrapTransport, extra: Partial<ConstructorParameters<typeof NodeBootstrapService>[0]> = {}) => (
+    new NodeBootstrapService({
+      transport,
+      db: DatabaseService.getInstance(),
+      now: () => 1_762_300_000_000,
+      resolveAddresses: async () => ['10.0.0.1', '10.0.0.2'],
+      caPem: () => null,
+      ...extra,
+    })
+  );
+
+  it('neither pins a key nor succeeds when the transport never reported one', async () => {
+    const host = 'no-key-reported.example.com';
+    const transport: BootstrapTransport = {
+      captureHostKey: async () => ({ algorithm: 'ssh-ed25519', fingerprint: 'SHA256:x', knownHostsLine: 'line' }),
+      runCommands: async (_session, commands) => commands.map((command) => ({
+        id: command.id, stdout: '', stderr: '', exitCode: 0, truncated: false, timedOut: false, error: null,
+      })),
+    };
+    await expect(build(transport).preflight({ ...request, host }, { hubUrl: hub, audit }))
+      .rejects.toMatchObject({ code: 'HOST_KEY_UNTRUSTED' });
+    expect(DatabaseService.getInstance().getNodeBootstrapTrust(host, 22)).toBeUndefined();
+  });
+
+  it('stops dialing further addresses once the caller cancelled', async () => {
+    const controller = new AbortController();
+    const dialed: string[] = [];
+    const transport: BootstrapTransport = {
+      captureHostKey: async () => ({ algorithm: 'ssh-ed25519', fingerprint: 'SHA256:x', knownHostsLine: 'line' }),
+      runCommands: async (session) => {
+        dialed.push(session.address);
+        controller.abort();
+        throw new SshTransportError('SSH_UNREACHABLE', 'The request was cancelled.');
+      },
+    };
+    await expect(build(transport).preflight(
+      { ...request, host: 'cancel-loop.example.com' },
+      { hubUrl: hub, audit, signal: controller.signal },
+    )).rejects.toMatchObject({ code: 'SSH_UNREACHABLE' });
+    expect(dialed).toEqual(['10.0.0.1']);
+  });
+
+  it('abandons a hung DNS lookup when the caller cancels and releases the target lock', async () => {
+    const controller = new AbortController();
+    let resolves = 0;
+    const transport: BootstrapTransport = {
+      captureHostKey: async () => ({ algorithm: 'ssh-ed25519', fingerprint: 'SHA256:x', knownHostsLine: 'line' }),
+      runCommands: async (_session, commands, options) => {
+        options?.onHostKey?.({ algorithm: 'ssh-ed25519', fingerprint: request.expectedFingerprint as string, knownHostsLine: 'line' });
+        return commands.map((command) => ({
+          id: command.id, stdout: '', stderr: '', exitCode: 0, truncated: false, timedOut: false, error: null,
+        }));
+      },
+    };
+    const svc = build(transport, {
+      resolveAddresses: async () => {
+        resolves += 1;
+        if (resolves === 1) await new Promise(() => {});
+        return ['10.0.0.1'];
+      },
+    });
+    const first = svc.preflight({ ...request, host: 'hung-dns.example.com' }, { hubUrl: hub, audit, signal: controller.signal });
+    await new Promise((resolve) => setImmediate(resolve));
+    controller.abort();
+    await expect(first).rejects.toMatchObject({ code: 'SSH_UNREACHABLE' });
+    await expect(svc.preflight({ ...request, host: 'hung-dns.example.com' }, { hubUrl: hub, audit })).resolves.toBeDefined();
+  });
+
+  it('reports a command timeout that lands on the request deadline as a budget error', async () => {
+    const transport: BootstrapTransport = {
+      captureHostKey: async () => ({ algorithm: 'ssh-ed25519', fingerprint: 'SHA256:x', knownHostsLine: 'line' }),
+      runCommands: async (_session, commands, options) => {
+        options?.onHostKey?.({ algorithm: 'ssh-ed25519', fingerprint: request.expectedFingerprint as string, knownHostsLine: 'line' });
+        await new Promise((resolve) => setTimeout(resolve, 80));
+        return [{ id: commands[0].id, stdout: '', stderr: '', exitCode: null, truncated: false, timedOut: true, error: 'COMMAND_TIMEOUT' }];
+      },
+    };
+    await expect(build(transport, { requestBudgetMs: 60 }).preflight(
+      { ...request, host: 'deadline-race.example.com' },
+      { hubUrl: hub, audit },
+    )).rejects.toMatchObject({ code: 'PREFLIGHT_TIMEOUT' });
   });
 });

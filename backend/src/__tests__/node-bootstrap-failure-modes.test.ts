@@ -421,6 +421,8 @@ describe('container and agent inventory completeness across direct and sudo', ()
       probe('path_compose', pathCompose),
       probe('agent_inventory', '', { exitCode: 1 }),
       probe('agent_inventory_sudo', 'compose.yaml\0sencho-bootstrap.json\0'),
+      probe('agent_marker', '', { exitCode: 1 }),
+      probe('agent_marker_sudo', '{"project":"sencho-agent"}'),
       probe('compose_inventory', '', { exitCode: 1 }),
       probe('compose_inventory_sudo', '/opt/docker/sencho/a/compose.yaml\0/opt/docker/sencho/b/compose.yaml\0'),
     ]);
@@ -513,5 +515,71 @@ describe('path facts and partial listings that are incomplete', () => {
     expect(facts.containers.complete).toBe(false);
     expect(facts.containers.agentContainer).toBe('sencho-agent');
     expect(check(facts, 'agent_conflict').status).toBe('blocked');
+  });
+});
+
+describe('sudo, marker, fstab and transport gaps that must not read as clean', () => {
+  const agentPath = ['P_EXISTS=1', 'P_ISDIR=1', 'P_REAL=/opt/sencho-agent', 'P_FSTYPE=ext4', 'P_FSTARGET=/', 'P_USER_R=1', 'P_USER_W=1', 'P_PARENT_W=1'].join('\n');
+
+  it('reports a sudo check that timed out as unknown, and only when the plan needs sudo', () => {
+    const timedOut = assemble([
+      probe('user', 'ubuntu\n1000\nubuntu'),
+      probe('sudo', '', { timedOut: true, exitCode: null }),
+    ]);
+    expect(timedOut.user?.sudoNonInteractive).toBeNull();
+    expect(assemble([probe('user', 'ubuntu\n1000\nubuntu'), probe('sudo', '', { exitCode: 1 })]).user?.sudoNonInteractive).toBe(false);
+
+    const needsSudo = makeFacts({
+      user: { name: 'ubuntu', uid: 1000, group: 'ubuntu', isRoot: false, sudoNonInteractive: null },
+      docker: { cliInstalled: false, serverVersion: null, composeVersion: null, socketAccess: 'none', serviceActive: false, serviceEnabled: false },
+    });
+    expect(check(needsSudo, 'sudo').status).toBe('unknown');
+    expect(suppressed(needsSudo)).toBe(true);
+    const noSudoNeeded = makeFacts({ user: { name: 'ubuntu', uid: 1000, group: 'ubuntu', isRoot: false, sudoNonInteractive: null } });
+    expect(check(noSudoNeeded, 'sudo').status).toBe('pass');
+  });
+
+  it('flags a bootstrap marker that is listed but could not be read', () => {
+    const facts = assemble([
+      probe('path_agent', agentPath),
+      probe('agent_inventory', 'compose.yaml\0sencho-bootstrap.json\0'),
+      probe('agent_marker', '', { timedOut: true, exitCode: null }),
+      probe('agent_marker_sudo', '', { exitCode: 1 }),
+    ]);
+    expect(facts.paths.agentDir.inventoryError).toMatch(/marker could not be read/);
+    const readable = assemble([
+      probe('path_agent', agentPath),
+      probe('agent_inventory', 'compose.yaml\0sencho-bootstrap.json\0'),
+      probe('agent_marker', '{"project":"sencho-agent"}'),
+    ]);
+    expect(readable.paths.agentDir.inventoryError).toBeNull();
+    expect(readable.paths.agentDir.hasMarker).toBe(true);
+  });
+
+  it('warns instead of passing when /etc/fstab could not be read for a separate mount', () => {
+    const facts = makeFacts({
+      composeDir: { filesystem: { type: 'ext4', source: '/dev/sdb1', mountPoint: '/mnt/stacks' }, mountInFstab: null },
+    });
+    const persistence = check(facts, 'path_persistence');
+    expect(persistence.status).toBe('warn');
+    expect(persistence.summary).toMatch(/fstab could not be read/);
+    const root = makeFacts({ composeDir: { filesystem: { type: 'ext4', source: '/dev/sda1', mountPoint: '/' }, mountInFstab: null } });
+    expect(check(root, 'path_persistence').status).toBe('pass');
+  });
+
+  it('keeps the plan builder in step with the evidence when Docker is not installed', () => {
+    const facts = makeFacts({
+      docker: { cliInstalled: false, serverVersion: null, composeVersion: null, socketAccess: 'unknown', serviceActive: false, serviceEnabled: false },
+      repo: { dockerSourceConfigured: false, keyringPresent: false, sourceVerified: false, keyringVerified: false },
+      packages: [
+        { name: 'docker-ce', installedVersion: null, candidateVersion: null },
+        { name: 'docker-ce-cli', installedVersion: null, candidateVersion: null },
+        { name: 'containerd.io', installedVersion: null, candidateVersion: null },
+        { name: 'docker-buildx-plugin', installedVersion: null, candidateVersion: null },
+        { name: 'docker-compose-plugin', installedVersion: null, candidateVersion: null },
+      ],
+    });
+    expect(suppressed(facts)).toBe(false);
+    expect(() => buildBootstrapPlan({ facts, targetName: 'srv', hubUrl: 'https://sencho.example.com', caPem: null, now: 1 })).not.toThrow();
   });
 });

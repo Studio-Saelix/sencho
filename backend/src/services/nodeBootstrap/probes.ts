@@ -931,7 +931,10 @@ export function assembleFacts(input: AssembleFactsInput): BootstrapFacts {
     : { stackCount: 0, stackNames: [], truncated: false, rootComposeFile: false };
   const agentOutcome = inventoryOutcome(map, 'agent_inventory', 'agent_inventory_sudo');
   const agentInventory = parseAgentInventory(agentOutcome.text, agentOutcome.truncated);
-  const marker = parseBootstrapMarker(stdoutOf(map, 'agent_marker') || stdoutOf(map, 'agent_marker_sudo'));
+  const markerOutcome = inventoryOutcome(map, 'agent_marker', 'agent_marker_sudo');
+  const marker = parseBootstrapMarker(markerOutcome.complete ? markerOutcome.text : '');
+  // A marker that is listed but could not be read is unknown, not "unrelated content".
+  const markerUnreadable = !markerOutcome.complete && agentInventory.entries.includes('sencho-bootstrap.json');
 
   const composeDir: ComposeDirObservation = {
     ...composeBase,
@@ -950,7 +953,9 @@ export function assembleFacts(input: AssembleFactsInput): BootstrapFacts {
       ? isUnderAnyMount(agentBase.filesystem.mountPoint, input.fstabMountPoints)
       : null,
     ...agentInventory,
-    inventoryError: agentBase.exists ? agentOutcome.error : null,
+    inventoryError: agentBase.exists
+      ? agentOutcome.error ?? (markerUnreadable ? `the bootstrap marker could not be read (${markerOutcome.error})` : null)
+      : null,
     ...marker,
   };
 
@@ -982,7 +987,9 @@ export function assembleFacts(input: AssembleFactsInput): BootstrapFacts {
     target: input.target,
     hostKey: input.hostKey,
     os: osBase ? { ...osBase, arch: uname.arch, kernel: uname.kernel } : null,
-    user: userBase ? { ...userBase, sudoNonInteractive: sudoAvailable } : null,
+    user: userBase
+      ? { ...userBase, sudoNonInteractive: sudoAvailable ? true : isProbeUnknown(map, 'sudo') ? null : false }
+      : null,
     docker: {
       cliInstalled,
       cliProbeUnknown,

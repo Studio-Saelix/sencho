@@ -150,7 +150,8 @@ export interface BootstrapFacts {
   target: BootstrapTarget;
   hostKey: HostKeyObservation;
   os: { id: string; versionId: string; codename: string; prettyName: string; arch: string; kernel: string } | null;
-  user: { name: string; uid: number; group: string; isRoot: boolean; sudoNonInteractive: boolean } | null;
+  /** `sudoNonInteractive` is null when the `sudo -n true` probe did not complete. */
+  user: { name: string; uid: number; group: string; isRoot: boolean; sudoNonInteractive: boolean | null } | null;
   docker: {
     cliInstalled: boolean;
     /** True when the CLI probe itself timed out, errored or was truncated. */

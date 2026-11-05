@@ -287,7 +287,7 @@ export function buildBootstrapPlan(input: PlanBuildInput): BootstrapPlan {
     && !(facts.docker.cliInstalled && facts.docker.serverVersion && facts.docker.composeVersion)) {
     throw new Error('The plan cannot be built while the Docker package source could not be inspected.');
   }
-  if (facts.docker.socketAccess === 'unknown' || facts.docker.composeProbeUnknown) {
+  if ((facts.docker.cliInstalled && facts.docker.socketAccess === 'unknown') || facts.docker.composeProbeUnknown) {
     throw new Error('The plan requires complete Docker daemon and Compose probes.');
   }
   if (facts.docker.cliInstalled && (!facts.containers.complete || facts.agent.dataVolumeExists === null)) {

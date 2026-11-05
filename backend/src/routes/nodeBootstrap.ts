@@ -78,6 +78,7 @@ function sendError(res: Response, error: unknown): void {
     return;
   }
   if (error instanceof SshTransportError) {
+    if (res.destroyed) return;
     console.warn(`[Bootstrap] Transport failure (${error.code}):`, sanitizeForLog(error.message));
     res.status(error.status).json({ error: error.message, code: error.code });
     return;
