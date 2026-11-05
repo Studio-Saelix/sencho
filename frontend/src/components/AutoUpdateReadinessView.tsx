@@ -1302,10 +1302,8 @@ function AutoUpdateReadinessContent({ headerActions }: AutoUpdateReadinessProps)
   const [groups, setGroups] = useState<NodeGroup[]>([]);
   const [reachableNodeCount, setReachableNodeCount] = useState<number | null>(null);
   const [loading, setLoading] = useState(true);
-  // True once any load has settled (data or error). The skeleton belongs to the
-  // first load only: a later reload, even over an empty list, keeps what is shown.
-  // The groups check on top covers rows that arrive while the first load is still
-  // fetching their previews.
+  // True once the latest load has settled (data or error). The skeleton belongs to
+  // the first load only: a later reload, even over an empty list, keeps what is shown.
   const [hasLoaded, setHasLoaded] = useState(false);
   const [refreshing, setRefreshing] = useState(false);
   const [cadence, setCadence] = useState<ImageUpdateStatus | null>(null);
@@ -1624,6 +1622,7 @@ function AutoUpdateReadinessContent({ headerActions }: AutoUpdateReadinessProps)
 
   const { mode: viewMode, setMode: setViewMode } = useReadinessViewMode();
   // A fast first answer never flashes the skeleton; the min-h wrapper holds the pane open until the data lands.
+  // It ends when the first load settles or its rows arrive (their previews may still be fetching), so later reloads over an empty list keep the empty state.
   const firstLoad = loading && !hasLoaded && groups.length === 0;
   const { showBusy: showSkeleton } = useVisualBusy(firstLoad);
 

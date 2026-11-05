@@ -2,6 +2,8 @@
  * Loading and Recheck feedback on the Update page: the first load shows a
  * layout-matched skeleton only after the visual-busy delay, and Recheck locks
  * at once but turns its icon and changes its label only after that same delay.
+ * The skeleton belongs to the first load only (later slow reloads keep what is
+ * shown), and the desktop hero holds the busy label's width in an inert copy.
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { render, screen, act, fireEvent, within } from '@testing-library/react';
@@ -29,12 +31,13 @@ vi.mock('@/context/NodeContext', () => ({
   useNodes: () => ({ nodes: nodeState.list, nodeMeta: mockNodeMeta, refreshNodeMeta: mockRefreshNodeMeta }),
 }));
 
-import { apiFetch } from '@/lib/api';
+import { apiFetch, fetchForNode } from '@/lib/api';
 import { toast } from '@/components/ui/toast-store';
 import { DURATION_BASE_MS } from '@/hooks/useVisualBusy';
 import AutoUpdateReadinessView from '../AutoUpdateReadinessView';
 
 const mockedFetch = apiFetch as unknown as ReturnType<typeof vi.fn>;
+const mockedFetchForNode = fetchForNode as unknown as ReturnType<typeof vi.fn>;
 
 type JsonResponse = { ok: boolean; json: () => Promise<unknown> };
 
@@ -47,6 +50,8 @@ function deferred() {
 const IDLE_LABEL = /^Recheck$/;
 const BUSY_LABEL = /^Rechecking\.\.\.$/;
 const EMPTY_STATE = 'All stacks on current builds';
+// handleRefresh reloads the list this long after a Recheck request.
+const RELOAD_AFTER_RECHECK_MS = 2500;
 
 const json = (body: unknown): JsonResponse => ({ ok: true, json: async () => body });
 
@@ -67,6 +72,8 @@ describe('AutoUpdateReadinessView loading and recheck feedback', () => {
     vi.clearAllMocks();
   });
 
+  let fleetCalls = () => 0;
+
   // `fleet` is one answer for every call, or one answer per call (the last repeats).
   function route(
     fleet: Promise<JsonResponse> | Promise<JsonResponse>[],
@@ -74,9 +81,10 @@ describe('AutoUpdateReadinessView loading and recheck feedback', () => {
     cadence: unknown = {},
   ) {
     const fleets = Array.isArray(fleet) ? fleet : [fleet];
-    let fleetCalls = 0;
+    let calls = 0;
+    fleetCalls = () => calls;
     mockedFetch.mockImplementation((url: string) => {
-      if (url === '/image-updates/fleet') return fleets[Math.min(fleetCalls++, fleets.length - 1)];
+      if (url === '/image-updates/fleet') return fleets[Math.min(calls++, fleets.length - 1)];
       if (url === '/image-updates/fleet/refresh' && refresh) return refresh;
       if (url === '/image-updates/status') return Promise.resolve(json(cadence));
       if (url.startsWith('/scheduled-tasks')) return Promise.resolve(json([]));
@@ -205,7 +213,8 @@ describe('AutoUpdateReadinessView loading and recheck feedback', () => {
     await settle();
 
     const recheck = screen.getByRole('button', { name: 'Recheck registries' });
-    // The button itself carries only the current label, so no slack sits around "Recheck".
+    // The button itself carries only the current label (jsdom has no layout, so this pins the
+    // structure: the idle button holds no hidden busy label that would widen it).
     expect(recheck).toHaveTextContent(IDLE_LABEL);
     expect(recheck.textContent).not.toContain('Rechecking');
     // The busy label's width is held beside it by a copy nobody can reach or hear.
@@ -216,10 +225,14 @@ describe('AutoUpdateReadinessView loading and recheck feedback', () => {
     expect(holder).toHaveAttribute('tabindex', '-1');
     expect(holder).toHaveClass('invisible');
     expect(screen.getAllByRole('button', { name: /recheck/i })).toEqual([recheck]);
+    // Both sit in one grid cell, the button at the end, so the row keeps the busy width.
     expect(recheck.parentElement).toBe(holder.parentElement);
+    expect(holder.parentElement).toHaveClass('inline-grid');
+    expect(holder).toHaveClass('col-start-1', 'row-start-1');
+    expect(recheck).toHaveClass('col-start-1', 'row-start-1', 'justify-self-end');
   });
 
-  it('shows no empty-state skeleton on a slow reload after the first load settled empty', async () => {
+  it('shows no skeleton on a slow reload after the first load settled empty', async () => {
     const reload = deferred();
     const refresh = deferred();
     route([Promise.resolve(json({})), reload.promise], refresh.promise);
@@ -231,9 +244,9 @@ describe('AutoUpdateReadinessView loading and recheck feedback', () => {
     await act(async () => {
       refresh.resolve(json({ triggered: [1], rateLimited: [], failed: [] }));
     });
-    await settle(2500);
     // The reload is in flight and slower than the delay: the settled empty state stays.
-    await settle(DURATION_BASE_MS * 3);
+    await settle(RELOAD_AFTER_RECHECK_MS + DURATION_BASE_MS * 3);
+    expect(fleetCalls()).toBe(2);
     expect(screen.queryByTestId('readiness-skeleton')).toBeNull();
     expect(screen.getByText(EMPTY_STATE)).toBeInTheDocument();
 
@@ -256,7 +269,41 @@ describe('AutoUpdateReadinessView loading and recheck feedback', () => {
     await act(async () => {
       refresh.resolve(json({ triggered: [1], rateLimited: [], failed: [] }));
     });
-    await settle(2500 + DURATION_BASE_MS * 3);
+    await settle(RELOAD_AFTER_RECHECK_MS + DURATION_BASE_MS * 3);
+    expect(fleetCalls()).toBe(2);
+    expect(screen.queryByTestId('readiness-skeleton')).toBeNull();
+    expect(screen.getByText(EMPTY_STATE)).toBeInTheDocument();
+  });
+
+  it('keeps the skeleton off while rows wait for their previews on the first load', async () => {
+    const preview = deferred();
+    mockedFetchForNode.mockReturnValue(preview.promise);
+    route(Promise.resolve(json({ '1': { web: true } })));
+    render(<AutoUpdateReadinessView />);
+    await settle(DURATION_BASE_MS * 3);
+    // The first load has not settled (previews pending), but the rows are already on screen.
+    expect(screen.queryByTestId('readiness-skeleton')).toBeNull();
+    expect(screen.getByText('web')).toBeInTheDocument();
+  });
+
+  it('keeps the skeleton until the latest first load settles when a newer load supersedes it', async () => {
+    const first = deferred();
+    const second = deferred();
+    route([first.promise, second.promise]);
+    const { rerender } = render(<AutoUpdateReadinessView />);
+    await settle(DURATION_BASE_MS * 2);
+    expect(screen.getByTestId('readiness-skeleton')).toBeInTheDocument();
+
+    nodeState.list = [...LOCAL_ONLY, { id: 2, name: 'Second', type: 'remote', status: 'online' }];
+    rerender(<AutoUpdateReadinessView />);
+    // The superseded answer must not mark the load as done.
+    await act(async () => { first.resolve(json({})); });
+    await settle(DURATION_BASE_MS * 2);
+    expect(screen.getByTestId('readiness-skeleton')).toBeInTheDocument();
+    expect(screen.queryByText(EMPTY_STATE)).toBeNull();
+
+    await act(async () => { second.resolve(json({})); });
+    await settle();
     expect(screen.queryByTestId('readiness-skeleton')).toBeNull();
     expect(screen.getByText(EMPTY_STATE)).toBeInTheDocument();
   });
@@ -271,6 +318,7 @@ describe('AutoUpdateReadinessView loading and recheck feedback', () => {
     nodeState.list = [...LOCAL_ONLY, { id: 2, name: 'Second', type: 'remote', status: 'online' }];
     rerender(<AutoUpdateReadinessView />);
     await settle(DURATION_BASE_MS * 3);
+    expect(fleetCalls()).toBe(2);
     expect(screen.queryByTestId('readiness-skeleton')).toBeNull();
     expect(screen.getByText(EMPTY_STATE)).toBeInTheDocument();
   });
@@ -336,7 +384,8 @@ describe('AutoUpdateReadinessView loading and recheck feedback', () => {
       await act(async () => {
         refresh.resolve(json({ triggered: [1], rateLimited: [], failed: [] }));
       });
-      await settle(2500 + DURATION_BASE_MS * 3);
+      await settle(RELOAD_AFTER_RECHECK_MS + DURATION_BASE_MS * 3);
+    expect(fleetCalls()).toBe(2);
       expect(screen.queryByTestId('readiness-skeleton')).toBeNull();
       expect(screen.getByText(EMPTY_STATE)).toBeInTheDocument();
     });
