@@ -698,6 +698,23 @@ recoveryRouter.post('/restores/:intentId/resolve', handle(async (req, res) => {
 }));
 
 // --- Operations -------------------------------------------------------------
+/**
+ * Boot parks every operation a dead process left as `completion_unknown`, then an
+ * overwrite's own reconciler proves the volume committed or rolled back and the
+ * operation takes that ending. Until boot has finished, the parked ending of an
+ * overwrite is provisional, and reporting it would tell a client that a volume the
+ * reconciler is about to prove is unprovable. Such a read answers like the routes
+ * that wait for boot: `503`, ask again.
+ */
+function holdProvisionalEnding(req: Request, operation: RecoveryOperation): void {
+  if (operation.kind !== 'restore' || operation.state !== 'completion_unknown' || operation.errorClass !== 'interrupted') return;
+  if (!engineService(req).isSettlingAtBoot()) return;
+  const intent = RestoreIntentStore.getInstance().getByOperation(operation.id);
+  if (intent && intent.targetMode === 'staged_overwrite') {
+    throw new RecoveryError('capability_unavailable', { reason: 'engine_starting' });
+  }
+}
+
 /** The operation with its progress and whatever evidence it produced. */
 recoveryRouter.get('/operations/:id', handle(async (req, res) => {
   const operation = RecoveryOperationStore.getInstance().get(paramOf(req, 'id'));
@@ -714,6 +731,7 @@ recoveryRouter.get('/operations/:id', handle(async (req, res) => {
     sendRecoveryError(res, 'permission_denied');
     return;
   }
+  holdProvisionalEnding(req, operation);
   const progress = engineService(req).progressFor(operation.id);
   res.json({ operation, progress, result: operationResult(operation) });
 }));
@@ -752,6 +770,7 @@ recoveryRouter.post('/operations/:id/cancel', handle(async (req, res) => {
       return;
     }
   }
+  holdProvisionalEnding(req, operation);
   engineService(req).cancel(operation.id);
   res.status(202).json({ operation: RecoveryOperationStore.getInstance().get(operation.id) ?? operation });
 }));

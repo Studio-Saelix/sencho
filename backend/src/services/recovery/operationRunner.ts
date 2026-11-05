@@ -197,6 +197,15 @@ export class RecoveryEngineService {
     return this.boot.ready;
   }
 
+  /**
+   * Whether boot has not finished its reconciliation. A boot that ended without
+   * opening the gate has settled what it could, so it is not "settling"; one that
+   * has not started or is still running may yet prove an interrupted overwrite.
+   */
+  isSettlingAtBoot(): boolean {
+    return this.boot.finishedAt === null;
+  }
+
   // --- Health ---------------------------------------------------------------
 
   /**

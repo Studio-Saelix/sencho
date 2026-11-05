@@ -297,6 +297,50 @@ describe('the storage lock of an interrupted overwrite', () => {
     expect(admitted.replayed).toBe(false);
   });
 
+  // The operation reads `completion_unknown` from the moment boot parks it until the
+  // reconciler settles it, and the API is already listening. The service has to say it
+  // is still settling for that whole window, and only for it.
+  it('says boot is settling while the operation is parked, and not once boot has ended', async () => {
+    const seeded = seedInterrupted('restore', { storageLock: true });
+    seedOverwriteIntent(seeded, 'staging');
+    vi.spyOn(DockerController.prototype, 'getDocker').mockReturnValue(fakeDocker([OTHER_VOLUME, 'interrupted_data']));
+    const service = runner.RecoveryEngineService.getInstance(nodeId);
+    const store = operations.RecoveryOperationStore.getInstance();
+    expect(service.isSettlingAtBoot()).toBe(true);
+    const seen: Array<{ settling: boolean; state: string | undefined }> = [];
+    const observe = () => seen.push({ settling: service.isSettlingAtBoot(), state: store.get(seeded.operationId)?.state });
+    service.setHelperRunnerForTests({
+      run: async (spec: { profile: string; onStdoutLine?: (line: string) => void }) => {
+        observe();
+        if (spec.profile === 'probe') spec.onStdoutLine?.(JSON.stringify({ dev: 1, ino: 2, uid: 0, gid: 0, mode: 16877 }));
+        return { exitCode: 0, stderrTail: '', aborted: false, killed: false };
+      },
+      removeForeignEpochHelpers: async () => { observe(); return 0; },
+      countForeignEpochHelpers: async () => 0,
+    } as never);
+    await service.runBootSequence();
+
+    // Boot parked the operation before it did any helper work, and the service said so.
+    expect(seen.length).toBeGreaterThan(0);
+    expect(seen).toContainEqual({ settling: true, state: 'completion_unknown' });
+    expect(seen.every((entry) => entry.settling)).toBe(true);
+    expect(store.get(seeded.operationId)).toMatchObject({ state: 'failed', errorClass: 'interrupted' });
+    expect(service.isSettlingAtBoot()).toBe(false);
+  });
+
+  it('stops saying boot is settling when boot ended without opening the gate', async () => {
+    const seeded = seedInterrupted('restore', { storageLock: true });
+    seedOverwriteIntent(seeded, 'staging');
+    vi.spyOn(DockerController.prototype, 'getDocker').mockReturnValue(fakeDocker([OTHER_VOLUME, 'interrupted_data']));
+    const service = runner.RecoveryEngineService.getInstance(nodeId);
+    service.setHelperRunnerForTests(helper(0).instance);
+    vi.spyOn(service as unknown as { refreshHealth: () => Promise<void> }, 'refreshHealth').mockRejectedValue(new Error('daemon gone'));
+    vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    await service.runBootSequence();
+    expect(service.isReady()).toBe(false);
+    expect(service.isSettlingAtBoot()).toBe(false);
+  });
+
   it('keeps completion_unknown and the stale lock for a restore boot could not prove', async () => {
     const seeded = seedInterrupted('restore', { storageLock: true });
     const intentId = seedOverwriteIntent(seeded, 'completion_unknown');

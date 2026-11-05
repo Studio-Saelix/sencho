@@ -1469,4 +1469,73 @@ describe('an overwrite is authorized against the stacks its fence stopped', () =
       expect(res.body.error, phase).toMatch(/This restore has passed the point/);
     }
   });
+
+  // Boot parks what a dead process left as `completion_unknown`; the overwrite
+  // reconciler then proves the volume and the operation takes that ending. Until boot
+  // has finished the parked ending is provisional, so a read must not report it.
+  describe('an interrupted overwrite whose boot reconciliation has not finished', () => {
+    async function seedParked(): Promise<string> {
+      const { operationId } = await seedStoppedStacks();
+      recoveryDbModule.recoveryDb().prepare(
+        "UPDATE recovery_operations SET state = 'completion_unknown', error_class = 'interrupted' WHERE id = ?",
+      ).run(operationId);
+      // A fresh service has not run its boot sequence.
+      engine.RecoveryEngineService.resetForTests();
+      return operationId;
+    }
+
+    it('is not reported by a read, or by a cancel that would echo it', async () => {
+      const operationId = await seedParked();
+      const read = await request(app).get(`/api/recovery/operations/${operationId}`).set('Cookie', adminCookie);
+      expect(read.status).toBe(503);
+      expect(read.body).toMatchObject({ errorClass: 'capability_unavailable', reason: 'engine_starting' });
+      expect(JSON.stringify(read.body)).not.toContain('completion_unknown');
+      const cancel = await request(app).post(`/api/recovery/operations/${operationId}/cancel`).set('Cookie', adminCookie);
+      expect(cancel.status).toBe(503);
+      expect(JSON.stringify(cancel.body)).not.toContain('completion_unknown');
+    });
+
+    it('is held back for a caller who may read it, and a cancel checks access before it', async () => {
+      const operationId = await seedParked();
+      const viewer = await request(app).get(`/api/recovery/operations/${operationId}`).set('Cookie', viewerCookie);
+      expect(viewer.status).toBe(503);
+      // Access first: a caller who may not touch the restore is told nothing about its state.
+      const alphaOnly = await userEditing('edits-alpha-only-parked', ['alpha']);
+      const denied = await request(app).post(`/api/recovery/operations/${operationId}/cancel`).set('Cookie', alphaOnly);
+      expect(denied.status).toBe(403);
+      expect(JSON.stringify(denied.body)).not.toContain('engine_starting');
+    });
+
+    it('answers what boot proved once the operation is settled, and as it is once boot has ended', async () => {
+      const operationId = await seedParked();
+      const store = operations.RecoveryOperationStore.getInstance();
+      store.settleReconciled(operationId, { state: 'failed', errorClass: 'interrupted' });
+      service().markReadyForTests();
+      const settled = await request(app).get(`/api/recovery/operations/${operationId}`).set('Cookie', adminCookie);
+      expect(settled.status).toBe(200);
+      expect(settled.body.operation).toMatchObject({ state: 'failed', errorClass: 'interrupted' });
+    });
+
+    it('reports an unproven ending once boot has finished and stays unproven', async () => {
+      const operationId = await seedParked();
+      service().markReadyForTests();
+      const res = await request(app).get(`/api/recovery/operations/${operationId}`).set('Cookie', adminCookie);
+      expect(res.status).toBe(200);
+      expect(res.body.operation).toMatchObject({ state: 'completion_unknown', errorClass: 'interrupted' });
+    });
+
+    it('does not hold back an interrupted operation that is not an overwrite', async () => {
+      const pointId = await seedPoint();
+      const point = points.RecoveryPointStore.getInstance().get(pointId)!;
+      const captureId = randomUUID();
+      recoveryDbModule.recoveryDb().prepare(`INSERT INTO recovery_operations
+        (id, idempotency_key, kind, storage_id, point_id, actor, transport, state, error_class, process_epoch, created_at, updated_at)
+        VALUES (?, ?, 'create_point', ?, ?, 'admin', 'local', 'completion_unknown', 'interrupted', 'e', 1, 1)`)
+        .run(captureId, randomUUID(), point.storageId, pointId);
+      engine.RecoveryEngineService.resetForTests();
+      const res = await request(app).get(`/api/recovery/operations/${captureId}`).set('Cookie', adminCookie);
+      expect(res.status).toBe(200);
+      expect(res.body.operation).toMatchObject({ state: 'completion_unknown' });
+    });
+  });
 });
