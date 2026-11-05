@@ -889,9 +889,10 @@ class TrivyService {
      * Resolve the digest, platform and cache key a scan of `imageRef` would use.
      *
      * Shared by `scanImage` and `findReusableScan` so a caller that asks whether
-     * a scan would be served from cache gets exactly the answer the scan itself
-     * would give: a second copy of the digest/platform rules is how a cache check
-     * and the scan it guards drift apart.
+     * a scan would be served from cache resolves the same digest, platform and
+     * cache key the scan itself would: a second copy of those rules is how a
+     * cache check and the scan it guards drift apart. The row can still be
+     * inserted or pruned between the two calls; `finishScan` handles that.
      */
     private async resolveScanRequest(
         imageRef: string,
@@ -985,8 +986,10 @@ class TrivyService {
      * Callers that create an `in_progress` row before scanning (the manual scan
      * route) use this so a cache hit returns the stored row instead of inserting
      * a duplicate row with the same findings and timestamp. It resolves the same
-     * digest, platform and cache rule as the scan itself, so the check cannot
-     * disagree with the result.
+     * digest, platform and cache rule as the scan itself, so the check and the
+     * scan agree on the key. A row inserted or pruned between the two calls is
+     * handled by `finishScan`, which rescans rather than write stale findings
+     * into the placeholder.
      */
     async findReusableScan(
         imageRef: string,
@@ -1317,7 +1320,7 @@ class TrivyService {
         const db = DatabaseService.getInstance();
         const startedAt = Date.now();
         try {
-            const result = await this.scanImage(imageRef, nodeId, {
+            let result = await this.scanImage(imageRef, nodeId, {
                 useCache: opts.useCache,
                 scanners: opts.scanners,
                 // A candidate scan persists the digest it actually scanned, and
@@ -1342,6 +1345,24 @@ class TrivyService {
                     );
                     return cached;
                 }
+                // The row was pruned between the scan's lookup and this read
+                // (retention and orphan cleanup run concurrently). Its findings
+                // are a real observation but have no row left to belong to;
+                // copying them into the placeholder under the old timestamp
+                // would recreate the duplicate history entry this method exists
+                // to avoid, possibly with an empty detail set. The placeholder
+                // is the scan that never ran, so run it now.
+                diag(
+                    `finishScan: scanId=${scanId} cached scanId=${result.cachedScanId} vanished; scanning fresh for ${imageRef}`,
+                );
+                result = await this.scanImage(imageRef, nodeId, {
+                    useCache: false,
+                    scanners: opts.scanners,
+                    digest: opts.digest,
+                    platform: opts.platform,
+                    scanRef: opts.scanRef,
+                    cacheRule: opts.cacheRule,
+                });
             }
             // Read after a scan that actually ran, so a database Trivy downloaded
             // during it is what gets recorded. A cache hit kept findings from an
@@ -1472,9 +1493,11 @@ class TrivyService {
      * names a platform still turn reuse off entirely, because a row written
      * before the platform was actually selected may describe another child.
      * Only runs the vulnerability scanner (secrets/misconfig are irrelevant to
-     * the gate and add latency). The scan is persisted as a normal row with
+     * the gate and add latency). A fresh scan is persisted as a normal row with
      * triggered_by=deploy-preflight so the history and compare views continue to
-     * work unchanged.
+     * work unchanged; a cache hit returns the stored row and keeps that row's
+     * original trigger and stack context, because it is that earlier
+     * observation, not a new one.
      *
      * `scanRef` and `digest` are how the gate evaluates the image an update will
      * install: Trivy is pointed at `repo@sha256:<platform digest>`, the row keeps

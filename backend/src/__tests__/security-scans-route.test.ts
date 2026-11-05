@@ -178,7 +178,7 @@ describe('POST /api/security/scan cache reuse', () => {
       expect(res.body.scanId).toBe(id);
       expect(find).toHaveBeenCalledWith(
         'alpine:3.19',
-        expect.any(Number),
+        1,
         expect.objectContaining({ useCache: true, scanners: ['vuln'] }),
       );
       expect(begin).not.toHaveBeenCalled();
@@ -262,8 +262,16 @@ describe('POST /api/security/scan cache reuse', () => {
       expect(res.status).toBe(202);
       expect(res.body.scanId).toBe(42);
       expect(find).not.toHaveBeenCalled();
-      expect(begin).toHaveBeenCalledWith('alpine:3.19', expect.any(Number), 'manual', null, ['vuln']);
-      expect(finish).toHaveBeenCalled();
+      expect(begin).toHaveBeenCalledWith('alpine:3.19', 1, 'manual', null, ['vuln']);
+      // A forced scan must run the scan it opened the row for. If it consulted
+      // the cache it could hit a row that appeared after the placeholder was
+      // created and delete the id the client is polling.
+      expect(finish).toHaveBeenCalledWith(
+        42,
+        'alpine:3.19',
+        1,
+        expect.objectContaining({ useCache: false, scanners: ['vuln'] }),
+      );
     } finally {
       finish.mockRestore();
       begin.mockRestore();

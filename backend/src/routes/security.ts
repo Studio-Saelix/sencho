@@ -537,8 +537,8 @@ securityRouter.post('/scan', authMiddleware, async (req: Request, res: Response)
   }
   // A non-forced scan may be served from a stored row. Answer with that row's
   // id before opening a placeholder: the cached row is already `completed`, so
-  // the client's poll finishes at once, and no second history entry is written
-  // for the same image, digest and timestamp.
+  // the client's first poll sees a finished scan, and no second history entry
+  // is written for the same image, digest and timestamp.
   if (!force) {
     try {
       const reusable = await svc.findReusableScan(imageRef, nodeId, { useCache: true, scanners });
@@ -565,9 +565,10 @@ securityRouter.post('/scan', authMiddleware, async (req: Request, res: Response)
   const scanId = svc.beginScan(imageRef, nodeId, 'manual', stackContext, scanners);
   res.status(202).json({ scanId });
 
-  // The cache was already checked above, so the scan that fills this row must
-  // run: `useCache: false` keeps it from hitting a row that appeared since and
-  // deleting the id the client is now polling.
+  // A non-forced scan already checked the cache above; force bypasses it. In
+  // both cases the scan that fills this row must run: `useCache: false` keeps
+  // it from hitting a row that appeared since and deleting the id the client
+  // is now polling.
   svc.finishScan(scanId, imageRef, nodeId, { useCache: false, scanners }).catch((err) => {
     console.error('[Security] Scan failed for %s:', sanitizeForLog(imageRef), sanitizeForLog((err as Error).message));
   });

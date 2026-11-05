@@ -11,6 +11,7 @@ import { describe, it, expect, beforeAll, afterAll, beforeEach, vi } from 'vites
 import { setupTestDb, cleanupTestDb } from './helpers/setupTestDb';
 import { DatabaseService } from '../services/DatabaseService';
 import DockerController from '../services/DockerController';
+import { triggerPostDeployScan } from '../helpers/policyGate';
 
 let tmpDir: string;
 let TrivyService: typeof import('../services/TrivyService').default;
@@ -36,6 +37,7 @@ function seedScan(options: {
   vulnDbUpdatedAt?: number | null;
   platform?: string | null;
   nodeId?: number;
+  trigger?: 'manual' | 'scheduled' | 'deploy' | 'deploy-preflight';
 } = {}): number {
   return db().createVulnerabilityScan({
     node_id: options.nodeId ?? 1,
@@ -57,7 +59,7 @@ function seedScan(options: {
     os_info: null,
     trivy_version: '0.50.0',
     scan_duration_ms: null,
-    triggered_by: 'deploy-preflight',
+    triggered_by: options.trigger ?? 'deploy-preflight',
     status: 'completed',
     error: null,
     stack_context: 'web',
@@ -356,7 +358,9 @@ describe('a cached scan reuses its row', () => {
   }
 
   it('does not insert a preflight row when the cache answers', async () => {
-    const seeded = seedScan({ vulnDbUpdatedAt: DB_BUILD });
+    // The stored row keeps the trigger of the observation it records; the
+    // preflight that reused it did not scan.
+    const seeded = seedScan({ vulnDbUpdatedAt: DB_BUILD, trigger: 'manual' });
 
     const persisted = await svc().scanImagePreflight('registry.example.com/web:latest', 1, 'web', {
       digest: DIGEST,
@@ -364,7 +368,7 @@ describe('a cached scan reuses its row', () => {
     });
 
     expect(persisted.id).toBe(seeded);
-    expect(persisted.triggered_by).toBe('deploy-preflight');
+    expect(persisted.triggered_by).toBe('manual');
     expect(scanCount()).toBe(1);
   });
 
@@ -404,6 +408,59 @@ describe('a cached scan reuses its row', () => {
     })).rejects.toThrow();
   });
 
+  it('does not let another platform child answer the cache check', async () => {
+    const seeded = seedScan({ vulnDbUpdatedAt: DB_BUILD, platform: 'linux/amd64' });
+
+    const wrongChild = await svc().findReusableScan('registry.example.com/web:latest', 1, {
+      useCache: true,
+      scanners: ['vuln'],
+      digest: DIGEST,
+      platform: 'linux/arm64',
+      cacheRule: 'database',
+    });
+    expect(wrongChild).toBeNull();
+
+    const sameChild = await svc().findReusableScan('registry.example.com/web:latest', 1, {
+      useCache: true,
+      scanners: ['vuln'],
+      digest: DIGEST,
+      platform: 'linux/amd64',
+      cacheRule: 'database',
+    });
+    expect(sameChild?.id).toBe(seeded);
+  });
+
+  it('rescans instead of copying a cached result whose row vanished', async () => {
+    const placeholder = svc().beginScan('registry.example.com/web:latest', 1, 'manual');
+    expect(scanCount()).toBe(1);
+    const cached = {
+      ...freshResult(),
+      scannedAt: DB_BUILD - 60_000,
+      fromCache: true,
+      cachedScanId: 424242,
+    };
+    const scanImage = vi.spyOn(svc(), 'scanImage')
+      .mockResolvedValueOnce(cached)
+      .mockResolvedValueOnce(freshResult());
+
+    const stored = await svc().finishScan(placeholder, 'registry.example.com/web:latest', 1, {
+      useCache: true,
+      scanners: ['vuln'],
+      digest: DIGEST,
+      platform: PLATFORM,
+      cacheRule: 'digest',
+    });
+
+    // The cached row was pruned between the scan's lookup and the reuse. The
+    // placeholder is the scan that never ran, so it must run rather than store
+    // the vanished row's old timestamp and findings under a new identity.
+    expect(scanImage).toHaveBeenCalledTimes(2);
+    expect(scanImage.mock.calls[1][2]).toEqual(expect.objectContaining({ useCache: false }));
+    expect(stored.id).toBe(placeholder);
+    expect(stored.scanned_at).not.toBe(cached.scannedAt);
+    expect(scanCount()).toBe(1);
+  });
+
   it('discards a placeholder opened before a cache hit was discovered', async () => {
     const seeded = seedScan({ vulnDbUpdatedAt: DB_BUILD });
     const placeholder = svc().beginScan('registry.example.com/web:latest', 1, 'manual');
@@ -437,5 +494,48 @@ describe('a cached scan reuses its row', () => {
     expect(stored.triggered_by).toBe('deploy-preflight');
     expect(stored.image_digest).toBe(DIGEST);
     expect(stored.total_vulnerabilities).toBe(1);
+  });
+});
+
+/**
+ * The post-deploy scan has its own cache pre-check before it calls
+ * runScanAndPersist. It must use the node-scoped lookup too, or another node's
+ * fresh row would suppress this node's scan.
+ */
+describe('the post-deploy scan cache is node-scoped', () => {
+  function stubContainers(): void {
+    vi.spyOn(DockerController, 'getInstance').mockReturnValue({
+      getDocker: () => ({
+        listContainers: vi.fn().mockResolvedValue([{ Image: 'registry.example.com/web:latest' }]),
+      }),
+    } as unknown as DockerController);
+  }
+
+  function stubScan(): ReturnType<typeof vi.spyOn> {
+    vi.spyOn(svc(), 'isTrivyAvailable').mockReturnValue(true);
+    vi.spyOn(svc(), 'getImageDigest').mockResolvedValue(DIGEST);
+    vi.spyOn(svc(), 'getImagePlatform').mockResolvedValue(PLATFORM);
+    return vi.spyOn(svc(), 'runScanAndPersist')
+      .mockResolvedValue({ critical_count: 0, high_count: 0 } as never);
+  }
+
+  it('scans when only another node has the fresh row', async () => {
+    seedScan({ vulnDbUpdatedAt: DB_BUILD, nodeId: 2 });
+    stubContainers();
+    const scan = stubScan();
+
+    await triggerPostDeployScan('web', 1);
+
+    expect(scan).toHaveBeenCalledWith('registry.example.com/web:latest', 1, 'deploy', 'web');
+  });
+
+  it('skips when this node has its own fresh row', async () => {
+    seedScan({ vulnDbUpdatedAt: DB_BUILD, nodeId: 1 });
+    stubContainers();
+    const scan = stubScan();
+
+    await triggerPostDeployScan('web', 1);
+
+    expect(scan).not.toHaveBeenCalled();
   });
 });
