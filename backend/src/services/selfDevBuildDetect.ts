@@ -8,6 +8,7 @@ import { getErrorMessage } from '../utils/errors';
 import DockerController from './DockerController';
 import {
     compareLocalToRemoteTagDetailed,
+    configIdForLocalBuild,
     selectLocalRepoDigests,
     type RegistryCredentials,
 } from './registry-api';
@@ -33,6 +34,8 @@ export interface InspectedImage {
     Architecture: string;
     /** The image config ID; a local build's RepoDigest can repeat it. */
     Id?: string;
+    /** Docker's provenance record (`Pull` or `Build`), used to tell them apart. */
+    Identity?: unknown;
 }
 
 /** Bounded read of `docker image inspect` (RepoDigests, OS, architecture) for a
@@ -41,11 +44,13 @@ export interface InspectedImage {
  * captured. */
 export async function defaultInspectImage(imageId: string): Promise<InspectedImage> {
     const inspect = await DockerController.getInstance().getDocker().getImage(`sha256:${imageId}`).inspect();
+    const identity = (inspect as { Identity?: unknown }).Identity;
     return {
         RepoDigests: inspect.RepoDigests ?? [],
         Os: inspect.Os,
         Architecture: inspect.Architecture,
         ...(typeof inspect.Id === 'string' ? { Id: inspect.Id } : {}),
+        ...(identity !== undefined ? { Identity: identity } : {}),
     };
 }
 
@@ -76,7 +81,7 @@ export async function detectSelfDevBuildUpdate(
     const localDigests = selectLocalRepoDigests(
         inspected.RepoDigests,
         { registry, repo, tag },
-        inspected.Id,
+        configIdForLocalBuild(inspected.Id, inspected.Identity),
     );
     if (localDigests.length === 0) {
         return { kind: 'inconclusive', reason: `Running image has no digest matching ${registry}/${repo}:${tag}` };

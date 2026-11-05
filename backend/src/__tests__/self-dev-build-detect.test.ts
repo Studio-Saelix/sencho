@@ -103,6 +103,7 @@ describe('detectSelfDevBuildUpdate', () => {
     const deps: DetectSelfDevBuildUpdateDeps = {
       inspectImage: vi.fn().mockResolvedValue({
         Id: LOCAL_DIGEST,
+        Identity: { Build: [{ Ref: 'buildkit-ref' }] },
         RepoDigests: [LOCAL_REPO_DIGEST],
         Os: 'linux',
         Architecture: 'amd64',
@@ -113,6 +114,32 @@ describe('detectSelfDevBuildUpdate', () => {
     const result = await detectSelfDevBuildUpdate(INPUT, deps);
     expect(result.kind).toBe('inconclusive');
     expect(compareDetailed).not.toHaveBeenCalled();
+  });
+
+  it('still compares a pulled containerd image whose Id equals its RepoDigest', async () => {
+    // The containerd store sets a pulled image's Id to the registry manifest
+    // digest, so equality with the RepoDigest is provenance, not a local build.
+    const compareDetailed = compareReturning({ kind: 'match', primaryDigest: LOCAL_DIGEST });
+    const deps: DetectSelfDevBuildUpdateDeps = {
+      inspectImage: vi.fn().mockResolvedValue({
+        Id: LOCAL_DIGEST,
+        Identity: { Pull: [{ Repository: `${REGISTRY}/${REPO}` }] },
+        RepoDigests: [LOCAL_REPO_DIGEST],
+        Os: 'linux',
+        Architecture: 'amd64',
+      }),
+      compareDetailed,
+    };
+
+    expect(await detectSelfDevBuildUpdate(INPUT, deps)).toEqual({ kind: 'up_to_date' });
+    expect(compareDetailed).toHaveBeenCalledWith(
+      [LOCAL_DIGEST],
+      REGISTRY,
+      REPO,
+      TAG,
+      { os: 'linux', architecture: 'amd64' },
+      null,
+    );
   });
 
   it('returns inconclusive, not a throw, when inspectImage throws', async () => {

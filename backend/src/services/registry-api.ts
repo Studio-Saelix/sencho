@@ -290,10 +290,11 @@ const SHA256_DIGEST_RE = /^sha256:[0-9a-f]{64}$/i;
  * compare every candidate: Docker can list a stale index digest ahead of the
  * current one on the same image.
  *
- * `configId` is the image's `Id` from `docker image inspect`. A local build on
- * the containerd image store records a self-referential RepoDigest whose digest
- * is that config ID; it names no registry content, so it is filtered out here
- * rather than compared against a tag or addressed as a remote image.
+ * `configId` is the value from {@link configIdForLocalBuild}: the image's `Id`
+ * when the image is a local build, null when it came from a registry. A local
+ * build on the containerd image store records a self-referential RepoDigest
+ * whose digest is that ID; it names no registry content, so it is filtered out
+ * here rather than compared against a tag or addressed as a remote image.
  */
 export function selectLocalRepoDigests(
     repoDigests: readonly string[],
@@ -328,10 +329,35 @@ export function selectLocalRepoDigests(
 }
 
 /**
+ * The value to pass as {@link selectLocalRepoDigests}' `configId`, or null when
+ * the image came from a registry.
+ *
+ * On the containerd image store a pulled image's `Id` is the manifest or index
+ * digest the registry served, so it already equals its RepoDigest; only a
+ * locally built image's matching digest is self-referential. Docker reports
+ * that provenance in `Identity` (`Pull` for a pulled image, `Build` for a local
+ * build). When the field is absent (the classic image store), a matching digest
+ * already means the config ID, because a pulled image's `Id` is its config
+ * digest.
+ */
+export function configIdForLocalBuild(
+    id: string | null | undefined,
+    identity: unknown,
+): string | null {
+    if (typeof id !== 'string' || id.trim() === '') return null;
+    if (identity !== null && typeof identity === 'object') {
+        const record = identity as Record<string, unknown>;
+        if (Array.isArray(record.Pull) && record.Pull.length > 0) return null;
+        if (Array.isArray(record.Build) && record.Build.length > 0) return id;
+    }
+    return id;
+}
+
+/**
  * Scalar view of {@link selectLocalRepoDigests}: the first candidate, or null.
  * Prefer the plural form when comparing against a remote tag. `configId` is
- * forwarded so a caller that has the image's `Id` also rejects a local build's
- * self-referential RepoDigest instead of taking it for registry content.
+ * forwarded so a caller that has the image's provenance also rejects a local
+ * build's self-referential RepoDigest instead of taking it for registry content.
  */
 export function selectLocalRepoDigest(
     repoDigests: readonly string[],

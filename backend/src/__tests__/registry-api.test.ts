@@ -63,6 +63,7 @@ import {
   parseImageRef,
   selectLocalRepoDigest,
   selectLocalRepoDigests,
+  configIdForLocalBuild,
   compareLocalToRemoteTag,
   compareLocalToRemoteTagDetailed,
   resolveRegistryImageDigestForPlatform,
@@ -465,12 +466,13 @@ describe('selectLocalRepoDigest', () => {
 
   it('forwards the config ID so a self-referential RepoDigest is not returned', () => {
     const configId = `sha256:${'d'.repeat(64)}`;
+    const localBuild = configIdForLocalBuild(configId, { Build: [{ Ref: 'buildkit-ref' }] });
     expect(selectLocalRepoDigest(
       [`nginx@${configId}`, `nginx@${DIGEST_A}`],
       parsed('nginx:latest'),
-      configId,
+      localBuild,
     )).toBe(DIGEST_A);
-    expect(selectLocalRepoDigest([`nginx@${configId}`], parsed('nginx:latest'), configId)).toBeNull();
+    expect(selectLocalRepoDigest([`nginx@${configId}`], parsed('nginx:latest'), localBuild)).toBeNull();
   });
 });
 
@@ -546,6 +548,42 @@ describe('selectLocalRepoDigests', () => {
   it('returns empty when every matching RepoDigest is the image config ID', () => {
     const configId = `sha256:${'d'.repeat(64)}`;
     expect(selectLocalRepoDigests([`nginx@${configId}`], parsed('nginx:latest'), configId)).toEqual([]);
+  });
+
+  it('keeps a matching RepoDigest for a pulled image whose containerd ID equals it', () => {
+    // The containerd image store sets a pulled image's Id to the manifest/index
+    // digest, so it equals the RepoDigest. That digest is registry content and
+    // must not be filtered just because the two match.
+    const configId = `sha256:${'d'.repeat(64)}`;
+    const pulled = configIdForLocalBuild(configId, { Pull: [{ Repository: 'docker.io/library/nginx' }] });
+    expect(selectLocalRepoDigests([`nginx@${configId}`], parsed('nginx:latest'), pulled)).toEqual([configId]);
+  });
+});
+
+// ─── configIdForLocalBuild ───────────────────────────────────────────────
+
+describe('configIdForLocalBuild', () => {
+  const CONFIG_ID = `sha256:${'d'.repeat(64)}`;
+
+  it('returns the image ID for a local build', () => {
+    expect(configIdForLocalBuild(CONFIG_ID, { Build: [{ Ref: 'buildkit-ref' }] })).toBe(CONFIG_ID);
+  });
+
+  it('returns null for a pulled image, even when its Id equals its RepoDigest', () => {
+    expect(configIdForLocalBuild(CONFIG_ID, {
+      Pull: [{ Repository: 'docker.io/library/nginx' }],
+    })).toBeNull();
+  });
+
+  it('falls back to the image ID when Docker reports no provenance', () => {
+    // The classic image store has no Identity field; a pulled image's Id is its
+    // config digest, so a RepoDigest equal to it is a local build's self-reference.
+    expect(configIdForLocalBuild(CONFIG_ID, undefined)).toBe(CONFIG_ID);
+  });
+
+  it('returns null for a missing or empty image ID', () => {
+    expect(configIdForLocalBuild(undefined, { Build: [{}] })).toBeNull();
+    expect(configIdForLocalBuild('  ', { Build: [{}] })).toBeNull();
   });
 });
 

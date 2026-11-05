@@ -23,7 +23,7 @@ import {
 } from './imageUpdateFacts';
 import { ImageUpdateObservationService } from './ImageUpdateObservationService';
 import { resolveUpdatePolicyPair, toUnattendedStatusPolicy } from './updatePolicy';
-import { parseImageRef, selectLocalRepoDigests } from './registry-api';
+import { configIdForLocalBuild, parseImageRef, selectLocalRepoDigests } from './registry-api';
 import { NodeRegistry } from './NodeRegistry';
 import { withTimeout } from '../utils/withTimeout';
 import { sanitizeForLog } from '../utils/safeLog';
@@ -189,7 +189,11 @@ export class ImageUpdateFactsService {
                 const parsed = parseImageRef(ref);
                 const platform = { os: inspect.Os, architecture: inspect.Architecture };
                 const localDigests = parsed
-                    ? selectLocalRepoDigests(repoDigests, parsed, inspect.Id)
+                    ? selectLocalRepoDigests(
+                        repoDigests,
+                        parsed,
+                        configIdForLocalBuild(inspect.Id, (inspect as { Identity?: unknown }).Identity),
+                    )
                     : repoDigests;
                 out.push({
                     ref,

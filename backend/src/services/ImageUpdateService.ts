@@ -9,7 +9,7 @@ import { RegistryService } from './RegistryService';
 import { NodeRegistry } from './NodeRegistry';
 import { NotificationService } from './NotificationService';
 import { sanitizeNotificationMessage } from '../utils/notificationMessage';
-import { parseImageRef, selectLocalRepoDigests } from './registry-api';
+import { configIdForLocalBuild, parseImageRef, selectLocalRepoDigests } from './registry-api';
 import { detectImageUpdate, type PreviewImageCheckStatus } from './imageUpdateDetect';
 import { isDebugEnabled } from '../utils/debug';
 import { getErrorMessage } from '../utils/errors';
@@ -1634,7 +1634,11 @@ export class ImageUpdateService {
                 return { hasUpdate: false, checkStatus: 'not_checkable', notCheckable: true };
             }
 
-            localDigests = selectLocalRepoDigests(repoDigests, parsed, inspect.Id);
+            localDigests = selectLocalRepoDigests(
+                repoDigests,
+                parsed,
+                configIdForLocalBuild(inspect.Id, (inspect as { Identity?: unknown }).Identity),
+            );
             platform = { os: inspect.Os, architecture: inspect.Architecture };
         } catch {
             return {

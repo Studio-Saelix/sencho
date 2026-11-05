@@ -13,7 +13,7 @@ import { DatabaseService } from '../services/DatabaseService';
 import type { ScanPolicy } from '../services/DatabaseService';
 import { NotificationService } from '../services/NotificationService';
 import TrivyService, { DIGEST_CACHE_TTL_MS } from '../services/TrivyService';
-import { parseImageRef, selectLocalRepoDigests } from '../services/registry-api';
+import { configIdForLocalBuild, parseImageRef, selectLocalRepoDigests } from '../services/registry-api';
 import { probeRemoteCapability } from './remoteCapabilities';
 import { CANDIDATE_IMAGE_GATE_CAPABILITY } from '../services/CapabilityRegistry';
 import { getErrorMessage } from '../utils/errors';
@@ -302,8 +302,16 @@ export async function verifyPulledCandidates(
     if (!parsed) continue;
     let digests: string[] = [];
     try {
-      const info = (await docker.getImage(candidate.ref).inspect()) as { RepoDigests?: string[]; Id?: string };
-      digests = selectLocalRepoDigests(info.RepoDigests ?? [], parsed, info.Id);
+      const info = (await docker.getImage(candidate.ref).inspect()) as {
+        RepoDigests?: string[];
+        Id?: string;
+        Identity?: unknown;
+      };
+      digests = selectLocalRepoDigests(
+        info.RepoDigests ?? [],
+        parsed,
+        configIdForLocalBuild(info.Id, info.Identity),
+      );
     } catch {
       // The image is not on the node after a pull that was supposed to fetch it,
       // so it certainly is not provably the one that was scanned.

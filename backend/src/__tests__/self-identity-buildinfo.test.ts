@@ -115,6 +115,7 @@ describe('SelfIdentityService.getBuildInfo', () => {
     const selfDigest = `sha256:${FULL_IMAGE_ID_HEX}`;
     mockInspectImage.mockResolvedValue({
       Id: selfDigest,
+      Identity: { Build: [{ Ref: 'buildkit-ref' }] },
       RepoDigests: [
         `ghcr.io/studio-saelix/sencho-dev@${selfDigest}`,
         `ghcr.io/studio-saelix/sencho-dev@sha256:${DIGEST}`,
@@ -130,6 +131,7 @@ describe('SelfIdentityService.getBuildInfo', () => {
     const selfDigest = `sha256:${FULL_IMAGE_ID_HEX}`;
     mockInspectImage.mockResolvedValue({
       Id: selfDigest,
+      Identity: { Build: [{ Ref: 'buildkit-ref' }] },
       RepoDigests: [`ghcr.io/studio-saelix/sencho-dev@${selfDigest}`],
       Os: 'linux',
       Architecture: 'amd64',

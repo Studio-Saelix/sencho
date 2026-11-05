@@ -5,6 +5,7 @@ import DockerController from '../DockerController';
 import type { ContainerInfo } from 'dockerode';
 import { RegistryService } from '../RegistryService';
 import {
+  configIdForLocalBuild,
   parseImageRef,
   resolveRegistryImageDigestForPlatform,
   selectLocalRepoDigests,
@@ -783,7 +784,7 @@ async function observeServiceRuntime(
       registry: 'registry-1.docker.io',
       repo: serviceName,
       tag: 'latest',
-    }, image.Id);
+    }, configIdForLocalBuild(image.Id, (image as { Identity?: unknown }).Identity));
     const localDigests = [...repoDigests].sort((a, b) => a.localeCompare(b));
     const hasRepoDigest = localDigests.length > 0;
     const platformDigest = localDigests[0] ?? null;

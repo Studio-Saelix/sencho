@@ -28,7 +28,7 @@ import {
     imagePlatformLabel,
     platformCacheKey,
 } from './gitops/platformNames';
-import { parseImageRef, selectLocalRepoDigests } from './registry-api';
+import { configIdForLocalBuild, parseImageRef, selectLocalRepoDigests } from './registry-api';
 
 const execFileAsync = promisify(execFile);
 
@@ -702,8 +702,9 @@ class TrivyService {
             const info = (await docker.getImage(imageRef).inspect()) as {
                 RepoDigests?: string[];
                 Id?: string;
+                Identity?: unknown;
             };
-            const configId = typeof info.Id === 'string' ? info.Id.toLowerCase() : null;
+            const configId = configIdForLocalBuild(info.Id, info.Identity)?.toLowerCase() ?? null;
             if (info.RepoDigests && info.RepoDigests.length > 0) {
                 for (const entry of info.RepoDigests) {
                     const digest = entry.split('@')[1];
@@ -745,6 +746,7 @@ class TrivyService {
             const info = (await docker.getImage(imageRef).inspect()) as {
                 RepoDigests?: unknown;
                 Id?: unknown;
+                Identity?: unknown;
             };
             const repoDigests = Array.isArray(info.RepoDigests)
                 ? info.RepoDigests.filter((entry): entry is string => typeof entry === 'string')
@@ -752,7 +754,7 @@ class TrivyService {
             const digest = selectLocalRepoDigests(
                 repoDigests,
                 parsed,
-                typeof info.Id === 'string' ? info.Id : null,
+                configIdForLocalBuild(typeof info.Id === 'string' ? info.Id : null, info.Identity),
             )[0];
             return digest ? `${parsed.registry}/${parsed.repo}@${digest}` : null;
         } catch (err) {

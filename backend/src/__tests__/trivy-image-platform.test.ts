@@ -28,6 +28,7 @@ const state = vi.hoisted(() => ({
     Architecture?: string;
     Variant?: string;
     Id?: string;
+    Identity?: unknown;
   },
   /** Force the platform the fake Trivy report claims, regardless of the selector. */
   forcedReadArchitecture: null as string | null,
@@ -372,6 +373,7 @@ describe('trivy image platform selection', () => {
     const configId = `sha256:${'5'.repeat(64)}`;
     state.local = {
       Id: configId,
+      Identity: { Build: [{ Ref: 'buildkit-ref' }] },
       RepoDigests: [`registry.example.com/web@${configId}`],
       Os: 'linux',
       Architecture: 'arm64',
@@ -383,6 +385,30 @@ describe('trivy image platform selection', () => {
       }),
     ).rejects.toThrow(/no registry digest/);
     expect(state.calls).toHaveLength(0);
+  });
+
+  it('addresses a pulled containerd image by its RepoDigest even when the ID matches it', async () => {
+    // On the containerd image store a pulled image's Id is the registry
+    // manifest/index digest, so it equals the RepoDigest. That is registry
+    // content and must still be scanned remotely for the requested child.
+    state.local = {
+      Id: INDEX_DIGEST,
+      Identity: { Pull: [{ Repository: 'registry.example.com/web' }] },
+      RepoDigests: [`registry.example.com/web@${INDEX_DIGEST}`],
+      Os: 'linux',
+      Architecture: 'arm64',
+    };
+
+    const result = await TrivyService.getInstance().scanImage('registry.example.com/web:1.2', 1, {
+      platform: 'linux/amd64',
+    });
+
+    expect(state.calls).toHaveLength(1);
+    const call = state.calls[0];
+    expect(call.args[call.args.indexOf('--image-src') + 1]).toBe('remote');
+    expect(call.args[call.args.indexOf('--platform') + 1]).toBe('linux/amd64');
+    expect(lastArg(call)).toBe(`registry.example.com/web@${INDEX_DIGEST}`);
+    expect(result.imageDigest).toBe(INDEX_DIGEST);
   });
 
   it('leaves a candidate addressed by its own manifest digest without a selector', async () => {

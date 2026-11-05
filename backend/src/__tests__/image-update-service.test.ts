@@ -186,10 +186,11 @@ describe('ImageUpdateService - image ref parsing (via checkImage)', () => {
     service = ImageUpdateService.getInstance();
   });
 
-  function makeMockDocker(repoDigests: string[] = [], id?: string) {
+  function makeMockDocker(repoDigests: string[] = [], id?: string, identity?: unknown) {
     const inspectFn = vi.fn().mockResolvedValue({
       RepoDigests: repoDigests,
       ...(id ? { Id: id } : {}),
+      ...(identity !== undefined ? { Identity: identity } : {}),
     });
     return {
       getDocker: () => ({
@@ -267,7 +268,11 @@ describe('ImageUpdateService - image ref parsing (via checkImage)', () => {
     // a RepoDigest. It names no registry content, so there is nothing to compare
     // and the check must not fabricate an update.
     const configId = `sha256:${'d'.repeat(64)}`;
-    const docker = makeMockDocker([`registry-1.docker.io/library/nginx@${configId}`], configId);
+    const docker = makeMockDocker(
+      [`registry-1.docker.io/library/nginx@${configId}`],
+      configId,
+      { Build: [{ Ref: 'buildkit-ref' }] },
+    );
     const result = await service.checkImage(docker, 'nginx:latest');
     expect(result.hasUpdate).toBe(false);
     expect(result.notCheckable).toBeUndefined();
