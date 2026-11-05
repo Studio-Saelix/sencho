@@ -569,7 +569,7 @@ describe('bootstrap Docker repository provenance', () => {
       listBlock('/etc/apt/sources.list.d/docker.list', 'deb [arch=amd64 signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/ubuntu noble stable'),
       keyBlock(),
     ].join('\n');
-    expect(parseDockerRepo(output, 'noble')).toMatchObject({
+    expect(parseDockerRepo(output, 'noble', 'amd64')).toMatchObject({
       dockerSourceConfigured: true,
       keyringPresent: true,
       sourceVerified: true,
@@ -588,21 +588,21 @@ describe('bootstrap Docker repository provenance', () => {
       ].join('\n')),
       keyBlock(),
     ].join('\n');
-    expect(parseDockerRepo(output, 'noble')).toMatchObject({ sourceVerified: true, keyringVerified: true });
+    expect(parseDockerRepo(output, 'noble', 'amd64')).toMatchObject({ sourceVerified: true, keyringVerified: true });
   });
 
   it('rejects an arbitrary URL and a mismatched suite', () => {
     const arbitrary = parseDockerRepo([
       listBlock('/etc/apt/sources.list.d/docker.list', 'deb [arch=amd64 signed-by=/etc/apt/keyrings/docker.asc] https://example.com/linux/ubuntu noble stable'),
       keyBlock(),
-    ].join('\n'), 'noble');
+    ].join('\n'), 'noble', 'amd64');
     expect(arbitrary.sourceVerified).toBe(false);
     expect(arbitrary.problem).toContain('not https://download.docker.com');
 
     const mismatch = parseDockerRepo([
       listBlock('/etc/apt/sources.list.d/docker.list', 'deb [arch=amd64 signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/ubuntu jammy stable'),
       keyBlock(),
-    ].join('\n'), 'noble');
+    ].join('\n'), 'noble', 'amd64');
     expect(mismatch.sourceVerified).toBe(false);
     expect(mismatch.problem).toContain('suite');
   });
@@ -613,13 +613,13 @@ describe('bootstrap Docker repository provenance', () => {
       'SOURCE_UNREADABLE=1',
       'SOURCE_END=/etc/apt/sources.list.d/docker.list',
       keyBlock(),
-    ].join('\n'), 'noble');
+    ].join('\n'), 'noble', 'amd64');
     expect(unreadable.sourceVerified).toBeNull();
 
     const badKey = parseDockerRepo([
       listBlock('/etc/apt/sources.list.d/docker.list', 'deb [arch=amd64 signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/ubuntu noble stable'),
       keyBlockOf(DOCKER_ASC_PATH, Buffer.from('not a pgp key')),
-    ].join('\n'), 'noble');
+    ].join('\n'), 'noble', 'amd64');
     expect(badKey.keyringVerified).toBe(false);
     expect(badKey.keyringPresent).toBe(true);
   });
@@ -660,7 +660,7 @@ describe('bootstrap repository signed-by verification', () => {
       keyBlockOf('/etc/apt/keyrings/docker.asc', Buffer.from('not a pgp key')),
       dockerAscBlock('/usr/share/keyrings/docker-archive-keyring.asc'),
     ].join('\n');
-    const result = parseDockerRepo(output, 'noble');
+    const result = parseDockerRepo(output, 'noble', 'amd64');
     expect(result.keyringPresent).toBe(true);
     expect(result.keyringVerified).toBe(true);
     expect(result.sourceVerified).toBe(false);

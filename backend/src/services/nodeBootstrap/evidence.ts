@@ -1045,7 +1045,7 @@ export function buildBootstrapEvidence(input: { facts: BootstrapFacts; nodeNameT
     status: 'unknown',
     summary: 'The Docker package source could not be inspected, so the plan cannot decide whether to configure it.',
     observed: facts.repo.problem ?? (facts.repo.probeComplete ? 'apt-cache policy did not complete' : 'repository probe did not complete'),
-    remediation: 'Read /etc/apt/sources.list.d and /etc/apt/keyrings on the host, then run the preflight again.',
+    remediation: 'Read /etc/apt/sources.list, /etc/apt/sources.list.d and /etc/apt/keyrings on the host, then run the preflight again.',
   } : repoConfigured ? {
     ...aptSourceCheck,
     status: 'pass',

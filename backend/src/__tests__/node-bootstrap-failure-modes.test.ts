@@ -354,7 +354,7 @@ describe('docker repository variants', () => {
     ['a deb822 source without the stable component', { ...official, Components: 'test' }],
     ['a deb822 Signed-By that is not an installed keyring', { ...official, 'Signed-By': '/etc/apt/keyrings/other.asc' }],
   ])('rejects %s', (_label, fields) => {
-    const parsed = parseDockerRepo([source('/etc/apt/sources.list.d/docker.sources', deb822(fields)), keyBlock()].join('\n'), 'noble');
+    const parsed = parseDockerRepo([source('/etc/apt/sources.list.d/docker.sources', deb822(fields)), keyBlock()].join('\n'), 'noble', 'amd64');
     expect(parsed.sourceVerified).toBe(false);
     expect(parsed.problem).toBeTruthy();
   });
@@ -365,7 +365,7 @@ describe('docker repository variants', () => {
     ['a signed-by naming a missing keyring', `deb [arch=amd64 signed-by=/etc/apt/keyrings/missing.asc] ${OFFICIAL} noble stable`],
     ['an empty file', ''],
   ])('rejects a .list source with %s', (_label, content) => {
-    const parsed = parseDockerRepo([source('/etc/apt/sources.list.d/docker.list', content), keyBlock()].join('\n'), 'noble');
+    const parsed = parseDockerRepo([source('/etc/apt/sources.list.d/docker.list', content), keyBlock()].join('\n'), 'noble', 'amd64');
     expect(parsed.sourceVerified).toBe(false);
   });
 
@@ -373,7 +373,7 @@ describe('docker repository variants', () => {
     const parsed = parseDockerRepo([
       source('/etc/apt/sources.list.d/docker.list', `deb [arch=amd64 signed-by=/etc/apt/keyrings/docker.asc] ${OFFICIAL} noble stable`),
       'KEY_BEGIN=/etc/apt/keyrings/docker.asc\nKEY_UNREADABLE=1\nKEY_END=/etc/apt/keyrings/docker.asc',
-    ].join('\n'), 'noble');
+    ].join('\n'), 'noble', 'amd64');
     expect(parsed.keyringVerified).toBeNull();
     expect(parsed.keyringPresent).toBe(true);
   });
@@ -382,7 +382,7 @@ describe('docker repository variants', () => {
     const parsed = parseDockerRepo([
       source('/etc/apt/sources.list.d/docker.list', `deb [arch=amd64 signed-by=/etc/apt/keyrings/docker.asc] ${OFFICIAL} noble stable`),
       keyBlockOf(DOCKER_ASC_PATH, Buffer.from('plain text')),
-    ].join('\n'), 'noble');
+    ].join('\n'), 'noble', 'amd64');
     expect(parsed.keyringVerified).toBe(false);
   });
 });

@@ -69,7 +69,8 @@ function assemble(results: SshCommandResult[]) {
     hubUrl: 'https://sencho.example.com',
     composeDir: '/opt/docker/sencho',
     agentDir: '/opt/sencho-agent',
-    results,
+    // The supported target unless a test says otherwise.
+    results: results.some((result) => result.id === 'uname') ? results : [...results, probe('uname', 'x86_64\n6.8.0')],
     fstabMountPoints: ['/'],
     now: 1_762_300_000_000,
   });
@@ -530,7 +531,7 @@ describe('repository provenance (S5-R)', () => {
   const listFile = '/etc/apt/sources.list.d/docker.list';
   const sourcesFile = '/etc/apt/sources.list.d/docker.sources';
   const deb = (options: string, extra = '') => `deb [${options} signed-by=${DOCKER_ASC_PATH}] ${OFFICIAL} noble stable${extra}`;
-  const parse = (...parts: string[]) => parseDockerRepo(parts.join('\n'), 'noble');
+  const parse = (...parts: string[]) => parseDockerRepo(parts.join('\n'), 'noble', 'amd64');
   const deb822 = (fields: Record<string, string>) => Object.entries(fields).map(([name, value]) => `${name}: ${value}`).join('\n');
   const official822 = { Types: 'deb', URIs: OFFICIAL, Suites: 'noble', Components: 'stable', 'Signed-By': DOCKER_ASC_PATH };
 
@@ -607,7 +608,7 @@ describe('repository provenance (S5-R)', () => {
     it('does not count a deb-src entry as a binary source, in either format', () => {
       const srcOnlyList = parse(block(listFile, `deb-src [arch=amd64 signed-by=${DOCKER_ASC_PATH}] ${OFFICIAL} noble stable`), dockerAscBlock());
       expect(srcOnlyList.sourceVerified).toBe(false);
-      expect(srcOnlyList.problem).toMatch(/no binary/);
+      expect(srcOnlyList.problem).toMatch(/no enabled binary/);
       const srcOnly822 = parse(block(sourcesFile, deb822({ ...official822, Types: 'deb-src' })), dockerAscBlock());
       expect(srcOnly822.sourceVerified).toBe(false);
       expect(srcOnly822.problem).toMatch(/no enabled binary/);
@@ -770,7 +771,7 @@ describe('review follow-ups on the corrected probes', () => {
   const listFile = '/etc/apt/sources.list.d/docker.list';
   const block = (file: string, content: string) => `SOURCE_BEGIN=${file}\n${content}\nSOURCE_END=${file}`;
   const deb = (options: string) => `deb [${options} signed-by=${DOCKER_ASC_PATH}] ${OFFICIAL} noble stable`;
-  const parse = (...parts: string[]) => parseDockerRepo(parts.join('\n'), 'noble');
+  const parse = (...parts: string[]) => parseDockerRepo(parts.join('\n'), 'noble', 'amd64');
   const canDeny = process.getuid?.() !== 0;
 
   describe('the armored key with header lines', () => {
@@ -793,11 +794,11 @@ describe('review follow-ups on the corrected probes', () => {
   });
 
   describe('a repository file that could not be inspected is never absent', () => {
-    function runRepoScript(setup: (dir: string) => { sources: string[]; keys: string[] }): string {
+    function runRepoScript(setup: (dir: string) => { sources: string[]; dirs?: string[]; keys: string[] }): string {
       const dir = mkdtempSync(path.join(os.tmpdir(), 'sencho-repo-script-'));
       try {
         const paths = setup(dir);
-        return execFileSync('sh', ['-c', buildDockerRepoScript(paths.sources, paths.keys)], { encoding: 'utf8' });
+        return execFileSync('sh', ['-c', buildDockerRepoScript(paths.sources, paths.dirs ?? [], paths.keys)], { encoding: 'utf8' });
       } finally {
         try { chmodSync(path.join(dir, 'closed'), 0o700); } catch { /* not created */ }
         rmSync(dir, { recursive: true, force: true });

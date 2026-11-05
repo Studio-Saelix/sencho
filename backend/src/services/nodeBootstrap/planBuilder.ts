@@ -8,7 +8,7 @@ import {
   repoVerified,
   unsupportedComposeAddition,
 } from './evidence';
-import { DOCKER_LOCAL_ASSIGNMENTS, DOCKER_LOCAL_UNSET_ARGS } from './probes';
+import { DOCKER_LOCAL_ASSIGNMENTS, DOCKER_LOCAL_UNSET_ARGS, debianArchitecture } from './probes';
 import {
   BOOTSTRAP_MARKER_FILENAME,
   BOOTSTRAP_MARKER_SCHEMA_VERSION,
@@ -119,7 +119,7 @@ function aptUpdateStep(sudo: boolean): BootstrapPlanStep {
 function repoSteps(facts: BootstrapFacts, sudo: boolean): BootstrapPlanStep[] {
   const codename = facts.os?.codename;
   if (!codename) throw new Error('The plan requires a known Ubuntu codename.');
-  const arch = facts.os?.arch === 'x86_64' ? 'amd64' : (facts.os?.arch || 'amd64');
+  const arch = facts.os?.arch ? debianArchitecture(facts.os.arch) : 'amd64';
   const sourcesLine = `deb [arch=${arch} signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/ubuntu ${codename} stable`;
   return [
     {
@@ -302,6 +302,9 @@ export function buildBootstrapPlan(input: PlanBuildInput): BootstrapPlan {
   }
   if (unsupportedComposeAddition(facts)) {
     throw new Error('The plan cannot add Compose to a Docker engine that was not installed from Docker packages.');
+  }
+  if (facts.repo.dockerSourceConfigured && !dockerAndComposeWork(facts) && !repoVerified(facts)) {
+    throw new Error('The plan cannot write the Docker apt source beside an existing Docker source that is not verified.');
   }
   const owner = facts.user.name;
   const group = facts.user.group;
