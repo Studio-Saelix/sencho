@@ -441,6 +441,68 @@ describe('a staged overwrite that fails before anything live moves', () => {
     expect(preRestore?.status).toBe('failed');
   });
 
+  it.each(['permission_denied', 'unreadable', 'vanished', 'unsupported_type'] as const)(
+    'fails with pre_restore_failed when the point leaves out a path for %s',
+    async (reason) => {
+      const member = container({ Id: 'c1', State: 'running', Mounts: [{ Type: 'volume', Name: VOLUME }] });
+      const fake = fakeDocker({ volumes: [{ name: VOLUME }], containers: [member] });
+      const seeded = seed({ createdAt: fake.volumes.get(VOLUME)?.createdAt ?? '', members: [member] });
+      const engine = scriptedEngine({
+        createPoint: async () => ({
+          ok: true as const,
+          evidence: {
+            ...DEFAULT_CAPTURE,
+            // A policy exclusion is the operator's choice and stays complete; one
+            // the engine could not read, beside it, must not be kept as the copy.
+            exclusions: [
+              { path: 'cache', reason: 'policy_excluded' as const },
+              { path: 'db/locked', reason },
+            ],
+          },
+        }),
+      });
+      const { outcomes } = await run({ fake, helper: successHelper(), engine, seeded });
+
+      expect(outcomes).toEqual([{ state: 'failed', errorClass: 'pre_restore_failed' }]);
+      // The refusal happens before anything is copied into the live volume.
+      expect(engine.restoreCalls.some((call) => call.mode === 'staged_overwrite')).toBe(false);
+      const intent = intents.RestoreIntentStore.getInstance().get(seeded.intentId);
+      expect(intent?.phase).toBe('rolled_back');
+      expect(intent?.fenceState).toBe('released');
+      // The point is settled failed, not left partial and selectable.
+      const preRestore = points.RecoveryPointStore.getInstance().get(intent?.preRestorePointId ?? '');
+      expect(preRestore?.status).toBe('failed');
+      expect(preRestore?.failureClass).toBe('pre_restore_failed');
+      expect(fake.calls).toContain('start:c1');
+      expect(fake.containers.get('c1')?.State).toBe('running');
+      expect(points.RecoveryPointStore.getInstance().listHolds(seeded.pointId)).toEqual([]);
+    },
+  );
+
+  it('keeps the pre-restore point when every exclusion was chosen by the operator', async () => {
+    const member = container({ Id: 'c1', State: 'running', Mounts: [{ Type: 'volume', Name: VOLUME }] });
+    const fake = fakeDocker({ volumes: [{ name: VOLUME }], containers: [member] });
+    const seeded = seed({ createdAt: fake.volumes.get(VOLUME)?.createdAt ?? '', members: [member] });
+    const engine = scriptedEngine({
+      createPoint: async () => ({
+        ok: true as const,
+        evidence: {
+          ...DEFAULT_CAPTURE,
+          exclusions: [{ path: 'cache', reason: 'policy_excluded' as const }],
+        },
+      }),
+    });
+    const { outcomes } = await run({ fake, helper: successHelper(), engine, seeded });
+
+    expect(outcomes).toEqual([{ state: 'succeeded' }]);
+    expect(engine.restoreCalls.some((call) => call.mode === 'staged_overwrite')).toBe(true);
+    const intent = intents.RestoreIntentStore.getInstance().get(seeded.intentId);
+    expect(intent?.phase).toBe('committed');
+    const preRestore = points.RecoveryPointStore.getInstance().get(intent?.preRestorePointId ?? '');
+    expect(preRestore?.status).toBe('succeeded');
+    expect(preRestore?.exclusions).toEqual([{ path: 'cache', reason: 'policy_excluded' }]);
+  });
+
   it('fails with pre_restore_failed when a new container is running while the point is taken', async () => {
     const member = container({ Id: 'c1', State: 'running', Mounts: [{ Type: 'volume', Name: VOLUME }] });
     const fake = fakeDocker({ volumes: [{ name: VOLUME }], containers: [member] });
@@ -825,6 +887,48 @@ describe('a staged overwrite that fails before anything live moves', () => {
     expect(warn.mock.calls.map((call) => format(...call)).some((line) =>
       line.includes('Finalizing the pre-restore point'))).toBe(true);
   });
+
+  it.each(['the point row', 'the intent update', 'the point hold'] as const)(
+    'settles the rollback when the store refuses %s before the point',
+    async (refused) => {
+      const member = container({ Id: 'c1', State: 'running', Mounts: [{ Type: 'volume', Name: VOLUME }] });
+      const fake = fakeDocker({ volumes: [{ name: VOLUME }], containers: [member] });
+      const seeded = seed({ createdAt: fake.volumes.get(VOLUME)?.createdAt ?? '', members: [member] });
+      const store = points.RecoveryPointStore.getInstance();
+      const intentStore = intents.RestoreIntentStore.getInstance();
+      if (refused === 'the point row') {
+        vi.spyOn(store, 'begin').mockImplementationOnce(() => { throw new Error('store went away'); });
+      } else if (refused === 'the intent update') {
+        vi.spyOn(intentStore, 'update').mockImplementationOnce(() => { throw new Error('store went away'); });
+      } else {
+        vi.spyOn(store, 'addHold').mockImplementationOnce(() => { throw new Error('store went away'); });
+      }
+      const engine = scriptedEngine();
+      const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+      const { outcomes } = await run({ fake, helper: successHelper(), engine, seeded });
+
+      // The refusal settles the restore instead of escaping with the fence held.
+      expect(outcomes).toEqual([{ state: 'failed', errorClass: 'internal' }]);
+      expect(engine.createPointCalls).toBe(0);
+      expect(engine.restoreCalls.some((call) => call.mode === 'staged_overwrite')).toBe(false);
+      const intent = intentStore.get(seeded.intentId);
+      expect(intent?.phase).toBe('rolled_back');
+      expect(intent?.fenceState).toBe('released');
+      expect(fake.calls).toContain('start:c1');
+      expect(fake.containers.get('c1')?.State).toBe('running');
+      expect(points.RecoveryPointStore.getInstance().listHolds(seeded.pointId)).toEqual([]);
+      // A row that was written before the refusal is settled failed, never left pending.
+      const created = store.findBySourceOperation(seeded.operationId);
+      if (refused === 'the point row') {
+        expect(created).toBeNull();
+      } else {
+        expect(created?.status).toBe('failed');
+        expect(created?.failureClass).toBe('pre_restore_failed');
+      }
+      expect(warn.mock.calls.map((call) => format(...call)).some((line) =>
+        line.includes('Recording the pre-restore point'))).toBe(true);
+    },
+  );
 
   it('releases the fence and restarts the workload when the pre-swap recheck throws', async () => {
     const member = container({ Id: 'c1', State: 'running', Mounts: [{ Type: 'volume', Name: VOLUME }] });
