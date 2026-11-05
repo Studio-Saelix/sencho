@@ -987,9 +987,9 @@ class TrivyService {
      * route) use this so a cache hit returns the stored row instead of inserting
      * a duplicate row with the same findings and timestamp. It resolves the same
      * digest, platform and cache rule as the scan itself, so the check and the
-     * scan agree on the key. A row inserted or pruned between the two calls is
-     * handled by `finishScan`, which rescans rather than write stale findings
-     * into the placeholder.
+     * scan agree on the key. A row inserted between the two calls is reused and
+     * the placeholder discarded; a row pruned before reuse triggers a fresh
+     * scan rather than writing stale findings into the placeholder.
      */
     async findReusableScan(
         imageRef: string,

@@ -433,15 +433,19 @@ describe('a cached scan reuses its row', () => {
   it('rescans instead of copying a cached result whose row vanished', async () => {
     const placeholder = svc().beginScan('registry.example.com/web:latest', 1, 'manual');
     expect(scanCount()).toBe(1);
+    // The cached row's detail set is already gone, as an orphan cleanup would
+    // leave it; copying this result would report a count with no findings.
     const cached = {
       ...freshResult(),
+      vulnerabilities: [],
       scannedAt: DB_BUILD - 60_000,
       fromCache: true,
       cachedScanId: 424242,
     };
+    const fresh = { ...freshResult(), scannedAt: Date.now() + 60_000 };
     const scanImage = vi.spyOn(svc(), 'scanImage')
       .mockResolvedValueOnce(cached)
-      .mockResolvedValueOnce(freshResult());
+      .mockResolvedValueOnce(fresh);
 
     const stored = await svc().finishScan(placeholder, 'registry.example.com/web:latest', 1, {
       useCache: true,
@@ -453,11 +457,20 @@ describe('a cached scan reuses its row', () => {
 
     // The cached row was pruned between the scan's lookup and the reuse. The
     // placeholder is the scan that never ran, so it must run rather than store
-    // the vanished row's old timestamp and findings under a new identity.
+    // the vanished row's old timestamp and findings under a new identity. The
+    // replay keeps the original identity: same digest, platform and cache rule.
     expect(scanImage).toHaveBeenCalledTimes(2);
-    expect(scanImage.mock.calls[1][2]).toEqual(expect.objectContaining({ useCache: false }));
+    expect(scanImage.mock.calls[1][2]).toEqual(expect.objectContaining({
+      useCache: false,
+      digest: DIGEST,
+      platform: PLATFORM,
+    }));
     expect(stored.id).toBe(placeholder);
+    expect(stored.status).toBe('completed');
+    expect(stored.scanned_at).toBe(fresh.scannedAt);
     expect(stored.scanned_at).not.toBe(cached.scannedAt);
+    expect(stored.critical_count).toBe(1);
+    expect(db().getAllVulnerabilityDetails(placeholder)).toHaveLength(1);
     expect(scanCount()).toBe(1);
   });
 
