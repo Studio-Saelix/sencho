@@ -53,7 +53,7 @@
     "date-fns": "^4.4.0",
     "fflate": "^0.8.2",
     "geist": "^1.8.2",
-    "lucide-react": "^1.65.0",
+    "lucide-react": "^1.69.0",
     "monaco-editor": "^0.57.0",
     "motion": "^14.8.0",
     "qrcode.react": "^4.2.0",

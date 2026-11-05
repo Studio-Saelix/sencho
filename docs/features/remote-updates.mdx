@@ -27,7 +27,9 @@ Nodes deployed with `docker run`, with hand-rolled systemd units, or with orches
 
 ## Anatomy at a glance
 
-Open the **Fleet** tab and click **Node Update** in the Overview toolbar to open the **Node updates** sheet. The sheet lists every registered node with its current and latest Sencho version, the cluster-wide summary, and the action buttons, split across two tabs: **Nodes** (the table and summary) and **Changelog** (release notes for the latest published version, pulled from GitHub Releases).
+Open the **Fleet** tab, choose **Node management** in the Overview toolbar, and select **Node updates** to open the **Node updates** sheet.
+
+A Pilot agent installed by the guided bootstrap uses `/opt/sencho-agent` by default, and the directory can be customized. Either way, self-update locates the agent's compose file from the container's Compose labels rather than a fixed path, so a custom install directory does not disable updates. The sheet lists every registered node with its current and latest Sencho version, the cluster-wide summary, and the action buttons, split across two tabs: **Nodes** (the table and summary) and **Changelog** (release notes for the latest published version, pulled from GitHub Releases).
 
 <Frame>
   <img src="/images/fleet-view/fleet-node-updates.png" alt="Node updates sheet titled 'Node updates · 4 nodes · 0 updates available'. A Recheck button sits under the header, above Nodes and Changelog tabs. Four summary cards read '4 Up to date', '0 Available', '0 Updating', '0 Failed'. A 'Filter nodes…' search box sits above a table with columns Node / Type / Current / Latest / Status; all four rows (Local, Opsix, Pitt-Moba, SLX-Mars) show a green 'Up to date' badge at v0.95.0. The footer reads 'LATEST VERSION v0.95.0'." />

@@ -1,0 +1,160 @@
+import { describe, it, expect, vi } from 'vitest';
+
+vi.mock('@/lib/clipboard', () => ({ copyToClipboard: vi.fn(async () => {}) }));
+import { render, screen } from '@testing-library/react';
+import userEvent from '@testing-library/user-event';
+import { BootstrapPlanStep } from '../BootstrapPlanStep';
+import type { BootstrapInspection, BootstrapPlan } from '../types';
+
+const composeDir = {
+  input: '/srv/sencho-stacks', normalized: '/srv/sencho-stacks', realPath: '/srv/sencho-stacks', exists: true,
+  isDirectory: true, isFinalSymlink: false, hasSymlinkAncestor: false, owner: 'ubuntu', group: 'ubuntu', mode: '755',
+  readableByUser: true, writableByUser: true, writableBySudo: true, parentWritableByUser: true,
+  nearestExistingAncestor: null, filesystem: null, freeBytes: null, probeError: null,
+  stackCount: 3, stackNames: ['media', 'tools', 'web'], inventoryTruncated: false, rootComposeFile: false,
+};
+const agentDir = {
+  input: '/srv/sencho-agent', normalized: '/srv/sencho-agent', realPath: '/srv/sencho-agent', exists: false,
+  isDirectory: false, isFinalSymlink: false, hasSymlinkAncestor: false, owner: null, group: null, mode: null,
+  readableByUser: false, writableByUser: false, writableBySudo: false, parentWritableByUser: true,
+  nearestExistingAncestor: '/srv', filesystem: null, freeBytes: null, probeError: null,
+  entries: [], entriesTruncated: false, hasComposeFile: false, hasCaFile: false, hasMarker: false,
+  markerProject: null, markerComposeDir: null, markerAgentDir: null,
+};
+
+const inspection = {
+  observedAt: 1,
+  target: { host: 'server.example.com', port: 22, username: 'ubuntu', address: '192.168.1.50' },
+  hostKey: { algorithm: 'ssh-ed25519', fingerprint: 'SHA256:abc', knownHostsLine: 'line' },
+  paths: { composeDir, agentDir },
+  agent: { projectContainers: [], dataVolumeExists: false, defaultDirHasComposeFile: false },
+  dockerRoot: { path: '/var/lib/docker', freeBytes: 1, filesystemType: 'ext4' },
+  checks: [],
+  blockers: 0,
+  warnings: 1,
+} as BootstrapInspection;
+
+const plan: BootstrapPlan = {
+  version: 1,
+  generatedAt: 1,
+  target: { host: 'server.example.com', port: 22, username: 'ubuntu', address: '192.168.1.50' },
+  targetName: 'media-server',
+  hostKeyFingerprint: 'SHA256:abc',
+  hubUrl: 'https://sencho.example.com',
+  paths: {
+    composeDir: { input: '/srv/sencho-stacks', realPath: '/srv/sencho-stacks', exists: true, created: false, stackCount: 3 },
+    agentDir: { input: '/srv/sencho-agent', realPath: '/srv/sencho-agent', exists: false, created: true },
+  },
+  projectName: 'sencho-agent',
+  containerName: 'sencho-agent',
+  dataVolume: 'sencho-agent-data',
+  image: { ref: 'saelix/sencho:latest', digest: null, resolvedAt: 'execution' },
+  stages: [
+    {
+      id: 'agent_dir',
+      title: 'Pilot Agent installation directory',
+      steps: [{
+        id: 'create-agent-dir',
+        title: 'Create the Agent installation directory',
+        rationale: 'The agent keeps its compose file in a dedicated directory.',
+        effect: 'directory-create',
+        privilege: 'user',
+        command: "install -d -m 0700 -o 'ubuntu' -g 'ubuntu' -- '/srv/sencho-agent'",
+        target: { path: '/srv/sencho-agent', mode: '0700', owner: 'ubuntu', group: 'ubuntu', preserveExisting: false },
+        disruptive: false,
+        reversible: 'yes',
+        pointOfNoReturn: false,
+        timeoutMs: 10_000,
+      }],
+    },
+    {
+      id: 'agent_project',
+      title: 'Agent files',
+      steps: [{
+        id: 'agent-compose-file',
+        title: 'Write the Pilot compose file',
+        rationale: 'The agent runs from this file.',
+        effect: 'file-write',
+        privilege: 'sudo',
+        command: null,
+        target: { path: '/srv/sencho-agent/compose.yaml', mode: '0600', owner: 'root', group: 'root', preserveExisting: false },
+        file: { path: '/srv/sencho-agent/compose.yaml', mode: '0600', content: 'name: sencho-agent\nSENCHO_ENROLL_TOKEN: {{SENCHO_ENROLL_TOKEN}}', redacted: true },
+        disruptive: false,
+        reversible: 'yes',
+        pointOfNoReturn: false,
+        timeoutMs: 10_000,
+      }],
+    },
+    {
+      id: 'agent_start',
+      title: 'Start the Pilot agent',
+      steps: [{
+        id: 'start-agent',
+        title: 'Start the sencho-agent project',
+        rationale: 'Pinned project name.',
+        effect: 'container-start',
+        privilege: 'sudo',
+        command: "env -u DOCKER_HOST docker compose --project-name sencho-agent up -d",
+        disruptive: true,
+        reversible: 'yes',
+        pointOfNoReturn: true,
+        timeoutMs: 300_000,
+      }],
+    },
+  ],
+  skipped: [{ id: 'compose_dir', reason: 'Existing directory preserved; 3 stacks found; ownership and mode unchanged.' }],
+  sources: [],
+  versions: {},
+  redactions: [{ placeholder: '{{SENCHO_ENROLL_TOKEN}}', purpose: 'Minted at execution.' }],
+  verification: [{ id: 'project-exists', title: 'The sencho-agent project exists', expected: 'docker compose ls lists it', slice: 'S2' }],
+  notices: ['No changes have been made on this server.', '3 existing stack folders in /srv/sencho-stacks will be left untouched.'],
+  evidenceDigest: 'a'.repeat(64),
+  digest: 'b'.repeat(64),
+};
+
+describe('BootstrapPlanStep', () => {
+  it('renders both paths and the preserved directory reason', () => {
+    render(<BootstrapPlanStep plan={plan} inspection={inspection} />);
+    expect(screen.getAllByText('/srv/sencho-stacks').length).toBeGreaterThan(0);
+    expect(screen.getAllByText('/srv/sencho-agent').length).toBeGreaterThan(0);
+    expect(screen.getByText(/Existing directory preserved; 3 stacks found/)).toBeInTheDocument();
+  });
+
+  it('shows the filesystem commands with their modes and owners', () => {
+    render(<BootstrapPlanStep plan={plan} inspection={inspection} />);
+    expect(screen.getByText('Filesystem changes')).toBeInTheDocument();
+    expect(screen.getByText(/install -d -m 0700/)).toBeInTheDocument();
+    expect(screen.getByText(/mode 0700/)).toBeInTheDocument();
+    expect(screen.getByText('user · mode 0700 · ubuntu:ubuntu')).toBeInTheDocument();
+  });
+
+  it('shows the compose file content with the token placeholder', async () => {
+    const user = userEvent.setup();
+    render(<BootstrapPlanStep plan={plan} inspection={inspection} />);
+    await user.click(screen.getByText(/view content/));
+    expect(screen.getByText(/SENCHO_ENROLL_TOKEN: \{\{SENCHO_ENROLL_TOKEN\}\}/)).toBeInTheDocument();
+  });
+
+  it('shows the start command, digest and the no-change line', () => {
+    render(<BootstrapPlanStep plan={plan} inspection={inspection} />);
+    expect(screen.getByText(/--project-name sencho-agent/)).toBeInTheDocument();
+    expect(screen.getByText(`sha256:${plan.digest}`)).toBeInTheDocument();
+    expect(screen.getByText('No changes have been made on this server.')).toBeInTheDocument();
+  });
+
+  it('lists the expected checks separately from evidence', () => {
+    render(<BootstrapPlanStep plan={plan} inspection={inspection} />);
+    expect(screen.getByText('Expected after execution')).toBeInTheDocument();
+    expect(screen.getByText('The sencho-agent project exists')).toBeInTheDocument();
+    expect(screen.getByText('S2')).toBeInTheDocument();
+  });
+
+  it('copies the plan to the clipboard', async () => {
+    const user = userEvent.setup();
+    const { copyToClipboard } = await import('@/lib/clipboard');
+    render(<BootstrapPlanStep plan={plan} inspection={inspection} />);
+    await user.click(screen.getByRole('button', { name: /Copy plan/ }));
+    expect(copyToClipboard).toHaveBeenCalledTimes(1);
+    expect(vi.mocked(copyToClipboard).mock.calls[0][0]).toContain(`Plan digest: sha256:${plan.digest}`);
+  });
+});

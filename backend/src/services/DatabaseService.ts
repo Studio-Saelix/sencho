@@ -558,6 +558,17 @@ export interface PilotEnrollment {
     used_at: number | null;
 }
 
+/** Trust-on-first-use pin for a bootstrap SSH host key, keyed by host and port. */
+export interface NodeBootstrapTrust {
+    host: string;
+    port: number;
+    fingerprint: string;
+    algorithm: string;
+    approved_by: string | null;
+    approved_at: number;
+    last_seen_at: number;
+}
+
 export interface Label {
     id: number;
     node_id: number;
@@ -1596,6 +1607,17 @@ export class DatabaseService {
         expires_at INTEGER NOT NULL,
         used_at INTEGER,
         FOREIGN KEY (node_id) REFERENCES nodes(id) ON DELETE CASCADE
+      );
+
+      CREATE TABLE IF NOT EXISTS node_bootstrap_trust (
+        host TEXT NOT NULL,
+        port INTEGER NOT NULL,
+        fingerprint TEXT NOT NULL,
+        algorithm TEXT NOT NULL,
+        approved_by TEXT,
+        approved_at INTEGER NOT NULL,
+        last_seen_at INTEGER NOT NULL,
+        PRIMARY KEY (host, port)
       );
 
       CREATE TABLE IF NOT EXISTS system_state (
@@ -6417,6 +6439,35 @@ stmt.run('gitops_schema_version', '1');
             this.db.prepare('UPDATE pilot_enrollments SET used_at = ? WHERE node_id = ?').run(now, row.node_id);
             return { ...row, used_at: now };
         })();
+    }
+
+    // --- Node bootstrap trust pins ---
+
+    public getNodeBootstrapTrust(host: string, port: number): NodeBootstrapTrust | undefined {
+        return this.db.prepare(
+            'SELECT host, port, fingerprint, algorithm, approved_by, approved_at, last_seen_at FROM node_bootstrap_trust WHERE host = ? AND port = ?'
+        ).get(host, port) as NodeBootstrapTrust | undefined;
+    }
+
+    public upsertNodeBootstrapTrust(record: NodeBootstrapTrust): void {
+        this.db.prepare(
+            `INSERT INTO node_bootstrap_trust (host, port, fingerprint, algorithm, approved_by, approved_at, last_seen_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?)
+             ON CONFLICT(host, port) DO UPDATE SET
+                fingerprint = excluded.fingerprint,
+                algorithm = excluded.algorithm,
+                approved_by = excluded.approved_by,
+                approved_at = excluded.approved_at,
+                last_seen_at = excluded.last_seen_at`
+        ).run(
+            record.host,
+            record.port,
+            record.fingerprint,
+            record.algorithm,
+            record.approved_by,
+            record.approved_at,
+            record.last_seen_at,
+        );
     }
 
     public deletePilotEnrollment(nodeId: number): void {

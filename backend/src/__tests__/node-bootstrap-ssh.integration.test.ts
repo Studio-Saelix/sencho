@@ -1,0 +1,276 @@
+import { describe, it, expect, afterEach } from 'vitest';
+import crypto from 'crypto';
+import net from 'net';
+import { Server } from 'ssh2';
+import {
+  SshProbeClient,
+  SshTransportError,
+  hostKeyObservation,
+  parsePrivateKey,
+  scrubSecrets,
+} from '../services/nodeBootstrap/sshProbeClient';
+import { buildProbeCatalog, isReadOnlyProbeCommand } from '../services/nodeBootstrap/probes';
+
+/**
+ * In-process SSH server used to prove the transport policy without a real host:
+ * host-key capture, pin mismatch before any exec, auth failure, timeouts, output
+ * caps, the fixed path script, and the read-only command catalog.
+ */
+
+const { privateKey: HOST_KEY } = crypto.generateKeyPairSync('rsa', {
+  modulusLength: 2048,
+  privateKeyEncoding: { type: 'pkcs1', format: 'pem' },
+  publicKeyEncoding: { type: 'pkcs1', format: 'pem' },
+});
+
+const { privateKey: USER_KEY } = crypto.generateKeyPairSync('rsa', {
+  modulusLength: 2048,
+  privateKeyEncoding: { type: 'pkcs1', format: 'pem' },
+  publicKeyEncoding: { type: 'pkcs1', format: 'pem' },
+});
+
+interface FixtureOptions {
+  rejectAuth?: boolean;
+  hangCommand?: string;
+  largeOutput?: boolean;
+  closeAfterFirstCommand?: boolean;
+  closeDuringCommand?: string;
+  responses?: Record<string, string>;
+}
+
+interface Fixture {
+  port: number;
+  commands: string[];
+  close: () => Promise<void>;
+}
+
+const servers: Server[] = [];
+
+async function startServer(options: FixtureOptions = {}): Promise<Fixture> {
+  const commands: string[] = [];
+  const server = new Server({ hostKeys: [HOST_KEY] }, (client) => {
+    // A keyscan aborts the handshake on purpose, which surfaces here as a
+    // key-exchange failure. Swallow fixture-side errors: the client behavior is
+    // what this suite asserts.
+    client.on('error', () => {});
+    client.on('authentication', (ctx) => {
+      if (options.rejectAuth) ctx.reject();
+      else ctx.accept();
+    });
+    client.on('ready', () => {
+      client.on('session', (accept) => {
+        const session = accept();
+        session.on('exec', (acceptExec, _rejectExec, info) => {
+          commands.push(info.command);
+          const stream = acceptExec();
+          if (options.hangCommand && info.command.includes(options.hangCommand)) return;
+          if (options.closeDuringCommand && info.command.includes(options.closeDuringCommand)) {
+            setTimeout(() => client.end(), 10);
+            return;
+          }
+          if (options.closeAfterFirstCommand) {
+            stream.exit(0);
+            stream.end();
+            setTimeout(() => client.end(), 10);
+            return;
+          }
+          if (options.largeOutput) {
+            stream.write('x'.repeat(100 * 1024));
+            stream.exit(0);
+            stream.end();
+            return;
+          }
+          const match = Object.entries(options.responses ?? {})
+            .find(([needle]) => info.command.includes(needle));
+          if (match) stream.write(match[1]);
+          stream.exit(0);
+          stream.end();
+        });
+      });
+    });
+  });
+  servers.push(server);
+  server.on('error', () => {});
+  server.on('connection', (socket) => socket.on('error', () => {}));
+  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+  const address = server.address();
+  if (!address || typeof address === 'string') throw new Error('no port');
+  return {
+    port: address.port,
+    commands,
+    close: () => new Promise<void>((resolve) => { server.close(() => resolve()); }),
+  };
+}
+
+afterEach(async () => {
+  await Promise.all(servers.splice(0).map((server) => new Promise<void>((resolve) => server.close(() => resolve()))));
+});
+
+const client = new SshProbeClient();
+
+describe('bootstrap SSH transport', () => {
+  it('captures the host key without authenticating', async () => {
+    const fixture = await startServer();
+    const observation = await client.captureHostKey({ host: 'fixture.local', address: '127.0.0.1', port: fixture.port });
+    expect(observation.algorithm).toBe('ssh-rsa');
+    expect(observation.fingerprint).toMatch(/^SHA256:[A-Za-z0-9+/]+$/);
+    expect(observation.knownHostsLine.startsWith('fixture.local ssh-rsa ')).toBe(true);
+  });
+
+  it('rejects a changed host key before running any command', async () => {
+    const fixture = await startServer();
+    await expect(client.runCommands(
+      { host: 'fixture.local', address: '127.0.0.1', port: fixture.port, username: 'ubuntu', privateKey: USER_KEY },
+      [{ id: 'os_release', command: 'cat /etc/os-release' }],
+      { expectedFingerprint: 'SHA256:not-the-right-one' },
+    )).rejects.toMatchObject({ code: 'HOST_KEY_UNTRUSTED' });
+    expect(fixture.commands).toHaveLength(0);
+  });
+
+  it('runs a command when the fingerprint matches', async () => {
+    const fixture = await startServer({ responses: { 'uname -m': 'x86_64\n6.8.0\n' } });
+    const capture = await client.captureHostKey({ host: 'fixture.local', address: '127.0.0.1', port: fixture.port });
+    const results = await client.runCommands(
+      { host: 'fixture.local', address: '127.0.0.1', port: fixture.port, username: 'ubuntu', privateKey: USER_KEY },
+      [{ id: 'uname', command: 'uname -m; uname -r' }],
+      { expectedFingerprint: capture.fingerprint },
+    );
+    expect(results[0].stdout).toContain('x86_64');
+    expect(results[0].exitCode).toBe(0);
+    expect(fixture.commands[0]).toBe('LC_ALL=C uname -m; uname -r');
+  });
+
+  it('maps a rejected authentication to SSH_AUTH_FAILED', async () => {
+    const fixture = await startServer({ rejectAuth: true });
+    await expect(client.runCommands(
+      { host: 'fixture.local', address: '127.0.0.1', port: fixture.port, username: 'ubuntu', privateKey: USER_KEY },
+      [{ id: 'uname', command: 'uname -m' }],
+      {},
+    )).rejects.toMatchObject({ code: 'SSH_AUTH_FAILED' });
+  });
+
+  it('rejects an unreadable private key before dialing', () => {
+    expect(() => parsePrivateKey('not a key')).toThrow(SshTransportError);
+    try {
+      parsePrivateKey('not a key');
+    } catch (error) {
+      expect((error as SshTransportError).code).toBe('SSH_KEY_INVALID');
+    }
+  });
+
+  it('closes a hanging command at the timeout', async () => {
+    const fixture = await startServer({ hangCommand: 'sleep' });
+    const results = await client.runCommands(
+      { host: 'fixture.local', address: '127.0.0.1', port: fixture.port, username: 'ubuntu', privateKey: USER_KEY },
+      [{ id: 'hang', command: 'sleep 60' }, { id: 'after', command: 'uname -m' }],
+      { perCommandMs: 200, totalMs: 5_000 },
+    );
+    expect(results[0].timedOut).toBe(true);
+    expect(results).toHaveLength(1);
+  });
+
+  it('truncates output above the per-command cap', async () => {
+    const fixture = await startServer({ largeOutput: true });
+    const results = await client.runCommands(
+      { host: 'fixture.local', address: '127.0.0.1', port: fixture.port, username: 'ubuntu', privateKey: USER_KEY },
+      [{ id: 'big', command: 'cat big-file' }],
+      {},
+    );
+    expect(results[0].truncated).toBe(true);
+    expect(Buffer.byteLength(results[0].stdout)).toBeLessThanOrEqual(64 * 1024);
+  });
+
+  it('rejects a session that closes before the whole catalog ran', async () => {
+    const fixture = await startServer({ closeAfterFirstCommand: true });
+    await expect(client.runCommands(
+      { host: 'fixture.local', address: '127.0.0.1', port: fixture.port, username: 'ubuntu', privateKey: USER_KEY },
+      [
+        { id: 'one', command: 'uname -m' },
+        { id: 'two', command: 'uname -r' },
+        { id: 'three', command: 'id -un' },
+      ],
+      {},
+    )).rejects.toMatchObject({ code: 'SSH_UNREACHABLE' });
+  });
+
+  it('rejects a session that drops while the last command is still running', async () => {
+    const fixture = await startServer({ closeDuringCommand: 'uname -r' });
+    await expect(client.runCommands(
+      { host: 'fixture.local', address: '127.0.0.1', port: fixture.port, username: 'ubuntu', privateKey: USER_KEY },
+      [
+        { id: 'one', command: 'uname -m' },
+        { id: 'two', command: 'uname -r' },
+      ],
+      { perCommandMs: 500, totalMs: 5_000 },
+    )).rejects.toMatchObject({ code: 'SSH_UNREACHABLE' });
+  });
+
+  it('sends the exact validated path to the fixed path script', async () => {
+    const path = '/opt/docker/my-stacks';
+    const fixture = await startServer({
+      responses: {
+        'sencho-probe': [
+          `P_INPUT=${path}`,
+          'P_EXISTS=1',
+          'P_ISDIR=1',
+          'P_FINAL_LINK=0',
+          `P_REAL=${path}`,
+          'P_ANCESTOR_LINK=0',
+          'P_OWNER=ubuntu',
+          'P_GROUP=ubuntu',
+          'P_MODE=755',
+          'P_USER_R=1',
+          'P_USER_W=1',
+          'P_FSTYPE=ext4',
+          'P_FSSOURCE=/dev/sda1',
+          'P_FSTARGET=/',
+        ].join('\n'),
+      },
+    });
+    const catalog = buildProbeCatalog({ composeDir: path, agentDir: '/opt/sencho-agent', hubUrl: 'https://sencho.example.com' });
+    const pathProbe = catalog.find((probe) => probe.id === 'path_compose');
+    const results = await client.runCommands(
+      { host: 'fixture.local', address: '127.0.0.1', port: fixture.port, username: 'ubuntu', privateKey: USER_KEY },
+      [{ id: 'path_compose', command: pathProbe!.command }],
+      {},
+    );
+    expect(fixture.commands[0]).toContain(`'${path}'`);
+    expect(results[0].stdout).toContain(`P_INPUT=${path}`);
+  });
+
+  it('sends only commands from the read-only catalog', async () => {
+    const fixture = await startServer();
+    const catalog = buildProbeCatalog({
+      composeDir: '/opt/docker/sencho',
+      agentDir: '/opt/sencho-agent',
+      hubUrl: 'https://sencho.example.com',
+    });
+    await client.runCommands(
+      { host: 'fixture.local', address: '127.0.0.1', port: fixture.port, username: 'ubuntu', privateKey: USER_KEY },
+      catalog.map(({ id, command }) => ({ id, command })),
+      { perCommandMs: 2_000, totalMs: 20_000 },
+    );
+    expect(fixture.commands.length).toBe(catalog.length);
+    for (const command of fixture.commands) {
+      expect(isReadOnlyProbeCommand(command.replace(/^LC_ALL=C /, ''))).toBe(true);
+    }
+  });
+
+  it('builds an OpenSSH fingerprint from the raw key blob', () => {
+    const blob = Buffer.concat([
+      Buffer.from([0, 0, 0, 7]),
+      Buffer.from('ssh-rsa'),
+      Buffer.from([0, 0, 0, 3, 1, 2, 3]),
+    ]);
+    const observation = hostKeyObservation('host.example.com', blob);
+    expect(observation.algorithm).toBe('ssh-rsa');
+    expect(observation.knownHostsLine.startsWith('host.example.com ssh-rsa ')).toBe(true);
+    expect(observation.fingerprint).toMatch(/^SHA256:/);
+    expect(net.isIP('127.0.0.1')).toBe(4);
+  });
+
+  it('scrubs secret material from messages', () => {
+    const key = '-----BEGIN OPENSSH PRIVATE KEY-----secretsecret';
+    expect(scrubSecrets(`error with ${key} inside`, [key])).not.toContain('secretsecret');
+  });
+});
