@@ -893,10 +893,13 @@ async function fenceWorkloads(ctx: OverwriteRunContext, state: PipelineState): P
   }
   // Recorded after the fence stopped them: if a member is started and stopped
   // again while the point is read, this time moves even though the final state
-  // and the container set look the same.
+  // and the container set look the same. A start time that cannot be read is not
+  // proof of anything, so the fence refuses before a point exists.
   try {
     for (const member of state.members) {
-      state.memberStartedAt.set(member.containerId, await startedAtFor(deps, member.containerId));
+      const startedAt = await startedAtFor(deps, member.containerId);
+      if (startedAt === null) throw new RecoveryError('identity_unknown');
+      state.memberStartedAt.set(member.containerId, startedAt);
     }
   } catch (err) {
     logEngineThrow(state, 'Reading the start time of the fenced containers', err);
@@ -916,20 +919,35 @@ async function takePreRestorePoint(ctx: OverwriteRunContext, state: PipelineStat
   if (!await recheckDependentsOrSettle(
     ctx, state, { requireStopped: true }, 'Re-checking the dependents before the pre-restore point',
   )) return false;
-  const point = deps.points.begin({
-    kind: 'root',
-    storageId: state.storage.id,
-    expectedGenerationToken: state.intent.expectedGenerationToken ?? state.storage.generationToken,
-    repositoryId: ctx.repository.id,
-    trigger: 'pre_restore',
-    actor: state.intent.actor,
-    sourceOperationId: ctx.operationId,
-    sourceNodeKey: deps.ownerNodeKey,
-    engineId: RESTIC_ENGINE_ID,
-  });
-  deps.points.addHold({ pointId: point.id, holderKind: 'restore_intent', holderRef: state.intent.id });
-  // Still `protecting`: the point id is evidence for this phase, not a move.
-  deps.intents.update(state.intent.id, { preRestorePointId: point.id });
+  // The fence is already held, so a store that refuses the row must settle the
+  // restore here rather than leave the workloads stopped until reconciliation.
+  let point: RecoveryPoint | null = null;
+  try {
+    point = deps.points.begin({
+      kind: 'root',
+      storageId: state.storage.id,
+      expectedGenerationToken: state.intent.expectedGenerationToken ?? state.storage.generationToken,
+      repositoryId: ctx.repository.id,
+      trigger: 'pre_restore',
+      actor: state.intent.actor,
+      sourceOperationId: ctx.operationId,
+      sourceNodeKey: deps.ownerNodeKey,
+      engineId: RESTIC_ENGINE_ID,
+    });
+    // Still `protecting`: the point id is evidence for this phase, not a move.
+    // Recorded before the hold so a throw cannot leave the hold unreachable.
+    deps.intents.update(state.intent.id, { preRestorePointId: point.id });
+    deps.points.addHold({ pointId: point.id, holderKind: 'restore_intent', holderRef: state.intent.id });
+  } catch (err) {
+    logEngineThrow(state, 'Recording the pre-restore point', err);
+    if (point) settleFailedPoint(deps, point.id, 'pre_restore_failed');
+    await settleRollback(ctx, state, classifyRecoveryError(err));
+    return false;
+  }
+  if (!point) {
+    await settleRollback(ctx, state, 'internal');
+    return false;
+  }
 
   let result;
   try {
@@ -955,10 +973,12 @@ async function takePreRestorePoint(ctx: OverwriteRunContext, state: PipelineStat
   }
   // The fence stopped the workloads admission recorded, but a container that
   // appeared since can still be running while the point is read. The engine's
-  // own before/after observation labels that `crash_consistent_live`, and
-  // `unknown` means it could not make the observation. Anything other than
-  // `crash_consistent_stopped` is not the stopped copy this step promises, so it
-  // is discarded rather than kept beside a rollback that might need it.
+  // own before/after observation labels `crash_consistent_live` when a container
+  // is running at either check, and `unknown` means it could not make the
+  // observation; a container that starts and stops between the two checks is
+  // caught below. Anything other than `crash_consistent_stopped` is not the
+  // stopped copy this step promises, so it is discarded rather than kept beside
+  // a rollback that might need it.
   if (result.evidence.consistency !== 'crash_consistent_stopped') {
     console.warn(
       '[Recovery] The pre-restore point for %s was not captured with the workloads proven stopped (%s).',
@@ -983,13 +1003,37 @@ async function takePreRestorePoint(ctx: OverwriteRunContext, state: PipelineStat
     await settleRollback(ctx, state, 'pre_restore_failed');
     return false;
   }
-  const finalized = deps.points.finalize(point.id, { status: 'succeeded', evidence: result.evidence });
-  if (finalized.status !== 'succeeded' || result.evidence.capture.skippedCount > 0) {
+  // A point with a skipped file, or with anything left out that the operator
+  // did not choose to exclude, is not the complete stopped copy this step
+  // promises. It is settled failed before it can be stored as complete, so it
+  // is never later selectable as a safety copy.
+  if (result.evidence.capture.skippedCount > 0
+    || result.evidence.exclusions.some((exclusion) => exclusion.reason !== 'policy_excluded')) {
     console.warn(
-      '[Recovery] The pre-restore point for %s was not complete (status %s, %d skipped).',
+      '[Recovery] The pre-restore point for %s was not complete (%d skipped).',
+      sanitizeForLog(state.intent.id),
+      result.evidence.capture.skippedCount,
+    );
+    settleFailedPoint(deps, point.id, 'pre_restore_failed');
+    await settleRollback(ctx, state, 'pre_restore_failed');
+    return false;
+  }
+  let finalized: RecoveryPoint;
+  try {
+    finalized = deps.points.finalize(point.id, { status: 'succeeded', evidence: result.evidence });
+  } catch (err) {
+    // The store refused the terminal write. The fence is already held, so the
+    // restore is rolled back here rather than left for reconciliation.
+    logEngineThrow(state, 'Finalizing the pre-restore point', err);
+    settleFailedPoint(deps, point.id, 'pre_restore_failed');
+    await settleRollback(ctx, state, 'pre_restore_failed');
+    return false;
+  }
+  if (finalized.status !== 'succeeded') {
+    console.warn(
+      '[Recovery] The pre-restore point for %s was not complete (status %s).',
       sanitizeForLog(state.intent.id),
       finalized.status,
-      result.evidence.capture.skippedCount,
     );
     await settleRollback(ctx, state, 'pre_restore_failed');
     return false;
@@ -1020,7 +1064,10 @@ async function containersStillFenced(ctx: OverwriteRunContext, state: PipelineSt
     for (const container of current) {
       if (!recorded.has(container.id) || container.running) return false;
       const startedAt = state.memberStartedAt.get(container.id);
-      if (startedAt === undefined || await startedAtFor(ctx.deps, container.id) !== startedAt) return false;
+      // A null start time is an unprovable observation, not proof that nothing
+      // ran; Docker normally reports one for every container it lists.
+      if (startedAt === undefined || startedAt === null) return false;
+      if (await startedAtFor(ctx.deps, container.id) !== startedAt) return false;
     }
     return true;
   } catch (err) {

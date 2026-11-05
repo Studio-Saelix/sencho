@@ -270,20 +270,40 @@ function failNextContainerList(fake: ReturnType<typeof fakeDocker>): void {
   };
 }
 
-/** Make the next inspect of one container fail, as a daemon that went away would. */
-function failNextInspect(fake: ReturnType<typeof fakeDocker>, id: string): void {
+/** Make the nth inspect of one container fail, as a daemon that went away would. */
+function failNthInspect(fake: ReturnType<typeof fakeDocker>, id: string, n = 1): void {
   const docker = fake.docker as unknown as {
     getContainer: (containerId: string) => { inspect: () => Promise<unknown> };
   };
   const getContainer = docker.getContainer.bind(docker);
-  let armed = true;
+  let seen = 0;
   docker.getContainer = (containerId: string) => {
     const container = getContainer(containerId);
-    if (!armed || containerId !== id) return container;
-    armed = false;
+    if (containerId !== id) return container;
+    seen += 1;
+    if (seen !== n) return container;
     return {
       ...container,
       inspect: async () => { throw new Error('docker went away'); },
+    } as typeof container;
+  };
+}
+
+/** Report no Docker start time for one container, without breaking a later start. */
+function hideStartedAt(fake: ReturnType<typeof fakeDocker>, id: string): void {
+  const docker = fake.docker as unknown as {
+    getContainer: (containerId: string) => { inspect: () => Promise<unknown> };
+  };
+  const getContainer = docker.getContainer.bind(docker);
+  docker.getContainer = (containerId: string) => {
+    const container = getContainer(containerId);
+    if (containerId !== id) return container;
+    return {
+      ...container,
+      inspect: async () => {
+        const inspected = await container.inspect() as { State?: { StartedAt?: string } };
+        return { ...inspected, State: { ...inspected.State, StartedAt: undefined } };
+      },
     } as typeof container;
   };
 }
@@ -414,7 +434,11 @@ describe('a staged overwrite that fails before anything live moves', () => {
     expect(fake.calls).toContain('start:c1');
     expect(fake.containers.get('c1')?.State).toBe('running');
     expect(fake.calls.some((call) => call === 'start:nonexistent')).toBe(false);
-    expect(intents.RestoreIntentStore.getInstance().get(seeded.intentId)?.phase).toBe('rolled_back');
+    const intent = intents.RestoreIntentStore.getInstance().get(seeded.intentId);
+    expect(intent?.phase).toBe('rolled_back');
+    // A point with a skipped file is settled failed, not left partial and selectable.
+    const preRestore = points.RecoveryPointStore.getInstance().get(intent?.preRestorePointId ?? '');
+    expect(preRestore?.status).toBe('failed');
   });
 
   it('fails with pre_restore_failed when a new container is running while the point is taken', async () => {
@@ -503,6 +527,29 @@ describe('a staged overwrite that fails before anything live moves', () => {
     expect(intent?.fenceState).toBe('released');
     expect(fake.containers.get('c1')?.State).toBe('running');
     expect(fake.calls).toContain('start:c1');
+  });
+
+  it('aborts before taking the point when an exited container appears after the fence', async () => {
+    const member = container({ Id: 'c1', State: 'running', Mounts: [{ Type: 'volume', Name: VOLUME }] });
+    const fake = fakeDocker({ volumes: [{ name: VOLUME }], containers: [member] });
+    const seeded = seed({ createdAt: fake.volumes.get(VOLUME)?.createdAt ?? '', members: [member] });
+    // Stopped, so only the set comparison catches it; requireStopped alone would not.
+    afterFence(fake, () => {
+      fake.containers.set('c2', container({
+        Id: 'c2', State: 'exited', Mounts: [{ Type: 'volume', Name: VOLUME }],
+      }));
+    });
+    const engine = scriptedEngine();
+    const { outcomes } = await run({ fake, helper: successHelper(), engine, seeded });
+
+    expect(outcomes).toEqual([{ state: 'failed', errorClass: 'dependents_changed' }]);
+    expect(engine.createPointCalls).toBe(0);
+    const intent = intents.RestoreIntentStore.getInstance().get(seeded.intentId);
+    expect(intent?.preRestorePointId).toBeNull();
+    expect(intent?.phase).toBe('rolled_back');
+    expect(intent?.fenceState).toBe('released');
+    expect(fake.containers.get('c1')?.State).toBe('running');
+    expect(fake.containers.get('c2')?.State).toBe('exited');
   });
 
   it('aborts before taking the point when a stack starts declaring the volume after the fence', async () => {
@@ -654,6 +701,27 @@ describe('a staged overwrite that fails before anything live moves', () => {
     expect(fake.containers.get('c1')?.State).toBe('running');
   });
 
+  it('discards the point when a fenced member is removed during the capture', async () => {
+    const member = container({ Id: 'c1', State: 'running', Mounts: [{ Type: 'volume', Name: VOLUME }] });
+    const fake = fakeDocker({ volumes: [{ name: VOLUME }], containers: [member] });
+    const seeded = seed({ createdAt: fake.volumes.get(VOLUME)?.createdAt ?? '', members: [member] });
+    const engine = scriptedEngine({
+      createPoint: async () => {
+        fake.containers.delete('c1');
+        return { ok: true as const, evidence: { ...DEFAULT_CAPTURE } };
+      },
+    });
+    const { outcomes } = await run({ fake, helper: successHelper(), engine, seeded });
+
+    expect(outcomes).toEqual([{ state: 'failed', errorClass: 'pre_restore_failed' }]);
+    expect(engine.restoreCalls.some((call) => call.mode === 'staged_overwrite')).toBe(false);
+    const intent = intents.RestoreIntentStore.getInstance().get(seeded.intentId);
+    expect(intent?.phase).toBe('rolled_back');
+    expect(intent?.fenceState).toBe('released');
+    const preRestore = points.RecoveryPointStore.getInstance().get(intent?.preRestorePointId ?? '');
+    expect(preRestore?.status).toBe('failed');
+  });
+
   it('discards the point when the containers cannot be read after the capture', async () => {
     const member = container({ Id: 'c1', State: 'running', Mounts: [{ Type: 'volume', Name: VOLUME }] });
     const fake = fakeDocker({ volumes: [{ name: VOLUME }], containers: [member] });
@@ -680,7 +748,9 @@ describe('a staged overwrite that fails before anything live moves', () => {
     const seeded = seed({ createdAt: fake.volumes.get(VOLUME)?.createdAt ?? '', members: [member] });
     const engine = scriptedEngine({
       createPoint: async () => {
-        failNextInspect(fake, 'c1');
+        // The post-capture list inspects c1 first; this fails the start-time
+        // read that follows it, inside containersStillFenced.
+        failNthInspect(fake, 'c1', 2);
         return { ok: true as const, evidence: { ...DEFAULT_CAPTURE } };
       },
     });
@@ -711,6 +781,47 @@ describe('a staged overwrite that fails before anything live moves', () => {
     expect(fake.containers.get('c1')?.State).toBe('running');
     expect(warn.mock.calls.map((call) => format(...call)).some((line) =>
       line.includes('Reading the start time of the fenced containers'))).toBe(true);
+  });
+
+  it('refuses the fence before a point when a member start time is unreadable', async () => {
+    const member = container({ Id: 'c1', State: 'running', Mounts: [{ Type: 'volume', Name: VOLUME }] });
+    const fake = fakeDocker({ volumes: [{ name: VOLUME }], containers: [member] });
+    const seeded = seed({ createdAt: fake.volumes.get(VOLUME)?.createdAt ?? '', members: [member] });
+    hideStartedAt(fake, 'c1');
+    const engine = scriptedEngine();
+    const { outcomes } = await run({ fake, helper: successHelper(), engine, seeded });
+
+    expect(outcomes).toEqual([{ state: 'failed', errorClass: 'identity_unknown' }]);
+    expect(engine.createPointCalls).toBe(0);
+    const intent = intents.RestoreIntentStore.getInstance().get(seeded.intentId);
+    expect(intent?.preRestorePointId).toBeNull();
+    expect(intent?.phase).toBe('rolled_back');
+    expect(intent?.fenceState).toBe('released');
+    expect(fake.containers.get('c1')?.State).toBe('running');
+  });
+
+  it('discards the point and releases the fence when the point cannot be finalized', async () => {
+    const member = container({ Id: 'c1', State: 'running', Mounts: [{ Type: 'volume', Name: VOLUME }] });
+    const fake = fakeDocker({ volumes: [{ name: VOLUME }], containers: [member] });
+    const seeded = seed({ createdAt: fake.volumes.get(VOLUME)?.createdAt ?? '', members: [member] });
+    const engine = scriptedEngine();
+    const store = points.RecoveryPointStore.getInstance();
+    vi.spyOn(store, 'finalize').mockImplementationOnce(() => {
+      throw new Error('store went away');
+    });
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    const { outcomes } = await run({ fake, helper: successHelper(), engine, seeded });
+
+    expect(outcomes).toEqual([{ state: 'failed', errorClass: 'pre_restore_failed' }]);
+    expect(engine.restoreCalls.some((call) => call.mode === 'staged_overwrite')).toBe(false);
+    const intent = intents.RestoreIntentStore.getInstance().get(seeded.intentId);
+    expect(intent?.phase).toBe('rolled_back');
+    expect(intent?.fenceState).toBe('released');
+    expect(fake.containers.get('c1')?.State).toBe('running');
+    const preRestore = store.get(intent?.preRestorePointId ?? '');
+    expect(preRestore?.status).toBe('failed');
+    expect(warn.mock.calls.map((call) => format(...call)).some((line) =>
+      line.includes('Finalizing the pre-restore point'))).toBe(true);
   });
 
   it('releases the fence and restarts the workload when the pre-swap recheck throws', async () => {

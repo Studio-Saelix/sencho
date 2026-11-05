@@ -6460,15 +6460,17 @@ paths:
         current data, swaps the contents, removes the originals, and restarts what was running.
         A container that appeared or was removed, a fenced container found running again, or a stack
         that started declaring the volume before the point aborts with `dependents_changed`; a
-        volume generation that moved or a check that cannot answer ends the operation with
-        `identity_unknown` or its own class. A point read while a container was running, with a
-        container added or removed, with a fenced container restarted (its Docker start time moved),
-        or without a usable observation (`unknown`) is settled `failed` and the operation fails with
-        `pre_restore_failed`. A stack that starts declaring the volume during the read is caught
-        before the swap. On any refusal here or before the swap the fence is released and the
-        workloads that were running restart, unless the release itself fails: the restore then stays
-        open as `completion_unknown` with `fence_unavailable`, and a retry or the next start finishes
-        it. The operation is asynchronous: read it with `GET /api/recovery/operations/{id}`,
+        volume generation that moved, a fenced container whose Docker start time cannot be read, or
+        a check that cannot answer ends the operation with `identity_unknown` or its own class. A
+        point read while a container was observed running at either capture check, with a container
+        still present after the read that the fence did not stop (or a fenced one gone), with a
+        fenced container restarted (its Docker start time moved), or without a usable observation
+        (`unknown`) is settled `failed` and the operation fails with `pre_restore_failed`. A stack
+        that starts declaring the volume during the read is caught before the swap. On any refusal
+        here or before the swap the fence is released and the workloads that were running restart,
+        unless the release itself fails: the operation then ends `completion_unknown`, the restore
+        records `fence_unavailable` with its fence still held, and a retry or the next start
+        finishes the release. The operation is asynchronous: read it with `GET /api/recovery/operations/{id}`,
         whose `result.restore` carries the intent id, phase, fence state and outcome class. A
         state that cannot be proven ends `completion_unknown` and is settled with
         `POST /api/recovery/restores/{intentId}/resolve`. When Sencho restarts mid-restore, startup
@@ -6484,7 +6486,8 @@ paths:
         `GET /api/recovery/operations/{id}`, where the operation ends `failed`, `partial` (the
         data is committed but the originals could not be removed, or the fence could not be
         released) or `completion_unknown`, with the class in `errorClass`: `pre_restore_failed`
-        (the point could not be taken complete and stopped), `fence_unavailable` (a container
+        (the point was not proven complete, stopped and unchanged while it was read),
+        `fence_unavailable` (a container
         start was still unanswered, with nothing stopped, or a container could not be fenced and
         the rollback restarted what had stopped), `dependents_changed` (a container set that
         changed after admission, including a container that appeared, was removed, or was running
