@@ -202,6 +202,40 @@ func listNames(dir string) ([]string, error) {
 	return names, nil
 }
 
+// listWorkDirNames lists the restore work directories at a volume's root, which
+// is what `prepare` refuses a second of. It stops after maxReportedWorkDirs.
+func listWorkDirNames(root string) ([]string, error) {
+	names, err := listNames(root)
+	if err != nil {
+		return nil, err
+	}
+	found := []string{}
+	for _, name := range names {
+		if strings.HasPrefix(name, workDirPrefix) {
+			found = append(found, name)
+			if len(found) == maxReportedWorkDirs {
+				break
+			}
+		}
+	}
+	return found, nil
+}
+
+// withoutWorkDirs drops the entries a restored snapshot carries under the work
+// directory prefix. A capture taken while an earlier swap's directory was in the
+// volume holds one, and moving it up would put a second work directory in the
+// live volume, which every later `prepare` refuses. It stays in the incoming
+// copy, which the clean-up removes.
+func withoutWorkDirs(names []string) []string {
+	kept := make([]string, 0, len(names))
+	for _, name := range names {
+		if !strings.HasPrefix(name, workDirPrefix) {
+			kept = append(kept, name)
+		}
+	}
+	return kept
+}
+
 func exists(path string) bool {
 	_, err := os.Lstat(path)
 	return err == nil
@@ -264,6 +298,7 @@ func swapPrepare(request swapRequest) (swapReport, error) {
 	if err != nil {
 		return swapReport{}, err
 	}
+	incoming = withoutWorkDirs(incoming)
 
 	st, err := statRoot(incomingRoot)
 	if err != nil {

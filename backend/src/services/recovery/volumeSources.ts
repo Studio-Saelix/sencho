@@ -157,6 +157,12 @@ export interface ProbeReport {
   mode: number;
   /** Bytes available to a write, when the probe reported statfs. */
   free: number | null;
+  /**
+   * The restore work directories at the root, when the probe was asked to list
+   * them. `null` means the probe was not asked or did not answer, which is not
+   * the same as an empty volume.
+   */
+  workDirs: string[] | null;
 }
 
 /** Parse the probe's one JSON line. Anything else is not a report. */
@@ -173,6 +179,8 @@ export function parseProbeReport(line: string): ProbeReport | null {
     }
     const free = record.free;
     if (free !== undefined && (typeof free !== 'number' || !Number.isSafeInteger(free) || free < 0)) return null;
+    const workDirs = record.work_dirs;
+    if (workDirs !== undefined && (!Array.isArray(workDirs) || workDirs.some((name) => typeof name !== 'string'))) return null;
     return {
       dev: record.dev as number,
       ino: record.ino as number,
@@ -180,6 +188,7 @@ export function parseProbeReport(line: string): ProbeReport | null {
       gid: record.gid as number,
       mode: record.mode as number,
       free: typeof free === 'number' ? free : null,
+      workDirs: Array.isArray(workDirs) ? (workDirs as string[]) : null,
     };
   } catch {
     // Anything that is not one JSON object of integers is not a probe report.
@@ -196,12 +205,16 @@ export async function probeVolumeReport(input: {
   operationId: string;
   volumeName: string;
   profile?: HelperProfile;
+  /** Also list the restore work directories at the root (one directory listing). */
+  listWorkDirs?: boolean;
 }): Promise<ProbeReport> {
   const lines: string[] = [];
   const result = await input.runner.run({
     profile: input.profile ?? 'probe',
     operationId: input.operationId,
-    cmd: [RECOVERY_HELPER_PROBE_PATH, '/data'],
+    cmd: input.listWorkDirs
+      ? [RECOVERY_HELPER_PROBE_PATH, '/data', '--work-dirs']
+      : [RECOVERY_HELPER_PROBE_PATH, '/data'],
     mounts: { source: input.volumeName },
     onStdoutLine: (line) => {
       if (lines.length === 0) lines.push(line);

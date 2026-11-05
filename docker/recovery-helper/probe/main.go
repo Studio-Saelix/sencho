@@ -8,7 +8,12 @@
 // not survive that recreate. The probe reads metadata only, never file content,
 // and it runs inside the recovery helper with the root mounted read-only.
 //
-// Usage: sencho-recovery-probe <path>
+// Usage: sencho-recovery-probe <path> [--work-dirs]
+//
+// --work-dirs also lists the restore work directories a staged overwrite left at
+// the root (names under the work directory prefix), so a preview can refuse a
+// volume the next swap would refuse. It reads one directory listing, so only the
+// caller that needs it asks.
 //
 //	sencho-recovery-probe swap <prepare|commit|status|rollback|cleanup> --root <path> --id <intent>
 //
@@ -32,15 +37,24 @@ type report struct {
 	// Available bytes for a write by an unprivileged process. The overwrite
 	// preview uses it to refuse a restore that cannot fit next to the live data.
 	Free uint64 `json:"free"`
+	// Names at the root under the work directory prefix. Present only with
+	// --work-dirs (a pointer, so an empty answer is `[]` and not absent), so a
+	// plain probe stays a metadata read.
+	WorkDirs *[]string `json:"work_dirs,omitempty"`
 }
+
+// maxReportedWorkDirs bounds the listing: one is enough to refuse, a few name
+// the cause, and a volume full of them is not worth a long line.
+const maxReportedWorkDirs = 8
 
 func main() {
 	if len(os.Args) >= 2 && os.Args[1] == "swap" {
 		runSwap(os.Args[2:])
 		return
 	}
-	if len(os.Args) != 2 {
-		fail("usage: sencho-recovery-probe <path>")
+	listWorkDirs := len(os.Args) == 3 && os.Args[2] == "--work-dirs"
+	if len(os.Args) != 2 && !listWorkDirs {
+		fail("usage: sencho-recovery-probe <path> [--work-dirs]")
 	}
 	var st syscall.Stat_t
 	if err := syscall.Stat(os.Args[1], &st); err != nil {
@@ -50,14 +64,22 @@ func main() {
 	if err := syscall.Statfs(os.Args[1], &fs); err != nil {
 		fail(err.Error())
 	}
-	out, err := json.Marshal(report{
+	result := report{
 		Device: int64(st.Dev),
 		Inode:  st.Ino,
 		UID:    st.Uid,
 		GID:    st.Gid,
 		Mode:   uint32(st.Mode),
 		Free:   fs.Bavail * uint64(fs.Bsize),
-	})
+	}
+	if listWorkDirs {
+		names, err := listWorkDirNames(os.Args[1])
+		if err != nil {
+			fail(err.Error())
+		}
+		result.WorkDirs = &names
+	}
+	out, err := json.Marshal(result)
 	if err != nil {
 		fail(err.Error())
 	}

@@ -17,6 +17,7 @@ import {
 import { sanitizeForLog } from '../../../utils/safeLog';
 import { consistencyFromObservations, type InUseObservation } from '../volumeSources';
 import { RECOVERY_CONTRACT_VERSION } from '../types';
+import { RECOVERY_WORK_DIR_PREFIX } from '../restoreIntents';
 import type {
   BackupEngine,
   CreatePointRequest,
@@ -85,7 +86,10 @@ export class ResticEngine implements BackupEngine {
     ];
 
     const accumulator = newBackupAccumulator();
-    const args = ['backup', '/data', '--json', '--host', 'sencho'];
+    // A staged overwrite's work directory holds the replaced data and a copy of the
+    // restored data, not the volume's own content. A point that carried one would
+    // put it back on restore, and the next overwrite of that volume would refuse it.
+    const args = ['backup', '/data', '--json', '--host', 'sencho', '--exclude', `/data/${RECOVERY_WORK_DIR_PREFIX}*`];
     for (const tag of tags) args.push('--tag', tag);
     const parent = this.deps.parentSnapshot(request.storage, request.repository.id);
     if (parent) args.push('--parent', parent);

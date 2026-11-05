@@ -202,3 +202,31 @@ describe('a failed restore helper', () => {
     expect(warn).not.toHaveBeenCalled();
   });
 });
+
+describe('what a capture leaves out', () => {
+  const REQUEST = {
+    kind: 'root',
+    storage: { kind: 'named_volume', locator: 'live-volume', storageKey: 'k'.repeat(64), generation: 1, generationToken: 'token' },
+    repository: { id: 'repo', locator: 'repo-volume' },
+    trigger: 'manual',
+    actor: 'admin',
+  } as never;
+
+  // A work directory left by a restore that did not settle holds the replaced data and a
+  // copy of the restored data. A point that carried it would put it back on a restore, and
+  // every later overwrite of that volume would refuse it.
+  it('excludes the restore work directories at the volume root, and only there', async () => {
+    const { engine, specs } = engineWith(async (spec) => {
+      expect(spec.profile).toBe('backup');
+      return { ...OK, aborted: true };
+    });
+    await engine.createPoint(REQUEST, context());
+    expect(specs).toHaveLength(1);
+    const args = specs[0].cmd as readonly string[];
+    const at = args.indexOf('--exclude');
+    expect(at).toBeGreaterThan(-1);
+    expect(args[at + 1]).toBe('/data/.sencho-restore-*');
+    expect(args.filter((arg) => arg === '--exclude')).toHaveLength(1);
+    expect(args.indexOf('/data')).toBeLessThan(at);
+  });
+});

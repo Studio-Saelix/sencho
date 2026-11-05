@@ -175,6 +175,8 @@ export function scriptedHelper(input: {
   dev?: number;
   ino?: number;
   free?: number;
+  /** The restore work directories at the volume root, for a probe asked with `--work-dirs`. */
+  workDirs?: string[];
 } = {}): {
   helper: RecoveryHelperRunner;
   runs: HelperRunRecord[];
@@ -195,6 +197,7 @@ export function scriptedHelper(input: {
         probes += 1;
         spec.onStdoutLine?.(JSON.stringify({
           dev: input.dev ?? 63, ino: input.ino ?? 42, uid: 0, gid: 0, mode: 16877, free: input.free ?? 10_000_000,
+          ...(spec.cmd.includes('--work-dirs') ? { work_dirs: input.workDirs ?? [] } : {}),
         }));
         return { exitCode: 0, stderrTail: '', aborted: false, killed: false };
       }

@@ -197,6 +197,95 @@ describe('preview', () => {
     expect(preview.swap.reason).toBeTruthy();
   });
 
+  it('lists the restore work directories only when the probe is asked to', async () => {
+    const fake = fakeDocker({ volumes: [{ name: VOLUME }], containers: [mountingContainer()] });
+    const seeded = seed({ createdAt: fake.volumes.get(VOLUME)?.createdAt ?? '' });
+    const helper = scriptedHelper();
+    await overwrite.previewOverwrite(deps(fake.docker, helper), seeded.pointId);
+    expect(helper.runs.map((run) => run.cmd)).toContainEqual(expect.arrayContaining(['/data', '--work-dirs']));
+  });
+
+  describe('a work directory an earlier restore left in the volume', () => {
+    const LEFTOVER = '.sencho-restore-4f3a2b1c-0d9e-4a8b-9c7d-6e5f4a3b2c1d';
+
+    it('makes the preview ineligible and names the directory', async () => {
+      const fake = fakeDocker({ volumes: [{ name: VOLUME }], containers: [mountingContainer()] });
+      const seeded = seed({ createdAt: fake.volumes.get(VOLUME)?.createdAt ?? '' });
+      const helper = scriptedHelper({ workDirs: [LEFTOVER] });
+      const preview = await overwrite.previewOverwrite(deps(fake.docker, helper), seeded.pointId);
+      expect(preview.target.eligible).toBe(false);
+      expect(preview.target.ineligibleReason).toContain(LEFTOVER);
+      expect(preview.swap.supported).toBe(false);
+      expect(preview.swap.reason).toBe(preview.target.ineligibleReason);
+      expect(helper.runs.every((run) => run.profile === 'probe')).toBe(true);
+    });
+
+    it('refuses the admission before anything is recorded, stopped or protected', async () => {
+      const fake = fakeDocker({ volumes: [{ name: VOLUME }], containers: [mountingContainer()] });
+      const seeded = seed({ createdAt: fake.volumes.get(VOLUME)?.createdAt ?? '' });
+      const clean = deps(fake.docker, scriptedHelper());
+      const preview = await overwrite.previewOverwrite(clean, seeded.pointId);
+      const helper = scriptedHelper({ workDirs: [LEFTOVER] });
+      await expect(overwrite.prepareOverwriteAdmission(deps(fake.docker, helper), {
+        pointId: seeded.pointId,
+        confirmationToken: preview.confirmation.token,
+        confirmVolumeName: VOLUME,
+      })).rejects.toMatchObject({ errorClass: 'invalid_request', detail: expect.stringContaining(LEFTOVER) });
+      expect(fake.calls).toEqual([]);
+      expect(intents.RestoreIntentStore.getInstance().listUnsettled()).toHaveLength(0);
+    });
+
+    it('is the state a released completion_unknown restore leaves, and the next preview says so', async () => {
+      const fake = fakeDocker({ volumes: [{ name: VOLUME }], containers: [mountingContainer()] });
+      const seeded = seed({ createdAt: fake.volumes.get(VOLUME)?.createdAt ?? '' });
+      const operationId = randomUUID();
+      recoveryDbModule.recoveryDb().prepare(`INSERT INTO recovery_operations (id, idempotency_key, kind, storage_id, point_id, actor, transport, state, process_epoch, created_at, updated_at)
+        VALUES (?, ?, 'restore', ?, ?, 'admin', 'local', 'completion_unknown', 'e', 1, 1)`)
+        .run(operationId, randomUUID(), seeded.storageId, seeded.pointId);
+      const store = intents.RestoreIntentStore.getInstance();
+      const intent = store.recordOverwrite({
+        operationId, pointId: seeded.pointId, targetVolume: VOLUME, actor: 'admin', processEpoch: 'e',
+        stagingVolume: 'sencho-recovery-stage-w', expectedGenerationToken: seeded.generationToken,
+      });
+      for (const phase of ['staging', 'staged_verified', 'fenced', 'protecting', 'materializing', 'swapping', 'completion_unknown'] as const) {
+        store.advance(intent.id, phase);
+      }
+      store.setFenceState(intent.id, 'released');
+      const helper = scriptedHelper({ workDirs: [`.sencho-restore-${intent.id}`] });
+      const preview = await overwrite.previewOverwrite(deps(fake.docker, helper), seeded.pointId);
+      expect(preview.target.eligible).toBe(false);
+      expect(preview.target.ineligibleReason).toContain(`.sencho-restore-${intent.id}`);
+    });
+
+    it('ignores the work directory of the restore that is running now', async () => {
+      const fake = fakeDocker({ volumes: [{ name: VOLUME }], containers: [mountingContainer()] });
+      const seeded = seed({ createdAt: fake.volumes.get(VOLUME)?.createdAt ?? '' });
+      const operationId = randomUUID();
+      recoveryDbModule.recoveryDb().prepare(`INSERT INTO recovery_operations (id, idempotency_key, kind, storage_id, point_id, actor, transport, state, process_epoch, created_at, updated_at)
+        VALUES (?, ?, 'restore', ?, ?, 'admin', 'local', 'running', 'e', 1, 1)`)
+        .run(operationId, randomUUID(), seeded.storageId, seeded.pointId);
+      const store = intents.RestoreIntentStore.getInstance();
+      const intent = store.recordOverwrite({
+        operationId, pointId: seeded.pointId, targetVolume: VOLUME, actor: 'admin', processEpoch: 'e',
+        stagingVolume: 'sencho-recovery-stage-v', expectedGenerationToken: seeded.generationToken,
+      });
+      store.advance(intent.id, 'staging');
+      const helper = scriptedHelper({ workDirs: [`.sencho-restore-${intent.id}`] });
+      const preview = await overwrite.previewOverwrite(deps(fake.docker, helper), seeded.pointId);
+      expect(preview.target.eligible).toBe(true);
+    });
+
+    it('does not echo a name that is not plain printable text', async () => {
+      const fake = fakeDocker({ volumes: [{ name: VOLUME }], containers: [mountingContainer()] });
+      const seeded = seed({ createdAt: fake.volumes.get(VOLUME)?.createdAt ?? '' });
+      const helper = scriptedHelper({ workDirs: ['.sencho-restore-evil\nname'] });
+      const preview = await overwrite.previewOverwrite(deps(fake.docker, helper), seeded.pointId);
+      expect(preview.target.eligible).toBe(false);
+      expect(preview.target.ineligibleReason).not.toContain('evil');
+      expect(preview.target.ineligibleReason).not.toContain('\n');
+    });
+  });
+
   it('names the hub\'s node for a relayed request, and this instance\'s own for a direct one', async () => {
     const fake = fakeDocker({ volumes: [{ name: VOLUME }], containers: [mountingContainer()] });
     const seeded = seed({ createdAt: fake.volumes.get(VOLUME)?.createdAt ?? '' });

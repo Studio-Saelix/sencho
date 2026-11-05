@@ -4,6 +4,7 @@ import { errorMessageForLog, sanitizeForLog } from '../../utils/safeLog';
 import { classifyRecoveryError, RecoveryError } from './redaction';
 import {
   RECOVERY_STAGING_TARGET_PREFIX,
+  RECOVERY_WORK_DIR_PREFIX,
   RestoreIntentStore,
   type RestoreIntentRecord,
 } from './restoreIntents';
@@ -29,7 +30,7 @@ import {
   probeVolumeReport,
   resolveVolumeDependents,
 } from './volumeSources';
-import { runSwapStep, swapIncomingDir, type SwapRunResult, type SwapStatus } from './volumeSwap';
+import { runSwapStep, swapIncomingDir, swapWorkDir, type SwapRunResult, type SwapStatus } from './volumeSwap';
 import type { RecoveryHelperRunner } from './restic/helperRunner';
 import type { RecoveryOperationStore } from './operations';
 import type { RecoveryPointStore } from './recoveryPoints';
@@ -163,6 +164,17 @@ interface TargetObservation {
   stacks: string[];
   /** Free bytes on the volume's filesystem, or null when the probe could not say. */
   freeBytes: number | null;
+}
+
+/**
+ * A name at the volume root that the swap would refuse, shown in a sentence. The
+ * names come from the volume, so anything that is not plain printable text is
+ * replaced rather than echoed.
+ */
+function describeWorkDirs(names: readonly string[]): string {
+  const shown = names.map((name) => (/^[\x20-\x7e]{1,255}$/.test(name) ? name : `${RECOVERY_WORK_DIR_PREFIX}…`));
+  const label = shown.length === 1 ? `a work directory (${shown[0]})` : `work directories (${shown.join(', ')})`;
+  return `A restore that did not finish left ${label} in this volume, and it may hold the data that restore replaced. Review it and remove it from the volume, then preview again. Until then another overwrite of this volume would stop the containers and fail.`;
 }
 
 function requirePoint(deps: OverwriteDeps, pointId: string): TargetObservation["point"] {
@@ -340,16 +352,25 @@ async function observeTarget(deps: OverwriteDeps, pointId: string): Promise<Targ
   }
 
   let freeBytes: number | null = null;
+  let leftoverWorkDirs: string[] = [];
   try {
     const report = await probeVolumeReport({
       runner: deps.runner(),
       operationId: `overwrite-preview-${point.id}`,
       volumeName: storage.locator,
+      listWorkDirs: true,
     });
     freeBytes = report.free;
+    // The work directory of a restore that is still running is that restore's own;
+    // anything else was left by one that did not settle, and the swap refuses a
+    // volume that holds it after the workloads have already stopped.
+    const live = deps.fence.liveIntentForVolume(storage.locator);
+    leftoverWorkDirs = (report.workDirs ?? []).filter((name) => name !== (live ? swapWorkDir(live) : null));
   } catch (err) {
     // The estimate is useful, not required: a probe that cannot run makes the
     // space answer unknown, and admission checks again only when it has a number.
+    // The same goes for the work directory listing: the swap's own refusal is the
+    // backstop, and it rolls back.
     console.warn('[Recovery] Could not read free space for %s:', sanitizeForLog(storage.locator), errorMessageForLog(err));
   }
 
@@ -358,9 +379,11 @@ async function observeTarget(deps: OverwriteDeps, pointId: string): Promise<Targ
     point,
     repository,
     volumeName: storage.locator,
-    eligible: source?.eligible === true && endpointRefusal === null,
+    eligible: source?.eligible === true && endpointRefusal === null && leftoverWorkDirs.length === 0,
     ineligibleReason: endpointRefusal === null
-      ? describeIneligible(source ? source.ineligibleReason : 'volume_missing')
+      ? (source?.eligible === true && leftoverWorkDirs.length > 0
+        ? describeWorkDirs(leftoverWorkDirs)
+        : describeIneligible(source ? source.ineligibleReason : 'volume_missing'))
       : endpointRefusal.unresolved
         ? 'Sencho cannot prove this volume is not the one it runs on, because it could not identify its own container. Check the Docker endpoint permissions, then try again.'
         : 'This volume is mounted by the container that runs the Docker endpoint, so overwriting it would take Sencho offline with it.',

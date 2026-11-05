@@ -8,9 +8,11 @@ package main
 
 import (
 	"bytes"
+	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"syscall"
 	"testing"
 	"time"
@@ -545,6 +547,77 @@ func TestRefusesASecondWorkDirectory(t *testing.T) {
 	}
 }
 
+// A capture taken while an earlier swap's directory sat in the volume holds it.
+// Moving that entry up would leave a second work directory in the live volume,
+// which every later prepare refuses, so it stays in the incoming copy.
+func TestARestoredWorkDirectoryIsNotMovedIntoTheVolume(t *testing.T) {
+	stale := workDirPrefix + "11111111-2222-3333-4444-555555555555"
+	request := setupVolume(t,
+		map[string]string{"db.bin": "original"},
+		map[string]string{"db.bin": "restored", stale + "/plan.json": "{}"},
+	)
+	report, err := swapPrepare(request)
+	if err != nil {
+		t.Fatalf("prepare: %v", err)
+	}
+	if len(report.Incoming) != 1 || report.Incoming[0] != "db.bin" {
+		t.Fatalf("incoming = %v, want only db.bin", report.Incoming)
+	}
+	if _, err := swapCommit(request); err != nil {
+		t.Fatalf("commit: %v", err)
+	}
+	if status, err := swapStatus(request); err != nil || status.Status != statusSwapped {
+		t.Fatalf("status = %+v, %v", status, err)
+	}
+	if exists(filepath.Join(request.Root, stale)) {
+		t.Fatal("the restored work directory reached the live volume")
+	}
+	if _, err := swapCleanup(request); err != nil {
+		t.Fatalf("cleanup: %v", err)
+	}
+	if got := readFile(t, filepath.Join(request.Root, "db.bin")); got != "restored" {
+		t.Fatalf("db.bin = %q", got)
+	}
+	// The volume now holds no work directory, so the next overwrite can prepare.
+	if names, err := listWorkDirNames(request.Root); err != nil || len(names) != 0 {
+		t.Fatalf("work directories after cleanup = %v, %v", names, err)
+	}
+}
+
+func TestListWorkDirNamesReportsEveryWorkDirectoryAtTheRoot(t *testing.T) {
+	root := t.TempDir()
+	writeFile(t, filepath.Join(root, "data.bin"), "x")
+	writeFile(t, filepath.Join(root, "sub", workDirPrefix+"nested", "f"), "x")
+	first := workDirPrefix + "11111111-2222-3333-4444-555555555555"
+	second := workDirPrefix + "not-an-intent"
+	for _, name := range []string{second, first} {
+		if err := os.MkdirAll(filepath.Join(root, name), 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	names, err := listWorkDirNames(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(names) != 2 || names[0] != first || names[1] != second {
+		t.Fatalf("names = %v, want the two root work directories in order", names)
+	}
+}
+
+func TestListWorkDirNamesIsBounded(t *testing.T) {
+	root := t.TempDir()
+	for i := 0; i < maxReportedWorkDirs+3; i++ {
+		name := workDirPrefix + string(rune('a'+i))
+		if err := os.MkdirAll(filepath.Join(root, name), 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	names, err := listWorkDirNames(root)
+	if err != nil || len(names) != maxReportedWorkDirs {
+		t.Fatalf("names = %v, %v", names, err)
+	}
+}
+
 func TestSymlinksAndHardlinksSurviveTheRoundTrip(t *testing.T) {
 	request := setupVolume(t, map[string]string{"db.bin": "original"}, map[string]string{"new.txt": "restored"})
 	link := filepath.Join(request.Root, "current")
@@ -939,5 +1012,23 @@ func TestEmptyVolumeCommits(t *testing.T) {
 	}
 	if _, err := swapCleanup(volume); err != nil {
 		t.Fatalf("cleanup: %v", err)
+	}
+}
+
+func TestTheReportAnswersAnEmptyWorkDirectoryListAsAnArray(t *testing.T) {
+	names := []string{}
+	out, err := json.Marshal(report{WorkDirs: &names})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(out), `"work_dirs":[]`) {
+		t.Fatalf("report = %s, want an empty work_dirs array", out)
+	}
+	out, err = json.Marshal(report{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(out), "work_dirs") {
+		t.Fatalf("report = %s, want no work_dirs without --work-dirs", out)
 	}
 }

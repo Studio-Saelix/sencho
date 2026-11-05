@@ -314,3 +314,19 @@ describe('dependents', () => {
     expect(resolution.dependents).toEqual([{ stackName: 'was-using-it', serviceName: null }]);
   });
 });
+
+describe('the probe report', () => {
+  const BASE = { dev: 1, ino: 2, uid: 0, gid: 0, mode: 16877, free: 5 };
+
+  it('keeps an unlisted work directory set apart from an empty one', () => {
+    expect(volumeSources.parseProbeReport(JSON.stringify(BASE))).toMatchObject({ workDirs: null });
+    expect(volumeSources.parseProbeReport(JSON.stringify({ ...BASE, work_dirs: [] }))).toMatchObject({ workDirs: [] });
+    expect(volumeSources.parseProbeReport(JSON.stringify({ ...BASE, work_dirs: ['.sencho-restore-a'] })))
+      .toMatchObject({ workDirs: ['.sencho-restore-a'] });
+  });
+
+  it('rejects a work directory list that is not an array of names', () => {
+    expect(volumeSources.parseProbeReport(JSON.stringify({ ...BASE, work_dirs: '.sencho-restore-a' }))).toBeNull();
+    expect(volumeSources.parseProbeReport(JSON.stringify({ ...BASE, work_dirs: [1] }))).toBeNull();
+  });
+});
