@@ -10,6 +10,7 @@ import { findSnapshotNetwork, sanitizeNetworkInspect } from '../services/network
 import { getErrorMessage } from '../utils/errors';
 import { sanitizeForLog } from '../utils/safeLog';
 import { isValidDockerResourceId } from '../utils/validation';
+import { isValidDockerNetworkName } from '../services/network/dockerNetworkName';
 import { okEnvelope, runtimeUnavailableEnvelope } from '../services/network/networkingEnvelope';
 
 export const networkingRouter = Router();
@@ -58,7 +59,7 @@ networkingRouter.get('/networks', async (req: Request, res: Response): Promise<v
 networkingRouter.get('/networks/:id', async (req: Request, res: Response): Promise<void> => {
   if (!requirePermission(req, res, 'node:read')) return;
   const id = req.params.id as string;
-  if (!id || (!isValidDockerResourceId(id) && !/^[a-zA-Z0-9][a-zA-Z0-9._-]*$/.test(id))) {
+  if (!id || (!isValidDockerResourceId(id) && !isValidDockerNetworkName(id))) {
     res.status(400).json({ error: 'Invalid network ID format' });
     return;
   }

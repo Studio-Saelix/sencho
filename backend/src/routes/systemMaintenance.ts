@@ -17,6 +17,7 @@ import { requireAdmin } from '../middleware/tierGates';
 import { invalidateNodeCaches } from '../helpers/cacheInvalidation';
 import { activeBulkActions } from '../helpers/bulkActionLocks';
 import { isValidDockerResourceId, isValidCidr, isValidIPv4 } from '../utils/validation';
+import { isValidDockerNetworkName } from '../services/network/dockerNetworkName';
 import { isDebugEnabled } from '../utils/debug';
 import { getErrorMessage } from '../utils/errors';
 import { sanitizeForLog } from '../utils/safeLog';
@@ -668,7 +669,12 @@ systemMaintenanceRouter.get('/networks/:id', async (req: Request, res: Response)
   if (!requirePermission(req, res, 'node:read')) return;
   try {
     const id = req.params.id as string;
-    if (!id) return res.status(400).json({ error: 'Network ID is required' });
+    // Docker inspect accepts a network ID or a network name. Validate both
+    // here so a malformed reference never reaches Dockerode; syntactically
+    // valid but unknown references still fall through to the 404 path below.
+    if (!id || (!isValidDockerResourceId(id) && !isValidDockerNetworkName(id))) {
+      return res.status(400).json({ error: 'Invalid network ID or name format' });
+    }
     const dockerController = DockerController.getInstance(req.nodeId);
     const networkInfo = await dockerController.inspectNetwork(id);
     res.json(networkInfo);
