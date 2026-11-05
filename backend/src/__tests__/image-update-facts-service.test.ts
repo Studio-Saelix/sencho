@@ -135,6 +135,21 @@ it('does not accept digests belonging to a different repository', async () => {
     }]);
 });
 
+it('labels a local build self-referential digest as no registry digests, not an inspect failure', async () => {
+    const configId = `sha256:${'b'.repeat(64)}`;
+    const inspect = vi.fn().mockResolvedValue({
+        Id: configId,
+        Identity: { Build: [{ Ref: 'buildkit-ref' }] },
+        RepoDigests: [`nginx@${configId}`], Os: 'linux', Architecture: 'amd64',
+    });
+    docker.getDocker.mockReturnValue({ getImage: () => ({ inspect }) });
+    const facts = await ImageUpdateFactsService.getInstance().readLocal(1, 'site');
+    expect(facts.images).toEqual([{
+        ref: 'nginx:1.27', localDigests: [], platform: { os: 'linux', architecture: 'amd64' },
+        emptyReason: 'no_repo_digests',
+    }]);
+});
+
 it('preserves build-only services without inventing an image reference', async () => {
     vi.mocked(buildEffectiveServiceModel).mockResolvedValue({
         renderable: true, services: [{ name: 'builder', declaredImage: null, hasBuild: true, expectedReplicas: 1, dependsOn: [], hasHealthcheck: false }],

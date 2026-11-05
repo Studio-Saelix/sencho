@@ -157,6 +157,21 @@ describe('SelfIdentityService.getBuildInfo', () => {
     await until(() => expect(svc.getBuildInfo().revision).toBe(selfDigest));
   });
 
+  it('reports a pulled containerd digest on an engine that reports no Identity', async () => {
+    // API 1.53 added Identity. Before it, the descriptor still proves the Id is
+    // the manifest digest, so the revision must not be dropped as a local build.
+    const selfDigest = `sha256:${DIGEST}`;
+    mockInspectImage.mockResolvedValue({
+      Id: selfDigest,
+      Descriptor: { digest: selfDigest, mediaType: 'application/vnd.oci.image.index.v1+json' },
+      RepoDigests: [`ghcr.io/studio-saelix/sencho-dev@${selfDigest}`],
+      Os: 'linux',
+      Architecture: 'amd64',
+    });
+    const svc = await initWith('ghcr.io/studio-saelix/sencho-dev:dev');
+    await until(() => expect(svc.getBuildInfo().revision).toBe(selfDigest));
+  });
+
   it('derives the revision from a pinned dev-<sha> tag without an image inspect', async () => {
     const svc = await initWith('ghcr.io/studio-saelix/sencho-dev:dev-abc1234');
     await until(() => expect(svc.getBuildInfo().revision).toBe('dev-abc1234'));

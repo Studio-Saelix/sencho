@@ -318,7 +318,7 @@ class SelfIdentityService {
     return selectLocalRepoDigest(
       inspected.RepoDigests ?? [],
       parsed,
-      configIdForLocalBuild(inspected.Id, inspected.Identity),
+      configIdForLocalBuild(inspected),
     );
   }
 

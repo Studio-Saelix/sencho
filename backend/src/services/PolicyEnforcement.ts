@@ -660,6 +660,13 @@ async function planCandidates(
         };
         const byPlatform = new Map<string, {
             platform: { os: string; architecture: string; variant?: string } | null;
+            /**
+             * The most specific spelling in the group: an explicit default
+             * variant (`linux/arm64/v8`) asks for exactly that child, while the
+             * bare form accepts the default. Presence must satisfy every
+             * service in the group, so the explicit spelling decides.
+             */
+            presencePlatform: { os: string; architecture: string; variant?: string } | null;
             invalid?: string;
             services: EffectiveServiceSpec[];
         }>();
@@ -670,24 +677,33 @@ async function planCandidates(
                 : `invalid:${effective.reason}`;
             const group = byPlatform.get(key) ?? {
                 platform: effective.ok ? effective.platform : null,
+                presencePlatform: effective.ok ? effective.platform : null,
                 ...(effective.ok ? {} : { invalid: effective.reason }),
                 services: [],
             };
+            if (effective.ok && effective.platform?.variant) {
+                group.presencePlatform = effective.platform;
+            }
             group.services.push(spec);
             byPlatform.set(key, group);
         }
         const presentByPlatform = new Map<string, boolean>();
         const presenceFor = async (
             key: string,
-            group: { platform: { os: string; architecture: string; variant?: string } | null; invalid?: string },
+            group: {
+                platform: { os: string; architecture: string; variant?: string } | null;
+                presencePlatform?: { os: string; architecture: string; variant?: string } | null;
+                invalid?: string;
+            },
         ): Promise<boolean> => {
             const known = presentByPlatform.get(key);
             if (known !== undefined) return known;
+            const platform = group.presencePlatform ?? group.platform;
             // An override this build cannot read is resolved as unresolved when
             // it pulls; presence is moot there and must not read as installed.
-            const present = group.invalid || !group.platform
+            const present = group.invalid || !platform
                 ? false
-                : await localImageExists(nodeId, ref, group.platform);
+                : await localImageExists(nodeId, ref, platform);
             presentByPlatform.set(key, present);
             return present;
         };

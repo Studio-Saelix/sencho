@@ -29,6 +29,8 @@ const state = vi.hoisted(() => ({
     Variant?: string;
     Id?: string;
     Identity?: unknown;
+    Descriptor?: unknown;
+    Parent?: unknown;
   },
   /** Force the platform the fake Trivy report claims, regardless of the selector. */
   forcedReadArchitecture: null as string | null,
@@ -413,6 +415,49 @@ describe('trivy image platform selection', () => {
     expect(call.args[call.args.indexOf('--platform') + 1]).toBe('linux/amd64');
     expect(lastArg(call)).toBe(`registry.example.com/web@${INDEX_DIGEST}`);
     expect(result.imageDigest).toBe(INDEX_DIGEST);
+  });
+
+  it('addresses a pulled containerd image on an engine that reports no Identity', async () => {
+    // Identity arrived in API 1.53. Before it, a pulled containerd image still
+    // reports its manifest/index digest as the Id and as the RepoDigest, so the
+    // descriptor is the only proof that this is registry content; the child
+    // must not be refused as a local build.
+    state.local = {
+      Id: INDEX_DIGEST,
+      Descriptor: { digest: INDEX_DIGEST, mediaType: 'application/vnd.oci.image.index.v1+json' },
+      RepoDigests: [`registry.example.com/web@${INDEX_DIGEST}`],
+      Os: 'linux',
+      Architecture: 'arm64',
+    };
+
+    const result = await TrivyService.getInstance().scanImage('registry.example.com/web:1.2', 1, {
+      platform: 'linux/amd64',
+    });
+
+    expect(state.calls).toHaveLength(1);
+    expect(lastArg(state.calls[0])).toBe(`registry.example.com/web@${INDEX_DIGEST}`);
+    expect(result.imageDigest).toBe(INDEX_DIGEST);
+  });
+
+  it('refuses a locally created containerd image with no Identity and a self-referential digest', async () => {
+    // A classic-builder or committed image carries a Parent but no Identity.
+    // Its RepoDigest repeats the Id, which is not registry content.
+    const configId = `sha256:${'6'.repeat(64)}`;
+    state.local = {
+      Id: configId,
+      Parent: `sha256:${'7'.repeat(64)}`,
+      Descriptor: { digest: configId, mediaType: 'application/vnd.oci.image.manifest.v1+json' },
+      RepoDigests: [`registry.example.com/web@${configId}`],
+      Os: 'linux',
+      Architecture: 'arm64',
+    };
+
+    await expect(
+      TrivyService.getInstance().scanImage('registry.example.com/web:1.2', 1, {
+        platform: 'linux/amd64',
+      }),
+    ).rejects.toThrow(/no registry digest/);
+    expect(state.calls).toHaveLength(0);
   });
 
   it('leaves a candidate addressed by its own manifest digest without a selector', async () => {

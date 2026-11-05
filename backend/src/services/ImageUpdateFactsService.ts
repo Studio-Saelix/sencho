@@ -188,18 +188,23 @@ export class ImageUpdateFactsService {
                 }
                 const parsed = parseImageRef(ref);
                 const platform = { os: inspect.Os, architecture: inspect.Architecture };
+                const configId = parsed ? configIdForLocalBuild(inspect) : null;
+                const selfReferential = configId !== null && repoDigests.some((entry) => {
+                    const at = entry.indexOf('@');
+                    return at !== -1 && entry.slice(at + 1).toLowerCase() === configId.toLowerCase();
+                });
                 const localDigests = parsed
-                    ? selectLocalRepoDigests(
-                        repoDigests,
-                        parsed,
-                        configIdForLocalBuild(inspect.Id, (inspect as { Identity?: unknown }).Identity),
-                    )
+                    ? selectLocalRepoDigests(repoDigests, parsed, configId)
                     : repoDigests;
                 out.push({
                     ref,
                     localDigests: [...new Set(localDigests)],
                     platform,
-                    emptyReason: localDigests.length === 0 ? 'inspect_failed' : 'none',
+                    // A local build has no registry digests; that is not an
+                    // inspect failure, unlike a present but unrelated digest.
+                    emptyReason: localDigests.length === 0
+                        ? (selfReferential ? 'no_repo_digests' : 'inspect_failed')
+                        : 'none',
                 });
             } catch (error) {
                 console.error('[ImageUpdateFacts] Inspect failed for %s:', ref, error);

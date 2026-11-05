@@ -709,8 +709,10 @@ class TrivyService {
                 RepoDigests?: string[];
                 Id?: string;
                 Identity?: unknown;
+                Descriptor?: unknown;
+                Parent?: unknown;
             };
-            const configId = configIdForLocalBuild(info.Id, info.Identity)?.toLowerCase() ?? null;
+            const configId = configIdForLocalBuild(info)?.toLowerCase() ?? null;
             if (info.RepoDigests && info.RepoDigests.length > 0) {
                 for (const entry of info.RepoDigests) {
                     const digest = entry.split('@')[1];
@@ -753,15 +755,13 @@ class TrivyService {
                 RepoDigests?: unknown;
                 Id?: unknown;
                 Identity?: unknown;
+                Descriptor?: unknown;
+                Parent?: unknown;
             };
             const repoDigests = Array.isArray(info.RepoDigests)
                 ? info.RepoDigests.filter((entry): entry is string => typeof entry === 'string')
                 : [];
-            const digest = selectLocalRepoDigests(
-                repoDigests,
-                parsed,
-                configIdForLocalBuild(typeof info.Id === 'string' ? info.Id : null, info.Identity),
-            )[0];
+            const digest = selectLocalRepoDigests(repoDigests, parsed, configIdForLocalBuild(info))[0];
             return digest ? `${parsed.registry}/${parsed.repo}@${digest}` : null;
         } catch (err) {
             diag(`getRepoDigestRef: read failed for ${imageRef}: ${getErrorMessage(err, 'unknown')}`);

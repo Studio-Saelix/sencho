@@ -306,12 +306,10 @@ export async function verifyPulledCandidates(
         RepoDigests?: string[];
         Id?: string;
         Identity?: unknown;
+        Descriptor?: unknown;
+        Parent?: unknown;
       };
-      digests = selectLocalRepoDigests(
-        info.RepoDigests ?? [],
-        parsed,
-        configIdForLocalBuild(info.Id, info.Identity),
-      );
+      digests = selectLocalRepoDigests(info.RepoDigests ?? [], parsed, configIdForLocalBuild(info));
     } catch {
       // The image is not on the node after a pull that was supposed to fetch it,
       // so it certainly is not provably the one that was scanned.

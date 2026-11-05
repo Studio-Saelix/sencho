@@ -466,7 +466,10 @@ describe('selectLocalRepoDigest', () => {
 
   it('forwards the config ID so a self-referential RepoDigest is not returned', () => {
     const configId = `sha256:${'d'.repeat(64)}`;
-    const localBuild = configIdForLocalBuild(configId, { Build: [{ Ref: 'buildkit-ref' }] });
+    const localBuild = configIdForLocalBuild({
+      Id: configId,
+      Identity: { Build: [{ Ref: 'buildkit-ref' }] },
+    });
     expect(selectLocalRepoDigest(
       [`nginx@${configId}`, `nginx@${DIGEST_A}`],
       parsed('nginx:latest'),
@@ -555,7 +558,10 @@ describe('selectLocalRepoDigests', () => {
     // digest, so it equals the RepoDigest. That digest is registry content and
     // must not be filtered just because the two match.
     const configId = `sha256:${'d'.repeat(64)}`;
-    const pulled = configIdForLocalBuild(configId, { Pull: [{ Repository: 'docker.io/library/nginx' }] });
+    const pulled = configIdForLocalBuild({
+      Id: configId,
+      Identity: { Pull: [{ Repository: 'docker.io/library/nginx' }] },
+    });
     expect(selectLocalRepoDigests([`nginx@${configId}`], parsed('nginx:latest'), pulled)).toEqual([configId]);
   });
 });
@@ -564,26 +570,63 @@ describe('selectLocalRepoDigests', () => {
 
 describe('configIdForLocalBuild', () => {
   const CONFIG_ID = `sha256:${'d'.repeat(64)}`;
+  const DESCRIPTOR = { digest: CONFIG_ID, mediaType: 'application/vnd.oci.image.index.v1+json' };
 
   it('returns the image ID for a local build', () => {
-    expect(configIdForLocalBuild(CONFIG_ID, { Build: [{ Ref: 'buildkit-ref' }] })).toBe(CONFIG_ID);
+    expect(configIdForLocalBuild({
+      Id: CONFIG_ID,
+      Identity: { Build: [{ Ref: 'buildkit-ref' }] },
+    })).toBe(CONFIG_ID);
   });
 
   it('returns null for a pulled image, even when its Id equals its RepoDigest', () => {
-    expect(configIdForLocalBuild(CONFIG_ID, {
-      Pull: [{ Repository: 'docker.io/library/nginx' }],
+    expect(configIdForLocalBuild({
+      Id: CONFIG_ID,
+      Identity: { Pull: [{ Repository: 'docker.io/library/nginx' }] },
+      Descriptor: DESCRIPTOR,
     })).toBeNull();
   });
 
-  it('falls back to the image ID when Docker reports no provenance', () => {
-    // The classic image store has no Identity field; a pulled image's Id is its
-    // config digest, so a RepoDigest equal to it is a local build's self-reference.
-    expect(configIdForLocalBuild(CONFIG_ID, undefined)).toBe(CONFIG_ID);
+  it('falls back to the image ID on the classic store when Docker reports no provenance', () => {
+    // The classic image store has no Identity or Descriptor; a pulled image's
+    // Id is its config digest, so a RepoDigest equal to it is a local build's
+    // self-reference.
+    expect(configIdForLocalBuild({ Id: CONFIG_ID })).toBe(CONFIG_ID);
+  });
+
+  it('keeps a containerd image with no provenance as registry content', () => {
+    // An engine before Identity (API 1.53) reports the Id as the manifest/index
+    // digest on the containerd store. Equality with the RepoDigest is normal for
+    // a pulled image, so it must not be filtered or the child is falsely
+    // blocked as "no registry digest".
+    expect(configIdForLocalBuild({ Id: CONFIG_ID, Descriptor: DESCRIPTOR })).toBeNull();
+  });
+
+  it('treats a locally created containerd image with a parent as a self-reference', () => {
+    expect(configIdForLocalBuild({
+      Id: CONFIG_ID,
+      Parent: `sha256:${'e'.repeat(64)}`,
+      Descriptor: DESCRIPTOR,
+    })).toBe(CONFIG_ID);
+  });
+
+  it('treats a descriptor that does not name the Id as the config digest', () => {
+    expect(configIdForLocalBuild({
+      Id: CONFIG_ID,
+      Descriptor: { digest: `sha256:${'f'.repeat(64)}` },
+    })).toBe(CONFIG_ID);
+  });
+
+  it('compares a descriptor digest case-insensitively', () => {
+    expect(configIdForLocalBuild({
+      Id: CONFIG_ID,
+      Descriptor: { digest: CONFIG_ID.toUpperCase() },
+    })).toBeNull();
   });
 
   it('returns null for a missing or empty image ID', () => {
-    expect(configIdForLocalBuild(undefined, { Build: [{}] })).toBeNull();
-    expect(configIdForLocalBuild('  ', { Build: [{}] })).toBeNull();
+    expect(configIdForLocalBuild({ Identity: { Build: [{}] } })).toBeNull();
+    expect(configIdForLocalBuild({ Id: '  ', Identity: { Build: [{}] } })).toBeNull();
   });
 });
 

@@ -938,6 +938,49 @@ describe('compose mode (a plain up)', () => {
     );
   });
 
+  it('uses the explicit default variant for presence regardless of service order', async () => {
+    // linux/arm64 and linux/arm64/v8 are one child, but an image that reports no
+    // variant only proves the bare request. Grouping must therefore let the
+    // explicit spelling decide presence, or the pull decision depends on which
+    // service Compose lists first.
+    candidates.platform = { os: 'linux', architecture: 'arm64' };
+    candidates.resolve.mockResolvedValue({
+      ...CANDIDATE_RESOLUTION,
+      platform: 'linux/arm64',
+      platformDigest: PLATFORM_DIGEST,
+    });
+    candidates.localImageExists.mockImplementation(
+      async (_nodeId: number, _ref: string, platform?: { variant?: string }) => platform?.variant === undefined,
+    );
+
+    for (const order of [
+      ['linux/arm64', 'linux/arm64/v8'],
+      ['linux/arm64/v8', 'linux/arm64'],
+    ]) {
+      candidates.resolve.mockClear();
+      candidates.localImageExists.mockClear();
+      modelWith(order.map((platform, index) => ({
+        name: `svc-${index}`,
+        declaredImage: 'registry.example.com/web:latest',
+        hasBuild: false,
+        pullPolicy: '',
+        platform,
+        expectedReplicas: 1,
+        dependsOn: [],
+        hasHealthcheck: false,
+      })));
+
+      await enforcePolicyPreDeploy('web', 1, { bypass: false, actor: 'u', imageSource: 'compose' });
+
+      expect(candidates.localImageExists).toHaveBeenCalledWith(
+        1,
+        'registry.example.com/web:latest',
+        { os: 'linux', architecture: 'arm64', variant: 'v8' },
+      );
+      expect(candidates.resolve).toHaveBeenCalledTimes(1);
+    }
+  });
+
   it('evaluates the local child of an implicit non-pulling group beside a platform that pulls', async () => {
     candidates.platform = { os: 'linux', architecture: 'arm64' };
     candidates.resolve.mockResolvedValue(CANDIDATE_RESOLUTION);

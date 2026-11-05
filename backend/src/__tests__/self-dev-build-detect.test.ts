@@ -142,6 +142,33 @@ describe('detectSelfDevBuildUpdate', () => {
     );
   });
 
+  it('still compares a pulled containerd image on an engine that reports no Identity', async () => {
+    // API 1.53 added Identity. Before it, the containerd store still reports the
+    // manifest digest as both Id and RepoDigest; the descriptor proves it is
+    // registry content and must not be filtered as a local build.
+    const compareDetailed = compareReturning({ kind: 'match', primaryDigest: LOCAL_DIGEST });
+    const deps: DetectSelfDevBuildUpdateDeps = {
+      inspectImage: vi.fn().mockResolvedValue({
+        Id: LOCAL_DIGEST,
+        Descriptor: { digest: LOCAL_DIGEST, mediaType: 'application/vnd.oci.image.index.v1+json' },
+        RepoDigests: [LOCAL_REPO_DIGEST],
+        Os: 'linux',
+        Architecture: 'amd64',
+      }),
+      compareDetailed,
+    };
+
+    expect(await detectSelfDevBuildUpdate(INPUT, deps)).toEqual({ kind: 'up_to_date' });
+    expect(compareDetailed).toHaveBeenCalledWith(
+      [LOCAL_DIGEST],
+      REGISTRY,
+      REPO,
+      TAG,
+      { os: 'linux', architecture: 'amd64' },
+      null,
+    );
+  });
+
   it('returns inconclusive, not a throw, when inspectImage throws', async () => {
     const deps: DetectSelfDevBuildUpdateDeps = {
       inspectImage: vi.fn().mockRejectedValue(new Error('no such image')),

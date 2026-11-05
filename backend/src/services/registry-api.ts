@@ -330,25 +330,44 @@ export function selectLocalRepoDigests(
 
 /**
  * The value to pass as {@link selectLocalRepoDigests}' `configId`, or null when
- * the image came from a registry.
+ * the image may carry registry content.
  *
- * On the containerd image store a pulled image's `Id` is the manifest or index
- * digest the registry served, so it already equals its RepoDigest; only a
- * locally built image's matching digest is self-referential. Docker reports
- * that provenance in `Identity` (`Pull` for a pulled image, `Build` for a local
- * build). When the field is absent (the classic image store), a matching digest
- * already means the config ID, because a pulled image's `Id` is its config
- * digest.
+ * Docker's `Identity` field (Engine 29.2 / API 1.53) is authoritative: `Pull`
+ * means the image came from a registry and `Build` means it was built locally.
+ * Older engines omit it. On the classic image store the image Id is the config
+ * digest, so a RepoDigest equal to it can only be a locally built image's
+ * self-reference. On the containerd image store the Id is the manifest or index
+ * digest, so equality alone proves nothing: a `Descriptor` that names the Id is
+ * registry content, while a locally created image with a `Parent` is a
+ * self-reference. A containerd image on an engine without `Identity` cannot be
+ * told apart from a pulled one; it keeps the digest so a pulled child is not
+ * falsely blocked, and a local build there fails closed when the registry
+ * rejects the address.
  */
-export function configIdForLocalBuild(
-    id: string | null | undefined,
-    identity: unknown,
-): string | null {
+export interface ImageProvenance {
+    Id?: unknown;
+    Identity?: unknown;
+    Descriptor?: unknown;
+    Parent?: unknown;
+}
+
+export function configIdForLocalBuild(inspect: ImageProvenance): string | null {
+    const id = inspect.Id;
     if (typeof id !== 'string' || id.trim() === '') return null;
+    const identity = inspect.Identity;
     if (identity !== null && typeof identity === 'object') {
         const record = identity as Record<string, unknown>;
         if (Array.isArray(record.Pull) && record.Pull.length > 0) return null;
         if (Array.isArray(record.Build) && record.Build.length > 0) return id;
+    }
+    // A locally created image carries its parent; a pulled image does not.
+    if (typeof inspect.Parent === 'string' && inspect.Parent.trim() !== '') return id;
+    const descriptor = inspect.Descriptor;
+    if (descriptor !== null && typeof descriptor === 'object') {
+        const digest = (descriptor as Record<string, unknown>).digest;
+        if (typeof digest === 'string' && digest.toLowerCase() === id.toLowerCase()) {
+            return null;
+        }
     }
     return id;
 }

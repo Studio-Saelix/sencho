@@ -784,7 +784,7 @@ async function observeServiceRuntime(
       registry: 'registry-1.docker.io',
       repo: serviceName,
       tag: 'latest',
-    }, configIdForLocalBuild(image.Id, (image as { Identity?: unknown }).Identity));
+    }, configIdForLocalBuild(image));
     const localDigests = [...repoDigests].sort((a, b) => a.localeCompare(b));
     const hasRepoDigest = localDigests.length > 0;
     const platformDigest = localDigests[0] ?? null;
