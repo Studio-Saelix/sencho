@@ -676,7 +676,11 @@ export function buildBootstrapEvidence(input: { facts: BootstrapFacts; nodeNameT
   const osReleaseSupported = facts.os
     ? facts.os.id === 'ubuntu' && ['22.04', '24.04'].includes(facts.os.versionId)
     : null;
-  const osSupported = osReleaseSupported === null ? null : osReleaseSupported ? Boolean(facts.os?.codename) : false;
+  // A supported release whose codename could not be read is unknown, not
+  // unsupported: the plan needs the codename to address the Docker repository.
+  const osSupported = osReleaseSupported === null
+    ? null
+    : osReleaseSupported ? (facts.os?.codename ? true : null) : false;
   checks.push(osSupported === null ? {
     id: 'os_supported',
     category: 'host',

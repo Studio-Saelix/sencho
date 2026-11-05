@@ -89,7 +89,7 @@ function FooterActions({ wizard, onClose }: { wizard: UseNodeBootstrap; onClose:
             {result ? 'Run preflight again' : 'Run preflight'}
           </BusyButton>
         )}
-        hint={running ? 'Inspecting the host over SSH. This usually takes under 30 seconds.' : undefined}
+        hint={running ? 'Inspecting the host over SSH. The preflight is bounded to 90 seconds.' : undefined}
       />
     );
   }

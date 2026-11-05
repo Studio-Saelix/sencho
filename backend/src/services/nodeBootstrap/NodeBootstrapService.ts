@@ -359,6 +359,7 @@ export class NodeBootstrapService {
                 pinnedFingerprint: pin?.fingerprint ?? null,
                 expectedFingerprint,
                 observedFingerprint,
+                observedAlgorithm: hostKey?.algorithm ?? null,
               },
             });
           }
@@ -459,9 +460,10 @@ export class NodeBootstrapService {
   }
 
   private budgetError(): SshTransportError {
+    const ms = this.deps.requestBudgetMs;
     return new SshTransportError(
       'PREFLIGHT_TIMEOUT',
-      `The preflight exceeded its ${Math.round(this.deps.requestBudgetMs / 1000)}-second budget.`,
+      `The preflight exceeded its ${ms >= 1000 ? `${Math.round(ms / 1000)}-second` : `${ms}-millisecond`} budget.`,
     );
   }
 

@@ -95,11 +95,13 @@ export function BootstrapPreflightStep({
   const tone: StatusTone = blocked ? 'destructive' : 'success';
   const stages = stagesFromChecks(inspection.checks);
   const blockers = inspection.checks.filter((check) => check.status === 'blocked');
-  const unknownRequired = inspection.checks.filter((check) => check.status === 'unknown').length;
+  // An unknown fact can withhold the plan on its own, so a blocked result with
+  // no blockers must still show which facts could not be established.
+  const unknownChecks = inspection.checks.filter((check) => check.status === 'unknown');
   const answers = blocked
     ? inspection.blockers > 0
       ? `${inspection.blockers} blocker${inspection.blockers === 1 ? '' : 's'} must be resolved before a plan can be generated.`
-      : `${unknownRequired} check${unknownRequired === 1 ? '' : 's'} could not be established, so no plan can be generated.`
+      : `${unknownChecks.length} check${unknownChecks.length === 1 ? '' : 's'} could not be established, so no plan can be generated.`
     : `The host can be prepared. ${inspection.warnings} warning${inspection.warnings === 1 ? '' : 's'} will be carried into the plan.`;
 
   return (
@@ -119,7 +121,9 @@ export function BootstrapPreflightStep({
         {hostKeyTrust === 'changed' && (
           <div className="mt-2 rounded-lg border border-destructive/30 bg-destructive/5 p-2.5">
             <p className="text-xs text-destructive">
-              This key differs from the pinned key. Only replace it if you know the host was rebuilt.
+              {pinnedFingerprint
+                ? 'This key differs from the pinned key. Only replace it if you know the host was rebuilt.'
+                : 'This key differs from the key you reviewed. Review the new fingerprint before you continue.'}
             </p>
             {pinnedFingerprint && (
               <p className="mt-1 break-all font-mono text-[10px] text-stat-subtitle">Pinned: {pinnedFingerprint}</p>
@@ -180,6 +184,21 @@ export function BootstrapPreflightStep({
       />
 
       <BootstrapPathSummary composeDir={inspection.paths.composeDir} agentDir={inspection.paths.agentDir} />
+
+      {blocked && unknownChecks.length > 0 && (
+        <div className="space-y-2" data-testid="bootstrap-unknown-checks">
+          <h4 className="font-mono text-[10px] uppercase tracking-[0.18em] text-stat-subtitle">Could not be established</h4>
+          <ul className="space-y-2">
+            {unknownChecks.map((check) => (
+              <li key={check.id} className="rounded-lg border border-muted bg-card/40 px-3 py-2 text-xs">
+                <p className="font-medium text-foreground/80">{check.label}</p>
+                <p className="mt-1 text-foreground/80">{check.summary}</p>
+                {check.remediation && <p className="mt-1 text-stat-subtitle">{check.remediation}</p>}
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
 
       {blockers.length > 0 && (
         <div className="space-y-2">

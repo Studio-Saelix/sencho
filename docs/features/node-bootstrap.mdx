@@ -5,7 +5,7 @@ description: Inspect a Linux server over SSH before you provision it. Sencho ver
 
 The node bootstrap preflight is the first half of the guided provisioning workflow for a new Linux server. It connects to the host over SSH, runs a fixed catalog of read-only commands, and reports what it found with the same pass, warning, blocked and unknown language used by the other environment checks.
 
-**Nothing on the target is changed.** The preflight does not install packages, create directories, write files, start services or enroll an agent. Its output is an ordered plan with exact commands that you can read, copy and download. Running that plan is a separate, later step.
+**Nothing on the target is changed.** The preflight does not install packages, create directories, write files, start services or enroll an agent. Its output is an ordered plan with exact commands that you can read, copy and download. This release only previews the plan: no action runs it yet, so **Copy plan** and **Download** are for review and for running by hand.
 
 Use it to answer questions a manual enrollment cannot:
 
@@ -67,7 +67,7 @@ ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub
 - **Known host:** a key that matches the pin proceeds without a prompt.
 - **Changed key:** Sencho blocks the preflight and shows both fingerprints. Replacing the pin is a separate, explicit action, and both fingerprints are recorded in the audit log.
 
-Once trusted, select **Run preflight**. Sencho opens one SSH connection and runs the fixed read-only catalog. The request is bounded: 15 seconds to connect, 10 seconds per command, 90 seconds overall, with output caps. An inventory or identity fact from a timed-out, errored or truncated command is treated as `unknown` or `blocked`; it never becomes a clean pass.
+Once trusted, select **Run preflight**. Sencho opens one SSH connection and runs the fixed read-only catalog. The request is bounded: 15 seconds to connect, 10 seconds per command, 90 seconds overall, with output caps. Closing the dialog or editing the host, port or user cancels the request on the server. If a command times out, the inspection stops there and the commands that did not run are reported as `unknown`. An inventory or identity fact from a timed-out, errored or truncated command is treated as `unknown` or `blocked`; it never becomes a clean pass.
 
 The result has four verdicts:
 
@@ -76,7 +76,7 @@ The result has four verdicts:
 | Pass | The check ran and the host satisfies it. |
 | Warning | The host can be prepared, but something is worth reading first. |
 | Blocked | The plan cannot be generated until this is resolved. Every blocker names the observed fact and one specific remedy. |
-| Unknown | The fact could not be read. Unknown is never treated as a pass. |
+| Unknown | The fact could not be read. Unknown is never treated as a pass, and an unknown fact the plan depends on withholds the plan the same way a blocker does. The dialog lists each one with what to confirm on the host. |
 
 A blocked inspection is still a successful inspection: it returns the evidence, no plan, and the remediation for each blocker.
 
@@ -86,7 +86,7 @@ A blocked inspection is still a successful inspection: it returns the evidence, 
 
 ### 3. Plan
 
-When there are no blockers, Sencho builds the plan. It contains:
+When there are no blockers and every fact the plan depends on was established, Sencho builds the plan. It contains:
 
 - Both directories, their resolved real paths where they differ, and whether each exists or will be created.
 - Directory creation commands with the exact mode (`0755` for stacks, `0700` for the agent), owner, group and privilege.
@@ -100,7 +100,7 @@ When there are no blockers, Sencho builds the plan. It contains:
   <img src="/images/node-bootstrap/03-plan-filesystem.png" alt="Bootstrap dialog on the Plan step: the two paths, numbered execution stages with the agent directory install command and its 0700 mode and owner, the compose file write at 0600, and the Not changed block listing the preserved Compose directory." />
 </Frame>
 
-The plan reads **No changes have been made on this server.** Use **Copy plan** or **Download** to keep it for review. The digest is what a later approval binds to, so a plan that changes is a plan that must be approved again.
+The plan reads **No changes have been made on this server.** Use **Copy plan** or **Download** to keep it for review. Each generated plan has its own digest, because the marker file carries the generation time. A later approval would bind to that digest, so a plan that changes is a plan that must be approved again.
 
 ## Existing content is preserved
 
@@ -129,7 +129,7 @@ The plan step stays unreachable until a new preflight succeeds, and the new dige
 The plan keeps the contracts later steps depend on:
 
 - **Enrollment:** the compose file carries the mode, hub URL, enrollment token, Compose directory, Docker socket, the `sencho-agent-data` volume and the optional CA mount.
-- **Self-update:** the container's Compose labels locate the compose file, so a custom Agent directory remains self-updateable. The project and container names stay `sencho-agent`, and the Compose service stays `agent`.
+- **Self-update:** the container's Compose labels locate the compose file and service, so a custom Agent directory remains self-updateable. The generated project and container are named `sencho-agent` and the Compose service is `agent`; the preflight uses those names to recognize an existing Pilot.
 - **Reboot:** both directories must be on persistent local storage, Docker is enabled at boot, and the agent uses `restart: unless-stopped`.
 - **Restart and recovery:** the project is idempotent, the volume survives container recreation, and the bootstrap marker distinguishes a previous attempt from an unrelated installation.
 - **Readiness:** a tunnel connection alone is not proof that the node is ready. A later readiness check inspects the running container, requires a bind mount whose source and destination both equal the chosen Compose directory, and verifies the agent can read and write it.
@@ -147,14 +147,15 @@ The Agent installation directory has no settings field. It is chosen only here.
 - Ubuntu 22.04 and 24.04 on x86_64 only.
 - IPv6 targets, SSH agent forwarding, password authentication and passworded sudo are not supported in this release.
 - The preflight never changes firewall, SSH server, Docker daemon, user or group configuration.
-- The plan previews the official Docker repository only. When that repository is not configured yet, package versions are shown as unresolved and are resolved from the official repository at execution time. On a host where Docker and Compose already work, the plan preserves that installation and does not install or replace Docker packages.
+- Only the Docker daemon on the host's own socket (`/var/run/docker.sock`) is inspected, and every Docker command in the preflight and the plan is pinned to it with the default context. Rootless installs, custom sockets and remote Docker contexts are reported as blocked. A host where Docker is installed but stopped is blocked too: containers and volumes cannot be inventoried until the service runs.
+- The plan previews the official Docker repository only. When apt has no candidate for a package yet, because the repository is not configured or its index was never refreshed, package versions are shown as unresolved and are resolved from the official repository at execution time. On a host where Docker and Compose already work, the plan preserves that installation and does not install or replace Docker packages.
 
 ## Troubleshooting
 
 | What you see | What to do |
 | --- | --- |
 | `HOST_KEY_MISMATCH` | The live key differs from the pinned one. Compare the fingerprints on the host before replacing the pin. |
-| `HOST_KEY_UNTRUSTED` | Trust the key first, or re-run **Check host key** if it changed between the check and the preflight. |
+| `HOST_KEY_UNTRUSTED` | Trust the key first. If the host's key changed between the check and the preflight, the dialog shows the pinned and live fingerprints; tick the replacement confirmation only when you know the host was rebuilt. |
 | `SSH_AUTH_FAILED` | Check the SSH user and that the public half of the key is in the user's `authorized_keys`. |
 | `SSH_KEY_PASSPHRASE_REQUIRED` | The key is encrypted. Enter its passphrase. |
 | `SSH_KEY_INVALID` | Use an OpenSSH private key, or convert an RSA key to PEM. PKCS8 ed25519 keys are not accepted. |

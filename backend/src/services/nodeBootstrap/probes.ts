@@ -632,7 +632,7 @@ export function parsePathFacts(text: string, input: string, kindLabel = 'path'):
     const match = /^P_([A-Z_]+)=(.*)$/.exec(line);
     if (match) raw.set(match[1], match[2]);
   }
-  const exists = raw.size > 0 && !raw.has('ERROR') && raw.get('EXISTS') !== '0';
+  const exists = raw.get('EXISTS') === '1' && !raw.has('ERROR');
   const isDirectory = raw.get('ISDIR') === '1';
   const realPath = raw.get('REAL') ?? null;
   const dfFields = (raw.get('DF') ?? '').trim().split(/\s+/);
@@ -642,7 +642,9 @@ export function parsePathFacts(text: string, input: string, kindLabel = 'path'):
   const fstype = raw.get('FSTYPE')?.trim() || '';
   const fsSource = raw.get('FSSOURCE')?.trim() || '';
   const fsTarget = raw.get('FSTARGET')?.trim() || '';
-  const error = raw.get('ERROR') ?? (raw.size === 0 ? `${kindLabel} probe returned no facts` : null);
+  const error = raw.get('ERROR')
+    ?? (raw.size === 0 ? `${kindLabel} probe returned no facts` : null)
+    ?? (raw.has('EXISTS') ? null : `${kindLabel} probe did not report whether the path exists`);
   const nearest = raw.get('NEAREST') ?? null;
   return {
     input,
@@ -824,7 +826,11 @@ function inventoryOutcome(
   const candidates = [map.get(directId), map.get(sudoId)].filter((entry): entry is SshCommandResult => Boolean(entry));
   const complete = candidates.find(isCompleteResult);
   if (complete) return { text: complete.stdout, complete: true, error: null, truncated: false };
-  const partial = candidates.find((result) => !result.timedOut || result.truncated);
+  // Keep the richest partial listing: a failed direct attempt must not hide a
+  // Pilot row that the sudo attempt did print before it was cut off.
+  const partial = candidates
+    .filter((result) => !result.timedOut || result.truncated)
+    .sort((a, b) => b.stdout.length - a.stdout.length)[0];
   const reasons = candidates.map((result) => (
     result.timedOut ? 'timed out' : result.truncated ? 'output truncated' : result.error ? result.error : `exited ${result.exitCode ?? 'without a status'}`
   ));
@@ -1024,7 +1030,7 @@ export function assembleFacts(input: AssembleFactsInput): BootstrapFacts {
   };
 }
 
-/** Reject anything that is not a valid absolute http(s) URL with a non-loopback host. */
+/** Reject anything that is not a valid absolute http(s) URL without credentials; loopback is flagged for the caller to block. */
 export function validateHubUrl(raw: string): { ok: boolean; reason: string | null; loopback: boolean } {
   let url: URL;
   try {

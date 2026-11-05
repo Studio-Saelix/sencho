@@ -93,7 +93,7 @@ The guided [bootstrap preflight](/features/node-bootstrap) and manual enrollment
 
 The Agent installation directory is chosen only in the bootstrap workflow; it has no Settings field. The agent's persistent data is always the fixed Compose volume `sencho-agent-data` mounted at `/app/data`; Compose creates it under the project-qualified name `sencho-agent_sencho-agent-data`. There is no configurable data directory, because enrollment, self-update and recovery all depend on that named volume.
 
-Because self-update reads its compose context from the container's Compose labels, a custom Agent installation directory remains self-updateable as long as the project and container names stay `sencho-agent` and the Compose service stays `agent`.
+Because self-update reads its compose context from the container's Compose labels, a custom Agent installation directory remains self-updateable: the compose file and service are read from the labels, not from a fixed path. The generated project and container name `sencho-agent` and service `agent` are what the bootstrap preflight uses to detect an existing Pilot, so keep them when you enroll manually.
 
 ### The control instance's public URL
 

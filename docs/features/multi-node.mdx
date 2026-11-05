@@ -68,7 +68,7 @@ The same form opens from **Fleet → Node management → Connect existing node**
 Pilot notes:
 
 - The agent's persistent data is the fixed Compose volume `sencho-agent-data` at `/app/data`; Compose creates it under the project-qualified name `sencho-agent_sencho-agent-data`. There is no data-directory option.
-- The bootstrap preflight plans the agent under `/opt/sencho-agent` by default and keeps its compose file there; it does not install anything until that plan is executed. Manual enrollment can use any dedicated directory; the start command's project name must stay `sencho-agent` and the Compose service stays `agent`.
+- The bootstrap preflight plans the agent under `/opt/sencho-agent` by default and keeps its compose file there; this release only previews that plan and installs nothing. Manual enrollment can use any dedicated directory; keep the project and container name `sencho-agent` and the Compose service `agent` so the preflight recognizes an existing Pilot.
 - After a Pilot connects, its Compose Directory is fixed in the Edit node form. Moving it is a separate relocation operation, not a settings edit.
 
 ### Step 2. Deploy the agent on the remote host

@@ -417,3 +417,58 @@ describe('bootstrap plan prerequisites', () => {
     }))).toThrow(/package source could not be inspected/i);
   });
 });
+
+describe('bootstrap plan privilege consistency and canonical names', () => {
+  const assertConsistent = (plan: BootstrapPlan) => {
+    for (const step of allSteps(plan)) {
+      if (!step.command) continue;
+      if (step.privilege === 'sudo') expect(step.command, step.id).toMatch(/^sudo -n /);
+      else expect(step.command, step.id).not.toMatch(/^sudo /);
+    }
+  };
+
+  it('prefixes exactly the steps marked sudo on a fresh non-root host', () => {
+    assertConsistent(planFor(freshFacts()));
+  });
+
+  it('elevates directory creation under an unwritable parent for both directories', () => {
+    const plan = planFor(makeFacts({
+      composeDir: { exists: false, isDirectory: false, realPath: null, parentWritableByUser: false, stackCount: null, stackNames: [] },
+      agentDir: { exists: false, isDirectory: false, realPath: null, parentWritableByUser: false, writableByUser: false, entries: [] },
+    }));
+    assertConsistent(plan);
+    const creates = allSteps(plan).filter((entry) => entry.effect === 'directory-create');
+    expect(creates.length).toBeGreaterThanOrEqual(2);
+    for (const step of creates) expect(step.privilege, step.id).toBe('sudo');
+    for (const step of allSteps(plan).filter((entry) => entry.effect === 'file-write')) {
+      expect(step.privilege, step.id).toBe('sudo');
+    }
+  });
+
+  it('starts the agent through sudo when the daemon answered only through sudo', () => {
+    const plan = planFor(makeFacts({ docker: { socketAccess: 'sudo' } }));
+    const start = allSteps(plan).find((entry) => entry.id === 'start-agent');
+    expect(start?.privilege).toBe('sudo');
+    assertConsistent(plan);
+  });
+
+  it('starts the agent directly for root and for a user with direct socket access', () => {
+    const direct = allSteps(planFor(makeFacts())).find((entry) => entry.id === 'start-agent');
+    expect(direct?.privilege).toBe('user');
+    expect(direct?.command).not.toMatch(/^sudo /);
+  });
+
+  it('keeps the canonical Pilot names in step with the enrollment generator', async () => {
+    const { buildPilotEnrollmentCompose } = await import('../helpers/pilotEnrollmentCompose');
+    const { PILOT_DATA_VOLUME_CANONICAL } = await import('../services/nodeBootstrap/probes');
+    const compose = parseYaml(buildPilotEnrollmentCompose({
+      primaryUrl: 'https://sencho.example.com',
+      token: 'tok',
+      composeDir: '/opt/docker/sencho',
+    })) as { name: string; services: Record<string, { container_name?: string }>; volumes: Record<string, unknown> };
+    expect(Object.keys(compose.services)).toEqual(['agent']);
+    expect(compose.services.agent.container_name).toBe('sencho-agent');
+    const [volume] = Object.keys(compose.volumes);
+    expect(`${compose.name}_${volume}`).toBe(PILOT_DATA_VOLUME_CANONICAL);
+  });
+});

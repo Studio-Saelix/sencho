@@ -819,3 +819,228 @@ describe('bootstrap service trust serialization', () => {
     expect(transport.runCommands).not.toHaveBeenCalled();
   });
 });
+
+describe('bootstrap service failure handling', () => {
+  const audit = { username: 'admin', ip: '127.0.0.1', method: 'POST', path: '/api/nodes/bootstrap/preflight' };
+  const hub = 'https://sencho.example.com';
+  const key = '-----BEGIN OPENSSH PRIVATE KEY-----\nnot-a-real-key\n-----END OPENSSH PRIVATE KEY-----';
+  const base = (host: string, extra: Partial<BootstrapPreflightRequest> = {}): BootstrapPreflightRequest => ({
+    host,
+    port: 22,
+    username: 'ubuntu',
+    privateKey: key,
+    expectedFingerprint: 'SHA256:fixturefingerprint000000000000000000000000',
+    targetName: 'failure-server',
+    composeDir: '/opt/docker/sencho',
+    agentDir: '/opt/sencho-agent',
+    ...extra,
+  });
+  const ok = (id: string, stdout = ''): SshCommandResult => ({
+    id, stdout, stderr: '', exitCode: 0, truncated: false, timedOut: false, error: null,
+  });
+  const makeService = (transport: BootstrapTransport, extra: Partial<ConstructorParameters<typeof NodeBootstrapService>[0]> = {}) => (
+    new NodeBootstrapService({
+      transport,
+      db: DatabaseService.getInstance(),
+      now: () => 1_762_300_000_000,
+      resolveAddresses: async () => ['192.168.1.50'],
+      caPem: () => null,
+      ...extra,
+    })
+  );
+  const pin = (host: string, fingerprint: string) => DatabaseService.getInstance().upsertNodeBootstrapTrust({
+    host, port: 22, fingerprint, algorithm: 'ssh-ed25519', approved_by: 'admin', approved_at: 1, last_seen_at: 1,
+  });
+
+  it('keeps a pin that changed mid-run even when the request confirms a replacement', async () => {
+    const db = DatabaseService.getInstance();
+    const host = 'cas-replace.example.com';
+    const observed = 'SHA256:observed000000000000000000000000000000000';
+    pin(host, 'SHA256:original0000000000000000000000000000000');
+    const transport: BootstrapTransport = {
+      captureHostKey: async () => ({ algorithm: 'ssh-ed25519', fingerprint: observed, knownHostsLine: 'line' }),
+      runCommands: async (_session, commands, options) => {
+        options?.onHostKey?.({ algorithm: 'ssh-ed25519', fingerprint: observed, knownHostsLine: 'line' });
+        pin(host, 'SHA256:interposed000000000000000000000000000000');
+        return commands.map((command) => ok(command.id));
+      },
+    };
+    await expect(makeService(transport).preflight(
+      base(host, { expectedFingerprint: observed, replacePinnedFingerprint: observed }),
+      { hubUrl: hub, audit },
+    )).rejects.toMatchObject({ code: 'HOST_KEY_MISMATCH' });
+    expect(db.getNodeBootstrapTrust(host, 22)?.fingerprint).toBe('SHA256:interposed000000000000000000000000000000');
+    const { entries } = db.getAuditLogs({ search: host, limit: 50 });
+    expect(entries.some((entry) => entry.summary.startsWith('bootstrap.trust.replaced'))).toBe(false);
+  });
+
+  it('blocks and issues no plan when inventories and the Docker CLI probe fail', async () => {
+    const outputs = probeOutputs();
+    const transport: BootstrapTransport = {
+      captureHostKey: async () => ({ algorithm: 'ssh-ed25519', fingerprint: 'SHA256:x', knownHostsLine: 'line' }),
+      runCommands: async (_session, commands, options) => {
+        options?.onHostKey?.({ algorithm: 'ssh-ed25519', fingerprint: base('x').expectedFingerprint as string, knownHostsLine: 'line' });
+        return commands.map((command) => {
+          if (['compose_inventory', 'compose_inventory_sudo', 'containers', 'containers_sudo'].includes(command.id)) {
+            return { ...ok(command.id), exitCode: 1 };
+          }
+          if (command.id === 'docker_info') return { ...ok(command.id, '|\n'), exitCode: 1 };
+          if (command.id === 'docker_cli') return { ...ok(command.id), error: 'COMMAND_ERROR', exitCode: null };
+          return ok(command.id, outputs[command.id] ?? '');
+        });
+      },
+    };
+    const result = await makeService(transport).preflight(base('failed-probes.example.com'), { hubUrl: hub, audit });
+    expect(result.blocked).toBe(true);
+    expect(result.plan).toBeNull();
+    const unknown = result.inspection.checks.filter((entry) => entry.status === 'unknown').map((entry) => entry.id);
+    expect(unknown).toEqual(expect.arrayContaining(['docker_cli', 'agent_conflict']));
+  });
+
+  it('reports the mount as unknown when /etc/fstab could not be read', async () => {
+    const outputs = probeOutputs();
+    const transport: BootstrapTransport = {
+      captureHostKey: async () => ({ algorithm: 'ssh-ed25519', fingerprint: 'SHA256:x', knownHostsLine: 'line' }),
+      runCommands: async (_session, commands, options) => {
+        options?.onHostKey?.({ algorithm: 'ssh-ed25519', fingerprint: base('x').expectedFingerprint as string, knownHostsLine: 'line' });
+        return commands.map((command) => (
+          command.id === 'fstab'
+            ? { ...ok('fstab'), exitCode: null, timedOut: true, error: 'COMMAND_TIMEOUT' }
+            : ok(command.id, outputs[command.id] ?? '')
+        ));
+      },
+    };
+    const result = await makeService(transport).preflight(base('fstab-fail.example.com'), { hubUrl: hub, audit });
+    expect(result.inspection.paths.composeDir.mountInFstab).toBeNull();
+  });
+
+  it('does not dial a second address after the first rejected the live host key', async () => {
+    const dialed: string[] = [];
+    const transport: BootstrapTransport = {
+      captureHostKey: async () => ({ algorithm: 'ssh-ed25519', fingerprint: 'SHA256:x', knownHostsLine: 'line' }),
+      runCommands: async (session, _commands, options) => {
+        dialed.push(session.address);
+        options?.onHostKey?.({ algorithm: 'ssh-ed25519', fingerprint: 'SHA256:live', knownHostsLine: 'line' });
+        throw new SshTransportError('HOST_KEY_UNTRUSTED', 'changed');
+      },
+    };
+    await expect(makeService(transport, { resolveAddresses: async () => ['10.0.0.1', '10.0.0.2'] }).preflight(
+      base('two-address-mismatch.example.com'),
+      { hubUrl: hub, audit },
+    )).rejects.toMatchObject({ code: 'HOST_KEY_UNTRUSTED' });
+    expect(dialed).toEqual(['10.0.0.1']);
+  });
+
+  it.each(['SSH_AUTH_FAILED', 'SSH_KEY_INVALID', 'SSH_KEY_PASSPHRASE_REQUIRED'] as const)(
+    'reports %s without trying the next address',
+    async (code) => {
+      const dialed: string[] = [];
+      const transport: BootstrapTransport = {
+        captureHostKey: async () => ({ algorithm: 'ssh-ed25519', fingerprint: 'SHA256:x', knownHostsLine: 'line' }),
+        runCommands: async (session) => {
+          dialed.push(session.address);
+          throw new SshTransportError(code, 'rejected');
+        },
+      };
+      await expect(makeService(transport, { resolveAddresses: async () => ['10.0.0.1', '10.0.0.2'] }).preflight(
+        base(`auth-${code.toLowerCase().replace(/_/g, "-")}.example.com`),
+        { hubUrl: hub, audit },
+      )).rejects.toMatchObject({ code });
+      expect(dialed).toEqual(['10.0.0.1']);
+    },
+  );
+
+  it('does not let a refused first address hide an authentication failure on the second', async () => {
+    const transport: BootstrapTransport = {
+      captureHostKey: async () => ({ algorithm: 'ssh-ed25519', fingerprint: 'SHA256:x', knownHostsLine: 'line' }),
+      runCommands: async (session) => {
+        throw new SshTransportError(session.address === '10.0.0.1' ? 'SSH_UNREACHABLE' : 'SSH_AUTH_FAILED', 'x');
+      },
+    };
+    await expect(makeService(transport, { resolveAddresses: async () => ['10.0.0.1', '10.0.0.2'] }).preflight(
+      base('refused-then-auth.example.com'),
+      { hubUrl: hub, audit },
+    )).rejects.toMatchObject({ code: 'SSH_AUTH_FAILED' });
+  });
+
+  it('shares one deadline across host-key capture attempts and stops dialing once it is spent', async () => {
+    const timeouts: number[] = [];
+    const dialed: string[] = [];
+    const transport: BootstrapTransport = {
+      captureHostKey: async ({ address }, options) => {
+        dialed.push(address);
+        timeouts.push(options?.timeoutMs ?? -1);
+        await new Promise((resolve) => setTimeout(resolve, 80));
+        throw new SshTransportError('SSH_UNREACHABLE', 'down');
+      },
+      runCommands: async () => [],
+    };
+    await expect(makeService(transport, {
+      resolveAddresses: async () => ['10.0.0.1', '10.0.0.2', '10.0.0.3'],
+      requestBudgetMs: 120,
+    }).captureHostKey({ host: 'slow-scan.example.com', port: 22 })).rejects.toMatchObject({ code: 'PREFLIGHT_TIMEOUT' });
+    expect(timeouts[0]).toBeLessThanOrEqual(120);
+    expect(timeouts[1]).toBeLessThan(timeouts[0]);
+    expect(dialed).not.toContain('10.0.0.3');
+  });
+
+  it('hands the caller abort signal to both transport entry points', async () => {
+    const controller = new AbortController();
+    const seen: Array<AbortSignal | undefined> = [];
+    const transport: BootstrapTransport = {
+      captureHostKey: async (_target, options) => {
+        seen.push(options?.signal);
+        return { algorithm: 'ssh-ed25519', fingerprint: 'SHA256:x', knownHostsLine: 'line' };
+      },
+      runCommands: async (_session, commands, options) => {
+        seen.push(options?.signal);
+        options?.onHostKey?.({ algorithm: 'ssh-ed25519', fingerprint: base('x').expectedFingerprint as string, knownHostsLine: 'line' });
+        return commands.map((command) => ok(command.id, probeOutputs()[command.id] ?? ''));
+      },
+    };
+    const svc = makeService(transport);
+    await svc.captureHostKey({ host: 'signal.example.com', port: 22 }, { signal: controller.signal });
+    await svc.preflight(base('signal.example.com'), { hubUrl: hub, audit, signal: controller.signal });
+    expect(seen).toEqual([controller.signal, controller.signal]);
+  });
+
+  it('words the budget error from the configured budget', async () => {
+    const svc = makeService(new FakeTransport(), {
+      resolveAddresses: async () => { await new Promise((resolve) => setTimeout(resolve, 1500)); return ['192.168.1.50']; },
+      requestBudgetMs: 1000,
+    });
+    await expect(svc.preflight(base('budget-words.example.com'), { hubUrl: hub, audit }))
+      .rejects.toMatchObject({ code: 'PREFLIGHT_TIMEOUT', message: expect.stringContaining('1-second') });
+  });
+});
+
+describe('bootstrap routes: client disconnect', () => {
+  it('aborts the service call when the client goes away before the reply', async () => {
+    let signal: AbortSignal | undefined;
+    let started!: () => void;
+    const running = new Promise<void>((resolve) => { started = resolve; });
+    vi.spyOn(NodeBootstrapService.getInstance(), 'preflight').mockImplementation(async (_input, context) => {
+      signal = context.signal;
+      started();
+      await new Promise<void>((resolve) => context.signal?.addEventListener('abort', () => resolve(), { once: true }));
+      throw new SshTransportError('SSH_UNREACHABLE', 'The request was cancelled.');
+    });
+    const pending = request(app)
+      .post('/api/nodes/bootstrap/preflight')
+      .set('Authorization', adminAuth)
+      .send({
+        host: 'server.example.com',
+        username: 'ubuntu',
+        privateKey: 'key',
+        targetName: 'media-server',
+        composeDir: '/opt/docker/sencho',
+        agentDir: '/opt/sencho-agent',
+      });
+    const done = pending.then(() => null, () => null);
+    await running;
+    expect(signal?.aborted).toBe(false);
+    pending.abort();
+    await done;
+    await vi.waitFor(() => expect(signal?.aborted).toBe(true));
+  });
+});

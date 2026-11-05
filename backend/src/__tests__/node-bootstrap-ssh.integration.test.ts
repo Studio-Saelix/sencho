@@ -348,6 +348,63 @@ describe('bootstrap SSH transport deadlines and byte budgets', () => {
     expect(results[0]).toMatchObject({ id: 'hang', timedOut: true, error: 'COMMAND_TIMEOUT' });
   });
 
+  it('ends the session at the session budget even when the per-command budget is far longer', async () => {
+    const fixture = await startServer({ withholdExec: 'sleep' });
+    const started = Date.now();
+    const results = await client.runCommands(
+      { host: 'fixture.local', address: '127.0.0.1', port: fixture.port, username: 'ubuntu', privateKey: USER_KEY },
+      [{ id: 'hang', command: 'sleep 60' }, { id: 'after', command: 'uname -m' }],
+      { perCommandMs: 30_000, totalMs: 250 },
+    );
+    expect(Date.now() - started).toBeLessThan(1_500);
+    expect(results.map((entry) => [entry.id, entry.error])).toEqual([
+      ['hang', 'PREFLIGHT_TIMEOUT'],
+      ['after', 'PREFLIGHT_TIMEOUT'],
+    ]);
+  });
+
+  it('abandons a running session when the caller aborts', async () => {
+    const fixture = await startServer({ hangCommand: 'sleep' });
+    const controller = new AbortController();
+    const started = Date.now();
+    const pending = client.runCommands(
+      { host: 'fixture.local', address: '127.0.0.1', port: fixture.port, username: 'ubuntu', privateKey: USER_KEY },
+      [{ id: 'hang', command: 'sleep 60' }],
+      { perCommandMs: 30_000, totalMs: 30_000, signal: controller.signal },
+    );
+    setTimeout(() => controller.abort(), 100);
+    await expect(pending).rejects.toBeInstanceOf(SshTransportError);
+    expect(Date.now() - started).toBeLessThan(2_000);
+  });
+
+  it('refuses to start when the caller already aborted', async () => {
+    const fixture = await startServer();
+    const controller = new AbortController();
+    controller.abort();
+    await expect(client.runCommands(
+      { host: 'fixture.local', address: '127.0.0.1', port: fixture.port, username: 'ubuntu', privateKey: USER_KEY },
+      [{ id: 'uname', command: 'uname -m' }],
+      { signal: controller.signal },
+    )).rejects.toBeInstanceOf(SshTransportError);
+    expect(fixture.commands).toEqual([]);
+  });
+
+  it('bounds a host-key scan against a peer that accepts the socket and says nothing', async () => {
+    const silent = net.createServer((socket) => { socket.on('error', () => {}); });
+    await new Promise<void>((resolve) => silent.listen(0, '127.0.0.1', resolve));
+    try {
+      const { port } = silent.address() as net.AddressInfo;
+      const started = Date.now();
+      await expect(plainClient.captureHostKey(
+        { host: 'silent.local', address: '127.0.0.1', port },
+        { timeoutMs: 200 },
+      )).rejects.toBeInstanceOf(SshTransportError);
+      expect(Date.now() - started).toBeLessThan(2_000);
+    } finally {
+      silent.close();
+    }
+  });
+
   it('ignores an exec acknowledgement that arrives after the deadline', async () => {
     const fixture = await startServer({ delayExecMs: 200, delayExecCommand: 'sleep' });
     const results = await client.runCommands(

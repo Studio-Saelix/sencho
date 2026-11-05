@@ -1,7 +1,7 @@
 import { describe, it, expect, vi } from 'vitest';
 import { act, renderHook, waitFor } from '@testing-library/react';
 import { useNodeBootstrap } from '../useNodeBootstrap';
-import { FALLBACK_CAPABILITIES } from '../bootstrapApi';
+import { BootstrapApiError, FALLBACK_CAPABILITIES } from '../bootstrapApi';
 import type { BootstrapCapabilities, BootstrapPreflightResult } from '../types';
 
 function capabilities(overrides: Partial<BootstrapCapabilities['defaults']> = {}): BootstrapCapabilities {
@@ -225,5 +225,101 @@ describe('useNodeBootstrap', () => {
     expect(hook.current.form.composeDir).toBe(FALLBACK_CAPABILITIES.defaults.composeDir);
     expect(hook.current.form.targetName).toBe('');
     expect(hook.current.step).toBe('target');
+  });
+});
+
+describe('useNodeBootstrap stale responses and request ownership', () => {
+  type KeyResolver = (value: import('../types').BootstrapHostKeyResult) => void;
+
+  function deferredApi() {
+    const resolvers: KeyResolver[] = [];
+    const api = {
+      capabilities: vi.fn(async () => capabilities()),
+      hostKey: vi.fn(() => new Promise<import('../types').BootstrapHostKeyResult>((resolve) => { resolvers.push(resolve); })),
+      preflight: vi.fn(async () => result()),
+    };
+    return { api, resolvers };
+  }
+
+  it.each([
+    ['port', '2222'],
+    ['username', 'deploy'],
+  ] as const)('discards a keyscan response after the %s was edited', async (field, value) => {
+    const { api, resolvers } = deferredApi();
+    const { result: hook } = renderHook(() => useNodeBootstrap({ open: true, api }));
+    await act(async () => { fillTarget(hook.current); });
+    let pending: Promise<void> | null = null;
+    act(() => { pending = hook.current.checkHostKey(); });
+    await act(async () => { hook.current.setField(field, value); });
+    await act(async () => { resolvers[0](HOST_KEY); await pending; });
+    expect(hook.current.hostKey).toBeNull();
+    expect(hook.current.step).toBe('target');
+    expect(hook.current.busy).toBeNull();
+  });
+
+  it('discards a keyscan response that lands after a reset', async () => {
+    const { api, resolvers } = deferredApi();
+    const { result: hook } = renderHook(() => useNodeBootstrap({ open: true, api }));
+    await act(async () => { fillTarget(hook.current); });
+    let pending: Promise<void> | null = null;
+    act(() => { pending = hook.current.checkHostKey(); });
+    await act(async () => { hook.current.reset(); });
+    await act(async () => { resolvers[0](HOST_KEY); await pending; });
+    expect(hook.current.hostKey).toBeNull();
+    expect(hook.current.step).toBe('target');
+  });
+
+  it('keeps the busy flag for the newer request when a superseded one settles late', async () => {
+    const { api, resolvers } = deferredApi();
+    const { result: hook } = renderHook(() => useNodeBootstrap({ open: true, api }));
+    await act(async () => { fillTarget(hook.current); });
+    let first: Promise<void> | null = null;
+    let second: Promise<void> | null = null;
+    act(() => { first = hook.current.checkHostKey(); });
+    act(() => { second = hook.current.checkHostKey(); });
+    expect(hook.current.busy).toBe('host-key');
+    // The superseded request resolving must not re-enable the controls.
+    await act(async () => { resolvers[0](HOST_KEY); await first; });
+    expect(hook.current.busy).toBe('host-key');
+    await act(async () => { resolvers[1](HOST_KEY); await second; });
+    expect(hook.current.busy).toBeNull();
+    expect(hook.current.hostKey?.fingerprint).toBe('SHA256:abc');
+  });
+
+  it('shows the live key and algorithm when the host key changes between scan and connect', async () => {
+    const api = fakeApi();
+    api.hostKey.mockResolvedValue({ ...HOST_KEY, trust: 'trusted', pinnedFingerprint: 'SHA256:abc' });
+    api.preflight.mockRejectedValueOnce(new BootstrapApiError(
+      'The host key changed before the preflight connected.',
+      'HOST_KEY_UNTRUSTED',
+      null,
+      { pinnedFingerprint: 'SHA256:abc', observedFingerprint: 'SHA256:live', observedAlgorithm: 'ssh-rsa' },
+    ));
+    const { result: hook } = renderHook(() => useNodeBootstrap({ open: true, api }));
+    await act(async () => { fillTarget(hook.current); });
+    await act(async () => { await hook.current.checkHostKey(); });
+    await act(async () => { await hook.current.runPreflight(); });
+    expect(hook.current.hostKey).toMatchObject({
+      fingerprint: 'SHA256:live',
+      algorithm: 'ssh-rsa',
+      knownHostsLine: '',
+      trust: 'changed',
+      pinnedFingerprint: 'SHA256:abc',
+    });
+    expect(hook.current.step).toBe('preflight');
+    expect(hook.current.result).toBeNull();
+    expect(hook.current.busy).toBeNull();
+  });
+
+  it('marks the key trusted once a confirmed replacement succeeded', async () => {
+    const api = fakeApi();
+    api.hostKey.mockResolvedValue({ ...HOST_KEY, trust: 'changed', pinnedFingerprint: 'SHA256:old' });
+    const { result: hook } = renderHook(() => useNodeBootstrap({ open: true, api }));
+    await act(async () => { fillTarget(hook.current); });
+    await act(async () => { await hook.current.checkHostKey(); });
+    await act(async () => { hook.current.setReplacing(true); });
+    await act(async () => { await hook.current.runPreflight(); });
+    expect(hook.current.hostKey).toMatchObject({ trust: 'trusted', pinnedFingerprint: 'SHA256:abc' });
+    expect(hook.current.replacing).toBe(false);
   });
 });

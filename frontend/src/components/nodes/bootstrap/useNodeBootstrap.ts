@@ -202,6 +202,8 @@ export function useNodeBootstrap({ open, api }: UseNodeBootstrapOptions) {
       setHostKey(null);
       setTrusted(false);
       setReplacing(false);
+      // The superseded request no longer owns the busy flag.
+      setBusy(null);
       clearResult(true);
       return;
     }
@@ -258,7 +260,12 @@ export function useNodeBootstrap({ open, api }: UseNodeBootstrapOptions) {
       if (fieldError) setFieldErrors([fieldError]);
       setError(caught instanceof Error ? caught.message : 'The host key check failed.');
     } finally {
-      setBusy(null);
+      // Only the current request clears the busy flag: a superseded one
+      // finishing late must not re-enable the controls under a newer request.
+      if (abortRef.current === controller) {
+        abortRef.current = null;
+        setBusy(null);
+      }
     }
   }, [client, form.host, form.port, validate]);
 
@@ -288,6 +295,11 @@ export function useNodeBootstrap({ open, api }: UseNodeBootstrapOptions) {
       setResult(response);
       setResultRevision(revision);
       setInvalidated(false);
+      // The server pinned (or replaced) the reviewed key as part of this run.
+      setHostKey((current) => (
+        current ? { ...current, trust: 'trusted', pinnedFingerprint: current.fingerprint } : current
+      ));
+      setReplacing(false);
       setStep(response.plan ? 'plan' : 'preflight');
     } catch (caught: unknown) {
       if (isAbort(caught)) return;
@@ -305,6 +317,9 @@ export function useNodeBootstrap({ open, api }: UseNodeBootstrapOptions) {
         const observed = typeof caught.details.observedFingerprint === 'string'
           ? caught.details.observedFingerprint
           : null;
+        const observedAlgorithm = typeof caught.details.observedAlgorithm === 'string'
+          ? caught.details.observedAlgorithm
+          : null;
         // Drop a previous inspection so the dialog shows the live observation,
         // not the key from the earlier run.
         setResult(null);
@@ -313,7 +328,15 @@ export function useNodeBootstrap({ open, api }: UseNodeBootstrapOptions) {
         setHostKey((current) => {
           if (!current) return current;
           if (caught.code === 'HOST_KEY_UNTRUSTED' && observed) {
-            return { ...current, fingerprint: observed, trust: 'changed', pinnedFingerprint: pinned };
+            // Everything captured earlier described the previous key.
+            return {
+              ...current,
+              fingerprint: observed,
+              algorithm: observedAlgorithm ?? 'unknown',
+              knownHostsLine: '',
+              trust: 'changed',
+              pinnedFingerprint: pinned,
+            };
           }
           return { ...current, trust: 'changed', pinnedFingerprint: pinned };
         });
@@ -322,7 +345,10 @@ export function useNodeBootstrap({ open, api }: UseNodeBootstrapOptions) {
       }
       setError(caught instanceof Error ? caught.message : 'The preflight failed.');
     } finally {
-      setBusy(null);
+      if (abortRef.current === controller) {
+        abortRef.current = null;
+        setBusy(null);
+      }
     }
   }, [client, configRevision, form, hostKey, replacing]);
 

@@ -6,8 +6,10 @@ import path from 'path';
 import {
   assembleFacts,
   buildProbeCatalog,
+  isReadOnlyProbeCommand,
   parseComposeInventory,
   parseDockerInfo,
+  parseDockerRepo,
   parseHubHealth,
 } from '../services/nodeBootstrap/probes';
 import { buildBootstrapEvidence } from '../services/nodeBootstrap/evidence';
@@ -334,5 +336,182 @@ describe('docker commands under a hostile environment', () => {
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
+  });
+});
+
+describe('docker repository variants', () => {
+  const key = Buffer.from('-----BEGIN PGP PUBLIC KEY BLOCK-----\nfixture\n-----END PGP PUBLIC KEY BLOCK-----\n').toString('base64');
+  const keyBlock = (keyPath = '/etc/apt/keyrings/docker.asc') => `KEY_BEGIN=${keyPath}\n${key}\nKEY_END=${keyPath}`;
+  const source = (file: string, content: string) => `SOURCE_BEGIN=${file}\n${content}\nSOURCE_END=${file}`;
+  const OFFICIAL = 'https://download.docker.com/linux/ubuntu';
+  const deb822 = (fields: Record<string, string>) => Object.entries(fields).map(([name, value]) => `${name}: ${value}`).join('\n');
+  const official = { Types: 'deb', URIs: OFFICIAL, Suites: 'noble', Components: 'stable', 'Signed-By': '/etc/apt/keyrings/docker.asc' };
+
+  it.each([
+    ['a wrong deb822 URI', { ...official, URIs: 'https://example.com/linux/ubuntu' }],
+    ['two deb822 URIs', { ...official, URIs: `${OFFICIAL} https://example.com/linux/ubuntu` }],
+    ['a wrong deb822 suite', { ...official, Suites: 'jammy' }],
+    ['a deb822 source without the stable component', { ...official, Components: 'test' }],
+    ['a deb822 Signed-By that is not an installed keyring', { ...official, 'Signed-By': '/etc/apt/keyrings/other.asc' }],
+  ])('rejects %s', (_label, fields) => {
+    const parsed = parseDockerRepo([source('/etc/apt/sources.list.d/docker.sources', deb822(fields)), keyBlock()].join('\n'), 'noble');
+    expect(parsed.sourceVerified).toBe(false);
+    expect(parsed.problem).toBeTruthy();
+  });
+
+  it.each([
+    ['a malformed line', 'this is not an apt entry'],
+    ['an unsupported architecture', `deb [arch=s390x signed-by=/etc/apt/keyrings/docker.asc] ${OFFICIAL} noble stable`],
+    ['a signed-by naming a missing keyring', `deb [arch=amd64 signed-by=/etc/apt/keyrings/missing.asc] ${OFFICIAL} noble stable`],
+    ['an empty file', ''],
+  ])('rejects a .list source with %s', (_label, content) => {
+    const parsed = parseDockerRepo([source('/etc/apt/sources.list.d/docker.list', content), keyBlock()].join('\n'), 'noble');
+    expect(parsed.sourceVerified).toBe(false);
+  });
+
+  it('keeps an unreadable keyring unknown instead of verified or rejected', () => {
+    const parsed = parseDockerRepo([
+      source('/etc/apt/sources.list.d/docker.list', `deb [arch=amd64 signed-by=/etc/apt/keyrings/docker.asc] ${OFFICIAL} noble stable`),
+      'KEY_BEGIN=/etc/apt/keyrings/docker.asc\nKEY_UNREADABLE=1\nKEY_END=/etc/apt/keyrings/docker.asc',
+    ].join('\n'), 'noble');
+    expect(parsed.keyringVerified).toBeNull();
+    expect(parsed.keyringPresent).toBe(true);
+  });
+
+  it('does not accept a source whose keyring is not a key', () => {
+    const parsed = parseDockerRepo([
+      source('/etc/apt/sources.list.d/docker.list', `deb [arch=amd64 signed-by=/etc/apt/keyrings/docker.asc] ${OFFICIAL} noble stable`),
+      `KEY_BEGIN=/etc/apt/keyrings/docker.asc\n${Buffer.from('plain text').toString('base64')}\nKEY_END=/etc/apt/keyrings/docker.asc`,
+    ].join('\n'), 'noble');
+    expect(parsed.keyringVerified).toBe(false);
+  });
+});
+
+describe('container and agent inventory completeness across direct and sudo', () => {
+  const docker = [probe('docker_cli', '/usr/bin/docker'), probe('docker_info', '27.3.1|/var/lib/docker')];
+
+  it.each([
+    ['exits non-zero', { exitCode: 1 }],
+    ['times out', { timedOut: true, exitCode: null }],
+    ['errors', { error: 'COMMAND_ERROR', exitCode: null }],
+    ['is truncated', { truncated: true }],
+  ] as const)('marks the container list incomplete when both attempts fail (%s)', (_label, overrides) => {
+    const facts = assemble([...docker, probe('containers', 'a\tb\t\t\tUp', overrides), probe('containers_sudo', '', overrides)]);
+    expect(facts.containers.complete).toBe(false);
+    expect(check(facts, 'agent_conflict').status).toBe('unknown');
+    expect(check(facts, 'existing_workloads').status).toBe('unknown');
+  });
+
+  it('completes the container list from sudo when the direct attempt was denied', () => {
+    const facts = assemble([
+      ...docker,
+      probe('containers', '', { exitCode: 1 }),
+      probe('containers_sudo', 'sencho-agent\tsaelix/sencho\tsencho-agent\t/opt/sencho-agent\tUp'),
+    ]);
+    expect(facts.containers.complete).toBe(true);
+    expect(facts.containers.agentContainer).toBe('sencho-agent');
+  });
+
+  const pathAgent = ['P_EXISTS=1', 'P_ISDIR=1', 'P_REAL=/opt/sencho-agent', 'P_FSTYPE=ext4', 'P_FSTARGET=/', 'P_USER_R=0', 'P_USER_W=1', 'P_PARENT_W=1'].join('\n');
+  const pathCompose = ['P_EXISTS=1', 'P_ISDIR=1', 'P_REAL=/opt/docker/sencho', 'P_FSTYPE=ext4', 'P_FSTARGET=/', 'P_USER_R=0', 'P_USER_W=1', 'P_PARENT_W=1'].join('\n');
+
+  it('reads the Agent and Compose inventories through sudo when the direct attempt is denied', () => {
+    const facts = assemble([
+      probe('path_agent', pathAgent),
+      probe('path_compose', pathCompose),
+      probe('agent_inventory', '', { exitCode: 1 }),
+      probe('agent_inventory_sudo', 'compose.yaml\0sencho-bootstrap.json\0'),
+      probe('compose_inventory', '', { exitCode: 1 }),
+      probe('compose_inventory_sudo', '/opt/docker/sencho/a/compose.yaml\0/opt/docker/sencho/b/compose.yaml\0'),
+    ]);
+    expect(facts.paths.agentDir.inventoryError).toBeNull();
+    expect(facts.paths.agentDir.hasComposeFile).toBe(true);
+    expect(facts.paths.composeDir.inventoryError).toBeNull();
+    expect(facts.paths.composeDir.stackCount).toBe(2);
+  });
+
+  it('reports both attempts when neither inventory completes', () => {
+    const facts = assemble([
+      probe('path_agent', pathAgent),
+      probe('agent_inventory', '', { exitCode: 1 }),
+      probe('agent_inventory_sudo', '', { timedOut: true, exitCode: null }),
+    ]);
+    expect(facts.paths.agentDir.inventoryError).toMatch(/exited 1.*timed out/);
+  });
+});
+
+describe('persistence of a directory that does not exist yet', () => {
+  const missing = (filesystem: { type: string; source: string; mountPoint: string } | null) => makeFacts({
+    composeDir: { exists: false, isDirectory: false, realPath: null, nearestExistingAncestor: '/mnt', filesystem, mountInFstab: null, stackCount: null, stackNames: [] },
+  });
+
+  it.each(['tmpfs', 'nfs4', 'cifs'])('blocks a missing child on %s', (type) => {
+    expect(check(missing({ type, source: 'x', mountPoint: '/mnt' }), 'path_persistence').status).toBe('blocked');
+  });
+
+  it('keeps persistence unknown when the backing filesystem could not be read', () => {
+    const facts = missing(null);
+    expect(check(facts, 'path_persistence').status).toBe('unknown');
+    expect(suppressed(facts)).toBe(true);
+  });
+
+  it('passes a missing child on local persistent storage', () => {
+    expect(check(missing({ type: 'ext4', source: '/dev/sda1', mountPoint: '/' }), 'path_persistence').status).toBe('pass');
+  });
+});
+
+describe('platform and privilege evidence', () => {
+  it('treats a Ubuntu release without a codename as unknown, not unsupported', () => {
+    const facts = makeFacts({ os: { id: 'ubuntu', versionId: '24.04', codename: '', prettyName: 'Ubuntu', arch: 'x86_64', kernel: 'k' } });
+    expect(check(facts, 'os_supported').status).toBe('unknown');
+    expect(suppressed(facts)).toBe(true);
+  });
+
+  it('does not demand sudo for a working Docker install even when apt records are missing', () => {
+    const facts = makeFacts({
+      user: { name: 'ubuntu', uid: 1000, group: 'ubuntu', isRoot: false, sudoNonInteractive: false },
+      packages: [
+        { name: 'docker-ce', installedVersion: null, candidateVersion: null },
+        { name: 'docker-ce-cli', installedVersion: null, candidateVersion: null },
+        { name: 'containerd.io', installedVersion: null, candidateVersion: null },
+        { name: 'docker-buildx-plugin', installedVersion: null, candidateVersion: null },
+        { name: 'docker-compose-plugin', installedVersion: null, candidateVersion: null },
+      ],
+    });
+    expect(check(facts, 'sudo').status).not.toBe('blocked');
+  });
+});
+
+describe('read-only probe catalog guard', () => {
+  it('rejects commands that would change the host', () => {
+    expect(isReadOnlyProbeCommand('apt-get install -y docker-ce')).toBe(false);
+    expect(isReadOnlyProbeCommand('mkdir -p /opt/x')).toBe(false);
+    expect(isReadOnlyProbeCommand('docker compose up -d')).toBe(false);
+    expect(isReadOnlyProbeCommand('cat /etc/os-release > /etc/motd')).toBe(false);
+  });
+
+  it('accepts every catalog command', () => {
+    const catalog = buildProbeCatalog({ composeDir: '/opt/docker/sencho', agentDir: '/opt/sencho-agent', hubUrl: 'https://h.example.com' });
+    for (const entry of catalog) expect(isReadOnlyProbeCommand(entry.command), entry.id).toBe(true);
+  });
+});
+
+describe('path facts and partial listings that are incomplete', () => {
+  it('treats path output that never says whether the path exists as a probe error', () => {
+    const facts = assemble([probe('path_compose', 'P_FSTYPE=ext4\nP_FSTARGET=/')]);
+    expect(facts.paths.composeDir.exists).toBe(false);
+    expect(facts.paths.composeDir.probeError).toMatch(/did not report whether the path exists/);
+  });
+
+  it('keeps a Pilot row printed by the sudo attempt when the direct attempt printed nothing', () => {
+    const facts = assemble([
+      probe('docker_cli', '/usr/bin/docker'),
+      probe('docker_info', '27.3.1|/var/lib/docker'),
+      probe('containers', '', { exitCode: 1 }),
+      probe('containers_sudo', 'sencho-agent\tsaelix/sencho\tsencho-agent\t/opt/sencho-agent\tUp', { exitCode: 1, truncated: true }),
+    ]);
+    expect(facts.containers.complete).toBe(false);
+    expect(facts.containers.agentContainer).toBe('sencho-agent');
+    expect(check(facts, 'agent_conflict').status).toBe('blocked');
   });
 });
