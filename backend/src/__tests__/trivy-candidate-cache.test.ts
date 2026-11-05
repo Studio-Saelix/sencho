@@ -323,3 +323,96 @@ describe('recording the database revision', () => {
     );
   });
 });
+
+/**
+ * A cache hit is the stored row's answer. It must not be written into a new row:
+ * the deploy preflight and the manual scan both used to open a placeholder first,
+ * so every cached scan added a history entry with the same image, digest and
+ * timestamp, and the per-image retention limit pruned genuine history.
+ */
+describe('a cached scan reuses its row', () => {
+  function scanCount(): number {
+    return (db().getDb().prepare('SELECT COUNT(*) AS cnt FROM vulnerability_scans').get() as { cnt: number }).cnt;
+  }
+
+  function freshResult() {
+    return {
+      imageRef: 'registry.example.com/web:latest',
+      imageDigest: DIGEST,
+      platform: PLATFORM,
+      scannedAt: Date.now(),
+      totalVulnerabilities: 1, criticalCount: 1, highCount: 0, mediumCount: 0, lowCount: 0,
+      unknownCount: 0, fixableCount: 0, secretCount: 0, scannersUsed: 'vuln', highestSeverity: 'CRITICAL' as const,
+      vulnerabilities: [{
+        vulnerabilityId: 'CVE-2026-0001', pkgName: 'openssl', installedVersion: '1', fixedVersion: null,
+        severity: 'CRITICAL' as const, title: '', description: '', primaryUrl: null, status: null,
+        cvssScore: null, cvssVector: null, cvssSource: null, vendorSeverity: null, purl: null,
+        pkgPath: null, layerDigest: null,
+      }],
+      secrets: [],
+      metadata: { os: null, trivyVersion: '0.50.0', scanDurationMs: 5 },
+    };
+  }
+
+  it('does not insert a preflight row when the cache answers', async () => {
+    const seeded = seedScan({ vulnDbUpdatedAt: DB_BUILD });
+
+    const persisted = await svc().scanImagePreflight('registry.example.com/web:latest', 1, 'web', {
+      digest: DIGEST,
+      platform: PLATFORM,
+    });
+
+    expect(persisted.id).toBe(seeded);
+    expect(persisted.triggered_by).toBe('deploy-preflight');
+    expect(scanCount()).toBe(1);
+  });
+
+  it('returns the stored row from the manual cache lookup, with no insert', async () => {
+    const seeded = seedScan({ vulnDbUpdatedAt: DB_BUILD });
+    vi.spyOn(svc(), 'getImagePlatform').mockResolvedValue(PLATFORM);
+    vi.spyOn(svc(), 'getImageDigest').mockResolvedValue(DIGEST);
+
+    const reusable = await svc().findReusableScan('registry.example.com/web:latest', 1, {
+      useCache: true,
+      scanners: ['vuln'],
+    });
+
+    expect(reusable?.id).toBe(seeded);
+    expect(scanCount()).toBe(1);
+  });
+
+  it('discards a placeholder opened before a cache hit was discovered', async () => {
+    const seeded = seedScan({ vulnDbUpdatedAt: DB_BUILD });
+    const placeholder = svc().beginScan('registry.example.com/web:latest', 1, 'manual');
+    expect(scanCount()).toBe(2);
+
+    const stored = await svc().finishScan(placeholder, 'registry.example.com/web:latest', 1, {
+      useCache: true,
+      scanners: ['vuln'],
+      digest: DIGEST,
+      platform: PLATFORM,
+      cacheRule: 'digest',
+    });
+
+    expect(stored.id).toBe(seeded);
+    expect(db().getVulnerabilityScan(placeholder)).toBeNull();
+    expect(scanCount()).toBe(1);
+  });
+
+  it('still inserts exactly one row, labelled with the trigger, on a cache miss', async () => {
+    vi.spyOn(svc(), 'scanImage').mockResolvedValue(freshResult());
+
+    const stored = await svc().runScanAndPersist(
+      'registry.example.com/web:latest',
+      1,
+      'deploy-preflight',
+      'web',
+      { scanners: ['vuln'], digest: DIGEST, platform: PLATFORM },
+    );
+
+    expect(scanCount()).toBe(1);
+    expect(stored.triggered_by).toBe('deploy-preflight');
+    expect(stored.image_digest).toBe(DIGEST);
+    expect(stored.total_vulnerabilities).toBe(1);
+  });
+});

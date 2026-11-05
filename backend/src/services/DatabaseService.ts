@@ -9018,6 +9018,25 @@ stmt.run('gitops_schema_version', '1');
         );
     }
 
+    /**
+     * Delete one scan and its child findings. Used to discard the placeholder
+     * row a caller opened before discovering the scan is served from cache: the
+     * cached row is the history entry, and a placeholder left behind would
+     * duplicate the same image, digest and timestamp. Idempotent (0 when the row
+     * is already gone).
+     */
+    public deleteVulnerabilityScan(id: number): number {
+        const deleteChild = (table: string) =>
+            this.db.prepare(`DELETE FROM ${table} WHERE scan_id = ?`).run(id);
+        const txn = this.db.transaction(() => {
+            deleteChild('vulnerability_details');
+            deleteChild('secret_findings');
+            deleteChild('misconfig_findings');
+            return this.db.prepare('DELETE FROM vulnerability_scans WHERE id = ?').run(id).changes;
+        });
+        return txn();
+    }
+
     public deleteOldScans(olderThanMs: number): number {
         const cutoff = Date.now() - olderThanMs;
         const result = this.db

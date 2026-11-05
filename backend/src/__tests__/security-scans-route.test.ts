@@ -158,3 +158,60 @@ describe('POST /api/security/scan hold refs', () => {
     expect(begin).not.toHaveBeenCalled();
   });
 });
+
+describe('POST /api/security/scan cache reuse', () => {
+  it('answers with the stored row id and opens no placeholder when the cache answers', async () => {
+    const { default: TrivyService } = await import('../services/TrivyService');
+    const svc = TrivyService.getInstance();
+    const available = vi.spyOn(svc, 'isTrivyAvailable').mockReturnValue(true);
+    const id = seedScan({ image_ref: 'alpine:3.19', image_digest: 'sha256:reuse01' });
+    const row = DatabaseService.getInstance().getVulnerabilityScan(id)!;
+    const find = vi.spyOn(svc, 'findReusableScan').mockResolvedValue(row);
+    const begin = vi.spyOn(svc, 'beginScan');
+    try {
+      const res = await request(app)
+        .post('/api/security/scan')
+        .set('Cookie', adminCookie)
+        .send({ imageRef: 'alpine:3.19', scanners: ['vuln'] });
+
+      expect(res.status).toBe(202);
+      expect(res.body.scanId).toBe(id);
+      expect(find).toHaveBeenCalledWith(
+        'alpine:3.19',
+        expect.any(Number),
+        expect.objectContaining({ useCache: true, scanners: ['vuln'] }),
+      );
+      expect(begin).not.toHaveBeenCalled();
+    } finally {
+      begin.mockRestore();
+      find.mockRestore();
+      available.mockRestore();
+    }
+  });
+
+  it('opens a scan row when force bypasses the cache', async () => {
+    const { default: TrivyService } = await import('../services/TrivyService');
+    const svc = TrivyService.getInstance();
+    const available = vi.spyOn(svc, 'isTrivyAvailable').mockReturnValue(true);
+    const find = vi.spyOn(svc, 'findReusableScan');
+    const begin = vi.spyOn(svc, 'beginScan').mockReturnValue(42);
+    const finish = vi.spyOn(svc, 'finishScan').mockResolvedValue({} as never);
+    try {
+      const res = await request(app)
+        .post('/api/security/scan')
+        .set('Cookie', adminCookie)
+        .send({ imageRef: 'alpine:3.19', force: true, scanners: ['vuln'] });
+
+      expect(res.status).toBe(202);
+      expect(res.body.scanId).toBe(42);
+      expect(find).not.toHaveBeenCalled();
+      expect(begin).toHaveBeenCalledWith('alpine:3.19', expect.any(Number), 'manual', null, ['vuln']);
+      expect(finish).toHaveBeenCalled();
+    } finally {
+      finish.mockRestore();
+      begin.mockRestore();
+      find.mockRestore();
+      available.mockRestore();
+    }
+  });
+});

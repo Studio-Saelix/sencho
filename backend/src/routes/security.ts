@@ -502,7 +502,7 @@ securityRouter.get('/stacks/:stackName/pre-deploy-summary', authMiddleware, asyn
   }
 });
 
-securityRouter.post('/scan', authMiddleware, (req: Request, res: Response): void => {
+securityRouter.post('/scan', authMiddleware, async (req: Request, res: Response): Promise<void> => {
   if (!requirePermission(req, res, 'stack:deploy')) return;
   const svc = TrivyService.getInstance();
   if (!svc.isTrivyAvailable()) {
@@ -534,6 +534,27 @@ securityRouter.post('/scan', authMiddleware, (req: Request, res: Response): void
   if (svc.isScanning(nodeId, imageRef)) {
     res.status(409).json({ error: 'Already scanning this image' });
     return;
+  }
+  // A non-forced scan may be served from a stored row. Answer with that row's
+  // id before opening a placeholder: the cached row is already `completed`, so
+  // the client's poll finishes at once, and no second history entry is written
+  // for the same image, digest and timestamp.
+  if (!force) {
+    try {
+      const reusable = await svc.findReusableScan(imageRef, nodeId, { useCache: true, scanners });
+      if (reusable) {
+        res.status(202).json({ scanId: reusable.id });
+        return;
+      }
+    } catch (err) {
+      // A cache check is an optimisation; if it cannot answer, start the scan
+      // and let the normal failure path report why.
+      console.warn(
+        '[Security] Scan cache check failed for %s:',
+        sanitizeForLog(imageRef),
+        sanitizeForLog(getErrorMessage(err, 'unknown error')),
+      );
+    }
   }
   const scanId = svc.beginScan(imageRef, nodeId, 'manual', stackContext, scanners);
   res.status(202).json({ scanId });
