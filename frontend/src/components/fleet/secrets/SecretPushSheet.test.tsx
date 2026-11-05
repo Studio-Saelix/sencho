@@ -37,7 +37,7 @@ function planEntry(overrides: Partial<SecretPushPlanEntry> = {}): SecretPushPlan
     return {
         nodeId: 1, nodeName: 'central', stackName: 'my-app', envFileBasename: '.env',
         reachable: true, stackExists: true,
-        diff: [{ key: 'DB_PASSWORD', status: 'changed', before: '***', after: '***' }],
+        diff: [{ key: 'DB_PASSWORD', status: 'changed' }],
         added: 0, changed: 1, unchanged: 4, removedInformational: 0,
         ...overrides,
     };

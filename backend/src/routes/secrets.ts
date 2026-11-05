@@ -1,8 +1,14 @@
 import { Router, type Request, type Response } from 'express';
 import { authMiddleware } from '../middleware/auth';
 import { requireAdmin, requireUserSession, requireBody } from '../middleware/tierGates';
-import { SecretsService, PushBusyError, type SecretKv } from '../services/SecretsService';
-import { DatabaseService, type BlueprintSelector } from '../services/DatabaseService';
+import {
+    SecretsService,
+    PushBusyError,
+    RevealTargetError,
+    SecretOpError,
+    type SecretPatchOp,
+} from '../services/SecretsService';
+import { DatabaseService, SecretVersionConflictError, type BlueprintSelector } from '../services/DatabaseService';
 import { isValidStackName } from '../utils/validation';
 import { getErrorMessage, isSqliteUniqueViolation } from '../utils/errors';
 import { parseIntParam } from '../utils/parseIntParam';
@@ -10,12 +16,22 @@ import { sanitizeForLog } from '../utils/safeLog';
 
 export const secretsRouter = Router();
 
-// Fleet Secrets reveals decrypted values and writes credentials fleet-wide, so
-// every route requires a signed-in admin user. requireUserSession rejects API
-// tokens and node_proxy / pilot_tunnel machine credentials (authMiddleware maps
-// the latter to role 'admin'), then requireAdmin enforces the role.
+// Fleet Secrets holds operator-owned credentials, so every route requires a
+// signed-in admin user. requireUserSession rejects API tokens and node_proxy /
+// pilot_tunnel machine credentials (authMiddleware maps the latter to role
+// 'admin'), then requireAdmin enforces the role.
+//
+// Bundle reads are masked by default: key names and metadata only. Plaintext
+// leaves the server through one short-lived, single-use reveal per key, or as
+// the value the operator just typed into an edit.
+secretsRouter.use((_req: Request, res: Response, next) => {
+    res.set('Cache-Control', 'no-store');
+    next();
+});
 
 const NAME_PATTERN = /^[a-zA-Z0-9][a-zA-Z0-9 _.-]{0,62}[a-zA-Z0-9]$/;
+const KEY_PATTERN = /^[A-Za-z_][A-Za-z0-9_]*$/;
+const MAX_PATCH_OPS = 500;
 
 function isValidName(name: unknown): name is string {
     return typeof name === 'string' && NAME_PATTERN.test(name);
@@ -27,12 +43,28 @@ function isValidEnvFileBasename(name: unknown): name is string {
     return /^[A-Za-z0-9._-]+$/.test(name);
 }
 
-function isValidKv(value: unknown): value is SecretKv {
+function isValidKv(value: unknown): value is Record<string, string> {
     if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
     for (const [k, v] of Object.entries(value as Record<string, unknown>)) {
         if (typeof k !== 'string' || typeof v !== 'string') return false;
     }
     return true;
+}
+
+function isValidKey(key: unknown): key is string {
+    return typeof key === 'string' && KEY_PATTERN.test(key);
+}
+
+function isValidOpList(value: unknown): value is SecretPatchOp[] {
+    if (!Array.isArray(value) || value.length > MAX_PATCH_OPS) return false;
+    return value.every((entry) => {
+        if (!entry || typeof entry !== 'object') return false;
+        const op = entry as { op?: unknown; key?: unknown; value?: unknown; from?: unknown; to?: unknown };
+        if (op.op === 'set') return isValidKey(op.key) && typeof op.value === 'string';
+        if (op.op === 'remove') return isValidKey(op.key);
+        if (op.op === 'rename') return isValidKey(op.from) && isValidKey(op.to) && op.from !== op.to;
+        return false;
+    });
 }
 
 function isValidSelector(value: unknown): value is BlueprintSelector {
@@ -46,6 +78,12 @@ function isValidSelector(value: unknown): value is BlueprintSelector {
         return isStringArr(sel.any) && isStringArr(sel.all);
     }
     return false;
+}
+
+/** Request bodies never carry a version as a string; keep the check in one place. */
+function parseVersion(value: unknown): number | null {
+    if (typeof value !== 'number' || !Number.isInteger(value) || value < 1) return null;
+    return value;
 }
 
 function getActor(req: Request): string {
@@ -62,6 +100,43 @@ function parsePushBody(body: unknown): PushBody | { error: string } {
     const basename = envFileBasename === undefined ? '.env' : envFileBasename;
     if (!isValidEnvFileBasename(basename)) return { error: 'envFileBasename is invalid' };
     return { selector, stackName, envFileBasename: basename };
+}
+
+interface ImportBody { nodeId: number; stackName: string; envFileBasename: string }
+
+function parseImportBody(body: unknown): ImportBody | { error: string } {
+    if (!body || typeof body !== 'object') return { error: 'Request body is required' };
+    const { nodeId, stackName, envFileBasename } = body as { nodeId?: unknown; stackName?: unknown; envFileBasename?: unknown };
+    if (typeof nodeId !== 'number' || !Number.isFinite(nodeId)) return { error: 'nodeId must be a number' };
+    if (typeof stackName !== 'string' || !isValidStackName(stackName)) return { error: 'stackName is invalid' };
+    const basename = envFileBasename === undefined ? '.env' : envFileBasename;
+    if (!isValidEnvFileBasename(basename)) return { error: 'envFileBasename is invalid' };
+    return { nodeId, stackName, envFileBasename: basename };
+}
+
+function sendVersionConflict(res: Response, err: SecretVersionConflictError): void {
+    res.status(409).json({
+        error: 'This bundle changed since you opened it. Reload it and apply your edit again.',
+        code: 'VERSION_CONFLICT',
+        currentVersion: err.currentVersion,
+    });
+}
+
+function sendServiceError(res: Response, err: unknown, fallback: string): void {
+    if (err instanceof SecretVersionConflictError) {
+        sendVersionConflict(res, err);
+        return;
+    }
+    if (err instanceof RevealTargetError) {
+        res.status(404).json({ error: err.message, code: 'REVEAL_TARGET_MISSING' });
+        return;
+    }
+    if (err instanceof SecretOpError) {
+        res.status(400).json({ error: err.message });
+        return;
+    }
+    console.error(`[Secrets] ${fallback}:`, err);
+    res.status(500).json({ error: getErrorMessage(err, fallback) });
 }
 
 secretsRouter.get('/', authMiddleware, async (req: Request, res: Response): Promise<void> => {
@@ -123,33 +198,43 @@ secretsRouter.get('/:id', authMiddleware, async (req: Request, res: Response): P
     try {
         const id = parseIntParam(req, res, 'id', 'secret ID');
         if (id === null) return;
-        const summary = SecretsService.getInstance().getCurrent(id);
-        if (!summary) {
+        const detail = SecretsService.getInstance().getDetail(id);
+        if (!detail) {
             res.status(404).json({ error: 'Secret not found' });
             return;
         }
-        const kv = SecretsService.getInstance().getDecryptedKv(id);
-        res.json({ ...summary, kv });
+        res.json(detail);
     } catch (err) {
         console.error('[Secrets] Get error:', err);
         res.status(500).json({ error: 'Failed to read secret' });
     }
 });
 
-secretsRouter.put('/:id', authMiddleware, async (req: Request, res: Response): Promise<void> => {
+secretsRouter.patch('/:id', authMiddleware, async (req: Request, res: Response): Promise<void> => {
     if (!requireUserSession(req, res)) return;
     if (!requireAdmin(req, res)) return;
     if (!requireBody(req, res)) return;
     try {
         const id = parseIntParam(req, res, 'id', 'secret ID');
         if (id === null) return;
-        const { description, kv, note } = req.body as { description?: unknown; kv?: unknown; note?: unknown };
+        const { expectedVersion, description, ops, note } = req.body as {
+            expectedVersion?: unknown; description?: unknown; ops?: unknown; note?: unknown;
+        };
+        const version = parseVersion(expectedVersion);
+        if (version === null) {
+            res.status(400).json({ error: 'expectedVersion must be the version you loaded' });
+            return;
+        }
         if (description !== undefined && typeof description !== 'string') {
             res.status(400).json({ error: 'description must be a string' });
             return;
         }
-        if (!isValidKv(kv)) {
-            res.status(400).json({ error: 'kv must be an object of string values' });
+        if (!isValidOpList(ops)) {
+            res.status(400).json({ error: 'ops must be a list of set, remove, or rename operations' });
+            return;
+        }
+        if (ops.length === 0 && typeof description !== 'string') {
+            res.status(400).json({ error: 'Send at least one operation, or a description to change' });
             return;
         }
         if (note !== undefined && typeof note !== 'string') {
@@ -161,17 +246,17 @@ secretsRouter.put('/:id', authMiddleware, async (req: Request, res: Response): P
             res.status(404).json({ error: 'Secret not found' });
             return;
         }
-        const result = SecretsService.getInstance().update(id, {
+        const result = SecretsService.getInstance().applyPatch(id, {
+            expectedVersion: version,
+            ops,
             description: typeof description === 'string' ? description : undefined,
-            kv,
             user: getActor(req),
             note: typeof note === 'string' ? note : undefined,
         });
         console.log(`[Secrets] Updated bundle ${sanitizeForLog(existing.name)} to v${result.version} by ${sanitizeForLog(getActor(req))}`);
         res.json(result);
     } catch (err) {
-        console.error('[Secrets] Update error:', err);
-        res.status(500).json({ error: getErrorMessage(err, 'Failed to update secret') });
+        sendServiceError(res, err, 'Failed to update secret');
     }
 });
 
@@ -211,6 +296,77 @@ secretsRouter.get('/:id/versions', authMiddleware, async (req: Request, res: Res
     }
 });
 
+secretsRouter.post('/:id/reveal-grant', authMiddleware, async (req: Request, res: Response): Promise<void> => {
+    if (!requireUserSession(req, res)) return;
+    if (!requireAdmin(req, res)) return;
+    if (!requireBody(req, res)) return;
+    try {
+        const id = parseIntParam(req, res, 'id', 'secret ID');
+        if (id === null) return;
+        const { key, version } = req.body as { key?: unknown; version?: unknown };
+        if (!isValidKey(key)) {
+            res.status(400).json({ error: 'key must be an env-var name' });
+            return;
+        }
+        const targetVersion = version === undefined ? undefined : parseVersion(version);
+        if (version !== undefined && targetVersion === null) {
+            res.status(400).json({ error: 'version must be a positive integer' });
+            return;
+        }
+        const grant = SecretsService.getInstance().createRevealGrant(id, key, getActor(req), targetVersion ?? undefined);
+        res.json(grant);
+    } catch (err) {
+        sendServiceError(res, err, 'Failed to authorize reveal');
+    }
+});
+
+secretsRouter.post('/:id/reveal', authMiddleware, async (req: Request, res: Response): Promise<void> => {
+    if (!requireUserSession(req, res)) return;
+    if (!requireAdmin(req, res)) return;
+    if (!requireBody(req, res)) return;
+    try {
+        const id = parseIntParam(req, res, 'id', 'secret ID');
+        if (id === null) return;
+        const { grantId } = req.body as { grantId?: unknown };
+        if (typeof grantId !== 'string' || grantId.length < 16 || grantId.length > 128) {
+            res.status(400).json({ error: 'grantId is required' });
+            return;
+        }
+        const result = SecretsService.getInstance().consumeRevealGrant(id, grantId, getActor(req));
+        if (!result.ok) {
+            const code = result.reason === 'expired' ? 'REVEAL_EXPIRED' : result.reason === 'mismatch' ? 'REVEAL_MISMATCH' : 'REVEAL_GRANT_INVALID';
+            res.status(403).json({ error: 'Reveal authorization is no longer valid. Reveal the value again.', code });
+            return;
+        }
+        res.json(result.revealed);
+    } catch (err) {
+        sendServiceError(res, err, 'Failed to reveal value');
+    }
+});
+
+secretsRouter.post('/:id/import-from-stack/preview', authMiddleware, async (req: Request, res: Response): Promise<void> => {
+    if (!requireUserSession(req, res)) return;
+    if (!requireAdmin(req, res)) return;
+    if (!requireBody(req, res)) return;
+    try {
+        const id = parseIntParam(req, res, 'id', 'secret ID');
+        if (id === null) return;
+        const parsed = parseImportBody(req.body);
+        if ('error' in parsed) {
+            res.status(400).json({ error: parsed.error });
+            return;
+        }
+        if (!DatabaseService.getInstance().getSecret(id)) {
+            res.status(404).json({ error: 'Secret not found' });
+            return;
+        }
+        const preview = await SecretsService.getInstance().previewImport(id, parsed.nodeId, parsed.stackName, parsed.envFileBasename);
+        res.json(preview);
+    } catch (err) {
+        sendServiceError(res, err, 'Failed to preview import');
+    }
+});
+
 secretsRouter.post('/:id/import-from-stack', authMiddleware, async (req: Request, res: Response): Promise<void> => {
     if (!requireUserSession(req, res)) return;
     if (!requireAdmin(req, res)) return;
@@ -218,25 +374,38 @@ secretsRouter.post('/:id/import-from-stack', authMiddleware, async (req: Request
     try {
         const id = parseIntParam(req, res, 'id', 'secret ID');
         if (id === null) return;
-        const { nodeId, stackName, envFileBasename } = req.body as { nodeId?: unknown; stackName?: unknown; envFileBasename?: unknown };
-        if (typeof nodeId !== 'number' || !Number.isFinite(nodeId)) {
-            res.status(400).json({ error: 'nodeId must be a number' });
+        const parsed = parseImportBody(req.body);
+        if ('error' in parsed) {
+            res.status(400).json({ error: parsed.error });
             return;
         }
-        if (typeof stackName !== 'string' || !isValidStackName(stackName)) {
-            res.status(400).json({ error: 'stackName is invalid' });
+        const { expectedVersion, note } = req.body as { expectedVersion?: unknown; note?: unknown };
+        const version = parseVersion(expectedVersion);
+        if (version === null) {
+            res.status(400).json({ error: 'expectedVersion must be the version you loaded' });
             return;
         }
-        const basename = envFileBasename === undefined ? '.env' : envFileBasename;
-        if (!isValidEnvFileBasename(basename)) {
-            res.status(400).json({ error: 'envFileBasename is invalid' });
+        if (note !== undefined && typeof note !== 'string') {
+            res.status(400).json({ error: 'note must be a string' });
             return;
         }
-        const kv = await SecretsService.getInstance().importFromStack(nodeId, stackName, basename);
-        res.json({ kv });
+        const secret = DatabaseService.getInstance().getSecret(id);
+        if (!secret) {
+            res.status(404).json({ error: 'Secret not found' });
+            return;
+        }
+        const result = await SecretsService.getInstance().applyImport(id, {
+            nodeId: parsed.nodeId,
+            stackName: parsed.stackName,
+            envFileBasename: parsed.envFileBasename,
+            expectedVersion: version,
+            user: getActor(req),
+            note: typeof note === 'string' ? note : undefined,
+        });
+        console.log(`[Secrets] Imported env from stack into ${sanitizeForLog(secret.name)} (v${result.version}) by ${sanitizeForLog(getActor(req))}`);
+        res.json(result);
     } catch (err) {
-        console.error('[Secrets] Import error:', err);
-        res.status(500).json({ error: getErrorMessage(err, 'Failed to import env from stack') });
+        sendServiceError(res, err, 'Failed to import env from stack');
     }
 });
 

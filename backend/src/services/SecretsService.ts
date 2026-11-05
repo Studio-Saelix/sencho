@@ -1,7 +1,7 @@
 import path from 'path';
 import crypto from 'crypto';
 import { CryptoService } from './CryptoService';
-import { DatabaseService, type BlueprintSelector, type Node, type SecretRow, type SecretVersionRow, type SecretPushStatus } from './DatabaseService';
+import { DatabaseService, SecretVersionConflictError, type BlueprintSelector, type Node, type SecretRow, type SecretVersionRow, type SecretPushStatus } from './DatabaseService';
 import { FileSystemService } from './FileSystemService';
 import { NodeLabelService } from './NodeLabelService';
 import { NodeRegistry } from './NodeRegistry';
@@ -40,6 +40,61 @@ export interface SecretVersionSummary {
     note: string;
 }
 
+/**
+ * The fixed stand-in for a value the client has not been authorized to read.
+ * It never encodes the real value's length or shape.
+ */
+export const MASKED_VALUE = '••••••••';
+
+export interface SecretKeyEntry {
+    key: string;
+    masked: string;
+}
+
+/** Bundle detail with key names only: no current or historical value crosses this boundary. */
+export interface SecretDetail extends SecretSummary {
+    masked: true;
+    keys: SecretKeyEntry[];
+}
+
+/**
+ * Per-key edit applied on top of the current version, so a client that never
+ * saw the other values cannot overwrite or erase them.
+ */
+export type SecretPatchOp =
+    | { op: 'set'; key: string; value: string }
+    | { op: 'remove'; key: string }
+    | { op: 'rename'; from: string; to: string };
+
+export interface RevealGrant {
+    grantId: string;
+    key: string;
+    version: number;
+    expiresAt: number;
+}
+
+export interface RevealedValue {
+    key: string;
+    version: number;
+    value: string;
+    expiresAt: number;
+}
+
+export type RevealGrantFailure = 'unknown' | 'expired' | 'mismatch';
+
+/** A diff entry with the values stripped: the only shape a preview may carry. */
+export interface SecretDiffClassEntry {
+    key: string;
+    status: DiffStatus;
+}
+
+export interface SecretImportPreview {
+    added: number;
+    changed: number;
+    unchanged: number;
+    keys: SecretDiffClassEntry[];
+}
+
 export interface SecretPushPlanEntry {
     nodeId: number;
     nodeName: string;
@@ -48,7 +103,7 @@ export interface SecretPushPlanEntry {
     reachable: boolean;
     stackExists: boolean;
     error?: string;
-    diff: SecretDiffEntry[];
+    diff: SecretDiffClassEntry[];
     added: number;
     changed: number;
     unchanged: number;
@@ -69,6 +124,50 @@ export interface SecretPushResultEntry {
 
 const ENV_KEY_PATTERN = /^[A-Za-z_][A-Za-z0-9_]*$/;
 const REQUEST_TIMEOUT_MS = 10_000;
+/** How long a reveal grant stays exchangeable, and how long a revealed value may be shown. */
+const REVEAL_GRANT_TTL_MS = 30_000;
+const MAX_PENDING_REVEAL_GRANTS = 256;
+
+interface PendingRevealGrant {
+    secretId: number;
+    version: number;
+    key: string;
+    username: string;
+    expiresAt: number;
+}
+
+/** The requested key is not in the requested bundle version. */
+export class RevealTargetError extends Error {
+    constructor(message: string) {
+        super(message);
+        this.name = 'RevealTargetError';
+    }
+}
+
+/** An edit operation cannot be applied to the current version. */
+export class SecretOpError extends Error {
+    constructor(message: string) {
+        super(message);
+        this.name = 'SecretOpError';
+    }
+}
+
+function applyOp(kv: SecretKv, op: SecretPatchOp): void {
+    if (op.op === 'set') {
+        kv[op.key] = op.value;
+        return;
+    }
+    if (op.op === 'remove') {
+        if (!(op.key in kv)) throw new SecretOpError(`Key '${op.key}' is not in the current version`);
+        delete kv[op.key];
+        return;
+    }
+    if (!(op.from in kv)) throw new SecretOpError(`Key '${op.from}' is not in the current version`);
+    if (op.to in kv && op.to !== op.from) throw new SecretOpError(`Key '${op.to}' already exists`);
+    const value = kv[op.from];
+    delete kv[op.from];
+    kv[op.to] = value;
+}
 
 export function parseEnv(text: string): SecretKv {
     const out: SecretKv = {};
@@ -162,6 +261,11 @@ function aggregateDiff(diff: SecretDiffEntry[]): { added: number; changed: numbe
     return r;
 }
 
+/** Strip before/after values so a preview can only ever carry key names and change classes. */
+function maskDiff(diff: SecretDiffEntry[]): SecretDiffClassEntry[] {
+    return diff.map(({ key, status }) => ({ key, status }));
+}
+
 function isLocalNode(node: Node): boolean {
     return node.type === 'local';
 }
@@ -183,7 +287,9 @@ function decryptKv(payload: string): SecretKv {
         }
         return out;
     } catch (err) {
-        console.error('[Secrets] Failed to parse decrypted payload:', err);
+        // A JSON.parse failure message can quote a fragment of its input, which
+        // here is decrypted plaintext. Log the error kind only.
+        console.error('[Secrets] Failed to parse decrypted payload:', err instanceof Error ? err.name : 'unknown error');
         return {};
     }
 }
@@ -341,6 +447,9 @@ const activePushes = new Set<number>();
 export class SecretsService {
     private static instance: SecretsService | null = null;
 
+    /** Single-use reveal grants, in memory only: never persisted, never logged. */
+    private readonly revealGrants = new Map<string, PendingRevealGrant>();
+
     static getInstance(): SecretsService {
         if (!SecretsService.instance) {
             SecretsService.instance = new SecretsService();
@@ -392,18 +501,16 @@ export class SecretsService {
         });
     }
 
-    update(id: number, input: { description?: string; kv: SecretKv; user: string; note?: string }): { version: number } {
-        const validation = validateKv(input.kv);
-        if (!validation.ok) throw new Error(validation.error);
-        const db = DatabaseService.getInstance();
-        return db.updateSecretWithVersion({
-            secretId: id,
-            description: input.description === undefined ? null : input.description,
-            encryptedPayload: encryptKv(input.kv),
-            keyCount: Object.keys(input.kv).length,
-            createdBy: input.user,
-            note: input.note ?? '',
-        });
+    /** Bundle detail: metadata plus key names. Never a value, current or historical. */
+    getDetail(id: number): SecretDetail | null {
+        const summary = this.getCurrent(id);
+        if (!summary) return null;
+        const kv = this.getDecryptedKv(id);
+        return {
+            ...summary,
+            masked: true,
+            keys: Object.keys(kv).sort().map((key) => ({ key, masked: MASKED_VALUE })),
+        };
     }
 
     delete(id: number): boolean {
@@ -417,12 +524,163 @@ export class SecretsService {
         return decryptKv(v.encrypted_payload);
     }
 
-    async importFromStack(nodeId: number, stackName: string, envFileBasename = '.env'): Promise<SecretKv> {
+    private versionRow(secretId: number, version: number): SecretVersionRow | undefined {
+        const db = DatabaseService.getInstance();
+        const current = db.getCurrentSecretVersion(secretId);
+        if (current && current.version === version) return current;
+        return db.getSecretVersion(secretId, version);
+    }
+
+    /**
+     * Mint a single-use, short-lived grant for exactly one bundle version and
+     * key. The grant carries no value; the client exchanges it once below.
+     */
+    createRevealGrant(id: number, key: string, username: string, version?: number): RevealGrant {
+        const db = DatabaseService.getInstance();
+        const secret = db.getSecret(id);
+        if (!secret) throw new RevealTargetError('Secret not found');
+        const target = version === undefined ? db.getCurrentSecretVersion(id) : this.versionRow(id, version);
+        if (!target) throw new RevealTargetError(`Version ${version} not found`);
+        if (!(key in decryptKv(target.encrypted_payload))) {
+            throw new RevealTargetError(`Key '${key}' is not in version ${target.version}`);
+        }
+        this.purgeExpiredGrants();
+        if (this.revealGrants.size >= MAX_PENDING_REVEAL_GRANTS) {
+            // Bound the store: drop the oldest pending grant rather than grow without limit.
+            const oldest = this.revealGrants.keys().next();
+            if (!oldest.done) this.revealGrants.delete(oldest.value);
+        }
+        const grantId = crypto.randomBytes(24).toString('base64url');
+        const expiresAt = Date.now() + REVEAL_GRANT_TTL_MS;
+        this.revealGrants.set(grantId, { secretId: id, version: target.version, key, username, expiresAt });
+        return { grantId, key, version: target.version, expiresAt };
+    }
+
+    /**
+     * Exchange a grant for one value. The grant is consumed before the value is
+     * read, so a replay finds nothing, and it only answers for the bundle, user,
+     * version and key it was minted for.
+     */
+    consumeRevealGrant(id: number, grantId: string, username: string):
+        { ok: true; revealed: RevealedValue } | { ok: false; reason: RevealGrantFailure } {
+        const grant = this.revealGrants.get(grantId);
+        if (!grant) return { ok: false, reason: 'unknown' };
+        this.revealGrants.delete(grantId);
+        if (grant.expiresAt <= Date.now()) return { ok: false, reason: 'expired' };
+        if (grant.secretId !== id || grant.username !== username) return { ok: false, reason: 'mismatch' };
+        const row = this.versionRow(id, grant.version);
+        if (!row) return { ok: false, reason: 'unknown' };
+        const kv = decryptKv(row.encrypted_payload);
+        if (!(grant.key in kv)) return { ok: false, reason: 'unknown' };
+        return {
+            ok: true,
+            revealed: { key: grant.key, version: grant.version, value: kv[grant.key], expiresAt: grant.expiresAt },
+        };
+    }
+
+    /** Test seam: drop every pending grant. */
+    clearRevealGrants(): void {
+        this.revealGrants.clear();
+    }
+
+    private purgeExpiredGrants(): void {
+        const now = Date.now();
+        for (const [grantId, grant] of this.revealGrants) {
+            if (grant.expiresAt <= now) this.revealGrants.delete(grantId);
+        }
+    }
+
+    /**
+     * Apply per-key operations onto the current version. Untouched keys keep the
+     * value already stored server-side, and a stale `expectedVersion` is refused
+     * instead of overwriting values the caller never saw.
+     */
+    applyPatch(id: number, input: {
+        expectedVersion: number;
+        ops: SecretPatchOp[];
+        description?: string;
+        user: string;
+        note?: string;
+    }): { version: number } {
+        const db = DatabaseService.getInstance();
+        const current = db.getCurrentSecretVersion(id);
+        if (!current) throw new Error('Secret not found');
+        if (current.version !== input.expectedVersion) {
+            throw new SecretVersionConflictError(current.version);
+        }
+        if (input.ops.length === 0) {
+            // Metadata-only edit: no value is touched, so no version is minted.
+            return db.updateSecretDescription({
+                secretId: id,
+                description: input.description ?? '',
+                expectedVersion: input.expectedVersion,
+            });
+        }
+        const kv = decryptKv(current.encrypted_payload);
+        for (const op of input.ops) applyOp(kv, op);
+        const validation = validateKv(kv);
+        if (!validation.ok) throw new Error(validation.error);
+        return db.updateSecretWithVersion({
+            secretId: id,
+            description: input.description === undefined ? null : input.description,
+            encryptedPayload: encryptKv(kv),
+            keyCount: Object.keys(kv).length,
+            createdBy: input.user,
+            note: input.note ?? '',
+            expectedVersion: input.expectedVersion,
+        });
+    }
+
+    async readImportOverlay(nodeId: number, stackName: string, envFileBasename = '.env'): Promise<SecretKv> {
         const node = DatabaseService.getInstance().getNodes().find(n => n.id === nodeId);
         if (!node) throw new Error('Node not found');
         const read = await readExistingEnv(node, stackName, envFileBasename);
         if (!read) throw new Error(`env file '${envFileBasename}' not found on node ${node.name}`);
         return parseEnv(read.text);
+    }
+
+    /** Names and change classes only: the env file's values stay server-side. */
+    async previewImport(id: number, nodeId: number, stackName: string, envFileBasename = '.env'): Promise<SecretImportPreview> {
+        const overlay = await this.readImportOverlay(nodeId, stackName, envFileBasename);
+        const diff = computeDiff(this.getDecryptedKv(id), overlay);
+        const agg = aggregateDiff(diff);
+        return {
+            added: agg.added,
+            changed: agg.changed,
+            unchanged: agg.unchanged,
+            keys: maskDiff(diff).filter(e => e.status !== 'removed'),
+        };
+    }
+
+    async applyImport(id: number, input: {
+        nodeId: number;
+        stackName: string;
+        envFileBasename?: string;
+        expectedVersion: number;
+        user: string;
+        note?: string;
+    }): Promise<{ version: number; added: number; changed: number; unchanged: number }> {
+        const basename = input.envFileBasename ?? '.env';
+        const overlay = await this.readImportOverlay(input.nodeId, input.stackName, basename);
+        const db = DatabaseService.getInstance();
+        const current = db.getCurrentSecretVersion(id);
+        if (!current) throw new Error('Secret not found');
+        if (current.version !== input.expectedVersion) {
+            throw new SecretVersionConflictError(current.version);
+        }
+        const existing = decryptKv(current.encrypted_payload);
+        const agg = aggregateDiff(computeDiff(existing, overlay));
+        const merged = applyOverlay(existing, overlay);
+        const { version } = db.updateSecretWithVersion({
+            secretId: id,
+            description: null,
+            encryptedPayload: encryptKv(merged),
+            keyCount: Object.keys(merged).length,
+            createdBy: input.user,
+            note: input.note ?? '',
+            expectedVersion: input.expectedVersion,
+        });
+        return { version, added: agg.added, changed: agg.changed, unchanged: agg.unchanged };
     }
 
     async previewPushDiff(id: number, selector: BlueprintSelector, stackName: string, envFileBasename: string): Promise<SecretPushPlanEntry[]> {
@@ -453,8 +711,9 @@ export class SecretsService {
                     entry.error = `env file '${envFileBasename}' not found`;
                     return entry;
                 }
-                entry.diff = computeDiff(parseEnv(read.text), overlay);
-                Object.assign(entry, aggregateDiff(entry.diff));
+                const diff = computeDiff(parseEnv(read.text), overlay);
+                entry.diff = maskDiff(diff);
+                Object.assign(entry, aggregateDiff(diff));
             } catch (err) {
                 entry.reachable = false;
                 entry.error = getErrorMessage(err, 'preview failed');

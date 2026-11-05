@@ -333,11 +333,13 @@ export function SecretPushSheet({ open, onOpenChange, secret }: Props) {
                             </button>
                             {expanded.has(entry.nodeId) && entry.diff.length > 0 && (
                                 <div className="border-t border-card-border/40 px-3 py-2 space-y-1">
+                                    <p className="text-[10px] uppercase tracking-[0.18em] font-mono text-stat-subtitle">
+                                        Key names and change classes only. Values never enter the preview.
+                                    </p>
                                     {entry.diff.map((d) => (
                                         <div key={d.key} className="flex items-baseline gap-2 font-mono text-xs">
                                             <span className={`w-16 uppercase tracking-[0.18em] text-[10px] ${DIFF_STATUS_COLOR[d.status]}`}>{d.status}</span>
                                             <span className="flex-1 truncate">{d.key}</span>
-                                            {d.status === 'changed' && <span className="text-stat-subtitle">old to new</span>}
                                         </div>
                                     ))}
                                 </div>

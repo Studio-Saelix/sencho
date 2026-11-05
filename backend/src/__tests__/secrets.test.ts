@@ -51,10 +51,13 @@ const SECRET_ENDPOINTS: Array<[string, string]> = [
     ['get', '/api/secrets'],
     ['post', '/api/secrets'],
     ['get', '/api/secrets/1'],
-    ['put', '/api/secrets/1'],
+    ['patch', '/api/secrets/1'],
     ['delete', '/api/secrets/1'],
     ['get', '/api/secrets/1/versions'],
+    ['post', '/api/secrets/1/import-from-stack/preview'],
     ['post', '/api/secrets/1/import-from-stack'],
+    ['post', '/api/secrets/1/reveal-grant'],
+    ['post', '/api/secrets/1/reveal'],
     ['post', '/api/secrets/1/push/preview'],
     ['post', '/api/secrets/1/push'],
 ];
@@ -63,6 +66,7 @@ function callWithToken(method: string, p: string, token: string) {
     const agent = request(app);
     const r = method === 'get' ? agent.get(p)
         : method === 'post' ? agent.post(p)
+        : method === 'patch' ? agent.patch(p)
         : method === 'put' ? agent.put(p)
         : agent.delete(p);
     return r.set('Authorization', `Bearer ${token}`);
@@ -271,8 +275,17 @@ describe('SecretsService', () => {
     it('listVersions returns newest first', () => {
         const svc = SecretsService.getInstance();
         const { id } = svc.create({ name: 'v-list', kv: { A: '1' }, user: TEST_USERNAME });
-        svc.update(id, { kv: { A: '2', B: '3' }, user: TEST_USERNAME, note: 'add B' });
-        svc.update(id, { kv: { A: '4' }, user: TEST_USERNAME });
+        svc.applyPatch(id, {
+            expectedVersion: 1,
+            ops: [{ op: 'set', key: 'A', value: '2' }, { op: 'set', key: 'B', value: '3' }],
+            user: TEST_USERNAME,
+            note: 'add B',
+        });
+        svc.applyPatch(id, {
+            expectedVersion: 2,
+            ops: [{ op: 'set', key: 'A', value: '4' }, { op: 'remove', key: 'B' }],
+            user: TEST_USERNAME,
+        });
         const versions = svc.listVersions(id);
         expect(versions.map(v => v.version)).toEqual([3, 2, 1]);
         expect(versions[1].note).toBe('add B');
@@ -281,7 +294,7 @@ describe('SecretsService', () => {
 
 // ---- importFromStack against the local node ----
 
-describe('SecretsService.importFromStack (local node)', () => {
+describe('SecretsService.readImportOverlay (local node)', () => {
     beforeEach(() => {
         const composeDir = process.env.COMPOSE_DIR!;
         const stackDir = path.join(composeDir, 'demo');
@@ -290,10 +303,10 @@ describe('SecretsService.importFromStack (local node)', () => {
         fs.writeFileSync(path.join(stackDir, 'compose.yaml'), 'services:\n  app:\n    image: nginx\n');
     });
 
-    it('reads the local stack .env into a KV map', async () => {
+    it('reads the local stack .env into a KV map server-side', async () => {
         const db = DatabaseService.getInstance();
         const localNode = db.getNodes().find(n => n.type === 'local')!;
-        const kv = await SecretsService.getInstance().importFromStack(localNode.id, 'demo', '.env');
+        const kv = await SecretsService.getInstance().readImportOverlay(localNode.id, 'demo', '.env');
         expect(kv).toEqual({ DB_URL: 'postgres://x', API_KEY: 'abc' });
     });
 });
@@ -371,12 +384,15 @@ describe('SecretsService.executePush (local node)', () => {
 describe('getAuditSummary for secrets routes', () => {
     it('resolves create / update / delete', () => {
         expect(getAuditSummary('POST', '/secrets')).toBe('Created secret');
-        expect(getAuditSummary('PUT', '/secrets/42')).toBe('Updated secret: 42');
+        expect(getAuditSummary('PATCH', '/secrets/42')).toBe('Updated secret: 42');
         expect(getAuditSummary('DELETE', '/secrets/42')).toBe('Deleted secret: 42');
     });
 
-    it('resolves push and import wildcards', () => {
+    it('resolves push, import, and reveal wildcards', () => {
+        expect(getAuditSummary('POST', '/secrets/42/import-from-stack/preview')).toBe('Previewed secret import: 42');
         expect(getAuditSummary('POST', '/secrets/42/import-from-stack')).toBe('Imported env into secret: 42');
+        expect(getAuditSummary('POST', '/secrets/42/reveal-grant')).toBe('Authorized secret reveal: 42');
+        expect(getAuditSummary('POST', '/secrets/42/reveal')).toBe('Revealed secret value: 42');
         expect(getAuditSummary('POST', '/secrets/42/push/preview')).toBe('Previewed secret push: 42');
         expect(getAuditSummary('POST', '/secrets/42/push')).toBe('Pushed secret: 42');
     });
@@ -418,18 +434,21 @@ describe('Routes /api/secrets Community Admin access', () => {
             .send({ name: 'community-test-bundle', kv: { KEY: 'val' } });
         expect(create.status).toBe(201);
         const id: number = create.body.id;
-        // Read
+        // Read: metadata and key names only, never the value
         const get = await request(app)
             .get(`/api/secrets/${id}`)
             .set('Authorization', `Bearer ${adminToken()}`);
         expect(get.status).toBe(200);
-        expect(get.body.kv).toEqual({ KEY: 'val' });
-        // Update
+        expect(get.body.kv).toBeUndefined();
+        expect(get.body.keys).toEqual([{ key: 'KEY', masked: expect.any(String) }]);
+        expect(JSON.stringify(get.body)).not.toContain('val');
+        // Update: one key, with the version the client read
         const upd = await request(app)
-            .put(`/api/secrets/${id}`)
+            .patch(`/api/secrets/${id}`)
             .set('Authorization', `Bearer ${adminToken()}`)
-            .send({ kv: { KEY: 'updated' } });
+            .send({ expectedVersion: 1, ops: [{ op: 'set', key: 'KEY', value: 'updated' }] });
         expect(upd.status).toBe(200);
+        expect(upd.body.version).toBe(2);
         // Delete
         const del = await request(app)
             .delete(`/api/secrets/${id}`)
@@ -447,7 +466,7 @@ describe('Routes /api/secrets Community Admin access', () => {
         expect(res.body).toHaveLength(1);
     });
 
-    it('lets a Community admin import from a stack over HTTP', async () => {
+    it('lets a Community admin preview and apply an import from a stack over HTTP', async () => {
         const composeDir = process.env.COMPOSE_DIR!;
         const stackDir = path.join(composeDir, 'importstack');
         fs.mkdirSync(stackDir, { recursive: true });
@@ -459,12 +478,24 @@ describe('Routes /api/secrets Community Admin access', () => {
         const svc = SecretsService.getInstance();
         const { id } = svc.create({ name: 'import-http', kv: { X: '1' }, user: TEST_USERNAME });
 
-        const res = await request(app)
-            .post(`/api/secrets/${id}/import-from-stack`)
+        const preview = await request(app)
+            .post(`/api/secrets/${id}/import-from-stack/preview`)
             .set('Authorization', `Bearer ${adminToken()}`)
             .send({ nodeId: localNode.id, stackName: 'importstack', envFileBasename: '.env' });
-        expect(res.status).toBe(200);
-        expect(res.body.kv).toEqual({ IMPORT_KEY: 'hello' });
+        expect(preview.status).toBe(200);
+        expect(preview.body.added).toBe(1);
+        expect(preview.body.keys).toEqual([{ key: 'IMPORT_KEY', status: 'added' }]);
+        expect(JSON.stringify(preview.body)).not.toContain('hello');
+
+        const apply = await request(app)
+            .post(`/api/secrets/${id}/import-from-stack`)
+            .set('Authorization', `Bearer ${adminToken()}`)
+            .send({ nodeId: localNode.id, stackName: 'importstack', envFileBasename: '.env', expectedVersion: 1 });
+        expect(apply.status).toBe(200);
+        expect(apply.body).toEqual({ version: 2, added: 1, changed: 0, unchanged: 0 });
+        expect(JSON.stringify(apply.body)).not.toContain('hello');
+
+        expect(svc.getDecryptedKv(id)).toEqual({ X: '1', IMPORT_KEY: 'hello' });
     });
 
     it('lets a Community admin preview and execute a push over HTTP', async () => {
