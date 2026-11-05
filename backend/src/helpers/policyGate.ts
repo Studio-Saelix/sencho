@@ -302,8 +302,8 @@ export async function verifyPulledCandidates(
     if (!parsed) continue;
     let digests: string[] = [];
     try {
-      const info = (await docker.getImage(candidate.ref).inspect()) as { RepoDigests?: string[] };
-      digests = selectLocalRepoDigests(info.RepoDigests ?? [], parsed);
+      const info = (await docker.getImage(candidate.ref).inspect()) as { RepoDigests?: string[]; Id?: string };
+      digests = selectLocalRepoDigests(info.RepoDigests ?? [], parsed, info.Id);
     } catch {
       // The image is not on the node after a pull that was supposed to fetch it,
       // so it certainly is not provably the one that was scanned.

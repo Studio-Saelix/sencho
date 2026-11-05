@@ -31,6 +31,8 @@ export interface InspectedImage {
     RepoDigests: string[];
     Os: string;
     Architecture: string;
+    /** The image config ID; a local build's RepoDigest can repeat it. */
+    Id?: string;
 }
 
 /** Bounded read of `docker image inspect` (RepoDigests, OS, architecture) for a
@@ -39,7 +41,12 @@ export interface InspectedImage {
  * captured. */
 export async function defaultInspectImage(imageId: string): Promise<InspectedImage> {
     const inspect = await DockerController.getInstance().getDocker().getImage(`sha256:${imageId}`).inspect();
-    return { RepoDigests: inspect.RepoDigests ?? [], Os: inspect.Os, Architecture: inspect.Architecture };
+    return {
+        RepoDigests: inspect.RepoDigests ?? [],
+        Os: inspect.Os,
+        Architecture: inspect.Architecture,
+        ...(typeof inspect.Id === 'string' ? { Id: inspect.Id } : {}),
+    };
 }
 
 export interface DetectSelfDevBuildUpdateDeps {
@@ -66,7 +73,11 @@ export async function detectSelfDevBuildUpdate(
         return { kind: 'inconclusive', reason: 'Running image has no registry digests (not registry-backed or locally built)' };
     }
 
-    const localDigests = selectLocalRepoDigests(inspected.RepoDigests, { registry, repo, tag });
+    const localDigests = selectLocalRepoDigests(
+        inspected.RepoDigests,
+        { registry, repo, tag },
+        inspected.Id,
+    );
     if (localDigests.length === 0) {
         return { kind: 'inconclusive', reason: `Running image has no digest matching ${registry}/${repo}:${tag}` };
     }

@@ -1634,7 +1634,7 @@ export class ImageUpdateService {
                 return { hasUpdate: false, checkStatus: 'not_checkable', notCheckable: true };
             }
 
-            localDigests = selectLocalRepoDigests(repoDigests, parsed);
+            localDigests = selectLocalRepoDigests(repoDigests, parsed, inspect.Id);
             platform = { os: inspect.Os, architecture: inspect.Architecture };
         } catch {
             return {

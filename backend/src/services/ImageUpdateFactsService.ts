@@ -189,7 +189,7 @@ export class ImageUpdateFactsService {
                 const parsed = parseImageRef(ref);
                 const platform = { os: inspect.Os, architecture: inspect.Architecture };
                 const localDigests = parsed
-                    ? selectLocalRepoDigests(repoDigests, parsed)
+                    ? selectLocalRepoDigests(repoDigests, parsed, inspect.Id)
                     : repoDigests;
                 out.push({
                     ref,

@@ -96,6 +96,25 @@ describe('detectSelfDevBuildUpdate', () => {
     expect(compareDetailed).not.toHaveBeenCalled();
   });
 
+  it('treats a RepoDigest that repeats the image config ID as not registry-backed', async () => {
+    // A local build's self-referential RepoDigest is its config ID, not a
+    // registry digest; comparing it to the tracked tag would invent an update.
+    const compareDetailed = vi.fn();
+    const deps: DetectSelfDevBuildUpdateDeps = {
+      inspectImage: vi.fn().mockResolvedValue({
+        Id: LOCAL_DIGEST,
+        RepoDigests: [LOCAL_REPO_DIGEST],
+        Os: 'linux',
+        Architecture: 'amd64',
+      }),
+      compareDetailed,
+    };
+
+    const result = await detectSelfDevBuildUpdate(INPUT, deps);
+    expect(result.kind).toBe('inconclusive');
+    expect(compareDetailed).not.toHaveBeenCalled();
+  });
+
   it('returns inconclusive, not a throw, when inspectImage throws', async () => {
     const deps: DetectSelfDevBuildUpdateDeps = {
       inspectImage: vi.fn().mockRejectedValue(new Error('no such image')),

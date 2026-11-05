@@ -23,7 +23,7 @@ import { parseImageRef, resolveRegistryImageDigestForPlatform, type RegistryCred
 import { mapRegistryFailure } from './gitops/registryFailure';
 import { evidenceStateForFailureClass } from './securityEvidence';
 import { readNodePlatform, type NodePlatform } from './gitops/effectiveArtifactContext';
-import { canonicalNodePlatform, DEFAULT_ARCHITECTURE_VARIANT } from './gitops/platformNames';
+import { canonicalNodePlatform, DEFAULT_ARCHITECTURE_VARIANT, imagePlatformLabel } from './gitops/platformNames';
 import type { ArtifactServiceFailureClass } from './gitops/json';
 
 /**
@@ -239,6 +239,29 @@ export async function localImageExists(
     return platform.variant === undefined;
   } catch {
     return false;
+  }
+}
+
+/**
+ * The platform of the image the node holds for `ref`, in the scanner's
+ * cache-key vocabulary, or null when the image is absent or the daemon did not
+ * report a platform.
+ *
+ * This is the child an implicit service (one with no `platform:` override)
+ * runs: Compose starts whatever child the daemon holds. A non-pulling group
+ * that also names a platform uses this to decide whether the named and
+ * implicit entries are the same child, so the gate plans and reports it once.
+ */
+export async function localImagePlatform(nodeId: number, ref: string): Promise<string | null> {
+  try {
+    const info = await DockerController.getInstance(nodeId).getDocker().getImage(ref).inspect() as {
+      Os?: string;
+      Architecture?: string;
+      Variant?: string;
+    };
+    return imagePlatformLabel(info);
+  } catch {
+    return null;
   }
 }
 

@@ -289,8 +289,20 @@ const SHA256_DIGEST_RE = /^sha256:[0-9a-f]{64}$/i;
  * as "could not resolve" rather than a guessed match or update. Callers must
  * compare every candidate: Docker can list a stale index digest ahead of the
  * current one on the same image.
+ *
+ * `configId` is the image's `Id` from `docker image inspect`. A local build on
+ * the containerd image store records a self-referential RepoDigest whose digest
+ * is that config ID; it names no registry content, so it is filtered out here
+ * rather than compared against a tag or addressed as a remote image.
  */
-export function selectLocalRepoDigests(repoDigests: readonly string[], parsed: ParsedRef): string[] {
+export function selectLocalRepoDigests(
+    repoDigests: readonly string[],
+    parsed: ParsedRef,
+    configId?: string | null,
+): string[] {
+    const configDigest = typeof configId === 'string' && configId.trim() !== ''
+        ? configId.trim().toLowerCase()
+        : null;
     const valid = repoDigests
         .map((entry) => {
             const at = entry.indexOf('@');
@@ -302,6 +314,7 @@ export function selectLocalRepoDigests(repoDigests: readonly string[], parsed: P
     const seen = new Set<string>();
     for (const e of valid) {
         if (!repoDigestMatchesRef(e.entry, parsed)) continue;
+        if (configDigest !== null && e.digest.toLowerCase() === configDigest) continue;
         const key = e.digest.toLowerCase();
         if (seen.has(key)) continue;
         seen.add(key);

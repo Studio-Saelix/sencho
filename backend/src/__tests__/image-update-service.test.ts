@@ -186,8 +186,11 @@ describe('ImageUpdateService - image ref parsing (via checkImage)', () => {
     service = ImageUpdateService.getInstance();
   });
 
-  function makeMockDocker(repoDigests: string[] = []) {
-    const inspectFn = vi.fn().mockResolvedValue({ RepoDigests: repoDigests });
+  function makeMockDocker(repoDigests: string[] = [], id?: string) {
+    const inspectFn = vi.fn().mockResolvedValue({
+      RepoDigests: repoDigests,
+      ...(id ? { Id: id } : {}),
+    });
     return {
       getDocker: () => ({
         getImage: () => ({ inspect: inspectFn }),
@@ -257,6 +260,19 @@ describe('ImageUpdateService - image ref parsing (via checkImage)', () => {
     expect(result.hasUpdate).toBe(false);
     expect(result.notCheckable).toBeUndefined();
     expect(result.error).toContain('Could not resolve a local registry digest');
+  });
+
+  it('does not compare a local build self-referential config-ID RepoDigest against the registry', async () => {
+    // A local build on the containerd image store records its own config ID as
+    // a RepoDigest. It names no registry content, so there is nothing to compare
+    // and the check must not fabricate an update.
+    const configId = `sha256:${'d'.repeat(64)}`;
+    const docker = makeMockDocker([`registry-1.docker.io/library/nginx@${configId}`], configId);
+    const result = await service.checkImage(docker, 'nginx:latest');
+    expect(result.hasUpdate).toBe(false);
+    expect(result.notCheckable).toBeUndefined();
+    expect(result.error).toContain('Could not resolve a local registry digest');
+    expect(mockCompareLocalToRemoteTag).not.toHaveBeenCalled();
   });
 });
 

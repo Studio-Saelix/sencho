@@ -44,6 +44,7 @@ const notificationStub = { dispatchAlert: vi.fn() };
 const candidates = vi.hoisted(() => ({
   resolve: vi.fn(),
   localImageExists: vi.fn(),
+  localImagePlatform: vi.fn(),
   lastTagTime: vi.fn(),
   platform: { os: 'linux', architecture: 'amd64' } as { os: string; architecture: string } | null,
 }));
@@ -76,6 +77,8 @@ vi.mock('../services/candidateImage', async () => {
     nodePlatformFor: async () => candidates.platform,
     localImageExists: (nodeId: number, ref: string, platform?: { os: string; architecture: string } | null) =>
       candidates.localImageExists(nodeId, ref, platform),
+    localImagePlatform: (nodeId: number, ref: string) =>
+      candidates.localImagePlatform(nodeId, ref),
     localImageLastTagTime: (nodeId: number, ref: string) => candidates.lastTagTime(nodeId, ref),
     resolveCandidateImage: (nodeId: number, ref: string, platform: unknown) =>
       candidates.resolve(nodeId, ref, platform),
@@ -159,6 +162,7 @@ beforeEach(() => {
   composeStub.listStackImages.mockResolvedValue(['registry.example.com/web:latest']);
   candidates.platform = { os: 'linux', architecture: 'amd64' };
   candidates.localImageExists.mockResolvedValue(true);
+  candidates.localImagePlatform.mockResolvedValue(null);
   candidates.lastTagTime.mockResolvedValue(Date.now());
   candidates.resolve.mockResolvedValue(CANDIDATE_RESOLUTION);
   models.build.mockResolvedValue({
@@ -873,7 +877,10 @@ describe('compose mode (a plain up)', () => {
   });
 
   it('evaluates both the named and the local child when a non-pulling group mixes them', async () => {
+    // The daemon holds another platform's child, so the implicit service runs a
+    // different image than the one its sibling declares: both must be read.
     candidates.platform = { os: 'linux', architecture: 'arm64' };
+    candidates.localImagePlatform.mockResolvedValue('linux/amd64');
     modelWith([
       { name: 'named', declaredImage: 'registry.example.com/web:latest', hasBuild: false, pullPolicy: 'never', platform: 'linux/arm64', expectedReplicas: 1, dependsOn: [], hasHealthcheck: false },
       { name: 'implicit', declaredImage: 'registry.example.com/web:latest', hasBuild: false, pullPolicy: 'never', platform: null, expectedReplicas: 1, dependsOn: [], hasHealthcheck: false },
@@ -883,6 +890,52 @@ describe('compose mode (a plain up)', () => {
 
     const options = trivyStub.scanImagePreflight.mock.calls.map((call) => call[3]);
     expect(options).toEqual([{ platform: 'linux/arm64' }, undefined]);
+  });
+
+  it('plans one installed entry when the named and implicit children are the same', async () => {
+    // F9: the named service and the implicit service both read the daemon's
+    // arm64 child. Planning both scanned it twice and the block dialog counted
+    // two images; the duplicate collapses to one row.
+    candidates.platform = { os: 'linux', architecture: 'arm64' };
+    candidates.localImagePlatform.mockResolvedValue('linux/arm64');
+    trivyStub.scanImagePreflight.mockResolvedValue(mkScan({
+      id: 51,
+      highest_severity: 'CRITICAL',
+      critical_count: 1,
+      total_vulnerabilities: 1,
+    }));
+    modelWith([
+      { name: 'named', declaredImage: 'registry.example.com/web:latest', hasBuild: false, pullPolicy: 'never', platform: 'linux/arm64', expectedReplicas: 1, dependsOn: [], hasHealthcheck: false },
+      { name: 'implicit', declaredImage: 'registry.example.com/web:latest', hasBuild: false, pullPolicy: 'never', platform: null, expectedReplicas: 1, dependsOn: [], hasHealthcheck: false },
+    ]);
+
+    const result = await enforcePolicyPreDeploy('web', 1, { bypass: false, actor: 'u', imageSource: 'compose' });
+
+    expect(trivyStub.scanImagePreflight).toHaveBeenCalledTimes(1);
+    expect(trivyStub.scanImagePreflight).toHaveBeenCalledWith(
+      'registry.example.com/web:latest', 1, 'web', { platform: 'linux/arm64' },
+    );
+    expect(result.violations).toHaveLength(1);
+    expect(result.violations[0].platform).toBe('linux/arm64');
+    expect(result.evidence?.records.filter((record) => record.subject === 'installed')).toHaveLength(1);
+  });
+
+  it('plans one installed entry when services name the default variant and the bare architecture', async () => {
+    // linux/arm64/v8 and linux/arm64 are the same child. Grouping by the
+    // scanner's cache vocabulary keeps them in one group, so the ref is not
+    // planned and scanned twice under two labels.
+    candidates.platform = { os: 'linux', architecture: 'arm64' };
+    modelWith([
+      { name: 'a', declaredImage: 'registry.example.com/web:latest', hasBuild: false, pullPolicy: 'never', platform: 'linux/arm64/v8', expectedReplicas: 1, dependsOn: [], hasHealthcheck: false },
+      { name: 'b', declaredImage: 'registry.example.com/web:latest', hasBuild: false, pullPolicy: 'never', platform: 'linux/arm64', expectedReplicas: 1, dependsOn: [], hasHealthcheck: false },
+    ]);
+
+    await enforcePolicyPreDeploy('web', 1, { bypass: false, actor: 'u', imageSource: 'compose' });
+
+    expect(trivyStub.scanImagePreflight).toHaveBeenCalledTimes(1);
+    expect(trivyStub.scanImagePreflight).toHaveBeenCalledWith(
+      'registry.example.com/web:latest', 1, 'web', { platform: 'linux/arm64/v8' },
+    );
   });
 
   it('evaluates the local child of an implicit non-pulling group beside a platform that pulls', async () => {

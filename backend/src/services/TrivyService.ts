@@ -703,9 +703,17 @@ class TrivyService {
                 RepoDigests?: string[];
                 Id?: string;
             };
+            const configId = typeof info.Id === 'string' ? info.Id.toLowerCase() : null;
             if (info.RepoDigests && info.RepoDigests.length > 0) {
-                const digest = info.RepoDigests[0].split('@')[1];
-                if (digest) return digest;
+                for (const entry of info.RepoDigests) {
+                    const digest = entry.split('@')[1];
+                    if (!digest) continue;
+                    // A local build's self-referential RepoDigest is its config
+                    // ID, not registry content; the image ID is the honest
+                    // identity for that entry.
+                    if (configId !== null && digest.toLowerCase() === configId) continue;
+                    return digest;
+                }
             }
             return info.Id ?? null;
         } catch {
@@ -720,7 +728,10 @@ class TrivyService {
      *
      * Unlike {@link getImageDigest} this never falls back to the image config
      * ID: only a RepoDigest names content a registry can resolve, which is what
-     * a platform child scan needs. Every repo digest is offered to
+     * a platform child scan needs. A local build on the containerd image store
+     * records a self-referential RepoDigest whose digest is the config ID; that
+     * is not registry content, so it is rejected while a real repo digest is
+     * still accepted. Every repo digest is offered to
      * {@link selectLocalRepoDigests}, so an unrelated repository's leftover
      * digest is never used. The first matching digest is taken; a caller keys
      * the row and addresses the scan by this same digest, so the two cannot
@@ -731,11 +742,18 @@ class TrivyService {
             const parsed = parseImageRef(imageRef);
             if (!parsed) return null;
             const docker = DockerController.getInstance(nodeId).getDocker();
-            const info = (await docker.getImage(imageRef).inspect()) as { RepoDigests?: unknown };
+            const info = (await docker.getImage(imageRef).inspect()) as {
+                RepoDigests?: unknown;
+                Id?: unknown;
+            };
             const repoDigests = Array.isArray(info.RepoDigests)
                 ? info.RepoDigests.filter((entry): entry is string => typeof entry === 'string')
                 : [];
-            const digest = selectLocalRepoDigests(repoDigests, parsed)[0];
+            const digest = selectLocalRepoDigests(
+                repoDigests,
+                parsed,
+                typeof info.Id === 'string' ? info.Id : null,
+            )[0];
             return digest ? `${parsed.registry}/${parsed.repo}@${digest}` : null;
         } catch (err) {
             diag(`getRepoDigestRef: read failed for ${imageRef}: ${getErrorMessage(err, 'unknown')}`);

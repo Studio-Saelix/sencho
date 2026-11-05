@@ -364,6 +364,27 @@ describe('trivy image platform selection', () => {
     expect(state.calls).toHaveLength(0);
   });
 
+  it('does not address a local build by the RepoDigest that repeats its config ID', async () => {
+    // The containerd image store records a local build's own config ID as a
+    // self-referential RepoDigest. Treating that as a registry digest sent the
+    // image to Docker Hub, which answered UNAUTHORIZED instead of the intended
+    // "no registry digest" failure for a child the node cannot provide.
+    const configId = `sha256:${'5'.repeat(64)}`;
+    state.local = {
+      Id: configId,
+      RepoDigests: [`registry.example.com/web@${configId}`],
+      Os: 'linux',
+      Architecture: 'arm64',
+    };
+
+    await expect(
+      TrivyService.getInstance().scanImage('registry.example.com/web:1.2', 1, {
+        platform: 'linux/amd64',
+      }),
+    ).rejects.toThrow(/no registry digest/);
+    expect(state.calls).toHaveLength(0);
+  });
+
   it('leaves a candidate addressed by its own manifest digest without a selector', async () => {
     // The digest-addressed ref is the amd64 child, so the report describes it.
     state.forcedReadArchitecture = 'amd64';

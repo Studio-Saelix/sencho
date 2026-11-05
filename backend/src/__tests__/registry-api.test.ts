@@ -520,6 +520,23 @@ describe('selectLocalRepoDigests', () => {
     ], parsed('nginx:latest'));
     expect(digests).toEqual([DIGEST_A, DIGEST_B]);
   });
+
+  it('does not treat a RepoDigest that equals the image config ID as a registry digest', () => {
+    // A local build on the containerd image store records its own config ID as
+    // a self-referential RepoDigest. It names no registry content, so it must
+    // not be compared to a tag or addressed as a remote image.
+    const configId = `sha256:${'d'.repeat(64)}`;
+    expect(selectLocalRepoDigests(
+      [`nginx@${configId}`, `nginx@${DIGEST_A}`],
+      parsed('nginx:latest'),
+      configId,
+    )).toEqual([DIGEST_A]);
+  });
+
+  it('returns empty when every matching RepoDigest is the image config ID', () => {
+    const configId = `sha256:${'d'.repeat(64)}`;
+    expect(selectLocalRepoDigests([`nginx@${configId}`], parsed('nginx:latest'), configId)).toEqual([]);
+  });
 });
 
 // ─── compareLocalToRemoteTag ─────────────────────────────────────────────

@@ -434,7 +434,7 @@ export class UpdatePreviewService {
                             emptyReason: 'not_checkable',
                         };
                     }
-                    const digests = selectLocalRepoDigests(repoDigests, parsed);
+                    const digests = selectLocalRepoDigests(repoDigests, parsed, inspect.Id);
                     return {
                         digests,
                         platform: { os: inspect.Os, architecture: inspect.Architecture },

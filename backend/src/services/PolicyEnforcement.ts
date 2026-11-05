@@ -49,6 +49,7 @@ import {
     isLatestImageTag,
     localImageExists,
     localImageLastTagTime,
+    localImagePlatform,
     nodePlatformFor,
     normalizedPullPolicy,
     pullPolicyRefreshAfterMs,
@@ -57,6 +58,7 @@ import {
     type CandidateResolution,
     type ImageSource,
 } from './candidateImage';
+import { platformCacheKey } from './gitops/platformNames';
 import { buildEffectiveServiceModel, type EffectiveServiceSpec } from './effectiveServiceModel';
 import {
     resolveSecurityEvidencePolicy,
@@ -645,6 +647,17 @@ async function planCandidates(
         // prove. Presence is a per-platform fact too: a local copy of another
         // platform's child does not stop Compose from fetching this one, so a
         // present ref is not the same as a present image for the service.
+        // Grouping uses the scanner's cache-key form: `linux/arm64/v8` and
+        // `linux/arm64` are one child, so naming the default variant and naming
+        // only the architecture must not plan or resolve it twice.
+        const platformKey = (platform: { os: string; architecture: string; variant?: string } | null): string =>
+            platform
+                ? `${platform.os}/${platform.architecture}${platform.variant ? `/${platform.variant}` : ''}`
+                : '';
+        const platformGroupKey = (platform: { os: string; architecture: string; variant?: string }): string => {
+            const label = platformKey(platform);
+            return platformCacheKey(label) ?? label;
+        };
         const byPlatform = new Map<string, {
             platform: { os: string; architecture: string; variant?: string } | null;
             invalid?: string;
@@ -653,9 +666,7 @@ async function planCandidates(
         for (const spec of runnable) {
             const effective = effectiveServicePlatform(spec.platform, nodePlatform);
             const key = effective.ok
-                ? (effective.platform
-                    ? `${effective.platform.os}/${effective.platform.architecture}${effective.platform.variant ? `/${effective.platform.variant}` : ''}`
-                    : 'platform-unknown')
+                ? (effective.platform ? platformGroupKey(effective.platform) : 'platform-unknown')
                 : `invalid:${effective.reason}`;
             const group = byPlatform.get(key) ?? {
                 platform: effective.ok ? effective.platform : null,
@@ -696,33 +707,54 @@ async function planCandidates(
         // entries let a policy-blocked child run because another platform's
         // child was clean. The group's platform is kept when a service
         // declared it, because a multi-platform image store can hold more than
-        // one child under one tag. The empty string is the no-platform entry:
-        // the service declared no override (or it cannot be read), so the
-        // local image's own child is what it runs.
-        const nonPullingPlatforms = new Set<string>();
-        const platformKey = (platform: { os: string; architecture: string; variant?: string } | null): string =>
-            platform
-                ? `${platform.os}/${platform.architecture}${platform.variant ? `/${platform.variant}` : ''}`
-                : '';
+        // one child under one tag. The local-child entry is the service that
+        // declared no override (or whose override cannot be read): no platform
+        // is named, and the scanner reads the child the daemon holds.
+        //
+        // Entries are keyed by the child they read, not by the service that
+        // reads it. A named platform and an implicit service can resolve to the
+        // same child (the daemon holds the platform the sibling declared); two
+        // entries there scanned the same image twice and the block dialog
+        // reported "2 images" for one. The local child is read once per ref,
+        // and an unreadable platform is kept as its own entry because it cannot
+        // be proven the same as any named one.
+        const installedChildren = new Map<string, string | null>();
+        let localChildKey: string | null | undefined;
+        const localChild = async (): Promise<string | null> => {
+            if (localChildKey === undefined) {
+                const label = await localImagePlatform(nodeId, ref);
+                localChildKey = label ? platformCacheKey(label) : null;
+            }
+            return localChildKey;
+        };
+        const addInstalledChild = (childKey: string, label: string | null): void => {
+            const existing = installedChildren.get(childKey);
+            if (existing === undefined) {
+                installedChildren.set(childKey, label);
+                return;
+            }
+            // The same child: a named platform says more about it than the
+            // implicit entry, so keep that label for the evidence and dialog.
+            if (existing === null && label !== null) installedChildren.set(childKey, label);
+        };
         const declaresPlatform = (spec: EffectiveServiceSpec): boolean =>
             typeof spec.platform === 'string' && spec.platform.trim() !== '';
         /**
          * Add the installed entries for services in `group` that will not be
          * replaced by a pull. A service that declared `platform:` runs that
          * child; a service that declared none (or whose override cannot be
-         * read) runs whatever child the daemon holds, so no platform is named
-         * and the scanner reads the local image itself.
+         * read) runs whatever child the daemon holds.
          */
-        const addInstalledEntries = (
+        const addInstalledEntries = async (
             group: { platform: { os: string; architecture: string; variant?: string } | null },
             services: readonly EffectiveServiceSpec[],
-        ): void => {
+        ): Promise<void> => {
             if (services.length === 0) return;
             if (group.platform && services.some(declaresPlatform)) {
-                nonPullingPlatforms.add(platformKey(group.platform));
+                addInstalledChild(platformGroupKey(group.platform), platformKey(group.platform));
             }
             if (!group.platform || services.some((spec) => !declaresPlatform(spec))) {
-                nonPullingPlatforms.add('');
+                addInstalledChild((await localChild()) ?? '', null);
             }
         };
         for (const [key, group] of byPlatform) {
@@ -756,7 +788,7 @@ async function planCandidates(
             };
             const pulling = group.services.filter(pullsFor);
             if (pulling.length === 0) {
-                addInstalledEntries(group, group.services);
+                await addInstalledEntries(group, group.services);
                 continue;
             }
             const pullingSet = new Set(pulling);
@@ -764,7 +796,7 @@ async function planCandidates(
             if (group.invalid) {
                 // Nothing can be pulled through an unreadable override; the
                 // non-pulling siblings still run their local child.
-                addInstalledEntries(group, notPulling);
+                await addInstalledEntries(group, notPulling);
                 entries.push({
                     kind: 'unresolved',
                     resolution: {
@@ -789,7 +821,7 @@ async function planCandidates(
             if (withPlatform.kind === 'unresolved') {
                 // The pull will not happen, so nothing replaces the tag: the
                 // non-pulling siblings still run their old local child.
-                addInstalledEntries(group, notPulling);
+                await addInstalledEntries(group, notPulling);
             }
             entries.push(withPlatform.kind === 'unresolved'
                 ? {
@@ -805,14 +837,14 @@ async function planCandidates(
         // and the pull succeeds, its remaining services run the pulled child;
         // when the resolution fails and nothing is pulled, their installed
         // child is added here too.
-        if (entries.length === 0 && nonPullingPlatforms.size === 0) {
+        if (entries.length === 0 && installedChildren.size === 0) {
             plan.set(ref, [{ kind: 'installed', why: 'not_pulled' }]);
         } else {
-            for (const platform of nonPullingPlatforms) {
+            for (const label of installedChildren.values()) {
                 entries.push({
                     kind: 'installed',
                     why: 'not_pulled',
-                    ...(platform ? { platform } : {}),
+                    ...(label ? { platform: label } : {}),
                 });
             }
             plan.set(ref, entries);
