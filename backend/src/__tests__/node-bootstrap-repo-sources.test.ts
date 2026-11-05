@@ -255,6 +255,18 @@ describe('sources outside docker.list and docker.sources', () => {
       expect(result.sourceVerified).toBe(false);
     });
 
+    it('verifies an official source written with the host in upper case', () => {
+      const result = parse('amd64', block(CUSTOM_LIST, deb('arch=amd64', 'HTTPS://Download.Docker.com/linux/ubuntu')), dockerAscBlock());
+      expect(result.sourceVerified).toBe(true);
+    });
+
+    it('does not take a mirror path that contains the host name for a Docker source', () => {
+      const mirror = 'deb https://artifactory.corp/remote/download.docker.com/linux/ubuntu noble stable';
+      const result = parse('amd64', block(MAIN_LIST, `${mirror}\n${deb('arch=amd64')}`), dockerAscBlock());
+      expect(result.sourceVerified).toBe(true);
+      expect(parse('amd64', block(CUSTOM_LIST, mirror), dockerAscBlock()).dockerSourceConfigured).toBe(false);
+    });
+
     it('rejects a custom source for another path or scheme on Docker\'s host', () => {
       expect(parse('amd64', block(CUSTOM_LIST, deb('arch=amd64', 'https://download.docker.com/linux/debian')), dockerAscBlock()).sourceVerified).toBe(false);
       expect(parse('amd64', block(CUSTOM_LIST, deb('arch=amd64', 'http://download.docker.com/linux/ubuntu')), dockerAscBlock()).sourceVerified).toBe(false);
@@ -311,7 +323,7 @@ describe('sources outside docker.list and docker.sources', () => {
       // Both keyrings hold Docker's key, so only the disagreement is wrong.
       expect(result.keyringVerified).toBe(true);
       expect(result.sourceVerified).toBe(false);
-      expect(result.problem).toMatch(/different Signed-By values/);
+      expect(result.problem).toMatch(/different signed-by values/i);
     });
 
     it('rejects the same disagreement between the two formats and the main list', () => {
@@ -342,7 +354,7 @@ describe('sources outside docker.list and docker.sources', () => {
         keyBlock(GPG_PATH, DOCKER_KEY_GPG),
       );
       expect(result.sourceVerified).toBe(false);
-      expect(result.problem).toMatch(/different Signed-By values for .* noble/);
+      expect(result.problem).toMatch(/different signed-by values for .* noble/i);
     });
 
     it('rejects a deb-src twin that names another keyring, and a trailing-slash twin', () => {
@@ -362,6 +374,17 @@ describe('sources outside docker.list and docker.sources', () => {
       expect(parse('amd64', block(LIST_FILE, deb('arch=amd64 trusted=no')), block(CUSTOM_LIST, deb('arch=amd64')), dockerAscBlock()).sourceVerified).toBe(false);
       const agreeing = parse('amd64', block(LIST_FILE, deb('arch=amd64 trusted=no')), block(CUSTOM_LIST, deb('arch=amd64 trusted=no')), dockerAscBlock());
       expect(agreeing.sourceVerified).toBe(true);
+    });
+
+    it.each([
+      ['check-valid-until=no'],
+      ['valid-until-min=100'],
+      ['date-max-future=10'],
+    ])('rejects two entries for one source that disagree on %s, which apt refuses', (option) => {
+      const result = parse('amd64', block(LIST_FILE, deb(`arch=amd64 ${option}`)), block(CUSTOM_LIST, deb('arch=amd64')), dockerAscBlock());
+      expect(result.sourceVerified).toBe(false);
+      expect(result.problem).toContain(option.split('=')[0]);
+      expect(parse('amd64', block(LIST_FILE, deb(`arch=amd64 ${option}`)), block(CUSTOM_LIST, deb(`arch=amd64 ${option}`)), dockerAscBlock()).sourceVerified).toBe(true);
     });
 
     it('requires every Docker entry to include the host architecture, even when another entry covers it', () => {
@@ -424,6 +447,12 @@ describe('sources outside docker.list and docker.sources', () => {
   });
 
   describe('an unknown host release', () => {
+    it('still reports a contradiction found in the same entry', () => {
+      const result = parseDockerRepo([block(LIST_FILE, deb('arch=amd64 trusted=yes')), dockerAscBlock()].join('\n'), '', 'amd64');
+      expect(result.sourceVerified).toBe(false);
+      expect(result.problem).toMatch(/weakens signature checking/);
+    });
+
     it('leaves a good source unknown rather than naming the wrong suite', () => {
       const result = parseDockerRepo([block(LIST_FILE, deb('arch=amd64')), dockerAscBlock()].join('\n'), '', 'amd64');
       expect(result.sourceVerified).toBeNull();

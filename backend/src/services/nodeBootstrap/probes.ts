@@ -495,6 +495,8 @@ const DOCKER_HOST = 'download.docker.com';
 
 /** apt options that switch off or weaken signature checking for a source. */
 const INSECURE_SOURCE_OPTIONS = ['trusted', 'allow-insecure', 'allow-weak', 'allow-downgrade-to-insecure'];
+/** Options apt requires every entry for one source (URI and suite) to agree on, an unset one counting as a different value. */
+const SOURCE_AGREEMENT_OPTIONS = ['trusted', 'check-valid-until', 'valid-until-min', 'valid-until-max', 'check-date', 'date-max-future', 'inrelease-path'];
 const FALSE_OPTION_VALUES = new Set(['no', 'false', 'without', 'off', 'disable', '0']);
 
 /** Maps the two machine types `uname -m` reports on hosts the verifier handles to apt's names, and returns any other value unchanged. */
@@ -557,17 +559,21 @@ const ARCHITECTURE_OPTIONS = new Set(Object.values(LIST_OPTION_NAMES));
 /**
  * The name an option has in the deb822 vocabulary. apt reads the one-line
  * `arch`, `arch+`, `arch-` and `signed-by` options only in these exact
- * spellings (another spelling is ignored, so `Signed-By=` names no keyring),
- * but it honors the signing options in any letter case, so those always count.
+ * spellings (another spelling is ignored, so `Signed-By=` names no keyring).
+ * The signing and conflict options count in any letter case, because a
+ * spelling one apt version ignores another may read; counting it fails closed.
  */
 function oneLineOptionName(rawKey: string): string {
   if (Object.hasOwn(LIST_OPTION_NAMES, rawKey)) return LIST_OPTION_NAMES[rawKey];
   const lower = rawKey.toLowerCase();
-  return INSECURE_SOURCE_OPTIONS.includes(lower) ? lower : rawKey;
+  return INSECURE_SOURCE_OPTIONS.includes(lower) || SOURCE_AGREEMENT_OPTIONS.includes(lower) ? lower : rawKey;
 }
 
+/** Docker's host as a URI host (after a scheme, an option bracket or whitespace), not a path segment on another host. */
+const DOCKER_HOST_MENTION = /(?:^|[\s[@]|:\/\/)download\.docker\.com(?![a-z0-9-])/i;
+
 function mentionsDockerHost(text: string): boolean {
-  return text.toLowerCase().includes(DOCKER_HOST);
+  return DOCKER_HOST_MENTION.test(text);
 }
 
 function parseListSource(content: string, conventional: boolean): ParsedSourceFile {
@@ -671,8 +677,14 @@ function parseDeb822Source(content: string): ParsedSourceFile {
   return { entries, invalid, empty: paragraphs.length === 0 };
 }
 
+/** The URI as apt compares it: scheme and host in lower case, no trailing slash. */
 function normalizeUri(uri: string): string {
-  return uri.replace(/\/+$/, '');
+  try {
+    const url = new URL(uri);
+    return `${url.protocol}//${url.host}${url.pathname}`.replace(/\/+$/, '');
+  } catch {
+    return uri.replace(/\/+$/, '');
+  }
 }
 
 function isDockerHostUri(uri: string): boolean {
@@ -713,8 +725,6 @@ function checkBinaryEntry(entry: AptSourceEntry, codename: string, arch: string,
   if (entry.uris.length !== 1 || normalizeUri(entry.uris[0]) !== OFFICIAL_DOCKER_URI) {
     return fail(`the source points at ${entry.uris.join(' ') || 'no URI'}, not ${OFFICIAL_DOCKER_URI}`);
   }
-  if (!codename) return unknownCheck('the host release is unknown, so the source suite cannot be checked');
-  if (!entry.suites.includes(codename)) return fail(`the suite is ${entry.suites.join(' ') || 'missing'}, not ${codename}`);
   if (!entry.components.includes('stable')) return fail('the source does not enable the stable component');
   const weakened = insecureOption((name) => entry.options.get(name));
   if (weakened) return fail(`the source sets ${weakened}, which weakens signature checking`);
@@ -724,14 +734,17 @@ function checkBinaryEntry(entry: AptSourceEntry, codename: string, arch: string,
   const supported = supportsArchitecture(entry.options, arch);
   if (supported === null) return unknownCheck('the host architecture is unknown, so the source architectures cannot be checked');
   if (!supported) return fail(`the source does not provide packages for the ${arch} architecture`);
+  // Last, so that a contradiction found above is not hidden by an unknown release.
+  if (!codename) return unknownCheck('the host release is unknown, so the source suite cannot be checked');
+  if (!entry.suites.includes(codename)) return fail(`the suite is ${entry.suites.join(' ') || 'missing'}, not ${codename}`);
   return null;
 }
 
-/** A signing option one entry sets for a source (URI and suite), which apt requires every entry for that source to agree on. */
+/** An option one entry sets for a source (URI and suite), which apt requires every entry for that source to agree on. */
 interface SigningSetting {
   path: string;
   target: string;
-  option: 'Signed-By' | 'Trusted';
+  option: string;
   value: string;
 }
 
@@ -779,13 +792,14 @@ function verifySourceFile(
       if (check) verdict.problems.push(check);
     }
     const signedBy = entry.options.get('signed-by')?.trim().replace(/\s+/g, ' ');
-    const trusted = entry.options.get('trusted');
-    const trustedValue = trusted === undefined ? 'unset' : weakensSignatures(trusted) ? 'yes' : 'no';
     for (const uri of entry.uris) {
       for (const suite of entry.suites) {
         const target = `${normalizeUri(uri)} ${suite}`;
-        if (signedBy) verdict.signing.push({ path: file.path, target, option: 'Signed-By', value: signedBy });
-        verdict.signing.push({ path: file.path, target, option: 'Trusted', value: trustedValue });
+        if (signedBy) verdict.signing.push({ path: file.path, target, option: 'signed-by', value: signedBy });
+        for (const option of SOURCE_AGREEMENT_OPTIONS) {
+          const value = entry.options.get(option)?.trim().toLowerCase();
+          verdict.signing.push({ path: file.path, target, option, value: value === undefined ? 'unset' : option === 'trusted' && weakensSignatures(value) ? 'yes' : value });
+        }
       }
     }
   }
@@ -794,10 +808,10 @@ function verifySourceFile(
 
 /**
  * apt rejects its whole source list when two entries for one URI and suite
- * disagree on the keyring (Signed-By) or on whether signatures are trusted, so
- * a preserved configuration must not do that. An entry that does not set
- * Signed-By agrees with any value; one that does not set Trusted disagrees with
- * an explicit one.
+ * disagree on the keyring (Signed-By) or on one of the agreement options
+ * (Trusted, Check-Valid-Until and the like), so a preserved configuration must
+ * not do that. An entry that does not set Signed-By agrees with any value; one
+ * that leaves another option unset disagrees with an entry that sets it.
  */
 function signingConflict(verdicts: SourceFileVerdict[]): string | null {
   const seen = new Map<string, { path: string; value: string }>();
