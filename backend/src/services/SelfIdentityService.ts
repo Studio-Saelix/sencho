@@ -2,7 +2,7 @@ import fs from 'fs/promises';
 import DockerController from './DockerController';
 import { classifyBuildChannel, isSenchoDevRepository, type BuildChannel } from '../helpers/selfUpdateCompose';
 import { defaultInspectImage } from './selfDevBuildDetect';
-import { parseImageRef, selectLocalRepoDigest } from './registry-api';
+import { configIdForLocalBuild, parseImageRef, selectLocalRepoDigest } from './registry-api';
 import { getSenchoVersion } from './CapabilityRegistry';
 import { withTimeout } from '../utils/withTimeout';
 
@@ -315,7 +315,11 @@ class SelfIdentityService {
     const parsed = parseImageRef(imageRef);
     if (!parsed) return null;
     const inspected = await withTimeout(defaultInspectImage(imageIdHex), 2000, 'build revision inspect');
-    return selectLocalRepoDigest(inspected.RepoDigests ?? [], parsed, inspected.Id);
+    return selectLocalRepoDigest(
+      inspected.RepoDigests ?? [],
+      parsed,
+      configIdForLocalBuild(inspected.Id, inspected.Identity),
+    );
   }
 
   /** True when the given container ID or name matches the running Sencho container. Accepts short or full IDs. */

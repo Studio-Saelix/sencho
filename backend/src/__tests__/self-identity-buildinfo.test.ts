@@ -142,6 +142,21 @@ describe('SelfIdentityService.getBuildInfo', () => {
     expect(svc.getBuildInfo().revision).toBeNull();
   });
 
+  it('reports a pulled containerd image digest even when its Id equals the RepoDigest', async () => {
+    // On the containerd store a pulled image's Id is the registry manifest
+    // digest, so equality is provenance, not a local build.
+    const selfDigest = `sha256:${DIGEST}`;
+    mockInspectImage.mockResolvedValue({
+      Id: selfDigest,
+      Identity: { Pull: [{ Repository: 'ghcr.io/studio-saelix/sencho-dev' }] },
+      RepoDigests: [`ghcr.io/studio-saelix/sencho-dev@${selfDigest}`],
+      Os: 'linux',
+      Architecture: 'amd64',
+    });
+    const svc = await initWith('ghcr.io/studio-saelix/sencho-dev:dev');
+    await until(() => expect(svc.getBuildInfo().revision).toBe(selfDigest));
+  });
+
   it('derives the revision from a pinned dev-<sha> tag without an image inspect', async () => {
     const svc = await initWith('ghcr.io/studio-saelix/sencho-dev:dev-abc1234');
     await until(() => expect(svc.getBuildInfo().revision).toBe('dev-abc1234'));
