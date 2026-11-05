@@ -6455,10 +6455,13 @@ paths:
         A refusal writes nothing, so the same `idempotencyKey` can be sent again after a new
         preview.
 
-        Sencho restores and verifies the point into a staging volume, captures a stopped
-        pre-restore point of the current data, stops and fences every container that mounts
-        the volume, swaps the contents, removes the originals, and restarts what was
-        running. The operation is asynchronous: read it with `GET /api/recovery/operations/{id}`,
+        Sencho restores and verifies the point into a staging volume and removes it, fences and
+        stops every container that mounts the volume, captures a stopped pre-restore point of the
+        current data, swaps the contents, removes the originals, and restarts what was running.
+        A container or stack that starts using the volume after the fence aborts before the point
+        with `dependents_changed`; one that is running while the point is captured makes the point
+        fail with `pre_restore_failed` and is never kept as the safety copy. The operation is
+        asynchronous: read it with `GET /api/recovery/operations/{id}`,
         whose `result.restore` carries the intent id, phase, fence state and outcome class. A
         state that cannot be proven ends `completion_unknown` and is settled with
         `POST /api/recovery/restores/{intentId}/resolve`. When Sencho restarts mid-restore, startup
@@ -6473,11 +6476,11 @@ paths:
         `507 insufficient_space`. Errors found after admission answer `202` and show up on
         `GET /api/recovery/operations/{id}`, where the operation ends `failed`, `partial` (the
         data is committed but the originals could not be removed, or the fence could not be
-        released) or `completion_unknown`, with the class in `errorClass`: `pre_restore_failed`,
-        `fence_unavailable` (a container start was still unanswered, with nothing stopped, or a
-        container could not be fenced and the rollback restarted what had stopped),
-        `dependents_changed` (a container set that changed at the fence), `cleanup_failed`, and
-        the rest of the class list.
+        released) or `completion_unknown`, with the class in `errorClass`: `pre_restore_failed`
+        (the point could not be taken complete and stopped), `fence_unavailable` (a container
+        start was still unanswered, with nothing stopped, or a container could not be fenced and
+        the rollback restarted what had stopped), `dependents_changed` (a container or stack that
+        appeared after the fence), `cleanup_failed`, and the rest of the class list.
         A request to the new-volume route naming `staged_overwrite` is refused with
         `reason: wrong_route`.
         Only a Full Admin API token may call it; any other scope is refused with `403 SCOPE_DENIED`.

@@ -215,6 +215,45 @@ function successHelper(overrides: Array<{ action: string; exitCode: number; stat
   });
 }
 
+/**
+ * Run `appeared` the first time the pipeline lists containers after the fence
+ * has stopped `c1`: the window between the fence and the pre-restore point.
+ */
+function afterFence(fake: ReturnType<typeof fakeDocker>, appeared: () => void): void {
+  const docker = fake.docker as unknown as {
+    listContainers: (...args: unknown[]) => Promise<unknown>;
+  };
+  const list = docker.listContainers.bind(docker);
+  let done = false;
+  docker.listContainers = async (...args: unknown[]) => {
+    if (!done && fake.calls.includes('stop:c1')) {
+      done = true;
+      appeared();
+    }
+    return list(...args);
+  };
+}
+
+/**
+ * Run `appeared` the first time the pipeline reads a volume after the fence has
+ * stopped `c1`: before the dependent resolution of the pre-restore recheck reads
+ * its recorded stacks.
+ */
+function afterFenceVolumeRead(fake: ReturnType<typeof fakeDocker>, appeared: () => void): void {
+  const docker = fake.docker as unknown as {
+    getVolume: (name: string) => unknown;
+  };
+  const getVolume = docker.getVolume.bind(docker);
+  let done = false;
+  docker.getVolume = (name: string) => {
+    if (!done && fake.calls.includes('stop:c1')) {
+      done = true;
+      appeared();
+    }
+    return getVolume(name);
+  };
+}
+
 describe('a staged overwrite that succeeds', () => {
   it('stages, fences, protects, materializes, swaps, cleans up and restarts', async () => {
     const member = container({
@@ -319,6 +358,107 @@ describe('a staged overwrite that fails before anything live moves', () => {
     expect(fake.containers.get('c1')?.State).toBe('running');
     expect(fake.calls.some((call) => call === 'start:nonexistent')).toBe(false);
     expect(intents.RestoreIntentStore.getInstance().get(seeded.intentId)?.phase).toBe('rolled_back');
+  });
+
+  it('fails with pre_restore_failed when a new container is running while the point is taken', async () => {
+    const member = container({ Id: 'c1', State: 'running', Mounts: [{ Type: 'volume', Name: VOLUME }] });
+    const fake = fakeDocker({ volumes: [{ name: VOLUME }], containers: [member] });
+    const seeded = seed({ createdAt: fake.volumes.get(VOLUME)?.createdAt ?? '', members: [member] });
+    const engine = scriptedEngine({
+      createPoint: async () => {
+        // It appeared after the fence, while the capture was reading the volume.
+        fake.containers.set('intruder', container({
+          Id: 'intruder', State: 'running', Mounts: [{ Type: 'volume', Name: VOLUME }],
+        }));
+        return {
+          ok: true as const,
+          evidence: {
+            snapshotId: 'snap-live',
+            capture: { fileCount: 2, byteCount: 20, skippedCount: 0 },
+            exclusions: [],
+            consistency: 'crash_consistent_live' as const,
+          },
+        };
+      },
+    });
+    const { outcomes } = await run({ fake, helper: successHelper(), engine, seeded });
+
+    expect(outcomes).toEqual([{ state: 'failed', errorClass: 'pre_restore_failed' }]);
+    // The point is refused before anything is copied into the live volume.
+    expect(engine.restoreCalls.some((call) => call.mode === 'staged_overwrite')).toBe(false);
+    expect(fake.calls).not.toContain('start:intruder');
+    const intent = intents.RestoreIntentStore.getInstance().get(seeded.intentId);
+    expect(intent?.phase).toBe('rolled_back');
+    expect(intent?.fenceState).toBe('released');
+    // A live-consistent point must not be left looking like a usable safety copy.
+    const preRestore = points.RecoveryPointStore.getInstance().get(intent?.preRestorePointId ?? '');
+    expect(preRestore?.status).toBe('failed');
+    expect(preRestore?.failureClass).toBe('pre_restore_failed');
+    expect(fake.containers.get('c1')?.State).toBe('running');
+    expect(fake.containers.get('c1')?.HostConfig.RestartPolicy).toEqual({ Name: 'always' });
+    expect(points.RecoveryPointStore.getInstance().listHolds(seeded.pointId)).toEqual([]);
+  });
+
+  it.each(['crash_consistent_live', 'unknown'] as const)(
+    'fails with pre_restore_failed when the point is labelled %s',
+    async (consistency) => {
+      const member = container({ Id: 'c1', State: 'running', Mounts: [{ Type: 'volume', Name: VOLUME }] });
+      const fake = fakeDocker({ volumes: [{ name: VOLUME }], containers: [member] });
+      const seeded = seed({ createdAt: fake.volumes.get(VOLUME)?.createdAt ?? '', members: [member] });
+      const engine = scriptedEngine({
+        createPoint: async () => ({
+          ok: true as const,
+          evidence: { ...DEFAULT_CAPTURE, consistency },
+        }),
+      });
+      const { outcomes } = await run({ fake, helper: successHelper(), engine, seeded });
+
+      expect(outcomes).toEqual([{ state: 'failed', errorClass: 'pre_restore_failed' }]);
+      expect(engine.restoreCalls.some((call) => call.mode === 'staged_overwrite')).toBe(false);
+      const intent = intents.RestoreIntentStore.getInstance().get(seeded.intentId);
+      const preRestore = points.RecoveryPointStore.getInstance().get(intent?.preRestorePointId ?? '');
+      expect(preRestore?.status).toBe('failed');
+      expect(fake.containers.get('c1')?.State).toBe('running');
+    },
+  );
+
+  it('aborts before taking the point when a container appears after the fence', async () => {
+    const member = container({ Id: 'c1', State: 'running', Mounts: [{ Type: 'volume', Name: VOLUME }] });
+    const fake = fakeDocker({ volumes: [{ name: VOLUME }], containers: [member] });
+    const seeded = seed({ createdAt: fake.volumes.get(VOLUME)?.createdAt ?? '', members: [member] });
+    afterFence(fake, () => {
+      fake.containers.set('c2', container({
+        Id: 'c2', State: 'running', Mounts: [{ Type: 'volume', Name: VOLUME }],
+      }));
+    });
+    const engine = scriptedEngine();
+    const { outcomes } = await run({ fake, helper: successHelper(), engine, seeded });
+
+    expect(outcomes).toEqual([{ state: 'failed', errorClass: 'dependents_changed' }]);
+    // No point was created for a volume a new container was using.
+    expect(engine.createPointCalls).toBe(0);
+    const intent = intents.RestoreIntentStore.getInstance().get(seeded.intentId);
+    expect(intent?.preRestorePointId).toBeNull();
+    expect(intent?.phase).toBe('rolled_back');
+    expect(intent?.fenceState).toBe('released');
+    expect(fake.containers.get('c1')?.State).toBe('running');
+    expect(fake.calls).toContain('start:c1');
+  });
+
+  it('aborts before taking the point when a stack starts declaring the volume after the fence', async () => {
+    const member = container({ Id: 'c1', State: 'running', Mounts: [{ Type: 'volume', Name: VOLUME }] });
+    const fake = fakeDocker({ volumes: [{ name: VOLUME }], containers: [member] });
+    const createdAt = fake.volumes.get(VOLUME)?.createdAt ?? '';
+    const seeded = seed({ createdAt, members: [member] });
+    recordDependentStacks(seeded.intentId, [STACK]);
+    afterFenceVolumeRead(fake, () => observeDependents(createdAt, [STACK, 'stack-late']));
+    const engine = scriptedEngine();
+    const { outcomes } = await run({ fake, helper: successHelper(), engine, seeded });
+
+    expect(outcomes).toEqual([{ state: 'failed', errorClass: 'dependents_changed' }]);
+    expect(engine.createPointCalls).toBe(0);
+    expect(intents.RestoreIntentStore.getInstance().get(seeded.intentId)?.preRestorePointId).toBeNull();
+    expect(fake.containers.get('c1')?.State).toBe('running');
   });
 
   it('does not restart a workload when the swap ends in an unknown state', async () => {

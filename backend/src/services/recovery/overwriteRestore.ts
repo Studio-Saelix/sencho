@@ -882,6 +882,14 @@ async function fenceWorkloads(ctx: OverwriteRunContext, state: PipelineState): P
 /** A complete root point of the target's current generation, taken stopped. */
 async function takePreRestorePoint(ctx: OverwriteRunContext, state: PipelineState): Promise<boolean> {
   const deps = ctx.deps;
+  // The fence stopped the set admission recorded. A container or stack that
+  // appeared since must abort before a point exists, or the point would describe
+  // a volume a workload was still writing while it was read.
+  const dependency = await recheckDependents(ctx, state, { requireStopped: true });
+  if (dependency !== 'ok') {
+    await settleRollback(ctx, state, dependency === 'changed' ? 'dependents_changed' : 'identity_unknown');
+    return false;
+  }
   const point = deps.points.begin({
     kind: 'root',
     storageId: state.storage.id,
@@ -917,6 +925,21 @@ async function takePreRestorePoint(ctx: OverwriteRunContext, state: PipelineStat
       console.warn('[Recovery] The pre-restore point for %s failed with %s.', sanitizeForLog(state.intent.id), result.errorClass);
       await settleRollback(ctx, state, 'pre_restore_failed');
     }
+    return false;
+  }
+  // The fence stopped the workloads admission recorded, but a container or stack
+  // that appeared since can still be running while the point is read. The
+  // engine's own before/after observation labels that `crash_consistent_live`;
+  // a point like that is not the stopped copy this step promises, so it is
+  // discarded rather than kept beside a rollback that might need it.
+  if (result.evidence.consistency !== 'crash_consistent_stopped') {
+    console.warn(
+      '[Recovery] The pre-restore point for %s was captured %s, not with the workloads stopped.',
+      sanitizeForLog(state.intent.id),
+      result.evidence.consistency,
+    );
+    settleFailedPoint(deps, point.id, 'pre_restore_failed');
+    await settleRollback(ctx, state, 'pre_restore_failed');
     return false;
   }
   const finalized = deps.points.finalize(point.id, { status: 'succeeded', evidence: result.evidence });
