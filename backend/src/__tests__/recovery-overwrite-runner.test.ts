@@ -270,6 +270,47 @@ function failNextContainerList(fake: ReturnType<typeof fakeDocker>): void {
   };
 }
 
+/** Make the next inspect of one container fail, as a daemon that went away would. */
+function failNextInspect(fake: ReturnType<typeof fakeDocker>, id: string): void {
+  const docker = fake.docker as unknown as {
+    getContainer: (containerId: string) => { inspect: () => Promise<unknown> };
+  };
+  const getContainer = docker.getContainer.bind(docker);
+  let armed = true;
+  docker.getContainer = (containerId: string) => {
+    const container = getContainer(containerId);
+    if (!armed || containerId !== id) return container;
+    armed = false;
+    return {
+      ...container,
+      inspect: async () => { throw new Error('docker went away'); },
+    } as typeof container;
+  };
+}
+
+/**
+ * Make the first inspect of one member after the fence stops it fail, which is
+ * the start-time read the pipeline takes before the pre-restore point.
+ */
+function failStartedAtReadAfterFence(fake: ReturnType<typeof fakeDocker>, id: string): void {
+  const docker = fake.docker as unknown as {
+    getContainer: (containerId: string) => { inspect: () => Promise<unknown> };
+  };
+  const getContainer = docker.getContainer.bind(docker);
+  let armed = false;
+  let fired = false;
+  docker.getContainer = (containerId: string) => {
+    if (!armed && fake.calls.includes(`stop:${id}`)) armed = true;
+    const container = getContainer(containerId);
+    if (!armed || fired || containerId !== id) return container;
+    fired = true;
+    return {
+      ...container,
+      inspect: async () => { throw new Error('docker went away'); },
+    } as typeof container;
+  };
+}
+
 describe('a staged overwrite that succeeds', () => {
   it('stages, fences, protects, materializes, swaps, cleans up and restarts', async () => {
     const member = container({
@@ -631,6 +672,45 @@ describe('a staged overwrite that fails before anything live moves', () => {
     const preRestore = points.RecoveryPointStore.getInstance().get(intent?.preRestorePointId ?? '');
     expect(preRestore?.status).toBe('failed');
     expect(fake.containers.get('c1')?.State).toBe('running');
+  });
+
+  it('discards the point when a member start time cannot be read after the capture', async () => {
+    const member = container({ Id: 'c1', State: 'running', Mounts: [{ Type: 'volume', Name: VOLUME }] });
+    const fake = fakeDocker({ volumes: [{ name: VOLUME }], containers: [member] });
+    const seeded = seed({ createdAt: fake.volumes.get(VOLUME)?.createdAt ?? '', members: [member] });
+    const engine = scriptedEngine({
+      createPoint: async () => {
+        failNextInspect(fake, 'c1');
+        return { ok: true as const, evidence: { ...DEFAULT_CAPTURE } };
+      },
+    });
+    const { outcomes } = await run({ fake, helper: successHelper(), engine, seeded });
+
+    expect(outcomes).toEqual([{ state: 'failed', errorClass: 'pre_restore_failed' }]);
+    expect(engine.restoreCalls.some((call) => call.mode === 'staged_overwrite')).toBe(false);
+    const intent = intents.RestoreIntentStore.getInstance().get(seeded.intentId);
+    const preRestore = points.RecoveryPointStore.getInstance().get(intent?.preRestorePointId ?? '');
+    expect(preRestore?.status).toBe('failed');
+    expect(fake.containers.get('c1')?.State).toBe('running');
+  });
+
+  it('releases the fence and restarts the workload when a member start time cannot be read', async () => {
+    const member = container({ Id: 'c1', State: 'running', Mounts: [{ Type: 'volume', Name: VOLUME }] });
+    const fake = fakeDocker({ volumes: [{ name: VOLUME }], containers: [member] });
+    const seeded = seed({ createdAt: fake.volumes.get(VOLUME)?.createdAt ?? '', members: [member] });
+    failStartedAtReadAfterFence(fake, 'c1');
+    const engine = scriptedEngine();
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    const { outcomes } = await run({ fake, helper: successHelper(), engine, seeded });
+
+    expect(outcomes).toEqual([{ state: 'failed', errorClass: 'internal' }]);
+    expect(engine.createPointCalls).toBe(0);
+    const intent = intents.RestoreIntentStore.getInstance().get(seeded.intentId);
+    expect(intent?.phase).toBe('rolled_back');
+    expect(intent?.fenceState).toBe('released');
+    expect(fake.containers.get('c1')?.State).toBe('running');
+    expect(warn.mock.calls.map((call) => format(...call)).some((line) =>
+      line.includes('Reading the start time of the fenced containers'))).toBe(true);
   });
 
   it('releases the fence and restarts the workload when the pre-swap recheck throws', async () => {
