@@ -2373,7 +2373,7 @@ stacksRouter.post('/:stackName/deploy', async (req: Request, res: Response) => {
       );
     }
   } catch (error: unknown) {
-    console.error('[Stacks] Deploy failed: %s', sanitizeForLog(stackName), error);
+    console.error('[Stacks] Deploy failed: %s', sanitizeForLog(stackName), errorMessageForLog(error));
     if (sendIfDockerEndpointProtected(res, error)) return;
     if (error instanceof PulledCandidateBlockedError) {
       // The pull landed an image the gate refused before `up` ran, so the
@@ -3497,7 +3497,7 @@ stacksRouter.post('/:stackName/rollback', async (req: Request, res: Response) =>
     res.json({ message: 'Stack rolled back: compose and env files restored.', ...policyEvidenceFor(res) });
     notifyActionSuccess('deploy_success', `${stackName} rolled back`, stackName, req.user?.username ?? 'system');
   } catch (error: unknown) {
-    console.error('[Stacks] Rollback failed: %s', sanitizeForLog(stackName), error);
+    console.error('[Stacks] Rollback failed: %s', sanitizeForLog(stackName), errorMessageForLog(error));
     if (error instanceof PulledCandidateBlockedError) {
       // The pull landed an image the gate refused, so `up` never ran and the
       // previous containers are intact. The restored files are not what is
@@ -3506,7 +3506,7 @@ stacksRouter.post('/:stackName/rollback', async (req: Request, res: Response) =>
         try {
           await revertRestore();
         } catch (revertError) {
-          console.error('[Stacks] Failed to revert files after a policy-blocked rollback: %s', sanitizeForLog(stackName), revertError);
+          console.error('[Stacks] Failed to revert files after a policy-blocked rollback: %s', sanitizeForLog(stackName), errorMessageForLog(revertError));
           notifyActionFailure('rollback', stackName, revertError, req.user?.username ?? 'system');
         }
       }

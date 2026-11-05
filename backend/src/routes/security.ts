@@ -40,7 +40,7 @@ import {
   readSettledExposures,
   type PackagedImageExposureContexts,
 } from '../services/securityExposureTargets';
-import { sanitizeForLog } from '../utils/safeLog';
+import { errorMessageForLog, sanitizeForLog } from '../utils/safeLog';
 import { getErrorMessage } from '../utils/errors';
 import { isDebugEnabled } from '../utils/debug';
 import { blockIfReplica } from '../middleware/fleetSyncGuards';
@@ -182,7 +182,13 @@ function resolveBannerEvaluation(
     // recompute failure must degrade to the stored snapshot rather than 500 the
     // scan detail. The recompute is synchronous DB reads that should not throw,
     // so surface it at error level if it ever does.
-    console.error('[Security] banner re-evaluation failed for scanId=%s node=%s stack=%s:', scan.id, scan.node_id, forStack ?? scan.stack_context, getErrorMessage(err, 'unknown'));
+    console.error(
+      '[Security] banner re-evaluation failed for scanId=%s node=%s stack=%s:',
+      scan.id,
+      scan.node_id,
+      sanitizeForLog(forStack ?? scan.stack_context),
+      errorMessageForLog(err),
+    );
     // The snapshot describes the row's own stack, so it would answer a request
     // for another stack with the wrong policy. A null banner would read as "no
     // policy matched" for a stack the caller asked about by name, so the request
