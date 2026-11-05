@@ -57,6 +57,7 @@ import { composeServiceNames } from '@/lib/composeServiceUrl';
 import { lockedServiceUrlReasons, type ServiceUrlEntry } from '@/lib/serviceUrlResolve';
 import type { GitSourcePendingMap } from '@/lib/gitopsState';
 import type { StackServiceUpdateStatus } from '@/types/imageUpdates';
+import { revealLocation, type AuthoredLocation, type PendingAuthoredReveal } from '@/lib/authoredLocation';
 
 export interface ContainerInfo {
     Id: string;
@@ -180,6 +181,11 @@ export interface EditorViewProps {
 
     // Edit lifecycle
     openComposeEditor: () => void;
+    /** Open an authored Compose location in this stack's editor or Files tab. */
+    openAuthoredLocation?: (location: AuthoredLocation) => void;
+    /** A location requested by the Doctor or Compose Labels panels, consumed once. */
+    pendingReveal?: PendingAuthoredReveal | null;
+    onRevealApplied?: () => void;
     closeComposeEditor: () => void;
     requestSave: () => void;
     requestSaveAndDeploy: (e: React.MouseEvent) => void;
@@ -300,6 +306,9 @@ export function EditorView(props: EditorViewProps) {
         rollbackStack,
         scanStackConfig,
         openComposeEditor,
+        openAuthoredLocation,
+        pendingReveal = null,
+        onRevealApplied,
         closeComposeEditor,
         requestSave,
         requestSaveAndDeploy,
@@ -372,6 +381,16 @@ export function EditorView(props: EditorViewProps) {
             }
         };
     }, []);
+
+    // Apply a requested authored location once the compose editor is on screen,
+    // then clear it so a later manual navigation is not overridden.
+    useEffect(() => {
+        if (!pendingReveal || pendingReveal.target.surface !== 'compose' || activeTab !== 'compose' || !editingCompose) return;
+        const editor = monacoEditorRef.current;
+        if (!editor) return;
+        revealLocation(editor, pendingReveal.location);
+        onRevealApplied?.();
+    }, [pendingReveal, activeTab, editingCompose, onRevealApplied]);
 
     // Force Monaco to re-measure its container after the tab switch DOM settles.
     // Monaco's internal child is position:static with an explicit pixel height that
@@ -477,6 +496,7 @@ export function EditorView(props: EditorViewProps) {
             gitSourcePending={gitSourcePendingMap[stackName] ?? null}
             onEditCompose={openComposeEditor}
             onOpenFiles={canRead ? () => { setEditingCompose(true); setActiveTab('files'); } : undefined}
+            onOpenLocation={openAuthoredLocation}
             onOpenGitSource={() => setGitSourceOpen(true)}
             onApplyUpdate={() => { void updateStack(); }}
             onRedeploy={() => deployStack()}
@@ -777,6 +797,8 @@ export function EditorView(props: EditorViewProps) {
                                     isDarkMode={isDarkMode}
                                     onNavigateToCompose={() => setActiveTab('compose')}
                                     onNavigateToEnv={() => setActiveTab('env')}
+                                    reveal={pendingReveal?.target.surface === 'files' ? pendingReveal : null}
+                                    onRevealApplied={onRevealApplied}
                                 />
                             ) : (
                                 <>
@@ -810,7 +832,10 @@ export function EditorView(props: EditorViewProps) {
                                                     value={activeTab === 'compose' ? safeContent : safeEnvContent}
                                                     onMount={(editor) => {
                                                         monacoEditorRef.current = editor;
-                                                        if (editingCompose && activeTab === 'compose' && canEditCompose) {
+                                                        if (pendingReveal?.target.surface === 'compose') {
+                                                            revealLocation(editor, pendingReveal.location);
+                                                            onRevealApplied?.();
+                                                        } else if (editingCompose && activeTab === 'compose' && canEditCompose) {
                                                             editor.focus();
                                                         }
                                                     }}

@@ -7,6 +7,7 @@ import { toast } from '@/components/ui/toast-store';
 import { readStackFile, writeStackFile, downloadStackFile, FileConflictError } from '@/lib/stackFilesApi';
 import { extensionToLanguage } from '@/lib/monacoLanguages';
 import { cn, formatBytes } from '@/lib/utils';
+import { revealLocation, type AuthoredLocation } from '@/lib/authoredLocation';
 
 const WORD_WRAP_KEY = 'sencho.fileViewer.wordWrap';
 
@@ -19,6 +20,9 @@ interface FileViewerProps {
   rootId?: string;
   onSaved?: () => void;
   onDirtyChange?: (dirty: boolean) => void;
+  /** A reported authored location to reveal once this file's content is loaded. */
+  reveal?: AuthoredLocation | null;
+  onRevealApplied?: () => void;
 }
 
 function getFilename(path: string): string {
@@ -119,9 +123,14 @@ export function FileViewer({
   rootId,
   onSaved,
   onDirtyChange,
+  reveal,
+  onRevealApplied,
 }: FileViewerProps) {
   const [content, setContent] = useState('');
   const [originalContent, setOriginalContent] = useState('');
+  const [loadedPath, setLoadedPath] = useState<string | null>(null);
+  const editorRef = useRef<import('monaco-editor').editor.IStandaloneCodeEditor | null>(null);
+  const appliedRevealRef = useRef<string | null>(null);
   const [loading, setLoading] = useState(false);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -193,6 +202,7 @@ export function FileViewer({
     let cancelled = false;
     setLoading(true);
     setError(null);
+    setLoadedPath(null);
     setIsBinary(false);
     setIsOversized(false);
 
@@ -216,6 +226,7 @@ export function FileViewer({
           const text = result.content ?? '';
           setContent(text);
           setOriginalContent(text);
+          setLoadedPath(selectedPath);
         }
       })
       .catch((e: unknown) => {
@@ -263,6 +274,27 @@ export function FileViewer({
       setSaving(false);
     }
   };
+
+  const applyReveal = () => {
+    if (!reveal || !editorRef.current || loadedPath !== reveal.file) return;
+    const key = `${reveal.file}:${reveal.line}:${reveal.column}:${reveal.endLine}:${reveal.endColumn}`;
+    if (appliedRevealRef.current === key) return;
+    revealLocation(editorRef.current, reveal);
+    appliedRevealRef.current = key;
+    onRevealApplied?.();
+  };
+
+  useEffect(() => {
+    if (!reveal) {
+      // A cleared request must not suppress the next click on the same line.
+      appliedRevealRef.current = null;
+      return;
+    }
+    applyReveal();
+    // The editor must exist and the requested file's content must be loaded
+    // before a range can be applied to the right model.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [reveal, loadedPath]);
 
   if (!selectedPath) {
     return (
@@ -402,6 +434,10 @@ export function FileViewer({
             height="100%"
             language={language}
             value={content}
+            onMount={(editor) => {
+              editorRef.current = editor;
+              applyReveal();
+            }}
             onChange={(val) => {
               if (!readOnly) setContent(val ?? '');
             }}

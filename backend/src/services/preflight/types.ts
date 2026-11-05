@@ -37,6 +37,17 @@ export interface RuleHit {
  */
 export type PreflightStatus = 'never-run' | 'pass' | 'unrenderable' | PreflightSeverity;
 
+/** The authored source of a finding: stack-relative file plus a 1-based range. */
+export interface PreflightSourceLocation {
+  file: string;
+  /** Authored dot path, when the rule names one. */
+  path?: string;
+  line: number;
+  column: number;
+  endLine: number;
+  endColumn: number;
+}
+
 /** A single deterministic finding. Never carries an environment value. */
 export interface PreflightFinding {
   ruleId: string;
@@ -51,6 +62,8 @@ export interface PreflightFinding {
   remediation?: string;
   /** Service the finding is scoped to, when applicable. */
   service?: string;
+  /** Where the operator wrote the declaration, when a single source can be decided. */
+  location?: PreflightSourceLocation;
   /** True when an active acknowledgement covers this finding. */
   acknowledged?: boolean;
   acknowledgementId?: number;

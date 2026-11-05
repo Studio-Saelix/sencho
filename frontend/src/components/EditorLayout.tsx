@@ -1229,6 +1229,9 @@ export default function EditorLayout() {
       rollbackStack={stackActions.rollbackStack}
       scanStackConfig={stackActions.scanStackConfig}
       openComposeEditor={stackActions.openComposeEditor}
+      openAuthoredLocation={stackActions.openAuthoredLocation}
+      pendingReveal={editorState.pendingReveal}
+      onRevealApplied={() => editorState.setPendingReveal(null)}
       closeComposeEditor={stackActions.closeComposeEditor}
       requestSave={stackActions.requestSave}
       requestSaveAndDeploy={stackActions.requestSaveAndDeploy}

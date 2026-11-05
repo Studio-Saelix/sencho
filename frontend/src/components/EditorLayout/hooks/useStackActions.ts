@@ -1,4 +1,5 @@
 import { useRef, useCallback, useEffect, useState } from 'react';
+import { planAuthoredLocation, type AuthoredLocation } from '@/lib/authoredLocation';
 import { apiFetch, withDeploySession } from '@/lib/api';
 import {
   dockerEndpointRefusal,
@@ -2260,6 +2261,20 @@ export function useStackActions(options: UseStackActionsOptions) {
     editorState.setIsEditing(true);
   };
 
+  /**
+   * Open a reported authored location. One click, one handler: the compose tab
+   * when the file is the loaded primary compose file, the Files tab otherwise.
+   * Tab switches preserve both buffers, so no guard is needed for unsaved edits.
+   */
+  const openAuthoredLocation = (location: AuthoredLocation) => {
+    if (!stackListState.selectedFile) return;
+    const target = planAuthoredLocation(location, editorState.composeFilename);
+    if (!target) return;
+    editorState.setEditingCompose(true);
+    editorState.setActiveTab(target.surface === 'compose' ? 'compose' : 'files');
+    editorState.setPendingReveal({ target, location });
+  };
+
   const closeComposeEditor = () => {
     if (hasUnsavedChanges()) {
       discardAllChanges();
@@ -3081,6 +3096,7 @@ export function useStackActions(options: UseStackActionsOptions) {
     rollbackStack,
     discardChanges,
     openComposeEditor,
+    openAuthoredLocation,
     closeComposeEditor,
     scanStackConfig,
     runDeploy,

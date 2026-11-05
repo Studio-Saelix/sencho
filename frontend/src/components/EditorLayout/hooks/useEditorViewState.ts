@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react';
 import type { ContainerInfo } from '../EditorView';
 import type { EffectiveServiceSpec } from '@/types/effectiveServices';
 import type { GitSourcePendingMap } from '@/lib/gitopsState';
+import type { PendingAuthoredReveal } from '@/lib/authoredLocation';
 
 export const LOGS_MODE_STORAGE_KEY = 'sencho.stackView.logsMode';
 
@@ -67,6 +68,9 @@ export function useEditorViewState() {
   const [backupInfo, setBackupInfo] = useState<BackupInfo>({ exists: false, timestamp: null });
   const [isEditing, setIsEditing] = useState(false);
   const [editingCompose, setEditingCompose] = useState(false);
+  // A location requested from the Doctor or Compose Labels panels. It is
+  // consumed once by the compose editor or the Files viewer and then cleared.
+  const [pendingReveal, setPendingReveal] = useState<PendingAuthoredReveal | null>(null);
 
   return {
     stackMisconfigScanning, setStackMisconfigScanning,
@@ -94,5 +98,6 @@ export function useEditorViewState() {
     backupInfo, setBackupInfo,
     isEditing, setIsEditing,
     editingCompose, setEditingCompose,
+    pendingReveal, setPendingReveal,
   } as const;
 }

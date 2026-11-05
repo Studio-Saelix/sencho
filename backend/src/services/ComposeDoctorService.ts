@@ -20,8 +20,10 @@ import type {
 import type { AssuranceCoverage } from './assurance/types';
 import { runAssuranceRules, parseCoverage, unrecordedCoverage } from './assurance/coverage';
 import {
-  findFingerprintCollisions, normalizeDoctorHit, normalizeStoredFinding, withDecision, type AssuranceFinding,
+  findFingerprintCollisions, normalizeDoctorHit, normalizeStoredFinding, serializeSourceLocation,
+  withDecision, type AssuranceFinding,
 } from './assurance/finding';
+import { buildAuthoredProject, locateFinding, type AuthoredProject } from './composeSource';
 import { assuranceRuleOrder, getAssuranceRule } from './assurance/ruleRegistry';
 import { collectServiceHealthcheckEvidence } from './healthcheck/collectServiceHealthcheckEvidence';
 import {
@@ -63,12 +65,27 @@ function sortNormalized(findings: AssuranceFinding[]): AssuranceFinding[] {
  *  type predates the contract and stays additive: a finding's subject and
  *  identity are backend internals until a normalized wire format exists. */
 function projectFinding(finding: AssuranceFinding): PreflightFinding {
+  const location = finding.location;
+  const authored = location?.file !== undefined && location.line !== undefined && location.column !== undefined
+    && location.endLine !== undefined && location.endColumn !== undefined
+    ? {
+      file: location.file,
+      ...(location.authoredPath !== undefined || location.path !== undefined
+        ? { path: location.authoredPath ?? location.path }
+        : {}),
+      line: location.line,
+      column: location.column,
+      endLine: location.endLine,
+      endColumn: location.endColumn,
+    }
+    : undefined;
   return {
     ruleId: finding.ruleId,
     severity: finding.severity,
     title: finding.title,
     message: finding.message,
     ...(finding.location?.path !== undefined ? { sourcePath: finding.location.path } : {}),
+    ...(authored ? { location: authored } : {}),
     ...(finding.remediation !== undefined ? { remediation: finding.remediation } : {}),
     ...(finding.scope.service !== undefined ? { service: finding.scope.service } : {}),
   };
@@ -197,11 +214,12 @@ export class ComposeDoctorService {
     const sourceServiceNames = source !== null ? parseComposeDependencies(source).services.map(s => s.name) : [];
 
     const ctx = await this.buildContext(nodeId, stackName, sourceServiceNames, sourceReadable);
+    const authored = await this.loadAuthoredProject(nodeId, stackName);
     const { findings: hits, coverage } = runAssuranceRules(ctx);
     const normalized = sortNormalized(hits.map(hit => {
       const rule = getAssuranceRule(hit.ruleId);
       if (!rule) throw new Error(`Compose Doctor rule "${hit.ruleId}" is missing from the assurance registry`);
-      return normalizeDoctorHit(nodeId, stackName, hit, rule);
+      return normalizeDoctorHit(nodeId, stackName, hit, rule, locateFinding(authored, hit, ctx.model));
     }));
     const collisions = findFingerprintCollisions(normalized);
     if (collisions.length > 0) {
@@ -298,6 +316,21 @@ export class ComposeDoctorService {
       coverage,
       ...activeFields(renderable, findings),
     };
+  }
+
+  /**
+   * The authored source model, built fail-soft: a model failure leaves every
+   * finding unlocated (today's behaviour) and never fails the run. The warning
+   * names the stack and a sanitized message, never file content.
+   */
+  private async loadAuthoredProject(nodeId: number, stackName: string): Promise<AuthoredProject | null> {
+    try {
+      return await buildAuthoredProject(nodeId, stackName);
+    } catch (error) {
+      console.warn('[ComposeDoctor] Authored source model unavailable for %s:',
+        sanitizeForLog(stackName), sanitizeForLog(getErrorMessage(error, 'unknown')));
+      return null;
+    }
   }
 
   private async buildContext(nodeId: number, stackName: string, sourceServiceNames: string[], sourceReadable: boolean): Promise<PreflightContext> {
@@ -581,6 +614,7 @@ export class ComposeDoctorService {
           title: finding.title,
           message: finding.message,
           source_path: finding.location?.path ?? null,
+          source_location: serializeSourceLocation(finding.location),
           remediation: finding.remediation ?? null,
           service: finding.scope.service ?? null,
           rule_version: finding.ruleVersion,

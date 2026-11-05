@@ -23,10 +23,13 @@ import {
   showsNotifyRouteMatch,
   sourcesPresent,
   withReadBehaviors,
+  type LabelAuthoredOrigin,
   type LabelSource,
   type LabelValue,
   type StackLabelInventory,
 } from '@/lib/labelInventory';
+import { SourceLocationLink } from '@/components/ui/source-location-link';
+import type { AuthoredLocation } from '@/lib/authoredLocation';
 import { SENCHO_LABELS_V1_CAPABILITY, SENCHO_LABEL_POLICY_CAPABILITY } from '@/lib/capabilities';
 
 const LABEL_CLASS = 'font-mono text-[10px] uppercase tracking-[0.18em] text-stat-subtitle';
@@ -43,7 +46,61 @@ function labelVisible(label: LabelValue, search: string, excluded: Set<LabelSour
   return parentHit || matchesSearch(search, label.key, label.value);
 }
 
-function LabelRow({ label, nodeEvaluatesPolicy, onReveal }: { label: LabelValue; nodeEvaluatesPolicy: boolean; onReveal?: () => void }) {
+const AUTHORED_AMBIGUITY_LABELS: Record<NonNullable<LabelAuthoredOrigin['ambiguity']>, string> = {
+  'duplicate-key': 'ambiguous',
+  'unparsed-source': 'unreadable',
+  interpolated: 'interpolated',
+  'outside-boundary': 'outside stack',
+};
+
+function AuthoredLabelOrigin({
+  origin,
+  onOpen,
+}: {
+  origin: LabelAuthoredOrigin;
+  onOpen?: (location: AuthoredLocation) => void;
+}) {
+  if (origin.ambiguity) {
+    return (
+      <span className="font-mono text-[10px] text-stat-subtitle" data-testid="label-authored-ambiguity">
+        {AUTHORED_AMBIGUITY_LABELS[origin.ambiguity]}
+      </span>
+    );
+  }
+  if (origin.file === undefined || origin.line === undefined || origin.column === undefined
+    || origin.endLine === undefined || origin.endColumn === undefined) return null;
+  const location: AuthoredLocation = {
+    file: origin.file,
+    line: origin.line,
+    column: origin.column,
+    endLine: origin.endLine,
+    endColumn: origin.endColumn,
+  };
+  return (
+    <span className="inline-flex flex-wrap items-center gap-2">
+      {origin.source === 'label-file' && (
+        <span className="font-mono text-[10px] text-stat-subtitle">label file</span>
+      )}
+      {onOpen ? <SourceLocationLink location={location} onOpen={onOpen} /> : null}
+      {origin.shared && <span className="font-mono text-[10px] text-stat-subtitle">shared</span>}
+      {origin.overridden && <span className="font-mono text-[10px] text-stat-subtitle">inline overrides label file</span>}
+    </span>
+  );
+}
+
+function LabelRow({
+  label,
+  authored,
+  nodeEvaluatesPolicy,
+  onReveal,
+  onOpenLocation,
+}: {
+  label: LabelValue;
+  authored?: LabelAuthoredOrigin;
+  nodeEvaluatesPolicy: boolean;
+  onReveal?: () => void;
+  onOpenLocation?: (location: AuthoredLocation) => void;
+}) {
   const { isAdmin } = useAuth();
   const policyState = policyLabelRowState(label, nodeEvaluatesPolicy);
   return (
@@ -61,6 +118,7 @@ function LabelRow({ label, nodeEvaluatesPolicy, onReveal }: { label: LabelValue;
       <span className="rounded border border-muted px-1.5 py-0.5 font-mono text-[10px] text-stat-subtitle">
         {SOURCE_LABELS[label.source]}
       </span>
+      {authored && <AuthoredLabelOrigin origin={authored} onOpen={onOpenLocation} />}
       {policyState === 'not-evaluated' ? (
         <>
           <span
@@ -107,7 +165,13 @@ function MismatchBadge({ kind, count }: { kind: 'only-compose' | 'only-container
   );
 }
 
-export default function ComposeLabelsPanel({ stackName }: { stackName: string }) {
+export default function ComposeLabelsPanel({
+  stackName,
+  onOpenLocation,
+}: {
+  stackName: string;
+  onOpenLocation?: (location: AuthoredLocation) => void;
+}) {
   const { isAdmin } = useAuth();
   const { hasCapability, activeNodeMeta } = useNodes();
   // A failed or pending node info fetch has no version; only a node that answered and lacks the capability is old.
@@ -362,7 +426,14 @@ export default function ComposeLabelsPanel({ stackName }: { stackName: string })
             <div className="mt-3">
               <p className="font-mono text-[10px] uppercase tracking-[0.18em] text-stat-subtitle mb-1">Declared in Compose</p>
               {declaredVisible.map((label) => (
-                <LabelRow key={`decl-${label.key}`} label={label} nodeEvaluatesPolicy={nodeEvaluatesPolicy} onReveal={isAdmin && !revealSecrets ? handleReveal : undefined} />
+                <LabelRow
+                  key={`decl-${label.key}`}
+                  label={label}
+                  authored={svc.authored?.[label.key]}
+                  nodeEvaluatesPolicy={nodeEvaluatesPolicy}
+                  onReveal={isAdmin && !revealSecrets ? handleReveal : undefined}
+                  onOpenLocation={onOpenLocation}
+                />
               ))}
             </div>
           )}

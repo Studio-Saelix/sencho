@@ -257,6 +257,17 @@ Other signals (current container health, the pending image change, the rollback 
 
 Preflight runs against the **active node**, so selecting a remote node checks the stack against that machine's live Docker state. On mobile, the same report appears under the **Compose** section of the stack detail view.
 
+## Opening a finding's source
+
+A finding that points at a field you authored shows a small `file:line` link under the message. Clicking it opens the exact range in the stack editor:
+
+- A declaration in the primary Compose file opens the **compose.yaml** tab with the range selected.
+- A declaration in an override, an included file, or a `label_file` opens the **Files** tab on that file and selects the range.
+
+The location is shown only when Sencho can decide a single authored source. A value produced by more than one layer that cannot be told apart by the effective value, a value that contains interpolation, a `!reset` or `!override` marker, a Sencho-generated Mesh override, or a file that cannot be parsed shows no link. That is deliberate: a wrong line is worse than no line.
+
+Hovering a link shows the authored path, such as `services.api.image`. On a phone the location appears as plain text, because the phone detail has no full editor or Files tab.
+
 ## Acknowledging findings
 
 When a finding is valid in general but intentional for your stack, you can acknowledge it so it no longer counts toward the active warning total, the Doctor tab badge, or the update readiness check.
@@ -288,6 +299,8 @@ The **Doctor** tab only appears when the active node reports the `compose-doctor
 There is no tier gate: Compose Doctor is available on all plans.
 
 ## Limitations
+
+- A finding has no source link when the authored files cannot be read, when a layer that could declare the field cannot be parsed or lies outside the stack directory, or when several layers declare the field and the effective value does not identify one of them. The finding itself is still reported.
 
 - **Advisory only, with one exception.** Compose Doctor's report never blocks a deploy or changes any stack configuration; act on findings or ignore them. The one exception is the self-management guard: Sencho refuses generic deploy, update, stop, down, and delete actions on its own compose project regardless of whether that finding is acknowledged. See [Self-management](#self-management).
 - **Dismissing the summary is local to your browser.** The **X** on the summary card and the Doctor tab dot share a per-stack, per-node dismissal stored in your browser's local storage. It is not synced across devices or between teammates, so a dismissal you make is invisible to anyone else looking at the same stack.
