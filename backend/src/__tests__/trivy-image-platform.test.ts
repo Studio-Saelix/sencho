@@ -101,6 +101,10 @@ vi.mock('../services/DatabaseService', () => ({
         state.cacheLookups += 1;
         return state.cached;
       },
+      getLatestScanByDigestForNode: () => {
+        state.cacheLookups += 1;
+        return state.cached;
+      },
       getAllVulnerabilityDetails: () => [],
       getSecretFindings: () => ({ items: [] }),
     }),

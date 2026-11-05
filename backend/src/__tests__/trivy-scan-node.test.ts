@@ -104,13 +104,13 @@ describe('TrivyService.scanNode', () => {
     // Force a digest so the cache lookup runs; return null so the scan proceeds.
     vi.spyOn(svc() as unknown as { getImageDigest: (r: string, n: number) => Promise<string | null> }, 'getImageDigest')
       .mockResolvedValue('sha256:abc');
-    const cacheLookup = vi.spyOn(DatabaseService.getInstance(), 'getLatestScanByDigest').mockReturnValue(null);
+    const cacheLookup = vi.spyOn(DatabaseService.getInstance(), 'getLatestScanByDigestForNode').mockReturnValue(null);
     const run = vi.spyOn(svc(), 'runScanAndPersist').mockResolvedValue(fakeRow({ scanners_used: 'secret' }));
 
     await svc().scanNode(1, { vulns: false, secrets: true, misconfig: false });
 
     // A secrets-only scan must not reuse a vuln-only cached row.
-    expect(cacheLookup).toHaveBeenCalledWith('sha256:abc', 'secret');
+    expect(cacheLookup).toHaveBeenCalledWith('sha256:abc', 1, 'secret');
     expect(run).toHaveBeenCalledWith('a:1', 1, 'manual', null, { scanners: ['secret'] });
   });
 
