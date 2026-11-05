@@ -37,12 +37,14 @@ export interface ComposeDirFacts extends PathFacts {
   stackCount: number | null;
   stackNames: string[];
   inventoryTruncated: boolean;
+  inventoryError: string | null;
   rootComposeFile: boolean;
 }
 
 export interface AgentDirFacts extends PathFacts {
   entries: string[];
   entriesTruncated: boolean;
+  inventoryError: string | null;
   hasComposeFile: boolean;
   hasCaFile: boolean;
   hasMarker: boolean;
@@ -59,6 +61,7 @@ export interface BootstrapInspection {
   agent: {
     projectContainers: Array<{ name: string; workingDir: string | null; configFiles: string | null; image: string; status: string }>;
     dataVolumeExists: boolean | null;
+    dataVolumeNames: string[];
     defaultDirHasComposeFile: boolean;
   };
   dockerRoot: { path: string | null; freeBytes: number | null; filesystemType: string | null };

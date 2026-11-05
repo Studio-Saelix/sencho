@@ -31,18 +31,18 @@ function result(blocked = false): BootstrapPreflightResult {
           isDirectory: true, isFinalSymlink: false, hasSymlinkAncestor: false, owner: 'ubuntu', group: 'ubuntu', mode: '755',
           readableByUser: true, writableByUser: true, writableBySudo: true, parentWritableByUser: true,
           nearestExistingAncestor: null, filesystem: null, freeBytes: null, probeError: null,
-          stackCount: 0, stackNames: [], inventoryTruncated: false, rootComposeFile: false,
+          stackCount: 0, stackNames: [], inventoryTruncated: false, inventoryError: null, rootComposeFile: false,
         },
         agentDir: {
           input: '/opt/sencho-agent', normalized: '/opt/sencho-agent', realPath: '/opt/sencho-agent', exists: false,
           isDirectory: false, isFinalSymlink: false, hasSymlinkAncestor: false, owner: null, group: null, mode: null,
           readableByUser: false, writableByUser: false, writableBySudo: false, parentWritableByUser: true,
           nearestExistingAncestor: '/opt', filesystem: null, freeBytes: null, probeError: null,
-          entries: [], entriesTruncated: false, hasComposeFile: false, hasCaFile: false, hasMarker: false,
+          entries: [], entriesTruncated: false, inventoryError: null, hasComposeFile: false, hasCaFile: false, hasMarker: false,
           markerProject: null, markerComposeDir: null, markerAgentDir: null,
         },
       },
-      agent: { projectContainers: [], dataVolumeExists: false, defaultDirHasComposeFile: false },
+      agent: { projectContainers: [], dataVolumeExists: false, dataVolumeNames: [], defaultDirHasComposeFile: false },
       dockerRoot: { path: '/var/lib/docker', freeBytes: 1, filesystemType: 'ext4' },
       checks: [],
       blockers: blocked ? 1 : 0,
@@ -177,6 +177,26 @@ describe('useNodeBootstrap', () => {
       expect.objectContaining({ replacePinnedFingerprint: 'SHA256:abc' }),
       expect.anything(),
     );
+  });
+
+  it('discards a keyscan response for an endpoint that changed while it was in flight', async () => {
+    let resolveKey: ((value: import('../types').BootstrapHostKeyResult) => void) | null = null;
+    const api = {
+      capabilities: vi.fn(async () => capabilities()),
+      hostKey: vi.fn(() => new Promise<import('../types').BootstrapHostKeyResult>((resolve) => { resolveKey = resolve; })),
+      preflight: vi.fn(async () => result()),
+    };
+    const { result: hook } = renderHook(() => useNodeBootstrap({ open: true, api }));
+    await act(async () => { fillTarget(hook.current); });
+    let pending: Promise<void> | null = null;
+    act(() => { pending = hook.current.checkHostKey(); });
+    await act(async () => { hook.current.setField('host', 'other.example.com'); });
+    await act(async () => {
+      resolveKey?.(HOST_KEY);
+      await pending;
+    });
+    expect(hook.current.hostKey).toBeNull();
+    expect(hook.current.step).toBe('target');
   });
 
   it('clears the key and passphrase when the dialog closes', async () => {

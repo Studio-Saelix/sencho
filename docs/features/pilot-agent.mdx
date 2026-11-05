@@ -91,9 +91,9 @@ The guided [bootstrap preflight](/features/node-bootstrap) and manual enrollment
 - **Compose stacks directory:** `/opt/docker/sencho` by default. The agent mounts it at the same absolute path inside the container and sets `COMPOSE_DIR` to it.
 - **Agent installation directory:** `/opt/sencho-agent` by default. Holds the agent's `compose.yaml`, the optional hub CA and a bootstrap marker. It is separate from the stacks directory so the agent is never listed as a stack.
 
-The Agent installation directory is chosen only in the bootstrap workflow; it has no Settings field. The agent's persistent data is always the fixed `sencho-agent-data` volume mounted at `/app/data`. There is no configurable data directory, because enrollment, self-update and recovery all depend on that named volume.
+The Agent installation directory is chosen only in the bootstrap workflow; it has no Settings field. The agent's persistent data is always the fixed Compose volume `sencho-agent-data` mounted at `/app/data`; Compose creates it under the project-qualified name `sencho-agent_sencho-agent-data`. There is no configurable data directory, because enrollment, self-update and recovery all depend on that named volume.
 
-Because self-update reads its compose context from the container's Compose labels, a custom Agent installation directory remains self-updateable as long as the project, container and service names stay `sencho-agent`.
+Because self-update reads its compose context from the container's Compose labels, a custom Agent installation directory remains self-updateable as long as the project and container names stay `sencho-agent` and the Compose service stays `agent`.
 
 ### The control instance's public URL
 

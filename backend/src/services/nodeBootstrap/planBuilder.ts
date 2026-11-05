@@ -1,5 +1,6 @@
 import crypto from 'crypto';
 import { buildPilotEnrollmentCompose } from '../../helpers/pilotEnrollmentCompose';
+import { DOCKER_LOCAL_ENV_ARGS } from './probes';
 import {
   BOOTSTRAP_MARKER_FILENAME,
   BOOTSTRAP_MARKER_SCHEMA_VERSION,
@@ -66,10 +67,17 @@ function installDirCommand(path: string, mode: string, owner: string, group: str
   return sudo ? `sudo -n ${base}` : base;
 }
 
-function startCommand(facts: BootstrapFacts, agentDir: string, sudo: boolean): string {
+function sudoCommand(command: string, sudo: boolean): string {
+  return sudo ? `sudo -n ${command}` : command;
+}
+
+function startCommand(agentDir: string, sudo: boolean): string {
   const compose = `${agentDir}/compose.yaml`;
+  // Pin both the Docker endpoint and the Compose project: a configured remote
+  // context or ambient Compose variable must not change which daemon or project
+  // this command starts.
   const base = [
-    'env -u DOCKER_HOST -u DOCKER_CONTEXT -u COMPOSE_FILE -u COMPOSE_PROJECT_NAME -u COMPOSE_PROFILES',
+    `env ${DOCKER_LOCAL_ENV_ARGS} -u COMPOSE_FILE -u COMPOSE_PROJECT_NAME -u COMPOSE_PROFILES`,
     'docker compose',
     `--project-name ${PILOT_PROJECT_NAME}`,
     `--project-directory ${shellQuote(agentDir)}`,
@@ -110,7 +118,7 @@ function repoSteps(facts: BootstrapFacts, sudo: boolean): BootstrapPlanStep[] {
       rationale: 'apt verifies the Docker package signatures with this key.',
       effect: 'file-write',
       privilege: sudo ? 'sudo' : 'user',
-      command: `curl -fsSL https://download.docker.com/linux/ubuntu/gpg -o /etc/apt/keyrings/docker.asc`,
+      command: sudoCommand('curl -fsSL https://download.docker.com/linux/ubuntu/gpg -o /etc/apt/keyrings/docker.asc', sudo),
       target: { path: '/etc/apt/keyrings/docker.asc', mode: CA_FILE_MODE, owner: 'root', group: 'root', preserveExisting: false },
       disruptive: false,
       reversible: 'yes',
@@ -123,7 +131,7 @@ function repoSteps(facts: BootstrapFacts, sudo: boolean): BootstrapPlanStep[] {
       rationale: 'apt reads the key as a non-root user.',
       effect: 'file-write',
       privilege: sudo ? 'sudo' : 'user',
-      command: 'chmod 0644 /etc/apt/keyrings/docker.asc',
+      command: sudoCommand('chmod 0644 /etc/apt/keyrings/docker.asc', sudo),
       disruptive: false,
       reversible: 'yes',
       pointOfNoReturn: false,
@@ -154,7 +162,7 @@ function repoSteps(facts: BootstrapFacts, sudo: boolean): BootstrapPlanStep[] {
       rationale: 'The new repository must be indexed before its packages can be resolved.',
       effect: 'package-metadata',
       privilege: sudo ? 'sudo' : 'user',
-      command: 'apt-get update',
+      command: sudoCommand('apt-get update', sudo),
       disruptive: false,
       reversible: 'yes',
       pointOfNoReturn: false,
@@ -171,11 +179,14 @@ function agentProjectSteps(
   previousAttempt: boolean,
 ): BootstrapPlanStep[] {
   const agentDir = facts.paths.agentDir.input;
-  const managedByRoot = facts.docker.socketAccess === 'sudo' || facts.user?.isRoot === true;
-  const fileOwner = managedByRoot ? 'root' : owner;
-  const fileGroup = managedByRoot ? 'root' : group;
-  // Writing a root-owned file needs sudo unless the session is already root.
-  const filePrivilege: BootstrapPlanStep['privilege'] = managedByRoot && facts.user?.isRoot !== true ? 'sudo' : 'user';
+  // File privilege follows the directory that receives the write, not Docker
+  // socket access: the user who can write the directory owns the result.
+  const dirWritableByUser = facts.paths.agentDir.exists
+    ? facts.paths.agentDir.writableByUser
+    : facts.paths.agentDir.parentWritableByUser === true;
+  const filePrivilege: BootstrapPlanStep['privilege'] = dirWritableByUser || facts.user?.isRoot === true ? 'user' : 'sudo';
+  const fileOwner = owner;
+  const fileGroup = group;
   const marker = {
     schemaVersion: BOOTSTRAP_MARKER_SCHEMA_VERSION,
     project: PILOT_PROJECT_NAME,
@@ -257,6 +268,14 @@ function agentProjectSteps(
 
 export function buildBootstrapPlan(input: PlanBuildInput): BootstrapPlan {
   const { facts } = input;
+  // The evidence gate suppresses the plan when a required fact is unknown.
+  // These guards make a direct call fail closed too, rather than inventing a
+  // default distribution, user or filesystem.
+  if (!facts.os) throw new Error('The plan requires a known operating system.');
+  if (!facts.user) throw new Error('The plan requires a known SSH user.');
+  if (facts.paths.composeDir.probeError || facts.paths.agentDir.probeError) {
+    throw new Error('The plan cannot be built while a directory could not be inspected.');
+  }
   const owner = facts.user?.name ?? facts.target.username;
   const group = facts.user?.group ?? owner;
   const root = facts.user?.isRoot === true;
@@ -266,9 +285,14 @@ export function buildBootstrapPlan(input: PlanBuildInput): BootstrapPlan {
   const skipped: BootstrapPlan['skipped'] = [];
   const notices: string[] = ['No changes have been made on this server.'];
 
-  const repoConfigured = facts.repo.dockerSourceConfigured && facts.repo.keyringPresent;
+  const dockerWorking = facts.docker.cliInstalled
+    && facts.docker.serverVersion !== null
+    && facts.docker.composeVersion !== null;
+  const repoConfigured = facts.repo.sourceVerified === true
+    && facts.repo.keyringVerified === true
+    && facts.repo.candidateSourceVerified !== false;
   const missingPackages = facts.packages.filter((pkg) => pkg.installedVersion === null);
-  const needsRepo = !repoConfigured || missingPackages.length > 0;
+  const needsRepo = !dockerWorking && (!repoConfigured || missingPackages.length > 0);
 
   if (needsRepo) {
     stages.push({
@@ -276,11 +300,22 @@ export function buildBootstrapPlan(input: PlanBuildInput): BootstrapPlan {
       title: 'Docker package repository',
       steps: repoSteps(facts, !root),
     });
+  } else if (dockerWorking && !repoConfigured) {
+    skipped.push({
+      id: 'docker_repository',
+      reason: 'Docker and Compose already work; the existing installation is preserved and its package source is not replaced.',
+    });
   } else {
     skipped.push({ id: 'docker_repository', reason: 'The official Docker repository and keyring are already configured.' });
   }
 
-  if (missingPackages.length > 0) {
+  if (missingPackages.length > 0 && dockerWorking) {
+    skipped.push({
+      id: 'docker_packages',
+      reason: 'Docker and Compose already work; the existing distribution installation is preserved instead of being replaced.',
+    });
+    notices.push('Docker and Compose already work on this host. The plan does not install or replace Docker packages.');
+  } else if (missingPackages.length > 0) {
     const versionsKnown = missingPackages.every((pkg) => pkg.candidateVersion !== null);
     if (!versionsKnown) {
       notices.push('The Docker repository is not configured yet, so package versions are resolved from the official repository when the plan runs. Execution re-checks the resolved versions before installation.');
@@ -404,16 +439,20 @@ export function buildBootstrapPlan(input: PlanBuildInput): BootstrapPlan {
     steps: agentProjectSteps(input, facts, owner, group, previousAttempt),
   });
 
+  // A fresh install reaches the socket as root until the user is in the docker
+  // group, so the start command follows the post-install access, not the
+  // pre-install probe.
+  const startSudo = !root && (sudoDocker || !facts.docker.cliInstalled || facts.docker.socketAccess === 'none');
   stages.push({
     id: 'agent_start',
     title: 'Start the Pilot agent',
     steps: [{
       id: 'start-agent',
       title: `Start the ${PILOT_PROJECT_NAME} project`,
-      rationale: 'The project name and directory are pinned so ambient Compose variables cannot change which project runs.',
+      rationale: 'The project name, directory and local Docker endpoint are pinned so ambient variables and contexts cannot change which project or daemon runs.',
       effect: 'container-start',
-      privilege: sudoDocker ? 'sudo' : 'user',
-      command: startCommand(facts, agentDir.input, sudoDocker),
+      privilege: startSudo ? 'sudo' : 'user',
+      command: startCommand(agentDir.input, startSudo),
       disruptive: true,
       reversible: 'yes',
       pointOfNoReturn: true,
@@ -425,7 +464,10 @@ export function buildBootstrapPlan(input: PlanBuildInput): BootstrapPlan {
     notices.push(`${composeDir.stackCount} existing stack folder${composeDir.stackCount === 1 ? '' : 's'} in ${composeDir.input} will be left untouched.`);
   }
   if (facts.agent.dataVolumeExists === true) {
-    notices.push(`The ${PILOT_DATA_VOLUME} volume already exists. Execution verifies the stored Pilot identity before reusing it.`);
+    const volumeNames = facts.agent.dataVolumeNames.length > 0
+      ? facts.agent.dataVolumeNames.join(', ')
+      : PILOT_DATA_VOLUME;
+    notices.push(`The ${volumeNames} volume already exists. Execution verifies the stored Pilot identity before reusing it.`);
   }
   if (previousAttempt) {
     notices.push('A previous bootstrap attempt was found in the agent directory. Execution reconciles it against this plan and never overwrites a file whose content differs.');
@@ -508,30 +550,60 @@ export const BOOTSTRAP_STAGE_ORDER: BootstrapStageId[] = [
   'agent_start',
 ];
 
-/** Human-readable plan text for Copy plan / Download plan. */
+/**
+ * Human-readable plan text for Copy plan / Download plan. This is the retained
+ * review artifact, so it carries every step in execution order, every skipped
+ * stage, all file contents, both paths and both digests.
+ */
 export function formatPlanText(plan: BootstrapPlan): string {
   const lines: string[] = [];
   lines.push(`Sencho bootstrap plan v${plan.version}`);
+  lines.push(`Generated: ${new Date(plan.generatedAt).toISOString()}`);
   lines.push(`Target: ${plan.targetName} (${plan.target.username}@${plan.target.host}:${plan.target.port}, ${plan.target.address})`);
   lines.push(`Host key: ${plan.hostKeyFingerprint}`);
-  lines.push(`Compose stacks directory: ${plan.paths.composeDir.input}`);
-  lines.push(`Pilot Agent installation directory: ${plan.paths.agentDir.input}`);
+  lines.push(`Hub URL: ${plan.hubUrl}`);
+  lines.push(`Compose stacks directory: ${plan.paths.composeDir.input} (real: ${plan.paths.composeDir.realPath ?? 'unresolved'}, ${plan.paths.composeDir.created ? 'will be created' : `existing, ${plan.paths.composeDir.stackCount ?? 'unknown'} stacks`})`);
+  lines.push(`Pilot Agent installation directory: ${plan.paths.agentDir.input} (real: ${plan.paths.agentDir.realPath ?? 'unresolved'}, ${plan.paths.agentDir.created ? 'will be created' : 'existing'})`);
   lines.push(`Project: ${plan.projectName}  Container: ${plan.containerName}  Volume: ${plan.dataVolume}`);
+  lines.push(`Image: ${plan.image.ref} (digest ${plan.image.digest ?? 'resolved at execution'}, ${plan.image.resolvedAt})`);
+  lines.push(`Evidence digest: sha256:${plan.evidenceDigest}`);
   lines.push('');
-  for (const stage of plan.stages) {
-    lines.push(`## ${stage.title}`);
+  lines.push('Sources:');
+  for (const source of plan.sources) {
+    lines.push(`- ${source.name}: ${source.url}${source.keyFingerprint ? ` (key ${source.keyFingerprint})` : ''}`);
+  }
+  lines.push('');
+  lines.push('Versions:');
+  for (const [name, version] of Object.entries(plan.versions)) {
+    lines.push(`- ${name}: ${version ?? 'not installed'}`);
+  }
+  lines.push('');
+  for (const [index, stage] of plan.stages.entries()) {
+    lines.push(`## ${index + 1}. ${stage.title} [${stage.id}]`);
     for (const step of stage.steps) {
-      lines.push(`- ${step.title} (${step.privilege}, ${step.effect})`);
+      lines.push(`- ${step.title} [${step.id}] (${step.privilege}, ${step.effect}; disruptive=${step.disruptive}; reversible=${step.reversible}; pointOfNoReturn=${step.pointOfNoReturn}; timeout=${step.timeoutMs}ms)`);
+      lines.push(`  rationale: ${step.rationale}`);
       if (step.target) {
-        lines.push(`  path: ${step.target.path} mode: ${step.target.mode ?? 'unchanged'} owner: ${step.target.owner ?? 'unchanged'}`);
+        lines.push(`  path: ${step.target.path} mode: ${step.target.mode ?? 'unchanged'} owner: ${step.target.owner ?? 'unchanged'} group: ${step.target.group ?? 'unchanged'} preserveExisting: ${step.target.preserveExisting}`);
       }
       if (step.command) lines.push(`  command: ${step.command}`);
-      if (step.file) lines.push(`  file: ${step.file.path} (${step.file.mode})`);
+      if (step.file) {
+        lines.push(`  file: ${step.file.path} (${step.file.mode})${step.file.redacted ? ' [redacted]' : ''}`);
+        lines.push('  content:');
+        for (const contentLine of step.file.content.replace(/\n$/, '').split('\n')) {
+          lines.push(`    ${contentLine}`);
+        }
+      }
     }
     lines.push('');
   }
-  for (const skip of plan.skipped) lines.push(`Skipped ${skip.id}: ${skip.reason}`);
-  if (plan.skipped.length > 0) lines.push('');
+  lines.push('Not changed:');
+  if (plan.skipped.length === 0) lines.push('- Nothing');
+  for (const skip of plan.skipped) lines.push(`- ${skip.id}: ${skip.reason}`);
+  lines.push('');
+  lines.push('Redactions:');
+  for (const redaction of plan.redactions) lines.push(`- ${redaction.placeholder}: ${redaction.purpose}`);
+  lines.push('');
   for (const notice of plan.notices) lines.push(`Note: ${notice}`);
   lines.push('');
   lines.push('Expected after execution:');

@@ -84,13 +84,16 @@ export interface PathObservation {
 export interface ComposeDirObservation extends PathObservation {
   stackCount: number | null;
   stackNames: string[];
+  /** A partial or failed inventory never proves that a stack is absent. */
   inventoryTruncated: boolean;
+  inventoryError: string | null;
   rootComposeFile: boolean;
 }
 
 export interface AgentDirObservation extends PathObservation {
   entries: string[];
   entriesTruncated: boolean;
+  inventoryError: string | null;
   hasComposeFile: boolean;
   hasCaFile: boolean;
   hasMarker: boolean;
@@ -108,6 +111,7 @@ export interface AgentInstallObservation {
     status: string;
   }>;
   dataVolumeExists: boolean | null;
+  dataVolumeNames: string[];
   defaultDirHasComposeFile: boolean;
 }
 
@@ -122,11 +126,26 @@ export interface DockerPackage {
   name: DockerPackageName;
   installedVersion: string | null;
   candidateVersion: string | null;
+  /** Repository URI apt reports for the candidate version, when known. */
+  candidateSource?: string | null;
 }
 
 export interface BootstrapPaths {
   composeDir: ComposeDirObservation;
   agentDir: AgentDirObservation;
+}
+
+export interface RepositoryObservation {
+  /** A Docker source file exists. Existence alone proves nothing about its provenance. */
+  dockerSourceConfigured: boolean;
+  /** A Docker keyring file exists and parses as a public key. */
+  keyringPresent: boolean;
+  /** Null when the source exists but could not be read or parsed. */
+  sourceVerified: boolean | null;
+  keyringVerified: boolean | null;
+  candidateSourceVerified: boolean | null;
+  /** Human-readable reason the source or keyring is not provably official. */
+  problem: string | null;
 }
 
 export interface BootstrapFacts {
@@ -142,8 +161,10 @@ export interface BootstrapFacts {
     serviceEnabled: boolean | null;
     socketAccess: 'user' | 'sudo' | 'none';
     rootDir: string | null;
+    /** The local unix socket every Docker command is pinned to. */
+    endpoint: string;
   };
-  repo: { dockerSourceConfigured: boolean; keyringPresent: boolean };
+  repo: RepositoryObservation;
   packages: DockerPackage[];
   paths: {
     composeDir: ComposeDirObservation;
@@ -151,7 +172,14 @@ export interface BootstrapFacts {
   };
   agent: AgentInstallObservation;
   dockerRoot: { path: string | null; freeBytes: number | null; filesystemType: string | null };
-  containers: { total: number; sample: Array<{ name: string; image: string; project: string | null }>; agentContainer: string | null };
+  containers: {
+    total: number;
+    sample: Array<{ name: string; image: string; project: string | null }>;
+    agentContainer: string | null;
+    /** False when the container list is truncated or could not be read. */
+    complete: boolean;
+    error: string | null;
+  };
   clockSkewMs: number | null;
   hub: { url: string; reachable: boolean | null; statusCode: number | null; tlsTrusted: boolean | null };
 }

@@ -1,5 +1,12 @@
 import { describe, it, expect } from 'vitest';
+import { execFileSync } from 'child_process';
+import { chmodSync, mkdirSync, mkdtempSync, rmSync } from 'fs';
+import os from 'os';
+import path from 'path';
 import {
+  DOCKER_LOCAL_ENDPOINT,
+  PATH_FACTS_SCRIPT,
+  PILOT_DATA_VOLUME_CANONICAL,
   assembleFacts,
   buildProbeCatalog,
   isReadOnlyProbeCommand,
@@ -14,8 +21,9 @@ import {
   parseFstabMountPoints,
   parseHubHealth,
   parsePathFacts,
+  parseVolumeNames,
 } from '../services/nodeBootstrap/probes';
-import type { SshCommandResult } from '../services/nodeBootstrap/sshProbeClient';
+import { scrubCommandOutput, type SshCommandResult } from '../services/nodeBootstrap/sshProbeClient';
 
 const PATH_SCRIPT_OUTPUT = [
   'P_INPUT=/opt/docker/sencho',
@@ -171,8 +179,14 @@ describe('bootstrap probe parsers', () => {
     });
     expect(packages.find((pkg) => pkg.name === 'docker-compose-plugin')?.installedVersion).toBe('2.29.7-1~ubuntu.24.04~noble');
 
-    expect(parseDockerRepo('list\nkeyring')).toEqual({ dockerSourceConfigured: true, keyringPresent: true });
-    expect(parseDockerRepo('')).toEqual({ dockerSourceConfigured: false, keyringPresent: false });
+    expect(parseDockerRepo('')).toEqual({
+      dockerSourceConfigured: false,
+      keyringPresent: false,
+      sourceVerified: false,
+      keyringVerified: false,
+      candidateSourceVerified: null,
+      problem: null,
+    });
   });
 
   it('parses containers with missing compose labels', () => {
@@ -180,7 +194,7 @@ describe('bootstrap probe parsers', () => {
       'web\tnginx:latest\tweb\t/opt/docker/sencho/web\tUp 2 hours',
       'orphan\tbusybox\t\t\tExited (0)',
     ].join('\n');
-    const rows = parseContainers(text);
+    const { rows } = parseContainers(text);
     expect(rows).toHaveLength(2);
     expect(rows[0].project).toBe('web');
     expect(rows[1].project).toBeNull();
@@ -226,10 +240,10 @@ describe('bootstrap fact assembly', () => {
         result('compose_version', '2.29.7'),
         result('docker_service_active', 'active'),
         result('docker_service_enabled', 'enabled'),
-        result('docker_repo', 'list\nkeyring'),
+        result('docker_repo', ''),
         result('apt_policy', 'docker-ce:\n  Installed: 1\n  Candidate: 1'),
         result('containers', 'web\tnginx:latest\tweb\t/opt/docker/sencho/web\tUp'),
-        result('agent_volume', '', 1),
+        result('agent_volume', ''),
         result('clock', String(Math.floor(Date.now() / 1000))),
         result('hub_health', '200'),
         result('path_compose', PATH_SCRIPT_OUTPUT),
@@ -252,5 +266,282 @@ describe('bootstrap fact assembly', () => {
     expect(facts.agent.dataVolumeExists).toBe(false);
     expect(facts.dockerRoot.freeBytes).toBe(123456789 * 1024);
     expect(facts.containers.total).toBe(1);
+  });
+});
+
+function probe(id: string, stdout: string, overrides: Partial<SshCommandResult> = {}): SshCommandResult {
+  return { id, stdout, stderr: '', exitCode: 0, truncated: false, timedOut: false, error: null, ...overrides };
+}
+
+function minimalAssembly(results: SshCommandResult[]) {
+  return assembleFacts({
+    target: { host: 'server.example.com', port: 22, username: 'ubuntu', address: '192.168.1.50' },
+    hostKey: { algorithm: 'ssh-ed25519', fingerprint: 'SHA256:abc', knownHostsLine: 'line' },
+    hubUrl: 'https://sencho.example.com',
+    composeDir: '/opt/docker/sencho',
+    agentDir: '/opt/sencho-agent',
+    results,
+    fstabMountPoints: ['/'],
+    now: 1_762_300_000_000,
+  });
+}
+
+describe('bootstrap inventory completeness', () => {
+  it('finds a Pilot container beyond row 200 and keeps the full count', () => {
+    const rows = Array.from({ length: 250 }, (_, index) => {
+      const project = index === 220 ? 'sencho-agent' : 'other';
+      const name = index === 220 ? 'sencho-agent' : `container-${index}`;
+      return `${name}\tnginx:latest\t${project}\t/opt/docker/sencho/${project}\tUp`;
+    });
+    const facts = minimalAssembly([
+      probe('docker_info', '27.3.1|/var/lib/docker'),
+      probe('containers', rows.join('\n')),
+    ]);
+    expect(facts.containers.total).toBe(250);
+    expect(facts.containers.complete).toBe(true);
+    expect(facts.agent.projectContainers.map((row) => row.name)).toEqual(['sencho-agent']);
+  });
+
+  it('marks a truncated container inventory incomplete instead of claiming absence', () => {
+    const facts = minimalAssembly([
+      probe('docker_info', '27.3.1|/var/lib/docker'),
+      probe('containers', 'container-1\tnginx\tother\t/opt/docker/sencho/other\tUp', { truncated: true }),
+    ]);
+    expect(facts.containers.complete).toBe(false);
+    expect(facts.containers.error).toMatch(/truncated/i);
+  });
+
+  it('keeps a failed volume inspection unknown instead of reporting no volume', () => {
+    const facts = minimalAssembly([
+      probe('docker_info', '27.3.1|/var/lib/docker'),
+      probe('agent_volume', '', { exitCode: 1 }),
+    ]);
+    expect(facts.agent.dataVolumeExists).toBeNull();
+  });
+
+  it('recognises the canonical project-qualified data volume', () => {
+    const facts = minimalAssembly([
+      probe('docker_info', '27.3.1|/var/lib/docker'),
+      probe('agent_volume', `${PILOT_DATA_VOLUME_CANONICAL}\nsencho-agent-data`),
+    ]);
+    expect(facts.agent.dataVolumeExists).toBe(true);
+    expect(facts.agent.dataVolumeNames).toEqual(['sencho-agent-data', PILOT_DATA_VOLUME_CANONICAL]);
+    expect(parseVolumeNames('sencho-agent_other\nsencho-agent_sencho-agent-data')).toEqual([PILOT_DATA_VOLUME_CANONICAL]);
+  });
+
+  it('does not turn a failed Compose inventory into an empty stacks root', () => {
+    const pathFacts = [
+      'P_EXISTS=1', 'P_ISDIR=1', 'P_REAL=/opt/docker/sencho', 'P_FSTYPE=ext4', 'P_FSTARGET=/',
+      'P_USER_R=1', 'P_USER_W=1', 'P_PARENT_W=1', 'P_DF=/dev/sda1 1 1 104857600 1% /',
+    ].join('\n');
+    const facts = minimalAssembly([
+      probe('path_compose', pathFacts),
+      probe('compose_inventory', '', { exitCode: 1 }),
+    ]);
+    expect(facts.paths.composeDir.exists).toBe(true);
+    expect(facts.paths.composeDir.stackCount).toBeNull();
+    expect(facts.paths.composeDir.inventoryError).toMatch(/exited 1/);
+  });
+
+  it('uses a successful sudo inventory when the direct one is denied', () => {
+    const pathFacts = [
+      'P_EXISTS=1', 'P_ISDIR=1', 'P_REAL=/opt/docker/sencho', 'P_FSTYPE=ext4', 'P_FSTARGET=/',
+      'P_USER_R=1', 'P_USER_W=1', 'P_PARENT_W=1', 'P_SUDO_R=1', 'P_SUDO_W=1',
+    ].join('\n');
+    const facts = minimalAssembly([
+      probe('path_compose', pathFacts),
+      probe('compose_inventory', '', { exitCode: 1 }),
+      probe('compose_inventory_sudo', '/opt/docker/sencho/media/compose.yaml\0'),
+    ]);
+    expect(facts.paths.composeDir.inventoryError).toBeNull();
+    expect(facts.paths.composeDir.stackCount).toBe(1);
+  });
+
+  it('treats partial and timed-out inventories as incomplete', () => {
+    const pathFacts = [
+      'P_EXISTS=1', 'P_ISDIR=1', 'P_REAL=/opt/docker/sencho', 'P_FSTYPE=ext4', 'P_FSTARGET=/',
+      'P_USER_R=1', 'P_USER_W=1', 'P_PARENT_W=1',
+    ].join('\n');
+    for (const failure of [{ truncated: true }, { timedOut: true }]) {
+      const facts = minimalAssembly([
+        probe('path_compose', pathFacts),
+        probe('compose_inventory', '/opt/docker/sencho/known/compose.yaml\0', failure),
+      ]);
+      expect(facts.paths.composeDir.inventoryError).toBeTruthy();
+      expect(facts.paths.composeDir.stackCount).toBeNull();
+    }
+  });
+
+  it('does not turn an unreadable Agent directory into an empty one', () => {
+    const pathFacts = [
+      'P_EXISTS=1', 'P_ISDIR=1', 'P_REAL=/opt/sencho-agent', 'P_MODE=300', 'P_USER_W=1',
+      'P_FSTYPE=ext4', 'P_FSTARGET=/', 'P_PARENT_W=1',
+    ].join('\n');
+    const facts = minimalAssembly([
+      probe('path_agent', pathFacts),
+      probe('agent_inventory', '', { exitCode: 1 }),
+    ]);
+    expect(facts.paths.agentDir.exists).toBe(true);
+    expect(facts.paths.agentDir.readableByUser).toBe(false);
+    expect(facts.paths.agentDir.inventoryError).toMatch(/exited 1/);
+  });
+
+  it('detects every stack before the display-name cap', () => {
+    const entries = Array.from({ length: 80 }, (_, index) => `/opt/docker/sencho/stack-${index}/compose.yaml`);
+    const summary = parseComposeInventory(entries.join('\0'), '/opt/docker/sencho');
+    expect(summary.stackCount).toBe(80);
+    expect(summary.stackNames).toHaveLength(50);
+    expect(summary.truncated).toBe(true);
+  });
+
+  it('preserves NUL-delimited inventory records through transport sanitation', () => {
+    const compose = '/opt/docker/sencho/media/compose.yaml\0/opt/docker/sencho/tools/compose.yaml\0';
+    const sanitized = scrubCommandOutput(compose);
+    expect(sanitized).toBe(compose);
+    expect(parseComposeInventory(sanitized, '/opt/docker/sencho').stackNames).toEqual(['media', 'tools']);
+
+    const agent = scrubCommandOutput('compose.yaml\0sencho-bootstrap.json\0sencho-hub-ca.pem\0');
+    expect(parseAgentInventory(agent).entries).toEqual(['compose.yaml', 'sencho-bootstrap.json', 'sencho-hub-ca.pem']);
+  });
+});
+
+describe('bootstrap Docker endpoint pinning', () => {
+  it('binds every Docker probe to the local socket and default context', () => {
+    const catalog = buildProbeCatalog({
+      composeDir: '/opt/docker/sencho',
+      agentDir: '/opt/sencho-agent',
+      hubUrl: 'https://sencho.example.com',
+    });
+    const dockerIds = [
+      'docker_info', 'docker_info_sudo', 'compose_version', 'compose_version_sudo',
+      'containers', 'containers_sudo', 'agent_volume', 'agent_volume_sudo', 'docker_root_disk',
+    ];
+    for (const id of dockerIds) {
+      const command = catalog.find((entry) => entry.id === id)?.command ?? '';
+      expect(command, id).toContain(`DOCKER_HOST=${DOCKER_LOCAL_ENDPOINT}`);
+      expect(command, id).toContain('DOCKER_CONTEXT=default');
+    }
+  });
+
+  it('reports an unsearchable path as an inspection error, not a missing directory', () => {
+    if (typeof process.getuid === 'function' && process.getuid() === 0) return;
+    const dir = mkdtempSync(path.join(os.tmpdir(), 'sencho-bootstrap-denied-'));
+    const blocked = path.join(dir, 'blocked');
+    const child = path.join(blocked, 'child');
+    try {
+      mkdirSync(blocked);
+      chmodSync(blocked, 0o400);
+      const output = execFileSync('sh', ['-c', PATH_FACTS_SCRIPT, 'sencho-probe', child], { encoding: 'utf8' });
+      expect(output).toContain('P_EXISTS=0');
+      expect(output).toMatch(/P_ERROR=stat:/);
+      expect(parsePathFacts(output, child).probeError).toMatch(/Permission denied/i);
+    } finally {
+      chmodSync(blocked, 0o700);
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('reads filesystem facts from the nearest existing ancestor for a missing path', () => {
+    const dir = mkdtempSync(path.join(os.tmpdir(), 'sencho-bootstrap-path-'));
+    try {
+      const missing = path.join(dir, 'missing', 'child');
+      const output = execFileSync('sh', ['-c', PATH_FACTS_SCRIPT, 'sencho-probe', missing], { encoding: 'utf8' });
+      expect(output).toContain('P_EXISTS=0');
+      expect(output).toContain(`P_NEAREST=${dir}`);
+      expect(output).toMatch(/P_FSTYPE=\S+/);
+      expect(output).toMatch(/P_FSTARGET=\S+/);
+      expect(output).toMatch(/P_DF=\S+\s+\d+\s+\d+\s+\d+/);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
+
+describe('bootstrap Docker repository provenance', () => {
+  const keyBytes = Buffer.from('-----BEGIN PGP PUBLIC KEY BLOCK-----\nfixture\n-----END PGP PUBLIC KEY BLOCK-----\n');
+  const keyBlock = (keyPath = '/etc/apt/keyrings/docker.asc') => [
+    `KEY_BEGIN=${keyPath}`,
+    keyBytes.toString('base64'),
+    `KEY_END=${keyPath}`,
+  ].join('\n');
+  const listBlock = (sourcePath: string, content: string) => [
+    `SOURCE_BEGIN=${sourcePath}`,
+    content,
+    `SOURCE_END=${sourcePath}`,
+  ].join('\n');
+
+  it('verifies an official debian .list source and its keyring', () => {
+    const output = [
+      listBlock('/etc/apt/sources.list.d/docker.list', 'deb [arch=amd64 signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/ubuntu noble stable'),
+      keyBlock(),
+    ].join('\n');
+    expect(parseDockerRepo(output, 'noble')).toMatchObject({
+      dockerSourceConfigured: true,
+      keyringPresent: true,
+      sourceVerified: true,
+      keyringVerified: true,
+    });
+  });
+
+  it('verifies an official deb822 .sources source', () => {
+    const output = [
+      listBlock('/etc/apt/sources.list.d/docker.sources', [
+        'Types: deb',
+        'URIs: https://download.docker.com/linux/ubuntu',
+        'Suites: noble',
+        'Components: stable',
+        'Signed-By: /etc/apt/keyrings/docker.asc',
+      ].join('\n')),
+      keyBlock(),
+    ].join('\n');
+    expect(parseDockerRepo(output, 'noble')).toMatchObject({ sourceVerified: true, keyringVerified: true });
+  });
+
+  it('rejects an arbitrary URL and a mismatched suite', () => {
+    const arbitrary = parseDockerRepo([
+      listBlock('/etc/apt/sources.list.d/docker.list', 'deb [arch=amd64 signed-by=/etc/apt/keyrings/docker.asc] https://example.com/linux/ubuntu noble stable'),
+      keyBlock(),
+    ].join('\n'), 'noble');
+    expect(arbitrary.sourceVerified).toBe(false);
+    expect(arbitrary.problem).toContain('not https://download.docker.com');
+
+    const mismatch = parseDockerRepo([
+      listBlock('/etc/apt/sources.list.d/docker.list', 'deb [arch=amd64 signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/ubuntu jammy stable'),
+      keyBlock(),
+    ].join('\n'), 'noble');
+    expect(mismatch.sourceVerified).toBe(false);
+    expect(mismatch.problem).toContain('suite');
+  });
+
+  it('keeps an unreadable source unknown and rejects a non-key keyring', () => {
+    const unreadable = parseDockerRepo([
+      'SOURCE_BEGIN=/etc/apt/sources.list.d/docker.list',
+      'SOURCE_UNREADABLE=1',
+      'SOURCE_END=/etc/apt/sources.list.d/docker.list',
+      keyBlock(),
+    ].join('\n'), 'noble');
+    expect(unreadable.sourceVerified).toBeNull();
+
+    const badKey = parseDockerRepo([
+      listBlock('/etc/apt/sources.list.d/docker.list', 'deb [arch=amd64 signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/ubuntu noble stable'),
+      'KEY_BEGIN=/etc/apt/keyrings/docker.asc',
+      Buffer.from('not a pgp key').toString('base64'),
+      'KEY_END=/etc/apt/keyrings/docker.asc',
+    ].join('\n'), 'noble');
+    expect(badKey.keyringVerified).toBe(false);
+    expect(badKey.keyringPresent).toBe(false);
+  });
+
+  it('records which archive serves the candidate version', () => {
+    const packages = parseAptPolicy([
+      'docker-ce:',
+      '  Installed: 5:27.3.1-1',
+      '  Candidate: 5:27.3.1-1',
+      '  Version table:',
+      '     5:27.3.1-1 500',
+      '        500 https://download.docker.com/linux/ubuntu noble/stable amd64 Packages',
+    ].join('\n'));
+    expect(packages.find((pkg) => pkg.name === 'docker-ce')?.candidateSource)
+      .toBe('https://download.docker.com/linux/ubuntu');
   });
 });

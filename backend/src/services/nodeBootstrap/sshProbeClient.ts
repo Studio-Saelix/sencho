@@ -1,6 +1,6 @@
 import crypto from 'crypto';
 import { Client, utils as sshUtils } from 'ssh2';
-import type { ConnectConfig } from 'ssh2';
+import type { ClientChannel, ConnectConfig } from 'ssh2';
 import type { HostKeyObservation } from './types';
 
 /**
@@ -82,7 +82,8 @@ export const SSH_TOTAL_TIMEOUT_MS = 90_000;
 export const SSH_MAX_BYTES_PER_COMMAND = 64 * 1024;
 export const SSH_MAX_BYTES_TOTAL = 512 * 1024;
 
-const CONTROLS_EXCEPT_LAYOUT_AND_NUL = /[\x00-\x08\x0b-\x1f\x7f]/g;
+// Start at 0x01: NUL is the inventory record separator and must survive.
+const CONTROLS_EXCEPT_LAYOUT_AND_NUL = /[\x01-\x08\x0b-\x1f\x7f]/g;
 const ANSI_ESCAPE = /\x1b\[[0-9;?]*[A-Za-z]|\x1b\][^\x07]*\x07/g;
 
 /** Keep newline, tab and NUL (inventory output is NUL-delimited); drop the rest. */
@@ -180,6 +181,8 @@ interface ExecOutcome {
   exitCode: number | null;
   truncated: boolean;
   timedOut: boolean;
+  /** Raw bytes retained before scrubbing, for the session-wide budget. */
+  bytes: number;
 }
 
 function execOne(
@@ -188,67 +191,84 @@ function execOne(
   timeoutMs: number,
   maxBytes: number,
   remainingTotalBytes: number,
+  onTimeout: () => void,
 ): Promise<ExecOutcome> {
   const cap = Math.min(maxBytes, remainingTotalBytes);
   return new Promise((resolve, reject) => {
-    conn.exec(`LC_ALL=C ${command}`, (err, stream) => {
+    const stdout: Buffer[] = [];
+    const stderr: Buffer[] = [];
+    let bytes = 0;
+    let truncated = false;
+    let timedOut = false;
+    let settled = false;
+    let stream: ClientChannel | null = null;
+
+    const snapshot = (exitCode: number | null): ExecOutcome => ({
+      stdout: scrubCommandOutput(Buffer.concat(stdout).toString('utf8')),
+      stderr: scrubCommandOutput(Buffer.concat(stderr).toString('utf8')),
+      exitCode,
+      truncated,
+      timedOut,
+      bytes,
+    });
+    const settle = (exitCode: number | null) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      resolve(snapshot(exitCode));
+    };
+    // Budget both output streams through one raw-byte counter. A peer that
+    // writes only stderr must hit the same cap as one that writes stdout.
+    const collect = (chunk: Buffer, target: Buffer[]): void => {
+      if (bytes >= cap) {
+        truncated = true;
+        return;
+      }
+      const room = cap - bytes;
+      const slice = chunk.length > room ? chunk.subarray(0, room) : chunk;
+      if (chunk.length > room) truncated = true;
+      bytes += slice.length;
+      target.push(slice);
+    };
+
+    // The timer starts before the exec request, so a peer that withholds the
+    // exec acknowledgement cannot keep the request (and the target lock) alive.
+    const timer = setTimeout(() => {
+      timedOut = true;
+      onTimeout();
+      try {
+        stream?.destroy();
+      } catch {
+        // The channel may already be gone; the session close is the cleanup.
+      }
+      settle(null);
+    }, timeoutMs);
+
+    conn.exec(`LC_ALL=C ${command}`, (err, channel) => {
+      if (settled) {
+        try {
+          channel?.destroy();
+        } catch {
+          // Late acknowledgement after the deadline: nothing left to read.
+        }
+        return;
+      }
       if (err) {
+        settled = true;
+        clearTimeout(timer);
         reject(err);
         return;
       }
-      const stdout: Buffer[] = [];
-      const stderr: Buffer[] = [];
-      let bytes = 0;
-      let truncated = false;
-      let timedOut = false;
-      let settled = false;
-
-      const timer = setTimeout(() => {
-        timedOut = true;
-        stream.destroy();
-        finish();
-      }, timeoutMs);
-
-      const finish = () => {
+      stream = channel;
+      channel.on('data', (chunk: Buffer) => collect(chunk, stdout));
+      channel.stderr.on('data', (chunk: Buffer) => collect(chunk, stderr));
+      channel.on('close', (code: number | null) => {
         if (settled) return;
         settled = true;
         clearTimeout(timer);
-        resolve({
-          stdout: scrubCommandOutput(Buffer.concat(stdout).toString('utf8')),
-          stderr: scrubCommandOutput(Buffer.concat(stderr).toString('utf8')),
-          exitCode: null,
-          truncated,
-          timedOut,
-        });
-      };
-
-      stream.on('data', (chunk: Buffer) => {
-        if (bytes >= cap) {
-          truncated = true;
-          return;
-        }
-        const room = cap - bytes;
-        const slice = chunk.length > room ? chunk.subarray(0, room) : chunk;
-        if (chunk.length > room) truncated = true;
-        bytes += slice.length;
-        stdout.push(slice);
+        resolve(snapshot(typeof code === 'number' ? code : null));
       });
-      stream.stderr.on('data', (chunk: Buffer) => {
-        if (stderr.length < 32) stderr.push(Buffer.from(chunk));
-      });
-      stream.on('close', (code: number | null) => {
-        if (settled) return;
-        settled = true;
-        clearTimeout(timer);
-        resolve({
-          stdout: scrubCommandOutput(Buffer.concat(stdout).toString('utf8')),
-          stderr: scrubCommandOutput(Buffer.concat(stderr).toString('utf8')),
-          exitCode: typeof code === 'number' ? code : null,
-          truncated,
-          timedOut,
-        });
-      });
-      stream.on('error', () => finish());
+      channel.on('error', () => settle(null));
     });
   });
 }
@@ -325,10 +345,29 @@ function runSession(
     let hostKeyRejected = false;
     let completed = 0;
     let remainingBytes = SSH_MAX_BYTES_TOTAL;
+    let aborted = false;
+    let watchdog: NodeJS.Timeout | null = null;
+
+    const clearWatchdog = () => {
+      if (watchdog) {
+        clearTimeout(watchdog);
+        watchdog = null;
+      }
+    };
+    const timeoutResult = (command: SshCommand, error: string): SshCommandResult => ({
+      id: command.id,
+      stdout: '',
+      stderr: '',
+      exitCode: null,
+      truncated: false,
+      timedOut: true,
+      error,
+    });
 
     const fail = (error: unknown) => {
       if (finished) return;
       finished = true;
+      clearWatchdog();
       conn.end();
       reject(hostKeyRejected
         ? new SshTransportError('HOST_KEY_UNTRUSTED', 'The host key changed before the preflight connected.')
@@ -338,9 +377,27 @@ function runSession(
     const finish = () => {
       if (finished) return;
       finished = true;
+      clearWatchdog();
       conn.end();
       resolve(results);
     };
+
+    // The watchdog is independent of every callback. It covers connect, exec
+    // acknowledgement and stream collection, so a peer cannot hold the request
+    // open past the session budget.
+    watchdog = setTimeout(() => {
+      if (finished) return;
+      aborted = true;
+      try {
+        conn.end();
+      } catch {
+        // Already closing.
+      }
+      for (let index = completed; index < commands.length; index += 1) {
+        results.push(timeoutResult(commands[index], 'PREFLIGHT_TIMEOUT'));
+      }
+      finish();
+    }, options.totalMs);
 
     conn.on('error', fail);
     conn.on('ready', () => {
@@ -348,17 +405,11 @@ function runSession(
       void (async () => {
         try {
           for (const command of commands) {
+            if (finished) return;
             const remainingMs = deadline - Date.now();
             if (remainingMs <= 0) {
-              results.push({
-                id: command.id,
-                stdout: '',
-                stderr: '',
-                exitCode: null,
-                truncated: false,
-                timedOut: true,
-                error: 'PREFLIGHT_TIMEOUT',
-              });
+              results.push(timeoutResult(command, 'PREFLIGHT_TIMEOUT'));
+              completed += 1;
               continue;
             }
             if (remainingBytes <= 0) {
@@ -371,6 +422,7 @@ function runSession(
                 timedOut: false,
                 error: 'OUTPUT_CAP',
               });
+              completed += 1;
               continue;
             }
             const outcome = await execOne(
@@ -379,8 +431,17 @@ function runSession(
               Math.min(options.perCommandMs, remainingMs),
               SSH_MAX_BYTES_PER_COMMAND,
               remainingBytes,
+              () => {
+                aborted = true;
+                try {
+                  conn.end();
+                } catch {
+                  // Already closing.
+                }
+              },
             );
-            remainingBytes -= Buffer.byteLength(outcome.stdout) + Buffer.byteLength(outcome.stderr);
+            if (finished) return;
+            remainingBytes -= outcome.bytes;
             results.push({
               id: command.id,
               stdout: outcome.stdout,
@@ -401,22 +462,24 @@ function runSession(
     });
 
     conn.on('close', () => {
-      if (!finished) {
-        finished = true;
-        if (!ready) {
-          reject(hostKeyRejected
-            ? new SshTransportError('HOST_KEY_UNTRUSTED', 'The host key changed before the preflight connected.')
-            : new SshTransportError('SSH_UNREACHABLE', 'The SSH connection closed before authentication.'));
-          return;
-        }
-        if (completed < commands.length) {
-          // A dropped session must not look like a completed inspection: an
-          // unread fact would otherwise be reported as a clean negative.
-          reject(new SshTransportError('SSH_UNREACHABLE', 'The SSH connection closed before the inspection finished.'));
-          return;
-        }
-        resolve(results);
+      if (finished) return;
+      // An abort already has a resolver: the command loop or the watchdog.
+      if (aborted) return;
+      finished = true;
+      clearWatchdog();
+      if (!ready) {
+        reject(hostKeyRejected
+          ? new SshTransportError('HOST_KEY_UNTRUSTED', 'The host key changed before the preflight connected.')
+          : new SshTransportError('SSH_UNREACHABLE', 'The SSH connection closed before authentication.'));
+        return;
       }
+      if (completed < commands.length) {
+        // A dropped session must not look like a completed inspection: an
+        // unread fact would otherwise be reported as a clean negative.
+        reject(new SshTransportError('SSH_UNREACHABLE', 'The SSH connection closed before the inspection finished.'));
+        return;
+      }
+      resolve(results);
     });
 
     conn.connect(config);

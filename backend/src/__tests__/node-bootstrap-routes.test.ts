@@ -292,7 +292,7 @@ describe('bootstrap routes: preflight', () => {
         target: { host: 'server.example.com', port: 22, username: 'ubuntu', address: '192.168.1.50' },
         hostKey: { algorithm: 'ssh-ed25519', fingerprint: 'SHA256:abc', knownHostsLine: 'line' },
         paths: {} as never,
-        agent: { projectContainers: [], dataVolumeExists: false, defaultDirHasComposeFile: false },
+        agent: { projectContainers: [], dataVolumeExists: false, dataVolumeNames: [], defaultDirHasComposeFile: false },
         dockerRoot: { path: '/var/lib/docker', freeBytes: 1, filesystemType: 'ext4' },
         checks: [{
           id: 'agent_dir',
@@ -324,7 +324,7 @@ describe('bootstrap routes: preflight', () => {
         target: { host: 'server.example.com', port: 22, username: 'ubuntu', address: '192.168.1.50' },
         hostKey: { algorithm: 'ssh-ed25519', fingerprint: 'SHA256:abc', knownHostsLine: 'line' },
         paths: {} as never,
-        agent: { projectContainers: [], dataVolumeExists: false, defaultDirHasComposeFile: false },
+        agent: { projectContainers: [], dataVolumeExists: false, dataVolumeNames: [], defaultDirHasComposeFile: false },
         dockerRoot: { path: null, freeBytes: null, filesystemType: null },
         checks: [],
         blockers: 0,
@@ -543,5 +543,275 @@ describe('bootstrap service orchestration', () => {
     const serialized = JSON.stringify(result);
     expect(serialized).not.toContain('not-a-real-key');
     expect(serialized).not.toContain(request.privateKey);
+  });
+});
+
+describe('bootstrap service trust serialization', () => {
+  const audit = { username: 'admin', ip: '127.0.0.1', method: 'POST', path: '/api/nodes/bootstrap/preflight' };
+  const baseRequest: BootstrapPreflightRequest = {
+    host: 'race.example.com',
+    port: 22,
+    username: 'ubuntu',
+    privateKey: '-----BEGIN OPENSSH PRIVATE KEY-----\nnot-a-real-key\n-----END OPENSSH PRIVATE KEY-----',
+    expectedFingerprint: 'SHA256:fixturefingerprint000000000000000000000000',
+    targetName: 'race-server',
+    composeDir: '/opt/docker/sencho',
+    agentDir: '/opt/sencho-agent',
+  };
+
+  it('serializes pin validation with DNS and the probe run', async () => {
+    let release: (() => void) | null = null;
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    let calls = 0;
+    const resolver = async (): Promise<string[]> => {
+      calls += 1;
+      if (calls === 1) await gate;
+      return ['192.168.1.50'];
+    };
+    const svc = new NodeBootstrapService({
+      transport: new FakeTransport(),
+      db: DatabaseService.getInstance(),
+      now: () => 1_762_300_000_000,
+      resolveAddresses: resolver,
+      caPem: () => null,
+    });
+
+    const first = svc.preflight(
+      { ...baseRequest, expectedFingerprint: 'SHA256:fixturefingerprint000000000000000000000000' },
+      { hubUrl: 'https://sencho.example.com', audit },
+    );
+    await new Promise((resolve) => setImmediate(resolve));
+    await expect(svc.preflight(
+      { ...baseRequest, expectedFingerprint: 'SHA256:secondfingerprint00000000000000000000000000' },
+      { hubUrl: 'https://sencho.example.com', audit },
+    )).rejects.toMatchObject({ code: 'BOOTSTRAP_IN_PROGRESS' });
+
+    release!();
+    await first;
+    const db = DatabaseService.getInstance();
+    expect(db.getNodeBootstrapTrust('race.example.com', 22)?.fingerprint)
+      .toBe('SHA256:fixturefingerprint000000000000000000000000');
+
+    // The first pin is preserved: the second request never observed an empty
+    // store and cannot replace it without an explicit replacement confirmation.
+    await expect(svc.preflight(
+      { ...baseRequest, expectedFingerprint: 'SHA256:secondfingerprint00000000000000000000000000' },
+      { hubUrl: 'https://sencho.example.com', audit },
+    )).rejects.toMatchObject({ code: 'HOST_KEY_MISMATCH' });
+    expect(db.getNodeBootstrapTrust('race.example.com', 22)?.fingerprint)
+      .toBe('SHA256:fixturefingerprint000000000000000000000000');
+  });
+
+  it('refuses to overwrite a pin that changed while the probe was running', async () => {
+    const db = DatabaseService.getInstance();
+    const host = 'cas.example.com';
+    const observed = 'SHA256:observed000000000000000000000000000000000';
+    const interposed = 'SHA256:interposed000000000000000000000000000000';
+    const transport: BootstrapTransport = {
+      captureHostKey: async () => ({
+        algorithm: 'ssh-ed25519',
+        fingerprint: observed,
+        knownHostsLine: 'line',
+      }),
+      runCommands: async (session, commands, options) => {
+        options?.onHostKey?.({
+          algorithm: 'ssh-ed25519',
+          fingerprint: observed,
+          knownHostsLine: `${host} ssh-ed25519 AAAA`,
+        });
+        db.upsertNodeBootstrapTrust({
+          host,
+          port: 22,
+          fingerprint: interposed,
+          algorithm: 'ssh-ed25519',
+          approved_by: 'other',
+          approved_at: 1,
+          last_seen_at: 1,
+        });
+        return commands.map((command) => ({
+          id: command.id,
+          stdout: '',
+          stderr: '',
+          exitCode: 0,
+          truncated: false,
+          timedOut: false,
+          error: null,
+        }));
+      },
+    };
+    const svc = new NodeBootstrapService({
+      transport,
+      db,
+      now: () => 1_762_300_000_000,
+      resolveAddresses: async () => ['192.168.1.50'],
+      caPem: () => null,
+    });
+
+    await expect(svc.preflight(
+      { ...baseRequest, host, expectedFingerprint: observed },
+      { hubUrl: 'https://sencho.example.com', audit },
+    )).rejects.toMatchObject({ code: 'HOST_KEY_MISMATCH' });
+    expect(db.getNodeBootstrapTrust(host, 22)?.fingerprint).toBe(interposed);
+    const { entries } = db.getAuditLogs({ search: 'bootstrap.trust.mismatch', limit: 50 });
+    expect(entries.some((entry) => entry.summary.includes(`observed=${observed}`))).toBe(true);
+  });
+
+  it('records an explicit live mismatch audit with the pinned and observed keys', async () => {
+    const db = DatabaseService.getInstance();
+    const host = 'live-mismatch.example.com';
+    const pinned = 'SHA256:pinnedfingerprint000000000000000000000000';
+    const observed = 'SHA256:livefingerprint00000000000000000000000000';
+    db.upsertNodeBootstrapTrust({
+      host,
+      port: 22,
+      fingerprint: pinned,
+      algorithm: 'ssh-ed25519',
+      approved_by: 'admin',
+      approved_at: 1,
+      last_seen_at: 1,
+    });
+    let executed = 0;
+    const transport: BootstrapTransport = {
+      captureHostKey: async () => ({ algorithm: 'ssh-ed25519', fingerprint: pinned, knownHostsLine: 'line' }),
+      runCommands: async (session, _commands, options) => {
+        executed += 1;
+        options?.onHostKey?.({
+          algorithm: 'ssh-ed25519',
+          fingerprint: observed,
+          knownHostsLine: `${host} ssh-ed25519 AAAA`,
+        });
+        throw new SshTransportError('HOST_KEY_UNTRUSTED', 'The host key changed before the preflight connected.');
+      },
+    };
+    const svc = new NodeBootstrapService({
+      transport,
+      db,
+      now: () => 1_762_300_000_000,
+      resolveAddresses: async () => ['192.168.1.50'],
+      caPem: () => null,
+    });
+
+    await expect(svc.preflight(
+      { ...baseRequest, host, expectedFingerprint: pinned },
+      { hubUrl: 'https://sencho.example.com', audit },
+    )).rejects.toMatchObject({ code: 'HOST_KEY_UNTRUSTED' });
+    expect(executed).toBe(1);
+    const { entries } = db.getAuditLogs({ search: 'bootstrap.trust.mismatch', limit: 50 });
+    const row = entries.find((entry) => entry.summary.includes(`host=${host}`));
+    expect(row?.summary).toContain(`pinned=${pinned}`);
+    expect(row?.summary).toContain(`expected=${pinned}`);
+    expect(row?.summary).toContain(`observed=${observed}`);
+    expect(row?.status_code).toBe(409);
+  });
+
+  it('fails a request whose DNS does not answer inside the request budget', async () => {
+    const svc = new NodeBootstrapService({
+      transport: new FakeTransport(),
+      db: DatabaseService.getInstance(),
+      now: () => 1_762_300_000_000,
+      resolveAddresses: async () => {
+        await new Promise((resolve) => setTimeout(resolve, 500));
+        return ['192.168.1.50'];
+      },
+      caPem: () => null,
+      requestBudgetMs: 40,
+    });
+    const started = Date.now();
+    await expect(svc.preflight(
+      { ...baseRequest, host: 'slow-dns.example.com' },
+      { hubUrl: 'https://sencho.example.com', audit },
+    )).rejects.toMatchObject({ code: 'PREFLIGHT_TIMEOUT' });
+    expect(Date.now() - started).toBeLessThan(400);
+  });
+
+  it('gives each address attempt only the remaining request budget', async () => {
+    const seenTotals: number[] = [];
+    const transport: BootstrapTransport = {
+      captureHostKey: async () => ({ algorithm: 'ssh-ed25519', fingerprint: 'SHA256:x', knownHostsLine: 'line' }),
+      runCommands: async (session, commands, options) => {
+        seenTotals.push(options?.totalMs ?? -1);
+        if (session.address === '192.168.1.10') {
+          await new Promise((resolve) => setTimeout(resolve, 40));
+          throw new SshTransportError('SSH_UNREACHABLE', 'first address down');
+        }
+        return commands.map((command) => ({
+          id: command.id, stdout: '', stderr: '', exitCode: 0, truncated: false, timedOut: false, error: null,
+        }));
+      },
+    };
+    const svc = new NodeBootstrapService({
+      transport,
+      db: DatabaseService.getInstance(),
+      now: () => 1_762_300_000_000,
+      resolveAddresses: async () => ['192.168.1.10', '192.168.1.20'],
+      caPem: () => null,
+      requestBudgetMs: 300,
+    });
+    await svc.preflight(
+      { ...baseRequest, host: 'fallback.example.com' },
+      { hubUrl: 'https://sencho.example.com', audit },
+    );
+    expect(seenTotals).toHaveLength(2);
+    expect(seenTotals[0]).toBeLessThanOrEqual(300);
+    expect(seenTotals[1]).toBeLessThan(seenTotals[0]);
+    expect(seenTotals[1]).toBeGreaterThan(0);
+  });
+
+  it('releases the target lock after a bounded transport timeout', async () => {
+    let timedOut = true;
+    const transport: BootstrapTransport = {
+      captureHostKey: async () => ({ algorithm: 'ssh-ed25519', fingerprint: 'SHA256:t', knownHostsLine: 'line' }),
+      runCommands: async (session, commands) => {
+        if (timedOut) {
+          return commands.map((command) => ({
+            id: command.id, stdout: '', stderr: '', exitCode: null, truncated: false, timedOut: true, error: 'PREFLIGHT_TIMEOUT',
+          }));
+        }
+        return commands.map((command) => ({
+          id: command.id, stdout: '', stderr: '', exitCode: 0, truncated: false, timedOut: false, error: null,
+        }));
+      },
+    };
+    const svc = new NodeBootstrapService({
+      transport,
+      db: DatabaseService.getInstance(),
+      now: () => 1_762_300_000_000,
+      resolveAddresses: async () => ['192.168.1.50'],
+      caPem: () => null,
+    });
+    const host = 'timeout-lock.example.com';
+    await expect(svc.preflight(
+      { ...baseRequest, host, expectedFingerprint: 'SHA256:t' },
+      { hubUrl: 'https://sencho.example.com', audit },
+    )).rejects.toMatchObject({ code: 'PREFLIGHT_TIMEOUT' });
+
+    timedOut = false;
+    await expect(svc.preflight(
+      { ...baseRequest, host, expectedFingerprint: 'SHA256:t' },
+      { hubUrl: 'https://sencho.example.com', audit },
+    )).resolves.toBeDefined();
+  });
+
+  it('rejects a blocked address before invoking the transport from either entry point', async () => {
+    const transport: BootstrapTransport = {
+      captureHostKey: vi.fn(async () => ({ algorithm: 'ssh-ed25519', fingerprint: 'SHA256:x', knownHostsLine: 'line' })),
+      runCommands: vi.fn(async () => []),
+    };
+    const { resolveTargetAddresses } = await import('../services/nodeBootstrap/targetPolicy');
+    const svc = new NodeBootstrapService({
+      transport,
+      db: DatabaseService.getInstance(),
+      now: () => 1_762_300_000_000,
+      resolveAddresses: (host) => resolveTargetAddresses(host, async () => [{ address: '127.0.0.1', family: 4 }]),
+      caPem: () => null,
+    });
+    await expect(svc.captureHostKey({ host: 'blocked.example.com' }))
+      .rejects.toMatchObject({ code: 'INVALID_TARGET' });
+    await expect(svc.preflight(
+      { ...baseRequest, host: 'blocked.example.com', expectedFingerprint: 'SHA256:x' },
+      { hubUrl: 'https://sencho.example.com', audit },
+    )).rejects.toMatchObject({ code: 'INVALID_TARGET' });
+    expect(transport.captureHostKey).not.toHaveBeenCalled();
+    expect(transport.runCommands).not.toHaveBeenCalled();
   });
 });

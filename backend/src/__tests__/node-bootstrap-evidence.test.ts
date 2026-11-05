@@ -90,7 +90,7 @@ describe('bootstrap evidence: compose directory', () => {
 
 describe('bootstrap evidence: agent directory', () => {
   it('reuses an empty existing directory', () => {
-    const row = check(makeFacts({ agentDir: { exists: true, isDirectory: true, writableByUser: true, realPath: '/opt/sencho-agent', entries: [] } }), 'agent_dir');
+    const row = check(makeFacts({ agentDir: { exists: true, isDirectory: true, writableByUser: true, readableByUser: true, realPath: '/opt/sencho-agent', entries: [] } }), 'agent_dir');
     expect(row.status).toBe('pass');
   });
 
@@ -100,6 +100,7 @@ describe('bootstrap evidence: agent directory', () => {
         exists: true,
         isDirectory: true,
         writableByUser: true,
+        readableByUser: true,
         realPath: '/opt/sencho-agent',
         entries: ['compose.yaml', 'sencho-bootstrap.json'],
         hasMarker: true,
@@ -218,7 +219,8 @@ describe('bootstrap evidence: conflicts and network', () => {
     };
     const repoMissing = makeFacts({
       user: noSudo,
-      repo: { dockerSourceConfigured: false, keyringPresent: false },
+      docker: { cliInstalled: false, serverVersion: null, composeVersion: null, socketAccess: 'none' },
+      repo: { dockerSourceConfigured: false, keyringPresent: false, sourceVerified: false, keyringVerified: false },
     });
     const row = check(repoMissing, 'sudo');
     expect(row.status).toBe('blocked');
@@ -226,6 +228,7 @@ describe('bootstrap evidence: conflicts and network', () => {
 
     const packagesMissing = makeFacts({
       user: noSudo,
+      docker: { cliInstalled: false, serverVersion: null, composeVersion: null, socketAccess: 'none' },
       packages: [
         { name: 'docker-ce', installedVersion: null, candidateVersion: '1' },
         { name: 'docker-ce-cli', installedVersion: null, candidateVersion: '1' },
@@ -263,5 +266,121 @@ describe('bootstrap evidence: conflicts and network', () => {
     expect(check(makeFacts({ os: { id: 'ubuntu', versionId: '24.04', codename: 'noble', prettyName: '', arch: 'aarch64', kernel: '6.8' } }), 'arch_supported').status).toBe('blocked');
     expect(check(makeFacts({ os: null }), 'os_supported').status).toBe('unknown');
     expect(check(makeFacts({ clockSkewMs: null }), 'clock_skew').status).toBe('unknown');
+  });
+});
+
+describe('bootstrap evidence: incomplete and unknown facts fail closed', () => {
+  it('blocks an unreadable Agent directory even when it is writable', () => {
+    const facts = makeFacts({
+      agentDir: { exists: true, isDirectory: true, writableByUser: true, readableByUser: false, entries: [] },
+    });
+    expect(check(facts, 'agent_dir').status).toBe('blocked');
+  });
+
+  it('does not treat a failed Compose inventory as an empty directory', () => {
+    const result = evidence(makeFacts({ composeDir: { inventoryError: 'exited 1' } }));
+    expect(result.checks.find((entry) => entry.id === 'compose_dir')?.status).toBe('unknown');
+    expect(result.planSuppressed).toBe(true);
+  });
+
+  it('blocks known Agent content from a partial inventory and suppresses an unknown empty result', () => {
+    const partial = evidence(makeFacts({ agentDir: { exists: true, isDirectory: true, writableByUser: true, readableByUser: true, inventoryError: 'truncated', entries: ['notes.txt'] } }));
+    expect(partial.checks.find((entry) => entry.id === 'agent_dir')?.status).toBe('blocked');
+
+    const unknown = evidence(makeFacts({ agentDir: { exists: true, isDirectory: true, writableByUser: true, readableByUser: true, inventoryError: 'timed out', entries: [] } }));
+    expect(unknown.checks.find((entry) => entry.id === 'agent_dir')?.status).toBe('unknown');
+    expect(unknown.planSuppressed).toBe(true);
+  });
+
+  it('treats an incomplete container inventory as an unknown Pilot conflict', () => {
+    const result = evidence(makeFacts({ containers: { complete: false, error: 'output truncated' } }));
+    expect(result.checks.find((entry) => entry.id === 'agent_conflict')?.status).toBe('unknown');
+    expect(result.checks.find((entry) => entry.id === 'existing_workloads')?.status).toBe('unknown');
+    expect(result.planSuppressed).toBe(true);
+  });
+
+  it('suppresses the plan when a mandatory platform, privilege, storage or network fact is unknown', () => {
+    const cases: BootstrapFacts[] = [
+      makeFacts({ os: null }),
+      makeFacts({ user: null }),
+      makeFacts({ dockerRoot: { freeBytes: null } }),
+      makeFacts({ composeDir: { filesystem: null } }),
+      makeFacts({ hub: { reachable: null, statusCode: null, tlsTrusted: null } }),
+      makeFacts({ clockSkewMs: null }),
+    ];
+    for (const facts of cases) {
+      const result = evidence(facts);
+      expect(result.planSuppressed, JSON.stringify(result.checks.filter((entry) => entry.status === 'unknown'))).toBe(true);
+    }
+  });
+
+  it('does not issue a plan when the Docker daemon cannot be established', () => {
+    const result = evidence(makeFacts({
+      docker: { cliInstalled: true, serverVersion: null, serviceActive: null, socketAccess: 'none' },
+    }));
+    expect(result.blockers > 0 || result.planSuppressed).toBe(true);
+  });
+});
+
+describe('bootstrap evidence: working Docker and repository provenance', () => {
+  const missingPackages = [
+    { name: 'docker-ce' as const, installedVersion: null, candidateVersion: null },
+    { name: 'docker-ce-cli' as const, installedVersion: null, candidateVersion: null },
+    { name: 'containerd.io' as const, installedVersion: null, candidateVersion: null },
+    { name: 'docker-buildx-plugin' as const, installedVersion: null, candidateVersion: null },
+    { name: 'docker-compose-plugin' as const, installedVersion: null, candidateVersion: null },
+  ];
+
+  it('preserves a working distribution Docker instead of treating missing official packages as a blocker', () => {
+    const result = evidence(makeFacts({
+      packages: missingPackages,
+      repo: { dockerSourceConfigured: false, keyringPresent: false, sourceVerified: false, keyringVerified: false },
+    }));
+    const source = result.checks.find((entry) => entry.id === 'apt_source');
+    expect(source?.status).toBe('warn');
+    expect(source?.summary).toMatch(/preserves the existing installation/i);
+    expect(result.blockers).toBe(0);
+    expect(result.planSuppressed).toBe(false);
+  });
+
+  it('blocks a Docker-named source that points somewhere else', () => {
+    const result = evidence(makeFacts({
+      docker: { cliInstalled: false, serverVersion: null, composeVersion: null, socketAccess: 'none' },
+      repo: {
+        dockerSourceConfigured: true,
+        keyringPresent: true,
+        sourceVerified: false,
+        keyringVerified: true,
+        candidateSourceVerified: null,
+        problem: '/etc/apt/sources.list.d/docker.list: the source points at https://example.com/linux/ubuntu',
+      },
+    }));
+    expect(result.checks.find((entry) => entry.id === 'apt_source')?.status).toBe('blocked');
+    expect(result.planSuppressed).toBe(false);
+  });
+
+  it('keeps an unreadable source or keyring unknown', () => {
+    const result = evidence(makeFacts({
+      docker: { cliInstalled: false, serverVersion: null, composeVersion: null, socketAccess: 'none' },
+      repo: {
+        dockerSourceConfigured: true,
+        keyringPresent: false,
+        sourceVerified: null,
+        keyringVerified: null,
+        candidateSourceVerified: null,
+        problem: '/etc/apt/sources.list.d/docker.list could not be read',
+      },
+    }));
+    expect(result.checks.find((entry) => entry.id === 'apt_source')?.status).toBe('unknown');
+    expect(result.planSuppressed).toBe(true);
+  });
+
+  it('names the retained canonical Compose volume', () => {
+    const result = evidence(makeFacts({
+      agent: { dataVolumeExists: true, dataVolumeNames: ['sencho-agent_sencho-agent-data'] },
+    }));
+    const row = result.checks.find((entry) => entry.id === 'agent_conflict');
+    expect(row?.status).toBe('warn');
+    expect(row?.observed).toBe('sencho-agent_sencho-agent-data');
   });
 });

@@ -54,7 +54,7 @@ function FooterActions({ wizard, onClose }: { wizard: UseNodeBootstrap; onClose:
   const { step, busy, hostKey, trusted, replacing, result, resultIsCurrent, runPreflight, checkHostKey, back } = wizard;
   const checkingKey = busy === 'host-key';
   const running = busy === 'preflight';
-  const canRun = hostKey !== null && (trusted || hostKey.trust === 'trusted' || replacing);
+  const canRun = hostKey !== null && (trusted || hostKey.trust === 'trusted' || (hostKey.trust === 'changed' && replacing));
   const planShown = step === 'plan' && resultIsCurrent && result?.plan;
 
   if (step === 'target') {
@@ -154,9 +154,24 @@ function DialogBody({ wizard }: { wizard: UseNodeBootstrap }) {
                 </label>
               )}
               {hostKey.trust === 'changed' && (
-                <p className="mt-2 text-xs text-destructive">
-                  This key differs from the pinned key. Replace the pin only if you know the host was rebuilt.
-                </p>
+                <div className="mt-2 rounded-lg border border-destructive/30 bg-destructive/5 p-2.5">
+                  <p className="text-xs text-destructive">
+                    This key differs from the pinned key. Replace the pin only if you know the host was rebuilt.
+                  </p>
+                  {hostKey.pinnedFingerprint && (
+                    <p className="mt-1 break-all font-mono text-[10px] text-stat-subtitle">Pinned: {hostKey.pinnedFingerprint}</p>
+                  )}
+                  <p className="mt-1 break-all font-mono text-[10px] text-stat-subtitle">Observed: {hostKey.fingerprint}</p>
+                  <label className="mt-2 flex cursor-pointer items-start gap-2 text-xs text-muted-foreground">
+                    <input
+                      type="checkbox"
+                      className="mt-0.5"
+                      checked={replacing}
+                      onChange={(event) => setReplacing(event.target.checked)}
+                    />
+                    I understand this replaces the pinned key and confirms the observed fingerprint.
+                  </label>
+                </div>
               )}
             </div>
             <p className="text-xs text-muted-foreground">

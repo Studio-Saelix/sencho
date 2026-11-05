@@ -32,7 +32,11 @@ const { privateKey: USER_KEY } = crypto.generateKeyPairSync('rsa', {
 interface FixtureOptions {
   rejectAuth?: boolean;
   hangCommand?: string;
+  withholdExec?: string;
+  delayExecMs?: number;
+  delayExecCommand?: string;
   largeOutput?: boolean;
+  largeStderr?: boolean;
   closeAfterFirstCommand?: boolean;
   closeDuringCommand?: string;
   responses?: Record<string, string>;
@@ -62,6 +66,15 @@ async function startServer(options: FixtureOptions = {}): Promise<Fixture> {
         const session = accept();
         session.on('exec', (acceptExec, _rejectExec, info) => {
           commands.push(info.command);
+          if (options.withholdExec && info.command.includes(options.withholdExec)) return;
+          if (options.delayExecMs && options.delayExecCommand && info.command.includes(options.delayExecCommand)) {
+            setTimeout(() => {
+              const stream = acceptExec();
+              stream.exit(0);
+              stream.end();
+            }, options.delayExecMs);
+            return;
+          }
           const stream = acceptExec();
           if (options.hangCommand && info.command.includes(options.hangCommand)) return;
           if (options.closeDuringCommand && info.command.includes(options.closeDuringCommand)) {
@@ -76,6 +89,12 @@ async function startServer(options: FixtureOptions = {}): Promise<Fixture> {
           }
           if (options.largeOutput) {
             stream.write('x'.repeat(100 * 1024));
+            stream.exit(0);
+            stream.end();
+            return;
+          }
+          if (options.largeStderr) {
+            stream.stderr.write('y'.repeat(100 * 1024));
             stream.exit(0);
             stream.end();
             return;
@@ -272,5 +291,70 @@ describe('bootstrap SSH transport', () => {
   it('scrubs secret material from messages', () => {
     const key = '-----BEGIN OPENSSH PRIVATE KEY-----secretsecret';
     expect(scrubSecrets(`error with ${key} inside`, [key])).not.toContain('secretsecret');
+  });
+});
+
+describe('bootstrap SSH transport deadlines and byte budgets', () => {
+  it('closes a command whose exec acknowledgement never arrives', async () => {
+    const fixture = await startServer({ withholdExec: 'sleep' });
+    const started = Date.now();
+    const results = await client.runCommands(
+      { host: 'fixture.local', address: '127.0.0.1', port: fixture.port, username: 'ubuntu', privateKey: USER_KEY },
+      [{ id: 'hang', command: 'sleep 60' }, { id: 'after', command: 'uname -m' }],
+      { perCommandMs: 100, totalMs: 1_000 },
+    );
+    expect(Date.now() - started).toBeLessThan(800);
+    expect(results).toHaveLength(1);
+    expect(results[0]).toMatchObject({ id: 'hang', timedOut: true, error: 'COMMAND_TIMEOUT' });
+  });
+
+  it('ignores an exec acknowledgement that arrives after the deadline', async () => {
+    const fixture = await startServer({ delayExecMs: 200, delayExecCommand: 'sleep' });
+    const results = await client.runCommands(
+      { host: 'fixture.local', address: '127.0.0.1', port: fixture.port, username: 'ubuntu', privateKey: USER_KEY },
+      [{ id: 'late', command: 'sleep 1' }],
+      { perCommandMs: 60, totalMs: 1_000 },
+    );
+    expect(results[0]).toMatchObject({ timedOut: true, error: 'COMMAND_TIMEOUT' });
+    // Let the late acknowledgement land; it must not reopen or append to the session.
+    await new Promise((resolve) => setTimeout(resolve, 250));
+    expect(results).toHaveLength(1);
+  });
+
+  it('applies the byte cap to stderr as well as stdout', async () => {
+    const fixture = await startServer({ largeStderr: true });
+    const results = await client.runCommands(
+      { host: 'fixture.local', address: '127.0.0.1', port: fixture.port, username: 'ubuntu', privateKey: USER_KEY },
+      [{ id: 'stderr', command: 'cat big-error-file' }],
+      {},
+    );
+    expect(results[0].truncated).toBe(true);
+    expect(Buffer.byteLength(results[0].stderr)).toBeLessThanOrEqual(64 * 1024);
+    expect(Buffer.byteLength(results[0].stdout)).toBeLessThanOrEqual(64 * 1024);
+  });
+
+  it('shares one raw-byte budget across every command in the session', async () => {
+    const fixture = await startServer({ largeOutput: true });
+    const commands = Array.from({ length: 10 }, (_, index) => ({ id: `big-${index}`, command: `cat file-${index}` }));
+    const results = await client.runCommands(
+      { host: 'fixture.local', address: '127.0.0.1', port: fixture.port, username: 'ubuntu', privateKey: USER_KEY },
+      commands,
+      { perCommandMs: 2_000, totalMs: 20_000 },
+    );
+    expect(results).toHaveLength(10);
+    expect(results[8].truncated).toBe(true);
+    expect(results[9].error).toBe('OUTPUT_CAP');
+    const total = results.reduce((sum, result) => sum + Buffer.byteLength(result.stdout) + Buffer.byteLength(result.stderr), 0);
+    expect(total).toBeLessThanOrEqual(512 * 1024);
+  });
+
+  it('preserves NUL-delimited inventory output through the real transport', async () => {
+    const fixture = await startServer({ responses: { 'sencho-inventory': 'one\0two\0' } });
+    const results = await client.runCommands(
+      { host: 'fixture.local', address: '127.0.0.1', port: fixture.port, username: 'ubuntu', privateKey: USER_KEY },
+      [{ id: 'inventory', command: 'sh -c true sencho-inventory' }],
+      {},
+    );
+    expect(results[0].stdout).toBe('one\0two\0');
   });
 });

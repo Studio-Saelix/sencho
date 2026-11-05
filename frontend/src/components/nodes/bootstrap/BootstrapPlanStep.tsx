@@ -63,11 +63,6 @@ export function BootstrapPlanStep({
 }) {
   const [copied, setCopied] = useState(false);
   const text = formatBootstrapPlanText(plan);
-  const steps = plan.stages.flatMap((stage) => stage.steps);
-  const filesystem = steps.filter((step) => step.effect === 'directory-create' || step.effect === 'file-write');
-  const docker = steps.filter((step) => ['package-metadata', 'package-install', 'service-change'].includes(step.effect));
-  const start = steps.filter((step) => step.effect === 'container-start');
-  const directorySkips = plan.skipped.filter((entry) => entry.id === 'compose_dir' || entry.id === 'agent_dir');
 
   const copy = async () => {
     try {
@@ -108,19 +103,34 @@ export function BootstrapPlanStep({
 
       <BootstrapPathSummary composeDir={inspection.paths.composeDir} agentDir={inspection.paths.agentDir} />
 
-      <Group title="Filesystem changes" steps={filesystem} />
-      {directorySkips.length > 0 && (
-        <div className="rounded-lg border border-muted bg-card/30 px-3 py-2">
-          <p className="font-mono text-[10px] uppercase tracking-[0.18em] text-stat-subtitle">Preserved</p>
-          <ul className="mt-1 space-y-1">
-            {directorySkips.map((entry) => (
-              <li key={entry.id} className="text-xs text-muted-foreground">{entry.reason}</li>
-            ))}
-          </ul>
-        </div>
-      )}
-      <Group title="Docker" steps={docker} />
-      <Group title="Start" steps={start} />
+      <div className="grid gap-1 rounded-lg border border-muted bg-card/30 px-3 py-2 font-mono text-[10px] text-stat-subtitle">
+        <span>Generated {new Date(plan.generatedAt).toISOString()} · hub {plan.hubUrl}</span>
+        <span>Image {plan.image.ref} · digest {plan.image.digest ?? 'resolved at execution'}</span>
+        <span className="break-all">Evidence digest sha256:{plan.evidenceDigest}</span>
+      </div>
+
+      {plan.stages.map((stage, index) => (
+        <Group key={stage.id} title={`${index + 1}. ${stage.title}`} steps={stage.steps} />
+      ))}
+
+      <div className="rounded-lg border border-muted bg-card/30 px-3 py-2">
+        <p className="font-mono text-[10px] uppercase tracking-[0.18em] text-stat-subtitle">Not changed</p>
+        <ul className="mt-1 space-y-1">
+          {plan.skipped.length === 0 && <li className="text-xs text-muted-foreground">Nothing</li>}
+          {plan.skipped.map((entry) => (
+            <li key={entry.id} className="text-xs text-muted-foreground">{entry.reason}</li>
+          ))}
+        </ul>
+      </div>
+
+      <div className="rounded-lg border border-muted bg-card/30 px-3 py-2">
+        <p className="font-mono text-[10px] uppercase tracking-[0.18em] text-stat-subtitle">Redactions</p>
+        <ul className="mt-1 space-y-1">
+          {plan.redactions.map((redaction) => (
+            <li key={redaction.placeholder} className="text-xs text-muted-foreground">{redaction.placeholder}: {redaction.purpose}</li>
+          ))}
+        </ul>
+      </div>
 
       <section className="space-y-2" aria-label="Expected after execution">
         <h4 className="font-mono text-[10px] uppercase tracking-[0.18em] text-stat-subtitle">Expected after execution</h4>

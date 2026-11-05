@@ -225,3 +225,141 @@ describe('bootstrap plan builder', () => {
     expect(canonicalJson({ b: 1, a: { d: 2, c: 3 } })).toBe(canonicalJson({ a: { c: 3, d: 2 }, b: 1 }));
   });
 });
+
+const missingAllPackages: BootstrapFacts['packages'] = [
+  { name: 'docker-ce', installedVersion: null, candidateVersion: null },
+  { name: 'docker-ce-cli', installedVersion: null, candidateVersion: null },
+  { name: 'containerd.io', installedVersion: null, candidateVersion: null },
+  { name: 'docker-buildx-plugin', installedVersion: null, candidateVersion: null },
+  { name: 'docker-compose-plugin', installedVersion: null, candidateVersion: null },
+];
+
+function freshFacts(overrides: Parameters<typeof makeFacts>[0] = {}): BootstrapFacts {
+  return makeFacts({
+    docker: {
+      cliInstalled: false,
+      serverVersion: null,
+      composeVersion: null,
+      serviceActive: false,
+      serviceEnabled: false,
+      socketAccess: 'none',
+    },
+    repo: {
+      dockerSourceConfigured: false,
+      keyringPresent: false,
+      sourceVerified: false,
+      keyringVerified: false,
+      candidateSourceVerified: null,
+    },
+    packages: missingAllPackages,
+    ...overrides,
+  });
+}
+
+describe('bootstrap plan privileges and working installations', () => {
+  it('starts a fresh non-root host through sudo after the install', () => {
+    const plan = planFor(freshFacts());
+    const start = allSteps(plan).find((entry) => entry.id === 'start-agent');
+    expect(start?.privilege).toBe('sudo');
+    expect(start?.command).toMatch(/^sudo -n env /);
+    expect(start?.command).toContain('DOCKER_CONTEXT=default');
+    expect(start?.command).toContain('DOCKER_HOST=unix:///var/run/docker.sock');
+  });
+
+  it('writes Agent files with sudo when only root can write the directory, even with direct Docker access', () => {
+    const facts = makeFacts({
+      agentDir: {
+        exists: true,
+        isDirectory: true,
+        writableByUser: false,
+        writableBySudo: true,
+        readableByUser: true,
+        entries: [],
+      },
+    });
+    const files = allSteps(planFor(facts)).filter((entry) => entry.effect === 'file-write');
+    expect(files).toHaveLength(2);
+    for (const step of files) expect(step.privilege).toBe('sudo');
+  });
+
+  it('marks and prefixes every repository command that needs sudo', () => {
+    const plan = planFor(freshFacts());
+    const repo = plan.stages.find((stage) => stage.id === 'docker_repository');
+    expect(repo).toBeDefined();
+    for (const step of repo!.steps) {
+      expect(step.privilege, step.id).toBe('sudo');
+      if (step.command) expect(step.command, step.id).toMatch(/^sudo -n /);
+    }
+  });
+
+  it('preserves a working distribution Docker instead of planning replacement packages', () => {
+    const facts = makeFacts({
+      packages: missingAllPackages,
+      repo: {
+        dockerSourceConfigured: false,
+        keyringPresent: false,
+        sourceVerified: false,
+        keyringVerified: false,
+        candidateSourceVerified: null,
+      },
+    });
+    const plan = planFor(facts);
+    expect(plan.stages.map((stage) => stage.id)).not.toContain('docker_repository');
+    expect(plan.stages.map((stage) => stage.id)).not.toContain('docker_packages');
+    expect(plan.skipped.find((entry) => entry.id === 'docker_packages')?.reason).toMatch(/already work/i);
+    expect(plan.notices.join(' ')).toMatch(/does not install or replace Docker packages/i);
+  });
+
+  it('preserves a working installation missing one official plugin record', () => {
+    const packages = missingAllPackages.map((pkg, index) => (
+      index === 0 ? { ...pkg, installedVersion: '5:27.3.1-1' } : pkg
+    ));
+    const plan = planFor(makeFacts({ packages }));
+    expect(plan.stages.map((stage) => stage.id)).not.toContain('docker_repository');
+    expect(plan.stages.map((stage) => stage.id)).not.toContain('docker_packages');
+  });
+
+  it('still plans repository and packages for a host without working Docker', () => {
+    const plan = planFor(freshFacts());
+    expect(plan.stages.map((stage) => stage.id)).toEqual(expect.arrayContaining([
+      'docker_repository', 'docker_packages',
+    ]));
+  });
+
+  it('names the retained canonical Compose volume in the plan notice', () => {
+    const plan = planFor(makeFacts({
+      agent: { dataVolumeExists: true, dataVolumeNames: ['sencho-agent_sencho-agent-data'] },
+    }));
+    expect(plan.notices.join(' ')).toContain('sencho-agent_sencho-agent-data');
+  });
+});
+
+describe('bootstrap plan export completeness', () => {
+  it('exports ordered stages, every skip, file contents and both digests', () => {
+    const plan = planFor(makeFacts({
+      agentDir: { exists: false, isDirectory: false, parentWritableByUser: true },
+      composeDir: { stackCount: 2 },
+    }));
+    const text = formatPlanText(plan);
+    expect(text).toContain('Generated:');
+    expect(text).toContain(plan.hubUrl);
+    expect(text).toContain(`Evidence digest: sha256:${plan.evidenceDigest}`);
+    expect(text).toContain(`Plan digest: sha256:${plan.digest}`);
+    expect(text).toContain('Not changed:');
+    expect(text).toContain('docker_service');
+    expect(text).toContain('compose_dir');
+    expect(text).toContain('file: /opt/sencho-agent/compose.yaml (0600) [redacted]');
+    expect(text).toContain('content:');
+    expect(text).toContain('{{SENCHO_ENROLL_TOKEN}}');
+    expect(text).toMatch(/## 1\. .*\n[\s\S]*## 2\. /);
+    expect(text).toContain('Evidence digest');
+  });
+});
+
+describe('bootstrap plan prerequisites', () => {
+  it('refuses to invent an operating system or user', () => {
+    expect(() => planFor(makeFacts({ os: null }))).toThrow(/operating system/i);
+    expect(() => planFor(makeFacts({ user: null }))).toThrow(/SSH user/i);
+    expect(() => planFor(makeFacts({ composeDir: { probeError: 'stat failed' } }))).toThrow(/could not be inspected/i);
+  });
+});

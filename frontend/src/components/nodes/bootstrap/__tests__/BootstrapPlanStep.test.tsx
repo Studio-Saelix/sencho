@@ -11,14 +11,14 @@ const composeDir = {
   isDirectory: true, isFinalSymlink: false, hasSymlinkAncestor: false, owner: 'ubuntu', group: 'ubuntu', mode: '755',
   readableByUser: true, writableByUser: true, writableBySudo: true, parentWritableByUser: true,
   nearestExistingAncestor: null, filesystem: null, freeBytes: null, probeError: null,
-  stackCount: 3, stackNames: ['media', 'tools', 'web'], inventoryTruncated: false, rootComposeFile: false,
+  stackCount: 3, stackNames: ['media', 'tools', 'web'], inventoryTruncated: false, inventoryError: null, rootComposeFile: false,
 };
 const agentDir = {
   input: '/srv/sencho-agent', normalized: '/srv/sencho-agent', realPath: '/srv/sencho-agent', exists: false,
   isDirectory: false, isFinalSymlink: false, hasSymlinkAncestor: false, owner: null, group: null, mode: null,
   readableByUser: false, writableByUser: false, writableBySudo: false, parentWritableByUser: true,
   nearestExistingAncestor: '/srv', filesystem: null, freeBytes: null, probeError: null,
-  entries: [], entriesTruncated: false, hasComposeFile: false, hasCaFile: false, hasMarker: false,
+  entries: [], entriesTruncated: false, inventoryError: null, hasComposeFile: false, hasCaFile: false, hasMarker: false,
   markerProject: null, markerComposeDir: null, markerAgentDir: null,
 };
 
@@ -27,7 +27,7 @@ const inspection = {
   target: { host: 'server.example.com', port: 22, username: 'ubuntu', address: '192.168.1.50' },
   hostKey: { algorithm: 'ssh-ed25519', fingerprint: 'SHA256:abc', knownHostsLine: 'line' },
   paths: { composeDir, agentDir },
-  agent: { projectContainers: [], dataVolumeExists: false, defaultDirHasComposeFile: false },
+  agent: { projectContainers: [], dataVolumeExists: false, dataVolumeNames: [], defaultDirHasComposeFile: false },
   dockerRoot: { path: '/var/lib/docker', freeBytes: 1, filesystemType: 'ext4' },
   checks: [],
   blockers: 0,
@@ -102,7 +102,10 @@ const plan: BootstrapPlan = {
       }],
     },
   ],
-  skipped: [{ id: 'compose_dir', reason: 'Existing directory preserved; 3 stacks found; ownership and mode unchanged.' }],
+  skipped: [
+    { id: 'compose_dir', reason: 'Existing directory preserved; 3 stacks found; ownership and mode unchanged.' },
+    { id: 'docker_service', reason: 'The Docker service is active and enabled at boot.' },
+  ],
   sources: [],
   versions: {},
   redactions: [{ placeholder: '{{SENCHO_ENROLL_TOKEN}}', purpose: 'Minted at execution.' }],
@@ -120,12 +123,21 @@ describe('BootstrapPlanStep', () => {
     expect(screen.getByText(/Existing directory preserved; 3 stacks found/)).toBeInTheDocument();
   });
 
-  it('shows the filesystem commands with their modes and owners', () => {
+  it('shows stages in execution order and every no-change row', () => {
     render(<BootstrapPlanStep plan={plan} inspection={inspection} />);
-    expect(screen.getByText('Filesystem changes')).toBeInTheDocument();
+    expect(screen.getByText('1. Pilot Agent installation directory')).toBeInTheDocument();
+    expect(screen.getByText('2. Agent files')).toBeInTheDocument();
+    expect(screen.getByText('3. Start the Pilot agent')).toBeInTheDocument();
     expect(screen.getByText(/install -d -m 0700/)).toBeInTheDocument();
     expect(screen.getByText(/mode 0700/)).toBeInTheDocument();
     expect(screen.getByText('user · mode 0700 · ubuntu:ubuntu')).toBeInTheDocument();
+    expect(screen.getByText(/The Docker service is active and enabled at boot/)).toBeInTheDocument();
+  });
+
+  it('shows the evidence digest and generated metadata', () => {
+    render(<BootstrapPlanStep plan={plan} inspection={inspection} />);
+    expect(screen.getByText(/Evidence digest sha256:a{64}/)).toBeInTheDocument();
+    expect(screen.getByText(/hub https:\/\/sencho\.example\.com/)).toBeInTheDocument();
   });
 
   it('shows the compose file content with the token placeholder', async () => {
@@ -155,6 +167,11 @@ describe('BootstrapPlanStep', () => {
     render(<BootstrapPlanStep plan={plan} inspection={inspection} />);
     await user.click(screen.getByRole('button', { name: /Copy plan/ }));
     expect(copyToClipboard).toHaveBeenCalledTimes(1);
-    expect(vi.mocked(copyToClipboard).mock.calls[0][0]).toContain(`Plan digest: sha256:${plan.digest}`);
+    const text = vi.mocked(copyToClipboard).mock.calls[0][0];
+    expect(text).toContain(`Plan digest: sha256:${plan.digest}`);
+    expect(text).toContain(`Evidence digest: sha256:${plan.evidenceDigest}`);
+    expect(text).toContain('Not changed:');
+    expect(text).toContain('The Docker service is active and enabled at boot.');
+    expect(text).toContain('name: sencho-agent');
   });
 });

@@ -27,7 +27,12 @@ import {
   DOCKER_ROOT_FREE_BLOCK_BYTES,
   DOCKER_ROOT_FREE_WARN_BYTES,
 } from './evidence';
-import { SshTransportError, type BootstrapTransport, type SshCommandResult } from './sshProbeClient';
+import {
+  SSH_TOTAL_TIMEOUT_MS,
+  SshTransportError,
+  type BootstrapTransport,
+  type SshCommandResult,
+} from './sshProbeClient';
 import { sshProbeClient } from './sshProbeClient';
 import {
   resolveTargetAddresses,
@@ -107,6 +112,8 @@ interface BootstrapDeps {
   now: () => number;
   resolveAddresses: AddressResolver;
   caPem: () => string | null;
+  /** Request-wide SSH budget; the default is the advertised 90 seconds. */
+  requestBudgetMs: number;
 }
 
 /**
@@ -119,6 +126,7 @@ const DEFAULT_DEPS: Omit<BootstrapDeps, 'db'> = {
   now: () => Date.now(),
   resolveAddresses: (hostname) => resolveTargetAddresses(hostname),
   caPem: () => (loadNativeTlsMaterial()?.caPem ?? null),
+  requestBudgetMs: SSH_TOTAL_TIMEOUT_MS,
 };
 
 export function validateInstallPaths(composeDirRaw: string, agentDirRaw: string): { composeDir: string; agentDir: string } {
@@ -205,7 +213,7 @@ export class NodeBootstrapService {
       const message = error instanceof Error ? error.message : 'Invalid target';
       throw new BootstrapError(400, 'INVALID_TARGET', message, { field });
     }
-    const addresses = await this.resolveOrThrow(host);
+    const addresses = await this.resolveOrThrow(host, Date.now() + this.deps.requestBudgetMs);
     let dialed = addresses[0];
     const observation = await this.withTargetLock(host, port, async () => {
       let lastError: unknown = null;
@@ -262,42 +270,29 @@ export class NodeBootstrapService {
       );
     }
 
-    const pin = this.deps.db.getNodeBootstrapTrust(targetInput.host, targetInput.port);
-    if (pin) {
-      const replaced = replacePinnedFingerprint !== null && replacePinnedFingerprint === expectedFingerprint;
-      if (!expectedFingerprint || (pin.fingerprint !== expectedFingerprint && !replaced)) {
-        this.recordAudit(context.audit, 'bootstrap.trust.mismatch', {
-          target: targetInput.targetName,
-          host: targetInput.host,
-          port: targetInput.port,
-          pinned: pin.fingerprint,
-          expected: expectedFingerprint,
-        }, 409);
-        throw new BootstrapError(
-          409,
-          'HOST_KEY_MISMATCH',
-          'The host key does not match the pinned key. Confirm the replacement to continue.',
-          { details: { pinnedFingerprint: pin.fingerprint, expectedFingerprint } },
-        );
-      }
-    } else if (!expectedFingerprint) {
-      throw new BootstrapError(
-        409,
-        'HOST_KEY_UNTRUSTED',
-        'Trust this host key before running the preflight.',
-      );
-    }
-
-    const addresses = await this.resolveOrThrow(targetInput.host);
+    const deadline = Date.now() + this.deps.requestBudgetMs;
     const preparedKey = input.privateKey ?? '';
     const passphrase = input.passphrase ?? null;
     let hostKey: HostKeyObservation | null = null;
-    let dialed = addresses[0];
+    let dialed = '';
+    let pin: import('../DatabaseService').NodeBootstrapTrust | undefined;
 
+    // The pin is read, validated and written under the same per-target lock as
+    // the probe run and DNS resolution. A concurrent preflight can therefore
+    // never pass validation against a stale snapshot and overwrite a newer pin.
     const results = await this.withTargetLock(targetInput.host, targetInput.port, async () => {
+      pin = this.deps.db.getNodeBootstrapTrust(targetInput.host, targetInput.port);
+      this.assertPinnedTrust(targetInput, pin, expectedFingerprint, replacePinnedFingerprint, context.audit);
+
+      const addresses = await this.resolveOrThrow(targetInput.host, deadline);
+      dialed = addresses[0];
       let lastError: unknown = null;
       for (const address of addresses) {
         try {
+          const remaining = deadline - Date.now();
+          if (remaining <= 0) {
+            throw new SshTransportError('PREFLIGHT_TIMEOUT', 'The preflight exceeded its 90-second budget.');
+          }
           const probeResults = await this.runProbes(
             address,
             targetInput,
@@ -306,15 +301,43 @@ export class NodeBootstrapService {
             expectedFingerprint,
             context.hubUrl,
             paths,
+            remaining,
             (observation) => { hostKey = observation; },
           );
           if (probeResults.some((result) => result.error === 'PREFLIGHT_TIMEOUT')) {
             throw new SshTransportError('PREFLIGHT_TIMEOUT', 'The preflight exceeded its 90-second budget.');
           }
           dialed = address;
+          const observation: HostKeyObservation = hostKey ?? {
+            algorithm: 'unknown',
+            fingerprint: expectedFingerprint ?? '',
+            knownHostsLine: `${targetInput.host} expected ${expectedFingerprint ?? ''}`,
+          };
+          this.persistTrust(
+            targetInput,
+            observation,
+            context.audit,
+            pin,
+            expectedFingerprint,
+            replacePinnedFingerprint,
+          );
           return probeResults;
         } catch (error: unknown) {
-          if (error instanceof SshTransportError && error.code === 'HOST_KEY_UNTRUSTED') throw error;
+          if (error instanceof BootstrapError) throw error;
+          if (error instanceof SshTransportError && error.code === 'HOST_KEY_UNTRUSTED') {
+            // A live key that changes between capture and connection is a trust
+            // event, not a generic transport failure. Keep both identities.
+            this.recordAudit(context.audit, 'bootstrap.trust.mismatch', {
+              target: targetInput.targetName,
+              host: targetInput.host,
+              port: targetInput.port,
+              address,
+              pinned: pin?.fingerprint ?? null,
+              expected: expectedFingerprint,
+              observed: hostKey?.fingerprint ?? null,
+            }, 409);
+            throw error;
+          }
           lastError = error;
         }
       }
@@ -327,7 +350,6 @@ export class NodeBootstrapService {
       fingerprint: expectedFingerprint ?? '',
       knownHostsLine: `${targetInput.host} expected ${expectedFingerprint ?? ''}`,
     };
-
     const facts = assembleFacts({
       target: {
         host: targetInput.host,
@@ -345,8 +367,6 @@ export class NodeBootstrapService {
       ),
       now,
     });
-
-    this.trackTrust(targetInput, hostKeyObservation, context.audit, pin);
 
     const nodeNameTaken = this.deps.db.getNodes().some((node) => node.name === targetInput.targetName);
     const evidence = buildBootstrapEvidence({ facts, nodeNameTaken, targetName: targetInput.targetName });
@@ -410,16 +430,31 @@ export class NodeBootstrapService {
     }
   }
 
-  private async resolveOrThrow(host: string): Promise<string[]> {
+  private async resolveOrThrow(host: string, deadline: number): Promise<string[]> {
+    const remaining = deadline - Date.now();
+    if (remaining <= 0) {
+      throw new SshTransportError('PREFLIGHT_TIMEOUT', 'The preflight exceeded its 90-second budget.');
+    }
+    let timer: NodeJS.Timeout | null = null;
     try {
-      return await this.deps.resolveAddresses(host);
+      return await Promise.race([
+        this.deps.resolveAddresses(host),
+        new Promise<never>((_resolve, reject) => {
+          timer = setTimeout(() => {
+            reject(new SshTransportError('PREFLIGHT_TIMEOUT', 'The preflight exceeded its 90-second budget.'));
+          }, remaining);
+        }),
+      ]);
     } catch (error: unknown) {
+      if (error instanceof SshTransportError) throw error;
       const code = (error as { code?: string }).code;
       const message = error instanceof Error ? error.message : 'The target host could not be resolved.';
       if (code === 'SSH_DNS_FAILED') {
         throw new BootstrapError(422, 'PREFLIGHT_FAILED', message);
       }
       throw new BootstrapError(400, 'INVALID_TARGET', message);
+    } finally {
+      if (timer) clearTimeout(timer);
     }
   }
 
@@ -436,6 +471,7 @@ export class NodeBootstrapService {
     expectedFingerprint: string | null,
     hubUrl: string,
     paths: { composeDir: string; agentDir: string },
+    totalMs: number,
     onHostKey: (observation: HostKeyObservation) => void,
   ): Promise<SshCommandResult[]> {
     const catalog = buildProbeCatalog({
@@ -453,39 +489,114 @@ export class NodeBootstrapService {
         passphrase,
       },
       catalog.map(({ id, command }) => ({ id, command })),
-      { expectedFingerprint, onHostKey },
+      { expectedFingerprint, onHostKey, totalMs },
     );
   }
 
-  private trackTrust(
+  /** Validate the request against the pin observed at the start of the locked run. */
+  private assertPinnedTrust(
+    target: BootstrapTargetInput,
+    pin: import('../DatabaseService').NodeBootstrapTrust | undefined,
+    expectedFingerprint: string | null,
+    replacePinnedFingerprint: string | null,
+    audit: AuditContext,
+  ): void {
+    if (pin) {
+      const replaced = replacePinnedFingerprint !== null && replacePinnedFingerprint === expectedFingerprint;
+      if (!expectedFingerprint || (pin.fingerprint !== expectedFingerprint && !replaced)) {
+        this.recordAudit(audit, 'bootstrap.trust.mismatch', {
+          target: target.targetName,
+          host: target.host,
+          port: target.port,
+          pinned: pin.fingerprint,
+          expected: expectedFingerprint,
+        }, 409);
+        throw new BootstrapError(
+          409,
+          'HOST_KEY_MISMATCH',
+          'The host key does not match the pinned key. Confirm the replacement to continue.',
+          { details: { pinnedFingerprint: pin.fingerprint, expectedFingerprint } },
+        );
+      }
+    } else if (!expectedFingerprint) {
+      throw new BootstrapError(
+        409,
+        'HOST_KEY_UNTRUSTED',
+        'Trust this host key before running the preflight.',
+      );
+    }
+  }
+
+  /**
+   * Compare-and-swap the pin against the record read at the start of this
+   * locked run. A pin that changed underneath the request is never overwritten
+   * without confirming the replacement of the key that is current now.
+   */
+  private persistTrust(
     target: BootstrapTargetInput,
     hostKey: HostKeyObservation,
     context: AuditContext,
-    previousPin: import('../DatabaseService').NodeBootstrapTrust | undefined,
+    initialPin: import('../DatabaseService').NodeBootstrapTrust | undefined,
+    expectedFingerprint: string | null,
+    replacePinnedFingerprint: string | null,
   ): void {
     if (!hostKey.fingerprint) return;
+    const current = this.deps.db.getNodeBootstrapTrust(target.host, target.port);
+    if ((current?.fingerprint ?? null) !== (initialPin?.fingerprint ?? null)) {
+      this.recordAudit(context, 'bootstrap.trust.mismatch', {
+        target: target.targetName,
+        host: target.host,
+        port: target.port,
+        pinned: current?.fingerprint ?? null,
+        expected: expectedFingerprint,
+        observed: hostKey.fingerprint,
+      }, 409);
+      throw new BootstrapError(
+        409,
+        'HOST_KEY_MISMATCH',
+        'The pinned key changed while the preflight was running. Confirm the replacement and run it again.',
+        { details: { pinnedFingerprint: current?.fingerprint ?? null, expectedFingerprint } },
+      );
+    }
+    const replaced = replacePinnedFingerprint !== null && replacePinnedFingerprint === expectedFingerprint;
+    if (current && current.fingerprint !== hostKey.fingerprint && !replaced) {
+      this.recordAudit(context, 'bootstrap.trust.mismatch', {
+        target: target.targetName,
+        host: target.host,
+        port: target.port,
+        pinned: current.fingerprint,
+        expected: expectedFingerprint,
+        observed: hostKey.fingerprint,
+      }, 409);
+      throw new BootstrapError(
+        409,
+        'HOST_KEY_MISMATCH',
+        'The host key does not match the pinned key. Confirm the replacement to continue.',
+        { details: { pinnedFingerprint: current.fingerprint, expectedFingerprint } },
+      );
+    }
     const now = this.deps.now();
-    const unchanged = previousPin?.fingerprint === hostKey.fingerprint;
+    const unchanged = current?.fingerprint === hostKey.fingerprint;
     this.deps.db.upsertNodeBootstrapTrust({
       host: target.host,
       port: target.port,
       fingerprint: hostKey.fingerprint,
       algorithm: hostKey.algorithm,
-      approved_by: unchanged ? (previousPin?.approved_by ?? context.username) : context.username,
-      approved_at: unchanged ? (previousPin?.approved_at ?? now) : now,
+      approved_by: unchanged ? (current?.approved_by ?? context.username) : context.username,
+      approved_at: unchanged ? (current?.approved_at ?? now) : now,
       last_seen_at: now,
     });
-    if (!previousPin) {
+    if (!current) {
       this.recordAudit(context, 'bootstrap.trust.pinned', {
         host: target.host,
         port: target.port,
         fingerprint: hostKey.fingerprint,
       });
-    } else if (previousPin.fingerprint !== hostKey.fingerprint) {
+    } else if (current.fingerprint !== hostKey.fingerprint) {
       this.recordAudit(context, 'bootstrap.trust.replaced', {
         host: target.host,
         port: target.port,
-        previous: previousPin.fingerprint,
+        previous: current.fingerprint,
         fingerprint: hostKey.fingerprint,
       });
     }

@@ -42,7 +42,33 @@ export const DENIED_FILESYSTEMS: readonly string[] = [
   '9p',
 ];
 
-const PATH_CHECK_IDS = new Set(['compose_dir', 'agent_dir', 'path_separation']);
+/**
+ * Facts the plan cannot be issued without. An unknown here is a missing
+ * prerequisite, not a pass: the plan may create directories, install packages
+ * and start a container, so every input it relies on must be established.
+ */
+const PLAN_REQUIRED_CHECK_IDS = new Set([
+  'ssh_host_key',
+  'ssh_auth',
+  'os_supported',
+  'arch_supported',
+  'clock_skew',
+  'sudo',
+  'docker_cli',
+  'docker_daemon',
+  'compose_plugin',
+  'docker_socket',
+  'apt_source',
+  'disk_space',
+  'compose_dir',
+  'agent_dir',
+  'path_separation',
+  'path_persistence',
+  'agent_conflict',
+  'node_name',
+  'hub_url',
+  'hub_reachable',
+]);
 
 export interface EvidenceResult {
   checks: BootstrapCheck[];
@@ -57,6 +83,18 @@ function fmtBytes(bytes: number | null): string {
   const gib = bytes / 1024 ** 3;
   if (gib >= 1) return `${gib.toFixed(1)} GiB`;
   return `${Math.round(bytes / 1024 ** 2)} MiB`;
+}
+
+function dockerAndComposeWork(facts: BootstrapFacts): boolean {
+  return facts.docker.cliInstalled
+    && facts.docker.serverVersion !== null
+    && facts.docker.composeVersion !== null;
+}
+
+function repoVerified(facts: BootstrapFacts): boolean {
+  return facts.repo.sourceVerified === true
+    && facts.repo.keyringVerified === true
+    && facts.repo.candidateSourceVerified !== false;
 }
 
 function isDeniedFilesystem(type: string | null | undefined): boolean {
@@ -143,7 +181,9 @@ function composeDirCheck(
     };
   }
   const keepAndDescribe = path.exists
-    ? `${path.stackCount ?? 0} existing stack${path.stackCount === 1 ? '' : 's'} will be preserved.`
+    ? path.stackCount === null
+      ? 'The existing stack count is unknown.'
+      : `${path.stackCount} existing stack${path.stackCount === 1 ? '' : 's'} will be preserved.`
     : '';
 
   if (!path.exists) {
@@ -208,6 +248,15 @@ function composeDirCheck(
       summary: `${path.input} is reached through a symlinked directory and resolves to ${path.realPath ?? 'another path'}. ${keepAndDescribe}`,
       observed: describePath(path),
       remediation: 'The resolved path is recorded in the plan digest. Confirm it is still the directory you mean before approving execution.',
+    };
+  }
+  if (path.inventoryError) {
+    return {
+      ...base,
+      status: 'unknown',
+      summary: `The existing stacks in ${path.input} could not be inventoried (${path.inventoryError}). ${keepAndDescribe}`,
+      observed: path.inventoryError,
+      remediation: 'Confirm the directory contents manually over SSH, or grant the SSH user read and traverse access, then run the preflight again.',
     };
   }
   if (path.rootComposeFile) {
@@ -326,6 +375,26 @@ function agentDirCheck(
       summary: `${path.input} is not writable by the SSH user or by root.`,
       observed: describePath(path),
       remediation: 'Choose an empty directory the SSH user can write, or enable non-interactive sudo for this user.',
+    };
+  }
+  if (!path.readableByUser) {
+    return {
+      ...base,
+      status: 'blocked',
+      summary: `${path.input} cannot be listed by the SSH user, so a previous bootstrap attempt or unrelated content cannot be ruled out.`,
+      observed: describePath(path),
+      remediation: 'Grant the SSH user read and traverse access to this directory, or choose an empty directory.',
+    };
+  }
+  if (path.inventoryError) {
+    return {
+      ...base,
+      status: path.entries.length > 0 ? 'blocked' : 'unknown',
+      summary: path.entries.length > 0
+        ? `${path.input} contains entries that could not be fully inventoried (${path.inventoryError}).`
+        : `The contents of ${path.input} could not be inventoried (${path.inventoryError}).`,
+      observed: path.entries.length > 0 ? path.entries.slice(0, 10).join(', ') : path.inventoryError,
+      remediation: 'Confirm the directory contents manually over SSH, or grant the SSH user read and traverse access, then run the preflight again.',
     };
   }
 
@@ -519,6 +588,15 @@ function agentConflictCheck(facts: BootstrapFacts): BootstrapCheck {
       remediation: 'Choose another host, or remove the existing Pilot deliberately before running this workflow. Nothing is replaced automatically.',
     };
   }
+  if (facts.docker.cliInstalled && !facts.containers.complete) {
+    return {
+      ...base,
+      status: 'unknown',
+      summary: `The container inventory could not be completed (${facts.containers.error ?? 'unknown error'}), so an existing Pilot cannot be ruled out.`,
+      observed: facts.containers.error ?? 'container inventory incomplete',
+      remediation: 'Confirm on the host that no sencho-agent container is running, then run the preflight again.',
+    };
+  }
   if (facts.agent.defaultDirHasComposeFile && !facts.paths.agentDir.exists) {
     return {
       ...base,
@@ -533,7 +611,7 @@ function agentConflictCheck(facts: BootstrapFacts): BootstrapCheck {
       ...base,
       status: 'warn',
       summary: `The ${PILOT_PROJECT_NAME} data volume already exists without a running project.`,
-      observed: 'sencho-agent-data',
+      observed: facts.agent.dataVolumeNames.join(', ') || 'sencho-agent-data',
       remediation: 'The volume can carry a previous Pilot identity. Execution must verify the stored identity or require an explicit replace before reusing it.',
     };
   }
@@ -659,12 +737,17 @@ export function buildBootstrapEvidence(input: { facts: BootstrapFacts; nodeNameT
     remediation: 'Synchronize the host clock (timedatectl or an NTP client), then run the preflight again.',
   });
 
-  const repoConfigured = facts.repo.dockerSourceConfigured && facts.repo.keyringPresent;
+  const dockerWorking = dockerAndComposeWork(facts);
+  const repoConfigured = repoVerified(facts);
   const missingPackages = facts.packages.some((pkg) => pkg.installedVersion === null);
+  // A working Docker and Compose installation is preserved as-is, so a missing
+  // official package record is not a reason to install or elevate.
+  const willInstallPackages = !dockerWorking && missingPackages;
+  const willConfigureRepo = !dockerWorking && (!repoConfigured || missingPackages);
   const serviceNeedsChange = facts.docker.serviceActive !== true || facts.docker.serviceEnabled !== true;
   const needsSudo = !facts.docker.cliInstalled
-    || !repoConfigured
-    || missingPackages
+    || willInstallPackages
+    || willConfigureRepo
     || serviceNeedsChange
     || (facts.paths.composeDir.exists === false && facts.paths.composeDir.parentWritableByUser === false)
     || (facts.paths.agentDir.exists === false && facts.paths.agentDir.parentWritableByUser === false);
@@ -757,8 +840,8 @@ export function buildBootstrapEvidence(input: { facts: BootstrapFacts; nodeNameT
       category: 'docker',
       label: 'Docker daemon',
       status: 'blocked',
-      summary: 'Docker is installed but the daemon cannot be reached, directly or through sudo.',
-      remediation: 'Start the Docker service and grant the SSH user access, then run the preflight again.',
+      summary: 'Docker is installed but the daemon at the host local socket cannot be reached, directly or through sudo.',
+      remediation: 'Start the Docker service and grant the SSH user access to /var/run/docker.sock, then run the preflight again. Rootless or remote Docker sockets are not supported by this release.',
     });
   }
 
@@ -812,32 +895,56 @@ export function buildBootstrapEvidence(input: { facts: BootstrapFacts; nodeNameT
       category: 'docker',
       label: 'Docker socket access',
       status: 'blocked',
-      summary: 'The Docker socket is not accessible directly or through sudo.',
-      remediation: 'Grant the SSH user access to the Docker socket, then run the preflight again.',
+      summary: 'The Docker local socket is not accessible directly or through sudo.',
+      remediation: 'Grant the SSH user access to /var/run/docker.sock, then run the preflight again. Rootless or remote Docker sockets are not supported by this release.',
     });
   }
 
-  checks.push(facts.repo.dockerSourceConfigured && facts.repo.keyringPresent ? {
+  const repoPresent = facts.repo.dockerSourceConfigured || facts.repo.keyringPresent;
+  const repoUnverified = facts.repo.sourceVerified === null || facts.repo.keyringVerified === null;
+  const repoContradicted = facts.repo.sourceVerified === false
+    || facts.repo.keyringVerified === false
+    || facts.repo.candidateSourceVerified === false;
+  checks.push(repoVerified(facts) ? {
     id: 'apt_source',
     category: 'docker',
     label: 'Docker package source',
     status: 'pass',
-    summary: 'The official Docker repository and keyring are configured.',
-    observed: 'docker.list or docker.sources plus a keyring',
-  } : facts.packages.every((pkg) => pkg.installedVersion === null) && !facts.docker.cliInstalled ? {
+    summary: 'The official Docker repository, keyring and candidate provenance are verified.',
+    observed: `${facts.repo.sourceVerified ? 'source verified' : 'source'} / ${facts.repo.keyringVerified ? 'keyring verified' : 'keyring'}`,
+  } : dockerWorking ? {
     id: 'apt_source',
     category: 'docker',
     label: 'Docker package source',
     status: 'warn',
-    summary: 'The official Docker repository is not configured. The plan adds it.',
-    remediation: 'No action is needed if the host can reach download.docker.com.',
-  } : {
+    summary: 'Docker and Compose already work; the plan preserves the existing installation and does not use or replace the Docker apt repository.',
+    observed: repoPresent
+      ? (facts.repo.problem ?? 'an existing source or keyring does not match the official repository')
+      : 'no official Docker repository configured',
+    remediation: 'No action is needed. The plan does not install or replace Docker packages on this host.',
+  } : repoPresent && repoUnverified ? {
     id: 'apt_source',
     category: 'docker',
     label: 'Docker package source',
     status: 'unknown',
-    summary: 'The Docker package source could not be read.',
-    remediation: 'Confirm the host uses the official Docker repository, then run the preflight again.',
+    summary: 'A Docker source or keyring file exists but could not be verified.',
+    observed: facts.repo.problem ?? 'unreadable Docker repository configuration',
+    remediation: 'Read the source and keyring on the host, or remove them and let the plan configure the official repository, then run the preflight again.',
+  } : repoPresent && repoContradicted ? {
+    id: 'apt_source',
+    category: 'docker',
+    label: 'Docker package source',
+    status: 'blocked',
+    summary: 'A Docker source or keyring file exists but does not point at the official Docker repository.',
+    observed: facts.repo.problem ?? 'the Docker repository configuration did not verify',
+    remediation: 'Review or remove the misleading Docker apt source and keyring on the host, then run the preflight again.',
+  } : {
+    id: 'apt_source',
+    category: 'docker',
+    label: 'Docker package source',
+    status: 'warn',
+    summary: 'The official Docker repository is not configured. The plan adds and verifies it.',
+    remediation: 'No action is needed if the host can reach download.docker.com.',
   });
 
   checks.push(diskSpaceCheck(facts));
@@ -875,9 +982,17 @@ export function buildBootstrapEvidence(input: { facts: BootstrapFacts; nodeNameT
     id: 'existing_workloads',
     category: 'conflicts',
     label: 'Existing workloads',
+    status: 'pass',
+    summary: 'Docker is not installed, so no existing containers can be affected.',
+    observed: 'no Docker CLI',
+  } : !facts.containers.complete ? {
+    id: 'existing_workloads',
+    category: 'conflicts',
+    label: 'Existing workloads',
     status: 'unknown',
-    summary: 'Docker is not installed, so there are no workloads to inventory yet.',
-    remediation: 'This is expected on a fresh host. No action is needed.',
+    summary: `The container inventory could not be completed (${facts.containers.error ?? 'unknown error'}).`,
+    observed: facts.containers.error ?? 'container inventory incomplete',
+    remediation: 'Confirm the Docker container list on the host, then run the preflight again.',
   } : {
     id: 'existing_workloads',
     category: 'conflicts',
@@ -969,6 +1084,7 @@ export function buildBootstrapEvidence(input: { facts: BootstrapFacts; nodeNameT
 
   const blockers = checks.filter((check) => check.status === 'blocked').length;
   const warnings = checks.filter((check) => check.status === 'warn').length;
-  const planSuppressed = checks.some((check) => PATH_CHECK_IDS.has(check.id) && check.status === 'unknown');
+  const planSuppressed = checks.some((check) => PLAN_REQUIRED_CHECK_IDS.has(check.id) && check.status === 'unknown')
+    || [...PLAN_REQUIRED_CHECK_IDS].some((id) => !checks.some((check) => check.id === id));
   return { checks, blockers, warnings, planSuppressed };
 }

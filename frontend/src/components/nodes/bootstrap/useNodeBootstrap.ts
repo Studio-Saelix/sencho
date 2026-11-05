@@ -86,6 +86,9 @@ export function useNodeBootstrap({ open, api }: UseNodeBootstrapOptions) {
   const [advancedOpen, setAdvancedOpen] = useState(false);
   const [invalidated, setInvalidated] = useState(false);
   const abortRef = useRef<AbortController | null>(null);
+  // Bumped whenever the SSH endpoint changes, so a keyscan response for the
+  // previous host, port or user can never populate the current form.
+  const targetGenerationRef = useRef(0);
   const dirtyFieldsRef = useRef<Set<keyof BootstrapForm>>(new Set());
   const resultRef = useRef<BootstrapPreflightResult | null>(null);
   const hostKeyRef = useRef<BootstrapHostKeyResult | null>(null);
@@ -121,6 +124,7 @@ export function useNodeBootstrap({ open, api }: UseNodeBootstrapOptions) {
   const reset = useCallback(() => {
     abortRef.current?.abort();
     abortRef.current = null;
+    targetGenerationRef.current += 1;
     setForm({ ...EMPTY_FORM, composeDir: capabilities.defaults.composeDir, agentDir: capabilities.defaults.agentDir });
     setStep('target');
     setHostKey(null);
@@ -192,6 +196,9 @@ export function useNodeBootstrap({ open, api }: UseNodeBootstrapOptions) {
     setError(null);
     setFieldErrors((current) => current.filter((entry) => entry.field !== field));
     if (field === 'host' || field === 'port' || field === 'username') {
+      targetGenerationRef.current += 1;
+      abortRef.current?.abort();
+      abortRef.current = null;
       setHostKey(null);
       setTrusted(false);
       setReplacing(false);
@@ -229,6 +236,7 @@ export function useNodeBootstrap({ open, api }: UseNodeBootstrapOptions) {
     abortRef.current?.abort();
     const controller = new AbortController();
     abortRef.current = controller;
+    const generation = targetGenerationRef.current;
     setBusy('host-key');
     setError(null);
     try {
@@ -236,12 +244,16 @@ export function useNodeBootstrap({ open, api }: UseNodeBootstrapOptions) {
         { host: form.host.trim(), port: Number(form.port) },
         controller.signal,
       );
+      // The form may have moved to another endpoint while this request was in
+      // flight; its key and trust state are no longer about the shown target.
+      if (targetGenerationRef.current !== generation) return;
       setHostKey(response);
       setTrusted(response.trust === 'trusted');
       setReplacing(false);
       setStep('preflight');
     } catch (caught: unknown) {
       if (isAbort(caught)) return;
+      if (targetGenerationRef.current !== generation) return;
       const fieldError = toFieldError(caught);
       if (fieldError) setFieldErrors([fieldError]);
       setError(caught instanceof Error ? caught.message : 'The host key check failed.');
@@ -253,6 +265,7 @@ export function useNodeBootstrap({ open, api }: UseNodeBootstrapOptions) {
   const runPreflight = useCallback(async (confirmReplace = false) => {
     if (!hostKey) return;
     const revision = configRevision;
+    const generation = targetGenerationRef.current;
     abortRef.current?.abort();
     const controller = new AbortController();
     abortRef.current = controller;
@@ -271,16 +284,24 @@ export function useNodeBootstrap({ open, api }: UseNodeBootstrapOptions) {
         composeDir: form.composeDir,
         agentDir: form.agentDir,
       }, controller.signal);
+      if (targetGenerationRef.current !== generation) return;
       setResult(response);
       setResultRevision(revision);
       setInvalidated(false);
       setStep(response.plan ? 'plan' : 'preflight');
     } catch (caught: unknown) {
       if (isAbort(caught)) return;
+      if (targetGenerationRef.current !== generation) return;
       const fieldError = toFieldError(caught);
       if (fieldError) setFieldErrors([fieldError]);
       if (caught instanceof BootstrapApiError && caught.code === 'HOST_KEY_MISMATCH') {
-        setReplacing(true);
+        // The pin changed underneath the keyscan. Keep the observed key, show
+        // the pin the server reported, and require an explicit confirmation.
+        const pinned = typeof caught.details.pinnedFingerprint === 'string'
+          ? caught.details.pinnedFingerprint
+          : null;
+        setHostKey((current) => (current ? { ...current, trust: 'changed', pinnedFingerprint: pinned } : current));
+        setReplacing(false);
         setTrusted(false);
       }
       setError(caught instanceof Error ? caught.message : 'The preflight failed.');
