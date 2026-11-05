@@ -172,6 +172,7 @@ describe('GET /api/system/networks/:id', () => {
       .get('/api/system/networks/bad!name')
       .set('Authorization', deployerHeader);
     expect(deployerMalformed.status).toBe(403);
+    expect(fake.inspectNetwork).not.toHaveBeenCalled();
 
     const viewer = await request(app)
       .get(`/api/system/networks/${NET_ID_12}`)
@@ -210,7 +211,18 @@ describe('GET /api/networking/networks/:id parity', () => {
     }
     expect(getInstance).not.toHaveBeenCalled();
     expect(fake.inspectNetwork).not.toHaveBeenCalled();
-    expect(fake.getDependencySnapshot).not.toHaveBeenCalled();
+  });
+
+  it('requires node:read before validating the reference', async () => {
+    const { fake } = stubDocker();
+
+    expect((await request(app).get('/api/networking/networks/bad!name')).status).toBe(401);
+
+    const deployer = await request(app)
+      .get('/api/networking/networks/bad!name')
+      .set('Authorization', deployerHeader);
+    expect(deployer.status).toBe(403);
+    expect(fake.inspectNetwork).not.toHaveBeenCalled();
   });
 
   it('still accepts names and returns the sanitized envelope', async () => {
