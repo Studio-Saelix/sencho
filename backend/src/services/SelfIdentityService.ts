@@ -315,7 +315,7 @@ class SelfIdentityService {
     const parsed = parseImageRef(imageRef);
     if (!parsed) return null;
     const inspected = await withTimeout(defaultInspectImage(imageIdHex), 2000, 'build revision inspect');
-    return selectLocalRepoDigest(inspected.RepoDigests ?? [], parsed);
+    return selectLocalRepoDigest(inspected.RepoDigests ?? [], parsed, inspected.Id);
   }
 
   /** True when the given container ID or name matches the running Sencho container. Accepts short or full IDs. */

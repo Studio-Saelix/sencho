@@ -329,10 +329,16 @@ export function selectLocalRepoDigests(
 
 /**
  * Scalar view of {@link selectLocalRepoDigests}: the first candidate, or null.
- * Prefer the plural form when comparing against a remote tag.
+ * Prefer the plural form when comparing against a remote tag. `configId` is
+ * forwarded so a caller that has the image's `Id` also rejects a local build's
+ * self-referential RepoDigest instead of taking it for registry content.
  */
-export function selectLocalRepoDigest(repoDigests: readonly string[], parsed: ParsedRef): string | null {
-    return selectLocalRepoDigests(repoDigests, parsed)[0] ?? null;
+export function selectLocalRepoDigest(
+    repoDigests: readonly string[],
+    parsed: ParsedRef,
+    configId?: string | null,
+): string | null {
+    return selectLocalRepoDigests(repoDigests, parsed, configId)[0] ?? null;
 }
 
 /** Outcome of a remote-digest lookup: the digest, or a human-readable reason it failed. */

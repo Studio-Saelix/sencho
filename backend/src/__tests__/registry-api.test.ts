@@ -462,6 +462,16 @@ describe('selectLocalRepoDigest', () => {
     const upper = `sha256:${'A'.repeat(64)}`;
     expect(selectLocalRepoDigest([`nginx@${upper}`], parsed('nginx:latest'))).toBe(upper);
   });
+
+  it('forwards the config ID so a self-referential RepoDigest is not returned', () => {
+    const configId = `sha256:${'d'.repeat(64)}`;
+    expect(selectLocalRepoDigest(
+      [`nginx@${configId}`, `nginx@${DIGEST_A}`],
+      parsed('nginx:latest'),
+      configId,
+    )).toBe(DIGEST_A);
+    expect(selectLocalRepoDigest([`nginx@${configId}`], parsed('nginx:latest'), configId)).toBeNull();
+  });
 });
 
 // ─── selectLocalRepoDigests ──────────────────────────────────────────────
