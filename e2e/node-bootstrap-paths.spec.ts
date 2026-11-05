@@ -253,7 +253,8 @@ test.describe('Node bootstrap wizard', () => {
     await page.getByRole('checkbox', { name: /I trust this host key/ }).check();
     await page.getByRole('button', { name: 'Run preflight' }).click();
 
-    await expect(page.getByText('Filesystem changes')).toBeVisible();
+    await expect(page.getByText('1. Pilot Agent installation directory')).toBeVisible();
+    await expect(page.getByText('Not changed')).toBeVisible();
     await expect(page.getByText('/srv/sencho-stacks').first()).toBeVisible();
     await expect(page.getByText('/srv/sencho-agent').first()).toBeVisible();
     await expect(page.getByText(/install -d -m 0700/)).toBeVisible();
@@ -266,11 +267,11 @@ test.describe('Node bootstrap wizard', () => {
     await page.getByLabel('Compose stacks directory').fill('/srv/other-stacks');
 
     await expect(page.getByText(/Paths changed. The previous preflight and plan no longer apply/)).toBeVisible();
-    await expect(page.getByText('Filesystem changes')).toHaveCount(0);
+    await expect(page.getByText('1. Pilot Agent installation directory')).toHaveCount(0);
 
     await page.getByRole('button', { name: 'Continue to preflight' }).click();
     await page.getByRole('button', { name: /^Run preflight/ }).click();
-    await expect(page.getByText('Filesystem changes')).toBeVisible();
+    await expect(page.getByText('1. Pilot Agent installation directory')).toBeVisible();
     const secondDigest = await page.locator('code', { hasText: /^sha256:/ }).innerText();
     expect(secondDigest).not.toBe(firstDigest);
   });
