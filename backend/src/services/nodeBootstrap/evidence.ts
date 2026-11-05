@@ -608,6 +608,15 @@ function agentConflictCheck(facts: BootstrapFacts): BootstrapCheck {
       remediation: 'Confirm on the host that no sencho-agent container is running, then run the preflight again.',
     };
   }
+  if (facts.agent.defaultDirHasComposeFile === null) {
+    return {
+      ...base,
+      status: 'unknown',
+      summary: `The default Pilot directory ${DEFAULT_AGENT_DIR} could not be checked, so an earlier installation cannot be ruled out.`,
+      observed: 'default directory probe incomplete',
+      remediation: `Confirm on the host that ${DEFAULT_AGENT_DIR}/compose.yaml does not exist, then run the preflight again.`,
+    };
+  }
   if (facts.agent.defaultDirHasComposeFile && !facts.paths.agentDir.exists) {
     return {
       ...base,
@@ -694,7 +703,7 @@ export function buildBootstrapEvidence(input: { facts: BootstrapFacts; nodeNameT
     remediation: 'Use Ubuntu 22.04 or 24.04, or enroll the node manually.',
   });
 
-  checks.push(facts.os === null ? {
+  checks.push(facts.os === null || facts.os.arch === '' ? {
     id: 'arch_supported',
     category: 'host',
     label: 'Architecture',
@@ -845,6 +854,15 @@ export function buildBootstrapEvidence(input: { facts: BootstrapFacts; nodeNameT
       summary: 'Docker is not installed, so the daemon cannot be reached yet. The plan installs and starts it.',
       remediation: 'No action is needed if the official Docker repository is reachable from the host.',
     });
+  } else if (facts.docker.socketAccess === 'unknown') {
+    checks.push({
+      id: 'docker_daemon',
+      category: 'docker',
+      label: 'Docker daemon',
+      status: 'unknown',
+      summary: 'A Docker daemon query timed out or failed to run, so the daemon cannot be classified.',
+      remediation: 'Confirm Docker answers on the host (docker info), then run the preflight again.',
+    });
   } else if (facts.docker.serverVersion) {
     checks.push({
       id: 'docker_daemon',
@@ -864,9 +882,9 @@ export function buildBootstrapEvidence(input: { facts: BootstrapFacts; nodeNameT
       id: 'docker_daemon',
       category: 'docker',
       label: 'Docker daemon',
-      status: 'warn',
-      summary: 'Docker is installed but not running. The plan starts it.',
-      remediation: 'No action is needed; the plan enables and starts the Docker service.',
+      status: 'blocked',
+      summary: 'Docker is installed but not running. Existing containers and volumes cannot be inventoried while the daemon is stopped.',
+      remediation: 'Start the Docker service on the host (sudo systemctl start docker), then run the preflight again.',
     });
   } else {
     checks.push({
@@ -886,6 +904,13 @@ export function buildBootstrapEvidence(input: { facts: BootstrapFacts; nodeNameT
     status: 'unknown',
     summary: 'The Docker CLI probe did not complete, so the Compose plugin cannot be classified.',
     remediation: 'Confirm docker compose works on the host, then run the preflight again.',
+  } : facts.docker.composeProbeUnknown ? {
+    id: 'compose_plugin',
+    category: 'docker',
+    label: 'Docker Compose',
+    status: 'unknown',
+    summary: 'The Compose version query timed out or failed to run, so the Compose plugin cannot be classified.',
+    remediation: 'Confirm docker compose version works on the host, then run the preflight again.',
   } : facts.docker.composeVersion ? {
     id: 'compose_plugin',
     category: 'docker',
@@ -920,6 +945,15 @@ export function buildBootstrapEvidence(input: { facts: BootstrapFacts; nodeNameT
       summary: 'Docker is not installed, so socket access cannot be checked yet.',
       remediation: 'No action is needed; the plan installs Docker and starts the agent as root through the socket.',
     });
+  } else if (facts.docker.socketAccess === 'unknown') {
+    checks.push({
+      id: 'docker_socket',
+      category: 'docker',
+      label: 'Docker socket access',
+      status: 'unknown',
+      summary: 'A Docker daemon query timed out or failed to run, so socket access cannot be established.',
+      remediation: 'Confirm the SSH user can reach /var/run/docker.sock, then run the preflight again.',
+    });
   } else if (facts.docker.socketAccess === 'user') {
     checks.push({
       id: 'docker_socket',
@@ -952,25 +986,29 @@ export function buildBootstrapEvidence(input: { facts: BootstrapFacts; nodeNameT
 
   const repoPresent = facts.repo.dockerSourceConfigured || facts.repo.keyringPresent;
   const repoUnverified = facts.repo.sourceVerified === null || facts.repo.keyringVerified === null;
-  const repoContradicted = facts.repo.sourceVerified === false
-    || facts.repo.keyringVerified === false
+  // A missing file is not a contradiction: a leftover keyring without a source
+  // (or the reverse) is half-configured, which the plan completes.
+  const repoContradicted = (facts.repo.dockerSourceConfigured && facts.repo.sourceVerified === false)
+    || (facts.repo.keyringPresent && facts.repo.keyringVerified === false)
     || facts.repo.candidateSourceVerified === false;
-  checks.push(!facts.repo.probeComplete && !dockerWorking ? {
+  checks.push((!facts.repo.probeComplete || !facts.packagesComplete) && !dockerWorking ? {
     id: 'apt_source',
     category: 'docker',
     label: 'Docker package source',
     status: 'unknown',
     summary: 'The Docker package source could not be inspected, so the plan cannot decide whether to configure it.',
-    observed: facts.repo.problem ?? 'repository probe did not complete',
+    observed: facts.repo.problem ?? (facts.repo.probeComplete ? 'apt-cache policy did not complete' : 'repository probe did not complete'),
     remediation: 'Read /etc/apt/sources.list.d and /etc/apt/keyrings on the host, then run the preflight again.',
   } : repoVerified(facts) ? {
     id: 'apt_source',
     category: 'docker',
     label: 'Docker package source',
     status: 'pass',
+    // The probe reads the source entry and the first bytes of the keyring, not
+    // the key's fingerprint, so the claim stops at what was read.
     summary: facts.repo.candidateSourceVerified === true
-      ? 'The official Docker repository, keyring and candidate provenance are verified.'
-      : 'The official Docker repository and keyring are verified.',
+      ? 'The Docker source points at the official repository with an OpenPGP keyring, and apt serves the candidates from it.'
+      : 'The Docker source points at the official repository and names an installed OpenPGP keyring.',
     observed: `${facts.repo.sourceVerified ? 'source verified' : 'source'} / ${facts.repo.keyringVerified ? 'keyring verified' : 'keyring'}${facts.repo.candidateSourceVerified === true ? ' / candidate verified' : ''}`,
   } : dockerWorking ? {
     id: 'apt_source',
@@ -1114,7 +1152,7 @@ export function buildBootstrapEvidence(input: { facts: BootstrapFacts; nodeNameT
     category: 'network',
     label: 'Hub URL',
     status: 'pass',
-    summary: 'The hub URL is a reachable HTTPS address.',
+    summary: 'The hub URL is a valid HTTPS address.',
     observed: facts.hub.url,
   });
 
@@ -1123,7 +1161,7 @@ export function buildBootstrapEvidence(input: { facts: BootstrapFacts; nodeNameT
     category: 'network',
     label: 'Hub reachability',
     status: 'unknown',
-    summary: 'Hub reachability could not be measured from the target (curl is unavailable or the check timed out).',
+    summary: 'Hub reachability could not be measured from the target (curl is unavailable, failed to run or timed out).',
     remediation: 'Confirm the target can reach the hub URL over HTTPS, then run the preflight again.',
   } : facts.hub.tlsTrusted === false ? {
     id: 'hub_reachable',
@@ -1133,6 +1171,14 @@ export function buildBootstrapEvidence(input: { facts: BootstrapFacts; nodeNameT
     summary: 'The target reached the hub, but does not trust its TLS certificate.',
     observed: `HTTP ${facts.hub.statusCode ?? 'unavailable'}`,
     remediation: 'The Pilot uses the hub CA written next to its compose file. If you use a private CA, confirm the certificate chain.',
+  } : facts.hub.reachable && (facts.hub.statusCode ?? 0) >= 400 ? {
+    id: 'hub_reachable',
+    category: 'network',
+    label: 'Hub reachability',
+    status: 'warn',
+    summary: `The target reached a server at the hub URL, but /api/health answered HTTP ${facts.hub.statusCode}.`,
+    observed: `HTTP ${facts.hub.statusCode}`,
+    remediation: 'Confirm the hub URL points at this Sencho instance and not a proxy or captive portal, then run the preflight again.',
   } : facts.hub.reachable ? {
     id: 'hub_reachable',
     category: 'network',

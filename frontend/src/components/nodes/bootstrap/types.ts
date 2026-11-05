@@ -62,7 +62,7 @@ export interface BootstrapInspection {
     projectContainers: Array<{ name: string; workingDir: string | null; configFiles: string | null; image: string; status: string }>;
     dataVolumeExists: boolean | null;
     dataVolumeNames: string[];
-    defaultDirHasComposeFile: boolean;
+    defaultDirHasComposeFile: boolean | null;
   };
   dockerRoot: { path: string | null; freeBytes: number | null; filesystemType: string | null };
   checks: BootstrapCheck[];

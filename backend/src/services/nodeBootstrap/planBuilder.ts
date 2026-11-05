@@ -283,8 +283,18 @@ export function buildBootstrapPlan(input: PlanBuildInput): BootstrapPlan {
     || facts.paths.composeDir.inventoryError || facts.paths.agentDir.inventoryError) {
     throw new Error('The plan cannot be built while a directory could not be inspected.');
   }
-  if (!facts.repo.probeComplete && !(facts.docker.cliInstalled && facts.docker.serverVersion && facts.docker.composeVersion)) {
+  if ((!facts.repo.probeComplete || !facts.packagesComplete)
+    && !(facts.docker.cliInstalled && facts.docker.serverVersion && facts.docker.composeVersion)) {
     throw new Error('The plan cannot be built while the Docker package source could not be inspected.');
+  }
+  if (facts.docker.socketAccess === 'unknown' || facts.docker.composeProbeUnknown) {
+    throw new Error('The plan requires complete Docker daemon and Compose probes.');
+  }
+  if (facts.docker.cliInstalled && (!facts.containers.complete || facts.agent.dataVolumeExists === null)) {
+    throw new Error('The plan requires a complete container and volume inventory.');
+  }
+  if (facts.agent.defaultDirHasComposeFile === null) {
+    throw new Error('The plan requires the default Pilot directory to be checked.');
   }
   const owner = facts.user?.name ?? facts.target.username;
   const group = facts.user?.group ?? owner;
@@ -559,7 +569,11 @@ export function buildBootstrapPlan(input: PlanBuildInput): BootstrapPlan {
   return plan;
 }
 
-/** Digest over the plan without its generation time and without the digest itself. */
+/**
+ * Digest over the plan without its generation time and without the digest
+ * itself. The marker file content carries its own creation time, so every
+ * generated plan has its own digest; it identifies the reviewed artifact.
+ */
 export function planDigest(plan: BootstrapPlan): string {
   const { generatedAt: _generatedAt, digest: _digest, ...rest } = plan;
   return sha256Hex(canonicalJson(rest));

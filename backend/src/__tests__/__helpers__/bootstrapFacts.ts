@@ -85,6 +85,7 @@ export interface FactsOverrides {
   docker?: Partial<BootstrapFacts['docker']>;
   repo?: Partial<BootstrapFacts['repo']>;
   packages?: BootstrapFacts['packages'];
+  packagesComplete?: boolean;
   composeDir?: Partial<ComposeDirObservation>;
   agentDir?: Partial<AgentDirObservation>;
   agent?: Partial<BootstrapFacts['agent']>;
@@ -129,6 +130,7 @@ export function makeFacts(overrides: FactsOverrides = {}): BootstrapFacts {
       cliProbeUnknown: false,
       serverVersion: '27.3.1',
       composeVersion: '2.29.7',
+      composeProbeUnknown: false,
       serviceActive: true,
       serviceEnabled: true,
       socketAccess: 'user',
@@ -146,6 +148,7 @@ export function makeFacts(overrides: FactsOverrides = {}): BootstrapFacts {
       problem: null,
       ...overrides.repo,
     },
+    packagesComplete: overrides.packagesComplete ?? true,
     packages: overrides.packages ?? [
       { name: 'docker-ce', installedVersion: '5:27.3.1-1~ubuntu.24.04~noble', candidateVersion: '5:27.3.1-1~ubuntu.24.04~noble' },
       { name: 'docker-ce-cli', installedVersion: '5:27.3.1-1~ubuntu.24.04~noble', candidateVersion: '5:27.3.1-1~ubuntu.24.04~noble' },

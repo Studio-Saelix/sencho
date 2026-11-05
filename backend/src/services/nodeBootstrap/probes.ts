@@ -134,12 +134,12 @@ export const DOCKER_ROOT_DISK_SCRIPT = [
   'df -Pk -- "$d" 2>/dev/null | tail -n 1',
 ].join('\n');
 
-export interface ProbeDefinition extends SshCommand {
-  /** Sent only when the direct probe failed and non-interactive sudo works. */
-  requiresSudo?: boolean;
-  /** Sent only when the direct probe succeeded. Never sent on its own. */
-  directOnly?: boolean;
-}
+/**
+ * The whole catalog runs in one session. Sudo variants are always sent: `sudo -n`
+ * refuses at once when a password would be needed, so a direct-access host pays
+ * only for a fast failure.
+ */
+export type ProbeDefinition = SshCommand;
 
 export function buildProbeCatalog(input: ProbeCatalogInput): ProbeDefinition[] {
   const compose = shellQuote(input.composeDir);
@@ -151,10 +151,10 @@ export function buildProbeCatalog(input: ProbeCatalogInput): ProbeDefinition[] {
     { id: 'user', command: `id -un; id -u; id -gn` },
     { id: 'sudo', command: `sudo -n true` },
     { id: 'docker_cli', command: `command -v docker` },
-    { id: 'docker_info', command: `${DOCKER_LOCAL_COMMAND} info --format '{{.ServerVersion}}|{{.DockerRootDir}}' 2>/dev/null`, directOnly: true },
-    { id: 'docker_info_sudo', command: `sudo -n ${DOCKER_LOCAL_ENV} docker info --format '{{.ServerVersion}}|{{.DockerRootDir}}' 2>/dev/null`, requiresSudo: true },
-    { id: 'compose_version', command: `${DOCKER_LOCAL_COMMAND} compose version --short 2>/dev/null`, directOnly: true },
-    { id: 'compose_version_sudo', command: `sudo -n ${DOCKER_LOCAL_ENV} docker compose version --short 2>/dev/null`, requiresSudo: true },
+    { id: 'docker_info', command: `${DOCKER_LOCAL_COMMAND} info --format '{{.ServerVersion}}|{{.DockerRootDir}}' 2>/dev/null` },
+    { id: 'docker_info_sudo', command: `sudo -n ${DOCKER_LOCAL_ENV} docker info --format '{{.ServerVersion}}|{{.DockerRootDir}}' 2>/dev/null` },
+    { id: 'compose_version', command: `${DOCKER_LOCAL_COMMAND} compose version --short 2>/dev/null` },
+    { id: 'compose_version_sudo', command: `sudo -n ${DOCKER_LOCAL_ENV} docker compose version --short 2>/dev/null` },
     { id: 'docker_service_active', command: `systemctl is-active docker 2>/dev/null` },
     { id: 'docker_service_enabled', command: `systemctl is-enabled docker 2>/dev/null` },
     {
@@ -184,51 +184,43 @@ export function buildProbeCatalog(input: ProbeCatalogInput): ProbeDefinition[] {
     {
       id: 'containers',
       command: `${DOCKER_LOCAL_COMMAND} ps -a --format '{{.Names}}\\t{{.Image}}\\t{{.Label "com.docker.compose.project"}}\\t{{.Label "com.docker.compose.project.working_dir"}}\\t{{.Status}}' 2>/dev/null`,
-      directOnly: true,
     },
     {
       id: 'containers_sudo',
       command: `sudo -n ${DOCKER_LOCAL_ENV} docker ps -a --format '{{.Names}}\\t{{.Image}}\\t{{.Label "com.docker.compose.project"}}\\t{{.Label "com.docker.compose.project.working_dir"}}\\t{{.Status}}' 2>/dev/null`,
-      requiresSudo: true,
     },
-    { id: 'agent_volume', command: `sh -c ${shellQuote(DOCKER_VOLUME_PROBE)}`, directOnly: true },
-    { id: 'agent_volume_sudo', command: `sh -c ${shellQuote(DOCKER_VOLUME_PROBE_SUDO)}`, requiresSudo: true },
+    { id: 'agent_volume', command: `sh -c ${shellQuote(DOCKER_VOLUME_PROBE)}` },
+    { id: 'agent_volume_sudo', command: `sh -c ${shellQuote(DOCKER_VOLUME_PROBE_SUDO)}` },
     { id: 'clock', command: `date +%s` },
     {
       id: 'hub_health',
-      command: `curl -sS --max-time 10 -o /dev/null -w '%{http_code}' ${hub}/api/health 2>/dev/null`,
+      command: `curl -sS --max-time 6 -o /dev/null -w '%{http_code}' ${hub}/api/health`,
     },
     { id: 'path_compose', command: `sh -c ${shellQuote(PATH_FACTS_SCRIPT)} sencho-probe ${compose}` },
     { id: 'path_agent', command: `sh -c ${shellQuote(PATH_FACTS_SCRIPT)} sencho-probe ${agent}` },
     {
       id: 'compose_inventory',
       command: `sh -c ${shellQuote(guardedInventoryScript(`find "$p" -mindepth 1 -maxdepth 2 -type f ${COMPOSE_FILE_NAMES} -print0 2>/dev/null`))} sencho-inventory ${compose}`,
-      directOnly: true,
     },
     {
       id: 'compose_inventory_sudo',
       command: `sh -c ${shellQuote(guardedInventoryScript(`sudo -n find "$p" -mindepth 1 -maxdepth 2 -type f ${COMPOSE_FILE_NAMES} -print0 2>/dev/null`))} sencho-inventory ${compose}`,
-      requiresSudo: true,
     },
     {
       id: 'agent_inventory',
       command: `sh -c ${shellQuote(guardedInventoryScript(`find "$p" -mindepth 1 -maxdepth 1 -printf '%f\\0' 2>/dev/null`))} sencho-inventory ${agent}`,
-      directOnly: true,
     },
     {
       id: 'agent_inventory_sudo',
       command: `sh -c ${shellQuote(guardedInventoryScript(`sudo -n find "$p" -mindepth 1 -maxdepth 1 -printf '%f\\0' 2>/dev/null`))} sencho-inventory ${agent}`,
-      requiresSudo: true,
     },
     {
       id: 'agent_marker',
       command: `sh -c ${shellQuote(guardedInventoryScript(`cat "$p/sencho-bootstrap.json" 2>/dev/null`))} sencho-inventory ${agent}`,
-      directOnly: true,
     },
     {
       id: 'agent_marker_sudo',
       command: `sh -c ${shellQuote(guardedInventoryScript(`sudo -n cat "$p/sencho-bootstrap.json" 2>/dev/null`))} sencho-inventory ${agent}`,
-      requiresSudo: true,
     },
     { id: 'default_agent_path', command: `test -f /opt/sencho-agent/compose.yaml && echo yes || echo no` },
     { id: 'docker_root_disk', command: `sh -c ${shellQuote(DOCKER_ROOT_DISK_SCRIPT)}` },
@@ -289,8 +281,11 @@ export function parseDockerInfo(text: string): { serverVersion: string | null; r
   const line = text.trim().split('\n')[0] ?? '';
   if (!line.includes('|')) return null;
   const [version, rootDir] = line.split('|');
+  // A daemon that cannot be reached still prints the empty template ("|"), so
+  // an answer without a server version is no answer.
+  if (!version.trim()) return null;
   return {
-    serverVersion: version.trim() || null,
+    serverVersion: version.trim(),
     rootDir: rootDir.trim() || null,
   };
 }
@@ -598,15 +593,19 @@ export interface HubHealthObservation {
 }
 
 export function parseHubHealth(result: SshCommandResult): HubHealthObservation {
-  if (result.timedOut || result.truncated) return { reachable: null, statusCode: null, tlsTrusted: null };
+  if (result.timedOut || result.truncated || result.error) {
+    return { reachable: null, statusCode: null, tlsTrusted: null };
+  }
   const code = Number(result.stdout.trim());
   if (result.exitCode === 0 && Number.isInteger(code) && code > 0) {
     return { reachable: true, statusCode: code, tlsTrusted: true };
   }
-  if (/server certificate|certificate verify|SSL certificate/i.test(result.stderr)) {
+  // curl exits 60 for an untrusted certificate; its message goes to stderr.
+  if (result.exitCode === 60 || /server certificate|certificate verify|SSL certificate/i.test(result.stderr)) {
     return { reachable: true, statusCode: null, tlsTrusted: false };
   }
-  if (/command not found|curl: not found/i.test(result.stderr)) {
+  // 126/127 mean the shell could not run curl at all, which says nothing about the hub.
+  if (result.exitCode === 126 || result.exitCode === 127 || /command not found|curl: not found/i.test(result.stderr)) {
     return { reachable: null, statusCode: null, tlsTrusted: null };
   }
   return { reachable: false, statusCode: null, tlsTrusted: null };
@@ -677,13 +676,12 @@ export interface InventorySummary {
   rootComposeFile: boolean;
 }
 
-export function parseComposeInventory(text: string, composeDir: string, cap = 500, outputTruncated = false): InventorySummary {
+export function parseComposeInventory(text: string, composeDir: string, outputTruncated = false): InventorySummary {
   const normalizedDir = composeDir.endsWith('/') ? composeDir.slice(0, -1) : composeDir;
   const entries = text.split('\0').filter((entry) => entry.length > 0);
   const names = new Set<string>();
   let rootComposeFile = false;
-  let truncated = false;
-  for (const entry of entries.slice(0, cap)) {
+  for (const entry of entries) {
     if (!entry.startsWith(`${normalizedDir}/`)) continue;
     const relative = entry.slice(normalizedDir.length + 1);
     const parts = relative.split('/').filter(Boolean);
@@ -693,12 +691,13 @@ export function parseComposeInventory(text: string, composeDir: string, cap = 50
     }
     if (parts.length >= 2) names.add(parts[0]);
   }
-  if (entries.length > cap || outputTruncated) truncated = true;
   const stackNames = [...names].sort();
   return {
     stackCount: stackNames.length,
+    // Only the displayed names are capped. The count covers every entry, so it
+    // is exact unless the transport cut the output off (a lower bound).
     stackNames: stackNames.slice(0, 50),
-    truncated: truncated || stackNames.length > 50,
+    truncated: outputTruncated,
     rootComposeFile,
   };
 }
@@ -769,7 +768,8 @@ export interface AssembleFactsInput {
   composeDir: string;
   agentDir: string;
   results: SshCommandResult[];
-  fstabMountPoints: string[];
+  /** Null when the fstab probe did not complete, so mounts are unknown. */
+  fstabMountPoints: string[] | null;
   now: number;
 }
 
@@ -788,6 +788,11 @@ function stdoutOf(map: Map<string, SshCommandResult>, id: string): string {
 function succeeded(map: Map<string, SshCommandResult>, id: string): boolean {
   const result = map.get(id);
   return Boolean(result && !result.timedOut && !result.truncated && !result.error && result.exitCode === 0);
+}
+
+/** Output of a command that ran to a normal exit; anything else reads as empty. */
+function completeStdout(map: Map<string, SshCommandResult>, id: string): string {
+  return succeeded(map, id) ? (map.get(id) as SshCommandResult).stdout : '';
 }
 
 function isProbeUnknown(map: Map<string, SshCommandResult>, id: string): boolean {
@@ -860,17 +865,23 @@ export function assembleFacts(input: AssembleFactsInput): BootstrapFacts {
   const cliInstalled = succeeded(map, 'docker_cli');
   const cliProbeUnknown = isProbeUnknown(map, 'docker_cli');
 
-  const directDocker = parseDockerInfo(stdoutOf(map, 'docker_info'));
-  const sudoDocker = parseDockerInfo(stdoutOf(map, 'docker_info_sudo'));
+  // `docker info` prints its empty template and exits non-zero when the daemon
+  // cannot be reached, so only a clean exit with a server version is an answer.
+  const directDocker = parseDockerInfo(completeStdout(map, 'docker_info'));
+  const sudoDocker = parseDockerInfo(completeStdout(map, 'docker_info_sudo'));
   const dockerInfo = directDocker ?? sudoDocker;
+  const dockerInfoUnknown = !dockerInfo
+    && (isProbeUnknown(map, 'docker_info') || isProbeUnknown(map, 'docker_info_sudo'));
   const socketAccess: BootstrapFacts['docker']['socketAccess'] = directDocker
     ? 'user'
     : sudoDocker
       ? 'sudo'
-      : 'none';
+      : dockerInfoUnknown ? 'unknown' : 'none';
 
-  const composeVersion = parseComposeVersion(stdoutOf(map, 'compose_version'))
-    ?? parseComposeVersion(stdoutOf(map, 'compose_version_sudo'));
+  const composeVersion = parseComposeVersion(completeStdout(map, 'compose_version'))
+    ?? parseComposeVersion(completeStdout(map, 'compose_version_sudo'));
+  const composeProbeUnknown = composeVersion === null
+    && (isProbeUnknown(map, 'compose_version') || isProbeUnknown(map, 'compose_version_sudo'));
   const repoProbe = map.get('docker_repo');
   const repoBase = repoProbe && !repoProbe.timedOut && !repoProbe.truncated
     && !repoProbe.error && repoProbe.exitCode === 0
@@ -884,7 +895,8 @@ export function assembleFacts(input: AssembleFactsInput): BootstrapFacts {
       candidateSourceVerified: null,
       problem: 'the repository probe did not complete',
     };
-  const packages = parseAptPolicy(stdoutOf(map, 'apt_policy'));
+  const packagesComplete = succeeded(map, 'apt_policy');
+  const packages = parseAptPolicy(completeStdout(map, 'apt_policy'));
   const candidatesWithSource = packages.filter((pkg) => pkg.candidateVersion !== null);
   const candidateSourceVerified = candidatesWithSource.length === 0
     || candidatesWithSource.every((pkg) => !pkg.candidateSource)
@@ -909,7 +921,7 @@ export function assembleFacts(input: AssembleFactsInput): BootstrapFacts {
 
   const composeOutcome = inventoryOutcome(map, 'compose_inventory', 'compose_inventory_sudo');
   const composeInventory = composeBase.exists
-    ? parseComposeInventory(composeOutcome.text, input.composeDir, 500, composeOutcome.truncated)
+    ? parseComposeInventory(composeOutcome.text, input.composeDir, composeOutcome.truncated)
     : { stackCount: 0, stackNames: [], truncated: false, rootComposeFile: false };
   const agentOutcome = inventoryOutcome(map, 'agent_inventory', 'agent_inventory_sudo');
   const agentInventory = parseAgentInventory(agentOutcome.text, agentOutcome.truncated);
@@ -917,7 +929,9 @@ export function assembleFacts(input: AssembleFactsInput): BootstrapFacts {
 
   const composeDir: ComposeDirObservation = {
     ...composeBase,
-    mountInFstab: composeBase.filesystem ? isUnderAnyMount(composeBase.filesystem.mountPoint, input.fstabMountPoints) : null,
+    mountInFstab: composeBase.filesystem && input.fstabMountPoints
+      ? isUnderAnyMount(composeBase.filesystem.mountPoint, input.fstabMountPoints)
+      : null,
     stackCount: composeBase.exists && composeOutcome.complete ? composeInventory.stackCount : null,
     stackNames: composeBase.exists ? composeInventory.stackNames : [],
     inventoryTruncated: composeInventory.truncated,
@@ -926,13 +940,19 @@ export function assembleFacts(input: AssembleFactsInput): BootstrapFacts {
   };
   const agentDir: AgentDirObservation = {
     ...agentBase,
-    mountInFstab: agentBase.filesystem ? isUnderAnyMount(agentBase.filesystem.mountPoint, input.fstabMountPoints) : null,
+    mountInFstab: agentBase.filesystem && input.fstabMountPoints
+      ? isUnderAnyMount(agentBase.filesystem.mountPoint, input.fstabMountPoints)
+      : null,
     ...agentInventory,
     inventoryError: agentBase.exists ? agentOutcome.error : null,
     ...marker,
   };
 
-  const agentContainers = containerInventory.rows.filter((row) => row.project === 'sencho-agent');
+  // The planned container_name collides with a same-named container whether or
+  // not Compose started it, so a `docker run` Pilot counts as well.
+  const agentContainers = containerInventory.rows.filter((row) => (
+    row.project === 'sencho-agent' || row.name === 'sencho-agent'
+  ));
   const agentInstall: AgentInstallObservation = {
     projectContainers: agentContainers.map((row) => ({
       name: row.name,
@@ -945,7 +965,9 @@ export function assembleFacts(input: AssembleFactsInput): BootstrapFacts {
       ? volumeOutcome.result ? volumeNames.length > 0 : null
       : cliProbeUnknown || cliInstalled ? null : false,
     dataVolumeNames: volumeNames,
-    defaultDirHasComposeFile: stdoutOf(map, 'default_agent_path').trim() === 'yes',
+    defaultDirHasComposeFile: succeeded(map, 'default_agent_path')
+      ? stdoutOf(map, 'default_agent_path').trim() === 'yes'
+      : null,
   };
 
   const dockerRootFreeBytes = parseDfFreeBytes(stdoutOf(map, 'docker_root_disk'));
@@ -960,6 +982,7 @@ export function assembleFacts(input: AssembleFactsInput): BootstrapFacts {
       cliProbeUnknown,
       serverVersion: dockerInfo?.serverVersion ?? null,
       composeVersion,
+      composeProbeUnknown,
       serviceActive: stdoutOf(map, 'docker_service_active').trim() === 'active'
         ? true
         : isProbeUnknown(map, 'docker_service_active') ? null : false,
@@ -972,6 +995,7 @@ export function assembleFacts(input: AssembleFactsInput): BootstrapFacts {
     },
     repo,
     packages,
+    packagesComplete,
     paths: { composeDir, agentDir },
     agent: agentInstall,
     dockerRoot: {

@@ -54,6 +54,19 @@ function auditContext(req: Request) {
   };
 }
 
+/**
+ * Aborts when the client goes away before the reply is written (the wizard
+ * cancels a superseded request), so the SSH session and the target lock are
+ * released instead of running out the full budget.
+ */
+function abortOnDisconnect(res: Response): AbortSignal {
+  const controller = new AbortController();
+  res.once('close', () => {
+    if (!res.writableFinished) controller.abort();
+  });
+  return controller.signal;
+}
+
 function sendError(res: Response, error: unknown): void {
   if (error instanceof BootstrapError) {
     res.status(error.status).json({
@@ -65,6 +78,7 @@ function sendError(res: Response, error: unknown): void {
     return;
   }
   if (error instanceof SshTransportError) {
+    console.warn(`[Bootstrap] Transport failure (${error.code}):`, sanitizeForLog(error.message));
     res.status(error.status).json({ error: error.message, code: error.code });
     return;
   }
@@ -97,7 +111,9 @@ nodeBootstrapRouter.post('/host-key', bootstrapLimiter, async (req: Request, res
     return;
   }
   try {
-    const result = await NodeBootstrapService.getInstance().captureHostKey(parsed.data);
+    const result = await NodeBootstrapService.getInstance().captureHostKey(parsed.data, {
+      signal: abortOnDisconnect(res),
+    });
     console.log(`[Bootstrap] Host key checked for ${sanitizeForLog(result.host)}:${result.port} (${result.trust})`);
     res.json(result);
   } catch (error: unknown) {
@@ -122,6 +138,7 @@ nodeBootstrapRouter.post('/preflight', bootstrapLimiter, async (req: Request, re
     const result = await NodeBootstrapService.getInstance().preflight(parsed.data, {
       hubUrl: resolvePrimaryUrl(req),
       audit: auditContext(req),
+      signal: abortOnDisconnect(res),
     });
     console.log(
       `[Bootstrap] Preflight for ${sanitizeForLog(parsed.data.host)} complete: blocked=${result.blocked} blockers=${result.inspection.blockers} warnings=${result.inspection.warnings}`,

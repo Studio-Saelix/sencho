@@ -133,7 +133,29 @@ afterEach(async () => {
   await Promise.all(servers.splice(0).map((server) => new Promise<void>((resolve) => server.close(() => resolve()))));
 });
 
-const client = new SshProbeClient();
+const plainClient = new SshProbeClient();
+
+/**
+ * The transport refuses a session with no expected fingerprint, so tests that
+ * are about something else run against the fixture's own pinned key.
+ */
+class PinnedClient extends SshProbeClient {
+  private pinned: string | null = null;
+
+  public override async runCommands(
+    session: Parameters<SshProbeClient['runCommands']>[0],
+    commands: Parameters<SshProbeClient['runCommands']>[1],
+    options: Parameters<SshProbeClient['runCommands']>[2] = {},
+  ) {
+    if (options.expectedFingerprint === undefined) {
+      this.pinned ??= (await this.captureHostKey(session)).fingerprint;
+      return super.runCommands(session, commands, { ...options, expectedFingerprint: this.pinned });
+    }
+    return super.runCommands(session, commands, options);
+  }
+}
+
+const client = new PinnedClient();
 
 describe('bootstrap SSH transport', () => {
   it('captures the host key without authenticating', async () => {
@@ -165,6 +187,16 @@ describe('bootstrap SSH transport', () => {
     expect(results[0].stdout).toContain('x86_64');
     expect(results[0].exitCode).toBe(0);
     expect(fixture.commands[0]).toBe('LC_ALL=C uname -m; uname -r');
+  });
+
+  it('refuses to authenticate when no fingerprint was supplied', async () => {
+    const fixture = await startServer();
+    await expect(plainClient.runCommands(
+      { host: 'fixture.local', address: '127.0.0.1', port: fixture.port, username: 'ubuntu', privateKey: USER_KEY },
+      [{ id: 'uname', command: 'uname -m' }],
+      {},
+    )).rejects.toMatchObject({ code: 'HOST_KEY_UNTRUSTED' });
+    expect(fixture.commands).toEqual([]);
   });
 
   it('maps a rejected authentication to SSH_AUTH_FAILED', async () => {

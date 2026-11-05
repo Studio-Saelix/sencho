@@ -153,6 +153,13 @@ export function validateInstallPaths(composeDirRaw: string, agentDirRaw: string)
 }
 
 
+/** Mount points from a completed fstab probe; null when the probe did not complete. */
+function fstabMountPoints(results: SshCommandResult[]): string[] | null {
+  const result = results.find((entry) => entry.id === 'fstab');
+  if (!result || result.timedOut || result.truncated || result.error || result.exitCode !== 0) return null;
+  return parseFstabMountPoints(result.stdout);
+}
+
 export class NodeBootstrapService {
   private static instance: NodeBootstrapService | null = null;
   private readonly deps: BootstrapDeps;
@@ -196,7 +203,10 @@ export class NodeBootstrapService {
   }
 
   /** Capture the host key without authenticating. Aborts the handshake after the key. */
-  public async captureHostKey(input: { host: string; port?: number }): Promise<BootstrapHostKeyResult> {
+  public async captureHostKey(
+    input: { host: string; port?: number },
+    options: { signal?: AbortSignal } = {},
+  ): Promise<BootstrapHostKeyResult> {
     let host: string;
     let port: number;
     try {
@@ -213,13 +223,20 @@ export class NodeBootstrapService {
       const message = error instanceof Error ? error.message : 'Invalid target';
       throw new BootstrapError(400, 'INVALID_TARGET', message, { field });
     }
-    const addresses = await this.resolveOrThrow(host, Date.now() + this.deps.requestBudgetMs);
+    // DNS and every address attempt share one request budget.
+    const deadline = Date.now() + this.deps.requestBudgetMs;
+    const addresses = await this.resolveOrThrow(host, deadline);
     let dialed = addresses[0];
     const observation = await this.withTargetLock(host, port, async () => {
       let lastError: unknown = null;
       for (const address of addresses) {
         try {
-          const captured = await this.deps.transport.captureHostKey({ host, address, port });
+          const remaining = deadline - Date.now();
+          if (remaining <= 0) throw this.budgetError();
+          const captured = await this.deps.transport.captureHostKey(
+            { host, address, port },
+            { timeoutMs: remaining, signal: options.signal },
+          );
           dialed = address;
           return captured;
         } catch (error: unknown) {
@@ -227,6 +244,7 @@ export class NodeBootstrapService {
           // try another record: falling through could reach a pinned key on a
           // different address and hide the change.
           if (error instanceof SshTransportError && error.code === 'HOST_KEY_UNTRUSTED') throw error;
+          if (error instanceof SshTransportError && error.code === 'PREFLIGHT_TIMEOUT') throw error;
           lastError = error;
         }
       }
@@ -252,7 +270,7 @@ export class NodeBootstrapService {
   /** Run the read-only inspection and, when unblocked, build the plan. */
   public async preflight(
     input: BootstrapPreflightRequest,
-    context: { hubUrl: string; audit: AuditContext },
+    context: { hubUrl: string; audit: AuditContext; signal?: AbortSignal },
   ): Promise<BootstrapPreflightResult> {
     const targetInput = this.validateTargetInput(input);
     const paths = validateInstallPaths(
@@ -290,9 +308,7 @@ export class NodeBootstrapService {
       for (const address of addresses) {
         try {
           const remaining = deadline - Date.now();
-          if (remaining <= 0) {
-            throw new SshTransportError('PREFLIGHT_TIMEOUT', 'The preflight exceeded its 90-second budget.');
-          }
+          if (remaining <= 0) throw this.budgetError();
           const probeResults = await this.runProbes(
             address,
             targetInput,
@@ -303,9 +319,10 @@ export class NodeBootstrapService {
             paths,
             remaining,
             (observation) => { hostKey = observation; },
+            context.signal,
           );
           if (probeResults.some((result) => result.error === 'PREFLIGHT_TIMEOUT')) {
-            throw new SshTransportError('PREFLIGHT_TIMEOUT', 'The preflight exceeded its 90-second budget.');
+            throw this.budgetError();
           }
           dialed = address;
           const observation: HostKeyObservation = hostKey ?? {
@@ -345,6 +362,12 @@ export class NodeBootstrapService {
               },
             });
           }
+          // The key was rejected, not the address: another record of the same
+          // host would only repeat the answer.
+          if (error instanceof SshTransportError
+            && ['SSH_AUTH_FAILED', 'SSH_KEY_INVALID', 'SSH_KEY_PASSPHRASE_REQUIRED', 'PREFLIGHT_TIMEOUT'].includes(error.code)) {
+            throw error;
+          }
           lastError = error;
         }
       }
@@ -369,9 +392,7 @@ export class NodeBootstrapService {
       composeDir: paths.composeDir,
       agentDir: paths.agentDir,
       results,
-      fstabMountPoints: parseFstabMountPoints(
-        results.find((result) => result.id === 'fstab')?.stdout ?? '',
-      ),
+      fstabMountPoints: fstabMountPoints(results),
       now,
     });
 
@@ -437,18 +458,23 @@ export class NodeBootstrapService {
     }
   }
 
+  private budgetError(): SshTransportError {
+    return new SshTransportError(
+      'PREFLIGHT_TIMEOUT',
+      `The preflight exceeded its ${Math.round(this.deps.requestBudgetMs / 1000)}-second budget.`,
+    );
+  }
+
   private async resolveOrThrow(host: string, deadline: number): Promise<string[]> {
     const remaining = deadline - Date.now();
-    if (remaining <= 0) {
-      throw new SshTransportError('PREFLIGHT_TIMEOUT', 'The preflight exceeded its 90-second budget.');
-    }
+    if (remaining <= 0) throw this.budgetError();
     let timer: NodeJS.Timeout | null = null;
     try {
       return await Promise.race([
         this.deps.resolveAddresses(host),
         new Promise<never>((_resolve, reject) => {
           timer = setTimeout(() => {
-            reject(new SshTransportError('PREFLIGHT_TIMEOUT', 'The preflight exceeded its 90-second budget.'));
+            reject(this.budgetError());
           }, remaining);
         }),
       ]);
@@ -480,6 +506,7 @@ export class NodeBootstrapService {
     paths: { composeDir: string; agentDir: string },
     totalMs: number,
     onHostKey: (observation: HostKeyObservation) => void,
+    signal?: AbortSignal,
   ): Promise<SshCommandResult[]> {
     const catalog = buildProbeCatalog({
       composeDir: paths.composeDir,
@@ -496,7 +523,7 @@ export class NodeBootstrapService {
         passphrase,
       },
       catalog.map(({ id, command }) => ({ id, command })),
-      { expectedFingerprint, onHostKey, totalMs },
+      { expectedFingerprint, onHostKey, totalMs, signal },
     );
   }
 

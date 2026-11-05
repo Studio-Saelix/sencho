@@ -1,13 +1,15 @@
 import crypto from 'crypto';
 import { Client, utils as sshUtils } from 'ssh2';
 import type { ClientChannel, ConnectConfig } from 'ssh2';
+import { sanitizeForLog } from '../../utils/safeLog';
 import type { HostKeyObservation } from './types';
 
 /**
  * Minimal, read-only SSH transport for the bootstrap preflight.
  *
  * Policy, enforced here rather than by convention:
- * - public-key auth only, no agent, no forwarding, no PTY, no shell;
+ * - public-key auth only, no agent, no forwarding, no PTY, no interactive shell
+ *   (each fixed command runs through exec, never a shell channel);
  * - the host key is checked before any authentication or command;
  * - each command has its own timeout, the session has a total budget;
  * - output is capped, and a capped result is reported as truncated so the
@@ -63,7 +65,7 @@ export class SshTransportError extends Error {
 }
 
 export interface BootstrapTransport {
-  captureHostKey(target: SshTarget): Promise<HostKeyObservation>;
+  captureHostKey(target: SshTarget, options?: { timeoutMs?: number; signal?: AbortSignal }): Promise<HostKeyObservation>;
   runCommands(
     session: SshSessionInput,
     commands: SshCommand[],
@@ -72,6 +74,8 @@ export interface BootstrapTransport {
       totalMs?: number;
       perCommandMs?: number;
       onHostKey?: (observation: HostKeyObservation) => void;
+      /** Aborts the session and releases the connection when the caller goes away. */
+      signal?: AbortSignal;
     },
   ): Promise<SshCommandResult[]>;
 }
@@ -280,15 +284,19 @@ interface HostKeyCapture {
   keyBlob: Buffer | null;
 }
 
-function captureHostKeyFrom(target: SshTarget): Promise<Buffer> {
+function captureHostKeyFrom(
+  target: SshTarget,
+  options: { timeoutMs?: number; signal?: AbortSignal } = {},
+): Promise<Buffer> {
   return new Promise((resolve, reject) => {
     const capture: HostKeyCapture = { keyBlob: null };
     const conn = new Client();
+    const budgetMs = Math.max(1, Math.min(SSH_CONNECT_TIMEOUT_MS, options.timeoutMs ?? SSH_CONNECT_TIMEOUT_MS));
     const config: ConnectConfig = {
       host: target.address,
       port: target.port,
       username: 'sencho-keyscan',
-      readyTimeout: SSH_CONNECT_TIMEOUT_MS,
+      readyTimeout: budgetMs,
       hostVerifier: (key: Buffer) => {
         capture.keyBlob = Buffer.from(key);
         // Abort before authentication: a keyscan needs the key, nothing else.
@@ -296,13 +304,24 @@ function captureHostKeyFrom(target: SshTarget): Promise<Buffer> {
       },
     };
     let done = false;
+    // ssh2's readyTimeout only covers the handshake; this timer also bounds a
+    // peer that stalls elsewhere, and the caller's deadline caps both.
+    const timer = setTimeout(() => settle(new Error('The target did not answer in time (timeout).')), budgetMs);
+    const onAbort = () => settle(new SshTransportError('SSH_UNREACHABLE', 'The request was cancelled.'));
     const settle = (error?: Error) => {
       if (done) return;
       done = true;
-      conn.end();
+      clearTimeout(timer);
+      options.signal?.removeEventListener('abort', onAbort);
+      conn.destroy();
       if (capture.keyBlob) resolve(capture.keyBlob);
       else reject(mapSshError(error ?? new Error('host key unavailable')));
     };
+    if (options.signal?.aborted) {
+      onAbort();
+      return;
+    }
+    options.signal?.addEventListener('abort', onAbort, { once: true });
     conn.on('ready', () => settle());
     conn.on('error', (error: Error) => settle(error));
     conn.on('close', () => settle());
@@ -318,6 +337,7 @@ function runSession(
     totalMs: number;
     perCommandMs: number;
     onHostKey?: (observation: HostKeyObservation) => void;
+    signal?: AbortSignal;
   },
 ): Promise<SshCommandResult[]> {
   return new Promise((resolve, reject) => {
@@ -334,7 +354,12 @@ function runSession(
       hostVerifier: (key: Buffer) => {
         const observation = hostKeyObservation(session.host, key);
         options.onHostKey?.(observation);
-        if (!options.expectedFingerprint) return true;
+        // No expected fingerprint means no trust decision was made: refuse
+        // before authentication rather than accept whatever key answers.
+        if (!options.expectedFingerprint) {
+          hostKeyRejected = true;
+          return false;
+        }
         const matches = safeEquals(observation.fingerprint, options.expectedFingerprint);
         if (!matches) hostKeyRejected = true;
         return matches;
@@ -371,16 +396,29 @@ function runSession(
       if (finished) return;
       finished = true;
       clearWatchdog();
-      conn.end();
-      reject(hostKeyRejected
-        ? new SshTransportError('HOST_KEY_UNTRUSTED', 'The host key changed before the preflight connected.')
-        : mapSshError(error));
+      options.signal?.removeEventListener('abort', onAbort);
+      conn.destroy();
+      if (hostKeyRejected) {
+        reject(new SshTransportError('HOST_KEY_UNTRUSTED', 'The host key changed before the preflight connected.'));
+        return;
+      }
+      const mapped = mapSshError(error);
+      // The API reply is deliberately generic; keep the cause for the operator.
+      if (!(error instanceof SshTransportError)) {
+        console.warn(
+          `[Bootstrap] SSH session to ${sanitizeForLog(session.host)} failed (${mapped.code}):`,
+          sanitizeForLog(error instanceof Error ? error.message : String(error)),
+        );
+      }
+      reject(mapped);
     };
+    const onAbort = () => fail(new SshTransportError('SSH_UNREACHABLE', 'The request was cancelled.'));
 
     const finish = () => {
       if (finished) return;
       finished = true;
       clearWatchdog();
+      options.signal?.removeEventListener('abort', onAbort);
       conn.end();
       resolve(results);
     };
@@ -391,19 +429,28 @@ function runSession(
     watchdog = setTimeout(() => {
       if (finished) return;
       aborted = true;
-      try {
-        conn.end();
-      } catch {
-        // Already closing.
-      }
+      // destroy() also tears down a connect that has not completed, which end() cannot.
+      conn.destroy();
       for (let index = completed; index < commands.length; index += 1) {
         results.push(timeoutResult(commands[index], 'PREFLIGHT_TIMEOUT'));
       }
       finish();
     }, options.totalMs);
 
+    if (options.signal?.aborted) {
+      onAbort();
+      return;
+    }
+    options.signal?.addEventListener('abort', onAbort, { once: true });
+
     conn.on('error', fail);
     conn.on('ready', () => {
+      // A connect that completes after the session was already settled must
+      // not leave an authenticated connection behind.
+      if (finished) {
+        conn.destroy();
+        return;
+      }
       ready = true;
       void (async () => {
         try {
@@ -490,8 +537,11 @@ function runSession(
 }
 
 export class SshProbeClient implements BootstrapTransport {
-  public async captureHostKey(target: SshTarget): Promise<HostKeyObservation> {
-    const keyBlob = await captureHostKeyFrom(target);
+  public async captureHostKey(
+    target: SshTarget,
+    options: { timeoutMs?: number; signal?: AbortSignal } = {},
+  ): Promise<HostKeyObservation> {
+    const keyBlob = await captureHostKeyFrom(target, options);
     return hostKeyObservation(target.host, keyBlob);
   }
 
@@ -503,6 +553,7 @@ export class SshProbeClient implements BootstrapTransport {
       totalMs?: number;
       perCommandMs?: number;
       onHostKey?: (observation: HostKeyObservation) => void;
+      signal?: AbortSignal;
     } = {},
   ): Promise<SshCommandResult[]> {
     parsePrivateKey(
@@ -514,6 +565,7 @@ export class SshProbeClient implements BootstrapTransport {
       totalMs: options.totalMs ?? SSH_TOTAL_TIMEOUT_MS,
       perCommandMs: options.perCommandMs ?? SSH_COMMAND_TIMEOUT_MS,
       onHostKey: options.onHostKey,
+      signal: options.signal,
     });
   }
 }

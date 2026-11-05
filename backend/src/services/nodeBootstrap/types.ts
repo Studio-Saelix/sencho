@@ -84,7 +84,7 @@ export interface PathObservation {
 export interface ComposeDirObservation extends PathObservation {
   stackCount: number | null;
   stackNames: string[];
-  /** A partial or failed inventory never proves that a stack is absent. */
+  /** The transport cut the listing off, so the stack count is a lower bound. */
   inventoryTruncated: boolean;
   inventoryError: string | null;
   rootComposeFile: boolean;
@@ -112,7 +112,8 @@ export interface AgentInstallObservation {
   }>;
   dataVolumeExists: boolean | null;
   dataVolumeNames: string[];
-  defaultDirHasComposeFile: boolean;
+  /** Null when the probe did not complete. */
+  defaultDirHasComposeFile: boolean | null;
 }
 
 export type DockerPackageName =
@@ -128,11 +129,6 @@ export interface DockerPackage {
   candidateVersion: string | null;
   /** Repository URI apt reports for the candidate version, when known. */
   candidateSource?: string | null;
-}
-
-export interface BootstrapPaths {
-  composeDir: ComposeDirObservation;
-  agentDir: AgentDirObservation;
 }
 
 export interface RepositoryObservation {
@@ -161,15 +157,20 @@ export interface BootstrapFacts {
     cliProbeUnknown: boolean;
     serverVersion: string | null;
     composeVersion: string | null;
+    /** True when no Compose version was read and a version probe did not complete. */
+    composeProbeUnknown: boolean;
     serviceActive: boolean | null;
     serviceEnabled: boolean | null;
-    socketAccess: 'user' | 'sudo' | 'none';
+    /** `unknown` when a `docker info` attempt timed out, errored or was truncated. */
+    socketAccess: 'user' | 'sudo' | 'none' | 'unknown';
     rootDir: string | null;
     /** The local unix socket every Docker command is pinned to. */
     endpoint: string;
   };
   repo: RepositoryObservation;
   packages: DockerPackage[];
+  /** False when `apt-cache policy` did not complete, so every package reads as unknown. */
+  packagesComplete: boolean;
   paths: {
     composeDir: ComposeDirObservation;
     agentDir: AgentDirObservation;

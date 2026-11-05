@@ -122,11 +122,11 @@ describe('bootstrap probe parsers', () => {
     expect(denied.probeError).toMatch(/Permission denied/i);
   });
 
-  it('reads a truncated inventory as a lower bound', () => {
+  it('counts every stack and caps only the displayed names', () => {
     const entries = Array.from({ length: 505 }, (_, index) => `/opt/docker/sencho/stack-${index}/compose.yaml`);
     const summary = parseComposeInventory(entries.join('\0'), '/opt/docker/sencho');
-    expect(summary.stackCount).toBe(500);
-    expect(summary.truncated).toBe(true);
+    expect(summary.stackCount).toBe(505);
+    expect(summary.truncated).toBe(false);
     expect(summary.stackNames).toHaveLength(50);
   });
 
@@ -150,7 +150,7 @@ describe('bootstrap probe parsers', () => {
   });
 
   it('reports a capped output stream as a truncated inventory even under the entry cap', () => {
-    const summary = parseComposeInventory('/opt/docker/sencho/media/compose.yaml\0', '/opt/docker/sencho', 500, true);
+    const summary = parseComposeInventory('/opt/docker/sencho/media/compose.yaml\0', '/opt/docker/sencho', true);
     expect(summary.truncated).toBe(true);
     expect(summary.stackCount).toBe(1);
     const agent = parseAgentInventory('compose.yaml\0', true);
@@ -400,7 +400,7 @@ describe('bootstrap inventory completeness', () => {
     const summary = parseComposeInventory(entries.join('\0'), '/opt/docker/sencho');
     expect(summary.stackCount).toBe(80);
     expect(summary.stackNames).toHaveLength(50);
-    expect(summary.truncated).toBe(true);
+    expect(summary.truncated).toBe(false);
   });
 
   it('preserves NUL-delimited inventory records through transport sanitation', () => {
