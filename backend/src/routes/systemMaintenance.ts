@@ -669,9 +669,10 @@ systemMaintenanceRouter.get('/networks/:id', async (req: Request, res: Response)
   if (!requirePermission(req, res, 'node:read')) return;
   try {
     const id = req.params.id as string;
-    // Docker inspect accepts an ID or a name, and Dockerode uses the value as
-    // a raw request path segment, so validate the syntax here. A well-formed
-    // but unknown reference still reaches Docker and returns 404 below.
+    // Docker inspect accepts an ID or a name, and the value is placed in
+    // Docker's request path, so reject anything that is not a known ID or
+    // name form. A well-formed but unknown reference still reaches Docker
+    // and returns 404 below.
     if (!id || (!isValidDockerResourceId(id) && !isValidDockerNetworkName(id))) {
       return res.status(400).json({ error: 'Invalid network ID or name format' });
     }

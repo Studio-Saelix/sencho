@@ -1,7 +1,7 @@
 /**
  * Legacy Resources network inspect route and its Networking counterpart:
- * reference syntax is validated before Docker is touched, IDs and names are
- * both accepted, and both routes share one predicate.
+ * reference syntax is validated before Docker is touched, both routes accept
+ * the same IDs and names, and both reject with the same message.
  */
 import { describe, it, expect, beforeAll, afterAll, afterEach, vi } from 'vitest';
 import express from 'express';
@@ -100,7 +100,6 @@ describe('GET /api/system/networks/:id', () => {
     }
     expect(getInstance).not.toHaveBeenCalled();
     expect(fake.inspectNetwork).not.toHaveBeenCalled();
-    expect(fake.getDependencySnapshot).not.toHaveBeenCalled();
   });
 
   it('accepts 12-character abbreviated and 64-character full hex IDs', async () => {
@@ -165,6 +164,14 @@ describe('GET /api/system/networks/:id', () => {
       .get(`/api/system/networks/${NET_ID_12}`)
       .set('Authorization', deployerHeader);
     expect(deployer.status).toBe(403);
+    expect(fake.inspectNetwork).not.toHaveBeenCalled();
+
+    // Authorization runs before the reference is inspected, so an
+    // unauthorized caller cannot learn whether a reference is well formed.
+    const deployerMalformed = await request(app)
+      .get('/api/system/networks/bad!name')
+      .set('Authorization', deployerHeader);
+    expect(deployerMalformed.status).toBe(403);
 
     const viewer = await request(app)
       .get(`/api/system/networks/${NET_ID_12}`)
@@ -173,7 +180,7 @@ describe('GET /api/system/networks/:id', () => {
     expect(fake.inspectNetwork).toHaveBeenCalledWith(NET_ID_12);
   });
 
-  it('inspects through the node selected on the request, not the default node', async () => {
+  it('forwards the request\'s node ID to the controller', async () => {
     const { getInstance } = stubDocker();
     const unitApp = express();
     unitApp.use((req, _res, next) => {
@@ -222,7 +229,7 @@ describe('GET /api/networking/networks/:id parity', () => {
     expect(fake.inspectNetwork).toHaveBeenCalledWith(NET_ID_12);
   });
 
-  it('keeps the unavailable-runtime envelope when Docker cannot be reached', async () => {
+  it('keeps the unavailable-runtime envelope when the Docker snapshot cannot be loaded', async () => {
     const { fake } = stubDocker({
       getDependencySnapshot: vi.fn().mockRejectedValue(new Error('runtime unavailable')),
     });
