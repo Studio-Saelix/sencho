@@ -5,7 +5,7 @@ import { toast } from '@/components/ui/toast-store';
 import { listSecrets, deleteSecret, type SecretSummary } from '@/lib/secretsApi';
 import { SecretBundleSheet } from './SecretBundleSheet';
 import { SecretPushSheet } from './SecretPushSheet';
-import { FleetTabHeading, FleetEmptyState, FleetEmptyCard } from '../FleetEmptyState';
+import { FleetTabActions, FleetEmptyState, FleetEmptyCard } from '../FleetEmptyState';
 
 export function SecretsTab() {
     const [items, setItems] = useState<SecretSummary[]>([]);
@@ -70,15 +70,11 @@ export function SecretsTab() {
 
     return (
         <div className="space-y-4">
-            <FleetTabHeading
-                title="Secret bundles"
-                subtitle="Centralized env-var bundles, encrypted at rest, versioned, pushed to labeled nodes."
-                action={
-                    <Button type="button" onClick={() => setCreating(true)} className="gap-1.5">
-                        <Plus className="w-4 h-4" /> New bundle
-                    </Button>
-                }
-            />
+            <FleetTabActions>
+                <Button type="button" onClick={() => setCreating(true)} className="gap-1.5">
+                    <Plus className="w-4 h-4" /> New bundle
+                </Button>
+            </FleetTabActions>
 
             {items.length === 0 ? (
                 <FleetEmptyState>
