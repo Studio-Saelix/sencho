@@ -457,8 +457,13 @@ export function SecretBundleSheet({ open, onOpenChange, secret, onSaved }: Props
             await loadDetail(secret.id);
             onSaved();
         } catch (err) {
-            const conflict = err instanceof Error && (err as Error & { status?: number }).status === 409;
-            if (conflict) {
+            const apiError = err as Error & { status?: number; code?: string };
+            if (apiError.status === 409 && apiError.code === 'IMPORT_SOURCE_CHANGED') {
+                // The env file moved, not the bundle: keep the editor as it is
+                // and make the operator look at the new source.
+                toast.error('The env file changed since you previewed it. Preview again before importing.');
+                resetImport();
+            } else if (apiError.status === 409) {
                 toast.error('This bundle changed since you opened it. Reloading the current version.');
                 resetImport();
                 await loadDetail(secret.id);

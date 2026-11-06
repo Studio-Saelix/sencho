@@ -324,3 +324,28 @@ describe('SecretBundleSheet bundle switching', () => {
         expect(screen.getByDisplayValue('B_KEY')).toBeInTheDocument();
     });
 });
+
+describe('SecretBundleSheet import source drift', () => {
+    it('asks for a new preview when the env file itself changed', async () => {
+        vi.mocked(previewImport).mockResolvedValue({
+            added: 1, changed: 0, unchanged: 0, keys: [{ key: 'NEW_KEY', status: 'added' }], fingerprint: 'f'.repeat(64),
+        });
+        vi.mocked(applyImport).mockRejectedValue(Object.assign(
+            new Error('The env file changed since you previewed it. Preview again before importing.'),
+            { status: 409, code: 'IMPORT_SOURCE_CHANGED' },
+        ));
+        renderSheet();
+        await screen.findByDisplayValue('API_KEY');
+
+        await userEvent.click(screen.getByRole('button', { name: /import from stack/i }));
+        await userEvent.selectOptions(screen.getByLabelText('Node'), '1');
+        await userEvent.type(screen.getByLabelText('Stack name'), 'visualstack');
+        await userEvent.click(screen.getByRole('button', { name: /preview import/i }));
+        await screen.findByText('NEW_KEY');
+        await userEvent.click(screen.getByRole('button', { name: /import & save/i }));
+
+        await waitFor(() => expect(vi.mocked(toast.error)).toHaveBeenCalledWith(expect.stringMatching(/env file changed/i)));
+        expect(vi.mocked(getSecret)).toHaveBeenCalledTimes(1);
+        expect(screen.queryByText('NEW_KEY')).not.toBeInTheDocument();
+    });
+});
