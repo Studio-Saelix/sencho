@@ -90,6 +90,7 @@ function NetworkingContextList({
             <button
               type="button"
               className="flex min-w-0 flex-1 items-start justify-between gap-2 text-left"
+              title="Open stack networking"
               onClick={() => openNetworking(nodeId, ctx.stackName)}
             >
               <span className="min-w-0">
@@ -117,7 +118,7 @@ function NetworkingContextList({
                 trigger={(
                   <button
                     type="button"
-                    className="shrink-0 font-mono text-[10px] text-brand whitespace-nowrap hover:underline"
+                    className="shrink-0 font-mono text-[10px] text-brand whitespace-nowrap hover:underline max-md:min-h-11"
                     aria-label={`${verb} for ${ctx.stackName}/${ctx.serviceName}`}
                   >
                     {verb}
@@ -132,17 +133,21 @@ function NetworkingContextList({
   );
 }
 
-/** Network exposed badge + optional multi-context Networking popover. */
+/**
+ * Network exposed badge. Where the session may edit the stack and the intent is
+ * readable it sets the exposure intent in place; otherwise it names the stack's
+ * networking. Several contexts open a list, each row carrying the same verb.
+ */
 export function NetworkExposedControl({
   contexts,
   nodeId,
-  onIntentSaved = () => undefined,
+  onIntentSaved,
   className,
 }: {
   contexts: ImageExposureContext[];
   nodeId?: number;
   /** An intent was saved from the popover, so the exposure conclusions should be re-read. */
-  onIntentSaved?: () => void;
+  onIntentSaved: () => void;
   className?: string;
 }) {
   const intentVerb = useIntentVerb(nodeId ?? 0);
@@ -176,7 +181,7 @@ export function NetworkExposedControl({
               className="hover:underline"
               title={title}
               onClick={(e) => e.stopPropagation()}
-              aria-label={`${verb} for ${only.stackName}/${only.serviceName}${via}`}
+              aria-label={`Network exposed: ${verb.toLowerCase()} for ${only.stackName}/${only.serviceName}${via}`}
             >
               {badge}
             </button>
@@ -219,7 +224,7 @@ export function NetworkExposedControl({
   );
 }
 
-const BANNER_VERB_CLASS = 'text-xs font-medium text-brand hover:underline whitespace-nowrap shrink-0';
+const BANNER_VERB_CLASS = 'text-xs font-medium text-brand hover:underline whitespace-nowrap shrink-0 max-md:min-h-11';
 
 /**
  * Banner control: one context sets its intent in place (or names the stack's
@@ -228,11 +233,11 @@ const BANNER_VERB_CLASS = 'text-xs font-medium text-brand hover:underline whites
 export function ViewNetworkingAction({
   contexts,
   nodeId,
-  onIntentSaved = () => undefined,
+  onIntentSaved,
 }: {
   contexts: ImageExposureContext[];
   nodeId?: number;
-  onIntentSaved?: () => void;
+  onIntentSaved: () => void;
 }) {
   const intentVerb = useIntentVerb(nodeId ?? 0);
   if (contexts.length === 0 || nodeId === undefined) return null;

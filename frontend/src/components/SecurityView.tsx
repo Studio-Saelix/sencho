@@ -299,6 +299,16 @@ export function SecurityView({ activeTab, onTabChange, headerActions }: Security
 
   const nodeOverview = overview;
   const reloadOverview = useCallback(() => setReloadToken((t) => t + 1), []);
+
+  // Targeting is a snapshot of the exposure contexts taken when the operator
+  // arrived; an intent saved from the list makes it stale (the conflict banner,
+  // the mismatch hint, the verb), so it is dropped and the rows read the
+  // reloaded summaries instead.
+  const onIntentSaved = useCallback(() => {
+    setImagesTargeting(null);
+    reloadOverview();
+  }, [reloadOverview]);
+
   const reasons = useSecurityReasons({
     overview: nodeOverview,
     isReplica,
@@ -446,7 +456,7 @@ export function SecurityView({ activeTab, onTabChange, headerActions }: Security
               onClearTargeting={clearImagesTargeting}
               posturePartial={overview?.posturePartial === true}
               nodeId={activeNode?.id}
-              onIntentSaved={reloadOverview}
+              onIntentSaved={onIntentSaved}
             />
           </CapabilityGate>
         </TabsContent>

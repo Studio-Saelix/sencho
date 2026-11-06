@@ -1,4 +1,4 @@
-import { useEffect, useState, type ReactNode } from 'react';
+import { useEffect, useState, type ReactElement, type ReactNode } from 'react';
 import { Button } from '@/components/ui/button';
 import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover';
 import { toast } from '@/components/ui/toast-store';
@@ -7,16 +7,16 @@ import type { NetworkingFinding } from '@/types/networking';
 import { ExposureIntentPicker } from './ExposureIntentPicker';
 
 type PopoverTriggerProps =
-  | { label: string; finding: Pick<NetworkingFinding, 'id'> }
+  | { label: string; finding: Pick<NetworkingFinding, 'id'>; trigger?: never }
   /** A surface that already has its own control (a badge) opens the picker from it. */
-  | { trigger: ReactNode };
+  | { trigger: ReactElement; label?: never; finding?: never };
 
 type SetExposureIntentPopoverProps = PopoverTriggerProps & {
   stack: string;
   /** The service the finding is about; absent classifies the whole stack. */
   service: string | undefined;
   nodeId: number | undefined;
-  /** The intent was saved, so the finding should be re-evaluated. */
+  /** The intent was saved, so whatever was concluded from it should be re-read. */
   onSaved: () => void;
   /** A named way out for the work that lives elsewhere, under the picker. */
   footer?: ReactNode;
@@ -25,7 +25,7 @@ type SetExposureIntentPopoverProps = PopoverTriggerProps & {
 };
 
 /**
- * Classify what a service publishes without leaving the finding. The verb is
+ * Classify what a service publishes without leaving the surface that shows it. The verb is
  * the first click and choosing an intent is the second, which saves it: the
  * route is the one the stack networking panel uses.
  */
@@ -52,13 +52,14 @@ export function SetExposureIntentPopover(props: SetExposureIntentPopoverProps) {
   return (
     <Popover open={open} onOpenChange={setOpen}>
       <PopoverTrigger asChild>
-        {'trigger' in props ? props.trigger : (
+        {props.trigger !== undefined ? props.trigger : (
           <Button variant="ghost" size="sm" className="h-7 px-2 text-xs max-md:min-h-11" data-testid={`finding-verb-${props.finding.id}`}>
             {props.label}
           </Button>
         )}
       </PopoverTrigger>
       <PopoverContent align={align} className="w-80 space-y-2" onClick={e => e.stopPropagation()}>
+        {/* Portaled content still bubbles React clicks to the row it opened from (a phone image row inspects on click). */}
         <p className="font-mono text-[10px] uppercase tracking-[0.18em] text-stat-subtitle">
           {service ? `${service} in ${stack}` : stack}
         </p>

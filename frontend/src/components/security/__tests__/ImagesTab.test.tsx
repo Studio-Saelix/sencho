@@ -41,6 +41,7 @@ const base = {
   canScan: false,
   scanningRef: null as string | null,
   onScan: vi.fn(),
+  onIntentSaved: vi.fn(),
 };
 
 beforeEach(() => vi.clearAllMocks());

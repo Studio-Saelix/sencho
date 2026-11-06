@@ -145,7 +145,7 @@ function IntentionalExposureBanner({
   unavailableCount: number;
   contexts: ImageExposureContext[];
   nodeId?: number;
-  onIntentSaved?: () => void;
+  onIntentSaved: () => void;
   onClear?: () => void;
 }) {
   const title = kind === 'absolute'
@@ -196,10 +196,10 @@ interface ImagesTabProps {
   onClearTargeting?: () => void;
   /** When true, targeting banner discloses the overview pass may be incomplete. */
   posturePartial?: boolean;
-  /** Active node id for SENCHO_OPEN_STACK Networking navigation. */
+  /** Active node id: the node an exposure intent is saved on and permission-checked against, and the target of Networking navigation. */
   nodeId?: number;
-  /** An exposure intent was set from an exposure control, so the scan summaries should be re-read. */
-  onIntentSaved?: () => void;
+  /** An exposure intent was set from an exposure control, so the scan summaries and any targeting snapshot should be re-read. */
+  onIntentSaved: () => void;
 }
 
 /** Latest-scan index for real images (stack/config scans live in Compose risks). */

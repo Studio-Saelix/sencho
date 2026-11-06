@@ -51,4 +51,22 @@ describe('SetExposureIntentPopover', () => {
     await waitFor(() => expect(api.apiFetch).toHaveBeenCalledTimes(2));
     expect(onSaved).not.toHaveBeenCalled();
   });
+
+  it('opens from a caller\'s own trigger and shows the footer under the picker', async () => {
+    api.apiFetch.mockResolvedValueOnce(json({ intents: [] }));
+    render(
+      <SetExposureIntentPopover
+        stack="web"
+        service="app"
+        nodeId={2}
+        onSaved={vi.fn()}
+        trigger={<button type="button">Network exposed</button>}
+        footer={<span>Open stack networking</span>}
+      />,
+    );
+    expect(screen.queryByTestId(/^finding-verb-/)).toBeNull();
+    await userEvent.click(screen.getByRole('button', { name: 'Network exposed' }));
+    expect(await screen.findByRole('button', { name: 'lan' })).toBeInTheDocument();
+    expect(screen.getByText('Open stack networking')).toBeInTheDocument();
+  });
 });

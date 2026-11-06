@@ -138,10 +138,11 @@ export function ImageScanRow({
   driverVulnerabilityIds?: string[];
   /** Compact exposure-intent line (standing or while posture-targeting). */
   intentEvidence?: string | null;
-  /** Stack/service contexts for Networking navigation from Network exposed. */
+  /** Stack/service contexts behind the Network exposed label: used to set the exposure intent in place, or to open the stack's networking when the session cannot. */
   exposureContexts?: ImageExposureContext[];
   nodeId?: number;
-  onIntentSaved?: () => void;
+  /** An exposure intent was set from the label, so the scan summaries should be re-read. */
+  onIntentSaved: () => void;
 }) {
   // Use the shared classifier so the count tags agree with the leading dot: a
   // medium/low-only image is not "clean", it is its highest severity.

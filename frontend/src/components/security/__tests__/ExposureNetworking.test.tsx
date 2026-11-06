@@ -40,7 +40,7 @@ const contexts: ImageExposureContext[] = [
 
 describe('NetworkExposedControl with tunnel contexts', () => {
   it('lists the tunnel path under each tunnel-exposed service', async () => {
-    render(<NetworkExposedControl contexts={contexts} nodeId={1} />);
+    render(<NetworkExposedControl contexts={contexts} nodeId={1} onIntentSaved={vi.fn()} />);
     fireEvent.click(screen.getByRole('button', { name: 'View networking contexts' }));
     expect(await screen.findByText('via Cloudflare Tunnel (cloudflared), routing unverified')).toBeInTheDocument();
     expect(screen.getByText('via Tailscale (tailscale)')).toBeInTheDocument();
@@ -51,14 +51,14 @@ describe('NetworkExposedControl with tunnel contexts', () => {
 
 describe('NetworkExposedControl with one context', () => {
   it('marks the badge as a tunnel and names the path in its label', () => {
-    render(<NetworkExposedControl contexts={[contexts[0]!]} nodeId={1} />);
+    render(<NetworkExposedControl contexts={[contexts[0]!]} nodeId={1} onIntentSaved={vi.fn()} />);
     const button = screen.getByRole('button', { name: 'View networking for web/app, via Cloudflare Tunnel (cloudflared), routing unverified' });
     expect(button).toHaveTextContent('Network exposed · tunnel');
     expect(button).toHaveAttribute('title', 'via Cloudflare Tunnel (cloudflared), routing unverified');
   });
 
   it('keeps the plain badge for a published port', () => {
-    render(<NetworkExposedControl contexts={[contexts[2]!]} nodeId={1} />);
+    render(<NetworkExposedControl contexts={[contexts[2]!]} nodeId={1} onIntentSaved={vi.fn()} />);
     expect(screen.getByRole('button', { name: 'View networking for web/proxy' })).toHaveTextContent(/^Network exposed$/);
   });
 });
@@ -76,7 +76,7 @@ describe('exposure intent in place', () => {
     const onIntentSaved = vi.fn();
     render(<NetworkExposedControl contexts={[unset]} nodeId={3} onIntentSaved={onIntentSaved} />);
 
-    await userEvent.click(screen.getByRole('button', { name: 'Set intent for web/app' }));
+    await userEvent.click(screen.getByRole('button', { name: 'Network exposed: set intent for web/app' }));
     await userEvent.click(await screen.findByRole('button', { name: 'lan' }));
 
     await waitFor(() => expect(onIntentSaved).toHaveBeenCalledTimes(1));
@@ -93,7 +93,7 @@ describe('exposure intent in place', () => {
     const opened: SenchoOpenStackDetail[] = [];
     const listener = (e: Event) => opened.push((e as CustomEvent<SenchoOpenStackDetail>).detail);
     window.addEventListener(SENCHO_OPEN_STACK_EVENT, listener);
-    render(<ViewNetworkingAction contexts={[conflict]} nodeId={3} />);
+    render(<ViewNetworkingAction contexts={[conflict]} nodeId={3} onIntentSaved={vi.fn()} />);
 
     await userEvent.click(screen.getByRole('button', { name: 'Change intent' }));
     await userEvent.click(await screen.findByRole('button', { name: 'Open stack networking' }));
@@ -104,21 +104,21 @@ describe('exposure intent in place', () => {
 
   it('puts a verb on each row of the list and leaves the name as the navigation', async () => {
     auth.can.mockReturnValue(true);
-    render(<NetworkExposedControl contexts={[unset, conflict]} nodeId={3} />);
+    render(<NetworkExposedControl contexts={[unset, conflict]} nodeId={3} onIntentSaved={vi.fn()} />);
     await userEvent.click(screen.getByRole('button', { name: 'View networking contexts' }));
     expect(await screen.findByRole('button', { name: 'Set intent for web/app' })).toBeInTheDocument();
     expect(screen.getByRole('button', { name: 'Change intent for vpn/admin' })).toBeInTheDocument();
   });
 
   it('keeps the navigation when the session cannot edit the stack', () => {
-    render(<NetworkExposedControl contexts={[unset]} nodeId={3} />);
+    render(<NetworkExposedControl contexts={[unset]} nodeId={3} onIntentSaved={vi.fn()} />);
     expect(screen.getByRole('button', { name: 'View networking for web/app' })).toBeInTheDocument();
     expect(screen.queryByRole('button', { name: /intent/i })).toBeNull();
   });
 
   it('keeps the navigation when the intent could not be read', () => {
     auth.can.mockReturnValue(true);
-    render(<ViewNetworkingAction contexts={[{ ...unset, intentStatus: 'unavailable' }]} nodeId={3} />);
+    render(<ViewNetworkingAction contexts={[{ ...unset, intentStatus: 'unavailable' }]} nodeId={3} onIntentSaved={vi.fn()} />);
     expect(screen.getByRole('button', { name: 'View networking' })).toBeInTheDocument();
   });
 });
