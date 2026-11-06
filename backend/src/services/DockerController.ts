@@ -29,7 +29,7 @@ import type { NetworkingNetworkBase } from './network/networkingTypes';
 import { isPathWithinBase, isValidStackName } from '../utils/validation';
 import { isDebugEnabled } from '../utils/debug';
 import { getErrorMessage } from '../utils/errors';
-import { sanitizeForLog } from '../utils/safeLog';
+import { errorMessageForLog, sanitizeForLog } from '../utils/safeLog';
 import { describeSpawnError } from '../utils/spawnErrors';
 import { authoredComposeFileArgs, authoredComposeEnvFileArgs } from '../utils/authoredComposeArgs';
 import { isFullySyntheticHoldImage } from '../utils/senchoRollbackHold';
@@ -327,6 +327,70 @@ export interface LabelInventoryRow {
   labels: Record<string, string>;
   imageId: string;
   inspectFailed: boolean;
+}
+
+/** A bind mount on a container, normalized from Docker inspect. */
+export interface SocketInventoryMountRow {
+  type: string;
+  source: string | null;
+  destination: string | null;
+  readOnly: boolean;
+  name: string | null;
+}
+
+/** A port binding on a container, normalized from Docker inspect or list. */
+export interface SocketInventoryPortRow {
+  privatePort: number | null;
+  publicPort: number | null;
+  ip: string;
+  protocol: string;
+}
+
+export interface SocketInventoryNetworkRow {
+  name: string;
+  id: string | null;
+  ipAddress: string | null;
+}
+
+/**
+ * One container as the socket inventory needs it: the runtime metadata an
+ * authorized discovery read may use, with no raw environment values beyond
+ * what the caller already owns. `env` is returned for the classification
+ * service to read recognized proxy flags from; it never reaches an API
+ * response.
+ */
+export interface SocketInventoryContainerRow {
+  id: string;
+  name: string;
+  state: string;
+  /** Docker's human-readable status line (for example "Exited (0) 2 days ago"). */
+  status: string;
+  image: string;
+  imageId: string;
+  stack: string | null;
+  service: string | null;
+  composeProject: string | null;
+  composeWorkingDir: string | null;
+  labels: Record<string, string>;
+  inspectFailed: boolean;
+  health: string | null;
+  mounts: SocketInventoryMountRow[];
+  ports: SocketInventoryPortRow[];
+  exposedPorts: string[];
+  networks: SocketInventoryNetworkRow[];
+  env: string[];
+  privileged: boolean;
+  readonlyRootfs: boolean;
+  /** A metadata list exceeded the inventory's bound; the row is incomplete. */
+  metadataTruncated: boolean;
+}
+
+/** One bounded container listing for the socket inventory. */
+export interface SocketInventoryListResult {
+  rows: SocketInventoryContainerRow[];
+  /** Containers Docker listed, before the inspection bound was applied. */
+  listedContainers: number;
+  truncated: boolean;
 }
 
 /**
@@ -2298,6 +2362,146 @@ class DockerController {
     return results;
   }
 
+  /**
+   * Containers with the runtime metadata the Docker socket inventory needs:
+   * state, Compose ownership, image identity, mounts, ports, networks, health,
+   * and the raw environment (parsed for recognized proxy flags only; never
+   * returned to a client). Stopped containers are included and carry their
+   * state. A container inspect failure degrades that row to list-level data and
+   * marks it `inspectFailed`, so an unreadable container is visible rather than
+   * silently absent.
+   */
+  public async listContainersForSocketInventory(limit = 1000): Promise<SocketInventoryListResult> {
+    const knownStacks = await FileSystemService.getInstance(this.nodeId).getStacks();
+    const allListed: unknown[] = await this.getAllContainers();
+    const boundedLimit = Number.isInteger(limit) && limit > 0 ? limit : 1000;
+    const listed = allListed.slice(0, boundedLimit);
+    const truncated = allListed.length > listed.length;
+    const projectToStack = await DockerController.resolveProjectNameMap(knownStacks);
+    const absDirToStack = DockerController.buildAbsDirMap(knownStacks);
+    const resolvedBase = path.resolve(COMPOSE_DIR);
+    const knownStackSet = new Set(knownStacks);
+
+    const rows = await mapWithConcurrency(listed, 8, async (raw): Promise<SocketInventoryContainerRow> => {
+      const listedRow = asRecord(raw);
+      const id = readContainerString(listedRow?.Id) ?? '';
+      const listedNames = listedRow?.Names;
+      const name = (readContainerString(Array.isArray(listedNames) ? listedNames[0] : undefined) ?? '')
+        .replace(/^\//, '');
+      const listedLabels = normalizeDockerLabels(listedRow?.Labels);
+      const listedState = readContainerString(listedRow?.State) ?? 'unknown';
+      const listedStatus = readContainerString(listedRow?.Status) ?? '';
+      const listedImage = readContainerString(listedRow?.Image) ?? '';
+      const listedImageId = readContainerString(listedRow?.ImageID) ?? '';
+      const listedPorts = normalizeDockerPorts(listedRow?.Ports);
+      const listedNetworks = normalizeDockerNetworks(
+        asRecord(listedRow?.NetworkSettings)?.Networks,
+      );
+      const rawListedLabels = Array.isArray(listedRow?.Labels)
+        ? listedRow.Labels.length
+        : Object.keys(asRecord(listedRow?.Labels) ?? {}).length;
+      const rawListedPorts = Array.isArray(listedRow?.Ports) ? listedRow.Ports.length : 0;
+      const rawListedNetworks = Object.keys(
+        asRecord(asRecord(listedRow?.NetworkSettings)?.Networks) ?? {},
+      ).length;
+
+      let labels = listedLabels;
+      let state = listedState;
+      const status = listedStatus;
+      let image = listedImage;
+      let imageId = listedImageId;
+      let health: string | null = null;
+      let mounts: SocketInventoryMountRow[] = [];
+      let ports = listedPorts;
+      let exposedPorts: string[] = [];
+      let networks = listedNetworks;
+      let env: string[] = [];
+      let privileged = false;
+      let readonlyRootfs = false;
+      let metadataTruncated = rawListedLabels > 256 || rawListedPorts > 64 || rawListedNetworks > 32;
+      let inspectFailed = id.length === 0;
+
+      if (id) {
+        try {
+          const info = await this.docker.getContainer(id).inspect();
+          const config = asRecord(info.Config);
+          const stateInfo = asRecord(info.State);
+          labels = { ...listedLabels, ...normalizeDockerLabels(config?.Labels) };
+          state = readContainerString(stateInfo?.Status) ?? state;
+          image = readContainerString(config?.Image) ?? image;
+          imageId = readContainerString(info.Image) ?? imageId;
+          health = readContainerString(asRecord(stateInfo?.Health)?.Status);
+          mounts = normalizeDockerMounts(info.Mounts);
+          exposedPorts = normalizeDockerExposedPorts(config?.ExposedPorts);
+          // An empty inspect section is not more truthful than the list data:
+          // keep the list-level ports and networks when inspect has none.
+          const inspectedPorts = normalizeInspectPorts(asRecord(info.NetworkSettings)?.Ports, ports);
+          if (inspectedPorts.length > 0) ports = inspectedPorts;
+          const inspectedNetworks = normalizeDockerNetworks(asRecord(info.NetworkSettings)?.Networks);
+          if (inspectedNetworks.length > 0) networks = inspectedNetworks;
+          env = normalizeDockerEnv(config?.Env);
+          const rawMounts = Array.isArray(info.Mounts) ? info.Mounts.length : 0;
+          const rawLabels = Array.isArray(config?.Labels)
+            ? config.Labels.length
+            : Object.keys(asRecord(config?.Labels) ?? {}).length;
+          const rawEnv = Array.isArray(config?.Env) ? config.Env.length : 0;
+          const rawNetworks = Object.keys(asRecord(asRecord(info.NetworkSettings)?.Networks) ?? {}).length;
+          const rawExposed = Object.keys(asRecord(config?.ExposedPorts) ?? {}).length;
+          const rawPorts = Object.keys(asRecord(asRecord(info.NetworkSettings)?.Ports) ?? {}).length;
+          metadataTruncated = metadataTruncated || !Array.isArray(info.Mounts)
+            || rawMounts > 64 || rawLabels > 256 || rawEnv > 256
+            || rawNetworks > 32 || rawExposed > 64 || rawPorts > 64;
+          const hostConfig = asRecord(info.HostConfig);
+          privileged = hostConfig?.Privileged === true;
+          readonlyRootfs = hostConfig?.ReadonlyRootfs === true;
+        } catch (err) {
+          inspectFailed = true;
+          console.error(
+            '[DockerController] Container inspect failed for socket inventory %s:',
+            sanitizeForLog(id),
+            errorMessageForLog(err),
+          );
+        }
+      }
+
+      const composeProject = labels['com.docker.compose.project'] ?? null;
+      const service = labels['com.docker.compose.service'] ?? null;
+      const composeWorkingDir = labels['com.docker.compose.project.working_dir'] ?? null;
+      const stack = DockerController.resolveContainerStack(
+        labels,
+        projectToStack,
+        knownStackSet,
+        absDirToStack,
+        resolvedBase,
+      );
+
+      return {
+        id,
+        name,
+        state,
+        status,
+        image,
+        imageId,
+        stack,
+        service,
+        composeProject,
+        composeWorkingDir,
+        labels,
+        inspectFailed,
+        health,
+        mounts,
+        ports,
+        exposedPorts,
+        networks,
+        env,
+        privileged,
+        readonlyRootfs,
+        metadataTruncated,
+      };
+    });
+    return { rows, listedContainers: allListed.length, truncated };
+  }
+
   /** Resolve a container by its durable name (not ephemeral ID). */
   public async findContainerByName(name: string): Promise<{
     id: string;
@@ -3661,5 +3865,155 @@ export const updateGlobalDockerNetwork = async () => {
 
 // Poll network stats every 5s (reduced from 3s to lower Docker daemon pressure)
 setInterval(updateGlobalDockerNetwork, 5000);
+
+// ── Socket inventory metadata normalization ────────────────────────────
+// Docker metadata is untrusted input: a daemon, an old API version, or a
+// proxy can return a field as a different type, null, or absent. These
+// helpers narrow every value once, so the inventory never throws on a
+// malformed field and never keeps an unbounded value.
+
+function asRecord(value: unknown): Record<string, unknown> | null {
+  return typeof value === 'object' && value !== null && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : null;
+}
+
+function readContainerString(value: unknown): string | null {
+  return typeof value === 'string' ? value : null;
+}
+
+function readContainerNumber(value: unknown): number | null {
+  return typeof value === 'number' && Number.isFinite(value) ? value : null;
+}
+
+function normalizeDockerLabels(value: unknown): Record<string, string> {
+  const out: Record<string, string> = {};
+  let count = 0;
+  const put = (key: unknown, raw: unknown) => {
+    if (count >= 256 || typeof key !== 'string' || key.length === 0) return;
+    count += 1;
+    out[key] = typeof raw === 'string' ? raw : String(raw ?? '');
+  };
+  if (Array.isArray(value)) {
+    for (const entry of value) {
+      if (typeof entry !== 'string') continue;
+      const eq = entry.indexOf('=');
+      if (eq <= 0) put(entry, '');
+      else put(entry.slice(0, eq), entry.slice(eq + 1));
+    }
+    return out;
+  }
+  const record = asRecord(value);
+  if (record) {
+    for (const [key, raw] of Object.entries(record)) put(key, raw);
+  }
+  return out;
+}
+
+function normalizeDockerMounts(value: unknown): SocketInventoryMountRow[] {
+  if (!Array.isArray(value)) return [];
+  const mounts: SocketInventoryMountRow[] = [];
+  for (const entry of value.slice(0, 64)) {
+    const mount = asRecord(entry);
+    if (!mount) continue;
+    mounts.push({
+      type: readContainerString(mount.Type) ?? 'unknown',
+      source: readContainerString(mount.Source),
+      destination: readContainerString(mount.Destination),
+      // A missing read/write flag is treated as writable: the safe reading is
+      // the one that does not clear a risk.
+      readOnly: mount.RW === false,
+      name: readContainerString(mount.Name),
+    });
+  }
+  return mounts;
+}
+
+function normalizeDockerPorts(value: unknown): SocketInventoryPortRow[] {
+  if (!Array.isArray(value)) return [];
+  const ports: SocketInventoryPortRow[] = [];
+  for (const entry of value.slice(0, 64)) {
+    const port = asRecord(entry);
+    if (!port) continue;
+    const publicPort = readContainerNumber(port.PublicPort);
+    ports.push({
+      privatePort: readContainerNumber(port.PrivatePort),
+      publicPort: publicPort !== null && publicPort > 0 ? publicPort : null,
+      ip: readContainerString(port.IP) ?? '',
+      protocol: readContainerString(port.Type) ?? 'tcp',
+    });
+  }
+  return ports;
+}
+
+function normalizeInspectPorts(
+  value: unknown,
+  fallback: SocketInventoryPortRow[],
+): SocketInventoryPortRow[] {
+  const bindings = asRecord(value);
+  if (!bindings) return fallback;
+  const ports: SocketInventoryPortRow[] = [];
+  for (const [spec, rawBindings] of Object.entries(bindings)) {
+    if (ports.length >= 64) break;
+    const slash = spec.lastIndexOf('/');
+    const privatePort = Number.parseInt(slash > 0 ? spec.slice(0, slash) : spec, 10);
+    const protocol = slash > 0 ? spec.slice(slash + 1) : 'tcp';
+    const protocolName = protocol.length > 0 ? protocol : 'tcp';
+    const targets = Array.isArray(rawBindings) ? rawBindings : [];
+    if (targets.length === 0) {
+      ports.push({
+        privatePort: Number.isFinite(privatePort) ? privatePort : null,
+        publicPort: null,
+        ip: '',
+        protocol: protocolName,
+      });
+      continue;
+    }
+    for (const binding of targets.slice(0, 8)) {
+      const host = asRecord(binding);
+      // Docker reports the host port as a string; an empty one means exposed only.
+      const rawPublic = host?.HostPort;
+      const parsed = typeof rawPublic === 'number'
+        ? rawPublic
+        : typeof rawPublic === 'string' && rawPublic !== '' ? Number.parseInt(rawPublic, 10) : NaN;
+      ports.push({
+        privatePort: Number.isFinite(privatePort) ? privatePort : null,
+        publicPort: Number.isFinite(parsed) && parsed > 0 ? parsed : null,
+        ip: readContainerString(host?.HostIp) ?? '',
+        protocol: protocolName,
+      });
+    }
+  }
+  return ports;
+}
+
+function normalizeDockerExposedPorts(value: unknown): string[] {
+  const record = asRecord(value);
+  return record ? Object.keys(record).slice(0, 64) : [];
+}
+
+function normalizeDockerNetworks(value: unknown): SocketInventoryNetworkRow[] {
+  const record = asRecord(value);
+  if (!record) return [];
+  const networks: SocketInventoryNetworkRow[] = [];
+  for (const [name, raw] of Object.entries(record)) {
+    if (networks.length >= 32) break;
+    const network = asRecord(raw);
+    networks.push({
+      name,
+      id: readContainerString(network?.NetworkID),
+      ipAddress: readContainerString(network?.IPAddress),
+    });
+  }
+  return networks;
+}
+
+function normalizeDockerEnv(value: unknown): string[] {
+  if (!Array.isArray(value)) return [];
+  return value
+    .filter((entry): entry is string => typeof entry === 'string')
+    .slice(0, 256)
+    .map(entry => entry.slice(0, 4096));
+}
 
 export default DockerController;

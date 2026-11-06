@@ -74,6 +74,8 @@ tags:
     description: Check for available container image updates across stacks
   - name: Recovery
     description: Create, verify, and restore application-data recovery points for named Docker volumes on a node. The read calls (`GET`) work with a Read Only, Deploy Only, or Full Admin token; every write call needs a Full Admin token. A write call with any other scope, and every recovery call with an Observe Only token, gets `403 SCOPE_DENIED`.
+  - name: Socket
+    description: Read-only Docker socket access discovery for one node. Reports socket proxies, direct socket consumers, and the container carrying Sencho's own Docker connection; it never changes Docker, a Compose file, or a provider.
 
 components:
   securitySchemes:
@@ -429,6 +431,212 @@ components:
           type: object
           additionalProperties: { type: string }
           description: Map of node id to error for nodes that were unreachable or returned a malformed payload.
+
+    SocketInventory:
+      type: object
+      required: [schemaVersion, node, generatedAt, durationMs, status, truncated, counts, endpoint, containers, errors]
+      properties:
+        schemaVersion: { type: integer, enum: [1] }
+        node:
+          type: object
+          required: [id, instanceIdentity]
+          properties:
+            id: { type: integer }
+            name: { type: string, nullable: true }
+            type: { type: string, enum: [local, remote], nullable: true }
+            mode: { type: string, nullable: true }
+            instanceIdentity:
+              type: string
+              nullable: true
+              description: Hashed identity of the instance that produced this inventory. A hub must not relabel it as another node's inventory.
+        generatedAt: { type: integer, description: Epoch milliseconds when this snapshot was produced. }
+        durationMs: { type: integer }
+        status:
+          type: string
+          enum: [complete, partial]
+          description: >-
+            `partial` means at least one piece of evidence was unreadable,
+            truncated, or undetermined. It never means there is no Docker access.
+        truncated: { type: boolean }
+        counts:
+          type: object
+          required: [listedContainers, matchedContainers, proxies, directSocketConsumers, undetermined, inspectFailures]
+          properties:
+            listedContainers: { type: integer }
+            matchedContainers: { type: integer }
+            proxies: { type: integer }
+            directSocketConsumers: { type: integer }
+            undetermined: { type: integer }
+            inspectFailures: { type: integer }
+        endpoint:
+          $ref: "#/components/schemas/SocketEndpoint"
+        containers:
+          type: array
+          items: { $ref: "#/components/schemas/SocketInventoryContainer" }
+        errors:
+          type: array
+          maxItems: 10
+          items: { $ref: "#/components/schemas/SocketInventoryError" }
+
+    SocketEndpoint:
+      type: object
+      required: [transport, address, addressSource, detection, reason, provider, sencho, evidence]
+      properties:
+        transport: { type: string, enum: [unix, tcp, npipe, ssh, unknown] }
+        address:
+          type: string
+          nullable: true
+          description: Credential-free display form of the configured endpoint.
+        addressSource: { type: string, enum: [env, default] }
+        detection: { type: string, enum: [detected, undetermined, unsupported] }
+        reason: { type: string, nullable: true }
+        provider:
+          type: object
+          required: [kind, providerType, containerId, containerName, compose, socketBindSource]
+          properties:
+            kind: { type: string, enum: [direct-socket, container, unknown] }
+            providerType:
+              type: string
+              nullable: true
+              enum: [tecnativa, linuxserver, wollomatic, sencho-socket-gateway, generic-socket-proxy, direct-unix-socket, unknown]
+            containerId: { type: string, nullable: true }
+            containerName: { type: string, nullable: true }
+            compose:
+              type: object
+              nullable: true
+              properties:
+                project: { type: string, nullable: true }
+                service: { type: string, nullable: true }
+            socketBindSource: { type: string, nullable: true }
+        sencho:
+          type: object
+          required: [state, inContainer, containerId, containerName, socketBindSource, reason]
+          properties:
+            state: { type: string, enum: [resolved, none, unresolved] }
+            inContainer: { type: boolean, nullable: true }
+            containerId: { type: string, nullable: true }
+            containerName: { type: string, nullable: true }
+            socketBindSource: { type: string, nullable: true }
+            reason: { type: string, nullable: true }
+        evidence:
+          type: array
+          items: { type: string }
+
+    SocketInventoryContainer:
+      type: object
+      required:
+        - id
+        - name
+        - state
+        - status
+        - image
+        - imageId
+        - role
+        - classification
+        - providerType
+        - senchoStack
+        - compose
+        - health
+        - socketMounts
+        - apiGroups
+        - publishedPorts
+        - exposedPorts
+        - networks
+        - privileged
+        - readonlyRootfs
+        - infrastructureLabel
+        - isSencho
+        - isSenchoEndpointProvider
+        - labels
+        - evidence
+        - inspectFailed
+        - metadataTruncated
+      properties:
+        id: { type: string }
+        name: { type: string }
+        state: { type: string, description: Docker container state, including exited and created. }
+        status: { type: string }
+        image: { type: string, description: Credential-redacted image reference. }
+        imageId: { type: string }
+        role: { type: string, enum: [proxy, direct-socket-consumer, undetermined] }
+        classification: { type: string, enum: [detected, candidate, unknown] }
+        providerType:
+          type: string
+          nullable: true
+          enum: [tecnativa, linuxserver, wollomatic, sencho-socket-gateway, generic-socket-proxy, direct-unix-socket, unknown]
+        senchoStack: { type: string, nullable: true }
+        compose:
+          type: object
+          nullable: true
+          properties:
+            project: { type: string, nullable: true }
+            service: { type: string, nullable: true }
+            workingDir: { type: string, nullable: true }
+        health: { type: string, nullable: true }
+        socketMounts:
+          type: array
+          items:
+            type: object
+            required: [source, destination, readOnly]
+            properties:
+              source: { type: string, nullable: true }
+              destination: { type: string, nullable: true }
+              readOnly: { type: boolean }
+        apiGroups:
+          type: array
+          description: Recognized proxy API group names enabled with the literal value `1`.
+          items: { type: string }
+        publishedPorts:
+          type: array
+          items:
+            type: object
+            required: [privatePort, publicPort, ip, allInterfaces, protocol]
+            properties:
+              privatePort: { type: integer, nullable: true }
+              publicPort: { type: integer, nullable: true }
+              ip: { type: string }
+              allInterfaces: { type: boolean }
+              protocol: { type: string }
+        exposedPorts:
+          type: array
+          items: { type: string }
+        networks:
+          type: array
+          items:
+            type: object
+            required: [name, id]
+            properties:
+              name: { type: string }
+              id: { type: string, nullable: true }
+        privileged: { type: boolean }
+        readonlyRootfs: { type: boolean }
+        infrastructureLabel: { type: boolean }
+        isSencho: { type: boolean }
+        isSenchoEndpointProvider: { type: boolean }
+        labels:
+          type: array
+          items:
+            type: object
+            required: [key, value]
+            properties:
+              key: { type: string }
+              value: { type: string }
+              redacted: { type: boolean }
+        evidence:
+          type: array
+          items: { type: string }
+        inspectFailed: { type: boolean }
+        metadataTruncated:
+          type: boolean
+          description: A metadata list exceeded the inventory bound; a mount or proxy flag may be missing from this row.
+
+    SocketInventoryError:
+      type: object
+      required: [stage, message]
+      properties:
+        stage: { type: string, enum: [list-containers, inspect-container, container-metadata, self-identity, endpoint-provider] }
+        message: { type: string }
+        containerId: { type: string }
 
     FailureClassification:
       type: object
@@ -2566,6 +2774,59 @@ paths:
                 $ref: "#/components/schemas/FleetLabelInventory"
         "403":
           $ref: "#/components/responses/Forbidden"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /api/socket/inventory:
+    get:
+      operationId: getSocketInventory
+      tags: [Socket]
+      summary: Get the read-only Docker socket access inventory for a node
+      description: >-
+        Inspects every container on the addressed node, including stopped
+        containers, for Docker socket proxies, direct socket consumers, and the
+        container carrying Sencho's own Docker connection. Reports the
+        endpoint transport without assuming `/var/run/docker.sock`, and keeps
+        proxy candidates and undetermined rows distinct from detected proxies.
+
+        The response is produced by the node that owns the Docker daemon, so a
+        remote node's inventory is never relabelled as the control instance's.
+        A Docker read failure is `503` and a timeout is `504`; an empty
+        `containers` array means discovery completed and found no matching
+        targets, not that the node has no Docker access. Requires `node:read`.
+      parameters:
+        - $ref: "#/components/parameters/nodeId"
+      responses:
+        "200":
+          description: Node-scoped Docker socket access inventory.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SocketInventory"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "503":
+          description: Docker is unavailable on the node, so no inventory could be read.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/Error"
+                  - type: object
+                    properties:
+                      code: { type: string, enum: [DOCKER_UNAVAILABLE] }
+        "504":
+          description: The discovery read timed out on the node.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/Error"
+                  - type: object
+                    properties:
+                      code: { type: string, enum: [SOCKET_INVENTORY_TIMEOUT] }
         "500":
           $ref: "#/components/responses/InternalError"
 

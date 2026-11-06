@@ -1,0 +1,1006 @@
+/**
+ * Read-only, node-scoped Docker socket access inventory.
+ *
+ * The inventory answers one bounded question per node: which containers on this
+ * node act as Docker socket proxies, which consume the socket directly, which
+ * container (if any) carries Sencho's own Docker connection, and which parts of
+ * that picture could not be determined. It never mutates Docker, a Compose
+ * file, or a provider, and it never treats a failed read as a clean result: a
+ * top-level Docker failure throws (the route answers 503), and a partial scan
+ * reports `status: 'partial'` with the stages that failed.
+ *
+ * Discovery deliberately does not reuse the endpoint guard's single protecting
+ * provider: every matching container is reported, and only one of them can be
+ * flagged as Sencho's endpoint. Provider identity is reused from
+ * `resolveDockerEndpointProvider()` where the endpoint is a tcp address.
+ */
+
+import { DatabaseService, type Node } from '../DatabaseService';
+import DockerController, {
+  type SocketInventoryContainerRow,
+  type SocketInventoryListResult,
+} from '../DockerController';
+import SelfIdentityService, { type SelfIdentityState } from '../SelfIdentityService';
+import {
+  resolveDockerEndpointProvider,
+  type DockerEndpointProvider,
+} from '../DockerEndpointProvider';
+import { FleetSyncService } from '../FleetSyncService';
+import {
+  enabledProxyApiFlags,
+  hasSocketProxyNameHint,
+  isDockerSocketPath,
+  socketProxyProviderForImage,
+  type SocketProviderType,
+} from '../../helpers/socketProxyIdentity';
+import { redactLabelValue } from '../../helpers/labelValueRedaction';
+import { SENCHO_INFRASTRUCTURE_LABEL } from '../../helpers/senchoLabels';
+import { getErrorMessage } from '../../utils/errors';
+import { errorMessageForLog, redactImageReference, redactSensitiveText } from '../../utils/safeLog';
+
+/** Hard bound on containers inspected in one snapshot. */
+export const MAX_INVENTORY_CONTAINERS = 1000;
+const MAX_LABELS = 64;
+const MAX_LABEL_KEY = 128;
+const MAX_LABEL_VALUE = 256;
+const MAX_ERRORS = 10;
+const MAX_STATUS = 200;
+const MAX_PATH = 512;
+const MAX_PORTS = 16;
+const MAX_MOUNTS = 8;
+const MAX_NETWORKS = 16;
+const MAX_EVIDENCE = 8;
+
+const DEFAULT_DOCKER_SOCKET = '/var/run/docker.sock';
+
+export type SocketRole = 'proxy' | 'direct-socket-consumer' | 'undetermined';
+export type SocketClassification = 'detected' | 'candidate' | 'unknown';
+export type SocketEndpointTransport = 'unix' | 'tcp' | 'npipe' | 'ssh' | 'unknown';
+export type SocketEndpointDetection = 'detected' | 'undetermined' | 'unsupported';
+
+export interface SocketInventoryError {
+  stage: 'list-containers' | 'inspect-container' | 'container-metadata' | 'self-identity' | 'endpoint-provider';
+  message: string;
+  containerId?: string;
+}
+
+export interface SocketInventoryLabel {
+  key: string;
+  value: string;
+  redacted?: boolean;
+}
+
+export interface SocketInventoryMount {
+  source: string | null;
+  destination: string | null;
+  readOnly: boolean;
+}
+
+export interface SocketInventoryPort {
+  privatePort: number | null;
+  publicPort: number | null;
+  ip: string;
+  /** True when the binding is on every host interface ('' / 0.0.0.0 / ::). */
+  allInterfaces: boolean;
+  protocol: string;
+}
+
+export interface SocketInventoryNetwork {
+  name: string;
+  id: string | null;
+}
+
+export interface SocketInventoryContainer {
+  id: string;
+  name: string;
+  /** Docker state, including `exited` and `created` for stopped containers. */
+  state: string;
+  status: string;
+  image: string;
+  imageId: string;
+  role: SocketRole;
+  classification: SocketClassification;
+  providerType: SocketProviderType | null;
+  senchoStack: string | null;
+  compose: {
+    project: string | null;
+    service: string | null;
+    workingDir: string | null;
+  } | null;
+  health: string | null;
+  socketMounts: SocketInventoryMount[];
+  /** Recognized proxy API group names enabled with the literal value `1`. */
+  apiGroups: string[];
+  publishedPorts: SocketInventoryPort[];
+  exposedPorts: string[];
+  networks: SocketInventoryNetwork[];
+  privileged: boolean;
+  readonlyRootfs: boolean;
+  infrastructureLabel: boolean;
+  isSencho: boolean;
+  isSenchoEndpointProvider: boolean;
+  labels: SocketInventoryLabel[];
+  evidence: string[];
+  inspectFailed: boolean;
+  /** A metadata list exceeded the bound, so a mount or flag may be missing. */
+  metadataTruncated: boolean;
+}
+
+export interface SocketEndpointDescription {
+  transport: SocketEndpointTransport;
+  address: string | null;
+  host: string | null;
+  port: number | null;
+  socketPath: string | null;
+  addressSource: 'env' | 'default';
+}
+
+export interface SocketInventoryEndpoint {
+  transport: SocketEndpointTransport;
+  address: string | null;
+  addressSource: 'env' | 'default';
+  detection: SocketEndpointDetection;
+  reason: string | null;
+  provider: {
+    kind: 'direct-socket' | 'container' | 'unknown';
+    providerType: SocketProviderType | null;
+    containerId: string | null;
+    containerName: string | null;
+    compose: { project: string | null; service: string | null } | null;
+    socketBindSource: string | null;
+  };
+  sencho: {
+    state: SelfIdentityState;
+    inContainer: boolean | null;
+    containerId: string | null;
+    containerName: string | null;
+    /** Host path bind-mounted at the configured socket inside Sencho, when resolvable. */
+    socketBindSource: string | null;
+    reason: string | null;
+  };
+  evidence: string[];
+}
+
+export interface SocketInventory {
+  schemaVersion: 1;
+  node: {
+    id: number;
+    name: string | null;
+    type: Node['type'] | null;
+    mode: Node['mode'] | null;
+    /** Hashed control-instance identity; a hub must not relabel this inventory as another node's. */
+    instanceIdentity: string | null;
+  };
+  generatedAt: number;
+  durationMs: number;
+  status: 'complete' | 'partial';
+  truncated: boolean;
+  counts: {
+    listedContainers: number;
+    matchedContainers: number;
+    proxies: number;
+    directSocketConsumers: number;
+    undetermined: number;
+    inspectFailures: number;
+  };
+  endpoint: SocketInventoryEndpoint;
+  containers: SocketInventoryContainer[];
+  errors: SocketInventoryError[];
+}
+
+/** A failed socket inventory read. The route maps this to 503, never to an empty 200. */
+export class SocketInventoryUnavailableError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'SocketInventoryUnavailableError';
+  }
+}
+
+interface SocketSelfInfo {
+  state: SelfIdentityState;
+  reason: string | null;
+  containerId: string | null;
+  containerName: string | null;
+  bindMounts: Array<{ source: string; destination: string }> | null;
+}
+
+export interface SocketInventoryBuildInput {
+  nodeId: number;
+  node: Node | undefined;
+  instanceIdentity: string;
+  listedContainers: number;
+  truncated: boolean;
+  containers: SocketInventoryContainerRow[];
+  self: SocketSelfInfo;
+  endpoint: SocketEndpointDescription;
+  endpointProvider: DockerEndpointProvider | { state: 'error'; reason: string };
+  generatedAt: number;
+  durationMs: number;
+  errors: SocketInventoryError[];
+}
+
+export interface SocketInventoryDeps {
+  docker: Pick<DockerController, 'listContainersForSocketInventory'>;
+  self: Pick<
+    SelfIdentityService,
+    'ensureResolved' | 'getIdentity' | 'getBindMounts' | 'getUnresolvedReason'
+  >;
+  resolveEndpointProvider: () => Promise<DockerEndpointProvider>;
+  node: (nodeId: number) => Node | undefined;
+  instanceIdentity: () => string;
+  now: () => number;
+}
+
+function defaultDeps(nodeId: number): SocketInventoryDeps {
+  return {
+    docker: DockerController.getInstance(nodeId),
+    self: SelfIdentityService.getInstance(),
+    resolveEndpointProvider: resolveDockerEndpointProvider,
+    node: id => DatabaseService.getInstance().getNode(id),
+    instanceIdentity: () => FleetSyncService.getControlIdentity(),
+    now: () => Date.now(),
+  };
+}
+
+function bound(value: string, max: number): string {
+  return value.length > max ? `${value.slice(0, max - 3)}...` : value;
+}
+
+function safeText(value: string, max: number): string {
+  return bound(redactSensitiveText(value), max);
+}
+
+function bindsAllInterfaces(ip: string): boolean {
+  return ip === '' || ip === '0.0.0.0' || ip === '::';
+}
+
+function idMatches(a: string | null | undefined, b: string | null | undefined): boolean {
+  if (!a || !b) return false;
+  if (a === b) return true;
+  const left = a.replace(/^sha256:/, '');
+  const right = b.replace(/^sha256:/, '');
+  return left.length >= 12 && right.length >= 12 && (left.startsWith(right) || right.startsWith(left));
+}
+
+/**
+ * Parse `DOCKER_HOST` for display. Credentials are dropped: a `tcp://user:pass@`
+ * userinfo never leaves this function. An unset value is Docker's documented
+ * unix default and is labelled as such, not as an observed setting.
+ */
+export function describeDockerEndpoint(raw: string | undefined): SocketEndpointDescription {
+  const value = raw?.trim();
+  if (!value) {
+    return {
+      transport: 'unix',
+      address: `unix://${DEFAULT_DOCKER_SOCKET}`,
+      host: null,
+      port: null,
+      socketPath: DEFAULT_DOCKER_SOCKET,
+      addressSource: 'default',
+    };
+  }
+  const unix = /^unix:\/\/(.*)$/i.exec(value);
+  if (unix) {
+    const rawPath = unix[1] ?? '';
+    const socketPath = rawPath.startsWith('/') ? rawPath : `/${rawPath}`;
+    return {
+      transport: 'unix',
+      address: safeText(`unix://${socketPath}`, MAX_PATH),
+      host: null,
+      port: null,
+      socketPath: bound(socketPath, MAX_PATH),
+      addressSource: 'env',
+    };
+  }
+  if (/^npipe:\/\//i.test(value)) {
+    return {
+      transport: 'npipe',
+      address: safeText(value, MAX_PATH),
+      host: null,
+      port: null,
+      socketPath: null,
+      addressSource: 'env',
+    };
+  }
+  if (/^ssh:\/\//i.test(value)) {
+    const host = URL.canParse(value) ? new URL(value).hostname || null : null;
+    return {
+      transport: 'ssh',
+      address: host ? safeText(`ssh://${host}`, MAX_PATH) : null,
+      host,
+      port: null,
+      socketPath: null,
+      addressSource: 'env',
+    };
+  }
+  const tcp = /^(tcp|http|https):\/\/(.+)$/i.exec(value);
+  if (tcp) {
+    const scheme = (tcp[1] ?? 'tcp').toLowerCase();
+    try {
+      const url = new URL(`${scheme}://${tcp[2]}`);
+      const host = url.hostname || null;
+      const port = url.port ? Number.parseInt(url.port, 10) : null;
+      return {
+        transport: 'tcp',
+        address: host ? safeText(`${scheme}://${host}${port ? `:${port}` : ''}`, MAX_PATH) : null,
+        host,
+        port: Number.isFinite(port) ? port : null,
+        socketPath: null,
+        addressSource: 'env',
+      };
+    } catch {
+      return {
+        transport: 'unknown',
+        address: null,
+        host: null,
+        port: null,
+        socketPath: null,
+        addressSource: 'env',
+      };
+    }
+  }
+  return {
+    transport: 'unknown',
+    address: null,
+    host: null,
+    port: null,
+    socketPath: null,
+    addressSource: 'env',
+  };
+}
+
+interface ClassifiedRow {
+  row: SocketInventoryContainerRow;
+  container: SocketInventoryContainer;
+  proxyEvidence: boolean;
+}
+
+function normalizeLabels(row: SocketInventoryContainerRow): SocketInventoryLabel[] {
+  const labels: SocketInventoryLabel[] = [];
+  for (const [key, value] of Object.entries(row.labels)) {
+    if (labels.length >= MAX_LABELS) break;
+    if (!key) continue;
+    const redacted = redactLabelValue(key, value, false);
+    labels.push({
+      key: bound(key, MAX_LABEL_KEY),
+      value: safeText(redacted.value, MAX_LABEL_VALUE),
+      ...(redacted.redacted ? { redacted: true } : {}),
+    });
+  }
+  return labels.sort((a, b) => a.key.localeCompare(b.key));
+}
+
+function normalizePorts(row: SocketInventoryContainerRow): SocketInventoryPort[] {
+  return row.ports
+    .filter(port => port.publicPort !== null)
+    .slice(0, MAX_PORTS)
+    .map(port => ({
+      privatePort: port.privatePort,
+      publicPort: port.publicPort,
+      ip: port.ip,
+      allInterfaces: bindsAllInterfaces(port.ip),
+      protocol: port.protocol,
+    }));
+}
+
+/**
+ * Socket mounts on a container. A `docker.sock` source or target is certain. A
+ * mount that shares the host socket path Sencho itself uses is certain too,
+ * which covers a proxy that listens on a custom unix socket path.
+ */
+function socketMountsFor(
+  row: SocketInventoryContainerRow,
+  endpointBindSource: string | null,
+): SocketInventoryMount[] {
+  return row.mounts
+    .filter(mount => mount.type === 'bind')
+    .filter(mount => isDockerSocketPath(mount.source)
+      || isDockerSocketPath(mount.destination)
+      || (endpointBindSource !== null
+        && (mount.source === endpointBindSource || mount.destination === endpointBindSource)))
+    .slice(0, MAX_MOUNTS)
+    .map(mount => ({
+      source: mount.source ? safeText(mount.source, MAX_PATH) : null,
+      destination: mount.destination ? safeText(mount.destination, MAX_PATH) : null,
+      readOnly: mount.readOnly,
+    }));
+}
+
+function classifyRow(
+  row: SocketInventoryContainerRow,
+  ctx: {
+    endpointBindSource: string | null;
+    senchoContainerId: string | null;
+    senchoContainerName: string | null;
+  },
+): ClassifiedRow | null {
+  const socketMounts = socketMountsFor(row, ctx.endpointBindSource);
+  const imageProvider = socketProxyProviderForImage(row.image);
+  const nameHint = hasSocketProxyNameHint([row.name, row.service]);
+  const apiGroups = enabledProxyApiFlags(row.env);
+  const infrastructureLabel = row.labels[SENCHO_INFRASTRUCTURE_LABEL] === 'true';
+  const isSencho = idMatches(row.id, ctx.senchoContainerId)
+    || (ctx.senchoContainerName !== null && row.name === ctx.senchoContainerName);
+  const dockerApiPort = row.ports.some(port =>
+    port.privatePort === 2375 || port.privatePort === 2376
+    || port.publicPort === 2375 || port.publicPort === 2376);
+  const readOnlyMount = socketMounts.length > 0 && socketMounts.every(mount => mount.readOnly);
+
+  // An uninspectable container could be the only proxy on the node. It stays
+  // in the inventory as undetermined whatever its name or image, because a
+  // missing row would read as "nothing there".
+  if (row.inspectFailed) {
+    return buildClassified(row, {
+      role: 'undetermined',
+      classification: 'unknown',
+      providerType: imageProvider,
+      socketMounts: [],
+      apiGroups,
+      evidence: [
+        'inspect-failed',
+        ...(imageProvider ? ['known-provider-image'] : []),
+        ...(nameHint ? ['socket-proxy-name-hint'] : []),
+        ...(dockerApiPort ? ['docker-api-port-published'] : []),
+      ],
+      infrastructureLabel,
+      isSencho,
+    });
+  }
+
+  if (socketMounts.length > 0) {
+    if (imageProvider && imageProvider !== 'generic-socket-proxy') {
+      return buildClassified(row, {
+        role: 'proxy',
+        classification: 'detected',
+        providerType: imageProvider,
+        socketMounts,
+        apiGroups,
+        evidence: [
+          'socket-bind-mount',
+          'known-provider-image',
+          ...(readOnlyMount ? [] : ['socket-mount-writable']),
+        ],
+        infrastructureLabel,
+        isSencho,
+      });
+    }
+    if (imageProvider === 'generic-socket-proxy') {
+      // A generic `socket-proxy` image is strong intent, but the vendor (and so
+      // its flag semantics) is unknown: candidate, never a confirmed provider.
+      return buildClassified(row, {
+        role: 'proxy',
+        classification: 'candidate',
+        providerType: 'generic-socket-proxy',
+        socketMounts,
+        apiGroups,
+        evidence: ['socket-bind-mount', 'known-provider-image'],
+        infrastructureLabel,
+        isSencho,
+      });
+    }
+    if (nameHint && (readOnlyMount || apiGroups.length > 0)) {
+      return buildClassified(row, {
+        role: 'proxy',
+        classification: 'candidate',
+        providerType: 'generic-socket-proxy',
+        socketMounts,
+        apiGroups,
+        evidence: ['socket-bind-mount', 'socket-proxy-name-hint'],
+        infrastructureLabel,
+        isSencho,
+      });
+    }
+    if (apiGroups.length >= 2 && readOnlyMount) {
+      return buildClassified(row, {
+        role: 'proxy',
+        classification: 'candidate',
+        providerType: 'generic-socket-proxy',
+        socketMounts,
+        apiGroups,
+        evidence: ['socket-bind-mount', 'enabled-api-groups'],
+        infrastructureLabel,
+        isSencho,
+      });
+    }
+    if (dockerApiPort) {
+      // The socket is mounted and a Docker API port is published, but nothing
+      // proves this is a proxy. Say so instead of guessing in either direction.
+      return buildClassified(row, {
+        role: 'undetermined',
+        classification: 'unknown',
+        providerType: imageProvider,
+        socketMounts,
+        apiGroups,
+        evidence: ['socket-bind-mount', 'docker-api-port-published'],
+        infrastructureLabel,
+        isSencho,
+      });
+    }
+    return buildClassified(row, {
+      role: 'direct-socket-consumer',
+      classification: 'detected',
+      providerType: null,
+      socketMounts,
+      apiGroups,
+      evidence: [
+        'socket-bind-mount',
+        ...(readOnlyMount ? [] : ['socket-mount-writable']),
+      ],
+      infrastructureLabel,
+      isSencho,
+    });
+  }
+
+  // No socket bind is visible. A provider image, a proxy-like name, or a Docker
+  // API port is a candidate whose topology cannot be confirmed from here.
+  if (imageProvider || nameHint || dockerApiPort) {
+    return buildClassified(row, {
+      role: 'undetermined',
+      classification: 'unknown',
+      providerType: imageProvider,
+      socketMounts: [],
+      apiGroups,
+      evidence: [
+        ...(imageProvider ? ['known-provider-image'] : []),
+        ...(nameHint ? ['socket-proxy-name-hint'] : []),
+        ...(dockerApiPort ? ['docker-api-port-published'] : []),
+        'no-socket-bind-observed',
+      ],
+      infrastructureLabel,
+      isSencho,
+    });
+  }
+
+  if (infrastructureLabel || row.metadataTruncated) {
+    return buildClassified(row, {
+      role: 'undetermined',
+      classification: 'unknown',
+      providerType: null,
+      socketMounts: [],
+      apiGroups,
+      evidence: [
+        ...(infrastructureLabel ? ['infrastructure-label'] : []),
+        ...(row.metadataTruncated ? ['metadata-truncated'] : []),
+      ],
+      infrastructureLabel,
+      isSencho,
+    });
+  }
+
+  return null;
+}
+
+function buildClassified(
+  row: SocketInventoryContainerRow,
+  input: {
+    role: SocketRole;
+    classification: SocketClassification;
+    providerType: SocketProviderType | null;
+    socketMounts: SocketInventoryMount[];
+    apiGroups: string[];
+    evidence: string[];
+    infrastructureLabel: boolean;
+    isSencho: boolean;
+  },
+): ClassifiedRow {
+  const compose = row.composeProject || row.service || row.composeWorkingDir
+    ? {
+      project: row.composeProject ? safeText(row.composeProject, 128) : null,
+      service: row.service ? safeText(row.service, 128) : null,
+      workingDir: row.composeWorkingDir ? safeText(row.composeWorkingDir, MAX_PATH) : null,
+    }
+    : null;
+  const evidence = [...input.evidence];
+  if (row.state !== 'running') evidence.push('not-running');
+  if (compose) evidence.push('compose-owned');
+  if (input.infrastructureLabel) evidence.push('infrastructure-label');
+  if (input.isSencho) evidence.push('is-sencho');
+  if (row.metadataTruncated) evidence.push('metadata-truncated');
+  return {
+    row,
+    proxyEvidence: input.role === 'proxy',
+    container: {
+      id: bound(row.id, 128),
+      name: safeText(row.name, 256),
+      state: bound(row.state, 32),
+      status: safeText(row.status, MAX_STATUS),
+      image: safeText(redactImageReference(row.image), 256),
+      imageId: bound(row.imageId, 128),
+      role: input.role,
+      classification: input.classification,
+      providerType: input.providerType,
+      senchoStack: row.stack ? safeText(row.stack, 128) : null,
+      compose,
+      health: row.health ? bound(row.health, 32) : null,
+      socketMounts: input.socketMounts,
+      apiGroups: [...input.apiGroups].slice(0, 16),
+      publishedPorts: normalizePorts(row),
+      exposedPorts: row.exposedPorts.slice(0, MAX_PORTS).map(port => bound(port, 32)),
+      networks: row.networks.slice(0, MAX_NETWORKS).map(network => ({
+        name: safeText(network.name, 128),
+        id: network.id ? bound(network.id, 128) : null,
+      })),
+      privileged: row.privileged,
+      readonlyRootfs: row.readonlyRootfs,
+      infrastructureLabel: input.infrastructureLabel,
+      isSencho: input.isSencho,
+      isSenchoEndpointProvider: false,
+      labels: normalizeLabels(row),
+      evidence: [...new Set(evidence)].slice(0, MAX_EVIDENCE),
+      inspectFailed: row.inspectFailed,
+      metadataTruncated: row.metadataTruncated,
+    },
+  };
+}
+
+function endpointEvidenceFor(description: SocketEndpointDescription): string[] {
+  if (description.addressSource === 'default') return ['docker-host-unset-default-socket'];
+  return [`docker-host-${description.transport}`];
+}
+
+function buildEndpoint(
+  input: SocketInventoryBuildInput,
+  classified: ClassifiedRow[],
+): { endpoint: SocketInventoryEndpoint; providerRow: ClassifiedRow | null; providerAmbiguous: boolean } {
+  const { endpoint: description, self } = input;
+  const senchoSocketBind = description.socketPath && self.bindMounts
+    ? self.bindMounts.find(mount => mount.destination === description.socketPath)
+    : undefined;
+  const socketBindSource = senchoSocketBind
+    ? bound(senchoSocketBind.source, MAX_PATH)
+    : null;
+
+  const sencho = {
+    state: self.state,
+    inContainer: self.state === 'resolved' ? true : self.state === 'none' ? false : null,
+    containerId: self.containerId,
+    containerName: self.containerName,
+    socketBindSource,
+    reason: self.reason,
+  };
+
+  if (description.transport === 'unix') {
+    const canonicalSocket = description.socketPath === '/var/run/docker.sock'
+      || description.socketPath === '/run/docker.sock';
+    if (canonicalSocket) {
+      return {
+        providerRow: null,
+        providerAmbiguous: false,
+        endpoint: {
+          transport: description.transport,
+          address: description.address,
+          addressSource: description.addressSource,
+          detection: 'detected',
+          reason: null,
+          provider: {
+            kind: 'direct-socket',
+            providerType: 'direct-unix-socket',
+            containerId: null,
+            containerName: null,
+            compose: null,
+            socketBindSource,
+          },
+          sencho,
+          evidence: [...endpointEvidenceFor(description), ...(socketBindSource ? ['sencho-socket-bind-source'] : [])],
+        },
+      };
+    }
+    // A non-default unix path can be served by the host daemon, a proxy, or a
+    // host-level forwarder. Container metadata cannot prove which one, and a
+    // shared bind source only says both mount the same host file.
+    return {
+      providerRow: null,
+      providerAmbiguous: false,
+      endpoint: {
+        transport: description.transport,
+        address: description.address,
+        addressSource: description.addressSource,
+        detection: 'undetermined',
+        reason: socketBindSource
+          ? 'The configured socket path is not the host default. Its host path is visible, but container metadata cannot prove which process serves it, so the provider type is undetermined.'
+          : 'The configured socket path is not the host default and its host path is not visible, so the provider type cannot be determined.',
+        provider: {
+          kind: 'unknown',
+          providerType: null,
+          containerId: null,
+          containerName: null,
+          compose: null,
+          socketBindSource,
+        },
+        sencho,
+        evidence: [
+          'socket-path-custom',
+          ...(socketBindSource ? ['sencho-socket-bind-source'] : []),
+        ],
+      },
+    };
+  }
+
+  if (description.transport === 'tcp') {
+    const resolved = input.endpointProvider;
+    if (resolved.state === 'resolved') {
+      const provider = resolved.provider;
+      const byId = classified.find(entry => idMatches(entry.row.id, provider.containerId));
+      const byCompose = !byId && provider.project && provider.service
+        ? classified.filter(entry => entry.row.composeProject === provider.project
+          && entry.row.service === provider.service)
+        : [];
+      // A recreate changes the container id. Only a single current container
+      // with the same Compose identity may stand in; two is ambiguous, and a
+      // wrong attribution is worse than an open one.
+      const providerRow = byId ?? (byCompose.length === 1 ? byCompose[0] : undefined);
+      const reason = providerRow
+        ? null
+        : byCompose.length > 1
+          ? 'The tcp endpoint resolved to a container id that is gone, and more than one current container shares its Compose identity, so the provider row cannot be attributed.'
+          : 'The tcp endpoint resolved, but its provider container is not in this inventory (it may be outside the inspection bound or not classified as a socket target).';
+      return {
+        providerRow: providerRow ?? null,
+        providerAmbiguous: providerRow === undefined && byCompose.length > 1,
+        endpoint: {
+          transport: description.transport,
+          address: description.address,
+          addressSource: description.addressSource,
+          detection: 'detected',
+          reason: reason ? safeText(reason, MAX_STATUS) : null,
+          provider: {
+            kind: 'container',
+            providerType: providerRow?.container.providerType ?? 'unknown',
+            containerId: providerRow?.row.id ?? provider.containerId,
+            containerName: providerRow?.container.name ?? safeText(provider.containerName, 256),
+            compose: {
+              project: providerRow?.container.compose?.project
+                ?? (provider.project ? safeText(provider.project, 128) : null),
+              service: providerRow?.container.compose?.service
+                ?? (provider.service ? safeText(provider.service, 128) : null),
+            },
+            socketBindSource: provider.socketBindSource
+              ? bound(provider.socketBindSource, MAX_PATH)
+              : socketBindSource,
+          },
+          sencho,
+          evidence: ['docker-host-tcp-address-matched-container'],
+        },
+      };
+    }
+    const reason = resolved.state === 'error'
+      ? resolved.reason
+      : resolved.reason || 'The container carrying the tcp Docker endpoint could not be identified.';
+    return {
+      providerRow: null,
+      providerAmbiguous: false,
+      endpoint: {
+        transport: description.transport,
+        address: description.address,
+        addressSource: description.addressSource,
+        detection: 'undetermined',
+        reason: safeText(reason, MAX_STATUS),
+        provider: {
+          kind: 'unknown',
+          providerType: null,
+          containerId: null,
+          containerName: null,
+          compose: null,
+          socketBindSource,
+        },
+        sencho,
+        evidence: ['docker-host-tcp-address-unmatched'],
+      },
+    };
+  }
+
+  return {
+    providerRow: null,
+    providerAmbiguous: false,
+    endpoint: {
+      transport: description.transport,
+      address: description.address,
+      addressSource: description.addressSource,
+      detection: description.transport === 'unknown' ? 'unsupported' : 'undetermined',
+      reason: description.transport === 'unknown'
+        ? 'The configured Docker endpoint is not a supported transport for discovery.'
+        : `Discovery does not support the ${description.transport} Docker endpoint transport.`,
+      provider: {
+        kind: 'unknown',
+        providerType: null,
+        containerId: null,
+        containerName: null,
+        compose: null,
+        socketBindSource,
+      },
+      sencho,
+      evidence: [`docker-host-${description.transport}`],
+    },
+  };
+}
+
+/** Pure assembly of the API contract from already-collected evidence. */
+export function buildSocketInventory(input: SocketInventoryBuildInput): SocketInventory {
+  const errors: SocketInventoryError[] = [...input.errors];
+  if (input.truncated && !errors.some(error => error.stage === 'list-containers')) {
+    errors.push({
+      stage: 'list-containers',
+      message: `Inventory truncated at ${MAX_INVENTORY_CONTAINERS} containers; some targets may be missing.`,
+    });
+  }
+  for (const row of input.containers.filter(entry => entry.inspectFailed)) {
+    if (errors.length >= MAX_ERRORS) break;
+    errors.push({
+      stage: 'inspect-container',
+      message: 'Container inspect failed; its mounts, environment, and health are unknown.',
+      ...(row.id ? { containerId: row.id } : {}),
+    });
+  }
+
+  const endpointBindSource = input.endpoint.socketPath && input.self.bindMounts
+    ? input.self.bindMounts.find(mount => mount.destination === input.endpoint.socketPath)?.source ?? null
+    : null;
+
+  const classified = input.containers
+    .map(row => classifyRow(row, {
+      endpointBindSource,
+      senchoContainerId: input.self.containerId,
+      senchoContainerName: input.self.containerName,
+    }))
+    .filter((entry): entry is ClassifiedRow => entry !== null);
+
+  const { endpoint, providerRow, providerAmbiguous } = buildEndpoint(input, classified);
+  if (providerRow) {
+    providerRow.container.isSenchoEndpointProvider = true;
+    if (!providerRow.container.evidence.includes('sencho-endpoint-provider')) {
+      providerRow.container.evidence = [...providerRow.container.evidence, 'sencho-endpoint-provider']
+        .slice(0, MAX_EVIDENCE);
+    }
+  }
+
+  const containers = classified
+    .map(entry => entry.container)
+    .sort((a, b) => a.name.localeCompare(b.name) || a.id.localeCompare(b.id));
+
+  if (containers.some(container => container.metadataTruncated)
+    && !errors.some(error => error.stage === 'container-metadata')) {
+    errors.push({
+      stage: 'container-metadata',
+      message: 'A container metadata list exceeded the inventory bound; some mounts or proxy flags may be missing.',
+    });
+  }
+  const providerMissing = input.truncated && endpoint.provider.kind === 'container'
+    && endpoint.provider.containerId !== null
+    && !containers.some(container => idMatches(container.id, endpoint.provider.containerId)
+      || (endpoint.provider.containerName !== null && container.name === endpoint.provider.containerName));
+  if (providerMissing && !errors.some(error => error.stage === 'endpoint-provider')) {
+    errors.push({
+      stage: 'endpoint-provider',
+      message: 'The container carrying the Docker endpoint may be outside the bounded inventory.',
+    });
+  }
+  const inspectFailures = input.containers.filter(row => row.inspectFailed).length;
+  const endpointKnown = endpoint.detection === 'detected';
+  const undetermined = containers.some(container => container.role === 'undetermined');
+  const status: SocketInventory['status'] = input.truncated || errors.length > 0
+    || !endpointKnown || undetermined || providerMissing || providerAmbiguous
+    || input.self.state === 'unresolved'
+    ? 'partial'
+    : 'complete';
+
+  const node = input.node;
+  return {
+    schemaVersion: 1,
+    node: {
+      id: input.nodeId,
+      name: node?.name ?? null,
+      type: node?.type ?? null,
+      mode: node?.mode ?? null,
+      instanceIdentity: input.instanceIdentity ? bound(input.instanceIdentity, 64) : null,
+    },
+    generatedAt: input.generatedAt,
+    durationMs: input.durationMs,
+    status,
+    truncated: input.truncated,
+    counts: {
+      listedContainers: input.listedContainers,
+      matchedContainers: containers.length,
+      proxies: containers.filter(container => container.role === 'proxy').length,
+      directSocketConsumers: containers.filter(container => container.role === 'direct-socket-consumer').length,
+      undetermined: containers.filter(container => container.role === 'undetermined').length,
+      inspectFailures,
+    },
+    endpoint,
+    containers,
+    errors: errors.slice(0, MAX_ERRORS),
+  };
+}
+
+async function readSelf(
+  deps: SocketInventoryDeps,
+  errors: SocketInventoryError[],
+): Promise<SocketSelfInfo> {
+  let state: SelfIdentityState;
+  let reason: string | null;
+  try {
+    state = await deps.self.ensureResolved();
+    reason = deps.self.getUnresolvedReason();
+  } catch (error) {
+    const message = `Self identification failed: ${getErrorMessage(error, 'unknown error')}`;
+    errors.push({ stage: 'self-identity', message: safeText(message, MAX_STATUS) });
+    return { state: 'unresolved', reason: safeText(message, MAX_STATUS), containerId: null, containerName: null, bindMounts: null };
+  }
+  if (state !== 'resolved') {
+    return {
+      state,
+      reason: reason ? safeText(reason, MAX_STATUS) : null,
+      containerId: null,
+      containerName: null,
+      bindMounts: null,
+    };
+  }
+  const identity = deps.self.getIdentity();
+  let bindMounts: Array<{ source: string; destination: string }> | null = null;
+  try {
+    bindMounts = await deps.self.getBindMounts();
+  } catch (error) {
+    errors.push({
+      stage: 'self-identity',
+      message: safeText(`Could not read Sencho's own bind mounts: ${getErrorMessage(error, 'unknown error')}`, MAX_STATUS),
+    });
+  }
+  return {
+    state,
+    reason: reason ? safeText(reason, MAX_STATUS) : null,
+    containerId: identity.containerId,
+    containerName: identity.containerName,
+    bindMounts: bindMounts?.map(mount => ({
+      source: bound(mount.source, MAX_PATH),
+      destination: bound(mount.destination, MAX_PATH),
+    })) ?? null,
+  };
+}
+
+/** Collect one node-scoped snapshot. Throws when the container list itself cannot be read. */
+export async function loadSocketInventory(
+  nodeId: number,
+  deps: SocketInventoryDeps = defaultDeps(nodeId),
+): Promise<SocketInventory> {
+  const started = deps.now();
+  const errors: SocketInventoryError[] = [];
+  let listing: SocketInventoryListResult;
+  try {
+    listing = await deps.docker.listContainersForSocketInventory(MAX_INVENTORY_CONTAINERS);
+  } catch (error) {
+    const message = getErrorMessage(error, 'Docker list failed');
+    console.error('[SocketInventory] Container list failed on node %d: %s', nodeId, errorMessageForLog(error));
+    throw new SocketInventoryUnavailableError(message);
+  }
+  const { rows, listedContainers, truncated } = listing;
+
+  const self = await readSelf(deps, errors);
+  const endpoint = describeDockerEndpoint(process.env.DOCKER_HOST);
+
+  let endpointProvider: DockerEndpointProvider | { state: 'error'; reason: string };
+  if (endpoint.transport === 'tcp') {
+    try {
+      endpointProvider = await deps.resolveEndpointProvider();
+    } catch (error) {
+      const reason = `The Docker endpoint provider lookup failed: ${getErrorMessage(error, 'unknown error')}`;
+      errors.push({ stage: 'endpoint-provider', message: safeText(reason, MAX_STATUS) });
+      endpointProvider = { state: 'error', reason };
+    }
+  } else {
+    endpointProvider = { state: 'none', reason: 'The Docker endpoint is not a tcp address.' };
+  }
+
+  return buildSocketInventory({
+    nodeId,
+    node: deps.node(nodeId),
+    instanceIdentity: deps.instanceIdentity(),
+    listedContainers,
+    truncated,
+    containers: rows,
+    self,
+    endpoint,
+    endpointProvider,
+    generatedAt: deps.now(),
+    durationMs: Math.max(0, deps.now() - started),
+    errors,
+  });
+}
