@@ -17,6 +17,7 @@ import { useFleetOverview } from './FleetView/hooks/useFleetOverview';
 import { useFleetDossierExport } from './FleetView/hooks/useFleetDossierExport';
 import { useTopologyPreferences } from '@/hooks/useTopologyPreferences';
 import { Button } from '@/components/ui/button';
+import { IconBusyButton } from '@/components/ui/icon-busy-button';
 import { Tabs, TabsContent } from '@/components/ui/tabs';
 import { useAuth } from '@/context/AuthContext';
 import { useNodes } from '@/context/NodeContext';
@@ -202,21 +203,20 @@ export function FleetView({
                         <TooltipProvider>
                             <Tooltip>
                                 <TooltipTrigger asChild>
-                                    <Button
+                                    <IconBusyButton
                                         variant="outline"
                                         size="sm"
+                                        icon={RefreshCw}
                                         onClick={() => {
                                             void overview.fetchOverview(true);
                                             // Overview refreshes skip the fleet-wide readiness fan-out;
                                             // returning to the tab re-checks a stale result instead.
                                             if (activeTab === 'readiness') setReadinessRefreshKey(key => key + 1);
                                         }}
-                                        disabled={refreshing}
+                                        pending={refreshing}
                                         className="h-9 w-9 p-0"
                                         aria-label="Refresh"
-                                    >
-                                        <RefreshCw className={`w-4 h-4 ${refreshing ? 'animate-spin' : ''}`} />
-                                    </Button>
+                                    />
                                 </TooltipTrigger>
                                 <TooltipContent>Refresh</TooltipContent>
                             </Tooltip>

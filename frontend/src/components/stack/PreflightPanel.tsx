@@ -11,6 +11,7 @@ import { formatTimeAgo } from '@/lib/relativeTime';
 import { useNodes } from '@/context/NodeContext';
 import { preflightFingerprint, useStackDismiss } from '@/hooks/useStackDismiss';
 import { Button } from '@/components/ui/button';
+import { IconBusyButton } from '@/components/ui/icon-busy-button';
 import { Label } from '@/components/ui/label';
 import { Combobox, type ComboboxOption } from '@/components/ui/combobox';
 import { Modal, ModalHeader, ModalBody, ModalFooter, ConfirmModal } from '@/components/ui/modal';
@@ -55,6 +56,7 @@ const LABEL_CLASS = 'font-mono text-[10px] uppercase tracking-[0.18em] text-stat
 const MODAL_FIELD_LABEL = LABEL_CLASS;
 const ACTION_CLASS =
   'inline-flex items-center gap-1 font-mono text-[10px] uppercase tracking-wide text-stat-subtitle hover:text-brand transition-colors disabled:opacity-40';
+const ACTION_BUTTON_CLASS = cn(ACTION_CLASS, 'h-auto rounded-none p-0 text-[10px] font-normal hover:bg-transparent [&_svg]:size-3');
 const CARD_CLASS = 'rounded-lg border px-3 py-2.5';
 
 const SEVERITY_META: Record<PreflightSeverity, { label: string; icon: LucideIcon; tone: string }> = {
@@ -392,15 +394,15 @@ export default function PreflightPanel({ stackName, canEdit = false }: { stackNa
     <div data-testid="preflight-panel" className="flex-1 min-h-0 overflow-y-auto px-3 py-3 flex flex-col gap-4">
       <div className="flex items-center justify-between gap-2">
         <span className={LABEL_CLASS}>compose doctor</span>
-        <button
-          type="button"
+        <IconBusyButton
           data-testid="preflight-run-btn"
+          variant="ghost"
+          icon={RefreshCw}
+          label="run preflight"
+          pending={busy}
           onClick={runPreflight}
-          disabled={busy}
-          className={ACTION_CLASS}
-        >
-          <RefreshCw className={cn('h-3 w-3', running && 'animate-spin')} strokeWidth={1.5} /> run preflight
-        </button>
+          className={ACTION_BUTTON_CLASS}
+        />
       </div>
 
       {loadError ? (
