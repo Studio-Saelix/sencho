@@ -144,6 +144,27 @@ describe('describeDockerEndpoint', () => {
     });
     expect(describeDockerEndpoint('fd://').transport).toBe('unknown');
   });
+
+  it('describes the socket the active client picked when DOCKER_HOST is unset', () => {
+    expect(describeDockerEndpoint(undefined, {
+      defaultSocketPath: '/home/operator/.docker/run/docker.sock',
+    })).toMatchObject({
+      transport: 'unix',
+      address: 'unix:///home/operator/.docker/run/docker.sock',
+      socketPath: '/home/operator/.docker/run/docker.sock',
+      addressSource: 'default',
+    });
+  });
+
+  it('lets an explicit DOCKER_HOST win over the client default', () => {
+    expect(describeDockerEndpoint('unix:///run/explicit.sock', {
+      defaultSocketPath: '/home/operator/.docker/run/docker.sock',
+    })).toMatchObject({
+      transport: 'unix',
+      socketPath: '/run/explicit.sock',
+      addressSource: 'env',
+    });
+  });
 });
 
 describe('buildSocketInventory classification', () => {
@@ -460,6 +481,83 @@ describe('buildSocketInventory classification', () => {
     expect(inventory.status).toBe('partial');
   });
 
+  it.each(['/var/run/docker.sock', '/run/docker.sock'])(
+    'does not call a canonical destination at %s direct when its host source is a forwarder',
+    destination => {
+      const inventory = buildSocketInventory(input({
+        endpoint: describeDockerEndpoint(`unix://${destination}`),
+        self: {
+          state: 'resolved',
+          reason: null,
+          containerId: 'sencho1',
+          containerName: 'sencho',
+          bindMounts: [{ source: '/run/forwarder.sock', destination }],
+        },
+      }));
+      expect(inventory.endpoint).toMatchObject({
+        detection: 'undetermined',
+        provider: { kind: 'unknown', socketBindSource: '/run/forwarder.sock' },
+      });
+      expect(inventory.endpoint.evidence).toContain('socket-destination-default-source-custom');
+      expect(inventory.status).toBe('partial');
+    },
+  );
+
+  it('keeps a canonical destination direct when Sencho mounts the same host socket through', () => {
+    const inventory = buildSocketInventory(input({
+      endpoint: describeDockerEndpoint('unix:///var/run/docker.sock'),
+      self: {
+        state: 'resolved',
+        reason: null,
+        containerId: 'sencho1',
+        containerName: 'sencho',
+        bindMounts: [{ source: '/var/run/docker.sock', destination: '/var/run/docker.sock' }],
+      },
+    }));
+    expect(inventory.endpoint).toMatchObject({
+      detection: 'detected',
+      provider: { kind: 'direct-socket', socketBindSource: '/var/run/docker.sock' },
+    });
+    expect(inventory.status).toBe('complete');
+  });
+
+  it('reports the client default socket when it differs from the conventional path', () => {
+    const inventory = buildSocketInventory(input({
+      endpoint: describeDockerEndpoint(undefined, {
+        defaultSocketPath: '/home/operator/.docker/run/docker.sock',
+      }),
+      self: {
+        state: 'none',
+        reason: null,
+        containerId: null,
+        containerName: null,
+        bindMounts: null,
+      },
+    }));
+    expect(inventory.endpoint).toMatchObject({
+      transport: 'unix',
+      address: 'unix:///home/operator/.docker/run/docker.sock',
+      addressSource: 'default',
+      detection: 'undetermined',
+    });
+    expect(inventory.status).toBe('partial');
+  });
+
+  it('stays undetermined for a canonical destination inside a container with no visible bind', () => {
+    const inventory = buildSocketInventory(input({
+      endpoint: describeDockerEndpoint('unix:///var/run/docker.sock'),
+      self: {
+        state: 'resolved',
+        reason: null,
+        containerId: 'sencho1',
+        containerName: 'sencho',
+        bindMounts: null,
+      },
+    }));
+    expect(inventory.endpoint.detection).toBe('undetermined');
+    expect(inventory.status).toBe('partial');
+  });
+
   it('marks a failed inspect as undetermined and partial, not as absent', () => {
     const inventory = buildSocketInventory(input({
       containers: [proxyRow({ id: 'broken1', inspectFailed: true, mounts: [], env: [] })],
@@ -513,7 +611,102 @@ describe('buildSocketInventory classification', () => {
     expect(inventory.status).toBe('partial');
   });
 
-  it('reports a tcp provider that may be outside a truncated inventory as partial', () => {
+  it('retains a resolver-proven provider with an unknown image and no socket hint', () => {
+    const inventory = buildSocketInventory(input({
+      listedContainers: 1,
+      containers: [row({ id: 'gateway1', name: 'gateway', image: 'alpine:3' })],
+      endpoint: describeDockerEndpoint('tcp://gateway:8999'),
+      endpointProvider: {
+        state: 'resolved',
+        provider: {
+          containerId: 'gateway1',
+          containerName: 'gateway',
+          project: null,
+          service: null,
+          workingDir: null,
+          socketBindSource: null,
+        },
+      },
+    }));
+    expect(inventory.containers).toHaveLength(1);
+    expect(inventory.containers[0]).toMatchObject({
+      id: 'gateway1',
+      role: 'undetermined',
+      classification: 'unknown',
+      isSenchoEndpointProvider: true,
+    });
+    expect(inventory.endpoint).toMatchObject({
+      detection: 'detected',
+      provider: { kind: 'container', containerId: 'gateway1' },
+    });
+    expect(inventory.status).toBe('partial');
+  });
+
+  it('retains a resolver-proven provider that only mounts a custom socket path', () => {
+    const inventory = buildSocketInventory(input({
+      containers: [row({
+        id: 'custom-provider',
+        name: 'gateway',
+        image: 'alpine:3',
+        mounts: [socketMount('/run/proxy.sock', '/run/proxy.sock', true)],
+      })],
+      endpoint: describeDockerEndpoint('tcp://gateway:8999'),
+      endpointProvider: {
+        state: 'resolved',
+        provider: {
+          containerId: 'custom-provider',
+          containerName: 'gateway',
+          project: null,
+          service: null,
+          workingDir: null,
+          socketBindSource: '/run/proxy.sock',
+        },
+      },
+    }));
+    expect(inventory.containers).toHaveLength(1);
+    expect(inventory.containers[0]).toMatchObject({
+      role: 'undetermined',
+      isSenchoEndpointProvider: true,
+    });
+    expect(inventory.status).toBe('partial');
+  });
+
+  it('attributes a recreated provider by Compose identity even without image or port hints', () => {
+    const inventory = buildSocketInventory(input({
+      containers: [row({
+        id: 'new-provider-id',
+        name: 'renamed-gateway',
+        image: 'alpine:3',
+        composeProject: 'gateway',
+        service: 'proxy',
+        labels: {
+          'com.docker.compose.project': 'gateway',
+          'com.docker.compose.service': 'proxy',
+        },
+      })],
+      endpoint: describeDockerEndpoint('tcp://gateway:8999'),
+      endpointProvider: {
+        state: 'resolved',
+        provider: {
+          containerId: 'stale-provider-id',
+          containerName: 'gateway',
+          project: 'gateway',
+          service: 'proxy',
+          workingDir: '/srv/gateway',
+          socketBindSource: null,
+        },
+      },
+    }));
+    expect(inventory.containers[0]).toMatchObject({
+      id: 'new-provider-id',
+      role: 'undetermined',
+      isSenchoEndpointProvider: true,
+    });
+    expect(inventory.endpoint.provider.containerId).toBe('new-provider-id');
+    expect(inventory.status).toBe('partial');
+  });
+
+  it('reports a tcp provider that is missing from the inventory as partial', () => {
     const provider = {
       containerId: 'outside-bound',
       containerName: 'proxy-outside',
@@ -535,13 +728,14 @@ describe('buildSocketInventory classification', () => {
     expect(truncated.status).toBe('partial');
     expect(truncated.errors.some(error => error.stage === 'endpoint-provider')).toBe(true);
 
-    // Without truncation every container was considered, so a provider that is
-    // not a socket target is named by the endpoint block but is not a gap.
+    // A provider that disappears between collection and attribution is a
+    // genuine evidence gap even when the list itself was not truncated.
     const complete = buildSocketInventory(input({
       endpoint: describeDockerEndpoint('tcp://proxy:2375'),
       endpointProvider: { state: 'resolved', provider },
     }));
-    expect(complete.status).toBe('complete');
+    expect(complete.status).toBe('partial');
+    expect(complete.errors.some(error => error.stage === 'endpoint-provider')).toBe(true);
   });
 
   it('reports an unmatched tcp endpoint as undetermined with its reason', () => {
@@ -647,6 +841,123 @@ describe('buildSocketInventory classification', () => {
   });
 });
 
+describe('buildSocketInventory response bounds', () => {
+  function labels(count: number): Record<string, string> {
+    return Object.fromEntries(Array.from({ length: count }, (_, index) => [`label-${index}`, `value-${index}`]));
+  }
+
+  function publishedPorts(count: number) {
+    return Array.from({ length: count }, (_, index) => ({
+      privatePort: 1000 + index,
+      publicPort: 2000 + index,
+      ip: index === count - 1 ? '' : '127.0.0.1',
+      protocol: 'tcp',
+    }));
+  }
+
+  function network(name: string) {
+    return { name, id: null, ipAddress: null };
+  }
+
+  it.each<[number, boolean]>([
+    [63, false],
+    [64, false],
+    [65, true],
+  ])('keeps %i labels complete only up to the response cap', (count, truncated) => {
+    const inventory = buildSocketInventory(input({
+      containers: [proxyRow({ labels: labels(count) })],
+    }));
+    const [container] = inventory.containers;
+    expect(container.labels).toHaveLength(Math.min(count, 64));
+    expect(container.metadataTruncated).toBe(truncated);
+    expect(inventory.status).toBe(truncated ? 'partial' : 'complete');
+  });
+
+  it.each<[number, boolean]>([
+    [7, false],
+    [8, false],
+    [9, true],
+  ])('marks %i socket mounts complete only up to the response cap', (count, truncated) => {
+    const mounts = Array.from({ length: count }, () => socketMount(SOCKET, SOCKET, true));
+    // The ninth, omitted mount is writable: classification must still read it.
+    if (count > 8) mounts[count - 1] = socketMount(SOCKET, SOCKET, false);
+    const inventory = buildSocketInventory(input({
+      containers: [proxyRow({ mounts })],
+    }));
+    const [container] = inventory.containers;
+    expect(container.socketMounts).toHaveLength(Math.min(count, 8));
+    expect(container.metadataTruncated).toBe(truncated);
+    expect(inventory.status).toBe(truncated ? 'partial' : 'complete');
+    if (truncated) expect(container.evidence).toContain('socket-mount-writable');
+  });
+
+  it.each<[number, boolean]>([
+    [15, false],
+    [16, false],
+    [17, true],
+  ])('marks %i published ports complete only up to the response cap', (count, truncated) => {
+    const inventory = buildSocketInventory(input({
+      containers: [proxyRow({ ports: publishedPorts(count) })],
+    }));
+    const [container] = inventory.containers;
+    expect(container.publishedPorts).toHaveLength(Math.min(count, 16));
+    expect(container.metadataTruncated).toBe(truncated);
+    expect(inventory.status).toBe(truncated ? 'partial' : 'complete');
+  });
+
+  it.each<[number, boolean]>([
+    [15, false],
+    [16, false],
+    [17, true],
+  ])('marks %i networks complete only up to the response cap', (count, truncated) => {
+    const inventory = buildSocketInventory(input({
+      containers: [proxyRow({
+        networks: Array.from({ length: count }, (_, index) => network(`net-${index}`)),
+      })],
+    }));
+    const [container] = inventory.containers;
+    expect(container.networks).toHaveLength(Math.min(count, 16));
+    expect(container.metadataTruncated).toBe(truncated);
+    expect(inventory.status).toBe(truncated ? 'partial' : 'complete');
+  });
+
+  it.each<[number, boolean]>([
+    [15, false],
+    [16, false],
+    [17, true],
+  ])('marks %i exposed ports complete only up to the response cap', (count, truncated) => {
+    const inventory = buildSocketInventory(input({
+      containers: [proxyRow({
+        exposedPorts: Array.from({ length: count }, (_, index) => `${1000 + index}/tcp`),
+      })],
+    }));
+    const [container] = inventory.containers;
+    expect(container.exposedPorts).toHaveLength(Math.min(count, 16));
+    expect(container.metadataTruncated).toBe(truncated);
+    expect(inventory.status).toBe(truncated ? 'partial' : 'complete');
+    if (truncated) {
+      expect(inventory.errors.some(error => error.stage === 'container-metadata')).toBe(true);
+    }
+  });
+
+  it('bounds untrusted port ip and protocol strings', () => {
+    const inventory = buildSocketInventory(input({
+      containers: [proxyRow({
+        ports: [{
+          privatePort: 8080,
+          publicPort: 8080,
+          ip: `10.0.0.1${'x'.repeat(5000)}`,
+          protocol: `tcp${'y'.repeat(5000)}`,
+        }],
+      })],
+    }));
+    const [port] = inventory.containers[0].publishedPorts;
+    expect(port.ip.length).toBeLessThanOrEqual(64);
+    expect(port.protocol.length).toBeLessThanOrEqual(32);
+    expect(port.allInterfaces).toBe(false);
+  });
+});
+
 describe('loadSocketInventory', () => {
   function deps(overrides: Partial<SocketInventoryDeps> = {}): SocketInventoryDeps {
     return {
@@ -654,6 +965,7 @@ describe('loadSocketInventory', () => {
         listContainersForSocketInventory: vi.fn().mockResolvedValue({
           rows: [], listedContainers: 0, truncated: false,
         }),
+        getDockerSocketPath: vi.fn().mockResolvedValue(null),
       },
       self: {
         ensureResolved: vi.fn().mockResolvedValue('none'),
@@ -683,6 +995,7 @@ describe('loadSocketInventory', () => {
     const depsWithFailure = deps({
       docker: {
         listContainersForSocketInventory: vi.fn().mockRejectedValue(new Error('socket refused')),
+        getDockerSocketPath: vi.fn().mockResolvedValue(null),
       },
     });
     await expect(loadSocketInventory(1, depsWithFailure))
@@ -700,7 +1013,10 @@ describe('loadSocketInventory', () => {
       truncated: true,
     });
     const inventory = await loadSocketInventory(1, deps({
-      docker: { listContainersForSocketInventory: list },
+      docker: {
+        listContainersForSocketInventory: list,
+        getDockerSocketPath: vi.fn().mockResolvedValue(null),
+      },
     }));
     expect(list).toHaveBeenCalledWith(MAX_INVENTORY_CONTAINERS);
     expect(inventory.truncated).toBe(true);
@@ -720,6 +1036,45 @@ describe('loadSocketInventory', () => {
       process.env.DOCKER_HOST = 'tcp://proxy:2375';
       await loadSocketInventory(1, deps({ resolveEndpointProvider: resolve }));
       expect(resolve).toHaveBeenCalledTimes(1);
+    } finally {
+      if (original === undefined) delete process.env.DOCKER_HOST;
+      else process.env.DOCKER_HOST = original;
+    }
+  });
+
+  it('describes the socket the active Docker client dials, not an assumed path', async () => {
+    const socketPath = vi.fn().mockResolvedValue('/home/operator/.docker/run/docker.sock');
+    const original = process.env.DOCKER_HOST;
+    try {
+      delete process.env.DOCKER_HOST;
+      const inventory = await loadSocketInventory(1, deps({
+        docker: {
+          listContainersForSocketInventory: vi.fn().mockResolvedValue({
+            rows: [], listedContainers: 0, truncated: false,
+          }),
+          getDockerSocketPath: socketPath,
+        },
+      }));
+      expect(socketPath).toHaveBeenCalledTimes(1);
+      expect(inventory.endpoint).toMatchObject({
+        address: 'unix:///home/operator/.docker/run/docker.sock',
+        addressSource: 'default',
+      });
+
+      socketPath.mockClear();
+      process.env.DOCKER_HOST = 'unix:///run/explicit.sock';
+      const explicit = await loadSocketInventory(1, deps({
+        docker: {
+          listContainersForSocketInventory: vi.fn().mockResolvedValue({
+            rows: [], listedContainers: 0, truncated: false,
+          }),
+          getDockerSocketPath: socketPath,
+        },
+      }));
+      expect(explicit.endpoint).toMatchObject({
+        address: 'unix:///run/explicit.sock',
+        addressSource: 'env',
+      });
     } finally {
       if (original === undefined) delete process.env.DOCKER_HOST;
       else process.env.DOCKER_HOST = original;

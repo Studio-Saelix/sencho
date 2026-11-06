@@ -440,6 +440,37 @@ class DockerController {
     return this.docker;
   }
 
+  /**
+   * The unix socket the active Docker client will dial. Dockerode resolves an
+   * unset `DOCKER_HOST` lazily (Docker Desktop's `~/.docker/run/docker.sock` can
+   * win over `/var/run/docker.sock`), so discovery must ask the client instead
+   * of assuming the conventional path. Returns null for tcp/ssh clients and
+   * when the modem cannot be inspected.
+   */
+  public async getDockerSocketPath(): Promise<string | null> {
+    const modem = (this.docker as unknown as {
+      modem?: {
+        socketPath?: string | (() => string | Promise<string>);
+        getSocketPath?: () => Promise<string | undefined>;
+      };
+    }).modem;
+    if (!modem) return null;
+    try {
+      if (typeof modem.getSocketPath === 'function') {
+        const resolved = await modem.getSocketPath();
+        return typeof resolved === 'string' && resolved.length > 0 ? resolved : null;
+      }
+      if (typeof modem.socketPath === 'string') return modem.socketPath || null;
+      if (typeof modem.socketPath === 'function') {
+        const resolved = await modem.socketPath();
+        return typeof resolved === 'string' && resolved.length > 0 ? resolved : null;
+      }
+    } catch {
+      return null;
+    }
+    return null;
+  }
+
   /** Drop the cached client for this node so the next lookup opens a new connection. */
   public resetDockerConnection(): void {
     NodeRegistry.getInstance().resetDockerConnection(this.nodeId);
@@ -2436,7 +2467,7 @@ class DockerController {
           // An empty inspect section is not more truthful than the list data:
           // keep the list-level ports and networks when inspect has none.
           const inspectedPorts = normalizeInspectPorts(asRecord(info.NetworkSettings)?.Ports, ports);
-          if (inspectedPorts.length > 0) ports = inspectedPorts;
+          if (inspectedPorts.ports.length > 0) ports = inspectedPorts.ports;
           const inspectedNetworks = normalizeDockerNetworks(asRecord(info.NetworkSettings)?.Networks);
           if (inspectedNetworks.length > 0) networks = inspectedNetworks;
           env = normalizeDockerEnv(config?.Env);
@@ -2447,10 +2478,14 @@ class DockerController {
           const rawEnv = Array.isArray(config?.Env) ? config.Env.length : 0;
           const rawNetworks = Object.keys(asRecord(asRecord(info.NetworkSettings)?.Networks) ?? {}).length;
           const rawExposed = Object.keys(asRecord(config?.ExposedPorts) ?? {}).length;
+          const inspectPortBindings = Object.values(asRecord(asRecord(info.NetworkSettings)?.Ports) ?? {})
+            .reduce<number>((sum, entry) => sum + (Array.isArray(entry) ? entry.length : 0), 0);
           const rawPorts = Object.keys(asRecord(asRecord(info.NetworkSettings)?.Ports) ?? {}).length;
-          metadataTruncated = metadataTruncated || !Array.isArray(info.Mounts)
+          metadataTruncated = metadataTruncated || inspectedPorts.truncated
+            || !Array.isArray(info.Mounts)
             || rawMounts > 64 || rawLabels > 256 || rawEnv > 256
-            || rawNetworks > 32 || rawExposed > 64 || rawPorts > 64;
+            || rawNetworks > 32 || rawExposed > 64 || rawPorts > 64
+            || inspectPortBindings > 64;
           const hostConfig = asRecord(info.HostConfig);
           privileged = hostConfig?.Privileged === true;
           readonlyRootfs = hostConfig?.ReadonlyRootfs === true;
@@ -3946,15 +3981,26 @@ function normalizeDockerPorts(value: unknown): SocketInventoryPortRow[] {
   return ports;
 }
 
+interface InspectedPorts {
+  ports: SocketInventoryPortRow[];
+  /** A per-port binding list or the overall port list exceeded its bound. */
+  truncated: boolean;
+}
+
 function normalizeInspectPorts(
   value: unknown,
   fallback: SocketInventoryPortRow[],
-): SocketInventoryPortRow[] {
+): InspectedPorts {
   const bindings = asRecord(value);
-  if (!bindings) return fallback;
+  if (!bindings) return { ports: fallback, truncated: false };
+  const entries = Object.entries(bindings);
   const ports: SocketInventoryPortRow[] = [];
-  for (const [spec, rawBindings] of Object.entries(bindings)) {
-    if (ports.length >= 64) break;
+  let truncated = false;
+  for (const [spec, rawBindings] of entries) {
+    if (ports.length >= 64) {
+      truncated = true;
+      break;
+    }
     const slash = spec.lastIndexOf('/');
     const privatePort = Number.parseInt(slash > 0 ? spec.slice(0, slash) : spec, 10);
     const protocol = slash > 0 ? spec.slice(slash + 1) : 'tcp';
@@ -3969,7 +4015,12 @@ function normalizeInspectPorts(
       });
       continue;
     }
+    if (targets.length > 8) truncated = true;
     for (const binding of targets.slice(0, 8)) {
+      if (ports.length >= 64) {
+        truncated = true;
+        break;
+      }
       const host = asRecord(binding);
       // Docker reports the host port as a string; an empty one means exposed only.
       const rawPublic = host?.HostPort;
@@ -3984,7 +4035,7 @@ function normalizeInspectPorts(
       });
     }
   }
-  return ports;
+  return { ports, truncated };
 }
 
 function normalizeDockerExposedPorts(value: unknown): string[] {

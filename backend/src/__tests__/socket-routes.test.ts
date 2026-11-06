@@ -1,9 +1,11 @@
 /**
- * GET /api/socket/inventory: auth, node:read, node-scoped dispatch, and the
- * 503/504 envelopes that keep an unreadable node from looking like empty data.
+ * GET /api/socket/inventory: auth, node:read, node-scoped dispatch, the
+ * 503/504 envelopes that keep an unreadable node from looking like empty data,
+ * and both remote transports (proxy and Pilot) preserving producer identity.
  */
-import { describe, it, expect, beforeAll, afterAll, beforeEach, vi } from 'vitest';
+import { describe, it, expect, beforeAll, afterAll, beforeEach, afterEach, vi } from 'vitest';
 import request from 'supertest';
+import http from 'http';
 import bcrypt from 'bcrypt';
 import { setupTestDb, cleanupTestDb, loginAsTestAdmin } from './helpers/setupTestDb';
 import { requestedTimeoutBudgets, resetRequestedTimeoutBudgets } from './helpers/fastTimeouts';
@@ -24,9 +26,18 @@ let tmpDir: string;
 let app: import('express').Express;
 let DatabaseService: typeof import('../services/DatabaseService').DatabaseService;
 let SocketInventoryUnavailableError: typeof import('../services/socket/SocketInventoryService').SocketInventoryUnavailableError;
+let PilotTunnelManager: typeof import('../services/PilotTunnelManager').PilotTunnelManager;
 let adminCookie: string;
 let viewerCookie: string;
 let deployerCookie: string;
+let remoteServer: http.Server;
+let remoteBase: string;
+let remoteNodeId: number;
+let pilotNodeId: number;
+let deniedNodeId: number;
+let legacyNodeId: number;
+let unreachableNodeId: number;
+const remoteHops: string[] = [];
 
 const inventory = {
   schemaVersion: 1,
@@ -41,6 +52,12 @@ const inventory = {
   truncated: false,
 };
 
+const remoteInventory = {
+  ...inventory,
+  status: 'partial',
+  node: { id: 2, name: 'remote', type: 'remote', mode: 'proxy', instanceIdentity: 'remote-instance' },
+};
+
 async function loginAs(username: string, password: string): Promise<string> {
   const res = await request(app).post('/api/auth/login').send({ username, password });
   const cookies = res.headers['set-cookie'] as string | string[];
@@ -51,6 +68,7 @@ beforeAll(async () => {
   tmpDir = await setupTestDb();
   ({ DatabaseService } = await import('../services/DatabaseService'));
   ({ SocketInventoryUnavailableError } = await import('../services/socket/SocketInventoryService'));
+  ({ PilotTunnelManager } = await import('../services/PilotTunnelManager'));
   ({ app } = await import('../index'));
   adminCookie = await loginAsTestAdmin(app);
 
@@ -60,14 +78,66 @@ beforeAll(async () => {
   }
   viewerCookie = await loginAs('socket-viewer', 'socketpass');
   deployerCookie = await loginAs('socket-deployer', 'socketpass');
+
+  remoteServer = http.createServer((req, res) => {
+    const path = req.url ?? '';
+    remoteHops.push(path);
+    res.setHeader('content-type', 'application/json');
+    if (path.endsWith('/api/meta')) {
+      res.end(JSON.stringify({
+        version: '1.0.0',
+        capabilities: ['cross-node-rbac', 'scoped-stack-auth-evidence'],
+      }));
+      return;
+    }
+    if (path.startsWith('/denied/')) {
+      res.statusCode = 403;
+      res.end(JSON.stringify({ error: 'remote denied' }));
+      return;
+    }
+    if (path.startsWith('/legacy/')) {
+      res.statusCode = 404;
+      res.end(JSON.stringify({ error: 'API endpoint not found' }));
+      return;
+    }
+    if (path.startsWith('/remote/api/socket/inventory')) {
+      res.end(JSON.stringify(remoteInventory));
+      return;
+    }
+    res.end(JSON.stringify({ target: true }));
+  });
+  await new Promise<void>(resolve => remoteServer.listen(0, '127.0.0.1', resolve));
+  const port = (remoteServer.address() as import('net').AddressInfo).port;
+  remoteBase = `http://127.0.0.1:${port}`;
+  const addRemote = (name: string, mode: 'proxy' | 'pilot_agent' = 'proxy') => db.addNode({
+    name, type: 'remote', mode, compose_dir: '/unused', is_default: false,
+    api_url: mode === 'proxy' ? `${remoteBase}/${name}` : '', api_token: 'fixture-token',
+  });
+  remoteNodeId = addRemote('remote');
+  remoteInventory.node.id = remoteNodeId;
+  deniedNodeId = addRemote('denied');
+  legacyNodeId = addRemote('legacy');
+  pilotNodeId = addRemote('pilot', 'pilot_agent');
+  unreachableNodeId = db.addNode({
+    name: 'unreachable', type: 'remote', mode: 'proxy', compose_dir: '/unused', is_default: false,
+    api_url: 'http://127.0.0.1:1/unreachable', api_token: 'fixture-token',
+  });
 });
 
-afterAll(() => cleanupTestDb(tmpDir));
+afterAll(async () => {
+  await new Promise<void>(resolve => remoteServer.close(() => resolve()));
+  cleanupTestDb(tmpDir);
+});
 
 beforeEach(() => {
   loadSocketInventoryMock.mockReset();
   loadSocketInventoryMock.mockResolvedValue(inventory);
   resetRequestedTimeoutBudgets();
+  remoteHops.length = 0;
+});
+
+afterEach(() => {
+  vi.restoreAllMocks();
 });
 
 describe('GET /api/socket/inventory', () => {
@@ -126,5 +196,66 @@ describe('GET /api/socket/inventory', () => {
       .get('/api/socket/inventory')
       .set('Cookie', adminCookie);
     expect(res.status).toBe(500);
+  });
+});
+
+describe('GET /api/socket/inventory remote transports', () => {
+  it('routes a proxy request to that node and preserves its producer identity and partial state', async () => {
+    const res = await request(app)
+      .get('/api/socket/inventory')
+      .set('Cookie', adminCookie)
+      .set('x-node-id', String(remoteNodeId));
+    expect(res.status).toBe(200);
+    expect(res.body).toMatchObject({
+      status: 'partial',
+      node: { id: remoteNodeId, instanceIdentity: 'remote-instance' },
+    });
+    expect(remoteHops).toContain('/remote/api/socket/inventory');
+    expect(loadSocketInventoryMock).not.toHaveBeenCalled();
+  });
+
+  it('routes a Pilot request through the loopback tunnel target, never local discovery', async () => {
+    const tunnel = vi.spyOn(PilotTunnelManager.getInstance(), 'getLoopbackUrl')
+      .mockReturnValue(`${remoteBase}/remote`);
+    const res = await request(app)
+      .get('/api/socket/inventory')
+      .set('Cookie', adminCookie)
+      .set('x-node-id', String(pilotNodeId));
+    expect(tunnel).toHaveBeenCalledWith(pilotNodeId);
+    expect(res.status).toBe(200);
+    expect(res.body.node).toMatchObject({ instanceIdentity: 'remote-instance' });
+    expect(res.body.status).toBe('partial');
+    expect(remoteHops).toContain('/remote/api/socket/inventory');
+    expect(loadSocketInventoryMock).not.toHaveBeenCalled();
+  });
+
+  it('keeps a remote denial distinct from a clean result', async () => {
+    const res = await request(app)
+      .get('/api/socket/inventory')
+      .set('Cookie', adminCookie)
+      .set('x-node-id', String(deniedNodeId));
+    expect(res.status).toBe(403);
+    expect(res.body.error).toBe('remote denied');
+    expect(loadSocketInventoryMock).not.toHaveBeenCalled();
+  });
+
+  it('keeps an older node without the route from looking like empty discovery', async () => {
+    const res = await request(app)
+      .get('/api/socket/inventory')
+      .set('Cookie', adminCookie)
+      .set('x-node-id', String(legacyNodeId));
+    expect(res.status).toBe(404);
+    expect(res.body.containers).toBeUndefined();
+    expect(loadSocketInventoryMock).not.toHaveBeenCalled();
+  });
+
+  it('reports an unreachable node as a transport failure, not an empty inventory', async () => {
+    const res = await request(app)
+      .get('/api/socket/inventory')
+      .set('Cookie', adminCookie)
+      .set('x-node-id', String(unreachableNodeId));
+    expect(res.status).toBe(502);
+    expect(res.body.containers).toBeUndefined();
+    expect(loadSocketInventoryMock).not.toHaveBeenCalled();
   });
 });

@@ -486,9 +486,17 @@ components:
         address:
           type: string
           nullable: true
-          description: Credential-free display form of the configured endpoint.
+          description: Credential-free display form of the Docker client's endpoint. With `DOCKER_HOST` unset this is the socket the active client resolves, which can differ from `/var/run/docker.sock`.
         addressSource: { type: string, enum: [env, default] }
-        detection: { type: string, enum: [detected, undetermined, unsupported] }
+        detection:
+          type: string
+          enum: [detected, undetermined, unsupported]
+          description: >-
+            `detected` for a unix provider means the address is a canonical
+            socket and either Sencho runs outside a container or the observed
+            host bind source is itself canonical. A canonical destination
+            backed by a different host path stays `undetermined`, because a
+            proxy or forwarder can serve it.
         reason: { type: string, nullable: true }
         provider:
           type: object
@@ -628,7 +636,7 @@ components:
         inspectFailed: { type: boolean }
         metadataTruncated:
           type: boolean
-          description: A metadata list exceeded the inventory bound; a mount or proxy flag may be missing from this row.
+          description: A metadata list exceeded the collection or response bound; mounts, labels, ports, networks, or proxy flags may be missing from this row.
 
     SocketInventoryError:
       type: object

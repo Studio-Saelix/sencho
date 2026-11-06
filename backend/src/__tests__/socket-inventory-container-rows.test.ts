@@ -244,4 +244,45 @@ describe('listContainersForSocketInventory', () => {
     expect(row.exposedPorts).toHaveLength(64);
     expect(row.networks).toHaveLength(32);
   });
+
+  it('keeps eight bindings under one port and marks more than that incomplete', async () => {
+    const bindings = (count: number) => Array.from({ length: count }, (_, index) => ({
+      HostIp: '127.0.0.1', HostPort: String(9000 + index),
+    }));
+    for (const [count, expected, truncated] of [[8, 8, false], [9, 8, true]] as const) {
+      mockDocker.listContainers.mockResolvedValue([listed()]);
+      mockDocker.getContainer.mockReturnValue({
+        inspect: vi.fn().mockResolvedValue(inspected({
+          NetworkSettings: {
+            Ports: { '8080/tcp': bindings(count) },
+            Networks: { alpha_default: { NetworkID: 'net1', IPAddress: '172.18.0.2' } },
+          },
+        })),
+      });
+      const { rows: [row] } = await DockerController.getInstance(1).listContainersForSocketInventory();
+      expect(row.ports).toHaveLength(expected);
+      expect(row.metadataTruncated).toBe(truncated);
+    }
+  });
+
+  it('marks a binding list beyond the overall port cap incomplete', async () => {
+    const ports = Object.fromEntries(Array.from({ length: 9 }, (_, specIndex) => [
+      `${8080 + specIndex}/tcp`,
+      Array.from({ length: 8 }, (_, index) => ({
+        HostIp: '127.0.0.1', HostPort: String(9000 + specIndex * 10 + index),
+      })),
+    ]));
+    mockDocker.listContainers.mockResolvedValue([listed()]);
+    mockDocker.getContainer.mockReturnValue({
+      inspect: vi.fn().mockResolvedValue(inspected({
+        NetworkSettings: {
+          Ports: ports,
+          Networks: { alpha_default: { NetworkID: 'net1', IPAddress: '172.18.0.2' } },
+        },
+      })),
+    });
+    const { rows: [row] } = await DockerController.getInstance(1).listContainersForSocketInventory();
+    expect(row.ports).toHaveLength(64);
+    expect(row.metadataTruncated).toBe(true);
+  });
 });

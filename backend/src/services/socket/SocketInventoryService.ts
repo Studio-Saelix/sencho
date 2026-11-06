@@ -19,6 +19,7 @@ import { DatabaseService, type Node } from '../DatabaseService';
 import DockerController, {
   type SocketInventoryContainerRow,
   type SocketInventoryListResult,
+  type SocketInventoryMountRow,
 } from '../DockerController';
 import SelfIdentityService, { type SelfIdentityState } from '../SelfIdentityService';
 import {
@@ -220,7 +221,7 @@ export interface SocketInventoryBuildInput {
 }
 
 export interface SocketInventoryDeps {
-  docker: Pick<DockerController, 'listContainersForSocketInventory'>;
+  docker: Pick<DockerController, 'listContainersForSocketInventory' | 'getDockerSocketPath'>;
   self: Pick<
     SelfIdentityService,
     'ensureResolved' | 'getIdentity' | 'getBindMounts' | 'getUnresolvedReason'
@@ -264,25 +265,45 @@ function idMatches(a: string | null | undefined, b: string | null | undefined): 
 
 /**
  * Parse `DOCKER_HOST` for display. Credentials are dropped: a `tcp://user:pass@`
- * userinfo never leaves this function. An unset value is Docker's documented
- * unix default and is labelled as such, not as an observed setting.
+ * userinfo never leaves this function. An unset value follows the active Docker
+ * client: dockerode resolves it lazily (Docker Desktop's
+ * `~/.docker/run/docker.sock` can win over `/var/run/docker.sock`), so the
+ * caller may pass that resolved path. Without one, an unset value is Docker's
+ * documented unix default and is labelled as such, not as an observed setting.
  */
-export function describeDockerEndpoint(raw: string | undefined): SocketEndpointDescription {
+export function describeDockerEndpoint(
+  raw: string | undefined,
+  options: { defaultSocketPath?: string | null } = {},
+): SocketEndpointDescription {
   const value = raw?.trim();
   if (!value) {
+    const resolved = options.defaultSocketPath?.trim() || DEFAULT_DOCKER_SOCKET;
+    const npipe = /^\/\/\.\/pipe\//i.test(resolved) || /^npipe:/i.test(resolved);
+    if (npipe) {
+      return {
+        transport: 'npipe',
+        address: safeText(`npipe://${resolved.replace(/^npipe:\/\//i, '')}`, MAX_PATH),
+        host: null,
+        port: null,
+        socketPath: null,
+        addressSource: 'default',
+      };
+    }
     return {
       transport: 'unix',
-      address: `unix://${DEFAULT_DOCKER_SOCKET}`,
+      address: `unix://${bound(resolved, MAX_PATH)}`,
       host: null,
       port: null,
-      socketPath: DEFAULT_DOCKER_SOCKET,
+      socketPath: bound(resolved, MAX_PATH),
       addressSource: 'default',
     };
   }
   const unix = /^unix:\/\/(.*)$/i.exec(value);
   if (unix) {
     const rawPath = unix[1] ?? '';
-    const socketPath = rawPath.startsWith('/') ? rawPath : `/${rawPath}`;
+    const socketPath = rawPath === ''
+      ? (options.defaultSocketPath?.trim() || DEFAULT_DOCKER_SOCKET)
+      : rawPath.startsWith('/') ? rawPath : `/${rawPath}`;
     return {
       transport: 'unix',
       address: safeText(`unix://${socketPath}`, MAX_PATH),
@@ -355,11 +376,18 @@ interface ClassifiedRow {
   proxyEvidence: boolean;
 }
 
-function normalizeLabels(row: SocketInventoryContainerRow): SocketInventoryLabel[] {
+function normalizeLabels(row: SocketInventoryContainerRow): {
+  labels: SocketInventoryLabel[];
+  truncated: boolean;
+} {
   const labels: SocketInventoryLabel[] = [];
+  let truncated = false;
   for (const [key, value] of Object.entries(row.labels)) {
-    if (labels.length >= MAX_LABELS) break;
     if (!key) continue;
+    if (labels.length >= MAX_LABELS) {
+      truncated = true;
+      break;
+    }
     const redacted = redactLabelValue(key, value, false);
     labels.push({
       key: bound(key, MAX_LABEL_KEY),
@@ -367,43 +395,45 @@ function normalizeLabels(row: SocketInventoryContainerRow): SocketInventoryLabel
       ...(redacted.redacted ? { redacted: true } : {}),
     });
   }
-  return labels.sort((a, b) => a.key.localeCompare(b.key));
+  return { labels: labels.sort((a, b) => a.key.localeCompare(b.key)), truncated };
 }
 
-function normalizePorts(row: SocketInventoryContainerRow): SocketInventoryPort[] {
-  return row.ports
-    .filter(port => port.publicPort !== null)
-    .slice(0, MAX_PORTS)
-    .map(port => ({
+function normalizePorts(row: SocketInventoryContainerRow): {
+  ports: SocketInventoryPort[];
+  truncated: boolean;
+} {
+  const published = row.ports.filter(port => port.publicPort !== null);
+  return {
+    ports: published.slice(0, MAX_PORTS).map(port => ({
       privatePort: port.privatePort,
       publicPort: port.publicPort,
-      ip: port.ip,
+      // Docker reports both strings as untrusted metadata; bound them before
+      // they reach the API so one container cannot inflate the response.
+      ip: safeText(port.ip, 64),
       allInterfaces: bindsAllInterfaces(port.ip),
-      protocol: port.protocol,
-    }));
+      protocol: safeText(port.protocol, 32),
+    })),
+    truncated: published.length > MAX_PORTS,
+  };
 }
 
 /**
- * Socket mounts on a container. A `docker.sock` source or target is certain. A
- * mount that shares the host socket path Sencho itself uses is certain too,
- * which covers a proxy that listens on a custom unix socket path.
+ * Socket mounts on a container, before presentation truncation. A `docker.sock`
+ * source or target is certain. A mount that shares the host socket path Sencho
+ * itself uses is certain too, which covers a proxy that listens on a custom
+ * unix socket path. Classification reads the full list; the response projection
+ * bounds it and marks the row incomplete.
  */
 function socketMountsFor(
   row: SocketInventoryContainerRow,
   endpointBindSource: string | null,
-): SocketInventoryMount[] {
+): SocketInventoryMountRow[] {
   return row.mounts
     .filter(mount => mount.type === 'bind')
     .filter(mount => isDockerSocketPath(mount.source)
       || isDockerSocketPath(mount.destination)
       || (endpointBindSource !== null
-        && (mount.source === endpointBindSource || mount.destination === endpointBindSource)))
-    .slice(0, MAX_MOUNTS)
-    .map(mount => ({
-      source: mount.source ? safeText(mount.source, MAX_PATH) : null,
-      destination: mount.destination ? safeText(mount.destination, MAX_PATH) : null,
-      readOnly: mount.readOnly,
-    }));
+        && (mount.source === endpointBindSource || mount.destination === endpointBindSource)));
 }
 
 function classifyRow(
@@ -412,6 +442,12 @@ function classifyRow(
     endpointBindSource: string | null;
     senchoContainerId: string | null;
     senchoContainerName: string | null;
+    endpointProvider: {
+      containerId: string;
+      containerName: string;
+      project: string | null;
+      service: string | null;
+    } | null;
   },
 ): ClassifiedRow | null {
   const socketMounts = socketMountsFor(row, ctx.endpointBindSource);
@@ -421,6 +457,15 @@ function classifyRow(
   const infrastructureLabel = row.labels[SENCHO_INFRASTRUCTURE_LABEL] === 'true';
   const isSencho = idMatches(row.id, ctx.senchoContainerId)
     || (ctx.senchoContainerName !== null && row.name === ctx.senchoContainerName);
+  const provider = ctx.endpointProvider;
+  // Resolver-proven endpoint ownership is itself relevance: an unknown image,
+  // name, port set, or custom socket mount must never drop the provider row.
+  const isEndpointProvider = provider !== null && (
+    idMatches(row.id, provider.containerId)
+    || row.name === provider.containerName
+    || (provider.project !== null && provider.service !== null
+      && row.composeProject === provider.project && row.service === provider.service)
+  );
   const dockerApiPort = row.ports.some(port =>
     port.privatePort === 2375 || port.privatePort === 2376
     || port.publicPort === 2375 || port.publicPort === 2376);
@@ -551,7 +596,7 @@ function classifyRow(
     });
   }
 
-  if (infrastructureLabel || row.metadataTruncated) {
+  if (infrastructureLabel || row.metadataTruncated || isEndpointProvider) {
     return buildClassified(row, {
       role: 'undetermined',
       classification: 'unknown',
@@ -561,6 +606,7 @@ function classifyRow(
       evidence: [
         ...(infrastructureLabel ? ['infrastructure-label'] : []),
         ...(row.metadataTruncated ? ['metadata-truncated'] : []),
+        ...(isEndpointProvider ? ['endpoint-provider-owner'] : []),
       ],
       infrastructureLabel,
       isSencho,
@@ -576,7 +622,7 @@ function buildClassified(
     role: SocketRole;
     classification: SocketClassification;
     providerType: SocketProviderType | null;
-    socketMounts: SocketInventoryMount[];
+    socketMounts: SocketInventoryMountRow[];
     apiGroups: string[];
     evidence: string[];
     infrastructureLabel: boolean;
@@ -595,7 +641,31 @@ function buildClassified(
   if (compose) evidence.push('compose-owned');
   if (input.infrastructureLabel) evidence.push('infrastructure-label');
   if (input.isSencho) evidence.push('is-sencho');
-  if (row.metadataTruncated) evidence.push('metadata-truncated');
+
+  // Presentation bounds are smaller than the adapter's collection bounds. Any
+  // evidence dropped here must turn the row incomplete: a hidden writable mount,
+  // wildcard binding, or public port cannot be presented as a complete picture.
+  const labels = normalizeLabels(row);
+  const publishedPorts = normalizePorts(row);
+  const socketMounts: SocketInventoryMount[] = input.socketMounts
+    .slice(0, MAX_MOUNTS)
+    .map(mount => ({
+      source: mount.source ? safeText(mount.source, MAX_PATH) : null,
+      destination: mount.destination ? safeText(mount.destination, MAX_PATH) : null,
+      readOnly: mount.readOnly,
+    }));
+  const exposedPorts = row.exposedPorts.slice(0, MAX_PORTS);
+  const networks = row.networks.slice(0, MAX_NETWORKS);
+  const apiGroups = [...input.apiGroups].slice(0, 16);
+  const projectionTruncated = input.socketMounts.length > MAX_MOUNTS
+    || labels.truncated
+    || publishedPorts.truncated
+    || row.exposedPorts.length > MAX_PORTS
+    || row.networks.length > MAX_NETWORKS
+    || input.apiGroups.length > 16;
+  const metadataTruncated = row.metadataTruncated || projectionTruncated;
+  if (metadataTruncated) evidence.push('metadata-truncated');
+  const boundedEvidence = [...new Set(evidence)].slice(0, MAX_EVIDENCE);
   return {
     row,
     proxyEvidence: input.role === 'proxy',
@@ -612,11 +682,11 @@ function buildClassified(
       senchoStack: row.stack ? safeText(row.stack, 128) : null,
       compose,
       health: row.health ? bound(row.health, 32) : null,
-      socketMounts: input.socketMounts,
-      apiGroups: [...input.apiGroups].slice(0, 16),
-      publishedPorts: normalizePorts(row),
-      exposedPorts: row.exposedPorts.slice(0, MAX_PORTS).map(port => bound(port, 32)),
-      networks: row.networks.slice(0, MAX_NETWORKS).map(network => ({
+      socketMounts,
+      apiGroups,
+      publishedPorts: publishedPorts.ports,
+      exposedPorts: exposedPorts.map(port => bound(port, 32)),
+      networks: networks.map(network => ({
         name: safeText(network.name, 128),
         id: network.id ? bound(network.id, 128) : null,
       })),
@@ -625,10 +695,10 @@ function buildClassified(
       infrastructureLabel: input.infrastructureLabel,
       isSencho: input.isSencho,
       isSenchoEndpointProvider: false,
-      labels: normalizeLabels(row),
-      evidence: [...new Set(evidence)].slice(0, MAX_EVIDENCE),
+      labels: labels.labels,
+      evidence: boundedEvidence,
       inspectFailed: row.inspectFailed,
-      metadataTruncated: row.metadataTruncated,
+      metadataTruncated,
     },
   };
 }
@@ -662,7 +732,18 @@ function buildEndpoint(
   if (description.transport === 'unix') {
     const canonicalSocket = description.socketPath === '/var/run/docker.sock'
       || description.socketPath === '/run/docker.sock';
-    if (canonicalSocket) {
+    const canonicalBindSource = socketBindSource === '/var/run/docker.sock'
+      || socketBindSource === '/run/docker.sock';
+    // A canonical destination on its own does not prove direct daemon access: a
+    // forwarder or proxy can mount its own socket at that path. Direct is only
+    // claimed when Sencho runs outside a container, or when the observed host
+    // bind source is itself a canonical daemon socket (a true passthrough).
+    const directProven = canonicalSocket && (
+      self.state === 'none'
+      || (socketBindSource !== null && socketBindSource === description.socketPath)
+      || canonicalBindSource
+    );
+    if (directProven) {
       return {
         providerRow: null,
         providerAmbiguous: false,
@@ -685,9 +766,10 @@ function buildEndpoint(
         },
       };
     }
-    // A non-default unix path can be served by the host daemon, a proxy, or a
-    // host-level forwarder. Container metadata cannot prove which one, and a
-    // shared bind source only says both mount the same host file.
+    // A non-default unix path, or a default destination backed by a different
+    // host file, can be served by the host daemon, a proxy, or a host-level
+    // forwarder. Container metadata cannot prove which one, and a shared bind
+    // source only says both mount the same host file.
     return {
       providerRow: null,
       providerAmbiguous: false,
@@ -696,9 +778,11 @@ function buildEndpoint(
         address: description.address,
         addressSource: description.addressSource,
         detection: 'undetermined',
-        reason: socketBindSource
-          ? 'The configured socket path is not the host default. Its host path is visible, but container metadata cannot prove which process serves it, so the provider type is undetermined.'
-          : 'The configured socket path is not the host default and its host path is not visible, so the provider type cannot be determined.',
+        reason: canonicalSocket
+          ? 'The socket destination is the host default, but its observed host source is different. Container metadata cannot prove which process serves it, so the provider type is undetermined.'
+          : socketBindSource
+            ? 'The configured socket path is not the host default. Its host path is visible, but container metadata cannot prove which process serves it, so the provider type is undetermined.'
+            : 'The configured socket path is not the host default and its host path is not visible, so the provider type cannot be determined.',
         provider: {
           kind: 'unknown',
           providerType: null,
@@ -709,7 +793,7 @@ function buildEndpoint(
         },
         sencho,
         evidence: [
-          'socket-path-custom',
+          ...(canonicalSocket ? ['socket-destination-default-source-custom'] : ['socket-path-custom']),
           ...(socketBindSource ? ['sencho-socket-bind-source'] : []),
         ],
       },
@@ -836,11 +920,23 @@ export function buildSocketInventory(input: SocketInventoryBuildInput): SocketIn
     ? input.self.bindMounts.find(mount => mount.destination === input.endpoint.socketPath)?.source ?? null
     : null;
 
+  const resolvedEndpointProvider = input.endpointProvider.state === 'resolved'
+    ? input.endpointProvider.provider
+    : null;
+
   const classified = input.containers
     .map(row => classifyRow(row, {
       endpointBindSource,
       senchoContainerId: input.self.containerId,
       senchoContainerName: input.self.containerName,
+      endpointProvider: resolvedEndpointProvider
+        ? {
+          containerId: resolvedEndpointProvider.containerId,
+          containerName: resolvedEndpointProvider.containerName,
+          project: resolvedEndpointProvider.project,
+          service: resolvedEndpointProvider.service,
+        }
+        : null,
     }))
     .filter((entry): entry is ClassifiedRow => entry !== null);
 
@@ -861,17 +957,19 @@ export function buildSocketInventory(input: SocketInventoryBuildInput): SocketIn
     && !errors.some(error => error.stage === 'container-metadata')) {
     errors.push({
       stage: 'container-metadata',
-      message: 'A container metadata list exceeded the inventory bound; some mounts or proxy flags may be missing.',
+      message: 'A container metadata list exceeded the inventory bound; some mounts, ports, labels, networks, or proxy flags may be missing.',
     });
   }
-  const providerMissing = input.truncated && endpoint.provider.kind === 'container'
+  const providerMissing = endpoint.provider.kind === 'container'
     && endpoint.provider.containerId !== null
     && !containers.some(container => idMatches(container.id, endpoint.provider.containerId)
       || (endpoint.provider.containerName !== null && container.name === endpoint.provider.containerName));
   if (providerMissing && !errors.some(error => error.stage === 'endpoint-provider')) {
     errors.push({
       stage: 'endpoint-provider',
-      message: 'The container carrying the Docker endpoint may be outside the bounded inventory.',
+      message: input.truncated
+        ? 'The container carrying the Docker endpoint may be outside the bounded inventory.'
+        : 'The container carrying the Docker endpoint is not in this inventory.',
     });
   }
   const inspectFailures = input.containers.filter(row => row.inspectFailed).length;
@@ -974,7 +1072,16 @@ export async function loadSocketInventory(
   const { rows, listedContainers, truncated } = listing;
 
   const self = await readSelf(deps, errors);
-  const endpoint = describeDockerEndpoint(process.env.DOCKER_HOST);
+  // Ask the active Docker client which socket it dials: with DOCKER_HOST unset
+  // dockerode lazily picks between the conventional path and Docker Desktop's
+  // per-user socket, and a bare `unix://` also falls back to that choice.
+  let defaultSocketPath: string | null = null;
+  try {
+    defaultSocketPath = await deps.docker.getDockerSocketPath();
+  } catch {
+    defaultSocketPath = null;
+  }
+  const endpoint = describeDockerEndpoint(process.env.DOCKER_HOST, { defaultSocketPath });
 
   let endpointProvider: DockerEndpointProvider | { state: 'error'; reason: string };
   if (endpoint.transport === 'tcp') {
