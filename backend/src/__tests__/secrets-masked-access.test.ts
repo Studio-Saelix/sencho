@@ -609,3 +609,35 @@ describe('an import source that does not exist is reported, not read as empty', 
         expect(res.body.code).toBe('IMPORT_SOURCE_NOT_FOUND');
     });
 });
+
+describe('hostile key names and escape attempts are refused', () => {
+    it('refuses a prototype key on set, remove, or rename', async () => {
+        for (const op of [
+            { op: 'set', key: '__proto__', value: 'polluted' },
+            { op: 'rename', from: 'API_KEY', to: '__proto__' },
+        ]) {
+            const res = await request(app)
+                .patch(`/api/secrets/${bundleId}`)
+                .set('Authorization', `Bearer ${adminToken()}`)
+                .send({ expectedVersion: 1, ops: [op] });
+            expect(res.status).toBe(400);
+        }
+        expect(({} as Record<string, unknown>).polluted).toBeUndefined();
+        expect(SecretsService.getInstance().getDecryptedKv(bundleId)).toEqual({
+            API_KEY: 'super-secret-api',
+            DB_PASSWORD: 'hunter2',
+        });
+    });
+
+    it('keeps a stored env key named like a prototype slot as data', () => {
+        const kv: Record<string, string> = {};
+        Object.defineProperty(kv, '__proto__', { value: 'stored', enumerable: true, writable: true, configurable: true });
+        const { id } = SecretsService.getInstance().create({
+            name: 'prototype-key-bundle',
+            kv,
+            user: TEST_USERNAME,
+        });
+        expect(SecretsService.getInstance().getDecryptedKv(id)).toEqual(kv);
+        expect(({} as Record<string, unknown>).stored).toBeUndefined();
+    });
+});

@@ -177,6 +177,14 @@ export class SecretSourceChangedError extends Error {
     }
 }
 
+/** Names that would hit an object prototype slot instead of a plain env key. */
+const RESERVED_KV_KEYS = new Set(['__proto__', 'constructor', 'prototype']);
+
+/** Write one env key without tripping the `__proto__` setter. */
+function setKvValue(kv: SecretKv, key: string, value: string): void {
+    Object.defineProperty(kv, key, { value, enumerable: true, writable: true, configurable: true });
+}
+
 /** An edit operation cannot be applied to the current version. */
 export class SecretOpError extends Error {
     constructor(message: string) {
@@ -186,8 +194,10 @@ export class SecretOpError extends Error {
 }
 
 function applyOp(kv: SecretKv, op: SecretPatchOp): void {
+    const writtenKey = op.op === 'rename' ? op.to : op.key;
+    if (RESERVED_KV_KEYS.has(writtenKey)) throw new SecretOpError(`Reserved key: ${writtenKey}`);
     if (op.op === 'set') {
-        kv[op.key] = op.value;
+        setKvValue(kv, op.key, op.value);
         return;
     }
     if (op.op === 'remove') {
@@ -199,7 +209,7 @@ function applyOp(kv: SecretKv, op: SecretPatchOp): void {
     if (op.to in kv && op.to !== op.from) throw new SecretOpError(`Key '${op.to}' already exists`);
     const value = kv[op.from];
     delete kv[op.from];
-    kv[op.to] = value;
+    setKvValue(kv, op.to, value);
 }
 
 export function parseEnv(text: string): SecretKv {
@@ -335,7 +345,9 @@ function decryptKv(payload: string): SecretKv {
         const out: SecretKv = {};
         for (const [k, v] of Object.entries(parsed)) {
             if (typeof v !== 'string') throw new SecretPayloadError();
-            out[k] = v;
+            // defineProperty keeps a stored `__proto__` key as data instead of
+            // letting the assignment hit the prototype setter.
+            setKvValue(out, k, v);
         }
         return out;
     } catch (err) {
@@ -360,17 +372,31 @@ function validateKv(kv: SecretKv): { ok: true } | { ok: false; error: string } {
 
 interface ResolvedEnvFile { absolutePath: string }
 
+/** Resolve a path inside the node's compose root, or null when it escapes it. */
+function confineToComposeRoot(nodeId: number, candidate: string): string | null {
+    const baseDir = path.resolve(FileSystemService.getInstance(nodeId).getBaseDir());
+    const resolved = path.resolve(candidate);
+    if (resolved !== baseDir && !resolved.startsWith(baseDir + path.sep)) return null;
+    return resolved;
+}
+
 async function resolveEnvFileLocal(nodeId: number, stackName: string, basename: string): Promise<ResolvedEnvFile | null> {
     const paths = await resolveAllEnvFilePaths(nodeId, stackName);
     if (paths.length === 0) {
         if (basename === '.env') {
             const baseDir = FileSystemService.getInstance(nodeId).getBaseDir();
-            return { absolutePath: path.join(baseDir, stackName, '.env') };
+            const fallback = confineToComposeRoot(nodeId, path.join(baseDir, stackName, '.env'));
+            if (!fallback) throw new SecretSourceError('Invalid stack path');
+            return { absolutePath: fallback };
         }
         return null;
     }
     const match = paths.find(p => path.basename(p) === basename);
-    return match ? { absolutePath: match } : null;
+    if (!match) return null;
+    // A compose `env_file:` entry is authored content, not a trusted path.
+    const safe = confineToComposeRoot(nodeId, match);
+    if (!safe) throw new SecretSourceError('Invalid env file path');
+    return { absolutePath: safe };
 }
 
 async function resolveEnvFileRemote(node: Node, stackName: string, basename: string): Promise<ResolvedEnvFile | null> {

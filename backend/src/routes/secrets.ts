@@ -158,7 +158,9 @@ function sendServiceError(res: Response, err: unknown, fallback: string): void {
         });
         return;
     }
-    console.error(`[Secrets] ${fallback}:`, err);
+    // Errors from a remote read can carry request details, so log the kind only;
+    // the caller still gets the message.
+    console.error(`[Secrets] ${fallback}:`, err instanceof Error ? err.name : 'unknown error');
     res.status(500).json({ error: getErrorMessage(err, fallback) });
 }
 
