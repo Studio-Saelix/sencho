@@ -564,6 +564,27 @@ describe('an unreadable stored payload is an error, never an empty bundle', () =
         expect(DatabaseService.getInstance().listSecretVersions(bundleId)).toHaveLength(2);
     });
 
+    it('answers a client error for an invalid env key on replace, and writes nothing', async () => {
+        corruptPayload('enc:00112233:44556677:aabbcc');
+        const logSpy = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+        try {
+            for (const kv of [{ '1A': 'x' }, { 'A-B': 'y' }]) {
+                const res = await request(app)
+                    .post(`/api/secrets/${bundleId}/replace`)
+                    .set('Authorization', `Bearer ${adminToken()}`)
+                    .send({ expectedVersion: 1, kv });
+                expect(res.status).toBe(400);
+                expect(res.body.error).toMatch(/Invalid env key/);
+                expect(res.body.code).toBeUndefined();
+            }
+            expect(DatabaseService.getInstance().getSecret(bundleId)!.current_version).toBe(1);
+            expect(DatabaseService.getInstance().listSecretVersions(bundleId)).toHaveLength(1);
+            expect(logSpy).not.toHaveBeenCalled();
+        } finally {
+            logSpy.mockRestore();
+        }
+    });
+
     it('refuses a replace on a readable bundle and on a stale version', async () => {
         const readable = await request(app)
             .post(`/api/secrets/${bundleId}/replace`)

@@ -628,7 +628,9 @@ export class SecretsService {
 
     create(input: { name: string; description?: string; kv: SecretKv; user: string; note?: string }): { id: number; version: number } {
         const validation = validateKv(input.kv);
-        if (!validation.ok) throw new Error(validation.error);
+        // An invalid env key is a client error, so every caller can answer 400
+        // instead of falling through to the generic 500.
+        if (!validation.ok) throw new SecretOpError(validation.error);
         assertNoReservedKeys(input.kv);
         const db = DatabaseService.getInstance();
         return db.createSecretWithVersion({
@@ -766,7 +768,7 @@ export class SecretsService {
         for (const op of input.ops) applyOp(work, op);
         const kv: SecretKv = Object.fromEntries(work);
         const validation = validateKv(kv);
-        if (!validation.ok) throw new Error(validation.error);
+        if (!validation.ok) throw new SecretOpError(validation.error);
         return db.updateSecretWithVersion({
             secretId: id,
             description: input.description === undefined ? null : input.description,
@@ -812,7 +814,7 @@ export class SecretsService {
         }
         if (!unreadable) throw new SecretOpError('The stored payload is readable; edit individual keys instead');
         const validation = validateKv(input.kv);
-        if (!validation.ok) throw new Error(validation.error);
+        if (!validation.ok) throw new SecretOpError(validation.error);
         assertNoReservedKeys(input.kv);
         return db.updateSecretWithVersion({
             secretId: id,

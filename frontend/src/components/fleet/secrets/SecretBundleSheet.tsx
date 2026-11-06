@@ -235,6 +235,9 @@ export function SecretBundleSheet({ open, onOpenChange, secret, onSaved }: Props
             return;
         }
         if (secret) {
+            // The summary names the current version even when the detail read
+            // fails as unreadable, so Replace starts from the right guard.
+            setExpectedVersion(secret.currentVersion);
             void loadDetail(secret.id);
         } else {
             loadTokenRef.current += 1;
@@ -290,13 +293,18 @@ export function SecretBundleSheet({ open, onOpenChange, secret, onSaved }: Props
         return () => window.clearInterval(timer);
     }, [hasLiveReveal]);
 
-    const tabs: SystemSheetTab[] = mode === 'edit'
-        ? [{ id: 'keys', label: 'Keys', count: rows.filter(r => !r.deleted && r.key.trim().length > 0).length }, { id: 'versions', label: 'Versions' }]
-        : [{ id: 'keys', label: 'Keys', count: rows.filter(r => r.key.trim().length > 0).length }];
-
     const rowError = useMemo(() => validateRows(rows), [rows]);
     const ops = useMemo(() => buildOps(rows), [rows]);
     const descriptionChanged = description !== loadedDescription;
+    const liveKeys = rows.filter(r => r.key.trim().length > 0).length;
+    const tabKeyCount = rows.filter(r => !r.deleted && r.key.trim().length > 0).length;
+    // An unreadable bundle has an unknown key count, and a replacement with no
+    // rows yet has none: a numeric badge there would contradict the header.
+    const keysBadge = (!replacing && loadError) || (replacing && tabKeyCount === 0) ? undefined : tabKeyCount;
+
+    const tabs: SystemSheetTab[] = mode === 'edit'
+        ? [{ id: 'keys', label: 'Keys', count: keysBadge }, { id: 'versions', label: 'Versions' }]
+        : [{ id: 'keys', label: 'Keys', count: keysBadge }];
 
     const canSubmit = useMemo(() => {
         if (rowError) return false;
@@ -361,14 +369,21 @@ export function SecretBundleSheet({ open, onOpenChange, secret, onSaved }: Props
         } catch (err) {
             const apiError = err as Error & { status?: number; currentVersion?: number };
             if (apiError.status === 409 && replacing && typeof apiError.currentVersion === 'number') {
-                // A reload cannot read the corrupt payload, but the conflict
-                // named the version that won; keep the typed replacement and
-                // let the operator save it against that version.
+                // A version bump on an unreadable bundle can only come from
+                // another replace, which makes the payload readable, so the
+                // "save again" retry would be refused. Leave replace mode and
+                // reload; keep the winning version in case the reload still
+                // reports unreadable and Replace is offered again.
                 setExpectedVersion(apiError.currentVersion);
-                toast.error('This bundle changed since you opened it. Review the current version and save again.');
+                setReplacing(false);
+                toast.error('This bundle changed since you opened it. Reloading the current version.');
+                await loadDetail(secret.id);
                 return;
             }
             if (apiError.status === 409) {
+                // Any other conflict also leaves replace mode: a reload replaces
+                // the typed rows, and the error panel shows if it is unreadable.
+                setReplacing(false);
                 toast.error('This bundle changed since you opened it. Reloading the current version.');
                 await loadDetail(secret.id);
             } else {
@@ -385,7 +400,8 @@ export function SecretBundleSheet({ open, onOpenChange, secret, onSaved }: Props
         setName(secret.name);
         setDescription(secret.description);
         setLoadedDescription(secret.description);
-        setExpectedVersion(secret.currentVersion);
+        // expectedVersion already holds the newest version the sheet knows:
+        // the summary it opened with, or the version a conflict reported.
         setRows([newRow()]);
         setNote('');
         setActiveTab('keys');
@@ -536,8 +552,6 @@ export function SecretBundleSheet({ open, onOpenChange, secret, onSaved }: Props
         }
     }
 
-    const liveKeys = rows.filter(r => r.key.trim().length > 0).length;
-
     return (
         <SystemSheet
             open={open}
@@ -619,7 +633,9 @@ export function SecretBundleSheet({ open, onOpenChange, secret, onSaved }: Props
                                 <div className="space-y-2">
                                     {mode === 'edit' && (
                                         <p className="text-[10px] uppercase tracking-[0.18em] font-mono text-stat-subtitle">
-                                            Values are masked. Reveal shows one value at a time for a few seconds; typing replaces it, and clearing a field leaves the stored value.
+                                            {replacing
+                                                ? 'Enter every key and value this bundle should hold. Each row is written exactly as typed, so an empty value stores an empty string.'
+                                                : 'Values are masked. Reveal shows one value at a time for a few seconds; typing replaces it, and clearing a field leaves the stored value.'}
                                         </p>
                                     )}
                                     {rows.map((row) => {

@@ -440,11 +440,13 @@ describe('SecretBundleSheet does not leave the panel stuck', () => {
 });
 
 describe('SecretBundleSheet unreadable payload recovery', () => {
+    const unreadable = () => Object.assign(
+        new Error("The stored bundle payload could not be read. Replace the bundle's values to recover it."),
+        { status: 500, code: 'SECRET_PAYLOAD_UNREADABLE' },
+    );
+
     it('reports unknown keys and replaces the payload when the stored version cannot be read', async () => {
-        vi.mocked(getSecret).mockRejectedValue(Object.assign(
-            new Error("The stored bundle payload could not be read. Replace the bundle's values to recover it."),
-            { status: 500, code: 'SECRET_PAYLOAD_UNREADABLE' },
-        ));
+        vi.mocked(getSecret).mockRejectedValue(unreadable());
         renderSheet();
         expect(await screen.findByText(/could not be read/i)).toBeInTheDocument();
         expect(screen.getByText(/keys unknown/i)).toBeInTheDocument();
@@ -471,5 +473,103 @@ describe('SecretBundleSheet unreadable payload recovery', () => {
         expect(await screen.findByText(/failed to load secret/i)).toBeInTheDocument();
         expect(screen.queryByRole('button', { name: /replace values/i })).not.toBeInTheDocument();
         expect(screen.getByRole('button', { name: /retry/i })).toBeInTheDocument();
+    });
+
+    it('leaves replace mode and reloads when a replace hits a version conflict', async () => {
+        vi.mocked(getSecret)
+            .mockRejectedValueOnce(unreadable())
+            .mockResolvedValueOnce(detail({
+                currentVersion: 4,
+                keyCount: 1,
+                keys: [{ key: 'THEIRS', masked: MASK }],
+            }));
+        vi.mocked(replaceSecret).mockRejectedValueOnce(Object.assign(
+            new Error('This bundle changed since you opened it.'),
+            { status: 409, currentVersion: 4 },
+        ));
+        renderSheet();
+
+        await screen.findByText(/could not be read/i);
+        await userEvent.click(screen.getByRole('button', { name: /replace values/i }));
+        await userEvent.type(screen.getByPlaceholderText('KEY_NAME'), 'MINE');
+        await userEvent.type(screen.getByLabelText('Value'), 'typed');
+        await userEvent.click(screen.getByRole('button', { name: /^save$/i }));
+
+        // The conflict means another replace won and made the payload readable,
+        // so the sheet reloads it instead of keeping a retry that would be refused.
+        await waitFor(() => expect(vi.mocked(getSecret)).toHaveBeenCalledTimes(2));
+        expect(await screen.findByDisplayValue('THEIRS')).toBeInTheDocument();
+        expect(screen.queryByText(/replacing all values/i)).not.toBeInTheDocument();
+        expect(screen.queryByText(/enter the complete key\/value set/i)).not.toBeInTheDocument();
+        expect(screen.queryByDisplayValue('MINE')).not.toBeInTheDocument();
+
+        // The normal per-key editor is back and saves at the winning version.
+        await userEvent.type(screen.getByLabelText('Value for THEIRS'), 'rotated');
+        await userEvent.click(screen.getByRole('button', { name: /^save$/i }));
+        await waitFor(() => expect(vi.mocked(patchSecret)).toHaveBeenCalledWith(7, expect.objectContaining({
+            expectedVersion: 4,
+            ops: [{ op: 'set', key: 'THEIRS', value: 'rotated' }],
+        })));
+        expect(vi.mocked(replaceSecret)).toHaveBeenCalledTimes(1);
+    });
+
+    it('keeps the winning version when the reload after a replace conflict is still unreadable', async () => {
+        vi.mocked(getSecret).mockRejectedValue(unreadable());
+        vi.mocked(replaceSecret).mockRejectedValueOnce(Object.assign(
+            new Error('This bundle changed since you opened it.'),
+            { status: 409, currentVersion: 4 },
+        ));
+        renderSheet();
+
+        await screen.findByText(/could not be read/i);
+        await userEvent.click(screen.getByRole('button', { name: /replace values/i }));
+        await userEvent.type(screen.getByPlaceholderText('KEY_NAME'), 'MINE');
+        await userEvent.type(screen.getByLabelText('Value'), 'typed');
+        await userEvent.click(screen.getByRole('button', { name: /^save$/i }));
+
+        await waitFor(() => expect(vi.mocked(getSecret)).toHaveBeenCalledTimes(2));
+        await userEvent.click(await screen.findByRole('button', { name: /replace values/i }));
+        await userEvent.type(screen.getByPlaceholderText('KEY_NAME'), 'MINE2');
+        await userEvent.type(screen.getByLabelText('Value'), 'typed');
+        await userEvent.click(screen.getByRole('button', { name: /^save$/i }));
+
+        await waitFor(() => expect(vi.mocked(replaceSecret)).toHaveBeenCalledTimes(2));
+        expect(vi.mocked(replaceSecret).mock.calls[1][1].expectedVersion).toBe(4);
+    });
+});
+
+describe('SecretBundleSheet key counts and helper copy', () => {
+    const unreadable = () => Object.assign(
+        new Error("The stored bundle payload could not be read. Replace the bundle's values to recover it."),
+        { status: 500, code: 'SECRET_PAYLOAD_UNREADABLE' },
+    );
+
+    it('shows no key count while the stored payload is unreadable', async () => {
+        vi.mocked(getSecret).mockRejectedValue(unreadable());
+        renderSheet();
+        await screen.findByText(/could not be read/i);
+        expect(screen.getByRole('tab', { name: 'Keys' })).toBeInTheDocument();
+        expect(screen.queryByRole('tab', { name: 'Keys 0' })).not.toBeInTheDocument();
+    });
+
+    it('uses replace-specific helper copy and no zero badge, then counts typed keys', async () => {
+        vi.mocked(getSecret).mockRejectedValue(unreadable());
+        renderSheet();
+        await screen.findByText(/could not be read/i);
+
+        await userEvent.click(screen.getByRole('button', { name: /replace values/i }));
+        expect(screen.getByRole('tab', { name: 'Keys' })).toBeInTheDocument();
+        expect(screen.getByText(/each row is written exactly as typed/i)).toBeInTheDocument();
+        expect(screen.queryByText(/clearing a field leaves the stored value/i)).not.toBeInTheDocument();
+
+        await userEvent.type(screen.getByPlaceholderText('KEY_NAME'), 'RECOVERED');
+        expect(await screen.findByRole('tab', { name: 'Keys1' })).toBeInTheDocument();
+    });
+
+    it('keeps the masked-edit helper copy in the normal editor', async () => {
+        renderSheet();
+        await screen.findByDisplayValue('API_KEY');
+        expect(screen.getByText(/clearing a field leaves the stored value/i)).toBeInTheDocument();
+        expect(screen.queryByText(/each row is written exactly as typed/i)).not.toBeInTheDocument();
     });
 });

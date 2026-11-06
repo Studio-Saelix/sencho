@@ -18,7 +18,7 @@ import fs from 'fs';
 import jwt from 'jsonwebtoken';
 import { setupTestDb, cleanupTestDb, TEST_USERNAME, TEST_JWT_SECRET } from './helpers/setupTestDb';
 import { getAuditSummary } from '../utils/audit-summaries';
-import { parseEnv, serializeEnv, applyOverlay, computeDiff } from '../services/SecretsService';
+import { parseEnv, serializeEnv, applyOverlay, computeDiff, SecretOpError } from '../services/SecretsService';
 
 let tmpDir: string;
 let app: import('express').Express;
@@ -278,6 +278,11 @@ describe('SecretsService', () => {
             name: 'bad-keys',
             kv: { '1BAD': 'value' },
             user: TEST_USERNAME,
+        })).toThrow(SecretOpError);
+        expect(() => svc.create({
+            name: 'bad-keys',
+            kv: { '1BAD': 'value' },
+            user: TEST_USERNAME,
         })).toThrow(/Invalid env key/);
     });
 
@@ -423,6 +428,23 @@ describe('Routes /api/secrets basic guards', () => {
             .set('Authorization', `Bearer ${adminToken()}`)
             .send({ name: 'x', kv: 'not-an-object' });
         expect(res.status).toBe(400);
+    });
+
+    it('answers 400, not 500, for an invalid env key on POST /secrets', async () => {
+        const logSpy = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+        try {
+            for (const kv of [{ '1BAD': 'value' }, { 'A-B': 'value' }]) {
+                const res = await request(app)
+                    .post('/api/secrets')
+                    .set('Authorization', `Bearer ${adminToken()}`)
+                    .send({ name: 'bad-key-bundle', kv });
+                expect(res.status).toBe(400);
+                expect(res.body.error).toMatch(/Invalid env key/);
+            }
+            expect(logSpy).not.toHaveBeenCalled();
+        } finally {
+            logSpy.mockRestore();
+        }
     });
 });
 
