@@ -42,7 +42,7 @@ Admins can open **Create network** from the page header. The dialog matches the 
 
 The **Findings** tab lists Compose-first networking issues Sencho derives from the effective model plus one live Docker snapshot per refresh, grouped into **Needs action**, **Review recommended**, and **Informational**. Examples include missing external networks, duplicate network names across stacks, host-network exposure mismatches, tunnel connectors (Cloudflare Tunnel, Tailscale, WireGuard) and the services they reach, and stacks whose model could not be rendered. Missing external findings only offer create actions when the declaration is a safe default bridge network.
 
-Findings also fold in the networking-relevant results from your last Compose Doctor run on each stack. A finding both engines detect shows **Live · also found by Doctor**; a finding only Doctor caught (Doctor checks a few things the live engine does not, such as host port conflicts) shows **Last Doctor run** with the timestamp of that run. Doctor's contribution is always the cached result of the last run on that stack, not a fresh check, so run Doctor again on a stack if you want its findings current. A Doctor finding you have acknowledged moves to the dismissed list below instead of the active list.
+Findings also fold in the networking-relevant results from your last Compose Doctor run on each stack. A finding both engines detect shows **Live · also found by Doctor**; a finding only Doctor caught (Doctor checks a few things the live engine does not, such as host port conflicts) shows **Last Doctor run** with the timestamp of that run. Doctor's contribution is always the cached result of the last run on that stack, not a fresh check, so run Doctor again on a stack if you want its findings current. A Doctor finding you have acknowledged moves to the dismissed list instead of the active list.
 
 The **Publishing without exposure intent** and **Reachable through a tunnel without exposure intent** cards also state that service's detected exposure, the same answer the stack's [Networking tab](/features/compose-networking#detected-exposure) shows, so you can see what Sencho found before you classify it.
 
@@ -57,7 +57,7 @@ Each finding includes a severity, what it means, what to do about it, and the ac
 
 **Dismiss** sets a finding aside for the whole team until it changes: the next time its severity rises, its fingerprint (the ports, stacks, or networks it covers) changes, or it covers more than it did, it returns on its own. If it later comes back in exactly the state you dismissed, it stays dismissed until the hold ends or you restore it. The arrow next to **Dismiss** offers 7 days or permanently. A finding about runtime data Sencho could not read can only be dismissed for a set number of days.
 
-Dismissed findings stay counted: the masthead and the posture word still include them. (A Doctor finding you acknowledged is the exception: Doctor already excludes it.) They appear under a quiet **N dismissed** row with who dismissed them, when, and for how long, and **Restore** brings one back. A toast right after dismissing offers **Undo**.
+Dismissed findings stay counted: the masthead and the posture word still include them. (A Doctor finding you acknowledged is the exception: Doctor already excludes it.) Select the **N dismissed** count on the Overview or Findings tab to open a sheet that lists each one with who dismissed it, when, and for how long; **Restore** brings one back. A toast right after dismissing offers **Undo**.
 
 ## Resources and cleanup
 

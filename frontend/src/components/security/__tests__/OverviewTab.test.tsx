@@ -356,7 +356,7 @@ describe('OverviewTab remediation affordances', () => {
 
     /** Desktop control names in the review queue, in visual order. The phone menu stays in the DOM under jsdom. */
     function queueControlNames(): string[] {
-      const card = screen.getByRole('heading', { name: /why monitoring/i }).parentElement;
+      const card = screen.getByRole('heading', { name: /why monitoring/i }).closest<HTMLElement>('.shadow-card-bevel');
       if (card === null) throw new Error('review queue card missing');
       return within(card)
         .getAllByRole('button')
@@ -391,7 +391,7 @@ describe('OverviewTab remediation affordances', () => {
         'More ways to dismiss',
       ]);
       expect(screen.queryByRole('button', { name: /more actions/i })).not.toBeInTheDocument();
-      const card = screen.getByRole('heading', { name: /why monitoring/i }).parentElement;
+      const card = screen.getByRole('heading', { name: /why monitoring/i }).closest<HTMLElement>('.shadow-card-bevel');
       if (card === null) throw new Error('review queue card missing');
       const slot = within(card).getByTestId('finding-row-more-slot');
       expect(slot.previousElementSibling).toBe(
@@ -429,8 +429,8 @@ describe('OverviewTab remediation affordances', () => {
       }];
       renderOverview([dismissable()], { canManageNode: true });
       expect(screen.getByRole('heading', { name: /why monitoring/i })).toBeInTheDocument();
-      expect(screen.getByText(/1 dismissed/i)).toBeInTheDocument();
-      expect(screen.getByText(/dismissed by alice/i)).toBeInTheDocument();
+      await user.click(screen.getByRole('button', { name: /1 dismissed/i }));
+      expect(await screen.findByText(/dismissed by alice/i)).toBeInTheDocument();
       await user.click(screen.getByRole('button', { name: /restore/i }));
       expect(dismissalState.restore).toHaveBeenCalledWith(7);
     });

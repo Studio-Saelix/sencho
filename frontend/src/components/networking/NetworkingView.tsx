@@ -7,6 +7,7 @@ import { PageMasthead, type MastheadMetadataItem } from '@/components/ui/PageMas
 import { Button } from '@/components/ui/button';
 import { Card, CardContent } from '@/components/ui/card';
 import { LockCard } from '@/components/ui/LockCard';
+import { DismissedCountButton, DismissedSheet } from '@/components/ui/dismissed-sheet';
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table';
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip';
 import { apiFetch } from '@/lib/api';
@@ -22,7 +23,8 @@ import { CreateNetworkDialog } from '@/components/resources/CreateNetworkDialog'
 import { ConfirmModal } from '@/components/ui/modal';
 import { NetworkDetailDrawer } from './NetworkDetailDrawer';
 import { NetworkInventoryTable } from './NetworkInventoryTable';
-import { NetworkingDismissedSection, NetworkingFindingsList, type NetworkingDismissedList } from './NetworkingFindingsList';
+import { NetworkingFindingsList, type NetworkingDismissedList } from './NetworkingFindingsList';
+import { networkingDismissedItems } from './networkingDismissedItems';
 import { NetworkingFindingActions, type NetworkingFindingControls } from './NetworkingFindingActions';
 import { NetworkingFindingText } from './NetworkingFindingText';
 import { AcknowledgeInDoctorDialog } from './AcknowledgeInDoctorDialog';
@@ -101,6 +103,7 @@ export function NetworkingView({ headerActions }: NetworkingViewProps) {
   const nodeId = activeNode?.id;
 
   const [tab, setTab] = useState<NetworkingTab>('overview');
+  const [dismissedOpen, setDismissedOpen] = useState(false);
   const [loading, setLoading] = useState(true);
   const [unsupported, setUnsupported] = useState(false);
   const [loadFailure, setLoadFailure] = useState<RemoteReadFailure | null>(null);
@@ -464,11 +467,18 @@ export function NetworkingView({ headerActions }: NetworkingViewProps) {
         <CardContent className="p-4">
           <div className="mb-2 flex items-center justify-between">
             <p className="font-mono text-[10px] uppercase tracking-[0.18em] text-stat-subtitle">Operator attention</p>
-            {partition.active.length > 5 && (
-              <button type="button" className="text-xs text-brand hover:underline" onClick={() => setTab('findings')}>
-                View all findings
-              </button>
-            )}
+            <div className="flex items-center gap-3">
+              {!isLegacy && (
+                <span className="font-mono text-[11px] text-stat-subtitle">
+                  <DismissedCountButton count={partition.dismissed.length} onClick={() => setDismissedOpen(true)} />
+                </span>
+              )}
+              {partition.active.length > 5 && (
+                <button type="button" className="text-xs text-brand hover:underline" onClick={() => setTab('findings')}>
+                  View all findings
+                </button>
+              )}
+            </div>
           </div>
           {isLegacy ? (
             <p className="text-sm text-stat-value">This node provides a partial networking response. Update it to review enriched findings.</p>
@@ -503,11 +513,6 @@ export function NetworkingView({ headerActions }: NetworkingViewProps) {
                 ))}
               </TableBody>
             </Table>
-          )}
-          {!isLegacy && partition.dismissed.length > 0 && (
-            <div className="mt-3">
-              <NetworkingDismissedSection dismissed={dismissedList} />
-            </div>
           )}
         </CardContent>
       </Card>
@@ -694,12 +699,20 @@ export function NetworkingView({ headerActions }: NetworkingViewProps) {
           <NetworkingFindingsList
             findings={partition.active}
             dismissed={dismissedList}
+            onOpenDismissed={() => setDismissedOpen(true)}
             loading={loading}
             controls={findingControls}
             disabled={isLegacy}
           />
         </TabsContent>
       </Tabs>
+
+      <DismissedSheet
+        open={dismissedOpen}
+        onOpenChange={setDismissedOpen}
+        crumb={['Networking', tab === 'overview' ? 'Overview' : 'Findings']}
+        items={networkingDismissedItems(dismissedList)}
+      />
 
       <CreateNetworkDialog
         open={showCreateNetwork}

@@ -1,7 +1,6 @@
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table';
 import { ScrollArea } from '@/components/ui/scroll-area';
-import { DismissedSection } from '@/components/ui/dismissed-section';
-import { describeDismissal } from '@/components/fleet/readiness/describeDismissal';
+import { DismissedCountButton } from '@/components/ui/dismissed-sheet';
 import type { DismissedNetworkingFinding } from '@/lib/networkingDismissals';
 import {
   FINDING_GROUP_LABELS, findingSourceLabel, groupFindings, SEVERITY_TEXT_CLASS, type NetworkingFindingGroup,
@@ -28,51 +27,36 @@ export interface NetworkingDismissedList {
   isRestoring: (item: DismissedNetworkingFinding) => boolean;
 }
 
-function dismissedMeta(item: DismissedNetworkingFinding, now: number): string {
-  return item.dismissal === null ? 'acknowledged in Compose Doctor' : describeDismissal(item.dismissal, now);
-}
-
-/** The quiet "N dismissed" row, shared by the Findings tab and the Overview block. */
-export function NetworkingDismissedSection({ dismissed, forceOpen = false }: { dismissed: NetworkingDismissedList; forceOpen?: boolean }) {
-  return (
-    <DismissedSection
-      forceOpen={forceOpen}
-      items={dismissed.items.map(item => ({
-        id: item.dismissal?.id ?? `ack:${item.finding.id}`,
-        title: item.finding.title,
-        meta: dismissedMeta(item, dismissed.now),
-        onRestore: dismissed.canRestore(item) ? () => dismissed.onRestore(item) : undefined,
-        restoring: dismissed.isRestoring(item),
-      }))}
-    />
-  );
-}
-
 export function NetworkingFindingsList({
   findings,
   dismissed,
+  onOpenDismissed,
   loading,
   controls,
   disabled = false,
 }: {
   findings: NetworkingFinding[];
   dismissed?: NetworkingDismissedList;
+  /** Opens the dismissed sheet; the dismissed count above the list is the control that reaches it. */
+  onOpenDismissed: () => void;
   loading: boolean;
   controls: NetworkingFindingControls;
   disabled?: boolean;
 }) {
   if (loading) return <p className="text-sm text-muted-foreground">Loading findings…</p>;
-  const dismissedItems = dismissed?.items ?? [];
-  const dismissedSection = dismissed && dismissedItems.length > 0 && (
-    <NetworkingDismissedSection dismissed={dismissed} forceOpen={findings.length === 0} />
+  const dismissedCount = dismissed?.items.length ?? 0;
+  const dismissedCountRow = dismissedCount > 0 && (
+    <p className="font-mono text-[11px] text-stat-subtitle">
+      <DismissedCountButton count={dismissedCount} onClick={onOpenDismissed} />
+    </p>
   );
   if (findings.length === 0) {
     return (
       <div className="space-y-3">
         <p className="text-sm text-muted-foreground">
-          {dismissedItems.length > 0 ? 'Nothing needs attention right now.' : 'No networking issues detected.'}
+          {dismissedCount > 0 ? 'Nothing needs attention right now.' : 'No networking issues detected.'}
         </p>
-        {dismissedSection}
+        {dismissedCountRow}
       </div>
     );
   }
@@ -81,6 +65,7 @@ export function NetworkingFindingsList({
 
   return (
     <div className="space-y-6">
+      {dismissedCountRow}
       {GROUP_ORDER.map((group) => {
         const items = groups[group];
         if (!items.length) return null;
@@ -138,7 +123,6 @@ export function NetworkingFindingsList({
           </section>
         );
       })}
-      {dismissedSection}
     </div>
   );
 }
