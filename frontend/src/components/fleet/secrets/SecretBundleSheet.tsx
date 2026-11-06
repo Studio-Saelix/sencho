@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Eye, EyeOff, Plus, Trash2, Copy, Loader2, Download, Undo2, ShieldAlert } from 'lucide-react';
 import { SystemSheet, SheetSection, type SystemSheetTab } from '@/components/ui/system-sheet';
 import { Input } from '@/components/ui/input';
@@ -26,9 +26,12 @@ interface KvRow {
     /** The key as stored, or null for a row the operator is adding. */
     originalKey: string | null;
     key: string;
-    /** Typed or revealed value. Empty means "leave the stored value alone". */
+    /**
+     * Typed or revealed value. Empty always means "leave the stored value
+     * alone", so clearing a field never erases a credential.
+     */
     value: string;
-    /** True once the operator typed a replacement value. */
+    /** The operator typed a non-empty replacement, so Save sends a `set` op. */
     dirty: boolean;
     /** An original row the operator asked to remove, kept visible for undo. */
     deleted: boolean;
@@ -41,6 +44,17 @@ interface KvRow {
 }
 
 type Mode = 'create' | 'edit';
+
+interface ImportInput {
+    nodeId: number;
+    stackName: string;
+    envFileBasename: string;
+}
+
+/** The import needs the editor clean: an import writes a version and reloads the rows. */
+function hasUnsavedEdits(ops: unknown[], descriptionChanged: boolean): boolean {
+    return ops.length > 0 || descriptionChanged;
+}
 
 interface Props {
     open: boolean;
@@ -86,7 +100,11 @@ function newRow(): KvRow {
     };
 }
 
-/** Collapse the editor into the smallest set of per-key operations. */
+/**
+ * Collapse the editor into per-key operations. Untouched rows contribute
+ * nothing (their stored value stays), a renamed row carries its value across
+ * without a reveal, and blank or duplicate rows are skipped.
+ */
 function buildOps(rows: KvRow[]): SecretPatchOp[] {
     const ops: SecretPatchOp[] = [];
     const kept = new Set<string>();
@@ -103,7 +121,7 @@ function buildOps(rows: KvRow[]): SecretPatchOp[] {
             continue;
         }
         if (key !== row.originalKey) ops.push({ op: 'rename', from: row.originalKey, to: key });
-        if (row.dirty) ops.push({ op: 'set', key, value: row.value });
+        if (row.dirty && row.value.length > 0) ops.push({ op: 'set', key, value: row.value });
     }
     return ops;
 }
@@ -140,7 +158,7 @@ export function SecretBundleSheet({ open, onOpenChange, secret, onSaved }: Props
     const [submitting, setSubmitting] = useState(false);
     const [loading, setLoading] = useState(false);
     const [loadError, setLoadError] = useState<string | null>(null);
-    const [revealingId, setRevealingId] = useState<string | null>(null);
+    const [revealing, setRevealing] = useState<Set<string>>(new Set());
     const [now, setNow] = useState(() => Date.now());
     const [versions, setVersions] = useState<SecretVersionSummary[]>([]);
     const [versionsLoading, setVersionsLoading] = useState(false);
@@ -148,34 +166,49 @@ export function SecretBundleSheet({ open, onOpenChange, secret, onSaved }: Props
     const [importNodeId, setImportNodeId] = useState<number | null>(null);
     const [importStackName, setImportStackName] = useState('');
     const [importEnvFile, setImportEnvFile] = useState('.env');
-    const [importPreview, setImportPreview] = useState<SecretImportPreview | null>(null);
+    const [importPreview, setImportPreview] = useState<{ preview: SecretImportPreview; input: ImportInput } | null>(null);
     const [importBusy, setImportBusy] = useState(false);
+    // Every async load carries a token: a response for a sheet that has since
+    // closed or switched bundles is dropped instead of filling the editor.
+    const loadTokenRef = useRef(0);
+    const importTokenRef = useRef(0);
 
     const loadDetail = useCallback(async (id: number) => {
+        const token = ++loadTokenRef.current;
         setLoading(true);
         setLoadError(null);
         try {
             const fresh = await getSecret(id);
+            if (loadTokenRef.current !== token) return;
             setName(fresh.name);
             setDescription(fresh.description);
             setLoadedDescription(fresh.description);
             setExpectedVersion(fresh.currentVersion);
             setRows(fresh.keys.map(maskToRow));
             setNote('');
+            importTokenRef.current += 1;
+            setImportPreview(null);
         } catch (err) {
+            if (loadTokenRef.current !== token) return;
             const message = err instanceof Error ? err.message : 'Failed to load secret';
             setLoadError(message);
             toast.error(message);
         } finally {
-            setLoading(false);
+            if (loadTokenRef.current === token) setLoading(false);
         }
     }, []);
 
     useEffect(() => {
-        if (!open) return;
+        if (!open) {
+            // Drop any in-flight detail load; the sheet state must not change
+            // after it closes.
+            loadTokenRef.current += 1;
+            return;
+        }
         if (secret) {
             void loadDetail(secret.id);
         } else {
+            loadTokenRef.current += 1;
             setName('');
             setDescription('');
             setLoadedDescription('');
@@ -184,6 +217,7 @@ export function SecretBundleSheet({ open, onOpenChange, secret, onSaved }: Props
             setNote('');
             setActiveTab('keys');
         }
+        importTokenRef.current += 1;
         setImportOpen(false);
         setImportNodeId(null);
         setImportStackName('');
@@ -313,15 +347,32 @@ export function SecretBundleSheet({ open, onOpenChange, secret, onSaved }: Props
 
     async function handleReveal(row: KvRow) {
         if (!secret) return;
-        setRevealingId(row.id);
+        if (row.dirty) {
+            toast.error('This row has an unsaved value. Save it or clear it before revealing.');
+            return;
+        }
+        const token = row.id;
+        setRevealing(prev => new Set(prev).add(token));
         try {
+            // Reveal the stored key: after an unsaved rename the value still
+            // lives under the original key.
             const revealed = await revealValue(secret.id, row.originalKey ?? row.key, expectedVersion);
-            updateRow(row.id, { value: revealed.value, dirty: false, revealedUntil: revealed.expiresAt });
             setNow(Date.now());
+            setRows(prev => prev.map(r => {
+                if (r.id === token) {
+                    return { ...r, value: revealed.value, dirty: false, revealedUntil: revealed.expiresAt };
+                }
+                // One value at a time: any other revealed row re-masks.
+                return r.revealedUntil === null ? r : { ...r, value: '', dirty: false, revealedUntil: null };
+            }));
         } catch (err) {
             toast.error(err instanceof Error ? err.message : 'Failed to reveal value');
         } finally {
-            setRevealingId(null);
+            setRevealing(prev => {
+                const next = new Set(prev);
+                next.delete(token);
+                return next;
+            });
         }
     }
 
@@ -339,45 +390,58 @@ export function SecretBundleSheet({ open, onOpenChange, secret, onSaved }: Props
     }
 
     function resetImport() {
+        // A new input set invalidates any preview in flight.
+        importTokenRef.current += 1;
         setImportPreview(null);
     }
 
-    async function handlePreviewImport() {
-        if (!secret) return;
+    function currentImportInput(): ImportInput | null {
         if (importNodeId === null) {
             toast.error('Pick a node');
-            return;
+            return null;
         }
         const stackName = importStackName.trim();
         if (!stackName) {
             toast.error('Stack name is required');
+            return null;
+        }
+        return { nodeId: importNodeId, stackName, envFileBasename: importEnvFile.trim() || '.env' };
+    }
+
+    async function handlePreviewImport() {
+        if (!secret) return;
+        if (hasUnsavedEdits(ops, descriptionChanged)) {
+            toast.error('Save or discard your key edits before importing.');
             return;
         }
+        const input = currentImportInput();
+        if (!input) return;
+        const token = ++importTokenRef.current;
         setImportBusy(true);
         try {
-            const preview = await previewImport(secret.id, {
-                nodeId: importNodeId,
-                stackName,
-                envFileBasename: importEnvFile.trim() || '.env',
-            });
-            setImportPreview(preview);
+            const preview = await previewImport(secret.id, input);
+            if (importTokenRef.current !== token) return;
+            setImportPreview({ preview, input });
             if (preview.keys.length === 0) toast.info('Every key in that env file already matches this bundle');
         } catch (err) {
+            if (importTokenRef.current !== token) return;
             toast.error(err instanceof Error ? err.message : 'Failed to preview import');
         } finally {
-            setImportBusy(false);
+            if (importTokenRef.current === token) setImportBusy(false);
         }
     }
 
     async function handleApplyImport() {
-        if (!secret) return;
-        if (importNodeId === null) return;
+        if (!secret || !importPreview) return;
+        if (hasUnsavedEdits(ops, descriptionChanged)) {
+            toast.error('Save or discard your key edits before importing.');
+            return;
+        }
         setImportBusy(true);
         try {
+            // Apply exactly what was previewed, not whatever the fields hold now.
             const result = await applyImport(secret.id, {
-                nodeId: importNodeId,
-                stackName: importStackName.trim(),
-                envFileBasename: importEnvFile.trim() || '.env',
+                ...importPreview.input,
                 expectedVersion,
                 note: note || undefined,
             });
@@ -489,7 +553,13 @@ export function SecretBundleSheet({ open, onOpenChange, secret, onSaved }: Props
                                                     <Input
                                                         type={row.hidden ? 'password' : 'text'}
                                                         value={row.value}
-                                                        onChange={(e) => updateRow(row.id, { value: e.target.value, dirty: true, revealedUntil: null })}
+                                                        onChange={(e) => updateRow(row.id, {
+                                                            value: e.target.value,
+                                                            // Empty means "keep the stored value": clearing a
+                                                            // field never erases a credential.
+                                                            dirty: e.target.value.length > 0,
+                                                            revealedUntil: null,
+                                                        })}
                                                         placeholder={row.originalKey !== null ? (row.masked ?? MASK) : 'value'}
                                                         aria-label={row.originalKey !== null ? `Value for ${row.originalKey}` : 'Value'}
                                                         disabled={row.deleted}
@@ -507,11 +577,15 @@ export function SecretBundleSheet({ open, onOpenChange, secret, onSaved }: Props
                                                         variant="ghost"
                                                         size="icon"
                                                         onClick={() => (revealed ? hideRow(row) : void handleReveal(row))}
-                                                        disabled={revealingId === row.id}
+                                                        disabled={revealing.has(row.id) || row.dirty}
                                                         aria-label={revealed ? 'Hide value' : 'Reveal value'}
-                                                        title={revealed ? 'Hide value' : 'Reveal for 30 seconds'}
+                                                        title={revealed
+                                                            ? 'Hide value'
+                                                            : row.dirty
+                                                                ? 'Save or clear your edit to reveal the stored value'
+                                                                : 'Reveal this value'}
                                                     >
-                                                        {revealingId === row.id
+                                                        {revealing.has(row.id)
                                                             ? <Loader2 className="w-4 h-4 animate-spin" />
                                                             : revealed ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
                                                     </Button>
@@ -639,9 +713,9 @@ export function SecretBundleSheet({ open, onOpenChange, secret, onSaved }: Props
                                             {importPreview && (
                                                 <div className="rounded border border-card-border/60 bg-background/40 p-2 space-y-1">
                                                     <div className="text-[10px] uppercase tracking-[0.18em] font-mono text-stat-subtitle">
-                                                        +{importPreview.added} added · ~{importPreview.changed} changed · {importPreview.unchanged} unchanged
+                                                        +{importPreview.preview.added} added · ~{importPreview.preview.changed} changed · {importPreview.preview.unchanged} unchanged
                                                     </div>
-                                                    {importPreview.keys.map((entry) => (
+                                                    {importPreview.preview.keys.map((entry) => (
                                                         <div key={entry.key} className="flex items-baseline gap-2 font-mono text-xs">
                                                             <span className={`w-16 uppercase tracking-[0.18em] text-[10px] ${entry.status === 'added' ? 'text-emerald-500' : entry.status === 'changed' ? 'text-amber-500' : 'text-stat-subtitle/60'}`}>
                                                                 {entry.status}
@@ -679,7 +753,7 @@ export function SecretBundleSheet({ open, onOpenChange, secret, onSaved }: Props
                                                         variant="outline"
                                                         size="sm"
                                                         onClick={() => void handleApplyImport()}
-                                                        disabled={importBusy || importPreview.keys.length === 0}
+                                                        disabled={importBusy || importPreview.preview.keys.length === 0}
                                                         className="gap-1.5"
                                                     >
                                                         {importBusy ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Download className="w-3.5 h-3.5" />}

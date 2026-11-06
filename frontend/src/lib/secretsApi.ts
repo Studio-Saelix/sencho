@@ -38,7 +38,8 @@ export interface SecretVersionSummary {
     note: string;
 }
 
-export interface SecretDiffEntry {
+/** A diff entry with the values stripped: the only shape a preview may carry. */
+export interface SecretDiffClassEntry {
     key: string;
     status: DiffStatus;
 }
@@ -47,7 +48,8 @@ export interface SecretImportPreview {
     added: number;
     changed: number;
     unchanged: number;
-    keys: SecretDiffEntry[];
+    /** Target keys the bundle does not have are not part of an import preview. */
+    keys: Array<SecretDiffClassEntry & { status: Exclude<DiffStatus, 'removed'> }>;
 }
 
 export interface SecretPushPlanEntry {
@@ -58,7 +60,7 @@ export interface SecretPushPlanEntry {
     reachable: boolean;
     stackExists: boolean;
     error?: string;
-    diff: SecretDiffEntry[];
+    diff: SecretDiffClassEntry[];
     added: number;
     changed: number;
     unchanged: number;
@@ -97,35 +99,37 @@ export interface RevealedValue {
     expiresAt: number;
 }
 
-async function expectJson<T>(res: Response, fallback: string): Promise<T> {
-    if (!res.ok) {
-        let detail = fallback;
-        try {
-            const body = await res.json();
-            if (body && typeof body === 'object' && typeof body.error === 'string') detail = body.error;
-        } catch {
-            // body not JSON
+interface ApiError extends Error {
+    status: number;
+    /** Machine-readable reason the route answered with, when it sent one. */
+    code?: string;
+}
+
+async function errorFrom(res: Response, fallback: string): Promise<ApiError> {
+    let detail = fallback;
+    let code: string | undefined;
+    try {
+        const body = await res.json();
+        if (body && typeof body === 'object') {
+            if (typeof body.error === 'string') detail = body.error;
+            if (typeof body.code === 'string') code = body.code;
         }
-        const err = new Error(detail) as Error & { status: number; code?: string };
-        err.status = res.status;
-        throw err;
+    } catch {
+        // body not JSON
     }
+    const err = new Error(detail) as ApiError;
+    err.status = res.status;
+    if (code !== undefined) err.code = code;
+    return err;
+}
+
+async function expectJson<T>(res: Response, fallback: string): Promise<T> {
+    if (!res.ok) throw await errorFrom(res, fallback);
     return res.json() as Promise<T>;
 }
 
 async function expectOk(res: Response, fallback: string): Promise<void> {
-    if (!res.ok) {
-        let detail = fallback;
-        try {
-            const body = await res.json();
-            if (body && typeof body === 'object' && typeof body.error === 'string') detail = body.error;
-        } catch {
-            // body not JSON
-        }
-        const err = new Error(detail) as Error & { status: number };
-        err.status = res.status;
-        throw err;
-    }
+    if (!res.ok) throw await errorFrom(res, fallback);
 }
 
 export async function listSecrets(): Promise<SecretSummary[]> {

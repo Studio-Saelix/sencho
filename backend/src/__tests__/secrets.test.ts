@@ -4,7 +4,8 @@
  *  - applyOverlay / computeDiff
  *  - encrypt round-trip via CryptoService
  *  - DatabaseService secret + version + push CRUD
- *  - SecretsService versioning, importFromStack, executePush aggregation
+ *  - SecretsService versioning, readImportOverlay / previewImport / applyImport,
+ *    executePush aggregation
  *  - Route guards (requireAdmin 403, requireUserSession 403, push lock 409)
  *  - Hub-only enforcement is covered in hub-only-guard.test.ts
  *  - developer_mode diagnostics gating (and that diagnostics never log the secret value)
@@ -292,7 +293,7 @@ describe('SecretsService', () => {
     });
 });
 
-// ---- importFromStack against the local node ----
+// ---- readImportOverlay against the local node ----
 
 describe('SecretsService.readImportOverlay (local node)', () => {
     beforeEach(() => {
@@ -538,7 +539,7 @@ describe('Routes /api/secrets Community Admin access', () => {
     });
 });
 
-// ---- Admin-role gating: secrets reveal decrypted values, so every route is admin-only ----
+// ---- Admin-role gating: every secrets route is admin-only, including the reveal pair ----
 
 describe('Routes /api/secrets admin-role gating', () => {
     // authMiddleware resolves the role from the DB (not the JWT), so a real
@@ -579,9 +580,10 @@ describe('Routes /api/secrets admin-role gating', () => {
 
 describe('Routes /api/secrets machine-credential rejection', () => {
     // A full-admin API token resolves to role 'admin' and would otherwise pass
-    // requireAdmin and reach the decrypted-value GET. requireUserSession runs
-    // first and blocks it. Mint the token through the real endpoint so the test
-    // exercises the production creation path and carries no hashing of its own.
+    // requireAdmin and reach the reveal endpoints, which are the only routes
+    // that hand out a value. requireUserSession runs first and blocks it. Mint
+    // the token through the real endpoint so the test exercises the production
+    // creation path and carries no hashing of its own.
     let fullAdminToken: string;
     beforeAll(async () => {
         const res = await request(app)

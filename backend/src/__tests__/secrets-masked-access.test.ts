@@ -21,12 +21,23 @@ import { setupTestDb, cleanupTestDb, TEST_USERNAME, TEST_JWT_SECRET } from './he
 let tmpDir: string;
 let app: import('express').Express;
 let DatabaseService: typeof import('../services/DatabaseService').DatabaseService;
+let SecretVersionConflictError: typeof import('../services/DatabaseService').SecretVersionConflictError;
 let SecretsService: typeof import('../services/SecretsService').SecretsService;
 
 function adminToken(): string {
     const db = DatabaseService.getInstance();
     const user = db.getUserByUsername(TEST_USERNAME)!;
     return jwt.sign({ username: TEST_USERNAME, role: 'admin', tv: user.token_version }, TEST_JWT_SECRET, { expiresIn: '1m' });
+}
+
+function secondAdminToken(): string {
+    const db = DatabaseService.getInstance();
+    let user = db.getUserByUsername('masked-admin-two');
+    if (!user) {
+        db.addUser({ username: 'masked-admin-two', password_hash: 'x', role: 'admin' });
+        user = db.getUserByUsername('masked-admin-two')!;
+    }
+    return jwt.sign({ username: 'masked-admin-two', role: 'admin', tv: user.token_version }, TEST_JWT_SECRET, { expiresIn: '1m' });
 }
 
 function viewerToken(): string {
@@ -50,7 +61,7 @@ let bundleId: number;
 
 beforeAll(async () => {
     tmpDir = await setupTestDb();
-    ({ DatabaseService } = await import('../services/DatabaseService'));
+    ({ DatabaseService, SecretVersionConflictError } = await import('../services/DatabaseService'));
     ({ SecretsService } = await import('../services/SecretsService'));
     ({ app } = await import('../index'));
 });
@@ -104,6 +115,11 @@ describe('GET /api/secrets/:id masks values by default', () => {
             .get(`/api/secrets/${bundleId}`)
             .set('Authorization', `Bearer ${adminToken()}`);
         expect(res.headers['cache-control']).toBe('no-store');
+        const grant = await request(app)
+            .post(`/api/secrets/${bundleId}/reveal-grant`)
+            .set('Authorization', `Bearer ${adminToken()}`)
+            .send({ key: 'API_KEY' });
+        expect(grant.headers['cache-control']).toBe('no-store');
     });
 });
 
@@ -127,6 +143,7 @@ describe('reveal is bound, single use, and short lived', () => {
     it('reveals exactly one key for a bounded window', async () => {
         const created = await grant('DB_PASSWORD');
         expect(created.expiresAt - Date.now()).toBeLessThanOrEqual(30_000);
+        expect(created.expiresAt - Date.now()).toBeGreaterThan(25_000);
         const res = await consume(created.grantId);
         expect(res.status).toBe(200);
         expect(res.body).toEqual({
@@ -176,6 +193,17 @@ describe('reveal is bound, single use, and short lived', () => {
         const res = await consume(created.grantId, other.id);
         expect(res.status).toBe(403);
         expect(res.body.code).toBe('REVEAL_MISMATCH');
+    });
+
+    it('refuses a grant redeemed by a different admin account', async () => {
+        const created = await grant('API_KEY');
+        const res = await request(app)
+            .post(`/api/secrets/${bundleId}/reveal`)
+            .set('Authorization', `Bearer ${secondAdminToken()}`)
+            .send({ grantId: created.grantId });
+        expect(res.status).toBe(403);
+        expect(res.body.code).toBe('REVEAL_MISMATCH');
+        expect(JSON.stringify(res.body)).not.toContain('super-secret-api');
     });
 
     it('404s a key that is not in the bundle', async () => {
@@ -228,6 +256,20 @@ describe('PATCH /api/secrets/:id writes one key and keeps the rest', () => {
         });
     });
 
+    it('refuses a rename onto a key that already exists, leaving both values intact', async () => {
+        const res = await patch({ expectedVersion: 1, ops: [{ op: 'rename', from: 'API_KEY', to: 'DB_PASSWORD' }] });
+        expect(res.status).toBe(400);
+        expect(SecretsService.getInstance().getDecryptedKv(bundleId)).toEqual({
+            API_KEY: 'super-secret-api',
+            DB_PASSWORD: 'hunter2',
+        });
+    });
+
+    it('refuses a rename from a key that is not there', async () => {
+        const res = await patch({ expectedVersion: 1, ops: [{ op: 'rename', from: 'NOPE', to: 'OTHER' }] });
+        expect(res.status).toBe(400);
+    });
+
     it('removes a key on request', async () => {
         const res = await patch({ expectedVersion: 1, ops: [{ op: 'remove', key: 'API_KEY' }] });
         expect(res.status).toBe(200);
@@ -268,6 +310,13 @@ describe('PATCH /api/secrets/:id writes one key and keeps the rest', () => {
             DB_PASSWORD: 'hunter2',
         });
         expect(SecretsService.getInstance().listVersions(bundleId)).toHaveLength(1);
+    });
+
+    it('refuses a description-only change based on a stale version', async () => {
+        expect((await patch({ expectedVersion: 1, ops: [{ op: 'set', key: 'API_KEY', value: 'first' }] })).status).toBe(200);
+        const stale = await patch({ expectedVersion: 1, description: 'late description', ops: [] });
+        expect(stale.status).toBe(409);
+        expect(SecretsService.getInstance().getDetail(bundleId)!.description).toBe('api and db credentials');
     });
 
     it('changes the description alongside a value write', async () => {
@@ -368,5 +417,112 @@ describe('new routes keep the admin and session boundary', () => {
             .send({ key: 'API_KEY' });
         expect(res.status).toBe(403);
         expect(res.body.code).toBe('SESSION_REQUIRED');
+    });
+});
+
+describe('the version guard holds inside the write transaction', () => {
+    it('refuses a stale updateSecretWithVersion after the bundle has moved on', () => {
+        const db = DatabaseService.getInstance();
+        expect(() => db.updateSecretWithVersion({
+            secretId: bundleId,
+            description: null,
+            encryptedPayload: 'enc:whatever',
+            keyCount: 1,
+            createdBy: TEST_USERNAME,
+            note: '',
+            expectedVersion: 99,
+        })).toThrow(SecretVersionConflictError);
+    });
+
+    it('refuses a stale updateSecretDescription', () => {
+        const db = DatabaseService.getInstance();
+        expect(() => db.updateSecretDescription({
+            secretId: bundleId,
+            description: 'late',
+            expectedVersion: 99,
+        })).toThrow(SecretVersionConflictError);
+        expect(SecretsService.getInstance().getDetail(bundleId)!.description).toBe('api and db credentials');
+    });
+});
+
+describe('an unreadable stored payload is an error, never an empty bundle', () => {
+    function corruptPayload(value: string): void {
+        DatabaseService.getInstance().getDb()
+            .prepare('UPDATE secret_versions SET encrypted_payload = ? WHERE secret_id = ?')
+            .run(value, bundleId);
+    }
+
+    it('answers 500 with a specific code on a non-encrypted payload', async () => {
+        corruptPayload('{"API_KEY":"leaked"}');
+        const read = await request(app)
+            .get(`/api/secrets/${bundleId}`)
+            .set('Authorization', `Bearer ${adminToken()}`);
+        expect(read.status).toBe(500);
+        expect(read.body.code).toBe('SECRET_PAYLOAD_UNREADABLE');
+        expect(JSON.stringify(read.body)).not.toContain('leaked');
+    });
+
+    it('answers 500 on ciphertext that cannot be decrypted', async () => {
+        corruptPayload('enc:00112233:44556677:aabbcc');
+        const read = await request(app)
+            .get(`/api/secrets/${bundleId}`)
+            .set('Authorization', `Bearer ${adminToken()}`);
+        expect(read.status).toBe(500);
+        expect(read.body.code).toBe('SECRET_PAYLOAD_UNREADABLE');
+    });
+
+    it('refuses a patch rather than overwriting the unreadable bundle', async () => {
+        corruptPayload('enc:00112233:44556677:aabbcc');
+        const res = await request(app)
+            .patch(`/api/secrets/${bundleId}`)
+            .set('Authorization', `Bearer ${adminToken()}`)
+            .send({ expectedVersion: 1, ops: [{ op: 'set', key: 'C', value: 'c' }] });
+        expect(res.status).toBe(500);
+        expect(res.body.code).toBe('SECRET_PAYLOAD_UNREADABLE');
+        const row = DatabaseService.getInstance().getSecret(bundleId)!;
+        expect(row.current_version).toBe(1);
+        expect(DatabaseService.getInstance().listSecretVersions(bundleId)).toHaveLength(1);
+    });
+
+    it('refuses a reveal grant rather than blaming the key', async () => {
+        corruptPayload('enc:00112233:44556677:aabbcc');
+        const res = await request(app)
+            .post(`/api/secrets/${bundleId}/reveal-grant`)
+            .set('Authorization', `Bearer ${adminToken()}`)
+            .send({ key: 'API_KEY' });
+        expect(res.status).toBe(500);
+        expect(res.body.code).toBe('SECRET_PAYLOAD_UNREADABLE');
+    });
+});
+
+describe('an import source that does not exist is reported, not read as empty', () => {
+    it('404s a preview for a stack that is not there', async () => {
+        const localNode = DatabaseService.getInstance().getNodes().find(n => n.type === 'local')!;
+        const res = await request(app)
+            .post(`/api/secrets/${bundleId}/import-from-stack/preview`)
+            .set('Authorization', `Bearer ${adminToken()}`)
+            .send({ nodeId: localNode.id, stackName: 'no-such-stack', envFileBasename: '.env' });
+        expect(res.status).toBe(404);
+        expect(res.body.code).toBe('IMPORT_SOURCE_NOT_FOUND');
+    });
+
+    it('404s an apply for a stack that is not there and mints no version', async () => {
+        const localNode = DatabaseService.getInstance().getNodes().find(n => n.type === 'local')!;
+        const res = await request(app)
+            .post(`/api/secrets/${bundleId}/import-from-stack`)
+            .set('Authorization', `Bearer ${adminToken()}`)
+            .send({ nodeId: localNode.id, stackName: 'no-such-stack', envFileBasename: '.env', expectedVersion: 1 });
+        expect(res.status).toBe(404);
+        expect(res.body.code).toBe('IMPORT_SOURCE_NOT_FOUND');
+        expect(SecretsService.getInstance().getDetail(bundleId)!.currentVersion).toBe(1);
+    });
+
+    it('404s an import from a node that is not in the fleet', async () => {
+        const res = await request(app)
+            .post(`/api/secrets/${bundleId}/import-from-stack/preview`)
+            .set('Authorization', `Bearer ${adminToken()}`)
+            .send({ nodeId: 99999, stackName: 'anything', envFileBasename: '.env' });
+        expect(res.status).toBe(404);
+        expect(res.body.code).toBe('IMPORT_SOURCE_NOT_FOUND');
     });
 });

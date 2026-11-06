@@ -6,6 +6,8 @@ import {
     PushBusyError,
     RevealTargetError,
     SecretOpError,
+    SecretPayloadError,
+    SecretSourceError,
     type SecretPatchOp,
 } from '../services/SecretsService';
 import { DatabaseService, SecretVersionConflictError, type BlueprintSelector } from '../services/DatabaseService';
@@ -21,9 +23,8 @@ export const secretsRouter = Router();
 // pilot_tunnel machine credentials (authMiddleware maps the latter to role
 // 'admin'), then requireAdmin enforces the role.
 //
-// Bundle reads are masked by default: key names and metadata only. Plaintext
-// leaves the server through one short-lived, single-use reveal per key, or as
-// the value the operator just typed into an edit.
+// Bundle reads are always masked: key names and metadata only. Plaintext leaves
+// the server only through one short-lived, single-use reveal per key.
 secretsRouter.use((_req: Request, res: Response, next) => {
     res.set('Cache-Control', 'no-store');
     next();
@@ -90,6 +91,11 @@ function getActor(req: Request): string {
     return req.user?.username || 'unknown';
 }
 
+/** Grant binding uses the database id, so a recreated account cannot inherit a stale grant. */
+function getActorId(req: Request): number {
+    return req.user?.userId ?? 0;
+}
+
 interface PushBody { selector: BlueprintSelector; stackName: string; envFileBasename: string }
 
 function parsePushBody(body: unknown): PushBody | { error: string } {
@@ -133,6 +139,18 @@ function sendServiceError(res: Response, err: unknown, fallback: string): void {
     }
     if (err instanceof SecretOpError) {
         res.status(400).json({ error: err.message });
+        return;
+    }
+    if (err instanceof SecretSourceError) {
+        res.status(404).json({ error: err.message, code: 'IMPORT_SOURCE_NOT_FOUND' });
+        return;
+    }
+    if (err instanceof SecretPayloadError) {
+        console.error(`[Secrets] Unreadable bundle payload (${fallback})`);
+        res.status(500).json({
+            error: 'The stored bundle payload could not be read. Restore a version or re-save the bundle before editing it.',
+            code: 'SECRET_PAYLOAD_UNREADABLE',
+        });
         return;
     }
     console.error(`[Secrets] ${fallback}:`, err);
@@ -205,6 +223,10 @@ secretsRouter.get('/:id', authMiddleware, async (req: Request, res: Response): P
         }
         res.json(detail);
     } catch (err) {
+        if (err instanceof SecretPayloadError) {
+            sendServiceError(res, err, 'read secret');
+            return;
+        }
         console.error('[Secrets] Get error:', err);
         res.status(500).json({ error: 'Failed to read secret' });
     }
@@ -313,7 +335,7 @@ secretsRouter.post('/:id/reveal-grant', authMiddleware, async (req: Request, res
             res.status(400).json({ error: 'version must be a positive integer' });
             return;
         }
-        const grant = SecretsService.getInstance().createRevealGrant(id, key, getActor(req), targetVersion ?? undefined);
+        const grant = SecretsService.getInstance().createRevealGrant(id, key, getActorId(req), targetVersion ?? undefined);
         res.json(grant);
     } catch (err) {
         sendServiceError(res, err, 'Failed to authorize reveal');
@@ -332,7 +354,7 @@ secretsRouter.post('/:id/reveal', authMiddleware, async (req: Request, res: Resp
             res.status(400).json({ error: 'grantId is required' });
             return;
         }
-        const result = SecretsService.getInstance().consumeRevealGrant(id, grantId, getActor(req));
+        const result = SecretsService.getInstance().consumeRevealGrant(id, grantId, getActorId(req));
         if (!result.ok) {
             const code = result.reason === 'expired' ? 'REVEAL_EXPIRED' : result.reason === 'mismatch' ? 'REVEAL_MISMATCH' : 'REVEAL_GRANT_INVALID';
             res.status(403).json({ error: 'Reveal authorization is no longer valid. Reveal the value again.', code });

@@ -29,7 +29,7 @@ vi.mock('@/context/NodeContext', () => ({
     useNodes: () => ({ nodes: [{ id: 1, name: 'central', type: 'local' }] }),
 }));
 
-import { getSecret, patchSecret, revealValue } from '@/lib/secretsApi';
+import { applyImport, getSecret, patchSecret, previewImport, revealValue } from '@/lib/secretsApi';
 import { toast } from '@/components/ui/toast-store';
 import { SecretBundleSheet } from './SecretBundleSheet';
 
@@ -171,5 +171,123 @@ describe('SecretBundleSheet masked editing', () => {
 
         await waitFor(() => expect(vi.mocked(getSecret)).toHaveBeenCalledTimes(2));
         expect(vi.mocked(toast.error)).toHaveBeenCalledWith(expect.stringMatching(/reloading/i));
+    });
+});
+
+describe('SecretBundleSheet reveal and import guards', () => {
+    it('does not erase a stored value when a typed replacement is cleared', async () => {
+        renderSheet();
+        await screen.findByDisplayValue('API_KEY');
+
+        const apiValue = screen.getByLabelText('Value for API_KEY');
+        await userEvent.type(apiValue, 'typed');
+        expect(screen.getByRole('button', { name: /^save$/i })).toBeEnabled();
+        await userEvent.clear(apiValue);
+        expect(screen.getByRole('button', { name: /^save$/i })).toBeDisabled();
+        expect(vi.mocked(patchSecret)).not.toHaveBeenCalled();
+    });
+
+    it('does not offer a reveal that would clobber an unsaved value', async () => {
+        renderSheet();
+        await screen.findByDisplayValue('API_KEY');
+
+        await userEvent.type(screen.getByLabelText('Value for API_KEY'), 'typed');
+        const revealButtons = screen.getAllByLabelText('Reveal value');
+        expect(revealButtons[0]).toBeDisabled();
+        expect(revealButtons[1]).toBeEnabled();
+    });
+
+    it('reveals the stored key after an unsaved rename', async () => {
+        renderSheet();
+        const keyInput = await screen.findByDisplayValue('DB_PASSWORD');
+        await userEvent.clear(keyInput);
+        await userEvent.type(keyInput, 'DATABASE_PASSWORD');
+
+        await userEvent.click(screen.getAllByLabelText('Reveal value')[1]);
+        await waitFor(() => expect(vi.mocked(revealValue)).toHaveBeenCalledWith(7, 'DB_PASSWORD', 3));
+    });
+
+    it('keeps only one value revealed at a time', async () => {
+        renderSheet();
+        await screen.findByDisplayValue('API_KEY');
+
+        await userEvent.click(screen.getAllByLabelText('Reveal value')[1]);
+        const dbValue = screen.getByLabelText('Value for DB_PASSWORD') as HTMLInputElement;
+        await waitFor(() => expect(dbValue.value).toBe('hunter2'));
+
+        vi.mocked(revealValue).mockResolvedValue({
+            key: 'API_KEY', version: 3, value: 'sk-live', expiresAt: Date.now() + 30_000,
+        });
+        await userEvent.click(screen.getAllByLabelText('Reveal value')[0]);
+
+        const apiValue = screen.getByLabelText('Value for API_KEY') as HTMLInputElement;
+        await waitFor(() => expect(apiValue.value).toBe('sk-live'));
+        expect(dbValue.value).toBe('');
+        expect(document.body.textContent).not.toContain('hunter2');
+    });
+
+    it('previews an import with key names only and applies the previewed source', async () => {
+        vi.mocked(previewImport).mockResolvedValue({
+            added: 1,
+            changed: 1,
+            unchanged: 0,
+            keys: [{ key: 'API_KEY', status: 'changed' }, { key: 'NEW_KEY', status: 'added' }],
+        });
+        vi.mocked(applyImport).mockResolvedValue({ version: 4, added: 1, changed: 1, unchanged: 0 });
+        renderSheet();
+        await screen.findByDisplayValue('API_KEY');
+
+        await userEvent.click(screen.getByRole('button', { name: /import from stack/i }));
+        await userEvent.selectOptions(screen.getByLabelText('Node'), '1');
+        await userEvent.type(screen.getByLabelText('Stack name'), 'visualstack');
+        await userEvent.click(screen.getByRole('button', { name: /preview import/i }));
+
+        expect(await screen.findByText(/\+1 added · ~1 changed · 0 unchanged/)).toBeInTheDocument();
+        expect(screen.getByText('NEW_KEY')).toBeInTheDocument();
+        expect(document.body.textContent).not.toContain('hunter2');
+
+        await userEvent.click(screen.getByRole('button', { name: /import & save/i }));
+        await waitFor(() => expect(vi.mocked(applyImport)).toHaveBeenCalled());
+        expect(vi.mocked(applyImport).mock.calls[0][1]).toEqual({
+            nodeId: 1,
+            stackName: 'visualstack',
+            envFileBasename: '.env',
+            expectedVersion: 3,
+            note: undefined,
+        });
+    });
+
+    it('refuses an import while key edits are unsaved', async () => {
+        renderSheet();
+        await screen.findByDisplayValue('API_KEY');
+        await userEvent.type(screen.getByLabelText('Value for API_KEY'), 'typed');
+
+        await userEvent.click(screen.getByRole('button', { name: /import from stack/i }));
+        await userEvent.selectOptions(screen.getByLabelText('Node'), '1');
+        await userEvent.type(screen.getByLabelText('Stack name'), 'visualstack');
+        await userEvent.click(screen.getByRole('button', { name: /preview import/i }));
+
+        expect(vi.mocked(previewImport)).not.toHaveBeenCalled();
+        expect(vi.mocked(toast.error)).toHaveBeenCalledWith(expect.stringMatching(/save or discard/i));
+    });
+
+    it('reloads and clears the preview when the import hits a stale version', async () => {
+        vi.mocked(previewImport).mockResolvedValue({
+            added: 1, changed: 0, unchanged: 0, keys: [{ key: 'NEW_KEY', status: 'added' }],
+        });
+        vi.mocked(applyImport).mockRejectedValue(Object.assign(new Error('This bundle changed since you opened it.'), { status: 409 }));
+        renderSheet();
+        await screen.findByDisplayValue('API_KEY');
+
+        await userEvent.click(screen.getByRole('button', { name: /import from stack/i }));
+        await userEvent.selectOptions(screen.getByLabelText('Node'), '1');
+        await userEvent.type(screen.getByLabelText('Stack name'), 'visualstack');
+        await userEvent.click(screen.getByRole('button', { name: /preview import/i }));
+        await screen.findByText('NEW_KEY');
+        await userEvent.click(screen.getByRole('button', { name: /import & save/i }));
+
+        await waitFor(() => expect(vi.mocked(getSecret)).toHaveBeenCalledTimes(2));
+        expect(vi.mocked(toast.error)).toHaveBeenCalledWith(expect.stringMatching(/reloading/i));
+        await waitFor(() => expect(screen.queryByText('NEW_KEY')).not.toBeInTheDocument());
     });
 });

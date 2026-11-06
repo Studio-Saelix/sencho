@@ -41,14 +41,15 @@ export interface SecretVersionSummary {
 }
 
 /**
- * The fixed stand-in for a value the client has not been authorized to read.
- * It never encodes the real value's length or shape.
+ * The fixed stand-in a detail read sends for every value. It never encodes the
+ * real value's length or shape, and the literal type stops a caller assigning
+ * an actual value into the field.
  */
 export const MASKED_VALUE = '••••••••';
 
 export interface SecretKeyEntry {
     key: string;
-    masked: string;
+    masked: typeof MASKED_VALUE;
 }
 
 /** Bundle detail with key names only: no current or historical value crosses this boundary. */
@@ -92,7 +93,8 @@ export interface SecretImportPreview {
     added: number;
     changed: number;
     unchanged: number;
-    keys: SecretDiffClassEntry[];
+    /** Target keys the bundle does not have are not part of an import preview. */
+    keys: Array<SecretDiffClassEntry & { status: Exclude<DiffStatus, 'removed'> }>;
 }
 
 export interface SecretPushPlanEntry {
@@ -132,7 +134,8 @@ interface PendingRevealGrant {
     secretId: number;
     version: number;
     key: string;
-    username: string;
+    /** The signed-in user's database id, so a recreated account cannot inherit a grant. */
+    userId: number;
     expiresAt: number;
 }
 
@@ -141,6 +144,26 @@ export class RevealTargetError extends Error {
     constructor(message: string) {
         super(message);
         this.name = 'RevealTargetError';
+    }
+}
+
+/**
+ * A stored version payload exists but cannot be decrypted or parsed. Never
+ * treated as an empty bundle: the write paths merge onto the current payload,
+ * so "unreadable" and "empty" must not be the same value.
+ */
+export class SecretPayloadError extends Error {
+    constructor() {
+        super('The stored bundle payload could not be read');
+        this.name = 'SecretPayloadError';
+    }
+}
+
+/** The import source (node or env file) does not exist. */
+export class SecretSourceError extends Error {
+    constructor(message: string) {
+        super(message);
+        this.name = 'SecretSourceError';
     }
 }
 
@@ -274,23 +297,36 @@ function encryptKv(kv: SecretKv): string {
     return CryptoService.getInstance().encrypt(JSON.stringify(kv));
 }
 
+/**
+ * Decrypt a stored version. An absent payload is an empty bundle; anything
+ * else that does not decrypt to a JSON object of strings throws, so a corrupt
+ * version can never be reported (or written over) as an empty one.
+ */
 function decryptKv(payload: string): SecretKv {
     if (!payload) return {};
-    const plaintext = CryptoService.getInstance().decrypt(payload);
-    if (!plaintext) return {};
+    if (!CryptoService.getInstance().isEncrypted(payload)) throw new SecretPayloadError();
+    let plaintext: string;
+    try {
+        plaintext = CryptoService.getInstance().decrypt(payload);
+    } catch {
+        // Auth-tag or key mismatch: the payload is unreadable, not empty.
+        throw new SecretPayloadError();
+    }
+    if (!plaintext) throw new SecretPayloadError();
     try {
         const parsed: unknown = JSON.parse(plaintext);
-        if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return {};
+        if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) throw new SecretPayloadError();
         const out: SecretKv = {};
         for (const [k, v] of Object.entries(parsed)) {
-            if (typeof v === 'string') out[k] = v;
+            if (typeof v !== 'string') throw new SecretPayloadError();
+            out[k] = v;
         }
         return out;
     } catch (err) {
+        if (err instanceof SecretPayloadError) throw err;
         // A JSON.parse failure message can quote a fragment of its input, which
-        // here is decrypted plaintext. Log the error kind only.
-        console.error('[Secrets] Failed to parse decrypted payload:', err instanceof Error ? err.name : 'unknown error');
-        return {};
+        // here is decrypted plaintext. Nothing about the payload is logged.
+        throw new SecretPayloadError();
     }
 }
 
@@ -351,13 +387,21 @@ async function resolveEnvFileRemote(node: Node, stackName: string, basename: str
     return match ? { absolutePath: match } : null;
 }
 
-async function readEnvLocal(nodeId: number, absolutePath: string): Promise<string> {
+/**
+ * Read an env file. A push treats a missing file as empty so the overlay still
+ * writes it; an import must not, or a typo in the stack name reads as "nothing
+ * to import".
+ */
+async function readEnvLocal(nodeId: number, absolutePath: string, missingAsEmpty: boolean): Promise<string> {
     const fsService = FileSystemService.getInstance(nodeId);
     try {
         return await fsService.readFile(absolutePath, 'utf-8');
     } catch (err) {
         const code = (err as NodeJS.ErrnoException)?.code;
-        if (code === 'ENOENT') return '';
+        if (code === 'ENOENT') {
+            if (missingAsEmpty) return '';
+            throw new SecretSourceError(`${absolutePath} does not exist on this node`);
+        }
         throw err;
     }
 }
@@ -367,7 +411,7 @@ async function writeEnvLocal(nodeId: number, absolutePath: string, content: stri
     await fsService.writeFile(absolutePath, content, 'utf-8');
 }
 
-async function readEnvRemote(node: Node, stackName: string, absolutePath: string): Promise<string> {
+async function readEnvRemote(node: Node, stackName: string, absolutePath: string, missingAsEmpty: boolean): Promise<string> {
     const target = NodeRegistry.getInstance().getProxyTarget(node.id);
     if (!target) throw new Error(formatNoTargetError(node));
     const baseUrl = target.apiUrl.replace(/\/$/, '');
@@ -379,7 +423,10 @@ async function readEnvRemote(node: Node, stackName: string, absolutePath: string
         headers,
         signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
     }, target.trustedLoopback);
-    if (res.status === 404) return '';
+    if (res.status === 404) {
+        if (missingAsEmpty) return '';
+        throw new SecretSourceError(`env file '${path.basename(absolutePath)}' does not exist in stack '${stackName}' on node ${node.name}`);
+    }
     if (!res.ok) throw new Error(`failed to read env (HTTP ${res.status})`);
     return await res.text();
 }
@@ -408,16 +455,16 @@ async function writeEnvRemote(node: Node, stackName: string, absolutePath: strin
 
 interface ResolvedRead { absolutePath: string; text: string }
 
-async function readExistingEnv(node: Node, stackName: string, basename: string): Promise<ResolvedRead | null> {
+async function readExistingEnv(node: Node, stackName: string, basename: string, missingAsEmpty = true): Promise<ResolvedRead | null> {
     if (isLocalNode(node)) {
         const resolved = await resolveEnvFileLocal(node.id, stackName, basename);
         if (!resolved) return null;
-        const text = await readEnvLocal(node.id, resolved.absolutePath);
+        const text = await readEnvLocal(node.id, resolved.absolutePath, missingAsEmpty);
         return { absolutePath: resolved.absolutePath, text };
     }
     const resolved = await resolveEnvFileRemote(node, stackName, basename);
     if (!resolved) return null;
-    const text = await readEnvRemote(node, stackName, resolved.absolutePath);
+    const text = await readEnvRemote(node, stackName, resolved.absolutePath, missingAsEmpty);
     return { absolutePath: resolved.absolutePath, text };
 }
 
@@ -535,7 +582,7 @@ export class SecretsService {
      * Mint a single-use, short-lived grant for exactly one bundle version and
      * key. The grant carries no value; the client exchanges it once below.
      */
-    createRevealGrant(id: number, key: string, username: string, version?: number): RevealGrant {
+    createRevealGrant(id: number, key: string, userId: number, version?: number): RevealGrant {
         const db = DatabaseService.getInstance();
         const secret = db.getSecret(id);
         if (!secret) throw new RevealTargetError('Secret not found');
@@ -552,7 +599,7 @@ export class SecretsService {
         }
         const grantId = crypto.randomBytes(24).toString('base64url');
         const expiresAt = Date.now() + REVEAL_GRANT_TTL_MS;
-        this.revealGrants.set(grantId, { secretId: id, version: target.version, key, username, expiresAt });
+        this.revealGrants.set(grantId, { secretId: id, version: target.version, key, userId, expiresAt });
         return { grantId, key, version: target.version, expiresAt };
     }
 
@@ -561,13 +608,13 @@ export class SecretsService {
      * read, so a replay finds nothing, and it only answers for the bundle, user,
      * version and key it was minted for.
      */
-    consumeRevealGrant(id: number, grantId: string, username: string):
+    consumeRevealGrant(id: number, grantId: string, userId: number):
         { ok: true; revealed: RevealedValue } | { ok: false; reason: RevealGrantFailure } {
         const grant = this.revealGrants.get(grantId);
         if (!grant) return { ok: false, reason: 'unknown' };
         this.revealGrants.delete(grantId);
         if (grant.expiresAt <= Date.now()) return { ok: false, reason: 'expired' };
-        if (grant.secretId !== id || grant.username !== username) return { ok: false, reason: 'mismatch' };
+        if (grant.secretId !== id || grant.userId !== userId) return { ok: false, reason: 'mismatch' };
         const row = this.versionRow(id, grant.version);
         if (!row) return { ok: false, reason: 'unknown' };
         const kv = decryptKv(row.encrypted_payload);
@@ -610,9 +657,14 @@ export class SecretsService {
         }
         if (input.ops.length === 0) {
             // Metadata-only edit: no value is touched, so no version is minted.
+            // The caller must name the new description rather than have an
+            // omitted field silently clear the stored one.
+            if (input.description === undefined) {
+                throw new SecretOpError('Send at least one operation, or a description to change');
+            }
             return db.updateSecretDescription({
                 secretId: id,
-                description: input.description ?? '',
+                description: input.description,
                 expectedVersion: input.expectedVersion,
             });
         }
@@ -633,13 +685,17 @@ export class SecretsService {
 
     async readImportOverlay(nodeId: number, stackName: string, envFileBasename = '.env'): Promise<SecretKv> {
         const node = DatabaseService.getInstance().getNodes().find(n => n.id === nodeId);
-        if (!node) throw new Error('Node not found');
-        const read = await readExistingEnv(node, stackName, envFileBasename);
-        if (!read) throw new Error(`env file '${envFileBasename}' not found on node ${node.name}`);
+        if (!node) throw new SecretSourceError(`Node ${nodeId} is not in this fleet`);
+        const read = await readExistingEnv(node, stackName, envFileBasename, false);
+        if (!read) throw new SecretSourceError(`env file '${envFileBasename}' not found on node ${node.name}`);
         return parseEnv(read.text);
     }
 
-    /** Names and change classes only: the env file's values stay server-side. */
+    /**
+     * Names and change classes only: the env file's values stay server-side.
+     * Target keys the bundle does not have are dropped from the list, so every
+     * entry a preview shows is a key the import would add or change.
+     */
     async previewImport(id: number, nodeId: number, stackName: string, envFileBasename = '.env'): Promise<SecretImportPreview> {
         const overlay = await this.readImportOverlay(nodeId, stackName, envFileBasename);
         const diff = computeDiff(this.getDecryptedKv(id), overlay);
@@ -648,7 +704,9 @@ export class SecretsService {
             added: agg.added,
             changed: agg.changed,
             unchanged: agg.unchanged,
-            keys: maskDiff(diff).filter(e => e.status !== 'removed'),
+            keys: maskDiff(diff).filter(
+                (entry): entry is SecretDiffClassEntry & { status: Exclude<DiffStatus, 'removed'> } => entry.status !== 'removed',
+            ),
         };
     }
 
