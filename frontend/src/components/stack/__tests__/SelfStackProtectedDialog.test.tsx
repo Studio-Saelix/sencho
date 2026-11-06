@@ -71,4 +71,45 @@ describe('SelfStackProtectedDialog', () => {
 
     expect(props.onOpenFleetUpdates).not.toHaveBeenCalled();
   });
+
+  it('names the node and the reason when Reapply is unavailable', () => {
+    renderDialog({ unavailable: { nodeName: 'sencho-nas', reason: 'container_unidentified' } });
+
+    const copy = screen.getByText(/sencho-nas could not identify its own container/).textContent ?? '';
+    expect(copy).toMatch(/retrying/);
+    expect(screen.queryByText(/Eligible admins can use Save & Reapply/)).toBeNull();
+  });
+
+  it('renders every bounded reason without leaking the code itself', () => {
+    const reasons = [
+      'not_in_container',
+      'container_unidentified',
+      'docker_unreachable',
+      'not_compose_managed',
+      'compose_cli_unavailable',
+      'image_unknown',
+      'detecting',
+      'node_unreachable',
+      'node_outdated',
+    ] as const;
+    for (const reason of reasons) {
+      const { unmount } = render(
+        <SelfStackProtectedDialog
+          open
+          onOpenChange={vi.fn()}
+          canOpenFleetUpdates={false}
+          unavailable={{ nodeName: 'node-7', reason }}
+        />,
+      );
+      expect(screen.getByText(/node-7/)).toBeInTheDocument();
+      expect(screen.queryByText(new RegExp(reason))).toBeNull();
+      unmount();
+    }
+  });
+
+  it('keeps the generic copy when no reason was recorded', () => {
+    renderDialog();
+
+    expect(screen.getByText(/Eligible admins can use Save & Reapply/)).toBeInTheDocument();
+  });
 });

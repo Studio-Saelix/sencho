@@ -445,6 +445,7 @@ export async function startServer(server: Server): Promise<void> {
   // is sequenced after self identity so it never classifies Sencho's own
   // container as a routeable stack event.
   await Promise.all([
+    SelfUpdateService.getInstance().start(),
     SelfUpdateService.getInstance().initialize(),
     (async () => {
       await SelfIdentityService.getInstance().initialize();
