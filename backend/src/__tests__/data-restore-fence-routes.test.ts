@@ -109,6 +109,8 @@ afterEach(async () => {
   vi.clearAllMocks();
   mockGetContainersByStack.mockResolvedValue([{ Id: 'c1', Labels: { 'com.docker.compose.service': 'web' } }]);
   mockAssertNoEndpointContainers.mockResolvedValue(undefined);
+  mockStartContainer.mockResolvedValue(undefined);
+  mockRestartContainer.mockResolvedValue(undefined);
   mockStopContainer.mockResolvedValue(undefined);
   const { StackOpLockService } = await import('../services/StackOpLockService');
   StackOpLockService.resetForTests();

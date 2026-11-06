@@ -559,6 +559,35 @@ describe('SchedulerService - executeRestart', () => {
     expect(mockRestartContainer).toHaveBeenCalledTimes(2);
   });
 
+  it('skips the whole restart while a data restore owns the stack', async () => {
+    mockGetScheduledTask.mockReturnValue({
+      id: 65,
+      name: 'restart-fenced',
+      action: 'restart',
+      cron_expression: '*/5 * * * *',
+      enabled: true,
+      target_id: 'my-stack',
+      node_id: 1,
+      created_by: 'admin',
+      last_status: null,
+    });
+    mockGetContainersByStack.mockResolvedValue([
+      { Id: 'c1', Service: 'web' },
+      { Id: 'c2', Service: 'db' },
+    ]);
+    // The lock a staged overwrite holds for a stack whose model uses its volume.
+    expect(StackOpLockService.getInstance().tryAcquire(1, 'my-stack', 'data_restore', 'system:data-restore').acquired).toBe(true);
+
+    const svc = SchedulerService.getInstance();
+    await svc.triggerTask(65, { userId: 1, username: 'admin', role: 'admin' } as const);
+
+    expect(mockRestartContainer).not.toHaveBeenCalled();
+    expect(mockUpdateScheduledTaskRun).toHaveBeenCalledWith(
+      expect.any(Number),
+      expect.objectContaining({ status: 'failure', error: expect.stringContaining('data_restore') }),
+    );
+  });
+
   it('refuses the whole scheduled restart before restarting any sibling of the Docker endpoint container', async () => {
     mockGetScheduledTask.mockReturnValue({
       id: 62,
