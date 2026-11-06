@@ -160,6 +160,9 @@ describe('socket inventory malformed mount metadata', () => {
       Mounts: [{ Type: 'bind', Source: '', Destination: SOCKET, RW: false }],
     }));
     expect(rows[0].metadataTruncated).toBe(true);
+    expect(rows[0].mounts).toEqual([{
+      type: 'bind', source: '', destination: SOCKET, readOnly: true, name: null,
+    }]);
 
     const inventory = inventoryOf(rows);
     expect(inventory.containers[0]).toMatchObject({
@@ -174,6 +177,16 @@ describe('socket inventory malformed mount metadata', () => {
       Mounts: [{ Type: 'tmpfs', Source: '', Destination: '/tmp', RW: true }],
     }));
     expect(rows[0].metadataTruncated).toBe(false);
+    expect(rows[0].mounts).toEqual([{
+      type: 'tmpfs', source: '', destination: '/tmp', readOnly: false, name: null,
+    }]);
+  });
+
+  it('marks an empty volume source incomplete because Docker always supplies one', async () => {
+    const rows = await rowsFrom(listed(), inspected({
+      Mounts: [{ Type: 'volume', Source: '', Destination: '/data', RW: true }],
+    }));
+    expect(rows[0].metadataTruncated).toBe(true);
   });
 });
 
@@ -211,6 +224,43 @@ describe('socket inventory malformed port metadata', () => {
     },
   );
 
+  it.each([2375.5, -1, 0.5, 70000])(
+    'does not invent a published port from a whole-number HostPort %j',
+    async hostPort => {
+      const rows = await rowsFrom(
+        listed({
+          Ports: [{ IP: '0.0.0.0', PrivatePort: 2375, PublicPort: 8080, Type: 'tcp' }],
+        }),
+        inspected({
+          NetworkSettings: {
+            Ports: { '2375/tcp': [{ HostIp: '127.0.0.1', HostPort: hostPort }] },
+            Networks: {},
+          },
+        }),
+      );
+      expect(rows[0].ports, String(hostPort)).toEqual([
+        { privatePort: 2375, publicPort: 8080, ip: '0.0.0.0', protocol: 'tcp' },
+      ]);
+      expect(rows[0].metadataTruncated, String(hostPort)).toBe(true);
+    },
+  );
+
+  it('reads a numeric HostPort 0 as not published without inventing a port', async () => {
+    const rows = await rowsFrom(
+      listed({ Ports: [] }),
+      inspected({
+        NetworkSettings: {
+          Ports: { '2375/tcp': [{ HostIp: '0.0.0.0', HostPort: 0 }] },
+          Networks: {},
+        },
+      }),
+    );
+    expect(rows[0].ports).toEqual([
+      { privatePort: 2375, publicPort: null, ip: '0.0.0.0', protocol: 'tcp' },
+    ]);
+    expect(rows[0].metadataTruncated).toBe(false);
+  });
+
   it.each([
     [
       { PrivatePort: 2375.5, PublicPort: 8080 },
@@ -228,8 +278,8 @@ describe('socket inventory malformed port metadata', () => {
       [],
     ],
     [
-      { PrivatePort: 2375, PublicPort: '2375junk' },
-      { privatePort: 2375, publicPort: null },
+      { PrivatePort: 0, PublicPort: 65536 },
+      { privatePort: null, publicPort: null },
       [],
     ],
   ])('rejects malformed listing port values %j', async (ports, expected, exposed) => {
@@ -248,6 +298,17 @@ describe('socket inventory malformed port metadata', () => {
       publicPort: port.publicPort,
     }))).toEqual(exposed);
     expect(inventory.status).toBe('partial');
+  });
+
+  it('accepts the range boundaries 1 and 65535', async () => {
+    const rows = await rowsFrom(
+      listed({ Ports: [{ IP: '0.0.0.0', PrivatePort: 1, PublicPort: 65535, Type: 'tcp' }] }),
+      new Error('inspect unavailable'),
+    );
+    expect(rows[0].ports).toEqual([
+      { privatePort: 1, publicPort: 65535, ip: '0.0.0.0', protocol: 'tcp' },
+    ]);
+    expect(rows[0].metadataTruncated).toBe(false);
   });
 
   it.each([{ Ip: undefined }, { Ip: 5 }, { Ip: {} }])(
@@ -275,7 +336,7 @@ describe('socket inventory malformed port metadata', () => {
   );
 
   it.each([{ HostIp: undefined }, { HostIp: 5 }, { HostIp: {} }])(
-    'does not turn an unreadable inspect address into a wildcard binding: %j',
+    'keeps the listing address when inspect cannot read the same published binding: %j',
     async ({ HostIp }) => {
       const rows = await rowsFrom(
         listed({ Ports: [{ IP: '0.0.0.0', PrivatePort: 2375, PublicPort: 8080, Type: 'tcp' }] }),
@@ -286,8 +347,10 @@ describe('socket inventory malformed port metadata', () => {
           },
         }),
       );
+      // The public port matches the listing; only inspect's address is
+      // unreadable, so the listing's proven wildcard address is kept.
       expect(rows[0].ports).toEqual([
-        { privatePort: 2375, publicPort: 8080, ip: null, protocol: 'tcp' },
+        { privatePort: 2375, publicPort: 8080, ip: '0.0.0.0', protocol: 'tcp' },
       ]);
       expect(rows[0].metadataTruncated).toBe(true);
 
@@ -295,13 +358,110 @@ describe('socket inventory malformed port metadata', () => {
       expect(inventory.containers[0].publishedPorts).toEqual([{
         privatePort: 2375,
         publicPort: 8080,
-        ip: null,
-        allInterfaces: false,
+        ip: '0.0.0.0',
+        allInterfaces: true,
         protocol: 'tcp',
       }]);
       expect(inventory.status).toBe('partial');
     },
   );
+
+  it('does not turn an unreadable inspect address into a wildcard when the listing address is also unreadable', async () => {
+    const rows = await rowsFrom(
+      listed({ Ports: [{ IP: 5, PrivatePort: 2375, PublicPort: 8080, Type: 'tcp' }] }),
+      inspected({
+        NetworkSettings: {
+          Ports: { '2375/tcp': [{ HostIp: {}, HostPort: '8080' }] },
+          Networks: {},
+        },
+      }),
+    );
+    expect(rows[0].ports).toEqual([
+      { privatePort: 2375, publicPort: 8080, ip: null, protocol: 'tcp' },
+    ]);
+    expect(rows[0].metadataTruncated).toBe(true);
+
+    const inventory = inventoryOf(rows);
+    expect(inventory.containers[0].publishedPorts[0]).toMatchObject({
+      ip: null,
+      allInterfaces: false,
+    });
+    expect(inventory.status).toBe('partial');
+  });
+
+  it('marks an exposed-only listing entry with an unreadable address incomplete', async () => {
+    const rows = await rowsFrom(
+      listed({ Ports: [{ IP: 5, PrivatePort: 2375, PublicPort: 0, Type: 'tcp' }] }),
+      new Error('inspect unavailable'),
+    );
+    expect(rows[0].ports).toEqual([
+      { privatePort: 2375, publicPort: null, ip: null, protocol: 'tcp' },
+    ]);
+    expect(rows[0].metadataTruncated).toBe(true);
+  });
+
+  it('marks an exposed-only inspect binding with a malformed HostIp incomplete', async () => {
+    const rows = await rowsFrom(
+      listed({ Ports: [] }),
+      inspected({
+        NetworkSettings: {
+          Ports: { '2375/tcp': [{ HostIp: {}, HostPort: '' }] },
+          Networks: {},
+        },
+      }),
+    );
+    expect(rows[0].metadataTruncated).toBe(true);
+  });
+
+  it('marks an inspect port spec with an empty protocol incomplete', async () => {
+    const rows = await rowsFrom(listed({ Ports: [] }), inspected({
+      NetworkSettings: {
+        Ports: { '2375/': [{ HostIp: '0.0.0.0', HostPort: '8080' }] },
+        Networks: {},
+      },
+    }));
+    expect(rows[0].ports).toEqual([
+      { privatePort: 2375, publicPort: 8080, ip: '0.0.0.0', protocol: 'tcp' },
+    ]);
+    expect(rows[0].metadataTruncated).toBe(true);
+  });
+
+  it('marks a malformed listing protocol incomplete instead of defaulting silently', async () => {
+    const rows = await rowsFrom(
+      listed({ Ports: [{ IP: '0.0.0.0', PrivatePort: 2375, PublicPort: 8080, Type: 5 }] }),
+      inspected({
+        NetworkSettings: {
+          Ports: { '2375/tcp': [{ HostIp: '0.0.0.0', HostPort: '8080' }] },
+          Networks: {},
+        },
+      }),
+    );
+    expect(rows[0].ports).toEqual([
+      { privatePort: 2375, publicPort: 8080, ip: '0.0.0.0', protocol: 'tcp' },
+    ]);
+    expect(rows[0].metadataTruncated).toBe(true);
+  });
+
+  it('treats a published empty address as a proven wildcard binding', async () => {
+    const rows = await rowsFrom(listed({ Ports: [] }), inspected({
+      Mounts: [{ Type: 'bind', Source: SOCKET, Destination: SOCKET, RW: false }],
+      NetworkSettings: {
+        Ports: { '8080/tcp': [{ HostIp: '', HostPort: '8080' }] },
+        Networks: {},
+      },
+    }));
+    expect(rows[0].metadataTruncated).toBe(false);
+
+    const inventory = inventoryOf(rows);
+    expect(inventory.containers[0].publishedPorts).toEqual([{
+      privatePort: 8080,
+      publicPort: 8080,
+      ip: '',
+      allInterfaces: true,
+      protocol: 'tcp',
+    }]);
+    expect(inventory.status).toBe('complete');
+  });
 
   it('rejects a malformed inspect private-port key without inventing a binding', async () => {
     const rows = await rowsFrom(listed(), inspected({

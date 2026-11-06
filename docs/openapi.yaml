@@ -484,8 +484,7 @@ components:
       properties:
         transport: { type: string, enum: [unix, tcp, npipe, ssh, unknown] }
         address:
-          type: string
-          nullable: true
+          type: [string, "null"]
           description: >-
             Credential-free display form of the Docker client's endpoint. With
             `DOCKER_HOST` unset this is the client-resolved socket (or named
@@ -510,42 +509,39 @@ components:
             (`sencho.state: none`) is not proof of host execution, and a
             relative socket path is not a canonical host socket, so both stay
             `undetermined`.
-        reason: { type: string, nullable: true }
+        reason: { type: [string, "null"] }
         provider:
           type: object
           required: [kind, providerType, containerId, containerName, compose, socketBindSource]
           properties:
             kind: { type: string, enum: [direct-socket, container, unknown] }
             providerType:
-              type: string
-              nullable: true
+              type: [string, "null"]
               enum: [tecnativa, linuxserver, wollomatic, sencho-socket-gateway, generic-socket-proxy, direct-unix-socket, unknown]
-            containerId: { type: string, nullable: true }
-            containerName: { type: string, nullable: true }
+            containerId: { type: [string, "null"] }
+            containerName: { type: [string, "null"] }
             compose:
-              type: object
-              nullable: true
+              type: [object, "null"]
               properties:
-                project: { type: string, nullable: true }
-                service: { type: string, nullable: true }
-            socketBindSource: { type: string, nullable: true }
+                project: { type: [string, "null"] }
+                service: { type: [string, "null"] }
+            socketBindSource: { type: [string, "null"] }
         sencho:
           type: object
           required: [state, inContainer, containerId, containerName, socketBindSource, reason]
           properties:
             state: { type: string, enum: [resolved, none, unresolved] }
             inContainer:
-              type: boolean
-              nullable: true
+              type: [boolean, "null"]
               description: >-
                 `true` only when Sencho identified its own container. It is null
                 for `none` and `unresolved`: `none` also covers a container whose
                 identity no probe could see, so it is not evidence that Sencho
                 runs outside a container.
-            containerId: { type: string, nullable: true }
-            containerName: { type: string, nullable: true }
-            socketBindSource: { type: string, nullable: true }
-            reason: { type: string, nullable: true }
+            containerId: { type: [string, "null"] }
+            containerName: { type: [string, "null"] }
+            socketBindSource: { type: [string, "null"] }
+            reason: { type: [string, "null"] }
         evidence:
           type: array
           items: { type: string }
@@ -589,26 +585,24 @@ components:
         role: { type: string, enum: [proxy, direct-socket-consumer, undetermined] }
         classification: { type: string, enum: [detected, candidate, unknown] }
         providerType:
-          type: string
-          nullable: true
+          type: [string, "null"]
           enum: [tecnativa, linuxserver, wollomatic, sencho-socket-gateway, generic-socket-proxy, direct-unix-socket, unknown]
-        senchoStack: { type: string, nullable: true }
+        senchoStack: { type: [string, "null"] }
         compose:
-          type: object
-          nullable: true
+          type: [object, "null"]
           properties:
-            project: { type: string, nullable: true }
-            service: { type: string, nullable: true }
-            workingDir: { type: string, nullable: true }
-        health: { type: string, nullable: true }
+            project: { type: [string, "null"] }
+            service: { type: [string, "null"] }
+            workingDir: { type: [string, "null"] }
+        health: { type: [string, "null"] }
         socketMounts:
           type: array
           items:
             type: object
             required: [source, destination, readOnly]
             properties:
-              source: { type: string, nullable: true }
-              destination: { type: string, nullable: true }
+              source: { type: [string, "null"] }
+              destination: { type: [string, "null"] }
               readOnly: { type: boolean }
         apiGroups:
           type: array
@@ -620,8 +614,8 @@ components:
             type: object
             required: [privatePort, publicPort, ip, allInterfaces, protocol]
             properties:
-              privatePort: { type: integer, nullable: true }
-              publicPort: { type: integer, nullable: true }
+              privatePort: { type: [integer, "null"] }
+              publicPort: { type: [integer, "null"] }
               ip:
                 type: [string, "null"]
                 description: The binding address, or null when Docker did not provide a readable one. A non-null empty string or `0.0.0.0`/`::` means every interface.
@@ -637,7 +631,7 @@ components:
             required: [name, id]
             properties:
               name: { type: string }
-              id: { type: string, nullable: true }
+              id: { type: [string, "null"] }
         privileged: { type: boolean }
         readonlyRootfs: { type: boolean }
         infrastructureLabel: { type: boolean }
@@ -3297,8 +3291,7 @@ paths:
                           items:
                             type: string
                         creationSpec:
-                          type: object
-                          nullable: true
+                          type: [object, "null"]
         "403":
           $ref: "#/components/responses/Forbidden"
         "404":

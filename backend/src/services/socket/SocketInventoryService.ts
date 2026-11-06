@@ -1055,7 +1055,7 @@ export function buildSocketInventory(input: SocketInventoryBuildInput): SocketIn
     && !errors.some(error => error.stage === 'container-metadata')) {
     errors.push({
       stage: 'container-metadata',
-      message: 'A container metadata list exceeded the inventory bound; some mounts, ports, labels, networks, or proxy flags may be missing.',
+      message: 'A container metadata list exceeded the inventory bound or could not be read completely; some mounts, ports, labels, networks, or proxy flags may be missing.',
     });
   }
   const providerMissing = endpoint.provider.kind === 'container'

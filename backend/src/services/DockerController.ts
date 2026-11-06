@@ -3955,7 +3955,7 @@ function parsePortString(value: string): number | null {
 
 interface NormalizedLabels {
   labels: Record<string, string>;
-  /** A non-null label collection or entry could not be read. */
+  /** A label collection or entry could not be read, or the list exceeded its bound. */
   incomplete: boolean;
 }
 
@@ -4002,7 +4002,10 @@ function normalizeDockerLabels(value: unknown): NormalizedLabels {
 
 interface NormalizedMounts {
   mounts: SocketInventoryMountRow[];
-  /** An entry, mount field, or read/write flag could not be read, or the list exceeded its bound. */
+  /**
+   * An entry, mount field, or read/write flag could not be read, a mount type
+   * had to be canonicalized, or the list exceeded its bound.
+   */
   incomplete: boolean;
 }
 
@@ -4014,7 +4017,9 @@ interface NormalizedMounts {
 const KNOWN_MOUNT_TYPES = new Set(['bind', 'volume', 'tmpfs', 'npipe', 'cluster']);
 
 function normalizeDockerMounts(value: unknown): NormalizedMounts {
-  if (!Array.isArray(value)) return { mounts: [], incomplete: false };
+  if (!Array.isArray(value)) {
+    return { mounts: [], incomplete: value !== undefined && value !== null };
+  }
   const mounts: SocketInventoryMountRow[] = [];
   let incomplete = value.length > 64;
   for (const entry of value.slice(0, 64)) {
@@ -4041,10 +4046,10 @@ function normalizeDockerMounts(value: unknown): NormalizedMounts {
     const destination = readContainerString(mount.Destination);
     if (source === null || destination === null) incomplete = true;
     // An empty destination is unreadable for every type. An empty source is
-    // flagged for a bind (or a possible bind), where it could be the socket;
-    // storage and pipe types may legitimately omit a source.
+    // valid only for tmpfs; for a bind it could be the socket, and Docker
+    // always supplies one for volume, npipe, and cluster mounts.
     if (destination === '') incomplete = true;
-    if (source === '' && (type === 'bind' || type === 'unknown')) incomplete = true;
+    if (source === '' && type !== 'tmpfs') incomplete = true;
     // A read/write flag that is not a boolean (including an explicit null) is
     // unreadable; the safe reading is still writable, but the row must not look
     // complete.
@@ -4066,7 +4071,7 @@ function normalizeDockerMounts(value: unknown): NormalizedMounts {
 
 interface NormalizedPorts {
   ports: SocketInventoryPortRow[];
-  /** A listing entry could not be read. */
+  /** A listing entry could not be read, or the list exceeded its bound. */
   incomplete: boolean;
 }
 
@@ -4098,11 +4103,14 @@ function normalizeDockerPorts(value: unknown): NormalizedPorts {
     // would report as a proven wildcard binding.
     if (publicPort !== null && rawIp === null) incomplete = true;
     if (port.IP !== undefined && port.IP !== null && rawIp === null) incomplete = true;
+    const rawProtocol = readContainerString(port.Type);
+    // A present-but-malformed protocol is not a clean `tcp` default.
+    if (port.Type !== undefined && port.Type !== null && rawProtocol === null) incomplete = true;
     ports.push({
       privatePort,
       publicPort,
       ip: rawIp,
-      protocol: readContainerString(port.Type) ?? 'tcp',
+      protocol: rawProtocol ?? 'tcp',
     });
   }
   return { ports, incomplete };
@@ -4230,14 +4238,24 @@ function normalizeInspectPorts(
     }
     // The spec is present. An exposed-only list entry adds nothing to it.
     if (candidate.publicPort === null) continue;
-    if (sameSpecPorts.some(port => port.publicPort === candidate.publicPort)) continue;
+    const matchingPort = sameSpecPorts.find(port => port.publicPort === candidate.publicPort);
+    if (matchingPort) {
+      // Inspect has the same published port but could not read its address.
+      // The listing's readable address is still evidence, so keep it rather
+      // than reporting an unreadable inspect address over a known one.
+      if (matchingPort.ip === null && candidate.ip !== null) {
+        matchingPort.ip = candidate.ip;
+        restored = true;
+      }
+      continue;
+    }
     const nullMatch = sameSpecPorts.find(port => port.publicPort === null);
     if (nullMatch) {
       // Inspect could not establish a valid binding for this spec, so the whole
-      // listing binding is the evidence to keep: filling only the port would
-      // pair the list's port with an unrelated inspect address.
+      // listing binding is the evidence to keep. A readable inspect address is
+      // kept only when the listing address itself is unreadable.
       nullMatch.publicPort = candidate.publicPort;
-      nullMatch.ip = candidate.ip;
+      nullMatch.ip = candidate.ip ?? nullMatch.ip;
       restored = true;
     }
     // Otherwise inspect already carries a different valid public port; do not
@@ -4266,7 +4284,7 @@ function normalizeDockerExposedPorts(value: unknown): NormalizedExposedPorts {
 
 interface NormalizedNetworks {
   networks: SocketInventoryNetworkRow[];
-  /** A non-null network map or entry could not be read. */
+  /** A network map or entry could not be read, or the list exceeded its bound. */
   incomplete: boolean;
 }
 
