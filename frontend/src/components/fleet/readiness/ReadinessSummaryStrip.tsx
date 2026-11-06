@@ -3,6 +3,7 @@ import { formatAgeShort } from '@/lib/relativeTime';
 import { DOMAIN_STATE_ORDER, type DomainState, type FleetReadinessResponse } from '@/types/readiness';
 import { TONE_DOT, TONE_TEXT, domainMeta, stateMeta } from '../readinessMeta';
 import { useNow } from './useNow';
+import { DismissedCountButton } from '@/components/ui/dismissed-sheet';
 
 /** The headline for the fleet's worst node state. Not a score: a short phrase. */
 const HEADLINE: Record<DomainState, string> = {
@@ -57,17 +58,10 @@ export function ReadinessSummaryStrip({ data, checking, dismissedCount = 0, onOp
         </div>
         <span className="font-mono text-[11px] tabular-nums text-stat-subtitle">
           {parts.join(' · ')}
-          {dismissedCount > 0 && (
+          {dismissedCount > 0 && onOpenDismissed && (
             <>
               {' · '}
-              <button
-                type="button"
-                aria-haspopup="dialog"
-                onClick={onOpenDismissed}
-                className="rounded-sm underline decoration-dotted underline-offset-4 transition-colors hover:text-stat-value focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand/50 max-md:min-h-11"
-              >
-                {dismissedCount} dismissed
-              </button>
+              <DismissedCountButton count={dismissedCount} onClick={onOpenDismissed} />
             </>
           )}
         </span>

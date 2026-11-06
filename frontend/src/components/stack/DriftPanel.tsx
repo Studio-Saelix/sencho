@@ -12,7 +12,7 @@ import { useNodes } from '@/context/NodeContext';
 import { useAuth } from '@/context/AuthContext';
 import { Button } from '@/components/ui/button';
 import { ConfirmModal } from '@/components/ui/modal';
-import { DismissedSection } from '@/components/ui/dismissed-section';
+import { DismissedCountButton, DismissedSheet } from '@/components/ui/dismissed-sheet';
 import { useFindingDismissal } from '@/hooks/useFindingDismissal';
 import { DRIFT_SEVERITY_SCALE, partitionFindings } from '@/lib/findingDismissals';
 import { describeDismissal } from '@/components/fleet/readiness/describeDismissal';
@@ -292,6 +292,7 @@ export default function DriftPanel({ stackName, onRedeploy, onEditCompose, onOpe
   const { can } = useAuth();
   const now = useNow(30_000);
   const [report, setReport] = useState<StackDriftReport | null>(null);
+  const [dismissedOpen, setDismissedOpen] = useState(false);
   /**
    * The node `report` was read from, so a report can be recognised as belonging
    * to a node the operator has since left.
@@ -559,7 +560,10 @@ export default function DriftPanel({ stackName, onRedeploy, onEditCompose, onOpe
                   </span>
                 )}
                 {dismissed.length > 0 && (
-                  <span className="font-mono text-[10px] text-stat-subtitle">· {dismissed.length} dismissed</span>
+                  <span className="font-mono text-[10px] text-stat-subtitle">
+                    {'· '}
+                    <DismissedCountButton count={dismissed.length} onClick={() => setDismissedOpen(true)} />
+                  </span>
                 )}
               </div>
               <div className="mt-1 font-mono text-[11px] leading-relaxed text-foreground/80">{meta.line}</div>
@@ -625,7 +629,10 @@ export default function DriftPanel({ stackName, onRedeploy, onEditCompose, onOpe
             </section>
           )}
 
-          <DismissedSection
+          <DismissedSheet
+            open={dismissedOpen}
+            onOpenChange={setDismissedOpen}
+            crumb={['Stacks', stackName, 'Drift']}
             items={dismissed.map(({ finding, dismissal }) => ({
               id: dismissal.id,
               title: [finding.service, DRIFT_FINDING_LABEL[finding.kind]].filter(part => part !== '').join(' · '),

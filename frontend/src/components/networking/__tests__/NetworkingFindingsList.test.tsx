@@ -1,6 +1,7 @@
 import { describe, it, expect, vi } from 'vitest';
 import { render, screen } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
+import { networkingDismissedItems } from '../networkingDismissedItems';
 import { NetworkingFindingsList, type NetworkingDismissedList } from '../NetworkingFindingsList';
 import type { NetworkingFindingControls } from '../NetworkingFindingActions';
 import type { NetworkingFinding } from '@/types/networking';
@@ -48,13 +49,13 @@ function exposureFinding(): NetworkingFinding {
 
 describe('NetworkingFindingsList', () => {
   it('shows a calm empty state when there are no findings', () => {
-    render(<NetworkingFindingsList findings={[]} loading={false} controls={controls()} />);
+    render(<NetworkingFindingsList onOpenDismissed={() => {}} findings={[]} loading={false} controls={controls()} />);
     expect(screen.getByText('No networking issues detected.')).toBeInTheDocument();
   });
 
   it('groups findings into Needs action, Review recommended, and Informational', () => {
     render(
-      <NetworkingFindingsList
+      <NetworkingFindingsList onOpenDismissed={() => {}}
         findings={[
           finding({ id: 'a', severity: 'critical', title: 'Critical issue' }),
           finding({ id: 'b', severity: 'medium', title: 'Medium issue' }),
@@ -70,18 +71,18 @@ describe('NetworkingFindingsList', () => {
   });
 
   it('respects node-scoped stack:edit for the primary action', () => {
-    render(<NetworkingFindingsList findings={[exposureFinding()]} loading={false} controls={controls({ isAdmin: false, nodeId: 7, canEditStack: () => true })} />);
+    render(<NetworkingFindingsList onOpenDismissed={() => {}} findings={[exposureFinding()]} loading={false} controls={controls({ isAdmin: false, nodeId: 7, canEditStack: () => true })} />);
     expect(screen.getByRole('button', { name: 'Set exposure intent' })).toBeInTheDocument();
   });
 
   it('hides the primary action when the node scope does not match', () => {
-    render(<NetworkingFindingsList findings={[exposureFinding()]} loading={false} controls={controls({ isAdmin: false, nodeId: 7, canEditStack: () => false })} />);
+    render(<NetworkingFindingsList onOpenDismissed={() => {}} findings={[exposureFinding()]} loading={false} controls={controls({ isAdmin: false, nodeId: 7, canEditStack: () => false })} />);
     expect(screen.queryByRole('button', { name: 'Set exposure intent' })).not.toBeInTheDocument();
   });
 
   it('shows the merged source label for a card found by both engines', () => {
     render(
-      <NetworkingFindingsList
+      <NetworkingFindingsList onOpenDismissed={() => {}}
         findings={[finding({
           sources: ['live', 'doctor'],
           doctorFindings: [{ ruleId: 'sensitive-service-broad-exposure', ranAt: new Date().toISOString(), title: 't', message: 'm', severity: 'high' }],
@@ -99,7 +100,7 @@ describe('NetworkingFindingsList', () => {
       id: 'drift', kind: 'declared-network-unused', title: 'Declared network unused',
       recommendedActions: [{ kind: 'open-stack-editor', label: 'Open stack editor', stack: 'web' }],
     });
-    render(<NetworkingFindingsList findings={[drift]} loading={false} controls={controls({ onAction })} />);
+    render(<NetworkingFindingsList onOpenDismissed={() => {}} findings={[drift]} loading={false} controls={controls({ onAction })} />);
     await userEvent.click(screen.getByRole('button', { name: 'Open stack editor' }));
     expect(onAction).toHaveBeenCalledWith(expect.objectContaining({ kind: 'open-stack-editor', stack: 'web' }));
   });
@@ -113,7 +114,7 @@ describe('NetworkingFindingsList', () => {
         { kind: 'open-stack-editor', label: 'Open stack editor', stack: 'web' },
       ],
     });
-    render(<NetworkingFindingsList findings={[missing]} loading={false} controls={controls()} />);
+    render(<NetworkingFindingsList onOpenDismissed={() => {}} findings={[missing]} loading={false} controls={controls()} />);
     expect(screen.getByRole('button', { name: 'Create network' })).toBeInTheDocument();
     expect(screen.queryByRole('button', { name: 'Copy Docker command' })).not.toBeInTheDocument();
     await userEvent.click(screen.getByRole('button', { name: /More actions/ }));
@@ -128,7 +129,7 @@ describe('NetworkingFindingsList', () => {
         { kind: 'open-stack-editor', label: 'Open stack editor', stack: 'web' },
       ],
     });
-    render(<NetworkingFindingsList findings={[missing]} loading={false} controls={controls({ isAdmin: false })} />);
+    render(<NetworkingFindingsList onOpenDismissed={() => {}} findings={[missing]} loading={false} controls={controls({ isAdmin: false })} />);
     expect(screen.queryByRole('button', { name: 'Create network' })).not.toBeInTheDocument();
     expect(screen.getByRole('button', { name: 'Open stack editor' })).toBeInTheDocument();
   });
@@ -136,10 +137,10 @@ describe('NetworkingFindingsList', () => {
   it('dismisses in one click and offers no Dismiss to an account that may not', async () => {
     const onDismiss = vi.fn();
     const item = finding({ id: 'shared', title: 'Shared network' });
-    const { rerender } = render(<NetworkingFindingsList findings={[item]} loading={false} controls={controls({ onDismiss })} />);
+    const { rerender } = render(<NetworkingFindingsList onOpenDismissed={() => {}} findings={[item]} loading={false} controls={controls({ onDismiss })} />);
     await userEvent.click(screen.getByRole('button', { name: 'Dismiss: Shared network' }));
     expect(onDismiss).toHaveBeenCalledWith(item, 'until_change', undefined);
-    rerender(<NetworkingFindingsList findings={[item]} loading={false} controls={controls({ canDismiss: () => false })} />);
+    rerender(<NetworkingFindingsList onOpenDismissed={() => {}} findings={[item]} loading={false} controls={controls({ canDismiss: () => false })} />);
     expect(screen.queryByRole('button', { name: /^Dismiss/ })).not.toBeInTheDocument();
   });
 
@@ -151,7 +152,7 @@ describe('NetworkingFindingsList', () => {
       doctorFindings: [{ ruleId: 'r', ranAt: new Date().toISOString(), title: 't', message: 'm', severity: 'high', service: 'db' }],
       recommendedActions: [{ kind: 'open-stack-doctor', label: 'Open Doctor', stack: 'web' }],
     });
-    render(<NetworkingFindingsList findings={[doctorOnly]} loading={false} controls={controls({ onAcknowledge })} />);
+    render(<NetworkingFindingsList onOpenDismissed={() => {}} findings={[doctorOnly]} loading={false} controls={controls({ onAcknowledge })} />);
     expect(screen.queryByRole('button', { name: /^Dismiss/ })).not.toBeInTheDocument();
     await userEvent.click(screen.getByRole('button', { name: 'Acknowledge in Doctor' }));
     expect(onAcknowledge).toHaveBeenCalledWith(doctorOnly);
@@ -159,7 +160,7 @@ describe('NetworkingFindingsList', () => {
 
   it("shows Doctor's remediation under the message", () => {
     render(
-      <NetworkingFindingsList
+      <NetworkingFindingsList onOpenDismissed={() => {}}
         findings={[finding({
           doctorFindings: [{ ruleId: 'r', ranAt: new Date().toISOString(), title: 't', message: 'm', severity: 'high', remediation: 'Bind the port to 127.0.0.1.' }],
         })]}
@@ -170,8 +171,9 @@ describe('NetworkingFindingsList', () => {
     expect(screen.getByText('Bind the port to 127.0.0.1.')).toBeInTheDocument();
   });
 
-  it('lists dismissed findings under a quiet count and restores one on request', async () => {
+  it('opens the dismissed sheet from the count and lists the rows it is given', async () => {
     const onRestore = vi.fn();
+    const onOpenDismissed = vi.fn();
     const hidden = finding({ id: 'hidden', title: 'Hidden finding' });
     const dismissed: NetworkingDismissedList = {
       items: [{
@@ -183,11 +185,16 @@ describe('NetworkingFindingsList', () => {
       onRestore,
       isRestoring: () => false,
     };
-    render(<NetworkingFindingsList findings={[]} dismissed={dismissed} loading={false} controls={controls()} />);
+    render(<NetworkingFindingsList onOpenDismissed={onOpenDismissed} findings={[]} dismissed={dismissed} loading={false} controls={controls()} />);
     expect(screen.getByText('Nothing needs attention right now.')).toBeInTheDocument();
-    expect(screen.getByText('1 dismissed')).toBeInTheDocument();
-    expect(screen.getByText(/dismissed by alice/)).toBeInTheDocument();
-    await userEvent.click(screen.getByRole('button', { name: 'Restore' }));
+    expect(screen.queryByText(/dismissed by alice/)).not.toBeInTheDocument();
+    await userEvent.click(screen.getByRole('button', { name: '1 dismissed' }));
+    expect(onOpenDismissed).toHaveBeenCalledTimes(1);
+
+    const items = networkingDismissedItems(dismissed);
+    expect(items).toHaveLength(1);
+    expect(items[0].meta).toMatch(/dismissed by alice/);
+    items[0].onRestore?.();
     expect(onRestore).toHaveBeenCalledWith(dismissed.items[0]);
   });
 });

@@ -1,5 +1,4 @@
-import { SystemSheet, SheetSection } from '@/components/ui/system-sheet';
-import { DismissedList, type DismissedItem } from '@/components/ui/dismissed-section';
+import { DismissedSheet, type DismissedItem } from '@/components/ui/dismissed-sheet';
 import type { FindingDismissal } from '@/types/findingDismissal';
 import type { DismissedFinding } from '@/lib/findingDismissals';
 import type { FleetReadinessNode, ReadinessFinding } from '@/types/readiness';
@@ -33,19 +32,5 @@ export function ReadinessDismissedSheet({ open, onOpenChange, dismissed, nodes, 
     restoring: isRestoring(dismissal),
   }));
 
-  return (
-    <SystemSheet
-      open={open}
-      onOpenChange={onOpenChange}
-      crumb={['Fleet', 'Readiness']}
-      name="Dismissed findings"
-      meta={`${items.length} set aside · still counted, never hidden`}
-    >
-      <SheetSection title={`Dismissed · ${items.length}`}>
-        {items.length > 0
-          ? <DismissedList items={items} flush />
-          : <p className="py-8 text-center text-sm text-muted-foreground">Nothing is dismissed.</p>}
-      </SheetSection>
-    </SystemSheet>
-  );
+  return <DismissedSheet open={open} onOpenChange={onOpenChange} crumb={['Fleet', 'Readiness']} items={items} />;
 }

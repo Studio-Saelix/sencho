@@ -280,7 +280,7 @@ describe('DriftPanel dismissals', () => {
     const post = vi.mocked(apiFetch).mock.calls.find(([path]) => path === '/stacks/web/drift/dismissals');
     expect(post?.[1]).toMatchObject({ method: 'POST', localOnly: false });
     expect(JSON.parse(String(post?.[1]?.body))).toMatchObject({ findingId: f.id, fingerprint: f.fingerprint, count: 1, mode: 'until_change' });
-    expect(screen.getByTestId('dismissed-section')).toHaveTextContent('1 dismissed');
+    expect(screen.getByRole('button', { name: '1 dismissed' })).toBeInTheDocument();
   });
 
   it('keeps counting a dismissed finding and leaves the verdict alone', async () => {
@@ -299,7 +299,7 @@ describe('DriftPanel dismissals', () => {
     mockReads(report([f], { dismissals: [dismissal(f, { fingerprint: 'fp-old' })] }));
     renderPanel();
     expect(await screen.findByTestId('drift-finding')).toBeInTheDocument();
-    expect(screen.queryByTestId('dismissed-section')).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /dismissed/ })).not.toBeInTheDocument();
   });
 
   it('restores a dismissed finding through the stack route by id', async () => {
