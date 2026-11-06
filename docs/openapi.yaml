@@ -490,10 +490,10 @@ components:
             Credential-free display form of the Docker client's endpoint. With
             `DOCKER_HOST` unset this is the client-resolved socket (or named
             pipe) when it can be inspected. If the client cannot be inspected,
-            `address` and `socketPath` are null and the endpoint is
-            `undetermined`; `/var/run/docker.sock` is not substituted. A bare
-            `unix://` follows the same rule. The conventional-path fallback
-            applies only when the caller does not mark the socket unresolved.
+            `address` is null and `detection` is `undetermined`;
+            `/var/run/docker.sock` is not substituted. A bare `unix://` follows
+            the same rule. The conventional-path fallback applies only when the
+            caller does not mark the socket unresolved.
         addressSource: { type: string, enum: [env, default] }
         detection:
           type: string
