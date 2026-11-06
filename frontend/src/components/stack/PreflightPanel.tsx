@@ -16,6 +16,8 @@ import { Combobox, type ComboboxOption } from '@/components/ui/combobox';
 import { Modal, ModalHeader, ModalBody, ModalFooter, ConfirmModal } from '@/components/ui/modal';
 import { isPreflightNoteFinding } from '@/lib/preflightNotes';
 import { coverageGapLine, type AssuranceCoverage } from '@/lib/coverageGaps';
+import { SourceLocationLink } from '@/components/ui/source-location-link';
+import type { AuthoredLocation } from '@/lib/authoredLocation';
 
 type PreflightSeverity = 'blocker' | 'high' | 'warning' | 'info';
 type PreflightStatus = 'never-run' | 'pass' | 'unrenderable' | PreflightSeverity;
@@ -27,6 +29,8 @@ interface PreflightFinding {
   title: string;
   message: string;
   sourcePath?: string;
+  /** Authored file and range, when one source could be decided. */
+  location?: AuthoredLocation;
   remediation?: string;
   service?: string;
   acknowledged?: boolean;
@@ -149,10 +153,12 @@ function FindingRow({
   finding,
   canEdit,
   onAcknowledge,
+  onOpenLocation,
 }: {
   finding: PreflightFinding;
   canEdit: boolean;
   onAcknowledge?: (finding: PreflightFinding) => void;
+  onOpenLocation?: (location: AuthoredLocation) => void;
 }) {
   return (
     <div className="border-t border-muted py-2 first:border-t-0">
@@ -180,9 +186,13 @@ function FindingRow({
           <span className="font-mono text-[10px] uppercase tracking-wide">fix</span> · {finding.remediation}
         </div>
       )}
-      {finding.sourcePath && (
+      {finding.location && onOpenLocation ? (
+        <div className="mt-0.5">
+          <SourceLocationLink location={finding.location} onOpen={onOpenLocation} />
+        </div>
+      ) : finding.sourcePath ? (
         <div className="mt-0.5 font-mono text-[10px] text-stat-subtitle">{finding.sourcePath}</div>
-      )}
+      ) : null}
     </div>
   );
 }
@@ -230,7 +240,15 @@ function AcknowledgedRow({
   );
 }
 
-export default function PreflightPanel({ stackName, canEdit = false }: { stackName: string; canEdit?: boolean }) {
+export default function PreflightPanel({
+  stackName,
+  canEdit = false,
+  onOpenLocation,
+}: {
+  stackName: string;
+  canEdit?: boolean;
+  onOpenLocation?: (location: AuthoredLocation) => void;
+}) {
   const { activeNode } = useNodes();
   const nodeId = activeNode?.id;
   const [report, setReport] = useState<PreflightReport | null>(null);
@@ -470,6 +488,7 @@ export default function PreflightPanel({ stackName, canEdit = false }: { stackNa
                     key={`note-${f.ruleId}-${f.service ?? ''}-${i}`}
                     finding={f}
                     canEdit={false}
+                    onOpenLocation={onOpenLocation}
                   />
                 ))}
               </div>
@@ -489,6 +508,7 @@ export default function PreflightPanel({ stackName, canEdit = false }: { stackNa
                       finding={f}
                       canEdit={canEdit}
                       onAcknowledge={openAckDialog}
+                      onOpenLocation={onOpenLocation}
                     />
                   ))}
                 </div>

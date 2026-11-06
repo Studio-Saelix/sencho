@@ -5,6 +5,7 @@
 
 import { ComposeService } from './ComposeService';
 import DockerController from './DockerController';
+import { buildAuthoredProject, correlateLabel, isActingReason, type AuthoredProject } from './composeSource';
 import { redactLabelValue } from '../helpers/labelValueRedaction';
 import { sanitizeForLog } from '../utils/safeLog';
 import {
@@ -89,10 +90,31 @@ export interface StackLabelReplica {
   inspectFailed?: boolean;
 }
 
+/**
+ * The authored origin of one Compose-declared label. Never carries a value.
+ * Absent for runtime, image, and system labels.
+ */
+export interface LabelAuthoredOrigin {
+  /** Omitted when only an ambiguity is known; present on every acting origin. */
+  source?: 'inline' | 'label-file';
+  /** Present only for an acting origin; an ambiguous one has no link. */
+  file?: string;
+  line?: number;
+  column?: number;
+  endLine?: number;
+  endColumn?: number;
+  shared?: boolean;
+  /** The inline `labels:` map overrides a label-file entry for this key. */
+  overridden?: boolean;
+  ambiguity?: 'duplicate-key' | 'unparsed-source' | 'interpolated' | 'outside-boundary';
+}
+
 export interface StackServiceLabelRow {
   service: string;
   declaredLabels: LabelValue[];
   replicas: StackLabelReplica[];
+  /** Authored origin by label key, for labels declared in Compose. */
+  authored?: Record<string, LabelAuthoredOrigin>;
 }
 
 export interface StackLabelInventory {
@@ -296,6 +318,48 @@ export async function buildNodeLabelInventory(
   };
 }
 
+function authoredOriginsFor(
+  project: AuthoredProject | null,
+  service: string,
+  keys: string[],
+): Record<string, LabelAuthoredOrigin> | undefined {
+  if (!project) return undefined;
+  const serviceLabels = project.labels.get(service);
+  const out: Record<string, LabelAuthoredOrigin> = {};
+  for (const key of keys) {
+    const result = correlateLabel(project, service, key);
+    if (serviceLabels && isActingReason(result.reason) && result.origin) {
+      const winner = serviceLabels.winners[key];
+      if (!winner) continue;
+      const overridden = winner.source === 'inline'
+        && serviceLabels.contributions.some(contribution => contribution.key === key && contribution.source === 'label-file');
+      out[key] = {
+        source: winner.source,
+        file: result.origin.file,
+        line: result.origin.range.line,
+        column: result.origin.range.column,
+        endLine: result.origin.range.endLine,
+        endColumn: result.origin.range.endColumn,
+        ...(winner.shared ? { shared: true } : {}),
+        ...(overridden ? { overridden: true } : {}),
+      };
+      continue;
+    }
+    const kind = result.ambiguity?.kind;
+    // An aliased declaration is unresolved; the wire reason stays the stable
+    // `unparsed-source` value the client already renders as "unreadable".
+    const wireKind = kind === 'unresolved-alias' ? 'unparsed-source' : kind;
+    if (wireKind === 'duplicate-key' || wireKind === 'unparsed-source' || wireKind === 'interpolated' || wireKind === 'outside-boundary') {
+      const winner = serviceLabels?.winners[key];
+      out[key] = {
+        ...(winner ? { source: winner.source } : {}),
+        ambiguity: wireKind,
+      };
+    }
+  }
+  return Object.keys(out).length > 0 ? out : undefined;
+}
+
 /** Per-stack declared vs runtime label reconciliation for Stack Anatomy. */
 export async function buildStackLabelInventory(
   nodeId: number,
@@ -332,6 +396,15 @@ export async function buildStackLabelInventory(
     renderFailed = true;
   }
 
+  let authoredProject: AuthoredProject | null = null;
+  try {
+    authoredProject = await buildAuthoredProject(nodeId, stackName);
+  } catch (error) {
+    // Authored origins are additive: a model failure leaves provenance and
+    // reconciliation exactly as they were.
+    console.warn('[LabelInventory] Authored source model unavailable for stack %s:', sanitizeForLog(stackName), error);
+  }
+
   const docker = DockerController.getInstance(nodeId);
   const stackContainers = await docker.getContainersByStack(stackName) as Array<{ Id?: string; Names?: string[]; State?: string; Service?: string }>;
   const inspected = await mapWithConcurrency(stackContainers, INSPECT_CONCURRENCY, async (c) => {
@@ -365,6 +438,7 @@ export async function buildStackLabelInventory(
     const declaredLabels = Object.entries(declared)
       .map(([key, value]) => toLabelValue(key, value, 'compose', revealSecrets, declaredLabelBehavior(sencho, service, key)))
       .sort((a, b) => a.key.localeCompare(b.key));
+    const authored = authoredOriginsFor(authoredProject, service, Object.keys(declared));
 
     const replicas: StackLabelReplica[] = (replicasByService.get(service) ?? []).map((rep) => {
       // A failed inspect has no runtime labels; reconciling against {} would falsely
@@ -410,7 +484,7 @@ export async function buildStackLabelInventory(
       };
     });
 
-    return { service, declaredLabels, replicas };
+    return { service, declaredLabels, replicas, ...(authored ? { authored } : {}) };
   });
 
   return {

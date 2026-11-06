@@ -164,6 +164,10 @@ Against a node whose Sencho instance does not include this action, only the down
 
 The same controls apply to the `compose.yaml` and `.env` editors.
 
+## Opening a reported location
+
+Compose Doctor findings and Compose Labels rows can open the exact authored line. A link in the form `compose.override.yaml:14` opens the **Files** tab on that file and selects the range; a link to the primary Compose file opens the **compose.yaml** tab instead. Switching tabs keeps both buffers, so an unsaved edit in the other tab is not discarded. If the Files viewer already has unsaved changes, its usual discard confirmation appears before the new file opens.
+
 ## Diff preview before save
 
 When **Diff preview before save** is enabled in **Settings → Infrastructure → Stacks**, clicking **Save & Deploy**, **Save & Reapply**, **Save Only**, or **Save & Pull Images** opens a side-by-side diff modal before anything is written to disk. The left pane is the on-disk content; the right pane is your unsaved edits with additions highlighted in green. The footer reads `ON DISK → UNSAVED` so the panes are unambiguous.

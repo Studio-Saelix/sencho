@@ -112,6 +112,47 @@ describe('withReadBehaviors', () => {
     expect(read.services[0].replicas[0].runtimeLabels[0]).toMatchObject({ behavior: { state: 'inert' } });
   });
 
+  it('drops an all-invalid authored map instead of carrying it through the service spread', () => {
+    const body = {
+      stackName: 'demo',
+      renderable: true,
+      generatedAt: 1,
+      services: [{
+        service: 'web',
+        declaredLabels: [{ key: 'a', value: '1', source: 'compose' }],
+        replicas: [],
+        authored: {
+          a: { source: 'inline', file: '../../escape', line: -1, column: 1, endLine: 1, endColumn: 2 },
+        },
+      }],
+    } as unknown as StackLabelInventory;
+    const read = withReadBehaviors(body);
+    expect('authored' in read.services[0]).toBe(false);
+    expect(read.services[0].authored).toBeUndefined();
+  });
+
+  it('keeps only the valid entries of a partially invalid authored map', () => {
+    const body = {
+      stackName: 'demo',
+      renderable: true,
+      generatedAt: 1,
+      services: [{
+        service: 'web',
+        declaredLabels: [
+          { key: 'a', value: '1', source: 'compose' },
+          { key: 'b', value: '2', source: 'compose' },
+        ],
+        replicas: [],
+        authored: {
+          a: { source: 'inline', file: 'compose.yaml', line: 4, column: 7, endLine: 4, endColumn: 12 },
+          b: { source: 'inline', file: '../escape', line: 1, column: 1, endLine: 1, endColumn: 2 },
+        },
+      }],
+    } as unknown as StackLabelInventory;
+    const read = withReadBehaviors(body);
+    expect(Object.keys(read.services[0].authored ?? {})).toEqual(['a']);
+  });
+
   it.each([
     ['a null body', null],
     ['a body with no inventory shape', { stackName: 'demo' }],

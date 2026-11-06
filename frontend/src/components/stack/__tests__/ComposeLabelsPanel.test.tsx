@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { render, screen } from '@testing-library/react';
+import { render, screen, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import ComposeLabelsPanel from '../ComposeLabelsPanel';
 import { LABEL_DISAMBIGUATION_COPY } from '@/lib/labelInventory';
@@ -588,5 +588,78 @@ describe('ComposeLabelsPanel io.sencho.* status', () => {
     const row = (await screen.findAllByText('io.sencho.update'))[0].closest('[data-testid="compose-label-row"]');
     expect(row).toHaveAttribute('data-policy-state', 'ignored');
     expect(screen.getByText('Use auto, manual, or disabled.')).toBeInTheDocument();
+  });
+
+  it('renders authored origins, shared and override words, and one reason for an ambiguity', async () => {
+    vi.mocked(apiFetch).mockResolvedValue({
+      ok: true,
+      json: async () => ({
+        stackName: 'demo', renderable: true, partial: false, generatedAt: Date.now(),
+        services: [{
+          service: 'web',
+          declaredLabels: [
+            { key: 'from.file', value: '1', source: 'compose' as const },
+            { key: 'inline.key', value: '2', source: 'compose' as const },
+            { key: 'unknown.origin', value: '3', source: 'compose' as const },
+          ],
+          replicas: [],
+          authored: {
+            'from.file': { source: 'label-file', file: 'app.labels', line: 2, column: 1, endLine: 2, endColumn: 12, shared: true },
+            'inline.key': { source: 'inline', file: 'compose.yaml', line: 6, column: 7, endLine: 6, endColumn: 14, overridden: true },
+            'unknown.origin': { source: 'inline', ambiguity: 'unparsed-source' },
+          },
+        }],
+      }),
+    } as Response);
+    const onOpenLocation = vi.fn();
+    render(<ComposeLabelsPanel stackName="demo" onOpenLocation={onOpenLocation} />);
+    const card = await screen.findByTestId('compose-label-service');
+    expect(within(card).getByText('label file')).toBeInTheDocument();
+    expect(within(card).getByText('shared')).toBeInTheDocument();
+    expect(within(card).getByText('inline overrides label file')).toBeInTheDocument();
+    expect(within(card).getByText('unreadable')).toBeInTheDocument();
+    const fileLink = within(card).getByRole('button', { name: 'Open app.labels at line 2' });
+    const inlineLink = within(card).getByRole('button', { name: 'Open compose.yaml at line 6' });
+    fileLink.click();
+    inlineLink.click();
+    expect(onOpenLocation).toHaveBeenCalledWith(expect.objectContaining({ file: 'app.labels', line: 2 }));
+    expect(onOpenLocation).toHaveBeenCalledWith(expect.objectContaining({ file: 'compose.yaml', line: 6 }));
+    // One link per acting origin: the ambiguous row has a reason word only.
+    expect(within(card).getAllByTestId('source-location-link')).toHaveLength(2);
+  });
+
+  it('renders no authored control when every authored entry is rejected', async () => {
+    vi.mocked(apiFetch).mockResolvedValue({
+      ok: true,
+      json: async () => ({
+        stackName: 'demo', renderable: true, partial: false, generatedAt: Date.now(),
+        services: [{
+          service: 'web',
+          declaredLabels: [{ key: 'from.file', value: '1', source: 'compose' as const }],
+          replicas: [],
+          authored: {
+            'from.file': { source: 'inline', file: '../../escape', line: -2, column: 0, endLine: 1, endColumn: 1 },
+          },
+        }],
+      }),
+    } as Response);
+    render(<ComposeLabelsPanel stackName="demo" onOpenLocation={vi.fn()} />);
+    const card = await screen.findByTestId('compose-label-service');
+    expect(within(card).getByText('from.file')).toBeInTheDocument();
+    expect(within(card).queryByTestId('source-location-link')).toBeNull();
+    expect(within(card).queryByTestId('label-authored-ambiguity')).toBeNull();
+    expect(within(card).queryByText('label file')).toBeNull();
+  });
+
+  it('renders exactly as today when the payload carries no authored map', async () => {
+    vi.mocked(apiFetch).mockResolvedValue({
+      ok: true,
+      json: async () => mockInventory,
+    } as Response);
+    render(<ComposeLabelsPanel stackName="demo" onOpenLocation={vi.fn()} />);
+    await screen.findByTestId('compose-label-service');
+    expect(screen.queryByTestId('source-location-link')).toBeNull();
+    expect(screen.queryByText('label file')).toBeNull();
+    expect(screen.getAllByText('Declared in Compose').length).toBeGreaterThan(0);
   });
 });

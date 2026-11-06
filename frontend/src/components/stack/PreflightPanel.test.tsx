@@ -4,7 +4,7 @@
  * state, and running preflight on demand.
  */
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { render, screen, fireEvent, waitFor } from '@testing-library/react';
+import { render, screen, fireEvent, waitFor, within } from '@testing-library/react';
 
 vi.mock('@/lib/api', () => ({ apiFetch: vi.fn() }));
 vi.mock('@/components/ui/toast-store', () => ({ toast: { success: vi.fn(), error: vi.fn() } }));
@@ -21,9 +21,13 @@ interface Finding {
   title: string;
   message: string;
   sourcePath?: string;
+  location?: { file: string; path?: string; line: number; column: number; endLine: number; endColumn: number };
   remediation?: string;
   service?: string;
   acknowledged?: boolean;
+  acknowledgementId?: number;
+  acknowledgementReason?: string;
+  acknowledgementExpiry?: string;
 }
 interface Report {
   stack: string;
@@ -397,6 +401,54 @@ describe('PreflightPanel', () => {
     render(<PreflightPanel stackName="web" />);
     expect(await screen.findByText(/Could not load the preflight report/i)).toBeInTheDocument();
     expect(toast.error).toHaveBeenCalled();
+  });
+
+  it('renders a location link in place of the sourcePath line and calls the handler', async () => {
+    const onOpenLocation = vi.fn();
+    vi.mocked(apiFetch).mockResolvedValue(jsonRes(report({
+      status: 'warning', highestSeverity: 'warning',
+      findings: [{
+        ruleId: 'image-latest', severity: 'warning', title: 'Image uses a moving tag', message: 'latest tag',
+        service: 'web', sourcePath: 'web',
+        location: { file: 'compose.override.yaml', path: 'services.web.image', line: 14, column: 12, endLine: 14, endColumn: 22 },
+      }],
+    })));
+    render(<PreflightPanel stackName="web" onOpenLocation={onOpenLocation} />);
+    const link = await screen.findByRole('button', { name: 'Open compose.override.yaml at line 14' });
+    expect(link).toHaveTextContent('compose.override.yaml:14');
+    // The service chip still says "web"; the old sourcePath line is gone.
+    expect(screen.queryAllByText('web')).toHaveLength(1);
+    fireEvent.click(link);
+    expect(onOpenLocation).toHaveBeenCalledWith(expect.objectContaining({ file: 'compose.override.yaml', line: 14 }));
+  });
+
+  it('keeps the plain sourcePath line for a finding without a location', async () => {
+    vi.mocked(apiFetch).mockResolvedValue(jsonRes(report({
+      status: 'warning', highestSeverity: 'warning',
+      findings: [{
+        ruleId: 'image-latest', severity: 'warning', title: 'Image uses a moving tag', message: 'latest tag',
+        sourcePath: 'networks.edge',
+      }],
+    })));
+    render(<PreflightPanel stackName="web" onOpenLocation={vi.fn()} />);
+    expect(await screen.findByText('networks.edge')).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /^Open / })).toBeNull();
+  });
+
+  it('shows no location on an acknowledged row', async () => {
+    vi.mocked(apiFetch).mockResolvedValue(jsonRes(report({
+      status: 'warning', highestSeverity: 'warning', activeCount: 0, acknowledgedCount: 1,
+      findings: [{
+        ruleId: 'image-latest', severity: 'warning', title: 'Image uses a moving tag', message: 'latest tag',
+        service: 'web', acknowledged: true, acknowledgementId: 7, acknowledgementReason: 'accepted',
+        location: { file: 'compose.yaml', line: 3, column: 12, endLine: 3, endColumn: 20 },
+      }],
+    })));
+    render(<PreflightPanel stackName="web" onOpenLocation={vi.fn()} />);
+    const acknowledgedSection = await screen.findByTestId('preflight-acknowledged-section');
+    fireEvent.click(within(acknowledgedSection).getByRole('button'));
+    expect(await screen.findByText('accepted')).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /^Open / })).toBeNull();
   });
 
   it('runs preflight on demand and shows the new findings', async () => {
