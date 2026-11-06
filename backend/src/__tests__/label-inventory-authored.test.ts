@@ -112,6 +112,44 @@ describe('authored label origins in the stack inventory', () => {
     expect(api.authored?.a).toEqual({ ambiguity: 'unparsed-source' });
   });
 
+  it('omits authored origins when a service extends an unresolvable base', async () => {
+    writeStack('label-extends-cycle', {
+      'compose.yaml': [
+        'services:',
+        '  a:',
+        '    extends: b',
+        '    image: nginx:1',
+        '    labels:',
+        '      a: "1"',
+        '  b:',
+        '    extends: a',
+        '    image: nginx:1',
+        '    labels:',
+        '      b: "1"',
+        '',
+      ].join('\n'),
+    });
+    stubRender({ a: { a: '1' }, b: { b: '1' } });
+    stubDocker();
+    const inventory = await buildStackLabelInventory(nodeId, 'label-extends-cycle');
+    const a = inventory.services.find(service => service.service === 'a')!;
+    expect(a.authored?.a).toEqual({ source: 'inline', ambiguity: 'unparsed-source' });
+    expect(a.authored?.a?.file).toBeUndefined();
+    expect(a.authored?.a?.line).toBeUndefined();
+  });
+
+  it('shows an unreadable reason when the service is only declared in an unparsable layer', async () => {
+    writeStack('label-service-unparsed', {
+      'compose.yaml': 'services: [\n',
+    });
+    stubRender({ api: { a: '1' } });
+    stubDocker();
+    const inventory = await buildStackLabelInventory(nodeId, 'label-service-unparsed');
+    const api = inventory.services.find(service => service.service === 'api')!;
+    expect(api.authored?.a).toEqual({ ambiguity: 'unparsed-source' });
+    expect(api.authored?.a?.file).toBeUndefined();
+  });
+
   it('leaves runtime-only labels untouched and adds no authored map when the payload has none', async () => {
     writeStack('label-runtime-only', {
       'compose.yaml': 'services:\n  api:\n    image: nginx:1\n',

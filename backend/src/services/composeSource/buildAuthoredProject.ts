@@ -16,13 +16,15 @@ import { sanitizeForLog } from '../../utils/safeLog';
 import { parseComposeDocument, parseLabelFile, MAX_COMPOSE_PARSE_BYTES, diagnosticMessage } from './parseComposeDocument';
 import { resolveProjectInputs, stackRelativePath } from './resolveProjectInputs';
 import type {
-  AuthoredDiagnostic, AuthoredFileSource, AuthoredProject, LabelContribution,
+  AuthoredDiagnostic, AuthoredFileSource, AuthoredProject, AuthoredServiceDefinition, LabelContribution,
   ParsedLabelFile, ServiceAuthoredLabels, SourceFileKind, SourceWritability,
 } from './types';
 
 const MAX_PROJECT_FILES = 64;
 const MAX_PROJECT_BYTES = 8 * 1024 * 1024;
 const MAX_GRAPH_DEPTH = 16;
+/** Total `extends` edges one project may walk, across every service. */
+const MAX_INHERITANCE_WORK = 2_000;
 
 type ParsedComposeFile = ReturnType<typeof parseComposeDocument>;
 
@@ -30,6 +32,8 @@ interface LoadedComposeFile {
   file: string;
   projectBase: string;
   parsed: ParsedComposeFile;
+  /** Files this document includes, so a later promotion can promote its subtree. */
+  includes: string[];
 }
 
 interface BuildState {
@@ -38,14 +42,19 @@ interface BuildState {
   fsSvc: FileSystemService;
   files: AuthoredFileSource[];
   loadedCompose: Map<string, LoadedComposeFile>;
+  /** Compose files reached from the project's own file chain (never extends-only bases). */
+  projectMembers: Set<string>;
   loadedLabelFiles: Map<string, AuthoredFileSource>;
   labelEntries: Map<string, ParsedLabelFile>;
-  loadedIdentity: Set<string>;
+  loadedIdentity: Map<string, AuthoredFileSource>;
   diagnostics: AuthoredDiagnostic[];
   partialReasons: string[];
   bytes: number;
   nextLayer: number;
-  extendsServices: Map<string, string[]>;
+  serviceDefinitions: Map<string, AuthoredServiceDefinition[]>;
+  unresolvedServices: Set<string>;
+  inheritanceWork: number;
+  inheritanceBudgetReported: boolean;
 }
 
 function resolveAgainst(base: string, raw: string): string | null {
@@ -68,6 +77,11 @@ function addDiagnostic(
   range?: AuthoredDiagnostic['range'],
 ): void {
   state.diagnostics.push({ file, code, message: diagnosticMessage(code), ...(range ? { range } : {}) });
+}
+
+/** A git-authoritative declaration wins when the same input is named from several layers. */
+function strongerWritability(a: SourceWritability, b: SourceWritability): SourceWritability {
+  return a === 'git-authoritative' || b === 'git-authoritative' ? 'git-authoritative' : a;
 }
 
 async function readProjectFile(
@@ -106,9 +120,60 @@ async function readProjectFile(
 }
 
 /**
+ * A file first reached through an extends graph can later appear in the
+ * project's own file chain. It then becomes a real project layer: it needs a
+ * fresh merge position (the chain order, not the earlier extends load), the
+ * project kind, and its include subtree promoted with it.
+ */
+function promoteProjectFile(
+  state: BuildState,
+  relPath: string,
+  kind: SourceFileKind,
+  writability: SourceWritability,
+): void {
+  const loaded = state.loadedCompose.get(relPath);
+  if (!loaded) {
+    // A depth-refused descendant has no parsed document. Promote its refusal
+    // placeholder so the project layer stays visible to the correlation guards.
+    const placeholders = state.files.filter(file => file.file === relPath && file.state === 'parse-failed');
+    if (placeholders.length === 0) return;
+    state.projectMembers.add(relPath);
+    const layerIndex = state.nextLayer++;
+    for (const entry of placeholders) {
+      entry.kind = kind;
+      entry.layerIndex = layerIndex;
+      entry.writability = strongerWritability(entry.writability, writability);
+    }
+    return;
+  }
+  const alreadyProject = state.projectMembers.has(relPath);
+  state.projectMembers.add(relPath);
+  const authority = strongerWritability(loaded.parsed.writability, writability);
+  loaded.parsed.writability = authority;
+  const entry = state.files.find(file => file.file === relPath);
+  if (alreadyProject) {
+    if (entry) entry.writability = authority;
+    return;
+  }
+  const layerIndex = state.nextLayer++;
+  loaded.parsed.layerIndex = layerIndex;
+  loaded.parsed.kind = kind;
+  if (entry) {
+    entry.layerIndex = layerIndex;
+    entry.kind = kind;
+    entry.writability = authority;
+  }
+  for (const child of loaded.includes) {
+    promoteProjectFile(state, child, 'compose-include', authority);
+  }
+}
+
+/**
  * Load one compose document, its own supporting declarations, then its
  * include/extends graph. `trail` is the recursion stack (a repeat there is a
  * cycle); `loadedCompose` dedupes a shared base reached twice after completion.
+ * `inProject` marks files reached from the project's own chain; an extends base
+ * is deliberately not a project layer of its own.
  */
 async function loadComposeFile(
   state: BuildState,
@@ -118,16 +183,32 @@ async function loadComposeFile(
   projectBase: string,
   depth: number,
   trail: Set<string>,
+  inProject: boolean,
 ): Promise<void> {
   if (trail.has(relPath)) {
     addDiagnostic(state, relPath, 'cycle');
     addPartial(state, 'cycle');
+    // Distinguish a project file-graph cycle from a service `extends` cycle:
+    // only the former leaves the project's merge order unknowable.
+    addPartial(state, 'project-cycle');
     return;
   }
-  if (state.loadedCompose.has(relPath)) return;
+  if (state.loadedCompose.has(relPath)) {
+    if (inProject) promoteProjectFile(state, relPath, kind, writability);
+    return;
+  }
   if (depth > MAX_GRAPH_DEPTH) {
     addDiagnostic(state, relPath, 'too-deep');
     addPartial(state, 'too-deep');
+    // The layer was not read. Record it so a correlation cannot claim an origin
+    // it could still supersede; an extends-only placeholder is upgraded if its
+    // base is later promoted into the project chain.
+    state.files.push({
+      file: relPath, kind: inProject ? kind : 'compose-extends', writability, layerIndex: state.nextLayer++,
+      state: 'parse-failed', nodes: new Map(), diagnostics: [{
+        file: relPath, code: 'too-deep', message: diagnosticMessage('too-deep'),
+      }],
+    });
     return;
   }
   const read = await readProjectFile(state, relPath);
@@ -140,6 +221,11 @@ async function loadComposeFile(
     return;
   }
 
+  // A shallow path can reach a file a too-deep branch refused first; replace
+  // that placeholder with the real layer rather than leaving two entries.
+  state.files = state.files.filter(entry => !(
+    entry.file === relPath && entry.state === 'parse-failed'
+    && entry.diagnostics.some(diagnostic => diagnostic.code === 'too-deep')));
   const parsed = parseComposeDocument({
     file: relPath,
     kind,
@@ -147,7 +233,8 @@ async function loadComposeFile(
     layerIndex: state.nextLayer++,
     source: read.content,
   });
-  state.loadedCompose.set(relPath, { file: relPath, projectBase, parsed });
+  state.loadedCompose.set(relPath, { file: relPath, projectBase, parsed, includes: [] });
+  if (inProject) state.projectMembers.add(relPath);
   state.files.push({
     file: relPath,
     kind,
@@ -190,26 +277,30 @@ async function loadComposeFile(
       if (child === null) {
         addPartial(state, 'outside-boundary');
         addDiagnostic(state, include.paths[index], 'unreadable');
+        // An include this reader refuses is still a declared project layer: a
+        // consumer must not claim an origin that file could supersede.
+        state.files.push({
+          file: include.paths[index], kind: 'compose-include', writability: 'outside-boundary',
+          layerIndex: state.nextLayer++, state: 'outside-boundary', nodes: new Map(), diagnostics: [],
+        });
         continue;
       }
-      await loadComposeFile(state, child, 'compose-include', writability, childBase, depth + 1, trail);
+      state.loadedCompose.get(relPath)!.includes.push(child);
+      await loadComposeFile(state, child, 'compose-include', writability, childBase, depth + 1, trail, inProject);
     }
   }
 
   for (const declaration of parsed.extends) {
+    if (declaration.file === undefined) continue; // same-file: no extra document to load
     const basePath = resolveAgainst(projectBase, declaration.file);
     if (basePath === null) {
       addPartial(state, 'outside-boundary');
       addDiagnostic(state, declaration.file, 'unreadable');
+      state.unresolvedServices.add(declaration.service);
       continue;
     }
     const baseBase = path.posix.dirname(basePath) === '.' ? '' : path.posix.dirname(basePath);
-    await loadComposeFile(state, basePath, 'compose-extends', writability, baseBase, depth + 1, trail);
-    if (declaration.baseService) {
-      const bases = state.extendsServices.get(declaration.service) ?? [];
-      if (!bases.includes(declaration.baseService)) bases.push(declaration.baseService);
-      state.extendsServices.set(declaration.service, bases);
-    }
+    await loadComposeFile(state, basePath, 'compose-extends', writability, baseBase, depth + 1, trail, false);
   }
 
   trail.delete(relPath);
@@ -228,13 +319,13 @@ async function loadDeclarationsFor(
       addDiagnostic(state, declaration.rawPath, 'unreadable');
       continue;
     }
-    await loadLabelFile(state, target);
+    await loadLabelFile(state, target, parsed.writability);
   }
   for (const declaration of parsed.envFiles) {
-    addIdentityInput(state, declaration.rawPath, projectBase, 'env-file');
+    addIdentityInput(state, declaration.rawPath, projectBase, 'env-file', parsed.writability);
   }
   for (const declaration of parsed.resources) {
-    addIdentityInput(state, declaration.file, projectBase, declaration.kind);
+    addIdentityInput(state, declaration.file, projectBase, declaration.kind, parsed.writability);
   }
 }
 
@@ -243,6 +334,7 @@ function addIdentityInput(
   rawPath: string,
   projectBase: string,
   kind: SourceFileKind,
+  writability: SourceWritability,
 ): void {
   const target = resolveAgainst(projectBase, rawPath);
   if (target === null) {
@@ -250,20 +342,30 @@ function addIdentityInput(
     addPartial(state, 'outside-boundary');
     return;
   }
-  if (state.loadedIdentity.has(target) || state.loadedCompose.has(target) || state.loadedLabelFiles.has(target)) return;
-  state.loadedIdentity.add(target);
-  state.files.push({
-    file: target, kind, writability: 'writable', layerIndex: state.nextLayer++,
+  if (state.loadedCompose.has(target) || state.loadedLabelFiles.has(target)) return;
+  const existing = state.loadedIdentity.get(target);
+  if (existing) {
+    existing.writability = strongerWritability(existing.writability, writability);
+    return;
+  }
+  const entry: AuthoredFileSource = {
+    file: target, kind, writability, layerIndex: state.nextLayer++,
     state: 'identity-only', nodes: new Map(), diagnostics: [],
-  });
+  };
+  state.loadedIdentity.set(target, entry);
+  state.files.push(entry);
 }
 
-async function loadLabelFile(state: BuildState, relPath: string): Promise<void> {
-  if (state.loadedLabelFiles.has(relPath)) return;
+async function loadLabelFile(state: BuildState, relPath: string, writability: SourceWritability): Promise<void> {
+  const existing = state.loadedLabelFiles.get(relPath);
+  if (existing) {
+    existing.writability = strongerWritability(existing.writability, writability);
+    return;
+  }
   const read = await readProjectFile(state, relPath);
   if (read.content === undefined) {
     const entry: AuthoredFileSource = {
-      file: relPath, kind: 'label-file', writability: 'writable', layerIndex: state.nextLayer++,
+      file: relPath, kind: 'label-file', writability, layerIndex: state.nextLayer++,
       state: read.state === 'too-large' ? 'too-large' : 'unreadable', nodes: new Map(), diagnostics: [],
     };
     state.loadedLabelFiles.set(relPath, entry);
@@ -273,9 +375,13 @@ async function loadLabelFile(state: BuildState, relPath: string): Promise<void> 
   }
   const parsed = parseLabelFile(relPath, read.content);
   state.labelEntries.set(relPath, parsed);
-  const stateName = parsed.diagnostics.some(entry => entry.code === 'too-large') ? 'too-large' : 'parsed';
+  const tooLarge = parsed.diagnostics.some(entry => entry.code === 'too-large');
+  // A line this reader does not reproduce may be a valid Compose label entry,
+  // so the file is not understood: no key in it can be treated as parsed.
+  const unsupported = parsed.diagnostics.some(entry => entry.code === 'unsupported-syntax');
+  const stateName = tooLarge ? 'too-large' : unsupported ? 'parse-failed' : 'parsed';
   const entry: AuthoredFileSource = {
-    file: relPath, kind: 'label-file', writability: 'writable', layerIndex: state.nextLayer++,
+    file: relPath, kind: 'label-file', writability, layerIndex: state.nextLayer++,
     state: stateName, nodes: new Map(), diagnostics: parsed.diagnostics,
   };
   state.loadedLabelFiles.set(relPath, entry);
@@ -283,19 +389,122 @@ async function loadLabelFile(state: BuildState, relPath: string): Promise<void> 
   if (stateName !== 'parsed') addPartial(state, stateName);
 }
 
-interface LabelDeclaration {
-  service: string;
-  file: string;
-  layerIndex: number;
-  rawPath: string;
-  index: number;
+function serviceKey(file: string, service: string): string {
+  return `${file}\u0000${service}`;
 }
 
 /**
- * Turn parsed inline labels and label files into ordered contributions.
- * Compose precedence is: extended base first, then each layer in order, within
- * a layer label files in declared order (last wins) and inline `labels` last.
- * That order is reproduced here, never guessed from values.
+ * Walk one service's `extends` declarations, deepest base first. The returned
+ * definitions all belong to the extending project layer (`layerIndex`) so an
+ * inherited value sorts below that layer's own declaration and above earlier
+ * layers, which is where Compose merges it.
+ */
+function collectInheritedDefinitions(
+  state: BuildState,
+  effectiveService: string,
+  service: string,
+  declaringFile: string,
+  layerIndex: number,
+  trail: Set<string>,
+  out: AuthoredServiceDefinition[],
+): boolean {
+  const loaded = state.loadedCompose.get(declaringFile);
+  if (!loaded) return false;
+  let resolved = true;
+  for (const declaration of loaded.parsed.extends) {
+    if (declaration.service !== service) continue;
+    // A long same-file chain is quadratic across services; one shared budget
+    // keeps the synchronous build bounded and makes refusal explicit.
+    state.inheritanceWork += 1;
+    if (state.inheritanceWork > MAX_INHERITANCE_WORK) {
+      if (!state.inheritanceBudgetReported) {
+        state.inheritanceBudgetReported = true;
+        addDiagnostic(state, declaringFile, 'bounds-exceeded');
+        addPartial(state, 'bounds-exceeded');
+      }
+      return false;
+    }
+    let targetFile = declaringFile;
+    if (declaration.file !== undefined) {
+      const target = resolveAgainst(loaded.projectBase, declaration.file);
+      if (target === null) {
+        addDiagnostic(state, declaration.file, 'unreadable');
+        addPartial(state, 'outside-boundary');
+        resolved = false;
+        continue;
+      }
+      targetFile = target;
+    }
+    const baseService = declaration.baseService ?? service;
+    const key = serviceKey(targetFile, baseService);
+    if (trail.has(key)) {
+      addDiagnostic(state, targetFile, 'cycle');
+      addPartial(state, 'cycle');
+      resolved = false;
+      continue;
+    }
+    const target = state.loadedCompose.get(targetFile);
+    if (!target || target.parsed.state !== 'parsed' || !target.parsed.serviceNames.includes(baseService)) {
+      addDiagnostic(state, targetFile, 'unreadable');
+      addPartial(state, 'unreadable');
+      resolved = false;
+      continue;
+    }
+    trail.add(key);
+    const nested = collectInheritedDefinitions(state, effectiveService, baseService, targetFile, layerIndex, trail, out);
+    trail.delete(key);
+    if (!nested) resolved = false;
+    out.push({
+      service: effectiveService,
+      declaredService: baseService,
+      file: targetFile,
+      layerIndex,
+      rank: 0,
+    });
+  }
+  return resolved;
+}
+
+/** Build every effective service's file-scoped declaration chain. */
+function buildServiceDefinitions(state: BuildState): void {
+  const layers = [...state.loadedCompose.values()]
+    .filter(loaded => state.projectMembers.has(loaded.file))
+    .sort((a, b) => a.parsed.layerIndex - b.parsed.layerIndex);
+
+  for (const layer of layers) {
+    for (const service of layer.parsed.serviceNames) {
+      const definitions = state.serviceDefinitions.get(service) ?? [];
+      const inherited: AuthoredServiceDefinition[] = [];
+      const complete = collectInheritedDefinitions(
+        state,
+        service,
+        service,
+        layer.file,
+        layer.parsed.layerIndex,
+        new Set([serviceKey(layer.file, service)]),
+        inherited,
+      );
+      definitions.push(...inherited, {
+        service,
+        declaredService: service,
+        file: layer.file,
+        layerIndex: layer.parsed.layerIndex,
+        rank: 1,
+      });
+      state.serviceDefinitions.set(service, definitions);
+      if (!complete) {
+        if (!state.unresolvedServices.has(service)) addPartial(state, 'unresolved-extends');
+        state.unresolvedServices.add(service);
+      }
+    }
+  }
+}
+
+/**
+ * Turn parsed inline labels and label files into ordered contributions. Compose
+ * gives `labels` precedence over `label_file` across the whole merged project,
+ * so source kind sorts before layer; within one source, layer and declaration
+ * order decide. An `extends` base sorts below the layer that inherits it.
  */
 function assembleLabels(state: BuildState): Map<string, ServiceAuthoredLabels> {
   const labels = new Map<string, ServiceAuthoredLabels>();
@@ -317,29 +526,76 @@ function assembleLabels(state: BuildState): Map<string, ServiceAuthoredLabels> {
   };
 
   const fileConsumers = new Map<string, Set<string>>();
-  const declarations: LabelDeclaration[] = [];
-  const indexByService = new Map<string, number>();
+  const contributionsByService = new Map<string, LabelContribution[]>();
 
-  for (const loaded of state.loadedCompose.values()) {
-    for (const declaration of loaded.parsed.labelFiles) {
-      const target = resolveAgainst(loaded.projectBase, declaration.rawPath);
-      if (target === null) {
-        const svc = getService(declaration.service);
-        svc.outsideLabelFiles.push(declaration.rawPath);
-        continue;
+  for (const [service, definitions] of state.serviceDefinitions) {
+    const svc = getService(service);
+    const bucket = contributionsByService.get(service) ?? [];
+    contributionsByService.set(service, bucket);
+    for (const definition of definitions) {
+      const loaded = state.loadedCompose.get(definition.file);
+      if (!loaded) continue;
+      const via: LabelContribution['via'] = definition.rank === 0 ? 'extends' : 'own';
+      let fileIndex = 0;
+      for (const declaration of loaded.parsed.labelFiles) {
+        if (declaration.service !== definition.declaredService) continue;
+        const target = resolveAgainst(loaded.projectBase, declaration.rawPath);
+        if (target === null) {
+          svc.outsideLabelFiles.push(declaration.rawPath);
+          fileIndex += 1;
+          continue;
+        }
+        const consumers = fileConsumers.get(target) ?? new Set<string>();
+        consumers.add(service);
+        fileConsumers.set(target, consumers);
+        const parsed = state.labelEntries.get(target);
+        const fileEntry = state.loadedLabelFiles.get(target);
+        if (!parsed || !fileEntry || fileEntry.state !== 'parsed') {
+          svc.unparsedLabelFiles.push(target);
+          fileIndex += 1;
+          continue;
+        }
+        for (const entry of parsed.entries) {
+          if (parsed.duplicateKeys.has(entry.key)) {
+            svc.ambiguity[entry.key] = 'duplicate-key';
+            continue;
+          }
+          bucket.push({
+            key: entry.key,
+            source: 'label-file',
+            file: target,
+            range: entry.range,
+            form: 'map',
+            fileIndex,
+            layerIndex: definition.layerIndex,
+            writability: fileEntry.writability,
+            hasInterpolation: entry.hasInterpolation,
+            overridden: false,
+            via,
+          });
+        }
+        fileIndex += 1;
       }
-      const consumers = fileConsumers.get(target) ?? new Set<string>();
-      consumers.add(declaration.service);
-      fileConsumers.set(target, consumers);
-      const index = indexByService.get(declaration.service) ?? 0;
-      indexByService.set(declaration.service, index + 1);
-      declarations.push({
-        service: declaration.service,
-        file: target,
-        layerIndex: loaded.parsed.layerIndex,
-        rawPath: declaration.rawPath,
-        index,
-      });
+      for (const declaration of loaded.parsed.inlineLabels) {
+        if (declaration.service !== definition.declaredService) continue;
+        if (declaration.unresolved) {
+          svc.ambiguity[declaration.key] = 'unresolved-alias';
+          continue;
+        }
+        bucket.push({
+          key: declaration.key,
+          source: 'inline',
+          file: definition.file,
+          range: declaration.range,
+          form: declaration.form,
+          fileIndex: 0,
+          layerIndex: definition.layerIndex,
+          writability: loaded.parsed.writability,
+          hasInterpolation: declaration.hasInterpolation,
+          overridden: false,
+          via,
+        });
+      }
     }
   }
 
@@ -354,82 +610,18 @@ function assembleLabels(state: BuildState): Map<string, ServiceAuthoredLabels> {
     }
   }
 
-  const contributionsByService = new Map<string, LabelContribution[]>();
-
-  for (const declaration of declarations) {
-    const parsed = state.labelEntries.get(declaration.file);
-    const fileEntry = state.loadedLabelFiles.get(declaration.file);
-    const bucket = contributionsByService.get(declaration.service) ?? [];
-    contributionsByService.set(declaration.service, bucket);
-    if (!parsed || !fileEntry || fileEntry.state !== 'parsed') {
-      getService(declaration.service).unparsedLabelFiles.push(declaration.file);
-      continue;
-    }
-    for (const entry of parsed.entries) {
-      if (parsed.duplicateKeys.has(entry.key)) {
-        getService(declaration.service).ambiguity[entry.key] = 'duplicate-key';
-        continue;
-      }
-      bucket.push({
-        key: entry.key,
-        source: 'label-file',
-        file: declaration.file,
-        range: entry.range,
-        form: 'map',
-        fileIndex: declaration.index,
-        layerIndex: declaration.layerIndex,
-        hasInterpolation: entry.hasInterpolation,
-        overridden: false,
-        via: 'own',
-        ...(sharedFiles.has(declaration.file) ? { shared: true } : {}),
-      });
-    }
-  }
-
-  for (const loaded of state.loadedCompose.values()) {
-    for (const declaration of loaded.parsed.inlineLabels) {
-      const bucket = contributionsByService.get(declaration.service) ?? [];
-      contributionsByService.set(declaration.service, bucket);
-      bucket.push({
-        key: declaration.key,
-        source: 'inline',
-        file: loaded.file,
-        range: declaration.range,
-        form: declaration.form,
-        fileIndex: 0,
-        layerIndex: loaded.parsed.layerIndex,
-        hasInterpolation: declaration.hasInterpolation,
-        overridden: false,
-        via: 'own',
-      });
-    }
-  }
-
-  // `extends` makes the base service's labels part of the extending service,
-  // always below the extending service's own declarations.
-  for (const loaded of state.loadedCompose.values()) {
-    for (const declaration of loaded.parsed.extends) {
-      if (!declaration.baseService) continue;
-      const base = contributionsByService.get(declaration.baseService) ?? [];
-      const bucket = contributionsByService.get(declaration.service) ?? [];
-      for (const contribution of base) {
-        bucket.push({
-          ...contribution,
-          via: 'extends',
-          overridden: false,
-        });
-      }
-      contributionsByService.set(declaration.service, bucket);
-    }
-  }
+  const sourceRank = (contribution: LabelContribution): number => contribution.source === 'label-file' ? 0 : 1;
+  const viaRank = (contribution: LabelContribution): number => contribution.via === 'extends' ? 0 : 1;
 
   for (const [service, contributions] of contributionsByService) {
     const svc = getService(service);
-    svc.contributions = contributions;
+    for (const contribution of contributions) {
+      if (sharedFiles.has(contribution.file)) contribution.shared = true;
+    }
     const sorted = [...contributions].sort((a, b) =>
-      (a.via === 'extends' ? 0 : 1) - (b.via === 'extends' ? 0 : 1)
+      sourceRank(a) - sourceRank(b)
       || a.layerIndex - b.layerIndex
-      || (a.source === 'label-file' ? 0 : 1) - (b.source === 'label-file' ? 0 : 1)
+      || viaRank(a) - viaRank(b)
       || a.fileIndex - b.fileIndex);
     const winnerByKey = new Map<string, LabelContribution>();
     for (const contribution of sorted) {
@@ -438,13 +630,21 @@ function assembleLabels(state: BuildState): Map<string, ServiceAuthoredLabels> {
       winnerByKey.set(contribution.key, contribution);
     }
     for (const [key, winner] of winnerByKey) {
-      if (svc.ambiguity[key] === 'duplicate-key') continue;
+      const prior = svc.ambiguity[key];
+      // A duplicate inside a label file cannot supersede an inline declaration:
+      // inline labels outrank every label file in the merged project.
+      if (prior === 'duplicate-key' && winner.source === 'inline') {
+        delete svc.ambiguity[key];
+      } else if (prior !== undefined) {
+        continue;
+      }
       if (winner.hasInterpolation) {
         svc.ambiguity[key] = 'interpolated';
         continue;
       }
       svc.winners[key] = winner;
     }
+    svc.contributions = sorted;
   }
 
   return labels;
@@ -458,14 +658,18 @@ export async function buildAuthoredProject(nodeId: number, stackName: string): P
     fsSvc: FileSystemService.getInstance(nodeId),
     files: [],
     loadedCompose: new Map(),
+    projectMembers: new Set(),
     loadedLabelFiles: new Map(),
     labelEntries: new Map(),
-    loadedIdentity: new Set(),
+    loadedIdentity: new Map(),
     diagnostics: [...inputs.diagnostics],
     partialReasons: [...inputs.partialReasons],
     bytes: 0,
     nextLayer: inputs.files.length,
-    extendsServices: new Map(),
+    serviceDefinitions: new Map(),
+    unresolvedServices: new Set(),
+    inheritanceWork: 0,
+    inheritanceBudgetReported: false,
   };
 
   const primary = inputs.files[0];
@@ -483,9 +687,10 @@ export async function buildAuthoredProject(nodeId: number, stackName: string): P
       addPartial(state, 'outside-boundary');
       continue;
     }
-    await loadComposeFile(state, entry.file, entry.kind, entry.writability, projectBase, 0, new Set());
+    await loadComposeFile(state, entry.file, entry.kind, entry.writability, projectBase, 0, new Set(), true);
   }
 
+  buildServiceDefinitions(state);
   const labels = assembleLabels(state);
 
   return {
@@ -497,6 +702,7 @@ export async function buildAuthoredProject(nodeId: number, stackName: string): P
     diagnostics: state.diagnostics,
     partial: state.partialReasons.length > 0,
     partialReasons: state.partialReasons,
-    extendsServices: state.extendsServices,
+    serviceDefinitions: state.serviceDefinitions,
+    unresolvedServices: state.unresolvedServices,
   };
 }

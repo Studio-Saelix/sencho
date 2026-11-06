@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest';
+import { spawnSync } from 'child_process';
 
 import {
   parseComposeDocument, parseLabelFile, MAX_COMPOSE_PARSE_BYTES,
@@ -57,6 +58,79 @@ describe('parseComposeDocument', () => {
     expect(parsed.nodes.get('services.api.ports')?.customTag).toBe('!override');
   });
 
+  it('projects declarations through aliases and merge keys instead of dropping them', () => {
+    const parsed = parse([
+      'x-base: &base',
+      '  file: base.yml',
+      '  service: base',
+      'x-svc: &svc',
+      '  image: nginx:1',
+      '  labels:',
+      '    team: override',
+      'services:',
+      '  <<: {app: *svc}',
+      '  worker:',
+      '    extends: *base',
+      '',
+    ].join('\n'));
+    expect(parsed.serviceNames).toEqual(expect.arrayContaining(['app', 'worker']));
+    expect(parsed.extends).toContainEqual({ service: 'worker', baseService: 'base', file: 'base.yml' });
+    expect(parsed.inlineLabels).toContainEqual(expect.objectContaining({
+      service: 'app', key: 'team', form: 'map', hasInterpolation: false,
+    }));
+  });
+
+  it('marks an inline label whose value is an alias as unresolved', () => {
+    const parsed = parse([
+      'x-value: &value override',
+      'services:',
+      '  app:',
+      '    image: nginx:1',
+      '    labels:',
+      '      team: *value',
+      '',
+    ].join('\n'));
+    expect(parsed.state).toBe('parsed');
+    expect(parsed.inlineLabels).toContainEqual(expect.objectContaining({
+      service: 'app', key: 'team', unresolved: true,
+    }));
+  });
+
+  it('flattens a merge nested inside an anchored map', () => {
+    const parsed = parse([
+      'x-a: &a',
+      '  image: new-image',
+      '  healthcheck:',
+      '    test: ["CMD", "new"]',
+      'x-b: &b',
+      '  <<: *a',
+      'services:',
+      '  api:',
+      '    <<: *b',
+      '    restart: always',
+      '',
+    ].join('\n'));
+    expect(parsed.state).toBe('parsed');
+    expect(parsed.nodes.get('services.api.image')?.via).toBe('merge');
+    expect(parsed.nodes.get('services.api.healthcheck.test[0]')?.via).toBe('merge');
+    expect(parsed.nodes.has('services.api.<<')).toBe(false);
+  });
+
+  it('keeps a bare list-form label as a declaration so later ranges stay aligned', () => {
+    const parsed = parse([
+      'services:',
+      '  api:',
+      '    image: nginx',
+      '    labels:',
+      '      - io.sencho.url',
+      '      - io.sencho.url=https://example.test',
+      '      - other=y',
+      '',
+    ].join('\n'));
+    expect(parsed.inlineLabels.map(entry => entry.key)).toEqual(['io.sencho.url', 'io.sencho.url', 'other']);
+    expect(parsed.inlineLabels.map(entry => entry.range.line)).toEqual([5, 6, 7]);
+  });
+
   it('records anchors, aliases, and merge keys with their via', () => {
     const parsed = parse([
       'x-base: &base',
@@ -94,6 +168,92 @@ describe('parseComposeDocument', () => {
     const list = parse('- a\n- b\n');
     expect(list.state).toBe('parse-failed');
     expect(list.diagnostics[0]?.code).toBe('malformed-yaml');
+  });
+
+  it('refuses a file with a self-referential alias and one fixed cycle diagnostic', () => {
+    const source = 'services:\n  api:\n    x-a: &a [*a, *a, *a, *a, *a, *a, *a, *a]\n    <<: *a\n    image: nginx\n';
+    const parsed = parse(source);
+    // The walk stopped early, so the file is not understood and no location may
+    // be claimed from it.
+    expect(parsed.state).toBe('parse-failed');
+    expect(parsed.diagnostics.filter(entry => entry.code === 'alias-cycle')).toHaveLength(1);
+    expect(parsed.diagnostics.some(entry => entry.code === 'alias-budget')).toBe(false);
+  });
+
+  it('refuses a file whose alias work budget is exhausted', () => {
+    const lines = ['x1: &x1', '  k: 1'];
+    for (let level = 2; level <= 8; level += 1) {
+      const refs = Array.from({ length: 8 }, () => `*x${level - 1}`).join(', ');
+      lines.push(`x${level}: &x${level}`, `  <<: [${refs}]`);
+    }
+    lines.push('services:', '  api:', '    <<: *x8', '    image: nginx');
+    const parsed = parse(`${lines.join('\n')}\n`);
+    expect(parsed.state).toBe('parse-failed');
+    expect(parsed.diagnostics.filter(entry => entry.code === 'alias-budget')).toHaveLength(1);
+  });
+
+  it('refuses a file with a forward or missing alias instead of dropping it', () => {
+    const forward = parse('services:\n  api:\n    <<: *later\nxlater: &later\n  restart: always\n');
+    expect(forward.state).toBe('parse-failed');
+    expect(forward.diagnostics.filter(entry => entry.code === 'alias-unresolved')).toHaveLength(1);
+    const missing = parse('services:\n  api:\n    <<: *nope\n');
+    expect(missing.state).toBe('parse-failed');
+    expect(missing.diagnostics.filter(entry => entry.code === 'alias-unresolved')).toHaveLength(1);
+  });
+
+  it('refuses a file whose alias chain exceeds the depth bound', () => {
+    const lines: string[] = ['x0: &x0', '  k: 0'];
+    for (let level = 1; level <= 20; level += 1) {
+      lines.push(`x${level}: &x${level}`, `  k: *x${level - 1}`);
+    }
+    lines.push('services:', '  api:', '    <<: *x20', '    image: nginx');
+    const parsed = parse(`${lines.join('\n')}\n`);
+    expect(parsed.state).toBe('parse-failed');
+    expect(parsed.diagnostics.filter(entry => entry.code === 'too-deep')).toHaveLength(1);
+  });
+
+  it('refuses hostile alias graphs inside an external process deadline', () => {
+    const self = 'services:\n  api:\n    x-a: &a [*a, *a, *a, *a, *a, *a, *a, *a]\n    <<: *a\n    image: nginx\n';
+    const lines = ['x1: &x1', '  k: 1'];
+    for (let level = 2; level <= 8; level += 1) {
+      const refs = Array.from({ length: 8 }, () => `*x${level - 1}`).join(', ');
+      lines.push(`x${level}: &x${level}`, `  <<: [${refs}]`);
+    }
+    lines.push('services:', '  api:', '    <<: *x8', '    image: nginx');
+    const branching = `${lines.join('\n')}\n`;
+    // YAML anchors cannot express true mutual recursion (an alias must follow
+    // its anchor), so this is the forward-reference form: it must be refused as
+    // unresolved, not silently dropped or looped on.
+    const mutual = 'x-a: &a\n  k: *b\nx-b: &b\n  k: *a\nservices:\n  api:\n    <<: *a\n    image: nginx\n';
+    const script = [
+      "const { parseComposeDocument } = require('./src/services/composeSource');",
+      `const cases = ${JSON.stringify({ self, branching, mutual })};`,
+      'const out = {};',
+      'for (const [name, source] of Object.entries(cases)) {',
+      '  const started = Date.now();',
+      '  const parsed = parseComposeDocument({ file: "compose.yaml", kind: "compose-primary", writability: "writable", layerIndex: 0, source });',
+      '  out[name] = { state: parsed.state, codes: [...new Set(parsed.diagnostics.map((entry) => entry.code))], ms: Date.now() - started };',
+      '}',
+      'console.log(JSON.stringify(out));',
+      'process.exit(0);',
+    ].join('\n');
+    const result = spawnSync(process.execPath, ['-r', 'ts-node/register/transpile-only', '-e', script], {
+      cwd: process.cwd(),
+      timeout: 15_000,
+      encoding: 'utf8',
+    });
+    expect(result.signal).not.toBe('SIGTERM');
+    expect(result.status).toBe(0);
+    const parsed = JSON.parse((result.stdout.trim().split('\n').pop() ?? '{}')) as Record<string, { state: string; codes: string[]; ms: number }>;
+    expect(parsed.self.state).toBe('parse-failed');
+    expect(parsed.self.codes).toContain('alias-cycle');
+    expect(parsed.self.ms).toBeLessThan(1_000);
+    expect(parsed.branching.state).toBe('parse-failed');
+    expect(parsed.branching.codes).toContain('alias-budget');
+    expect(parsed.branching.ms).toBeLessThan(1_000);
+    expect(parsed.mutual.state).toBe('parse-failed');
+    expect(parsed.mutual.codes).toContain('alias-unresolved');
+    expect(parsed.mutual.ms).toBeLessThan(1_000);
   });
 });
 

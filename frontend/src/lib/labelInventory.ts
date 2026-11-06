@@ -316,8 +316,10 @@ export function withReadBehaviors(inventory: StackLabelInventory): StackLabelInv
     services: inventory.services.map(svc => {
       const declaredLabels = readLabelValues(svc.declaredLabels);
       const authored = readAuthoredOrigins(svc.authored, new Set(declaredLabels.map(label => label.key)));
+      // Build the row explicitly: spreading `svc` would carry a rejected
+      // `authored` map through when every entry fails validation.
       return {
-        ...svc,
+        service: svc.service,
         declaredLabels,
         replicas: svc.replicas.map(rep => ({ ...rep, runtimeLabels: readLabelValues(rep.runtimeLabels) })),
         ...(authored ? { authored } : {}),

@@ -3,7 +3,7 @@ import { describe, expect, it } from 'vitest';
 import {
   correlateField, correlateLabel, normalizeForCompare, parseComposeDocument, resolveEditOrigin,
 } from '../services/composeSource';
-import type { AuthoredFileSource, AuthoredProject, SourceFileKind } from '../services/composeSource';
+import type { AuthoredFileSource, AuthoredProject, AuthoredServiceDefinition, SourceFileKind } from '../services/composeSource';
 
 function file(file: string, source: string, layerIndex: number, kind: SourceFileKind = 'compose-primary'): AuthoredFileSource {
   const parsed = parseComposeDocument({ file, source, kind, layerIndex, writability: 'writable' });
@@ -14,15 +14,31 @@ function file(file: string, source: string, layerIndex: number, kind: SourceFile
 }
 
 function project(files: Array<{ file: string; source: string; kind?: SourceFileKind }>, generated: Array<'mesh-override'> = []): AuthoredProject {
+  const built = files.map((entry, index) => file(entry.file, entry.source, index, entry.kind));
+  const definitions = new Map<string, AuthoredServiceDefinition[]>();
+  for (const entry of built) {
+    for (const [path, node] of entry.nodes) {
+      const match = /^services\.([^.]+)$/.exec(path);
+      if (!match || node.kind !== 'mapping') continue;
+      const list = definitions.get(match[1]) ?? [];
+      list.push({
+        service: match[1], declaredService: match[1], file: entry.file,
+        layerIndex: entry.layerIndex, rank: 1,
+      });
+      definitions.set(match[1], list);
+    }
+  }
   return {
     stack: 'demo',
     nodeId: 1,
-    files: files.map((entry, index) => file(entry.file, entry.source, index, entry.kind)),
+    files: built,
     generatedLayers: generated,
     labels: new Map(),
     diagnostics: [],
     partial: false,
     partialReasons: [],
+    serviceDefinitions: definitions,
+    unresolvedServices: new Set(),
   };
 }
 
@@ -93,6 +109,73 @@ describe('correlateField', () => {
     expect(result.reason).toBe('ambiguous-unparsed-source');
   });
 
+  it('does not claim an earlier literal when a later layer interpolates the same field', () => {
+    const result = correlateField(project([
+      { file: 'compose.yaml', source: 'services:\n  api:\n    image: nginx:latest\n' },
+      { file: 'compose.override.yaml', source: 'services:\n  api:\n    image: ${IMAGE}\n', kind: 'compose-override' },
+    ]), 'api', 'image', 'nginx:latest');
+    expect(result.reason).toBe('interpolated');
+    expect(result.origin).toBeUndefined();
+  });
+
+  it('claims a decisive later literal after an earlier !reset declaration', () => {
+    const result = correlateField(project([
+      { file: 'compose.yaml', source: 'services:\n  api:\n    image: !reset null\n' },
+      { file: 'compose.override.yaml', source: 'services:\n  api:\n    image: nginx:latest\n', kind: 'compose-override' },
+    ]), 'api', 'image', 'nginx:latest');
+    expect(result.reason).toBe('override-winner');
+    expect(result.origin?.file).toBe('compose.override.yaml');
+  });
+
+  it('claims a decisive later literal after an earlier interpolated declaration', () => {
+    const result = correlateField(project([
+      { file: 'compose.yaml', source: 'services:\n  api:\n    image: ${IMAGE}\n' },
+      { file: 'compose.override.yaml', source: 'services:\n  api:\n    image: nginx:latest\n', kind: 'compose-override' },
+    ]), 'api', 'image', 'nginx:latest');
+    expect(result.reason).toBe('override-winner');
+    expect(result.origin?.file).toBe('compose.override.yaml');
+  });
+
+  it('refuses a lone parsed field when a later compose layer failed to parse', () => {
+    const result = correlateField(project([
+      { file: 'compose.yaml', source: 'services:\n  api:\n    image: nginx:latest\n' },
+      { file: 'compose.override.yaml', source: 'services: [\n', kind: 'compose-override' },
+    ]), 'api', 'image', 'nginx:latest');
+    expect(result.reason).toBe('ambiguous-unparsed-source');
+    expect(result.origin).toBeUndefined();
+  });
+
+  it('keeps an earlier literal decisive when only earlier layers failed to parse', () => {
+    const base = project([
+      { file: 'compose.yaml', source: 'services: [\n' },
+      { file: 'compose.override.yaml', source: 'services:\n  api:\n    image: nginx:latest\n', kind: 'compose-override' },
+    ]);
+    // The failed root layer sorts first; the parsed override is the last word.
+    const result = correlateField(base, 'api', 'image', 'nginx:latest');
+    expect(result.reason).toBe('unique');
+    expect(result.origin?.file).toBe('compose.override.yaml');
+  });
+
+  it('refuses a mapping field when an earlier compose layer failed to parse', () => {
+    const result = correlateField(project([
+      { file: 'compose.yaml', source: 'services: [\n' },
+      { file: 'compose.override.yaml', source: 'services:\n  api:\n    healthcheck:\n      test: ["CMD", "true"]\n', kind: 'compose-override' },
+    ]), 'api', 'healthcheck');
+    // A mapping merges across layers, so the earlier unparsed layer could still
+    // contribute disable: true even though the later file declares the field.
+    expect(result.origin).toBeUndefined();
+    expect(result.reason).toBe('ambiguous-unparsed-source');
+  });
+
+  it('refuses a match when a later literal contradicts the effective value', () => {
+    const result = correlateField(project([
+      { file: 'compose.yaml', source: 'services:\n  api:\n    image: nginx:latest\n' },
+      { file: 'compose.override.yaml', source: 'services:\n  api:\n    image: busybox:1\n', kind: 'compose-override' },
+    ]), 'api', 'image', 'nginx:latest');
+    expect(result.origin).toBeUndefined();
+    expect(result.reason).toBe('ambiguous-multiple-sources');
+  });
+
   it('refuses a location when a declared layer is outside the managed boundary', () => {
     const base = project([{ file: 'compose.yaml', source: 'services:\n  api:\n    image: nginx:1\n' }]);
     const withOutside = {
@@ -141,13 +224,13 @@ describe('resolveEditOrigin', () => {
       contributions: [{
         key: 'a', source: 'label-file' as const, file: 'app.labels',
         range: { line: 1, column: 1, endLine: 1, endColumn: 4 },
-        fileIndex: 0, layerIndex: 0, hasInterpolation: false, overridden: false, via: 'own' as const,
+        fileIndex: 0, layerIndex: 0, writability: 'writable' as const, hasInterpolation: false, overridden: false, via: 'own' as const,
       }],
       winners: {
         a: {
           key: 'a', source: 'label-file' as const, file: 'app.labels',
           range: { line: 1, column: 1, endLine: 1, endColumn: 4 },
-          fileIndex: 0, layerIndex: 0, hasInterpolation: false, overridden: false, via: 'own' as const,
+          fileIndex: 0, layerIndex: 0, writability: 'writable' as const, hasInterpolation: false, overridden: false, via: 'own' as const,
         },
       },
       sharedFiles: [],

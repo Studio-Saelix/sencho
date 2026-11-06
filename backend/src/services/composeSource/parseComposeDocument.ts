@@ -26,6 +26,8 @@ export const MAX_COMPOSE_PARSE_BYTES = 1_048_576;
 export const MAX_NODES_PER_FILE = 20_000;
 /** Alias/merge follow depth; the same bound as `composeInputParse`. */
 export const MAX_ALIAS_DEPTH = 16;
+/** Total alias/merge traversals one document may perform, across every walk. */
+export const MAX_ALIAS_WORK = 10_000;
 
 const DIAGNOSTIC_MESSAGES: Record<AuthoredDiagnosticCode, string> = {
   'duplicate-key': 'The file declares the same key more than once.',
@@ -33,6 +35,9 @@ const DIAGNOSTIC_MESSAGES: Record<AuthoredDiagnosticCode, string> = {
   'too-large': 'The file exceeds the 1 MiB parse cap.',
   'too-deep': 'The include or extends graph exceeds the supported depth.',
   cycle: 'The include or extends graph refers back to itself.',
+  'alias-cycle': 'The file expands an alias that refers back to itself.',
+  'alias-budget': 'The file expands aliases beyond the supported work budget.',
+  'alias-unresolved': 'The file uses an alias this reader cannot resolve.',
   'unsupported-tag': 'The file uses a tag this reader does not follow.',
   'unsupported-syntax': 'A line uses syntax this reader does not reproduce.',
   'bounds-exceeded': 'The file exceeds the node cap for a source model.',
@@ -71,9 +76,10 @@ export interface IncludeDeclaration {
 export interface ExtendsDeclaration {
   /** The service that declares the extends. */
   service: string;
-  /** The service it inherits from, when the declaration names one. */
+  /** The service it inherits from; defaults to the declaring service's name. */
   baseService?: string;
-  file: string;
+  /** The file the base is declared in; absent means this same file. */
+  file?: string;
   range?: SourceRange;
 }
 
@@ -103,6 +109,8 @@ export interface InlineLabelDeclaration {
   range: SourceRange;
   form: 'map' | 'list';
   hasInterpolation: boolean;
+  /** The declaration point is an alias whose value cannot be attributed to this key. */
+  unresolved?: boolean;
 }
 
 export interface ParsedComposeDocument {
@@ -119,6 +127,8 @@ export interface ParsedComposeDocument {
   resources: ResourceFileDeclaration[];
   labelFiles: LabelFileDeclaration[];
   inlineLabels: InlineLabelDeclaration[];
+  /** Service keys declared in this file, in declaration order. */
+  serviceNames: string[];
 }
 
 export interface ParseComposeDocumentInput {
@@ -171,6 +181,85 @@ interface WalkContext {
   source: string;
   nodeCount: number;
   boundsExceeded: boolean;
+  /** Aliases and resolved nodes on the current expansion path, for cycle detection. */
+  aliasTrail: Set<Node>;
+  /** Alias/merge traversals performed so far, across every walk of this document. */
+  aliasWork: number;
+  aliasBudgetExceeded: boolean;
+  aliasCycleReported: boolean;
+  aliasUnresolvedReported: boolean;
+  tooDeepReported: boolean;
+}
+
+/**
+ * Diagnostics that mean this reader stopped before it understood the document.
+ * A location must never be claimed from a partial walk, so any of these makes
+ * the file `parse-failed` even though the YAML library accepted it.
+ */
+const TRUNCATING_DIAGNOSTICS: ReadonlySet<AuthoredDiagnosticCode> = new Set<AuthoredDiagnosticCode>([
+  'alias-cycle', 'alias-budget', 'alias-unresolved', 'too-deep', 'bounds-exceeded',
+]);
+
+/** Charge one alias/merge traversal. False once the document's shared budget is spent. */
+function chargeAliasWork(ctx: WalkContext): boolean {
+  if (ctx.aliasBudgetExceeded) return false;
+  ctx.aliasWork += 1;
+  if (ctx.aliasWork > MAX_ALIAS_WORK) {
+    ctx.aliasBudgetExceeded = true;
+    ctx.diagnostics.push({ file: '', code: 'alias-budget', message: diagnosticMessage('alias-budget') });
+    return false;
+  }
+  return true;
+}
+
+function reportAliasCycle(ctx: WalkContext, node: Node): void {
+  if (ctx.aliasCycleReported) return;
+  ctx.aliasCycleReported = true;
+  ctx.diagnostics.push({
+    file: '',
+    code: 'alias-cycle',
+    message: diagnosticMessage('alias-cycle'),
+    ...(nodeRange(ctx.lineCounter, node) ? { range: nodeRange(ctx.lineCounter, node) } : {}),
+  });
+}
+
+function reportAliasUnresolved(ctx: WalkContext, node: Node): void {
+  if (ctx.aliasUnresolvedReported) return;
+  ctx.aliasUnresolvedReported = true;
+  ctx.diagnostics.push({
+    file: '',
+    code: 'alias-unresolved',
+    message: diagnosticMessage('alias-unresolved'),
+    ...(nodeRange(ctx.lineCounter, node) ? { range: nodeRange(ctx.lineCounter, node) } : {}),
+  });
+}
+
+function reportTooDeep(ctx: WalkContext, node: Node): void {
+  if (ctx.tooDeepReported) return;
+  ctx.tooDeepReported = true;
+  ctx.diagnostics.push({
+    file: '',
+    code: 'too-deep',
+    message: diagnosticMessage('too-deep'),
+    ...(nodeRange(ctx.lineCounter, node) ? { range: nodeRange(ctx.lineCounter, node) } : {}),
+  });
+}
+
+/** Resolve an alias, reporting an anchor this reader cannot see as unresolved. */
+function resolveAlias(ctx: WalkContext, alias: Alias): Node | null {
+  let resolved: Node | null | undefined;
+  try {
+    resolved = alias.resolve(ctx.doc) as Node | null | undefined;
+  } catch {
+    reportAliasUnresolved(ctx, alias);
+    return null;
+  }
+  // A forward or missing anchor resolves to undefined, not to a YAML null node.
+  if (resolved === undefined) {
+    reportAliasUnresolved(ctx, alias);
+    return null;
+  }
+  return resolved;
 }
 
 function recordNode(
@@ -228,20 +317,29 @@ function walkValue(
 ): void {
   if (!node) return;
   if (isAlias(node)) {
+    if (ctx.aliasTrail.has(node)) {
+      reportAliasCycle(ctx, node);
+      return;
+    }
+    if (!chargeAliasWork(ctx)) return;
     const authored = recordNode(ctx, path, node, keyRange, 'alias', form);
     if (authored) SCALAR_TEXT.delete(authored);
     if (depth >= MAX_ALIAS_DEPTH) {
-      ctx.diagnostics.push({ file: '', code: 'too-deep', message: diagnosticMessage('too-deep'), ...(nodeRange(ctx.lineCounter, node) ? { range: nodeRange(ctx.lineCounter, node) } : {}) });
+      reportTooDeep(ctx, node);
       return;
     }
-    const resolved: Node | null = (() => {
-      try {
-        return (node as Alias).resolve(ctx.doc) as Node | null;
-      } catch {
-        return null;
-      }
-    })();
-    if (resolved) walkValue(ctx, resolved, path, keyRange, 'alias', depth + 1, form);
+    const resolved = resolveAlias(ctx, node as Alias);
+    if (resolved && ctx.aliasTrail.has(resolved)) {
+      reportAliasCycle(ctx, node);
+      return;
+    }
+    ctx.aliasTrail.add(node);
+    if (resolved) {
+      ctx.aliasTrail.add(resolved);
+      walkValue(ctx, resolved, path, keyRange, 'alias', depth + 1, form);
+      ctx.aliasTrail.delete(resolved);
+    }
+    ctx.aliasTrail.delete(node);
     return;
   }
   const authored = recordNode(ctx, path, node, keyRange, via, form);
@@ -272,28 +370,45 @@ function walkValue(
 
 function mergedPairs(ctx: WalkContext, value: Node | null | undefined, depth: number): Array<{ pair: Pair; via: 'merge' | 'alias' }> {
   if (!value) return [];
+  if (!chargeAliasWork(ctx)) return [];
   if (depth >= MAX_ALIAS_DEPTH) {
-    ctx.diagnostics.push({ file: '', code: 'too-deep', message: diagnosticMessage('too-deep'), ...(nodeRange(ctx.lineCounter, value) ? { range: nodeRange(ctx.lineCounter, value) } : {}) });
+    reportTooDeep(ctx, value);
     return [];
   }
   if (isAlias(value)) {
-    const resolved: Node | null = (() => {
-      try {
-        return (value as Alias).resolve(ctx.doc) as Node | null;
-      } catch {
-        return null;
-      }
-    })();
-    return mergedPairs(ctx, resolved, depth + 1);
+    if (ctx.aliasTrail.has(value)) {
+      reportAliasCycle(ctx, value);
+      return [];
+    }
+    const resolved = resolveAlias(ctx, value as Alias);
+    if (resolved && ctx.aliasTrail.has(resolved)) {
+      reportAliasCycle(ctx, value);
+      return [];
+    }
+    ctx.aliasTrail.add(value);
+    if (resolved) ctx.aliasTrail.add(resolved);
+    const out = mergedPairs(ctx, resolved, depth + 1);
+    if (resolved) ctx.aliasTrail.delete(resolved);
+    ctx.aliasTrail.delete(value);
+    return out;
   }
   if (isMap(value)) {
-    return (value as YAMLMap).items
-      .filter((pair): pair is Pair => pair !== null && typeof pair === 'object' && 'key' in pair)
-      .map(pair => ({ pair, via: 'merge' as const }));
+    const pairs = (value as YAMLMap).items
+      .filter((pair): pair is Pair => pair !== null && typeof pair === 'object' && 'key' in pair);
+    const merges = pairs.filter(pair => scalarText(pair.key as Node) === '<<');
+    const own = pairs.filter(pair => scalarText(pair.key as Node) !== '<<');
+    // A mapping used as a merge source can itself merge another anchor. Flatten
+    // it here: recording its literal `<<` pair would lose every field it brings
+    // in. Own keys take precedence over its merge sources, and earlier sources
+    // over later ones, which is the order `walkMap` relies on.
+    const out: Array<{ pair: Pair; via: 'merge' | 'alias' }> = own.map(pair => ({ pair, via: 'merge' as const }));
+    for (const merge of merges) out.push(...mergedPairs(ctx, merge.value as Node, depth + 1));
+    return out;
   }
   if (isSeq(value)) {
     const out: Array<{ pair: Pair; via: 'merge' | 'alias' }> = [];
     for (const item of (value as YAMLSeq).items) {
+      if (!chargeAliasWork(ctx)) break;
       out.push(...mergedPairs(ctx, item as Node, depth + 1));
     }
     return out;
@@ -351,7 +466,7 @@ function parseErrorRange(error: { linePos?: Array<{ line: number; col: number }>
 function collectDeclarations(
   ctx: WalkContext,
   root: YAMLMap,
-  result: Pick<ParsedComposeDocument, 'includes' | 'extends' | 'envFiles' | 'resources' | 'labelFiles' | 'inlineLabels'>,
+  result: Pick<ParsedComposeDocument, 'includes' | 'extends' | 'envFiles' | 'resources' | 'labelFiles' | 'inlineLabels' | 'serviceNames'>,
 ): void {
   const readable = new Map<string, unknown>();
 
@@ -359,7 +474,7 @@ function collectDeclarations(
     if (!pair || typeof pair !== 'object' || !('key' in pair)) continue;
     const key = scalarText(pair.key as Node);
     if (key === undefined) continue;
-    readable.set(key, valueToPlain(pair.value as Node));
+    readable.set(key, valueToPlain(ctx, pair.value as Node));
   }
 
   const include = readable.get('include');
@@ -387,15 +502,24 @@ function collectDeclarations(
   if (services && typeof services === 'object' && !Array.isArray(services)) {
     for (const [service, value] of Object.entries(services as Record<string, unknown>)) {
       if (!value || typeof value !== 'object' || Array.isArray(value)) continue;
+      result.serviceNames.push(service);
       const svc = value as Record<string, unknown>;
       const ext = svc.extends;
-      if (ext && typeof ext === 'object') {
+      if (typeof ext === 'string') {
+        // Short form: the base service is in this same file.
+        result.extends.push({ service, baseService: ext });
+      } else if (ext && typeof ext === 'object' && !Array.isArray(ext)) {
         const map = ext as Record<string, unknown>;
         const file = asString(map.file);
-        if (file !== undefined) {
-          const baseService = asString(map.service);
-          result.extends.push({ service, ...(baseService !== undefined ? { baseService } : {}), file });
-        }
+        const baseService = asString(map.service);
+        // A declaration with neither a file nor a named service still extends
+        // the same-named service in this file; record it so it is resolved or
+        // reported, never silently dropped.
+        result.extends.push({
+          service,
+          ...(baseService !== undefined ? { baseService } : {}),
+          ...(file !== undefined ? { file } : {}),
+        });
       }
       const envFile = svc.env_file;
       if (envFile !== undefined) {
@@ -425,10 +549,14 @@ function collectDeclarations(
             const text = typeof item === 'string' ? item : undefined;
             if (text === undefined) continue;
             const eq = text.indexOf('=');
-            if (eq <= 0) continue;
+            if (eq === 0) continue;
+            // A bare item is a real Compose label with an empty value. It must
+            // keep its place in the list: dropping it would shift every later
+            // declaration onto the wrong sequence index and line.
+            const key = eq === -1 ? text : text.slice(0, eq);
             result.inlineLabels.push({
               service,
-              key: text.slice(0, eq),
+              key,
               range: { line: 1, column: 1, endLine: 1, endColumn: 1 },
               form: 'list',
               hasInterpolation: hasInterpolationSyntax(text),
@@ -463,20 +591,63 @@ function collectDeclarations(
 
 /**
  * A small plain-value projection used only to enumerate declarations (include
- * paths, env_file entries, label lists). Values are structural here and are
- * never retained on the model: `labels` values are reduced to the key plus an
- * interpolation flag, and env/config/secret files are identity only.
+ * paths, env_file entries, label lists, extends). It follows aliases and merge
+ * keys under the same cycle/work budget as the node walk, because a declaration
+ * behind an alias is still a declaration: dropping it would let an earlier file
+ * look decisive. If a value cannot be projected, the document is marked
+ * `parse-failed` through the truncating diagnostics, never silently narrowed.
  */
-function valueToPlain(node: Node | null | undefined, depth = 0): unknown {
-  if (!node || depth > 8) return undefined;
+function valueToPlain(
+  ctx: WalkContext,
+  node: Node | null | undefined,
+  depth = 0,
+  trail: Set<Node> = new Set(),
+): unknown {
+  if (!node) return undefined;
+  // Declaration positions are shallow; a deeper plain structure is not needed
+  // for the projection and must not fail the document. Alias traversal below
+  // is still charged to the shared work budget.
+  if (depth > 8) return undefined;
+  if (isAlias(node)) {
+    if (trail.has(node)) {
+      reportAliasCycle(ctx, node);
+      return undefined;
+    }
+    if (!chargeAliasWork(ctx)) return undefined;
+    const resolved = resolveAlias(ctx, node as Alias);
+    if (!resolved) return undefined;
+    if (trail.has(resolved)) {
+      reportAliasCycle(ctx, node);
+      return undefined;
+    }
+    trail.add(node);
+    trail.add(resolved);
+    const out = valueToPlain(ctx, resolved, depth + 1, trail);
+    trail.delete(resolved);
+    trail.delete(node);
+    return out;
+  }
   if (isScalar(node)) return (node as Scalar).value;
-  if (isSeq(node)) return (node as YAMLSeq).items.map(item => valueToPlain(item as Node, depth + 1));
+  if (isSeq(node)) return (node as YAMLSeq).items.map(item => valueToPlain(ctx, item as Node, depth + 1, trail));
   if (isMap(node)) {
     const out: Record<string, unknown> = {};
-    for (const pair of (node as YAMLMap).items) {
-      if (!pair || typeof pair !== 'object' || !('key' in pair)) continue;
+    const pairs = (node as YAMLMap).items
+      .filter((pair): pair is Pair => pair !== null && typeof pair === 'object' && 'key' in pair);
+    // YAML merge semantics: merged keys first, then the map's own keys win.
+    for (const pair of pairs.filter(entry => scalarText(entry.key as Node) === '<<')) {
+      const merged = valueToPlain(ctx, pair.value as Node, depth + 1, trail);
+      const sources = Array.isArray(merged) ? merged : [merged];
+      for (const source of sources) {
+        if (!source || typeof source !== 'object' || Array.isArray(source)) continue;
+        // YAML merge: a key in an earlier source wins over a later source.
+        for (const [key, value] of Object.entries(source as Record<string, unknown>)) {
+          if (!(key in out)) out[key] = value;
+        }
+      }
+    }
+    for (const pair of pairs.filter(entry => scalarText(entry.key as Node) !== '<<')) {
       const key = scalarText(pair.key as Node);
-      if (key !== undefined) out[key] = valueToPlain(pair.value as Node, depth + 1);
+      if (key !== undefined) out[key] = valueToPlain(ctx, pair.value as Node, depth + 1, trail);
     }
     return out;
   }
@@ -498,6 +669,7 @@ export function parseComposeDocument(input: ParseComposeDocumentInput): ParsedCo
     resources: [],
     labelFiles: [],
     inlineLabels: [],
+    serviceNames: [],
   };
 
   if (Buffer.byteLength(input.source, 'utf8') > MAX_COMPOSE_PARSE_BYTES) {
@@ -529,6 +701,12 @@ export function parseComposeDocument(input: ParseComposeDocumentInput): ParsedCo
     source: input.source,
     nodeCount: 0,
     boundsExceeded: false,
+    aliasTrail: new Set(),
+    aliasWork: 0,
+    aliasBudgetExceeded: false,
+    aliasCycleReported: false,
+    aliasUnresolvedReported: false,
+    tooDeepReported: false,
   };
 
   // The root itself is not a compose declaration, so its children are the
@@ -558,18 +736,15 @@ export function parseComposeDocument(input: ParseComposeDocumentInput): ParsedCo
 
   // Inline label ranges: map form uses the key/value pair; list form uses the
   // item itself. The declaration order matches the file's own order because
-  // both the node walk and `valueToPlain` read the map in order.
-  const mapKeys = new Map<string, AuthoredNode>();
-  for (const [path, node] of empty.nodes) {
-    const match = /^services\.([^.]+)\.labels\.(.+)$/.exec(path);
-    if (match && node.kind === 'scalar') mapKeys.set(`${match[1]}\0${match[2]}`, node);
-  }
+  // both the node walk and `valueToPlain` read the map in order. The path is
+  // built from the declaration rather than matched with a dotted regex: a
+  // Compose service or label key may itself contain a dot.
   let listIndexByService = new Map<string, number>();
   const resolvedInline: typeof empty.inlineLabels = [];
   for (const declaration of empty.inlineLabels) {
     let node: AuthoredNode | undefined;
     if (declaration.form === 'map') {
-      node = mapKeys.get(`${declaration.service}\0${declaration.key}`);
+      node = empty.nodes.get(`services.${declaration.service}.labels.${declaration.key}`);
     } else {
       const next = listIndexByService.get(declaration.service) ?? 0;
       listIndexByService = listIndexByService.set(declaration.service, next + 1);
@@ -579,12 +754,19 @@ export function parseComposeDocument(input: ParseComposeDocumentInput): ParsedCo
     // never fall back to line 1: the declaration is dropped instead.
     if (!node || (!node.valueRange && !node.keyRange)) continue;
     declaration.range = (node.kind === 'scalar' ? node.valueRange : node.keyRange) ?? node.valueRange ?? node.keyRange!;
-    declaration.hasInterpolation = node.hasInterpolation;
+    declaration.hasInterpolation = declaration.hasInterpolation || node.hasInterpolation;
+    // The label key is declared through an alias. Its value is written at the
+    // anchor, which this key cannot attribute, so no origin may be claimed.
+    if (node.kind === 'alias') declaration.unresolved = true;
     resolvedInline.push(declaration);
   }
   empty.inlineLabels = resolvedInline;
 
-  return empty;
+  // A walk that hit a cycle, an unresolved anchor, a depth or work budget, or
+  // the node cap did not see every declaration. Correlation must refuse the
+  // whole file rather than claim an origin from the part it managed to read.
+  const truncated = ctx.diagnostics.some(diagnostic => TRUNCATING_DIAGNOSTICS.has(diagnostic.code));
+  return truncated ? { ...empty, state: 'parse-failed' } : empty;
 }
 
 /**

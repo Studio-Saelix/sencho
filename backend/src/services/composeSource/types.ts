@@ -71,6 +71,9 @@ export type AuthoredDiagnosticCode =
   | 'too-large'
   | 'too-deep'
   | 'cycle'
+  | 'alias-cycle'
+  | 'alias-budget'
+  | 'alias-unresolved'
   | 'unsupported-tag'
   | 'unsupported-syntax'
   | 'bounds-exceeded'
@@ -107,8 +110,10 @@ export interface LabelContribution {
   form?: 'map' | 'list';
   /** Order within the service's `label_file` list. */
   fileIndex: number;
-  /** Merge order of the declaring compose file, 0 first. */
+  /** Effective merge order of the declaration that introduced it, 0 first. */
   layerIndex: number;
+  /** Authority of the file that carries the entry. */
+  writability: SourceWritability;
   hasInterpolation: boolean;
   overridden: boolean;
   via: 'own' | 'extends' | 'merge';
@@ -119,6 +124,7 @@ export interface LabelContribution {
 export type LabelAmbiguity =
   | 'duplicate-key'
   | 'unparsed-source'
+  | 'unresolved-alias'
   | 'interpolated'
   | 'outside-boundary';
 
@@ -181,6 +187,25 @@ export interface CorrelationResult {
   ambiguity?: { kind: string; detail: string };
 }
 
+/**
+ * One file-scoped service declaration that contributes to an effective service.
+ * `extends` bases are copied into the extending layer: `layerIndex` is the
+ * project layer that introduced them and `rank` records whether it is inherited
+ * (0) or the layer's own declaration (1). The builder emits a deepest-base-first
+ * array and consumers preserve that order. That keeps a same-named service in
+ * an unrelated file from being treated as a declaration of this one.
+ */
+export interface AuthoredServiceDefinition {
+  /** Effective service name in the project. */
+  service: string;
+  /** Service key in `file`; differs when an `extends` base is inherited. */
+  declaredService: string;
+  file: string;
+  layerIndex: number;
+  /** 0 = inherited through `extends`, 1 = the layer's own declaration. */
+  rank: 0 | 1;
+}
+
 export interface AuthoredProject {
   stack: string;
   nodeId: number;
@@ -190,8 +215,10 @@ export interface AuthoredProject {
   diagnostics: AuthoredDiagnostic[];
   partial: boolean;
   partialReasons: string[];
-  /** Services an `extends` declaration inherits from, keyed by the extending service. */
-  extendsServices?: Map<string, string[]>;
+  /** File-scoped declarations of every effective service, in merge order. */
+  serviceDefinitions: Map<string, AuthoredServiceDefinition[]>;
+  /** Services whose `extends` graph could not be resolved (missing file, cycle, ...). */
+  unresolvedServices: Set<string>;
 }
 
 /** A location on the wire: stack-relative file plus a 1-based range. */

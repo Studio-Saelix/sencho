@@ -197,6 +197,9 @@ export function StackFileExplorer({
   const [pendingRootId, setPendingRootId] = useState<string | null>(null);
   const [pendingRevealSelection, setPendingRevealSelection] = useState<PendingAuthoredReveal | null>(null);
   const revealConfirmedRef = useRef(false);
+  // Set once the user or a reported location has chosen a root. A root list
+  // that arrives afterwards must not replace that explicit choice.
+  const rootChosenRef = useRef(false);
 
   const selectedRoot = useMemo(
     () => roots.find((r) => r.id === selectedRootId) ?? STACK_SOURCE_FALLBACK,
@@ -281,6 +284,7 @@ export function StackFileExplorer({
     setSelectedRootId(STACK_SOURCE_ROOT_ID);
     setPendingRootId(null);
     setSelectedPaths(new Set());
+    rootChosenRef.current = false;
   }, [stackName]);
 
   // Discover the stack's file roots and default to the first browsable volume
@@ -292,13 +296,16 @@ export function StackFileExplorer({
         if (cancelled) return;
         const list = fetched.length ? fetched : [STACK_SOURCE_FALLBACK];
         setRoots(list);
+        // A location the operator already opened owns the selection; the late
+        // root list must not redirect a completed source reveal to a volume.
+        if (rootChosenRef.current) return;
         const defaultVolume = list.find((r) => r.kind !== 'stack-source' && r.browsable);
         setSelectedRootId(defaultVolume?.id ?? STACK_SOURCE_ROOT_ID);
       })
       .catch(() => {
         if (cancelled) return;
         setRoots([STACK_SOURCE_FALLBACK]);
-        setSelectedRootId(STACK_SOURCE_ROOT_ID);
+        if (!rootChosenRef.current) setSelectedRootId(STACK_SOURCE_ROOT_ID);
       });
     return () => { cancelled = true; };
   }, [stackName]);
@@ -307,6 +314,7 @@ export function StackFileExplorer({
 
   // Apply a root switch: reset the open file/tree to the new root's contents.
   const applyRootSwitch = useCallback((rootId: string) => {
+    rootChosenRef.current = true;
     setSelectedRootId(rootId);
     setSelectedPath(null);
     setSelectedEntry(null);
@@ -326,6 +334,9 @@ export function StackFileExplorer({
   }, [selectedRootId, isViewerDirty, applyRootSwitch]);
 
   const applySelection = useCallback((relPath: string, entry: FileEntry) => {
+    // Opening a file is an explicit navigation choice; a roots response that
+    // arrives afterwards must not switch the viewer to another root.
+    rootChosenRef.current = true;
     setSelectedPath(relPath);
     setSelectedEntry(entry);
     const parts = relPath.split('/');
@@ -348,6 +359,8 @@ export function StackFileExplorer({
    * the path itself, and the toolbar's permissions action only needs the name.
    */
   const applyRevealSelection = useCallback((pending: PendingAuthoredReveal) => {
+    // Source locations always live under the stack-source root.
+    rootChosenRef.current = true;
     const relPath = pending.location.file;
     setSelectedPath(relPath);
     setSelectedEntry({

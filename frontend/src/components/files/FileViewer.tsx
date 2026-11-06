@@ -1,4 +1,4 @@
-import { useState, useEffect, useMemo, useRef, Suspense } from 'react';
+import { useState, useEffect, useMemo, useRef, useCallback, Suspense, type ComponentProps } from 'react';
 import { Editor } from '@/lib/monacoLoader';
 import { AlertCircle, FileIcon, Download, Loader2, Save, WrapText } from 'lucide-react';
 import { Button } from '@/components/ui/button';
@@ -10,6 +10,27 @@ import { cn, formatBytes } from '@/lib/utils';
 import { revealLocation, type AuthoredLocation } from '@/lib/authoredLocation';
 
 const WORD_WRAP_KEY = 'sencho.fileViewer.wordWrap';
+
+type MonacoEditor = import('monaco-editor').editor.IStandaloneCodeEditor;
+
+/**
+ * Binds an editor instance to the resource it was mounted for. The effect
+ * cleanup clears the binding when the resource changes or the editor unmounts,
+ * so a reveal can never be applied to the previous file's disposed editor.
+ */
+function EditorHost({
+  token,
+  onReady,
+  onGone,
+  ...props
+}: {
+  token: string;
+  onReady: (token: string, editor: MonacoEditor) => void;
+  onGone: (token: string) => void;
+} & Omit<ComponentProps<typeof Editor>, 'onMount'>) {
+  useEffect(() => () => onGone(token), [token, onGone]);
+  return <Editor {...props} onMount={(editor) => onReady(token, editor)} />;
+}
 
 interface FileViewerProps {
   stackName: string;
@@ -129,7 +150,14 @@ export function FileViewer({
   const [content, setContent] = useState('');
   const [originalContent, setOriginalContent] = useState('');
   const [loadedPath, setLoadedPath] = useState<string | null>(null);
-  const editorRef = useRef<import('monaco-editor').editor.IStandaloneCodeEditor | null>(null);
+  // A mounted editor is only valid for the exact resource it was created for.
+  // The token changes with the file (and root), so an unmount that races a new
+  // load cannot leave a stale editor eligible to receive a reveal.
+  const editorBindingRef = useRef<{ editor: MonacoEditor; token: string } | null>(null);
+  const editorToken = `${rootId ?? ''}\u0000${selectedPath ?? ''}`;
+  const editorTokenRef = useRef(editorToken);
+  editorTokenRef.current = editorToken;
+  const [editorBindingVersion, setEditorBindingVersion] = useState(0);
   const appliedRevealRef = useRef<string | null>(null);
   const [loading, setLoading] = useState(false);
   const [saving, setSaving] = useState(false);
@@ -275,11 +303,25 @@ export function FileViewer({
     }
   };
 
+  const bindEditor = useCallback((token: string, editor: MonacoEditor) => {
+    // A late mount from a render that has already been replaced is not the
+    // editor for the current resource; ignore it.
+    if (token !== editorTokenRef.current) return;
+    editorBindingRef.current = { editor, token };
+    appliedRevealRef.current = null;
+    setEditorBindingVersion((version) => version + 1);
+  }, []);
+
+  const unbindEditor = useCallback((token: string) => {
+    if (editorBindingRef.current?.token === token) editorBindingRef.current = null;
+  }, []);
+
   const applyReveal = () => {
-    if (!reveal || !editorRef.current || loadedPath !== reveal.file) return;
+    const binding = editorBindingRef.current;
+    if (!reveal || !binding || binding.token !== editorToken || loadedPath !== reveal.file) return;
     const key = `${reveal.file}:${reveal.line}:${reveal.column}:${reveal.endLine}:${reveal.endColumn}`;
     if (appliedRevealRef.current === key) return;
-    revealLocation(editorRef.current, reveal);
+    revealLocation(binding.editor, reveal);
     appliedRevealRef.current = key;
     onRevealApplied?.();
   };
@@ -291,10 +333,10 @@ export function FileViewer({
       return;
     }
     applyReveal();
-    // The editor must exist and the requested file's content must be loaded
-    // before a range can be applied to the right model.
+    // The editor must be mounted for this exact resource and the requested
+    // file's content must be loaded before a range can be applied.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [reveal, loadedPath]);
+  }, [reveal, loadedPath, editorToken, editorBindingVersion]);
 
   if (!selectedPath) {
     return (
@@ -430,14 +472,13 @@ export function FileViewer({
 
       <div className="flex-1 min-h-0">
         <Suspense fallback={<div className="w-full h-full" aria-busy="true" />}>
-          <Editor
+          <EditorHost
+            token={editorToken}
+            onReady={bindEditor}
+            onGone={unbindEditor}
             height="100%"
             language={language}
             value={content}
-            onMount={(editor) => {
-              editorRef.current = editor;
-              applyReveal();
-            }}
             onChange={(val) => {
               if (!readOnly) setContent(val ?? '');
             }}

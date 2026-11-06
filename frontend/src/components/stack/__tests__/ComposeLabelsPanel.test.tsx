@@ -628,6 +628,29 @@ describe('ComposeLabelsPanel io.sencho.* status', () => {
     expect(within(card).getAllByTestId('source-location-link')).toHaveLength(2);
   });
 
+  it('renders no authored control when every authored entry is rejected', async () => {
+    vi.mocked(apiFetch).mockResolvedValue({
+      ok: true,
+      json: async () => ({
+        stackName: 'demo', renderable: true, partial: false, generatedAt: Date.now(),
+        services: [{
+          service: 'web',
+          declaredLabels: [{ key: 'from.file', value: '1', source: 'compose' as const }],
+          replicas: [],
+          authored: {
+            'from.file': { source: 'inline', file: '../../escape', line: -2, column: 0, endLine: 1, endColumn: 1 },
+          },
+        }],
+      }),
+    } as Response);
+    render(<ComposeLabelsPanel stackName="demo" onOpenLocation={vi.fn()} />);
+    const card = await screen.findByTestId('compose-label-service');
+    expect(within(card).getByText('from.file')).toBeInTheDocument();
+    expect(within(card).queryByTestId('source-location-link')).toBeNull();
+    expect(within(card).queryByTestId('label-authored-ambiguity')).toBeNull();
+    expect(within(card).queryByText('label file')).toBeNull();
+  });
+
   it('renders exactly as today when the payload carries no authored map', async () => {
     vi.mocked(apiFetch).mockResolvedValue({
       ok: true,

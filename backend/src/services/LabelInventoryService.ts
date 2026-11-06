@@ -325,11 +325,10 @@ function authoredOriginsFor(
 ): Record<string, LabelAuthoredOrigin> | undefined {
   if (!project) return undefined;
   const serviceLabels = project.labels.get(service);
-  if (!serviceLabels) return undefined;
   const out: Record<string, LabelAuthoredOrigin> = {};
   for (const key of keys) {
     const result = correlateLabel(project, service, key);
-    if (isActingReason(result.reason) && result.origin) {
+    if (serviceLabels && isActingReason(result.reason) && result.origin) {
       const winner = serviceLabels.winners[key];
       if (!winner) continue;
       const overridden = winner.source === 'inline'
@@ -347,11 +346,14 @@ function authoredOriginsFor(
       continue;
     }
     const kind = result.ambiguity?.kind;
-    if (kind === 'duplicate-key' || kind === 'unparsed-source' || kind === 'interpolated' || kind === 'outside-boundary') {
-      const winner = serviceLabels.winners[key];
+    // An aliased declaration is unresolved; the wire reason stays the stable
+    // `unparsed-source` value the client already renders as "unreadable".
+    const wireKind = kind === 'unresolved-alias' ? 'unparsed-source' : kind;
+    if (wireKind === 'duplicate-key' || wireKind === 'unparsed-source' || wireKind === 'interpolated' || wireKind === 'outside-boundary') {
+      const winner = serviceLabels?.winners[key];
       out[key] = {
         ...(winner ? { source: winner.source } : {}),
-        ambiguity: kind,
+        ambiguity: wireKind,
       };
     }
   }
