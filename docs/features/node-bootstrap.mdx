@@ -133,7 +133,7 @@ Editing any field after a preflight discards the preflight result and the plan, 
 | Either directory | Paths changed. The previous preflight and plan no longer apply. Run the preflight again. |
 | Node name | The node name changed. The previous preflight and plan no longer apply. Run the preflight again. |
 
-When several kinds of field change, the banner names the first one in that order. The plan step stays unreachable until a new preflight succeeds, and the new digest differs. The host-key pin is a property of the host, not of a path or a key, so trust survives a path, key or name edit; changing the host, port or user does drop it.
+When several kinds of field change, the banner shows the first row of this table that applies. The plan step stays unreachable until a new preflight succeeds, and the new digest differs. The host-key pin is a property of the host, not of a path or a key, so trust survives a path, key or name edit; changing the host, port or user does drop it.
 
 ## Lifecycle
 

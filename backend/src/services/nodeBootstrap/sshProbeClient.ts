@@ -502,8 +502,8 @@ function runSession(
             if (finished) return;
             remainingBytes -= outcome.bytes;
             // The command timer is capped by what is left of the session budget,
-            // so it can fire a few milliseconds ahead of the watchdog. A timeout
-            // that the session budget bounded is the session timeout, and the
+            // so it can fire just before the watchdog. A timeout the session
+            // budget bounded (on a tie too) is the session timeout, and the
             // commands behind it did not run either: the outcome must not depend
             // on which timer wins the race.
             const sessionBound = outcome.timedOut && remainingMs <= options.perCommandMs;

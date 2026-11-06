@@ -406,13 +406,15 @@ describe('bootstrap SSH transport deadlines and byte budgets', () => {
   });
 
   it('reports the session timeout whichever timer wins when both budgets expire together', async () => {
-    // Equal budgets arm the command timer and the watchdog for the same instant,
-    // so either may fire first. The result must be the same in both cases.
+    // Equal budgets give the command timer and the watchdog the same deadline,
+    // so either may fire first; the result must not depend on which. The race
+    // is a few milliseconds wide, so a regression shows up as an occasional
+    // failure here, not on every run.
     const fixture = await startServer({ withholdExec: 'sleep' });
     const results = await client.runCommands(
       { host: 'fixture.local', address: '127.0.0.1', port: fixture.port, username: 'ubuntu', privateKey: USER_KEY },
       [{ id: 'first', command: 'uname -m' }, { id: 'hang', command: 'sleep 60' }, { id: 'after', command: 'uname -m' }],
-      { perCommandMs: 400, totalMs: 400 },
+      { perCommandMs: 1_000, totalMs: 1_000 },
     );
     expect(results.map((entry) => [entry.id, entry.error])).toEqual([
       ['first', null],

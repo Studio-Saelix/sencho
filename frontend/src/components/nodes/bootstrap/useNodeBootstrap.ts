@@ -182,16 +182,17 @@ export function useNodeBootstrap({ open, api }: UseNodeBootstrapOptions) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open]);
 
-  const clearResult = useCallback((field: keyof BootstrapForm, toTarget = false) => {
+  const clearResult = useCallback((field: keyof BootstrapForm) => {
     // A banner that is already up keeps the strongest reason; one is raised
     // only when a result is actually being discarded.
     const reason = invalidationForField(field);
+    const toTarget = reason === 'target';
     const hadResult = resultRef.current !== null;
     setInvalidated((current) => (hadResult || current ? strongerInvalidation(current, reason) : current));
     setResult(null);
     setResultRevision(null);
-    // The pin is a host property, so a path or key edit made from the preflight
-    // step can go straight back there with the existing trust. An edit on the
+    // The pin is a host property, so an edit that is not to the SSH target made
+    // from the preflight step can go straight back there with the existing trust. An edit on the
     // target step stays there so the operator can finish typing.
     if (stepRef.current === 'target') {
       setStep('target');
@@ -215,7 +216,7 @@ export function useNodeBootstrap({ open, api }: UseNodeBootstrapOptions) {
       setReplacing(false);
       // The superseded request no longer owns the busy flag.
       setBusy(null);
-      clearResult(field, true);
+      clearResult(field);
       return;
     }
     clearResult(field);

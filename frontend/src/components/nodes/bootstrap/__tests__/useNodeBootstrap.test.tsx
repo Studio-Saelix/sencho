@@ -137,7 +137,7 @@ describe('useNodeBootstrap', () => {
     ['composeDir', '/srv/other-stacks', 'paths'],
     ['agentDir', '/srv/other-agent', 'paths'],
     ['targetName', 'renamed', 'name'],
-  ] as const)('names the %s edit as a %s invalidation, not a path change', async (field, value, reason) => {
+  ] as const)('maps a %s edit to the %s invalidation', async (field, value, reason) => {
     const api = fakeApi();
     const { result: hook } = renderHook(() => useNodeBootstrap({ open: true, api }));
     await act(async () => { fillTarget(hook.current); });
@@ -148,6 +148,24 @@ describe('useNodeBootstrap', () => {
     await act(async () => { hook.current.setField(field, value); });
     expect(hook.current.result).toBeNull();
     expect(hook.current.invalidated).toBe(reason);
+  });
+
+  it.each([
+    ['composeDir', 'host', 'target'],
+    ['targetName', 'composeDir', 'paths'],
+    ['composeDir', 'privateKey', 'key'],
+    ['host', 'privateKey', 'target'],
+    ['privateKey', 'composeDir', 'key'],
+  ] as const)('after a %s edit, a %s edit leaves the %s banner', async (first, second, expected) => {
+    const api = fakeApi();
+    const { result: hook } = renderHook(() => useNodeBootstrap({ open: true, api }));
+    await act(async () => { fillTarget(hook.current); });
+    await act(async () => { await hook.current.checkHostKey(); });
+    await act(async () => { await hook.current.runPreflight(); });
+
+    await act(async () => { hook.current.setField(first, first === 'composeDir' ? '/srv/a' : 'changed-a'); });
+    await act(async () => { hook.current.setField(second, second === 'composeDir' ? '/srv/b' : 'changed-b'); });
+    expect(hook.current.invalidated).toBe(expected);
   });
 
   it('keeps the strongest reason when a smaller edit follows, and clears it on the next result', async () => {
