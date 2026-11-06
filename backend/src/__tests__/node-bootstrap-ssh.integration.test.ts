@@ -1,7 +1,7 @@
 import { describe, it, expect, afterEach } from 'vitest';
 import crypto from 'crypto';
 import net from 'net';
-import { Server } from 'ssh2';
+import { Server, utils } from 'ssh2';
 import {
   SshProbeClient,
   SshTransportError,
@@ -215,6 +215,48 @@ describe('bootstrap SSH transport', () => {
     } catch (error) {
       expect((error as SshTransportError).code).toBe('SSH_KEY_INVALID');
     }
+  });
+
+  describe('encrypted private keys', () => {
+    const PASSPHRASE = 'correct horse battery';
+    const encryptedKeys = {
+      'OpenSSH ed25519': utils.generateKeyPairSync('ed25519', { passphrase: PASSPHRASE, cipher: 'aes256-ctr', rounds: 16 }).private,
+      'OpenSSH rsa': utils.generateKeyPairSync('rsa', { bits: 2048, passphrase: PASSPHRASE, cipher: 'aes256-ctr', rounds: 16 }).private,
+      'PEM rsa': crypto.generateKeyPairSync('rsa', {
+        modulusLength: 2048,
+        privateKeyEncoding: { type: 'pkcs1', format: 'pem', cipher: 'aes-256-cbc', passphrase: PASSPHRASE },
+        publicKeyEncoding: { type: 'pkcs1', format: 'pem' },
+      }).privateKey,
+    };
+
+    function codeOf(fn: () => void): string | null {
+      try {
+        fn();
+        return null;
+      } catch (error) {
+        return error instanceof SshTransportError ? error.code : 'OTHER';
+      }
+    }
+
+    it.each(Object.entries(encryptedKeys))('%s: a wrong passphrase is reported as the passphrase, not the key format', (_name, key) => {
+      expect(codeOf(() => parsePrivateKey(key, 'not-the-passphrase'))).toBe('SSH_KEY_PASSPHRASE_INVALID');
+      expect(() => parsePrivateKey(key, 'not-the-passphrase')).toThrow(/passphrase/i);
+      expect(() => parsePrivateKey(key, 'not-the-passphrase')).not.toThrow(/OpenSSH key/);
+    });
+
+    it.each(Object.entries(encryptedKeys))('%s: a missing passphrase still asks for one', (_name, key) => {
+      expect(codeOf(() => parsePrivateKey(key))).toBe('SSH_KEY_PASSPHRASE_REQUIRED');
+      expect(codeOf(() => parsePrivateKey(key, ''))).toBe('SSH_KEY_PASSPHRASE_REQUIRED');
+    });
+
+    it.each(Object.entries(encryptedKeys))('%s: the right passphrase reads the key', (_name, key) => {
+      expect(codeOf(() => parsePrivateKey(key, PASSPHRASE))).toBeNull();
+    });
+
+    it('still reports garbage as an unreadable key, with or without a passphrase', () => {
+      expect(codeOf(() => parsePrivateKey('not a key', PASSPHRASE))).toBe('SSH_KEY_INVALID');
+      expect(codeOf(() => parsePrivateKey('not a key'))).toBe('SSH_KEY_INVALID');
+    });
   });
 
   it('closes a hanging command at the timeout', async () => {

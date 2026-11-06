@@ -1,4 +1,5 @@
-import { describe, it, expect, beforeAll, afterAll, afterEach, vi } from 'vitest';
+import { describe, it, expect, beforeAll, afterAll, beforeEach, afterEach, vi } from 'vitest';
+import os from 'os';
 import request from 'supertest';
 import jwt from 'jsonwebtoken';
 import { setupTestDb, cleanupTestDb, TEST_USERNAME, TEST_JWT_SECRET } from './helpers/setupTestDb';
@@ -10,11 +11,21 @@ import {
 } from '../services/nodeBootstrap/NodeBootstrapService';
 import {
   SshTransportError,
+  sshProbeClient,
   type BootstrapTransport,
   type SshCommand,
   type SshCommandResult,
 } from '../services/nodeBootstrap/sshProbeClient';
 import { DEFAULT_SOURCE_LOCATIONS, DOCKER_ASC_PATH, dockerAscBlock } from './__helpers__/dockerRepoFixtures';
+
+/** Creates a manually controllable clock for testing time-dependent logic. */
+function createManualClock(startMs: number): { now: () => number; advance: (ms: number) => void } {
+  let current = startMs;
+  return {
+    now: () => current,
+    advance: (ms: number) => { current += ms; },
+  };
+}
 
 const PATH_COMPOSE_OUTPUT = [
   'P_INPUT=/opt/docker/sencho',
@@ -223,6 +234,75 @@ describe('bootstrap routes: host key', () => {
     expect(res.status).toBe(200);
     expect(res.body.fingerprint).toBe('SHA256:abc');
     expect(res.body.trust).toBe('unknown');
+  });
+});
+
+describe('bootstrap routes: the hub as a target in a Docker or NAT deployment', () => {
+  const PUBLIC_IP = '8.8.4.4';
+  const preflightBody = {
+    host: PUBLIC_IP,
+    username: 'ubuntu',
+    privateKey: 'key',
+    targetName: 'self',
+    expectedFingerprint: 'SHA256:x',
+  };
+
+  beforeEach(() => {
+    // Inside a container the only non-loopback interface is the bridge.
+    vi.spyOn(os, 'networkInterfaces').mockReturnValue({
+      eth0: [{ address: '172.17.0.2', netmask: '255.255.0.0', family: 'IPv4', mac: '00:00:00:00:00:00', internal: false, cidr: '172.17.0.2/16' }],
+    });
+  });
+
+  afterEach(() => {
+    delete process.env.SENCHO_PUBLIC_URL;
+  });
+
+  it('refuses the address the operator reached the hub on, for the host key check and the preflight', async () => {
+    const captureSpy = vi.spyOn(sshProbeClient, 'captureHostKey');
+    const runSpy = vi.spyOn(sshProbeClient, 'runCommands');
+    const hostKey = await request(app)
+      .post('/api/nodes/bootstrap/host-key')
+      .set('Authorization', adminAuth)
+      .set('Host', `${PUBLIC_IP}:1852`)
+      .send({ host: PUBLIC_IP });
+    expect(hostKey.status).toBe(400);
+    expect(hostKey.body.code).toBe('INVALID_TARGET');
+    const preflight = await request(app)
+      .post('/api/nodes/bootstrap/preflight')
+      .set('Authorization', adminAuth)
+      .set('Host', `${PUBLIC_IP}:1852`)
+      .send(preflightBody);
+    expect(preflight.status).toBe(400);
+    expect(preflight.body.code).toBe('INVALID_TARGET');
+    expect(captureSpy).not.toHaveBeenCalled();
+    expect(runSpy).not.toHaveBeenCalled();
+  });
+
+  it('refuses the address in SENCHO_PUBLIC_URL when the request arrives on another host', async () => {
+    process.env.SENCHO_PUBLIC_URL = `https://${PUBLIC_IP}`;
+    const captureSpy = vi.spyOn(sshProbeClient, 'captureHostKey');
+    const res = await request(app)
+      .post('/api/nodes/bootstrap/host-key')
+      .set('Authorization', adminAuth)
+      .set('Host', 'localhost:1852')
+      .send({ host: PUBLIC_IP });
+    expect(res.status).toBe(400);
+    expect(res.body.code).toBe('INVALID_TARGET');
+    expect(captureSpy).not.toHaveBeenCalled();
+  });
+
+  it('does not refuse an unrelated target', async () => {
+    const captureSpy = vi.spyOn(sshProbeClient, 'captureHostKey').mockResolvedValue({
+      algorithm: 'ssh-ed25519', fingerprint: 'SHA256:other', knownHostsLine: '8.8.8.8 ssh-ed25519 AAAA',
+    });
+    const res = await request(app)
+      .post('/api/nodes/bootstrap/host-key')
+      .set('Authorization', adminAuth)
+      .set('Host', `${PUBLIC_IP}:1852`)
+      .send({ host: '8.8.8.8' });
+    expect(res.status).toBe(200);
+    expect(captureSpy).toHaveBeenCalledTimes(1);
   });
 });
 
@@ -737,7 +817,7 @@ describe('bootstrap service trust serialization', () => {
         seenTotals.push(options?.totalMs ?? -1);
         options?.onHostKey?.({ algorithm: 'ssh-ed25519', fingerprint: 'SHA256:fixturefingerprint000000000000000000000000', knownHostsLine: 'line' });
         if (session.address === '192.168.1.10') {
-          await new Promise((resolve) => setTimeout(resolve, 40));
+          clock.advance(40);
           throw new SshTransportError('SSH_UNREACHABLE', 'first address down');
         }
         return commands.map((command) => ({
@@ -745,10 +825,11 @@ describe('bootstrap service trust serialization', () => {
         }));
       },
     };
+    const clock = createManualClock(1_762_300_000_000);
     const svc = new NodeBootstrapService({
       transport,
       db: DatabaseService.getInstance(),
-      now: () => 1_762_300_000_000,
+      now: clock.now,
       resolveAddresses: async () => ['192.168.1.10', '192.168.1.20'],
       caPem: () => null,
       requestBudgetMs: 300,
@@ -1183,7 +1264,7 @@ describe('bootstrap service failure handling', () => {
     expect(dialed).toEqual(['10.0.0.1']);
   });
 
-  it.each(['SSH_AUTH_FAILED', 'SSH_KEY_INVALID', 'SSH_KEY_PASSPHRASE_REQUIRED'] as const)(
+  it.each(['SSH_AUTH_FAILED', 'SSH_KEY_INVALID', 'SSH_KEY_PASSPHRASE_REQUIRED', 'SSH_KEY_PASSPHRASE_INVALID'] as const)(
     'reports %s without trying the next address',
     async (code) => {
       const dialed: string[] = [];
@@ -1218,11 +1299,12 @@ describe('bootstrap service failure handling', () => {
   it('shares one deadline across host-key capture attempts and stops dialing once it is spent', async () => {
     const timeouts: number[] = [];
     const dialed: string[] = [];
+    const clock = createManualClock(1_762_300_000_000);
     const transport: BootstrapTransport = {
       captureHostKey: async ({ address }, options) => {
         dialed.push(address);
         timeouts.push(options?.timeoutMs ?? -1);
-        await new Promise((resolve) => setTimeout(resolve, 80));
+        clock.advance(80);
         throw new SshTransportError('SSH_UNREACHABLE', 'down');
       },
       runCommands: async () => [],
@@ -1230,6 +1312,7 @@ describe('bootstrap service failure handling', () => {
     await expect(makeService(transport, {
       resolveAddresses: async () => ['10.0.0.1', '10.0.0.2', '10.0.0.3'],
       requestBudgetMs: 120,
+      now: clock.now,
     }).captureHostKey({ host: 'slow-scan.example.com', port: 22 })).rejects.toMatchObject({ code: 'PREFLIGHT_TIMEOUT' });
     expect(timeouts[0]).toBeLessThanOrEqual(120);
     expect(timeouts[1]).toBeLessThan(timeouts[0]);
@@ -1379,15 +1462,16 @@ describe('bootstrap service cancellation and missing host key', () => {
   });
 
   it('reports a command timeout that lands on the request deadline as a budget error', async () => {
+    const clock = createManualClock(1_762_300_000_000);
     const transport: BootstrapTransport = {
       captureHostKey: async () => ({ algorithm: 'ssh-ed25519', fingerprint: 'SHA256:x', knownHostsLine: 'line' }),
       runCommands: async (_session, commands, options) => {
         options?.onHostKey?.({ algorithm: 'ssh-ed25519', fingerprint: request.expectedFingerprint as string, knownHostsLine: 'line' });
-        await new Promise((resolve) => setTimeout(resolve, 80));
+        clock.advance(80);
         return [{ id: commands[0].id, stdout: '', stderr: '', exitCode: null, truncated: false, timedOut: true, error: 'COMMAND_TIMEOUT' }];
       },
     };
-    await expect(build(transport, { requestBudgetMs: 60 }).preflight(
+    await expect(build(transport, { requestBudgetMs: 60, now: clock.now }).preflight(
       { ...request, host: 'deadline-race.example.com' },
       { hubUrl: hub, audit },
     )).rejects.toMatchObject({ code: 'PREFLIGHT_TIMEOUT' });

@@ -47,6 +47,8 @@ export const AUDIT_ROUTE_SUMMARIES: Record<string, string> = {
 
   // Node management
   'POST /nodes': 'Added node',
+  'POST /nodes/bootstrap/host-key': 'Checked bootstrap host key',
+  'POST /nodes/bootstrap/preflight': 'Ran bootstrap preflight',
   'PUT /nodes': 'Updated node',
   'DELETE /nodes': 'Deleted node',
   'POST /nodes/*/cordon': 'Cordoned node',
@@ -212,6 +214,10 @@ export function getAuditSummary(method: string, apiPath: string, statusCode?: nu
       if (statusCode === 409) return 'Prune blocked: plan stale';
       if (statusCode === 400) return 'Prune request rejected';
       return `Prune failed (${statusCode})`;
+    }
+    if (method === 'POST' && normalized.startsWith('nodes/bootstrap/')) {
+      const kind = normalized.includes('/host-key') ? 'Bootstrap host key check' : 'Bootstrap preflight';
+      return `${kind} failed (${statusCode})`;
     }
     if (method === 'POST' && normalized.startsWith('system/prune/plan')) {
       return `Prune plan failed (${statusCode})`;

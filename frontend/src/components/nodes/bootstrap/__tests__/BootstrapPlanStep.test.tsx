@@ -177,5 +177,7 @@ describe('BootstrapPlanStep', () => {
     expect(text).toContain('The Docker service is active and enabled at boot.');
     expect(text).toContain('Existing directory preserved; 3 stacks found; ownership and mode unchanged.');
     expect(text).toContain('name: sencho-agent');
+    expect(text).toContain('Image: saelix/sencho:latest (digest resolved at execution)');
+    expect(text).not.toMatch(/execution,\s*execution/);
   });
 });

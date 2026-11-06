@@ -15,7 +15,7 @@ export function formatBootstrapPlanText(plan: BootstrapPlan): string {
   lines.push(`Compose stacks directory: ${plan.paths.composeDir.input} (real: ${plan.paths.composeDir.realPath ?? 'unresolved'}, ${plan.paths.composeDir.created ? 'will be created' : `existing, ${plan.paths.composeDir.stackCount ?? 'unknown'} stacks`})`);
   lines.push(`Pilot Agent installation directory: ${plan.paths.agentDir.input} (real: ${plan.paths.agentDir.realPath ?? 'unresolved'}, ${plan.paths.agentDir.created ? 'will be created' : 'existing'})`);
   lines.push(`Project: ${plan.projectName}  Container: ${plan.containerName}  Volume: ${plan.dataVolume}`);
-  lines.push(`Image: ${plan.image.ref} (digest ${plan.image.digest ?? 'resolved at execution'}, ${plan.image.resolvedAt})`);
+  lines.push(`Image: ${plan.image.ref} (digest ${plan.image.digest ?? 'resolved at execution'})`);
   lines.push(`Evidence digest: sha256:${plan.evidenceDigest}`);
   lines.push('');
   lines.push('Sources:');

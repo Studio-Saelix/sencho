@@ -47,6 +47,7 @@ export type SshErrorCode =
   | 'SSH_AUTH_FAILED'
   | 'SSH_KEY_INVALID'
   | 'SSH_KEY_PASSPHRASE_REQUIRED'
+  | 'SSH_KEY_PASSPHRASE_INVALID'
   | 'SSH_UNREACHABLE'
   | 'SSH_DNS_FAILED'
   | 'HOST_KEY_UNTRUSTED'
@@ -144,11 +145,16 @@ export function parsePrivateKey(key: string, passphrase?: string | null): void {
   if (!key.trim()) {
     throw new SshTransportError('SSH_KEY_INVALID', 'A private SSH key is required.');
   }
-  const parsed = sshUtils.parseKey(key, passphrase ?? undefined);
+  // An empty passphrase is no passphrase: ssh2 would try it as a real one.
+  const parsed = sshUtils.parseKey(key, passphrase || undefined);
   if (parsed instanceof Error) {
     const message = parsed.message || '';
     if (!passphrase && /passphrase|encrypted/i.test(message)) {
       throw new SshTransportError('SSH_KEY_PASSPHRASE_REQUIRED', 'This key is encrypted. Enter its passphrase.');
+    }
+    // ssh2 words a failed decryption as "bad passphrase" in every key format.
+    if (passphrase && /bad passphrase/i.test(message)) {
+      throw new SshTransportError('SSH_KEY_PASSPHRASE_INVALID', 'The passphrase does not unlock this key. Check it and try again.');
     }
     throw new SshTransportError(
       'SSH_KEY_INVALID',
@@ -350,7 +356,7 @@ function runSession(
       port: session.port,
       username: session.username,
       privateKey: session.privateKey,
-      passphrase: session.passphrase ?? undefined,
+      passphrase: session.passphrase || undefined,
       readyTimeout: SSH_CONNECT_TIMEOUT_MS,
       keepaliveInterval: 5_000,
       keepaliveCountMax: 2,

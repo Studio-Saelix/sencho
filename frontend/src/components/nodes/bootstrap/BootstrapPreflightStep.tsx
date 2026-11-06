@@ -3,6 +3,7 @@ import { Badge } from '@/components/ui/badge';
 import { StatusPath, type StatusPathStage } from '@/components/ui/status-path';
 import type { StatusTone } from '@/lib/statusTone';
 import { BootstrapPathSummary } from './BootstrapPathSummary';
+import { HostKeyCompare } from './HostKeyCompare';
 import type { BootstrapCheck, BootstrapInspection, BootstrapStatus } from './types';
 
 const STATUS_TONE: Record<BootstrapStatus, StatusTone> = {
@@ -148,15 +149,18 @@ export function BootstrapPreflightStep({
         )}
 
         {hostKeyTrust === 'unknown' && (
-          <label className="mt-2 flex cursor-pointer items-start gap-2 text-xs text-muted-foreground">
-            <input
-              type="checkbox"
-              className="mt-0.5"
-              checked={trusted}
-              onChange={(event) => onTrustedChange(event.target.checked)}
-            />
-            I trust this host key. Compare it with <code className="font-mono">ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub</code> on the server.
-          </label>
+          <>
+            <HostKeyCompare algorithm={inspection.hostKey.algorithm} knownHostsLine={inspection.hostKey.knownHostsLine} />
+            <label className="mt-2 flex cursor-pointer items-start gap-2 text-xs text-muted-foreground">
+              <input
+                type="checkbox"
+                className="mt-0.5"
+                checked={trusted}
+                onChange={(event) => onTrustedChange(event.target.checked)}
+              />
+              I trust this host key.
+            </label>
+          </>
         )}
 
         {hostKeyTrust === 'trusted' && (

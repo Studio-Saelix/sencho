@@ -89,6 +89,28 @@ describe('BootstrapPreflightStep with facts that could not be established', () =
   });
 });
 
+describe('BootstrapPreflightStep host key comparison', () => {
+  it('names the key file for the observed algorithm and shows the public key line on a new host', () => {
+    const base = inspection([unknownCheck]);
+    renderStep({
+      hostKeyTrust: 'unknown',
+      trusted: false,
+      inspection: {
+        ...base,
+        hostKey: { algorithm: 'ecdsa-sha2-nistp256', fingerprint: 'SHA256:abc', knownHostsLine: 'server.example.com ecdsa-sha2-nistp256 AAAAE2VjZHNh' },
+      },
+    });
+    expect(screen.getByText(/ssh-keygen -lf \/etc\/ssh\/ssh_host_ecdsa_key\.pub/)).toBeInTheDocument();
+    expect(screen.getByTestId('host-key-line')).toHaveTextContent('ecdsa-sha2-nistp256 AAAAE2VjZHNh');
+    expect(screen.getByLabelText('I trust this host key.')).toBeInTheDocument();
+  });
+
+  it('does not offer the comparison once the key matches the pin', () => {
+    renderStep({ hostKeyTrust: 'trusted' });
+    expect(screen.queryByText(/ssh-keygen/)).not.toBeInTheDocument();
+  });
+});
+
 describe('BootstrapPathSummary with uninspected directories', () => {
   it('shows unknown instead of a zero count when an inventory failed', () => {
     render(<BootstrapPathSummary

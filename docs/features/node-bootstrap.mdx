@@ -57,15 +57,19 @@ There is no data-directory field. The agent's persistent data is the fixed `senc
 
 ### 2. Preflight
 
-Select **Check host key** first. Sencho connects only far enough to read the server's host key and shows its algorithm, SHA-256 fingerprint, and the public key line you can compare on the server with:
+Select **Check host key** first. Sencho connects only far enough to read the server's host key and shows its algorithm, SHA-256 fingerprint, and the public key line, the same text the server keeps in the matching `.pub` file. Compare the fingerprint on the server with the command the dialog shows for that algorithm, for an Ed25519 key:
 
 ```bash
 ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub
 ```
 
+An RSA or ECDSA host key points at `ssh_host_rsa_key.pub` or `ssh_host_ecdsa_key.pub` instead.
+
 - **New host:** tick **I trust this host key** to proceed. The fingerprint is pinned for this host and port.
 - **Known host:** a key that matches the pin proceeds without a prompt.
 - **Changed key:** Sencho blocks the preflight and shows both fingerprints. Replacing the pin is a separate, explicit action, and both fingerprints are recorded in the audit log.
+
+Each host key check and preflight is recorded in the audit log as `Checked bootstrap host key` or `Ran bootstrap preflight`; a request that was refused or failed is recorded as `Bootstrap host key check failed` or `Bootstrap preflight failed` with its status code.
 
 Once trusted, select **Run preflight**. Sencho opens one SSH connection and runs the fixed read-only catalog. The request is bounded: 15 seconds to connect, 10 seconds per command, 90 seconds overall, with output caps. Closing the dialog or editing the host, port or user cancels the request on the server. If a command times out, the inspection stops there and the commands that did not run are reported as `unknown`. An inventory or identity fact from a timed-out, errored or truncated command is treated as `unknown` or `blocked`; it never becomes a clean pass.
 
@@ -147,6 +151,7 @@ The Agent installation directory has no settings field. It is chosen only here.
 ## Limits
 
 - Ubuntu 22.04 and 24.04 on x86_64 only.
+- A target that is this Sencho instance is refused: its own network addresses, and the address you reach it on (the request host, or `SENCHO_PUBLIC_URL` when set), which is how a Docker or NAT deployment is told apart from the server it runs on.
 - IPv6 targets, SSH agent forwarding, password authentication and passworded sudo are not supported in this release.
 - The preflight never changes firewall, SSH server, Docker daemon, user or group configuration.
 - Only the Docker daemon on the host's own socket (`/var/run/docker.sock`) is inspected, and every Docker command in the preflight and the plan is pinned to it with the default context. Rootless installs, custom sockets and remote Docker contexts are reported as blocked. A host where Docker is installed but stopped is blocked too: containers and volumes cannot be inventoried until the service runs.
@@ -165,6 +170,7 @@ The Agent installation directory has no settings field. It is chosen only here.
 | `HOST_KEY_UNTRUSTED` | Trust the key first. If the host's key changed between the check and the preflight, the dialog shows the pinned and live fingerprints; tick the replacement confirmation only when you know the host was rebuilt. |
 | `SSH_AUTH_FAILED` | Check the SSH user and that the public half of the key is in the user's `authorized_keys`. |
 | `SSH_KEY_PASSPHRASE_REQUIRED` | The key is encrypted. Enter its passphrase. |
+| `SSH_KEY_PASSPHRASE_INVALID` | The passphrase does not unlock the key. Re-enter it. |
 | `SSH_KEY_INVALID` | Use an OpenSSH private key, or convert an RSA key to PEM. PKCS8 ed25519 keys are not accepted. |
 | `SSH_UNREACHABLE` or `SSH_DNS_FAILED` | Check the address, the port and outbound connectivity from the Sencho instance. |
 | `INVALID_PATH` | The response names the field and the rule. Fix that field; typing is never blocked. |

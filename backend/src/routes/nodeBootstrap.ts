@@ -114,6 +114,7 @@ nodeBootstrapRouter.post('/host-key', bootstrapLimiter, async (req: Request, res
   try {
     const result = await NodeBootstrapService.getInstance().captureHostKey(parsed.data, {
       signal: abortOnDisconnect(res),
+      hubUrl: resolvePrimaryUrl(req),
     });
     console.log(`[Bootstrap] Host key checked for ${sanitizeForLog(result.host)}:${result.port} (${result.trust})`);
     res.json(result);

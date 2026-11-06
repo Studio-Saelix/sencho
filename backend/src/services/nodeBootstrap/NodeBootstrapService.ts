@@ -106,7 +106,18 @@ interface AuditContext {
   path: string;
 }
 
-type AddressResolver = (host: string) => Promise<string[]>;
+/** `hubHost` is the host clients reach the hub on; a target resolving to it is refused as the hub itself. */
+type AddressResolver = (host: string, hubHost?: string | null) => Promise<string[]>;
+
+function hubHostOf(hubUrl: string | undefined): string | null {
+  if (!hubUrl) return null;
+  try {
+    // URL keeps the brackets of an IPv6 literal; the policy compares bare IPv4 only.
+    return new URL(hubUrl).hostname.replace(/^\[|\]$/g, '') || null;
+  } catch {
+    return null;
+  }
+}
 
 interface BootstrapDeps {
   transport: BootstrapTransport;
@@ -126,7 +137,7 @@ interface BootstrapDeps {
 const DEFAULT_DEPS: Omit<BootstrapDeps, 'db'> = {
   transport: sshProbeClient,
   now: () => Date.now(),
-  resolveAddresses: (hostname) => resolveTargetAddresses(hostname),
+  resolveAddresses: (hostname, hubHost) => resolveTargetAddresses(hostname, undefined, hubHost),
   caPem: () => (loadNativeTlsMaterial()?.caPem ?? null),
   requestBudgetMs: SSH_TOTAL_TIMEOUT_MS,
 };
@@ -206,7 +217,7 @@ export class NodeBootstrapService {
   /** Capture the host key without authenticating. Aborts the handshake after the key. */
   public async captureHostKey(
     input: { host: string; port?: number },
-    options: { signal?: AbortSignal } = {},
+    options: { signal?: AbortSignal; hubUrl?: string } = {},
   ): Promise<BootstrapHostKeyResult> {
     let host: string;
     let port: number;
@@ -225,15 +236,15 @@ export class NodeBootstrapService {
       throw new BootstrapError(400, 'INVALID_TARGET', message, { field });
     }
     // DNS and every address attempt share one request budget.
-    const deadline = Date.now() + this.deps.requestBudgetMs;
-    const addresses = await this.resolveOrThrow(host, deadline, options.signal);
+    const deadline = this.deps.now() + this.deps.requestBudgetMs;
+    const addresses = await this.resolveOrThrow(host, deadline, options.signal, hubHostOf(options.hubUrl));
     let dialed = addresses[0];
     const observation = await this.withTargetLock(host, port, async () => {
       let lastError: unknown = null;
       for (const address of addresses) {
         try {
           if (options.signal?.aborted) throw cancelledError();
-          const remaining = deadline - Date.now();
+          const remaining = deadline - this.deps.now();
           if (remaining <= 0) throw this.budgetError();
           const captured = await this.deps.transport.captureHostKey(
             { host, address, port },
@@ -291,7 +302,7 @@ export class NodeBootstrapService {
       );
     }
 
-    const deadline = Date.now() + this.deps.requestBudgetMs;
+    const deadline = this.deps.now() + this.deps.requestBudgetMs;
     const preparedKey = input.privateKey ?? '';
     const passphrase = input.passphrase ?? null;
     let hostKey: HostKeyObservation | null = null;
@@ -305,13 +316,13 @@ export class NodeBootstrapService {
       pin = this.deps.db.getNodeBootstrapTrust(targetInput.host, targetInput.port);
       this.assertPinnedTrust(targetInput, pin, expectedFingerprint, replacePinnedFingerprint, context.audit);
 
-      const addresses = await this.resolveOrThrow(targetInput.host, deadline, context.signal);
+      const addresses = await this.resolveOrThrow(targetInput.host, deadline, context.signal, hubHostOf(context.hubUrl));
       dialed = addresses[0];
       let lastError: unknown = null;
       for (const address of addresses) {
         try {
           if (context.signal?.aborted) throw cancelledError();
-          const remaining = deadline - Date.now();
+          const remaining = deadline - this.deps.now();
           if (remaining <= 0) throw this.budgetError();
           const probeResults = await this.runProbes(
             address,
@@ -326,7 +337,7 @@ export class NodeBootstrapService {
             context.signal,
           );
           if (probeResults.some((result) => result.error === 'PREFLIGHT_TIMEOUT')
-            || (Date.now() >= deadline && probeResults.some((result) => result.timedOut))) {
+            || (this.deps.now() >= deadline && probeResults.some((result) => result.timedOut))) {
             throw this.budgetError();
           }
           dialed = address;
@@ -372,7 +383,7 @@ export class NodeBootstrapService {
           // The key was rejected, not the address: another record of the same
           // host would only repeat the answer.
           if (error instanceof SshTransportError
-            && ['SSH_AUTH_FAILED', 'SSH_KEY_INVALID', 'SSH_KEY_PASSPHRASE_REQUIRED', 'PREFLIGHT_TIMEOUT'].includes(error.code)) {
+            && ['SSH_AUTH_FAILED', 'SSH_KEY_INVALID', 'SSH_KEY_PASSPHRASE_REQUIRED', 'SSH_KEY_PASSPHRASE_INVALID', 'PREFLIGHT_TIMEOUT'].includes(error.code)) {
             throw error;
           }
           if (context.signal?.aborted) throw error;
@@ -471,15 +482,15 @@ export class NodeBootstrapService {
     );
   }
 
-  private async resolveOrThrow(host: string, deadline: number, signal?: AbortSignal): Promise<string[]> {
-    const remaining = deadline - Date.now();
+  private async resolveOrThrow(host: string, deadline: number, signal?: AbortSignal, hubHost: string | null = null): Promise<string[]> {
+    const remaining = deadline - this.deps.now();
     if (remaining <= 0) throw this.budgetError();
     if (signal?.aborted) throw cancelledError();
     let timer: NodeJS.Timeout | null = null;
     let onAbort: (() => void) | null = null;
     try {
       return await Promise.race([
-        this.deps.resolveAddresses(host),
+        this.deps.resolveAddresses(host, hubHost),
         new Promise<never>((_resolve, reject) => {
           timer = setTimeout(() => {
             reject(this.budgetError());

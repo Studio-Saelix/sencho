@@ -46,6 +46,49 @@ describe('bootstrap target address policy', () => {
     ]))).rejects.toMatchObject({ code: 'INVALID_TARGET' });
   });
 
+  describe('the hub address as clients reach it (Docker and NAT deployments)', () => {
+    function bridgeOnly() {
+      vi.spyOn(os, 'networkInterfaces').mockReturnValue({
+        eth0: [{ address: '172.17.0.2', netmask: '255.255.0.0', family: 'IPv4', mac: '00:00:00:00:00:00', internal: false, cidr: '172.17.0.2/16' }],
+      });
+    }
+
+    it('rejects the hub public IPv4 address that no interface in the container holds', async () => {
+      bridgeOnly();
+      await expect(resolveTargetAddresses('8.8.4.4', resolveWith([]), '8.8.4.4'))
+        .rejects.toMatchObject({ code: 'INVALID_TARGET', message: 'The target resolves to this Sencho instance.' });
+    });
+
+    it('rejects a DNS name for the hub, and a target name that resolves to the hub public name', async () => {
+      bridgeOnly();
+      const resolve = async (hostname: string) => (
+        hostname === 'hub.example.com' || hostname === 'alias.example.com'
+          ? [{ address: '8.8.4.4', family: 4 }]
+          : []
+      );
+      await expect(resolveTargetAddresses('alias.example.com', resolve, 'hub.example.com'))
+        .rejects.toMatchObject({ code: 'INVALID_TARGET' });
+      await expect(resolveTargetAddresses('hub.example.com', resolve, 'hub.example.com'))
+        .rejects.toMatchObject({ code: 'INVALID_TARGET' });
+    });
+
+    it('accepts any other public address while the hub host is known', async () => {
+      bridgeOnly();
+      await expect(resolveTargetAddresses('8.8.8.8', resolveWith([]), '8.8.4.4')).resolves.toEqual(['8.8.8.8']);
+    });
+
+    it('accepts a target when the hub host does not resolve or is IPv6, and without a hub host', async () => {
+      bridgeOnly();
+      const failing = async (hostname: string) => {
+        if (hostname === 'hub.invalid') throw new Error('ENOTFOUND');
+        return [{ address: '8.8.8.8', family: 4 }];
+      };
+      await expect(resolveTargetAddresses('target.example.com', failing, 'hub.invalid')).resolves.toEqual(['8.8.8.8']);
+      await expect(resolveTargetAddresses('target.example.com', failing, '::1')).resolves.toEqual(['8.8.8.8']);
+      await expect(resolveTargetAddresses('target.example.com', failing, null)).resolves.toEqual(['8.8.8.8']);
+    });
+  });
+
   it('rejects malformed and IPv6 records', async () => {
     await expect(resolveTargetAddresses('host.example.com', resolveWith([
       { address: 'not-an-address', family: 4 },

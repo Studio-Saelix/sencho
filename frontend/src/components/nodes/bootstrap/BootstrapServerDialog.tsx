@@ -7,6 +7,7 @@ import { cn } from '@/lib/utils';
 import { BootstrapTargetStep } from './BootstrapTargetStep';
 import { BootstrapPreflightStep } from './BootstrapPreflightStep';
 import { BootstrapPlanStep } from './BootstrapPlanStep';
+import { HostKeyCompare } from './HostKeyCompare';
 import { useNodeBootstrap, type UseNodeBootstrap } from './useNodeBootstrap';
 import type { BootstrapStep } from './types';
 
@@ -148,10 +149,13 @@ function DialogBody({ wizard }: { wizard: UseNodeBootstrap }) {
               <code className="mt-1 block break-all font-mono text-[12px] text-stat-value">{hostKey.fingerprint}</code>
               <p className="mt-1 font-mono text-[10px] text-stat-subtitle">{hostKey.algorithm} · dialed {hostKey.address}</p>
               {hostKey.trust === 'unknown' && (
-                <label className="mt-2 flex cursor-pointer items-start gap-2 text-xs text-muted-foreground">
-                  <input type="checkbox" className="mt-0.5" checked={trusted} onChange={(event) => setTrusted(event.target.checked)} />
-                  I trust this host key.
-                </label>
+                <>
+                  <HostKeyCompare algorithm={hostKey.algorithm} knownHostsLine={hostKey.knownHostsLine} />
+                  <label className="mt-2 flex cursor-pointer items-start gap-2 text-xs text-muted-foreground">
+                    <input type="checkbox" className="mt-0.5" checked={trusted} onChange={(event) => setTrusted(event.target.checked)} />
+                    I trust this host key.
+                  </label>
+                </>
               )}
               {hostKey.trust === 'changed' && (
                 <div className="mt-2 rounded-lg border border-destructive/30 bg-destructive/5 p-2.5">
@@ -162,6 +166,7 @@ function DialogBody({ wizard }: { wizard: UseNodeBootstrap }) {
                     <p className="mt-1 break-all font-mono text-[10px] text-stat-subtitle">Pinned: {hostKey.pinnedFingerprint}</p>
                   )}
                   <p className="mt-1 break-all font-mono text-[10px] text-stat-subtitle">Observed: {hostKey.fingerprint}</p>
+                  <HostKeyCompare algorithm={hostKey.algorithm} knownHostsLine={hostKey.knownHostsLine} />
                   <label className="mt-2 flex cursor-pointer items-start gap-2 text-xs text-muted-foreground">
                     <input
                       type="checkbox"

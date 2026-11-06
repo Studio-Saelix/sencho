@@ -222,6 +222,13 @@ describe('bootstrap plan builder', () => {
     expect(planDigest(plan)).toBe(plan.digest);
   });
 
+  it('words the image digest line without repeating the word execution', () => {
+    const text = formatPlanText(planFor(makeFacts()));
+    const imageLine = text.split('\n').find((line) => line.startsWith('Image: '));
+    expect(imageLine).toBe('Image: saelix/sencho:latest (digest resolved at execution)');
+    expect(text).not.toMatch(/execution,\s*execution/);
+  });
+
   it('canonicalizes keys so the digest does not depend on insertion order', () => {
     expect(canonicalJson({ b: 1, a: { d: 2, c: 3 } })).toBe(canonicalJson({ a: { c: 3, d: 2 }, b: 1 }));
   });

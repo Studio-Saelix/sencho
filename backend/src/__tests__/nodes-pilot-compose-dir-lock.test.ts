@@ -73,6 +73,53 @@ describe('connected Pilot Compose directory lock', () => {
     expect(node?.compose_dir).toBe('/opt/docker/sencho');
   });
 
+  it.each(['/opt/docker/sencho/', '/opt/docker/sencho//', ' /opt/docker/sencho/ ', '/opt/docker/./sencho/'])(
+    'treats %j as the unchanged directory on a connected Pilot',
+    async (spelling) => {
+      const nodeId = await createPilotNode(`connected-pilot-slash-${spelling.replace(/\W/g, '_')}`);
+      markConnected(nodeId);
+      const res = await request(app)
+        .put(`/api/nodes/${nodeId}`)
+        .set('Authorization', authHeader)
+        .send({ compose_dir: spelling });
+      expect(res.status).toBe(200);
+      expect(DatabaseService.getInstance().getNode(nodeId)?.compose_dir).toBe('/opt/docker/sencho');
+    },
+  );
+
+  it('still locks a different directory written with a trailing slash', async () => {
+    const nodeId = await createPilotNode('connected-pilot-moved-slash');
+    markConnected(nodeId);
+    const res = await request(app)
+      .put(`/api/nodes/${nodeId}`)
+      .set('Authorization', authHeader)
+      .send({ compose_dir: '/srv/moved-stacks/' });
+    expect(res.status).toBe(409);
+    expect(res.body.code).toBe('PILOT_COMPOSE_DIR_LOCKED');
+  });
+
+  it('compares a stored value that carries a trailing slash as the same directory', async () => {
+    const nodeId = await createPilotNode('connected-pilot-stored-slash');
+    markConnected(nodeId);
+    DatabaseService.getInstance().getDb()
+      .prepare('UPDATE nodes SET compose_dir = ? WHERE id = ?')
+      .run('/opt/docker/sencho/', nodeId);
+    const res = await request(app)
+      .put(`/api/nodes/${nodeId}`)
+      .set('Authorization', authHeader)
+      .send({ compose_dir: '/opt/docker/sencho' });
+    expect(res.status).toBe(200);
+  });
+
+  it('stores a new Pilot node directory without the trailing slash', async () => {
+    const res = await request(app)
+      .post('/api/nodes')
+      .set('Authorization', authHeader)
+      .send({ name: 'new-pilot-slash', type: 'remote', mode: 'pilot_agent', compose_dir: '/srv/new-stacks/' });
+    expect(res.status).toBe(200);
+    expect(DatabaseService.getInstance().getNode(res.body.id)?.compose_dir).toBe('/srv/new-stacks');
+  });
+
   it('leaves a proxy node free to change its compose directory', async () => {
     const created = await request(app)
       .post('/api/nodes')

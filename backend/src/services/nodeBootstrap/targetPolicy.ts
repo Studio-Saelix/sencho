@@ -96,7 +96,33 @@ export type ResolveAddresses = (hostname: string) => Promise<Array<{ address: st
 
 const systemResolve: ResolveAddresses = (hostname) =>
   dnsPromises.lookup(hostname, { all: true, verbatim: true });
-function ownNonLoopbackAddresses(): Set<string> {
+
+/**
+ * The addresses this instance answers on. The interface list is all a bare-metal
+ * install needs, but inside a container it holds only the bridge address, so the
+ * host the operator used to reach the hub (the request host or SENCHO_PUBLIC_URL)
+ * is added: its IPv4 address is the public address of a Docker or NAT deployment.
+ * A hub host that does not resolve adds nothing; it never blocks a target.
+ */
+async function ownAddresses(hubHost: string | null, resolve: ResolveAddresses): Promise<Set<string>> {
+  const addresses = ownInterfaceAddresses();
+  if (!hubHost) return addresses;
+  if (net.isIP(hubHost) === 4) {
+    addresses.add(hubHost);
+    return addresses;
+  }
+  if (net.isIP(hubHost) !== 0) return addresses;
+  try {
+    for (const record of await resolve(hubHost)) {
+      if (net.isIP(record.address) === 4) addresses.add(record.address);
+    }
+  } catch {
+    // A hub name that cannot be resolved here identifies no address.
+  }
+  return addresses;
+}
+
+function ownInterfaceAddresses(): Set<string> {
   const addresses = new Set<string>();
   for (const entries of Object.values(os.networkInterfaces())) {
     for (const entry of entries ?? []) {
@@ -109,12 +135,14 @@ function ownNonLoopbackAddresses(): Set<string> {
 
 /**
  * Resolve a host to the addresses that may be dialed. Fails closed: any blocked
- * record, or a record that is one of this instance's own addresses, rejects the
+ * record, or a record that is one of this instance's own addresses (its network
+ * interfaces plus `hubHost`, the host clients reach the hub on), rejects the
  * whole target.
  */
 export async function resolveTargetAddresses(
   host: string,
   resolve: ResolveAddresses = systemResolve,
+  hubHost: string | null = null,
 ): Promise<string[]> {
   let records: Array<{ address: string; family: number }>;
   if (net.isIP(host) === 4) {
@@ -129,7 +157,7 @@ export async function resolveTargetAddresses(
   if (!records || records.length === 0) {
     throw new UnsafeTargetError('SSH_DNS_FAILED', `Could not resolve ${host}.`);
   }
-  const own = ownNonLoopbackAddresses();
+  const own = await ownAddresses(hubHost, resolve);
   for (const record of records) {
     if (net.isIP(record.address) !== 4) {
       throw new UnsafeTargetError('INVALID_TARGET', 'IPv6 targets are not supported in this release.');

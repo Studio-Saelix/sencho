@@ -83,6 +83,54 @@ beforeEach(() => {
   vi.mocked(runBootstrapPreflight).mockResolvedValue(BLOCKED_RESULT);
 });
 
+describe('BootstrapServerDialog new host trust decision', () => {
+  it('shows the compare command and the public key line before the host is trusted', async () => {
+    vi.mocked(checkBootstrapHostKey).mockResolvedValue({
+      ...CHANGED_KEY,
+      trust: 'unknown',
+      pinnedFingerprint: null,
+      knownHostsLine: 'server.example.com ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIexample',
+    });
+    render(<BootstrapServerDialog open onOpenChange={() => {}} />);
+    const user = await fillTarget();
+    await user.click(screen.getByRole('button', { name: 'Check host key' }));
+
+    const trust = await screen.findByLabelText(/I trust this host key/);
+    expect(trust).not.toBeChecked();
+    expect(screen.getByText(/ssh-keygen -lf \/etc\/ssh\/ssh_host_ed25519_key\.pub/)).toBeInTheDocument();
+    // The line is what a .pub file holds: algorithm and key, without the host.
+    expect(screen.getByTestId('host-key-line')).toHaveTextContent('ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIexample');
+    expect(screen.getByTestId('host-key-line')).not.toHaveTextContent('server.example.com');
+  });
+
+  it('points an RSA host key at the RSA key file', async () => {
+    vi.mocked(checkBootstrapHostKey).mockResolvedValue({
+      ...CHANGED_KEY,
+      trust: 'unknown',
+      pinnedFingerprint: null,
+      algorithm: 'ssh-rsa',
+      knownHostsLine: 'server.example.com ssh-rsa AAAAB3NzaC1yc2E',
+    });
+    render(<BootstrapServerDialog open onOpenChange={() => {}} />);
+    const user = await fillTarget();
+    await user.click(screen.getByRole('button', { name: 'Check host key' }));
+
+    await screen.findByLabelText(/I trust this host key/);
+    expect(screen.getByText(/ssh_host_rsa_key\.pub/)).toBeInTheDocument();
+    expect(screen.queryByText(/ssh_host_ed25519_key\.pub/)).not.toBeInTheDocument();
+  });
+
+  it('shows the compare command with the observed key when the pin was changed', async () => {
+    render(<BootstrapServerDialog open onOpenChange={() => {}} />);
+    const user = await fillTarget();
+    await user.click(screen.getByRole('button', { name: 'Check host key' }));
+
+    await screen.findByLabelText(/I understand this replaces the pinned key/);
+    expect(screen.getByText(/ssh-keygen -lf \/etc\/ssh\/ssh_host_ed25519_key\.pub/)).toBeInTheDocument();
+    expect(screen.getByTestId('host-key-line')).toHaveTextContent('ssh-ed25519 AAAA');
+  });
+});
+
 describe('BootstrapServerDialog live host-key mismatch', () => {
   it('shows the pin and observed key and requires confirmation before another run', async () => {
     vi.mocked(checkBootstrapHostKey).mockResolvedValue({ ...CHANGED_KEY, trust: 'trusted', pinnedFingerprint: CHANGED_KEY.fingerprint });

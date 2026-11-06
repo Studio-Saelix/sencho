@@ -52,7 +52,10 @@ function normalizePilotComposeDir(value: unknown): string | null {
   const raw = typeof value === 'string' ? value.trim() : '';
   const candidate = raw || DEFAULT_PILOT_COMPOSE_DIR;
   if (!path.posix.isAbsolute(candidate) || /[\0\r\n]/.test(candidate)) return null;
-  return path.posix.normalize(candidate);
+  // normalize keeps a trailing slash, so `/opt/x/` would otherwise read as a
+  // different directory from `/opt/x` (a no-op save then trips the connected-Pilot lock).
+  const normalized = path.posix.normalize(candidate);
+  return normalized.length > 1 ? normalized.replace(/\/+$/, '') : normalized;
 }
 
 function mintPilotEnrollment(nodeId: number, req: Request): {
