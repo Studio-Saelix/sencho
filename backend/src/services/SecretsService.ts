@@ -180,11 +180,6 @@ export class SecretSourceChangedError extends Error {
 /** Names that would hit an object prototype slot instead of a plain env key. */
 const RESERVED_KV_KEYS = new Set(['__proto__', 'constructor', 'prototype']);
 
-/** Write one env key without tripping the `__proto__` setter. */
-function setKvValue(kv: SecretKv, key: string, value: string): void {
-    Object.defineProperty(kv, key, { value, enumerable: true, writable: true, configurable: true });
-}
-
 /** An edit operation cannot be applied to the current version. */
 export class SecretOpError extends Error {
     constructor(message: string) {
@@ -193,28 +188,32 @@ export class SecretOpError extends Error {
     }
 }
 
-function applyOp(kv: SecretKv, op: SecretPatchOp): void {
+/**
+ * Apply one edit against a Map, never against a plain object: the key comes
+ * from the request, and a Map has no prototype slot to fall into.
+ */
+function applyOp(kv: Map<string, string>, op: SecretPatchOp): void {
     const writtenKey = op.op === 'rename' ? op.to : op.key;
     if (RESERVED_KV_KEYS.has(writtenKey)) throw new SecretOpError(`Reserved key: ${writtenKey}`);
     if (op.op === 'set') {
-        setKvValue(kv, op.key, op.value);
+        kv.set(op.key, op.value);
         return;
     }
     if (op.op === 'remove') {
-        if (!(op.key in kv)) throw new SecretOpError(`Key '${op.key}' is not in the current version`);
-        delete kv[op.key];
+        if (!kv.has(op.key)) throw new SecretOpError(`Key '${op.key}' is not in the current version`);
+        kv.delete(op.key);
         return;
     }
-    if (!(op.from in kv)) throw new SecretOpError(`Key '${op.from}' is not in the current version`);
-    if (op.to in kv && op.to !== op.from) throw new SecretOpError(`Key '${op.to}' already exists`);
-    const value = kv[op.from];
-    delete kv[op.from];
-    setKvValue(kv, op.to, value);
+    if (!kv.has(op.from)) throw new SecretOpError(`Key '${op.from}' is not in the current version`);
+    if (kv.has(op.to) && op.to !== op.from) throw new SecretOpError(`Key '${op.to}' already exists`);
+    const value = kv.get(op.from) ?? '';
+    kv.delete(op.from);
+    kv.set(op.to, value);
 }
 
 export function parseEnv(text: string): SecretKv {
-    const out: SecretKv = {};
-    if (!text) return out;
+    if (!text) return {};
+    const entries: Array<[string, string]> = [];
     const lines = text.split(/\r?\n/);
     for (const rawLine of lines) {
         const line = rawLine.trim();
@@ -234,14 +233,14 @@ export function parseEnv(text: string): SecretKv {
             if ((first === '"' && last === '"') || (first === '\'' && last === '\'')) {
                 const inner = rawValue.slice(1, -1);
                 if (first === '"') {
-                    out[key] = inner
+                    entries.push([key, inner
                         .replace(/\\n/g, '\n')
                         .replace(/\\r/g, '\r')
                         .replace(/\\t/g, '\t')
                         .replace(/\\"/g, '"')
-                        .replace(/\\\\/g, '\\');
+                        .replace(/\\\\/g, '\\')]);
                 } else {
-                    out[key] = inner;
+                    entries.push([key, inner]);
                 }
                 continue;
             }
@@ -249,9 +248,9 @@ export function parseEnv(text: string): SecretKv {
         // Bare value: strip trailing inline comment ` #...`
         const commentIdx = rawValue.search(/\s#/);
         const trimmed = (commentIdx >= 0 ? rawValue.slice(0, commentIdx) : rawValue).trim();
-        out[key] = trimmed;
+        entries.push([key, trimmed]);
     }
-    return out;
+    return Object.fromEntries(entries);
 }
 
 export function serializeEnv(kv: SecretKv): string {
@@ -342,14 +341,14 @@ function decryptKv(payload: string): SecretKv {
     try {
         const parsed: unknown = JSON.parse(plaintext);
         if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) throw new SecretPayloadError();
-        const out: SecretKv = {};
+        // fromEntries creates own data properties, so a stored key that looks
+        // like a prototype slot stays a plain key.
+        const entries: Array<[string, string]> = [];
         for (const [k, v] of Object.entries(parsed)) {
             if (typeof v !== 'string') throw new SecretPayloadError();
-            // defineProperty keeps a stored `__proto__` key as data instead of
-            // letting the assignment hit the prototype setter.
-            setKvValue(out, k, v);
+            entries.push([k, v]);
         }
-        return out;
+        return Object.fromEntries(entries);
     } catch (err) {
         if (err instanceof SecretPayloadError) throw err;
         // A JSON.parse failure message can quote a fragment of its input, which
@@ -376,7 +375,11 @@ interface ResolvedEnvFile { absolutePath: string }
 function confineToComposeRoot(nodeId: number, candidate: string): string | null {
     const baseDir = path.resolve(FileSystemService.getInstance(nodeId).getBaseDir());
     const resolved = path.resolve(candidate);
-    if (resolved !== baseDir && !resolved.startsWith(baseDir + path.sep)) return null;
+    // `relative` handles a root such as `/` without doubling the separator, and
+    // a sibling whose name merely starts with `..` stays inside the root.
+    const rel = path.relative(baseDir, resolved);
+    if (rel === '') return resolved;
+    if (rel === '..' || rel.startsWith(`..${path.sep}`) || path.isAbsolute(rel)) return null;
     return resolved;
 }
 
@@ -436,8 +439,13 @@ async function resolveEnvFileRemote(node: Node, stackName: string, basename: str
  */
 async function readEnvLocal(nodeId: number, absolutePath: string, missingAsEmpty: boolean): Promise<string> {
     const fsService = FileSystemService.getInstance(nodeId);
+    const baseDir = path.resolve(fsService.getBaseDir());
+    const resolved = path.resolve(absolutePath);
+    if (resolved !== baseDir && !resolved.startsWith(`${baseDir}${path.sep}`)) {
+        throw new SecretSourceError('Invalid env file path');
+    }
     try {
-        return await fsService.readFile(absolutePath, 'utf-8');
+        return await fsService.readFile(resolved, 'utf-8');
     } catch (err) {
         const code = (err as NodeJS.ErrnoException)?.code;
         if (code === 'ENOENT') {
@@ -716,8 +724,9 @@ export class SecretsService {
                 expectedVersion: input.expectedVersion,
             });
         }
-        const kv = decryptKv(current.encrypted_payload);
-        for (const op of input.ops) applyOp(kv, op);
+        const work = new Map(Object.entries(decryptKv(current.encrypted_payload)));
+        for (const op of input.ops) applyOp(work, op);
+        const kv: SecretKv = Object.fromEntries(work);
         const validation = validateKv(kv);
         if (!validation.ok) throw new Error(validation.error);
         return db.updateSecretWithVersion({

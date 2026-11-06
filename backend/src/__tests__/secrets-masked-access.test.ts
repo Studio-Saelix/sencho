@@ -23,6 +23,7 @@ let app: import('express').Express;
 let DatabaseService: typeof import('../services/DatabaseService').DatabaseService;
 let SecretVersionConflictError: typeof import('../services/DatabaseService').SecretVersionConflictError;
 let SecretsService: typeof import('../services/SecretsService').SecretsService;
+let parseEnv: typeof import('../services/SecretsService').parseEnv;
 
 function adminToken(): string {
     const db = DatabaseService.getInstance();
@@ -62,7 +63,7 @@ let bundleId: number;
 beforeAll(async () => {
     tmpDir = await setupTestDb();
     ({ DatabaseService, SecretVersionConflictError } = await import('../services/DatabaseService'));
-    ({ SecretsService } = await import('../services/SecretsService'));
+    ({ SecretsService, parseEnv } = await import('../services/SecretsService'));
     ({ app } = await import('../index'));
 });
 
@@ -614,6 +615,7 @@ describe('hostile key names and escape attempts are refused', () => {
     it('refuses a prototype key on set, remove, or rename', async () => {
         for (const op of [
             { op: 'set', key: '__proto__', value: 'polluted' },
+            { op: 'remove', key: '__proto__' },
             { op: 'rename', from: 'API_KEY', to: '__proto__' },
         ]) {
             const res = await request(app)
@@ -627,6 +629,32 @@ describe('hostile key names and escape attempts are refused', () => {
             API_KEY: 'super-secret-api',
             DB_PASSWORD: 'hunter2',
         });
+    });
+
+    it('keeps a prototype-shaped key from an env file as data', () => {
+        const kv = parseEnv('__proto__=stored\nNORMAL=value\n');
+        expect(Object.keys(kv).sort()).toEqual(['NORMAL', '__proto__']);
+        expect(kv['__proto__']).toBe('stored');
+        expect(({} as Record<string, unknown>).stored).toBeUndefined();
+    });
+
+    it('refuses an env file path that escapes the compose root', async () => {
+        const composeDir = process.env.COMPOSE_DIR!;
+        const stackDir = path.join(composeDir, 'escape-import');
+        fs.mkdirSync(stackDir, { recursive: true });
+        fs.writeFileSync(
+            path.join(stackDir, 'compose.yaml'),
+            'services:\n  app:\n    image: nginx\n    env_file:\n      - ../../outside.env\n',
+        );
+        fs.writeFileSync(path.join(composeDir, '..', 'outside.env'), 'STOLEN=value\n');
+        const localNode = DatabaseService.getInstance().getNodes().find(n => n.type === 'local')!;
+
+        const res = await request(app)
+            .post(`/api/secrets/${bundleId}/import-from-stack/preview`)
+            .set('Authorization', `Bearer ${adminToken()}`)
+            .send({ nodeId: localNode.id, stackName: 'escape-import', envFileBasename: 'outside.env' });
+        expect(res.status).toBe(404);
+        expect(JSON.stringify(res.body)).not.toContain('STOLEN');
     });
 
     it('keeps a stored env key named like a prototype slot as data', () => {

@@ -129,6 +129,15 @@ function sendVersionConflict(res: Response, err: SecretVersionConflictError): vo
     });
 }
 
+/** Log which operation failed and its frames, never its message: an error can quote a secret or a request body. */
+function logServiceError(operation: string, err: unknown): void {
+    const name = err instanceof Error ? err.name : 'unknown error';
+    const frames = err instanceof Error && err.stack
+        ? err.stack.split('\n').slice(1, 4).map(line => line.trim()).join(' ')
+        : '';
+    console.error(`[Secrets] ${operation}: ${name}${frames ? ` (${frames})` : ''}`);
+}
+
 function sendServiceError(res: Response, err: unknown, fallback: string): void {
     if (err instanceof SecretVersionConflictError) {
         sendVersionConflict(res, err);
@@ -158,9 +167,7 @@ function sendServiceError(res: Response, err: unknown, fallback: string): void {
         });
         return;
     }
-    // Errors from a remote read can carry request details, so log the kind only;
-    // the caller still gets the message.
-    console.error(`[Secrets] ${fallback}:`, err instanceof Error ? err.name : 'unknown error');
+    logServiceError(fallback, err);
     res.status(500).json({ error: getErrorMessage(err, fallback) });
 }
 
@@ -171,7 +178,7 @@ secretsRouter.get('/', authMiddleware, async (req: Request, res: Response): Prom
         const items = SecretsService.getInstance().list();
         res.json(items);
     } catch (err) {
-        console.error('[Secrets] List error:', err);
+        logServiceError('List error', err);
         res.status(500).json({ error: 'Failed to list secrets' });
     }
 });
@@ -205,14 +212,14 @@ secretsRouter.post('/', authMiddleware, async (req: Request, res: Response): Pro
             user: getActor(req),
             note: typeof note === 'string' ? note : undefined,
         });
-        console.log(`[Secrets] Created bundle ${sanitizeForLog(name)} (v${result.version}) by ${sanitizeForLog(getActor(req))}`);
+        console.log(`[Secrets] Created bundle ${sanitizeForLog(name)} (v${result.version})`);
         res.status(201).json(result);
     } catch (err) {
         if (isSqliteUniqueViolation(err)) {
             res.status(409).json({ error: 'A secret with that name already exists' });
             return;
         }
-        console.error('[Secrets] Create error:', err);
+        logServiceError('Create error', err);
         res.status(500).json({ error: getErrorMessage(err, 'Failed to create secret') });
     }
 });
@@ -234,7 +241,7 @@ secretsRouter.get('/:id', authMiddleware, async (req: Request, res: Response): P
             sendServiceError(res, err, 'read secret');
             return;
         }
-        console.error('[Secrets] Get error:', err);
+        logServiceError('Get error', err);
         res.status(500).json({ error: 'Failed to read secret' });
     }
 });
@@ -282,7 +289,7 @@ secretsRouter.patch('/:id', authMiddleware, async (req: Request, res: Response):
             user: getActor(req),
             note: typeof note === 'string' ? note : undefined,
         });
-        console.log(`[Secrets] Updated bundle ${sanitizeForLog(existing.name)} to v${result.version} by ${sanitizeForLog(getActor(req))}`);
+        console.log(`[Secrets] Updated bundle ${sanitizeForLog(existing.name)} to v${result.version}`);
         res.json(result);
     } catch (err) {
         sendServiceError(res, err, 'Failed to update secret');
@@ -300,10 +307,10 @@ secretsRouter.delete('/:id', authMiddleware, async (req: Request, res: Response)
             res.status(404).json({ error: 'Secret not found' });
             return;
         }
-        console.log(`[Secrets] Deleted bundle id=${id} by ${sanitizeForLog(getActor(req))}`);
+        console.log(`[Secrets] Deleted bundle id=${id}`);
         res.json({ ok: true });
     } catch (err) {
-        console.error('[Secrets] Delete error:', err);
+        logServiceError('Delete error', err);
         res.status(500).json({ error: 'Failed to delete secret' });
     }
 });
@@ -320,7 +327,7 @@ secretsRouter.get('/:id/versions', authMiddleware, async (req: Request, res: Res
         }
         res.json(SecretsService.getInstance().listVersions(id));
     } catch (err) {
-        console.error('[Secrets] Versions error:', err);
+        logServiceError('Versions error', err);
         res.status(500).json({ error: 'Failed to list versions' });
     }
 });
@@ -438,7 +445,7 @@ secretsRouter.post('/:id/import-from-stack', authMiddleware, async (req: Request
             user: getActor(req),
             note: typeof note === 'string' ? note : undefined,
         });
-        console.log(`[Secrets] Imported env from stack into ${sanitizeForLog(secret.name)} (v${result.version}) by ${sanitizeForLog(getActor(req))}`);
+        console.log(`[Secrets] Imported env from stack into ${sanitizeForLog(secret.name)} (v${result.version})`);
         res.json(result);
     } catch (err) {
         sendServiceError(res, err, 'Failed to import env from stack');
@@ -464,7 +471,7 @@ secretsRouter.post('/:id/push/preview', authMiddleware, async (req: Request, res
         const plan = await SecretsService.getInstance().previewPushDiff(id, parsed.selector, parsed.stackName, parsed.envFileBasename);
         res.json(plan);
     } catch (err) {
-        console.error('[Secrets] Preview error:', err);
+        logServiceError('Preview error', err);
         res.status(500).json({ error: getErrorMessage(err, 'Failed to preview push') });
     }
 });
@@ -489,7 +496,7 @@ secretsRouter.post('/:id/push', authMiddleware, async (req: Request, res: Respon
         try {
             const result = await SecretsService.getInstance().executePush(id, parsed.selector, parsed.stackName, parsed.envFileBasename, getActor(req));
             const failedCount = result.results.filter(r => r.status === 'failed').length;
-            console.log(`[Secrets] Push ${sanitizeForLog(secret.name)} v${secret.current_version}: ${result.results.length} node(s), ${failedCount} failed (by ${sanitizeForLog(getActor(req))})`);
+            console.log(`[Secrets] Push ${sanitizeForLog(secret.name)} v${secret.current_version}: ${result.results.length} node(s), ${failedCount} failed`);
             if (failedCount > 0) console.warn(`[Secrets] Push ${sanitizeForLog(secret.name)} v${secret.current_version}: ${failedCount} node(s) failed`);
             res.json(result);
         } catch (err) {
@@ -500,7 +507,7 @@ secretsRouter.post('/:id/push', authMiddleware, async (req: Request, res: Respon
             throw err;
         }
     } catch (err) {
-        console.error('[Secrets] Push error:', err);
+        logServiceError('Push error', err);
         res.status(500).json({ error: getErrorMessage(err, 'Failed to push secret') });
     }
 });
