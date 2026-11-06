@@ -192,6 +192,25 @@ describe('SecretBundleSheet masked editing', () => {
         })));
     });
 
+    it('saves a sibling edit while a legacy prototype key stays untouched', async () => {
+        vi.mocked(getSecret).mockResolvedValue(detail({
+            keys: [
+                { key: '__proto__', masked: MASK },
+                { key: 'API_KEY', masked: MASK },
+            ],
+        }));
+        renderSheet();
+        await screen.findByDisplayValue('API_KEY');
+
+        await userEvent.type(screen.getByLabelText('Value for API_KEY'), 'rotated');
+        const save = screen.getByRole('button', { name: /^save$/i });
+        expect(save).toBeEnabled();
+        await userEvent.click(save);
+        await waitFor(() => expect(vi.mocked(patchSecret)).toHaveBeenCalledWith(7, expect.objectContaining({
+            ops: [{ op: 'set', key: 'API_KEY', value: 'rotated' }],
+        })));
+    });
+
     it('refuses to introduce a prototype key in the editor', async () => {
         renderSheet();
         await screen.findByDisplayValue('API_KEY');
