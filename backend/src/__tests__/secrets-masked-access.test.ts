@@ -668,4 +668,50 @@ describe('hostile key names and escape attempts are refused', () => {
         expect(SecretsService.getInstance().getDecryptedKv(id)).toEqual(kv);
         expect(({} as Record<string, unknown>).stored).toBeUndefined();
     });
+
+    it('edits a stored constructor or prototype key instead of refusing it', async () => {
+        const { id } = SecretsService.getInstance().create({
+            name: 'inherited-name-bundle',
+            kv: { constructor: 'kept', prototype: 'kept-too', API_KEY: 'value' },
+            user: TEST_USERNAME,
+        });
+
+        const renamed = await request(app)
+            .patch(`/api/secrets/${id}`)
+            .set('Authorization', `Bearer ${adminToken()}`)
+            .send({ expectedVersion: 1, ops: [{ op: 'rename', from: 'constructor', to: 'CONSTRUCTOR' }] });
+        expect(renamed.status).toBe(200);
+
+        const removed = await request(app)
+            .patch(`/api/secrets/${id}`)
+            .set('Authorization', `Bearer ${adminToken()}`)
+            .send({ expectedVersion: 2, ops: [{ op: 'remove', key: 'prototype' }] });
+        expect(removed.status).toBe(200);
+
+        expect(SecretsService.getInstance().getDecryptedKv(id)).toEqual({
+            CONSTRUCTOR: 'kept',
+            API_KEY: 'value',
+        });
+    });
+
+    it('refuses an env file in a sibling directory that shares the root name prefix', async () => {
+        const composeDir = process.env.COMPOSE_DIR!;
+        const stackDir = path.join(composeDir, 'prefix-import');
+        const siblingDir = `${composeDir}-outside`;
+        fs.mkdirSync(stackDir, { recursive: true });
+        fs.mkdirSync(siblingDir, { recursive: true });
+        fs.writeFileSync(
+            path.join(stackDir, 'compose.yaml'),
+            `services:\n  app:\n    image: nginx\n    env_file:\n      - ../${path.basename(siblingDir)}/outside.env\n`,
+        );
+        fs.writeFileSync(path.join(siblingDir, 'outside.env'), 'STOLEN=value\n');
+        const localNode = DatabaseService.getInstance().getNodes().find(n => n.type === 'local')!;
+
+        const res = await request(app)
+            .post(`/api/secrets/${bundleId}/import-from-stack/preview`)
+            .set('Authorization', `Bearer ${adminToken()}`)
+            .send({ nodeId: localNode.id, stackName: 'prefix-import', envFileBasename: 'outside.env' });
+        expect(res.status).toBeGreaterThanOrEqual(400);
+        expect(JSON.stringify(res.body)).not.toContain('STOLEN');
+    });
 });

@@ -7,6 +7,7 @@ import { NodeLabelService } from './NodeLabelService';
 import { NodeRegistry } from './NodeRegistry';
 import { resolveAllEnvFilePaths } from '../routes/stacks';
 import { getErrorMessage } from '../utils/errors';
+import { isPathWithinBase } from '../utils/validation';
 import { formatNoTargetError } from '../utils/remoteTarget';
 import { isDebugEnabled } from '../utils/debug';
 import { safeRemoteFetch } from '../utils/outboundTarget';
@@ -177,8 +178,14 @@ export class SecretSourceChangedError extends Error {
     }
 }
 
-/** Names that would hit an object prototype slot instead of a plain env key. */
-const RESERVED_KV_KEYS = new Set(['__proto__', 'constructor', 'prototype']);
+/**
+ * `__proto__` stays refused even though edits run on a Map and the stored shape
+ * is rebuilt with `Object.fromEntries`: the name means a prototype slot to any
+ * plain-object consumer downstream. `constructor` and `prototype` are ordinary
+ * own keys on a Map, so refusing them would only block a bundle that already
+ * stores one.
+ */
+const RESERVED_KV_KEYS = new Set(['__proto__']);
 
 /** An edit operation cannot be applied to the current version. */
 export class SecretOpError extends Error {
@@ -375,12 +382,7 @@ interface ResolvedEnvFile { absolutePath: string }
 function confineToComposeRoot(nodeId: number, candidate: string): string | null {
     const baseDir = path.resolve(FileSystemService.getInstance(nodeId).getBaseDir());
     const resolved = path.resolve(candidate);
-    // `relative` handles a root such as `/` without doubling the separator, and
-    // a sibling whose name merely starts with `..` stays inside the root.
-    const rel = path.relative(baseDir, resolved);
-    if (rel === '') return resolved;
-    if (rel === '..' || rel.startsWith(`..${path.sep}`) || path.isAbsolute(rel)) return null;
-    return resolved;
+    return isPathWithinBase(resolved, baseDir) ? resolved : null;
 }
 
 async function resolveEnvFileLocal(nodeId: number, stackName: string, basename: string): Promise<ResolvedEnvFile | null> {
@@ -402,6 +404,11 @@ async function resolveEnvFileLocal(nodeId: number, stackName: string, basename: 
     return { absolutePath: safe };
 }
 
+/**
+ * Resolve an env file on a remote node. Containment is enforced there: the
+ * remote `/env` endpoint only serves a path that appears in its own resolved
+ * env-file list, and this path comes from that same list.
+ */
 async function resolveEnvFileRemote(node: Node, stackName: string, basename: string): Promise<ResolvedEnvFile | null> {
     // Throw on a null target so previewPushDiff / executePush surface the
     // tunnel-disconnected (or proxy-not-configured) reason on the right
@@ -439,11 +446,8 @@ async function resolveEnvFileRemote(node: Node, stackName: string, basename: str
  */
 async function readEnvLocal(nodeId: number, absolutePath: string, missingAsEmpty: boolean): Promise<string> {
     const fsService = FileSystemService.getInstance(nodeId);
-    const baseDir = path.resolve(fsService.getBaseDir());
-    const resolved = path.resolve(absolutePath);
-    if (resolved !== baseDir && !resolved.startsWith(`${baseDir}${path.sep}`)) {
-        throw new SecretSourceError('Invalid env file path');
-    }
+    const resolved = confineToComposeRoot(nodeId, absolutePath);
+    if (!resolved) throw new SecretSourceError('Invalid env file path');
     try {
         return await fsService.readFile(resolved, 'utf-8');
     } catch (err) {
@@ -458,6 +462,9 @@ async function readEnvLocal(nodeId: number, absolutePath: string, missingAsEmpty
 
 async function writeEnvLocal(nodeId: number, absolutePath: string, content: string): Promise<void> {
     const fsService = FileSystemService.getInstance(nodeId);
+    if (!isPathWithinBase(path.resolve(absolutePath), fsService.getBaseDir())) {
+        throw new SecretSourceError('Invalid env file path');
+    }
     await fsService.writeFile(absolutePath, content, 'utf-8');
 }
 

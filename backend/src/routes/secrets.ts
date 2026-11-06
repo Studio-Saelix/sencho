@@ -132,10 +132,13 @@ function sendVersionConflict(res: Response, err: SecretVersionConflictError): vo
 /** Log which operation failed and its frames, never its message: an error can quote a secret or a request body. */
 function logServiceError(operation: string, err: unknown): void {
     const name = err instanceof Error ? err.name : 'unknown error';
+    const rawCode = (err as NodeJS.ErrnoException | null)?.code;
+    // A filesystem code is a fixed token, not a message that can quote a secret.
+    const code = typeof rawCode === 'string' && /^[A-Z_]+$/.test(rawCode) ? ` ${rawCode}` : '';
     const frames = err instanceof Error && err.stack
         ? err.stack.split('\n').slice(1, 4).map(line => line.trim()).join(' ')
         : '';
-    console.error(`[Secrets] ${operation}: ${name}${frames ? ` (${frames})` : ''}`);
+    console.error(`[Secrets] ${operation}: ${name}${code}${frames ? ` (${frames})` : ''}`);
 }
 
 function sendServiceError(res: Response, err: unknown, fallback: string): void {
