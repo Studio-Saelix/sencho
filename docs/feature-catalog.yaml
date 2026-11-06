@@ -106,7 +106,7 @@ entries:
     category: security-foundation
     publicName: Fleet Secrets (encrypted env bundles)
     publicRoadmapKey: fleet-secrets
-    summary: Encrypted versioned environment bundles for fleet-wide secrets, read masked with a short-lived per-value reveal.
+    summary: Encrypted versioned environment bundles for fleet-wide secrets.
     limitation: ''
     featured: true
     homepageOrder: 6
