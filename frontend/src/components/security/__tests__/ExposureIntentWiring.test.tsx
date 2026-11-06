@@ -114,7 +114,7 @@ describe('onIntentSaved wiring', () => {
     const other: ImageExposureContext = { stackName: 'jobs', serviceName: 'worker', exposureReason: 'published-port', intentStatus: 'unset' };
     render(<ImageScanRow summary={summary()} onInspect={vi.fn()} exposureContexts={[context, other]} nodeId={3} onIntentSaved={onIntentSaved} />);
 
-    await userEvent.click(screen.getByRole('button', { name: 'View networking contexts' }));
+    await userEvent.click(screen.getByRole('button', { name: 'Network exposed: choose a service' }));
     await userEvent.click(await screen.findByRole('button', { name: 'Set intent for jobs/worker' }));
     await pickLan();
 

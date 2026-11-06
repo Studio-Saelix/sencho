@@ -105,7 +105,7 @@ describe('exposure intent in place', () => {
   it('puts a verb on each row of the list and leaves the name as the navigation', async () => {
     auth.can.mockReturnValue(true);
     render(<NetworkExposedControl contexts={[unset, conflict]} nodeId={3} onIntentSaved={vi.fn()} />);
-    await userEvent.click(screen.getByRole('button', { name: 'View networking contexts' }));
+    await userEvent.click(screen.getByRole('button', { name: 'Network exposed: choose a service' }));
     expect(await screen.findByRole('button', { name: 'Set intent for web/app' })).toBeInTheDocument();
     expect(screen.getByRole('button', { name: 'Change intent for vpn/admin' })).toBeInTheDocument();
   });
@@ -119,6 +119,22 @@ describe('exposure intent in place', () => {
   it('keeps the navigation when the intent could not be read', () => {
     auth.can.mockReturnValue(true);
     render(<ViewNetworkingAction contexts={[{ ...unset, intentStatus: 'unavailable' }]} nodeId={3} onIntentSaved={vi.fn()} />);
+    expect(screen.getByRole('button', { name: 'View networking' })).toBeInTheDocument();
+  });
+});
+
+describe('multi-context trigger names', () => {
+  const a: ImageExposureContext = { stackName: 'web', serviceName: 'app', exposureReason: 'published-port', intentStatus: 'unset' };
+  const b: ImageExposureContext = { stackName: 'jobs', serviceName: 'worker', exposureReason: 'published-port', intentStatus: 'unset' };
+
+  it('reads as choosing a service on the banner when the rows carry a verb', () => {
+    auth.can.mockReturnValue(true);
+    render(<ViewNetworkingAction contexts={[a, b]} nodeId={3} onIntentSaved={vi.fn()} />);
+    expect(screen.getByRole('button', { name: 'Choose service' })).toBeInTheDocument();
+  });
+
+  it('keeps the networking wording on the banner when no row can set an intent', () => {
+    render(<ViewNetworkingAction contexts={[a, b]} nodeId={3} onIntentSaved={vi.fn()} />);
     expect(screen.getByRole('button', { name: 'View networking' })).toBeInTheDocument();
   });
 });

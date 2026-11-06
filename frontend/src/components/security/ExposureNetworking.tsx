@@ -195,6 +195,8 @@ export function NetworkExposedControl({
     );
   }
 
+  // The list is where the service is chosen when its rows carry a verb, and a plain look at networking when they do not.
+  const choosesService = contexts.some((ctx) => intentVerb(ctx) !== null);
   return (
     <Popover>
       <PopoverTrigger asChild>
@@ -202,7 +204,7 @@ export function NetworkExposedControl({
           type="button"
           className="hover:underline"
           onClick={(e) => e.stopPropagation()}
-          aria-label="View networking contexts"
+          aria-label={choosesService ? 'Network exposed: choose a service' : 'View networking contexts'}
         >
           {badge}
         </button>
@@ -256,7 +258,7 @@ export function ViewNetworkingAction({
     <Popover>
       <PopoverTrigger asChild>
         <button type="button" className={BANNER_VERB_CLASS}>
-          View networking
+          {contexts.some((ctx) => intentVerb(ctx) !== null) ? 'Choose service' : 'View networking'}
         </button>
       </PopoverTrigger>
       <PopoverContent align="end" className="w-72 p-2">
