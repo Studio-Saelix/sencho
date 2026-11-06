@@ -284,8 +284,10 @@ export function computeDiff(existing: SecretKv, overlay: SecretKv): SecretDiffEn
     const keys = new Set<string>([...Object.keys(existing), ...Object.keys(overlay)]);
     const result: SecretDiffEntry[] = [];
     for (const key of [...keys].sort()) {
-        const inE = key in existing;
-        const inO = key in overlay;
+        // Own properties only: a bundle has no `constructor` key just because
+        // the object it arrives in inherits one.
+        const inE = Object.prototype.hasOwnProperty.call(existing, key);
+        const inO = Object.prototype.hasOwnProperty.call(overlay, key);
         if (inO && !inE) {
             result.push({ key, status: 'added', after: overlay[key] });
         } else if (!inO && inE) {
@@ -651,7 +653,7 @@ export class SecretsService {
         if (!secret) throw new RevealTargetError('Secret not found');
         const target = version === undefined ? db.getCurrentSecretVersion(id) : this.versionRow(id, version);
         if (!target) throw new RevealTargetError(`Version ${version} not found`);
-        if (!(key in decryptKv(target.encrypted_payload))) {
+        if (!Object.prototype.hasOwnProperty.call(decryptKv(target.encrypted_payload), key)) {
             throw new RevealTargetError(`Key '${key}' is not in version ${target.version}`);
         }
         this.purgeExpiredGrants();
@@ -681,7 +683,7 @@ export class SecretsService {
         const row = this.versionRow(id, grant.version);
         if (!row) return { ok: false, reason: 'unknown' };
         const kv = decryptKv(row.encrypted_payload);
-        if (!(grant.key in kv)) return { ok: false, reason: 'unknown' };
+        if (!Object.prototype.hasOwnProperty.call(kv, grant.key)) return { ok: false, reason: 'unknown' };
         return {
             ok: true,
             revealed: { key: grant.key, version: grant.version, value: kv[grant.key], expiresAt: grant.expiresAt },

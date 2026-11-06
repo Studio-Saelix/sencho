@@ -216,6 +216,16 @@ describe('reveal is bound, single use, and short lived', () => {
         expect(res.body.code).toBe('REVEAL_TARGET_MISSING');
     });
 
+    it('404s a key name that only exists on the object prototype', async () => {
+        const res = await request(app)
+            .post(`/api/secrets/${bundleId}/reveal-grant`)
+            .set('Authorization', `Bearer ${adminToken()}`)
+            .send({ key: 'toString' });
+        expect(res.status).toBe(404);
+        expect(res.body.code).toBe('REVEAL_TARGET_MISSING');
+        expect(JSON.stringify(res.body)).not.toContain('function');
+    });
+
     it('reveals a historical version, not just the current one', async () => {
         SecretsService.getInstance().applyPatch(bundleId, {
             expectedVersion: 1,

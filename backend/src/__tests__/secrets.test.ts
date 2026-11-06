@@ -165,6 +165,13 @@ describe('applyOverlay / computeDiff', () => {
         expect(byKey.GONE.status).toBe('removed');
         expect(byKey.GONE.before).toBe('orphan');
     });
+
+    it('treats a key named like a prototype slot as added, not changed', () => {
+        const diff = computeDiff({ KEEP: 'same' }, { KEEP: 'same', constructor: 'fresh' });
+        const added = diff.find(e => e.key === 'constructor');
+        expect(added?.status).toBe('added');
+        expect(added?.after).toBe('fresh');
+    });
 });
 
 // ---- Encryption round-trip ----
