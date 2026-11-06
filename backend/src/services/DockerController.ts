@@ -3998,9 +3998,10 @@ function normalizeDockerMounts(value: unknown): NormalizedMounts {
     const source = readContainerString(mount.Source);
     const destination = readContainerString(mount.Destination);
     if (type === null || source === null || destination === null) incomplete = true;
-    // A read/write flag that is not a boolean is unreadable; the safe reading
-    // is still writable, but the row must not look complete.
-    if (mount.RW !== undefined && mount.RW !== null && typeof mount.RW !== 'boolean') {
+    // A read/write flag that is not a boolean (including an explicit null) is
+    // unreadable; the safe reading is still writable, but the row must not look
+    // complete.
+    if (mount.RW !== undefined && typeof mount.RW !== 'boolean') {
       incomplete = true;
     }
     mounts.push({
@@ -4035,9 +4036,8 @@ function normalizeDockerPorts(value: unknown): NormalizedPorts {
       continue;
     }
     const privatePort = readContainerNumber(port.PrivatePort);
-    if (port.PrivatePort !== undefined && port.PrivatePort !== null && privatePort === null) {
-      incomplete = true;
-    }
+    // A listing entry with no readable private port is not a usable binding.
+    if (privatePort === null) incomplete = true;
     const publicPort = readContainerNumber(port.PublicPort);
     // A non-null value that is not a finite number is unreadable; 0 is
     // Docker's "not published" and is not a loss.

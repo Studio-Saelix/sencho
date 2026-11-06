@@ -369,6 +369,8 @@ describe('listContainersForSocketInventory', () => {
         listedPorts: [],
         inspectedPorts: { '2375/tcp': [{ HostIp: '0.0.0.0' }] },
       },
+      // A listing entry with no private port is not a usable binding.
+      { listedPorts: [{}], inspectedPorts: {} },
     ];
     for (const { listedPorts, inspectedPorts } of cases) {
       mockDocker.listContainers.mockResolvedValue([listed({ Ports: listedPorts })]);
@@ -405,20 +407,22 @@ describe('listContainersForSocketInventory', () => {
   });
 
   it('marks an unreadable read/write flag incomplete and still reads it as writable', async () => {
-    mockDocker.listContainers.mockResolvedValue([listed()]);
-    mockDocker.getContainer.mockReturnValue({
-      inspect: vi.fn().mockResolvedValue(inspected({
-        Mounts: [{
-          Type: 'bind',
-          Source: '/var/run/docker.sock',
-          Destination: '/var/run/docker.sock',
-          RW: 'false',
-        }],
-      })),
-    });
-    const { rows: [row] } = await DockerController.getInstance(1).listContainersForSocketInventory();
-    expect(row.mounts[0].readOnly).toBe(false);
-    expect(row.metadataTruncated).toBe(true);
+    for (const rw of ['false', null]) {
+      mockDocker.listContainers.mockResolvedValue([listed()]);
+      mockDocker.getContainer.mockReturnValue({
+        inspect: vi.fn().mockResolvedValue(inspected({
+          Mounts: [{
+            Type: 'bind',
+            Source: '/var/run/docker.sock',
+            Destination: '/var/run/docker.sock',
+            RW: rw,
+          }],
+        })),
+      });
+      const { rows: [row] } = await DockerController.getInstance(1).listContainersForSocketInventory();
+      expect(row.mounts[0].readOnly, String(rw)).toBe(false);
+      expect(row.metadataTruncated, String(rw)).toBe(true);
+    }
   });
 
   it('does not duplicate a spec when inspect and list disagree on a valid public port', async () => {
