@@ -558,6 +558,15 @@ const APT_SPACE_RUN = /[ \t\n\v\f\r]+/;
 const aptTrim = (text: string) => text.replace(/^[ \t\n\v\f\r]+|[ \t\n\v\f\r]+$/g, '');
 const aptWords = (text: string) => text.split(APT_SPACE_RUN).filter(Boolean);
 
+/**
+ * Whether apt reads an `Enabled` value as false: one of its words, or a number
+ * that is all zeros in any base `strtol` takes (`0`, `00`, `-0`, `0x0`).
+ */
+function disablesStanza(value: string): boolean {
+  const text = aptTrim(value).toLowerCase();
+  return FALSE_OPTION_VALUES.has(text) || /^[+-]?(?:0x0+|0+)$/.test(text);
+}
+
 function weakensSignatures(value: string | undefined): boolean {
   return value !== undefined && !FALSE_OPTION_VALUES.has(aptTrim(value).toLowerCase());
 }
@@ -906,7 +915,7 @@ function parseDeb822Source(content: string): ParsedSourceFile {
       invalid.push(`${where} has a Types value that apt does not know, which apt rejects`);
     }
     // A disabled stanza cannot supply packages to apt.
-    if (paragraph.enabled !== undefined && FALSE_OPTION_VALUES.has(aptTrim(paragraph.enabled).toLowerCase())) continue;
+    if (paragraph.enabled !== undefined && disablesStanza(paragraph.enabled)) continue;
     const uris = aptWords(paragraph.uris ?? '');
     const suites = aptWords(paragraph.suites ?? '');
     const components = aptWords(paragraph.components ?? '');
@@ -937,8 +946,8 @@ function parseDeb822Source(content: string): ParsedSourceFile {
 
 /** The URI as apt compares it: scheme and host in lower case, no trailing slash. */
 function normalizeUri(uri: string): string {
-  // A URL parser drops a fragment or query and trims whitespace; apt keeps them in the path, so such a URI is not any official one.
-  if (/[#?\s\x00-\x1f\x7f\uFFFD]/.test(uri)) return uri.replace(/\/+$/, '');
+  // A URL parser drops a fragment or query, trims whitespace and reads a backslash as a slash; apt keeps them all in the host or path, so such a URI is not any official one.
+  if (/[#?\\\s\x00-\x1f\x7f\uFFFD]/.test(uri)) return uri.replace(/\/+$/, '');
   try {
     const url = new URL(uri);
     return `${url.protocol}//${url.host}${url.pathname}`.replace(/\/+$/, '');
@@ -991,6 +1000,7 @@ function checkBinaryEntry(entry: AptSourceEntry, codename: string, arch: string,
     return fail(`the source points at ${entry.uris.map(redactUri).join(' ') || 'no URI'}, not ${OFFICIAL_DOCKER_URI}`);
   }
   if (!entry.components.includes('stable')) return fail('the source does not enable the stable component');
+  if (entry.components.includes('')) return fail('the source has an empty component, which apt reads as an index that does not exist');
   const weakened = weakenedSigningCheck(entry.options);
   if (weakened) return weakened;
   const keyring = signedByState(entry.options.get('signed-by'), keys);

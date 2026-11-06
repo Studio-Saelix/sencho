@@ -1461,7 +1461,29 @@ describe('what apt reads differently from JavaScript stays fail-closed', () => {
     expect(result.problem).toMatch(/not a valid apt entry/);
   });
 
+  it('does not take a URI with a backslash for the official one', () => {
+    expect(entry(`arch=amd64 ${SIGNED}`, 'https://download.docker.com\\linux/ubuntu').sourceVerified).toBe(false);
+    expect(parse('amd64', block(CUSTOM_SOURCES, stanza({ URIs: 'https://download.docker.com\\linux/ubuntu' })), dockerAscBlock()).sourceVerified).toBe(false);
+  });
+
+  it('does not verify an entry beside an empty component, which apt reads as an index that does not exist', () => {
+    const result = parse('amd64', block(CUSTOM_LIST, `deb [arch=amd64 ${SIGNED}] ${OFFICIAL} noble stable ""`), dockerAscBlock());
+    expect(result.sourceVerified).toBe(false);
+    expect(result.problem).toMatch(/empty component/);
+  });
+
   describe('a .sources file', () => {
+    it.each(['no', 'false', '0', '00', '0x0', '-0', '+0', ' 0', '0X00'])('treats Enabled: %j as disabled, as apt does', (value) => {
+      const result = parse('amd64', block(CUSTOM_SOURCES, stanza({ Enabled: value })), dockerAscBlock());
+      // A disabled stanza supplies no source, so none counts as configured.
+      expect(result.dockerSourceConfigured).toBe(false);
+      expect(result.sourceVerified).toBe(false);
+    });
+
+    it.each(['yes', '1', '2', 'maybe', '0x1', '01'])('keeps a stanza with Enabled: %j enabled', (value) => {
+      expect(parse('amd64', block(CUSTOM_SOURCES, stanza({ Enabled: value })), dockerAscBlock()).sourceVerified).toBe(true);
+    });
+
     it('takes a comma in Suites or Components as part of the word, as apt does', () => {
       const suite = deb822({ Suites: 'noble,jammy' });
       expect(suite.sourceVerified).toBe(false);
