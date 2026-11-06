@@ -1431,7 +1431,7 @@ describe('what apt reads differently from JavaScript stays fail-closed', () => {
     const result = entry(`arch=amd64 ${SIGNED}`, `${OFFICIAL}${suffix}`);
     expect(result.sourceVerified).toBe(false);
     expect(result.problem).toMatch(/points at https:\/\/download\.docker\.com, not/);
-    expect(parse('amd64', block(CUSTOM_SOURCES, stanza({ URIs: `${OFFICIAL}${suffix.replace('%23', '#').replace('%3f', '?')}` })), dockerAscBlock()).sourceVerified).toBe(false);
+    expect(parse('amd64', block(CUSTOM_SOURCES, stanza({ URIs: `${OFFICIAL}${decodeURIComponent(suffix)}` })), dockerAscBlock()).sourceVerified).toBe(false);
   });
 
   it('judges an entry whose escaped or quoted URI names Docker\'s host as apt reads it', () => {
