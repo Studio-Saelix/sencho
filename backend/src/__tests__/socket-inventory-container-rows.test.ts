@@ -355,6 +355,88 @@ describe('listContainersForSocketInventory', () => {
     expect(row.metadataTruncated).toBe(true);
   });
 
+  it('marks unreadable binding metadata incomplete and keeps listing evidence', async () => {
+    const cases: Array<{ listedPorts: unknown; inspectedPorts: unknown }> = [
+      // The list itself is malformed.
+      { listedPorts: 'broken', inspectedPorts: {} },
+      // The inspect section is present but not a map.
+      {
+        listedPorts: [{ IP: '0.0.0.0', PrivatePort: 2375, PublicPort: 2375, Type: 'tcp' }],
+        inspectedPorts: 'broken',
+      },
+      // A binding exists but its host port is unreadable/absent.
+      {
+        listedPorts: [],
+        inspectedPorts: { '2375/tcp': [{ HostIp: '0.0.0.0' }] },
+      },
+    ];
+    for (const { listedPorts, inspectedPorts } of cases) {
+      mockDocker.listContainers.mockResolvedValue([listed({ Ports: listedPorts })]);
+      mockDocker.getContainer.mockReturnValue({
+        inspect: vi.fn().mockResolvedValue(inspected({
+          NetworkSettings: {
+            Ports: inspectedPorts,
+            Networks: { alpha_default: { NetworkID: 'net1', IPAddress: '172.18.0.2' } },
+          },
+        })),
+      });
+      const { rows: [row] } = await DockerController.getInstance(1).listContainersForSocketInventory();
+      expect(row.metadataTruncated, JSON.stringify({ listedPorts, inspectedPorts })).toBe(true);
+    }
+  });
+
+  it('retains a listed private port that an empty inspect map would drop', async () => {
+    mockDocker.listContainers.mockResolvedValue([listed({
+      Ports: [{ IP: '', PrivatePort: 2375, PublicPort: 0, Type: 'tcp' }],
+    })]);
+    mockDocker.getContainer.mockReturnValue({
+      inspect: vi.fn().mockResolvedValue(inspected({
+        NetworkSettings: {
+          Ports: {},
+          Networks: { alpha_default: { NetworkID: 'net1', IPAddress: '172.18.0.2' } },
+        },
+      })),
+    });
+    const { rows: [row] } = await DockerController.getInstance(1).listContainersForSocketInventory();
+    expect(row.ports).toEqual([
+      { privatePort: 2375, publicPort: null, ip: '', protocol: 'tcp' },
+    ]);
+    expect(row.metadataTruncated).toBe(true);
+  });
+
+  it('marks an unreadable read/write flag incomplete and still reads it as writable', async () => {
+    mockDocker.listContainers.mockResolvedValue([listed()]);
+    mockDocker.getContainer.mockReturnValue({
+      inspect: vi.fn().mockResolvedValue(inspected({
+        Mounts: [{
+          Type: 'bind',
+          Source: '/var/run/docker.sock',
+          Destination: '/var/run/docker.sock',
+          RW: 'false',
+        }],
+      })),
+    });
+    const { rows: [row] } = await DockerController.getInstance(1).listContainersForSocketInventory();
+    expect(row.mounts[0].readOnly).toBe(false);
+    expect(row.metadataTruncated).toBe(true);
+  });
+
+  it('does not duplicate a spec when inspect and list disagree on a valid public port', async () => {
+    mockDocker.listContainers.mockResolvedValue([listed()]);
+    mockDocker.getContainer.mockReturnValue({
+      inspect: vi.fn().mockResolvedValue(inspected({
+        NetworkSettings: {
+          Ports: { '2375/tcp': [{ HostIp: '0.0.0.0', HostPort: '2376' }] },
+          Networks: { alpha_default: { NetworkID: 'net1', IPAddress: '172.18.0.2' } },
+        },
+      })),
+    });
+    const { rows: [row] } = await DockerController.getInstance(1).listContainersForSocketInventory();
+    expect(row.ports).toEqual([
+      { privatePort: 2375, publicPort: 2376, ip: '0.0.0.0', protocol: 'tcp' },
+    ]);
+  });
+
   it('marks an unreadable environment collection incomplete', async () => {
     mockDocker.listContainers.mockResolvedValue([listed()]);
     mockDocker.getContainer.mockReturnValue({

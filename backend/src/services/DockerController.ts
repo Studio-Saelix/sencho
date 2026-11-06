@@ -3998,6 +3998,11 @@ function normalizeDockerMounts(value: unknown): NormalizedMounts {
     const source = readContainerString(mount.Source);
     const destination = readContainerString(mount.Destination);
     if (type === null || source === null || destination === null) incomplete = true;
+    // A read/write flag that is not a boolean is unreadable; the safe reading
+    // is still writable, but the row must not look complete.
+    if (mount.RW !== undefined && mount.RW !== null && typeof mount.RW !== 'boolean') {
+      incomplete = true;
+    }
     mounts.push({
       type: type ?? 'unknown',
       source,
@@ -4018,7 +4023,9 @@ interface NormalizedPorts {
 }
 
 function normalizeDockerPorts(value: unknown): NormalizedPorts {
-  if (!Array.isArray(value)) return { ports: [], incomplete: false };
+  if (!Array.isArray(value)) {
+    return { ports: [], incomplete: value !== undefined && value !== null };
+  }
   const ports: SocketInventoryPortRow[] = [];
   let incomplete = value.length > 64;
   for (const entry of value.slice(0, 64)) {
@@ -4061,7 +4068,12 @@ function normalizeInspectPorts(
 ): InspectedPorts {
   const bindings = asRecord(value);
   if (!bindings) {
-    return { ports: fallback.map(port => ({ ...port })), truncated: false, incomplete: false };
+    return {
+      ports: fallback.map(port => ({ ...port })),
+      truncated: false,
+      // An absent section is not a loss; a non-null value that is not a map is.
+      incomplete: value !== undefined && value !== null,
+    };
   }
   const entries = Object.entries(bindings);
   const ports: SocketInventoryPortRow[] = [];
@@ -4120,7 +4132,9 @@ function normalizeInspectPorts(
           if (Number.isFinite(parsed) && parsed > 0) publicPort = parsed;
           else incomplete = true;
         }
-      } else if (rawPublic !== undefined && rawPublic !== null) {
+      } else {
+        // A binding without a readable HostPort is not "exposed only": Docker
+        // writes an empty string for that case, so this is unreadable metadata.
         incomplete = true;
       }
       ports.push({
@@ -4133,23 +4147,33 @@ function normalizeInspectPorts(
   }
 
   // Inspect is more authoritative than the list, but it must not silently erase
-  // a valid published port when its own binding is malformed or missing. Fill a
-  // missing binding from the list and flag the row incomplete; a valid inspect
-  // binding still wins.
+  // a valid published port when its own binding is malformed or missing. Keep a
+  // list-level spec that inspect dropped, fill a missing public port from the
+  // list, and flag the row incomplete; a valid inspect binding still wins.
   let restored = false;
   for (const candidate of fallback) {
-    if (candidate.publicPort === null) continue;
+    // A listing entry whose private port is unreadable already marks the row
+    // incomplete; it carries no spec to restore.
+    if (candidate.privatePort === null) continue;
     const sameSpec = (port: SocketInventoryPortRow) =>
       port.privatePort === candidate.privatePort && port.protocol === candidate.protocol;
-    if (ports.some(port => sameSpec(port) && port.publicPort === candidate.publicPort)) continue;
-    const nullMatch = ports.find(port => sameSpec(port) && port.publicPort === null);
+    const sameSpecPorts = ports.filter(sameSpec);
+    if (sameSpecPorts.length === 0) {
+      ports.push({ ...candidate });
+      restored = true;
+      continue;
+    }
+    // The spec is present. An exposed-only list entry adds nothing to it.
+    if (candidate.publicPort === null) continue;
+    if (sameSpecPorts.some(port => port.publicPort === candidate.publicPort)) continue;
+    const nullMatch = sameSpecPorts.find(port => port.publicPort === null);
     if (nullMatch) {
       nullMatch.publicPort = candidate.publicPort;
       if (!nullMatch.ip) nullMatch.ip = candidate.ip;
-    } else {
-      ports.push({ ...candidate });
+      restored = true;
     }
-    restored = true;
+    // Otherwise inspect already carries a different valid public port; do not
+    // duplicate the spec, and no port evidence is lost.
   }
   return { ports, truncated, incomplete: incomplete || restored };
 }
