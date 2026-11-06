@@ -626,6 +626,23 @@ describe('socket inventory malformed label and network metadata', () => {
     expect(inventory.status).toBe('partial');
   });
 
+  it('keeps readable listing network evidence when inspect fields are unreadable', async () => {
+    const rows = await rowsFrom(
+      listed({
+        NetworkSettings: { Networks: { alpha: { NetworkID: 'net1', IPAddress: '172.18.0.2' } } },
+      }),
+      inspected({
+        NetworkSettings: { Ports: {}, Networks: { alpha: { NetworkID: null, IPAddress: null } } },
+      }),
+    );
+    // Inspect still decides which networks are attached, but the listing's
+    // readable id and address are evidence that an unreadable inspect value
+    // must not erase.
+    expect(rows[0].networks).toEqual([{ name: 'alpha', id: 'net1', ipAddress: '172.18.0.2' }]);
+    expect(rows[0].metadataTruncated).toBe(true);
+    expect(inventoryOf(rows).status).toBe('partial');
+  });
+
   it('marks an explicit null network id and address incomplete', async () => {
     const rows = await rowsFrom(listed(), inspected({
       NetworkSettings: {

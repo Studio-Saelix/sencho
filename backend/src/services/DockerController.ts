@@ -2496,7 +2496,22 @@ class DockerController {
           const inspectedPorts = normalizeInspectPorts(asRecord(info.NetworkSettings)?.Ports, ports);
           ports = inspectedPorts.ports;
           const inspectedNetworks = normalizeDockerNetworks(asRecord(info.NetworkSettings)?.Networks);
-          if (inspectedNetworks.networks.length > 0) networks = inspectedNetworks.networks;
+          if (inspectedNetworks.networks.length > 0) {
+            // Inspect is authoritative for which networks are attached, but an
+            // unreadable field must not erase a readable listing value for the
+            // same network. Backfill per name; the row is already incomplete.
+            const listedByName = new Map(listedNetworks.networks.map(network => [network.name, network]));
+            networks = inspectedNetworks.networks.map(network => {
+              const listed = listedByName.get(network.name);
+              return listed
+                ? {
+                  name: network.name,
+                  id: network.id ?? listed.id,
+                  ipAddress: network.ipAddress ?? listed.ipAddress,
+                }
+                : network;
+            });
+          }
           // Interpret the flags from the full environment, before any bound is
           // applied: truncating an entry first can turn `KEY=<spaces>1` into
           // `KEY=<spaces>` (lost) or `KEY=1<spaces>0` into `KEY=1` (false grant).
