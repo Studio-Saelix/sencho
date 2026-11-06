@@ -34,6 +34,7 @@ import { describeSpawnError } from '../utils/spawnErrors';
 import { authoredComposeFileArgs, authoredComposeEnvFileArgs } from '../utils/authoredComposeArgs';
 import { isFullySyntheticHoldImage } from '../utils/senchoRollbackHold';
 import { mapWithConcurrency } from '../utils/mapWithConcurrency';
+import { enabledProxyApiFlags } from '../helpers/socketProxyIdentity';
 import { isValidDockerNetworkName } from './network/dockerNetworkName';
 
 export type {
@@ -354,10 +355,9 @@ export interface SocketInventoryNetworkRow {
 
 /**
  * One container as the socket inventory needs it: the runtime metadata an
- * authorized discovery read may use, with no raw environment values beyond
- * what the caller already owns. `env` is returned for the classification
- * service to read recognized proxy flags from; it never reaches an API
- * response.
+ * authorized discovery read may use, with no raw environment values. Proxy API
+ * flags are interpreted from the full environment before any bound is applied,
+ * so bounding retained data cannot invert a flag's meaning.
  */
 export interface SocketInventoryContainerRow {
   id: string;
@@ -378,7 +378,8 @@ export interface SocketInventoryContainerRow {
   ports: SocketInventoryPortRow[];
   exposedPorts: string[];
   networks: SocketInventoryNetworkRow[];
-  env: string[];
+  /** Recognized proxy API group names enabled with the literal value `1`. */
+  apiGroups: string[];
   privileged: boolean;
   readonlyRootfs: boolean;
   /** A metadata list exceeded a bound or could not be read completely; the row is incomplete. */
@@ -2437,20 +2438,21 @@ class DockerController {
         asRecord(asRecord(listedRow?.NetworkSettings)?.Networks) ?? {},
       ).length;
 
-      let labels = listedLabels;
+      let labels = listedLabels.labels;
       let state = listedState;
       const status = listedStatus;
       let image = listedImage;
       let imageId = listedImageId;
       let health: string | null = null;
       let mounts: SocketInventoryMountRow[] = [];
-      let ports = listedPorts;
+      let ports = listedPorts.ports;
       let exposedPorts: string[] = [];
-      let networks = listedNetworks;
-      let env: string[] = [];
+      let networks = listedNetworks.networks;
+      let apiGroups: string[] = [];
       let privileged = false;
       let readonlyRootfs = false;
-      let metadataTruncated = rawListedLabels > 256 || rawListedPorts > 64 || rawListedNetworks > 32;
+      let metadataTruncated = rawListedLabels > 256 || rawListedPorts > 64 || rawListedNetworks > 32
+        || listedLabels.incomplete || listedPorts.incomplete || listedNetworks.incomplete;
       let inspectFailed = id.length === 0;
 
       if (id) {
@@ -2458,32 +2460,47 @@ class DockerController {
           const info = await this.docker.getContainer(id).inspect();
           const config = asRecord(info.Config);
           const stateInfo = asRecord(info.State);
-          labels = { ...listedLabels, ...normalizeDockerLabels(config?.Labels) };
+          const inspectedLabels = normalizeDockerLabels(config?.Labels);
+          labels = { ...listedLabels.labels, ...inspectedLabels.labels };
           state = readContainerString(stateInfo?.Status) ?? state;
           image = readContainerString(config?.Image) ?? image;
           imageId = readContainerString(info.Image) ?? imageId;
           health = readContainerString(asRecord(stateInfo?.Health)?.Status);
-          mounts = normalizeDockerMounts(info.Mounts);
-          exposedPorts = normalizeDockerExposedPorts(config?.ExposedPorts);
-          // An empty inspect section is not more truthful than the list data:
-          // keep the list-level ports and networks when inspect has none.
+          const inspectedMounts = normalizeDockerMounts(info.Mounts);
+          mounts = inspectedMounts.mounts;
+          const inspectedExposed = normalizeDockerExposedPorts(config?.ExposedPorts);
+          exposedPorts = inspectedExposed.ports;
+          // Inspect is more authoritative than the list, but it must not erase
+          // valid listing evidence when a binding is malformed: the normalizer
+          // restores the list-level published port and marks the row incomplete.
           const inspectedPorts = normalizeInspectPorts(asRecord(info.NetworkSettings)?.Ports, ports);
-          if (inspectedPorts.ports.length > 0) ports = inspectedPorts.ports;
+          ports = inspectedPorts.ports;
           const inspectedNetworks = normalizeDockerNetworks(asRecord(info.NetworkSettings)?.Networks);
-          if (inspectedNetworks.length > 0) networks = inspectedNetworks;
-          env = normalizeDockerEnv(config?.Env);
+          if (inspectedNetworks.networks.length > 0) networks = inspectedNetworks.networks;
+          // Interpret the flags from the full environment, before any bound is
+          // applied: truncating an entry first can turn `KEY=<spaces>1` into
+          // `KEY=<spaces>` (lost) or `KEY=1<spaces>0` into `KEY=1` (false grant).
+          const rawEnv = config?.Env;
+          if (Array.isArray(rawEnv)) {
+            apiGroups = enabledProxyApiFlags(rawEnv.filter((entry): entry is string => typeof entry === 'string'));
+          }
           const rawMounts = Array.isArray(info.Mounts) ? info.Mounts.length : 0;
           const rawLabels = Array.isArray(config?.Labels)
             ? config.Labels.length
             : Object.keys(asRecord(config?.Labels) ?? {}).length;
-          const rawEnv = Array.isArray(config?.Env) ? config.Env.length : 0;
           const rawNetworks = Object.keys(asRecord(asRecord(info.NetworkSettings)?.Networks) ?? {}).length;
           const rawExposed = Object.keys(asRecord(config?.ExposedPorts) ?? {}).length;
           const rawPorts = Object.keys(asRecord(asRecord(info.NetworkSettings)?.Ports) ?? {}).length;
-          metadataTruncated = metadataTruncated || inspectedPorts.truncated
+          metadataTruncated = metadataTruncated || inspectedPorts.truncated || inspectedPorts.incomplete
+            || inspectedMounts.incomplete || inspectedLabels.incomplete || inspectedExposed.incomplete
+            || inspectedNetworks.incomplete
             || !Array.isArray(info.Mounts)
-            || rawMounts > 64 || rawLabels > 256 || rawEnv > 256
-            || rawNetworks > 32 || rawExposed > 64 || rawPorts > 64;
+            || rawMounts > 64 || rawLabels > 256
+            || rawNetworks > 32 || rawExposed > 64 || rawPorts > 64
+            // An environment that cannot be read or contains a non-string
+            // entry may hide a recognized flag, so the row is incomplete.
+            || (rawEnv !== undefined && rawEnv !== null
+              && (!Array.isArray(rawEnv) || rawEnv.some(entry => typeof entry !== 'string')));
           const hostConfig = asRecord(info.HostConfig);
           privileged = hostConfig?.Privileged === true;
           readonlyRootfs = hostConfig?.ReadonlyRootfs === true;
@@ -2526,7 +2543,7 @@ class DockerController {
         ports,
         exposedPorts,
         networks,
-        env,
+        apiGroups,
         privileged,
         readonlyRootfs,
         metadataTruncated,
@@ -3919,70 +3936,123 @@ function readContainerNumber(value: unknown): number | null {
   return typeof value === 'number' && Number.isFinite(value) ? value : null;
 }
 
-function normalizeDockerLabels(value: unknown): Record<string, string> {
+interface NormalizedLabels {
+  labels: Record<string, string>;
+  /** A non-null label collection or entry could not be read. */
+  incomplete: boolean;
+}
+
+function normalizeDockerLabels(value: unknown): NormalizedLabels {
   const out: Record<string, string> = {};
   let count = 0;
+  let incomplete = false;
   const put = (key: unknown, raw: unknown) => {
-    if (count >= 256 || typeof key !== 'string' || key.length === 0) return;
+    if (typeof key !== 'string' || key.length === 0) {
+      if (key !== undefined && key !== null) incomplete = true;
+      return;
+    }
+    if (count >= 256) return;
     count += 1;
     out[key] = typeof raw === 'string' ? raw : String(raw ?? '');
   };
   if (Array.isArray(value)) {
     for (const entry of value) {
-      if (typeof entry !== 'string') continue;
+      if (typeof entry !== 'string') {
+        incomplete = true;
+        continue;
+      }
       const eq = entry.indexOf('=');
       if (eq <= 0) put(entry, '');
       else put(entry.slice(0, eq), entry.slice(eq + 1));
     }
-    return out;
+    return { labels: out, incomplete };
   }
   const record = asRecord(value);
   if (record) {
     for (const [key, raw] of Object.entries(record)) put(key, raw);
+  } else if (value !== undefined && value !== null) {
+    incomplete = true;
   }
-  return out;
+  return { labels: out, incomplete };
 }
 
-function normalizeDockerMounts(value: unknown): SocketInventoryMountRow[] {
-  if (!Array.isArray(value)) return [];
+interface NormalizedMounts {
+  mounts: SocketInventoryMountRow[];
+  /** An entry, or a bind's source/destination, could not be read. */
+  incomplete: boolean;
+}
+
+function normalizeDockerMounts(value: unknown): NormalizedMounts {
+  if (!Array.isArray(value)) return { mounts: [], incomplete: false };
   const mounts: SocketInventoryMountRow[] = [];
+  let incomplete = value.length > 64;
   for (const entry of value.slice(0, 64)) {
     const mount = asRecord(entry);
-    if (!mount) continue;
+    // A missing entry could be the socket bind: keep the row incomplete rather
+    // than letting malformed metadata read as a clean absence.
+    if (!mount) {
+      incomplete = true;
+      continue;
+    }
+    const type = readContainerString(mount.Type);
+    const source = readContainerString(mount.Source);
+    const destination = readContainerString(mount.Destination);
+    if (type === null || source === null || destination === null) incomplete = true;
     mounts.push({
-      type: readContainerString(mount.Type) ?? 'unknown',
-      source: readContainerString(mount.Source),
-      destination: readContainerString(mount.Destination),
+      type: type ?? 'unknown',
+      source,
+      destination,
       // A missing read/write flag is treated as writable: the safe reading is
       // the one that does not clear a risk.
       readOnly: mount.RW === false,
       name: readContainerString(mount.Name),
     });
   }
-  return mounts;
+  return { mounts, incomplete };
 }
 
-function normalizeDockerPorts(value: unknown): SocketInventoryPortRow[] {
-  if (!Array.isArray(value)) return [];
+interface NormalizedPorts {
+  ports: SocketInventoryPortRow[];
+  /** A listing entry could not be read. */
+  incomplete: boolean;
+}
+
+function normalizeDockerPorts(value: unknown): NormalizedPorts {
+  if (!Array.isArray(value)) return { ports: [], incomplete: false };
   const ports: SocketInventoryPortRow[] = [];
+  let incomplete = value.length > 64;
   for (const entry of value.slice(0, 64)) {
     const port = asRecord(entry);
-    if (!port) continue;
+    if (!port) {
+      incomplete = true;
+      continue;
+    }
+    const privatePort = readContainerNumber(port.PrivatePort);
+    if (port.PrivatePort !== undefined && port.PrivatePort !== null && privatePort === null) {
+      incomplete = true;
+    }
     const publicPort = readContainerNumber(port.PublicPort);
+    // A non-null value that is not a finite number is unreadable; 0 is
+    // Docker's "not published" and is not a loss.
+    if (port.PublicPort !== undefined && port.PublicPort !== null && publicPort === null) {
+      incomplete = true;
+    }
     ports.push({
-      privatePort: readContainerNumber(port.PrivatePort),
+      privatePort,
       publicPort: publicPort !== null && publicPort > 0 ? publicPort : null,
       ip: readContainerString(port.IP) ?? '',
       protocol: readContainerString(port.Type) ?? 'tcp',
     });
   }
-  return ports;
+  return { ports, incomplete };
 }
 
 interface InspectedPorts {
   ports: SocketInventoryPortRow[];
   /** A per-port binding list or the overall port list exceeded its bound. */
   truncated: boolean;
+  /** A binding could not be read, or listing evidence had to be restored. */
+  incomplete: boolean;
 }
 
 function normalizeInspectPorts(
@@ -3990,10 +4060,13 @@ function normalizeInspectPorts(
   fallback: SocketInventoryPortRow[],
 ): InspectedPorts {
   const bindings = asRecord(value);
-  if (!bindings) return { ports: fallback, truncated: false };
+  if (!bindings) {
+    return { ports: fallback.map(port => ({ ...port })), truncated: false, incomplete: false };
+  }
   const entries = Object.entries(bindings);
   const ports: SocketInventoryPortRow[] = [];
   let truncated = false;
+  let incomplete = false;
   for (const [spec, rawBindings] of entries) {
     if (ports.length >= 64) {
       truncated = true;
@@ -4001,9 +4074,13 @@ function normalizeInspectPorts(
     }
     const slash = spec.lastIndexOf('/');
     const privatePort = Number.parseInt(slash > 0 ? spec.slice(0, slash) : spec, 10);
+    if (!Number.isFinite(privatePort)) incomplete = true;
     const protocol = slash > 0 ? spec.slice(slash + 1) : 'tcp';
     const protocolName = protocol.length > 0 ? protocol : 'tcp';
     const targets = Array.isArray(rawBindings) ? rawBindings : [];
+    if (rawBindings !== undefined && rawBindings !== null && !Array.isArray(rawBindings)) {
+      incomplete = true;
+    }
     if (targets.length === 0) {
       ports.push({
         privatePort: Number.isFinite(privatePort) ? privatePort : null,
@@ -4020,49 +4097,111 @@ function normalizeInspectPorts(
         break;
       }
       const host = asRecord(binding);
+      if (!host) {
+        incomplete = true;
+        ports.push({
+          privatePort: Number.isFinite(privatePort) ? privatePort : null,
+          publicPort: null,
+          ip: '',
+          protocol: protocolName,
+        });
+        continue;
+      }
       // Docker reports the host port as a string; an empty one means exposed only.
-      const rawPublic = host?.HostPort;
-      const parsed = typeof rawPublic === 'number'
-        ? rawPublic
-        : typeof rawPublic === 'string' && rawPublic !== '' ? Number.parseInt(rawPublic, 10) : NaN;
+      const rawPublic = host.HostPort;
+      let publicPort: number | null = null;
+      if (typeof rawPublic === 'number') {
+        publicPort = Number.isFinite(rawPublic) && rawPublic > 0 ? rawPublic : null;
+        if (!Number.isFinite(rawPublic)) incomplete = true;
+      } else if (typeof rawPublic === 'string') {
+        const trimmed = rawPublic.trim();
+        if (trimmed !== '') {
+          const parsed = Number.parseInt(trimmed, 10);
+          if (Number.isFinite(parsed) && parsed > 0) publicPort = parsed;
+          else incomplete = true;
+        }
+      } else if (rawPublic !== undefined && rawPublic !== null) {
+        incomplete = true;
+      }
       ports.push({
         privatePort: Number.isFinite(privatePort) ? privatePort : null,
-        publicPort: Number.isFinite(parsed) && parsed > 0 ? parsed : null,
-        ip: readContainerString(host?.HostIp) ?? '',
+        publicPort,
+        ip: readContainerString(host.HostIp) ?? '',
         protocol: protocolName,
       });
     }
   }
-  return { ports, truncated };
+
+  // Inspect is more authoritative than the list, but it must not silently erase
+  // a valid published port when its own binding is malformed or missing. Fill a
+  // missing binding from the list and flag the row incomplete; a valid inspect
+  // binding still wins.
+  let restored = false;
+  for (const candidate of fallback) {
+    if (candidate.publicPort === null) continue;
+    const sameSpec = (port: SocketInventoryPortRow) =>
+      port.privatePort === candidate.privatePort && port.protocol === candidate.protocol;
+    if (ports.some(port => sameSpec(port) && port.publicPort === candidate.publicPort)) continue;
+    const nullMatch = ports.find(port => sameSpec(port) && port.publicPort === null);
+    if (nullMatch) {
+      nullMatch.publicPort = candidate.publicPort;
+      if (!nullMatch.ip) nullMatch.ip = candidate.ip;
+    } else {
+      ports.push({ ...candidate });
+    }
+    restored = true;
+  }
+  return { ports, truncated, incomplete: incomplete || restored };
 }
 
-function normalizeDockerExposedPorts(value: unknown): string[] {
-  const record = asRecord(value);
-  return record ? Object.keys(record).slice(0, 64) : [];
+interface NormalizedExposedPorts {
+  ports: string[];
+  /** A non-null exposed-port map could not be read. */
+  incomplete: boolean;
 }
 
-function normalizeDockerNetworks(value: unknown): SocketInventoryNetworkRow[] {
+function normalizeDockerExposedPorts(value: unknown): NormalizedExposedPorts {
   const record = asRecord(value);
-  if (!record) return [];
+  if (!record) {
+    return {
+      ports: [],
+      incomplete: value !== undefined && value !== null,
+    };
+  }
+  const keys = Object.keys(record);
+  return { ports: keys.slice(0, 64), incomplete: keys.length > 64 };
+}
+
+interface NormalizedNetworks {
+  networks: SocketInventoryNetworkRow[];
+  /** A non-null network map or entry could not be read. */
+  incomplete: boolean;
+}
+
+function normalizeDockerNetworks(value: unknown): NormalizedNetworks {
+  const record = asRecord(value);
+  if (!record) {
+    return {
+      networks: [],
+      incomplete: value !== undefined && value !== null,
+    };
+  }
   const networks: SocketInventoryNetworkRow[] = [];
+  let incomplete = false;
   for (const [name, raw] of Object.entries(record)) {
-    if (networks.length >= 32) break;
+    if (networks.length >= 32) {
+      incomplete = true;
+      break;
+    }
     const network = asRecord(raw);
+    if (!network) incomplete = true;
     networks.push({
       name,
       id: readContainerString(network?.NetworkID),
       ipAddress: readContainerString(network?.IPAddress),
     });
   }
-  return networks;
-}
-
-function normalizeDockerEnv(value: unknown): string[] {
-  if (!Array.isArray(value)) return [];
-  return value
-    .filter((entry): entry is string => typeof entry === 'string')
-    .slice(0, 256)
-    .map(entry => entry.slice(0, 4096));
+  return { networks, incomplete };
 }
 
 export default DockerController;

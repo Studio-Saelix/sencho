@@ -493,20 +493,23 @@ components:
             `address` is null and `detection` is `undetermined`;
             `/var/run/docker.sock` is not substituted. A bare `unix://` follows
             the same rule. The conventional-path fallback applies only when the
-            caller does not mark the socket unresolved.
+            caller does not mark the socket unresolved. A relative
+            `unix://var/run/docker.sock` is reported as the client selected it,
+            without an added leading slash.
         addressSource: { type: string, enum: [env, default] }
         detection:
           type: string
           enum: [detected, undetermined, unsupported]
           description: >-
             `detected` for a unix provider means the address is a canonical
-            socket and either Sencho runs outside a container, or — when Sencho
-            is not known to run outside a container — the observed host bind
-            source is canonical (`/var/run/docker.sock` and
-            `/run/docker.sock` are treated as equivalent). When Sencho is not
-            known to run outside a container, a canonical destination backed by
-            a non-canonical host path, or with no visible host source, stays
-            `undetermined`, because a proxy or forwarder can serve it.
+            socket and the observed host bind source is itself canonical
+            (`/var/run/docker.sock` and `/run/docker.sock` are treated as
+            equivalent). A canonical destination backed by a non-canonical host
+            path, or with no visible host source, stays `undetermined`, because
+            a proxy or forwarder can serve it. An unidentified Sencho runtime
+            (`sencho.state: none`) is not proof of host execution, and a
+            relative socket path is not a canonical host socket, so both stay
+            `undetermined`.
         reason: { type: string, nullable: true }
         provider:
           type: object
@@ -531,7 +534,14 @@ components:
           required: [state, inContainer, containerId, containerName, socketBindSource, reason]
           properties:
             state: { type: string, enum: [resolved, none, unresolved] }
-            inContainer: { type: boolean, nullable: true }
+            inContainer:
+              type: boolean
+              nullable: true
+              description: >-
+                `true` only when Sencho identified its own container. It is null
+                for `none` and `unresolved`: `none` also covers a container whose
+                identity no probe could see, so it is not evidence that Sencho
+                runs outside a container.
             containerId: { type: string, nullable: true }
             containerName: { type: string, nullable: true }
             socketBindSource: { type: string, nullable: true }

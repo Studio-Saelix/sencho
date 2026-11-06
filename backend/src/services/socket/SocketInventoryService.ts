@@ -28,7 +28,6 @@ import {
 } from '../DockerEndpointProvider';
 import { FleetSyncService } from '../FleetSyncService';
 import {
-  enabledProxyApiFlags,
   hasSocketProxyNameHint,
   isDockerSocketPath,
   socketProxyProviderForImage,
@@ -328,9 +327,12 @@ export function describeDockerEndpoint(
         addressSource: 'env',
       };
     }
+    // Keep the client's actual path: a relative `unix://var/run/docker.sock`
+    // resolves against the process working directory, and inventing a leading
+    // slash would describe a different socket.
     const socketPath = rawPath === ''
       ? (options.defaultSocketPath?.trim() || DEFAULT_DOCKER_SOCKET)
-      : rawPath.startsWith('/') ? rawPath : `/${rawPath}`;
+      : rawPath;
     return {
       transport: 'unix',
       address: safeText(`unix://${socketPath}`, MAX_PATH),
@@ -456,7 +458,9 @@ function socketMountsFor(
   endpointBindSource: string | null,
 ): SocketInventoryMountRow[] {
   return row.mounts
-    .filter(mount => mount.type === 'bind')
+    // An unreadable mount type is a possible bind: read it as one when its
+    // source or destination names a Docker socket rather than dropping it.
+    .filter(mount => mount.type === 'bind' || mount.type === 'unknown')
     .filter(mount => isDockerSocketPath(mount.source)
       || isDockerSocketPath(mount.destination)
       || (endpointBindSource !== null
@@ -481,7 +485,7 @@ function classifyRow(
   const socketMounts = socketMountsFor(row, ctx.endpointBindSource);
   const imageProvider = socketProxyProviderForImage(row.image);
   const nameHint = hasSocketProxyNameHint([row.name, row.service]);
-  const apiGroups = enabledProxyApiFlags(row.env);
+  const apiGroups = [...row.apiGroups];
   const infrastructureLabel = row.labels[SENCHO_INFRASTRUCTURE_LABEL] === 'true';
   const isSencho = idMatches(row.id, ctx.senchoContainerId)
     || (ctx.senchoContainerName !== null && row.name === ctx.senchoContainerName);
@@ -752,7 +756,10 @@ function buildEndpoint(
 
   const sencho = {
     state: self.state,
-    inContainer: self.state === 'resolved' ? true : self.state === 'none' ? false : null,
+    // `none` means no identity probe found the container: dev mode, or a
+    // container whose id none of the probes shows. It is not proof that Sencho
+    // runs outside a container, so it never becomes `false`.
+    inContainer: self.state === 'resolved' ? true : null,
     containerId: self.containerId,
     containerName: self.containerName,
     socketBindSource,
@@ -786,17 +793,20 @@ function buildEndpoint(
         },
       };
     }
+    // A relative client path resolves against the process working directory, so
+    // it is not the host daemon socket however familiar its tail looks.
+    const relativeSocket = !description.socketPath.startsWith('/');
     const canonicalSocket = description.socketPath === '/var/run/docker.sock'
       || description.socketPath === '/run/docker.sock';
     const canonicalBindSource = socketBindSource === '/var/run/docker.sock'
       || socketBindSource === '/run/docker.sock';
-    // A canonical destination on its own does not prove direct daemon access: a
-    // forwarder or proxy can mount its own socket at that path. Direct is only
-    // claimed when Sencho runs outside a container, or when the observed host
-    // bind source is itself a canonical daemon socket (a true passthrough).
+    // A canonical destination on its own does not prove direct daemon access:
+    // a forwarder or proxy can mount its own socket at that path. `none` self
+    // identity is not proof either: it also covers a container whose identity
+    // no probe could see. Direct is only claimed when the observed host bind
+    // source is itself a canonical daemon socket (a true passthrough).
     const directProven = canonicalSocket && (
-      self.state === 'none'
-      || (socketBindSource !== null && socketBindSource === description.socketPath)
+      (socketBindSource !== null && socketBindSource === description.socketPath)
       || canonicalBindSource
     );
     if (directProven) {
@@ -835,15 +845,17 @@ function buildEndpoint(
         address: description.address,
         addressSource: description.addressSource,
         detection: 'undetermined',
-        reason: sourceUnobserved
-          ? 'The socket destination is the host default, but its host source is not visible from inside the container, so the provider type is undetermined.'
-          : canonicalSocket
-            ? 'The socket destination is the host default, but its observed host source is different. Container metadata cannot prove which process serves it, so the provider type is undetermined.'
-            : description.addressSource === 'default'
-              ? 'The Docker client resolved a socket path that is not a canonical host daemon socket; container metadata cannot prove which process serves it, so the provider type is undetermined.'
-              : socketBindSource
-                ? 'The configured socket path is not the host default. Its host path is visible, but container metadata cannot prove which process serves it, so the provider type is undetermined.'
-                : 'The configured socket path is not the host default and its host path is not visible, so the provider type cannot be determined.',
+        reason: relativeSocket
+          ? 'The Docker client selected a relative socket path, which resolves against the process working directory rather than a host socket path, so the provider type is undetermined.'
+          : sourceUnobserved
+            ? 'The socket destination is the host default, but its host source is not visible from inside the container, so the provider type is undetermined.'
+            : canonicalSocket
+              ? 'The socket destination is the host default, but its observed host source is different. Container metadata cannot prove which process serves it, so the provider type is undetermined.'
+              : description.addressSource === 'default'
+                ? 'The Docker client resolved a socket path that is not a canonical host daemon socket; container metadata cannot prove which process serves it, so the provider type is undetermined.'
+                : socketBindSource
+                  ? 'The configured socket path is not the host default. Its host path is visible, but container metadata cannot prove which process serves it, so the provider type is undetermined.'
+                  : 'The configured socket path is not the host default and its host path is not visible, so the provider type cannot be determined.',
         provider: {
           kind: 'unknown',
           providerType: null,
@@ -854,9 +866,11 @@ function buildEndpoint(
         },
         sencho,
         evidence: [
-          ...(canonicalSocket
-            ? [sourceUnobserved ? 'socket-destination-default-source-unobserved' : 'socket-destination-default-source-custom']
-            : [description.addressSource === 'default' ? 'socket-path-client-default' : 'socket-path-custom']),
+          ...(relativeSocket
+            ? ['socket-path-relative']
+            : canonicalSocket
+              ? [sourceUnobserved ? 'socket-destination-default-source-unobserved' : 'socket-destination-default-source-custom']
+              : [description.addressSource === 'default' ? 'socket-path-client-default' : 'socket-path-custom']),
           ...(socketBindSource ? ['sencho-socket-bind-source'] : []),
         ],
       },

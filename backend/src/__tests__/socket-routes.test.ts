@@ -192,12 +192,34 @@ describe('GET /api/socket/inventory', () => {
     expect(res.body.containers).toBeUndefined();
   });
 
-  it('answers 500 for an unexpected discovery failure', async () => {
-    loadSocketInventoryMock.mockRejectedValue(new Error('unexpected'));
+  it('redacts credentials from the unavailable-Docker failure log', async () => {
+    loadSocketInventoryMock.mockRejectedValue(new SocketInventoryUnavailableError(
+      'dial tcp://operator:hunter2@proxy:2375 failed',
+    ));
+    const errSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const res = await request(app)
+      .get('/api/socket/inventory')
+      .set('Cookie', adminCookie);
+    expect(res.status).toBe(503);
+    expect(res.body.code).toBe('DOCKER_UNAVAILABLE');
+    const logged = errSpy.mock.calls.flat().join(' ');
+    expect(logged).not.toContain('hunter2');
+    expect(logged).toContain('[redacted]');
+  });
+
+  it('answers 500 for an unexpected discovery failure and redacts its log', async () => {
+    loadSocketInventoryMock.mockRejectedValue(new Error(
+      'unexpected failure at https://operator:hunter2@proxy.example/api',
+    ));
+    const errSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
     const res = await request(app)
       .get('/api/socket/inventory')
       .set('Cookie', adminCookie);
     expect(res.status).toBe(500);
+    expect(res.body).toEqual({ error: 'Failed to read the Docker socket inventory.' });
+    const logged = errSpy.mock.calls.flat().join(' ');
+    expect(logged).not.toContain('hunter2');
+    expect(logged).toContain('[redacted]');
   });
 });
 

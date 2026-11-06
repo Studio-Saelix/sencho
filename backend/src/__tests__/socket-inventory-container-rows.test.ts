@@ -115,7 +115,7 @@ describe('listContainersForSocketInventory', () => {
     ]);
     expect(row.exposedPorts).toEqual(['2375/tcp']);
     expect(row.networks).toEqual([{ name: 'alpha_default', id: 'net1', ipAddress: '172.18.0.2' }]);
-    expect(row.env).toEqual(['CONTAINERS=1']);
+    expect(row.apiGroups).toEqual(['CONTAINERS']);
   });
 
   it('falls back to list metadata and marks the row when inspect fails', async () => {
@@ -135,7 +135,7 @@ describe('listContainersForSocketInventory', () => {
         'com.docker.compose.service': 'proxy',
       },
       mounts: [],
-      env: [],
+      apiGroups: [],
     });
     expect(row.ports).toEqual([
       { privatePort: 2375, publicPort: 2375, ip: '0.0.0.0', protocol: 'tcp' },
@@ -241,7 +241,7 @@ describe('listContainersForSocketInventory', () => {
     const { rows: [row] } = await DockerController.getInstance(1).listContainersForSocketInventory();
     expect(row.mounts).toHaveLength(64);
     expect(row.metadataTruncated).toBe(true);
-    expect(row.env).toHaveLength(256);
+    expect(row.apiGroups).toEqual([]);
     expect(row.exposedPorts).toHaveLength(64);
     expect(row.networks).toHaveLength(32);
   });
@@ -251,7 +251,7 @@ describe('listContainersForSocketInventory', () => {
       HostIp: '127.0.0.1', HostPort: String(9000 + index),
     }));
     for (const [count, expected, truncated] of [[8, 8, false], [9, 8, true]] as const) {
-      mockDocker.listContainers.mockResolvedValue([listed()]);
+      mockDocker.listContainers.mockResolvedValue([listed({ Ports: [] })]);
       mockDocker.getContainer.mockReturnValue({
         inspect: vi.fn().mockResolvedValue(inspected({
           NetworkSettings: {
@@ -273,7 +273,7 @@ describe('listContainersForSocketInventory', () => {
         HostIp: '127.0.0.1', HostPort: String(9000 + specIndex * 10 + index),
       })),
     ]));
-    mockDocker.listContainers.mockResolvedValue([listed()]);
+    mockDocker.listContainers.mockResolvedValue([listed({ Ports: [] })]);
     mockDocker.getContainer.mockReturnValue({
       inspect: vi.fn().mockResolvedValue(inspected({
         NetworkSettings: {
@@ -285,6 +285,107 @@ describe('listContainersForSocketInventory', () => {
     const { rows: [row] } = await DockerController.getInstance(1).listContainersForSocketInventory();
     expect(row.ports).toHaveLength(64);
     expect(row.metadataTruncated).toBe(true);
+  });
+
+  it('keeps every recognized proxy flag exact across the environment bound', async () => {
+    const keys = ['CONTAINERS', 'IMAGES', 'INFO', 'EVENTS', 'NETWORKS', 'VOLUMES', 'POST', 'DELETE'];
+    for (const key of keys) {
+      // Truncating first would turn the leading spaces into an empty value...
+      mockDocker.listContainers.mockResolvedValue([listed()]);
+      mockDocker.getContainer.mockReturnValue({
+        inspect: vi.fn().mockResolvedValue(inspected({
+          Config: {
+            Image: 'tecnativa/docker-socket-proxy:latest',
+            Labels: {},
+            Env: [`${key}=${' '.repeat(5000)}1`],
+            ExposedPorts: {},
+          },
+        })),
+      });
+      const enabled = await DockerController.getInstance(1).listContainersForSocketInventory();
+      expect(enabled.rows[0].apiGroups, `${key} enabled after long leading spaces`).toEqual([key]);
+
+      // ...and would turn a trailing `0` after a 1 into a bare enabled `1`.
+      mockDocker.getContainer.mockReturnValue({
+        inspect: vi.fn().mockResolvedValue(inspected({
+          Config: {
+            Image: 'tecnativa/docker-socket-proxy:latest',
+            Labels: {},
+            Env: [`${key}=1${' '.repeat(5000)}0`],
+            ExposedPorts: {},
+          },
+        })),
+      });
+      const disabled = await DockerController.getInstance(1).listContainersForSocketInventory();
+      expect(disabled.rows[0].apiGroups, `${key} disabled after long trailing text`).toEqual([]);
+    }
+  });
+
+  it('marks unreadable mount entries incomplete instead of dropping them', async () => {
+    const variants: unknown[] = [
+      [null],
+      [{}],
+      [{ Type: 'bind', Source: 5, Destination: {} }],
+      'not-an-array',
+    ];
+    for (const mounts of variants) {
+      mockDocker.listContainers.mockResolvedValue([listed()]);
+      mockDocker.getContainer.mockReturnValue({
+        inspect: vi.fn().mockResolvedValue(inspected({ Mounts: mounts })),
+      });
+      const { rows: [row] } = await DockerController.getInstance(1).listContainersForSocketInventory();
+      expect(row.metadataTruncated, `mounts=${JSON.stringify(mounts)}`).toBe(true);
+    }
+  });
+
+  it('keeps a valid list-level published port when the inspect binding is malformed', async () => {
+    mockDocker.listContainers.mockResolvedValue([listed()]);
+    mockDocker.getContainer.mockReturnValue({
+      inspect: vi.fn().mockResolvedValue(inspected({
+        NetworkSettings: {
+          Ports: { '2375/tcp': [{ HostIp: '0.0.0.0', HostPort: 'not-a-port' }] },
+          Networks: { alpha_default: { NetworkID: 'net1', IPAddress: '172.18.0.2' } },
+        },
+      })),
+    });
+    const { rows: [row] } = await DockerController.getInstance(1).listContainersForSocketInventory();
+    expect(row.ports).toEqual([
+      { privatePort: 2375, publicPort: 2375, ip: '0.0.0.0', protocol: 'tcp' },
+    ]);
+    expect(row.metadataTruncated).toBe(true);
+  });
+
+  it('marks an unreadable environment collection incomplete', async () => {
+    mockDocker.listContainers.mockResolvedValue([listed()]);
+    mockDocker.getContainer.mockReturnValue({
+      inspect: vi.fn().mockResolvedValue(inspected({
+        Config: {
+          Image: 'tecnativa/docker-socket-proxy:latest',
+          Labels: {},
+          Env: 'CONTAINERS=1',
+          ExposedPorts: {},
+        },
+      })),
+    });
+    const { rows: [row] } = await DockerController.getInstance(1).listContainersForSocketInventory();
+    expect(row.apiGroups).toEqual([]);
+    expect(row.metadataTruncated).toBe(true);
+  });
+
+  it('redacts credentials from an inspect failure log', async () => {
+    mockDocker.listContainers.mockResolvedValue([listed()]);
+    mockDocker.getContainer.mockReturnValue({
+      inspect: vi.fn().mockRejectedValue(
+        new Error('inspect failed for tcp://operator:hunter2@proxy:2375/containers'),
+      ),
+    });
+    const errSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const { rows: [row] } = await DockerController.getInstance(1).listContainersForSocketInventory();
+    expect(row.inspectFailed).toBe(true);
+    const logged = errSpy.mock.calls.flat().join(' ');
+    expect(logged).not.toContain('hunter2');
+    expect(logged).toContain('[redacted]');
+    errSpy.mockRestore();
   });
 });
 

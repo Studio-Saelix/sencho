@@ -51,7 +51,7 @@ function row(overrides: Partial<SocketInventoryContainerRow> = {}): SocketInvent
     ports: [],
     exposedPorts: [],
     networks: [],
-    env: [],
+    apiGroups: [],
     privileged: false,
     readonlyRootfs: false,
     metadataTruncated: false,
@@ -72,11 +72,11 @@ function input(overrides: Partial<SocketInventoryBuildInput> = {}): SocketInvent
     truncated: false,
     containers: [],
     self: {
-      state: 'none',
+      state: 'resolved',
       reason: null,
-      containerId: null,
-      containerName: null,
-      bindMounts: null,
+      containerId: 'sencho1',
+      containerName: 'sencho',
+      bindMounts: [{ source: SOCKET, destination: SOCKET }],
     },
     endpoint: describeDockerEndpoint(undefined),
     endpointProvider: { state: 'none', reason: 'not a tcp endpoint' },
@@ -100,7 +100,7 @@ function proxyRow(overrides: Partial<SocketInventoryContainerRow> = {}): SocketI
     service: 'proxy',
     mounts: [socketMount(SOCKET, SOCKET, true)],
     ports: [{ privatePort: 2375, publicPort: 2375, ip: '0.0.0.0', protocol: 'tcp' }],
-    env: ['CONTAINERS=1', 'POST=0'],
+    apiGroups: ['CONTAINERS'],
     networks: [{ name: 'alpha_default', id: 'net1', ipAddress: '172.18.0.2' }],
     ...overrides,
   });
@@ -205,6 +205,24 @@ describe('describeDockerEndpoint', () => {
       socketPath: null,
       addressSource: 'env',
     });
+  });
+
+  it('keeps the client-selected relative socket path instead of inventing a leading slash', () => {
+    for (const relative of ['var/run/docker.sock', 'run/docker.sock']) {
+      expect(describeDockerEndpoint(`unix://${relative}`)).toMatchObject({
+        transport: 'unix',
+        address: `unix://${relative}`,
+        socketPath: relative,
+        addressSource: 'env',
+      });
+      expect(describeDockerEndpoint(undefined, {
+        defaultSocketPath: relative,
+      })).toMatchObject({
+        transport: 'unix',
+        socketPath: relative,
+        addressSource: 'default',
+      });
+    }
   });
 });
 
@@ -371,6 +389,19 @@ describe('buildSocketInventory classification', () => {
     expect(inventory.containers[0].evidence).toContain('metadata-truncated');
     expect(inventory.status).toBe('partial');
     expect(inventory.errors.some(error => error.stage === 'container-metadata')).toBe(true);
+  });
+
+  it('retains an unhinted container whose mounts were unreadable', () => {
+    const inventory = buildSocketInventory(input({
+      containers: [row({ id: 'unreadable1', name: 'helper', metadataTruncated: true })],
+    }));
+    expect(inventory.containers).toHaveLength(1);
+    expect(inventory.containers[0]).toMatchObject({
+      role: 'undetermined',
+      classification: 'unknown',
+      metadataTruncated: true,
+    });
+    expect(inventory.status).toBe('partial');
   });
 
   it('does not trust a vendor hint embedded in a longer repository name', () => {
@@ -562,7 +593,7 @@ describe('buildSocketInventory classification', () => {
     expect(inventory.status).toBe('complete');
   });
 
-  it('keeps a host process on the conventional socket direct', () => {
+  it('stays undetermined when self identity cannot prove host execution', () => {
     const inventory = buildSocketInventory(input({
       endpoint: describeDockerEndpoint(undefined),
       self: {
@@ -573,12 +604,85 @@ describe('buildSocketInventory classification', () => {
         bindMounts: null,
       },
     }));
+    // `none` also covers a container whose identity no probe could see, so it is
+    // not proof that Sencho runs on the host and dials the daemon directly.
     expect(inventory.endpoint).toMatchObject({
       transport: 'unix',
-      detection: 'detected',
-      provider: { kind: 'direct-socket', providerType: 'direct-unix-socket' },
+      detection: 'undetermined',
+      provider: { kind: 'unknown', providerType: null },
+      sencho: { state: 'none', inContainer: null },
     });
-    expect(inventory.status).toBe('complete');
+    expect(inventory.endpoint.evidence).toContain('socket-destination-default-source-unobserved');
+    expect(inventory.status).toBe('partial');
+  });
+
+  it('stays undetermined for both canonical paths when self identity is unknown', () => {
+    for (const dockerHost of [undefined, 'unix:///var/run/docker.sock', 'unix:///run/docker.sock']) {
+      const inventory = buildSocketInventory(input({
+        endpoint: describeDockerEndpoint(dockerHost),
+        self: {
+          state: 'none',
+          reason: null,
+          containerId: null,
+          containerName: null,
+          bindMounts: null,
+        },
+      }));
+      expect(inventory.endpoint, String(dockerHost)).toMatchObject({
+        detection: 'undetermined',
+        provider: { kind: 'unknown', providerType: null },
+      });
+      expect(inventory.status, String(dockerHost)).toBe('partial');
+    }
+  });
+
+  it('does not claim direct access for an unidentified container forwarding a canonical destination', () => {
+    const inventory = buildSocketInventory(input({
+      endpoint: describeDockerEndpoint(undefined),
+      self: {
+        state: 'none',
+        reason: null,
+        containerId: null,
+        containerName: null,
+        bindMounts: null,
+      },
+      containers: [row({
+        id: 'forwarder1',
+        name: 'forwarder',
+        mounts: [socketMount('/run/forwarder.sock', '/var/run/docker.sock', false)],
+      })],
+    }));
+    expect(inventory.endpoint.detection).not.toBe('detected');
+    expect(inventory.endpoint.provider.kind).toBe('unknown');
+    expect(inventory.status).toBe('partial');
+  });
+
+  it('classifies a relative client socket path conservatively', () => {
+    for (const relative of ['var/run/docker.sock', 'run/docker.sock']) {
+      for (const endpoint of [
+        describeDockerEndpoint(`unix://${relative}`),
+        describeDockerEndpoint(undefined, { defaultSocketPath: relative }),
+      ]) {
+        const inventory = buildSocketInventory(input({
+          endpoint,
+          self: {
+            state: 'resolved',
+            reason: null,
+            containerId: 'sencho1',
+            containerName: 'sencho',
+            bindMounts: [{ source: '/var/run/docker.sock', destination: '/var/run/docker.sock' }],
+          },
+        }));
+        expect(inventory.endpoint, relative).toMatchObject({
+          transport: 'unix',
+          address: `unix://${relative}`,
+          detection: 'undetermined',
+          provider: { kind: 'unknown' },
+        });
+        expect(inventory.endpoint.evidence).toContain('socket-path-relative');
+        expect(inventory.status).toBe('partial');
+      }
+    }
   });
 
   it('treats the two canonical host socket paths as a passthrough', () => {
@@ -681,7 +785,7 @@ describe('buildSocketInventory classification', () => {
 
   it('marks a failed inspect as undetermined and partial, not as absent', () => {
     const inventory = buildSocketInventory(input({
-      containers: [proxyRow({ id: 'broken1', inspectFailed: true, mounts: [], env: [] })],
+      containers: [proxyRow({ id: 'broken1', inspectFailed: true, mounts: [], apiGroups: [] })],
     }));
     expect(inventory.containers[0]).toMatchObject({
       role: 'undetermined',
@@ -931,7 +1035,7 @@ describe('buildSocketInventory classification', () => {
           'com.docker.compose.project': 'alpha',
           'traefik.http.middlewares.auth.basicauth.users': 'admin:$apr1$secret',
         },
-        env: ['CONTAINERS=1', 'API_KEY=super-secret-value'],
+        apiGroups: ['CONTAINERS'],
         image: 'user:hunter2@registry.example.com/team/proxy:1',
       })],
     }));
@@ -1173,6 +1277,24 @@ describe('loadSocketInventory', () => {
       .rejects.toBeInstanceOf(SocketInventoryUnavailableError);
   });
 
+  it('redacts credentials from a container list failure log', async () => {
+    const errSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const depsWithFailure = deps({
+      docker: {
+        listContainersForSocketInventory: vi.fn().mockRejectedValue(
+          new Error('list failed at unix:///var/run/docker.sock?token=hunter2secret'),
+        ),
+        getDockerSocketPath: vi.fn().mockResolvedValue(null),
+      },
+    });
+    await expect(loadSocketInventory(1, depsWithFailure))
+      .rejects.toBeInstanceOf(SocketInventoryUnavailableError);
+    const logged = errSpy.mock.calls.flat().join(' ');
+    expect(logged).not.toContain('hunter2secret');
+    expect(logged).toContain('[redacted]');
+    errSpy.mockRestore();
+  });
+
   it('reports the bound while inspecting only the containers the list returned', async () => {
     const rows = Array.from({ length: MAX_INVENTORY_CONTAINERS }, (_, index) => proxyRow({
       id: `p${index}`,
@@ -1270,6 +1392,56 @@ describe('loadSocketInventory', () => {
         detection: 'undetermined',
       });
       expect(inventory.endpoint.evidence).toContain('socket-client-endpoint-unresolved');
+      expect(inventory.status).toBe('partial');
+    } finally {
+      if (original === undefined) delete process.env.DOCKER_HOST;
+      else process.env.DOCKER_HOST = original;
+    }
+  });
+
+  it('does not treat an unidentified runtime as proof of direct host access', async () => {
+    const original = process.env.DOCKER_HOST;
+    try {
+      delete process.env.DOCKER_HOST;
+      const inventory = await loadSocketInventory(1, deps({
+        docker: {
+          listContainersForSocketInventory: vi.fn().mockResolvedValue({
+            rows: [], listedContainers: 0, truncated: false,
+          }),
+          getDockerSocketPath: vi.fn().mockResolvedValue('/var/run/docker.sock'),
+        },
+      }));
+      expect(inventory.endpoint).toMatchObject({
+        transport: 'unix',
+        address: 'unix:///var/run/docker.sock',
+        detection: 'undetermined',
+        sencho: { state: 'none', inContainer: null },
+      });
+      expect(inventory.status).toBe('partial');
+    } finally {
+      if (original === undefined) delete process.env.DOCKER_HOST;
+      else process.env.DOCKER_HOST = original;
+    }
+  });
+
+  it('marks the endpoint undetermined when the client resolves a relative socket path', async () => {
+    const original = process.env.DOCKER_HOST;
+    try {
+      delete process.env.DOCKER_HOST;
+      const inventory = await loadSocketInventory(1, deps({
+        docker: {
+          listContainersForSocketInventory: vi.fn().mockResolvedValue({
+            rows: [], listedContainers: 0, truncated: false,
+          }),
+          getDockerSocketPath: vi.fn().mockResolvedValue('var/run/docker.sock'),
+        },
+      }));
+      expect(inventory.endpoint).toMatchObject({
+        transport: 'unix',
+        address: 'unix://var/run/docker.sock',
+        detection: 'undetermined',
+      });
+      expect(inventory.endpoint.evidence).toContain('socket-path-relative');
       expect(inventory.status).toBe('partial');
     } finally {
       if (original === undefined) delete process.env.DOCKER_HOST;

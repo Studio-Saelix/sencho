@@ -50,7 +50,11 @@ socketRouter.get('/inventory', async (req: Request, res: Response): Promise<void
       });
       return;
     }
-    console.error('[Socket] Inventory failed on node %d:', req.nodeId, error);
+    console.error(
+      '[Socket] Inventory failed on node %d: %s',
+      req.nodeId,
+      errorMessageForLog(error),
+    );
     res.status(500).json({ error: 'Failed to read the Docker socket inventory.' });
   }
 });
