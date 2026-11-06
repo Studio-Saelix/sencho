@@ -145,7 +145,10 @@ function validateRows(rows: KvRow[]): string | null {
     for (const row of liveRows) {
         const key = row.key.trim();
         if (!KEY_PATTERN.test(key)) return `Invalid key: ${key}`;
-        if (key === '__proto__') return 'Reserved key: __proto__';
+        // A legacy bundle may already store this name; keep it editable so the
+        // operator can remove it or rename it away. It cannot be introduced or
+        // used as a rename target.
+        if (key === '__proto__' && row.originalKey !== '__proto__') return 'Reserved key: __proto__';
         if (seen.has(key)) return `Duplicate key: ${key}`;
         seen.add(key);
     }

@@ -174,6 +174,35 @@ describe('SecretBundleSheet masked editing', () => {
         await waitFor(() => expect(vi.mocked(getSecret)).toHaveBeenCalledTimes(2));
         expect(vi.mocked(toast.error)).toHaveBeenCalledWith(expect.stringMatching(/reloading/i));
     });
+
+    it('lets a legacy prototype key be removed', async () => {
+        vi.mocked(getSecret).mockResolvedValue(detail({
+            keys: [
+                { key: '__proto__', masked: MASK },
+                { key: 'API_KEY', masked: MASK },
+            ],
+        }));
+        renderSheet();
+        await screen.findByDisplayValue('API_KEY');
+
+        await userEvent.click(screen.getAllByLabelText('Remove key')[0]);
+        await userEvent.click(screen.getByRole('button', { name: /^save$/i }));
+        await waitFor(() => expect(vi.mocked(patchSecret)).toHaveBeenCalledWith(7, expect.objectContaining({
+            ops: [{ op: 'remove', key: '__proto__' }],
+        })));
+    });
+
+    it('refuses to introduce a prototype key in the editor', async () => {
+        renderSheet();
+        await screen.findByDisplayValue('API_KEY');
+
+        await userEvent.click(screen.getByRole('button', { name: /add key/i }));
+        const keyInputs = screen.getAllByPlaceholderText('KEY_NAME');
+        await userEvent.type(keyInputs[keyInputs.length - 1], '__proto__');
+        await userEvent.type(screen.getByLabelText('Value'), 'value');
+        expect(screen.getByText('Reserved key: __proto__')).toBeInTheDocument();
+        expect(screen.getByRole('button', { name: /^save$/i })).toBeDisabled();
+    });
 });
 
 describe('SecretBundleSheet reveal and import guards', () => {
