@@ -1,6 +1,6 @@
 import { describe, it, expect, vi, afterEach } from 'vitest';
 import os from 'os';
-import { resolveTargetAddresses, UnsafeTargetError } from '../services/nodeBootstrap/targetPolicy';
+import { resolveTargetAddresses, UnsafeTargetError, validateHost, validateTarget } from '../services/nodeBootstrap/targetPolicy';
 
 /**
  * The target resolver is the security boundary in front of every SSH dial, so
@@ -111,5 +111,13 @@ describe('bootstrap target address policy', () => {
     await expect(resolveTargetAddresses('8.8.8.8', resolve)).resolves.toEqual(['8.8.8.8']);
     expect(resolve).not.toHaveBeenCalled();
     await expect(resolveTargetAddresses('127.0.0.1', resolve)).rejects.toBeInstanceOf(UnsafeTargetError);
+  });
+});
+
+describe('bootstrap target identity', () => {
+  it('canonicalizes a DNS name to lower case and leaves an IPv4 literal alone', () => {
+    expect(validateHost('  Server.Example.COM ')).toBe('server.example.com');
+    expect(validateHost('192.168.1.50')).toBe('192.168.1.50');
+    expect(validateTarget({ host: 'SERVER.example.com', username: 'ubuntu', targetName: 'x' }).host).toBe('server.example.com');
   });
 });

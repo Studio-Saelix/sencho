@@ -93,6 +93,10 @@ export function useNodeBootstrap({ open, api }: UseNodeBootstrapOptions) {
   const [advancedOpen, setAdvancedOpen] = useState(false);
   const [invalidated, setInvalidated] = useState<BootstrapInvalidation | null>(null);
   const abortRef = useRef<AbortController | null>(null);
+  // The live preflight request, if any. A preflight reply is applied only while
+  // its own controller is still here, so any edit that discards the inspection
+  // (and any newer request) supersedes it even if the reply is already on the way.
+  const preflightRef = useRef<AbortController | null>(null);
   // Bumped whenever the SSH endpoint changes, so a keyscan response for the
   // previous host, port or user can never populate the current form.
   const targetGenerationRef = useRef(0);
@@ -131,6 +135,7 @@ export function useNodeBootstrap({ open, api }: UseNodeBootstrapOptions) {
   const reset = useCallback(() => {
     abortRef.current?.abort();
     abortRef.current = null;
+    preflightRef.current = null;
     targetGenerationRef.current += 1;
     setForm({ ...EMPTY_FORM, composeDir: capabilities.defaults.composeDir, agentDir: capabilities.defaults.agentDir });
     setStep('target');
@@ -154,6 +159,7 @@ export function useNodeBootstrap({ open, api }: UseNodeBootstrapOptions) {
       // Closing clears the key material and any live request.
       abortRef.current?.abort();
       abortRef.current = null;
+      preflightRef.current = null;
       setForm((current) => ({ ...current, privateKey: '', passphrase: '' }));
       setBusy(null);
       setInvalidated(null);
@@ -182,12 +188,12 @@ export function useNodeBootstrap({ open, api }: UseNodeBootstrapOptions) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open]);
 
-  const clearResult = useCallback((field: keyof BootstrapForm) => {
+  const clearResult = useCallback((field: keyof BootstrapForm, discardedInFlight: boolean) => {
     // A banner that is already up keeps the strongest reason; one is raised
-    // only when a result is actually being discarded.
+    // only when a result, or an inspection still on its way, is being discarded.
     const reason = invalidationForField(field);
     const toTarget = reason === 'target';
-    const hadResult = resultRef.current !== null;
+    const hadResult = resultRef.current !== null || discardedInFlight;
     setInvalidated((current) => (hadResult || current ? strongerInvalidation(current, reason) : current));
     setResult(null);
     setResultRevision(null);
@@ -207,19 +213,32 @@ export function useNodeBootstrap({ open, api }: UseNodeBootstrapOptions) {
     setConfigRevision((revision) => revision + 1);
     setError(null);
     setFieldErrors((current) => current.filter((entry) => entry.field !== field));
+    const discardedInFlight = preflightRef.current !== null;
     if (field === 'host' || field === 'port' || field === 'username') {
       targetGenerationRef.current += 1;
       abortRef.current?.abort();
       abortRef.current = null;
+      preflightRef.current = null;
       setHostKey(null);
       setTrusted(false);
       setReplacing(false);
       // The superseded request no longer owns the busy flag.
       setBusy(null);
-      clearResult(field);
+      clearResult(field, discardedInFlight);
       return;
     }
-    clearResult(field);
+    // Every other field feeds the inspection too: a preflight still running
+    // describes the previous values, so its reply must not land on this edit.
+    const pending = preflightRef.current;
+    if (pending) {
+      pending.abort();
+      preflightRef.current = null;
+      if (abortRef.current === pending) {
+        abortRef.current = null;
+        setBusy(null);
+      }
+    }
+    clearResult(field, discardedInFlight);
   }, [clearResult]);
 
   const validate = useCallback((): { ok: boolean; errors: BootstrapFieldError[] } => {
@@ -248,6 +267,7 @@ export function useNodeBootstrap({ open, api }: UseNodeBootstrapOptions) {
     const validation = validate();
     if (!validation.ok) return;
     abortRef.current?.abort();
+    preflightRef.current = null;
     const controller = new AbortController();
     abortRef.current = controller;
     const generation = targetGenerationRef.current;
@@ -285,9 +305,13 @@ export function useNodeBootstrap({ open, api }: UseNodeBootstrapOptions) {
     if (!hostKey) return;
     const revision = configRevision;
     const generation = targetGenerationRef.current;
+    const confirmReplacement = confirmReplace || replacing;
     abortRef.current?.abort();
     const controller = new AbortController();
     abortRef.current = controller;
+    preflightRef.current = controller;
+    // Only the request that still owns the preflight slot may apply its reply.
+    const isCurrent = () => preflightRef.current === controller && targetGenerationRef.current === generation;
     setBusy('preflight');
     setError(null);
     try {
@@ -298,12 +322,13 @@ export function useNodeBootstrap({ open, api }: UseNodeBootstrapOptions) {
         privateKey: form.privateKey,
         passphrase: form.passphrase ? form.passphrase : null,
         expectedFingerprint: hostKey.fingerprint,
-        replacePinnedFingerprint: confirmReplace || replacing ? hostKey.fingerprint : null,
+        replacePinnedFingerprint: confirmReplacement ? hostKey.fingerprint : null,
+        reviewedPinnedFingerprint: confirmReplacement ? hostKey.pinnedFingerprint : null,
         targetName: form.targetName.trim(),
         composeDir: form.composeDir,
         agentDir: form.agentDir,
       }, controller.signal);
-      if (targetGenerationRef.current !== generation) return;
+      if (!isCurrent()) return;
       setResult(response);
       setResultRevision(revision);
       setInvalidated(null);
@@ -315,7 +340,7 @@ export function useNodeBootstrap({ open, api }: UseNodeBootstrapOptions) {
       setStep(response.plan ? 'plan' : 'preflight');
     } catch (caught: unknown) {
       if (isAbort(caught)) return;
-      if (targetGenerationRef.current !== generation) return;
+      if (!isCurrent()) return;
       const fieldError = toFieldError(caught);
       if (fieldError) setFieldErrors([fieldError]);
       if (caught instanceof BootstrapApiError
@@ -351,6 +376,7 @@ export function useNodeBootstrap({ open, api }: UseNodeBootstrapOptions) {
       }
       setError(caught instanceof Error ? caught.message : 'The preflight failed.');
     } finally {
+      if (preflightRef.current === controller) preflightRef.current = null;
       if (abortRef.current === controller) {
         abortRef.current = null;
         setBusy(null);

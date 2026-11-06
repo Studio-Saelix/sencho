@@ -428,7 +428,12 @@ function runSession(
       finished = true;
       clearWatchdog();
       options.signal?.removeEventListener('abort', onAbort);
-      conn.end();
+      // Destroy rather than end(): end() only half-closes the socket, and a peer
+      // that withholds its own close would keep the connection alive after the
+      // request released its target lock. ssh2's destroy() is a no-op once the
+      // socket is no longer writable, so end() cannot be followed by a fallback.
+      // Every command has finished or been abandoned by now, so no reply is lost.
+      conn.destroy();
       resolve(results);
     };
 
@@ -492,11 +497,7 @@ function runSession(
               remainingBytes,
               () => {
                 aborted = true;
-                try {
-                  conn.end();
-                } catch {
-                  // Already closing.
-                }
+                conn.destroy();
               },
             );
             if (finished) return;

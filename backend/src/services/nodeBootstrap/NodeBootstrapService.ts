@@ -94,6 +94,12 @@ export interface BootstrapPreflightRequest {
   passphrase?: string | null;
   expectedFingerprint?: string | null;
   replacePinnedFingerprint?: string | null;
+  /**
+   * The stored pin the operator saw being replaced. A replacement only counts
+   * when this is still the pin on record, so a confirmation never overwrites a
+   * pin the operator did not review.
+   */
+  reviewedPinnedFingerprint?: string | null;
   targetName: string;
   composeDir?: string;
   agentDir?: string;
@@ -165,6 +171,29 @@ export function validateInstallPaths(composeDirRaw: string, agentDirRaw: string)
   return { composeDir: compose.normalized as string, agentDir: agent.normalized as string };
 }
 
+
+/** What the operator confirmed when replacing a pinned key. */
+interface PinReplacement {
+  /** The new key the operator approved. */
+  fingerprint: string | null;
+  /** The pin the operator saw being replaced. */
+  reviewedPin: string | null;
+}
+
+/**
+ * A replacement is confirmed only for the key the operator approved and only
+ * against the pin they reviewed: a confirmation for "B replaces A" says
+ * nothing about a pin that has since become C.
+ */
+function confirmsReplacementOf(
+  currentPin: string,
+  expectedFingerprint: string | null,
+  replacement: PinReplacement,
+): boolean {
+  return replacement.fingerprint !== null
+    && replacement.fingerprint === expectedFingerprint
+    && replacement.reviewedPin === currentPin;
+}
 
 /** Mount points from a completed fstab probe; null when the probe did not complete. */
 function fstabMountPoints(results: SshCommandResult[]): string[] | null {
@@ -292,7 +321,10 @@ export class NodeBootstrapService {
       input.agentDir ?? DEFAULT_AGENT_DIR,
     );
     const expectedFingerprint = input.expectedFingerprint?.trim() || null;
-    const replacePinnedFingerprint = input.replacePinnedFingerprint?.trim() || null;
+    const replacement = {
+      fingerprint: input.replacePinnedFingerprint?.trim() || null,
+      reviewedPin: input.reviewedPinnedFingerprint?.trim() || null,
+    };
     const hubCheck = validateHubUrl(context.hubUrl);
     if (!hubCheck.ok) {
       throw new BootstrapError(
@@ -314,7 +346,7 @@ export class NodeBootstrapService {
     // never pass validation against a stale snapshot and overwrite a newer pin.
     const results = await this.withTargetLock(targetInput.host, targetInput.port, async () => {
       pin = this.deps.db.getNodeBootstrapTrust(targetInput.host, targetInput.port);
-      this.assertPinnedTrust(targetInput, pin, expectedFingerprint, replacePinnedFingerprint, context.audit);
+      this.assertPinnedTrust(targetInput, pin, expectedFingerprint, replacement, context.audit);
 
       const addresses = await this.resolveOrThrow(targetInput.host, deadline, context.signal, hubHostOf(context.hubUrl));
       dialed = addresses[0];
@@ -353,7 +385,7 @@ export class NodeBootstrapService {
             context.audit,
             pin,
             expectedFingerprint,
-            replacePinnedFingerprint,
+            replacement,
           );
           return probeResults;
         } catch (error: unknown) {
@@ -556,11 +588,11 @@ export class NodeBootstrapService {
     target: BootstrapTargetInput,
     pin: NodeBootstrapTrust | undefined,
     expectedFingerprint: string | null,
-    replacePinnedFingerprint: string | null,
+    replacement: PinReplacement,
     audit: AuditContext,
   ): void {
     if (pin) {
-      const replaced = replacePinnedFingerprint !== null && replacePinnedFingerprint === expectedFingerprint;
+      const replaced = confirmsReplacementOf(pin.fingerprint, expectedFingerprint, replacement);
       if (!expectedFingerprint || (pin.fingerprint !== expectedFingerprint && !replaced)) {
         this.recordAudit(audit, 'bootstrap.trust.mismatch', {
           target: target.targetName,
@@ -596,13 +628,13 @@ export class NodeBootstrapService {
     context: AuditContext,
     initialPin: NodeBootstrapTrust | undefined,
     expectedFingerprint: string | null,
-    replacePinnedFingerprint: string | null,
+    replacement: PinReplacement,
   ): void {
     if (!hostKey.fingerprint) return;
     const current = this.deps.db.getNodeBootstrapTrust(target.host, target.port);
     const pinned = current?.fingerprint ?? null;
     const pinChanged = pinned !== (initialPin?.fingerprint ?? null);
-    const replaced = replacePinnedFingerprint !== null && replacePinnedFingerprint === expectedFingerprint;
+    const replaced = pinned !== null && confirmsReplacementOf(pinned, expectedFingerprint, replacement);
     const keyChanged = pinned !== null && pinned !== hostKey.fingerprint && !replaced;
     if (pinChanged || keyChanged) {
       this.recordAudit(context, 'bootstrap.trust.mismatch', {

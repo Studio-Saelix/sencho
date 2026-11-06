@@ -1439,6 +1439,7 @@ export class DatabaseService {
         this.migrateStackAlertServiceScope();
         this.migrateGitOpsSourcePolicy();
         this.migrateRecoverySchema();
+        this.migrateNodeBootstrapTrustHostCase();
 
         // Reset the cache once at end of constructor in case any migration
         // populated it via getGlobalSettings() and a subsequent migration
@@ -6485,10 +6486,51 @@ stmt.run('gitops_schema_version', '1');
 
     // --- Node bootstrap trust pins ---
 
+    // The host column holds the lower-case spelling: DNS names are
+    // case-insensitive, so one server must never hold two pins. The accessors
+    // fold their input so a caller cannot reach a case variant of a pin.
+
     public getNodeBootstrapTrust(host: string, port: number): NodeBootstrapTrust | undefined {
         return this.db.prepare(
             'SELECT host, port, fingerprint, algorithm, approved_by, approved_at, last_seen_at FROM node_bootstrap_trust WHERE host = ? AND port = ?'
-        ).get(host, port) as NodeBootstrapTrust | undefined;
+        ).get(host.toLowerCase(), port) as NodeBootstrapTrust | undefined;
+    }
+
+    /**
+     * Fold pins stored under a mixed-case host into the lower-case row. Two
+     * spellings of one host that hold different keys are conflicting decisions:
+     * the most recently approved pin is kept (a changed-key check then reports
+     * the other key as a change) and the conflict is logged, never dropped
+     * without a trace. Idempotent.
+     */
+    private migrateNodeBootstrapTrustHostCase(): void {
+        const rows = this.db.prepare(
+            'SELECT host, port, fingerprint, algorithm, approved_by, approved_at, last_seen_at FROM node_bootstrap_trust ORDER BY approved_at DESC, last_seen_at DESC, host'
+        ).all() as NodeBootstrapTrust[];
+        if (!rows.some((row) => row.host !== row.host.toLowerCase())) return;
+        const remove = this.db.prepare('DELETE FROM node_bootstrap_trust WHERE host = ? AND port = ?');
+        const insert = this.db.prepare(
+            `INSERT INTO node_bootstrap_trust (host, port, fingerprint, algorithm, approved_by, approved_at, last_seen_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?)`
+        );
+        this.db.transaction(() => {
+            const kept = new Map<string, NodeBootstrapTrust>();
+            for (const row of rows) {
+                const key = `${row.host.toLowerCase()}:${row.port}`;
+                const winner = kept.get(key);
+                if (!winner) {
+                    kept.set(key, row);
+                } else if (winner.fingerprint !== row.fingerprint) {
+                    console.warn(
+                        `[Bootstrap] Conflicting host key pins for ${sanitizeForLog(key)}: kept ${sanitizeForLog(winner.fingerprint)}, dropped ${sanitizeForLog(row.fingerprint)} (older approval).`,
+                    );
+                }
+            }
+            for (const row of rows) remove.run(row.host, row.port);
+            for (const row of kept.values()) {
+                insert.run(row.host.toLowerCase(), row.port, row.fingerprint, row.algorithm, row.approved_by, row.approved_at, row.last_seen_at);
+            }
+        })();
     }
 
     public upsertNodeBootstrapTrust(record: NodeBootstrapTrust): void {
@@ -6502,7 +6544,7 @@ stmt.run('gitops_schema_version', '1');
                 approved_at = excluded.approved_at,
                 last_seen_at = excluded.last_seen_at`
         ).run(
-            record.host,
+            record.host.toLowerCase(),
             record.port,
             record.fingerprint,
             record.algorithm,

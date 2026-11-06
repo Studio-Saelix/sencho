@@ -1,9 +1,10 @@
-import { describe, it, expect, afterEach } from 'vitest';
+import { describe, it, expect, afterEach, vi } from 'vitest';
 import crypto from 'crypto';
 import net from 'net';
-import { Server, utils } from 'ssh2';
+import { Client, Server, utils } from 'ssh2';
 import {
   SshProbeClient,
+  type SshCommand,
   SshTransportError,
   hostKeyObservation,
   parsePrivateKey,
@@ -527,5 +528,78 @@ describe('bootstrap SSH transport deadlines and byte budgets', () => {
       {},
     );
     expect(results[0].stdout).toBe('one\0two\0');
+  });
+});
+
+describe('bootstrap SSH transport teardown', () => {
+  /**
+   * ssh2's end() only half-closes the socket, so a peer that never answers the
+   * disconnect keeps the connection open after the request returned. The check
+   * therefore reads the client socket the moment the result is delivered, before
+   * any close handshake could have finished.
+   */
+  function captureClients(): Array<{ _sock?: net.Socket }> {
+    const clients: Array<{ _sock?: net.Socket }> = [];
+    const connect = Client.prototype.connect;
+    vi.spyOn(Client.prototype, 'connect').mockImplementation(function (this: Client, config) {
+      clients.push(this as unknown as { _sock?: net.Socket });
+      return connect.call(this, config);
+    });
+    return clients;
+  }
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  async function runAndExpectTornDown(
+    options: FixtureOptions,
+    commands: SshCommand[],
+    run: { perCommandMs: number; totalMs: number },
+  ) {
+    const clients = captureClients();
+    const fixture = await startServer(options);
+    const results = await client.runCommands(
+      { host: 'fixture.local', address: '127.0.0.1', port: fixture.port, username: 'ubuntu', privateKey: USER_KEY },
+      commands,
+      run,
+    );
+    const sessions = clients.filter((entry) => entry._sock);
+    expect(sessions).toHaveLength(1);
+    expect(sessions[0]._sock?.destroyed).toBe(true);
+    return results;
+  }
+
+  it('destroys the connection when the catalog completes', async () => {
+    const results = await runAndExpectTornDown(
+      { responses: { 'uname -m': 'x86_64\n' } },
+      [{ id: 'uname', command: 'uname -m' }],
+      { perCommandMs: 1_000, totalMs: 5_000 },
+    );
+    expect(results[0].exitCode).toBe(0);
+  });
+
+  it('destroys the connection when the session byte budget was exhausted', async () => {
+    const commands = Array.from({ length: 10 }, (_, index) => ({ id: `big-${index}`, command: `cat file-${index}` }));
+    const results = await runAndExpectTornDown({ largeOutput: true }, commands, { perCommandMs: 2_000, totalMs: 20_000 });
+    expect(results[9].error).toBe('OUTPUT_CAP');
+  });
+
+  it('destroys the connection after a per-command timeout', async () => {
+    const results = await runAndExpectTornDown(
+      { hangCommand: 'sleep' },
+      [{ id: 'hang', command: 'sleep 60' }, { id: 'after', command: 'uname -m' }],
+      { perCommandMs: 100, totalMs: 5_000 },
+    );
+    expect(results[0]).toMatchObject({ timedOut: true, error: 'COMMAND_TIMEOUT' });
+  });
+
+  it('destroys the connection after a command whose exec acknowledgement never arrives', async () => {
+    const results = await runAndExpectTornDown(
+      { withholdExec: 'sleep' },
+      [{ id: 'hang', command: 'sleep 60' }, { id: 'after', command: 'uname -m' }],
+      { perCommandMs: 100, totalMs: 5_000 },
+    );
+    expect(results[0]).toMatchObject({ timedOut: true, error: 'COMMAND_TIMEOUT' });
   });
 });

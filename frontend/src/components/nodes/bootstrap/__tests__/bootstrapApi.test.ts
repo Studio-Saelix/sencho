@@ -66,6 +66,7 @@ describe('bootstrapApi', () => {
       passphrase: null,
       expectedFingerprint: 'SHA256:abc',
       replacePinnedFingerprint: null,
+      reviewedPinnedFingerprint: null,
       targetName: 'media-server',
       composeDir: '/etc/stacks',
       agentDir: '/opt/sencho-agent',
@@ -80,6 +81,7 @@ describe('bootstrapApi', () => {
         passphrase: null,
         expectedFingerprint: 'SHA256:abc',
         replacePinnedFingerprint: null,
+        reviewedPinnedFingerprint: null,
         targetName: 'media-server',
         composeDir: '/etc/stacks',
         agentDir: '/opt/sencho-agent',
@@ -99,6 +101,7 @@ describe('bootstrapApi', () => {
       passphrase: 'pass',
       expectedFingerprint: 'SHA256:abc',
       replacePinnedFingerprint: 'SHA256:def',
+      reviewedPinnedFingerprint: 'SHA256:old',
       targetName: 'media-server',
       composeDir: '/srv/stacks',
       agentDir: '/srv/agent',
@@ -108,5 +111,6 @@ describe('bootstrapApi', () => {
     expect(body.composeDir).toBe('/srv/stacks');
     expect(body.agentDir).toBe('/srv/agent');
     expect(body.replacePinnedFingerprint).toBe('SHA256:def');
+    expect(body.reviewedPinnedFingerprint).toBe('SHA256:old');
   });
 });

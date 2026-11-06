@@ -38,6 +38,11 @@ export class TargetValidationError extends Error {
 const HOSTNAME_PATTERN = /^(?=.{1,253}$)[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?(?:\.[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?)*$/;
 const USERNAME_PATTERN = /^[a-z_][a-z0-9_-]{0,31}$/;
 
+/**
+ * The canonical target identity. DNS names are case-insensitive, so the
+ * lower-case spelling is the one used for trust pins and the per-target lock;
+ * IPv4 literals have no case variant.
+ */
 export function validateHost(raw: unknown): string {
   const host = typeof raw === 'string' ? raw.trim() : '';
   if (!host) throw new TargetValidationError('host', 'Host is required.');
@@ -47,7 +52,7 @@ export function validateHost(raw: unknown): string {
   if (net.isIP(host) !== 4 && !HOSTNAME_PATTERN.test(host)) {
     throw new TargetValidationError('host', 'Host must be a DNS name or an IPv4 address.');
   }
-  return host;
+  return host.toLowerCase();
 }
 
 export function validatePort(raw: unknown): number {

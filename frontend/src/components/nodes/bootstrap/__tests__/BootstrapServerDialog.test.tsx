@@ -189,9 +189,11 @@ describe('BootstrapServerDialog preflight pin mismatch', () => {
     expect(run).toBeEnabled();
     await user.click(run);
     await waitFor(() => expect(runBootstrapPreflight).toHaveBeenCalledTimes(2));
+    // The confirmation names the pin the server reported as current, not the stale scan.
     expect(vi.mocked(runBootstrapPreflight).mock.calls[1][0]).toMatchObject({
       expectedFingerprint: CHANGED_KEY.fingerprint,
       replacePinnedFingerprint: CHANGED_KEY.fingerprint,
+      reviewedPinnedFingerprint: 'SHA256:pinnedchanged0000000000000000000000000',
     });
   });
 });
@@ -216,6 +218,7 @@ describe('BootstrapServerDialog changed host key', () => {
     expect(vi.mocked(runBootstrapPreflight).mock.calls[0][0]).toMatchObject({
       expectedFingerprint: CHANGED_KEY.fingerprint,
       replacePinnedFingerprint: CHANGED_KEY.fingerprint,
+      reviewedPinnedFingerprint: CHANGED_KEY.pinnedFingerprint,
     });
   });
 });

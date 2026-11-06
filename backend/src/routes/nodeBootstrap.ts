@@ -35,6 +35,7 @@ const preflightSchema = z.object({
   passphrase: z.string().nullable().optional(),
   expectedFingerprint: z.string().nullable().optional(),
   replacePinnedFingerprint: z.string().nullable().optional(),
+  reviewedPinnedFingerprint: z.string().nullable().optional(),
   targetName: z.string(),
   composeDir: z.string().optional(),
   agentDir: z.string().optional(),

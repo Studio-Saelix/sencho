@@ -437,6 +437,31 @@ describe('bootstrap routes: preflight', () => {
     expect(requestArg.agentDir).toBeUndefined();
     expect(contextArg.hubUrl).toEqual(expect.any(String));
   });
+
+  it('forwards the reviewed pin with the replacement confirmation instead of stripping it', async () => {
+    const spy = vi.spyOn(NodeBootstrapService.getInstance(), 'preflight').mockRejectedValue(
+      new BootstrapError(409, 'HOST_KEY_MISMATCH', 'mismatch', { details: { pinnedFingerprint: 'SHA256:current' } }),
+    );
+    const res = await request(app)
+      .post('/api/nodes/bootstrap/preflight')
+      .set('Authorization', adminAuth)
+      .send({
+        host: 'server.example.com',
+        username: 'ubuntu',
+        privateKey: 'key',
+        targetName: 'media-server',
+        expectedFingerprint: 'SHA256:live',
+        replacePinnedFingerprint: 'SHA256:live',
+        reviewedPinnedFingerprint: 'SHA256:reviewed',
+      });
+    expect(spy.mock.calls[0][0]).toMatchObject({
+      expectedFingerprint: 'SHA256:live',
+      replacePinnedFingerprint: 'SHA256:live',
+      reviewedPinnedFingerprint: 'SHA256:reviewed',
+    });
+    expect(res.status).toBe(409);
+    expect(res.body).toMatchObject({ code: 'HOST_KEY_MISMATCH', pinnedFingerprint: 'SHA256:current' });
+  });
 });
 
 describe('bootstrap service orchestration', () => {
@@ -518,11 +543,32 @@ describe('bootstrap service orchestration', () => {
         host: 'replace.example.com',
         expectedFingerprint: 'SHA256:fixturefingerprint000000000000000000000000',
         replacePinnedFingerprint: 'SHA256:fixturefingerprint000000000000000000000000',
+        reviewedPinnedFingerprint: 'SHA256:pinned',
       },
       { hubUrl: 'https://sencho.example.com', audit },
     );
     expect(result.blocked).toBe(false);
     expect(db.getNodeBootstrapTrust('replace.example.com', 22)?.fingerprint).toBe('SHA256:fixturefingerprint000000000000000000000000');
+  });
+
+  it('refuses a replacement that does not name the pin the operator reviewed', async () => {
+    const db = DatabaseService.getInstance();
+    const host = 'unreviewed.example.com';
+    db.upsertNodeBootstrapTrust({
+      host, port: 22, fingerprint: 'SHA256:pinned', algorithm: 'ssh-ed25519', approved_by: 'admin', approved_at: 1, last_seen_at: 1,
+    });
+    const transport = new FakeTransport();
+    await expect(service(transport).preflight(
+      {
+        ...request,
+        host,
+        expectedFingerprint: 'SHA256:fixturefingerprint000000000000000000000000',
+        replacePinnedFingerprint: 'SHA256:fixturefingerprint000000000000000000000000',
+      },
+      { hubUrl: 'https://sencho.example.com', audit },
+    )).rejects.toMatchObject({ code: 'HOST_KEY_MISMATCH' });
+    expect(transport.commands).toHaveLength(0);
+    expect(db.getNodeBootstrapTrust(host, 22)?.fingerprint).toBe('SHA256:pinned');
   });
 
   it('does not fall through to a second address when one host key is rejected', async () => {
@@ -962,12 +1008,81 @@ describe('bootstrap service failure handling', () => {
       },
     };
     await expect(makeService(transport).preflight(
-      base(host, { expectedFingerprint: observed, replacePinnedFingerprint: observed }),
+      base(host, {
+        expectedFingerprint: observed,
+        replacePinnedFingerprint: observed,
+        reviewedPinnedFingerprint: 'SHA256:original0000000000000000000000000000000',
+      }),
       { hubUrl: hub, audit },
     )).rejects.toMatchObject({ code: 'HOST_KEY_MISMATCH' });
     expect(db.getNodeBootstrapTrust(host, 22)?.fingerprint).toBe('SHA256:interposed000000000000000000000000000000');
     const { entries } = db.getAuditLogs({ search: host, limit: 50 });
     expect(entries.some((entry) => entry.summary.startsWith('bootstrap.trust.replaced'))).toBe(false);
+  });
+
+  it('rejects a stale replacement when the pin changed after the scan and before the preflight', async () => {
+    // Scan showed A (pinned) and B (live). Another preflight then re-pinned C.
+    // The operator's confirmation is "B replaces A", which says nothing about C.
+    const db = DatabaseService.getInstance();
+    const host = 'stale-confirm.example.com';
+    const reviewedPin = 'SHA256:pinnedA00000000000000000000000000000000';
+    const newerPin = 'SHA256:pinnedC00000000000000000000000000000000';
+    const live = 'SHA256:observedB0000000000000000000000000000000';
+    pin(host, newerPin);
+    const transport = new FakeTransport(probeOutputs(), live);
+    await expect(makeService(transport).preflight(
+      base(host, { expectedFingerprint: live, replacePinnedFingerprint: live, reviewedPinnedFingerprint: reviewedPin }),
+      { hubUrl: hub, audit },
+    )).rejects.toMatchObject({
+      status: 409,
+      code: 'HOST_KEY_MISMATCH',
+      details: { pinnedFingerprint: newerPin, expectedFingerprint: live },
+    });
+    expect(transport.commands).toHaveLength(0);
+    expect(db.getNodeBootstrapTrust(host, 22)?.fingerprint).toBe(newerPin);
+    const { entries } = db.getAuditLogs({ search: host, limit: 50 });
+    expect(entries.some((entry) => entry.summary.startsWith('bootstrap.trust.mismatch') && entry.summary.includes(`pinned=${newerPin}`))).toBe(true);
+    expect(entries.some((entry) => entry.summary.startsWith('bootstrap.trust.replaced'))).toBe(false);
+  });
+
+  it('replaces the pin when the confirmation names the current pin, and audits the replacement', async () => {
+    const db = DatabaseService.getInstance();
+    const host = 'current-confirm.example.com';
+    const current = 'SHA256:pinnedA00000000000000000000000000000000';
+    const live = 'SHA256:observedB0000000000000000000000000000000';
+    pin(host, current);
+    const result = await makeService(new FakeTransport(probeOutputs(), live)).preflight(
+      base(host, { expectedFingerprint: live, replacePinnedFingerprint: live, reviewedPinnedFingerprint: current }),
+      { hubUrl: hub, audit },
+    );
+    expect(result.blocked).toBe(false);
+    expect(db.getNodeBootstrapTrust(host, 22)?.fingerprint).toBe(live);
+    const { entries } = db.getAuditLogs({ search: host, limit: 50 });
+    expect(entries.some((entry) => entry.summary.startsWith('bootstrap.trust.replaced') && entry.summary.includes(`previous=${current}`))).toBe(true);
+  });
+
+  it('ignores a reviewed pin when no replacement fingerprint was confirmed', async () => {
+    const db = DatabaseService.getInstance();
+    const host = 'reviewed-only.example.com';
+    const current = 'SHA256:pinnedA00000000000000000000000000000000';
+    pin(host, current);
+    await expect(makeService(new FakeTransport()).preflight(
+      base(host, { reviewedPinnedFingerprint: current }),
+      { hubUrl: hub, audit },
+    )).rejects.toMatchObject({ code: 'HOST_KEY_MISMATCH' });
+    expect(db.getNodeBootstrapTrust(host, 22)?.fingerprint).toBe(current);
+  });
+
+  it('refuses a replacement that confirms a different key than the one expected', async () => {
+    const db = DatabaseService.getInstance();
+    const host = 'mismatched-confirm.example.com';
+    const current = 'SHA256:pinnedA00000000000000000000000000000000';
+    pin(host, current);
+    await expect(makeService(new FakeTransport()).preflight(
+      base(host, { replacePinnedFingerprint: 'SHA256:somethingelse000000000000000000000000000', reviewedPinnedFingerprint: current }),
+      { hubUrl: hub, audit },
+    )).rejects.toMatchObject({ code: 'HOST_KEY_MISMATCH' });
+    expect(db.getNodeBootstrapTrust(host, 22)?.fingerprint).toBe(current);
   });
 
   it('blocks and issues no plan when inventories and the Docker CLI probe fail', async () => {
@@ -1389,6 +1504,147 @@ describe('bootstrap routes: client disconnect', () => {
     pending.abort();
     await done;
     await vi.waitFor(() => expect(signal?.aborted).toBe(true));
+  });
+});
+
+describe('bootstrap service target identity: DNS names are case-insensitive', () => {
+  const audit = { username: 'admin', ip: '127.0.0.1', method: 'POST', path: '/api/nodes/bootstrap/preflight' };
+  const hub = 'https://sencho.example.com';
+  const key = '-----BEGIN OPENSSH PRIVATE KEY-----\nnot-a-real-key\n-----END OPENSSH PRIVATE KEY-----';
+  const pinnedKey = 'SHA256:pinnedA00000000000000000000000000000000';
+  const liveKey = 'SHA256:observedB0000000000000000000000000000000';
+  const db = () => DatabaseService.getInstance();
+  const base = (host: string, extra: Partial<BootstrapPreflightRequest> = {}): BootstrapPreflightRequest => ({
+    host,
+    port: 22,
+    username: 'ubuntu',
+    privateKey: key,
+    expectedFingerprint: liveKey,
+    targetName: 'case-server',
+    composeDir: '/opt/docker/sencho',
+    agentDir: '/opt/sencho-agent',
+    ...extra,
+  });
+  const makeService = (transport: BootstrapTransport) => new NodeBootstrapService({
+    transport,
+    db: db(),
+    now: () => 1_762_300_000_000,
+    resolveAddresses: async () => ['192.168.1.50'],
+    caPem: () => null,
+  });
+  const pin = (host: string, fingerprint: string) => db().upsertNodeBootstrapTrust({
+    host, port: 22, fingerprint, algorithm: 'ssh-ed25519', approved_by: 'admin', approved_at: 1, last_seen_at: 1,
+  });
+
+  it('finds the lower-case pin from a mixed-case host-key scan and reports the change', async () => {
+    pin('scan-case.example.com', pinnedKey);
+    const result = await makeService(new FakeTransport(probeOutputs(), liveKey))
+      .captureHostKey({ host: 'Scan-Case.Example.COM' });
+    expect(result.host).toBe('scan-case.example.com');
+    expect(result.trust).toBe('changed');
+    expect(result.pinnedFingerprint).toBe(pinnedKey);
+  });
+
+  it('rejects a mixed-case preflight against the lower-case pin and creates no second pin', async () => {
+    pin('pf-case.example.com', pinnedKey);
+    const transport = new FakeTransport(probeOutputs(), liveKey);
+    await expect(makeService(transport).preflight(
+      base('PF-Case.Example.com'),
+      { hubUrl: hub, audit },
+    )).rejects.toMatchObject({ code: 'HOST_KEY_MISMATCH', details: { pinnedFingerprint: pinnedKey } });
+    expect(transport.commands).toHaveLength(0);
+    expect(db().getNodeBootstrapTrust('pf-case.example.com', 22)?.fingerprint).toBe(pinnedKey);
+    const rows = db().getDb().prepare('SELECT host FROM node_bootstrap_trust WHERE lower(host) = ?').all('pf-case.example.com');
+    expect(rows).toEqual([{ host: 'pf-case.example.com' }]);
+    const { entries } = db().getAuditLogs({ search: 'pf-case.example.com', limit: 50 });
+    expect(entries.some((entry) => entry.summary.startsWith('bootstrap.trust.mismatch'))).toBe(true);
+  });
+
+  it('stores a first pin under the canonical spelling', async () => {
+    await makeService(new FakeTransport(probeOutputs(), liveKey)).preflight(
+      base('First-Pin.Example.COM'),
+      { hubUrl: hub, audit },
+    );
+    expect(db().getDb().prepare('SELECT host FROM node_bootstrap_trust WHERE lower(host) = ?').all('first-pin.example.com'))
+      .toEqual([{ host: 'first-pin.example.com' }]);
+    expect(db().getNodeBootstrapTrust('FIRST-PIN.example.com', 22)?.fingerprint).toBe(liveKey);
+  });
+
+  it('shares one target lock across case variants and releases it afterwards', async () => {
+    let release: (() => void) | null = null;
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    let calls = 0;
+    const svc = new NodeBootstrapService({
+      transport: new FakeTransport(probeOutputs(), liveKey),
+      db: db(),
+      now: () => 1_762_300_000_000,
+      resolveAddresses: async () => {
+        calls += 1;
+        if (calls === 1) await gate;
+        return ['192.168.1.50'];
+      },
+      caPem: () => null,
+    });
+    const first = svc.preflight(base('lock-case.example.com'), { hubUrl: hub, audit });
+    await new Promise((resolve) => setImmediate(resolve));
+    await expect(svc.preflight(base('LOCK-Case.example.com'), { hubUrl: hub, audit }))
+      .rejects.toMatchObject({ code: 'BOOTSTRAP_IN_PROGRESS' });
+    await expect(svc.captureHostKey({ host: 'Lock-CASE.example.com' }))
+      .rejects.toMatchObject({ code: 'BOOTSTRAP_IN_PROGRESS' });
+    release!();
+    await first;
+    await expect(svc.preflight(base('LOCK-case.example.com'), { hubUrl: hub, audit })).resolves.toBeDefined();
+  });
+
+  it('folds the host in the storage accessors, so no caller reaches a case variant', () => {
+    pin('Accessor.Example.COM', pinnedKey);
+    expect(db().getNodeBootstrapTrust('accessor.example.com', 22)?.fingerprint).toBe(pinnedKey);
+    expect(db().getNodeBootstrapTrust('ACCESSOR.example.com', 22)?.host).toBe('accessor.example.com');
+    pin('ACCESSOR.example.com', liveKey);
+    expect(db().getDb().prepare('SELECT fingerprint FROM node_bootstrap_trust WHERE lower(host) = ?').all('accessor.example.com'))
+      .toEqual([{ fingerprint: liveKey }]);
+  });
+
+  describe('stored case variants from an earlier build', () => {
+    const insertRaw = (host: string, fingerprint: string, approvedAt: number) => db().getDb().prepare(
+      `INSERT INTO node_bootstrap_trust (host, port, fingerprint, algorithm, approved_by, approved_at, last_seen_at)
+       VALUES (?, 22, ?, 'ssh-ed25519', 'admin', ?, ?)`,
+    ).run(host, fingerprint, approvedAt, approvedAt);
+    const rowsFor = (lowerHost: string) => db().getDb().prepare(
+      'SELECT host, fingerprint FROM node_bootstrap_trust WHERE lower(host) = ? ORDER BY host',
+    ).all(lowerHost);
+    const migrate = () => (db() as unknown as { migrateNodeBootstrapTrustHostCase: () => void }).migrateNodeBootstrapTrustHostCase();
+
+    it('renames a lone mixed-case pin to the lower-case host and keeps the decision', () => {
+      insertRaw('Legacy-One.Example.com', pinnedKey, 5);
+      migrate();
+      expect(rowsFor('legacy-one.example.com')).toEqual([{ host: 'legacy-one.example.com', fingerprint: pinnedKey }]);
+      expect(db().getNodeBootstrapTrust('legacy-one.example.com', 22)?.approved_at).toBe(5);
+    });
+
+    it('collapses duplicate spellings of one key into one pin', () => {
+      insertRaw('legacy-same.example.com', pinnedKey, 5);
+      insertRaw('LEGACY-same.example.com', pinnedKey, 9);
+      migrate();
+      expect(rowsFor('legacy-same.example.com')).toEqual([{ host: 'legacy-same.example.com', fingerprint: pinnedKey }]);
+    });
+
+    it('keeps the most recently approved key when spellings disagree, and says so in the log', () => {
+      const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+      insertRaw('legacy-conflict.example.com', pinnedKey, 5);
+      insertRaw('Legacy-Conflict.example.com', liveKey, 9);
+      migrate();
+      expect(rowsFor('legacy-conflict.example.com')).toEqual([{ host: 'legacy-conflict.example.com', fingerprint: liveKey }]);
+      expect(warn.mock.calls.some((call) => String(call[0]).includes('Conflicting host key pins')
+        && String(call[0]).includes(pinnedKey))).toBe(true);
+    });
+
+    it('is a no-op once every host is lower case', () => {
+      insertRaw('legacy-idem.example.com', pinnedKey, 5);
+      migrate();
+      migrate();
+      expect(rowsFor('legacy-idem.example.com')).toHaveLength(1);
+    });
   });
 });
 

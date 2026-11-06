@@ -238,7 +238,50 @@ describe('useNodeBootstrap', () => {
     await act(async () => { hook.current.setReplacing(true); });
     await act(async () => { await hook.current.runPreflight(); });
     expect(api.preflight).toHaveBeenCalledWith(
-      expect.objectContaining({ replacePinnedFingerprint: 'SHA256:abc' }),
+      expect.objectContaining({ replacePinnedFingerprint: 'SHA256:abc', reviewedPinnedFingerprint: 'SHA256:old' }),
+      expect.anything(),
+    );
+  });
+
+  it('sends no replacement confirmation, and no reviewed pin, for a trusted or first-seen key', async () => {
+    const api = fakeApi();
+    const { result: hook } = renderHook(() => useNodeBootstrap({ open: true, api }));
+    await act(async () => { fillTarget(hook.current); });
+    await act(async () => { await hook.current.checkHostKey(); });
+    await act(async () => { hook.current.setTrusted(true); });
+    await act(async () => { await hook.current.runPreflight(); });
+    expect(api.preflight).toHaveBeenCalledWith(
+      expect.objectContaining({ replacePinnedFingerprint: null, reviewedPinnedFingerprint: null }),
+      expect.anything(),
+    );
+  });
+
+  it('names the pin the server reported as current when the replacement is confirmed after a mismatch', async () => {
+    const api = fakeApi();
+    api.hostKey.mockResolvedValue({ ...HOST_KEY, trust: 'changed', pinnedFingerprint: 'SHA256:scanned' });
+    api.preflight.mockRejectedValueOnce(new BootstrapApiError(
+      'The host key does not match the pinned key.',
+      'HOST_KEY_MISMATCH',
+      null,
+      { pinnedFingerprint: 'SHA256:newer', expectedFingerprint: 'SHA256:abc' },
+    ));
+    const { result: hook } = renderHook(() => useNodeBootstrap({ open: true, api }));
+    await act(async () => { fillTarget(hook.current); });
+    await act(async () => { await hook.current.checkHostKey(); });
+    await act(async () => { hook.current.setReplacing(true); });
+    await act(async () => { await hook.current.runPreflight(); });
+    expect(api.preflight).toHaveBeenNthCalledWith(
+      1,
+      expect.objectContaining({ reviewedPinnedFingerprint: 'SHA256:scanned' }),
+      expect.anything(),
+    );
+    // The stale confirmation is spent: the operator must review the newer pin.
+    expect(hook.current.replacing).toBe(false);
+    expect(hook.current.hostKey).toMatchObject({ trust: 'changed', pinnedFingerprint: 'SHA256:newer' });
+    await act(async () => { await hook.current.runPreflight(true); });
+    expect(api.preflight).toHaveBeenNthCalledWith(
+      2,
+      expect.objectContaining({ replacePinnedFingerprint: 'SHA256:abc', reviewedPinnedFingerprint: 'SHA256:newer' }),
       expect.anything(),
     );
   });
@@ -385,5 +428,133 @@ describe('useNodeBootstrap stale responses and request ownership', () => {
     await act(async () => { await hook.current.runPreflight(); });
     expect(hook.current.hostKey).toMatchObject({ trust: 'trusted', pinnedFingerprint: 'SHA256:abc' });
     expect(hook.current.replacing).toBe(false);
+  });
+});
+
+describe('useNodeBootstrap preflight replies that land after the configuration changed', () => {
+  type Settle = { resolve: (value: BootstrapPreflightResult) => void; reject: (error: unknown) => void };
+  const EDITS = [
+    ['targetName', 'other-name', 'name'],
+    ['host', 'other.example.com', 'target'],
+    ['port', '2222', 'target'],
+    ['username', 'deploy', 'target'],
+    ['privateKey', '-----BEGIN OPENSSH PRIVATE KEY-----other', 'key'],
+    ['passphrase', 'secret', 'key'],
+    ['composeDir', '/srv/stacks', 'paths'],
+    ['agentDir', '/srv/agent', 'paths'],
+  ] as const;
+
+  function pendingApi() {
+    const settles: Settle[] = [];
+    const api = {
+      capabilities: vi.fn(async () => capabilities()),
+      hostKey: vi.fn(async () => ({ ...HOST_KEY, trust: 'trusted' as const, pinnedFingerprint: HOST_KEY.fingerprint })),
+      preflight: vi.fn(() => new Promise<BootstrapPreflightResult>((resolve, reject) => { settles.push({ resolve, reject }); })),
+    };
+    return { api, settles };
+  }
+
+  async function startPreflightThenGoBack(api: ReturnType<typeof pendingApi>['api']) {
+    const hook = renderHook(() => useNodeBootstrap({ open: true, api }));
+    await act(async () => { fillTarget(hook.result.current); });
+    await act(async () => { await hook.result.current.checkHostKey(); });
+    let pending: Promise<void> | null = null;
+    act(() => { pending = hook.result.current.runPreflight(); });
+    expect(hook.result.current.busy).toBe('preflight');
+    await act(async () => { hook.result.current.back(); });
+    expect(hook.result.current.step).toBe('target');
+    return { hook, pending: () => pending as Promise<void> };
+  }
+
+  it.each(EDITS)('ignores a successful reply that lands after %s was edited', async (field, value, reason) => {
+    const { api, settles } = pendingApi();
+    const { hook, pending } = await startPreflightThenGoBack(api);
+    await act(async () => { hook.result.current.setField(field, value); });
+    const before = { step: hook.result.current.step, hostKey: hook.result.current.hostKey };
+    await act(async () => { settles[0].resolve(result()); await pending(); });
+    expect(hook.result.current.result).toBeNull();
+    expect(hook.result.current.step).toBe(before.step);
+    expect(hook.result.current.step).toBe('target');
+    expect(hook.result.current.hostKey).toBe(before.hostKey);
+    expect(hook.result.current.invalidated).toBe(reason);
+    expect(hook.result.current.busy).toBeNull();
+    expect(hook.result.current.form[field]).toBe(value);
+  });
+
+  it.each(EDITS)('ignores a failed reply that lands after %s was edited', async (field, value, reason) => {
+    const { api, settles } = pendingApi();
+    const { hook, pending } = await startPreflightThenGoBack(api);
+    await act(async () => { hook.result.current.setField(field, value); });
+    const hostKey = hook.result.current.hostKey;
+    await act(async () => {
+      settles[0].reject(new BootstrapApiError('The preflight failed.', 'HOST_KEY_MISMATCH', null, { pinnedFingerprint: 'SHA256:other' }));
+      await pending();
+    });
+    expect(hook.result.current.error).toBeNull();
+    expect(hook.result.current.step).toBe('target');
+    expect(hook.result.current.hostKey).toBe(hostKey);
+    expect(hook.result.current.invalidated).toBe(reason);
+    expect(hook.result.current.busy).toBeNull();
+  });
+
+  it.each(['composeDir', 'privateKey'] as const)('keeps the banner and the step when a late reply follows a %s edit made from the preflight step', async (field) => {
+    const { api, settles } = pendingApi();
+    const hook = renderHook(() => useNodeBootstrap({ open: true, api }));
+    await act(async () => { fillTarget(hook.result.current); });
+    await act(async () => { await hook.result.current.checkHostKey(); });
+    let pending: Promise<void> | null = null;
+    act(() => { pending = hook.result.current.runPreflight(); });
+    await act(async () => { hook.result.current.setField(field, field === 'composeDir' ? '/srv/stacks' : 'new-key'); });
+    expect(hook.result.current.step).toBe('preflight');
+    expect(hook.result.current.busy).toBeNull();
+    await act(async () => { settles[0].resolve(result()); await pending; });
+    expect(hook.result.current.step).toBe('preflight');
+    expect(hook.result.current.result).toBeNull();
+    expect(hook.result.current.invalidated).not.toBeNull();
+  });
+
+  it('lets only the newest of two overlapping preflights apply, whichever settles first', async () => {
+    const { api, settles } = pendingApi();
+    const { hook, pending } = await startPreflightThenGoBack(api);
+    await act(async () => { hook.result.current.setField('composeDir', '/srv/stacks'); });
+    let second: Promise<void> | null = null;
+    act(() => { second = hook.result.current.runPreflight(); });
+    expect(settles).toHaveLength(2);
+    expect(hook.result.current.busy).toBe('preflight');
+    // The superseded request settling must not clear the newer request's busy flag or result.
+    await act(async () => { settles[0].resolve(result()); await pending(); });
+    expect(hook.result.current.busy).toBe('preflight');
+    expect(hook.result.current.result).toBeNull();
+    await act(async () => { settles[1].resolve(result()); await second; });
+    expect(hook.result.current.busy).toBeNull();
+    expect(hook.result.current.step).toBe('plan');
+    expect(hook.result.current.resultIsCurrent).toBe(true);
+    expect(hook.result.current.invalidated).toBeNull();
+  });
+
+  it('does not let a superseded reply that settles after the newer one replace its result', async () => {
+    const { api, settles } = pendingApi();
+    const { hook, pending } = await startPreflightThenGoBack(api);
+    await act(async () => { hook.result.current.setField('agentDir', '/srv/agent'); });
+    let second: Promise<void> | null = null;
+    act(() => { second = hook.result.current.runPreflight(); });
+    const newest = result(true);
+    await act(async () => { settles[1].resolve(newest); await second; });
+    expect(hook.result.current.result).toBe(newest);
+    await act(async () => { settles[0].resolve(result()); await pending(); });
+    expect(hook.result.current.result).toBe(newest);
+    expect(hook.result.current.step).toBe('preflight');
+  });
+
+  it('still applies a reply for the current configuration', async () => {
+    const { api, settles } = pendingApi();
+    const hook = renderHook(() => useNodeBootstrap({ open: true, api }));
+    await act(async () => { fillTarget(hook.result.current); });
+    await act(async () => { await hook.result.current.checkHostKey(); });
+    let pending: Promise<void> | null = null;
+    act(() => { pending = hook.result.current.runPreflight(); });
+    await act(async () => { settles[0].resolve(result()); await pending; });
+    expect(hook.result.current.step).toBe('plan');
+    expect(hook.result.current.busy).toBeNull();
   });
 });

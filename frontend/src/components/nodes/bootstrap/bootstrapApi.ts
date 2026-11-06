@@ -104,6 +104,8 @@ export interface PreflightInput {
   passphrase: string | null;
   expectedFingerprint: string;
   replacePinnedFingerprint: string | null;
+  /** The stored pin the operator saw being replaced; the server rejects the replacement if it is no longer current. */
+  reviewedPinnedFingerprint: string | null;
   targetName: string;
   composeDir: string;
   agentDir: string;
