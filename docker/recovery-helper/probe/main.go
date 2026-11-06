@@ -11,11 +11,12 @@
 //
 // Usage: sencho-recovery-probe <path> [--work-dirs]
 //
-// --work-dirs also lists the root entries whose names start with the restore work
-// directory prefix (a file counts as well as a directory, as it does for `swap
-// prepare`), so a preview can refuse a volume the next swap would refuse. It reads
-// and sorts the whole root listing before it caps the answer, so only the caller
-// that needs it asks.
+// --work-dirs also lists the root entries named like one of Sencho's restore work
+// directories (the prefix plus an intent UUID; a file counts as well as a
+// directory, as it does for `swap prepare`), so a preview can refuse a volume the
+// next swap would refuse. A name with the prefix and any other shape is user data
+// and is not listed. It reads and sorts the whole root listing before it caps the
+// answer, so only the caller that needs it asks.
 //
 //	sencho-recovery-probe swap <prepare|commit|status|rollback|cleanup> --root <path> --id <intent>
 //
