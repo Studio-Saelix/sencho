@@ -12,7 +12,7 @@ import { MeshDiagnosticsSheet } from './MeshDiagnosticsSheet';
 import { MeshActivitySheet } from './MeshActivitySheet';
 import { MeshTopologyGraph, type MeshGraphEdgeMode } from './MeshTopologyGraph';
 import { SegmentedControl } from '@/components/ui/segmented-control';
-import { FleetTabHeading, FleetEmptyState, FleetEmptyCard } from './FleetEmptyState';
+import { FleetEmptyState, FleetEmptyCard } from './FleetEmptyState';
 import { describeProbeFailure, fixActionLabel, type MeshFixAction } from './meshMessages';
 import { isMeshCascadeReachable } from './meshImpact';
 import type { MeshAlias, MeshDataPlaneStatus, MeshNodeStatus, MeshProbeResult } from '@/types/mesh';
@@ -176,10 +176,6 @@ export function RoutingTab({ canManageNode, canManageMembership }: {
     if (status.length === 0) {
         return (
             <div className="space-y-4">
-                <FleetTabHeading
-                    title="Routing"
-                    subtitle="Reach containers across nodes by hostname, no VPN required."
-                />
                 <FleetEmptyState>
                     <FleetEmptyCard
                         icon={ArrowLeftRight}

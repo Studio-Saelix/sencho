@@ -26,6 +26,15 @@ export function FleetTabHeading({ title, subtitle, action }: FleetTabHeadingProp
 }
 
 /**
+ * Action row for a Fleet tab. The Fleet masthead already names the page and the
+ * tab strip names the tab, so tab content carries only its own primary action,
+ * right-aligned, and no title block.
+ */
+export function FleetTabActions({ children }: { children: ReactNode }) {
+    return <div className="flex flex-wrap items-center justify-end gap-2">{children}</div>;
+}
+
+/**
  * Vertical-centering shell that floats an empty-state card in the middle of the
  * tab body, below the heading.
  */
