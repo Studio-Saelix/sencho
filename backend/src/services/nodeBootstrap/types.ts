@@ -129,7 +129,7 @@ export interface DockerPackage {
   name: DockerPackageName;
   installedVersion: string | null;
   candidateVersion: string | null;
-  /** Archives apt lists under the candidate version itself; empty when none is known. */
+  /** Archives apt lists under the candidate version itself; empty when none is known. The URI is redacted (`redactUri`), because facts are hashed and returned. */
   candidateSources?: Array<{ uri: string; release: string | null }>;
 }
 

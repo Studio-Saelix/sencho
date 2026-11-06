@@ -626,16 +626,30 @@ function suiteComponentProblem(suites: string[], components: string[]): string |
 const URI_SCHEME = /^[A-Za-z][A-Za-z0-9+.-]*:/;
 
 /**
- * A URI as a diagnostic or a stored fact may show it. A source URI can carry a
- * credential in its userinfo, query or path, so only the scheme and host are
- * kept, plus the path on Docker's own public host, which the official-repository
- * checks need.
+ * Whitespace JavaScript treats as a separator and apt does not (a no-break
+ * space pasted from a web page, a byte order mark from an editor): apt reads
+ * it as part of a word, so a line holding one is not read as apt reads it.
  */
-function redactUri(uri: string): string {
+const NON_APT_SPACE = /[\u0085\u00a0\u1680\u2000-\u200a\u2028\u2029\u202f\u205f\u3000\ufeff]/;
+
+/** URI schemes apt ships a method for; anything else in front of a colon may be part of a credential. */
+const APT_URI_SCHEME = /^(?:https?|ftp|file|cdrom|copy|rsh|ssh|tor\+https?|mirror(?:\+[a-z]+)?)$/i;
+
+/**
+ * A URI as a diagnostic or a stored fact may show it. A source URI can carry a
+ * credential in its userinfo, query or path, and a `#`, `/` or `?` inside the
+ * userinfo makes a URL parser read part of the credential as the host, so only
+ * what cannot hold one is shown: the official repository's own URI, or the
+ * scheme and host of a URI with no `@` in it, or just the scheme when it has one.
+ */
+export function redactUri(uri: string): string {
+  if (normalizeUri(uri) === OFFICIAL_DOCKER_URI) return OFFICIAL_DOCKER_URI;
+  const scheme = /^([A-Za-z][A-Za-z0-9+.-]*):/.exec(uri)?.[1];
+  if (!scheme || !APT_URI_SCHEME.test(scheme)) return '(unrecognized URI)';
+  if (uri.includes('@')) return `${scheme.toLowerCase()}: (host withheld)`;
   try {
     const url = new URL(uri);
-    const origin = url.host ? `${url.protocol}//${url.host}` : url.protocol;
-    return url.hostname.toLowerCase() === DOCKER_HOST ? `${origin}${url.pathname}` : origin;
+    return url.host ? `${url.protocol}//${url.host}` : url.protocol;
   } catch {
     return '(unparsable URI)';
   }
@@ -669,13 +683,13 @@ function matchAll(pattern: RegExp, text: string): RegExpExecArray[] | null {
 
 function parseListSource(content: string): ParsedSourceFile {
   const active = content.split('\n')
-    // A '#' that starts a word begins a comment, so a trailing comment is not part of the entry.
-    .map((text, index) => ({ number: index + 1, text: text.replace(/(^|\s)#.*$/, '').trim() }))
+    // apt starts a comment at any '#', inside a word as well, so what follows one is not part of the entry.
+    .map((text, index) => ({ number: index + 1, text: text.replace(/#.*$/, '').replace(/^[ \t\r]+|[ \t\r]+$/g, '') }))
     .filter((line) => line.text);
   const entries: AptSourceEntry[] = [];
   const invalid: string[] = [];
   for (const { number, text: line } of active) {
-    const head = /^(deb|deb-src)\s+(?:\[([^\]]*)\]\s+)?(.+)$/.exec(line);
+    const head = NON_APT_SPACE.test(line) ? null : /^(deb|deb-src)\s+(?:\[([^\]]*)\]\s+)?(.+)$/.exec(line);
     const optionMatches = head ? matchAll(LIST_OPTION, head[2] ?? '') : null;
     const words = head ? matchAll(APT_WORD, head[3]) : null;
     const [uri = '', suite = '', ...components] = (words ?? []).map((word) => unquote(word[1]));
@@ -726,26 +740,33 @@ function parseDeb822(content: string): { paragraphs: Deb822Stanza[]; unparsed: n
   };
   for (const [index, rawLine] of content.split('\n').entries()) {
     const number = index + 1;
-    if (!rawLine.trim()) {
+    if (/^[ \t\r]*$/.test(rawLine)) {
       close();
       continue;
     }
     if (rawLine.startsWith('#')) continue;
-    // An indented line continues the open field. With none open, an indented
-    // comment is a comment and anything else apt rejects, so it is not read as a field.
+    // With no field open an indented comment is a comment; with one open it continues the field.
+    if (!(current && lastKey) && /^[ \t]+#/.test(rawLine)) continue;
+    if (NON_APT_SPACE.test(rawLine)) {
+      unparsed.push(number);
+      continue;
+    }
+    // An indented line continues the open field; with none open apt rejects it,
+    // so it is not read as a field.
     if (/^\s/.test(rawLine)) {
       if (current && lastKey) current.fields[lastKey] = `${current.fields[lastKey]} ${rawLine.trim()}`;
-      else if (!/^\s+#/.test(rawLine)) unparsed.push(number);
+      else unparsed.push(number);
       continue;
     }
     // apt takes everything up to the colon as the field name, so a custom field
-    // such as `X+Note`, `X-Note/foo` or `X Note` is as good as `Types`.
+    // such as `X+Note`, `X-Note/foo` or `X Note` is as good as `Types`; only an
+    // empty name, or one that starts with whitespace, is not a field.
     const match = /^([^\s:][^:]*?)\s*:\s*(.*)$/.exec(rawLine.trim());
     if (!match) {
       unparsed.push(number);
       continue;
     }
-    current ??= { line: number, fields: {} };
+    current ??= { line: number, fields: Object.create(null) as Record<string, string> };
     lastKey = match[1].toLowerCase();
     current.fields[lastKey] = match[2];
   }
@@ -868,8 +889,9 @@ function checkBinaryEntry(entry: AptSourceEntry, codename: string, arch: string,
 /** An option one entry sets for a source (URI and suite), which apt requires every entry for that source to agree on. */
 interface SigningSetting {
   path: string;
+  /** The comparison key, built from the source text: never put it in a reason. */
   target: string;
-  /** The source as a diagnostic may name it: the host, with no suite or credential. */
+  /** The source as a diagnostic may name it (`redactUri`), with no suite or credential. */
   label: string;
   option: string;
   value: string;

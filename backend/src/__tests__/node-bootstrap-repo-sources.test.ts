@@ -11,6 +11,7 @@ import {
   parseAptPolicy,
   parseDockerRepo,
   parseRepoProbeOutput,
+  redactUri,
 } from '../services/nodeBootstrap/probes';
 import { buildBootstrapEvidence, repoVerified } from '../services/nodeBootstrap/evidence';
 import { buildBootstrapPlan, canonicalJson } from '../services/nodeBootstrap/planBuilder';
@@ -474,6 +475,13 @@ describe('sources outside docker.list and docker.sources', () => {
       ['a quoted URI with no scheme', 'deb "archive.ubuntu.com/ubuntu" noble main'],
       ['an option value in single quotes, which apt does not read as a quote', "deb [signed-by='/etc/apt/keyrings/one.gpg /etc/apt/keyrings/two.gpg'] http://archive.ubuntu.com/ubuntu noble main"],
       ['a quote that opens in the middle of an option value', 'deb [signed-by=/etc/apt/keyrings/one.gpg"two three"] http://archive.ubuntu.com/ubuntu noble main'],
+      // apt starts a comment at any '#', so what follows one inside a word is gone.
+      ['a hash inside the URI, which cuts the suite off', 'deb http://archive.ubuntu.com/ubuntu#x noble main'],
+      ['a hash that ends the Docker URI, which cuts the suite off', `deb [arch=amd64 signed-by=${DOCKER_ASC_PATH}] ${OFFICIAL}# noble stable`],
+      // Whitespace JavaScript splits on and apt does not.
+      ['a no-break space between the suite and the component', 'deb http://archive.ubuntu.com/ubuntu noble\u00a0main'],
+      ['a no-break space after the type', 'deb\u00a0http://archive.ubuntu.com/ubuntu noble main'],
+      ['a byte order mark before the type', '\ufeffdeb http://archive.ubuntu.com/ubuntu noble main'],
     ];
     const deb822Cases: Array<[string, string]> = [
       ['a bare word', 'garbage'],
@@ -494,6 +502,8 @@ describe('sources outside docker.list and docker.sources', () => {
       // An indented line after an open field continues it, a comment included, so it is part of the value.
       ['an indented comment that continues a Types value', 'Types: deb\n  # note\nURIs: http://archive.ubuntu.com/ubuntu\nSuites: noble\nComponents: main'],
       ['an indented comment that continues a URIs value', 'Types: deb\nURIs: http://archive.ubuntu.com/ubuntu\n  # note\nSuites: noble\nComponents: main'],
+      ['a no-break space after a field name', 'Types:\u00a0deb\nURIs: http://archive.ubuntu.com/ubuntu\nSuites: noble\nComponents: main'],
+      ['a byte order mark before the stanza', '\ufeffTypes: deb\nURIs: http://archive.ubuntu.com/ubuntu\nSuites: noble\nComponents: main'],
     ];
     const files: Array<[string, string, string, Array<[string, string]>]> = [
       ['docker.list', LIST_FILE, listGood, listCases],
@@ -544,6 +554,15 @@ describe('sources outside docker.list and docker.sources', () => {
       expect(result.problem).toBe(`${CUSTOM_LIST}: line 2 is not a valid apt entry, which apt rejects`);
       const deb822 = parse('amd64', block(CUSTOM_SOURCES, `${stanza({})}\n\nBroken suite value`), dockerAscBlock());
       expect(deb822.problem).toBe(`${CUSTOM_SOURCES}: line 7 is not a valid apt entry, which apt rejects`);
+    });
+
+    it('counts comment, blank and continuation lines in the position, so it is the line in the file', () => {
+      const list = parse('amd64', block(CUSTOM_LIST, `# Docker\n\n${listGood}\n\n# note\ndeb archive.ubuntu.com/ubuntu noble main`), dockerAscBlock());
+      expect(list.problem).toBe(`${CUSTOM_LIST}: line 6 is not a valid apt entry, which apt rejects`);
+      const lateUnparsed = parse('amd64', block(CUSTOM_SOURCES, `# note\n${stanza({})}\n  # a continuation\n\n# second\nBroken suite value`), dockerAscBlock());
+      expect(lateUnparsed.problem).toBe(`${CUSTOM_SOURCES}: line 10 is not a valid apt entry, which apt rejects`);
+      const unknownType = parse('amd64', block(CUSTOM_SOURCES, `# note\n\n# more\nTypes: rpm\nURIs: http://archive.ubuntu.com/ubuntu\nSuites: noble\nComponents: main`), dockerAscBlock());
+      expect(unknownType.problem).toBe(`${CUSTOM_SOURCES}: the stanza at line 4 has a Types value that apt does not know, which apt rejects`);
     });
 
     it('counts a malformed file that mentions Docker only in a comment, and not one that never mentions it', () => {
@@ -602,6 +621,8 @@ describe('sources outside docker.list and docker.sources', () => {
       ['a double-quoted option value holding two keyrings', unrelatedOne('[signed-by="/etc/apt/keyrings/ubuntu-one.gpg /etc/apt/keyrings/ubuntu-two.gpg"] http://archive.ubuntu.com/ubuntu noble main')],
       ['a double-quoted option value beside another option', unrelatedOne('[arch=amd64 signed-by="/etc/apt/keyrings/ubuntu-one.gpg"] http://archive.ubuntu.com/ubuntu noble main')],
       ['a double-quoted URI that holds credentials', unrelatedOne('"https://operator:secret@private.example/r" noble main')],
+      ['a hash that ends the last component', unrelatedOne('http://archive.ubuntu.com/ubuntu noble main#c')],
+      ['a no-break space inside a comment', unrelatedOne('http://archive.ubuntu.com/ubuntu noble main # a\u00a0b')],
     ];
     // The Docker stanza itself, so docker.sources (which is checked whatever it points at) takes them too.
     const acceptedStanzas: Array<[string, string]> = [
@@ -660,6 +681,12 @@ describe('sources outside docker.list and docker.sources', () => {
           const result = parse('amd64', block(file, line), ...keys);
           expect(result.sourceVerified).toBe(true);
           expect(result.problem).toBeNull();
+          const text = [block(file, line), ...keys].join('\n');
+          expect(repoVerified(freshHost(text))).toBe(true);
+          expect(planWithheld(freshHost(text))).toBe(false);
+          const assembled = assemble([probe('docker_repo', text), probe('apt_policy', '')]);
+          const healthy = makeFacts({ packagesComplete: assembled.packagesComplete, packages: NO_CANDIDATES, repo: assembled.repo });
+          expect(aptSource(healthy).status).toBe('pass');
         }
       });
 
@@ -700,6 +727,10 @@ describe('sources outside docker.list and docker.sources', () => {
         ['an option with no value', `deb [${PASSWORD}] https://private.example/r noble main`],
         ['Docker\'s host with a trailing dot, userinfo and a query', `deb [${SIGNED}] https://operator:${PASSWORD}@download.docker.com./linux/ubuntu?token=${QUERY_TOKEN} noble stable`],
         ['the official URI with userinfo and a suite that is a token', `deb [${SIGNED}] https://operator:${PASSWORD}@download.docker.com/linux/ubuntu?token=${QUERY_TOKEN} ${PATH_TOKEN} stable`],
+        // A '#', '/' or '?' in the userinfo makes a URL parser read part of the credential as the host.
+        ['a hash in the userinfo of a wrong repository', `deb [${SIGNED}] https://${PASSWORD}#x@private.example/r noble stable`],
+        ['a numeric-looking password and a hash in the userinfo', `deb [${SIGNED}] https://operator:4815#${PASSWORD}@private.example/r noble stable`],
+        ['a credential in a path on Docker\'s host', `deb [${SIGNED}] https://download.docker.com/linux/${PATH_TOKEN} noble stable`],
       ];
       const stanzaCases: Array<[string, string]> = [
         ['a line apt cannot parse', `https/operator ${PASSWORD}`],
@@ -709,11 +740,15 @@ describe('sources outside docker.list and docker.sources', () => {
         ['a credentialed URI with no components', `Types: deb\nURIs: https://operator:${PASSWORD}@private.example/r\nSuites: noble`],
         ['Docker\'s host with a trailing dot, userinfo and a query', stanza({ URIs: `https://operator:${PASSWORD}@download.docker.com./linux/ubuntu?token=${QUERY_TOKEN}` })],
         ['the official URI with userinfo and a suite that is a token', stanza({ URIs: `https://operator:${PASSWORD}@download.docker.com/linux/ubuntu?token=${QUERY_TOKEN}`, Suites: PATH_TOKEN })],
+        ['a credential in a path on Docker\'s host', stanza({ URIs: `https://download.docker.com/linux/${PATH_TOKEN}` })],
       ];
       // Only docker.list and docker.sources are checked whatever they point at.
       const wrongRepository: Array<[string, string, string]> = [
         ['a wrong repository with userinfo, path and query in docker.list', LIST_FILE, `deb [${SIGNED}] https://operator:${PASSWORD}@private.example/${PATH_TOKEN}/ubuntu?token=${QUERY_TOKEN} noble stable`],
         ['a wrong repository with userinfo, path and query in docker.sources', SOURCES_FILE, stanza({ URIs: `https://operator:${PASSWORD}@private.example/${PATH_TOKEN}/ubuntu?token=${QUERY_TOKEN}` })],
+        ['a slash in the userinfo of a wrong repository in docker.list', LIST_FILE, `deb [${SIGNED}] https://operator:${PASSWORD}/x@private.example/r noble stable`],
+        ['a hash in the userinfo of a wrong repository in docker.sources', SOURCES_FILE, stanza({ URIs: `https://${PASSWORD}#x@private.example/r` })],
+        ['a question mark in the userinfo of a wrong repository in docker.sources', SOURCES_FILE, stanza({ URIs: `https://${PASSWORD}?x@private.example/r` })],
       ];
       const credentialLineFiles: Array<[string, string]> = [['docker.list', LIST_FILE], ...lineFiles];
       const cases: Array<[string, string, string]> = [
@@ -745,7 +780,30 @@ describe('sources outside docker.list and docker.sources', () => {
         const unknownType = parse('amd64', block(CUSTOM_SOURCES, `${stanza({})}\n\nTypes: ${PATH_TOKEN}\nURIs: http://archive.ubuntu.com/ubuntu\nSuites: noble\nComponents: main`), dockerAscBlock());
         expect(unknownType.problem).toBe(`${CUSTOM_SOURCES}: the stanza at line 7 has a Types value that apt does not know, which apt rejects`);
         const wrong = parse('amd64', block(LIST_FILE, wrongRepository[0][2]), dockerAscBlock());
-        expect(wrong.problem).toBe(`${LIST_FILE}: the source points at https://private.example, not ${OFFICIAL}`);
+        expect(wrong.problem).toBe(`${LIST_FILE}: the source points at https: (host withheld), not ${OFFICIAL}`);
+        const noUserinfo = parse('amd64', block(LIST_FILE, `deb [${SIGNED}] https://private.example/${PATH_TOKEN}?token=${QUERY_TOKEN} noble stable`), dockerAscBlock());
+        expect(noUserinfo.problem).toBe(`${LIST_FILE}: the source points at https://private.example, not ${OFFICIAL}`);
+      });
+
+      it.each([
+        ['userinfo with a hash', `https://${PASSWORD}#x@h.example/r`, 'https: (host withheld)'],
+        ['userinfo with a slash', `https://op:${PASSWORD}/x@h.example/r`, 'https: (host withheld)'],
+        ['userinfo with a query mark', `https://${PASSWORD}?x@h.example/r`, 'https: (host withheld)'],
+        ['a numeric password', 'https://48151623#x@h.example/r', 'https: (host withheld)'],
+        ['an @ only in the path', `https://h.example/${PATH_TOKEN}@x`, 'https: (host withheld)'],
+        ['an upper-case scheme with userinfo', `HTTPS://${PASSWORD}@h.example`, 'https: (host withheld)'],
+        ['a scheme that is a credential', `${PASSWORD}:x@h.example`, '(unrecognized URI)'],
+        ['no scheme', `${PASSWORD}/r`, '(unrecognized URI)'],
+        ['a path and query on another host', `http://mirror.example:8080/${PATH_TOKEN}?t=${QUERY_TOKEN}`, 'http://mirror.example:8080'],
+        ['an IPv6 host', 'http://[2001:db8::1]/r', 'http://[2001:db8::1]'],
+        ['a file URI', `file:/srv/${PATH_TOKEN}`, 'file:'],
+        ['a cdrom URI', 'cdrom:[Ubuntu 22.04]/', 'cdrom:'],
+        ['a URL that does not parse', 'http://exa mple', '(unparsable URI)'],
+        ['the official URI with userinfo and a query', `https://op:${PASSWORD}@download.docker.com/linux/ubuntu/?t=${QUERY_TOKEN}`, OFFICIAL],
+        ['Docker\'s host with another path', `https://download.docker.com/linux/${PATH_TOKEN}`, 'https://download.docker.com'],
+      ])('shows %s as nothing but %j', (_label, uri, shown) => {
+        expect(redactUri(uri)).toBe(shown);
+        expect(leaks(redactUri(uri))).toEqual([]);
       });
 
       it('keeps the credentials of two entries that disagree on the keyring out of the conflict reason', () => {

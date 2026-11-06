@@ -1121,6 +1121,18 @@ describe('bootstrap service failure handling', () => {
         ['an unknown type in docker.sources', repo('/etc/apt/sources.list.d/docker.sources', `Types: deb ${credentialed}\nURIs: https://download.docker.com/linux/ubuntu\nSuites: noble\nComponents: stable`)],
         ['an unparsable line in an arbitrary .sources', repo('/etc/apt/sources.list.d/other.sources', `Types: deb\nURIs: https://download.docker.com/linux/ubuntu\nSuites: noble\nComponents: stable\n\n${credentialed.replace(/:/g, ' ')}`)],
         ['a suite that is a token in an arbitrary .list', repo('/etc/apt/sources.list.d/other.list', `deb [signed-by=${DOCKER_ASC_PATH}] https://download.docker.com/linux/ubuntu AUDIT_FAKE_PATH_TOKEN stable`)],
+        ['a credentialed Docker host with a trailing dot in an arbitrary .list', repo('/etc/apt/sources.list.d/other.list', `deb [signed-by=${DOCKER_ASC_PATH}] https://operator:AUDIT_FAKE_REPO_PASSWORD@download.docker.com./linux/ubuntu?token=AUDIT_FAKE_QUERY_TOKEN noble stable`)],
+        ['a hash in the userinfo in docker.list', repo('/etc/apt/sources.list.d/docker.list', `deb [signed-by=${DOCKER_ASC_PATH}] https://AUDIT_FAKE_REPO_PASSWORD#x@private.example/r noble stable`)],
+        ['two files that disagree on the keyring', [
+          DEFAULT_SOURCE_LOCATIONS,
+          'SOURCE_BEGIN=/etc/apt/sources.list.d/docker.list',
+          `deb [arch=amd64 signed-by=${DOCKER_ASC_PATH}] https://operator:AUDIT_FAKE_REPO_PASSWORD@download.docker.com/linux/ubuntu?token=AUDIT_FAKE_QUERY_TOKEN noble stable`,
+          'SOURCE_END=/etc/apt/sources.list.d/docker.list',
+          'SOURCE_BEGIN=/etc/apt/sources.list.d/other.sources',
+          `Types: deb\nURIs: https://operator:AUDIT_FAKE_REPO_PASSWORD@download.docker.com/linux/ubuntu?token=AUDIT_FAKE_QUERY_TOKEN\nSuites: noble\nComponents: stable\nSigned-By: /etc/apt/keyrings/other.asc`,
+          'SOURCE_END=/etc/apt/sources.list.d/other.sources',
+          dockerAscBlock(),
+        ].join('\n')],
       ];
 
       it.each(sources)('keeps it out of the response for %s on a working installation', async (_label, docker_repo) => {
@@ -1132,15 +1144,6 @@ describe('bootstrap service failure handling', () => {
       it.each(sources)('keeps it out of the response for %s on a fresh host', async (_label, docker_repo) => {
         const result = await preflightWith({ docker_info: '', docker_cli: '', compose_version: '', apt_policy: '', docker_repo }, freshFailures);
         expect(result.plan).toBeNull();
-        for (const secret of SECRETS) expect(JSON.stringify(result)).not.toContain(secret);
-      });
-
-      it('keeps the credential of a candidate archive out of the response', async () => {
-        const apt_policy = [
-          'docker-ce:', '  Installed: (none)', '  Candidate: 5:27.3.1-1', '  Version table:',
-          '     5:27.3.1-1 500', `        500 ${credentialed} noble/stable amd64 Packages`,
-        ].join('\n');
-        const result = await preflightWith({ docker_repo: repo('/etc/apt/sources.list.d/docker.list', good), apt_policy });
         for (const secret of SECRETS) expect(JSON.stringify(result)).not.toContain(secret);
       });
     });
