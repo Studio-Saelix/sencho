@@ -331,6 +331,7 @@ export default function DriftPanel({ stackName, onRedeploy, onEditCompose, onOpe
     // below for the same cycle, so the tab reads as checking rather than as wrong.
     liveScope.current = `${nodeId ?? 'none'}:${stackName}`;
     setReport(null);
+    setDismissedOpen(false);
     setReportNodeId(undefined);
     setRedeployTarget(null);
     const run = async () => {

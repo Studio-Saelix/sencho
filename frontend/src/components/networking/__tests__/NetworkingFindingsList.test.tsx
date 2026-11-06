@@ -197,4 +197,28 @@ describe('NetworkingFindingsList', () => {
     items[0].onRestore?.();
     expect(onRestore).toHaveBeenCalledWith(dismissed.items[0]);
   });
+
+  it('maps an acknowledged-in-Doctor finding to a row and withholds Restore the account may not use', () => {
+    const acked = finding({ id: 'acked', title: 'Acknowledged finding' });
+    const list: NetworkingDismissedList = {
+      items: [{ finding: acked, dismissal: null }],
+      now: Date.now(),
+      canRestore: () => false,
+      onRestore: vi.fn(),
+      isRestoring: () => false,
+    };
+    const [row] = networkingDismissedItems(list);
+    expect(row.id).toBe('ack:acked');
+    expect(row.meta).toBe('acknowledged in Compose Doctor');
+    expect(row.onRestore).toBeUndefined();
+  });
+
+  it('shows the dismissed count above active findings', () => {
+    const list: NetworkingDismissedList = {
+      items: [{ finding: finding({ id: 'h' }), dismissal: null }],
+      now: Date.now(), canRestore: () => true, onRestore: vi.fn(), isRestoring: () => false,
+    };
+    render(<NetworkingFindingsList onOpenDismissed={() => {}} findings={[finding()]} dismissed={list} loading={false} controls={controls()} />);
+    expect(screen.getByRole('button', { name: '1 dismissed' })).toBeInTheDocument();
+  });
 });

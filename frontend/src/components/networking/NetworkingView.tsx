@@ -710,7 +710,7 @@ export function NetworkingView({ headerActions }: NetworkingViewProps) {
       <DismissedSheet
         open={dismissedOpen}
         onOpenChange={setDismissedOpen}
-        crumb={['Networking', 'Findings']}
+        crumb={['Networking', tab === 'overview' ? 'Overview' : 'Findings']}
         items={networkingDismissedItems(dismissedList)}
       />
 
