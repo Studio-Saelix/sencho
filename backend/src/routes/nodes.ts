@@ -55,7 +55,9 @@ function normalizePilotComposeDir(value: unknown): string | null {
   // normalize keeps a trailing slash, so `/opt/x/` would otherwise read as a
   // different directory from `/opt/x` (a no-op save then trips the connected-Pilot lock).
   const normalized = path.posix.normalize(candidate);
-  return normalized.length > 1 ? normalized.replace(/\/+$/, '') : normalized;
+  let end = normalized.length;
+  while (end > 1 && normalized[end - 1] === '/') end -= 1;
+  return normalized.slice(0, end);
 }
 
 function mintPilotEnrollment(nodeId: number, req: Request): {
