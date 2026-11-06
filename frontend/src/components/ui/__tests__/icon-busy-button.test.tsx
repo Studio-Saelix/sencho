@@ -1,5 +1,6 @@
+import * as React from 'react';
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { render, screen, act } from '@testing-library/react';
+import { render, screen, act, fireEvent } from '@testing-library/react';
 import { RefreshCw, ShieldCheck, Loader2 } from 'lucide-react';
 import { IconBusyButton } from '../icon-busy-button';
 import { DURATION_BASE_MS } from '@/hooks/useVisualBusy';
@@ -70,6 +71,57 @@ describe('IconBusyButton', () => {
 
   it('stays disabled when the caller disables it while idle', () => {
     render(<IconBusyButton icon={RefreshCw} pending={false} disabled aria-label="Refresh" />);
+    expect(screen.getByRole('button', { name: 'Refresh' })).toBeDisabled();
+  });
+
+  it('returns to idle after busy chrome has shown', () => {
+    const { rerender, container } = render(
+      <IconBusyButton icon={ShieldCheck} busyIcon={Loader2} pending label="Scan" busyLabel="Scanning..." />,
+    );
+    act(() => {
+      vi.advanceTimersByTime(DURATION_BASE_MS);
+    });
+    expect(screen.getByRole('button', { name: 'Scanning...' })).toBeDisabled();
+    rerender(<IconBusyButton icon={ShieldCheck} busyIcon={Loader2} pending={false} label="Scan" busyLabel="Scanning..." />);
+    const btn = screen.getByRole('button', { name: 'Scan' });
+    expect(btn).toBeEnabled();
+    expect(btn).not.toHaveAttribute('aria-busy');
+    expect(container.querySelector('.lucide-shield-check')).not.toBeNull();
+    expect(container.querySelector('.animate-spin')).toBeNull();
+  });
+
+  it('keeps a plain label stable while busy', () => {
+    render(<IconBusyButton icon={RefreshCw} pending label="refresh" />);
+    act(() => {
+      vi.advanceTimersByTime(DURATION_BASE_MS);
+    });
+    expect(screen.getByRole('button', { name: 'refresh' })).toHaveAttribute('aria-busy', 'true');
+  });
+
+  it('does not submit a form by default', () => {
+    const onSubmit = vi.fn((e: React.FormEvent) => e.preventDefault());
+    render(
+      <form onSubmit={onSubmit}>
+        <IconBusyButton icon={RefreshCw} pending={false} aria-label="Refresh" />
+      </form>,
+    );
+    fireEvent.click(screen.getByRole('button', { name: 'Refresh' }));
+    expect(onSubmit).not.toHaveBeenCalled();
+  });
+
+  it('fires onClick when idle and not while pending', () => {
+    const onClick = vi.fn();
+    const { rerender } = render(<IconBusyButton icon={RefreshCw} pending={false} onClick={onClick} aria-label="Refresh" />);
+    fireEvent.click(screen.getByRole('button', { name: 'Refresh' }));
+    expect(onClick).toHaveBeenCalledTimes(1);
+    rerender(<IconBusyButton icon={RefreshCw} pending onClick={onClick} aria-label="Refresh" />);
+    fireEvent.click(screen.getByRole('button', { name: 'Refresh' }));
+    expect(onClick).toHaveBeenCalledTimes(1);
+  });
+
+  it('stays disabled after pending ends when the caller disabled it', () => {
+    const { rerender } = render(<IconBusyButton icon={RefreshCw} pending disabled aria-label="Refresh" />);
+    rerender(<IconBusyButton icon={RefreshCw} pending={false} disabled aria-label="Refresh" />);
     expect(screen.getByRole('button', { name: 'Refresh' })).toBeDisabled();
   });
 });

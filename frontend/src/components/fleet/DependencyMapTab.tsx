@@ -191,9 +191,7 @@ export function DependencyMapTab({ map }: { map: FleetMapState }) {
   const { data, loading, progress, refresh, retryFailed } = map;
   // A fast answer never flashes the skeleton; the pane just holds still.
   const { showBusy } = useVisualBusy(!data);
-  // The Refresh icon spins only for a request that outlasts the busy delay, so
-  // a quiet revalidation on tab reopen never flashes it.
-    const [view, setView] = useState<ViewMode>('graph');
+  const [view, setView] = useState<ViewMode>('graph');
   const [search, setSearch] = useState('');
   const [nodeFilter, setNodeFilter] = useState<Set<number>>(new Set());
   const [flagFilter, setFlagFilter] = useState<Set<DepFlagKind>>(new Set());

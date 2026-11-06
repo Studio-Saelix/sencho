@@ -16,7 +16,7 @@ type IconBusyButtonBase = Omit<ButtonProps, 'asChild' | 'children'> & {
 /** An icon-only control must carry an accessible name; a labelled one is named by its text. */
 export type IconBusyButtonProps = IconBusyButtonBase &
   (
-    | { label: string; busyLabel?: string }
+    | { label: string; busyLabel?: string; 'aria-label'?: never }
     | { label?: undefined; busyLabel?: undefined; 'aria-label': string }
   );
 
@@ -36,10 +36,10 @@ export const IconBusyButton = React.forwardRef<HTMLButtonElement, IconBusyButton
       <Button
         ref={ref}
         type={type}
-        disabled={disabled || pending}
-        aria-busy={pending || undefined}
         className={className}
         {...props}
+        disabled={disabled || pending}
+        aria-busy={pending || undefined}
       >
         <ShownIcon
           className={showBusy ? 'animate-spin' : undefined}
