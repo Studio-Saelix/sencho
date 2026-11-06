@@ -243,7 +243,8 @@ const APT_SOURCE_LOCATIONS_PRELUDE = [
  * Reads the apt source files in the given locations: the main source list
  * and each `.list` and `.sources` file in the source directories, named as apt
  * accepts them. The locations are shell words spliced in as written (the
- * production call passes the variables the prelude sets), not paths to quote. Only a file that mentions Docker's host (or is one the plan writes) is
+ * production call passes the variables the prelude sets), not paths to quote.
+ * Only a file that mentions Docker's host (or is one the plan writes) is
  * printed, which keeps unrelated sources out of the capped output; a file or a
  * directory that cannot be read is reported as unreadable, never as absent. The
  * keyrings are read in full (up to the key cap).
@@ -696,10 +697,10 @@ function parseDeb822Source(content: string): ParsedSourceFile {
     // is not skipped.
     const typeWords = (paragraph.types ?? '').split(/\s+/).filter(Boolean);
     const unknownType = typeWords.find((word) => word !== 'deb' && word !== 'deb-src');
-    if (paragraph.types === undefined || unknownType !== undefined) {
-      invalid.push(unknownType === undefined
-        ? 'the Docker deb822 source has a stanza with no Types field, which apt rejects'
-        : `the Docker deb822 source has the Types value "${unknownType}", which apt does not know and rejects`);
+    if (paragraph.types === undefined) {
+      invalid.push('the Docker deb822 source has a stanza with no Types field, which apt rejects');
+    } else if (unknownType !== undefined) {
+      invalid.push(`the Docker deb822 source has the Types value "${unknownType}", which apt does not know and rejects`);
     }
     // A disabled stanza cannot supply packages to apt.
     if (paragraph.enabled !== undefined && FALSE_OPTION_VALUES.has(paragraph.enabled.trim().toLowerCase())) continue;
@@ -945,7 +946,6 @@ export function parseDockerRepo(text: string, codename: string, arch: string): R
   let sourceVerified: boolean | null = true;
   if (!sourceConfigured || failureProblem) sourceVerified = false;
   else if (unknownProblem) sourceVerified = null;
-  if (sourceLocations === 'unknown' && sourceVerified !== false) sourceVerified = null;
   if (sourceLocations === 'custom' && !sourceConfigured) {
     unknownProblem ??= 'apt is configured to read its sources from somewhere other than /etc/apt/sources.list and /etc/apt/sources.list.d, and none of what it reads configures Docker';
   }

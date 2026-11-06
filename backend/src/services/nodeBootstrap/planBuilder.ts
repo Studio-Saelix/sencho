@@ -304,10 +304,13 @@ export function buildBootstrapPlan(input: PlanBuildInput): BootstrapPlan {
   if (unsupportedComposeAddition(facts)) {
     throw new Error('The plan cannot add Compose to a Docker engine that was not installed from Docker packages.');
   }
-  if (facts.repo.dockerSourceConfigured && !dockerAndComposeWork(facts) && !repoVerified(facts)) {
+  const dockerWorking = dockerAndComposeWork(facts);
+  const repoConfigured = repoVerified(facts);
+  const needsRepo = !dockerWorking && !repoConfigured;
+  if (needsRepo && facts.repo.dockerSourceConfigured) {
     throw new Error('The plan cannot write the Docker apt source beside an existing Docker source that is not verified.');
   }
-  if (!dockerAndComposeWork(facts) && !repoVerified(facts) && facts.repo.sourceLocations !== 'default') {
+  if (needsRepo && facts.repo.sourceLocations !== 'default') {
     throw new Error('The plan cannot add the Docker apt source while the locations apt reads its sources from are not the defaults.');
   }
   const owner = facts.user.name;
@@ -319,10 +322,7 @@ export function buildBootstrapPlan(input: PlanBuildInput): BootstrapPlan {
   const skipped: BootstrapPlan['skipped'] = [];
   const notices: string[] = ['No changes have been made on this server.'];
 
-  const dockerWorking = dockerAndComposeWork(facts);
-  const repoConfigured = repoVerified(facts);
   const packagesToInstall = plannedDockerPackages(facts);
-  const needsRepo = !dockerWorking && !repoConfigured;
   const needsMetadataRefresh = !dockerWorking && !needsRepo && packagesToInstall.length > 0;
 
   if (needsRepo) {
