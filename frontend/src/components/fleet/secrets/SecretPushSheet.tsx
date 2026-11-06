@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
-import { Loader2, Send, ChevronDown, ChevronRight, CheckCircle2, AlertCircle, MinusCircle, type LucideIcon } from 'lucide-react';
+import { Send, ChevronDown, ChevronRight, CheckCircle2, AlertCircle, MinusCircle, type LucideIcon } from 'lucide-react';
 import { SystemSheet, SheetSection, type SystemSheetTab } from '@/components/ui/system-sheet';
 import { Input } from '@/components/ui/input';
 import { MultiSelectCombobox, type MultiSelectOption } from '@/components/ui/multi-select-combobox';
@@ -205,8 +205,8 @@ export function SecretPushSheet({ open, onOpenChange, secret }: Props) {
         if (stage === 'target') return {
             label: previewLoading ? 'Previewing…' : 'Preview',
             onClick: handlePreview,
-            disabled: previewLoading || selectedLabels.size === 0 || !stackName.trim(),
-            icon: previewLoading ? Loader2 : undefined,
+            pending: previewLoading,
+            disabled: selectedLabels.size === 0 || !stackName.trim(),
         };
         if (stage === 'preview') return {
             label: pushLoading ? 'Pushing…' : `Push to ${plan.length} ${plan.length === 1 ? 'node' : 'nodes'}`,
