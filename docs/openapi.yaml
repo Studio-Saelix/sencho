@@ -517,7 +517,7 @@ components:
             kind: { type: string, enum: [direct-socket, container, unknown] }
             providerType:
               type: [string, "null"]
-              enum: [tecnativa, linuxserver, wollomatic, sencho-socket-gateway, generic-socket-proxy, direct-unix-socket, unknown]
+              enum: [tecnativa, linuxserver, wollomatic, sencho-socket-gateway, generic-socket-proxy, direct-unix-socket, unknown, null]
             containerId: { type: [string, "null"] }
             containerName: { type: [string, "null"] }
             compose:
@@ -586,7 +586,7 @@ components:
         classification: { type: string, enum: [detected, candidate, unknown] }
         providerType:
           type: [string, "null"]
-          enum: [tecnativa, linuxserver, wollomatic, sencho-socket-gateway, generic-socket-proxy, direct-unix-socket, unknown]
+          enum: [tecnativa, linuxserver, wollomatic, sencho-socket-gateway, generic-socket-proxy, direct-unix-socket, unknown, null]
         senchoStack: { type: [string, "null"] }
         compose:
           type: [object, "null"]
