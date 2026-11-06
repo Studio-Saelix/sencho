@@ -292,6 +292,18 @@ describe('bootstrap routes: the hub as a target in a Docker or NAT deployment', 
     expect(captureSpy).not.toHaveBeenCalled();
   });
 
+  it('does not refuse an unrelated target in the preflight either', async () => {
+    const runSpy = vi.spyOn(sshProbeClient, 'runCommands').mockRejectedValue(new SshTransportError('SSH_UNREACHABLE', 'fixture target down'));
+    const res = await request(app)
+      .post('/api/nodes/bootstrap/preflight')
+      .set('Authorization', adminAuth)
+      .set('Host', `${PUBLIC_IP}:1852`)
+      .send({ ...preflightBody, host: '8.8.8.8' });
+    // Past the own-address guard the fixture transport is reached and fails.
+    expect(res.body.code).toBe('SSH_UNREACHABLE');
+    expect(runSpy).toHaveBeenCalled();
+  });
+
   it('does not refuse an unrelated target', async () => {
     const captureSpy = vi.spyOn(sshProbeClient, 'captureHostKey').mockResolvedValue({
       algorithm: 'ssh-ed25519', fingerprint: 'SHA256:other', knownHostsLine: '8.8.8.8 ssh-ed25519 AAAA',

@@ -216,8 +216,8 @@ export function getAuditSummary(method: string, apiPath: string, statusCode?: nu
       return `Prune failed (${statusCode})`;
     }
     if (method === 'POST' && normalized.startsWith('nodes/bootstrap/')) {
-      const kind = normalized.includes('/host-key') ? 'Bootstrap host key check' : 'Bootstrap preflight';
-      return `${kind} failed (${statusCode})`;
+      if (normalized.startsWith('nodes/bootstrap/host-key')) return `Bootstrap host key check failed (${statusCode})`;
+      if (normalized.startsWith('nodes/bootstrap/preflight')) return `Bootstrap preflight failed (${statusCode})`;
     }
     if (method === 'POST' && normalized.startsWith('system/prune/plan')) {
       return `Prune plan failed (${statusCode})`;

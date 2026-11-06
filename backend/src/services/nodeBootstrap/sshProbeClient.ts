@@ -152,7 +152,7 @@ export function parsePrivateKey(key: string, passphrase?: string | null): void {
     if (!passphrase && /passphrase|encrypted/i.test(message)) {
       throw new SshTransportError('SSH_KEY_PASSPHRASE_REQUIRED', 'This key is encrypted. Enter its passphrase.');
     }
-    // ssh2 words a failed decryption as "bad passphrase" in every key format.
+    // ssh2 words a failed decryption as "bad passphrase" for OpenSSH, PEM and PPK keys.
     if (passphrase && /bad passphrase/i.test(message)) {
       throw new SshTransportError('SSH_KEY_PASSPHRASE_INVALID', 'The passphrase does not unlock this key. Check it and try again.');
     }

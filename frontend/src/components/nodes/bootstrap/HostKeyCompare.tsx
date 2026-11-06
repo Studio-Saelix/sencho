@@ -1,12 +1,12 @@
 /** The server's host key file that matches the algorithm the hub observed. */
 function hostKeyFilePath(algorithm: string): string {
   if (algorithm === 'ssh-ed25519') return '/etc/ssh/ssh_host_ed25519_key.pub';
-  if (algorithm === 'ssh-rsa' || algorithm.startsWith('rsa-sha2-')) return '/etc/ssh/ssh_host_rsa_key.pub';
+  if (algorithm === 'ssh-rsa') return '/etc/ssh/ssh_host_rsa_key.pub';
   if (algorithm.startsWith('ecdsa-sha2-')) return '/etc/ssh/ssh_host_ecdsa_key.pub';
   return '/etc/ssh/ssh_host_*_key.pub';
 }
 
-/** `host algorithm base64` becomes `algorithm base64`, the form a .pub file holds. */
+/** `host algorithm base64` becomes `algorithm base64`, the first two fields of a .pub file. */
 function publicKeyLine(knownHostsLine: string): string {
   return knownHostsLine.trim().split(/\s+/).slice(1).join(' ');
 }

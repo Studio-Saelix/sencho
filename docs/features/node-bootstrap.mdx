@@ -57,7 +57,7 @@ There is no data-directory field. The agent's persistent data is the fixed `senc
 
 ### 2. Preflight
 
-Select **Check host key** first. Sencho connects only far enough to read the server's host key and shows its algorithm, SHA-256 fingerprint, and the public key line, the same text the server keeps in the matching `.pub` file. Compare the fingerprint on the server with the command the dialog shows for that algorithm, for an Ed25519 key:
+Select **Check host key** first. Sencho connects only far enough to read the server's host key and shows its algorithm, SHA-256 fingerprint, and the public key line, which matches the first two fields (algorithm and key) of the matching `.pub` file on the server. Compare the fingerprint on the server with the command the dialog shows for that algorithm, for an Ed25519 key:
 
 ```bash
 ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub
@@ -151,7 +151,7 @@ The Agent installation directory has no settings field. It is chosen only here.
 ## Limits
 
 - Ubuntu 22.04 and 24.04 on x86_64 only.
-- A target that is this Sencho instance is refused: its own network addresses, and the address you reach it on (the request host, or `SENCHO_PUBLIC_URL` when set), which is how a Docker or NAT deployment is told apart from the server it runs on.
+- A target that is this Sencho instance is refused: an address on the hub's own network interfaces, or the address of the hub URL (`SENCHO_PUBLIC_URL` when it is set and valid, otherwise the host in your request), which is how a Docker or NAT deployment is told apart from the server it runs on. The hub URL check needs that name to resolve from the hub and ignores ports, so a server that shares the hub's public address is refused as well.
 - IPv6 targets, SSH agent forwarding, password authentication and passworded sudo are not supported in this release.
 - The preflight never changes firewall, SSH server, Docker daemon, user or group configuration.
 - Only the Docker daemon on the host's own socket (`/var/run/docker.sock`) is inspected, and every Docker command in the preflight and the plan is pinned to it with the default context. Rootless installs, custom sockets and remote Docker contexts are reported as blocked. A host where Docker is installed but stopped is blocked too: containers and volumes cannot be inventoried until the service runs.

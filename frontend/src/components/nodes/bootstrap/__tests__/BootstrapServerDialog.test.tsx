@@ -151,6 +151,9 @@ describe('BootstrapServerDialog live host-key mismatch', () => {
     await user.click(screen.getByRole('button', { name: 'Run preflight' }));
 
     await waitFor(() => expect(screen.getByText(/The host key changed before the preflight connected/)).toBeInTheDocument());
+    // The live observation carries no public key line, only the fingerprint.
+    expect(screen.queryByTestId('host-key-line')).not.toBeInTheDocument();
+    expect(screen.getAllByText(/ssh-keygen -lf/).length).toBeGreaterThan(0);
     expect(screen.getAllByText(new RegExp(CHANGED_KEY.fingerprint)).length).toBeGreaterThan(0);
     expect(screen.getAllByText(/SHA256:livechangedkey/).length).toBeGreaterThan(0);
     const run = screen.getByRole('button', { name: 'Run preflight' });

@@ -3,6 +3,7 @@ import net from 'net';
 import os from 'os';
 import { isDisallowedOutboundTargetAddress } from '../../utils/outboundTarget';
 import { isArchiveStorableName } from '../cloudBackupArchive';
+import { sanitizeForLog } from '../../utils/safeLog';
 
 /**
  * Target validation for the bootstrap SSH connection.
@@ -102,7 +103,8 @@ const systemResolve: ResolveAddresses = (hostname) =>
  * install needs, but inside a container it holds only the bridge address, so the
  * host the operator used to reach the hub (the request host or SENCHO_PUBLIC_URL)
  * is added: its IPv4 address is the public address of a Docker or NAT deployment.
- * A hub host that does not resolve adds nothing; it never blocks a target.
+ * A hub host that does not resolve adds nothing and is logged; it does not
+ * refuse the target, because this check is a convenience, not the outbound policy.
  */
 async function ownAddresses(hubHost: string | null, resolve: ResolveAddresses): Promise<Set<string>> {
   const addresses = ownInterfaceAddresses();
@@ -116,8 +118,9 @@ async function ownAddresses(hubHost: string | null, resolve: ResolveAddresses): 
     for (const record of await resolve(hubHost)) {
       if (net.isIP(record.address) === 4) addresses.add(record.address);
     }
-  } catch {
+  } catch (error: unknown) {
     // A hub name that cannot be resolved here identifies no address.
+    console.warn(`[Bootstrap] Hub host ${sanitizeForLog(hubHost)} did not resolve (${(error as { code?: string } | null)?.code ?? 'unknown'}); own-address check uses interfaces only.`);
   }
   return addresses;
 }
@@ -134,10 +137,10 @@ function ownInterfaceAddresses(): Set<string> {
 }
 
 /**
- * Resolve a host to the addresses that may be dialed. Fails closed: any blocked
- * record, or a record that is one of this instance's own addresses (its network
- * interfaces plus `hubHost`, the host clients reach the hub on), rejects the
- * whole target.
+ * Resolve a host to the addresses that may be dialed. Any blocked record, or a
+ * record that is one of this instance's own addresses (its network interfaces
+ * plus `hubHost`, the host clients reach the hub on, when it resolves), rejects
+ * the whole target.
  */
 export async function resolveTargetAddresses(
   host: string,
