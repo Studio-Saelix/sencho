@@ -70,6 +70,17 @@ var writeCommitMarkerForTests = true
 
 var intentIDPattern = regexp.MustCompile(`^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$`)
 
+// isWorkDirName reports whether a volume-root entry is one of Sencho's own swap
+// directories. The name is the prefix plus the intent UUID Sencho generated, so
+// a user's own `.sencho-restore-*` entry stays ordinary data and is neither
+// listed as a leftover work directory nor refused by prepare.
+func isWorkDirName(name string) bool {
+	if !strings.HasPrefix(name, workDirPrefix) {
+		return false
+	}
+	return intentIDPattern.MatchString(strings.TrimPrefix(name, workDirPrefix))
+}
+
 type rootMeta struct {
 	UID   uint32 `json:"uid"`
 	GID   uint32 `json:"gid"`
@@ -202,9 +213,10 @@ func listNames(dir string) ([]string, error) {
 	return names, nil
 }
 
-// listWorkDirNames lists the root entries named like a restore work directory,
-// which is what `prepare` refuses a second of. It reads the whole listing and
-// stops collecting after maxReportedWorkDirs.
+// listWorkDirNames lists the root entries that are restore work directories,
+// which is what `prepare` refuses a second of. A name with the prefix but not
+// the intent-id shape is a user's own entry, not a work directory. It reads the
+// whole listing and stops collecting after maxReportedWorkDirs.
 func listWorkDirNames(root string) ([]string, error) {
 	names, err := listNames(root)
 	if err != nil {
@@ -212,7 +224,7 @@ func listWorkDirNames(root string) ([]string, error) {
 	}
 	found := []string{}
 	for _, name := range names {
-		if strings.HasPrefix(name, workDirPrefix) {
+		if isWorkDirName(name) {
 			found = append(found, name)
 			if len(found) == maxReportedWorkDirs {
 				break
@@ -222,15 +234,16 @@ func listWorkDirNames(root string) ([]string, error) {
 	return found, nil
 }
 
-// withoutWorkDirs drops the entries a restored snapshot carries under the work
-// directory prefix. A capture taken while an earlier swap's directory was in the
-// volume holds one, and moving it up would put a second work directory in the
-// live volume, which every later `prepare` refuses. It stays in the incoming
-// copy, which the clean-up removes.
+// withoutWorkDirs drops the work directories a restored snapshot carries. A
+// capture taken while an earlier swap's directory was in the volume holds one,
+// and moving it up would put a second work directory in the live volume, which
+// every later `prepare` refuses. It stays in the incoming copy, which the
+// clean-up removes. A user's own `.sencho-restore-*` entry is not a work
+// directory and is restored like any other data.
 func withoutWorkDirs(names []string) []string {
 	kept := make([]string, 0, len(names))
 	for _, name := range names {
-		if !strings.HasPrefix(name, workDirPrefix) {
+		if !isWorkDirName(name) {
 			kept = append(kept, name)
 		}
 	}
@@ -263,7 +276,7 @@ func swapPrepare(request swapRequest) (swapReport, error) {
 		return swapReport{}, err
 	}
 	for _, name := range entries {
-		if strings.HasPrefix(name, workDirPrefix) && name != workDirPrefix+request.ID {
+		if isWorkDirName(name) && name != workDirPrefix+request.ID {
 			return swapReport{}, errors.New("another restore work directory exists in this volume")
 		}
 	}

@@ -1611,7 +1611,8 @@ components:
         `confirmation.token` is bound to the state described here (the point, the volume and its
         generation, the repository, and each dependent container's id, stack, running state and
         restart policy), so the overwrite can only run against what
-        the caller saw.
+        the caller saw. It is null when `target.eligible` is false: there is no state an
+        overwrite could be admitted against.
       properties:
         point:
           type: object
@@ -1706,8 +1707,9 @@ components:
           required: [token]
           properties:
             token:
-              type: string
+              type: ["string", "null"]
               pattern: '^[0-9a-f]{64}$'
+              description: Null when `target.eligible` is false.
 
     RecoveryProgress:
       type: object
@@ -6414,13 +6416,18 @@ paths:
         `POST /api/recovery/points/{pointId}/overwrite` to run it. The answer names the
         dependents, so it needs the same `restore` access on every dependent stack as the
         overwrite itself, plus the node-wide check when a mounting container belongs to no stack.
-        A restore that did not settle can leave its hidden work directory (`.sencho-restore-<id>`)
-        in the volume, holding the data it replaced. The next swap refuses a volume that holds one,
-        after the containers have already stopped, so the preview reports the volume as not
-        eligible (`target.eligible: false`, `swap.supported: false`) and names the directory in
-        `target.ineligibleReason`; the overwrite is refused with `400 invalid_request` for the same
-        reason. A capture skips the directory, so it is not in any point: copy out what you need,
-        remove it from the volume, and preview again. The listing reads a volume root an
+        A restore that did not settle can leave its hidden work directory (`.sencho-restore-<id>`,
+        an intent UUID) in the volume, holding the data it replaced. The next swap refuses a
+        volume that holds one, after the containers have already stopped, so the preview reports
+        the volume as not eligible (`target.eligible: false`, `swap.supported: false`,
+        `confirmation.token: null`) and names the directory in `target.ineligibleReason`; the
+        overwrite is refused with `400 invalid_request` for the same reason. A capture skips that
+        directory, so it is not in any point: copy out what you need, remove it, and preview again.
+        A top-level entry with the prefix but not an intent-id name is a user's own data: it is
+        captured, listed as content, and never treated as a work directory. A volume that does not
+        exist, or that was recreated after the point was captured, is also not eligible: the
+        preview compares the live volume's creation time and root device/inode with the point's
+        generation and does not mount a missing volume by name. The listing reads a volume root an
         application user owns (mode `0700` or `2750`) as well; when the helper cannot complete
         the listing at all, the preview adds a warning and the swap's own refusal is the backstop.
         Only a Full Admin API token may call it; any other scope is refused with `403 SCOPE_DENIED`.

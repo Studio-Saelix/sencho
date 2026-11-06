@@ -3,6 +3,7 @@ import type Docker from 'dockerode';
 import { errorMessageForLog, sanitizeForLog } from '../../utils/safeLog';
 import { classifyRecoveryError, RecoveryError } from './redaction';
 import {
+  isRecoveryWorkDirName,
   RECOVERY_STAGING_TARGET_PREFIX,
   RECOVERY_WORK_DIR_PREFIX,
   RestoreIntentStore,
@@ -85,6 +86,15 @@ const SWAP_WARNINGS: readonly string[] = [
 const WORK_DIRS_UNCHECKED_WARNING =
   'Sencho could not check this volume for a work directory left by an earlier restore. If one is there, the swap refuses it after the containers have stopped, and the restore rolls back and starts them again.';
 
+/**
+ * The target no longer holds the generation the point was captured from. The
+ * preview must say so and issue no token: admission recomputes the live token and
+ * would refuse every token from this preview, so offering one would advertise an
+ * operation that cannot run.
+ */
+const GENERATION_CHANGED_REASON =
+  'This volume was recreated after this point was captured, so the point does not describe the data on it now. Take a new point of this volume, then preview again.';
+
 /** Phases in which the live volume has not been touched. */
 const PRE_FENCE_PHASES = ['recorded', 'staging', 'staged_verified'];
 /** Phases whose fence is applied or may have been applied. */
@@ -124,7 +134,8 @@ export interface OverwritePreview {
   space: { requiredBytes: number; freeBytes: number | null; sufficient: boolean | null };
   preRestorePoint: { required: true; consistency: 'crash_consistent_stopped' };
   warnings: string[];
-  confirmation: { token: string };
+  /** Null when the target is not eligible: there is no admissible operation to confirm. */
+  confirmation: { token: string | null };
 }
 
 /**
@@ -163,6 +174,8 @@ interface TargetObservation {
   ineligibleReason: string | null;
   generationToken: string;
   isCurrentGeneration: boolean;
+  /** True when the live volume is a different generation from the point's. */
+  generationChanged: boolean;
   containers: OverwriteContainerFact[];
   stacks: string[];
   /** Free bytes on the volume's filesystem, or null when the probe could not say. */
@@ -361,42 +374,81 @@ async function observeTarget(deps: OverwriteDeps, pointId: string): Promise<Targ
     if (endpointRefusal) break;
   }
 
-  const probe = (listWorkDirs: boolean) => probeVolumeReport({
-    runner: deps.runner(),
-    operationId: `overwrite-preview-${point.id}`,
-    volumeName: storage.locator,
-    listWorkDirs,
-  });
   let freeBytes: number | null = null;
   let leftoverWorkDirs: string[] = [];
   let workDirsChecked = true;
-  try {
-    const report = await probe(true);
-    freeBytes = report.free;
-    if (report.workDirs === null) {
-      // The probe answered without the list it was asked for: not an empty volume.
-      workDirsChecked = false;
-      console.warn('[Recovery] The probe did not list the work directories of %s', sanitizeForLog(storage.locator));
-    } else {
-      // The work directory of the restore that owns the volume now is its own;
-      // anything else was left by one that did not settle, and the swap refuses a
-      // volume that holds it after the workloads have already stopped.
-      const live = deps.fence.liveIntentForVolume(storage.locator);
-      leftoverWorkDirs = report.workDirs.filter((name) => name !== (live ? swapWorkDir(live) : null));
-    }
-  } catch (err) {
-    // Neither answer is required to describe the volume. The preview says the
-    // listing was not made, and the swap's own refusal is the backstop: it rolls back.
-    workDirsChecked = false;
-    console.warn('[Recovery] Could not list the work directories of %s:', sanitizeForLog(storage.locator), errorMessageForLog(err));
+  /** The token the admission probe recomputes, or null when no probe could read it. */
+  let liveGenerationToken: string | null = null;
+  if (source) {
+    const probe = (listWorkDirs: boolean) => probeVolumeReport({
+      runner: deps.runner(),
+      operationId: `overwrite-preview-${point.id}`,
+      volumeName: storage.locator,
+      listWorkDirs,
+    });
     try {
-      // The space estimate does not depend on the listing.
-      freeBytes = (await probe(false)).free;
-    } catch (spaceErr) {
-      // A probe that cannot run makes the space answer unknown, and admission
-      // checks again only when it has a number.
-      console.warn('[Recovery] Could not read free space for %s:', sanitizeForLog(storage.locator), errorMessageForLog(spaceErr));
+      const report = await probe(true);
+      freeBytes = report.free;
+      // The same token admission recomputes: the volume's creation time plus the
+      // mounted root's device and inode, which a same-second recreate changes.
+      liveGenerationToken = `${source.createdAt ?? 'unknown'}|${report.dev}:${report.ino}`;
+      if (report.workDirs === null) {
+        // The probe answered without the list it was asked for: not an empty volume.
+        workDirsChecked = false;
+        console.warn('[Recovery] The probe did not list the work directories of %s', sanitizeForLog(storage.locator));
+      } else {
+        // The work directory of the restore that owns the volume now is its own;
+        // anything else was left by one that did not settle, and the swap refuses a
+        // volume that holds it after the workloads have already stopped. Only the
+        // intent-id names Sencho creates are work directories: a user's own
+        // `.sencho-restore-*` entry is ordinary data.
+        const live = deps.fence.liveIntentForVolume(storage.locator);
+        leftoverWorkDirs = report.workDirs
+          .filter((name) => isRecoveryWorkDirName(name))
+          .filter((name) => name !== (live ? swapWorkDir(live) : null));
+      }
+    } catch (err) {
+      // Neither answer is required to describe the volume. The preview says the
+      // listing was not made, and the swap's own refusal is the backstop: it rolls back.
+      workDirsChecked = false;
+      console.warn('[Recovery] Could not list the work directories of %s:', sanitizeForLog(storage.locator), errorMessageForLog(err));
+      try {
+        // The space estimate does not depend on the listing.
+        const report = await probe(false);
+        freeBytes = report.free;
+        liveGenerationToken = `${source.createdAt ?? 'unknown'}|${report.dev}:${report.ino}`;
+      } catch (spaceErr) {
+        // A probe that cannot run makes the space answer unknown, and admission
+        // checks again only when it has a number.
+        console.warn('[Recovery] Could not read free space for %s:', sanitizeForLog(storage.locator), errorMessageForLog(spaceErr));
+      }
     }
+  }
+  // A missing volume is the other generation problem: the bytes are gone, so the
+  // point cannot describe a target that does not exist. No probe runs then: a
+  // helper mount by name is what would make Docker create the empty volume.
+  const isCurrentGeneration = source === null
+    ? false
+    : liveGenerationToken !== null
+      ? liveGenerationToken === storage.generationToken
+      // A probe that could not answer leaves Docker's creation time as the only
+      // evidence, which is what the listing path always had.
+      : generationTokenMatchesVolume(storage.generationToken, source.createdAt);
+  const generationChanged = source !== null && source.eligible && !isCurrentGeneration;
+  const eligible = source?.eligible === true
+    && !generationChanged
+    && endpointRefusal === null
+    && leftoverWorkDirs.length === 0;
+  let ineligibleReason: string | null = null;
+  if (!eligible) {
+    if (source === null) ineligibleReason = describeIneligible('volume_missing');
+    else if (!source.eligible) ineligibleReason = describeIneligible(source.ineligibleReason);
+    else if (generationChanged) ineligibleReason = GENERATION_CHANGED_REASON;
+    else if (endpointRefusal) {
+      ineligibleReason = endpointRefusal.unresolved
+        ? 'Sencho cannot prove this volume is not the one it runs on, because it could not identify its own container. Check the Docker endpoint permissions, then try again.'
+        : 'This volume is mounted by the container that runs the Docker endpoint, so overwriting it would take Sencho offline with it.';
+    } else if (leftoverWorkDirs.length > 0) ineligibleReason = describeWorkDirs(leftoverWorkDirs);
   }
 
   return {
@@ -404,16 +456,11 @@ async function observeTarget(deps: OverwriteDeps, pointId: string): Promise<Targ
     point,
     repository,
     volumeName: storage.locator,
-    eligible: source?.eligible === true && endpointRefusal === null && leftoverWorkDirs.length === 0,
-    ineligibleReason: endpointRefusal === null
-      ? (source?.eligible === true && leftoverWorkDirs.length > 0
-        ? describeWorkDirs(leftoverWorkDirs)
-        : describeIneligible(source ? source.ineligibleReason : 'volume_missing'))
-      : endpointRefusal.unresolved
-        ? 'Sencho cannot prove this volume is not the one it runs on, because it could not identify its own container. Check the Docker endpoint permissions, then try again.'
-        : 'This volume is mounted by the container that runs the Docker endpoint, so overwriting it would take Sencho offline with it.',
+    eligible,
+    ineligibleReason,
     generationToken: storage.generationToken,
-    isCurrentGeneration: generationTokenMatchesVolume(storage.generationToken, source?.createdAt ?? null),
+    isCurrentGeneration,
+    generationChanged,
     containers,
     stacks: [...stacks].sort(),
     freeBytes,
@@ -501,13 +548,17 @@ export async function previewOverwrite(deps: OverwriteDeps, pointId: string): Pr
     preRestorePoint: { required: true, consistency: 'crash_consistent_stopped' },
     warnings: observed.workDirsChecked ? [...SWAP_WARNINGS] : [...SWAP_WARNINGS, WORK_DIRS_UNCHECKED_WARNING],
     confirmation: {
-      token: confirmationTokenFor({
-        pointId: observed.point.id,
-        storageKey: observed.storage.storageKey,
-        generationToken: observed.generationToken,
-        repositoryId: observed.repository.id,
-        containers: observed.containers,
-      }),
+      // No token for a target admission would refuse: an ineligible volume has no
+      // state an overwrite could be admitted against.
+      token: observed.eligible
+        ? confirmationTokenFor({
+          pointId: observed.point.id,
+          storageKey: observed.storage.storageKey,
+          generationToken: observed.generationToken,
+          repositoryId: observed.repository.id,
+          containers: observed.containers,
+        })
+        : null,
     },
   };
 }
@@ -537,7 +588,17 @@ export async function prepareOverwriteAdmission(deps: OverwriteDeps, input: {
 }): Promise<AdmittedOverwrite> {
   if (!deps.points.get(input.pointId) && !deps.authorizeGlobal()) throw new RecoveryError('permission_denied');
   const observed = await observeTarget(deps, input.pointId);
-  if (!observed.eligible) throw new RecoveryError('invalid_request', { detail: observed.ineligibleReason ?? undefined });
+  if (!observed.eligible) {
+    // A recreated volume is a moved precondition, not a malformed request: the
+    // caller's token was valid for the point, and the repair is a new point.
+    if (observed.generationChanged) {
+      throw new RecoveryError('precondition_failed', {
+        reason: 'generation_changed',
+        detail: GENERATION_CHANGED_REASON,
+      });
+    }
+    throw new RecoveryError('invalid_request', { detail: observed.ineligibleReason ?? undefined });
+  }
   if (input.confirmVolumeName !== observed.volumeName) throw new RecoveryError('invalid_request');
 
   const liveGenerationToken = await probeGenerationToken({
@@ -549,7 +610,7 @@ export async function prepareOverwriteAdmission(deps: OverwriteDeps, input: {
   if (liveGenerationToken !== observed.generationToken) {
     throw new RecoveryError('precondition_failed', {
       reason: 'generation_changed',
-      detail: 'This volume was recreated since the preview. Ask for a new preview and confirm again.',
+      detail: GENERATION_CHANGED_REASON,
     });
   }
   const expected = confirmationTokenFor({

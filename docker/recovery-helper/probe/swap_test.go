@@ -10,6 +10,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -589,7 +590,7 @@ func TestListWorkDirNamesReportsEveryWorkDirectoryAtTheRoot(t *testing.T) {
 	writeFile(t, filepath.Join(root, "data.bin"), "x")
 	writeFile(t, filepath.Join(root, "sub", workDirPrefix+"nested", "f"), "x")
 	first := workDirPrefix + "11111111-2222-3333-4444-555555555555"
-	second := workDirPrefix + "not-an-intent"
+	second := workDirPrefix + "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee"
 	for _, name := range []string{second, first} {
 		if err := os.MkdirAll(filepath.Join(root, name), 0o700); err != nil {
 			t.Fatal(err)
@@ -604,10 +605,42 @@ func TestListWorkDirNamesReportsEveryWorkDirectoryAtTheRoot(t *testing.T) {
 	}
 }
 
+// A user's entry with the prefix but not an intent id is ordinary data: the
+// listing must not call it a leftover work directory, prepare must not refuse the
+// volume for it, and a restore must not drop it from the incoming copy.
+func TestAPrefixNameThatIsNotAnIntentIDIsOrdinaryData(t *testing.T) {
+	root := t.TempDir()
+	for _, name := range []string{".sencho-restore-notes", ".sencho-restore-x.txt"} {
+		writeFile(t, filepath.Join(root, name), "user data")
+	}
+	names, err := listWorkDirNames(root)
+	if err != nil || len(names) != 0 {
+		t.Fatalf("work directories = %v, %v, want none for user names", names, err)
+	}
+
+	request := setupVolume(t,
+		map[string]string{".sencho-restore-notes/a.txt": "user data"},
+		map[string]string{"db.bin": "restored", ".sencho-restore-notes/a.txt": "user data"},
+	)
+	report, err := swapPrepare(request)
+	if err != nil {
+		t.Fatalf("prepare refused a user entry with the prefix: %v", err)
+	}
+	if !contains(report.Incoming, ".sencho-restore-notes") {
+		t.Fatalf("incoming = %v, want the user's prefixed entry kept", report.Incoming)
+	}
+	if _, err := swapCommit(request); err != nil {
+		t.Fatalf("commit: %v", err)
+	}
+	if got := readFile(t, filepath.Join(request.Root, ".sencho-restore-notes", "a.txt")); got != "user data" {
+		t.Fatalf(".sencho-restore-notes/a.txt = %q", got)
+	}
+}
+
 func TestListWorkDirNamesIsBounded(t *testing.T) {
 	root := t.TempDir()
 	for i := 0; i < maxReportedWorkDirs+3; i++ {
-		name := workDirPrefix + string(rune('a'+i))
+		name := workDirPrefix + fmt.Sprintf("%08d-0000-4000-8000-000000000000", i)
 		if err := os.MkdirAll(filepath.Join(root, name), 0o700); err != nil {
 			t.Fatal(err)
 		}

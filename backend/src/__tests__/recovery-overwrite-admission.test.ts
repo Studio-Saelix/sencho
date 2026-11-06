@@ -195,6 +195,22 @@ describe('preview', () => {
     expect(preview.target.eligible).toBe(false);
     expect(preview.swap.supported).toBe(false);
     expect(preview.swap.reason).toBeTruthy();
+    expect(preview.confirmation.token).toBeNull();
+  });
+
+  // A helper mount by name is what makes Docker create a missing volume. A
+  // preview of a point whose volume is already gone must not start one.
+  it('does not probe or create a target volume that does not exist', async () => {
+    const fake = fakeDocker({ containers: [] });
+    const seeded = seed({ createdAt: '2026-01-01T00:00:00.000Z' });
+    const helper = scriptedHelper();
+    const preview = await overwrite.previewOverwrite(deps(fake.docker, helper), seeded.pointId);
+    expect(preview.target.eligible).toBe(false);
+    expect(preview.target.ineligibleReason).toBe('This volume does not exist on this node yet.');
+    expect(preview.confirmation.token).toBeNull();
+    expect(helper.runs).toHaveLength(0);
+    expect(fake.calls).toEqual([]);
+    expect(fake.volumes.size).toBe(0);
   });
 
   it('lists the restore work directories only when the probe is asked to', async () => {
@@ -207,7 +223,7 @@ describe('preview', () => {
     // The generation probe an admission runs reads metadata only: it never asks for the listing.
     helper.runs.length = 0;
     await overwrite.prepareOverwriteAdmission(base, {
-      pointId: seeded.pointId, confirmationToken: preview.confirmation.token, confirmVolumeName: VOLUME,
+      pointId: seeded.pointId, confirmationToken: preview.confirmation.token!, confirmVolumeName: VOLUME,
     });
     const admissionProbes = helper.runs.filter((run) => run.profile === 'probe').map((run) => run.cmd);
     expect(admissionProbes).toContainEqual(expect.not.arrayContaining(['--work-dirs']));
@@ -236,7 +252,7 @@ describe('preview', () => {
       const helper = scriptedHelper({ workDirs: [LEFTOVER] });
       await expect(overwrite.prepareOverwriteAdmission(deps(fake.docker, helper), {
         pointId: seeded.pointId,
-        confirmationToken: preview.confirmation.token,
+        confirmationToken: preview.confirmation.token!,
         confirmVolumeName: VOLUME,
       })).rejects.toMatchObject({ errorClass: 'invalid_request', detail: expect.stringContaining(LEFTOVER) });
       expect(fake.calls).toEqual([]);
@@ -298,7 +314,7 @@ describe('preview', () => {
     it('says when it listed as many as the probe reports at most', async () => {
       const fake = fakeDocker({ volumes: [{ name: VOLUME }], containers: [mountingContainer()] });
       const seeded = seed({ createdAt: fake.volumes.get(VOLUME)?.createdAt ?? '' });
-      const names = Array.from({ length: 8 }, (_, i) => `.sencho-restore-${i}`);
+      const names = Array.from({ length: 8 }, () => `.sencho-restore-${randomUUID()}`);
       const preview = await overwrite.previewOverwrite(
         deps(fake.docker, scriptedHelper({ workDirs: names })), seeded.pointId,
       );
@@ -358,14 +374,29 @@ describe('preview', () => {
       });
     });
 
-    it('does not echo a name that is not plain printable text', async () => {
+    // The probe lists names by prefix, but only an intent-id name is a work
+    // directory. A user's own entry with the prefix is data: it must not make the
+    // target ineligible, and its name must never reach the refusal sentence.
+    it('ignores a user entry with the prefix that is not an intent id', async () => {
       const fake = fakeDocker({ volumes: [{ name: VOLUME }], containers: [mountingContainer()] });
       const seeded = seed({ createdAt: fake.volumes.get(VOLUME)?.createdAt ?? '' });
-      const helper = scriptedHelper({ workDirs: ['.sencho-restore-evil\nname'] });
+      const helper = scriptedHelper({
+        workDirs: ['.sencho-restore-notes', '.sencho-restore-x.txt', '.sencho-restore-evil\nname'],
+      });
+      const preview = await overwrite.previewOverwrite(deps(fake.docker, helper), seeded.pointId);
+      expect(preview.target.eligible).toBe(true);
+      expect(preview.target.ineligibleReason).toBeNull();
+      expect(preview.target.ineligibleReason ?? '').not.toContain('evil');
+    });
+
+    it('still reports a real work directory beside user entries with the prefix', async () => {
+      const fake = fakeDocker({ volumes: [{ name: VOLUME }], containers: [mountingContainer()] });
+      const seeded = seed({ createdAt: fake.volumes.get(VOLUME)?.createdAt ?? '' });
+      const helper = scriptedHelper({ workDirs: ['.sencho-restore-notes', LEFTOVER] });
       const preview = await overwrite.previewOverwrite(deps(fake.docker, helper), seeded.pointId);
       expect(preview.target.eligible).toBe(false);
-      expect(preview.target.ineligibleReason).not.toContain('evil');
-      expect(preview.target.ineligibleReason).not.toContain('\n');
+      expect(preview.target.ineligibleReason).toContain(LEFTOVER);
+      expect(preview.target.ineligibleReason).not.toContain('notes');
     });
   });
 
@@ -384,11 +415,49 @@ describe('preview', () => {
     expect(direct.node).toEqual({ id: 1, name: 'node-one', transport: 'pilot_tunnel' });
   });
 
-  it('reports a volume recreated since the point as a different generation', async () => {
+  // A recreating volume moves the generation behind the point. The preview must
+  // say so and issue no token, because admission recomputes the live token and
+  // would refuse every token this preview could offer.
+  it('marks a target recreated after the point ineligible and issues no token', async () => {
     const fake = fakeDocker({ volumes: [{ name: VOLUME }], containers: [mountingContainer()] });
-    const seeded = seed({ createdAt: '2020-01-01T00:00:00.000Z' });
-    const preview = await overwrite.previewOverwrite(deps(fake.docker, scriptedHelper()), seeded.pointId);
+    const createdAt = fake.volumes.get(VOLUME)!.createdAt;
+    const seeded = seed({ createdAt });
+    const base = deps(fake.docker, scriptedHelper());
+    const before = await overwrite.previewOverwrite(base, seeded.pointId);
+    expect(before.target.eligible).toBe(true);
+    expect(before.confirmation.token).toMatch(/^[0-9a-f]{64}$/);
+
+    // The host removes and recreates the volume after the first preview.
+    fake.volumes.get(VOLUME)!.createdAt = new Date(Date.parse(createdAt) + 2000).toISOString();
+    const after = await overwrite.previewOverwrite(base, seeded.pointId);
+    expect(after.point.isCurrentGeneration).toBe(false);
+    expect(after.target.eligible).toBe(false);
+    expect(after.target.ineligibleReason).toMatch(/recreated after this point was captured/);
+    expect(after.swap.supported).toBe(false);
+    expect(after.confirmation.token).toBeNull();
+
+    // The token the earlier preview offered describes the old generation.
+    await expect(overwrite.prepareOverwriteAdmission(base, {
+      pointId: seeded.pointId,
+      confirmationToken: before.confirmation.token!,
+      confirmVolumeName: VOLUME,
+    })).rejects.toMatchObject({ errorClass: 'precondition_failed', reason: 'generation_changed' });
+  });
+
+  // Docker's creation time has one-second resolution, so a remove and create
+  // inside the same second keeps it. The root inode the probe reads is what tells
+  // the two apart, and the preview must use it too.
+  it('marks a same-second recreation ineligible from the volume root identity', async () => {
+    const fake = fakeDocker({ volumes: [{ name: VOLUME }], containers: [mountingContainer()] });
+    const createdAt = fake.volumes.get(VOLUME)!.createdAt;
+    const seeded = seed({ createdAt, token: { dev: 63, ino: 42 } });
+    const preview = await overwrite.previewOverwrite(
+      deps(fake.docker, scriptedHelper({ dev: 63, ino: 99 })), seeded.pointId,
+    );
     expect(preview.point.isCurrentGeneration).toBe(false);
+    expect(preview.target.eligible).toBe(false);
+    expect(preview.target.ineligibleReason).toMatch(/recreated after this point was captured/);
+    expect(preview.confirmation.token).toBeNull();
   });
 });
 
@@ -402,7 +471,7 @@ describe('admission', () => {
     const preview = await overwrite.previewOverwrite(base, pointId);
     return overwrite.prepareOverwriteAdmission(base, {
       pointId,
-      confirmationToken: overrides.token ?? preview.confirmation.token,
+      confirmationToken: overrides.token ?? preview.confirmation.token ?? '',
       confirmVolumeName: overrides.volumeName ?? VOLUME,
     });
   }
@@ -448,7 +517,7 @@ describe('admission', () => {
     fake.containers.set('c2', mountingContainer('c2'));
     await expect(overwrite.prepareOverwriteAdmission(base, {
       pointId: seeded.pointId,
-      confirmationToken: preview.confirmation.token,
+      confirmationToken: preview.confirmation.token!,
       confirmVolumeName: VOLUME,
     })).rejects.toMatchObject({ errorClass: 'precondition_failed', reason: 'confirmation_mismatch' });
   });
@@ -469,7 +538,7 @@ describe('admission', () => {
     expect(preview.space.sufficient).toBe(false);
     await expect(overwrite.prepareOverwriteAdmission(base, {
       pointId: seeded.pointId,
-      confirmationToken: preview.confirmation.token,
+      confirmationToken: preview.confirmation.token!,
       confirmVolumeName: VOLUME,
     })).rejects.toMatchObject({ errorClass: 'insufficient_space' });
   });
@@ -506,7 +575,7 @@ describe('admission', () => {
     fence.RestoreFenceStore.getInstance().setFenceState(intent.id, 'held');
     await expect(overwrite.prepareOverwriteAdmission(base, {
       pointId: seeded.pointId,
-      confirmationToken: preview.confirmation.token,
+      confirmationToken: preview.confirmation.token!,
       confirmVolumeName: VOLUME,
     })).rejects.toMatchObject({ errorClass: 'lock_held' });
   });
@@ -536,7 +605,7 @@ describe('admission', () => {
     store.setFenceState(intent.id, 'held');
     const attempt = () => overwrite.prepareOverwriteAdmission(base, {
       pointId: seeded.pointId,
-      confirmationToken: preview.confirmation.token,
+      confirmationToken: preview.confirmation.token!,
       confirmVolumeName: VOLUME,
     });
     await expect(attempt()).rejects.toMatchObject({ errorClass: 'lock_held' });
@@ -574,7 +643,7 @@ describe('admission', () => {
     store.setFenceState(intent.id, 'release_failed');
     const attempt = () => overwrite.prepareOverwriteAdmission(base, {
       pointId: seeded.pointId,
-      confirmationToken: preview.confirmation.token,
+      confirmationToken: preview.confirmation.token!,
       confirmVolumeName: VOLUME,
     });
     await expect(attempt()).rejects.toMatchObject({ errorClass: 'lock_held' });
@@ -627,7 +696,7 @@ describe('admission', () => {
     fake.containers.get('c1')!.State = 'exited';
     await expect(overwrite.prepareOverwriteAdmission(base, {
       pointId: seeded.pointId,
-      confirmationToken: preview.confirmation.token,
+      confirmationToken: preview.confirmation.token!,
       confirmVolumeName: VOLUME,
     })).rejects.toMatchObject({ errorClass: 'precondition_failed', reason: 'confirmation_mismatch' });
   });

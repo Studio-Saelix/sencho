@@ -12,6 +12,7 @@ import { format } from 'util';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { HELPER_PROFILES, type HelperRunSpec } from '../services/recovery/restic/helperRunner';
 import { ResticEngine } from '../services/recovery/restic/ResticEngine';
+import { isRecoveryWorkDirName, RECOVERY_WORK_DIR_GLOB } from '../services/recovery/restoreIntents';
 import type { EngineExecutionContext, RestoreIntent } from '../services/recovery/types';
 
 const INTENT_ID = '4f3a2b1c-0d9e-4a8b-9c7d-6e5f4a3b2c1d';
@@ -213,7 +214,7 @@ describe('what a restore leaves out', () => {
     const args = specs[0].cmd as readonly string[];
     expect(args).toContain('snap-1:/data');
     const at = args.indexOf('--exclude');
-    expect(args[at + 1]).toBe('/.sencho-restore-*');
+    expect(args[at + 1]).toBe(`/${RECOVERY_WORK_DIR_GLOB}`);
     expect(args.filter((arg) => arg === '--exclude')).toHaveLength(1);
   });
 
@@ -222,8 +223,24 @@ describe('what a restore leaves out', () => {
     await engine.restore(intent(STAGED), context());
     const args = specs[0].cmd as readonly string[];
     const at = args.indexOf('--exclude');
-    expect(args[at + 1]).toBe('/data/.sencho-restore-*');
+    expect(args[at + 1]).toBe(`/data/${RECOVERY_WORK_DIR_GLOB}`);
     expect(args.filter((arg) => arg === '--exclude')).toHaveLength(1);
+  });
+
+  // The exclusion is by name, so it must match only the name Sencho makes. A
+  // user's `.sencho-restore-notes/` or `.sencho-restore-x.txt` is data.
+  it('matches only an intent-id work directory name', () => {
+    const glob = (text: string): RegExp => new RegExp(
+      `^${text.replace(/[.+^${}()|[\]\\]/g, '\\$&').replace(/\?/g, '.')}$`,
+    );
+    const matches = glob(RECOVERY_WORK_DIR_GLOB);
+    expect(matches.test(`.sencho-restore-${INTENT_ID}`)).toBe(true);
+    expect(matches.test('.sencho-restore-notes')).toBe(false);
+    expect(matches.test('.sencho-restore-x.txt')).toBe(false);
+    expect(matches.test('sub/.sencho-restore-' + INTENT_ID)).toBe(false);
+    expect(isRecoveryWorkDirName(`.sencho-restore-${INTENT_ID}`)).toBe(true);
+    expect(isRecoveryWorkDirName('.sencho-restore-notes')).toBe(false);
+    expect(isRecoveryWorkDirName('.sencho-restore-x.txt')).toBe(false);
   });
 });
 
@@ -249,7 +266,7 @@ describe('what a capture leaves out', () => {
     const args = specs[0].cmd as readonly string[];
     const at = args.indexOf('--exclude');
     expect(at).toBeGreaterThan(-1);
-    expect(args[at + 1]).toBe('/data/.sencho-restore-*');
+    expect(args[at + 1]).toBe(`/data/${RECOVERY_WORK_DIR_GLOB}`);
     expect(args.filter((arg) => arg === '--exclude')).toHaveLength(1);
     expect(args.indexOf('/data')).toBeLessThan(at);
   });

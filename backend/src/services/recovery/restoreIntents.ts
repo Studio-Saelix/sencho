@@ -28,6 +28,23 @@ export const RECOVERY_RESERVED_TARGET_PREFIX = 'sencho-recovery-';
 export const RECOVERY_STAGING_TARGET_PREFIX = 'sencho-recovery-stage-';
 /** The hidden work directory a staged overwrite swaps through, inside the target. */
 export const RECOVERY_WORK_DIR_PREFIX = '.sencho-restore-';
+/**
+ * Only a directory Sencho names after an intent is a work directory. The intent
+ * id is a UUID, so a user's own top-level `.sencho-restore-*` entry (a notes
+ * directory, a text file) is ordinary data: it must be captured, listed as
+ * content, and swapped like any other entry.
+ */
+const RECOVERY_WORK_DIR_NAME = /^\.sencho-restore-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+/** True when a root entry is one of Sencho's own swap work directories. */
+export function isRecoveryWorkDirName(name: string): boolean {
+  return RECOVERY_WORK_DIR_NAME.test(name);
+}
+/**
+ * The same names as a `filepath.Match` glob (restic's `--exclude` syntax and the
+ * Go helper's own matcher): `?` is exactly one character, so the eight/four/
+ * four/four/twelve UUID shape cannot match a user's shorter prefix name.
+ */
+export const RECOVERY_WORK_DIR_GLOB = `${RECOVERY_WORK_DIR_PREFIX}????????-????-????-????-????????????`;
 /** The journal file the swap helper writes inside that directory. */
 export const RECOVERY_SWAP_PLAN_FILE = 'plan.json';
 

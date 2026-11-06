@@ -17,7 +17,7 @@ import {
 import { sanitizeForLog } from '../../../utils/safeLog';
 import { consistencyFromObservations, type InUseObservation } from '../volumeSources';
 import { RECOVERY_CONTRACT_VERSION } from '../types';
-import { RECOVERY_WORK_DIR_PREFIX } from '../restoreIntents';
+import { RECOVERY_WORK_DIR_GLOB } from '../restoreIntents';
 import type {
   BackupEngine,
   CreatePointRequest,
@@ -89,10 +89,12 @@ export class ResticEngine implements BackupEngine {
     // A staged overwrite's work directory holds the replaced data and a copy of the
     // restored data, not the volume's own content. A point that carried one would
     // put it back on restore, and the next overwrite of that volume would refuse it.
-    // The pattern is anchored at the volume root, so a user's nested entry of that
-    // name is captured. Restic does not report an excluded path as a skipped one, so
-    // the preview tells the operator that a point does not carry the directory.
-    const args = ['backup', '/data', '--json', '--host', 'sencho', '--exclude', `/data/${RECOVERY_WORK_DIR_PREFIX}*`];
+    // The pattern is anchored at the volume root and matches only the intent-id
+    // shape Sencho creates, so a user's own top-level `.sencho-restore-*` entry is
+    // captured like any other data. Restic does not report an excluded path as a
+    // skipped one, so the preview tells the operator that a point does not carry
+    // the directory.
+    const args = ['backup', '/data', '--json', '--host', 'sencho', '--exclude', `/data/${RECOVERY_WORK_DIR_GLOB}`];
     for (const tag of tags) args.push('--tag', tag);
     const parent = this.deps.parentSnapshot(request.storage, request.repository.id);
     if (parent) args.push('--parent', parent);
@@ -191,7 +193,7 @@ export class ResticEngine implements BackupEngine {
       // which is the right shape for a volume Sencho created.
       // A point captured before the capture excluded work directories can carry one
       // at its root, which would make the new volume refuse its first overwrite.
-      args = ['restore', `${intent.snapshotId}:/data`, '--target', HELPER_RESTORE_MOUNT, '--exclude', `/${RECOVERY_WORK_DIR_PREFIX}*`];
+      args = ['restore', `${intent.snapshotId}:/data`, '--target', HELPER_RESTORE_MOUNT, '--exclude', `/${RECOVERY_WORK_DIR_GLOB}`];
     } else if (intent.target.mode === 'staged_overwrite') {
       // The whole snapshot, into a work directory inside the live volume. That
       // gives `.../incoming/data/...`, so the captured root's own owner and mode
@@ -202,7 +204,7 @@ export class ResticEngine implements BackupEngine {
       }
       args = [
         'restore', intent.snapshotId, '--target', `${HELPER_RESTORE_MOUNT}/${workDir}`,
-        '--exclude', `/data/${RECOVERY_WORK_DIR_PREFIX}*`,
+        '--exclude', `/data/${RECOVERY_WORK_DIR_GLOB}`,
       ];
       // The live root may belong to the application, which a plain root cannot write.
       profile = 'materialize';
