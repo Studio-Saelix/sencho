@@ -488,21 +488,25 @@ components:
           nullable: true
           description: >-
             Credential-free display form of the Docker client's endpoint. With
-            `DOCKER_HOST` unset this is the client-resolved socket when it can
-            be inspected, otherwise it falls back to `/var/run/docker.sock`. A
-            bare `unix://` also uses that resolution.
+            `DOCKER_HOST` unset this is the client-resolved socket (or named
+            pipe) when it can be inspected. If the client cannot be inspected,
+            `address` and `socketPath` are null and the endpoint is
+            `undetermined`; `/var/run/docker.sock` is not substituted. A bare
+            `unix://` follows the same rule. The conventional-path fallback
+            applies only when the caller does not mark the socket unresolved.
         addressSource: { type: string, enum: [env, default] }
         detection:
           type: string
           enum: [detected, undetermined, unsupported]
           description: >-
             `detected` for a unix provider means the address is a canonical
-            socket and either Sencho runs outside a container or the observed
-            host bind source is itself canonical (`/var/run/docker.sock` and
-            `/run/docker.sock` are treated as equivalent). A canonical
-            destination backed by a non-canonical host path, or with no visible
-            host source, stays `undetermined`, because a proxy or forwarder can
-            serve it.
+            socket and either Sencho runs outside a container, or — when Sencho
+            is not known to run outside a container — the observed host bind
+            source is canonical (`/var/run/docker.sock` and
+            `/run/docker.sock` are treated as equivalent). When Sencho is not
+            known to run outside a container, a canonical destination backed by
+            a non-canonical host path, or with no visible host source, stays
+            `undetermined`, because a proxy or forwarder can serve it.
         reason: { type: string, nullable: true }
         provider:
           type: object
@@ -2809,8 +2813,9 @@ paths:
         `containers` array means discovery completed and found no matching
         targets, not that the node has no Docker access. Transport failures on
         the remote-node proxy are returned unchanged (for example `502` when the
-        node is unreachable, or `404` from an older node that does not serve
-        this route). Requires `node:read`.
+        node is unreachable, `404` from an older node that does not serve this
+        route, or `503` when a Pilot tunnel is disconnected or the node has no
+        proxy target). Requires `node:read`.
       parameters:
         - $ref: "#/components/parameters/nodeId"
       responses:
@@ -2837,7 +2842,12 @@ paths:
               schema:
                 $ref: "#/components/schemas/Error"
         "503":
-          description: Docker is unavailable on the node, so no inventory could be read.
+          description: >-
+            The inventory could not be served. Either Docker is unavailable on
+            the node (`code: DOCKER_UNAVAILABLE`), or the remote-node proxy
+            refused the hop, for example a disconnected Pilot tunnel or a
+            remote node with no proxy target; those proxy refusals name the
+            transport in `error` and carry no Docker code.
           content:
             application/json:
               schema:

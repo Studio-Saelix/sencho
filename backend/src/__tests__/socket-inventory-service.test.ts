@@ -196,6 +196,15 @@ describe('describeDockerEndpoint', () => {
       socketPath: null,
       addressSource: 'default',
     });
+    expect(describeDockerEndpoint('unix://', {
+      defaultSocketPath: null,
+      defaultSocketUnresolved: true,
+    })).toMatchObject({
+      transport: 'unix',
+      address: null,
+      socketPath: null,
+      addressSource: 'env',
+    });
   });
 });
 

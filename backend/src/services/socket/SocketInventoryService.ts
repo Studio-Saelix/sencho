@@ -272,8 +272,11 @@ function idMatches(a: string | null | undefined, b: string | null | undefined): 
  * userinfo never leaves this function. An unset value follows the active Docker
  * client: dockerode resolves it lazily (Docker Desktop's
  * `~/.docker/run/docker.sock` can win over `/var/run/docker.sock`), so the
- * caller may pass that resolved path. Without one, an unset value is Docker's
- * documented unix default and is labelled as such, not as an observed setting.
+ * caller may pass that resolved path. When the caller marks the client socket
+ * unresolved, the endpoint keeps a null address and socket path instead of
+ * substituting the conventional path. Without a caller-supplied path, an unset
+ * value is Docker's documented unix default and is labelled as such, not as an
+ * observed setting.
  */
 export function describeDockerEndpoint(
   raw: string | undefined,

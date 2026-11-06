@@ -231,6 +231,7 @@ describe('GET /api/socket/inventory remote transports', () => {
       status: 'partial',
       node: { id: 999, instanceIdentity: 'remote-instance' },
       containers: [{ id: 'remote-c1' }],
+      errors: [{ stage: 'container-metadata' }],
     });
     expect(remoteHops).toContain('/remote/api/socket/inventory');
     expect(loadSocketInventoryMock).not.toHaveBeenCalled();
