@@ -29,10 +29,12 @@ export const RECOVERY_STAGING_TARGET_PREFIX = 'sencho-recovery-stage-';
 /** The hidden work directory a staged overwrite swaps through, inside the target. */
 export const RECOVERY_WORK_DIR_PREFIX = '.sencho-restore-';
 /**
- * Only a directory Sencho names after an intent is a work directory. The intent
- * id is a UUID, so a user's own top-level `.sencho-restore-*` entry (a notes
- * directory, a text file) is ordinary data: it must be captured, listed as
- * content, and swapped like any other entry.
+ * Only a top-level entry named after an intent is a work directory. The intent id
+ * is a UUID, so a user's own `.sencho-restore-*` entry with any other name (a
+ * notes directory, a text file) is ordinary data: it must be captured, listed as
+ * content, and swapped like any other entry. The check is by name, as the swap
+ * helper must decide before it has any provenance, so an entry a user gives the
+ * intent-id shape is reserved by definition.
  */
 const RECOVERY_WORK_DIR_NAME = /^\.sencho-restore-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 /** True when a root entry is one of Sencho's own swap work directories. */

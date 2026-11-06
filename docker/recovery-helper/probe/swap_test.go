@@ -610,7 +610,10 @@ func TestListWorkDirNamesReportsEveryWorkDirectoryAtTheRoot(t *testing.T) {
 // volume for it, and a restore must not drop it from the incoming copy.
 func TestAPrefixNameThatIsNotAnIntentIDIsOrdinaryData(t *testing.T) {
 	root := t.TempDir()
-	for _, name := range []string{".sencho-restore-notes", ".sencho-restore-x.txt"} {
+	// The last name has the UUID shape but not the lower-case hex alphabet Sencho
+	// generates, so it is data too.
+	nonHex := workDirPrefix + "ZZZZZZZZ-ZZZZ-ZZZZ-ZZZZ-ZZZZZZZZZZZZ"
+	for _, name := range []string{".sencho-restore-notes", ".sencho-restore-x.txt", nonHex} {
 		writeFile(t, filepath.Join(root, name), "user data")
 	}
 	names, err := listWorkDirNames(root)
@@ -619,21 +622,30 @@ func TestAPrefixNameThatIsNotAnIntentIDIsOrdinaryData(t *testing.T) {
 	}
 
 	request := setupVolume(t,
-		map[string]string{".sencho-restore-notes/a.txt": "user data"},
-		map[string]string{"db.bin": "restored", ".sencho-restore-notes/a.txt": "user data"},
+		map[string]string{".sencho-restore-notes/a.txt": "user data", nonHex + "/a.txt": "user data"},
+		map[string]string{
+			"db.bin": "restored",
+			".sencho-restore-notes/a.txt": "user data",
+			nonHex + "/a.txt":             "user data",
+		},
 	)
 	report, err := swapPrepare(request)
 	if err != nil {
 		t.Fatalf("prepare refused a user entry with the prefix: %v", err)
 	}
-	if !contains(report.Incoming, ".sencho-restore-notes") {
-		t.Fatalf("incoming = %v, want the user's prefixed entry kept", report.Incoming)
+	for _, name := range []string{".sencho-restore-notes", nonHex} {
+		if !contains(report.Incoming, name) {
+			t.Fatalf("incoming = %v, want the user's prefixed entry %q kept", report.Incoming, name)
+		}
 	}
 	if _, err := swapCommit(request); err != nil {
 		t.Fatalf("commit: %v", err)
 	}
 	if got := readFile(t, filepath.Join(request.Root, ".sencho-restore-notes", "a.txt")); got != "user data" {
 		t.Fatalf(".sencho-restore-notes/a.txt = %q", got)
+	}
+	if got := readFile(t, filepath.Join(request.Root, nonHex, "a.txt")); got != "user data" {
+		t.Fatalf("%s/a.txt = %q", nonHex, got)
 	}
 }
 

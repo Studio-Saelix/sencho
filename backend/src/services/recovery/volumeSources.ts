@@ -158,10 +158,11 @@ export interface ProbeReport {
   /** Bytes available to a write, when the probe reported statfs. */
   free: number | null;
   /**
-   * The root entries named like a restore work directory, when the probe was asked
-   * to list them: at most 8, matched by name only (a file with the prefix is listed
-   * too). `null` means the probe was not asked, or answered without the field,
-   * which is not the same as an empty volume.
+   * The root entries that are one of Sencho's restore work directories, when the
+   * probe was asked to list them: at most 8, matched by name only (the prefix plus
+   * an intent UUID; a file with that name is listed too). A prefixed entry of any
+   * other shape is user data and is not listed. `null` means the probe was not
+   * asked, or answered without the field, which is not the same as an empty volume.
    */
   workDirs: string[] | null;
 }

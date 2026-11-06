@@ -72,8 +72,9 @@ var intentIDPattern = regexp.MustCompile(`^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[
 
 // isWorkDirName reports whether a volume-root entry is one of Sencho's own swap
 // directories. The name is the prefix plus the intent UUID Sencho generated, so
-// a user's own `.sencho-restore-*` entry stays ordinary data and is neither
-// listed as a leftover work directory nor refused by prepare.
+// a user's `.sencho-restore-*` entry with any other name stays ordinary data and
+// is neither listed as a leftover work directory nor refused by prepare. The
+// check is by name: an entry a user gives the intent-id shape is reserved.
 func isWorkDirName(name string) bool {
 	if !strings.HasPrefix(name, workDirPrefix) {
 		return false
@@ -238,8 +239,8 @@ func listWorkDirNames(root string) ([]string, error) {
 // capture taken while an earlier swap's directory was in the volume holds one,
 // and moving it up would put a second work directory in the live volume, which
 // every later `prepare` refuses. It stays in the incoming copy, which the
-// clean-up removes. A user's own `.sencho-restore-*` entry is not a work
-// directory and is restored like any other data.
+// clean-up removes. A user's `.sencho-restore-*` entry with any other name is
+// not a work directory and is restored like any other data.
 func withoutWorkDirs(names []string) []string {
 	kept := make([]string, 0, len(names))
 	for _, name := range names {

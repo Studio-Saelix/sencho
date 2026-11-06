@@ -6411,8 +6411,8 @@ paths:
       description: |
         Describes what restoring the point over the volume it was captured from would do,
         without changing anything: the stacks and containers that would stop, whether any is
-        running, the free space, whether the swap is supported on this node, and a
-        `confirmation.token` bound to exactly this state. Send the token to
+        running, the free space, whether the swap is supported on this node, and, when the
+        target is eligible, a `confirmation.token` bound to exactly this state. Send the token to
         `POST /api/recovery/points/{pointId}/overwrite` to run it. The answer names the
         dependents, so it needs the same `restore` access on every dependent stack as the
         overwrite itself, plus the node-wide check when a mounting container belongs to no stack.
@@ -6427,7 +6427,10 @@ paths:
         captured, listed as content, and never treated as a work directory. A volume that does not
         exist, or that was recreated after the point was captured, is also not eligible: the
         preview compares the live volume's creation time and root device/inode with the point's
-        generation and does not mount a missing volume by name. The listing reads a volume root an
+        generation and does not mount a missing volume by name. Once a new capture records the
+        recreated volume, the point's generation is superseded and the preview refuses it as an
+        unknown storage identity instead. A preview that cannot read the live generation issues no
+        token. The listing reads a volume root an
         application user owns (mode `0700` or `2750`) as well; when the helper cannot complete
         the listing at all, the preview adds a warning and the swap's own refusal is the backstop.
         Only a Full Admin API token may call it; any other scope is refused with `403 SCOPE_DENIED`.

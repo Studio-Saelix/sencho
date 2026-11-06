@@ -177,6 +177,8 @@ export function scriptedHelper(input: {
   free?: number;
   /** The restore work directories at the volume root, for a probe asked with `--work-dirs`. */
   workDirs?: string[];
+  /** Make every probe fail, as a helper that cannot start does. */
+  probeFails?: boolean;
   /** How a probe asked with `--work-dirs` answers: normally, with exit 1 (a helper that predates the flag), or without the list. */
   workDirsProbe?: 'answers' | 'exits' | 'omits';
 } = {}): {
@@ -197,6 +199,9 @@ export function scriptedHelper(input: {
       runs.push({ profile: spec.profile, cmd: spec.cmd, mounts: spec.mounts });
       if (spec.profile === 'probe') {
         probes += 1;
+        if (input.probeFails) {
+          return { exitCode: 1, stderrTail: 'probe failed', aborted: false, killed: false };
+        }
         const asked = spec.cmd.includes('--work-dirs');
         if (asked && input.workDirsProbe === 'exits') {
           spec.onStdoutLine?.(JSON.stringify({ error: 'usage: sencho-recovery-probe <path>' }));

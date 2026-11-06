@@ -198,6 +198,20 @@ describe('preview', () => {
     expect(preview.confirmation.token).toBeNull();
   });
 
+  // No probe means no inode, so the creation time alone cannot prove the target
+  // is still the point's generation. The preview must not offer a token then.
+  it('issues no token when it cannot read the live generation', async () => {
+    const fake = fakeDocker({ volumes: [{ name: VOLUME }], containers: [mountingContainer()] });
+    const seeded = seed({ createdAt: fake.volumes.get(VOLUME)!.createdAt });
+    const preview = await overwrite.previewOverwrite(
+      deps(fake.docker, scriptedHelper({ probeFails: true })), seeded.pointId,
+    );
+    expect(preview.target.eligible).toBe(false);
+    expect(preview.target.ineligibleReason).toMatch(/could not read this volume's storage generation/);
+    expect(preview.swap.supported).toBe(false);
+    expect(preview.confirmation.token).toBeNull();
+  });
+
   // A helper mount by name is what makes Docker create a missing volume. A
   // preview of a point whose volume is already gone must not start one.
   it('does not probe or create a target volume that does not exist', async () => {
@@ -374,9 +388,10 @@ describe('preview', () => {
       });
     });
 
-    // The probe lists names by prefix, but only an intent-id name is a work
-    // directory. A user's own entry with the prefix is data: it must not make the
-    // target ineligible, and its name must never reach the refusal sentence.
+    // The probe returns only intent-id names, but an older helper could return a
+    // user's prefixed entry. The preview's own filter must still treat it as data:
+    // it must not make the target ineligible, and its name must never reach the
+    // refusal sentence.
     it('ignores a user entry with the prefix that is not an intent id', async () => {
       const fake = fakeDocker({ volumes: [{ name: VOLUME }], containers: [mountingContainer()] });
       const seeded = seed({ createdAt: fake.volumes.get(VOLUME)?.createdAt ?? '' });

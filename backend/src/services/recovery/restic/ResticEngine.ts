@@ -90,10 +90,10 @@ export class ResticEngine implements BackupEngine {
     // restored data, not the volume's own content. A point that carried one would
     // put it back on restore, and the next overwrite of that volume would refuse it.
     // The pattern is anchored at the volume root and matches only the intent-id
-    // shape Sencho creates, so a user's own top-level `.sencho-restore-*` entry is
-    // captured like any other data. Restic does not report an excluded path as a
-    // skipped one, so the preview tells the operator that a point does not carry
-    // the directory.
+    // shape Sencho creates, so a user's top-level entry with the prefix and any
+    // other name is captured like any other data. Restic does not report an
+    // excluded path as a skipped one, so the preview tells the operator that a
+    // point does not carry the directory.
     const args = ['backup', '/data', '--json', '--host', 'sencho', '--exclude', `/data/${RECOVERY_WORK_DIR_GLOB}`];
     for (const tag of tags) args.push('--tag', tag);
     const parent = this.deps.parentSnapshot(request.storage, request.repository.id);

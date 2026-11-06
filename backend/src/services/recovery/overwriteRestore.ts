@@ -95,6 +95,14 @@ const WORK_DIRS_UNCHECKED_WARNING =
 const GENERATION_CHANGED_REASON =
   'This volume was recreated after this point was captured, so the point does not describe the data on it now. Take a new point of this volume, then preview again.';
 
+/**
+ * No probe could read the live generation. Docker's creation time alone cannot
+ * prove the root inode is the point's, so the preview must not offer a token that
+ * admission would compute from a different state.
+ */
+const GENERATION_UNVERIFIED_REASON =
+  'Sencho could not read this volume\'s storage generation, so it cannot prove the point still describes the data on it. Try the preview again when the node can run the recovery helper.';
+
 /** Phases in which the live volume has not been touched. */
 const PRE_FENCE_PHASES = ['recorded', 'staging', 'staged_verified'];
 /** Phases whose fence is applied or may have been applied. */
@@ -399,9 +407,9 @@ async function observeTarget(deps: OverwriteDeps, pointId: string): Promise<Targ
       } else {
         // The work directory of the restore that owns the volume now is its own;
         // anything else was left by one that did not settle, and the swap refuses a
-        // volume that holds it after the workloads have already stopped. Only the
-        // intent-id names Sencho creates are work directories: a user's own
-        // `.sencho-restore-*` entry is ordinary data.
+        // volume that holds it after the workloads have already stopped. Only an
+        // intent-id name is a work directory: a user's `.sencho-restore-*` entry
+        // with any other name is ordinary data.
         const live = deps.fence.liveIntentForVolume(storage.locator);
         leftoverWorkDirs = report.workDirs
           .filter((name) => isRecoveryWorkDirName(name))
@@ -427,15 +435,17 @@ async function observeTarget(deps: OverwriteDeps, pointId: string): Promise<Targ
   // A missing volume is the other generation problem: the bytes are gone, so the
   // point cannot describe a target that does not exist. No probe runs then: a
   // helper mount by name is what would make Docker create the empty volume.
+  const generationVerified = source !== null && liveGenerationToken !== null;
   const isCurrentGeneration = source === null
     ? false
     : liveGenerationToken !== null
       ? liveGenerationToken === storage.generationToken
       // A probe that could not answer leaves Docker's creation time as the only
-      // evidence, which is what the listing path always had.
+      // evidence; it can prove a change, never that the inode is the same.
       : generationTokenMatchesVolume(storage.generationToken, source.createdAt);
   const generationChanged = source !== null && source.eligible && !isCurrentGeneration;
   const eligible = source?.eligible === true
+    && generationVerified
     && !generationChanged
     && endpointRefusal === null
     && leftoverWorkDirs.length === 0;
@@ -444,6 +454,7 @@ async function observeTarget(deps: OverwriteDeps, pointId: string): Promise<Targ
     if (source === null) ineligibleReason = describeIneligible('volume_missing');
     else if (!source.eligible) ineligibleReason = describeIneligible(source.ineligibleReason);
     else if (generationChanged) ineligibleReason = GENERATION_CHANGED_REASON;
+    else if (!generationVerified) ineligibleReason = GENERATION_UNVERIFIED_REASON;
     else if (endpointRefusal) {
       ineligibleReason = endpointRefusal.unresolved
         ? 'Sencho cannot prove this volume is not the one it runs on, because it could not identify its own container. Check the Docker endpoint permissions, then try again.'
