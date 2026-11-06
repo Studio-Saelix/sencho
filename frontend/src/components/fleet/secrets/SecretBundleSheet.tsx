@@ -546,7 +546,7 @@ export function SecretBundleSheet({ open, onOpenChange, secret, onSaved }: Props
                                 <div className="space-y-2">
                                     {mode === 'edit' && (
                                         <p className="text-[10px] uppercase tracking-[0.18em] font-mono text-stat-subtitle">
-                                            Values are masked. Reveal shows one value for 30 seconds; typing replaces it.
+                                            Values are masked. Reveal shows one value at a time for a few seconds; typing replaces it, and clearing a field leaves the stored value.
                                         </p>
                                     )}
                                     {rows.map((row) => {
