@@ -307,6 +307,28 @@ describe('PATCH /api/secrets/:id writes one key and keeps the rest', () => {
         expect((await patch({ expectedVersion: 1, ops: [{ op: 'remove', key: 'MISSING' }] })).status).toBe(400);
     });
 
+    it('answers 400 when the stored payload already carries an invalid env key', async () => {
+        // A legacy version can hold a key the current rule rejects. A valid op
+        // carries it forward, and the service's merged-payload check is the
+        // only place that turns that into a client error.
+        const db = DatabaseService.getInstance();
+        const legacy = db.createSecretWithVersion({
+            name: 'legacy-bad-key',
+            description: '',
+            encryptedPayload: CryptoService.getInstance().encrypt(JSON.stringify({ '1BAD': 'x', OK: 'y' })),
+            keyCount: 2,
+            createdBy: TEST_USERNAME,
+            note: '',
+        });
+        const res = await request(app)
+            .patch(`/api/secrets/${legacy.id}`)
+            .set('Authorization', `Bearer ${adminToken()}`)
+            .send({ expectedVersion: 1, ops: [{ op: 'set', key: 'OK', value: 'z' }] });
+        expect(res.status).toBe(400);
+        expect(res.body.error).toMatch(/Invalid env key/);
+        expect(db.getSecret(legacy.id)!.current_version).toBe(1);
+    });
+
     it('requires the version the caller loaded', async () => {
         const res = await patch({ ops: [{ op: 'set', key: 'API_KEY', value: 'x' }] });
         expect(res.status).toBe(400);
