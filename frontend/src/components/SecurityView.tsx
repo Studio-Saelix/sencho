@@ -446,6 +446,7 @@ export function SecurityView({ activeTab, onTabChange, headerActions }: Security
               onClearTargeting={clearImagesTargeting}
               posturePartial={overview?.posturePartial === true}
               nodeId={activeNode?.id}
+              onIntentSaved={reloadOverview}
             />
           </CapabilityGate>
         </TabsContent>

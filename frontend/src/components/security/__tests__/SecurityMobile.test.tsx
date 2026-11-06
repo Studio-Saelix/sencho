@@ -10,6 +10,9 @@ import { SecurityMobileTabs, ImageScanRow, SecuritySevStrip, type SecurityMobile
 import { ImagesTab } from '../ImagesTab';
 import type { ScanSummary, SecurityOverview } from '@/types/security';
 
+// These cases cover the named Networking navigation, which a session that may not edit the stack keeps.
+vi.mock('@/context/AuthContext', () => ({ useAuth: () => ({ can: () => false }) }));
+
 function overview(o: Partial<SecurityOverview> = {}): SecurityOverview {
   return {
     scannedImages: 0,
