@@ -219,3 +219,36 @@ describe('BootstrapServerDialog changed host key', () => {
     });
   });
 });
+
+describe('BootstrapServerDialog stale-result banner', () => {
+  async function reachResult() {
+    vi.mocked(checkBootstrapHostKey).mockResolvedValue({ ...CHANGED_KEY, trust: 'trusted', pinnedFingerprint: CHANGED_KEY.fingerprint });
+    render(<BootstrapServerDialog open onOpenChange={() => {}} />);
+    const user = await fillTarget();
+    await user.click(screen.getByRole('button', { name: 'Check host key' }));
+    await user.click(await screen.findByRole('button', { name: 'Run preflight' }));
+    await waitFor(() => expect(runBootstrapPreflight).toHaveBeenCalledTimes(1));
+    await user.click(await screen.findByRole('button', { name: 'Back' }));
+    return user;
+  }
+
+  it('says the SSH target changed, not the paths, after the host is edited', async () => {
+    const user = await reachResult();
+    await user.type(screen.getByLabelText('Host'), 'x');
+    expect(await screen.findByText(/The SSH target changed\. The previous host key check, preflight and plan no longer apply/)).toBeInTheDocument();
+    expect(screen.queryByText(/Paths changed/)).not.toBeInTheDocument();
+  });
+
+  it('says the SSH key changed after the private key is edited', async () => {
+    const user = await reachResult();
+    await user.type(screen.getByLabelText('Private key'), 'x');
+    expect(await screen.findByText(/The SSH key changed\./)).toBeInTheDocument();
+    expect(screen.queryByText(/Paths changed/)).not.toBeInTheDocument();
+  });
+
+  it('keeps the paths wording for a directory edit', async () => {
+    const user = await reachResult();
+    await user.type(screen.getByLabelText('Compose stacks directory'), '2');
+    expect(await screen.findByText(/Paths changed\. The previous preflight and plan no longer apply/)).toBeInTheDocument();
+  });
+});

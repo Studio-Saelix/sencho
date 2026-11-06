@@ -124,8 +124,54 @@ describe('useNodeBootstrap', () => {
     // A path edit keeps the host trust and lands back on the preflight step,
     // where the stale banner asks for another run.
     expect(hook.current.step).toBe('preflight');
-    expect(hook.current.invalidated).toBe(true);
+    expect(hook.current.invalidated).toBe('paths');
     expect(hook.current.hostKey?.fingerprint).toBe('SHA256:abc');
+  });
+
+  it.each([
+    ['host', 'other.example.com', 'target'],
+    ['port', '2222', 'target'],
+    ['username', 'deploy', 'target'],
+    ['privateKey', '-----BEGIN OPENSSH PRIVATE KEY-----other', 'key'],
+    ['passphrase', 'secret', 'key'],
+    ['composeDir', '/srv/other-stacks', 'paths'],
+    ['agentDir', '/srv/other-agent', 'paths'],
+    ['targetName', 'renamed', 'name'],
+  ] as const)('names the %s edit as a %s invalidation, not a path change', async (field, value, reason) => {
+    const api = fakeApi();
+    const { result: hook } = renderHook(() => useNodeBootstrap({ open: true, api }));
+    await act(async () => { fillTarget(hook.current); });
+    await act(async () => { await hook.current.checkHostKey(); });
+    await act(async () => { await hook.current.runPreflight(); });
+    expect(hook.current.invalidated).toBeNull();
+
+    await act(async () => { hook.current.setField(field, value); });
+    expect(hook.current.result).toBeNull();
+    expect(hook.current.invalidated).toBe(reason);
+  });
+
+  it('keeps the strongest reason when a smaller edit follows, and clears it on the next result', async () => {
+    const api = fakeApi();
+    const { result: hook } = renderHook(() => useNodeBootstrap({ open: true, api }));
+    await act(async () => { fillTarget(hook.current); });
+    await act(async () => { await hook.current.checkHostKey(); });
+    await act(async () => { await hook.current.runPreflight(); });
+
+    await act(async () => { hook.current.setField('host', 'other.example.com'); });
+    await act(async () => { hook.current.setField('composeDir', '/srv/other-stacks'); });
+    expect(hook.current.invalidated).toBe('target');
+
+    await act(async () => { await hook.current.checkHostKey(); });
+    await act(async () => { await hook.current.runPreflight(); });
+    expect(hook.current.invalidated).toBeNull();
+  });
+
+  it('shows no banner for an edit made before any preflight result exists', async () => {
+    const api = fakeApi();
+    const { result: hook } = renderHook(() => useNodeBootstrap({ open: true, api }));
+    await act(async () => { fillTarget(hook.current); });
+    await act(async () => { hook.current.setField('host', 'other.example.com'); });
+    expect(hook.current.invalidated).toBeNull();
   });
 
   it('drops the host key when the host, port or user changes', async () => {

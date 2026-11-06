@@ -8,6 +8,7 @@ import { BootstrapTargetStep } from './BootstrapTargetStep';
 import { BootstrapPreflightStep } from './BootstrapPreflightStep';
 import { BootstrapPlanStep } from './BootstrapPlanStep';
 import { HostKeyCompare } from './HostKeyCompare';
+import { INVALIDATION_MESSAGE } from './invalidation';
 import { useNodeBootstrap, type UseNodeBootstrap } from './useNodeBootstrap';
 import type { BootstrapStep } from './types';
 
@@ -113,7 +114,7 @@ function DialogBody({ wizard }: { wizard: UseNodeBootstrap }) {
         {invalidated && (
           <div className="rounded-lg border border-warning/30 bg-warning/5 px-3 py-2">
             <p className="text-xs text-warning">
-              Paths changed. The previous preflight and plan no longer apply. Run the preflight again.
+              {INVALIDATION_MESSAGE[invalidated]}
             </p>
           </div>
         )}

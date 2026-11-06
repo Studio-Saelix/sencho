@@ -405,6 +405,22 @@ describe('bootstrap SSH transport deadlines and byte budgets', () => {
     ]);
   });
 
+  it('reports the session timeout whichever timer wins when both budgets expire together', async () => {
+    // Equal budgets arm the command timer and the watchdog for the same instant,
+    // so either may fire first. The result must be the same in both cases.
+    const fixture = await startServer({ withholdExec: 'sleep' });
+    const results = await client.runCommands(
+      { host: 'fixture.local', address: '127.0.0.1', port: fixture.port, username: 'ubuntu', privateKey: USER_KEY },
+      [{ id: 'first', command: 'uname -m' }, { id: 'hang', command: 'sleep 60' }, { id: 'after', command: 'uname -m' }],
+      { perCommandMs: 400, totalMs: 400 },
+    );
+    expect(results.map((entry) => [entry.id, entry.error])).toEqual([
+      ['first', null],
+      ['hang', 'PREFLIGHT_TIMEOUT'],
+      ['after', 'PREFLIGHT_TIMEOUT'],
+    ]);
+  });
+
   it('abandons a running session when the caller aborts', async () => {
     const fixture = await startServer({ hangCommand: 'sleep' });
     const controller = new AbortController();

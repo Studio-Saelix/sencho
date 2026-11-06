@@ -6,11 +6,13 @@ import {
   fetchBootstrapCapabilities,
   runBootstrapPreflight,
 } from './bootstrapApi';
+import { invalidationForField, strongerInvalidation } from './invalidation';
 import { pathSeparationError, validateBootstrapPath, type BootstrapPathKind } from './pathValidation';
 import type {
   BootstrapCapabilities,
   BootstrapForm,
   BootstrapHostKeyResult,
+  BootstrapInvalidation,
   BootstrapPreflightResult,
   BootstrapStep,
 } from './types';
@@ -89,7 +91,7 @@ export function useNodeBootstrap({ open, api }: UseNodeBootstrapOptions) {
   const [configRevision, setConfigRevision] = useState(0);
   const [resultRevision, setResultRevision] = useState<number | null>(null);
   const [advancedOpen, setAdvancedOpen] = useState(false);
-  const [invalidated, setInvalidated] = useState(false);
+  const [invalidated, setInvalidated] = useState<BootstrapInvalidation | null>(null);
   const abortRef = useRef<AbortController | null>(null);
   // Bumped whenever the SSH endpoint changes, so a keyscan response for the
   // previous host, port or user can never populate the current form.
@@ -141,7 +143,7 @@ export function useNodeBootstrap({ open, api }: UseNodeBootstrapOptions) {
     setFieldErrors([]);
     setResultRevision(null);
     setAdvancedOpen(false);
-    setInvalidated(false);
+    setInvalidated(null);
     dirtyFieldsRef.current.clear();
   }, [capabilities.defaults.agentDir, capabilities.defaults.composeDir]);
 
@@ -154,7 +156,7 @@ export function useNodeBootstrap({ open, api }: UseNodeBootstrapOptions) {
       abortRef.current = null;
       setForm((current) => ({ ...current, privateKey: '', passphrase: '' }));
       setBusy(null);
-      setInvalidated(false);
+      setInvalidated(null);
       return;
     }
     const controller = new AbortController();
@@ -180,8 +182,12 @@ export function useNodeBootstrap({ open, api }: UseNodeBootstrapOptions) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open]);
 
-  const clearResult = useCallback((toTarget = false) => {
-    if (resultRef.current) setInvalidated(true);
+  const clearResult = useCallback((field: keyof BootstrapForm, toTarget = false) => {
+    // A banner that is already up keeps the strongest reason; one is raised
+    // only when a result is actually being discarded.
+    const reason = invalidationForField(field);
+    const hadResult = resultRef.current !== null;
+    setInvalidated((current) => (hadResult || current ? strongerInvalidation(current, reason) : current));
     setResult(null);
     setResultRevision(null);
     // The pin is a host property, so a path or key edit made from the preflight
@@ -209,10 +215,10 @@ export function useNodeBootstrap({ open, api }: UseNodeBootstrapOptions) {
       setReplacing(false);
       // The superseded request no longer owns the busy flag.
       setBusy(null);
-      clearResult(true);
+      clearResult(field, true);
       return;
     }
-    clearResult();
+    clearResult(field);
   }, [clearResult]);
 
   const validate = useCallback((): { ok: boolean; errors: BootstrapFieldError[] } => {
@@ -299,7 +305,7 @@ export function useNodeBootstrap({ open, api }: UseNodeBootstrapOptions) {
       if (targetGenerationRef.current !== generation) return;
       setResult(response);
       setResultRevision(revision);
-      setInvalidated(false);
+      setInvalidated(null);
       // The server pinned (or replaced) the reviewed key as part of this run.
       setHostKey((current) => (
         current ? { ...current, trust: 'trusted', pinnedFingerprint: current.fingerprint } : current

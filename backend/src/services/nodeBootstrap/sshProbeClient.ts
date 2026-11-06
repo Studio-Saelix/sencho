@@ -501,6 +501,12 @@ function runSession(
             );
             if (finished) return;
             remainingBytes -= outcome.bytes;
+            // The command timer is capped by what is left of the session budget,
+            // so it can fire a few milliseconds ahead of the watchdog. A timeout
+            // that the session budget bounded is the session timeout, and the
+            // commands behind it did not run either: the outcome must not depend
+            // on which timer wins the race.
+            const sessionBound = outcome.timedOut && remainingMs <= options.perCommandMs;
             results.push({
               id: command.id,
               stdout: outcome.stdout,
@@ -508,9 +514,15 @@ function runSession(
               exitCode: outcome.exitCode,
               truncated: outcome.truncated,
               timedOut: outcome.timedOut,
-              error: outcome.timedOut ? 'COMMAND_TIMEOUT' : outcome.error,
+              error: outcome.timedOut ? (sessionBound ? 'PREFLIGHT_TIMEOUT' : 'COMMAND_TIMEOUT') : outcome.error,
             });
             completed += 1;
+            if (sessionBound) {
+              for (let index = completed; index < commands.length; index += 1) {
+                results.push(timeoutResult(commands[index]));
+              }
+              completed = commands.length;
+            }
             if (outcome.timedOut) break;
           }
           finish();

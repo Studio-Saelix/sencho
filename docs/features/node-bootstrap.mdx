@@ -122,13 +122,18 @@ The plan reads **No changes have been made on this server.** Use **Copy plan** o
 - Both paths must be on local persistent filesystems. `tmpfs`, `overlay`, network filesystems and similar are blockers, because the agent must come back after a reboot with its stacks and its compose file. A separate local mount that cannot be confirmed in `/etc/fstab` is a warning; a systemd mount unit can be invisible there.
 - Free space is checked on the Compose path, the Agent path and the Docker root, each against its own reading even when two of them share a filesystem. The plan is blocked under the hard floor and warns below the comfortable level. An unreadable figure is `unknown`, never a pass, and it stays `unknown` when another filesystem is only low. The Docker root is the directory the daemon reports, measured on its own filesystem; the default `/var/lib/docker` is assumed only on a host that has no Docker CLI at all.
 
-## Path changes invalidate the plan
+## Edits invalidate the plan
 
-Editing either directory discards the preflight result and the plan and shows:
+Editing any field after a preflight discards the preflight result and the plan, and a banner names what changed:
 
-> Paths changed. The previous preflight and plan no longer apply. Run the preflight again.
+| Field edited | Banner |
+|---|---|
+| Host, port or SSH user | The SSH target changed. The previous host key check, preflight and plan no longer apply. Check the host key again. |
+| Private key or passphrase | The SSH key changed. The previous preflight and plan no longer apply. Run the preflight again. |
+| Either directory | Paths changed. The previous preflight and plan no longer apply. Run the preflight again. |
+| Node name | The node name changed. The previous preflight and plan no longer apply. Run the preflight again. |
 
-The plan step stays unreachable until a new preflight succeeds, and the new digest differs. The host-key pin is a property of the host, not of a path, so trust survives a path edit; changing the host, port or user does drop it.
+When several kinds of field change, the banner names the first one in that order. The plan step stays unreachable until a new preflight succeeds, and the new digest differs. The host-key pin is a property of the host, not of a path or a key, so trust survives a path, key or name edit; changing the host, port or user does drop it.
 
 ## Lifecycle
 

@@ -157,6 +157,9 @@ export interface BootstrapHostKeyResult {
 
 export type BootstrapStep = 'target' | 'preflight' | 'plan';
 
+/** What an edit made stale; it picks the wording of the banner that explains it. */
+export type BootstrapInvalidation = 'name' | 'paths' | 'key' | 'target';
+
 export interface BootstrapForm {
   targetName: string;
   host: string;
