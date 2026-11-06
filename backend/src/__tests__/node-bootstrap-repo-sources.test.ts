@@ -14,7 +14,7 @@ import {
   redactUri,
 } from '../services/nodeBootstrap/probes';
 import { buildBootstrapEvidence, repoVerified } from '../services/nodeBootstrap/evidence';
-import { buildBootstrapPlan, canonicalJson } from '../services/nodeBootstrap/planBuilder';
+import { buildBootstrapPlan, canonicalJson, evidenceDigestOf } from '../services/nodeBootstrap/planBuilder';
 import type { SshCommandResult } from '../services/nodeBootstrap/sshProbeClient';
 import type { BootstrapCheck, BootstrapFacts } from '../services/nodeBootstrap/types';
 import { makeFacts } from './__helpers__/bootstrapFacts';
@@ -476,7 +476,6 @@ describe('sources outside docker.list and docker.sources', () => {
       ['an upper-case URI scheme, which names no apt method', 'deb HTTPS://archive.ubuntu.com/ubuntu noble main'],
       ['an upper-case scheme on the official URI', `deb [arch=amd64 signed-by=${DOCKER_ASC_PATH}] HTTPS://download.docker.com/linux/ubuntu noble stable`],
       ['an option value in single quotes, which apt does not read as a quote', "deb [signed-by='/etc/apt/keyrings/one.gpg /etc/apt/keyrings/two.gpg'] http://archive.ubuntu.com/ubuntu noble main"],
-      ['a quote that opens in the middle of an option value', 'deb [signed-by=/etc/apt/keyrings/one.gpg"two three"] http://archive.ubuntu.com/ubuntu noble main'],
       // apt starts a comment at any '#', so what follows one inside a word is gone.
       ['a hash inside the URI, which cuts the suite off', 'deb http://archive.ubuntu.com/ubuntu#x noble main'],
       ['a hash that ends the Docker URI, which cuts the suite off', `deb [arch=amd64 signed-by=${DOCKER_ASC_PATH}] ${OFFICIAL}# noble stable`],
@@ -585,6 +584,7 @@ describe('sources outside docker.list and docker.sources', () => {
     // a fingerprint). apt-cache policy is the backstop.
     it.each([
       ['a Signed-By value that is not a path or fingerprint', CUSTOM_LIST, `${listGood}\ndeb [signed-by=foo] http://archive.ubuntu.com/ubuntu noble main`],
+      ['a quoted Signed-By value that leaves an item that is not a path or fingerprint', CUSTOM_LIST, `${listGood}\ndeb [signed-by=/etc/apt/keyrings/one.gpg"two three"] http://archive.ubuntu.com/ubuntu noble main`],
       ['a deb822 Signed-By value that is not a path or fingerprint', CUSTOM_SOURCES, `${stanza({})}\n\n${unrelatedStanza('Suites: noble\nComponents: main\nSigned-By: foo')}`],
     ])('does not trust %s once apt-cache policy fails', (_label, file, content) => {
       const text = [block(file, content), dockerAscBlock()].join('\n');
@@ -836,8 +836,8 @@ describe('sources outside docker.list and docker.sources', () => {
         expect(leaks(canonicalJson(facts))).toEqual([]);
         // Redacting the URI must not turn a foreign archive into the official one, or the reverse.
         expect(assembled.repo.candidateSourceVerified).toBe(false);
-        const official = parseAptPolicy(OFFICIAL_CANDIDATE).find((pkg) => pkg.name === 'docker-ce');
-        expect(official?.candidateSources).toEqual([{ uri: OFFICIAL, release: 'noble/stable' }]);
+        const official = parseAptPolicy(OFFICIAL_CANDIDATE, 'noble').find((pkg) => pkg.name === 'docker-ce');
+        expect(official?.candidateSources).toEqual([{ uri: OFFICIAL, official: true }]);
       });
     });
   });
@@ -1141,5 +1141,204 @@ describe('the probe reads the apt source files', () => {
     expect(command).toContain('/etc/apt/sources.list');
     expect(command).toContain('/etc/apt/sources.list.d');
     expect(command).not.toMatch(/\b(rm|mv|cp|tee|sed -i|apt-get)\b/);
+  });
+});
+
+describe('apt candidate archives keep every credential-shaped word out of the facts', () => {
+  const NAMES = ['docker-ce', 'docker-ce-cli', 'containerd.io', 'docker-buildx-plugin', 'docker-compose-plugin'] as const;
+  const TOKEN = 'AUDIT_FAKE_SUITE_SECRET';
+  const OTHER = 'AUDIT_FAKE_OTHER_SECRET';
+
+  /** apt-cache policy for all five packages, every candidate served by one archive line. */
+  const policyFor = (archive: (name: string) => string) => NAMES.map((name) => [
+    `${name}:`, '  Installed: (none)', '  Candidate: 5:27.3.1-1', '  Version table:', '     5:27.3.1-1 500', `        500 ${archive(name)}`,
+  ].join('\n')).join('\n');
+  const GOOD_REPO = [block(LIST_FILE, `deb [arch=amd64 signed-by=${DOCKER_ASC_PATH}] ${OFFICIAL} noble stable`), dockerAscBlock()].join('\n');
+  const GOOD_STANZA_REPO = [block(SOURCES_FILE, stanza({})), dockerAscBlock()].join('\n');
+
+  function factsFor(policy: string, repoText: string, fresh: boolean): BootstrapFacts {
+    const assembled = assemble([probe('docker_repo', repoText), probe('apt_policy', policy)]);
+    return makeFacts({
+      ...(fresh ? { docker: FRESH_DOCKER } : {}),
+      packages: parseAptPolicy(policy, 'noble'),
+      repo: assembled.repo,
+    });
+  }
+
+  const archives: Array<[string, (name: string) => string, boolean]> = [
+    ['a suite path on a private host', (name) => `https://private.example/ubuntu ${TOKEN}-${name}/main amd64 Packages`, false],
+    ['a component path on a private host', (name) => `https://private.example/ubuntu noble/${TOKEN}-${name} amd64 Packages`, false],
+    ['a suite path on a local file repository', (name) => `file:/srv/repo ${TOKEN}-${name}/main amd64 Packages`, false],
+    ['a component path on the official host', (name) => `${OFFICIAL} noble/stable-${TOKEN}-${name} amd64 Packages`, false],
+    ['a suite path on the official host', (name) => `${OFFICIAL} ${TOKEN}-${name}/stable amd64 Packages`, false],
+    ['extra words after the architecture', (name) => `${OFFICIAL} noble/stable amd64 Packages ${TOKEN}-${name}`, true],
+  ];
+
+  describe.each([['a list file', GOOD_REPO], ['a deb822 file', GOOD_STANZA_REPO]])('beside %s', (_format, repoText) => {
+    it.each(archives)('keeps %s out of the canonical facts of a fresh host and a healthy one', (_label, archive, official) => {
+      const policy = policyFor(archive);
+      for (const fresh of [true, false]) {
+        const facts = factsFor(policy, repoText, fresh);
+        expect(canonicalJson(facts)).not.toContain(TOKEN);
+        expect(JSON.stringify(evidenceFor(facts))).not.toContain(TOKEN);
+        if (!planWithheld(facts)) expect(JSON.stringify(planFor(facts))).not.toContain(TOKEN);
+        // Classifying before keeping must not change who is trusted: only the official archive for the host release passes.
+        expect(facts.repo.candidateSourceVerified).toBe(official);
+        expect(facts.packages.every((pkg) => pkg.candidateSources?.every((source) => source.official === official))).toBe(true);
+        if (!official) {
+          // A foreign candidate keeps a fresh host's plan back; a healthy host keeps its installation.
+          expect(planWithheld(factsFor(policy, repoText, true))).toBe(true);
+        }
+      }
+      expect(planWithheld(factsFor(policy, repoText, false))).toBe(false);
+      expect(aptSource(factsFor(policy, repoText, false)).status).toBe(official ? 'pass' : 'warn');
+    });
+
+    it.each(archives)('hashes the same evidence whatever credential-shaped word %s holds', (_label, archive) => {
+      const swapped = policyFor((name) => archive(name).replaceAll(TOKEN, OTHER));
+      for (const fresh of [true, false]) {
+        expect(evidenceDigestOf(factsFor(policyFor(archive), repoText, fresh))).toBe(evidenceDigestOf(factsFor(swapped, repoText, fresh)));
+      }
+      // Only a healthy host is issued a plan beside a foreign candidate; its digests must not move either.
+      const first = planFor(factsFor(policyFor(archive), repoText, false));
+      const second = planFor(factsFor(swapped, repoText, false));
+      expect(first.evidenceDigest).toBe(second.evidenceDigest);
+      expect(first.digest).toBe(second.digest);
+    });
+  });
+
+  it('still verifies the official archive for the host release and refuses it for another release', () => {
+    expect(factsFor(policyFor(() => `${OFFICIAL} noble/stable amd64 Packages`), GOOD_REPO, true).repo.candidateSourceVerified).toBe(true);
+    expect(factsFor(policyFor(() => `${OFFICIAL} jammy/stable amd64 Packages`), GOOD_REPO, true).repo.candidateSourceVerified).toBe(false);
+    expect(factsFor(policyFor(() => `${OFFICIAL} noble/test amd64 Packages`), GOOD_REPO, true).repo.candidateSourceVerified).toBe(false);
+  });
+
+  it('keeps the archive of every package, one foreign package among official ones', () => {
+    const policy = policyFor((name) => (name === 'containerd.io' ? `https://private.example ${TOKEN}/main amd64 Packages` : `${OFFICIAL} noble/stable amd64 Packages`));
+    const facts = factsFor(policy, GOOD_REPO, true);
+    expect(facts.repo.candidateSourceVerified).toBe(false);
+    expect(canonicalJson(facts)).not.toContain(TOKEN);
+  });
+});
+
+describe('apt-valid one-line and deb822 syntax is read as apt reads it', () => {
+  const UNRELATED_KEYRING = '/etc/apt/keyrings/one.gpg';
+  const unrelated = (options: string) => `deb [${options}] http://archive.ubuntu.com/ubuntu noble main`;
+  const QUOTED = [
+    ['a quoted option name', `"signed-by"=${UNRELATED_KEYRING}`],
+    ['a quote inside an option name', `sig"ned-by"=${UNRELATED_KEYRING}`],
+    ['an escaped option name', `%73igned-by=${UNRELATED_KEYRING}`],
+    ['an escaped equals sign', `signed-by%3d${UNRELATED_KEYRING}`],
+    ['a quoted name beside a plain option', `"arch"=amd64 signed-by=${UNRELATED_KEYRING}`],
+  ];
+  const CUSTOM_LOCATIONS = 'SOURCE_LOCATIONS_MAIN=/srv/apt/main.list\nSOURCE_LOCATIONS_PARTS=/srv/apt/parts';
+  const source = (file: string, content: string) => `SOURCE_BEGIN=${file}\n${content}\nSOURCE_END=${file}`;
+
+  describe.each([
+    ['the main list', DEFAULT_SOURCE_LOCATIONS, MAIN_LIST, LIST_FILE],
+    ['an arbitrary .list file', DEFAULT_SOURCE_LOCATIONS, CUSTOM_LIST, LIST_FILE],
+    ['a main list at a custom location', CUSTOM_LOCATIONS, '/srv/apt/main.list', '/srv/apt/parts/docker.list'],
+  ])('in %s', (_where, locations, file, dockerFile) => {
+    /** The unrelated entry in the file under test, beside a verified Docker entry. */
+    const repoText = (content: string) => [locations, source(file, content), source(dockerFile, deb('arch=amd64')), dockerAscBlock()].join('\n');
+
+    it.each(QUOTED)('verifies a Docker entry beside %s, with a plan for a fresh host and none of the warning for a healthy one', (_label, options) => {
+      const text = repoText(unrelated(options));
+      const assembled = assemble([probe('docker_repo', text), probe('apt_policy', '')]);
+      expect(assembled.repo.problem).toBeNull();
+      expect(assembled.repo.sourceVerified).toBe(true);
+      const fresh = makeFacts({ docker: FRESH_DOCKER, packages: NO_CANDIDATES, repo: assembled.repo });
+      expect(planWithheld(fresh)).toBe(false);
+      expect(aptSource(makeFacts({ packages: NO_CANDIDATES, repo: assembled.repo })).status).toBe('pass');
+    });
+
+    it('still fails closed on the malformed counterparts', () => {
+      for (const options of ['""=amd64', 'arch=amd64 ""', 'arch=amd64 foo']) {
+        const text = repoText(unrelated(options));
+        const assembled = assemble([probe('docker_repo', text), probe('apt_policy', '')]);
+        expect(assembled.repo.sourceVerified, options).toBe(false);
+        const fresh = makeFacts({ docker: FRESH_DOCKER, packages: NO_CANDIDATES, repo: assembled.repo });
+        expect(planWithheld(fresh), options).toBe(true);
+        expect(aptSource(makeFacts({ packages: NO_CANDIDATES, repo: assembled.repo })).status, options).toBe('warn');
+      }
+    });
+  });
+
+  describe('an option written the way apt reads it keeps its meaning', () => {
+    const verified = (options: string, arch = 'amd64') => parse(arch, block(CUSTOM_LIST, `deb [${options}] ${OFFICIAL} noble stable`), dockerAscBlock());
+
+    it.each([
+      ['a quoted trusted', `arch=amd64 "trusted"=yes signed-by=${DOCKER_ASC_PATH}`],
+      ['an escaped trusted', `arch=amd64 %74rusted=yes signed-by=${DOCKER_ASC_PATH}`],
+      ['a quote inside trusted', `arch=amd64 tr"usted"=yes signed-by=${DOCKER_ASC_PATH}`],
+      ['an escaped value', `arch=amd64 trusted=y%65s signed-by=${DOCKER_ASC_PATH}`],
+      ['a quoted allow-insecure', `arch=amd64 "allow-insecure"=yes signed-by=${DOCKER_ASC_PATH}`],
+      ['a spelling in another case beside a plain one', `arch=amd64 trusted=yes TRUSTED=no signed-by=${DOCKER_ASC_PATH}`],
+    ])('weakens signatures through %s', (_label, options) => {
+      const result = verified(options);
+      expect(result.sourceVerified).toBe(false);
+      expect(result.problem).toMatch(/weakens signature checking/);
+    });
+
+    it('applies an architecture option written with quotes or escapes', () => {
+      expect(verified(`"arch"=arm64 signed-by=${DOCKER_ASC_PATH}`).sourceVerified).toBe(false);
+      expect(verified(`%61rch=arm64 signed-by=${DOCKER_ASC_PATH}`).sourceVerified).toBe(false);
+      expect(verified(`"arch"=amd64 signed-by=${DOCKER_ASC_PATH}`).sourceVerified).toBe(true);
+    });
+
+    it('reads a quoted signed-by as the keyring it names', () => {
+      expect(verified(`arch=amd64 "signed-by"=${DOCKER_ASC_PATH}`).sourceVerified).toBe(true);
+      const unknownKeyring = verified('arch=amd64 "signed-by"=/etc/apt/keyrings/other.gpg');
+      expect(unknownKeyring.sourceVerified).toBe(false);
+      expect(unknownKeyring.problem).toMatch(/does not name an installed Docker keyring/);
+    });
+
+    it('reads a URI, suite and component written with quotes or escapes', () => {
+      const line = (uri: string, suite: string, component: string) => parse('amd64', block(CUSTOM_LIST, `deb [arch=amd64 signed-by=${DOCKER_ASC_PATH}] ${uri} ${suite} ${component}`), dockerAscBlock());
+      expect(line('https://download.docker.com/linux/ub"untu"', 'no"ble"', 'sta"ble"').sourceVerified).toBe(true);
+      expect(line('https://download.docker.com/linux/ubun%74u', '%6eoble', '%73table').sourceVerified).toBe(true);
+      expect(line(OFFICIAL, 'noble,jammy', 'stable').sourceVerified).toBe(false);
+    });
+
+    it('keeps a comment mark inside an option group out of the comment', () => {
+      expect(verified(`arch=amd64 signed-by=${DOCKER_ASC_PATH}`).sourceVerified).toBe(true);
+      const hashInOption = parse('amd64', block(CUSTOM_LIST, `deb [arch=amd64 signed-by=${DOCKER_ASC_PATH}#x] ${OFFICIAL} noble stable`), dockerAscBlock());
+      expect(hashInOption.sourceVerified).toBe(false);
+      expect(hashInOption.problem).toMatch(/does not name an installed Docker keyring/);
+    });
+  });
+
+  describe('deb822 forms apt skips or reads as a field', () => {
+    const withUnrelated = (extra: string) => parse('amd64', block(CUSTOM_SOURCES, extra), dockerAscBlock());
+
+    it.each([
+      ['an indented non-comment line before the first stanza', `  foo\n${stanza({})}`],
+      ['an indented field-like line before the first stanza', `  foo: bar\n${stanza({})}`],
+      ['an indented line between stanzas', `${stanza({})}\n\n  foo\n\n${stanza({})}`],
+      ['an empty field name', `${stanza({})}\n:x`],
+      ['an empty field name before the first field', `:x\n${stanza({})}`],
+      ['an empty field name with a space before its value', `${stanza({})}\n: x`],
+    ])('verifies a Docker stanza with %s', (_label, content) => {
+      const assembled = assemble([probe('docker_repo', [block(CUSTOM_SOURCES, content), dockerAscBlock()].join('\n')), probe('apt_policy', '')]);
+      expect(assembled.repo.problem).toBeNull();
+      expect(assembled.repo.sourceVerified).toBe(true);
+      const fresh = makeFacts({ docker: FRESH_DOCKER, packages: NO_CANDIDATES, repo: assembled.repo });
+      expect(planWithheld(fresh)).toBe(false);
+      expect(aptSource(makeFacts({ packages: NO_CANDIDATES, repo: assembled.repo })).status).toBe('pass');
+    });
+
+    it('keeps an indented line after a field as part of that field', () => {
+      const continued = withUnrelated(`${stanza({})}\n  /etc/apt/keyrings/other.gpg`);
+      expect(continued.sourceVerified).toBe(false);
+      expect(continued.problem).toMatch(/does not name an installed Docker keyring/);
+    });
+
+    it('still rejects the malformed counterparts', () => {
+      for (const content of [`${stanza({})}\ngarbage`, ':x', `Foo\n${stanza({})}`]) {
+        const result = withUnrelated(content);
+        expect(result.sourceVerified, content).toBe(false);
+        expect(result.problem, content).toMatch(/not a valid apt entry|no Types field/);
+      }
+    });
   });
 });

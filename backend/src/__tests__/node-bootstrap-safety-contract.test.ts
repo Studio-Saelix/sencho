@@ -707,8 +707,8 @@ describe('repository provenance (S5-R)', () => {
         '     1.0 500',
         '        500 http://archive.ubuntu.com/ubuntu noble/universe amd64 Packages',
       ]);
-      const ce = parseAptPolicy(text).find((pkg) => pkg.name === 'docker-ce');
-      expect(ce?.candidateSources).toEqual([{ uri: 'http://archive.ubuntu.com', release: 'noble/universe' }]);
+      const ce = parseAptPolicy(text, 'noble').find((pkg) => pkg.name === 'docker-ce');
+      expect(ce?.candidateSources).toEqual([{ uri: 'http://archive.ubuntu.com', official: false }]);
       const facts = assemble([
         probe('os_release', 'ID=ubuntu\nVERSION_ID="24.04"\nVERSION_CODENAME=noble'),
         probe('docker_info', '27.3.1|/var/lib/docker'),
@@ -727,8 +727,8 @@ describe('repository provenance (S5-R)', () => {
         '        500 https://download.docker.com/linux/ubuntu noble/stable amd64 Packages',
         '        100 /var/lib/dpkg/status',
       ]);
-      const ce = parseAptPolicy(text).find((pkg) => pkg.name === 'docker-ce');
-      expect(ce?.candidateSources).toEqual([{ uri: 'https://download.docker.com/linux/ubuntu', release: 'noble/stable' }]);
+      const ce = parseAptPolicy(text, 'noble').find((pkg) => pkg.name === 'docker-ce');
+      expect(ce?.candidateSources).toEqual([{ uri: 'https://download.docker.com/linux/ubuntu', official: true }]);
     });
 
     it('reports a candidate that any foreign archive also serves as unverified', () => {

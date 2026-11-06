@@ -129,8 +129,14 @@ export interface DockerPackage {
   name: DockerPackageName;
   installedVersion: string | null;
   candidateVersion: string | null;
-  /** Archives apt lists under the candidate version itself; empty when none is known. The URI is redacted (`redactUri`), because facts are hashed and returned. */
-  candidateSources?: Array<{ uri: string; release: string | null }>;
+  /**
+   * Archives apt lists under the candidate version itself, classified when
+   * parsed; empty when none is known. The URI is redacted (`redactUri`) and
+   * `official` says whether the archive is the official repository's for the
+   * host release. Nothing else apt prints is kept, because facts are hashed and
+   * returned and a suite or component path can carry a repository credential.
+   */
+  candidateSources?: Array<{ uri: string; official: boolean }>;
 }
 
 export interface RepositoryObservation {

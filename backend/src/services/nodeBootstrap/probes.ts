@@ -628,7 +628,8 @@ const URI_SCHEME = /^[a-z][a-z0-9+.-]*:/;
 /**
  * Whitespace JavaScript treats as a separator and apt does not (a no-break
  * space pasted from a web page, a byte order mark from an editor): apt reads
- * it as part of a word, so a line holding one is not read as apt reads it.
+ * it as part of a word, so a deb822 line holding one is not read as apt reads
+ * it. The one-line reader splits where apt does and needs no such guard.
  */
 const NON_APT_SPACE = /[\u0085\u00a0\u1680\u2000-\u200a\u2028\u2029\u202f\u205f\u3000\ufeff]/;
 
@@ -662,62 +663,162 @@ function mentionsDockerHost(text: string): boolean {
   return DOCKER_HOST_MENTION.test(text);
 }
 
-/** An apt word: whitespace-separated, or wrapped in double quotes to hold spaces. */
-const APT_WORD = /\s*("[^"]+"|[^\s"]+)(?=\s|$)/y;
-/** One `key=value` option of a one-line entry, the value optionally wrapped in double quotes. */
-const LIST_OPTION = /\s*([^\s="]+)=("[^"]+"|[^\s"]+)(?=\s|$)/y;
+/** What C's `isspace` counts, which is how apt splits a source line into words. */
+const isAptSpace = (char: string | undefined) => char !== undefined && ' \t\n\v\f\r'.includes(char);
 
-const unquote = (word: string) => word.replace(/^"([^"]+)"$/, '$1');
+interface AptWord {
+  /** The word apt hands on: quotes removed and `%XX` escapes decoded. */
+  word: string;
+  /** Where the raw word starts and ends in the line (end exclusive), and where the next word is looked for. */
+  start: number;
+  end: number;
+  next: number;
+}
 
-/** Every match of a sticky pattern across the text; null when anything but whitespace is left over. */
-function matchAll(pattern: RegExp, text: string): RegExpExecArray[] | null {
-  pattern.lastIndex = 0;
-  const matches: RegExpExecArray[] = [];
-  let end = 0;
-  for (let match = pattern.exec(text); match; match = pattern.exec(text)) {
-    matches.push(match);
-    end = pattern.lastIndex;
+/**
+ * One word of a one-line entry, read as apt's `ParseQuoteWord` does. A double
+ * quote anywhere in a word opens a run that ends at the next one (spaces
+ * included), a `[` runs on to the next `]`, the quotes are dropped, and `%` and
+ * two hex digits stand for the character they encode. A byte apt would store
+ * that is not plain ASCII (or a NUL) reads as U+FFFD, which matches nothing the
+ * checks look for. Null when a quote or bracket is not closed, or no word is left.
+ */
+function readAptWord(text: string, from: number): AptWord | null {
+  let start = from;
+  while (text[start] === ' ') start += 1;
+  if (start >= text.length) return null;
+  let end = start;
+  for (; end < text.length && !isAptSpace(text[end]); end += 1) {
+    if (text[end] === '"') {
+      end = text.indexOf('"', end + 1);
+      if (end < 0) return null;
+    }
+    if (text[end] === '[') {
+      end = text.indexOf(']', end + 1);
+      if (end < 0) return null;
+    }
   }
-  return text.slice(end).trim() === '' ? matches : null;
+  let word = '';
+  for (let at = start; at < end;) {
+    const escape = text[at] === '%' && at + 2 < end ? /^[0-9a-fA-F]{2}$/.exec(text.slice(at + 1, at + 3)) : null;
+    if (escape) {
+      const code = parseInt(escape[0], 16);
+      word += code > 0 && code < 0x80 ? String.fromCharCode(code) : '�';
+      at += 3;
+      continue;
+    }
+    if (text[at] !== '"') word += text[at];
+    at += 1;
+  }
+  let next = end;
+  while (isAptSpace(text[next])) next += 1;
+  return { word, start, end, next };
+}
+
+interface ListLine {
+  options: Map<string, string>;
+  uri: string;
+  suite: string;
+  components: string[];
+}
+
+/**
+ * What follows the type word of a one-line entry, read as apt's
+ * `Type::ParseLine` does: an optional `[option=value ...]` group, the URI, the
+ * suite, then every component. Null when apt cannot read the line, and
+ * 'unsupported' for the one shape this check refuses to guess at (an option
+ * whose closing bracket is written as an escape or inside quotes).
+ */
+function readListLine(rest: string): ListLine | 'unsupported' | null {
+  let at = 0;
+  while (isAptSpace(rest[at])) at += 1;
+  const options = new Map<string, string>();
+  if (rest[at] === '[') {
+    at += 1;
+    while (isAptSpace(rest[at])) at += 1;
+    while (rest[at] !== ']') {
+      const read = readAptWord(rest, at);
+      if (!read || read.word.length < 3) return null;
+      let option = read.word;
+      at = read.next;
+      // apt accepts a last option with no space before the closing bracket.
+      if (option.endsWith(']')) {
+        if (!rest.slice(read.start, read.end).endsWith(']')) return 'unsupported';
+        at = read.end - 1;
+        option = option.slice(0, -1);
+      }
+      const equals = option.indexOf('=');
+      if (equals < 1 || equals === option.length - 1) return null;
+      setListOption(options, option.slice(0, equals), option.slice(equals + 1));
+    }
+    at += 1;
+    while (isAptSpace(rest[at])) at += 1;
+  }
+  const uri = readAptWord(rest, at);
+  const suite = uri && readAptWord(rest, uri.next);
+  if (!uri || !suite || !uri.word.includes(':')) return null;
+  const components: string[] = [];
+  for (let read = readAptWord(rest, suite.next); read; read = readAptWord(rest, read.next)) components.push(read.word);
+  return { options, uri: uri.word, suite: suite.word, components };
+}
+
+/**
+ * Record one option under the name the deb822 vocabulary gives it. Where apt
+ * reads only the exact spelling and another letter case is ignored, a weakening
+ * option still counts in the spelling a later apt may read, so a spelling that
+ * does not weaken never overrides one that does.
+ */
+function setListOption(options: Map<string, string>, rawKey: string, value: string): void {
+  const name = oneLineOptionName(rawKey);
+  const earlier = options.get(name);
+  if (name !== rawKey && INSECURE_SOURCE_OPTIONS.includes(name) && weakensSignatures(earlier) && !weakensSignatures(value)) return;
+  options.set(name, value);
+}
+
+/** The text apt reads of a line: a `#` outside an open option group starts a comment, and a tab, space or carriage return at either end is dropped. */
+function aptLineText(raw: string): string {
+  let text = raw;
+  for (let at = text.indexOf('#'); at >= 0; at = text.indexOf('#', at + 1)) {
+    const before = text.slice(0, at);
+    if (before.split('[').length <= before.split(']').length) {
+      text = before;
+      break;
+    }
+  }
+  return text.replace(/^[ \t\r]+|[ \t\r]+$/g, '');
 }
 
 function parseListSource(content: string): ParsedSourceFile {
   const active = content.split('\n')
-    // apt starts a comment at any '#', inside a word as well, so what follows one is not part of the entry.
-    .map((text, index) => ({ number: index + 1, text: text.replace(/#.*$/, '').replace(/^[ \t\r]+|[ \t\r]+$/g, '') }))
+    .map((text, index) => ({ number: index + 1, text: aptLineText(text) }))
     .filter((line) => line.text);
   const entries: AptSourceEntry[] = [];
   const invalid: string[] = [];
   for (const { number, text: line } of active) {
-    const head = NON_APT_SPACE.test(line) ? null : /^(deb|deb-src)\s+(?:\[([^\]]*)\]\s+)?(.+)$/.exec(line);
-    const optionMatches = head ? matchAll(LIST_OPTION, head[2] ?? '') : null;
-    const words = head ? matchAll(APT_WORD, head[3]) : null;
-    const [uri = '', suite = '', ...components] = (words ?? []).map((word) => unquote(word[1]));
-    const suites = suite.split(/[,\s]+/).filter(Boolean);
     // apt rejects the whole source list at a line it cannot parse, so one
-    // beside a valid Docker entry is as fatal as one in a file of its own: no
-    // URI scheme (an unclosed option bracket leaves one behind), an option with
-    // no value, an unclosed quote, or suites and components that do not fit.
-    if (
-      !head
-      || !optionMatches
-      || !words
-      || words.length < 2
-      || !URI_SCHEME.test(uri)
-      || suiteComponentProblem(suites, components)
-    ) {
+    // beside a valid Docker entry is as fatal as one in a file of its own. The
+    // type is the text up to the first space, tab or vertical tab, and only
+    // `deb` and `deb-src` are types.
+    const split = line.search(/[ \t\v]/);
+    const type = split < 0 ? '' : line.slice(0, split);
+    const read = type === 'deb' || type === 'deb-src' ? readListLine(line.slice(split)) : null;
+    if (read === 'unsupported') {
+      invalid.push(`line ${number} closes its option group in a way this check does not read, so it cannot tell what apt does with it`);
+      continue;
+    }
+    // The suite and components must fit, and the scheme must be a lower-case
+    // one (apt looks its method up by that exact name).
+    if (!read || !URI_SCHEME.test(read.uri) || suiteComponentProblem([read.suite], read.components)) {
       invalid.push(`line ${number} is not a valid apt entry, which apt rejects`);
       continue;
     }
     // A line that names Docker's host but whose URI is not read as that host
     // (a trailing dot, a host inside another URI) is not one apt will use as written.
-    if (mentionsDockerHost(line) && !isDockerHostUri(uri)) {
+    if ((mentionsDockerHost(line) || mentionsDockerHost(read.uri)) && !isDockerHostUri(read.uri)) {
       invalid.push(`line ${number} names Docker's host in a URI that is not the official repository's host`);
       continue;
     }
-    const options = new Map<string, string>();
-    for (const [, key, value] of optionMatches) options.set(oneLineOptionName(key), unquote(value));
-    entries.push({ type: head[1] as 'deb' | 'deb-src', uris: [uri], suites, components, options });
+    entries.push({ type: type as 'deb' | 'deb-src', uris: [read.uri], suites: [read.suite], components: read.components, options: read.options });
   }
   return { entries, invalid, empty: active.length === 0 };
 }
@@ -746,22 +847,20 @@ function parseDeb822(content: string): { paragraphs: Deb822Stanza[]; unparsed: n
     }
     if (rawLine.startsWith('#')) continue;
     // With no field open an indented comment is a comment; with one open it continues the field.
-    if (!(current && lastKey) && /^[ \t]+#/.test(rawLine)) continue;
+    if (!(current && lastKey !== null) && /^[ \t]+#/.test(rawLine)) continue;
     if (NON_APT_SPACE.test(rawLine)) {
       unparsed.push(number);
       continue;
     }
-    // An indented line continues the open field; with none open apt rejects it,
-    // so it is not read as a field.
+    // An indented line continues the open field; with none open apt skips it
+    // (it is no field, and no stanza starts at it).
     if (/^\s/.test(rawLine)) {
-      if (current && lastKey) current.fields[lastKey] = `${current.fields[lastKey]} ${rawLine.trim()}`;
-      else unparsed.push(number);
+      if (current && lastKey !== null) current.fields[lastKey] = `${current.fields[lastKey]} ${rawLine.trim()}`;
       continue;
     }
     // apt takes everything up to the colon as the field name, so a custom field
-    // such as `X+Note`, `X-Note/foo` or `X Note` is as good as `Types`; only an
-    // empty name, or one that starts with whitespace, is not a field.
-    const match = /^([^\s:][^:]*?)\s*:\s*(.*)$/.exec(rawLine.trim());
+    // such as `X+Note`, `X-Note/foo`, `X Note` or `` (empty) is as good as `Types`.
+    const match = /^([^:]*?)\s*:\s*(.*)$/.exec(rawLine.trim());
     if (!match) {
       unparsed.push(number);
       continue;
@@ -1073,9 +1172,11 @@ const NUMERIC = /^-?\d+$/;
 /**
  * Parse `apt-cache policy`. A candidate is attributed to the archives listed
  * under its own version in the version table, never to the first archive that
- * follows the Candidate line.
+ * follows the Candidate line. Each archive is classified here, against the host
+ * release, and only the classification is kept: the release and component text
+ * after the URI can hold a repository credential, and facts are hashed.
  */
-export function parseAptPolicy(text: string): DockerPackage[] {
+export function parseAptPolicy(text: string, codename = ''): DockerPackage[] {
   const packages = new Map<string, DockerPackage>();
   let current: (DockerPackage & { candidateSources: NonNullable<DockerPackage['candidateSources']> }) | null = null;
   let inVersionTable = false;
@@ -1122,8 +1223,9 @@ export function parseAptPolicy(text: string): DockerPackage[] {
       // The installed-package record is not an archive.
       if (location === '/var/lib/dpkg/status') continue;
       if (tableVersion === current.candidateVersion) {
-        // The URI is stored redacted: facts are hashed and returned, and a source URI can carry a credential.
-        current.candidateSources.push({ uri: redactUri(location), release: tokens[2] ?? null });
+        const uri = redactUri(location);
+        const official = uri === OFFICIAL_DOCKER_URI && (!codename || tokens[2] === `${codename}/stable`);
+        current.candidateSources.push({ uri, official });
       }
     }
   }
@@ -1382,27 +1484,17 @@ export function parseDockerRootDisk(text: string): DockerRootDiskObservation {
   };
 }
 
-function isOfficialDockerArchive(source: { uri: string; release: string | null }, codename: string): boolean {
-  try {
-    const url = new URL(source.uri);
-    if (url.origin !== 'https://download.docker.com' || url.pathname !== '/linux/ubuntu') return false;
-  } catch {
-    return false;
-  }
-  return !codename || source.release === `${codename}/stable`;
-}
-
 /**
  * Whether apt would serve every candidate from the official archive. A
  * candidate without a known archive is unknown, and one foreign archive makes
  * the whole answer false.
  */
-function candidateProvenance(packages: DockerPackage[], codename: string): boolean | null {
+function candidateProvenance(packages: DockerPackage[]): boolean | null {
   const perPackage = packages
     .filter((pkg) => pkg.candidateVersion !== null)
     .map((pkg) => {
       const sources = pkg.candidateSources ?? [];
-      return sources.length === 0 ? null : sources.every((source) => isOfficialDockerArchive(source, codename));
+      return sources.length === 0 ? null : sources.every((source) => source.official);
     });
   if (perPackage.includes(false)) return false;
   return perPackage.length === 0 || perPackage.includes(null) ? null : true;
@@ -1579,8 +1671,8 @@ export function assembleFacts(input: AssembleFactsInput): BootstrapFacts {
       problem: 'the repository probe did not complete',
     };
   const packagesComplete = succeeded(map, 'apt_policy');
-  const packages = parseAptPolicy(completeStdout(map, 'apt_policy'));
-  const candidateSourceVerified = candidateProvenance(packages, osBase?.codename ?? '');
+  const packages = parseAptPolicy(completeStdout(map, 'apt_policy'), osBase?.codename ?? '');
+  const candidateSourceVerified = candidateProvenance(packages);
   const candidatesUnattributed = candidateSourceVerified === null
     && packages.some((pkg) => pkg.candidateVersion !== null)
     && repoBase.sourceVerified === true

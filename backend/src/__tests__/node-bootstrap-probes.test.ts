@@ -649,9 +649,9 @@ describe('bootstrap Docker repository provenance', () => {
       '  Version table:',
       '     5:27.3.1-1 500',
       '        500 https://download.docker.com/linux/ubuntu noble/stable amd64 Packages',
-    ].join('\n'));
+    ].join('\n'), 'noble');
     expect(packages.find((pkg) => pkg.name === 'docker-ce')?.candidateSources)
-      .toEqual([{ uri: 'https://download.docker.com/linux/ubuntu', release: 'noble/stable' }]);
+      .toEqual([{ uri: 'https://download.docker.com/linux/ubuntu', official: true }]);
   });
 });
 
