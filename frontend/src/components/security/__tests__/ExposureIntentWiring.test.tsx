@@ -50,6 +50,26 @@ async function pickLan() {
   await userEvent.click(await screen.findByRole('button', { name: 'lan' }));
 }
 
+/** The Images tab arrived at from a public-exposure reason whose one target is `exposed`. */
+function renderTargeted(exposed: ImageExposureContext, label: string, onIntentSaved: () => void) {
+  render(
+    <ImagesTab
+      {...base}
+      onInspect={vi.fn()}
+      onClearTargeting={vi.fn()}
+      onIntentSaved={onIntentSaved}
+      targeting={{
+        kind: 'public_exposure',
+        label,
+        imageRefs: ['exp:1'],
+        targets: [{ imageRef: 'exp:1', ...exposed }],
+        token: 1,
+      }}
+      summaries={{ 'exp:1': { ...summary(), exposure_contexts: [exposed] } }}
+    />,
+  );
+}
+
 describe('onIntentSaved wiring', () => {
   it('reports a save made from the desktop table label', async () => {
     api.apiFetch.mockResolvedValueOnce(json({ intents: [{ service: 'api', intent: 'lan' }] }));
@@ -66,22 +86,7 @@ describe('onIntentSaved wiring', () => {
     api.apiFetch.mockResolvedValueOnce(json({ intents: [{ service: 'api', intent: 'lan' }] }));
     const onIntentSaved = vi.fn();
     const conflict = { ...context, intentStatus: 'set' as const, exposureIntent: 'internal' as const, intentConflict: true };
-    render(
-      <ImagesTab
-        {...base}
-        onInspect={vi.fn()}
-        onClearTargeting={vi.fn()}
-        onIntentSaved={onIntentSaved}
-        targeting={{
-          kind: 'public_exposure',
-          label: 'Exposure conflicts with declared intent',
-          imageRefs: ['exp:1'],
-          targets: [{ imageRef: 'exp:1', ...conflict }],
-          token: 1,
-        }}
-        summaries={{ 'exp:1': { ...summary(), exposure_contexts: [conflict] } }}
-      />,
-    );
+    renderTargeted(conflict, 'Exposure conflicts with declared intent', onIntentSaved);
 
     await userEvent.click(screen.getAllByRole('button', { name: 'Change intent' })[0]!);
     await pickLan();
@@ -93,26 +98,11 @@ describe('onIntentSaved wiring', () => {
     api.apiFetch.mockResolvedValueOnce(json({ intents: [{ service: 'api', intent: 'public' }] }));
     const onIntentSaved = vi.fn();
     const classified = { ...context, intentStatus: 'set' as const, exposureIntent: 'public' as const };
-    render(
-      <ImagesTab
-        {...base}
-        onInspect={vi.fn()}
-        onClearTargeting={vi.fn()}
-        onIntentSaved={onIntentSaved}
-        targeting={{
-          kind: 'public_exposure',
-          label: 'Exposure',
-          imageRefs: ['exp:1'],
-          targets: [{ imageRef: 'exp:1', ...classified }],
-          token: 1,
-        }}
-        summaries={{ 'exp:1': { ...summary(), exposure_contexts: [classified] } }}
-      />,
-    );
+    renderTargeted(classified, 'Exposure', onIntentSaved);
     expect(screen.getByText('Exposure is intentional')).toBeInTheDocument();
 
     await userEvent.click(screen.getAllByRole('button', { name: 'Change intent' })[0]!);
-    await userEvent.click(await screen.findByRole('button', { name: 'lan' }));
+    await pickLan();
 
     await waitFor(() => expect(onIntentSaved).toHaveBeenCalledTimes(1));
   });

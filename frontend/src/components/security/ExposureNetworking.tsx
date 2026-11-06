@@ -165,43 +165,33 @@ export function NetworkExposedControl({
 
   if (contexts.length === 1) {
     const only = contexts[0]!;
-    const via = only.tunnel ? `, ${tunnelPathLabel(only.tunnel)}` : '';
     const verb = intentVerb(only);
-    const title = only.tunnel ? tunnelPathLabel(only.tunnel) : undefined;
-    if (verb !== null) {
-      return (
-        <ContextIntentPopover
-          ctx={only}
-          nodeId={nodeId}
-          onIntentSaved={onIntentSaved}
-          align="start"
-          trigger={(
-            <button
-              type="button"
-              className="hover:underline"
-              title={title}
-              onClick={(e) => e.stopPropagation()}
-              aria-label={`Network exposed: ${verb.toLowerCase()} for ${only.stackName}/${only.serviceName}${via}`}
-            >
-              {badge}
-            </button>
-          )}
-        />
-      );
-    }
-    return (
+    const tunnelLabel = only.tunnel ? tunnelPathLabel(only.tunnel) : undefined;
+    const via = tunnelLabel ? `, ${tunnelLabel}` : '';
+    const action = verb === null ? networkingActionLabel(only) : `Network exposed: ${verb.toLowerCase()}`;
+    const badgeButton = (
       <button
         type="button"
         className="hover:underline"
-        title={title}
+        title={tunnelLabel}
         onClick={(e) => {
           e.stopPropagation();
-          openNetworking(nodeId, only.stackName);
+          if (verb === null) openNetworking(nodeId, only.stackName);
         }}
-        aria-label={`${networkingActionLabel(only)} for ${only.stackName}/${only.serviceName}${via}`}
+        aria-label={`${action} for ${only.stackName}/${only.serviceName}${via}`}
       >
         {badge}
       </button>
+    );
+    if (verb === null) return badgeButton;
+    return (
+      <ContextIntentPopover
+        ctx={only}
+        nodeId={nodeId}
+        onIntentSaved={onIntentSaved}
+        align="start"
+        trigger={badgeButton}
+      />
     );
   }
 

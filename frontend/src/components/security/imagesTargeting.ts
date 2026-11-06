@@ -42,7 +42,7 @@ export function afterIntentSaved(state: ImagesTargetingState | null): ImagesTarg
   if (state === null) return null;
   return {
     ...state,
-    ...(state.kind === 'public_exposure' ? { label: 'Network exposed images' } : {}),
+    label: state.kind === 'public_exposure' ? 'Network exposed images' : state.label,
     targets: state.targets.map((target) => ({ imageRef: target.imageRef })),
   };
 }
