@@ -55,7 +55,10 @@ const inventory = {
 const remoteInventory = {
   ...inventory,
   status: 'partial',
-  node: { id: 2, name: 'remote', type: 'remote', mode: 'proxy', instanceIdentity: 'remote-instance' },
+  node: { id: 999, name: 'remote', type: 'remote', mode: 'proxy', instanceIdentity: 'remote-instance' },
+  counts: { ...inventory.counts, matchedContainers: 1 },
+  containers: [{ id: 'remote-c1', name: 'remote-proxy', role: 'proxy', classification: 'detected' }],
+  errors: [{ stage: 'container-metadata', message: 'remote partial evidence' }],
 };
 
 async function loginAs(username: string, password: string): Promise<string> {
@@ -114,7 +117,6 @@ beforeAll(async () => {
     api_url: mode === 'proxy' ? `${remoteBase}/${name}` : '', api_token: 'fixture-token',
   });
   remoteNodeId = addRemote('remote');
-  remoteInventory.node.id = remoteNodeId;
   deniedNodeId = addRemote('denied');
   legacyNodeId = addRemote('legacy');
   pilotNodeId = addRemote('pilot', 'pilot_agent');
@@ -208,7 +210,9 @@ describe('GET /api/socket/inventory remote transports', () => {
     expect(res.status).toBe(200);
     expect(res.body).toMatchObject({
       status: 'partial',
-      node: { id: remoteNodeId, instanceIdentity: 'remote-instance' },
+      node: { id: 999, instanceIdentity: 'remote-instance' },
+      containers: [{ id: 'remote-c1' }],
+      errors: [{ stage: 'container-metadata' }],
     });
     expect(remoteHops).toContain('/remote/api/socket/inventory');
     expect(loadSocketInventoryMock).not.toHaveBeenCalled();
@@ -223,9 +227,22 @@ describe('GET /api/socket/inventory remote transports', () => {
       .set('x-node-id', String(pilotNodeId));
     expect(tunnel).toHaveBeenCalledWith(pilotNodeId);
     expect(res.status).toBe(200);
-    expect(res.body.node).toMatchObject({ instanceIdentity: 'remote-instance' });
-    expect(res.body.status).toBe('partial');
+    expect(res.body).toMatchObject({
+      status: 'partial',
+      node: { id: 999, instanceIdentity: 'remote-instance' },
+      containers: [{ id: 'remote-c1' }],
+    });
     expect(remoteHops).toContain('/remote/api/socket/inventory');
+    expect(loadSocketInventoryMock).not.toHaveBeenCalled();
+  });
+
+  it('does not fall back to local discovery when the Pilot tunnel is disconnected', async () => {
+    const res = await request(app)
+      .get('/api/socket/inventory')
+      .set('Cookie', adminCookie)
+      .set('x-node-id', String(pilotNodeId));
+    expect(res.status).toBe(503);
+    expect(res.body.error).toMatch(/pilot tunnel/i);
     expect(loadSocketInventoryMock).not.toHaveBeenCalled();
   });
 

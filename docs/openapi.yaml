@@ -486,7 +486,11 @@ components:
         address:
           type: string
           nullable: true
-          description: Credential-free display form of the Docker client's endpoint. With `DOCKER_HOST` unset this is the socket the active client resolves, which can differ from `/var/run/docker.sock`.
+          description: >-
+            Credential-free display form of the Docker client's endpoint. With
+            `DOCKER_HOST` unset this is the client-resolved socket when it can
+            be inspected, otherwise it falls back to `/var/run/docker.sock`. A
+            bare `unix://` also uses that resolution.
         addressSource: { type: string, enum: [env, default] }
         detection:
           type: string
@@ -494,9 +498,11 @@ components:
           description: >-
             `detected` for a unix provider means the address is a canonical
             socket and either Sencho runs outside a container or the observed
-            host bind source is itself canonical. A canonical destination
-            backed by a different host path stays `undetermined`, because a
-            proxy or forwarder can serve it.
+            host bind source is itself canonical (`/var/run/docker.sock` and
+            `/run/docker.sock` are treated as equivalent). A canonical
+            destination backed by a non-canonical host path, or with no visible
+            host source, stays `undetermined`, because a proxy or forwarder can
+            serve it.
         reason: { type: string, nullable: true }
         provider:
           type: object
@@ -636,7 +642,7 @@ components:
         inspectFailed: { type: boolean }
         metadataTruncated:
           type: boolean
-          description: A metadata list exceeded the collection or response bound; mounts, labels, ports, networks, or proxy flags may be missing from this row.
+          description: A metadata list exceeded a collection or response bound, or could not be read completely; mounts, labels, ports, networks, or proxy flags may be missing from this row.
 
     SocketInventoryError:
       type: object
@@ -2801,7 +2807,10 @@ paths:
         remote node's inventory is never relabelled as the control instance's.
         A Docker read failure is `503` and a timeout is `504`; an empty
         `containers` array means discovery completed and found no matching
-        targets, not that the node has no Docker access. Requires `node:read`.
+        targets, not that the node has no Docker access. Transport failures on
+        the remote-node proxy are returned unchanged (for example `502` when the
+        node is unreachable, or `404` from an older node that does not serve
+        this route). Requires `node:read`.
       parameters:
         - $ref: "#/components/parameters/nodeId"
       responses:
@@ -2815,6 +2824,18 @@ paths:
           $ref: "#/components/responses/Unauthorized"
         "403":
           $ref: "#/components/responses/Forbidden"
+        "404":
+          description: The addressed remote node does not serve this route, for example an older node without `socket-inventory-v1`.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "502":
+          description: The remote node could not be reached through the proxy.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
         "503":
           description: Docker is unavailable on the node, so no inventory could be read.
           content:

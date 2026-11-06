@@ -123,7 +123,11 @@ export interface SocketInventoryContainer {
   labels: SocketInventoryLabel[];
   evidence: string[];
   inspectFailed: boolean;
-  /** A metadata list exceeded the bound, so a mount or flag may be missing. */
+  /**
+   * A metadata list exceeded the collection or response bound (or could not be
+   * read completely), so a mount, port, network, label, or proxy flag may be
+   * missing.
+   */
   metadataTruncated: boolean;
 }
 
@@ -273,10 +277,20 @@ function idMatches(a: string | null | undefined, b: string | null | undefined): 
  */
 export function describeDockerEndpoint(
   raw: string | undefined,
-  options: { defaultSocketPath?: string | null } = {},
+  options: { defaultSocketPath?: string | null; defaultSocketUnresolved?: boolean } = {},
 ): SocketEndpointDescription {
   const value = raw?.trim();
   if (!value) {
+    if (options.defaultSocketUnresolved) {
+      return {
+        transport: 'unix',
+        address: null,
+        host: null,
+        port: null,
+        socketPath: null,
+        addressSource: 'default',
+      };
+    }
     const resolved = options.defaultSocketPath?.trim() || DEFAULT_DOCKER_SOCKET;
     const npipe = /^\/\/\.\/pipe\//i.test(resolved) || /^npipe:/i.test(resolved);
     if (npipe) {
@@ -301,6 +315,16 @@ export function describeDockerEndpoint(
   const unix = /^unix:\/\/(.*)$/i.exec(value);
   if (unix) {
     const rawPath = unix[1] ?? '';
+    if (rawPath === '' && options.defaultSocketUnresolved) {
+      return {
+        transport: 'unix',
+        address: null,
+        host: null,
+        port: null,
+        socketPath: null,
+        addressSource: 'env',
+      };
+    }
     const socketPath = rawPath === ''
       ? (options.defaultSocketPath?.trim() || DEFAULT_DOCKER_SOCKET)
       : rawPath.startsWith('/') ? rawPath : `/${rawPath}`;
@@ -447,6 +471,7 @@ function classifyRow(
       containerName: string;
       project: string | null;
       service: string | null;
+      socketBindSource: string | null;
     } | null;
   },
 ): ClassifiedRow | null {
@@ -458,8 +483,9 @@ function classifyRow(
   const isSencho = idMatches(row.id, ctx.senchoContainerId)
     || (ctx.senchoContainerName !== null && row.name === ctx.senchoContainerName);
   const provider = ctx.endpointProvider;
-  // Resolver-proven endpoint ownership is itself relevance: an unknown image,
-  // name, port set, or custom socket mount must never drop the provider row.
+  // A resolver-proven provider identity (id, name, or Compose) is itself
+  // relevance: an unknown image, name, port set, or custom socket mount must
+  // never drop the provider row before attribution can flag it.
   const isEndpointProvider = provider !== null && (
     idMatches(row.id, provider.containerId)
     || row.name === provider.containerName
@@ -606,7 +632,7 @@ function classifyRow(
       evidence: [
         ...(infrastructureLabel ? ['infrastructure-label'] : []),
         ...(row.metadataTruncated ? ['metadata-truncated'] : []),
-        ...(isEndpointProvider ? ['endpoint-provider-owner'] : []),
+        ...(isEndpointProvider ? ['endpoint-provider-identity'] : []),
       ],
       infrastructureLabel,
       isSencho,
@@ -664,7 +690,8 @@ function buildClassified(
     || row.networks.length > MAX_NETWORKS
     || input.apiGroups.length > 16;
   const metadataTruncated = row.metadataTruncated || projectionTruncated;
-  if (metadataTruncated) evidence.push('metadata-truncated');
+  // Keep the reason token even when the evidence list is at its own cap.
+  if (metadataTruncated) evidence.unshift('metadata-truncated');
   const boundedEvidence = [...new Set(evidence)].slice(0, MAX_EVIDENCE);
   return {
     row,
@@ -730,6 +757,32 @@ function buildEndpoint(
   };
 
   if (description.transport === 'unix') {
+    if (description.socketPath === null) {
+      // The client could not be asked which socket it dials. Do not substitute
+      // the conventional path: that would present an unverified endpoint as
+      // direct daemon access.
+      return {
+        providerRow: null,
+        providerAmbiguous: false,
+        endpoint: {
+          transport: description.transport,
+          address: description.address,
+          addressSource: description.addressSource,
+          detection: 'undetermined',
+          reason: 'The active Docker client socket could not be determined, so the provider type is undetermined.',
+          provider: {
+            kind: 'unknown',
+            providerType: null,
+            containerId: null,
+            containerName: null,
+            compose: null,
+            socketBindSource,
+          },
+          sencho,
+          evidence: [...endpointEvidenceFor(description), 'socket-client-endpoint-unresolved'],
+        },
+      };
+    }
     const canonicalSocket = description.socketPath === '/var/run/docker.sock'
       || description.socketPath === '/run/docker.sock';
     const canonicalBindSource = socketBindSource === '/var/run/docker.sock'
@@ -767,9 +820,10 @@ function buildEndpoint(
       };
     }
     // A non-default unix path, or a default destination backed by a different
-    // host file, can be served by the host daemon, a proxy, or a host-level
-    // forwarder. Container metadata cannot prove which one, and a shared bind
-    // source only says both mount the same host file.
+    // or unseen host file, can be served by the host daemon, a proxy, or a
+    // host-level forwarder. Container metadata cannot prove which one, and a
+    // shared bind source only says both mount the same host file.
+    const sourceUnobserved = canonicalSocket && socketBindSource === null;
     return {
       providerRow: null,
       providerAmbiguous: false,
@@ -778,11 +832,15 @@ function buildEndpoint(
         address: description.address,
         addressSource: description.addressSource,
         detection: 'undetermined',
-        reason: canonicalSocket
-          ? 'The socket destination is the host default, but its observed host source is different. Container metadata cannot prove which process serves it, so the provider type is undetermined.'
-          : socketBindSource
-            ? 'The configured socket path is not the host default. Its host path is visible, but container metadata cannot prove which process serves it, so the provider type is undetermined.'
-            : 'The configured socket path is not the host default and its host path is not visible, so the provider type cannot be determined.',
+        reason: sourceUnobserved
+          ? 'The socket destination is the host default, but its host source is not visible from inside the container, so the provider type is undetermined.'
+          : canonicalSocket
+            ? 'The socket destination is the host default, but its observed host source is different. Container metadata cannot prove which process serves it, so the provider type is undetermined.'
+            : description.addressSource === 'default'
+              ? 'The Docker client resolved a socket path that is not a canonical host daemon socket; container metadata cannot prove which process serves it, so the provider type is undetermined.'
+              : socketBindSource
+                ? 'The configured socket path is not the host default. Its host path is visible, but container metadata cannot prove which process serves it, so the provider type is undetermined.'
+                : 'The configured socket path is not the host default and its host path is not visible, so the provider type cannot be determined.',
         provider: {
           kind: 'unknown',
           providerType: null,
@@ -793,7 +851,9 @@ function buildEndpoint(
         },
         sencho,
         evidence: [
-          ...(canonicalSocket ? ['socket-destination-default-source-custom'] : ['socket-path-custom']),
+          ...(canonicalSocket
+            ? [sourceUnobserved ? 'socket-destination-default-source-unobserved' : 'socket-destination-default-source-custom']
+            : [description.addressSource === 'default' ? 'socket-path-client-default' : 'socket-path-custom']),
           ...(socketBindSource ? ['sencho-socket-bind-source'] : []),
         ],
       },
@@ -805,22 +865,28 @@ function buildEndpoint(
     if (resolved.state === 'resolved') {
       const provider = resolved.provider;
       const byId = classified.find(entry => idMatches(entry.row.id, provider.containerId));
-      const byCompose = !byId && provider.project && provider.service
+      const byName = !byId && provider.containerName
+        ? classified.filter(entry => entry.row.name === provider.containerName)
+        : [];
+      const byCompose = !byId && !byName.length && provider.project && provider.service
         ? classified.filter(entry => entry.row.composeProject === provider.project
           && entry.row.service === provider.service)
         : [];
       // A recreate changes the container id. Only a single current container
-      // with the same Compose identity may stand in; two is ambiguous, and a
-      // wrong attribution is worse than an open one.
-      const providerRow = byId ?? (byCompose.length === 1 ? byCompose[0] : undefined);
+      // with the same name, or the same Compose identity, may stand in; two is
+      // ambiguous, and a wrong attribution is worse than an open one.
+      const providerRow = byId
+        ?? (byName.length === 1 ? byName[0] : undefined)
+        ?? (byCompose.length === 1 ? byCompose[0] : undefined);
+      const ambiguousRecreate = byName.length > 1 || byCompose.length > 1;
       const reason = providerRow
         ? null
-        : byCompose.length > 1
-          ? 'The tcp endpoint resolved to a container id that is gone, and more than one current container shares its Compose identity, so the provider row cannot be attributed.'
-          : 'The tcp endpoint resolved, but its provider container is not in this inventory (it may be outside the inspection bound or not classified as a socket target).';
+        : ambiguousRecreate
+          ? 'The tcp endpoint resolved to a container that is gone, and more than one current container shares its name or Compose identity, so the provider row cannot be attributed.'
+          : 'The tcp endpoint resolved, but its provider container is not in this inventory. If the list was truncated it may be outside the inspection bound; a recreated provider is attributed only by name or Compose identity.';
       return {
         providerRow: providerRow ?? null,
-        providerAmbiguous: providerRow === undefined && byCompose.length > 1,
+        providerAmbiguous: providerRow === undefined && ambiguousRecreate,
         endpoint: {
           transport: description.transport,
           address: description.address,
@@ -916,13 +982,21 @@ export function buildSocketInventory(input: SocketInventoryBuildInput): SocketIn
     });
   }
 
-  const endpointBindSource = input.endpoint.socketPath && input.self.bindMounts
-    ? input.self.bindMounts.find(mount => mount.destination === input.endpoint.socketPath)?.source ?? null
-    : null;
-
   const resolvedEndpointProvider = input.endpointProvider.state === 'resolved'
     ? input.endpointProvider.provider
     : null;
+
+  // A tcp provider's socket mount is the node's Docker socket just as much as
+  // Sencho's own unix bind is. Without it, a provider that mounts a custom
+  // socket path would be retained but its mount evidence would be invisible.
+  let endpointBindSource: string | null = null;
+  if (input.endpoint.socketPath && input.self.bindMounts) {
+    endpointBindSource = input.self.bindMounts
+      .find(mount => mount.destination === input.endpoint.socketPath)?.source ?? null;
+  }
+  if (endpointBindSource === null && resolvedEndpointProvider?.socketBindSource) {
+    endpointBindSource = resolvedEndpointProvider.socketBindSource;
+  }
 
   const classified = input.containers
     .map(row => classifyRow(row, {
@@ -935,6 +1009,7 @@ export function buildSocketInventory(input: SocketInventoryBuildInput): SocketIn
           containerName: resolvedEndpointProvider.containerName,
           project: resolvedEndpointProvider.project,
           service: resolvedEndpointProvider.service,
+          socketBindSource: resolvedEndpointProvider.socketBindSource,
         }
         : null,
     }))
@@ -969,7 +1044,7 @@ export function buildSocketInventory(input: SocketInventoryBuildInput): SocketIn
       stage: 'endpoint-provider',
       message: input.truncated
         ? 'The container carrying the Docker endpoint may be outside the bounded inventory.'
-        : 'The container carrying the Docker endpoint is not in this inventory.',
+        : 'No container in this inventory could be identified as the Docker endpoint provider.',
     });
   }
   const inspectFailures = input.containers.filter(row => row.inspectFailed).length;
@@ -1074,14 +1149,25 @@ export async function loadSocketInventory(
   const self = await readSelf(deps, errors);
   // Ask the active Docker client which socket it dials: with DOCKER_HOST unset
   // dockerode lazily picks between the conventional path and Docker Desktop's
-  // per-user socket, and a bare `unix://` also falls back to that choice.
+  // per-user socket, and a bare `unix://` also falls back to that choice. A null
+  // answer here means the unix client could not be inspected, which is
+  // uncertainty rather than a reason to assume the conventional path.
+  const dockerHost = process.env.DOCKER_HOST?.trim();
+  const needsClientSocket = !dockerHost || /^unix:\/\//i.test(dockerHost);
   let defaultSocketPath: string | null = null;
-  try {
-    defaultSocketPath = await deps.docker.getDockerSocketPath();
-  } catch {
-    defaultSocketPath = null;
+  let defaultSocketUnresolved = false;
+  if (needsClientSocket) {
+    try {
+      defaultSocketPath = await deps.docker.getDockerSocketPath();
+    } catch {
+      defaultSocketPath = null;
+    }
+    defaultSocketUnresolved = defaultSocketPath === null;
   }
-  const endpoint = describeDockerEndpoint(process.env.DOCKER_HOST, { defaultSocketPath });
+  const endpoint = describeDockerEndpoint(process.env.DOCKER_HOST, {
+    defaultSocketPath,
+    defaultSocketUnresolved,
+  });
 
   let endpointProvider: DockerEndpointProvider | { state: 'error'; reason: string };
   if (endpoint.transport === 'tcp') {

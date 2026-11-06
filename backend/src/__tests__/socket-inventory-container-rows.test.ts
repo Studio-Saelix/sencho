@@ -32,6 +32,7 @@ import DockerController from '../services/DockerController';
 
 beforeEach(() => {
   vi.clearAllMocks();
+  delete (mockDocker as { modem?: unknown }).modem;
   mockDocker.listContainers.mockResolvedValue([]);
   mockDocker.getContainer.mockReturnValue({ inspect: vi.fn().mockResolvedValue({}) });
 });
@@ -284,5 +285,40 @@ describe('listContainersForSocketInventory', () => {
     const { rows: [row] } = await DockerController.getInstance(1).listContainersForSocketInventory();
     expect(row.ports).toHaveLength(64);
     expect(row.metadataTruncated).toBe(true);
+  });
+});
+
+describe('getDockerSocketPath', () => {
+  it('resolves the socket the modem actually dials', async () => {
+    (mockDocker as { modem?: unknown }).modem = {
+      getSocketPath: vi.fn().mockResolvedValue('/home/operator/.docker/run/docker.sock'),
+    };
+    await expect(DockerController.getInstance(1).getDockerSocketPath())
+      .resolves.toBe('/home/operator/.docker/run/docker.sock');
+  });
+
+  it('reads a string socketPath when the modem has no resolver method', async () => {
+    (mockDocker as { modem?: unknown }).modem = { socketPath: '/run/docker.sock' };
+    await expect(DockerController.getInstance(1).getDockerSocketPath()).resolves.toBe('/run/docker.sock');
+  });
+
+  it('reads a function socketPath when the modem has no resolver method', async () => {
+    (mockDocker as { modem?: unknown }).modem = {
+      socketPath: vi.fn().mockResolvedValue('//./pipe/docker_engine'),
+    };
+    await expect(DockerController.getInstance(1).getDockerSocketPath()).resolves.toBe('//./pipe/docker_engine');
+  });
+
+  it('returns null for a tcp client or a modem that cannot be inspected', async () => {
+    await expect(DockerController.getInstance(1).getDockerSocketPath()).resolves.toBeNull();
+    (mockDocker as { modem?: unknown }).modem = { getSocketPath: vi.fn().mockResolvedValue(undefined) };
+    await expect(DockerController.getInstance(1).getDockerSocketPath()).resolves.toBeNull();
+  });
+
+  it('returns null instead of throwing when the modem resolution fails', async () => {
+    (mockDocker as { modem?: unknown }).modem = {
+      getSocketPath: vi.fn().mockRejectedValue(new Error('modem unavailable')),
+    };
+    await expect(DockerController.getInstance(1).getDockerSocketPath()).resolves.toBeNull();
   });
 });

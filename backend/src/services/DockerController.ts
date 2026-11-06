@@ -381,7 +381,7 @@ export interface SocketInventoryContainerRow {
   env: string[];
   privileged: boolean;
   readonlyRootfs: boolean;
-  /** A metadata list exceeded the inventory's bound; the row is incomplete. */
+  /** A metadata list exceeded a bound or could not be read completely; the row is incomplete. */
   metadataTruncated: boolean;
 }
 
@@ -441,11 +441,12 @@ class DockerController {
   }
 
   /**
-   * The unix socket the active Docker client will dial. Dockerode resolves an
-   * unset `DOCKER_HOST` lazily (Docker Desktop's `~/.docker/run/docker.sock` can
-   * win over `/var/run/docker.sock`), so discovery must ask the client instead
-   * of assuming the conventional path. Returns null for tcp/ssh clients and
-   * when the modem cannot be inspected.
+   * The socket the active Docker client will dial: a unix path or the Windows
+   * named pipe. Dockerode resolves an unset `DOCKER_HOST` lazily (Docker
+   * Desktop's `~/.docker/run/docker.sock` can win over
+   * `/var/run/docker.sock`), so discovery must ask the client instead of
+   * assuming the conventional path. Returns null for tcp/ssh clients and when
+   * the modem cannot be inspected.
    */
   public async getDockerSocketPath(): Promise<string | null> {
     const modem = (this.docker as unknown as {
@@ -2478,14 +2479,11 @@ class DockerController {
           const rawEnv = Array.isArray(config?.Env) ? config.Env.length : 0;
           const rawNetworks = Object.keys(asRecord(asRecord(info.NetworkSettings)?.Networks) ?? {}).length;
           const rawExposed = Object.keys(asRecord(config?.ExposedPorts) ?? {}).length;
-          const inspectPortBindings = Object.values(asRecord(asRecord(info.NetworkSettings)?.Ports) ?? {})
-            .reduce<number>((sum, entry) => sum + (Array.isArray(entry) ? entry.length : 0), 0);
           const rawPorts = Object.keys(asRecord(asRecord(info.NetworkSettings)?.Ports) ?? {}).length;
           metadataTruncated = metadataTruncated || inspectedPorts.truncated
             || !Array.isArray(info.Mounts)
             || rawMounts > 64 || rawLabels > 256 || rawEnv > 256
-            || rawNetworks > 32 || rawExposed > 64 || rawPorts > 64
-            || inspectPortBindings > 64;
+            || rawNetworks > 32 || rawExposed > 64 || rawPorts > 64;
           const hostConfig = asRecord(info.HostConfig);
           privileged = hostConfig?.Privileged === true;
           readonlyRootfs = hostConfig?.ReadonlyRootfs === true;
