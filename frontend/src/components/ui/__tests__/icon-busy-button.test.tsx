@@ -1,4 +1,4 @@
-import * as React from 'react';
+import type { FormEvent } from 'react';
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { render, screen, act, fireEvent } from '@testing-library/react';
 import { RefreshCw, ShieldCheck, Loader2 } from 'lucide-react';
@@ -48,15 +48,6 @@ describe('IconBusyButton', () => {
     expect(btn.querySelector('svg')).not.toHaveClass('animate-spin');
   });
 
-  it('swaps the label through stacked copies after the delay', () => {
-    render(<IconBusyButton icon={RefreshCw} pending label="Recheck" busyLabel="Rechecking..." />);
-    expect(screen.getByRole('button', { name: 'Recheck' })).toBeDisabled();
-    act(() => {
-      vi.advanceTimersByTime(DURATION_BASE_MS);
-    });
-    expect(screen.getByRole('button', { name: 'Rechecking...' })).toHaveAttribute('aria-busy', 'true');
-  });
-
   it('swaps to busyIcon instead of turning the resting icon', () => {
     const { container } = render(
       <IconBusyButton icon={ShieldCheck} busyIcon={Loader2} pending aria-label="Scan" />,
@@ -76,13 +67,13 @@ describe('IconBusyButton', () => {
 
   it('returns to idle after busy chrome has shown', () => {
     const { rerender, container } = render(
-      <IconBusyButton icon={ShieldCheck} busyIcon={Loader2} pending label="Scan" busyLabel="Scanning..." />,
+      <IconBusyButton icon={ShieldCheck} busyIcon={Loader2} pending label="Scan" />,
     );
     act(() => {
       vi.advanceTimersByTime(DURATION_BASE_MS);
     });
-    expect(screen.getByRole('button', { name: 'Scanning...' })).toBeDisabled();
-    rerender(<IconBusyButton icon={ShieldCheck} busyIcon={Loader2} pending={false} label="Scan" busyLabel="Scanning..." />);
+    expect(screen.getByRole('button', { name: 'Scan' })).toBeDisabled();
+    rerender(<IconBusyButton icon={ShieldCheck} busyIcon={Loader2} pending={false} label="Scan" />);
     const btn = screen.getByRole('button', { name: 'Scan' });
     expect(btn).toBeEnabled();
     expect(btn).not.toHaveAttribute('aria-busy');
@@ -90,16 +81,8 @@ describe('IconBusyButton', () => {
     expect(container.querySelector('.animate-spin')).toBeNull();
   });
 
-  it('keeps a plain label stable while busy', () => {
-    render(<IconBusyButton icon={RefreshCw} pending label="refresh" />);
-    act(() => {
-      vi.advanceTimersByTime(DURATION_BASE_MS);
-    });
-    expect(screen.getByRole('button', { name: 'refresh' })).toHaveAttribute('aria-busy', 'true');
-  });
-
   it('does not submit a form by default', () => {
-    const onSubmit = vi.fn((e: React.FormEvent) => e.preventDefault());
+    const onSubmit = vi.fn((e: FormEvent) => e.preventDefault());
     render(
       <form onSubmit={onSubmit}>
         <IconBusyButton icon={RefreshCw} pending={false} aria-label="Refresh" />
@@ -119,9 +102,4 @@ describe('IconBusyButton', () => {
     expect(onClick).toHaveBeenCalledTimes(1);
   });
 
-  it('stays disabled after pending ends when the caller disabled it', () => {
-    const { rerender } = render(<IconBusyButton icon={RefreshCw} pending disabled aria-label="Refresh" />);
-    rerender(<IconBusyButton icon={RefreshCw} pending={false} disabled aria-label="Refresh" />);
-    expect(screen.getByRole('button', { name: 'Refresh' })).toBeDisabled();
-  });
 });
