@@ -90,6 +90,7 @@ import {
 } from '../helpers/composeVersionSkew';
 import { withTimeout } from '../utils/withTimeout';
 import type { NotificationCategory } from './NotificationService';
+import type { DeployCandidateVerification } from '../helpers/policyGate';
 
 /** True when a generation capture recorded an invocation object (prefix may be empty). */
 function hasUsableCapturedInvocation(
@@ -1651,6 +1652,17 @@ export class ComposeService {
     ws?: WebSocket,
     atomic?: boolean,
     ctx?: DeployInvocationContext,
+    /**
+     * Confirms the images a plain `up` would fetch are the ones the gate
+     * evaluated. When set, the deploy pulls the candidate services first, and
+     * any candidate no service could be named for by its own reference, verifies
+     * the digests, and then runs `up --pull never`, so Compose cannot fetch a
+     * service image between the check and the container replacement. A boundary
+     * with no candidates exists when the gate must prevent a fetch it did not
+     * clear, such as a not-yet-due interval policy or a model that would not
+     * render; undefined keeps a non-pulling deploy identical.
+     */
+    verification?: DeployCandidateVerification,
   ): Promise<{ recoveryId: string | null; deployedGenerationId: string | null; gitopsOperationId: string | null }> {
     if (ctx?.overlayDir) {
       assertGitOverlaySource(ctx.source);
@@ -1660,7 +1672,7 @@ export class ComposeService {
       if (!decryptedComposeOutputWithheld()) {
         return runWithDecryptedComposeOutput(
           { stackName, nodeId: this.nodeId },
-          () => this.deployStack(stackName, ws, atomic, ctx),
+          () => this.deployStack(stackName, ws, atomic, ctx, verification),
         );
       }
     }
@@ -1726,22 +1738,16 @@ export class ComposeService {
     let composeHandedOff = false;
 
     try {
-      try {
-        const dockerController = DockerController.getInstance(this.nodeId);
-        const legacyOrphans = await dockerController.getLegacyOrphanContainersByStack(stackName);
-        if (legacyOrphans.length > 0) {
-          sendOutput(`=== Cleaning up legacy orphan containers before deployment ===\n`);
-          await dockerController.removeContainers(legacyOrphans.map((c) => c.Id));
-        }
-      } catch (e) {
-        console.warn('Failed to clean up legacy containers for %s:', sanitizeForLog(stackName), e);
-      }
-
       await this.withRegistryAuth(async (env) => {
         const digestPins = ctx?.digestPins;
         let overlayDir: string | null = null;
         try {
           const upAction = ['up', '-d', '--remove-orphans'];
+          // The verified candidates were just pulled by the boundary below;
+          // letting `up` fetch again would reopen the window the verification
+          // closed. Only services the gate evaluated as candidates are pulled,
+          // so a service with no pull_policy is not re-fetched here.
+          if (verification) upAction.push('--pull', 'never');
           let args: string[];
           if (digestPins && Object.keys(digestPins).length > 0) {
             const pinned = await this.withDigestPinOverlay(
@@ -1759,6 +1765,49 @@ export class ComposeService {
           // bounded, best-effort check must not leave a running workload with its
           // gate already retired.
           await this.noteComposeVersionSkew(stackName, 'deploy', sendOutput);
+          if (verification) {
+            // `up` would fetch these images itself, inside the same command that
+            // replaces the containers. Pulling the exact services first creates
+            // the boundary the update paths already have: the verifier sees what
+            // actually landed, and a block throws here, before any container is
+            // touched. A verification with no services and no verifier exists to
+            // keep `up` from fetching an image the gate did not clear, such as a
+            // not-yet-due interval image or one behind an unrenderable model.
+            // No `--ignore-buildable`: a service that declares both `image:` and
+            // `build:` is only in this list when its pull policy makes Compose
+            // fetch the image, and the boundary must fetch exactly that.
+            if (verification.pullServices.length > 0) {
+              sendOutput('=== Pulling registry images ===\n');
+              await this.execute(
+                'docker',
+                await this.authoredComposeArgs(
+                  stackName,
+                  ['pull', ...verification.pullServices],
+                  stackDir,
+                ),
+                stackDir, ws, true, env, getComposeStallTimeoutMs(),
+              );
+            }
+            for (const ref of verification.pullRefs) {
+              sendOutput(`=== Pulling ${ref} ===\n`);
+              await this.execute(
+                'docker', ['pull', ref], stackDir, ws, true, env, getComposeStallTimeoutMs(),
+              );
+            }
+            if (verification.verifyPulled) await verification.verifyPulled();
+          }
+          // Legacy orphans are removed only once the candidate check has passed,
+          // so a refused image leaves the running containers it found untouched.
+          try {
+            const dockerController = DockerController.getInstance(this.nodeId);
+            const legacyOrphans = await dockerController.getLegacyOrphanContainersByStack(stackName);
+            if (legacyOrphans.length > 0) {
+              sendOutput(`=== Cleaning up legacy orphan containers before deployment ===\n`);
+              await dockerController.removeContainers(legacyOrphans.map((c) => c.Id));
+            }
+          } catch (e) {
+            console.warn('Failed to clean up legacy containers for %s:', sanitizeForLog(stackName), e);
+          }
           // End the gates from any earlier run here, after the arguments and the
           // registry auth have resolved and immediately before the compose up
           // replaces the containers they are observing, so neither a refused
@@ -1821,6 +1870,17 @@ export class ComposeService {
       // stampGitOpsDeployId).
       if (gitopsDeploy) {
         this.stampGitOpsDeployId(deployError, gitopsDeploy.gitopsOperationId);
+      }
+      // A policy refusal from the pre-up verification is not a failed deploy:
+      // the pull changed only the local image store and no container was
+      // replaced. Abandon the captured generation instead of compensating a
+      // runtime that is still the one it captured, so a block cannot recreate
+      // running containers.
+      if (deployError instanceof Error && deployError.name === 'PulledCandidateBlockedError') {
+        if (atomic && recoverySvc && recoveryId) {
+          await recoverySvc.abandon(recoveryId);
+        }
+        throw deployError;
       }
       if (atomic && recoverySvc && handedOff && recoveryId) {
         sendOutput('\n=== Deployment failed - restoring previous runtime from recovery generation ===\n');
@@ -2731,6 +2791,11 @@ export class ComposeService {
               stackDir, ws, true, env, getComposeStallTimeoutMs(),
             );
             sendOutput('=== Pulling registry images ===\n');
+            // Unlike the plain-up boundary, a registry update builds every
+            // build-backed service first and this pull skips them, so a
+            // service with both `image:` and `build:` runs the build. The `up`
+            // below uses `--pull never`, so it cannot fetch the registry image
+            // over that build.
             await this.execute(
               'docker',
               await this.authoredComposeArgs(stackName, ['pull', '--ignore-buildable']),
@@ -2799,7 +2864,11 @@ export class ComposeService {
       gitopsDeploy = this.beginGitOpsDeploy(stackName);
       await this.withRegistryAuth(async (env) => {
         sendOutput('=== Recreating containers ===\n');
-        const args = await this.authoredComposeArgs(stackName, ['up', '-d', '--remove-orphans']);
+        // The pulls this update needs already ran above, and a build-backed
+        // service runs the image it just built. `up` must not fetch again:
+        // `pull_policy: always` would otherwise pull a registry image over the
+        // built one, after the gate proved the installed image.
+        const args = await this.authoredComposeArgs(stackName, ['up', '-d', '--remove-orphans', '--pull', 'never']);
         // Before the gates are superseded: a crash inside this bounded,
         // best-effort check must not leave a running workload with its gate
         // already retired.
@@ -3036,7 +3105,10 @@ export class ComposeService {
       // The policy was evaluated before the pull, so it is confirmed once more
       // against a fresh render immediately before the container is recreated.
       if (beforeUp) await beforeUp();
-      await this.execute('docker', await this.authoredComposeArgs(stackName, ['up', '-d', '--no-deps', '--force-recreate', serviceName]), stackDir, ws, true, env, getComposeStallTimeoutMs());
+      // The pull or build this update needs already ran above. A `pull_policy:
+      // always` service would otherwise fetch again here, after the gate checked
+      // the image that pull or build produced.
+      await this.execute('docker', await this.authoredComposeArgs(stackName, ['up', '-d', '--no-deps', '--force-recreate', '--pull', 'never', serviceName]), stackDir, ws, true, env, getComposeStallTimeoutMs());
     }, sendOutput);
   }
 

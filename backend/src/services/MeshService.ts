@@ -26,7 +26,7 @@ import { isPathWithinBase, isValidStackName, isValidRelativeStackPath } from '..
 import { getErrorMessage } from '../utils/errors';
 import { composeFileEnvVarSelectsLayers } from '../utils/authoredComposeArgs';
 import { PORT as SENCHO_LISTEN_PORT } from '../helpers/constants';
-import { assertPolicyGateAllows, buildSystemPolicyGateOptions } from '../helpers/policyGate';
+import { assertPolicyGateAllows, buildSystemPolicyGateOptions, evaluatedDeployCandidateVerification } from '../helpers/policyGate';
 import {
     appendRegistryDeliveryCode,
     prepareOutboundRegistryDeliveryBody,
@@ -3278,13 +3278,13 @@ export class MeshService extends EventEmitter implements MeshForwarderHost {
         if (!node) throw new Error(`unknown node ${nodeId}`);
 
         if (node.type !== 'remote') {
-            await assertPolicyGateAllows(
-                stackName,
-                nodeId,
-                buildSystemPolicyGateOptions(actor, {
-                    auditPath: `/api/mesh/nodes/${nodeId}/stacks/${stackName}/redeploy`,
-                }),
-            );
+            const policyOptions = buildSystemPolicyGateOptions(actor, {
+                auditPath: `/api/mesh/nodes/${nodeId}/stacks/${stackName}/redeploy`,
+                // A mesh redeploy is a plain `up` nobody is watching.
+                imageSource: 'compose',
+                unattended: true,
+            });
+            const gate = await assertPolicyGateAllows(stackName, nodeId, policyOptions);
             const lock = await StackOpLockService.getInstance().runExclusive(
                 nodeId, stackName, 'deploy', 'system',
                 () => ComposeService.getInstance(nodeId).deployStack(
@@ -3292,6 +3292,10 @@ export class MeshService extends EventEmitter implements MeshForwarderHost {
                     undefined,
                     undefined,
                     { source: 'mesh_redeploy', actor: 'system:mesh' },
+                    evaluatedDeployCandidateVerification(
+                        stackName, nodeId, gate.evaluatedCandidates, policyOptions,
+                        gate.pullServices, gate.noPullOnUp,
+                    ),
                 ),
             );
             if (!lock.ran) {

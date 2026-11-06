@@ -28,6 +28,20 @@ export interface EffectiveServiceSpec {
   name: string;
   declaredImage: string | null;
   hasBuild: boolean;
+  /**
+   * Compose's own `pull_policy` for this service, or null when the service does
+   * not declare one. A plain `up` fetches the image for `always`, `daily`,
+   * `weekly` and `every_*`, which is why the deploy gate reads it: those services
+   * run the registry image, not the one on the node. Absent means the Compose
+   * default (`missing`), which pulls only when the image is not on the node.
+   */
+  pullPolicy?: string | null;
+  /**
+   * The service-level `platform` override, when declared. Compose resolves the
+   * registry image and runs the container for this platform, which can differ
+   * from the node's own, so the gate must resolve the same variant Compose will.
+   */
+  platform?: string | null;
   /** May be 0 (explicit `scale: 0` or `deploy.replicas: 0`); defaults to 1 when neither is set, matching Compose's own default. */
   expectedReplicas: number;
   dependsOn: string[];
@@ -35,7 +49,16 @@ export interface EffectiveServiceSpec {
 }
 
 export type EffectiveServiceModelResult =
-  | { renderable: true; services: EffectiveServiceSpec[] }
+  | {
+      renderable: true;
+      services: EffectiveServiceSpec[];
+      /**
+       * Compose's project name from the rendered model. A build-only service
+       * runs an image Compose generates as `<project>-<service>`, which is what
+       * `config --images` names without any service declaring it.
+       */
+      projectName?: string | null;
+    }
   | { renderable: false; code: 'effective_model_render_failed'; error: string };
 
 function asString(v: unknown): string | undefined {
@@ -81,6 +104,8 @@ function parseServiceSpec(name: string, raw: unknown): EffectiveServiceSpec {
     name,
     declaredImage: asString(svc.image) ?? null,
     hasBuild: !!svc.build && typeof svc.build === 'object',
+    pullPolicy: asString(svc.pull_policy) ?? null,
+    platform: asString(svc.platform) ?? null,
     expectedReplicas: expectedReplicasOf(svc, deploy),
     dependsOn: dependsOnNames(svc.depends_on),
     hasHealthcheck,
@@ -94,6 +119,12 @@ function parseEffectiveServices(parsed: unknown): EffectiveServiceSpec[] {
     ? root.services as Record<string, unknown>
     : {};
   return Object.entries(rawServices).map(([name, svc]) => parseServiceSpec(name, svc));
+}
+
+/** Compose's project name from the rendered model, when it states one. */
+function parseProjectName(parsed: unknown): string | null {
+  const root = (parsed && typeof parsed === 'object') ? parsed as Record<string, unknown> : {};
+  return typeof root.name === 'string' && root.name !== '' ? root.name : null;
 }
 
 /**
@@ -110,7 +141,12 @@ export async function buildEffectiveServiceModel(nodeId: number, stackName: stri
     const result = await ComposeService.getInstance(nodeId).renderConfig(stackName);
     if (result.rendered !== null) {
       try {
-        return { renderable: true, services: parseEffectiveServices(JSON.parse(result.rendered)) };
+        const parsed: unknown = JSON.parse(result.rendered);
+        return {
+          renderable: true,
+          services: parseEffectiveServices(parsed),
+          projectName: parseProjectName(parsed),
+        };
       } catch (parseErr) {
         // JSON.parse errors carry no file content, so the message is safe to log.
         console.warn('[EffectiveServiceModel] Effective model parse failed for %s:',

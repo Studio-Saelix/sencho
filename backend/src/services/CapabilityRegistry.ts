@@ -79,6 +79,7 @@ export const CAPABILITIES = [
   'fleet-readiness-v1',
   'blueprint-digest-pins-v1',
   'health-gate-observation-v1',
+  'candidate-image-gate-v1',
   // Advertised only by a build whose recovery engine can create and restore
   // volume points. A node without it is an older build, and the hub reads that
   // as `update_required` rather than as "this feature does not exist".
@@ -135,6 +136,14 @@ export const STACK_DELETE_PRUNE_VOLUMES_CAPABILITY = 'stack-delete-prune-volumes
 
 /** Capability for the nested per-service update/restore routes and the `effective-services` model they read. */
 export const SERVICE_SCOPED_UPDATE_CAPABILITY = 'service-scoped-update' as const satisfies Capability;
+
+/**
+ * The node evaluates the image an update would pull (resolved by digest for its
+ * own platform) instead of the image it already holds. A hub-driven unattended
+ * update to a node without this capability is decided by the Candidate not
+ * evaluated rule, because that node cannot see the candidate at all.
+ */
+export const CANDIDATE_IMAGE_GATE_CAPABILITY = 'candidate-image-gate-v1' as const satisfies Capability;
 
 /** Capability for nullable `service_name` on stack alert rules and per-service cooldown evaluation. */
 export const SERVICE_SCOPED_STACK_ALERT_CAPABILITY =

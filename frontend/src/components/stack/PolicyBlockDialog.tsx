@@ -8,7 +8,7 @@ import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
 import { SeverityChip } from '@/components/VulnerabilityScanSheet';
 import type { VulnSeverity } from '@/types/security';
-import { buildEvidenceLines } from './policyBlockEvidence';
+import { buildEvidenceLines, candidateEvidenceFor, shortDigest } from './policyBlockEvidence';
 
 /** Risk inputs a deploy gate can block on; mirrors the backend reason set. */
 export type PolicyBlockReason = 'severity' | 'kev' | 'fixable';
@@ -23,6 +23,13 @@ export interface PolicyBlockViolation {
   /** Which inputs matched (empty when the image could not be evaluated). */
   reasons: PolicyBlockReason[];
   scanId: number;
+  /**
+   * The platform variant this row is about, when the gate resolved or tried to
+   * resolve a registry candidate. One ref shared by services with different
+   * `platform:` overrides has one row per variant, so the row pairs with its own
+   * evidence record.
+   */
+  platform?: string | null;
   /** Set when the gate blocked because the image could not be evaluated, which
    *  covers a scan or parse failure and an evaluation that threw. The message
    *  names which, so the row's subtitle does not have to distinguish them. */
@@ -37,6 +44,8 @@ export interface PolicyBlockEvidenceApplication {
   rule: string;
   /** Present when the application is about one image rather than the whole node. */
   target?: string;
+  /** The platform variant of `target` the application is about, when known. */
+  platform?: string | null;
 }
 
 /** One piece of evidence the gate obtained, or failed to. */
@@ -46,7 +55,23 @@ export interface PolicyBlockEvidenceRecord {
   target: string;
   collectedAt?: number | null;
   reason?: string;
+  /** The image digest this evidence is bound to (the index digest for a candidate). */
+  digest?: string | null;
+  /**
+   * Which image the evidence describes. `candidate` is the registry image an
+   * update or first deploy would pull, resolved before anything is pulled; `installed` is the
+   * one already on the node. Absent on older payloads, which only ever described
+   * the installed image.
+   */
+  subject?: 'installed' | 'candidate';
+  /** The exact manifest that was scanned (the platform child of an index). */
+  platformDigest?: string | null;
+  /** The platform the candidate was resolved for. */
+  platform?: string | null;
+  /** Trivy vulnerability-database build time the findings came from. */
+  databaseUpdatedAt?: number | null;
 }
+
 
 export interface PolicyBlockPayload {
   error: string;
@@ -205,10 +230,27 @@ export function PolicyBlockDialog({
               No violation details were returned. Check the scan history for this stack for more context.
             </div>
           ) : (
-            violations.map((v) => (
-              <div key={`${v.imageRef}-${v.scanId}`} className="px-4 py-3 flex items-center justify-between gap-4">
+            violations.map((v) => {
+              // The image this operation would pull, when the gate resolved it.
+              // Shown under the authored tag so the operator can see which new
+              // image was evaluated instead of the one already on the node.
+              // An error row with no platform could not name a variant (an
+              // invalid or unknown override). Falling back to another variant's
+              // record would label it with an image it never evaluated.
+              const candidate = v.error && !v.platform
+                ? null
+                : candidateEvidenceFor(payload?.evidence, v.imageRef, v.platform);
+              const candidateDigest = shortDigest(candidate?.digest);
+              return (
+              <div key={`${v.imageRef}-${v.platform ?? ''}-${v.scanId}-${v.error ?? ''}`} className="px-4 py-3 flex items-center justify-between gap-4">
                 <div className="min-w-0">
                   <div className="font-mono text-sm truncate">{v.imageRef}</div>
+                  {candidateDigest && (
+                    <div className="font-mono text-[10px] text-stat-subtitle mt-0.5">
+                      New image {candidateDigest}
+                      {candidate?.platform ? ` · ${candidate.platform}` : ''}
+                    </div>
+                  )}
                   {v.error ? (
                     <>
                       <div className="font-mono text-[10px] uppercase tracking-[0.18em] text-stat-subtitle">
@@ -237,7 +279,8 @@ export function PolicyBlockDialog({
                 </div>
                 <SeverityChip severity={normalizeSeverity(String(v.severity))} />
               </div>
-            ))
+              );
+            })
           )}
         </div>
         {violations.some((v) => v.error) && (

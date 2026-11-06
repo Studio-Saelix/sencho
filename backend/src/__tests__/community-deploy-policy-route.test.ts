@@ -21,6 +21,35 @@ vi.mock('../services/FileSystemService', () => ({
   },
 }));
 
+
+/**
+ * A deploy pulls only what Compose will pull, so a reference the node does not
+ * hold is resolved on the registry before it is scanned. This suite is about the
+ * Community hard-block that follows, not registry transport, so resolution is
+ * deterministic and offline here.
+ */
+vi.mock('../services/candidateImage', async () => {
+  const actual = await vi.importActual<typeof import('../services/candidateImage')>('../services/candidateImage');
+  const { createHash } = await import('node:crypto');
+  const digestOf = (ref: string): string => `sha256:${createHash('sha256').update(ref).digest('hex')}`;
+  return {
+    ...actual,
+    nodePlatformFor: async () => ({ os: 'linux', architecture: 'amd64' }),
+    // Nothing is on the node, so Compose would pull it.
+    localImageExists: async () => false,
+    pullPolicyPullsOnUp: () => false,
+    resolveCandidateImage: async (_nodeId: number, ref: string) => ({
+      kind: 'candidate',
+      ref,
+      scanRef: `registry-1.docker.io/library/${ref}@${digestOf(ref)}`,
+      indexDigest: digestOf(ref),
+      platformDigest: digestOf(ref),
+      platform: 'linux/amd64',
+      qualification: 'exact',
+    }),
+  };
+});
+
 let tmpDir: string;
 let app: import('express').Express;
 let authCookie: string;

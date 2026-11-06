@@ -178,3 +178,45 @@ describe('service update and restore refusals', () => {
     expect(result).toMatchObject({ ok: false, endpointRefusal: { reason: 'provider', service: 'socket-proxy' } });
   });
 });
+
+describe('service update scan-policy block', () => {
+  const blockBody = {
+    error: 'Policy "prod-gate" blocked update: 1 image(s) matched severity',
+    code: 'policy_blocked',
+    serviceName: 'web',
+    mutationStage: 'policy',
+    policy: { id: 1, name: 'prod-gate', maxSeverity: 'HIGH', blockOnSeverity: 1, blockOnKev: 0, blockOnFixable: 0 },
+    violations: [
+      { imageRef: 'app:latest', severity: 'CRITICAL', criticalCount: 1, highCount: 0, kevCount: 0, fixableCount: 0, reasons: ['severity'], scanId: 4 },
+    ],
+    evidence: { outcome: 'block', summary: 'Vulnerability scan: current, blocked by the Scan failed setting, set to block', records: [], applications: [] },
+  };
+
+  it('returns the payload the shared block dialog renders, so its bypass opens', async () => {
+    mockedApiFetch.mockResolvedValue(new Response(JSON.stringify(blockBody), { status: 409 }));
+
+    const result = await requestServiceUpdate({ nodeId: 1, stackName: 'web', serviceName: 'web' });
+
+    expect(result.ok).toBe(false);
+    expect(result.ok ? undefined : result.policyBlock).toMatchObject({
+      policy: { name: 'prod-gate' },
+      violations: [expect.objectContaining({ imageRef: 'app:latest' })],
+      evidence: { summary: expect.stringContaining('Scan failed setting') },
+    });
+  });
+
+  it('carries no block payload when the refusal is not a policy block', async () => {
+    mockedApiFetch.mockResolvedValue(new Response(JSON.stringify({ error: 'Compose failed', code: 'service_update_compose_failed' }), { status: 500 }));
+    const result = await requestServiceUpdate({ nodeId: 1, stackName: 'web', serviceName: 'web' });
+    expect(result.ok ? undefined : result.policyBlock).toBeUndefined();
+  });
+
+  it('asks for the bypass on the service route when retrying past a block', async () => {
+    mockedApiFetch.mockResolvedValue(new Response(JSON.stringify({
+      serviceName: 'web', healthGateId: null, observing: false, recoveryId: null, recoveryAvailable: false,
+    }), { status: 200 }));
+    await requestServiceUpdate({ nodeId: 1, stackName: 'web', serviceName: 'web', ignorePolicy: true });
+    const [path] = mockedApiFetch.mock.calls[0] as [string, Record<string, unknown>];
+    expect(path).toBe('/stacks/web/services/web/update?ignorePolicy=true');
+  });
+});

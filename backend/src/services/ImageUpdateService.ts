@@ -9,7 +9,7 @@ import { RegistryService } from './RegistryService';
 import { NodeRegistry } from './NodeRegistry';
 import { NotificationService } from './NotificationService';
 import { sanitizeNotificationMessage } from '../utils/notificationMessage';
-import { parseImageRef, selectLocalRepoDigests } from './registry-api';
+import { configIdForLocalBuild, parseImageRef, selectLocalRepoDigests } from './registry-api';
 import { detectImageUpdate, type PreviewImageCheckStatus } from './imageUpdateDetect';
 import { isDebugEnabled } from '../utils/debug';
 import { getErrorMessage } from '../utils/errors';
@@ -1624,9 +1624,11 @@ export class ImageUpdateService {
         // Get local digests and platform from RepoDigests / Os+Architecture
         let localDigests: string[];
         let platform: { os: string; architecture: string };
+        let repoDigests: string[];
+        let configId: string | null = null;
         try {
             const inspect = await withTimeout(docker.getDocker().getImage(imageRef).inspect(), ImageUpdateService.SOCKET_TIMEOUT_MS, 'inspect');
-            const repoDigests: string[] = inspect.RepoDigests ?? [];
+            repoDigests = inspect.RepoDigests ?? [];
 
             // No RepoDigests at all: locally built / not registry-backed, so update
             // status does not apply.
@@ -1634,7 +1636,8 @@ export class ImageUpdateService {
                 return { hasUpdate: false, checkStatus: 'not_checkable', notCheckable: true };
             }
 
-            localDigests = selectLocalRepoDigests(repoDigests, parsed);
+            configId = configIdForLocalBuild(inspect);
+            localDigests = selectLocalRepoDigests(repoDigests, parsed, configId);
             platform = { os: inspect.Os, architecture: inspect.Architecture };
         } catch {
             return {
@@ -1644,9 +1647,17 @@ export class ImageUpdateService {
             };
         }
 
-        // RepoDigests were present but none resolved a usable digest: genuinely
-        // ambiguous, so surface it rather than silently call the image up to date.
+        // RepoDigests were present but none resolved a usable digest. A
+        // self-referential digest means the image is a local build, so update
+        // status does not apply; anything else is genuinely ambiguous.
         if (localDigests.length === 0) {
+            const selfReferential = configId !== null && repoDigests.some((entry) => {
+                const at = entry.indexOf('@');
+                return at !== -1 && entry.slice(at + 1).toLowerCase() === configId.toLowerCase();
+            });
+            if (selfReferential) {
+                return { hasUpdate: false, checkStatus: 'not_checkable', notCheckable: true };
+            }
             return {
                 hasUpdate: false,
                 checkStatus: 'failed',

@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import { Button } from '@/components/ui/button';
 import { Card } from '@/components/ui/card';
+import { Skeleton } from '@/components/ui/skeleton';
 import { Badge } from '@/components/ui/badge';
 import { SegmentedControl } from '@/components/ui/segmented-control';
 import { SortableTableHead } from '@/components/ui/sortable-table';
@@ -26,6 +27,8 @@ import { DigestRebuildHint } from '@/components/DigestRebuildHint';
 import { useNodes } from '@/context/NodeContext';
 import { useAuth } from '@/context/AuthContext';
 import { useIsMobile } from '@/hooks/use-is-mobile';
+import { useVisualBusy } from '@/hooks/useVisualBusy';
+import { cn } from '@/lib/utils';
 import { useTableSort } from '@/hooks/useTableSort';
 import { useReadinessViewMode } from '@/hooks/useReadinessViewMode';
 import { Masthead, Kicker } from '@/components/mobile/mobile-ui';
@@ -555,6 +558,125 @@ function StackReadinessCard({
   );
 }
 
+/**
+ * Recheck control shared by the desktop hero and the phone toolbar. The click
+ * locks at once; the icon turns and the label reads "Rechecking..." only after
+ * the visual-busy delay, so a fast answer never flashes busy chrome. The phone
+ * button sits alone at the end of its row and simply grows. In the hero,
+ * `holdBusyWidth` keeps an invisible copy of the busy button in the same grid
+ * cell, so the row does not shift when the label changes while the idle button
+ * keeps its natural size.
+ */
+function RecheckButton({
+  refreshing,
+  onClick,
+  disabled = false,
+  compact = false,
+  holdBusyWidth = false,
+}: {
+  refreshing: boolean;
+  onClick: () => void;
+  disabled?: boolean;
+  compact?: boolean;
+  holdBusyWidth?: boolean;
+}) {
+  const { showBusy } = useVisualBusy(refreshing);
+  const iconClass = compact ? 'h-3.5 w-3.5' : 'h-4 w-4';
+  const gapClass = compact ? 'gap-1.5' : 'gap-2';
+  const button = (
+    <Button
+      variant="outline"
+      size="sm"
+      onClick={onClick}
+      disabled={disabled || refreshing}
+      aria-busy={refreshing || undefined}
+      aria-label="Recheck registries"
+      className={cn(gapClass, holdBusyWidth && 'col-start-1 row-start-1 justify-self-end')}
+    >
+      <RefreshCw className={cn(iconClass, showBusy && 'animate-spin')} strokeWidth={1.5} aria-hidden="true" />
+      {showBusy ? 'Rechecking...' : 'Recheck'}
+    </Button>
+  );
+  if (!holdBusyWidth) return button;
+  return (
+    <span className="inline-grid">
+      {button}
+      <Button
+        variant="outline"
+        size="sm"
+        disabled
+        tabIndex={-1}
+        aria-hidden="true"
+        data-testid="recheck-width-holder"
+        className={cn(gapClass, 'invisible pointer-events-none col-start-1 row-start-1')}
+      >
+        <RefreshCw className={iconClass} strokeWidth={1.5} />
+        Rechecking...
+      </Button>
+    </span>
+  );
+}
+
+/**
+ * First-load placeholder that mirrors the loaded board's structure (the table's
+ * column heads, the node card grid, or the phone cards) to limit layout shift.
+ * Callers mount it only after the visual-busy delay. Keep the column heads in
+ * sync with the readiness table head.
+ */
+function ReadinessLoadingSkeleton({ layout }: { layout: 'table' | 'cards' | 'phone' }) {
+  const label = 'Loading readiness';
+  if (layout === 'table') {
+    return (
+      <Card className="overflow-hidden" role="status" aria-busy="true" aria-label={label} data-testid="readiness-skeleton">
+        <Table>
+          <TableHeader>
+            <TableRow className="hover:bg-transparent">
+              <TableHead className="w-8 pr-0"><span className="sr-only">Details</span></TableHead>
+              <TableHead className={HEAD_CLASS}>Stack</TableHead>
+              <TableHead className={HEAD_CLASS}>Node</TableHead>
+              <TableHead className={`${HEAD_CLASS} max-2xl:hidden`}>Image</TableHead>
+              <TableHead className={HEAD_CLASS}>Change</TableHead>
+              <TableHead className={HEAD_CLASS}>Risk</TableHead>
+              <TableHead className={HEAD_CLASS}>Schedule</TableHead>
+              <TableHead className={`${HEAD_CLASS} text-right`}>Action</TableHead>
+            </TableRow>
+          </TableHeader>
+          <TableBody>
+            {Array.from({ length: 4 }).map((_, i) => (
+              <TableRow key={i} className="hover:bg-transparent">
+                <TableCell className="w-8 pr-0"><Skeleton className="h-4 w-4" /></TableCell>
+                <TableCell><Skeleton className="h-4 w-28" /></TableCell>
+                <TableCell><Skeleton className="h-4 w-20" /></TableCell>
+                <TableCell className="max-2xl:hidden"><Skeleton className="h-4 w-48" /></TableCell>
+                <TableCell><Skeleton className="h-4 w-24" /></TableCell>
+                <TableCell><Skeleton className="h-5 w-16" /></TableCell>
+                <TableCell><Skeleton className="h-4 w-32" /></TableCell>
+                <TableCell><Skeleton className="ml-auto h-8 w-24" /></TableCell>
+              </TableRow>
+            ))}
+          </TableBody>
+        </Table>
+      </Card>
+    );
+  }
+  const phone = layout === 'phone';
+  return (
+    <div role="status" aria-busy="true" aria-label={label} data-testid="readiness-skeleton" className="flex flex-col gap-4">
+      <Skeleton className={phone ? 'h-5 w-40' : 'h-6 w-48'} />
+      <div className={phone ? 'flex flex-col gap-3' : 'grid gap-4 grid-cols-1 lg:grid-cols-2 2xl:grid-cols-3'}>
+        {Array.from({ length: phone ? 2 : 3 }).map((_, i) => (
+          <Card key={i} className={cn('flex flex-col gap-4', phone ? 'p-4' : 'p-5')}>
+            <Skeleton className="h-6 w-40" />
+            <Skeleton className="h-4 w-full" />
+            <Skeleton className="h-4 w-3/4" />
+            <Skeleton className="h-8 w-28" />
+          </Card>
+        ))}
+      </div>
+    </div>
+  );
+}
+
 function ReadinessHero({
   total,
   ready,
@@ -618,21 +740,7 @@ function ReadinessHero({
             </div>
           )}
           {canRefresh && (
-            <Button
-              variant="outline"
-              size="sm"
-              onClick={onRefresh}
-              disabled={refreshing}
-              aria-label="Recheck registries"
-              className="gap-2"
-            >
-              <RefreshCw
-                className={`h-4 w-4 ${refreshing ? 'animate-spin' : ''}`}
-                strokeWidth={1.5}
-                aria-hidden="true"
-              />
-              Recheck
-            </Button>
+            <RecheckButton holdBusyWidth refreshing={refreshing} onClick={onRefresh} />
           )}
         </div>
       </div>
@@ -1194,6 +1302,9 @@ function AutoUpdateReadinessContent({ headerActions }: AutoUpdateReadinessProps)
   const [groups, setGroups] = useState<NodeGroup[]>([]);
   const [reachableNodeCount, setReachableNodeCount] = useState<number | null>(null);
   const [loading, setLoading] = useState(true);
+  // True once the latest load has settled (data or error). The skeleton belongs to
+  // the first load only: a later reload, even over an empty list, keeps what is shown.
+  const [hasLoaded, setHasLoaded] = useState(false);
   const [refreshing, setRefreshing] = useState(false);
   const [cadence, setCadence] = useState<ImageUpdateStatus | null>(null);
   // Local-node stacks whose latest check could not determine status. The fleet
@@ -1430,7 +1541,10 @@ function AutoUpdateReadinessContent({ headerActions }: AutoUpdateReadinessProps)
       if (token !== loadTokenRef.current) return;
       toast.error((err as Error)?.message || 'Failed to load readiness');
     } finally {
-      if (token === loadTokenRef.current) setLoading(false);
+      if (token === loadTokenRef.current) {
+        setLoading(false);
+        setHasLoaded(true);
+      }
     }
   }, [localNodeId, refreshNodeMeta]);
 
@@ -1507,6 +1621,10 @@ function AutoUpdateReadinessContent({ headerActions }: AutoUpdateReadinessProps)
   }, [loadReadiness, loadCadence]);
 
   const { mode: viewMode, setMode: setViewMode } = useReadinessViewMode();
+  // A fast first answer never flashes the skeleton; the min-h wrapper holds the pane open until the data lands.
+  // It ends when the first load settles or its rows arrive (their previews may still be fetching), so later reloads over an empty list keep the empty state.
+  const firstLoad = loading && !hasLoaded && groups.length === 0;
+  const { showBusy: showSkeleton } = useVisualBusy(firstLoad);
 
   // Nodes that advertise service-scoped updates, resolved per node (not just
   // the active one) since this view spans the whole fleet.
@@ -1722,10 +1840,7 @@ function AutoUpdateReadinessContent({ headerActions }: AutoUpdateReadinessProps)
         <div className="flex-1 min-h-0 overflow-y-auto p-4 [&>*+*]:mt-4">
           <div className="flex justify-end">
             {canRefreshFleet && (
-              <Button variant="outline" size="sm" onClick={handleRefresh} disabled={refreshing || cadence?.enabled === false} aria-label="Recheck registries" className="gap-1.5">
-                <RefreshCw className={`h-3.5 w-3.5 ${refreshing ? 'animate-spin' : ''}`} strokeWidth={1.5} aria-hidden="true" />
-                Recheck
-              </Button>
+              <RecheckButton compact refreshing={refreshing} onClick={handleRefresh} disabled={cadence?.enabled === false} />
             )}
           </div>
           <CadenceStrip cadence={cadence} />
@@ -1736,8 +1851,10 @@ function AutoUpdateReadinessContent({ headerActions }: AutoUpdateReadinessProps)
             </div>
           )}
           <CheckFailuresNotice failures={checkFailures} />
-          {loading && groups.length === 0 ? (
-            <div className="flex items-center justify-center py-16 font-mono text-xs text-stat-subtitle">Loading readiness...</div>
+          {firstLoad ? (
+            <div className="min-h-[320px]">
+              {showSkeleton && <ReadinessLoadingSkeleton layout="phone" />}
+            </div>
           ) : groups.length === 0 ? (
             <div className="flex flex-col items-center justify-center gap-3 rounded-lg border border-dashed border-card-border bg-card/40 py-16 text-center">
               <Shield className={`h-8 w-8 ${checkFailures.length > 0 ? 'text-warning/70' : 'text-success/70'}`} strokeWidth={1.5} aria-hidden="true" />
@@ -1793,9 +1910,9 @@ function AutoUpdateReadinessContent({ headerActions }: AutoUpdateReadinessProps)
 
       <CheckFailuresNotice failures={checkFailures} />
 
-      {loading && groups.length === 0 ? (
-        <div className="flex items-center justify-center py-16 font-mono text-xs text-stat-subtitle">
-          Loading readiness...
+      {firstLoad ? (
+        <div className="min-h-[320px]">
+          {showSkeleton && <ReadinessLoadingSkeleton layout={viewMode} />}
         </div>
       ) : groups.length === 0 ? (
         <div className="flex flex-col items-center justify-center gap-3 rounded-lg border border-dashed border-card-border bg-card/40 py-16">

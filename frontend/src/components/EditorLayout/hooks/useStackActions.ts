@@ -2146,7 +2146,10 @@ export function useStackActions(options: UseStackActionsOptions) {
       : (stackListState.files.find(f => f.replace(/\.(yml|yaml)$/, '') === stackName) ?? stackFile);
     overlayState.setPolicyBypassing(true);
     try {
-      if (action === 'update') {
+      if (policyBlock.serviceName) {
+        // A service-scoped block retries that service, not the whole stack.
+        await requestServiceUpdate(existingFile, policyBlock.serviceName, 'update', true, opNodeId);
+      } else if (action === 'update') {
         await runStackAction(existingFile, 'update', 'update', 'running', 'Stack updated successfully!', true, opNodeId);
       } else if (action === 'rollback') {
         await rollbackStack(true, opNodeId);
@@ -2520,11 +2523,13 @@ export function useStackActions(options: UseStackActionsOptions) {
     stackFile: string,
     serviceName: string,
     mode: 'update' | 'rebuild' = 'update',
+    ignorePolicy = false,
+    opNodeIdOverride: number | null = null,
   ): Promise<void> => {
     if (!hydrationReady()) return;
     if (stackListState.isStackBusy(stackFile) || editorState.serviceUpdateInProgress) return;
     const stackName = stackFile.replace(/\.(yml|yaml)$/, '');
-    const opNodeId = activeNode?.id ?? null;
+    const opNodeId = opNodeIdOverride ?? activeNode?.id ?? null;
     const run = async () => {
       // Final boundary recheck: the readiness dialog's proceed must not dispatch
       // to the captured node after readiness was lost or the active node changed.
@@ -2542,10 +2547,24 @@ export function useStackActions(options: UseStackActionsOptions) {
             serviceName,
             mode,
             deploySessionId: ds,
+            ignorePolicy,
           });
           if (!result.ok) {
             if (openServiceEndpointRefusal(result, stackFile, opNodeId)) {
               return { ok: false as const, errorMessage: 'Protected by Sencho' };
+            }
+            if (result.policyBlock) {
+              // The same dialog and bypass a stack-level block opens: one
+              // popup for one refusal, whichever scope raised it.
+              overlayState.setPolicyBlock({
+                stackName,
+                stackFile,
+                action: 'update',
+                payload: result.policyBlock,
+                nodeId: opNodeId,
+                serviceName,
+              });
+              return { ok: false as const, errorMessage: result.policyBlock.error };
             }
             if (result.policyRefusal) {
               toastUpdatePolicyRefusal(result.policyRefusal, {

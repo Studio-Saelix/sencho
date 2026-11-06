@@ -1,6 +1,8 @@
 import { apiFetch, withDeploySession } from './api';
-import { dockerEndpointRefusal, type DockerEndpointRefusal } from './stackUpdate';
+import { dockerEndpointRefusal, parsePolicyBlock, type DockerEndpointRefusal } from './stackUpdate';
 import { parseUpdatePolicyRefusal, type UpdatePolicyRefusal } from './updatePolicyRefusal';
+import type { PolicyBlockPayload } from '@/components/stack/PolicyBlockDialog';
+
 
 export interface RequestServiceUpdateParams {
     nodeId: number | null;
@@ -11,6 +13,8 @@ export interface RequestServiceUpdateParams {
     mode?: 'update' | 'rebuild';
     /** Deploy-feedback session id so Compose output streams to the panel. */
     deploySessionId?: string;
+    /** Admin bypass of the scan-policy gate; the server re-checks the role. */
+    ignorePolicy?: boolean;
 }
 
 export interface ServiceUpdateSuccess {
@@ -37,6 +41,12 @@ export interface ServiceUpdateFailure {
     endpointRefusal?: DockerEndpointRefusal;
     /** The `io.sencho.update` refusal, when the label rules this update out. */
     policyRefusal?: UpdatePolicyRefusal;
+    /**
+     * The scan-policy refusal, when the security gate blocked the service. Carries
+     * the same payload a stack-level block does, so the one block dialog (and its
+     * admin bypass) opens for a single-service update too.
+     */
+    policyBlock?: PolicyBlockPayload;
 }
 
 export type ServiceUpdateResult = ServiceUpdateSuccess | ServiceUpdateFailure;
@@ -50,10 +60,11 @@ const isRecord = (value: unknown): value is Record<string, unknown> =>
  * (see `sendServiceResult` in backend/src/routes/stacks.ts).
  */
 export async function requestServiceUpdate(params: RequestServiceUpdateParams): Promise<ServiceUpdateResult> {
-    const { nodeId, stackName, serviceName, mode = 'update', deploySessionId } = params;
+    const { nodeId, stackName, serviceName, mode = 'update', deploySessionId, ignorePolicy = false } = params;
     try {
         const res = await apiFetch(
-            `/stacks/${encodeURIComponent(stackName)}/services/${encodeURIComponent(serviceName)}/update`,
+            `/stacks/${encodeURIComponent(stackName)}/services/${encodeURIComponent(serviceName)}/update`
+                + (ignorePolicy ? '?ignorePolicy=true' : ''),
             withDeploySession(deploySessionId ?? '', { method: 'POST', nodeId }),
         );
         const body: unknown = await res.json().catch(() => null);
@@ -72,6 +83,9 @@ export async function requestServiceUpdate(params: RequestServiceUpdateParams): 
                 status: res.status,
                 endpointRefusal: dockerEndpointRefusal(JSON.stringify(body), res.status) ?? undefined,
                 policyRefusal: parseUpdatePolicyRefusal(body, res.status) ?? undefined,
+                policyBlock: isRecord(body) && body.code === 'policy_blocked'
+                    ? parsePolicyBlock(JSON.stringify(body)) ?? undefined
+                    : undefined,
             };
         }
         if (!isRecord(body) || typeof body.serviceName !== 'string') {

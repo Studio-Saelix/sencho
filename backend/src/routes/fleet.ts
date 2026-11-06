@@ -37,7 +37,7 @@ import {
   respondClaimRefused,
 } from '../helpers/endpointProviderRequest';
 import { parseRemotePolicyEvidence } from '../services/allowedPolicyEvidence';
-import { runPolicyGate, assertPolicyGateAllows, buildPolicyGateOptions, policyEvidenceFor, type AllowedPolicyEvidence } from '../helpers/policyGate';
+import { runPolicyGate, assertPolicyGateAllows, buildPolicyGateOptions, evaluatedDeployCandidateVerification, policyEvidenceFor, pulledDeployCandidateVerification, type AllowedPolicyEvidence, type DeployCandidateVerification } from '../helpers/policyGate';
 import { remoteSupportsCrossNodeRbac } from '../helpers/remoteCapabilities';
 import { captureLocalNodeFiles, captureRemoteNodeFiles, buildSnapshotDocumentation, pickDossierFields, dossierHasContent, FLEET_SNAPSHOT_APPLY_TIMEOUT_MS, type SnapshotNodeData, type SnapshotDocumentation } from '../utils/snapshot-capture';
 import { getLatestVersion, getLatestRelease, getReleaseByVersion } from '../utils/version-check';
@@ -3346,7 +3346,11 @@ async function applySnapshotStackFiles(
 // the remote node), so this only performs the deploy itself. A remote node's
 // gate decision rides back on its deploy response; it is returned so the hub's
 // own response can report it, as the local arm does from its central gate.
-async function redeploySnapshotStack(node: Node, stackName: string): Promise<{ policyEvidence?: AllowedPolicyEvidence }> {
+async function redeploySnapshotStack(
+  node: Node,
+  stackName: string,
+  candidateVerification?: DeployCandidateVerification,
+): Promise<{ policyEvidence?: AllowedPolicyEvidence }> {
   if (node.type === 'local') {
     const lock = await StackOpLockService.getInstance().runExclusive(
       node.id, stackName, 'deploy', 'system',
@@ -3355,6 +3359,7 @@ async function redeploySnapshotStack(node: Node, stackName: string): Promise<{ p
         undefined,
         undefined,
         { source: 'fleet_snapshot', actor: 'system:fleet-snapshot' },
+        candidateVerification,
       ),
     );
     if (!lock.ran) {
@@ -3644,8 +3649,12 @@ fleetRouter.post('/snapshots/:id/restore', authMiddleware, async (req: Request, 
     if (redeploy) {
       // Local deploys are gated centrally here; remote deploys are gated by the
       // remote node's own deploy endpoint.
-      if (node.type === 'local' && !(await runPolicyGate(req, res, stackName, node.id))) return;
-      const redeployResult = await redeploySnapshotStack(node, stackName);
+      if (node.type === 'local' && !(await runPolicyGate(req, res, stackName, node.id, { imageSource: 'compose' }))) return;
+      const redeployResult = await redeploySnapshotStack(
+        node,
+        stackName,
+        node.type === 'local' ? pulledDeployCandidateVerification(req, res, stackName, node.id) : undefined,
+      );
       if (redeployResult.policyEvidence) res.locals.policyEvidence = redeployResult.policyEvidence;
     }
 
@@ -3755,7 +3764,8 @@ fleetRouter.post('/snapshots/:id/restore-all', authMiddleware, async (req: Reque
       }
     }
 
-    const policyOptions = buildPolicyGateOptions(req);
+    // Every stack here is redeployed with a plain `up`.
+    const policyOptions = buildPolicyGateOptions(req, { imageSource: 'compose' });
     const results: SnapshotRestoreResult[] = [];
 
     // Restore every stack independently: one stack failing (unreachable node,
@@ -3816,9 +3826,21 @@ fleetRouter.post('/snapshots/:id/restore-all', authMiddleware, async (req: Reque
         let redeployed = false;
         let policyEvidence: AllowedPolicyEvidence | undefined;
         if (redeploy) {
-          if (node.type === 'local') ({ policyEvidence } = await assertPolicyGateAllows(group.stackName, node.id, policyOptions));
+          let localVerification: DeployCandidateVerification | undefined;
+          if (node.type === 'local') {
+            const gate = await assertPolicyGateAllows(group.stackName, node.id, policyOptions);
+            policyEvidence = gate.policyEvidence;
+            localVerification = evaluatedDeployCandidateVerification(
+              group.stackName,
+              node.id,
+              gate.evaluatedCandidates,
+              policyOptions,
+              gate.pullServices,
+              gate.noPullOnUp,
+            );
+          }
           try {
-            const remoteRedeploy = await redeploySnapshotStack(node, group.stackName);
+            const remoteRedeploy = await redeploySnapshotStack(node, group.stackName, localVerification);
             policyEvidence ??= remoteRedeploy.policyEvidence;
           } catch (redeployError) {
             const endpointRefusal = dockerEndpointRefusalOf(redeployError);

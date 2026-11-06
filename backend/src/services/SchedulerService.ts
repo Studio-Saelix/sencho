@@ -40,7 +40,7 @@ import TrivyService from './TrivyService';
 import type { ScanAllNodeImagesResult } from './TrivyService';
 import TrivyInstaller from './TrivyInstaller';
 import { CloudBackupService } from './CloudBackupService';
-import { buildSystemPolicyGateOptions } from '../helpers/policyGate';
+import { buildSystemPolicyGateOptions, evaluatedDeployCandidateVerification, remoteCandidateGateRefusal, verifyPulledCandidates } from '../helpers/policyGate';
 import {
     appendRegistryDeliveryCode,
     prepareOutboundRegistryDeliveryBody,
@@ -49,7 +49,7 @@ import {
 } from '../helpers/registryDeliveryOutbound';
 import { filterContainersByComposeService } from '../helpers/composeServiceMatch';
 import { excludeSelfContainers } from '../helpers/excludeSelfContainers';
-import { enforcePolicyPreDeploy } from './PolicyEnforcement';
+import { enforcePolicyPreDeploy, type EvaluatedCandidate, type PolicyEnforcementOptions } from './PolicyEnforcement';
 import { summarizeBlockReasons } from '../utils/policy-risk';
 import { describePolicyBlock } from '../helpers/policyGate';
 import { resolveTaskPermissionScope, type BackendScheduledAction, type TargetType } from './scheduledActionRegistry';
@@ -244,14 +244,30 @@ export class SchedulerService {
         nodeId: number,
         action: 'Auto-start' | 'Auto-update',
         auditPath: string,
-    ): Promise<void> {
+    ): Promise<{
+        evaluatedCandidates?: EvaluatedCandidate[];
+        pullServices?: string[];
+        noPullOnUp?: boolean;
+        options: PolicyEnforcementOptions;
+    }> {
         const actor = action === 'Auto-start' ? 'scheduler:auto-start' : 'scheduler:auto-update';
-        const gate = await enforcePolicyPreDeploy(
-            stackName,
-            nodeId,
-            buildSystemPolicyGateOptions(actor, { auditPath }),
-        );
-        if (gate.ok) return;
+        const options = buildSystemPolicyGateOptions(actor, {
+            auditPath,
+            // A scheduled run has nobody at the keyboard. An auto-update
+            // pulls every pullable service, while an auto-start is a plain
+            // `up` that pulls only what Compose's own pull policy makes it.
+            imageSource: action === 'Auto-update' ? 'registry' : 'compose',
+            unattended: true,
+        });
+        const gate = await enforcePolicyPreDeploy(stackName, nodeId, options);
+        if (gate.ok) {
+            return {
+                evaluatedCandidates: gate.evaluatedCandidates,
+                pullServices: gate.pullServices,
+                noPullOnUp: gate.noPullOnUp,
+                options,
+            };
+        }
         // describePolicyBlock distinguishes a matched finding from missing
         // evidence. Composing the sentence here instead reported a scanner
         // outage as a policy match on the unattended path.
@@ -677,8 +693,22 @@ export class SchedulerService {
         this.assertStackTarget(task, 'Auto-start');
         // Remote auto-start proxies to the remote's own deploy route, which runs
         // that node's scan-policy gate against the images it actually holds. The
-        // hub-side enforceSchedulerPolicyGate below is for local nodes only.
+        // hub-side enforceSchedulerPolicyGate below is for local nodes only; a
+        // remote node is checked once, here, for whether it can evaluate the
+        // image the start would pull.
         if (this.isRemoteNode(task.node_id)) {
+            // A scheduled start can install images (`up` fetches for a pulling
+            // pull policy, or a missing image), and nobody is there to answer, so
+            // a node that cannot see the candidate is held by the hub when a
+            // blocking policy matches.
+            const candidateRefusal = await remoteCandidateGateRefusal(
+                task.node_id,
+                task.target_id,
+                buildSystemPolicyGateOptions('system:scheduler', {
+                    auditPath: `/api/scheduled-tasks/${task.id}/run`,
+                }),
+            );
+            if (candidateRefusal) throw new Error(candidateRefusal);
             await this.postToRemoteStack(
                 task.node_id,
                 `${encodeURIComponent(task.target_id)}/deploy`,
@@ -686,7 +716,7 @@ export class SchedulerService {
             );
             return `Started stack "${task.target_id}" on remote node`;
         }
-        await this.enforceSchedulerPolicyGate(
+        const startGate = await this.enforceSchedulerPolicyGate(
             task.target_id,
             task.node_id,
             'Auto-start',
@@ -700,6 +730,14 @@ export class SchedulerService {
                 undefined,
                 undefined,
                 { source: 'scheduler', actor: 'system:scheduler' },
+                evaluatedDeployCandidateVerification(
+                    task.target_id,
+                    localNodeId,
+                    startGate.evaluatedCandidates,
+                    startGate.options,
+                    startGate.pullServices,
+                    startGate.noPullOnUp,
+                ),
             ),
         );
         if (!lock.ran) throw new Error(skipMessage(task.target_id, lock.existing.action));
@@ -1416,7 +1454,7 @@ export class SchedulerService {
                     recordUpdatePolicyDecision(nodeId, policy, 'system:scheduler');
                     return { kind: 'update_policy_skipped', policy };
                 }
-                await this.enforceSchedulerPolicyGate(
+                const schedulerGate = await this.enforceSchedulerPolicyGate(
                     stackName,
                     nodeId,
                     'Auto-update',
@@ -1424,7 +1462,13 @@ export class SchedulerService {
                 );
                 return StackUpdateOrchestrator.getInstance().execute(
                     { nodeId, stackName, target: { scope: 'stack' }, trigger: 'scheduled', actor: 'system:scheduler', policy },
-                    { atomic, terminalWs: null },
+                    {
+                        atomic,
+                        terminalWs: null,
+                        verifyPulled: () => verifyPulledCandidates(
+                            stackName, nodeId, schedulerGate.evaluatedCandidates, schedulerGate.options,
+                        ),
+                    },
                 );
             },
         );

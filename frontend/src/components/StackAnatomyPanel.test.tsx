@@ -15,8 +15,20 @@ vi.mock('./stack/StackActivityTimeline', () => ({
 // This suite covers the update banner, not the Doctor tab; keep the capability
 // off so the panel surface stays exactly what these tests assert against. The
 // active node is mutable so the footer-link tests can simulate a remote node.
-const { nodeState } = vi.hoisted(() => ({ nodeState: { activeNode: { id: 1 } as unknown } }));
-vi.mock('@/context/NodeContext', () => ({ useNodes: () => ({ activeNode: nodeState.activeNode, hasCapability: () => false }) }));
+const { nodeState } = vi.hoisted(() => ({
+  nodeState: { activeNode: { id: 1 } as unknown, unsupportedCapabilities: undefined as string[] | undefined },
+}));
+vi.mock('@/context/NodeContext', () => ({
+  useNodes: () => ({
+    activeNode: nodeState.activeNode,
+    // The capability registry is per test: false by default so the panel surface
+    // is exactly what these tests assert against, and true where a test checks
+    // that the older-node note is absent.
+    hasCapability: (capability: string) => nodeState.unsupportedCapabilities === undefined
+      ? false
+      : !nodeState.unsupportedCapabilities.includes(capability),
+  }),
+}));
 vi.mock('@/context/AuthContext', () => ({ useAuth: () => ({ can: () => true }) }));
 
 import { apiFetch } from '@/lib/api';
@@ -121,6 +133,9 @@ const updatePreviewCalls = () =>
 beforeEach(() => {
   hasUpdate = true;
   nodeState.activeNode = { id: 1 };
+  // Default: every capability absent, which is what the panel surfaces in this
+  // suite were written against. A test that needs one present sets the list.
+  nodeState.unsupportedCapabilities = undefined;
   vi.mocked(apiFetch).mockReset();
   vi.mocked(apiFetch).mockImplementation(async (input: RequestInfo | URL) => {
     const url = String(input);
@@ -237,6 +252,20 @@ describe('StackAnatomyPanel update banner', () => {
     await waitFor(() => expect(screen.getByTestId('update-available-banner')).toBeInTheDocument());
     expect(screen.getByText((t) => typeof t === 'string' && t.includes('newer tag') && t.includes('edit Compose pin'))).toBeInTheDocument();
     expect(screen.queryByRole('button', { name: 'apply' })).not.toBeInTheDocument();
+  });
+
+  it('says the node checks the installed image when it cannot evaluate a candidate', async () => {
+    // Default state: no capability reported, so the node cannot see a candidate.
+    render(panel(false));
+    await waitFor(() => expect(screen.getByTestId('update-available-banner')).toBeInTheDocument());
+    expect(screen.getByText(/checks the image already installed, not the new one/i)).toBeInTheDocument();
+  });
+
+  it('omits the older-node note when the node evaluates candidates', async () => {
+    nodeState.unsupportedCapabilities = [];
+    render(panel(false));
+    await waitFor(() => expect(screen.getByTestId('update-available-banner')).toBeInTheDocument());
+    expect(screen.queryByText(/checks the image already installed, not the new one/i)).toBeNull();
   });
 
   it('shows the apply button and fires onApplyUpdate when clicked', async () => {

@@ -9,6 +9,7 @@ import {
     type ComposeServiceImage,
 } from './ImageUpdateService';
 import {
+    configIdForLocalBuild,
     parseImageRef,
     selectLocalRepoDigests,
     compareLocalToRemoteTag,
@@ -434,7 +435,7 @@ export class UpdatePreviewService {
                             emptyReason: 'not_checkable',
                         };
                     }
-                    const digests = selectLocalRepoDigests(repoDigests, parsed);
+                    const digests = selectLocalRepoDigests(repoDigests, parsed, configIdForLocalBuild(inspect));
                     return {
                         digests,
                         platform: { os: inspect.Os, architecture: inspect.Architecture },

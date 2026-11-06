@@ -620,7 +620,7 @@ describe('BlueprintService per-stack lock', () => {
         expect(deploySpy).toHaveBeenCalledWith(bp.name, undefined, false, {
             source: 'blueprint',
             actor: 'system:blueprint',
-        });
+        }, undefined);
         // Compose is written first; the marker is deferred until after sibling cleanup and deploy.
         expect(writeSpy).toHaveBeenCalledTimes(2);
         expect(writeSpy.mock.calls[0][1]).toBe('compose.yaml');

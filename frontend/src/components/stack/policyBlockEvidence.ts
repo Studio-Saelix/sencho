@@ -7,7 +7,7 @@
  * function stops being Fast-Refresh eligible, which the component-only rule
  * enforces.
  */
-import type { PolicyBlockPayload } from './PolicyBlockDialog';
+import type { PolicyBlockEvidenceRecord, PolicyBlockPayload } from './PolicyBlockDialog';
 
 /** Spelled out rather than derived: 'allow' + 'd' is not a word. */
 const OUTCOME_PAST_TENSE: Record<'allow' | 'warn' | 'block', string> = {
@@ -28,7 +28,10 @@ const EVIDENCE_STATE_LABEL: Record<string, string> = {
   unavailable: 'unavailable',
   failed: 'failed',
   partial: 'incomplete',
-  unsupported: 'not supported on this node',
+  // `unsupported` is not a single cause: an older node cannot evaluate a
+  // candidate at all, while an unparseable reference cannot be resolved on any
+  // node. `describeState` picks the wording from the record's target and reason.
+  unsupported: 'not supported',
   not_evaluated: 'never evaluated',
   unknown: 'indeterminate',
 };
@@ -49,7 +52,34 @@ function describeSource(source: string): string {
   return spaced.charAt(0).toUpperCase() + spaced.slice(1);
 }
 
-function describeState(state: string): string {
+/** What the dialog knows about the evidence a state came from. */
+interface StateContext {
+  target?: string;
+  reason?: string | null;
+  rule?: string;
+}
+
+/**
+ * True when an `unsupported` record describes an older node rather than an
+ * image that cannot be resolved. A node-wide record carries the `(node)`
+ * sentinel, and the remote-support refusal's application carries no target and
+ * fires the Candidate not evaluated rule. An unparseable reference names an
+ * image with a resolution reason, so it must not borrow the node-version
+ * sentence.
+ */
+function isNodeVersionUnsupported(context: StateContext | undefined): boolean {
+  if (!context) return false;
+  if (context.target === '(node)') return true;
+  if (typeof context.reason === 'string' && /node(?:'s)? version/i.test(context.reason)) return true;
+  return context.target === undefined
+    && typeof context.rule === 'string'
+    && context.rule.startsWith('security_candidate_unproven=');
+}
+
+function describeState(state: string, context?: StateContext): string {
+  if (state === 'unsupported') {
+    return isNodeVersionUnsupported(context) ? 'not evaluated on this node version' : 'not supported';
+  }
   return Object.hasOwn(EVIDENCE_STATE_LABEL, state) ? EVIDENCE_STATE_LABEL[state] : state.replace(/_/g, ' ');
 }
 
@@ -112,6 +142,20 @@ function describeTarget(target: string): string {
   return target;
 }
 
+/** A target with its platform variant, when one ref has several. */
+function describeEvidenceTarget(target: string, platform?: string | null): string {
+  return `${describeTarget(target)}${platform ? ` (${platform})` : ''}`;
+}
+
+/**
+ * Identity of one evidence variant. A ref shared by services with different
+ * `platform:` overrides has one record and one application per platform, so the
+ * target alone no longer names a single row.
+ */
+function evidenceVariant(target: string | undefined, platform: string | null | undefined): string {
+  return `${target ?? ''}:${platform ?? ''}`;
+}
+
 /**
  * Turn the decision record into one sentence per piece of evidence that was not
  * usable, preferring the rule application (which names the setting that acted)
@@ -133,16 +177,17 @@ export function buildEvidenceLines(evidence: PolicyBlockPayload['evidence']): Ev
 
   for (const a of evidence.applications ?? []) {
     if (a.state === 'current') continue;
-    const who = a.target ? ` for ${describeTarget(a.target)}` : '';
+    const who = a.target ? ` for ${describeEvidenceTarget(a.target, a.platform)}` : '';
     lines.push({
-      key: `app:${a.source}:${a.state}:${a.target ?? ''}`,
-      text: `${describeSource(a.source)}${who}: ${describeState(a.state)}, ${describeOutcome(a.outcome)} by ${describeRule(a.rule)}.`,
+      key: `app:${a.source}:${a.state}:${evidenceVariant(a.target, a.platform)}`,
+      text: `${describeSource(a.source)}${who}: ${describeState(a.state, { target: a.target, rule: a.rule })}, ${describeOutcome(a.outcome)} by ${describeRule(a.rule)}.`,
     });
     // Keyed by state as well as target: one image can legitimately have two
     // distinct problems (a stale scan whose finding rows were also truncated),
-    // and collapsing them would drop the second explanation.
+    // and collapsing them would drop the second explanation. Platform is part of
+    // the key for the same reason: one ref can have several variants.
     for (const target of a.target ? [a.target] : NODE_WIDE_TARGETS) {
-      explained.add(`${a.source}:${a.state}:${target}`);
+      explained.add(`${a.source}:${a.state}:${evidenceVariant(target, a.platform)}`);
     }
   }
 
@@ -150,12 +195,44 @@ export function buildEvidenceLines(evidence: PolicyBlockPayload['evidence']): Ev
     if (r.state === 'current') continue;
     // Skip a record already described by an application, so the same evidence is
     // not explained twice in one dialog.
-    if (explained.has(`${r.source}:${r.state}:${r.target}`)) continue;
+    if (explained.has(`${r.source}:${r.state}:${evidenceVariant(r.target, r.platform)}`)) continue;
     lines.push({
-      key: `rec:${r.source}:${r.state}:${r.target}`,
-      text: `${describeSource(r.source)} for ${describeTarget(r.target)}: ${describeState(r.state)}.${r.reason ? ` ${sentence(r.reason)}` : ''}`,
+      key: `rec:${r.source}:${r.state}:${evidenceVariant(r.target, r.platform)}`,
+      text: `${describeSource(r.source)} for ${describeEvidenceTarget(r.target, r.platform)}: ${describeState(r.state, { target: r.target, reason: r.reason })}.${r.reason ? ` ${sentence(r.reason)}` : ''}`,
     });
   }
 
   return lines;
+}
+
+/** First 12 hex characters of a digest, for an inline reference. */
+export function shortDigest(digest: string | null | undefined): string | null {
+  if (typeof digest !== 'string') return null;
+  const bare = digest.startsWith('sha256:') ? digest.slice(7) : digest;
+  return bare.slice(0, 12);
+}
+
+/**
+ * The candidate evidence for one image variant, when the gate resolved the image
+ * the operation would pull. Only a record that named a digest is worth showing:
+ * the point of the line is which new image will run.
+ *
+ * A ref shared by services with different `platform:` overrides has one record
+ * per variant, so the row's own platform selects the record. The first record is
+ * the fallback only when the row does not name a platform (an older control).
+ * A named platform with no matching record means this variant produced no
+ * candidate digest, so showing another variant's digest would mislabel the row.
+ */
+export function candidateEvidenceFor(
+  evidence: PolicyBlockPayload['evidence'],
+  imageRef: string,
+  platform?: string | null,
+): PolicyBlockEvidenceRecord | null {
+  const records = (evidence?.records ?? []).filter(
+    (r) => r.subject === 'candidate' && r.target === imageRef && typeof r.digest === 'string',
+  );
+  if (typeof platform === 'string' && platform !== '') {
+    return records.find((r) => r.platform === platform) ?? null;
+  }
+  return records[0] ?? null;
 }

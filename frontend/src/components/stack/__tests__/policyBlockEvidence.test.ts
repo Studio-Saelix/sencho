@@ -6,7 +6,7 @@
  * availability setting governs.
  */
 import { describe, it, expect } from 'vitest';
-import { buildEvidenceLines } from '../policyBlockEvidence';
+import { buildEvidenceLines, candidateEvidenceFor } from '../policyBlockEvidence';
 import type { PolicyBlockPayload } from '../PolicyBlockDialog';
 
 type Evidence = PolicyBlockPayload['evidence'];
@@ -286,5 +286,159 @@ describe('buildEvidenceLines', () => {
       summary: '',
     });
     expect(lines[0].text).toContain('for node');
+  });
+
+  it('reads an unsupported image reference as unresolved, not as an older node version', () => {
+    // `unsupported` also covers a reference no build can resolve. Only the
+    // node-wide record may say the cause is the node's version.
+    const lines = buildEvidenceLines({
+      outcome: 'block',
+      records: [{
+        source: 'vulnerability_scan',
+        state: 'unsupported',
+        target: 'not a valid ref',
+        collectedAt: null,
+        reason: 'The image reference could not be parsed, so the registry image could not be resolved',
+      }],
+      applications: [{
+        source: 'vulnerability_scan',
+        state: 'unsupported',
+        outcome: 'block',
+        rule: 'security_scan_failure=block',
+        target: 'not a valid ref',
+      }],
+      summary: '',
+    });
+    const text = lines.map((line) => line.text).join(' ');
+    expect(text).toContain('not supported');
+    expect(text).not.toContain('node version');
+  });
+
+  it('keeps the node-version wording for a node that cannot evaluate a candidate', () => {
+    const lines = buildEvidenceLines({
+      outcome: 'block',
+      records: [{
+        source: 'vulnerability_scan',
+        state: 'unsupported',
+        target: '(node)',
+        collectedAt: null,
+        reason: "This node's version checks the image already installed, not the image this update would pull",
+      }],
+      applications: [{
+        source: 'vulnerability_scan',
+        state: 'unsupported',
+        outcome: 'block',
+        rule: 'security_candidate_unproven=block',
+      }],
+      summary: '',
+    });
+    expect(lines.map((line) => line.text).join(' ')).toContain('not evaluated on this node version');
+  });
+
+  it('gives one ref a distinct evidence line per platform', () => {
+    // One ref can have one record per platform variant; keying only on the
+    // source, state and target collapsed them into duplicate React keys, and
+    // the text alone could not tell the variants apart.
+    const lines = buildEvidenceLines({
+      outcome: 'block',
+      records: [
+        { source: 'vulnerability_scan', state: 'partial', target: 'app:latest', platform: 'linux/amd64' },
+        { source: 'vulnerability_scan', state: 'partial', target: 'app:latest', platform: 'linux/arm64' },
+      ],
+      applications: [],
+      summary: '',
+    });
+    expect(lines).toHaveLength(2);
+    expect(new Set(lines.map((line) => line.key)).size).toBe(2);
+    expect(lines[0].text).toContain('app:latest (linux/amd64)');
+    expect(lines[1].text).toContain('app:latest (linux/arm64)');
+  });
+
+  it('keys applications per platform', () => {
+    // Two unresolved variants produce applications with the same source, state
+    // and target. Target-only keys duplicated the React key.
+    const lines = buildEvidenceLines({
+      outcome: 'block',
+      records: [],
+      applications: [
+        { source: 'vulnerability_scan', state: 'unavailable', outcome: 'block', rule: 'security_scan_failure=block', target: 'app:latest', platform: 'linux/amd64' },
+        { source: 'vulnerability_scan', state: 'unavailable', outcome: 'block', rule: 'security_scan_failure=block', target: 'app:latest', platform: 'linux/arm64' },
+      ],
+      summary: '',
+    });
+    expect(lines).toHaveLength(2);
+    expect(new Set(lines.map((line) => line.key)).size).toBe(2);
+    expect(lines[0].text).toContain('app:latest (linux/amd64)');
+    expect(lines[1].text).toContain('app:latest (linux/arm64)');
+  });
+
+  it('does not let one variant\'s application suppress another variant\'s record', () => {
+    // The explained set is keyed by platform, so the amd64 application hides
+    // only the amd64 record; the arm64 record remains.
+    const lines = buildEvidenceLines({
+      outcome: 'block',
+      records: [
+        { source: 'vulnerability_scan', state: 'unavailable', target: 'app:latest', platform: 'linux/amd64', reason: 'registry 503' },
+        { source: 'vulnerability_scan', state: 'unavailable', target: 'app:latest', platform: 'linux/arm64', reason: 'registry 503' },
+      ],
+      applications: [
+        { source: 'vulnerability_scan', state: 'unavailable', outcome: 'block', rule: 'security_scan_failure=block', target: 'app:latest', platform: 'linux/amd64' },
+      ],
+      summary: '',
+    });
+    expect(new Set(lines.map((line) => line.key)).size).toBe(lines.length);
+    expect(lines.some((line) => line.text.includes('app:latest (linux/arm64)'))).toBe(true);
+  });
+});
+
+describe('candidateEvidenceFor', () => {
+  const evidence: Evidence = {
+    outcome: 'block',
+    summary: 'x',
+    records: [
+      {
+        source: 'vulnerability_scan',
+        state: 'current',
+        target: 'app:latest',
+        subject: 'candidate',
+        digest: 'sha256:451eee8bedcb',
+        platformDigest: 'sha256:aaaa',
+        platform: 'linux/amd64',
+      },
+      {
+        source: 'vulnerability_scan',
+        state: 'current',
+        target: 'app:latest',
+        subject: 'candidate',
+        digest: 'sha256:451eee8bedcb',
+        platformDigest: 'sha256:bbbb',
+        platform: 'linux/arm64',
+      },
+    ],
+    applications: [],
+  };
+
+  it('returns the record for the row platform, not the first record for the ref', () => {
+    expect(candidateEvidenceFor(evidence, 'app:latest', 'linux/arm64')?.platformDigest).toBe('sha256:bbbb');
+    expect(candidateEvidenceFor(evidence, 'app:latest', 'linux/amd64')?.platformDigest).toBe('sha256:aaaa');
+  });
+
+  it('falls back to the first record when the row does not name a platform', () => {
+    expect(candidateEvidenceFor(evidence, 'app:latest')?.platform).toBe('linux/amd64');
+  });
+
+  it('shows no candidate line for a named platform with no digest record', () => {
+    // The unresolved row for one variant must not borrow another variant's
+    // digest and platform label.
+    expect(candidateEvidenceFor(evidence, 'app:latest', 'linux/386')).toBeNull();
+  });
+
+  it('returns nothing when no candidate record named a digest', () => {
+    expect(candidateEvidenceFor({
+      outcome: 'block',
+      summary: 'x',
+      records: [{ source: 'vulnerability_scan', state: 'unavailable', target: 'app:latest', subject: 'candidate' }],
+      applications: [],
+    }, 'app:latest', 'linux/amd64')).toBeNull();
   });
 });

@@ -5,6 +5,7 @@ import DockerController from '../DockerController';
 import type { ContainerInfo } from 'dockerode';
 import { RegistryService } from '../RegistryService';
 import {
+  configIdForLocalBuild,
   parseImageRef,
   resolveRegistryImageDigestForPlatform,
   selectLocalRepoDigests,
@@ -19,7 +20,6 @@ import {
   encodeArtifactEvidenceJson,
   isRecord,
   type ArtifactEvidenceJson,
-  type ArtifactServiceFailureClass,
   type ObservedArtifactIdentity,
   type ServiceArtifactEvidence,
 } from './json';
@@ -37,6 +37,7 @@ import {
   type NodePlatform,
 } from './effectiveArtifactContext';
 import { canonicalNodePlatform } from './platformNames';
+import { mapRegistryFailure } from './registryFailure';
 
 const REMOTE_RESOLVE_TIMEOUT_MS = 30_000;
 
@@ -86,19 +87,10 @@ function buildContextFingerprint(serviceName: string, buildContexts: readonly Bu
   return `sha256:${hex}`;
 }
 
-function mapRegistryFailure(reason: string): ArtifactServiceFailureClass {
-  const lower = reason.toLowerCase();
-  if (lower.includes('unauthorized') || lower.includes('forbidden') || lower.includes('credentials')) {
-    return 'credential_failure';
-  }
-  if (lower.includes('ambiguous') || lower.includes('multiple') || lower.includes('confirmed')) {
-    return 'platform_ambiguity';
-  }
-  if (lower.includes('malformed') || lower.includes('no digest')) {
-    return 'digest_unavailable';
-  }
-  return 'registry_unavailable';
-}
+// The failure classifier lives beside this module rather than inside it, so a
+// reader that only needs the mapping (the deploy gate's candidate resolver) does
+// not import the whole resolution graph.
+export { mapRegistryFailure } from './registryFailure';
 
 async function resolveRegistryService(
   serviceName: string,
@@ -792,7 +784,7 @@ async function observeServiceRuntime(
       registry: 'registry-1.docker.io',
       repo: serviceName,
       tag: 'latest',
-    });
+    }, configIdForLocalBuild(image));
     const localDigests = [...repoDigests].sort((a, b) => a.localeCompare(b));
     const hasRepoDigest = localDigests.length > 0;
     const platformDigest = localDigests[0] ?? null;

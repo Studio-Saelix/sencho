@@ -38,8 +38,8 @@ describe('buildEffectiveServiceModel', () => {
     expect(result.renderable).toBe(true);
     if (!result.renderable) throw new Error('expected renderable');
     expect(result.services).toEqual([
-      { name: 'web', declaredImage: 'nginx:latest', hasBuild: false, expectedReplicas: 1, dependsOn: ['db'], hasHealthcheck: true },
-      { name: 'db', declaredImage: 'postgres:16', hasBuild: false, expectedReplicas: 1, dependsOn: [], hasHealthcheck: false },
+      { name: 'web', declaredImage: 'nginx:latest', hasBuild: false, pullPolicy: null, platform: null, expectedReplicas: 1, dependsOn: ['db'], hasHealthcheck: true },
+      { name: 'db', declaredImage: 'postgres:16', hasBuild: false, pullPolicy: null, platform: null, expectedReplicas: 1, dependsOn: [], hasHealthcheck: false },
     ]);
   });
 
@@ -54,6 +54,19 @@ describe('buildEffectiveServiceModel', () => {
     if (!result.renderable) throw new Error('expected renderable');
     expect(result.services[0]).toMatchObject({ name: 'api', declaredImage: null, hasBuild: true });
     expect(result.services[1]).toMatchObject({ name: 'worker', declaredImage: 'app:latest', hasBuild: true });
+  });
+
+  it('reads a service-level platform override so the gate can resolve the image Compose runs', async () => {
+    stubRender(JSON.stringify({
+      services: {
+        web: { image: 'app:latest', platform: 'linux/amd64' },
+        db: { image: 'postgres:16' },
+      },
+    }));
+    const result = await buildEffectiveServiceModel(1, 'mystack');
+    if (!result.renderable) throw new Error('expected renderable');
+    expect(result.services[0].platform).toBe('linux/amd64');
+    expect(result.services[1].platform).toBeNull();
   });
 
   it('reads expectedReplicas from the top-level scale field, deploy.replicas, or defaults to 1', async () => {

@@ -12,6 +12,7 @@ import { awaitHubPostUpdateVerification, type HubVerificationTransport } from '.
 import { getErrorMessage } from '../utils/errors';
 import { sanitizeForLog } from '../utils/safeLog';
 import { SENCHO_LABEL_POLICY_CAPABILITY, SENCHO_UPDATE_LABEL } from '../helpers/senchoLabels';
+import { buildSystemPolicyGateOptions, remoteCandidateGateRefusal } from '../helpers/policyGate';
 import {
   describePolicySkip,
   readRemoteUpdatePolicy,
@@ -163,6 +164,19 @@ export class AutoUpdateRemoteCoordinator {
   }
 
   private async executeStack(input: RemoteAutoUpdateInput, stack: string): Promise<string> {
+    // The target's own gate decides the candidate when its build can see one. A
+    // build that cannot is a different decision, and it is the hub's to make:
+    // there is nobody on the target to ask. Checking here, before the forward,
+    // keeps the refusal on the side that has the policy.
+    const candidateRefusal = await remoteCandidateGateRefusal(
+      input.nodeId,
+      stack,
+      buildSystemPolicyGateOptions(
+        input.caller.kind === 'scheduled' ? 'system:scheduler' : 'system:image-update',
+        { auditPath: '/api/auto-update/execute-checked' },
+      ),
+    );
+    if (candidateRefusal) return `Stack "${stack}": ${candidateRefusal}`;
     for (let attempt = 0; attempt < 2; attempt++) {
       const prepared = await this.prepare(input, stack);
       if ('message' in prepared) return prepared.message;

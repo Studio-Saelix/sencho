@@ -27,17 +27,12 @@ import type {
   RollbackRestoreTransactionMeta,
 } from '../types/rollbackGeneration';
 
-export type ImageReferenceKind = 'moving_tag' | 'digest_pinned' | 'none';
+// Re-exported so the call sites that already import it from the project context
+// keep working; the rule itself lives in a leaf module so the deploy gate's
+// candidate resolver does not pull this graph in for it.
+export { classifyReferenceKind, type ImageReferenceKind } from './imageReferenceKind';
 
 export type BackupOperation = RollbackOperationKind;
-
-const DIGEST_PIN_PATTERN = /@sha256:[a-f0-9]{64}$/i;
-
-export function classifyReferenceKind(declaredImageRef: string | null): ImageReferenceKind {
-  if (!declaredImageRef) return 'none';
-  if (DIGEST_PIN_PATTERN.test(declaredImageRef)) return 'digest_pinned';
-  return 'moving_tag';
-}
 
 async function requireRenderableModel(nodeId: number, stackName: string) {
   const model = await buildEffectiveServiceModel(nodeId, stackName);

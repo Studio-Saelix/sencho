@@ -45,6 +45,22 @@ import {
     type SecurityEvidenceState,
 } from './securityEvidence';
 import {
+    effectiveServicePlatform,
+    isLatestImageTag,
+    localImageExists,
+    localImageLastTagTime,
+    localImagePlatform,
+    nodePlatformFor,
+    normalizedPullPolicy,
+    pullPolicyRefreshAfterMs,
+    pullPolicyRefreshDue,
+    resolveCandidateImage,
+    type CandidateResolution,
+    type ImageSource,
+} from './candidateImage';
+import { platformCacheKey } from './gitops/platformNames';
+import { buildEffectiveServiceModel, type EffectiveServiceSpec } from './effectiveServiceModel';
+import {
     resolveSecurityEvidencePolicy,
     type SecurityEvidencePolicy,
 } from './securityEvidencePolicy';
@@ -62,6 +78,15 @@ export interface PolicyViolation {
     reasons: PolicyBlockReason[];
     scanId: number;
     /**
+     * The platform variant this row is about, when the gate resolved or tried
+     * to resolve a registry candidate, or any installed plan entry named a
+     * platform (a non-pulling service group, or a digest pin of an index). A
+     * ref shared by services with different `platform:` overrides produces one
+     * row per variant, so the dialog pairs each row with its own evidence
+     * rather than the first record for the ref.
+     */
+    platform?: string | null;
+    /**
      * Why the block is unactionable by policy: set when the gate blocked because
      * the image could not be scanned or evaluated (compose parse error, scan
      * failure, evaluation error), not because a policy input matched. Absent for
@@ -75,6 +100,30 @@ export interface PolicyEnforcementOptions {
     bypass: boolean;
     actor: string;
     ip?: string;
+    /**
+     * Which image the operation will run. Defaults to `installed`, which is what
+     * the node holds now and what every path evaluated before candidate
+     * resolution existed. A path that pulls sets `registry` or `compose`, and
+     * the gate decides per service whether the operation fetches the registry
+     * image or runs the installed one.
+     */
+    imageSource?: ImageSource;
+    /**
+     * True when no person is in the loop (auto-update, scheduled run, webhook,
+     * Git source, mesh). Read when `imageSource` is not `installed` or when
+     * `pulledCandidate` is set: an unattended path cannot ask anyone, so unproven
+     * candidate evidence is held by the Candidate not evaluated rule rather than
+     * the attended Scan failed rule.
+     */
+    unattended?: boolean;
+    /**
+     * The installed image being scanned is the candidate this operation just
+     * pulled, after the pull showed a different digest than the gate evaluated.
+     * It is evaluated as an installed image (that is where it lives now) but the
+     * evidence keeps candidate semantics, so an unattended update still holds it
+     * under Candidate not evaluated rather than the attended rule.
+     */
+    pulledCandidate?: boolean;
     /** HTTP method of the originating request; used for audit attribution. */
     auditMethod?: string;
     /** Request path of the originating route; used for audit attribution. */
@@ -121,6 +170,43 @@ export interface PolicyEnforcementResult {
      * when the gate short-circuited before any evidence was required.
      */
     evidence?: EvidenceGateDecision;
+    /**
+     * The registry candidates this decision evaluated, when the operation will
+     * pull. The pull executor compares the digests it actually fetched against
+     * these before recreating anything: a tag can move between the gate and the
+     * pull, and the image that lands must be the image that was proven.
+     */
+    evaluatedCandidates?: EvaluatedCandidate[];
+    /**
+     * Compose services the operation will fetch, including a service whose
+     * digest-pinned image Compose fetches by digest. A plain-up deploy pulls
+     * these before running `up` with pulls disabled.
+     */
+    pullServices?: string[];
+    /**
+     * A plain `up` must not fetch on its own. Set when an interval policy is not
+     * due yet: the gate evaluated the installed image, and Compose must not pull
+     * a different one if the interval expires before `up` starts. Also set when
+     * the effective model did not render in compose mode, where no reference can
+     * be attributed to a service for a targeted pull.
+     */
+    noPullOnUp?: boolean;
+}
+
+/** One registry candidate a gate decision covered. */
+export interface EvaluatedCandidate {
+    ref: string;
+    /** The digest the tag resolved to when the gate ran. */
+    indexDigest: string;
+    /** The platform child digest that was scanned. */
+    platformDigest: string;
+    /**
+     * Compose services this operation will fetch the ref through. A plain-up
+     * deploy pulls exactly these services before it runs `up` with pulls
+     * disabled; empty when the caller supplied references without a model
+     * (Blueprint preflight, GitOps acceptance).
+     */
+    services?: string[];
 }
 
 /**
@@ -237,7 +323,11 @@ function ruleClause(key: string, outcome: EvidenceAvailabilityOutcome): string {
 }
 
 /** One synthetic violation standing in for "the evidence could not be obtained". */
-function unavailableViolation(imageRef: string, message: string): PolicyViolation {
+function unavailableViolation(
+    imageRef: string,
+    message: string,
+    platform?: string | null,
+): PolicyViolation {
     return {
         imageRef,
         severity: 'UNKNOWN',
@@ -247,6 +337,7 @@ function unavailableViolation(imageRef: string, message: string): PolicyViolatio
         fixableCount: 0,
         reasons: [],
         scanId: 0,
+        ...(platform ? { platform } : {}),
         error: message,
     };
 }
@@ -268,6 +359,15 @@ function decideScannerUnavailable(
     stackName: string,
     opts: PolicyEnforcementOptions,
 ): PolicyEnforcementResult {
+    // An unattended pulling path has its own rule for "no evidence at all", and
+    // for the same reason the GitOps candidate path does: a setting an operator
+    // relaxes to get past a scanner outage at the keyboard must not become
+    // standing authority for an automation to install an image nothing proved.
+    const unattendedCandidate = isUnattendedCandidatePath(opts);
+    const outcome = unattendedCandidate ? evidencePolicy.candidateUnproven : evidencePolicy.scannerUnavailable;
+    const rule = unattendedCandidate
+        ? ruleClause('security_candidate_unproven', outcome)
+        : ruleClause('security_scanner_unavailable', outcome);
     const classification = classifyScannerEvidence({ available: false, collectedAt: null });
     const records: SecurityEvidenceRecord[] = [
         {
@@ -282,8 +382,8 @@ function decideScannerUnavailable(
         {
             source: 'scanner_availability',
             state: classification.state,
-            outcome: evidencePolicy.scannerUnavailable,
-            rule: ruleClause('security_scanner_unavailable', evidencePolicy.scannerUnavailable),
+            outcome,
+            rule,
         },
     ]);
 
@@ -322,6 +422,452 @@ function decideScannerUnavailable(
 }
 
 type PreflightScan = Pick<VulnerabilityScan, 'id' | 'highest_severity' | 'critical_count' | 'high_count' | 'total_vulnerabilities'>;
+
+/** True when this decision covers an image an unattended operation will pull. */
+function isUnattendedCandidatePath(opts: PolicyEnforcementOptions): boolean {
+    if (opts.unattended !== true) return false;
+    return (opts.imageSource ?? 'installed') !== 'installed' || opts.pulledCandidate === true;
+}
+
+/**
+ * The configured rule and its key for "evidence about the image could not be
+ * obtained". Attended operations ask the Scan failed setting (a person can retry
+ * or accept the risk); unattended pulling operations ask Candidate not evaluated,
+ * because nobody is there to answer and the image was never on the node before.
+ */
+function failureRule(
+    evidencePolicy: SecurityEvidencePolicy,
+    opts: PolicyEnforcementOptions,
+): { key: string; outcome: EvidenceAvailabilityOutcome } {
+    return isUnattendedCandidatePath(opts)
+        ? { key: 'security_candidate_unproven', outcome: evidencePolicy.candidateUnproven }
+        : { key: 'security_scan_failure', outcome: evidencePolicy.scanFailure };
+}
+
+/** One reference's role for this gate call. */
+type CandidatePlanEntry =
+    | {
+        kind: 'installed';
+        why: 'digest_pinned' | 'not_pulled' | 'build';
+        /**
+         * The platform of the installed child this entry must evaluate, when
+         * the group named one. On a multi-platform image store the tag can hold
+         * more than one child, so a single ref-level scan would read the
+         * daemon's default child and miss the one this group runs.
+         */
+        platform?: string | null;
+    }
+    | {
+        kind: 'candidate';
+        resolution: CandidateResolution & { kind: 'candidate' };
+        /** Compose services this operation will fetch this ref through. */
+        services: string[];
+    }
+    | {
+        kind: 'unresolved';
+        resolution: CandidateResolution & { kind: 'unresolved' };
+        /** The platform variant the gate could not resolve, when it asked for one. */
+        platform?: string | null;
+    };
+
+/**
+ * The build service whose image Compose generates for `ref`, if any.
+ *
+ * A build-only service declares no image; Compose names the image it builds
+ * `<project>-<service>` and `config --images` reports it. That name is not a
+ * registry reference the operation may fetch: pulling it would either fail or
+ * install an unrelated public image from the default registry. The rendered
+ * model normally states the project name. When it does not, the generated name
+ * is still a bare repository ending in `-<service>`, and no service declares it,
+ * so the suffix identifies the build service that produced it.
+ */
+function generatedBuildServiceFor(
+    ref: string,
+    services: readonly EffectiveServiceSpec[],
+    projectName: string | null,
+): EffectiveServiceSpec | undefined {
+    // A generated name is always a bare repository (`<project>-<service>`,
+    // optionally tagged). A registry-qualified reference or a digest pin cannot
+    // be one.
+    if (ref.includes('/') || ref.includes('@')) return undefined;
+    const repository = ref.split(':')[0];
+    return services.find((spec) => spec.hasBuild && (
+        projectName !== null
+            ? repository === `${projectName}-${spec.name}`
+            : repository.endsWith(`-${spec.name}`)
+    ));
+}
+
+/**
+ * Decide, for each reference, whether this operation will run the registry image
+ * or the one already on the node, and resolve the registry image.
+ *
+ * The plan is per service, from the fully rendered model, because a Compose
+ * `pull_policy` decides whether an update's `pull` or a plain `up` fetches, and
+ * a service-level `platform` decides which child of a multi-arch index Compose
+ * resolves. When the caller supplied references without a model, as the
+ * Blueprint preflight and GitOps acceptance do, every reference is treated as a
+ * candidate: the stricter reading, because nothing then proves the operation
+ * will not pull it. When the model was requested but could not be rendered, no
+ * reference can be attributed to a service: a plain `up` keeps `up --pull never`
+ * and evaluates the installed image, so a build-generated name is never fetched
+ * by bare reference, while a registry update still resolves every reference
+ * because its own pull is what could fetch one.
+ *
+ * A service that declares both `image:` and `build:` is not build-only: Compose
+ * still tries its image under `always`, a due interval, or a missing local copy,
+ * and a successful pull runs the registry image instead of building. A registry
+ * update builds every build-backed service first and then pulls only the
+ * non-build ones, so there the build wins and the installed image is what runs.
+ */
+async function planCandidates(
+    nodeId: number,
+    imageRefs: readonly string[],
+    mode: Exclude<ImageSource, 'installed'>,
+    modelServices: Awaited<ReturnType<typeof buildEffectiveServiceModel>> | null,
+): Promise<{ plan: Map<string, CandidatePlanEntry[]>; pullServices: Set<string>; noPullOnUp: boolean }> {
+    const plan = new Map<string, CandidatePlanEntry[]>();
+    // Every service the operation will fetch, including a digest pin Compose
+    // fetches by its pinned digest. The deploy executor pulls exactly these
+    // before it runs `up` with pulls disabled.
+    const pullServices = new Set<string>();
+    let noPullOnUp = false;
+    if (imageRefs.length === 0) return { plan, pullServices, noPullOnUp };
+    const services = modelServices && modelServices.renderable ? modelServices.services : null;
+    const projectName = modelServices && modelServices.renderable ? modelServices.projectName ?? null : null;
+    const nodePlatform = await nodePlatformFor(nodeId);
+    const registryMode = mode === 'registry';
+
+    const resolveEntry = async (
+        ref: string,
+        serviceNames: string[] = [],
+        platform: { os: string; architecture: string } | null = nodePlatform,
+    ): Promise<CandidatePlanEntry> => {
+        const resolution = await resolveCandidateImage(nodeId, ref, platform);
+        if (resolution.kind === 'candidate') {
+            for (const name of serviceNames) pullServices.add(name);
+            return { kind: 'candidate', resolution, services: serviceNames };
+        }
+        if (resolution.kind === 'unresolved') return { kind: 'unresolved', resolution };
+        // A digest pin is exact, so it is already the image the gate will run.
+        // Compose may still fetch it when the local copy is missing; that fetch
+        // belongs in the same pull boundary.
+        if (resolution.why === 'digest_pinned') {
+            for (const name of serviceNames) pullServices.add(name);
+        }
+        return { kind: 'installed', why: resolution.why };
+    };
+
+    for (const ref of imageRefs) {
+        if (!services) {
+            if (modelServices === null) {
+                // The caller supplied references without a model (Blueprint
+                // preflight, GitOps acceptance): there is no plain `up` boundary
+                // to fetch them, so each is resolved as the caller asked.
+                plan.set(ref, [await resolveEntry(ref)]);
+                continue;
+            }
+            if (mode === 'compose') {
+                // The effective model did not render, so no reference can be
+                // attributed to a service for a targeted pull, and one of them
+                // may be the image Compose generates for a build-only service
+                // (`<project>-<service>`). Pulling that name would either fail or
+                // install an unrelated public image from the default registry.
+                // Keep `up --pull never` instead and evaluate the installed image;
+                // a build may still fetch its own base images, but Compose cannot
+                // fetch a service image behind the gate.
+                noPullOnUp = true;
+                plan.set(ref, [{ kind: 'installed', why: 'not_pulled' }]);
+                continue;
+            }
+            // Registry mode: the update's own `compose pull` fetches these, and
+            // the model cannot say which one it skips. Resolve each as a
+            // candidate so nothing the pull fetches runs unevaluated.
+            plan.set(ref, [await resolveEntry(ref)]);
+            continue;
+        }
+        const declared = services.filter((spec) => spec.declaredImage === ref);
+        if (declared.length === 0) {
+            // A build-only service declares no image; Compose names the image it
+            // builds `<project>-<service>` and `config --images` reports it. That
+            // image does not exist until the build, so it is not a registry
+            // candidate even though no service declares the reference.
+            const generatedBuild = generatedBuildServiceFor(ref, services, projectName);
+            if (generatedBuild) {
+                plan.set(ref, [{ kind: 'installed', why: 'build' }]);
+                continue;
+            }
+            // Any other reference came from Compose's own image list, so it is an
+            // image this operation can install. Resolve it rather than assume
+            // otherwise.
+            plan.set(ref, [await resolveEntry(ref)]);
+            continue;
+        }
+        if (registryMode && declared.every((spec) => spec.hasBuild)) {
+            // A registry update builds every build-backed service before its
+            // pull, and `pull --ignore-buildable` skips them, so this image does
+            // not come from the registry on that path. Recorded as installed.
+            plan.set(ref, [{ kind: 'installed', why: 'build' }]);
+            continue;
+        }
+        // Both an update's `docker compose pull` and a plain `up` skip
+        // `pull_policy: never`, even when the image is absent, so that service
+        // never runs a registry image this gate could block on. `build` builds
+        // instead of fetching. `missing` skips a present non-latest image in
+        // both modes, while an explicit `pull` still refreshes a present
+        // `latest` and treats interval policies as due. `up` uses the `missing`
+        // default for a service with no policy and only refreshes an interval
+        // policy once its window has elapsed. A service that also declares
+        // `build:` is still fetched when its policy pulls or its image is
+        // missing, because a successful pull runs the registry image instead of
+        // the build; only `never` and `build` keep it on the build. An unknown
+        // policy is treated as pulling (fail-closed).
+        const runnable = registryMode ? declared.filter((spec) => !spec.hasBuild) : declared;
+        if (runnable.length === 0) {
+            plan.set(ref, [{ kind: 'installed', why: 'not_pulled' }]);
+            continue;
+        }
+        const policies = runnable.map((spec) => normalizedPullPolicy(spec.pullPolicy));
+        const isInterval = (policy: string): boolean =>
+            pullPolicyRefreshAfterMs(policy) !== null || policy.startsWith('every_');
+        // An interval policy that is not due now can become due while the scan
+        // and deploy preparation run. The deploy must then keep `up` from
+        // fetching the image the gate did not evaluate as a candidate.
+        if (!registryMode && policies.some(isInterval)) noPullOnUp = true;
+        // Only ask the daemon when the answer changes the decision. `always`
+        // and `refresh` always fetch, and `never` and `build` never do, so none
+        // of them needs the local copy.
+        const needsPresence = (policy: string): boolean => {
+            if (policy === 'always' || policy === 'refresh' || policy === 'never' || policy === 'build') return false;
+            if (registryMode) return policy === 'missing' || policy === 'if_not_present';
+            return true;
+        };
+        // Compose resolves the index for each service's own platform, so a ref
+        // shared by services with different overrides has more than one image to
+        // prove. Presence is a per-platform fact too: a local copy of another
+        // platform's child does not stop Compose from fetching this one, so a
+        // present ref is not the same as a present image for the service.
+        // Grouping uses the scanner's cache-key form: `linux/arm64/v8` and
+        // `linux/arm64` are one child, so naming the default variant and naming
+        // only the architecture must not plan or resolve it twice.
+        const platformKey = (platform: { os: string; architecture: string; variant?: string } | null): string =>
+            platform
+                ? `${platform.os}/${platform.architecture}${platform.variant ? `/${platform.variant}` : ''}`
+                : '';
+        const platformGroupKey = (platform: { os: string; architecture: string; variant?: string }): string => {
+            const label = platformKey(platform);
+            return platformCacheKey(label) ?? label;
+        };
+        const byPlatform = new Map<string, {
+            platform: { os: string; architecture: string; variant?: string } | null;
+            /**
+             * The most specific spelling in the group: an explicit default
+             * variant (`linux/arm64/v8`) asks for exactly that child, while the
+             * bare form accepts the default. Presence must satisfy every
+             * service in the group, so the explicit spelling decides.
+             */
+            presencePlatform: { os: string; architecture: string; variant?: string } | null;
+            invalid?: string;
+            services: EffectiveServiceSpec[];
+        }>();
+        for (const spec of runnable) {
+            const effective = effectiveServicePlatform(spec.platform, nodePlatform);
+            const key = effective.ok
+                ? (effective.platform ? platformGroupKey(effective.platform) : 'platform-unknown')
+                : `invalid:${effective.reason}`;
+            const group = byPlatform.get(key) ?? {
+                platform: effective.ok ? effective.platform : null,
+                presencePlatform: effective.ok ? effective.platform : null,
+                ...(effective.ok ? {} : { invalid: effective.reason }),
+                services: [],
+            };
+            if (effective.ok && effective.platform?.variant) {
+                group.presencePlatform = effective.platform;
+            }
+            group.services.push(spec);
+            byPlatform.set(key, group);
+        }
+        const presentByPlatform = new Map<string, boolean>();
+        const presenceFor = async (
+            key: string,
+            group: {
+                platform: { os: string; architecture: string; variant?: string } | null;
+                presencePlatform?: { os: string; architecture: string; variant?: string } | null;
+                invalid?: string;
+            },
+        ): Promise<boolean> => {
+            const known = presentByPlatform.get(key);
+            if (known !== undefined) return known;
+            const platform = group.presencePlatform ?? group.platform;
+            // An override this build cannot read is resolved as unresolved when
+            // it pulls; presence is moot there and must not read as installed.
+            const present = group.invalid || !platform
+                ? false
+                : await localImageExists(nodeId, ref, platform);
+            presentByPlatform.set(key, present);
+            return present;
+        };
+        let lastTagTime: number | null = null;
+        let lastTagTimeRead = false;
+        const lastTagTimeFor = async (): Promise<number | null> => {
+            if (!lastTagTimeRead) {
+                lastTagTime = await localImageLastTagTime(nodeId, ref);
+                lastTagTimeRead = true;
+            }
+            return lastTagTime;
+        };
+        const entries: CandidatePlanEntry[] = [];
+        // A ref can be shared by groups that pull at one platform and run the
+        // installed image at another. Every service in a group that does not
+        // pull is evaluated as the installed child it runs; dropping those
+        // entries let a policy-blocked child run because another platform's
+        // child was clean. The group's platform is kept when a service
+        // declared it, because a multi-platform image store can hold more than
+        // one child under one tag. The local-child entry is the service that
+        // declared no override (or whose override cannot be read): no platform
+        // is named, and the scanner reads the child the daemon holds.
+        //
+        // Entries are keyed by the child they read, not by the service that
+        // reads it. A named platform and an implicit service can resolve to the
+        // same child (the daemon holds the platform the sibling declared); two
+        // entries there scanned the same image twice and the block dialog
+        // reported "2 images" for one. The local child is read once per ref,
+        // and an unreadable platform is kept as its own entry because it cannot
+        // be proven the same as any named one.
+        const installedChildren = new Map<string, string | null>();
+        let localChildKey: string | null | undefined;
+        const localChild = async (): Promise<string | null> => {
+            if (localChildKey === undefined) {
+                const label = await localImagePlatform(nodeId, ref);
+                localChildKey = label ? platformCacheKey(label) : null;
+            }
+            return localChildKey;
+        };
+        const addInstalledChild = (childKey: string, label: string | null): void => {
+            const existing = installedChildren.get(childKey);
+            if (existing === undefined) {
+                installedChildren.set(childKey, label);
+                return;
+            }
+            // The same child: a named platform says more about it than the
+            // implicit entry, so keep that label for the evidence and dialog.
+            if (existing === null && label !== null) installedChildren.set(childKey, label);
+        };
+        const declaresPlatform = (spec: EffectiveServiceSpec): boolean =>
+            typeof spec.platform === 'string' && spec.platform.trim() !== '';
+        /**
+         * Add the installed entries for services in `group` that will not be
+         * replaced by a pull. A service that declared `platform:` runs that
+         * child; a service that declared none (or whose override cannot be
+         * read) runs whatever child the daemon holds.
+         */
+        const addInstalledEntries = async (
+            group: { platform: { os: string; architecture: string; variant?: string } | null },
+            services: readonly EffectiveServiceSpec[],
+        ): Promise<void> => {
+            if (services.length === 0) return;
+            if (group.platform && services.some(declaresPlatform)) {
+                addInstalledChild(platformGroupKey(group.platform), platformKey(group.platform));
+            }
+            if (!group.platform || services.some((spec) => !declaresPlatform(spec))) {
+                addInstalledChild((await localChild()) ?? '', null);
+            }
+        };
+        for (const [key, group] of byPlatform) {
+            const needsLocalCopy = group.services.some(
+                (spec) => needsPresence(normalizedPullPolicy(spec.pullPolicy)),
+            );
+            const present = needsLocalCopy ? await presenceFor(key, group) : false;
+            // The tag time is per reference, not per platform, so one read
+            // serves every group that has a present image and an interval.
+            const intervalTagTime = !registryMode && present
+                && group.services.some((spec) => isInterval(normalizedPullPolicy(spec.pullPolicy)))
+                ? await lastTagTimeFor()
+                : null;
+            const pullsFor = (spec: EffectiveServiceSpec): boolean => {
+                const policy = normalizedPullPolicy(spec.pullPolicy);
+                if (policy === 'never' || policy === 'build') return false;
+                if (registryMode) {
+                    if (spec.hasBuild) return false;
+                    if (policy === '') return true;
+                    if (policy === 'always') return true;
+                    if (policy === 'missing' || policy === 'if_not_present') {
+                        return !present || isLatestImageTag(ref);
+                    }
+                    return true;
+                }
+                if (policy === '') return !present;
+                if (policy === 'always') return true;
+                if (policy === 'missing' || policy === 'if_not_present') return !present;
+                if (isInterval(policy)) return !present || pullPolicyRefreshDue(policy, intervalTagTime);
+                return true;
+            };
+            const pulling = group.services.filter(pullsFor);
+            if (pulling.length === 0) {
+                await addInstalledEntries(group, group.services);
+                continue;
+            }
+            const pullingSet = new Set(pulling);
+            const notPulling = group.services.filter((spec) => !pullingSet.has(spec));
+            if (group.invalid) {
+                // Nothing can be pulled through an unreadable override; the
+                // non-pulling siblings still run their local child.
+                await addInstalledEntries(group, notPulling);
+                entries.push({
+                    kind: 'unresolved',
+                    resolution: {
+                        kind: 'unresolved',
+                        ref,
+                        state: 'unknown',
+                        failureClass: 'platform_ambiguity',
+                        reason: `The image could not be resolved because ${group.invalid}`,
+                    },
+                });
+                continue;
+            }
+            const entry = await resolveEntry(ref, pulling.map((spec) => spec.name), group.platform);
+            // A resolution failure still belongs to the platform it was asked
+            // for, so the record can name the variant the gate could not prove.
+            // An installed result (a digest pin) keeps the group platform too:
+            // a pin can name a multi-arch index, and each group runs its own
+            // child.
+            const withPlatform: CandidatePlanEntry = entry.kind === 'installed' && group.platform
+                ? { ...entry, platform: platformKey(group.platform) }
+                : entry;
+            if (withPlatform.kind === 'unresolved') {
+                // The pull will not happen, so nothing replaces the tag: the
+                // non-pulling siblings still run their old local child.
+                await addInstalledEntries(group, notPulling);
+            }
+            entries.push(withPlatform.kind === 'unresolved'
+                ? {
+                    ...withPlatform,
+                    platform: group.platform ? platformKey(group.platform) : null,
+                }
+                : withPlatform);
+        }
+        // A service in a group that does not pull is evaluated as the
+        // installed child it runs: the named platform for a service that
+        // declared one, and the local image's own child for a service that
+        // declared none (or whose override cannot be read). When a group pulls
+        // and the pull succeeds, its remaining services run the pulled child;
+        // when the resolution fails and nothing is pulled, their installed
+        // child is added here too.
+        if (entries.length === 0 && installedChildren.size === 0) {
+            plan.set(ref, [{ kind: 'installed', why: 'not_pulled' }]);
+        } else {
+            for (const label of installedChildren.values()) {
+                entries.push({
+                    kind: 'installed',
+                    why: 'not_pulled',
+                    ...(label ? { platform: label } : {}),
+                });
+            }
+            plan.set(ref, entries);
+        }
+    }
+    return { plan, pullServices, noPullOnUp };
+}
 
 interface ImageRiskEvaluation {
     /** Policy inputs that matched for this image. Those also listed in `unverified` were assumed or matched only provisionally. */
@@ -780,7 +1326,26 @@ async function evaluatePreDeploy(
         };
     }
 
-    return evaluateImageRefs(stackName, nodeId, imageRefs, opts, policy);
+    return evaluateImageRefs(stackName, nodeId, imageRefs, opts, policy, false, await candidateModelFor(nodeId, stackName, opts));
+}
+
+/**
+ * The per-service model the candidate plan reads, or null when this gate call is
+ * not in a pulling mode.
+ *
+ * A render failure is reported as an unrenderable model rather than thrown. A
+ * registry update then resolves every reference as a candidate, the stricter
+ * reading, because its own `compose pull` is what could fetch one. A plain `up`
+ * cannot attribute any reference to a service, so it evaluates the installed
+ * image and keeps `up --pull never` instead.
+ */
+async function candidateModelFor(
+    nodeId: number,
+    stackName: string,
+    opts: PolicyEnforcementOptions,
+): Promise<Awaited<ReturnType<typeof buildEffectiveServiceModel>> | null> {
+    if ((opts.imageSource ?? 'installed') === 'installed') return null;
+    return buildEffectiveServiceModel(nodeId, stackName);
 }
 
 export async function enforcePolicyForImageRefs(
@@ -790,8 +1355,11 @@ export async function enforcePolicyForImageRefs(
     opts: PolicyEnforcementOptions,
     matchedPolicy?: ScanPolicy,
     failClosedInvalidRefs = false,
+    candidateModel: Awaited<ReturnType<typeof buildEffectiveServiceModel>> | null = null,
 ): Promise<PolicyEnforcementResult> {
-    const result = await evaluateImageRefs(stackName, nodeId, imageRefs, opts, matchedPolicy, failClosedInvalidRefs);
+    const result = await evaluateImageRefs(
+        stackName, nodeId, imageRefs, opts, matchedPolicy, failClosedInvalidRefs, candidateModel,
+    );
     return retainAllowedDecision(result, stackName, nodeId, opts);
 }
 
@@ -808,6 +1376,7 @@ async function evaluateImageRefs(
     opts: PolicyEnforcementOptions,
     matchedPolicy?: ScanPolicy,
     failClosedInvalidRefs = false,
+    candidateModel: Awaited<ReturnType<typeof buildEffectiveServiceModel>> | null = null,
 ): Promise<PolicyEnforcementResult> {
     const db = DatabaseService.getInstance();
     const policy = matchedPolicy ?? db.getMatchingPolicy(nodeId, stackName, FleetSyncService.getSelfIdentity());
@@ -840,6 +1409,29 @@ async function evaluateImageRefs(
     const suppressionPasses: SuppressionPass[] = [];
     const evidenceRecords: SecurityEvidenceRecord[] = [];
     const evidenceApplications: EvidenceRuleApplication[] = [];
+    const imageSource = opts.imageSource ?? 'installed';
+    // Resolved once, before the loop: one registry probe per candidate and one
+    // platform read per gate call, not one per image.
+    const planned = imageSource === 'installed'
+        ? null
+        : await planCandidates(nodeId, imageRefs, imageSource, candidateModel);
+    const candidatePlan = planned?.plan ?? null;
+    const plannedPullServices = planned && planned.pullServices.size > 0
+        ? [...planned.pullServices]
+        : undefined;
+    const noPullOnUp = planned?.noPullOnUp === true;
+    const evaluatedCandidates: EvaluatedCandidate[] = [];
+    // A ref shared by services with different platform overrides has one plan
+    // entry per pulling platform, plus an installed entry for each child that
+    // a successful pull will not replace: the named platform for a service
+    // that declared one, and the local image's own child for a service that
+    // declared none (a group can contribute both). An unreadable override, or
+    // a pull whose resolution fails, leaves the group's non-pulling services
+    // on their installed child, so those entries sit beside the unresolved
+    // record. Invalid references are recorded before the scan loop, as before;
+    // every other target pairs a ref with one image (a candidate or the
+    // installed child) that service will run.
+    const targets: Array<{ imageRef: string; planned: CandidatePlanEntry | null }> = [];
     for (const imageRef of imageRefs) {
         if (!validateImageRef(imageRef)) {
             // A reference that cannot be parsed is not an image, so the scanner
@@ -859,9 +1451,88 @@ async function evaluateImageRefs(
             }
             continue;
         }
+        const entries = candidatePlan?.get(imageRef);
+        if (entries && entries.length > 0) {
+            for (const plannedEntry of entries) targets.push({ imageRef, planned: plannedEntry });
+        } else {
+            targets.push({ imageRef, planned: null });
+        }
+    }
+    for (const { imageRef, planned } of targets) {
         let scan: VulnerabilityScan;
+        if (planned?.kind === 'unresolved') {
+            // The image this operation would pull could not be resolved, so the
+            // installed image is NOT scanned in its place: it is not what will
+            // run, and a clean result about it would be a false assurance.
+            const { state, reason, failureClass } = planned.resolution;
+            const unresolvedPlatform = planned.platform ?? null;
+            evidenceRecords.push({
+                source: 'vulnerability_scan',
+                state,
+                target: imageRef,
+                collectedAt: null,
+                subject: 'candidate',
+                ...(unresolvedPlatform ? { platform: unresolvedPlatform } : {}),
+                reason,
+            });
+            const rule = failureRule(evidencePolicy, opts);
+            evidenceApplications.push({
+                source: 'vulnerability_scan',
+                state,
+                outcome: rule.outcome,
+                rule: ruleClause(rule.key, rule.outcome),
+                target: imageRef,
+                ...(unresolvedPlatform ? { platform: unresolvedPlatform } : {}),
+            });
+            if (rule.outcome === 'warn' && opts.recordAllowedEvidence !== false) {
+                notifyEvidenceWarningOnce(
+                    nodeId, stackName, rule.key,
+                    `the image ${imageRef} would install could not be resolved (${failureClass})`,
+                );
+            }
+            if (rule.outcome === 'block') {
+                violations.push(unavailableViolation(
+                    imageRef,
+                    `The image this operation would pull could not be resolved: ${reason}`,
+                    unresolvedPlatform,
+                ));
+            }
+            continue;
+        }
+        const candidateEntry = planned?.kind === 'candidate' ? planned : null;
+        const candidate = candidateEntry?.resolution ?? null;
+        // A non-pulling platform group names the installed child it runs; the
+        // scan must read that child, not the daemon's default one. The scanner
+        // reads the local child when the daemon exposes the requested platform,
+        // and otherwise reads it from the registry by the image's own digest and
+        // fails rather than filing another child's findings under this one.
+        // Without a plan (installed mode, an unrenderable model) no child is
+        // named and the scanner reads the local image's own platform.
+        const installedPlatform = planned?.kind === 'installed' ? planned.platform ?? null : null;
+        const subject: 'installed' | 'candidate' = candidate || opts.pulledCandidate === true ? 'candidate' : 'installed';
         try {
-            scan = await svc.scanImagePreflight(imageRef, nodeId, stackName);
+            scan = await svc.scanImagePreflight(
+                imageRef,
+                nodeId,
+                stackName,
+                candidate
+                    ? {
+                        scanRef: candidate.scanRef,
+                        digest: candidate.indexDigest,
+                        // The scan row is keyed by the persisted digest, which is
+                        // the index for a multi-arch tag, with the platform this
+                        // child was resolved for. A cached row may answer only
+                        // for the image it scanned, so the platform is part of
+                        // the key; a qualified child is also always scanned
+                        // fresh. An exact manifest is its own digest and keeps
+                        // cache reuse for the same platform.
+                        platform: candidate.platform,
+                        ...(candidate.qualification === 'qualified' ? { useCache: false } : {}),
+                    }
+                    : installedPlatform
+                        ? { platform: installedPlatform }
+                        : undefined,
+            );
         } catch (err) {
             const message = getErrorMessage(err, 'pre-flight scan failed');
             console.error(`[Policy] scanImagePreflight failed for ${imageRef}:`, message);
@@ -877,29 +1548,48 @@ async function evaluateImageRefs(
                 state: classification.state,
                 target: imageRef,
                 collectedAt: null,
+                // The resolver already named the exact image, so a failed scan
+                // still says which one it could not prove.
+                ...(candidate
+                    ? {
+                        subject: 'candidate' as const,
+                        digest: candidate.indexDigest,
+                        platformDigest: candidate.platformDigest,
+                        platform: candidate.platform,
+                    }
+                    : {
+                        subject,
+                        ...(installedPlatform ? { platform: installedPlatform } : {}),
+                    }),
                 reason: classification.reason,
             });
-            const outcome = evidencePolicy.scanFailure;
+            const rule = failureRule(evidencePolicy, opts);
+            const failedPlatform = candidate?.platform ?? installedPlatform ?? null;
             evidenceApplications.push({
                 source: 'vulnerability_scan',
                 state: classification.state,
-                outcome,
-                rule: ruleClause('security_scan_failure', outcome),
+                outcome: rule.outcome,
+                rule: ruleClause(rule.key, rule.outcome),
                 target: imageRef,
+                ...(failedPlatform ? { platform: failedPlatform } : {}),
             });
             // allow and warn both let the deploy through; warn additionally says
             // so out loud, which is the only thing distinguishing it from allow
             // at the call site. Neither is silent.
-            if (outcome === 'warn' && opts.recordAllowedEvidence !== false) {
+            if (rule.outcome === 'warn' && opts.recordAllowedEvidence !== false) {
                 notifyEvidenceWarningOnce(
-                    nodeId, stackName, 'security_scan_failure',
+                    nodeId, stackName, rule.key,
                     `the scan of ${imageRef} did not complete`,
                 );
             }
-            if (outcome !== 'block') {
+            if (rule.outcome !== 'block') {
                 continue;
             }
-            violations.push(unavailableViolation(imageRef, `Pre-flight scan failed: ${message}`));
+            violations.push(unavailableViolation(
+                imageRef,
+                `Pre-flight scan failed: ${message}`,
+                failedPlatform,
+            ));
             continue;
         }
 
@@ -914,12 +1604,32 @@ async function evaluateImageRefs(
             collectedAt: scan.scanned_at,
             freshnessThresholdMs: null,
         });
+        const candidateFields: Pick<SecurityEvidenceRecord, 'subject' | 'platformDigest' | 'platform' | 'databaseUpdatedAt'> = candidate
+            ? {
+                subject: 'candidate',
+                platformDigest: candidate.platformDigest,
+                platform: candidate.platform,
+                databaseUpdatedAt: scan.vuln_db_updated_at ?? null,
+            }
+            : {
+                subject,
+                ...(installedPlatform ? { platform: installedPlatform } : {}),
+            };
+        if (candidate) {
+            evaluatedCandidates.push({
+                ref: imageRef,
+                indexDigest: candidate.indexDigest,
+                platformDigest: candidate.platformDigest,
+                ...(candidateEntry && candidateEntry.services.length > 0 ? { services: candidateEntry.services } : {}),
+            });
+        }
         evidenceRecords.push({
             source: 'vulnerability_scan',
             state: scanEvidence.state,
             target: imageRef,
             collectedAt: scan.scanned_at,
             digest: scan.image_digest ?? null,
+            ...candidateFields,
             ...(scanEvidence.reason ? { reason: scanEvidence.reason } : {}),
         });
         try {
@@ -943,6 +1653,7 @@ async function evaluateImageRefs(
                     target: imageRef,
                     collectedAt: scan.scanned_at,
                     digest: scan.image_digest ?? null,
+                    ...candidateFields,
                     reason: evaluated.partialEvidenceReason,
                 });
                 // Deliberately a record and not an application. `outcome` reports
@@ -964,6 +1675,14 @@ async function evaluateImageRefs(
                     fixableCount: evaluated.fixableCount,
                     reasons: evaluated.reasons,
                     scanId: scan.id,
+                    // A ref shared by services with different overrides has one
+                    // row per platform; the row carries its own variant so the
+                    // dialog can pair it with the evidence for that variant.
+                    ...(candidate
+                        ? { platform: candidate.platform }
+                        : installedPlatform
+                            ? { platform: installedPlatform }
+                            : {}),
                 };
                 violations.push(violation);
                 if (evaluated.unverified) unverifiedByViolation.set(violation, evaluated.unverified);
@@ -988,6 +1707,7 @@ async function evaluateImageRefs(
                 target: imageRef,
                 collectedAt: scan.scanned_at,
                 digest: scan.image_digest ?? null,
+                ...candidateFields,
                 reason: `Policy evaluation failed: ${message}`,
             });
             violations.push({
@@ -1001,6 +1721,11 @@ async function evaluateImageRefs(
                 // The scan completed; only evaluation failed, so the real scan
                 // id is kept (the other failure sites have no scan and use 0).
                 scanId: scan.id,
+                ...(candidate
+                    ? { platform: candidate.platform }
+                    : installedPlatform
+                        ? { platform: installedPlatform }
+                        : {}),
                 error: `Policy evaluation failed: ${message}`,
             });
         }
@@ -1025,7 +1750,12 @@ async function evaluateImageRefs(
         if (suppressionPasses.length > 0 && opts.recordAllowedEvidence !== false) {
             recordSuppressionPassAudit(stackName, nodeId, policy, suppressionPasses, opts);
         }
-        return { ok: true, bypassed: false, policy, violations: [], evidence };
+        return {
+            ok: true, bypassed: false, policy, violations: [], evidence,
+            ...(evaluatedCandidates.length > 0 ? { evaluatedCandidates } : {}),
+            ...(plannedPullServices ? { pullServices: plannedPullServices } : {}),
+            ...(noPullOnUp ? { noPullOnUp: true } : {}),
+        };
     }
 
     if (opts.bypass) {
@@ -1036,7 +1766,12 @@ async function evaluateImageRefs(
                 sanitizeForLog(stackName), violations.length,
             );
         }
-        return { ok: true, bypassed: true, policy, violations, evidence };
+        return {
+            ok: true, bypassed: true, policy, violations, evidence,
+            ...(evaluatedCandidates.length > 0 ? { evaluatedCandidates } : {}),
+            ...(plannedPullServices ? { pullServices: plannedPullServices } : {}),
+            ...(noPullOnUp ? { noPullOnUp: true } : {}),
+        };
     }
 
     // Three causes, each logged as what it is. `error`: the image could not be
@@ -1068,7 +1803,64 @@ async function evaluateImageRefs(
             unevaluated.map((v) => `${logEntry(v.imageRef)}: ${logEntry(v.error ?? '')}`).join('; '),
         );
     }
-    return { ok: false, bypassed: false, policy, violations, evidence };
+    return {
+        ok: false, bypassed: false, policy, violations, evidence,
+        ...(evaluatedCandidates.length > 0 ? { evaluatedCandidates } : {}),
+        ...(plannedPullServices ? { pullServices: plannedPullServices } : {}),
+        ...(noPullOnUp ? { noPullOnUp: true } : {}),
+    };
+}
+
+/**
+ * Decide what a hub-driven unattended update means for a remote node whose build
+ * evaluates the installed image instead of the image the update would pull.
+ *
+ * Only a matching enabled blocking policy makes this a decision at all: with no
+ * policy there is nothing to enforce, and the update proceeds exactly as before.
+ * The record says `unsupported`, which is the truth about that node (it cannot
+ * evaluate a candidate), and the Candidate not evaluated rule says what to do
+ * about it. Nothing is probed here; the caller has already established that the
+ * node does not advertise the capability.
+ */
+export function evaluateRemoteCandidateSupport(
+    stackName: string,
+    nodeId: number,
+    opts: PolicyEnforcementOptions,
+): PolicyEnforcementResult {
+    const db = DatabaseService.getInstance();
+    const policy = db.getMatchingPolicy(nodeId, stackName, FleetSyncService.getSelfIdentity());
+    if (!policy || !policy.enabled || !policy.block_on_deploy) {
+        return { ok: true, bypassed: false, policy: policy ?? undefined, violations: [] };
+    }
+    const { evidencePolicy } = loadGateSettings();
+    const outcome = evidencePolicy.candidateUnproven;
+    const reason = 'This node\'s version checks the image already installed, not the image this update would pull';
+    const decision = decideEvidenceGate(
+        [{
+            source: 'vulnerability_scan',
+            state: 'unsupported',
+            target: NODE_WIDE_EVIDENCE_TARGET,
+            collectedAt: null,
+            subject: 'candidate',
+            reason,
+        }],
+        [{
+            source: 'vulnerability_scan',
+            state: 'unsupported',
+            outcome,
+            rule: ruleClause('security_candidate_unproven', outcome),
+        }],
+    );
+    if (outcome === 'warn' && opts.recordAllowedEvidence !== false) {
+        notifyEvidenceWarningOnce(
+            nodeId, stackName, 'security_candidate_unproven',
+            'this node checks the image already installed, not the image an update would pull',
+        );
+    }
+    const result: PolicyEnforcementResult = outcome === 'block'
+        ? { ok: false, bypassed: false, policy, violations: [unavailableViolation('(node)', reason)], evidence: decision }
+        : { ok: true, bypassed: false, policy, violations: [], evidence: decision };
+    return retainAllowedDecision(result, stackName, nodeId, opts);
 }
 
 /**
@@ -1086,6 +1878,11 @@ export async function evaluateCandidatePolicy(
 ): Promise<CandidatePolicyEvaluation> {
     const result = await evaluateImageRefs(stackName, nodeId, imageRefs, {
         ...opts,
+        // The candidate is a registry image the source will pull, and nobody is
+        // at the keyboard to answer for it, so it is resolved and scanned by
+        // digest and held under the Candidate not evaluated rule when unproven.
+        imageSource: 'registry',
+        unattended: true,
         // Undefaulted, these attribute the audit row to a deploy path
         // (the evaluator's own default), which never happened
         // for a pre-acceptance candidate.
@@ -1202,12 +1999,22 @@ function withCandidateRuleApplied(
             ? { source: basis.source, state: basis.state }
             : { source: 'vulnerability_scan', state: 'not_evaluated' };
     };
-    const added: EvidenceRuleApplication[] = targets.map((target) => ({
-        ...basisFor(target),
-        outcome,
-        rule: ruleClause('security_candidate_unproven', outcome),
-        target,
-    }));
+    const added: EvidenceRuleApplication[] = targets
+        // The evaluator now records the candidate rule itself for an unattended
+        // pulling path, so a target it already covers is not recorded twice: one
+        // image, one application. A node-wide application (the scanner gap)
+        // covers every target in this decision, because the cause is the node,
+        // not the image; a per-image one covers only its own target.
+        .filter((target) => !decision.applications.some(
+            (a) => a.rule.startsWith('security_candidate_unproven=')
+                && (a.target === undefined || a.target === target),
+        ))
+        .map((target) => ({
+            ...basisFor(target),
+            outcome,
+            rule: ruleClause('security_candidate_unproven', outcome),
+            target,
+        }));
     return {
         ...decision,
         applications: [...decision.applications, ...added],

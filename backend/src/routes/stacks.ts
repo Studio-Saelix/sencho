@@ -90,7 +90,7 @@ import { isDebugEnabled } from '../utils/debug';
 import { errorMessageForLog, redactImageReference, redactSensitiveText, sanitizeForLog } from '../utils/safeLog';
 import { logDebugTiming } from '../utils/requestTiming';
 import { sendGitSourceError } from '../utils/gitSourceHttp';
-import { allowedPolicyEvidence, buildPolicyGateOptions, type AllowedPolicyEvidence, policyBlockPayload, policyEvidenceFor, runPolicyGate, triggerPostDeployScan, describePolicyBlock, isPostDeployScanRunning } from '../helpers/policyGate';
+import { allowedPolicyEvidence, buildPolicyGateOptions, type AllowedPolicyEvidence, evaluatedDeployCandidateVerification, policyBlockPayload, policyEvidenceFor, pulledCandidateVerifier, pulledDeployCandidateVerification, runPolicyGate, triggerPostDeployScan, describePolicyBlock, isPostDeployScanRunning, PulledCandidateBlockedError, verifyPulledCandidates } from '../helpers/policyGate';
 import { parseComposePreview, type ComposePreview } from '../helpers/composePreview';
 import { filterContainersByComposeService } from '../helpers/composeServiceMatch';
 import { invalidateNodeCaches } from '../helpers/cacheInvalidation';
@@ -710,7 +710,10 @@ async function runStackBulkOp(
           code: 'update_policy_skipped',
         };
       }
-      const gate = await enforcePolicyPreDeploy(stackName, req.nodeId, buildPolicyGateOptions(req));
+      const gate = await enforcePolicyPreDeploy(stackName, req.nodeId, buildPolicyGateOptions(req, {
+        imageSource: 'registry',
+        unattended: false,
+      }));
       if (!gate.ok) {
         return {
           stackName,
@@ -722,7 +725,15 @@ async function runStackBulkOp(
       const atomic = true;
       const orchResult = await StackUpdateOrchestrator.getInstance().execute(
         { nodeId: req.nodeId, stackName, target: { scope: 'stack' }, trigger: 'bulk', actor: user, policy },
-        { atomic, terminalWs: getTerminalWs(req.get(DEPLOY_SESSION_HEADER)) },
+        {
+          atomic,
+          terminalWs: getTerminalWs(req.get(DEPLOY_SESSION_HEADER)),
+          // A tag can move between the gate and the pull; the image that landed
+          // is confirmed before any container is recreated.
+          verifyPulled: () => verifyPulledCandidates(
+            stackName, req.nodeId, gate.evaluatedCandidates, buildPolicyGateOptions(req),
+          ),
+        },
       );
       DatabaseService.getInstance().clearStackUpdateStatus(req.nodeId, stackName);
       NotificationService.getInstance().broadcastEvent({
@@ -1439,7 +1450,8 @@ stacksRouter.post('/from-git', async (req: Request, res: Response) => {
       const gate = await enforcePolicyPreDeploy(
         stack_name,
         req.nodeId,
-        buildPolicyGateOptions(req),
+        // A plain `up` pulls only what Compose's own pull policy makes it pull.
+        buildPolicyGateOptions(req, { imageSource: 'compose' }),
       );
       if (!gate.ok) {
         deployError = describePolicyBlock(gate.policy, gate.violations, 'deploy', gate.evidence);
@@ -1451,6 +1463,14 @@ stacksRouter.post('/from-git', async (req: Request, res: Response) => {
             undefined,
             undefined,
             req.deployContext ?? { source: 'from_git', actor: req.user?.username ?? null },
+            evaluatedDeployCandidateVerification(
+              stack_name,
+              req.nodeId,
+              gate.evaluatedCandidates,
+              buildPolicyGateOptions(req, { imageSource: 'compose' }),
+              gate.pullServices,
+              gate.noPullOnUp,
+            ),
           );
           deployed = true;
           invalidateNodeCaches(req.nodeId);
@@ -2337,7 +2357,7 @@ stacksRouter.post('/:stackName/deploy', async (req: Request, res: Response) => {
   const t0 = Date.now();
   let ok = false;
   try {
-    if (!(await runPolicyGate(req, res, stackName, req.nodeId))) return;
+    if (!(await runPolicyGate(req, res, stackName, req.nodeId, { imageSource: 'compose' }))) return;
     const skipScan = req.body?.skip_scan === true;
     const debug = isDebugEnabled();
     const atomic = true;
@@ -2347,6 +2367,9 @@ stacksRouter.post('/:stackName/deploy', async (req: Request, res: Response) => {
       getTerminalWs(req.get(DEPLOY_SESSION_HEADER)),
       atomic,
       req.deployContext ?? { source: 'manual', actor: req.user?.username ?? null },
+      // A plain `up` may fetch for a pulling pull_policy or a missing image; the
+      // deploy executor pulls those first and proves they are what the gate saw.
+      pulledDeployCandidateVerification(req, res, stackName, req.nodeId),
     );
     invalidateNodeCaches(req.nodeId);
     dlog(`[Stacks] Deploy completed: ${sanitizeForLog(stackName)}`);
@@ -2362,8 +2385,21 @@ stacksRouter.post('/:stackName/deploy', async (req: Request, res: Response) => {
       );
     }
   } catch (error: unknown) {
-    console.error('[Stacks] Deploy failed: %s', sanitizeForLog(stackName), error);
+    console.error('[Stacks] Deploy failed: %s', sanitizeForLog(stackName), errorMessageForLog(error));
     if (sendIfDockerEndpointProtected(res, error)) return;
+    if (error instanceof PulledCandidateBlockedError) {
+      // The pull landed an image the gate refused before `up` ran, so the
+      // previous containers are still the running workload. Answer like every
+      // other policy block so the same dialog (and bypass) opens.
+      if (!res.headersSent) {
+        res.status(409).json({
+          error: error.message,
+          code: 'policy_blocked',
+          ...policyBlockPayload(error.gate.policy, error.gate.violations, error.gate.evidence),
+        });
+      }
+      return;
+    }
     const { isMissingExternalNetworksError } = await import('../services/network/missingExternalNetworksError');
     if (isMissingExternalNetworksError(error)) {
       const status = error.kind === 'unavailable' ? 503 : error.kind === 'create_failed' ? 500 : 409;
@@ -2787,6 +2823,9 @@ function sendServiceResult(res: Response, result: OrchestratorResult, serviceNam
       serviceName: result.serviceName ?? serviceName,
       ...(result.mutationStage ? { mutationStage: result.mutationStage } : {}),
       ...(result.recoveryId ? { recoveryId: result.recoveryId } : {}),
+      // The same block payload a stack-level refusal sends, so the dialog and
+      // its admin bypass open for a single-service update too.
+      ...(result.policyBlock ?? {}),
     });
     return false;
   }
@@ -3157,14 +3196,21 @@ stacksRouter.post('/:stackName/update', async (req: Request, res: Response) => {
       });
       return;
     }
-    if (!(await runPolicyGate(req, res, stackName, req.nodeId))) return;
+    if (!(await runPolicyGate(req, res, stackName, req.nodeId, {
+      imageSource: 'registry',
+      unattended: trigger !== 'manual',
+    }))) return;
     const skipScan = req.body?.skip_scan === true;
     const debug = isDebugEnabled();
     const atomic = true;
     if (debug) console.debug('[Stacks:debug] Update starting', { stackName, atomic, nodeId: req.nodeId });
     const orchResult = await StackUpdateOrchestrator.getInstance().execute(
       { nodeId: req.nodeId, stackName, target: { scope: 'stack' }, trigger, actor, policy },
-      { atomic, terminalWs: getTerminalWs(req.get(DEPLOY_SESSION_HEADER)) },
+      {
+        atomic,
+        terminalWs: getTerminalWs(req.get(DEPLOY_SESSION_HEADER)),
+        verifyPulled: pulledCandidateVerifier(req, res, stackName, req.nodeId),
+      },
     );
     // Health observation starts immediately after Compose; registry recheck is
     // isolated so a verification failure cannot turn Compose success into 500.
@@ -3224,6 +3270,18 @@ stacksRouter.post('/:stackName/update', async (req: Request, res: Response) => {
           ...(error instanceof UpdatePolicyRefusedError
             ? { updatePolicy: toUpdatePolicyWire(error.result) }
             : {}),
+        });
+      }
+      return;
+    }
+    if (error instanceof PulledCandidateBlockedError) {
+      // The tag moved between the gate and the pull, and the image that landed
+      // is refused. Nothing was recreated, so this is the same refusal the gate
+      // would have sent, with the same dialog payload and bypass.
+      if (!res.headersSent) {
+        res.status(409).json({
+          error: error.message,
+          ...policyBlockPayload(error.gate.policy, error.gate.violations, error.gate.evidence),
         });
       }
       return;
@@ -3427,7 +3485,7 @@ stacksRouter.post('/:stackName/rollback', async (req: Request, res: Response) =>
     } else {
       await fsSvc.restoreStackFiles(stackName);
     }
-    if (!(await runPolicyGate(req, res, stackName, req.nodeId))) {
+    if (!(await runPolicyGate(req, res, stackName, req.nodeId, { imageSource: 'compose' }))) {
       try {
         await revertRestore();
       } catch (revertError) {
@@ -3444,13 +3502,35 @@ stacksRouter.post('/:stackName/rollback', async (req: Request, res: Response) =>
       getTerminalWs(req.get(DEPLOY_SESSION_HEADER)),
       false,
       req.deployContext ?? { source: 'rollback', actor: req.user?.username ?? null },
+      pulledDeployCandidateVerification(req, res, stackName, req.nodeId),
     );
     invalidateNodeCaches(req.nodeId);
     dlog(`[Stacks] Rollback completed: ${sanitizeForLog(stackName)}`);
     res.json({ message: 'Stack rolled back: compose and env files restored.', ...policyEvidenceFor(res) });
     notifyActionSuccess('deploy_success', `${stackName} rolled back`, stackName, req.user?.username ?? 'system');
   } catch (error: unknown) {
-    console.error('[Stacks] Rollback failed: %s', sanitizeForLog(stackName), error);
+    console.error('[Stacks] Rollback failed: %s', sanitizeForLog(stackName), errorMessageForLog(error));
+    if (error instanceof PulledCandidateBlockedError) {
+      // The pull landed an image the gate refused, so `up` never ran and the
+      // previous containers are intact. The restored files are not what is
+      // running, so put the stack back the way the block found it.
+      if (revertRestore) {
+        try {
+          await revertRestore();
+        } catch (revertError) {
+          console.error('[Stacks] Failed to revert files after a policy-blocked rollback: %s', sanitizeForLog(stackName), errorMessageForLog(revertError));
+          notifyActionFailure('rollback', stackName, revertError, req.user?.username ?? 'system');
+        }
+      }
+      if (!res.headersSent) {
+        res.status(409).json({
+          error: error.message,
+          code: 'policy_blocked',
+          ...policyBlockPayload(error.gate.policy, error.gate.violations, error.gate.evidence),
+        });
+      }
+      return;
+    }
     if (isDockerEndpointProtectedError(error)) {
       // Refused before compose ran, so the restored files are put back.
       if (revertRestore) {
