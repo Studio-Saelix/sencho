@@ -9,7 +9,7 @@ import {
   parseDockerRepo,
   parseSourceLocations,
 } from '../services/nodeBootstrap/probes';
-import { buildBootstrapEvidence } from '../services/nodeBootstrap/evidence';
+import { buildBootstrapEvidence, repoVerified } from '../services/nodeBootstrap/evidence';
 import { buildBootstrapPlan } from '../services/nodeBootstrap/planBuilder';
 import type { SshCommandResult } from '../services/nodeBootstrap/sshProbeClient';
 import type { BootstrapFacts } from '../services/nodeBootstrap/types';
@@ -31,12 +31,17 @@ const repoCommand = buildProbeCatalog({ composeDir: '/opt/docker/sencho', agentD
  * Runs the production `docker_repo` command with an `apt-config` that answers
  * as the test says (a function of the scratch directory), or fails.
  */
-function runRepoProbe(answer: ((dir: string) => string) | 'fails', files: (dir: string) => void = () => undefined): { output: string; dir: string } {
+function runRepoProbe(
+  answer: ((dir: string) => string) | 'fails',
+  files: (dir: string) => void = () => undefined,
+  stderr = '',
+): { output: string; dir: string } {
   const dir = mkdtempSync(path.join(os.tmpdir(), 'sencho-apt-locations-'));
   try {
     mkdirSync(path.join(dir, 'bin'));
     mkdirSync(path.join(dir, 'parts'));
-    const body = answer === 'fails' ? 'exit 1' : `printf '%s\\n' ${shellWords(answer(dir))}`;
+    const warn = stderr ? `printf '%s\\n' ${shellWords(stderr)} >&2\n` : '';
+    const body = answer === 'fails' ? 'exit 1' : `${warn}printf '%s\\n' ${shellWords(answer(dir))}`;
     writeFileSync(path.join(dir, 'bin', 'apt-config'), `#!/bin/sh\n${body}\n`);
     chmodSync(path.join(dir, 'bin', 'apt-config'), 0o755);
     files(dir);
@@ -109,6 +114,24 @@ describe('the repository probe asks apt where its sources are', () => {
     expect(parseSourceLocations(runRepoProbe(() => '').output)).toBe('unknown');
   });
 
+  it('reads the unknown when apt answers with a warning, as it does for a configuration file the user cannot read', () => {
+    const { output } = runRepoProbe(() => reports(DEFAULT_MAIN, DEFAULT_PARTS), undefined, 'W: Unable to read /etc/apt/apt.conf.d/50-root-only - open (13: Permission denied)');
+    expect(parseSourceLocations(output)).toBe('unknown');
+  });
+
+  it.each([
+    ['an apostrophe, which apt-config escapes', "it'\\''s"],
+    ['a backslash', 'back\\slash'],
+  ])('reads the unknown for a source directory path holding %s', (_name, odd) => {
+    const { output } = runRepoProbe((dir) => reports(`${dir}/main.list`, `${dir}/${odd}`));
+    expect(parseSourceLocations(output)).toBe('unknown');
+  });
+
+  it('compares the reported paths exactly, not trimmed', () => {
+    expect(parseSourceLocations(`SOURCE_LOCATIONS_MAIN=${DEFAULT_MAIN} \nSOURCE_LOCATIONS_PARTS=${DEFAULT_PARTS}\n`)).toBe('custom');
+    expect(parseSourceLocations(`SOURCE_LOCATIONS_MAIN=${DEFAULT_MAIN}\r\nSOURCE_LOCATIONS_PARTS=${DEFAULT_PARTS}\r\n`)).toBe('default');
+  });
+
   it('reads the files apt reads, in a custom main list and a custom directory, and not the default ones', () => {
     const { output, dir } = runRepoProbe(
       (d) => reports(`${d}/main.list`, `${d}/parts`),
@@ -174,6 +197,21 @@ describe('a custom apt source location through evidence and the plan', () => {
     ].join('\n');
     expect(parseDockerRepo(text, 'noble', 'amd64')).toMatchObject({ sourceLocations: 'unknown', sourceVerified: null });
     expect(parseDockerRepo(`${DEFAULT_SOURCE_LOCATIONS}\n${text}`, 'noble', 'amd64')).toMatchObject({ sourceLocations: 'default', sourceVerified: true });
+  });
+
+  it('never counts a verified source as the repository while the locations are unknown', () => {
+    const facts = makeFacts({ repo: { sourceLocations: 'unknown', sourceVerified: true, keyringVerified: true, candidateSourceVerified: true } });
+    expect(repoVerified(facts)).toBe(false);
+    expect(repoVerified(makeFacts({ repo: { sourceLocations: 'custom' } }))).toBe(true);
+  });
+
+  it('names the source that is configured, not a missing one, when a custom location cannot be used as it stands', () => {
+    const facts = makeFacts({
+      docker: FRESH,
+      packages: [],
+      repo: { sourceLocations: 'custom', dockerSourceConfigured: true, keyringPresent: false, sourceVerified: true, keyringVerified: false },
+    });
+    expect(aptSource(facts)).toMatchObject({ status: 'unknown', summary: expect.stringContaining('a Docker source is configured there') });
   });
 
   it('keeps the plan for a working installation whatever the locations', () => {

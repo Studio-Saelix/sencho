@@ -21,7 +21,7 @@ import { DEFAULT_SOURCE_LOCATIONS, DOCKER_ASC_PATH, DOCKER_KEY_GPG, dockerAscBlo
 
 /**
  * Repository verification must hold for the host's own architecture and for
- * every source in apt's default source list, not two conventional file names.
+ * every source in the source list apt reads, not two conventional file names.
  */
 
 const OFFICIAL = 'https://download.docker.com/linux/ubuntu';

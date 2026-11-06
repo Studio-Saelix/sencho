@@ -224,9 +224,15 @@ function repoUnreadableWhenInaccessible(marker: string, indent = '  '): string[]
  * empty report as unknown.
  */
 const APT_SOURCE_LOCATIONS_PRELUDE = [
-  'cfg=$(apt-config shell m Dir::Etc::sourcelist/f p Dir::Etc::sourceparts/d 2>/dev/null)',
+  // stderr is kept: apt-config exits 0 beside "W: Unable to read ..." when a
+  // configuration file is closed to this user, and its answer is then not the
+  // one apt gives root.
+  'cfg=$(apt-config shell m Dir::Etc::sourcelist/f p Dir::Etc::sourceparts/d 2>&1)',
   String.raw`apt_main=$(printf '%s\n' "$cfg" | sed -n "s/^m='\(.*\)'\$/\1/p")`,
   String.raw`apt_parts=$(printf '%s\n' "$cfg" | sed -n "s/^p='\(.*\)'\$/\1/p")`,
+  // Anything but the two plain assignments (a warning, an error, a value that
+  // holds a quote or backslash apt-config escapes) leaves the locations unestablished.
+  String.raw`[ -z "$(printf '%s\n' "$cfg" | grep -v -e "^[mp]='[^'\\]*'\$")" ] || { apt_main=; apt_parts=; }`,
   'apt_parts=${apt_parts%/}',
   `printf 'SOURCE_LOCATIONS_MAIN=%s\\nSOURCE_LOCATIONS_PARTS=%s\\n' "$apt_main" "$apt_parts"`,
   `[ -n "$apt_main" ] || apt_main=${DEFAULT_SOURCE_LIST}`,
@@ -236,7 +242,8 @@ const APT_SOURCE_LOCATIONS_PRELUDE = [
 /**
  * Reads the apt source files in the given locations: the main source list
  * and each `.list` and `.sources` file in the source directories, named as apt
- * accepts them. Only a file that mentions Docker's host (or is one the plan writes) is
+ * accepts them. The locations are shell words spliced in as written (the
+ * production call passes the variables the prelude sets), not paths to quote. Only a file that mentions Docker's host (or is one the plan writes) is
  * printed, which keeps unrelated sources out of the capped output; a file or a
  * directory that cannot be read is reported as unreadable, never as absent. The
  * keyrings are read in full (up to the key cap).
@@ -514,8 +521,10 @@ export function parseRepoProbeOutput(text: string): RepoProbeOutput {
  */
 export function parseSourceLocations(text: string): RepositoryObservation['sourceLocations'] {
   const head = text.split(/^(?:SOURCE|KEY)_BEGIN=/m)[0];
-  const main = /^SOURCE_LOCATIONS_MAIN=(.*)$/m.exec(head)?.[1]?.trim() ?? '';
-  const parts = /^SOURCE_LOCATIONS_PARTS=(.*)$/m.exec(head)?.[1]?.trim() ?? '';
+  // Compared exactly: a path that differs from the default only in
+  // whitespace is another path to apt.
+  const main = /^SOURCE_LOCATIONS_MAIN=(.*?)\r?$/m.exec(head)?.[1] ?? '';
+  const parts = /^SOURCE_LOCATIONS_PARTS=(.*?)\r?$/m.exec(head)?.[1] ?? '';
   if (!main || !parts) return 'unknown';
   return main === DEFAULT_SOURCE_LIST && parts === DEFAULT_SOURCE_PARTS ? 'default' : 'custom';
 }
@@ -874,7 +883,7 @@ function signingConflict(verdicts: SourceFileVerdict[]): string | null {
 
 /**
  * Verify what every apt source file and the Docker keyring actually say. A
- * source in any file of apt's default source list counts, whatever the file is
+ * source in any file of the source list apt reads counts, whatever the file is
  * called; a file named docker.list with an arbitrary URL is not the official
  * repository, a keyring is Docker's only when its fingerprint is, a source that
  * leaves out the host's architecture cannot supply its packages, and an

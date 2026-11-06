@@ -126,7 +126,7 @@ describe('capacity that cannot be read never ends in a plan (B4-R)', () => {
     expect(row.status).toBe('blocked');
   });
 
-  it('reads the shared Compose and Agent filesystem once, and its unknown still counts', () => {
+  it('keeps an unreadable Compose reading unknown beside a healthy Agent reading on one filesystem', () => {
     const facts = makeFacts({ composeDir: { freeBytes: null }, agentDir: { freeBytes: 100 * GIB } });
     expect(check(facts, 'disk_space').status).toBe('unknown');
     expect(evidence(facts).planSuppressed).toBe(true);

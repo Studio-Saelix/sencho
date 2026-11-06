@@ -147,7 +147,7 @@ export interface RepositoryObservation {
   dockerSourceConfigured: boolean;
   /** A Docker keyring file exists; whether it parses is keyringVerified. */
   keyringPresent: boolean;
-  /** False when none is configured or one contradicts the official repository; null when no verdict could be reached (an unreadable file or keyring, an unknown host release or architecture). */
+  /** False when none is configured or one contradicts the official repository; null when no verdict could be reached (an unreadable file or keyring, an unknown host release or architecture, or source locations apt did not report). */
   sourceVerified: boolean | null;
   keyringVerified: boolean | null;
   candidateSourceVerified: boolean | null;

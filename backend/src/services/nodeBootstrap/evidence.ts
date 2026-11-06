@@ -106,6 +106,7 @@ function hasCandidateVersions(facts: BootstrapFacts): boolean {
 export function repoVerified(facts: BootstrapFacts): boolean {
   return facts.repo.dockerSourceConfigured
     && facts.repo.keyringPresent
+    && facts.repo.sourceLocations !== 'unknown'
     && facts.repo.sourceVerified === true
     && facts.repo.keyringVerified === true
     && (hasCandidateVersions(facts)
@@ -1037,7 +1038,7 @@ export function buildBootstrapEvidence(input: { facts: BootstrapFacts; nodeNameT
     status: 'unknown',
     summary: 'The Docker package source could not be inspected, so the plan cannot decide whether to configure it.',
     observed: facts.repo.problem ?? (facts.repo.probeComplete ? 'apt-cache policy did not complete' : 'repository probe did not complete'),
-    remediation: 'Read /etc/apt/sources.list, /etc/apt/sources.list.d, /etc/apt/keyrings and /usr/share/keyrings on the host (and confirm the host release and architecture are known), then run the preflight again.',
+    remediation: 'Read the sources apt reads (apt-config shell Dir::Etc::sourcelist/f Dir::Etc::sourceparts/d shows where; /etc/apt/sources.list and /etc/apt/sources.list.d by default), /etc/apt/keyrings and /usr/share/keyrings on the host (and confirm the host release and architecture are known), then run the preflight again.',
   } : repoConfigured ? {
     ...aptSourceCheck,
     status: 'pass',
@@ -1078,9 +1079,11 @@ export function buildBootstrapEvidence(input: { facts: BootstrapFacts; nodeNameT
     // one where apt is configured to look elsewhere, or where apt did not say.
     ...aptSourceCheck,
     status: 'unknown',
-    summary: facts.repo.sourceLocations === 'custom'
-      ? 'apt reads its sources from a custom location, and no Docker source is configured there, so the plan cannot add one where apt would read it.'
-      : 'The locations apt reads its sources from could not be established, so the plan cannot add a Docker source where apt would read it.',
+    summary: facts.repo.sourceLocations === 'unknown'
+      ? 'The locations apt reads its sources from could not be established, so the plan cannot add a Docker source where apt would read it.'
+      : facts.repo.dockerSourceConfigured
+        ? 'apt reads its sources from a custom location and a Docker source is configured there, but it cannot be used as it stands, so the plan cannot add one beside it.'
+        : 'apt reads its sources from a custom location, and no Docker source is configured there, so the plan cannot add one where apt would read it.',
     observed: facts.repo.problem ?? 'apt source locations not established',
     remediation: 'Add the official Docker source to the sources apt reads on this host, or reset Dir::Etc::sourcelist and Dir::Etc::sourceparts to /etc/apt/sources.list and /etc/apt/sources.list.d (check with apt-config dump), then run the preflight again.',
   } : {
