@@ -13,7 +13,8 @@ import type { ImageExposureContext, ScanSummary } from '@/types/security';
 
 const api = vi.hoisted(() => ({ apiFetch: vi.fn() }));
 vi.mock('@/lib/api', () => ({ apiFetch: api.apiFetch }));
-vi.mock('@/components/ui/toast-store', () => ({ toast: { success: vi.fn(), error: vi.fn(), info: vi.fn() } }));
+const toasts = vi.hoisted(() => ({ error: vi.fn() }));
+vi.mock('@/components/ui/toast-store', () => ({ toast: { success: vi.fn(), error: toasts.error, info: vi.fn() } }));
 vi.mock('@/context/AuthContext', () => ({ useAuth: () => ({ can: () => true }) }));
 
 const json = (body: unknown, ok = true) => ({ ok, json: async () => body }) as Response;
@@ -40,6 +41,7 @@ const base = {
 };
 
 beforeEach(() => {
+  toasts.error.mockReset();
   api.apiFetch.mockReset();
   api.apiFetch.mockResolvedValueOnce(json({ intents: [] }));
 });
@@ -87,6 +89,50 @@ describe('onIntentSaved wiring', () => {
     await waitFor(() => expect(onIntentSaved).toHaveBeenCalledTimes(1));
   });
 
+  it('reports a save made from the intentional banner action', async () => {
+    api.apiFetch.mockResolvedValueOnce(json({ intents: [{ service: 'api', intent: 'public' }] }));
+    const onIntentSaved = vi.fn();
+    const classified = { ...context, intentStatus: 'set' as const, exposureIntent: 'public' as const };
+    render(
+      <ImagesTab
+        {...base}
+        onInspect={vi.fn()}
+        onClearTargeting={vi.fn()}
+        onIntentSaved={onIntentSaved}
+        targeting={{
+          kind: 'public_exposure',
+          label: 'Exposure',
+          imageRefs: ['exp:1'],
+          targets: [{ imageRef: 'exp:1', ...classified }],
+          token: 1,
+        }}
+        summaries={{ 'exp:1': { ...summary(), exposure_contexts: [classified] } }}
+      />,
+    );
+    expect(screen.getByText('Exposure is intentional')).toBeInTheDocument();
+
+    await userEvent.click(screen.getAllByRole('button', { name: 'Change intent' })[0]!);
+    await userEvent.click(await screen.findByRole('button', { name: 'lan' }));
+
+    await waitFor(() => expect(onIntentSaved).toHaveBeenCalledTimes(1));
+  });
+
+  it('reports a save made from a row of the multi-context list', async () => {
+    api.apiFetch.mockResolvedValueOnce(json({ intents: [] }));
+    api.apiFetch.mockResolvedValueOnce(json({ intents: [{ service: 'worker', intent: 'lan' }] }));
+    const onIntentSaved = vi.fn();
+    const other: ImageExposureContext = { stackName: 'jobs', serviceName: 'worker', exposureReason: 'published-port', intentStatus: 'unset' };
+    render(<ImageScanRow summary={summary()} onInspect={vi.fn()} exposureContexts={[context, other]} nodeId={3} onIntentSaved={onIntentSaved} />);
+
+    await userEvent.click(screen.getByRole('button', { name: 'View networking contexts' }));
+    await userEvent.click(await screen.findByRole('button', { name: 'Set intent for jobs/worker' }));
+    await pickLan();
+
+    await waitFor(() => expect(onIntentSaved).toHaveBeenCalledTimes(1));
+    const [path] = api.apiFetch.mock.calls[1] as [string];
+    expect(path).toBe('/stacks/jobs/exposure');
+  });
+
   it('reports a save made from the phone row without opening the scan', async () => {
     api.apiFetch.mockResolvedValueOnce(json({ intents: [{ service: 'api', intent: 'lan' }] }));
     const onInspect = vi.fn();
@@ -112,7 +158,7 @@ describe('a refused save', () => {
     await userEvent.click(screen.getByRole('button', { name: 'Network exposed: set intent for web/api' }));
     await pickLan();
 
-    await waitFor(() => expect(api.apiFetch).toHaveBeenCalledTimes(2));
+    await waitFor(() => expect(toasts.error).toHaveBeenCalledWith('nope'));
     expect(onIntentSaved).not.toHaveBeenCalled();
     expect(screen.getByRole('button', { name: 'lan' })).toBeInTheDocument();
   });
@@ -124,7 +170,7 @@ describe('a refused save', () => {
 
     await userEvent.click(screen.getByRole('button', { name: 'Network exposed: set intent for web/api' }));
 
-    await waitFor(() => expect(api.apiFetch).toHaveBeenCalledTimes(1));
+    await waitFor(() => expect(toasts.error).toHaveBeenCalledWith('down'));
     expect(screen.queryByRole('button', { name: 'lan' })).toBeNull();
   });
 });

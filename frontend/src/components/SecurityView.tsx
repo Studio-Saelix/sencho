@@ -35,6 +35,7 @@ import { MisconfigAckPanel } from './settings/MisconfigAckPanel';
 import { OverviewTab, type ChartLoadState, type OverviewLoadError } from './security/OverviewTab';
 import { useSecurityReasons } from './security/useSecurityReasons';
 import {
+  afterIntentSaved,
   type ImagesTargetingInput,
   type ImagesTargetingState,
 } from './security/imagesTargeting';
@@ -300,12 +301,12 @@ export function SecurityView({ activeTab, onTabChange, headerActions }: Security
   const nodeOverview = overview;
   const reloadOverview = useCallback(() => setReloadToken((t) => t + 1), []);
 
-  // Targeting is a snapshot of the exposure contexts taken when the operator
-  // arrived; an intent saved from the list makes it stale (the conflict banner,
-  // the mismatch hint, the verb), so it is dropped and the rows read the
-  // reloaded summaries instead.
+  // Targeting carries a snapshot of the exposure contexts taken when the
+  // operator arrived; an intent saved from the list makes it stale (the conflict
+  // banner, the mismatch hint, the verb), so the snapshot goes and the rows read
+  // the reloaded summaries instead. The listed images stay for the rest of a batch.
   const onIntentSaved = useCallback(() => {
-    setImagesTargeting(null);
+    setImagesTargeting(afterIntentSaved);
     reloadOverview();
   }, [reloadOverview]);
 

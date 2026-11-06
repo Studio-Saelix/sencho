@@ -1,7 +1,7 @@
 /**
- * Setting an exposure intent from the Images tab makes the posture targeting
- * the operator arrived with stale (its conflict banner and per-image contexts
- * are a snapshot), so SecurityView drops it and rereads the scan summaries.
+ * Setting an exposure intent from the Images tab makes the per-service intent in
+ * the posture targeting the operator arrived with stale (it is a snapshot), so
+ * SecurityView sheds it, keeps the listed images and rereads the scan summaries.
  */
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { render, screen, waitFor } from '@testing-library/react';
@@ -25,23 +25,37 @@ vi.mock('@/hooks/useNodeDismissals', () => ({
 vi.mock('@/hooks/use-is-mobile', () => ({ useIsMobile: () => false }));
 vi.mock('@/components/security/OverviewTab', () => ({
   OverviewTab: ({ onNavigate }: { onNavigate: (tab: string, filter?: undefined, targeting?: unknown) => void }) => (
-    <button
-      type="button"
-      onClick={() => onNavigate('images', undefined, {
-        kind: 'public_exposure',
-        label: 'Exposure conflicts with declared intent',
-        imageRefs: ['exp:1'],
-        targets: [{ imageRef: 'exp:1', intentStatus: 'set' }],
-      })}
-    >
-      go to images
-    </button>
+    <>
+      <button
+        type="button"
+        onClick={() => onNavigate('images', undefined, {
+          kind: 'public_exposure',
+          label: 'Exposure conflicts with declared intent',
+          imageRefs: ['exp:1'],
+          targets: [{ imageRef: 'exp:1', intentStatus: 'set' }],
+        })}
+      >
+        go to images
+      </button>
+      <button
+        type="button"
+        onClick={() => onNavigate('images', undefined, {
+          kind: 'elevated_exploit_risk',
+          label: 'Elevated exploit risk',
+          imageRefs: ['exp:1'],
+          targets: [{ imageRef: 'exp:1', stackName: 'web', serviceName: 'api', intentStatus: 'unset' }],
+        })}
+      >
+        go to drivers
+      </button>
+    </>
   ),
 }));
 vi.mock('@/components/security/ImagesTab', () => ({
-  ImagesTab: ({ targeting, onIntentSaved }: { targeting?: { kind: string } | null; onIntentSaved: () => void }) => (
+  ImagesTab: ({ targeting, onIntentSaved }: { targeting?: { kind: string; targets: object[] } | null; onIntentSaved: () => void }) => (
     <div>
       <span data-testid="targeting">{targeting?.kind ?? 'none'}</span>
+      <span data-testid="snapshot">{JSON.stringify(targeting?.targets ?? [])}</span>
       <button type="button" onClick={onIntentSaved}>intent saved</button>
     </div>
   ),
@@ -83,7 +97,7 @@ beforeEach(() => {
 });
 
 describe('SecurityView intent saved', () => {
-  it('drops the targeting snapshot and rereads the summaries', async () => {
+  it('keeps the listed images, drops the snapshot and rereads the summaries', async () => {
     const { rerender } = render(<SecurityView activeTab="overview" onTabChange={vi.fn()} />);
     await userEvent.click(await screen.findByRole('button', { name: 'go to images' }));
     rerender(<SecurityView activeTab="images" onTabChange={vi.fn()} />);
@@ -93,7 +107,20 @@ describe('SecurityView intent saved', () => {
 
     await userEvent.click(screen.getByRole('button', { name: 'intent saved' }));
 
-    await waitFor(() => expect(screen.getByTestId('targeting')).toHaveTextContent('none'));
+    await waitFor(() => expect(screen.getByTestId('snapshot')).toHaveTextContent('[{"imageRef":"exp:1"}]'));
+    expect(screen.getByTestId('targeting')).toHaveTextContent('public_exposure');
     await waitFor(() => expect(summaryReads()).toBeGreaterThan(before));
+  });
+
+  it('keeps another reason but sheds its per-service intent snapshot', async () => {
+    const { rerender } = render(<SecurityView activeTab="overview" onTabChange={vi.fn()} />);
+    await userEvent.click(await screen.findByRole('button', { name: 'go to drivers' }));
+    rerender(<SecurityView activeTab="images" onTabChange={vi.fn()} />);
+    expect(await screen.findByTestId('snapshot')).toHaveTextContent('"stackName":"web"');
+
+    await userEvent.click(screen.getByRole('button', { name: 'intent saved' }));
+
+    await waitFor(() => expect(screen.getByTestId('snapshot')).toHaveTextContent('[{"imageRef":"exp:1"}]'));
+    expect(screen.getByTestId('targeting')).toHaveTextContent('elevated_exploit_risk');
   });
 });

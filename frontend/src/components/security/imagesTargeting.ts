@@ -31,6 +31,22 @@ export interface ImagesTargetingState {
 /** Payload passed into navigate before SecurityView assigns a token. */
 export type ImagesTargetingInput = Omit<ImagesTargetingState, 'token'>;
 
+/**
+ * What the targeting still says about exposure once an intent has been saved.
+ * Everything on a target beyond its image is a snapshot taken on arrival, so it
+ * is shed and the rows read the reloaded summaries instead. The images and
+ * drivers stay, so the rest of a batch is still listed; an exposure reason also
+ * loses its "conflicts" label, which is no longer true of the list as a whole.
+ */
+export function afterIntentSaved(state: ImagesTargetingState | null): ImagesTargetingState | null {
+  if (state === null) return null;
+  return {
+    ...state,
+    ...(state.kind === 'public_exposure' ? { label: 'Network exposed images' } : {}),
+    targets: state.targets.map((target) => ({ imageRef: target.imageRef })),
+  };
+}
+
 /** Intent fields shared by posture targets and standing exposure contexts. */
 export type ExposureIntentSource =
   | ImageExposureContext

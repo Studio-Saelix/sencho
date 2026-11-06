@@ -198,7 +198,7 @@ interface ImagesTabProps {
   posturePartial?: boolean;
   /** Active node id: the node an exposure intent is saved on and permission-checked against, and the target of Networking navigation. */
   nodeId?: number;
-  /** An exposure intent was set from an exposure control, so the scan summaries and any targeting snapshot should be re-read. */
+  /** An exposure intent was set from an exposure control, so the scan summaries should be re-read. */
   onIntentSaved: () => void;
 }
 
@@ -234,8 +234,9 @@ export function ImagesTab({
 
   // Apply externally-driven filter / targeting. Keyed on tokens so repeating the
   // same navigation re-applies after Clear (R1) and resets severity (R2).
+  const hasTargeting = Boolean(targeting);
   useEffect(() => {
-    if (targeting) {
+    if (hasTargeting) {
       setSeverity(initialFilter ?? 'all');
       setPage(0);
       return;
@@ -244,7 +245,7 @@ export function ImagesTab({
       setSeverity(initialFilter);
       setPage(0);
     }
-  }, [targeting?.token, filterToken, targeting, initialFilter]);
+  }, [targeting?.token, filterToken, hasTargeting, initialFilter]);
 
   const imageSummaries = useMemo(
     () => Object.values(summaries).filter((s) => !s.image_ref.startsWith('stack:')),
