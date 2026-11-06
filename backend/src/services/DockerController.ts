@@ -343,7 +343,8 @@ export interface SocketInventoryMountRow {
 export interface SocketInventoryPortRow {
   privatePort: number | null;
   publicPort: number | null;
-  ip: string;
+  /** The binding address, null when Docker did not provide a readable one. */
+  ip: string | null;
   protocol: string;
 }
 
@@ -3932,8 +3933,24 @@ function readContainerString(value: unknown): string | null {
   return typeof value === 'string' ? value : null;
 }
 
-function readContainerNumber(value: unknown): number | null {
-  return typeof value === 'number' && Number.isFinite(value) ? value : null;
+const MIN_TCP_PORT = 1;
+const MAX_TCP_PORT = 65535;
+
+/** An INTEGER TCP/UDP port number in 1..65535. */
+function readPortNumber(value: unknown): number | null {
+  return typeof value === 'number'
+    && Number.isInteger(value)
+    && value >= MIN_TCP_PORT
+    && value <= MAX_TCP_PORT
+    ? value
+    : null;
+}
+
+/** A port string is valid only when the whole value is a decimal port. */
+function parsePortString(value: string): number | null {
+  const trimmed = value.trim();
+  if (!/^\d+$/.test(trimmed)) return null;
+  return readPortNumber(Number.parseInt(trimmed, 10));
 }
 
 interface NormalizedLabels {
@@ -3952,8 +3969,15 @@ function normalizeDockerLabels(value: unknown): NormalizedLabels {
       return;
     }
     if (count >= 256) return;
+    // Docker labels are strings. A non-string value (an object coerced to
+    // "[object Object]", a number, or an explicit null) is malformed metadata:
+    // never invent a label text from it, and never let the row read complete.
+    if (typeof raw !== 'string') {
+      incomplete = true;
+      return;
+    }
     count += 1;
-    out[key] = typeof raw === 'string' ? raw : String(raw ?? '');
+    out[key] = raw;
   };
   if (Array.isArray(value)) {
     for (const entry of value) {
@@ -3978,9 +4002,16 @@ function normalizeDockerLabels(value: unknown): NormalizedLabels {
 
 interface NormalizedMounts {
   mounts: SocketInventoryMountRow[];
-  /** An entry, or a bind's source/destination, could not be read. */
+  /** An entry, mount field, or read/write flag could not be read, or the list exceeded its bound. */
   incomplete: boolean;
 }
+
+/**
+ * Docker's documented mount types. Any other value is not a type we can trust:
+ * it may be a host bind (so the mount must stay visible) and it is malformed
+ * metadata (so the row cannot read complete).
+ */
+const KNOWN_MOUNT_TYPES = new Set(['bind', 'volume', 'tmpfs', 'npipe', 'cluster']);
 
 function normalizeDockerMounts(value: unknown): NormalizedMounts {
   if (!Array.isArray(value)) return { mounts: [], incomplete: false };
@@ -3994,10 +4025,26 @@ function normalizeDockerMounts(value: unknown): NormalizedMounts {
       incomplete = true;
       continue;
     }
-    const type = readContainerString(mount.Type);
+    const rawType = readContainerString(mount.Type);
+    // A case/whitespace variant is read as its canonical type but still marks
+    // the row incomplete. Anything else is an unreadable type: `unknown` is a
+    // possible bind, so a consumer is never dropped just because the daemon
+    // spelled the type differently.
+    const canonicalType = rawType === null ? null : rawType.trim().toLowerCase();
+    const knownType = canonicalType !== null && KNOWN_MOUNT_TYPES.has(canonicalType)
+      ? canonicalType
+      : null;
+    if (knownType === null) incomplete = true;
+    if (rawType !== null && rawType !== knownType) incomplete = true;
+    const type = knownType ?? 'unknown';
     const source = readContainerString(mount.Source);
     const destination = readContainerString(mount.Destination);
-    if (type === null || source === null || destination === null) incomplete = true;
+    if (source === null || destination === null) incomplete = true;
+    // An empty destination is unreadable for every type. An empty source is
+    // flagged for a bind (or a possible bind), where it could be the socket;
+    // storage and pipe types may legitimately omit a source.
+    if (destination === '') incomplete = true;
+    if (source === '' && (type === 'bind' || type === 'unknown')) incomplete = true;
     // A read/write flag that is not a boolean (including an explicit null) is
     // unreadable; the safe reading is still writable, but the row must not look
     // complete.
@@ -4005,7 +4052,7 @@ function normalizeDockerMounts(value: unknown): NormalizedMounts {
       incomplete = true;
     }
     mounts.push({
-      type: type ?? 'unknown',
+      type,
       source,
       destination,
       // A missing read/write flag is treated as writable: the safe reading is
@@ -4035,19 +4082,26 @@ function normalizeDockerPorts(value: unknown): NormalizedPorts {
       incomplete = true;
       continue;
     }
-    const privatePort = readContainerNumber(port.PrivatePort);
+    const privatePort = readPortNumber(port.PrivatePort);
     // A listing entry with no readable private port is not a usable binding.
     if (privatePort === null) incomplete = true;
-    const publicPort = readContainerNumber(port.PublicPort);
-    // A non-null value that is not a finite number is unreadable; 0 is
-    // Docker's "not published" and is not a loss.
-    if (port.PublicPort !== undefined && port.PublicPort !== null && publicPort === null) {
-      incomplete = true;
+    // 0 is Docker's "not published"; any other value must be a complete,
+    // in-range integer, never a numeric prefix of a malformed string.
+    let publicPort: number | null = null;
+    if (port.PublicPort !== undefined && port.PublicPort !== null && port.PublicPort !== 0) {
+      publicPort = readPortNumber(port.PublicPort);
+      if (publicPort === null) incomplete = true;
     }
+    const rawIp = readContainerString(port.IP);
+    // A published binding always carries its host address. Missing or
+    // non-string metadata must not become the empty string, which the response
+    // would report as a proven wildcard binding.
+    if (publicPort !== null && rawIp === null) incomplete = true;
+    if (port.IP !== undefined && port.IP !== null && rawIp === null) incomplete = true;
     ports.push({
       privatePort,
-      publicPort: publicPort !== null && publicPort > 0 ? publicPort : null,
-      ip: readContainerString(port.IP) ?? '',
+      publicPort,
+      ip: rawIp,
       protocol: readContainerString(port.Type) ?? 'tcp',
     });
   }
@@ -4085,19 +4139,21 @@ function normalizeInspectPorts(
       break;
     }
     const slash = spec.lastIndexOf('/');
-    const privatePort = Number.parseInt(slash > 0 ? spec.slice(0, slash) : spec, 10);
-    if (!Number.isFinite(privatePort)) incomplete = true;
-    const protocol = slash > 0 ? spec.slice(slash + 1) : 'tcp';
-    const protocolName = protocol.length > 0 ? protocol : 'tcp';
+    const rawPrivatePort = slash > 0 ? spec.slice(0, slash) : spec;
+    const privatePort = parsePortString(rawPrivatePort);
+    if (privatePort === null) incomplete = true;
+    const rawProtocol = slash > 0 ? spec.slice(slash + 1) : 'tcp';
+    if (rawProtocol.length === 0) incomplete = true;
+    const protocolName = rawProtocol.length > 0 ? rawProtocol : 'tcp';
     const targets = Array.isArray(rawBindings) ? rawBindings : [];
     if (rawBindings !== undefined && rawBindings !== null && !Array.isArray(rawBindings)) {
       incomplete = true;
     }
     if (targets.length === 0) {
       ports.push({
-        privatePort: Number.isFinite(privatePort) ? privatePort : null,
+        privatePort,
         publicPort: null,
-        ip: '',
+        ip: null,
         protocol: protocolName,
       });
       continue;
@@ -4112,9 +4168,9 @@ function normalizeInspectPorts(
       if (!host) {
         incomplete = true;
         ports.push({
-          privatePort: Number.isFinite(privatePort) ? privatePort : null,
+          privatePort,
           publicPort: null,
-          ip: '',
+          ip: null,
           protocol: protocolName,
         });
         continue;
@@ -4123,24 +4179,33 @@ function normalizeInspectPorts(
       const rawPublic = host.HostPort;
       let publicPort: number | null = null;
       if (typeof rawPublic === 'number') {
-        publicPort = Number.isFinite(rawPublic) && rawPublic > 0 ? rawPublic : null;
-        if (!Number.isFinite(rawPublic)) incomplete = true;
+        if (rawPublic !== 0) {
+          publicPort = readPortNumber(rawPublic);
+          if (publicPort === null) incomplete = true;
+        }
       } else if (typeof rawPublic === 'string') {
         const trimmed = rawPublic.trim();
         if (trimmed !== '') {
-          const parsed = Number.parseInt(trimmed, 10);
-          if (Number.isFinite(parsed) && parsed > 0) publicPort = parsed;
-          else incomplete = true;
+          // The whole value must be a port: `2375junk`, `2375.9`, and `1e4`
+          // are malformed metadata, not the number their prefix spells.
+          publicPort = parsePortString(trimmed);
+          if (publicPort === null) incomplete = true;
         }
       } else {
         // A binding without a readable HostPort is not "exposed only": Docker
         // writes an empty string for that case, so this is unreadable metadata.
         incomplete = true;
       }
+      const rawIp = readContainerString(host.HostIp);
+      // A published binding needs a readable address. Missing or non-string
+      // metadata must never become the empty string, which would read as a
+      // proven wildcard binding.
+      if (publicPort !== null && rawIp === null) incomplete = true;
+      if (host.HostIp !== undefined && host.HostIp !== null && rawIp === null) incomplete = true;
       ports.push({
-        privatePort: Number.isFinite(privatePort) ? privatePort : null,
+        privatePort,
         publicPort,
-        ip: readContainerString(host.HostIp) ?? '',
+        ip: rawIp,
         protocol: protocolName,
       });
     }
@@ -4168,8 +4233,11 @@ function normalizeInspectPorts(
     if (sameSpecPorts.some(port => port.publicPort === candidate.publicPort)) continue;
     const nullMatch = sameSpecPorts.find(port => port.publicPort === null);
     if (nullMatch) {
+      // Inspect could not establish a valid binding for this spec, so the whole
+      // listing binding is the evidence to keep: filling only the port would
+      // pair the list's port with an unrelated inspect address.
       nullMatch.publicPort = candidate.publicPort;
-      if (!nullMatch.ip) nullMatch.ip = candidate.ip;
+      nullMatch.ip = candidate.ip;
       restored = true;
     }
     // Otherwise inspect already carries a different valid public port; do not
@@ -4219,11 +4287,16 @@ function normalizeDockerNetworks(value: unknown): NormalizedNetworks {
     }
     const network = asRecord(raw);
     if (!network) incomplete = true;
-    networks.push({
-      name,
-      id: readContainerString(network?.NetworkID),
-      ipAddress: readContainerString(network?.IPAddress),
-    });
+    const id = readContainerString(network?.NetworkID);
+    const ipAddress = readContainerString(network?.IPAddress);
+    // A present field of the wrong type is unreadable, not a null value.
+    if (network && network.NetworkID !== undefined && network.NetworkID !== null && id === null) {
+      incomplete = true;
+    }
+    if (network && network.IPAddress !== undefined && network.IPAddress !== null && ipAddress === null) {
+      incomplete = true;
+    }
+    networks.push({ name, id, ipAddress });
   }
   return { networks, incomplete };
 }

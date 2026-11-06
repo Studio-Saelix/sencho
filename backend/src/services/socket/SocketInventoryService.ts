@@ -79,8 +79,13 @@ export interface SocketInventoryMount {
 export interface SocketInventoryPort {
   privatePort: number | null;
   publicPort: number | null;
-  ip: string;
-  /** True when the binding is on every host interface ('' / 0.0.0.0 / ::). */
+  /** The binding address, null when Docker did not provide a readable one. */
+  ip: string | null;
+  /**
+   * True when the binding is on every host interface ('' / 0.0.0.0 / ::).
+   * False for a loopback or specific address, and for an unreadable address:
+   * uncertainty is never reported as a wildcard.
+   */
   allInterfaces: boolean;
   protocol: string;
 }
@@ -254,8 +259,9 @@ function safeText(value: string, max: number): string {
   return bound(redactSensitiveText(value), max);
 }
 
-function bindsAllInterfaces(ip: string): boolean {
-  return ip === '' || ip === '0.0.0.0' || ip === '::';
+function bindsAllInterfaces(ip: string | null): boolean {
+  // An unreadable address is not proof of a wildcard binding.
+  return ip !== null && (ip === '' || ip === '0.0.0.0' || ip === '::');
 }
 
 function idMatches(a: string | null | undefined, b: string | null | undefined): boolean {
@@ -438,7 +444,7 @@ function normalizePorts(row: SocketInventoryContainerRow): {
       publicPort: port.publicPort,
       // Docker reports both strings as untrusted metadata; bound them before
       // they reach the API so one container cannot inflate the response.
-      ip: safeText(port.ip, 64),
+      ip: port.ip === null ? null : safeText(port.ip, 64),
       allInterfaces: bindsAllInterfaces(port.ip),
       protocol: safeText(port.protocol, 32),
     })),

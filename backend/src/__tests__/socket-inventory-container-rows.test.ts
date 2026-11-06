@@ -176,8 +176,8 @@ describe('listContainersForSocketInventory', () => {
       name: null,
     }]);
     expect(row.ports).toEqual([
-      { privatePort: 2375, publicPort: null, ip: '', protocol: 'tcp' },
-      { privatePort: 2375, publicPort: null, ip: '', protocol: 'tcp' },
+      { privatePort: 2375, publicPort: null, ip: null, protocol: 'tcp' },
+      { privatePort: 2375, publicPort: null, ip: null, protocol: 'tcp' },
     ]);
     expect(row.networks).toEqual([
       { name: 'broken', id: null, ipAddress: null },

@@ -622,7 +622,9 @@ components:
             properties:
               privatePort: { type: integer, nullable: true }
               publicPort: { type: integer, nullable: true }
-              ip: { type: string }
+              ip:
+                type: [string, "null"]
+                description: The binding address, or null when Docker did not provide a readable one. A non-null empty string or `0.0.0.0`/`::` means every interface.
               allInterfaces: { type: boolean }
               protocol: { type: string }
         exposedPorts:
