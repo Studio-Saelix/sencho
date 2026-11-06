@@ -1039,14 +1039,6 @@ export function buildBootstrapEvidence(input: { facts: BootstrapFacts; nodeNameT
     summary: 'The Docker package source could not be inspected, so the plan cannot decide whether to configure it.',
     observed: facts.repo.problem ?? (facts.repo.probeComplete ? 'apt-cache policy did not complete' : 'repository probe did not complete'),
     remediation: 'Read the sources apt reads (apt-config shell m Dir::Etc::sourcelist/f p Dir::Etc::sourceparts/d shows where; /etc/apt/sources.list and /etc/apt/sources.list.d by default), /etc/apt/keyrings and /usr/share/keyrings on the host (and confirm the host release and architecture are known), then run the preflight again.',
-  } : repoConfigured && dockerWorking && !facts.packagesComplete ? {
-    // apt-cache policy exits non-zero when apt rejects a source file, so a pass
-    // here would claim a configuration that apt itself may not accept.
-    ...aptSourceCheck,
-    status: 'warn',
-    summary: 'Docker and Compose already work and the Docker source looks right, but apt could not list the Docker packages, so it may reject one of its source files.',
-    observed: 'source and keyring verified / apt-cache policy did not complete',
-    remediation: 'No action is needed for this plan, which preserves the existing installation. Run apt-cache policy docker-ce on the host to see what apt reports.',
   } : repoConfigured ? {
     ...aptSourceCheck,
     status: 'pass',

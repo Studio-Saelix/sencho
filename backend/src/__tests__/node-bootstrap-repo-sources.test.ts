@@ -462,14 +462,24 @@ describe('sources outside docker.list and docker.sources', () => {
       ['a source line with no component', 'deb http://archive.ubuntu.com/ubuntu noble'],
       ['a source line of an unknown type', 'rpm http://archive.ubuntu.com/ubuntu noble main'],
       ['an exact-path suite with components', 'deb http://archive.ubuntu.com/ubuntu/ ./ main'],
+      ['an unclosed option bracket', 'deb [arch=amd64 http://archive.ubuntu.com/ubuntu noble main'],
+      ['an option with no value', 'deb [arch=amd64 foo] http://archive.ubuntu.com/ubuntu noble main'],
+      ['an option with an empty value', 'deb [signed-by=] http://archive.ubuntu.com/ubuntu noble main'],
+      ['no space after the option bracket', 'deb [arch=amd64]http://archive.ubuntu.com/ubuntu noble main'],
+      ['two option brackets', 'deb [arch=amd64] [trusted=no] http://archive.ubuntu.com/ubuntu noble main'],
+      ['a URI with no scheme', 'deb archive.ubuntu.com/ubuntu noble main'],
+      ['a bare path as the URI', 'deb /srv/repo noble main'],
     ];
     const deb822Cases: Array<[string, string]> = [
       ['a bare word', 'garbage'],
       ['a line that starts with !', '!garbage'],
       ['a line with a space where the colon belongs', 'Broken suite value'],
       ['a Types line with no colon', 'Types deb'],
+      ['an indented field that starts a stanza', ' Types: deb\nURIs: http://archive.ubuntu.com/ubuntu\nSuites: noble\nComponents: main'],
+      ['a tab-indented field that starts a stanza', '\tTypes: deb\nURIs: http://archive.ubuntu.com/ubuntu\nSuites: noble\nComponents: main'],
       ['an enabled stanza with no URIs', 'Types: deb\nSuites: noble\nComponents: main'],
       ['an enabled stanza with empty URIs', 'Types: deb\nURIs:\nSuites: noble\nComponents: main'],
+      ['an enabled stanza with a URI that has no scheme', 'Types: deb\nURIs: archive.ubuntu.com\nSuites: noble\nComponents: main'],
       ['an enabled stanza with no Suites', unrelatedStanza('Components: main')],
       ['an enabled stanza with empty Suites', unrelatedStanza('Suites:\nComponents: main')],
       ['an enabled stanza with no Components', unrelatedStanza('Suites: noble')],
@@ -488,10 +498,11 @@ describe('sources outside docker.list and docker.sources', () => {
       ([badLabel, extra]): [string, string, string] => [`${badLabel} in ${fileLabel}`, file, [good, extra].join('\n\n')],
     ));
 
+    /** What apt-cache policy does on the host when apt rejects a source file. */
+    const APT_REJECTED = { exitCode: 100 };
+
     it.each(rejected)('does not verify %s', (_label, file, content) => {
-      // A one-line file has no blank-line stanza break; the join only adds a blank line.
-      const text = [block(file, content), dockerAscBlock()].join('\n');
-      const result = parse('amd64', text);
+      const result = parse('amd64', block(file, content), dockerAscBlock());
       expect(result.dockerSourceConfigured).toBe(true);
       expect(result.sourceVerified).toBe(false);
       expect(result.problem).toContain(file);
@@ -499,12 +510,17 @@ describe('sources outside docker.list and docker.sources', () => {
     });
 
     it.each(rejected)('keeps a working installation but never reports %s as a verified source', (_label, file, content) => {
-      const assembled = assemble([probe('docker_repo', [block(file, content), dockerAscBlock()].join('\n'))]);
-      // The audited sequence: apt-cache policy failed (exit 100) because apt rejects the file.
-      const facts = makeFacts({ packagesComplete: false, packages: NO_CANDIDATES, repo: assembled.repo });
+      const assembled = assemble([
+        probe('docker_repo', [block(file, content), dockerAscBlock()].join('\n')),
+        probe('apt_policy', '', APT_REJECTED),
+      ]);
+      // The audited sequence: working Docker and Compose, apt-cache policy failed because apt rejects the file.
+      const facts = makeFacts({ packagesComplete: assembled.packagesComplete, packages: NO_CANDIDATES, repo: assembled.repo });
       expect(repoVerified(facts)).toBe(false);
       expect(aptSource(facts).status).toBe('warn');
       expect(aptSource(facts).observed).not.toMatch(/verified/);
+      expect(evidenceFor(facts).blockers).toBe(0);
+      expect(planWithheld(facts)).toBe(false);
       expect(stageIds(facts)).not.toContain('docker_repository');
     });
 
@@ -515,17 +531,59 @@ describe('sources outside docker.list and docker.sources', () => {
       expect(() => planFor(facts)).toThrow();
     });
 
+    it('names the offending line, so the operator can find it', () => {
+      const result = parse('amd64', block(CUSTOM_LIST, `${listGood}\ndeb archive.ubuntu.com/ubuntu noble main`), dockerAscBlock());
+      expect(result.problem).toContain('"deb archive.ubuntu.com/ubuntu noble main"');
+      const deb822 = parse('amd64', block(CUSTOM_SOURCES, `${stanza({})}\n\nBroken suite value`), dockerAscBlock());
+      expect(deb822.problem).toContain('"Broken suite value"');
+    });
+
+    it('counts a malformed file that mentions Docker only in a comment, and not one that never mentions it', () => {
+      const commentOnly = (file: string, malformed: string) => [
+        block(LIST_FILE, listGood),
+        block(file, `# download.docker.com mirror\n${malformed}`),
+        dockerAscBlock(),
+      ].join('\n');
+      expect(parse('amd64', commentOnly(CUSTOM_LIST, 'garbage')).sourceVerified).toBe(false);
+      expect(parse('amd64', commentOnly(CUSTOM_SOURCES, 'garbage')).sourceVerified).toBe(false);
+      // The probe never prints a file that does not mention the host, so the parser never sees it.
+      expect(parse('amd64', [block(LIST_FILE, listGood), dockerAscBlock()].join('\n')).sourceVerified).toBe(true);
+    });
+
+    // Values the parser does not model (a Signed-By that is neither a path nor
+    // a fingerprint, an unterminated quote). apt-cache policy is the backstop.
+    it.each([
+      ['a Signed-By value that is not a path or fingerprint', CUSTOM_LIST, `${listGood}\ndeb [signed-by=foo] http://archive.ubuntu.com/ubuntu noble main`],
+      ['an unterminated quote', CUSTOM_LIST, `${listGood}\ndeb http://archive.ubuntu.com/ubuntu "noble main`],
+      ['a deb822 Signed-By value that is not a path or fingerprint', CUSTOM_SOURCES, `${stanza({})}\n\n${unrelatedStanza('Suites: noble\nComponents: main\nSigned-By: foo')}`],
+    ])('does not trust %s once apt-cache policy fails', (_label, file, content) => {
+      const text = [block(file, content), dockerAscBlock()].join('\n');
+      const fresh = assemble([probe('docker_repo', text), probe('apt_policy', '', APT_REJECTED)]);
+      expect(fresh.repo.sourceVerified).toBeNull();
+      expect(fresh.repo.problem).toMatch(/apt-cache policy did not complete/);
+      const freshFacts = makeFacts({ docker: FRESH_DOCKER, packages: NO_CANDIDATES, packagesComplete: fresh.packagesComplete, repo: fresh.repo });
+      expect(repoVerified(freshFacts)).toBe(false);
+      expect(planWithheld(freshFacts)).toBe(true);
+      const healthy = makeFacts({ packages: NO_CANDIDATES, packagesComplete: fresh.packagesComplete, repo: fresh.repo });
+      expect(aptSource(healthy).status).toBe('warn');
+      expect(stageIds(healthy)).not.toContain('docker_repository');
+    });
+
     const accepted: Array<[string, string, string]> = [
       ['an exact-path line beside the Docker entry', CUSTOM_LIST, `${listGood}\ndeb http://example.com/ ./`],
+      ['a file: URI', CUSTOM_LIST, `${listGood}\ndeb file:/srv/repo ./`],
       ['a cdrom line whose URI holds spaces', CUSTOM_LIST, `${listGood}\ndeb cdrom:[Ubuntu 22.04 _Jammy_ - Release amd64 (20220419)]/ jammy main restricted`],
       ['an option bracket with inner spaces', MAIN_LIST, `${listGood}\ndeb [ arch=amd64 ] http://archive.ubuntu.com/ubuntu noble main`],
+      ['options that end in a sign', MAIN_LIST, `${listGood}\ndeb [arch-=i386] http://archive.ubuntu.com/ubuntu noble main`],
       ['tabs, a trailing comment, CRLF and a blank line', CUSTOM_LIST, `${listGood} # Docker\r\n\r\ndeb\thttp://archive.ubuntu.com/ubuntu\tnoble\tmain\r\n# note`],
       ['a deb-src line beside the Docker entry', CUSTOM_LIST, `${listGood}\ndeb-src http://archive.ubuntu.com/ubuntu noble main`],
       ['a disabled stanza with no URIs', CUSTOM_SOURCES, `${stanza({})}\n\nTypes: deb\nEnabled: no\nSuites: noble\nComponents: main`],
       ['a disabled stanza with empty URIs', CUSTOM_SOURCES, `${stanza({})}\n\nTypes: deb\nURIs:\nEnabled: no\nSuites: noble\nComponents: main`],
+      ['a disabled stanza with a URI that has no scheme', CUSTOM_SOURCES, `${stanza({})}\n\nTypes: deb\nEnabled: no\nURIs: archive.ubuntu.com\nSuites: noble\nComponents: main`],
       ['a disabled stanza with no Suites', CUSTOM_SOURCES, `${stanza({})}\n\n${unrelatedStanza('Enabled: no\nComponents: main')}`],
       ['a disabled stanza with no Components', CUSTOM_SOURCES, `${stanza({})}\n\n${unrelatedStanza('Enabled: no\nSuites: noble')}`],
       ['an exact-path stanza with no Components', CUSTOM_SOURCES, `${stanza({})}\n\n${unrelatedStanza('Suites: ./')}`],
+      ['a field name with an underscore', CUSTOM_SOURCES, `${stanza({})}\n\n${unrelatedStanza('Suites: noble\nComponents: main\nX_Note: kept')}`],
       ['comments, CRLF and a continuation line', CUSTOM_SOURCES, `# note\n${stanza({})}\n# note\n\nTypes: deb\r\nURIs: http://archive.ubuntu.com/ubuntu\r\nSuites: noble\r\nComponents: main\r\n  universe`],
     ];
 
@@ -533,18 +591,23 @@ describe('sources outside docker.list and docker.sources', () => {
       const result = parse('amd64', block(file, content), dockerAscBlock());
       expect(result.sourceVerified).toBe(true);
       expect(result.problem).toBeNull();
-      const facts = freshHost([block(file, content), dockerAscBlock()].join('\n'));
-      expect(repoVerified(facts)).toBe(true);
+      const text = [block(file, content), dockerAscBlock()].join('\n');
+      expect(repoVerified(freshHost(text))).toBe(true);
+      // A healthy host whose apt-cache policy ran keeps the pass.
+      const assembled = assemble([probe('docker_repo', text), probe('apt_policy', '')]);
+      const healthy = makeFacts({ packagesComplete: assembled.packagesComplete, packages: NO_CANDIDATES, repo: assembled.repo });
+      expect(aptSource(healthy).status).toBe('pass');
     });
 
-    it('warns rather than passes when apt-cache policy fails beside a source the parser accepts', () => {
-      const text = [block(CUSTOM_LIST, deb('arch=amd64')), dockerAscBlock()].join('\n');
-      const repo = assemble([probe('docker_repo', text)]).repo;
-      const failed = makeFacts({ packagesComplete: false, packages: NO_CANDIDATES, repo });
-      expect(aptSource(failed).status).toBe('warn');
-      expect(aptSource(failed).summary).toMatch(/apt could not list the Docker packages/);
-      expect(stageIds(failed)).not.toContain('docker_repository');
-      expect(aptSource(makeFacts({ packages: NO_CANDIDATES, repo })).status).toBe('pass');
+    it('turns a source that read as valid into unknown, not a pass, when apt-cache policy fails', () => {
+      const text = [block(CUSTOM_LIST, listGood), dockerAscBlock()].join('\n');
+      const ran = assemble([probe('docker_repo', text), probe('apt_policy', '')]);
+      const failed = assemble([probe('docker_repo', text), probe('apt_policy', '', APT_REJECTED)]);
+      expect(ran.repo.sourceVerified).toBe(true);
+      expect(failed.repo.sourceVerified).toBeNull();
+      const healthy = makeFacts({ packagesComplete: false, packages: NO_CANDIDATES, repo: failed.repo });
+      expect(aptSource(healthy).status).toBe('warn');
+      expect(stageIds(healthy)).not.toContain('docker_repository');
     });
   });
 
