@@ -579,7 +579,7 @@ interface AptSourceEntry {
 
 interface ParsedSourceFile {
   entries: AptSourceEntry[];
-  /** Lines or stanzas that are not valid apt entries and that name Docker's host (any line, for a file the plan would clash with). */
+  /** Why apt would reject the file: a line or stanza that is not a valid apt entry (in a disabled stanza as well, for a Types it does not know). */
   invalid: string[];
   /** True when the file holds no active line or stanza at all. */
   empty: boolean;
@@ -605,6 +605,18 @@ function oneLineOptionName(rawKey: string): string {
   return INSECURE_SOURCE_OPTIONS.includes(lower) || SOURCE_AGREEMENT_OPTIONS.includes(lower) ? lower : rawKey;
 }
 
+/**
+ * What apt rejects about the suites and components of one entry: a suite that is
+ * an exact path (ends in a slash) takes no components, any other suite needs
+ * at least one. Null when the pair is acceptable.
+ */
+function suiteComponentProblem(suites: string[], components: string[]): string | null {
+  const exactPaths = suites.filter((suite) => suite.endsWith('/')).length;
+  if (components.length > 0 && exactPaths > 0) return 'an exact-path suite (one that ends in a slash) with components';
+  if (components.length === 0 && exactPaths < suites.length) return 'no Components';
+  return null;
+}
+
 /** Docker's host as a URI host (after a scheme, an option bracket or whitespace), not a path segment on another host. */
 const DOCKER_HOST_MENTION = /(?:^|[\s[@]|:\/\/)download\.docker\.com(?![a-z0-9-])/i;
 
@@ -612,18 +624,20 @@ function mentionsDockerHost(text: string): boolean {
   return DOCKER_HOST_MENTION.test(text);
 }
 
-function parseListSource(content: string, conventional: boolean): ParsedSourceFile {
+function parseListSource(content: string): ParsedSourceFile {
   const active = content.split('\n')
     // A '#' that starts a word begins a comment, so a trailing comment is not part of the entry.
     .map((line) => line.replace(/(^|\s)#.*$/, '').trim())
     .filter(Boolean);
   const entries: AptSourceEntry[] = [];
   const invalid: string[] = [];
-  const invalidLine = 'the Docker source line is not a valid apt entry';
+  const invalidLine = 'the source file has a line that is not a valid apt entry, which apt rejects';
   for (const line of active) {
-    const match = /^(deb|deb-src)\s+(\[[^\]]*\]\s+)?(\S+)\s+(\S+)\s+(.+)$/.exec(line);
-    if (!match) {
-      if (conventional || mentionsDockerHost(line)) invalid.push(invalidLine);
+    const match = /^(deb|deb-src)\s+(\[[^\]]*\]\s+)?(\S+)\s+(\S+)(?:\s+(.+))?$/.exec(line);
+    if (!match || suiteComponentProblem(match[4].split(/[,\s]+/).filter(Boolean), (match[5] ?? '').split(/\s+/).filter(Boolean))) {
+      // apt rejects the whole source list at a line it cannot parse, so one
+      // beside a valid Docker entry is as fatal as one in a file of its own.
+      invalid.push(invalidLine);
       continue;
     }
     // A line that names Docker's host but whose URI is not read as that host
@@ -645,7 +659,7 @@ function parseListSource(content: string, conventional: boolean): ParsedSourceFi
       type: match[1] as 'deb' | 'deb-src',
       uris: [match[3]],
       suites: match[4].split(/[,\s]+/).filter(Boolean),
-      components: match[5].split(/\s+/),
+      components: (match[5] ?? '').split(/\s+/).filter(Boolean),
       options,
     });
   }
@@ -664,7 +678,7 @@ function parseDeb822(content: string): { paragraphs: Array<Record<string, string
       lastKey = null;
       continue;
     }
-    if (rawLine.startsWith('#') || rawLine.startsWith('!')) continue;
+    if (rawLine.startsWith('#')) continue;
     if (/^\s/.test(rawLine) && current && lastKey) {
       current[lastKey] = `${current[lastKey]} ${rawLine.trim()}`;
       continue;
@@ -686,10 +700,10 @@ function parseDeb822Source(content: string): ParsedSourceFile {
   const { paragraphs, unparsed } = parseDeb822(content);
   const entries: AptSourceEntry[] = [];
   const invalid: string[] = [];
-  const invalidStanza = 'the Docker deb822 source has a stanza that is not a valid apt entry';
-  // A line that is not "Field: value" and names Docker's host may be the URI
-  // of a stanza apt reads differently than this does.
-  if (unparsed.some(mentionsDockerHost)) invalid.push(invalidStanza);
+  const invalidStanza = 'the deb822 source has a stanza that is not a valid apt entry';
+  // apt rejects the whole source list at a line that is not "Field: value" or a
+  // comment, wherever it stands in the file.
+  if (unparsed.length > 0) invalid.push('the deb822 source has a line that is not a valid apt entry, which apt rejects');
   for (const paragraph of paragraphs) {
     // apt reads the Types field as exact, case-sensitive, whitespace-separated
     // words and rejects the whole source list at any other token, in a disabled
@@ -698,13 +712,21 @@ function parseDeb822Source(content: string): ParsedSourceFile {
     const typeWords = (paragraph.types ?? '').split(/\s+/).filter(Boolean);
     const unknownType = typeWords.find((word) => word !== 'deb' && word !== 'deb-src');
     if (paragraph.types === undefined) {
-      invalid.push('the Docker deb822 source has a stanza with no Types field, which apt rejects');
+      invalid.push('the deb822 source has a stanza with no Types field, which apt rejects');
     } else if (unknownType !== undefined) {
-      invalid.push(`the Docker deb822 source has the Types value "${unknownType}", which apt does not know and rejects`);
+      invalid.push(`the deb822 source has the Types value "${unknownType}", which apt does not know and rejects`);
     }
     // A disabled stanza cannot supply packages to apt.
     if (paragraph.enabled !== undefined && FALSE_OPTION_VALUES.has(paragraph.enabled.trim().toLowerCase())) continue;
     const uris = (paragraph.uris ?? '').split(/\s+/).filter(Boolean);
+    const suites = (paragraph.suites ?? '').split(/[,\s]+/).filter(Boolean);
+    const components = (paragraph.components ?? '').split(/[,\s]+/).filter(Boolean);
+    // apt rejects the whole source list at an enabled stanza with no URIs or
+    // Suites, or with components that do not fit its suites.
+    const stanzaProblem = uris.length === 0 ? 'no URIs'
+      : suites.length === 0 ? 'no Suites'
+        : suiteComponentProblem(suites, components);
+    if (stanzaProblem) invalid.push(`the deb822 source has an enabled stanza with ${stanzaProblem}, which apt rejects`);
     const options = new Map(Object.entries(paragraph));
     const types = typeWords.filter((type): type is 'deb' | 'deb-src' => type === 'deb' || type === 'deb-src');
     // A stanza for Docker's host with no type apt knows, or a URI that names the
@@ -715,8 +737,8 @@ function parseDeb822Source(content: string): ParsedSourceFile {
       entries.push({
         type,
         uris,
-        suites: (paragraph.suites ?? '').split(/[,\s]+/).filter(Boolean),
-        components: (paragraph.components ?? '').split(/[,\s]+/).filter(Boolean),
+        suites,
+        components,
         options,
       });
     }
@@ -817,7 +839,7 @@ function verifySourceFile(
 ): SourceFileVerdict {
   const conventional = CONVENTIONAL_SOURCE_FILE.test(file.path);
   const deb822 = /\.sources$/i.test(file.path);
-  const parsed = deb822 ? parseDeb822Source(file.content) : parseListSource(file.content, conventional);
+  const parsed = deb822 ? parseDeb822Source(file.content) : parseListSource(file.content);
   const verdict: SourceFileVerdict = { relevant: conventional, problems: [], binaryEntries: 0, signing: [] };
   for (const reason of parsed.invalid) {
     verdict.relevant = true;
