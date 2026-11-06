@@ -38,8 +38,6 @@ const SWAP_STATUSES: ReadonlySet<string> = new Set<SwapStatus>([
 
 export interface SwapReport {
   status: SwapStatus;
-  originals: string[];
-  incoming: string[];
   moved: number;
 }
 
@@ -69,18 +67,11 @@ export function parseSwapReport(line: string): SwapReport | null {
     if (typeof record.status !== 'string' || !SWAP_STATUSES.has(record.status)) return null;
     return {
       status: record.status as SwapStatus,
-      originals: stringArray(record.originals),
-      incoming: stringArray(record.incoming),
       moved: typeof record.moved === 'number' && Number.isSafeInteger(record.moved) ? record.moved : 0,
     };
   } catch {
     return null;
   }
-}
-
-function stringArray(value: unknown): string[] {
-  if (!Array.isArray(value)) return [];
-  return value.filter((item): item is string => typeof item === 'string');
 }
 
 /**

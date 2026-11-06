@@ -2689,8 +2689,13 @@ async function handleServiceAction(
     res.status(400).json({ error: 'Invalid service name' });
     return;
   }
-  if (action !== 'start' && await refuseIfDockerEndpoint(req, res, stackName, { kind: 'service', service: serviceName, restart: action === 'restart', engineOnly: true })) return;
+  // A service action is a stack lifecycle path like `stop` or `restart` above,
+  // so it takes the same lock: a staged overwrite holds it with `data_restore`
+  // for every stack whose model declares the fenced volume, and a concurrent
+  // lifecycle must lose to it instead of stopping a workload under the swap.
+  if (!tryAcquireStackOpLock(req, res, stackName, action)) return;
   try {
+    if (action !== 'start' && await refuseIfDockerEndpoint(req, res, stackName, { kind: 'service', service: serviceName, restart: action === 'restart', engineOnly: true })) return;
     const dockerController = DockerController.getInstance(req.nodeId);
     const all = await dockerController.getContainersByStack(stackName);
     if (!all || all.length === 0) {
@@ -2740,6 +2745,8 @@ async function handleServiceAction(
       return;
     }
     res.status(500).json({ error: getErrorMessage(error, `Failed to ${action} service`) });
+  } finally {
+    releaseStackOpLock(req, stackName);
   }
 }
 

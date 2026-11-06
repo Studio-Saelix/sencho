@@ -97,8 +97,16 @@ func TestPrepareCommitAndCleanup(t *testing.T) {
 	if err != nil {
 		t.Fatalf("second prepare: %v", err)
 	}
-	if again.Status != statusPlanned || len(again.Originals) != 2 || len(again.Incoming) != 2 {
+	if again.Status != statusPlanned {
 		t.Fatalf("second prepare = %+v", again)
+	}
+	_, _, _, planPath := paths(request)
+	plan, err := readPlan(planPath)
+	if err != nil {
+		t.Fatalf("read the journal after a second prepare: %v", err)
+	}
+	if len(plan.Originals) != 2 || len(plan.Incoming) != 2 {
+		t.Fatalf("journal after a second prepare = %+v", plan)
 	}
 
 	if _, err := swapCommit(request); err != nil {
@@ -147,6 +155,55 @@ func TestPrepareCommitAndCleanup(t *testing.T) {
 	}
 	if report, err := swapCleanup(request); err != nil || report.Status != statusCleaned {
 		t.Fatalf("second cleanup = %+v, %v", report, err)
+	}
+}
+
+// A volume with thousands of top-level entries used to make the one-line report
+// exceed Sencho's 64 KiB stdout cap. The caller then saw half a JSON object and
+// answered "exited 0 without a status", so the overwrite could never finish on a
+// real cache or spool directory. The report is a status, not a copy of the
+// journal, and its size must not grow with the volume.
+func TestALargeVolumeStillAnswersABoundedStatus(t *testing.T) {
+	const entries = 9000
+	originals := make(map[string]string, entries+1)
+	originals["marker.txt"] = "original"
+	for i := 0; i < entries; i++ {
+		originals[fmt.Sprintf("f%05d", i)] = ""
+	}
+	request := setupVolume(t, originals, map[string]string{"marker.txt": "restored"})
+
+	report, err := swapPrepare(request)
+	if err != nil {
+		t.Fatalf("prepare on a %d-entry volume: %v", entries, err)
+	}
+	if report.Status != statusPlanned {
+		t.Fatalf("prepare status = %s", report.Status)
+	}
+	out, err := json.Marshal(report)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The backend's line cap is 64 KiB; a report that names no entries stays
+	// three orders of magnitude below it.
+	if len(out) > 4096 {
+		t.Fatalf("prepare report is %d bytes for %d entries, want a bounded status line: %s", len(out), entries, out)
+	}
+	if strings.Contains(string(out), "f00000") {
+		t.Fatalf("prepare report echoes entry names: %s", out)
+	}
+
+	if _, err := swapCommit(request); err != nil {
+		t.Fatalf("commit on a %d-entry volume: %v", entries, err)
+	}
+	status, err := swapStatus(request)
+	if err != nil || status.Status != statusSwapped {
+		t.Fatalf("status = %+v, %v", status, err)
+	}
+	if _, err := swapCleanup(request); err != nil {
+		t.Fatalf("cleanup on a %d-entry volume: %v", entries, err)
+	}
+	if got := readFile(t, filepath.Join(request.Root, "marker.txt")); got != "restored" {
+		t.Fatalf("marker.txt = %q", got)
 	}
 }
 
@@ -561,8 +618,16 @@ func TestARestoredWorkDirectoryIsNotMovedIntoTheVolume(t *testing.T) {
 	if err != nil {
 		t.Fatalf("prepare: %v", err)
 	}
-	if len(report.Incoming) != 1 || report.Incoming[0] != "db.bin" {
-		t.Fatalf("incoming = %v, want only db.bin", report.Incoming)
+	if report.Status != statusPlanned {
+		t.Fatalf("prepare status = %s", report.Status)
+	}
+	_, _, _, planPath := paths(request)
+	plan, err := readPlan(planPath)
+	if err != nil {
+		t.Fatalf("read the journal: %v", err)
+	}
+	if len(plan.Incoming) != 1 || plan.Incoming[0] != "db.bin" {
+		t.Fatalf("incoming = %v, want only db.bin", plan.Incoming)
 	}
 	if _, err := swapCommit(request); err != nil {
 		t.Fatalf("commit: %v", err)
@@ -624,7 +689,7 @@ func TestAPrefixNameThatIsNotAnIntentIDIsOrdinaryData(t *testing.T) {
 	request := setupVolume(t,
 		map[string]string{".sencho-restore-notes/a.txt": "user data", nonHex + "/a.txt": "user data"},
 		map[string]string{
-			"db.bin": "restored",
+			"db.bin":                      "restored",
 			".sencho-restore-notes/a.txt": "user data",
 			nonHex + "/a.txt":             "user data",
 		},
@@ -633,9 +698,17 @@ func TestAPrefixNameThatIsNotAnIntentIDIsOrdinaryData(t *testing.T) {
 	if err != nil {
 		t.Fatalf("prepare refused a user entry with the prefix: %v", err)
 	}
+	if report.Status != statusPlanned {
+		t.Fatalf("prepare status = %s", report.Status)
+	}
+	_, _, _, planPath := paths(request)
+	plan, err := readPlan(planPath)
+	if err != nil {
+		t.Fatalf("read the journal: %v", err)
+	}
 	for _, name := range []string{".sencho-restore-notes", nonHex} {
-		if !contains(report.Incoming, name) {
-			t.Fatalf("incoming = %v, want the user's prefixed entry %q kept", report.Incoming, name)
+		if !contains(plan.Incoming, name) {
+			t.Fatalf("incoming = %v, want the user's prefixed entry %q kept", plan.Incoming, name)
 		}
 	}
 	if _, err := swapCommit(request); err != nil {
@@ -966,7 +1039,7 @@ func (f *failingJournalFile) Write(p []byte) (int, error) {
 	return len(p), nil
 }
 
-func (f *failingJournalFile) Sync() error { return f.sync }
+func (f *failingJournalFile) Sync() error  { return f.sync }
 func (f *failingJournalFile) Close() error { return f.closeErr }
 
 func TestCommitIntoAnEmptyVolume(t *testing.T) {

@@ -106,11 +106,14 @@ type swapPlan struct {
 	RootIno      uint64    `json:"root_ino"`
 }
 
+// swapReport is the one line this probe writes to stdout. It deliberately
+// carries no lists: Sencho caps each stdout line at 64 KiB, so echoing the plan's
+// originals and incoming names would cut the JSON in half on a volume with a few
+// thousand top-level entries and the caller would see no status at all. The
+// journal on disk already holds the lists; the caller only needs the state.
 type swapReport struct {
-	Status    string   `json:"status"`
-	Originals []string `json:"originals,omitempty"`
-	Incoming  []string `json:"incoming,omitempty"`
-	Moved     int      `json:"moved"`
+	Status string `json:"status"`
+	Moved  int    `json:"moved"`
 }
 
 type swapRequest struct {
@@ -296,7 +299,7 @@ func swapPrepare(request swapRequest) (swapReport, error) {
 		if statusErr != nil {
 			return swapReport{}, statusErr
 		}
-		return swapReport{Status: status, Originals: plan.Originals, Incoming: plan.Incoming}, nil
+		return swapReport{Status: status}, nil
 	}
 	if exists(originalDir) {
 		return swapReport{}, errors.New("a work directory exists without a journal")
@@ -347,7 +350,7 @@ func swapPrepare(request swapRequest) (swapReport, error) {
 	if err := writePlan(planPath, plan); err != nil {
 		return swapReport{}, err
 	}
-	return swapReport{Status: statusPlanned, Originals: plan.Originals, Incoming: plan.Incoming}, nil
+	return swapReport{Status: statusPlanned}, nil
 }
 
 func readPlan(path string) (swapPlan, error) {
@@ -547,7 +550,7 @@ func swapCommit(request swapRequest) (swapReport, error) {
 	// finished before a crash but the root metadata was not applied; the rest of
 	// this function applies it and commits.
 	if plan.Status == statusSwapped {
-		return swapReport{Status: statusSwapped, Originals: plan.Originals, Incoming: plan.Incoming}, nil
+		return swapReport{Status: statusSwapped}, nil
 	}
 
 	moved := 0
@@ -573,7 +576,7 @@ func swapCommit(request swapRequest) (swapReport, error) {
 			return swapReport{}, errors.New(statusInconsistent)
 		}
 		if !consumeMove() {
-			return swapReport{Status: statusMovingOriginals, Originals: plan.Originals, Incoming: plan.Incoming, Moved: moved}, nil
+			return swapReport{Status: statusMovingOriginals, Moved: moved}, nil
 		}
 		if err := os.Rename(filepath.Join(request.Root, name), filepath.Join(originalDir, name)); err != nil {
 			return swapReport{}, err
@@ -602,7 +605,7 @@ func swapCommit(request swapRequest) (swapReport, error) {
 			continue
 		}
 		if !consumeMove() {
-			return swapReport{Status: statusMovingIncoming, Originals: plan.Originals, Incoming: plan.Incoming, Moved: moved}, nil
+			return swapReport{Status: statusMovingIncoming, Moved: moved}, nil
 		}
 		if err := os.Rename(filepath.Join(incomingRoot, name), filepath.Join(request.Root, name)); err != nil {
 			return swapReport{}, err
@@ -610,7 +613,7 @@ func swapCommit(request swapRequest) (swapReport, error) {
 		moved++
 	}
 	if !writeCommitMarkerForTests {
-		return swapReport{Status: statusMetadataPending, Originals: plan.Originals, Incoming: plan.Incoming, Moved: moved}, nil
+		return swapReport{Status: statusMetadataPending, Moved: moved}, nil
 	}
 	if err := applyRootMeta(request.Root, plan.Root); err != nil {
 		return swapReport{}, err
@@ -628,7 +631,7 @@ func swapCommit(request swapRequest) (swapReport, error) {
 	if err := syncDir(workDir); err != nil {
 		return swapReport{}, err
 	}
-	return swapReport{Status: statusSwapped, Originals: plan.Originals, Incoming: plan.Incoming, Moved: moved}, nil
+	return swapReport{Status: statusSwapped, Moved: moved}, nil
 }
 
 func applyRootMeta(root string, meta rootMeta) error {
@@ -662,7 +665,7 @@ func swapStatus(request swapRequest) (swapReport, error) {
 	if err != nil {
 		return swapReport{}, err
 	}
-	return swapReport{Status: status, Originals: plan.Originals, Incoming: plan.Incoming}, nil
+	return swapReport{Status: status}, nil
 }
 
 /**
@@ -753,7 +756,7 @@ func swapRollback(request swapRequest) (swapReport, error) {
 			fmt.Fprintf(os.Stderr, "warning: the root modification time was not restored: %v\n", err)
 		}
 	}
-	return swapReport{Status: statusRolledBack, Originals: plan.Originals, Incoming: plan.Incoming}, nil
+	return swapReport{Status: statusRolledBack}, nil
 }
 
 /**
@@ -797,5 +800,5 @@ func swapCleanup(request swapRequest) (swapReport, error) {
 	if err := setTimes(request.Root, mtime, mtime); err != nil {
 		fmt.Fprintf(os.Stderr, "warning: the root modification time was not restored: %v\n", err)
 	}
-	return swapReport{Status: statusCleaned, Originals: plan.Originals, Incoming: plan.Incoming}, nil
+	return swapReport{Status: statusCleaned}, nil
 }

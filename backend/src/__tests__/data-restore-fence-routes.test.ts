@@ -8,15 +8,17 @@
  */
 import fs from 'fs';
 import path from 'path';
+import { randomUUID } from 'crypto';
 import { describe, it, expect, beforeAll, afterAll, afterEach, vi } from 'vitest';
 import request from 'supertest';
 import { setupTestDb, cleanupTestDb, loginAsTestAdmin } from './helpers/setupTestDb';
 import { DataRestoreFenceError } from '../helpers/dataRestoreFenceError';
 
-const { mockGetContainersByStack, mockStartContainer, mockRestartContainer, mockAssertNoEndpointContainers } = vi.hoisted(() => ({
+const { mockGetContainersByStack, mockStartContainer, mockRestartContainer, mockStopContainer, mockAssertNoEndpointContainers } = vi.hoisted(() => ({
   mockGetContainersByStack: vi.fn(),
   mockStartContainer: vi.fn(),
   mockRestartContainer: vi.fn(),
+  mockStopContainer: vi.fn(),
   mockAssertNoEndpointContainers: vi.fn(),
 }));
 
@@ -46,6 +48,7 @@ vi.mock('../services/DockerController', async () => {
         getContainersByStack: mockGetContainersByStack,
         startContainer: mockStartContainer,
         restartContainer: mockRestartContainer,
+        stopContainer: mockStopContainer,
         assertNoDockerEndpointContainers: mockAssertNoEndpointContainers,
       }),
     },
@@ -58,6 +61,33 @@ let authCookie: string;
 
 const VOLUME = 'app-data';
 const fenced = () => new DataRestoreFenceError(VOLUME);
+
+/**
+ * A held fence for a stack, written the way a running overwrite records it: an
+ * intent for the volume plus the container it stopped. The route asks the same
+ * durable store, so this exercises the real refusal, not a mocked one.
+ */
+async function seedHeldFence(stackName: string, projectName = stackName): Promise<void> {
+  const { recoveryDb } = await import('../services/recovery/recoveryDb');
+  const db = recoveryDb();
+  const intentId = randomUUID();
+  // Only the intent and its member decide `isStackFenced`; the operation and
+  // point rows a real admission writes are not needed, so the test seeds the
+  // two tables it exercises and leaves the declarative references unfulfilled.
+  db.pragma('foreign_keys = OFF');
+  try {
+    db.prepare(`INSERT INTO recovery_restore_intents
+      (id, operation_id, point_id, target_mode, target_volume, phase, fence_state, actor, process_epoch, created_at, updated_at)
+      VALUES (?, ?, ?, 'staged_overwrite', ?, 'fenced', 'held', 'admin', 'e', 1, 1)`)
+      .run(intentId, randomUUID(), randomUUID(), `${stackName}-vol`);
+    db.prepare(`INSERT INTO recovery_restore_fence_members
+      (intent_id, container_id, container_name, stack_name, project_name, restart_policy_json, was_running, released_at)
+      VALUES (?, 'c1', ?, ?, ?, '{"Name":"always"}', 1, NULL)`)
+      .run(intentId, `${stackName}-web-1`, stackName, projectName);
+  } finally {
+    db.pragma('foreign_keys = ON');
+  }
+}
 
 beforeAll(async () => {
   tmpDir = await setupTestDb();
@@ -79,8 +109,13 @@ afterEach(async () => {
   vi.clearAllMocks();
   mockGetContainersByStack.mockResolvedValue([{ Id: 'c1', Labels: { 'com.docker.compose.service': 'web' } }]);
   mockAssertNoEndpointContainers.mockResolvedValue(undefined);
+  mockStopContainer.mockResolvedValue(undefined);
   const { StackOpLockService } = await import('../services/StackOpLockService');
   StackOpLockService.resetForTests();
+  const { recoveryDb } = await import('../services/recovery/recoveryDb');
+  const db = recoveryDb();
+  db.prepare('DELETE FROM recovery_restore_fence_members').run();
+  db.prepare('DELETE FROM recovery_restore_intents').run();
 });
 
 describe('a start or restart refused by a restore fence', () => {
@@ -126,4 +161,58 @@ describe('a start or restart refused by a restore fence', () => {
       expect(res.body.results[0].error).toContain(VOLUME);
     });
   }
+});
+
+describe('a service lifecycle refused by the lock a restore holds', () => {
+  it('refuses a service stop while the fence is held', async () => {
+    await seedHeldFence('infra');
+    const res = await request(app)
+      .post('/api/stacks/infra/services/web/stop')
+      .set('Cookie', authCookie)
+      .send({});
+    expect(res.status).toBe(409);
+    expect(res.body.code).toBe('stack_op_in_progress');
+    expect(res.body.inProgress.action).toBe('data_restore');
+    expect(mockStopContainer).not.toHaveBeenCalled();
+  });
+
+  it('refuses a service start and restart before they reach Docker', async () => {
+    await seedHeldFence('infra');
+    for (const action of ['start', 'restart'] as const) {
+      const res = await request(app)
+        .post(`/api/stacks/infra/services/web/${action}`)
+        .set('Cookie', authCookie)
+        .send({});
+      expect(res.status).toBe(409);
+      expect(res.body.code).toBe('stack_op_in_progress');
+      expect(res.body.inProgress.action).toBe('data_restore');
+    }
+    expect(mockStartContainer).not.toHaveBeenCalled();
+    expect(mockRestartContainer).not.toHaveBeenCalled();
+  });
+
+  it('matches the stack by its Compose project name as well as its directory name', async () => {
+    // The route is asked with the project name while the recorded stack directory
+    // is different, which is the case a name comparison would miss.
+    await seedHeldFence('stack-directory', 'infra');
+    const res = await request(app)
+      .post('/api/stacks/infra/services/web/stop')
+      .set('Cookie', authCookie)
+      .send({});
+    expect(res.status).toBe(409);
+    expect(res.body.code).toBe('stack_op_in_progress');
+    expect(mockStopContainer).not.toHaveBeenCalled();
+  });
+
+  it('lets a service stop through once the fence is released', async () => {
+    await seedHeldFence('infra');
+    const { recoveryDb } = await import('../services/recovery/recoveryDb');
+    recoveryDb().prepare("UPDATE recovery_restore_intents SET fence_state = 'released'").run();
+    const res = await request(app)
+      .post('/api/stacks/infra/services/web/stop')
+      .set('Cookie', authCookie)
+      .send({});
+    expect(res.status).toBe(200);
+    expect(mockStopContainer).toHaveBeenCalledWith('c1');
+  });
 });
