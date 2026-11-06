@@ -232,6 +232,7 @@ describe('SecretBundleSheet reveal and import guards', () => {
             changed: 1,
             unchanged: 0,
             keys: [{ key: 'API_KEY', status: 'changed' }, { key: 'NEW_KEY', status: 'added' }],
+            fingerprint: 'f'.repeat(64),
         });
         vi.mocked(applyImport).mockResolvedValue({ version: 4, added: 1, changed: 1, unchanged: 0 });
         renderSheet();
@@ -253,6 +254,7 @@ describe('SecretBundleSheet reveal and import guards', () => {
             stackName: 'visualstack',
             envFileBasename: '.env',
             expectedVersion: 3,
+            expectedFingerprint: 'f'.repeat(64),
             note: undefined,
         });
     });
@@ -273,7 +275,7 @@ describe('SecretBundleSheet reveal and import guards', () => {
 
     it('reloads and clears the preview when the import hits a stale version', async () => {
         vi.mocked(previewImport).mockResolvedValue({
-            added: 1, changed: 0, unchanged: 0, keys: [{ key: 'NEW_KEY', status: 'added' }],
+            added: 1, changed: 0, unchanged: 0, keys: [{ key: 'NEW_KEY', status: 'added' }], fingerprint: 'f'.repeat(64),
         });
         vi.mocked(applyImport).mockRejectedValue(Object.assign(new Error('This bundle changed since you opened it.'), { status: 409 }));
         renderSheet();
@@ -289,5 +291,36 @@ describe('SecretBundleSheet reveal and import guards', () => {
         await waitFor(() => expect(vi.mocked(getSecret)).toHaveBeenCalledTimes(2));
         expect(vi.mocked(toast.error)).toHaveBeenCalledWith(expect.stringMatching(/reloading/i));
         await waitFor(() => expect(screen.queryByText('NEW_KEY')).not.toBeInTheDocument());
+    });
+});
+
+describe('SecretBundleSheet bundle switching', () => {
+    const secondSummary = { ...summary, id: 8, name: 'other-bundle', currentVersion: 1, keyCount: 1 };
+
+    it('drops a conflict reload that lands after the sheet switched bundles', async () => {
+        vi.mocked(patchSecret).mockRejectedValue(Object.assign(new Error('stale'), { status: 409 }));
+        let resolveReload!: (value: SecretDetail) => void;
+        let call = 0;
+        vi.mocked(getSecret).mockImplementation(async (id: number) => {
+            call += 1;
+            if (id === 8) return detail({ id: 8, name: 'other-bundle', currentVersion: 1, keys: [{ key: 'B_KEY', masked: MASK }] });
+            if (call === 1) return detail();
+            return new Promise<SecretDetail>((resolve) => { resolveReload = resolve; });
+        });
+
+        const { rerender } = render(
+            <SecretBundleSheet open onOpenChange={vi.fn()} secret={summary} onSaved={vi.fn()} />,
+        );
+        await screen.findByDisplayValue('API_KEY');
+        await userEvent.type(screen.getByLabelText('Value for API_KEY'), 'late');
+        await userEvent.click(screen.getByRole('button', { name: /^save$/i }));
+        await waitFor(() => expect(vi.mocked(getSecret)).toHaveBeenCalledTimes(2));
+
+        rerender(<SecretBundleSheet open onOpenChange={vi.fn()} secret={secondSummary} onSaved={vi.fn()} />);
+        expect(await screen.findByDisplayValue('B_KEY')).toBeInTheDocument();
+
+        resolveReload(detail());
+        await waitFor(() => expect(screen.queryByDisplayValue('API_KEY')).not.toBeInTheDocument());
+        expect(screen.getByDisplayValue('B_KEY')).toBeInTheDocument();
     });
 });

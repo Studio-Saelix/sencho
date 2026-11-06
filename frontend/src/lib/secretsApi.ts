@@ -50,6 +50,8 @@ export interface SecretImportPreview {
     unchanged: number;
     /** Target keys the bundle does not have are not part of an import preview. */
     keys: Array<SecretDiffClassEntry & { status: Exclude<DiffStatus, 'removed'> }>;
+    /** Digest of the source the preview read; the apply must present the same one. */
+    fingerprint: string;
 }
 
 export interface SecretPushPlanEntry {
@@ -225,7 +227,7 @@ export async function previewImport(id: number, input: ImportSourceInput): Promi
 
 export async function applyImport(
     id: number,
-    input: ImportSourceInput & { expectedVersion: number; note?: string },
+    input: ImportSourceInput & { expectedVersion: number; expectedFingerprint: string; note?: string },
 ): Promise<{ version: number; added: number; changed: number; unchanged: number }> {
     const res = await apiFetch(`/secrets/${id}/import-from-stack`, {
         method: 'POST',

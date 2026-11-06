@@ -307,8 +307,9 @@ describe('SecretsService.readImportOverlay (local node)', () => {
     it('reads the local stack .env into a KV map server-side', async () => {
         const db = DatabaseService.getInstance();
         const localNode = db.getNodes().find(n => n.type === 'local')!;
-        const kv = await SecretsService.getInstance().readImportOverlay(localNode.id, 'demo', '.env');
-        expect(kv).toEqual({ DB_URL: 'postgres://x', API_KEY: 'abc' });
+        const overlay = await SecretsService.getInstance().readImportOverlay(localNode.id, 'demo', '.env');
+        expect(overlay.kv).toEqual({ DB_URL: 'postgres://x', API_KEY: 'abc' });
+        expect(overlay.fingerprint).toMatch(/^[a-f0-9]{64}$/);
     });
 });
 
@@ -491,7 +492,13 @@ describe('Routes /api/secrets Community Admin access', () => {
         const apply = await request(app)
             .post(`/api/secrets/${id}/import-from-stack`)
             .set('Authorization', `Bearer ${adminToken()}`)
-            .send({ nodeId: localNode.id, stackName: 'importstack', envFileBasename: '.env', expectedVersion: 1 });
+            .send({
+                nodeId: localNode.id,
+                stackName: 'importstack',
+                envFileBasename: '.env',
+                expectedVersion: 1,
+                expectedFingerprint: preview.body.fingerprint,
+            });
         expect(apply.status).toBe(200);
         expect(apply.body).toEqual({ version: 2, added: 1, changed: 0, unchanged: 0 });
         expect(JSON.stringify(apply.body)).not.toContain('hello');

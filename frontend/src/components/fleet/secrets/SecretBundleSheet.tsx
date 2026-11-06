@@ -172,14 +172,18 @@ export function SecretBundleSheet({ open, onOpenChange, secret, onSaved }: Props
     // closed or switched bundles is dropped instead of filling the editor.
     const loadTokenRef = useRef(0);
     const importTokenRef = useRef(0);
+    // The bundle the sheet is open for right now. A reload triggered by a save
+    // or import conflict must not fill the editor after the operator moved on.
+    const openSecretIdRef = useRef<number | null>(null);
 
     const loadDetail = useCallback(async (id: number) => {
+        if (openSecretIdRef.current !== id) return;
         const token = ++loadTokenRef.current;
         setLoading(true);
         setLoadError(null);
         try {
             const fresh = await getSecret(id);
-            if (loadTokenRef.current !== token) return;
+            if (loadTokenRef.current !== token || openSecretIdRef.current !== id) return;
             setName(fresh.name);
             setDescription(fresh.description);
             setLoadedDescription(fresh.description);
@@ -189,7 +193,7 @@ export function SecretBundleSheet({ open, onOpenChange, secret, onSaved }: Props
             importTokenRef.current += 1;
             setImportPreview(null);
         } catch (err) {
-            if (loadTokenRef.current !== token) return;
+            if (loadTokenRef.current !== token || openSecretIdRef.current !== id) return;
             const message = err instanceof Error ? err.message : 'Failed to load secret';
             setLoadError(message);
             toast.error(message);
@@ -199,6 +203,7 @@ export function SecretBundleSheet({ open, onOpenChange, secret, onSaved }: Props
     }, []);
 
     useEffect(() => {
+        openSecretIdRef.current = open && secret ? secret.id : null;
         if (!open) {
             // Drop any in-flight detail load; the sheet state must not change
             // after it closes.
@@ -443,6 +448,7 @@ export function SecretBundleSheet({ open, onOpenChange, secret, onSaved }: Props
             const result = await applyImport(secret.id, {
                 ...importPreview.input,
                 expectedVersion,
+                expectedFingerprint: importPreview.preview.fingerprint,
                 note: note || undefined,
             });
             toast.success(`Imported env into v${result.version}`);

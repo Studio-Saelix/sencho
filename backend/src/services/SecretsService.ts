@@ -95,6 +95,8 @@ export interface SecretImportPreview {
     unchanged: number;
     /** Target keys the bundle does not have are not part of an import preview. */
     keys: Array<SecretDiffClassEntry & { status: Exclude<DiffStatus, 'removed'> }>;
+    /** Digest of the source the preview read; the apply must present the same one. */
+    fingerprint: string;
 }
 
 export interface SecretPushPlanEntry {
@@ -164,6 +166,14 @@ export class SecretSourceError extends Error {
     constructor(message: string) {
         super(message);
         this.name = 'SecretSourceError';
+    }
+}
+
+/** The import source changed after the preview the operator reviewed. */
+export class SecretSourceChangedError extends Error {
+    constructor() {
+        super('The env file changed since you previewed it. Preview again before importing.');
+        this.name = 'SecretSourceChangedError';
     }
 }
 
@@ -273,6 +283,11 @@ export function computeDiff(existing: SecretKv, overlay: SecretKv): SecretDiffEn
     return result;
 }
 
+/** Digest of the raw env file the preview read, so an apply can prove it reviewed the same source. */
+function fingerprintSource(text: string): string {
+    return crypto.createHash('sha256').update(text, 'utf-8').digest('hex');
+}
+
 function aggregateDiff(diff: SecretDiffEntry[]): { added: number; changed: number; unchanged: number; removedInformational: number } {
     const r = { added: 0, changed: 0, unchanged: 0, removedInformational: 0 };
     for (const e of diff) {
@@ -303,8 +318,9 @@ function encryptKv(kv: SecretKv): string {
  * version can never be reported (or written over) as an empty one.
  */
 function decryptKv(payload: string): SecretKv {
-    if (!payload) return {};
-    if (!CryptoService.getInstance().isEncrypted(payload)) throw new SecretPayloadError();
+    // A version row always holds ciphertext, even for an empty bundle, so an
+    // empty payload is corruption rather than an empty bundle.
+    if (!payload || !CryptoService.getInstance().isEncrypted(payload)) throw new SecretPayloadError();
     let plaintext: string;
     try {
         plaintext = CryptoService.getInstance().decrypt(payload);
@@ -428,6 +444,11 @@ async function readEnvRemote(node: Node, stackName: string, absolutePath: string
         throw new SecretSourceError(`env file '${path.basename(absolutePath)}' does not exist in stack '${stackName}' on node ${node.name}`);
     }
     if (!res.ok) throw new Error(`failed to read env (HTTP ${res.status})`);
+    // A node answers 200 with an empty body and this header when the stack has
+    // no env file at all. An import must not read that as an empty source.
+    if (!missingAsEmpty && res.headers.get('X-Env-Exists') === 'false') {
+        throw new SecretSourceError(`stack '${stackName}' has no env file on node ${node.name}`);
+    }
     return await res.text();
 }
 
@@ -683,12 +704,12 @@ export class SecretsService {
         });
     }
 
-    async readImportOverlay(nodeId: number, stackName: string, envFileBasename = '.env'): Promise<SecretKv> {
+    async readImportOverlay(nodeId: number, stackName: string, envFileBasename = '.env'): Promise<{ kv: SecretKv; fingerprint: string }> {
         const node = DatabaseService.getInstance().getNodes().find(n => n.id === nodeId);
         if (!node) throw new SecretSourceError(`Node ${nodeId} is not in this fleet`);
         const read = await readExistingEnv(node, stackName, envFileBasename, false);
         if (!read) throw new SecretSourceError(`env file '${envFileBasename}' not found on node ${node.name}`);
-        return parseEnv(read.text);
+        return { kv: parseEnv(read.text), fingerprint: fingerprintSource(read.text) };
     }
 
     /**
@@ -697,13 +718,14 @@ export class SecretsService {
      * entry a preview shows is a key the import would add or change.
      */
     async previewImport(id: number, nodeId: number, stackName: string, envFileBasename = '.env'): Promise<SecretImportPreview> {
-        const overlay = await this.readImportOverlay(nodeId, stackName, envFileBasename);
+        const { kv: overlay, fingerprint } = await this.readImportOverlay(nodeId, stackName, envFileBasename);
         const diff = computeDiff(this.getDecryptedKv(id), overlay);
         const agg = aggregateDiff(diff);
         return {
             added: agg.added,
             changed: agg.changed,
             unchanged: agg.unchanged,
+            fingerprint,
             keys: maskDiff(diff).filter(
                 (entry): entry is SecretDiffClassEntry & { status: Exclude<DiffStatus, 'removed'> } => entry.status !== 'removed',
             ),
@@ -715,11 +737,14 @@ export class SecretsService {
         stackName: string;
         envFileBasename?: string;
         expectedVersion: number;
+        /** Digest the preview answered with; a changed source is refused. */
+        expectedFingerprint: string;
         user: string;
         note?: string;
     }): Promise<{ version: number; added: number; changed: number; unchanged: number }> {
         const basename = input.envFileBasename ?? '.env';
-        const overlay = await this.readImportOverlay(input.nodeId, input.stackName, basename);
+        const { kv: overlay, fingerprint } = await this.readImportOverlay(input.nodeId, input.stackName, basename);
+        if (fingerprint !== input.expectedFingerprint) throw new SecretSourceChangedError();
         const db = DatabaseService.getInstance();
         const current = db.getCurrentSecretVersion(id);
         if (!current) throw new Error('Secret not found');

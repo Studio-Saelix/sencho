@@ -7,6 +7,7 @@ import {
     RevealTargetError,
     SecretOpError,
     SecretPayloadError,
+    SecretSourceChangedError,
     SecretSourceError,
     type SecretPatchOp,
 } from '../services/SecretsService';
@@ -143,6 +144,10 @@ function sendServiceError(res: Response, err: unknown, fallback: string): void {
     }
     if (err instanceof SecretSourceError) {
         res.status(404).json({ error: err.message, code: 'IMPORT_SOURCE_NOT_FOUND' });
+        return;
+    }
+    if (err instanceof SecretSourceChangedError) {
+        res.status(409).json({ error: err.message, code: 'IMPORT_SOURCE_CHANGED' });
         return;
     }
     if (err instanceof SecretPayloadError) {
@@ -401,10 +406,16 @@ secretsRouter.post('/:id/import-from-stack', authMiddleware, async (req: Request
             res.status(400).json({ error: parsed.error });
             return;
         }
-        const { expectedVersion, note } = req.body as { expectedVersion?: unknown; note?: unknown };
+        const { expectedVersion, expectedFingerprint, note } = req.body as {
+            expectedVersion?: unknown; expectedFingerprint?: unknown; note?: unknown;
+        };
         const version = parseVersion(expectedVersion);
         if (version === null) {
             res.status(400).json({ error: 'expectedVersion must be the version you loaded' });
+            return;
+        }
+        if (typeof expectedFingerprint !== 'string' || !/^[a-f0-9]{64}$/.test(expectedFingerprint)) {
+            res.status(400).json({ error: 'expectedFingerprint must be the digest the preview answered with' });
             return;
         }
         if (note !== undefined && typeof note !== 'string') {
@@ -421,6 +432,7 @@ secretsRouter.post('/:id/import-from-stack', authMiddleware, async (req: Request
             stackName: parsed.stackName,
             envFileBasename: parsed.envFileBasename,
             expectedVersion: version,
+            expectedFingerprint,
             user: getActor(req),
             note: typeof note === 'string' ? note : undefined,
         });

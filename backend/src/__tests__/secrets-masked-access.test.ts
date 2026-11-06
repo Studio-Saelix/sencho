@@ -484,6 +484,21 @@ describe('an unreadable stored payload is an error, never an empty bundle', () =
         expect(DatabaseService.getInstance().listSecretVersions(bundleId)).toHaveLength(1);
     });
 
+    it('treats an empty stored payload as unreadable, not as an empty bundle', async () => {
+        corruptPayload('');
+        const read = await request(app)
+            .get(`/api/secrets/${bundleId}`)
+            .set('Authorization', `Bearer ${adminToken()}`);
+        expect(read.status).toBe(500);
+        expect(read.body.code).toBe('SECRET_PAYLOAD_UNREADABLE');
+        const patch = await request(app)
+            .patch(`/api/secrets/${bundleId}`)
+            .set('Authorization', `Bearer ${adminToken()}`)
+            .send({ expectedVersion: 1, ops: [{ op: 'set', key: 'C', value: 'c' }] });
+        expect(patch.status).toBe(500);
+        expect(DatabaseService.getInstance().getSecret(bundleId)!.current_version).toBe(1);
+    });
+
     it('refuses a reveal grant rather than blaming the key', async () => {
         corruptPayload('enc:00112233:44556677:aabbcc');
         const res = await request(app)
@@ -511,10 +526,78 @@ describe('an import source that does not exist is reported, not read as empty', 
         const res = await request(app)
             .post(`/api/secrets/${bundleId}/import-from-stack`)
             .set('Authorization', `Bearer ${adminToken()}`)
-            .send({ nodeId: localNode.id, stackName: 'no-such-stack', envFileBasename: '.env', expectedVersion: 1 });
+            .send({
+                nodeId: localNode.id,
+                stackName: 'no-such-stack',
+                envFileBasename: '.env',
+                expectedVersion: 1,
+                expectedFingerprint: 'a'.repeat(64),
+            });
         expect(res.status).toBe(404);
         expect(res.body.code).toBe('IMPORT_SOURCE_NOT_FOUND');
         expect(SecretsService.getInstance().getDetail(bundleId)!.currentVersion).toBe(1);
+    });
+
+    it('refuses an apply whose source changed after the preview', async () => {
+        const composeDir = process.env.COMPOSE_DIR!;
+        const stackDir = path.join(composeDir, 'moving-import');
+        fs.mkdirSync(stackDir, { recursive: true });
+        fs.writeFileSync(path.join(stackDir, '.env'), 'FIRST=one\n');
+        fs.writeFileSync(path.join(stackDir, 'compose.yaml'), 'services:\n  app:\n    image: nginx\n');
+        const localNode = DatabaseService.getInstance().getNodes().find(n => n.type === 'local')!;
+
+        const preview = await request(app)
+            .post(`/api/secrets/${bundleId}/import-from-stack/preview`)
+            .set('Authorization', `Bearer ${adminToken()}`)
+            .send({ nodeId: localNode.id, stackName: 'moving-import', envFileBasename: '.env' });
+        expect(preview.status).toBe(200);
+        expect(preview.body.fingerprint).toMatch(/^[a-f0-9]{64}$/);
+
+        fs.writeFileSync(path.join(stackDir, '.env'), 'FIRST=one\nSNUCK_IN=two\n');
+        const apply = await request(app)
+            .post(`/api/secrets/${bundleId}/import-from-stack`)
+            .set('Authorization', `Bearer ${adminToken()}`)
+            .send({
+                nodeId: localNode.id,
+                stackName: 'moving-import',
+                envFileBasename: '.env',
+                expectedVersion: 1,
+                expectedFingerprint: preview.body.fingerprint,
+            });
+        expect(apply.status).toBe(409);
+        expect(apply.body.code).toBe('IMPORT_SOURCE_CHANGED');
+        expect(SecretsService.getInstance().getDecryptedKv(bundleId)).toEqual({
+            API_KEY: 'super-secret-api',
+            DB_PASSWORD: 'hunter2',
+        });
+        expect(DatabaseService.getInstance().getSecret(bundleId)!.current_version).toBe(1);
+    });
+
+    it('applies an import that presents the previewed fingerprint', async () => {
+        const composeDir = process.env.COMPOSE_DIR!;
+        const stackDir = path.join(composeDir, 'steady-import');
+        fs.mkdirSync(stackDir, { recursive: true });
+        fs.writeFileSync(path.join(stackDir, '.env'), 'STABLE=value\n');
+        fs.writeFileSync(path.join(stackDir, 'compose.yaml'), 'services:\n  app:\n    image: nginx\n');
+        const localNode = DatabaseService.getInstance().getNodes().find(n => n.type === 'local')!;
+
+        const preview = await request(app)
+            .post(`/api/secrets/${bundleId}/import-from-stack/preview`)
+            .set('Authorization', `Bearer ${adminToken()}`)
+            .send({ nodeId: localNode.id, stackName: 'steady-import', envFileBasename: '.env' });
+        const apply = await request(app)
+            .post(`/api/secrets/${bundleId}/import-from-stack`)
+            .set('Authorization', `Bearer ${adminToken()}`)
+            .send({
+                nodeId: localNode.id,
+                stackName: 'steady-import',
+                envFileBasename: '.env',
+                expectedVersion: 1,
+                expectedFingerprint: preview.body.fingerprint,
+            });
+        expect(apply.status).toBe(200);
+        expect(apply.body.added).toBe(1);
+        expect(SecretsService.getInstance().getDecryptedKv(bundleId).STABLE).toBe('value');
     });
 
     it('404s an import from a node that is not in the fleet', async () => {
