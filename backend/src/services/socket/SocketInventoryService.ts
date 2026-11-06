@@ -489,6 +489,11 @@ function classifyRow(
   },
 ): ClassifiedRow | null {
   const socketMounts = socketMountsFor(row, ctx.endpointBindSource);
+  // An unknown mount type is a possible bind, so the mount is kept visible. It
+  // is not proof of a direct consumer: a tmpfs or another mount kind the daemon
+  // mislabeled would look identical, so a socket mount whose type could not be
+  // read stays undetermined rather than asserted.
+  const unreadableMountType = socketMounts.some(mount => mount.type === 'unknown');
   const imageProvider = socketProxyProviderForImage(row.image);
   const nameHint = hasSocketProxyNameHint([row.name, row.service]);
   const apiGroups = [...row.apiGroups];
@@ -601,13 +606,14 @@ function classifyRow(
       });
     }
     return buildClassified(row, {
-      role: 'direct-socket-consumer',
-      classification: 'detected',
+      role: unreadableMountType ? 'undetermined' : 'direct-socket-consumer',
+      classification: unreadableMountType ? 'unknown' : 'detected',
       providerType: null,
       socketMounts,
       apiGroups,
       evidence: [
         'socket-bind-mount',
+        ...(unreadableMountType ? ['socket-mount-type-unknown'] : []),
         ...(readOnlyMount ? [] : ['socket-mount-writable']),
       ],
       infrastructureLabel,

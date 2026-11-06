@@ -117,9 +117,14 @@ async function rowsFrom(
 }
 
 describe('socket inventory malformed mount metadata', () => {
-  it.each(['', 'BIND', 'bind ', 'mystery'])(
+  it.each([
+    ['', 'undetermined'],
+    ['BIND', 'direct-socket-consumer'],
+    ['bind ', 'direct-socket-consumer'],
+    ['mystery', 'undetermined'],
+  ] as const)(
     'retains a socket consumer whose mount type is %j and reports partial',
-    async type => {
+    async (type, expectedRole) => {
       const rows = await rowsFrom(listed(), inspected({
         Mounts: [{ Type: type, Source: SOCKET, Destination: SOCKET, RW: false }],
       }));
@@ -127,13 +132,25 @@ describe('socket inventory malformed mount metadata', () => {
 
       const inventory = inventoryOf(rows);
       expect(inventory.containers).toHaveLength(1);
+      // The mount is kept as possible socket access. A type that only needed
+      // casing or whitespace canonicalized is still a proven bind; a type that
+      // could not be read at all is not proof of a direct consumer, so that row
+      // stays undetermined.
       expect(inventory.containers[0]).toMatchObject({
-        role: 'direct-socket-consumer',
+        role: expectedRole,
+        classification: expectedRole === 'undetermined' ? 'unknown' : 'detected',
         metadataTruncated: true,
       });
       expect(inventory.containers[0].socketMounts).toEqual([
         { source: SOCKET, destination: SOCKET, readOnly: true },
       ]);
+      if (expectedRole === 'undetermined') {
+        expect(inventory.containers[0].evidence).toContain('socket-mount-type-unknown');
+        expect(inventory.counts.undetermined).toBe(1);
+      } else {
+        expect(inventory.containers[0].evidence).not.toContain('socket-mount-type-unknown');
+        expect(inventory.counts.directSocketConsumers).toBe(1);
+      }
       expect(inventory.status).toBe('partial');
     },
   );
@@ -366,8 +383,62 @@ describe('socket inventory malformed port metadata', () => {
     },
   );
 
-  it('does not turn an unreadable inspect address into a wildcard when the listing address is also unreadable', async () => {
-    const rows = await rowsFrom(
+  it.each(['0.0.0.0garbage', '127.0.0.1:2375', 'localhost', ' 0.0.0.0'])(
+    'does not present an unparseable inspect address as a binding address: %j',
+    async HostIp => {
+      const rows = await rowsFrom(listed({ Ports: [] }), inspected({
+        Mounts: [{ Type: 'bind', Source: SOCKET, Destination: SOCKET, RW: false }],
+        NetworkSettings: {
+          Ports: { '2375/tcp': [{ HostIp, HostPort: '8080' }] },
+          Networks: {},
+        },
+      }));
+      expect(rows[0].ports).toEqual([
+        { privatePort: 2375, publicPort: 8080, ip: null, protocol: 'tcp' },
+      ]);
+      expect(rows[0].metadataTruncated).toBe(true);
+
+      const inventory = inventoryOf(rows);
+      expect(inventory.containers[0].publishedPorts[0]).toMatchObject({
+        ip: null,
+        allInterfaces: false,
+      });
+      expect(inventory.status).toBe('partial');
+    },
+  );
+
+  it.each(['0.0.0.0garbage', 'localhost'])(
+    'does not present an unparseable listing address as a binding address: %j',
+    async IP => {
+      const rows = await rowsFrom(
+        listed({ Ports: [{ IP, PrivatePort: 2375, PublicPort: 8080, Type: 'tcp' }] }),
+        new Error('inspect unavailable'),
+      );
+      expect(rows[0].ports).toEqual([
+        { privatePort: 2375, publicPort: 8080, ip: null, protocol: 'tcp' },
+      ]);
+      expect(rows[0].metadataTruncated).toBe(true);
+      expect(inventoryOf(rows).status).toBe('partial');
+    },
+  );
+
+  it.each(['::1', '::', '172.18.0.2'])(
+    'keeps a readable binding address: %j',
+    async HostIp => {
+      const rows = await rowsFrom(listed({ Ports: [] }), inspected({
+        NetworkSettings: {
+          Ports: { '2375/tcp': [{ HostIp, HostPort: '8080' }] },
+          Networks: {},
+        },
+      }));
+      expect(rows[0].ports).toEqual([
+        { privatePort: 2375, publicPort: 8080, ip: HostIp, protocol: 'tcp' },
+      ]);
+      expect(rows[0].metadataTruncated).toBe(false);
+    },
+  );
+
+  it('does not turn an unreadable inspect address into a wildcard when the listing address is also unreadable', async () => {    const rows = await rowsFrom(
       listed({ Ports: [{ IP: 5, PrivatePort: 2375, PublicPort: 8080, Type: 'tcp' }] }),
       inspected({
         NetworkSettings: {
@@ -528,17 +599,37 @@ describe('socket inventory malformed label and network metadata', () => {
         Networks: {
           net1: { NetworkID: 5, IPAddress: {} },
           net2: { NetworkID: 'n2', IPAddress: '10.0.0.2' },
+          net3: { NetworkID: 'n3', IPAddress: '10.0.0.2garbage' },
         },
       },
     }));
     expect(rows[0].networks).toEqual([
       { name: 'net1', id: null, ipAddress: null },
       { name: 'net2', id: 'n2', ipAddress: '10.0.0.2' },
+      { name: 'net3', id: 'n3', ipAddress: null },
     ]);
     expect(rows[0].metadataTruncated).toBe(true);
 
     const inventory = inventoryOf(rows);
     expect(inventory.containers[0].metadataTruncated).toBe(true);
     expect(inventory.status).toBe('partial');
+  });
+
+  it('marks present but unreadable inspect scalars incomplete and keeps the listing fallback', async () => {
+    const rows = await rowsFrom(listed(), inspected({
+      Image: 9,
+      Config: { Image: 7, Labels: {}, Env: [], ExposedPorts: {} },
+      State: { Status: 5, Health: { Status: {} } },
+    }));
+    // The listing values are still valid evidence, but the row cannot read
+    // complete when inspect answered with an unreadable value.
+    expect(rows[0]).toMatchObject({
+      state: 'running',
+      image: 'alpine:3',
+      imageId: 'sha256:image1',
+      health: null,
+      metadataTruncated: true,
+    });
+    expect(inventoryOf(rows).status).toBe('partial');
   });
 });

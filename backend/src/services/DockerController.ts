@@ -1,4 +1,5 @@
 import Docker from 'dockerode';
+import { isIP } from 'node:net';
 import { DockerEndpointProtectedError } from '../helpers/dockerEndpointError';
 import WebSocket from 'ws';
 import { execFile } from 'child_process';
@@ -2455,6 +2456,10 @@ class DockerController {
       let metadataTruncated = rawListedLabels > 256 || rawListedPorts > 64 || rawListedNetworks > 32
         || listedLabels.incomplete || listedPorts.incomplete || listedNetworks.incomplete;
       let inspectFailed = id.length === 0;
+      // Inspect fields that are present but unreadable are listed fallbacks, not
+      // facts: the row still reads incomplete rather than complete with a
+      // silently substituted value.
+      let inspectFieldIncomplete = false;
 
       if (id) {
         try {
@@ -2463,10 +2468,20 @@ class DockerController {
           const stateInfo = asRecord(info.State);
           const inspectedLabels = normalizeDockerLabels(config?.Labels);
           labels = { ...listedLabels.labels, ...inspectedLabels.labels };
+          if (stateInfo?.Status !== undefined && stateInfo?.Status !== null
+            && typeof stateInfo.Status !== 'string') inspectFieldIncomplete = true;
           state = readContainerString(stateInfo?.Status) ?? state;
+          if (config?.Image !== undefined && config?.Image !== null
+            && typeof config.Image !== 'string') inspectFieldIncomplete = true;
           image = readContainerString(config?.Image) ?? image;
+          if (info.Image !== undefined && info.Image !== null
+            && typeof info.Image !== 'string') inspectFieldIncomplete = true;
           imageId = readContainerString(info.Image) ?? imageId;
-          health = readContainerString(asRecord(stateInfo?.Health)?.Status);
+          const rawHealth = asRecord(stateInfo?.Health)?.Status;
+          if (rawHealth !== undefined && rawHealth !== null && typeof rawHealth !== 'string') {
+            inspectFieldIncomplete = true;
+          }
+          health = readContainerString(rawHealth);
           const inspectedMounts = normalizeDockerMounts(info.Mounts);
           mounts = inspectedMounts.mounts;
           const inspectedExposed = normalizeDockerExposedPorts(config?.ExposedPorts);
@@ -2494,7 +2509,7 @@ class DockerController {
           const rawPorts = Object.keys(asRecord(asRecord(info.NetworkSettings)?.Ports) ?? {}).length;
           metadataTruncated = metadataTruncated || inspectedPorts.truncated || inspectedPorts.incomplete
             || inspectedMounts.incomplete || inspectedLabels.incomplete || inspectedExposed.incomplete
-            || inspectedNetworks.incomplete
+            || inspectedNetworks.incomplete || inspectFieldIncomplete
             || !Array.isArray(info.Mounts)
             || rawMounts > 64 || rawLabels > 256
             || rawNetworks > 32 || rawExposed > 64 || rawPorts > 64
@@ -3933,6 +3948,18 @@ function readContainerString(value: unknown): string | null {
   return typeof value === 'string' ? value : null;
 }
 
+/**
+ * A host address Docker reports for a binding or network: the empty string (a
+ * wildcard binding, or a network with no address) or a literal IP. Any other
+ * string is malformed metadata, not an address, and must never be presented as
+ * one: null tells the reader it could not be read.
+ */
+function readBindingAddress(value: unknown): string | null {
+  if (typeof value !== 'string') return null;
+  if (value === '') return '';
+  return isIP(value) === 0 ? null : value;
+}
+
 const MIN_TCP_PORT = 1;
 const MAX_TCP_PORT = 65535;
 
@@ -4097,10 +4124,10 @@ function normalizeDockerPorts(value: unknown): NormalizedPorts {
       publicPort = readPortNumber(port.PublicPort);
       if (publicPort === null) incomplete = true;
     }
-    const rawIp = readContainerString(port.IP);
-    // A published binding always carries its host address. Missing or
-    // non-string metadata must not become the empty string, which the response
-    // would report as a proven wildcard binding.
+    const rawIp = readBindingAddress(port.IP);
+    // A published binding always carries its host address. Missing, non-string,
+    // or unparseable metadata must not become the empty string, which the
+    // response would report as a proven wildcard binding.
     if (publicPort !== null && rawIp === null) incomplete = true;
     if (port.IP !== undefined && port.IP !== null && rawIp === null) incomplete = true;
     const rawProtocol = readContainerString(port.Type);
@@ -4204,10 +4231,10 @@ function normalizeInspectPorts(
         // writes an empty string for that case, so this is unreadable metadata.
         incomplete = true;
       }
-      const rawIp = readContainerString(host.HostIp);
-      // A published binding needs a readable address. Missing or non-string
-      // metadata must never become the empty string, which would read as a
-      // proven wildcard binding.
+      const rawIp = readBindingAddress(host.HostIp);
+      // A published binding needs a readable address. Missing, non-string, or
+      // unparseable metadata must never become the empty string, which would
+      // read as a proven wildcard binding.
       if (publicPort !== null && rawIp === null) incomplete = true;
       if (host.HostIp !== undefined && host.HostIp !== null && rawIp === null) incomplete = true;
       ports.push({
@@ -4306,8 +4333,9 @@ function normalizeDockerNetworks(value: unknown): NormalizedNetworks {
     const network = asRecord(raw);
     if (!network) incomplete = true;
     const id = readContainerString(network?.NetworkID);
-    const ipAddress = readContainerString(network?.IPAddress);
-    // A present field of the wrong type is unreadable, not a null value.
+    const ipAddress = readBindingAddress(network?.IPAddress);
+    // A present field of the wrong type or an unparseable address is unreadable,
+    // not a null value.
     if (network && network.NetworkID !== undefined && network.NetworkID !== null && id === null) {
       incomplete = true;
     }
