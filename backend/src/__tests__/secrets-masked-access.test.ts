@@ -23,6 +23,7 @@ let app: import('express').Express;
 let DatabaseService: typeof import('../services/DatabaseService').DatabaseService;
 let SecretVersionConflictError: typeof import('../services/DatabaseService').SecretVersionConflictError;
 let SecretsService: typeof import('../services/SecretsService').SecretsService;
+let CryptoService: typeof import('../services/CryptoService').CryptoService;
 let parseEnv: typeof import('../services/SecretsService').parseEnv;
 
 function adminToken(): string {
@@ -64,6 +65,7 @@ beforeAll(async () => {
     tmpDir = await setupTestDb();
     ({ DatabaseService, SecretVersionConflictError } = await import('../services/DatabaseService'));
     ({ SecretsService, parseEnv } = await import('../services/SecretsService'));
+    ({ CryptoService } = await import('../services/CryptoService'));
     ({ app } = await import('../index'));
 });
 
@@ -323,6 +325,17 @@ describe('PATCH /api/secrets/:id writes one key and keeps the rest', () => {
         expect(SecretsService.getInstance().listVersions(bundleId)).toHaveLength(1);
     });
 
+    it('accepts a description-only change with no ops field', async () => {
+        const res = await patch({ expectedVersion: 1, description: 'description without ops' });
+        expect(res.status).toBe(200);
+        expect(res.body.version).toBe(1);
+        expect(SecretsService.getInstance().getDetail(bundleId)!.description).toBe('description without ops');
+        expect(SecretsService.getInstance().getDecryptedKv(bundleId)).toEqual({
+            API_KEY: 'super-secret-api',
+            DB_PASSWORD: 'hunter2',
+        });
+    });
+
     it('refuses a description-only change based on a stale version', async () => {
         expect((await patch({ expectedVersion: 1, ops: [{ op: 'set', key: 'API_KEY', value: 'first' }] })).status).toBe(200);
         const stale = await patch({ expectedVersion: 1, description: 'late description', ops: [] });
@@ -519,6 +532,79 @@ describe('an unreadable stored payload is an error, never an empty bundle', () =
         expect(res.status).toBe(500);
         expect(res.body.code).toBe('SECRET_PAYLOAD_UNREADABLE');
     });
+
+    it('names a recovery action that exists', async () => {
+        corruptPayload('enc:00112233:44556677:aabbcc');
+        const read = await request(app)
+            .get(`/api/secrets/${bundleId}`)
+            .set('Authorization', `Bearer ${adminToken()}`);
+        expect(read.status).toBe(500);
+        expect(read.body.error).toMatch(/Replace the bundle's values/i);
+        expect(read.body.error).not.toMatch(/Restore a version|re-save/i);
+    });
+
+    it('recovers by replacing the whole payload without reading the old one', async () => {
+        corruptPayload('enc:00112233:44556677:aabbcc');
+        const replace = await request(app)
+            .post(`/api/secrets/${bundleId}/replace`)
+            .set('Authorization', `Bearer ${adminToken()}`)
+            .send({ expectedVersion: 1, kv: { RECOVERED: 'restored', SECOND: 'two' }, description: 'recovered bundle', note: 'recover corrupt payload' });
+        expect(replace.status).toBe(200);
+        expect(replace.body.version).toBe(2);
+
+        const detail = await request(app)
+            .get(`/api/secrets/${bundleId}`)
+            .set('Authorization', `Bearer ${adminToken()}`);
+        expect(detail.status).toBe(200);
+        expect(detail.body.currentVersion).toBe(2);
+        expect(detail.body.description).toBe('recovered bundle');
+        expect(detail.body.keys.map((k: { key: string }) => k.key)).toEqual(['RECOVERED', 'SECOND']);
+        expect(SecretsService.getInstance().getDecryptedKv(bundleId)).toEqual({ RECOVERED: 'restored', SECOND: 'two' });
+        // The corrupt version stays in history; the replacement is a new version.
+        expect(DatabaseService.getInstance().listSecretVersions(bundleId)).toHaveLength(2);
+    });
+
+    it('refuses a replace on a readable bundle and on a stale version', async () => {
+        const readable = await request(app)
+            .post(`/api/secrets/${bundleId}/replace`)
+            .set('Authorization', `Bearer ${adminToken()}`)
+            .send({ expectedVersion: 1, kv: { ONLY: 'one' } });
+        expect(readable.status).toBe(400);
+        expect(SecretsService.getInstance().getDecryptedKv(bundleId)).toEqual({
+            API_KEY: 'super-secret-api',
+            DB_PASSWORD: 'hunter2',
+        });
+
+        corruptPayload('enc:00112233:44556677:aabbcc');
+        const stale = await request(app)
+            .post(`/api/secrets/${bundleId}/replace`)
+            .set('Authorization', `Bearer ${adminToken()}`)
+            .send({ expectedVersion: 99, kv: { ONLY: 'one' } });
+        expect(stale.status).toBe(409);
+        expect(stale.body.code).toBe('VERSION_CONFLICT');
+        expect(DatabaseService.getInstance().getSecret(bundleId)!.current_version).toBe(1);
+    });
+
+    it('answers a coded 500 on push preview and push, and writes nothing', async () => {
+        corruptPayload('enc:00112233:44556677:aabbcc');
+        const localNode = DatabaseService.getInstance().getNodes().find(n => n.type === 'local')!;
+        const body = {
+            selector: { type: 'nodes', ids: [localNode.id] },
+            stackName: 'unreadable-push',
+            envFileBasename: '.env',
+        };
+        for (const path of [`/api/secrets/${bundleId}/push/preview`, `/api/secrets/${bundleId}/push`]) {
+            const res = await request(app)
+                .post(path)
+                .set('Authorization', `Bearer ${adminToken()}`)
+                .send(body);
+            expect(res.status).toBe(500);
+            expect(res.body.code).toBe('SECRET_PAYLOAD_UNREADABLE');
+            expect(JSON.stringify(res.body)).not.toContain('super-secret-api');
+        }
+        expect(DatabaseService.getInstance().listSecretPushes(bundleId)).toHaveLength(0);
+        expect(DatabaseService.getInstance().getSecret(bundleId)!.current_version).toBe(1);
+    });
 });
 
 describe('an import source that does not exist is reported, not read as empty', () => {
@@ -622,10 +708,38 @@ describe('an import source that does not exist is reported, not read as empty', 
 });
 
 describe('hostile key names and escape attempts are refused', () => {
-    it('refuses a prototype key on set, remove, or rename', async () => {
+    /** Seed a version that already stores `__proto__`, as a pre-fix bundle does. */
+    function seedStoredPrototypeKey(name: string): number {
+        const db = DatabaseService.getInstance();
+        const { id } = SecretsService.getInstance().create({
+            name,
+            kv: { API_KEY: 'value' },
+            user: TEST_USERNAME,
+        });
+        const encryptedPayload = CryptoService.getInstance()
+            .encrypt(JSON.stringify(Object.fromEntries([['__proto__', 'stored'], ['API_KEY', 'value']])));
+        db.updateSecretWithVersion({
+            secretId: id,
+            description: null,
+            encryptedPayload,
+            keyCount: 2,
+            createdBy: TEST_USERNAME,
+            note: '',
+            expectedVersion: 1,
+        });
+        return id;
+    }
+
+    it('refuses a prototype key on create, set, or rename-to', async () => {
+        const created = await request(app)
+            .post('/api/secrets')
+            .set('Authorization', `Bearer ${adminToken()}`)
+            .send({ name: 'prototype-create', kv: Object.fromEntries([['__proto__', 'polluted'], ['OK', '1']]) });
+        expect(created.status).toBe(400);
+        expect(created.body.error).toMatch(/Reserved key/);
+
         for (const op of [
             { op: 'set', key: '__proto__', value: 'polluted' },
-            { op: 'remove', key: '__proto__' },
             { op: 'rename', from: 'API_KEY', to: '__proto__' },
         ]) {
             const res = await request(app)
@@ -641,11 +755,63 @@ describe('hostile key names and escape attempts are refused', () => {
         });
     });
 
+    it('removes or renames away an already stored prototype key', async () => {
+        const id = seedStoredPrototypeKey('legacy-rename-bundle');
+        expect(Object.keys(SecretsService.getInstance().getDecryptedKv(id)).sort()).toEqual(['API_KEY', '__proto__']);
+
+        const renamed = await request(app)
+            .patch(`/api/secrets/${id}`)
+            .set('Authorization', `Bearer ${adminToken()}`)
+            .send({ expectedVersion: 2, ops: [{ op: 'rename', from: '__proto__', to: 'LEGACY_PROTO' }] });
+        expect(renamed.status).toBe(200);
+        expect(SecretsService.getInstance().getDecryptedKv(id)).toEqual({ API_KEY: 'value', LEGACY_PROTO: 'stored' });
+
+        const legacyAgain = seedStoredPrototypeKey('legacy-remove-bundle');
+        const removed = await request(app)
+            .patch(`/api/secrets/${legacyAgain}`)
+            .set('Authorization', `Bearer ${adminToken()}`)
+            .send({ expectedVersion: 2, ops: [{ op: 'remove', key: '__proto__' }] });
+        expect(removed.status).toBe(200);
+        expect(SecretsService.getInstance().getDecryptedKv(legacyAgain)).toEqual({ API_KEY: 'value' });
+    });
+
     it('keeps a prototype-shaped key from an env file as data', () => {
         const kv = parseEnv('__proto__=stored\nNORMAL=value\n');
         expect(Object.keys(kv).sort()).toEqual(['NORMAL', '__proto__']);
         expect(kv['__proto__']).toBe('stored');
         expect(({} as Record<string, unknown>).stored).toBeUndefined();
+    });
+
+    it('refuses an env file that introduces a prototype key on preview and apply', async () => {
+        const composeDir = process.env.COMPOSE_DIR!;
+        const stackDir = path.join(composeDir, 'prototype-import');
+        fs.mkdirSync(stackDir, { recursive: true });
+        fs.writeFileSync(path.join(stackDir, '.env'), '__proto__=stored\nNORMAL=value\n');
+        fs.writeFileSync(path.join(stackDir, 'compose.yaml'), 'services:\n  app:\n    image: nginx\n');
+        const localNode = DatabaseService.getInstance().getNodes().find(n => n.type === 'local')!;
+
+        const preview = await request(app)
+            .post(`/api/secrets/${bundleId}/import-from-stack/preview`)
+            .set('Authorization', `Bearer ${adminToken()}`)
+            .send({ nodeId: localNode.id, stackName: 'prototype-import', envFileBasename: '.env' });
+        expect(preview.status).toBe(400);
+        expect(preview.body.error).toMatch(/Reserved key/);
+
+        const apply = await request(app)
+            .post(`/api/secrets/${bundleId}/import-from-stack`)
+            .set('Authorization', `Bearer ${adminToken()}`)
+            .send({
+                nodeId: localNode.id,
+                stackName: 'prototype-import',
+                envFileBasename: '.env',
+                expectedVersion: 1,
+                expectedFingerprint: 'a'.repeat(64),
+            });
+        expect(apply.status).toBe(400);
+        expect(SecretsService.getInstance().getDecryptedKv(bundleId)).toEqual({
+            API_KEY: 'super-secret-api',
+            DB_PASSWORD: 'hunter2',
+        });
     });
 
     it('refuses an env file path that escapes the compose root', async () => {
@@ -667,15 +833,11 @@ describe('hostile key names and escape attempts are refused', () => {
         expect(JSON.stringify(res.body)).not.toContain('STOLEN');
     });
 
-    it('keeps a stored env key named like a prototype slot as data', () => {
-        const kv: Record<string, string> = {};
-        Object.defineProperty(kv, '__proto__', { value: 'stored', enumerable: true, writable: true, configurable: true });
-        const { id } = SecretsService.getInstance().create({
-            name: 'prototype-key-bundle',
-            kv,
-            user: TEST_USERNAME,
-        });
-        expect(SecretsService.getInstance().getDecryptedKv(id)).toEqual(kv);
+    it('keeps a legacy stored prototype key as data, not a prototype slot', () => {
+        const id = seedStoredPrototypeKey('prototype-key-bundle');
+        const kv = SecretsService.getInstance().getDecryptedKv(id);
+        expect(Object.keys(kv).sort()).toEqual(['API_KEY', '__proto__']);
+        expect(kv['__proto__']).toBe('stored');
         expect(({} as Record<string, unknown>).stored).toBeUndefined();
     });
 
@@ -702,6 +864,44 @@ describe('hostile key names and escape attempts are refused', () => {
             CONSTRUCTOR: 'kept',
             API_KEY: 'value',
         });
+    });
+
+    it('answers a client error when the env file is a symlink out of the compose root', async () => {
+        const composeDir = process.env.COMPOSE_DIR!;
+        const stackDir = path.join(composeDir, 'symlink-import');
+        fs.mkdirSync(stackDir, { recursive: true });
+        const outside = path.join(composeDir, '..', 'outside-symlink.env');
+        fs.writeFileSync(outside, 'STOLEN=value\n');
+        fs.symlinkSync(outside, path.join(stackDir, '.env'));
+        fs.writeFileSync(
+            path.join(stackDir, 'compose.yaml'),
+            'services:\n  app:\n    image: nginx\n    env_file:\n      - .env\n',
+        );
+        const localNode = DatabaseService.getInstance().getNodes().find(n => n.type === 'local')!;
+
+        const preview = await request(app)
+            .post(`/api/secrets/${bundleId}/import-from-stack/preview`)
+            .set('Authorization', `Bearer ${adminToken()}`)
+            .send({ nodeId: localNode.id, stackName: 'symlink-import', envFileBasename: '.env' });
+        expect(preview.status).toBe(400);
+        expect(preview.body.code).toBe('IMPORT_SOURCE_REFUSED');
+        expect(JSON.stringify(preview.body)).not.toContain('STOLEN');
+
+        const pushPreview = await request(app)
+            .post(`/api/secrets/${bundleId}/push/preview`)
+            .set('Authorization', `Bearer ${adminToken()}`)
+            .send({ selector: { type: 'nodes', ids: [localNode.id] }, stackName: 'symlink-import', envFileBasename: '.env' });
+        expect(pushPreview.status).toBe(200);
+        expect(pushPreview.body[0].reachable).toBe(false);
+        expect(JSON.stringify(pushPreview.body)).not.toContain('STOLEN');
+
+        const push = await request(app)
+            .post(`/api/secrets/${bundleId}/push`)
+            .set('Authorization', `Bearer ${adminToken()}`)
+            .send({ selector: { type: 'nodes', ids: [localNode.id] }, stackName: 'symlink-import', envFileBasename: '.env' });
+        expect(push.status).toBe(200);
+        expect(push.body.results[0].status).toBe('failed');
+        expect(JSON.stringify(push.body)).not.toContain('STOLEN');
     });
 
     it('refuses an env file in a sibling directory that shares the root name prefix', async () => {

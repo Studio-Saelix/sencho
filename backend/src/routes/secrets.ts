@@ -9,6 +9,7 @@ import {
     SecretPayloadError,
     SecretSourceChangedError,
     SecretSourceError,
+    SecretSourceRefusedError,
     type SecretPatchOp,
 } from '../services/SecretsService';
 import { DatabaseService, SecretVersionConflictError, type BlueprintSelector } from '../services/DatabaseService';
@@ -158,6 +159,10 @@ function sendServiceError(res: Response, err: unknown, fallback: string): void {
         res.status(404).json({ error: err.message, code: 'IMPORT_SOURCE_NOT_FOUND' });
         return;
     }
+    if (err instanceof SecretSourceRefusedError) {
+        res.status(400).json({ error: err.message, code: 'IMPORT_SOURCE_REFUSED' });
+        return;
+    }
     if (err instanceof SecretSourceChangedError) {
         res.status(409).json({ error: err.message, code: 'IMPORT_SOURCE_CHANGED' });
         return;
@@ -165,7 +170,7 @@ function sendServiceError(res: Response, err: unknown, fallback: string): void {
     if (err instanceof SecretPayloadError) {
         console.error(`[Secrets] Unreadable bundle payload (${fallback})`);
         res.status(500).json({
-            error: 'The stored bundle payload could not be read. Restore a version or re-save the bundle before editing it.',
+            error: 'The stored bundle payload could not be read. Replace the bundle\'s values to recover it.',
             code: 'SECRET_PAYLOAD_UNREADABLE',
         });
         return;
@@ -222,6 +227,10 @@ secretsRouter.post('/', authMiddleware, async (req: Request, res: Response): Pro
             res.status(409).json({ error: 'A secret with that name already exists' });
             return;
         }
+        if (err instanceof SecretOpError) {
+            res.status(400).json({ error: err.message });
+            return;
+        }
         logServiceError('Create error', err);
         res.status(500).json({ error: getErrorMessage(err, 'Failed to create secret') });
     }
@@ -268,11 +277,14 @@ secretsRouter.patch('/:id', authMiddleware, async (req: Request, res: Response):
             res.status(400).json({ error: 'description must be a string' });
             return;
         }
-        if (!isValidOpList(ops)) {
+        // `ops` is optional when the request names a description: the route
+        // itself offers a description-only change as an alternative.
+        const opList = ops === undefined ? [] : ops;
+        if (!isValidOpList(opList)) {
             res.status(400).json({ error: 'ops must be a list of set, remove, or rename operations' });
             return;
         }
-        if (ops.length === 0 && typeof description !== 'string') {
+        if (opList.length === 0 && typeof description !== 'string') {
             res.status(400).json({ error: 'Send at least one operation, or a description to change' });
             return;
         }
@@ -287,7 +299,7 @@ secretsRouter.patch('/:id', authMiddleware, async (req: Request, res: Response):
         }
         const result = SecretsService.getInstance().applyPatch(id, {
             expectedVersion: version,
-            ops,
+            ops: opList,
             description: typeof description === 'string' ? description : undefined,
             user: getActor(req),
             note: typeof note === 'string' ? note : undefined,
@@ -296,6 +308,56 @@ secretsRouter.patch('/:id', authMiddleware, async (req: Request, res: Response):
         res.json(result);
     } catch (err) {
         sendServiceError(res, err, 'Failed to update secret');
+    }
+});
+
+// Recovery for a current version that cannot be decrypted: replace the whole
+// payload, which is impossible through the per-key PATCH because that path
+// must read the old values. A readable bundle is refused by the service, so
+// this stays a recovery action rather than a second general write path.
+secretsRouter.post('/:id/replace', authMiddleware, async (req: Request, res: Response): Promise<void> => {
+    if (!requireUserSession(req, res)) return;
+    if (!requireAdmin(req, res)) return;
+    if (!requireBody(req, res)) return;
+    try {
+        const id = parseIntParam(req, res, 'id', 'secret ID');
+        if (id === null) return;
+        const { expectedVersion, kv, description, note } = req.body as {
+            expectedVersion?: unknown; kv?: unknown; description?: unknown; note?: unknown;
+        };
+        const version = parseVersion(expectedVersion);
+        if (version === null) {
+            res.status(400).json({ error: 'expectedVersion must be the version you loaded' });
+            return;
+        }
+        if (!isValidKv(kv)) {
+            res.status(400).json({ error: 'kv must be an object of string values' });
+            return;
+        }
+        if (description !== undefined && typeof description !== 'string') {
+            res.status(400).json({ error: 'description must be a string' });
+            return;
+        }
+        if (note !== undefined && typeof note !== 'string') {
+            res.status(400).json({ error: 'note must be a string' });
+            return;
+        }
+        const existing = DatabaseService.getInstance().getSecret(id);
+        if (!existing) {
+            res.status(404).json({ error: 'Secret not found' });
+            return;
+        }
+        const result = SecretsService.getInstance().replaceUnreadablePayload(id, {
+            expectedVersion: version,
+            kv,
+            description: typeof description === 'string' ? description : undefined,
+            user: getActor(req),
+            note: typeof note === 'string' ? note : undefined,
+        });
+        console.log(`[Secrets] Replaced unreadable payload of ${sanitizeForLog(existing.name)} (v${result.version})`);
+        res.json(result);
+    } catch (err) {
+        sendServiceError(res, err, 'Failed to replace secret payload');
     }
 });
 
@@ -474,8 +536,7 @@ secretsRouter.post('/:id/push/preview', authMiddleware, async (req: Request, res
         const plan = await SecretsService.getInstance().previewPushDiff(id, parsed.selector, parsed.stackName, parsed.envFileBasename);
         res.json(plan);
     } catch (err) {
-        logServiceError('Preview error', err);
-        res.status(500).json({ error: getErrorMessage(err, 'Failed to preview push') });
+        sendServiceError(res, err, 'Failed to preview push');
     }
 });
 
@@ -510,7 +571,6 @@ secretsRouter.post('/:id/push', authMiddleware, async (req: Request, res: Respon
             throw err;
         }
     } catch (err) {
-        logServiceError('Push error', err);
-        res.status(500).json({ error: getErrorMessage(err, 'Failed to push secret') });
+        sendServiceError(res, err, 'Failed to push secret');
     }
 });

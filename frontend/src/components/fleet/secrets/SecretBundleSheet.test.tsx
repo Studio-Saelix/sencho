@@ -14,6 +14,7 @@ vi.mock('@/lib/secretsApi', async (importOriginal) => {
         getSecret: vi.fn(),
         createSecret: vi.fn(),
         patchSecret: vi.fn(),
+        replaceSecret: vi.fn(),
         listSecretVersions: vi.fn(),
         revealValue: vi.fn(),
         previewImport: vi.fn(),
@@ -29,7 +30,7 @@ vi.mock('@/context/NodeContext', () => ({
     useNodes: () => ({ nodes: [{ id: 1, name: 'central', type: 'local' }] }),
 }));
 
-import { applyImport, getSecret, patchSecret, previewImport, revealValue } from '@/lib/secretsApi';
+import { applyImport, getSecret, patchSecret, previewImport, replaceSecret, revealValue } from '@/lib/secretsApi';
 import { toast } from '@/components/ui/toast-store';
 import { SecretBundleSheet } from './SecretBundleSheet';
 
@@ -68,6 +69,7 @@ function renderSheet(onSaved = vi.fn()) {
 beforeEach(() => {
     vi.mocked(getSecret).mockResolvedValue(detail());
     vi.mocked(patchSecret).mockResolvedValue({ version: 4 });
+    vi.mocked(replaceSecret).mockResolvedValue({ version: 4 });
     vi.mocked(revealValue).mockResolvedValue({
         key: 'DB_PASSWORD', version: 3, value: 'hunter2', expiresAt: Date.now() + 30_000,
     });
@@ -386,5 +388,40 @@ describe('SecretBundleSheet does not leave the panel stuck', () => {
         await waitFor(() => expect(screen.queryByText(/could not be read/i)).not.toBeInTheDocument());
         expect(screen.getByPlaceholderText('app-secrets')).toBeInTheDocument();
         expect(screen.getByPlaceholderText('KEY_NAME')).toBeInTheDocument();
+    });
+});
+
+describe('SecretBundleSheet unreadable payload recovery', () => {
+    it('reports unknown keys and replaces the payload when the stored version cannot be read', async () => {
+        vi.mocked(getSecret).mockRejectedValue(Object.assign(
+            new Error("The stored bundle payload could not be read. Replace the bundle's values to recover it."),
+            { status: 500, code: 'SECRET_PAYLOAD_UNREADABLE' },
+        ));
+        renderSheet();
+        expect(await screen.findByText(/could not be read/i)).toBeInTheDocument();
+        expect(screen.getByText(/keys unknown/i)).toBeInTheDocument();
+        expect(screen.queryByText(/v1 · 0 keys/i)).not.toBeInTheDocument();
+
+        await userEvent.click(screen.getByRole('button', { name: /replace values/i }));
+        expect(screen.getByText(/enter the complete key\/value set/i)).toBeInTheDocument();
+        await userEvent.type(screen.getByPlaceholderText('KEY_NAME'), 'RECOVERED');
+        await userEvent.type(screen.getByLabelText('Value'), 'restored');
+        await userEvent.click(screen.getByRole('button', { name: /^save$/i }));
+
+        await waitFor(() => expect(vi.mocked(replaceSecret)).toHaveBeenCalledWith(7, {
+            expectedVersion: 3,
+            kv: { RECOVERED: 'restored' },
+            description: undefined,
+            note: undefined,
+        }));
+        expect(vi.mocked(patchSecret)).not.toHaveBeenCalled();
+    });
+
+    it('does not offer replace for a load error that is not an unreadable payload', async () => {
+        vi.mocked(getSecret).mockRejectedValue(Object.assign(new Error('Failed to load secret'), { status: 500 }));
+        renderSheet();
+        expect(await screen.findByText(/failed to load secret/i)).toBeInTheDocument();
+        expect(screen.queryByRole('button', { name: /replace values/i })).not.toBeInTheDocument();
+        expect(screen.getByRole('button', { name: /retry/i })).toBeInTheDocument();
     });
 });

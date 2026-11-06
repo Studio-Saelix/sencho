@@ -170,6 +170,18 @@ export class SecretSourceError extends Error {
     }
 }
 
+/**
+ * The import source exists but the request asked for a path the compose root
+ * does not own (a symlink escape or an invalid path). This is a refusal, not a
+ * missing source and not a server fault, so it must reach the client as a 400.
+ */
+export class SecretSourceRefusedError extends Error {
+    constructor(message: string) {
+        super(message);
+        this.name = 'SecretSourceRefusedError';
+    }
+}
+
 /** The import source changed after the preview the operator reviewed. */
 export class SecretSourceChangedError extends Error {
     constructor() {
@@ -179,11 +191,13 @@ export class SecretSourceChangedError extends Error {
 }
 
 /**
- * `__proto__` stays refused even though edits run on a Map and the stored shape
- * is rebuilt with `Object.fromEntries`: the name means a prototype slot to any
- * plain-object consumer downstream. `constructor` and `prototype` are ordinary
- * own keys on a Map, so refusing them would only block a bundle that already
- * stores one.
+ * `__proto__` is refused whenever a write introduces the name, even though
+ * edits run on a Map and the stored shape is rebuilt with `Object.fromEntries`:
+ * the name means a prototype slot to any plain-object consumer downstream.
+ * Create, replace, and import all enforce it, and a remove or a rename-from
+ * never does, so a bundle that already stores one can still be cleaned up.
+ * `constructor` and `prototype` are ordinary own keys on a Map, so refusing
+ * them would only block a bundle that already stores one.
  */
 const RESERVED_KV_KEYS = new Set(['__proto__']);
 
@@ -195,13 +209,22 @@ export class SecretOpError extends Error {
     }
 }
 
+/** Refuse a new payload that names a reserved key. Removal and rename-from are not new names. */
+function assertNoReservedKeys(kv: SecretKv): void {
+    for (const key of Object.keys(kv)) {
+        if (RESERVED_KV_KEYS.has(key)) throw new SecretOpError(`Reserved key: ${key}`);
+    }
+}
+
 /**
  * Apply one edit against a Map, never against a plain object: the key comes
  * from the request, and a Map has no prototype slot to fall into.
  */
 function applyOp(kv: Map<string, string>, op: SecretPatchOp): void {
-    const writtenKey = op.op === 'rename' ? op.to : op.key;
-    if (RESERVED_KV_KEYS.has(writtenKey)) throw new SecretOpError(`Reserved key: ${writtenKey}`);
+    // Only a write that introduces the name is refused. A remove and a
+    // rename-from must be able to get an already stored `__proto__` out.
+    if (op.op === 'set' && RESERVED_KV_KEYS.has(op.key)) throw new SecretOpError(`Reserved key: ${op.key}`);
+    if (op.op === 'rename' && RESERVED_KV_KEYS.has(op.to)) throw new SecretOpError(`Reserved key: ${op.to}`);
     if (op.op === 'set') {
         kv.set(op.key, op.value);
         return;
@@ -458,6 +481,11 @@ async function readEnvLocal(nodeId: number, absolutePath: string, missingAsEmpty
             if (missingAsEmpty) return '';
             throw new SecretSourceError(`${absolutePath} does not exist on this node`);
         }
+        // A symlink or path that leaves the compose root is the request's
+        // fault, not a server fault: answer a client error, never a bare 500.
+        if (code === 'INVALID_PATH' || code === 'SYMLINK_ESCAPE') {
+            throw new SecretSourceRefusedError('The env file resolves outside the compose directory');
+        }
         throw err;
     }
 }
@@ -601,6 +629,7 @@ export class SecretsService {
     create(input: { name: string; description?: string; kv: SecretKv; user: string; note?: string }): { id: number; version: number } {
         const validation = validateKv(input.kv);
         if (!validation.ok) throw new Error(validation.error);
+        assertNoReservedKeys(input.kv);
         const db = DatabaseService.getInstance();
         return db.createSecretWithVersion({
             name: input.name,
@@ -749,12 +778,63 @@ export class SecretsService {
         });
     }
 
+    /**
+     * Recover a bundle whose current version cannot be decrypted: write a
+     * complete replacement payload without reading the old one. The version
+     * check still applies, and a readable bundle is refused so this never
+     * becomes a second, unversioned write path behind the per-key editor.
+     */
+    replaceUnreadablePayload(id: number, input: {
+        expectedVersion: number;
+        kv: SecretKv;
+        description?: string;
+        user: string;
+        note?: string;
+    }): { version: number } {
+        const db = DatabaseService.getInstance();
+        const secret = db.getSecret(id);
+        if (!secret) throw new Error('Secret not found');
+        const current = db.getCurrentSecretVersion(id);
+        // A bundle row with no current version row is unreadable too; its
+        // current_version is still the guard the caller must present.
+        const currentVersion = current?.version ?? secret.current_version;
+        if (currentVersion !== input.expectedVersion) {
+            throw new SecretVersionConflictError(currentVersion);
+        }
+        let unreadable = current === undefined;
+        if (current) {
+            try {
+                decryptKv(current.encrypted_payload);
+            } catch (err) {
+                if (!(err instanceof SecretPayloadError)) throw err;
+                unreadable = true;
+            }
+        }
+        if (!unreadable) throw new SecretOpError('The stored payload is readable; edit individual keys instead');
+        const validation = validateKv(input.kv);
+        if (!validation.ok) throw new Error(validation.error);
+        assertNoReservedKeys(input.kv);
+        return db.updateSecretWithVersion({
+            secretId: id,
+            description: input.description === undefined ? null : input.description,
+            encryptedPayload: encryptKv(input.kv),
+            keyCount: Object.keys(input.kv).length,
+            createdBy: input.user,
+            note: input.note ?? '',
+            expectedVersion: input.expectedVersion,
+        });
+    }
+
     async readImportOverlay(nodeId: number, stackName: string, envFileBasename = '.env'): Promise<{ kv: SecretKv; fingerprint: string }> {
         const node = DatabaseService.getInstance().getNodes().find(n => n.id === nodeId);
         if (!node) throw new SecretSourceError(`Node ${nodeId} is not in this fleet`);
         const read = await readExistingEnv(node, stackName, envFileBasename, false);
         if (!read) throw new SecretSourceError(`env file '${envFileBasename}' not found on node ${node.name}`);
-        return { kv: parseEnv(read.text), fingerprint: fingerprintSource(read.text) };
+        const kv = parseEnv(read.text);
+        // An env file is a write path too: refuse a reserved name before the
+        // preview shows a key the apply would then reject.
+        assertNoReservedKeys(kv);
+        return { kv, fingerprint: fingerprintSource(read.text) };
     }
 
     /**

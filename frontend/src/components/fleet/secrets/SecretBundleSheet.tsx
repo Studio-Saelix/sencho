@@ -13,6 +13,7 @@ import {
     type SecretImportPreview,
     createSecret,
     patchSecret,
+    replaceSecret,
     getSecret,
     listSecretVersions,
     revealValue,
@@ -126,6 +127,15 @@ function buildOps(rows: KvRow[]): SecretPatchOp[] {
     return ops;
 }
 
+function buildKv(rows: KvRow[]): Record<string, string> {
+    const entries: Array<[string, string]> = [];
+    for (const row of rows) {
+        const key = row.key.trim();
+        if (!row.deleted && key) entries.push([key, row.value]);
+    }
+    return Object.fromEntries(entries);
+}
+
 function validateRows(rows: KvRow[]): string | null {
     const liveRows = rows.filter(r => !r.deleted && r.key.trim().length > 0);
     if (rows.some(r => !r.deleted && r.key.trim().length === 0 && r.value.length > 0)) {
@@ -135,6 +145,7 @@ function validateRows(rows: KvRow[]): string | null {
     for (const row of liveRows) {
         const key = row.key.trim();
         if (!KEY_PATTERN.test(key)) return `Invalid key: ${key}`;
+        if (key === '__proto__') return 'Reserved key: __proto__';
         if (seen.has(key)) return `Duplicate key: ${key}`;
         seen.add(key);
     }
@@ -158,6 +169,8 @@ export function SecretBundleSheet({ open, onOpenChange, secret, onSaved }: Props
     const [submitting, setSubmitting] = useState(false);
     const [loading, setLoading] = useState(false);
     const [loadError, setLoadError] = useState<string | null>(null);
+    const [loadErrorCode, setLoadErrorCode] = useState<string | null>(null);
+    const [replacing, setReplacing] = useState(false);
     const [revealing, setRevealing] = useState<Set<string>>(new Set());
     const [now, setNow] = useState(() => Date.now());
     const [versions, setVersions] = useState<SecretVersionSummary[]>([]);
@@ -181,6 +194,7 @@ export function SecretBundleSheet({ open, onOpenChange, secret, onSaved }: Props
         const token = ++loadTokenRef.current;
         setLoading(true);
         setLoadError(null);
+        setLoadErrorCode(null);
         try {
             const fresh = await getSecret(id);
             if (loadTokenRef.current !== token || openSecretIdRef.current !== id) return;
@@ -189,6 +203,7 @@ export function SecretBundleSheet({ open, onOpenChange, secret, onSaved }: Props
             setLoadedDescription(fresh.description);
             setExpectedVersion(fresh.currentVersion);
             setRows(fresh.keys.map(maskToRow));
+            setReplacing(false);
             setNote('');
             importTokenRef.current += 1;
             setImportPreview(null);
@@ -196,6 +211,8 @@ export function SecretBundleSheet({ open, onOpenChange, secret, onSaved }: Props
             if (loadTokenRef.current !== token || openSecretIdRef.current !== id) return;
             const message = err instanceof Error ? err.message : 'Failed to load secret';
             setLoadError(message);
+            setLoadErrorCode((err as { code?: string }).code ?? null);
+            setRows([]);
             toast.error(message);
         } finally {
             if (loadTokenRef.current === token) setLoading(false);
@@ -210,6 +227,8 @@ export function SecretBundleSheet({ open, onOpenChange, secret, onSaved }: Props
             loadTokenRef.current += 1;
             setLoading(false);
             setLoadError(null);
+            setLoadErrorCode(null);
+            setReplacing(false);
             return;
         }
         if (secret) {
@@ -218,6 +237,8 @@ export function SecretBundleSheet({ open, onOpenChange, secret, onSaved }: Props
             loadTokenRef.current += 1;
             setLoading(false);
             setLoadError(null);
+            setLoadErrorCode(null);
+            setReplacing(false);
             setName('');
             setDescription('');
             setLoadedDescription('');
@@ -277,8 +298,12 @@ export function SecretBundleSheet({ open, onOpenChange, secret, onSaved }: Props
     const canSubmit = useMemo(() => {
         if (rowError) return false;
         if (mode === 'create') return NAME_PATTERN.test(name);
+        // Recovery writes a complete replacement payload, so an empty set of
+        // rows is allowed: an operator may deliberately recover to an empty
+        // bundle and then add keys again.
+        if (replacing) return true;
         return ops.length > 0 || descriptionChanged;
-    }, [rowError, mode, name, ops, descriptionChanged]);
+    }, [rowError, mode, name, ops, descriptionChanged, replacing]);
 
     async function handleSave() {
         if (rowError) {
@@ -290,11 +315,7 @@ export function SecretBundleSheet({ open, onOpenChange, secret, onSaved }: Props
                 toast.error('Name must be 2-64 characters (letters, digits, dot, dash, underscore)');
                 return;
             }
-            const kv: Record<string, string> = {};
-            for (const row of rows) {
-                const key = row.key.trim();
-                if (key) kv[key] = row.value;
-            }
+            const kv = buildKv(rows);
             setSubmitting(true);
             try {
                 const result = await createSecret({ name, description: description || undefined, kv, note: note || undefined });
@@ -311,6 +332,18 @@ export function SecretBundleSheet({ open, onOpenChange, secret, onSaved }: Props
         if (!secret) return;
         setSubmitting(true);
         try {
+            if (replacing) {
+                const result = await replaceSecret(secret.id, {
+                    expectedVersion,
+                    kv: buildKv(rows),
+                    description: descriptionChanged ? description : undefined,
+                    note: note || undefined,
+                });
+                toast.success(`Bundle payload replaced (v${result.version})`);
+                onSaved();
+                onOpenChange(false);
+                return;
+            }
             const result = await patchSecret(secret.id, {
                 expectedVersion,
                 ops,
@@ -323,9 +356,16 @@ export function SecretBundleSheet({ open, onOpenChange, secret, onSaved }: Props
             onSaved();
             onOpenChange(false);
         } catch (err) {
-            const conflict = err instanceof Error
-                && (err as Error & { status?: number }).status === 409;
-            if (conflict) {
+            const apiError = err as Error & { status?: number; currentVersion?: number };
+            if (apiError.status === 409 && replacing && typeof apiError.currentVersion === 'number') {
+                // A reload cannot read the corrupt payload, but the conflict
+                // named the version that won; keep the typed replacement and
+                // let the operator save it against that version.
+                setExpectedVersion(apiError.currentVersion);
+                toast.error('This bundle changed since you opened it. Review the current version and save again.');
+                return;
+            }
+            if (apiError.status === 409) {
                 toast.error('This bundle changed since you opened it. Reloading the current version.');
                 await loadDetail(secret.id);
             } else {
@@ -334,6 +374,18 @@ export function SecretBundleSheet({ open, onOpenChange, secret, onSaved }: Props
         } finally {
             setSubmitting(false);
         }
+    }
+
+    function startReplace() {
+        if (!secret) return;
+        setReplacing(true);
+        setName(secret.name);
+        setDescription(secret.description);
+        setLoadedDescription(secret.description);
+        setExpectedVersion(secret.currentVersion);
+        setRows([newRow()]);
+        setNote('');
+        setActiveTab('keys');
     }
 
     function addRow() {
@@ -489,7 +541,13 @@ export function SecretBundleSheet({ open, onOpenChange, secret, onSaved }: Props
             onOpenChange={onOpenChange}
             crumb={['Fleet', 'Secrets', mode === 'create' ? 'New bundle' : (secret?.name ?? 'Bundle')]}
             name={mode === 'create' ? 'New secret bundle' : (secret?.name ?? 'Bundle')}
-            meta={mode === 'edit' && secret ? `v${expectedVersion} · ${liveKeys} keys · values masked` : undefined}
+            meta={mode === 'edit' && secret
+                ? replacing
+                    ? `v${expectedVersion} · replacing all values`
+                    : loadError
+                        ? `v${secret.currentVersion} · keys unknown · values masked`
+                        : `v${expectedVersion} · ${liveKeys} keys · values masked`
+                : undefined}
             primaryAction={{
                 label: submitting ? 'Saving…' : 'Save',
                 onClick: handleSave,
@@ -504,19 +562,31 @@ export function SecretBundleSheet({ open, onOpenChange, secret, onSaved }: Props
                 <div className="space-y-5">
                     {loading ? (
                         <div className="flex items-center gap-2 text-sm text-stat-subtitle"><Loader2 className="w-4 h-4 animate-spin" /> Loading bundle…</div>
-                    ) : loadError ? (
+                    ) : loadError && !replacing ? (
                         <div className="rounded border border-destructive/30 bg-destructive/5 p-4 space-y-2">
                             <div className="flex items-center gap-2 text-sm text-destructive">
                                 <ShieldAlert className="w-4 h-4" /> {loadError}
                             </div>
-                            {secret && (
-                                <Button type="button" variant="outline" size="sm" onClick={() => void loadDetail(secret.id)}>
-                                    Retry
-                                </Button>
-                            )}
+                            <div className="flex items-center gap-2">
+                                {secret && loadErrorCode === 'SECRET_PAYLOAD_UNREADABLE' && (
+                                    <Button type="button" variant="outline" size="sm" onClick={startReplace}>
+                                        Replace values
+                                    </Button>
+                                )}
+                                {secret && (
+                                    <Button type="button" variant="outline" size="sm" onClick={() => void loadDetail(secret.id)}>
+                                        Retry
+                                    </Button>
+                                )}
+                            </div>
                         </div>
                     ) : (
                         <>
+                            {replacing && (
+                                <div className="rounded border border-amber-500/30 bg-amber-500/5 p-3 text-sm">
+                                    The stored payload could not be read. Enter the complete key/value set this bundle should hold; saving replaces the unreadable version and keeps the earlier history.
+                                </div>
+                            )}
                             <SheetSection title="Identity">
                                 <div className="space-y-3">
                                     <div className="space-y-1">
@@ -659,7 +729,7 @@ export function SecretBundleSheet({ open, onOpenChange, secret, onSaved }: Props
                                         <Button type="button" variant="outline" size="sm" onClick={addRow} className="gap-1.5">
                                             <Plus className="w-3.5 h-3.5" /> Add key
                                         </Button>
-                                        {mode === 'edit' && (
+                                        {mode === 'edit' && !replacing && (
                                             <Button
                                                 type="button"
                                                 variant="ghost"
@@ -677,7 +747,7 @@ export function SecretBundleSheet({ open, onOpenChange, secret, onSaved }: Props
                                         )}
                                     </div>
                                     {rowError && <p className="text-xs text-destructive">{rowError}</p>}
-                                    {mode === 'edit' && importOpen && (
+                                    {mode === 'edit' && !replacing && importOpen && (
                                         <div id="import-from-stack-panel" className="rounded border border-card-border/60 bg-popover/40 p-3 space-y-3">
                                             <p className="text-[10px] uppercase tracking-[0.18em] font-mono text-stat-subtitle">
                                                 Read an env file from a deployed stack · previews keys and change classes, saves as a new version

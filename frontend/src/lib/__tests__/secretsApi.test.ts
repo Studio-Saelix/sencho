@@ -8,7 +8,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 vi.mock('../api', () => ({ apiFetch: vi.fn() }));
 
 import { apiFetch } from '../api';
-import { revealValue, patchSecret, getSecret } from '../secretsApi';
+import { revealValue, patchSecret, getSecret, replaceSecret } from '../secretsApi';
 
 function jsonResponse(body: unknown, status = 200): Response {
     return {
@@ -68,6 +68,21 @@ describe('revealValue', () => {
             code: 'REVEAL_TARGET_MISSING',
         });
         expect(vi.mocked(apiFetch)).toHaveBeenCalledTimes(1);
+    });
+});
+
+describe('replaceSecret', () => {
+    it('posts the complete recovery payload to the replace route', async () => {
+        vi.mocked(apiFetch).mockResolvedValueOnce(jsonResponse({ version: 4 }));
+
+        const result = await replaceSecret(7, { expectedVersion: 3, kv: { RECOVERED: 'value' }, note: 'recover' });
+
+        const [path, init] = vi.mocked(apiFetch).mock.calls[0];
+        expect(path).toBe('/secrets/7/replace');
+        expect(init?.method).toBe('POST');
+        expect(JSON.parse(String(init?.body))).toEqual({ expectedVersion: 3, kv: { RECOVERED: 'value' }, note: 'recover' });
+        expect(init?.localOnly).toBe(true);
+        expect(result).toEqual({ version: 4 });
     });
 });
 

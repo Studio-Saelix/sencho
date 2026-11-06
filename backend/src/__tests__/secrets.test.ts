@@ -59,6 +59,7 @@ const SECRET_ENDPOINTS: Array<[string, string]> = [
     ['post', '/api/secrets/1/import-from-stack'],
     ['post', '/api/secrets/1/reveal-grant'],
     ['post', '/api/secrets/1/reveal'],
+    ['post', '/api/secrets/1/replace'],
     ['post', '/api/secrets/1/push/preview'],
     ['post', '/api/secrets/1/push'],
 ];
@@ -402,6 +403,7 @@ describe('getAuditSummary for secrets routes', () => {
         expect(getAuditSummary('POST', '/secrets/42/import-from-stack')).toBe('Imported env into secret: 42');
         expect(getAuditSummary('POST', '/secrets/42/reveal-grant')).toBe('Authorized secret reveal: 42');
         expect(getAuditSummary('POST', '/secrets/42/reveal')).toBe('Revealed secret value: 42');
+        expect(getAuditSummary('POST', '/secrets/42/replace')).toBe('Replaced secret payload: 42');
         expect(getAuditSummary('POST', '/secrets/42/push/preview')).toBe('Previewed secret push: 42');
         expect(getAuditSummary('POST', '/secrets/42/push')).toBe('Pushed secret: 42');
     });

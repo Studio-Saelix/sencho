@@ -105,16 +105,20 @@ interface ApiError extends Error {
     status: number;
     /** Machine-readable reason the route answered with, when it sent one. */
     code?: string;
+    /** Current bundle version a conflict reported, when it sent one. */
+    currentVersion?: number;
 }
 
 async function errorFrom(res: Response, fallback: string): Promise<ApiError> {
     let detail = fallback;
     let code: string | undefined;
+    let currentVersion: number | undefined;
     try {
         const body = await res.json();
         if (body && typeof body === 'object') {
             if (typeof body.error === 'string') detail = body.error;
             if (typeof body.code === 'string') code = body.code;
+            if (typeof body.currentVersion === 'number') currentVersion = body.currentVersion;
         }
     } catch {
         // body not JSON
@@ -122,6 +126,7 @@ async function errorFrom(res: Response, fallback: string): Promise<ApiError> {
     const err = new Error(detail) as ApiError;
     err.status = res.status;
     if (code !== undefined) err.code = code;
+    if (currentVersion !== undefined) err.currentVersion = currentVersion;
     return err;
 }
 
@@ -175,6 +180,24 @@ export async function patchSecret(id: number, input: PatchSecretInput): Promise<
         localOnly: true,
     });
     return expectJson<{ version: number }>(res, 'Failed to update secret');
+}
+
+export interface ReplaceSecretInput {
+    /** The version the client loaded; a mismatch is refused. */
+    expectedVersion: number;
+    /** The complete new payload, used only to recover an unreadable version. */
+    kv: Record<string, string>;
+    description?: string;
+    note?: string;
+}
+
+export async function replaceSecret(id: number, input: ReplaceSecretInput): Promise<{ version: number }> {
+    const res = await apiFetch(`/secrets/${id}/replace`, {
+        method: 'POST',
+        body: JSON.stringify(input),
+        localOnly: true,
+    });
+    return expectJson<{ version: number }>(res, 'Failed to replace secret payload');
 }
 
 export async function deleteSecret(id: number): Promise<void> {

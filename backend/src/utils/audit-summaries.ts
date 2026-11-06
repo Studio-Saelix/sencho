@@ -174,6 +174,7 @@ export const AUDIT_ROUTE_SUMMARIES: Record<string, string> = {
   'POST /secrets/*/import-from-stack': 'Imported env into secret',
   'POST /secrets/*/reveal-grant': 'Authorized secret reveal',
   'POST /secrets/*/reveal': 'Revealed secret value',
+  'POST /secrets/*/replace': 'Replaced secret payload',
   'POST /secrets/*/push/preview': 'Previewed secret push',
   'POST /secrets/*/push': 'Pushed secret',
 
