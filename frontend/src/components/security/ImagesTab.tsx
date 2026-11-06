@@ -138,12 +138,14 @@ function IntentionalExposureBanner({
   unavailableCount,
   contexts,
   nodeId,
+  onIntentSaved,
   onClear,
 }: {
   kind: 'absolute' | 'partial';
   unavailableCount: number;
   contexts: ImageExposureContext[];
   nodeId?: number;
+  onIntentSaved: () => void;
   onClear?: () => void;
 }) {
   const title = kind === 'absolute'
@@ -161,7 +163,7 @@ function IntentionalExposureBanner({
           <p className="text-xs text-stat-subtitle mt-0.5">{body}</p>
         </div>
         <div className="flex items-center gap-3 shrink-0">
-          <ViewNetworkingAction contexts={contexts} nodeId={nodeId} />
+          <ViewNetworkingAction contexts={contexts} nodeId={nodeId} onIntentSaved={onIntentSaved} />
           <TargetingClearButton onClear={onClear} />
         </div>
       </div>
@@ -194,8 +196,10 @@ interface ImagesTabProps {
   onClearTargeting?: () => void;
   /** When true, targeting banner discloses the overview pass may be incomplete. */
   posturePartial?: boolean;
-  /** Active node id for SENCHO_OPEN_STACK Networking navigation. */
+  /** Active node id: the node an exposure intent is saved on and permission-checked against, and the target of Networking navigation. */
   nodeId?: number;
+  /** An exposure intent was set from an exposure control, so the scan summaries should be re-read. */
+  onIntentSaved: () => void;
 }
 
 /** Latest-scan index for real images (stack/config scans live in Compose risks). */
@@ -215,6 +219,7 @@ export function ImagesTab({
   onClearTargeting,
   posturePartial = false,
   nodeId,
+  onIntentSaved,
 }: ImagesTabProps) {
   const isMobile = useIsMobile();
   const [search, setSearch] = useState('');
@@ -229,8 +234,9 @@ export function ImagesTab({
 
   // Apply externally-driven filter / targeting. Keyed on tokens so repeating the
   // same navigation re-applies after Clear (R1) and resets severity (R2).
+  const hasTargeting = Boolean(targeting);
   useEffect(() => {
-    if (targeting) {
+    if (hasTargeting) {
       setSeverity(initialFilter ?? 'all');
       setPage(0);
       return;
@@ -239,7 +245,7 @@ export function ImagesTab({
       setSeverity(initialFilter);
       setPage(0);
     }
-  }, [targeting?.token, filterToken, targeting, initialFilter]);
+  }, [targeting?.token, filterToken, hasTargeting, initialFilter]);
 
   const imageSummaries = useMemo(
     () => Object.values(summaries).filter((s) => !s.image_ref.startsWith('stack:')),
@@ -374,11 +380,11 @@ export function ImagesTab({
             <div className="min-w-0">
               <p className="font-mono text-xs text-stat-value">Exposure conflicts with declared intent</p>
               <p className="text-xs text-stat-subtitle mt-0.5">
-                Compose publishes beyond loopback while Networking intent is internal or same-node. Review networking to align configuration with intent.
+                Compose publishes beyond loopback while Networking intent is internal or same-node. Align the declared intent with the published ports.
               </p>
             </div>
             <div className="flex items-center gap-3 shrink-0">
-              <ViewNetworkingAction contexts={allTargetingExposureContexts(targeting.targets)} nodeId={nodeId} />
+              <ViewNetworkingAction contexts={allTargetingExposureContexts(targeting.targets)} nodeId={nodeId} onIntentSaved={onIntentSaved} />
               <TargetingClearButton onClear={onClearTargeting} />
             </div>
           </div>
@@ -391,6 +397,7 @@ export function ImagesTab({
           unavailableCount={intentional.unavailableCount}
           contexts={allTargetingExposureContexts(targeting.targets)}
           nodeId={nodeId}
+          onIntentSaved={onIntentSaved}
           onClear={onClearTargeting}
         />
       );
@@ -488,6 +495,7 @@ export function ImagesTab({
                   intentEvidence={intentEvidenceFor(s, targeting)}
                   exposureContexts={contextsForImage(s, targeting)}
                   nodeId={nodeId}
+                  onIntentSaved={onIntentSaved}
                 />
               ))}
             </div>
@@ -557,6 +565,7 @@ export function ImagesTab({
                         <NetworkExposedControl
                           contexts={contextsForImage(s, targeting)}
                           nodeId={nodeId}
+                          onIntentSaved={onIntentSaved}
                         />
                       ) : null}
                     </div>

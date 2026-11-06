@@ -4,6 +4,8 @@ import {
   primaryExposureIntentEvidence,
   standingIntentEvidence,
   intentionalBannerKind,
+  afterIntentSaved,
+  type ImagesTargetingState,
 } from '../imagesTargeting';
 import type { ImageExposureContext, PostureTarget, ScanSummary } from '@/types/security';
 
@@ -270,3 +272,36 @@ describe('intentionalBannerKind', () => {
     }))).toEqual({ kind: 'partial', unavailableCount: 1 });
   });
 });
+
+describe('afterIntentSaved', () => {
+  const targeting = (kind: ImagesTargetingState['kind']): ImagesTargetingState => ({
+    kind,
+    label: 'reason',
+    imageRefs: ['a:1', 'b:1'],
+    targets: [
+      { imageRef: 'a:1', stackName: 'web', serviceName: 'api', intentStatus: 'set', exposureIntent: 'internal', intentConflict: true },
+      { imageRef: 'b:1', stackName: 'db', serviceName: 'pg', intentStatus: 'unset' },
+    ],
+    drivers: [{ vulnerabilityId: 'CVE-1', imageRef: 'a:1' }],
+    driverCount: 1,
+    token: 4,
+  });
+
+  it('keeps the exposure reason\'s images but sheds its snapshot and its conflict label', () => {
+    const next = afterIntentSaved(targeting('public_exposure'));
+    expect(next).toMatchObject({ kind: 'public_exposure', imageRefs: ['a:1', 'b:1'], label: 'Network exposed images', token: 4 });
+    expect(next?.targets).toEqual([{ imageRef: 'a:1' }, { imageRef: 'b:1' }]);
+  });
+
+  it('keeps another reason with its label and drivers and sheds the per-service intent', () => {
+    const next = afterIntentSaved(targeting('elevated_exploit_risk'));
+    expect(next).toMatchObject({ kind: 'elevated_exploit_risk', label: 'reason', imageRefs: ['a:1', 'b:1'], driverCount: 1, token: 4 });
+    expect(next?.drivers).toHaveLength(1);
+    expect(next?.targets).toEqual([{ imageRef: 'a:1' }, { imageRef: 'b:1' }]);
+  });
+
+  it('leaves no targeting as none', () => {
+    expect(afterIntentSaved(null)).toBeNull();
+  });
+});
+

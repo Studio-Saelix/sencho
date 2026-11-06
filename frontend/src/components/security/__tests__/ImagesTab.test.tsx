@@ -10,6 +10,9 @@ import userEvent from '@testing-library/user-event';
 import { ImagesTab } from '../ImagesTab';
 import type { ScanSummary } from '@/types/security';
 
+// These cases cover the named Networking navigation, which a session that may not edit the stack keeps.
+vi.mock('@/context/AuthContext', () => ({ useAuth: () => ({ can: () => false }) }));
+
 function summary(o: Partial<ScanSummary> & { image_ref: string; scan_id: number }): ScanSummary {
   return {
     highest_severity: null,
@@ -38,6 +41,7 @@ const base = {
   canScan: false,
   scanningRef: null as string | null,
   onScan: vi.fn(),
+  onIntentSaved: vi.fn(),
 };
 
 beforeEach(() => vi.clearAllMocks());
@@ -353,7 +357,7 @@ it('shows conflict banner for public_exposure intent mismatch', () => {
     />,
   );
   expect(screen.getByText('Exposure conflicts with declared intent')).toBeInTheDocument();
-  expect(screen.getByText(/Review networking to align configuration with intent/)).toBeInTheDocument();
+  expect(screen.getByText(/Align the declared intent with the published ports/)).toBeInTheDocument();
   expect(screen.getByRole('button', { name: 'View networking' })).toBeInTheDocument();
 });
 

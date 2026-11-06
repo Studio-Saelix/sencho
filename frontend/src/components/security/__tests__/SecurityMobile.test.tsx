@@ -10,6 +10,9 @@ import { SecurityMobileTabs, ImageScanRow, SecuritySevStrip, type SecurityMobile
 import { ImagesTab } from '../ImagesTab';
 import type { ScanSummary, SecurityOverview } from '@/types/security';
 
+// These cases cover the named Networking navigation, which a session that may not edit the stack keeps.
+vi.mock('@/context/AuthContext', () => ({ useAuth: () => ({ can: () => false }) }));
+
 function overview(o: Partial<SecurityOverview> = {}): SecurityOverview {
   return {
     scannedImages: 0,
@@ -92,27 +95,27 @@ describe('SecurityMobileTabs', () => {
 
 describe('ImageScanRow', () => {
   it('shows critical and high count tags', () => {
-    render(<ImageScanRow summary={summary({ image_ref: 'nginx:1', scan_id: 1, critical: 5, high: 2 })} onInspect={vi.fn()} />);
+    render(<ImageScanRow summary={summary({ image_ref: 'nginx:1', scan_id: 1, critical: 5, high: 2 })} onInspect={vi.fn()} onIntentSaved={vi.fn()} />);
     expect(screen.getByText('nginx:1')).toBeInTheDocument();
     expect(screen.getByText('5C')).toBeInTheDocument();
     expect(screen.getByText('2H')).toBeInTheDocument();
   });
 
   it('shows a clean tag when there are no findings', () => {
-    render(<ImageScanRow summary={summary({ image_ref: 'caddy:2', scan_id: 2 })} onInspect={vi.fn()} />);
+    render(<ImageScanRow summary={summary({ image_ref: 'caddy:2', scan_id: 2 })} onInspect={vi.fn()} onIntentSaved={vi.fn()} />);
     expect(screen.getByText('clean')).toBeInTheDocument();
   });
 
   it('does not call a medium/low-only image clean', () => {
     // A medium-only image has no critical/high/secret/misconfig findings but is
     // not clean; the dot and tags must follow getSeverityKey, not an all-zero check.
-    render(<ImageScanRow summary={summary({ image_ref: 'pg:16', scan_id: 3, highest_severity: 'MEDIUM', total: 4, medium: 4 })} onInspect={vi.fn()} />);
+    render(<ImageScanRow summary={summary({ image_ref: 'pg:16', scan_id: 3, highest_severity: 'MEDIUM', total: 4, medium: 4 })} onInspect={vi.fn()} onIntentSaved={vi.fn()} />);
     expect(screen.queryByText('clean')).not.toBeInTheDocument();
   });
 
   it('opens the scan on the vulns tab when tapped', async () => {
     const onInspect = vi.fn();
-    render(<ImageScanRow summary={summary({ image_ref: 'redis:7', scan_id: 9 })} onInspect={onInspect} />);
+    render(<ImageScanRow summary={summary({ image_ref: 'redis:7', scan_id: 9 })} onInspect={onInspect} onIntentSaved={vi.fn()} />);
     await userEvent.click(screen.getByText('redis:7'));
     expect(onInspect).toHaveBeenCalledWith(9, 'vulns', undefined);
   });
@@ -151,6 +154,7 @@ describe('ImagesTab (mobile)', () => {
     canScan: false,
     scanningRef: null as string | null,
     onScan: vi.fn(),
+    onIntentSaved: vi.fn(),
   };
 
   it('renders the severity chips and a row list below the breakpoint', () => {

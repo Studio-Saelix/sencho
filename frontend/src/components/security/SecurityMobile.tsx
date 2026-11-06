@@ -130,6 +130,7 @@ export function ImageScanRow({
   intentEvidence = null,
   exposureContexts = [],
   nodeId,
+  onIntentSaved,
 }: {
   summary: ScanSummary;
   onInspect: (scanId: number, initialTab?: ScanDetailTab, driverVulnerabilityIds?: string[]) => void;
@@ -137,9 +138,11 @@ export function ImageScanRow({
   driverVulnerabilityIds?: string[];
   /** Compact exposure-intent line (standing or while posture-targeting). */
   intentEvidence?: string | null;
-  /** Stack/service contexts for Networking navigation from Network exposed. */
+  /** Stack/service contexts behind the Network exposed label: used to set the exposure intent in place, or to open the stack's networking when the session cannot. */
   exposureContexts?: ImageExposureContext[];
   nodeId?: number;
+  /** An exposure intent was set from the label, so the scan summaries should be re-read. */
+  onIntentSaved: () => void;
 }) {
   // Use the shared classifier so the count tags agree with the leading dot: a
   // medium/low-only image is not "clean", it is its highest severity.
@@ -157,7 +160,7 @@ export function ImageScanRow({
         <span className="mt-px flex flex-wrap items-center gap-x-2 gap-y-0.5 font-mono text-[10px] text-stat-icon">
           <span>scanned {formatTimeAgo(summary.scanned_at)}</span>
           {summary.publicly_exposed === true ? (
-            <NetworkExposedControl contexts={exposureContexts} nodeId={nodeId} />
+            <NetworkExposedControl contexts={exposureContexts} nodeId={nodeId} onIntentSaved={onIntentSaved} />
           ) : null}
           {intentEvidence ? <span className="normal-case tracking-normal">{intentEvidence}</span> : null}
         </span>
