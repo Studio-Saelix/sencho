@@ -40,11 +40,14 @@ export function isRecoveryWorkDirName(name: string): boolean {
   return RECOVERY_WORK_DIR_NAME.test(name);
 }
 /**
- * The same names as a `filepath.Match` glob (restic's `--exclude` syntax and the
- * Go helper's own matcher): `?` is exactly one character, so the eight/four/
- * four/four/twelve UUID shape cannot match a user's shorter prefix name.
+ * The same names as a `filepath.Match` glob (restic's `--exclude` syntax): the
+ * character class spells out the intent UUID's lower-case hex shape. `?` alone
+ * would match any character, so a user's 36-character entry with a non-hex name
+ * would be silently dropped from a point even though the swap treats it as data.
  */
-export const RECOVERY_WORK_DIR_GLOB = `${RECOVERY_WORK_DIR_PREFIX}????????-????-????-????-????????????`;
+export const RECOVERY_WORK_DIR_GLOB = `${RECOVERY_WORK_DIR_PREFIX}${
+  ['[0-9a-f]'.repeat(8), '[0-9a-f]'.repeat(4), '[0-9a-f]'.repeat(4), '[0-9a-f]'.repeat(4), '[0-9a-f]'.repeat(12)].join('-')
+}`;
 /** The journal file the swap helper writes inside that directory. */
 export const RECOVERY_SWAP_PLAN_FILE = 'plan.json';
 

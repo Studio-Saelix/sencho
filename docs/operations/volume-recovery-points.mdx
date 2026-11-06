@@ -55,7 +55,7 @@ Locks do not follow the volume. Every operation takes the node's repository lock
 
 A volume is Protected when one point satisfies all of the following:
 
-- It is a root point: a capture of the whole volume, not of a single path. A capture skips the hidden `.sencho-restore-*` work directories at the volume root, which are Sencho's own and not the volume's data.
+- It is a root point: a capture of the whole volume, not of a single path. A capture skips a hidden `.sencho-restore-<intent-id>` work directory at the volume root, which is Sencho's own and not the volume's data. An entry with that prefix and any other name, such as `.sencho-restore-notes`, is captured like any other file.
 - It belongs to the volume's current generation. A volume deleted and recreated under the same name is a new generation, and points of the old bytes stop counting. Reading coverage compares Docker's creation time for the volume with the one the generation was recorded with, so a recreated volume stops reading Protected right away, with reason `older_generation`, and does not wait for the next capture. A volume recreated within the same second keeps its creation time; the next capture reads the volume's root inode and opens the new generation.
 - It completed. A point that skipped files or left files out is stored as `partial` and never counts.
 - Its most recent verification says verified. Verification is a repository-wide check, described below.

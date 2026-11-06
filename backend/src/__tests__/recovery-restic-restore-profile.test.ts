@@ -228,19 +228,37 @@ describe('what a restore leaves out', () => {
   });
 
   // The exclusion is by name, so it must match only the name Sencho makes. A
-  // user's `.sencho-restore-notes/` or `.sencho-restore-x.txt` is data.
+  // user's `.sencho-restore-notes/`, `.sencho-restore-x.txt`, or a 36-character
+  // name that is not the lower-case hex intent id is data.
   it('matches only an intent-id work directory name', () => {
-    const glob = (text: string): RegExp => new RegExp(
-      `^${text.replace(/[.+^${}()|[\]\\]/g, '\\$&').replace(/\?/g, '.')}$`,
-    );
+    const glob = (text: string): RegExp => {
+      let body = '';
+      for (let i = 0; i < text.length; i += 1) {
+        const char = text[i];
+        if (char === '[') {
+          // A filepath.Match character class is copied as-is; everything else is
+          // one literal character.
+          const end = text.indexOf(']', i + 1);
+          body += text.slice(i, end + 1);
+          i = end;
+        } else if ('\\.^$|+(){}*?'.includes(char)) {
+          body += `\\${char}`;
+        } else {
+          body += char;
+        }
+      }
+      return new RegExp(`^${body}$`);
+    };
     const matches = glob(RECOVERY_WORK_DIR_GLOB);
     expect(matches.test(`.sencho-restore-${INTENT_ID}`)).toBe(true);
     expect(matches.test('.sencho-restore-notes')).toBe(false);
     expect(matches.test('.sencho-restore-x.txt')).toBe(false);
+    expect(matches.test('.sencho-restore-ZZZZZZZZ-ZZZZ-ZZZZ-ZZZZ-ZZZZZZZZZZZZ')).toBe(false);
     expect(matches.test('sub/.sencho-restore-' + INTENT_ID)).toBe(false);
     expect(isRecoveryWorkDirName(`.sencho-restore-${INTENT_ID}`)).toBe(true);
     expect(isRecoveryWorkDirName('.sencho-restore-notes')).toBe(false);
     expect(isRecoveryWorkDirName('.sencho-restore-x.txt')).toBe(false);
+    expect(isRecoveryWorkDirName('.sencho-restore-ZZZZZZZZ-ZZZZ-ZZZZ-ZZZZ-ZZZZZZZZZZZZ')).toBe(false);
   });
 });
 
