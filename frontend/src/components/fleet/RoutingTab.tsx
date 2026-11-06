@@ -175,15 +175,13 @@ export function RoutingTab({ canManageNode, canManageMembership }: {
 
     if (status.length === 0) {
         return (
-            <div className="space-y-4">
-                <FleetEmptyState>
-                    <FleetEmptyCard
-                        icon={ArrowLeftRight}
-                        title="No nodes available"
-                        description="Add a node to the fleet to start routing traffic between containers across nodes."
-                    />
-                </FleetEmptyState>
-            </div>
+            <FleetEmptyState>
+                <FleetEmptyCard
+                    icon={ArrowLeftRight}
+                    title="No nodes available"
+                    description="Add a node to the fleet to start routing traffic between containers across nodes."
+                />
+            </FleetEmptyState>
         );
     }
 

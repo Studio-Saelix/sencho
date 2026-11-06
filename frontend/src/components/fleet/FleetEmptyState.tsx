@@ -8,10 +8,11 @@ interface FleetTabHeadingProps {
 }
 
 /**
- * Standardized Fleet tab header: heading-styled title and muted subtitle on the
- * left, an optional primary action on the right. Rendered in both empty and
- * populated states so the tab chrome stays consistent. The title follows the
- * theme heading style (signature italic or calm) via .font-heading.
+ * Title block for the Security and Settings panels that still carry one:
+ * heading-styled title and muted subtitle on the left, an optional primary
+ * action on the right. Fleet tabs do not use it; they use FleetTabActions.
+ * The title follows the theme heading style (signature italic or calm) via
+ * .font-heading.
  */
 export function FleetTabHeading({ title, subtitle, action }: FleetTabHeadingProps) {
     return (
@@ -36,7 +37,7 @@ export function FleetTabActions({ children }: { children: ReactNode }) {
 
 /**
  * Vertical-centering shell that floats an empty-state card in the middle of the
- * tab body, below the heading.
+ * tab body.
  */
 export function FleetEmptyState({ children }: { children: ReactNode }) {
     return (
