@@ -17,7 +17,7 @@ import { buildBootstrapPlan } from '../services/nodeBootstrap/planBuilder';
 import type { SshCommandResult } from '../services/nodeBootstrap/sshProbeClient';
 import type { BootstrapCheck, BootstrapFacts } from '../services/nodeBootstrap/types';
 import { makeFacts } from './__helpers__/bootstrapFacts';
-import { DOCKER_ASC_PATH, DOCKER_KEY_GPG, dockerAscBlock, keyBlock, unrelatedKeyBinary } from './__helpers__/dockerRepoFixtures';
+import { DEFAULT_SOURCE_LOCATIONS, DOCKER_ASC_PATH, DOCKER_KEY_GPG, dockerAscBlock, keyBlock, unrelatedKeyBinary } from './__helpers__/dockerRepoFixtures';
 
 /**
  * Repository verification must hold for the host's own architecture and for
@@ -32,7 +32,7 @@ const CUSTOM_SOURCES = '/etc/apt/sources.list.d/containers.sources';
 const MAIN_LIST = '/etc/apt/sources.list';
 const GPG_PATH = '/usr/share/keyrings/docker-archive-keyring.gpg';
 
-const block = (file: string, content: string) => `SOURCE_BEGIN=${file}\n${content}\nSOURCE_END=${file}`;
+const block = (file: string, content: string) => `${DEFAULT_SOURCE_LOCATIONS}\nSOURCE_BEGIN=${file}\n${content}\nSOURCE_END=${file}`;
 const deb = (options: string, uri = OFFICIAL) => `deb [${options} signed-by=${DOCKER_ASC_PATH}] ${uri} noble stable`;
 const stanza = (fields: Record<string, string>) => Object.entries({
   Types: 'deb', URIs: OFFICIAL, Suites: 'noble', Components: 'stable', 'Signed-By': DOCKER_ASC_PATH, ...fields,
@@ -400,6 +400,12 @@ describe('sources outside docker.list and docker.sources', () => {
     it.each([
       ['a deb822 stanza with no Types', CUSTOM_SOURCES, noTypes],
       ['a deb822 stanza with an unknown type', CUSTOM_SOURCES, stanza({ Types: 'rpm' })],
+      ['a deb822 stanza with a valid and an unknown type', CUSTOM_SOURCES, stanza({ Types: 'deb nonsense' })],
+      ['a deb822 stanza with the unknown type first', CUSTOM_SOURCES, stanza({ Types: 'nonsense deb' })],
+      ['a deb822 type in capital letters, which apt does not know', CUSTOM_SOURCES, stanza({ Types: 'DEB' })],
+      ['a deb822 type list separated by a comma, which apt does not split', CUSTOM_SOURCES, stanza({ Types: 'deb,deb-src' })],
+      ['a disabled deb822 stanza with an unknown type, which apt still rejects', CUSTOM_SOURCES, stanza({ Types: 'deb nonsense', Enabled: 'no' })],
+      ['a deb822 file named docker.sources with a valid and an unknown type', SOURCES_FILE, stanza({ Types: 'deb nonsense' })],
       ['a deb822 field with no colon', CUSTOM_SOURCES, `Types: deb\nURIs ${OFFICIAL}\nSuites: noble\nComponents: stable`],
       ['a deb822 URI with a trailing dot on the host', CUSTOM_SOURCES, stanza({ URIs: 'https://download.docker.com./linux/ubuntu' })],
       ['a one-line entry with an unclosed option bracket', CUSTOM_LIST, `deb [trusted=yes ${OFFICIAL} noble stable`],
@@ -412,6 +418,22 @@ describe('sources outside docker.list and docker.sources', () => {
       expect(result.problem).toContain(file);
       const facts = freshHost([block(file, content), dockerAscBlock()].join('\n'));
       expect(planWithheld(facts)).toBe(true);
+    });
+
+    it('does not verify a good Docker stanza beside an unrelated stanza with an unknown type', () => {
+      const unrelated = 'Types: deb nonsense\nURIs: http://archive.ubuntu.com/ubuntu\nSuites: noble\nComponents: main';
+      const result = parse('amd64', block(CUSTOM_SOURCES, `${unrelated}\n\n${stanza({})}`), dockerAscBlock());
+      expect(result.sourceVerified).toBe(false);
+      expect(result.problem).toContain('nonsense');
+    });
+
+    it.each(['deb', 'deb-src', 'deb deb-src', 'deb-src  deb', 'deb\tdeb-src'])('still verifies the valid deb822 types %j', (types) => {
+      const content = stanza({ Types: types });
+      for (const file of [SOURCES_FILE, CUSTOM_SOURCES]) {
+        const result = parse('amd64', block(file, content), dockerAscBlock());
+        // A deb-src stanza alone has no binary entry to verify.
+        expect(result.sourceVerified).toBe(types === 'deb-src' ? false : true);
+      }
     });
 
     it('still ignores an unrelated stanza or line beside a good Docker entry', () => {
@@ -545,7 +567,7 @@ describe('sources outside docker.list and docker.sources', () => {
     });
 
     it('only writes a source when no Docker source exists anywhere', () => {
-      const none = freshHost(dockerAscBlock());
+      const none = freshHost(`${DEFAULT_SOURCE_LOCATIONS}\n${dockerAscBlock()}`);
       expect(aptSource(none).status).toBe('warn');
       expect(planFor(none).stages.flatMap((stage) => stage.steps).map((step) => step.id)).toContain('docker-sources');
     });

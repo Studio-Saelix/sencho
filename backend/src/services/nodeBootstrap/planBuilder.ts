@@ -307,6 +307,9 @@ export function buildBootstrapPlan(input: PlanBuildInput): BootstrapPlan {
   if (facts.repo.dockerSourceConfigured && !dockerAndComposeWork(facts) && !repoVerified(facts)) {
     throw new Error('The plan cannot write the Docker apt source beside an existing Docker source that is not verified.');
   }
+  if (!dockerAndComposeWork(facts) && !repoVerified(facts) && facts.repo.sourceLocations !== 'default') {
+    throw new Error('The plan cannot add the Docker apt source while the locations apt reads its sources from are not the defaults.');
+  }
   const owner = facts.user.name;
   const group = facts.user.group;
   const root = facts.user.isRoot;

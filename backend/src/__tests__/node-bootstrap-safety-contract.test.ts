@@ -22,6 +22,7 @@ import type { SshCommandResult } from '../services/nodeBootstrap/sshProbeClient'
 import type { BootstrapCheck, BootstrapFacts } from '../services/nodeBootstrap/types';
 import { makeFacts } from './__helpers__/bootstrapFacts';
 import {
+  DEFAULT_SOURCE_LOCATIONS,
   DOCKER_ASC_PATH,
   DOCKER_KEY_ASC,
   DOCKER_KEY_GPG,
@@ -129,6 +130,62 @@ describe('capacity that cannot be read never ends in a plan (B4-R)', () => {
     const facts = makeFacts({ composeDir: { freeBytes: null }, agentDir: { freeBytes: 100 * GIB } });
     expect(check(facts, 'disk_space').status).toBe('unknown');
     expect(evidence(facts).planSuppressed).toBe(true);
+  });
+
+  describe('a Compose and Agent directory on one filesystem keep their own readings', () => {
+    const shared = (compose: number | null, agent: number | null) => makeFacts({
+      composeDir: { freeBytes: compose },
+      agentDir: { freeBytes: agent },
+    });
+
+    it('is unknown when the Agent reading is missing beside a healthy Compose reading', () => {
+      const facts = shared(100 * GIB, null);
+      expect(check(facts, 'disk_space')).toMatchObject({ status: 'unknown', summary: expect.stringContaining('Agent directory: unreadable') });
+      expect(evidence(facts).planSuppressed).toBe(true);
+    });
+
+    it('is blocked when the Agent reading is under the hard floor beside a healthy Compose reading', () => {
+      const facts = shared(100 * GIB, 100 * MIB);
+      expect(check(facts, 'disk_space').status).toBe('blocked');
+      expect(evidence(facts).blockers).toBeGreaterThan(0);
+    });
+
+    it('warns, naming the Agent directory, when only the Agent reading is low', () => {
+      const row = check(shared(100 * GIB, 768 * MIB), 'disk_space');
+      expect(row.status).toBe('warn');
+      expect(row.observed).toContain('Agent directory');
+    });
+
+    it.each([
+      ['Compose low, Agent unreadable', shared(low.compose, null)],
+      ['Compose unreadable, Agent low', shared(null, low.agent)],
+      ['both unreadable', shared(null, null)],
+    ])('stays unknown when %s', (_name, facts) => {
+      expect(check(facts, 'disk_space').status).toBe('unknown');
+      expect(evidence(facts).planSuppressed).toBe(true);
+    });
+
+    it('blocks when one reading is under the floor and the other is unreadable, in either order', () => {
+      expect(check(shared(null, 100 * MIB), 'disk_space').status).toBe('blocked');
+      expect(check(shared(1 * GIB, null), 'disk_space').status).toBe('blocked');
+    });
+
+    type Fs = { type: string; source: string; mountPoint: string } | null;
+    const root: Fs = { type: 'ext4', source: '/dev/sda1', mountPoint: '/' };
+    it.each<[string, Fs, Fs]>([
+      ['no filesystem identity for the Compose directory', null, root],
+      ['no filesystem identity for the Agent directory', root, null],
+      ['the same mount point on a different device', root, { type: 'ext4', source: '/dev/sdb1', mountPoint: '/' }],
+      ['an empty mount point on both', { type: 'ext4', source: '', mountPoint: '' }, { type: 'ext4', source: '', mountPoint: '' }],
+    ])('does not merge the readings with %s', (_name, composeFs, agentFs) => {
+      const withAgent = (freeBytes: number | null) => makeFacts({
+        composeDir: { filesystem: composeFs, freeBytes: 100 * GIB },
+        agentDir: { filesystem: agentFs, freeBytes },
+      });
+      expect(check(withAgent(null), 'disk_space').status).toBe('unknown');
+      expect(evidence(withAgent(null)).planSuppressed).toBe(true);
+      expect(check(withAgent(100 * MIB), 'disk_space').status).toBe('blocked');
+    });
   });
 
   it('warns, and still plans, only when every capacity is known and merely low', () => {
@@ -527,7 +584,7 @@ describe('a working Docker engine is never replaced (S4-R)', () => {
 
 describe('repository provenance (S5-R)', () => {
   const OFFICIAL = 'https://download.docker.com/linux/ubuntu';
-  const block = (file: string, content: string) => `SOURCE_BEGIN=${file}\n${content}\nSOURCE_END=${file}`;
+  const block = (file: string, content: string) => `${DEFAULT_SOURCE_LOCATIONS}\nSOURCE_BEGIN=${file}\n${content}\nSOURCE_END=${file}`;
   const listFile = '/etc/apt/sources.list.d/docker.list';
   const sourcesFile = '/etc/apt/sources.list.d/docker.sources';
   const deb = (options: string, extra = '') => `deb [${options} signed-by=${DOCKER_ASC_PATH}] ${OFFICIAL} noble stable${extra}`;
@@ -769,7 +826,7 @@ describe('repository provenance (S5-R)', () => {
 describe('review follow-ups on the corrected probes', () => {
   const OFFICIAL = 'https://download.docker.com/linux/ubuntu';
   const listFile = '/etc/apt/sources.list.d/docker.list';
-  const block = (file: string, content: string) => `SOURCE_BEGIN=${file}\n${content}\nSOURCE_END=${file}`;
+  const block = (file: string, content: string) => `${DEFAULT_SOURCE_LOCATIONS}\nSOURCE_BEGIN=${file}\n${content}\nSOURCE_END=${file}`;
   const deb = (options: string) => `deb [${options} signed-by=${DOCKER_ASC_PATH}] ${OFFICIAL} noble stable`;
   const parse = (...parts: string[]) => parseDockerRepo(parts.join('\n'), 'noble', 'amd64');
   const canDeny = process.getuid?.() !== 0;
@@ -1018,6 +1075,7 @@ describe('round 1 follow-ups', () => {
   const osRelease = probe('os_release', 'ID=ubuntu\nVERSION_ID="24.04"\nVERSION_CODENAME=noble');
   const unknownArchive = ['docker-ce:', '  Installed: (none)', '  Candidate: 1.0', '  Version table:', ' *** 1.0 100', '        100 /var/lib/dpkg/status'].join('\n');
   const verifiedRepo = [
+    DEFAULT_SOURCE_LOCATIONS,
     `SOURCE_BEGIN=${listFile}`,
     `deb [arch=amd64 signed-by=${DOCKER_ASC_PATH}] ${OFFICIAL} noble stable`,
     `SOURCE_END=${listFile}`,

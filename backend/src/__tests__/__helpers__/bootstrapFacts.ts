@@ -140,6 +140,7 @@ export function makeFacts(overrides: FactsOverrides = {}): BootstrapFacts {
     },
     repo: {
       probeComplete: true,
+      sourceLocations: 'default',
       dockerSourceConfigured: true,
       keyringPresent: true,
       sourceVerified: true,

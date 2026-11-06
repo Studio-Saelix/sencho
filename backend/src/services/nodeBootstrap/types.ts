@@ -136,6 +136,13 @@ export interface DockerPackage {
 export interface RepositoryObservation {
   /** False when the repository probe did not run to completion. */
   probeComplete: boolean;
+  /**
+   * Where apt reads its sources from. `default` is /etc/apt/sources.list and
+   * /etc/apt/sources.list.d, the only place the plan writes a source; `custom`
+   * means apt configuration moves either one; `unknown` means apt could not be
+   * asked, so a source seen at the defaults may not be the one apt reads.
+   */
+  sourceLocations: 'default' | 'custom' | 'unknown';
   /** A Docker source file exists. Existence alone proves nothing about its provenance. */
   dockerSourceConfigured: boolean;
   /** A Docker keyring file exists; whether it parses is keyringVerified. */

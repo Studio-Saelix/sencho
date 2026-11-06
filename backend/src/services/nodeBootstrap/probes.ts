@@ -193,8 +193,8 @@ export const DEFAULT_AGENT_PATH_SCRIPT = [
 ].join('\n');
 
 /** The files and directories apt reads its sources from by default. */
-const REPO_SOURCE_FILES = ['/etc/apt/sources.list'];
-const REPO_SOURCE_DIRS = ['/etc/apt/sources.list.d'];
+const DEFAULT_SOURCE_LIST = '/etc/apt/sources.list';
+const DEFAULT_SOURCE_PARTS = '/etc/apt/sources.list.d';
 const REPO_KEY_PATHS = ['/etc/apt/keyrings/docker.asc', '/etc/apt/keyrings/docker.gpg', '/usr/share/keyrings/docker-archive-keyring.gpg'];
 
 /** The file names that would clash with the plan's own docker.list: they are checked whatever they say. Keep in step with the case pattern in the probe script. */
@@ -217,15 +217,38 @@ function repoUnreadableWhenInaccessible(marker: string, indent = '  '): string[]
 }
 
 /**
- * Reads the apt source files in the default locations: the main source list
+ * Asks apt where it reads its sources from (`Dir::Etc::sourcelist` and
+ * `Dir::Etc::sourceparts`, resolved against the rest of its configuration),
+ * reports both answers as read, then points the scan at them. An answer apt
+ * could not give leaves the scan on the defaults, and the parser reads the
+ * empty report as unknown.
+ */
+const APT_SOURCE_LOCATIONS_PRELUDE = [
+  'cfg=$(apt-config shell m Dir::Etc::sourcelist/f p Dir::Etc::sourceparts/d 2>/dev/null)',
+  String.raw`apt_main=$(printf '%s\n' "$cfg" | sed -n "s/^m='\(.*\)'\$/\1/p")`,
+  String.raw`apt_parts=$(printf '%s\n' "$cfg" | sed -n "s/^p='\(.*\)'\$/\1/p")`,
+  'apt_parts=${apt_parts%/}',
+  `printf 'SOURCE_LOCATIONS_MAIN=%s\\nSOURCE_LOCATIONS_PARTS=%s\\n' "$apt_main" "$apt_parts"`,
+  `[ -n "$apt_main" ] || apt_main=${DEFAULT_SOURCE_LIST}`,
+  `[ -n "$apt_parts" ] || apt_parts=${DEFAULT_SOURCE_PARTS}`,
+];
+
+/**
+ * Reads the apt source files in the given locations: the main source list
  * and each `.list` and `.sources` file in the source directories, named as apt
  * accepts them. Only a file that mentions Docker's host (or is one the plan writes) is
  * printed, which keeps unrelated sources out of the capped output; a file or a
  * directory that cannot be read is reported as unreadable, never as absent. The
  * keyrings are read in full (up to the key cap).
  */
-export function buildDockerRepoScript(sourceFiles: string[], sourceDirs: string[], keyPaths: string[]): string {
+export function buildDockerRepoScript(
+  sourceFiles: string[],
+  sourceDirs: string[],
+  keyPaths: string[],
+  prelude: string[] = [],
+): string {
   return [
+    ...prelude,
     'emit_source() {',
     '  f="$1"',
     '  if [ -f "$f" ]; then',
@@ -282,7 +305,7 @@ export function buildDockerRepoScript(sourceFiles: string[], sourceDirs: string[
   ].join('\n');
 }
 
-const DOCKER_REPO_SCRIPT = buildDockerRepoScript(REPO_SOURCE_FILES, REPO_SOURCE_DIRS, REPO_KEY_PATHS);
+const DOCKER_REPO_SCRIPT = buildDockerRepoScript(['"$apt_main"'], ['"$apt_parts"'], REPO_KEY_PATHS, APT_SOURCE_LOCATIONS_PRELUDE);
 
 /**
  * The whole catalog runs in one session. Sudo variants are always sent: `sudo -n`
@@ -485,6 +508,18 @@ export function parseRepoProbeOutput(text: string): RepoProbeOutput {
   return { sources, keys };
 }
 
+/**
+ * The locations the script reported, read only from the lines before the first
+ * file block so that file content can never stand in for them.
+ */
+export function parseSourceLocations(text: string): RepositoryObservation['sourceLocations'] {
+  const head = text.split(/^(?:SOURCE|KEY)_BEGIN=/m)[0];
+  const main = /^SOURCE_LOCATIONS_MAIN=(.*)$/m.exec(head)?.[1]?.trim() ?? '';
+  const parts = /^SOURCE_LOCATIONS_PARTS=(.*)$/m.exec(head)?.[1]?.trim() ?? '';
+  if (!main || !parts) return 'unknown';
+  return main === DEFAULT_SOURCE_LIST && parts === DEFAULT_SOURCE_PARTS ? 'default' : 'custom';
+}
+
 const OFFICIAL_DOCKER_URI = 'https://download.docker.com/linux/ubuntu';
 const DOCKER_HOST = 'download.docker.com';
 
@@ -646,12 +681,22 @@ function parseDeb822Source(content: string): ParsedSourceFile {
   // of a stanza apt reads differently than this does.
   if (unparsed.some(mentionsDockerHost)) invalid.push(invalidStanza);
   for (const paragraph of paragraphs) {
+    // apt reads the Types field as exact, case-sensitive, whitespace-separated
+    // words and rejects the whole source list at any other token, in a disabled
+    // stanza as well, so no token is dropped here and a stanza without the field
+    // is not skipped.
+    const typeWords = (paragraph.types ?? '').split(/\s+/).filter(Boolean);
+    const unknownType = typeWords.find((word) => word !== 'deb' && word !== 'deb-src');
+    if (paragraph.types === undefined || unknownType !== undefined) {
+      invalid.push(unknownType === undefined
+        ? 'the Docker deb822 source has a stanza with no Types field, which apt rejects'
+        : `the Docker deb822 source has the Types value "${unknownType}", which apt does not know and rejects`);
+    }
     // A disabled stanza cannot supply packages to apt.
     if (paragraph.enabled !== undefined && FALSE_OPTION_VALUES.has(paragraph.enabled.trim().toLowerCase())) continue;
     const uris = (paragraph.uris ?? '').split(/\s+/).filter(Boolean);
     const options = new Map(Object.entries(paragraph));
-    const types = (paragraph.types ?? '').toLowerCase().split(/[,\s]+/).filter(Boolean)
-      .filter((type): type is 'deb' | 'deb-src' => type === 'deb' || type === 'deb-src');
+    const types = typeWords.filter((type): type is 'deb' | 'deb-src' => type === 'deb' || type === 'deb-src');
     // A stanza for Docker's host with no type apt knows, or a URI that names the
     // host without being read as it (a trailing dot), is not a source to ignore.
     const namesHost = mentionsDockerHost(paragraph.uris ?? '');
@@ -882,12 +927,23 @@ export function parseDockerRepo(text: string, codename: string, arch: string): R
       failureProblem = 'the Docker source files have no enabled binary (deb) entry';
     }
   }
+  // A source seen at the default paths proves nothing about the sources apt
+  // reads when apt could not say where those are.
+  const sourceLocations = parseSourceLocations(text);
+  if (sourceLocations === 'unknown') {
+    unknownProblem ??= 'the locations apt reads its sources from could not be established';
+  }
   let sourceVerified: boolean | null = true;
   if (!sourceConfigured || failureProblem) sourceVerified = false;
   else if (unknownProblem) sourceVerified = null;
+  if (sourceLocations === 'unknown' && sourceVerified !== false) sourceVerified = null;
+  if (sourceLocations === 'custom' && !sourceConfigured) {
+    unknownProblem ??= 'apt is configured to read its sources from somewhere other than /etc/apt/sources.list and /etc/apt/sources.list.d, and none of what it reads configures Docker';
+  }
 
   return {
     probeComplete: true,
+    sourceLocations,
     dockerSourceConfigured: sourceConfigured,
     keyringPresent: parsed.keys.length > 0,
     sourceVerified,
@@ -1406,6 +1462,7 @@ export function assembleFacts(input: AssembleFactsInput): BootstrapFacts {
     ? parseDockerRepo(repoProbe.stdout, osBase?.codename ?? '', debianArchitecture(uname.arch))
     : {
       probeComplete: false,
+      sourceLocations: 'unknown' as const,
       dockerSourceConfigured: false,
       keyringPresent: false,
       sourceVerified: null,

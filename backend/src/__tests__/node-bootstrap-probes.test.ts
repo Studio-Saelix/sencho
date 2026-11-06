@@ -25,7 +25,7 @@ import {
   parseVolumeNames,
 } from '../services/nodeBootstrap/probes';
 import { scrubCommandOutput, type SshCommandResult } from '../services/nodeBootstrap/sshProbeClient';
-import { DOCKER_ASC_PATH, dockerAscBlock, keyBlock as keyBlockOf } from './__helpers__/dockerRepoFixtures';
+import { DEFAULT_SOURCE_LOCATIONS, DOCKER_ASC_PATH, dockerAscBlock, keyBlock as keyBlockOf } from './__helpers__/dockerRepoFixtures';
 
 const PATH_SCRIPT_OUTPUT = [
   'P_INPUT=/opt/docker/sencho',
@@ -192,12 +192,13 @@ describe('bootstrap probe parsers', () => {
 
     expect(parseDockerRepo('', '', '')).toEqual({
       probeComplete: true,
+      sourceLocations: 'unknown',
       dockerSourceConfigured: false,
       keyringPresent: false,
       sourceVerified: false,
       keyringVerified: false,
       candidateSourceVerified: null,
-      problem: null,
+      problem: 'the locations apt reads its sources from could not be established',
     });
   });
 
@@ -561,6 +562,7 @@ describe('bootstrap volume probe execution', () => {
 describe('bootstrap Docker repository provenance', () => {
   const keyBlock = (keyPath = DOCKER_ASC_PATH) => dockerAscBlock(keyPath);
   const listBlock = (sourcePath: string, content: string) => [
+    DEFAULT_SOURCE_LOCATIONS,
     `SOURCE_BEGIN=${sourcePath}`,
     content,
     `SOURCE_END=${sourcePath}`,

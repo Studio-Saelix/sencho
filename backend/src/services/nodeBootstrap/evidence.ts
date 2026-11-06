@@ -523,11 +523,12 @@ function diskSpaceCheck(facts: BootstrapFacts): BootstrapCheck {
   const base = { id: 'disk_space' as const, category: 'storage' as const, label: 'Free disk space' };
   const compose = facts.paths.composeDir;
   const agent = facts.paths.agentDir;
-  const shared = compose.filesystem && agent.filesystem
-    && compose.filesystem.mountPoint === agent.filesystem.mountPoint;
-  // Each severity keeps its own list: a capacity that could not be read stays
-  // unknown beside a filesystem that is only low, in either order. A shortfall
-  // elsewhere still blocks, since that verdict does not depend on the unknown.
+  // Every path is judged on its own reading, even when both sit on one
+  // filesystem: a missing or low reading is never hidden behind the other
+  // path's healthy one. Each severity keeps its own list: a capacity that could
+  // not be read stays unknown beside a filesystem that is only low, in either
+  // order. A shortfall elsewhere still blocks, since that verdict does not
+  // depend on the unknown.
   const blocked: string[] = [];
   const unknown: string[] = [];
   const low: string[] = [];
@@ -542,17 +543,8 @@ function diskSpaceCheck(facts: BootstrapFacts): BootstrapCheck {
     }
   };
 
-  if (shared) {
-    evaluate(
-      'Compose and Agent directories',
-      compose.freeBytes,
-      COMPOSE_FREE_WARN_BYTES,
-      COMPOSE_FREE_BLOCK_BYTES,
-    );
-  } else {
-    evaluate('Compose directory', compose.freeBytes, COMPOSE_FREE_WARN_BYTES, COMPOSE_FREE_BLOCK_BYTES);
-    evaluate('Agent directory', agent.freeBytes, AGENT_FREE_WARN_BYTES, AGENT_FREE_BLOCK_BYTES);
-  }
+  evaluate('Compose directory', compose.freeBytes, COMPOSE_FREE_WARN_BYTES, COMPOSE_FREE_BLOCK_BYTES);
+  evaluate('Agent directory', agent.freeBytes, AGENT_FREE_WARN_BYTES, AGENT_FREE_BLOCK_BYTES);
   evaluate(
     facts.dockerRoot.path ? `Docker root (${facts.dockerRoot.path})` : 'Docker root',
     facts.dockerRoot.freeBytes,
@@ -1081,6 +1073,16 @@ export function buildBootstrapEvidence(input: { facts: BootstrapFacts; nodeNameT
     summary: 'A Docker source or keyring file exists but does not point at the official Docker repository.',
     observed: facts.repo.problem ?? 'the Docker repository configuration did not verify',
     remediation: 'Review or remove the misleading Docker apt source and keyring on the host, then run the preflight again.',
+  } : facts.repo.sourceLocations !== 'default' ? {
+    // The plan writes its source to apt's default location, so it cannot add
+    // one where apt is configured to look elsewhere, or where apt did not say.
+    ...aptSourceCheck,
+    status: 'unknown',
+    summary: facts.repo.sourceLocations === 'custom'
+      ? 'apt reads its sources from a custom location, and no Docker source is configured there, so the plan cannot add one where apt would read it.'
+      : 'The locations apt reads its sources from could not be established, so the plan cannot add a Docker source where apt would read it.',
+    observed: facts.repo.problem ?? 'apt source locations not established',
+    remediation: 'Add the official Docker source to the sources apt reads on this host, or reset Dir::Etc::sourcelist and Dir::Etc::sourceparts to /etc/apt/sources.list and /etc/apt/sources.list.d (check with apt-config dump), then run the preflight again.',
   } : {
     ...aptSourceCheck,
     status: 'warn',

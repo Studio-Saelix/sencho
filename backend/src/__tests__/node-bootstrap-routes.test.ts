@@ -14,7 +14,7 @@ import {
   type SshCommand,
   type SshCommandResult,
 } from '../services/nodeBootstrap/sshProbeClient';
-import { DOCKER_ASC_PATH, dockerAscBlock } from './__helpers__/dockerRepoFixtures';
+import { DEFAULT_SOURCE_LOCATIONS, DOCKER_ASC_PATH, dockerAscBlock } from './__helpers__/dockerRepoFixtures';
 
 const PATH_COMPOSE_OUTPUT = [
   'P_INPUT=/opt/docker/sencho',
@@ -970,6 +970,119 @@ describe('bootstrap service failure handling', () => {
       }, { compose_version: 1, compose_version_sudo: 1 });
       expect(statusOf(result, 'compose_plugin')).toBe('blocked');
       expect(result.plan).toBeNull();
+    });
+
+    describe('for a capacity the shared Compose and Agent filesystem did not report in full', () => {
+      const withoutDf = PATH_AGENT_OUTPUT.split('\n').filter((line) => !line.startsWith('P_DF=')).join('\n');
+      const withDf = (df: string) => PATH_AGENT_OUTPUT.replace(/^P_DF=.*$/m, `P_DF=${df}`);
+
+      it('whose Agent reading is missing', async () => {
+        const result = await preflightWith({ path_agent: withoutDf });
+        expect(statusOf(result, 'disk_space')).toBe('unknown');
+        expect(result.blocked).toBe(true);
+        expect(result.plan).toBeNull();
+      });
+
+      it('whose Agent reading is under the hard floor', async () => {
+        const result = await preflightWith({ path_agent: withDf('/dev/sda1 1 1 102400 99% /') });
+        expect(statusOf(result, 'disk_space')).toBe('blocked');
+        expect(result.plan).toBeNull();
+      });
+
+      it('whose Compose reading is missing beside a healthy Agent reading', async () => {
+        const result = await preflightWith({ path_compose: PATH_COMPOSE_OUTPUT.replace(/^P_DF=.*$/m, 'P_DF=') });
+        expect(statusOf(result, 'disk_space')).toBe('unknown');
+        expect(result.plan).toBeNull();
+      });
+    });
+
+    describe('for apt sources the preflight could not tie to the apt configuration', () => {
+      const freshHostFailures = { docker_cli: 1, docker_info: 1, docker_info_sudo: 1, compose_version: 1, compose_version_sudo: 1 };
+      const freshHost = {
+        docker_info: '',
+        docker_cli: '',
+        compose_version: '',
+        apt_policy: '',
+        docker_root_disk: 'D_SOURCE=default\nD_ROOT=/var/lib/docker\nD_DF=/dev/sda1 1 1 104857600 1% /',
+      };
+      const customLocations = (main: string, parts: string) => `SOURCE_LOCATIONS_MAIN=${main}\nSOURCE_LOCATIONS_PARTS=${parts}`;
+
+      it.each([
+        ['the main source list', customLocations('/srv/apt/sources.list', '/etc/apt/sources.list.d')],
+        ['the source directory', customLocations('/etc/apt/sources.list', '/srv/apt/sources.list.d')],
+        ['both', customLocations('/srv/apt/sources.list', '/srv/apt/sources.list.d')],
+        ['neither, because apt did not say', ''],
+      ])('on a fresh host where %s is not the default and holds no Docker source', async (_name, docker_repo) => {
+        const result = await preflightWith({ ...freshHost, docker_repo }, freshHostFailures);
+        expect(statusOf(result, 'apt_source')).toBe('unknown');
+        expect(result.blocked).toBe(true);
+        expect(result.plan).toBeNull();
+      });
+
+      it('on a fresh host whose default locations are confirmed, the plan adds the source', async () => {
+        const result = await preflightWith({ ...freshHost, docker_repo: DEFAULT_SOURCE_LOCATIONS }, freshHostFailures);
+        expect(statusOf(result, 'apt_source')).toBe('warn');
+        expect(result.plan).not.toBeNull();
+      });
+
+      it('on a fresh host where a custom list holds an active Docker source that apt would reject beside the plan', async () => {
+        const result = await preflightWith({
+          ...freshHost,
+          docker_repo: [
+            customLocations('/srv/apt/sources.list', '/etc/apt/sources.list.d'),
+            'SOURCE_BEGIN=/srv/apt/sources.list',
+            `deb [arch=arm64 trusted=yes signed-by=${DOCKER_ASC_PATH}] https://download.docker.com/linux/ubuntu noble stable`,
+            'SOURCE_END=/srv/apt/sources.list',
+            dockerAscBlock(),
+          ].join('\n'),
+        }, freshHostFailures);
+        expect(statusOf(result, 'apt_source')).toBe('blocked');
+        expect(result.plan).toBeNull();
+      });
+
+      it('on a working installation, the existing Docker is preserved whatever the locations', async () => {
+        const result = await preflightWith({ docker_repo: customLocations('/srv/apt/sources.list', '/srv/apt/sources.list.d') });
+        expect(statusOf(result, 'apt_source')).toBe('warn');
+        expect(result.blocked).toBe(false);
+      });
+    });
+
+    describe('for a deb822 source whose Types apt does not know', () => {
+      const debSource = (types: string) => [
+        DEFAULT_SOURCE_LOCATIONS,
+        'SOURCE_BEGIN=/etc/apt/sources.list.d/docker.sources',
+        `Types: ${types}`,
+        'URIs: https://download.docker.com/linux/ubuntu',
+        'Suites: noble',
+        'Components: stable',
+        `Signed-By: ${DOCKER_ASC_PATH}`,
+        'SOURCE_END=/etc/apt/sources.list.d/docker.sources',
+        dockerAscBlock(),
+      ].join('\n');
+      const failedPolicy = { apt_policy: '' };
+      const OFFICIAL_ARCHIVE_POLICY = [
+        'docker-ce:', '  Installed: 1', '  Candidate: 1', '  Version table:',
+        ' *** 1 500', '        500 https://download.docker.com/linux/ubuntu noble/stable amd64 Packages',
+      ].join('\n');
+
+      it.each(['deb nonsense', 'nonsense', 'DEB', 'deb,deb-src'])('is never verified on a working installation (%s)', async (types) => {
+        const result = await preflightWith({ docker_repo: debSource(types), ...failedPolicy }, { apt_policy: 100 });
+        expect(statusOf(result, 'apt_source')).not.toBe('pass');
+        expect(result.blocked).toBe(false);
+        expect(result.plan).not.toBeNull();
+      });
+
+      it.each(['deb nonsense', 'nonsense', 'DEB', 'deb,deb-src'])('withholds the plan on a fresh host (%s)', async (types) => {
+        const result = await preflightWith({
+          docker_info: '', docker_cli: '', compose_version: '', apt_policy: '', docker_repo: debSource(types),
+        }, { docker_cli: 1, docker_info: 1, docker_info_sudo: 1, compose_version: 1, compose_version_sudo: 1, apt_policy: 100 });
+        expect(result.plan).toBeNull();
+      });
+
+      it.each(['deb', 'deb deb-src', 'deb-src deb'])('still verifies the valid types (%s)', async (types) => {
+        const result = await preflightWith({ docker_repo: debSource(types), apt_policy: OFFICIAL_ARCHIVE_POLICY });
+        expect(statusOf(result, 'apt_source')).toBe('pass');
+      });
     });
 
     it('for a Docker source that weakens signature checking', async () => {

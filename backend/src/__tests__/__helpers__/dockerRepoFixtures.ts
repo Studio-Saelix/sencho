@@ -139,3 +139,6 @@ export function keyBlock(path: string, bytes: Buffer, size = bytes.length): stri
 
 export const DOCKER_ASC_PATH = '/etc/apt/keyrings/docker.asc';
 export const dockerAscBlock = (path = DOCKER_ASC_PATH): string => keyBlock(path, Buffer.from(DOCKER_KEY_ASC));
+
+/** What the repository probe reports first when apt reads its sources from the defaults. */
+export const DEFAULT_SOURCE_LOCATIONS = 'SOURCE_LOCATIONS_MAIN=/etc/apt/sources.list\nSOURCE_LOCATIONS_PARTS=/etc/apt/sources.list.d';
