@@ -1427,11 +1427,19 @@ describe('what apt reads differently from JavaScript stays fail-closed', () => {
     expect(result.problem).toMatch(/does not name an installed Docker keyring/);
   });
 
-  it.each(['%23x', '%3fx', '%20', '/%09'])('does not take the official URI followed by %s for the official one', (suffix) => {
+  // The suffix as a one-line word writes it, and as a .sources field would hold the same path (whitespace there is only a separator).
+  it.each([
+    ['%23x', '#x'],
+    ['%3fx', '?x'],
+    ['%20', null],
+    ['/%09', null],
+  ])('does not take the official URI followed by %s for the official one', (suffix, rawSuffix) => {
     const result = entry(`arch=amd64 ${SIGNED}`, `${OFFICIAL}${suffix}`);
     expect(result.sourceVerified).toBe(false);
     expect(result.problem).toMatch(/points at https:\/\/download\.docker\.com, not/);
-    expect(parse('amd64', block(CUSTOM_SOURCES, stanza({ URIs: `${OFFICIAL}${decodeURIComponent(suffix)}` })), dockerAscBlock()).sourceVerified).toBe(false);
+    if (rawSuffix !== null) {
+      expect(parse('amd64', block(CUSTOM_SOURCES, stanza({ URIs: `${OFFICIAL}${rawSuffix}` })), dockerAscBlock()).sourceVerified).toBe(false);
+    }
   });
 
   it('judges an entry whose escaped or quoted URI names Docker\'s host as apt reads it', () => {
