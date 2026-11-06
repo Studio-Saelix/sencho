@@ -2468,17 +2468,21 @@ class DockerController {
           const stateInfo = asRecord(info.State);
           const inspectedLabels = normalizeDockerLabels(config?.Labels);
           labels = { ...listedLabels.labels, ...inspectedLabels.labels };
-          if (stateInfo?.Status !== undefined && stateInfo?.Status !== null
-            && typeof stateInfo.Status !== 'string') inspectFieldIncomplete = true;
+          // An explicit null is present but unreadable, not an absent field.
+          if (stateInfo?.Status !== undefined && typeof stateInfo.Status !== 'string') {
+            inspectFieldIncomplete = true;
+          }
           state = readContainerString(stateInfo?.Status) ?? state;
-          if (config?.Image !== undefined && config?.Image !== null
-            && typeof config.Image !== 'string') inspectFieldIncomplete = true;
+          if (config?.Image !== undefined && typeof config.Image !== 'string') {
+            inspectFieldIncomplete = true;
+          }
           image = readContainerString(config?.Image) ?? image;
-          if (info.Image !== undefined && info.Image !== null
-            && typeof info.Image !== 'string') inspectFieldIncomplete = true;
+          if (info.Image !== undefined && typeof info.Image !== 'string') {
+            inspectFieldIncomplete = true;
+          }
           imageId = readContainerString(info.Image) ?? imageId;
           const rawHealth = asRecord(stateInfo?.Health)?.Status;
-          if (rawHealth !== undefined && rawHealth !== null && typeof rawHealth !== 'string') {
+          if (rawHealth !== undefined && typeof rawHealth !== 'string') {
             inspectFieldIncomplete = true;
           }
           health = readContainerString(rawHealth);
@@ -4129,10 +4133,11 @@ function normalizeDockerPorts(value: unknown): NormalizedPorts {
     // or unparseable metadata must not become the empty string, which the
     // response would report as a proven wildcard binding.
     if (publicPort !== null && rawIp === null) incomplete = true;
-    if (port.IP !== undefined && port.IP !== null && rawIp === null) incomplete = true;
+    if (port.IP !== undefined && rawIp === null) incomplete = true;
     const rawProtocol = readContainerString(port.Type);
-    // A present-but-malformed protocol is not a clean `tcp` default.
-    if (port.Type !== undefined && port.Type !== null && rawProtocol === null) incomplete = true;
+    // A present-but-malformed protocol (including an explicit null) is not a
+    // clean `tcp` default.
+    if (port.Type !== undefined && rawProtocol === null) incomplete = true;
     ports.push({
       privatePort,
       publicPort,
@@ -4236,7 +4241,7 @@ function normalizeInspectPorts(
       // unparseable metadata must never become the empty string, which would
       // read as a proven wildcard binding.
       if (publicPort !== null && rawIp === null) incomplete = true;
-      if (host.HostIp !== undefined && host.HostIp !== null && rawIp === null) incomplete = true;
+      if (host.HostIp !== undefined && rawIp === null) incomplete = true;
       ports.push({
         privatePort,
         publicPort,
@@ -4336,12 +4341,8 @@ function normalizeDockerNetworks(value: unknown): NormalizedNetworks {
     const ipAddress = readBindingAddress(network?.IPAddress);
     // A present field of the wrong type or an unparseable address is unreadable,
     // not a null value.
-    if (network && network.NetworkID !== undefined && network.NetworkID !== null && id === null) {
-      incomplete = true;
-    }
-    if (network && network.IPAddress !== undefined && network.IPAddress !== null && ipAddress === null) {
-      incomplete = true;
-    }
+    if (network && network.NetworkID !== undefined && id === null) incomplete = true;
+    if (network && network.IPAddress !== undefined && ipAddress === null) incomplete = true;
     networks.push({ name, id, ipAddress });
   }
   return { networks, incomplete };

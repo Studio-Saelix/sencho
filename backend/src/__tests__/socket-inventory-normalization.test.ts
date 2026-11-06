@@ -460,29 +460,35 @@ describe('socket inventory malformed port metadata', () => {
     expect(inventory.status).toBe('partial');
   });
 
-  it('marks an exposed-only listing entry with an unreadable address incomplete', async () => {
-    const rows = await rowsFrom(
-      listed({ Ports: [{ IP: 5, PrivatePort: 2375, PublicPort: 0, Type: 'tcp' }] }),
-      new Error('inspect unavailable'),
-    );
-    expect(rows[0].ports).toEqual([
-      { privatePort: 2375, publicPort: null, ip: null, protocol: 'tcp' },
-    ]);
-    expect(rows[0].metadataTruncated).toBe(true);
-  });
+  it.each([5, null])(
+    'marks an exposed-only listing entry with an unreadable address incomplete: %j',
+    async IP => {
+      const rows = await rowsFrom(
+        listed({ Ports: [{ IP, PrivatePort: 2375, PublicPort: 0, Type: 'tcp' }] }),
+        new Error('inspect unavailable'),
+      );
+      expect(rows[0].ports).toEqual([
+        { privatePort: 2375, publicPort: null, ip: null, protocol: 'tcp' },
+      ]);
+      expect(rows[0].metadataTruncated).toBe(true);
+    },
+  );
 
-  it('marks an exposed-only inspect binding with a malformed HostIp incomplete', async () => {
-    const rows = await rowsFrom(
-      listed({ Ports: [] }),
-      inspected({
-        NetworkSettings: {
-          Ports: { '2375/tcp': [{ HostIp: {}, HostPort: '' }] },
-          Networks: {},
-        },
-      }),
-    );
-    expect(rows[0].metadataTruncated).toBe(true);
-  });
+  it.each([{}, null])(
+    'marks an exposed-only inspect binding with a malformed HostIp incomplete: %j',
+    async HostIp => {
+      const rows = await rowsFrom(
+        listed({ Ports: [] }),
+        inspected({
+          NetworkSettings: {
+            Ports: { '2375/tcp': [{ HostIp, HostPort: '' }] },
+            Networks: {},
+          },
+        }),
+      );
+      expect(rows[0].metadataTruncated).toBe(true);
+    },
+  );
 
   it('marks an inspect port spec with an empty protocol incomplete', async () => {
     const rows = await rowsFrom(listed({ Ports: [] }), inspected({
@@ -497,21 +503,24 @@ describe('socket inventory malformed port metadata', () => {
     expect(rows[0].metadataTruncated).toBe(true);
   });
 
-  it('marks a malformed listing protocol incomplete instead of defaulting silently', async () => {
-    const rows = await rowsFrom(
-      listed({ Ports: [{ IP: '0.0.0.0', PrivatePort: 2375, PublicPort: 8080, Type: 5 }] }),
-      inspected({
-        NetworkSettings: {
-          Ports: { '2375/tcp': [{ HostIp: '0.0.0.0', HostPort: '8080' }] },
-          Networks: {},
-        },
-      }),
-    );
-    expect(rows[0].ports).toEqual([
-      { privatePort: 2375, publicPort: 8080, ip: '0.0.0.0', protocol: 'tcp' },
-    ]);
-    expect(rows[0].metadataTruncated).toBe(true);
-  });
+  it.each([5, null])(
+    'marks a malformed listing protocol (%j) incomplete instead of defaulting silently',
+    async Type => {
+      const rows = await rowsFrom(
+        listed({ Ports: [{ IP: '0.0.0.0', PrivatePort: 2375, PublicPort: 8080, Type }] }),
+        inspected({
+          NetworkSettings: {
+            Ports: { '2375/tcp': [{ HostIp: '0.0.0.0', HostPort: '8080' }] },
+            Networks: {},
+          },
+        }),
+      );
+      expect(rows[0].ports).toEqual([
+        { privatePort: 2375, publicPort: 8080, ip: '0.0.0.0', protocol: 'tcp' },
+      ]);
+      expect(rows[0].metadataTruncated).toBe(true);
+    },
+  );
 
   it('treats a published empty address as a proven wildcard binding', async () => {
     const rows = await rowsFrom(listed({ Ports: [] }), inspected({
@@ -600,6 +609,7 @@ describe('socket inventory malformed label and network metadata', () => {
           net1: { NetworkID: 5, IPAddress: {} },
           net2: { NetworkID: 'n2', IPAddress: '10.0.0.2' },
           net3: { NetworkID: 'n3', IPAddress: '10.0.0.2garbage' },
+          net4: { NetworkID: null, IPAddress: null },
         },
       },
     }));
@@ -607,6 +617,7 @@ describe('socket inventory malformed label and network metadata', () => {
       { name: 'net1', id: null, ipAddress: null },
       { name: 'net2', id: 'n2', ipAddress: '10.0.0.2' },
       { name: 'net3', id: 'n3', ipAddress: null },
+      { name: 'net4', id: null, ipAddress: null },
     ]);
     expect(rows[0].metadataTruncated).toBe(true);
 
@@ -615,21 +626,36 @@ describe('socket inventory malformed label and network metadata', () => {
     expect(inventory.status).toBe('partial');
   });
 
-  it('marks present but unreadable inspect scalars incomplete and keeps the listing fallback', async () => {
+  it('marks an explicit null network id and address incomplete', async () => {
     const rows = await rowsFrom(listed(), inspected({
-      Image: 9,
-      Config: { Image: 7, Labels: {}, Env: [], ExposedPorts: {} },
-      State: { Status: 5, Health: { Status: {} } },
+      NetworkSettings: {
+        Ports: {},
+        Networks: { net4: { NetworkID: null, IPAddress: null } },
+      },
     }));
-    // The listing values are still valid evidence, but the row cannot read
-    // complete when inspect answered with an unreadable value.
-    expect(rows[0]).toMatchObject({
-      state: 'running',
-      image: 'alpine:3',
-      imageId: 'sha256:image1',
-      health: null,
-      metadataTruncated: true,
-    });
+    expect(rows[0].networks).toEqual([{ name: 'net4', id: null, ipAddress: null }]);
+    expect(rows[0].metadataTruncated).toBe(true);
     expect(inventoryOf(rows).status).toBe('partial');
   });
+
+  it.each([7, null, {}])(
+    'marks present but unreadable inspect scalars (%j) incomplete and keeps the listing fallback',
+    async bad => {
+      const rows = await rowsFrom(listed(), inspected({
+        Image: bad,
+        Config: { Image: bad, Labels: {}, Env: [], ExposedPorts: {} },
+        State: { Status: bad, Health: { Status: bad } },
+      }));
+      // The listing values are still valid evidence, but the row cannot read
+      // complete when inspect answered with an unreadable value.
+      expect(rows[0]).toMatchObject({
+        state: 'running',
+        image: 'alpine:3',
+        imageId: 'sha256:image1',
+        health: null,
+        metadataTruncated: true,
+      });
+      expect(inventoryOf(rows).status).toBe('partial');
+    },
+  );
 });
