@@ -622,8 +622,8 @@ function suiteComponentProblem(suites: string[], components: string[]): string |
   return null;
 }
 
-/** A URI apt can parse starts with a scheme (`https:`, `file:`, `cdrom:`). */
-const URI_SCHEME = /^[A-Za-z][A-Za-z0-9+.-]*:/;
+/** A URI apt can use starts with a lower-case scheme (`https:`, `file:`, `cdrom:`); apt finds the method for it by that exact name. */
+const URI_SCHEME = /^[a-z][a-z0-9+.-]*:/;
 
 /**
  * Whitespace JavaScript treats as a separator and apt does not (a no-break
@@ -802,7 +802,7 @@ function parseDeb822Source(content: string): ParsedSourceFile {
     // Suites, or with components that do not fit its suites.
     let stanzaProblem: string | null;
     if (uris.length === 0) stanzaProblem = 'no URIs';
-    else if (uris.some((uri) => !URI_SCHEME.test(uri))) stanzaProblem = 'a URI with no scheme';
+    else if (uris.some((uri) => !URI_SCHEME.test(uri))) stanzaProblem = 'a URI with no lower-case scheme';
     else if (suites.length === 0) stanzaProblem = 'no Suites';
     else stanzaProblem = suiteComponentProblem(suites, components);
     if (stanzaProblem) invalid.push(`${where} is enabled with ${stanzaProblem}, which apt rejects`);

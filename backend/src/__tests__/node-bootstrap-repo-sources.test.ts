@@ -257,7 +257,7 @@ describe('sources outside docker.list and docker.sources', () => {
     });
 
     it('verifies an official source written with the host in upper case', () => {
-      const result = parse('amd64', block(CUSTOM_LIST, deb('arch=amd64', 'HTTPS://Download.Docker.com/linux/ubuntu')), dockerAscBlock());
+      const result = parse('amd64', block(CUSTOM_LIST, deb('arch=amd64', 'https://Download.Docker.com/linux/ubuntu')), dockerAscBlock());
       expect(result.sourceVerified).toBe(true);
     });
 
@@ -473,6 +473,8 @@ describe('sources outside docker.list and docker.sources', () => {
       ['a bare path as the URI', 'deb /srv/repo noble main'],
       ['an unterminated quote', 'deb http://archive.ubuntu.com/ubuntu "noble main'],
       ['a quoted URI with no scheme', 'deb "archive.ubuntu.com/ubuntu" noble main'],
+      ['an upper-case URI scheme, which names no apt method', 'deb HTTPS://archive.ubuntu.com/ubuntu noble main'],
+      ['an upper-case scheme on the official URI', `deb [arch=amd64 signed-by=${DOCKER_ASC_PATH}] HTTPS://download.docker.com/linux/ubuntu noble stable`],
       ['an option value in single quotes, which apt does not read as a quote', "deb [signed-by='/etc/apt/keyrings/one.gpg /etc/apt/keyrings/two.gpg'] http://archive.ubuntu.com/ubuntu noble main"],
       ['a quote that opens in the middle of an option value', 'deb [signed-by=/etc/apt/keyrings/one.gpg"two three"] http://archive.ubuntu.com/ubuntu noble main'],
       // apt starts a comment at any '#', so what follows one inside a word is gone.
@@ -502,6 +504,8 @@ describe('sources outside docker.list and docker.sources', () => {
       // An indented line after an open field continues it, a comment included, so it is part of the value.
       ['an indented comment that continues a Types value', 'Types: deb\n  # note\nURIs: http://archive.ubuntu.com/ubuntu\nSuites: noble\nComponents: main'],
       ['an indented comment that continues a URIs value', 'Types: deb\nURIs: http://archive.ubuntu.com/ubuntu\n  # note\nSuites: noble\nComponents: main'],
+      ['an upper-case URI scheme, which names no apt method', 'Types: deb\nURIs: HTTPS://archive.ubuntu.com/ubuntu\nSuites: noble\nComponents: main'],
+      ['an upper-case scheme on the official URI', stanza({ URIs: 'HTTPS://download.docker.com/linux/ubuntu' })],
       ['a no-break space after a field name', 'Types:\u00a0deb\nURIs: http://archive.ubuntu.com/ubuntu\nSuites: noble\nComponents: main'],
       ['a byte order mark before the stanza', '\ufeffTypes: deb\nURIs: http://archive.ubuntu.com/ubuntu\nSuites: noble\nComponents: main'],
     ];

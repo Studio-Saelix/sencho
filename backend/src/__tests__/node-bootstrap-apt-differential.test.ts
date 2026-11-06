@@ -63,6 +63,8 @@ const cases: Case[] = [
   { name: 'no component', kind: 'list', content: 'deb http://archive.ubuntu.com/ubuntu noble', apt: 'rejects', parser: 'rejects' },
   { name: 'upper-case type', kind: 'list', content: 'DEB http://archive.ubuntu.com/ubuntu noble main', apt: 'rejects', parser: 'rejects' },
   { name: 'URI with no scheme', kind: 'list', content: 'deb archive.ubuntu.com/ubuntu noble main', apt: 'rejects', parser: 'rejects' },
+  { name: 'upper-case URI scheme', kind: 'list', content: 'deb HTTPS://archive.ubuntu.com/ubuntu noble main', apt: 'rejects', parser: 'rejects' },
+  { name: 'upper-case URI scheme in a deb822 stanza', kind: 'sources', content: 'Types: deb\nURIs: HTTPS://download.docker.com/linux/ubuntu\nSuites: noble\nComponents: stable', apt: 'rejects', parser: 'rejects' },
   // A '#' starts a comment wherever it stands, inside a word too.
   { name: 'hash inside the URI', kind: 'list', content: 'deb http://archive.ubuntu.com/ubuntu#x noble main', apt: 'rejects', parser: 'rejects' },
   { name: 'hash that ends the last component', kind: 'list', content: 'deb http://archive.ubuntu.com/ubuntu noble main#c', apt: 'accepts', parser: 'accepts' },
