@@ -5,7 +5,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
-import type { SecretDetail } from '@/lib/secretsApi';
+import type { SecretDetail, SecretImportPreview } from '@/lib/secretsApi';
 
 vi.mock('@/lib/secretsApi', async (importOriginal) => {
     const actual = await importOriginal<typeof import('@/lib/secretsApi')>();
@@ -347,5 +347,44 @@ describe('SecretBundleSheet import source drift', () => {
         await waitFor(() => expect(vi.mocked(toast.error)).toHaveBeenCalledWith(expect.stringMatching(/env file changed/i)));
         expect(vi.mocked(getSecret)).toHaveBeenCalledTimes(1);
         expect(screen.queryByText('NEW_KEY')).not.toBeInTheDocument();
+    });
+});
+
+describe('SecretBundleSheet does not leave the panel stuck', () => {
+    it('clears the reading state when an import field changes mid-preview', async () => {
+        let resolvePreview!: (value: SecretImportPreview) => void;
+        vi.mocked(previewImport).mockReturnValue(new Promise<SecretImportPreview>((resolve) => { resolvePreview = resolve; }));
+        renderSheet();
+        await screen.findByDisplayValue('API_KEY');
+
+        await userEvent.click(screen.getByRole('button', { name: /import from stack/i }));
+        await userEvent.selectOptions(screen.getByLabelText('Node'), '1');
+        await userEvent.type(screen.getByLabelText('Stack name'), 'visualstack');
+        await userEvent.click(screen.getByRole('button', { name: /preview import/i }));
+        expect(await screen.findByRole('button', { name: /reading/i })).toBeDisabled();
+
+        // Change the stack name while the request is in flight.
+        await userEvent.type(screen.getByLabelText('Stack name'), '-v2');
+        await waitFor(() => expect(screen.getByRole('button', { name: /preview import/i })).toBeEnabled());
+
+        resolvePreview({ added: 0, changed: 0, unchanged: 0, keys: [], fingerprint: 'f'.repeat(64) });
+        await waitFor(() => expect(screen.queryByText(/added ·/)).not.toBeInTheDocument());
+    });
+
+    it('shows the key editor, not the previous bundle error, when creating after a failed load', async () => {
+        vi.mocked(getSecret).mockResolvedValueOnce(detail());
+        const { rerender } = render(
+            <SecretBundleSheet open onOpenChange={vi.fn()} secret={summary} onSaved={vi.fn()} />,
+        );
+        await screen.findByDisplayValue('API_KEY');
+
+        vi.mocked(getSecret).mockRejectedValueOnce(new Error('The stored bundle payload could not be read'));
+        rerender(<SecretBundleSheet open onOpenChange={vi.fn()} secret={{ ...summary }} onSaved={vi.fn()} />);
+        expect(await screen.findByText(/could not be read/i)).toBeInTheDocument();
+
+        rerender(<SecretBundleSheet open onOpenChange={vi.fn()} secret={null} onSaved={vi.fn()} />);
+        await waitFor(() => expect(screen.queryByText(/could not be read/i)).not.toBeInTheDocument());
+        expect(screen.getByPlaceholderText('app-secrets')).toBeInTheDocument();
+        expect(screen.getByPlaceholderText('KEY_NAME')).toBeInTheDocument();
     });
 });

@@ -208,12 +208,16 @@ export function SecretBundleSheet({ open, onOpenChange, secret, onSaved }: Props
             // Drop any in-flight detail load; the sheet state must not change
             // after it closes.
             loadTokenRef.current += 1;
+            setLoading(false);
+            setLoadError(null);
             return;
         }
         if (secret) {
             void loadDetail(secret.id);
         } else {
             loadTokenRef.current += 1;
+            setLoading(false);
+            setLoadError(null);
             setName('');
             setDescription('');
             setLoadedDescription('');
@@ -395,9 +399,11 @@ export function SecretBundleSheet({ open, onOpenChange, secret, onSaved }: Props
     }
 
     function resetImport() {
-        // A new input set invalidates any preview in flight.
+        // A new input set invalidates any preview in flight, and that request
+        // no longer owns the busy flag.
         importTokenRef.current += 1;
         setImportPreview(null);
+        setImportBusy(false);
     }
 
     function currentImportInput(): ImportInput | null {
@@ -427,7 +433,7 @@ export function SecretBundleSheet({ open, onOpenChange, secret, onSaved }: Props
             const preview = await previewImport(secret.id, input);
             if (importTokenRef.current !== token) return;
             setImportPreview({ preview, input });
-            if (preview.keys.length === 0) toast.info('Every key in that env file already matches this bundle');
+            if (preview.keys.length === 0) toast.info('That env file has no keys to import');
         } catch (err) {
             if (importTokenRef.current !== token) return;
             toast.error(err instanceof Error ? err.message : 'Failed to preview import');

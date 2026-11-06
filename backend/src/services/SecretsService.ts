@@ -588,7 +588,8 @@ export class SecretsService {
     getDecryptedKv(id: number): SecretKv {
         const db = DatabaseService.getInstance();
         const v = db.getCurrentSecretVersion(id);
-        if (!v) return {};
+        // A bundle row with no current version is a broken bundle, not an empty one.
+        if (!v) throw new SecretPayloadError();
         return decryptKv(v.encrypted_payload);
     }
 
