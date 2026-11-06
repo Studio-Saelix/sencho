@@ -125,18 +125,28 @@ export type DockerPackageName =
   | 'docker-buildx-plugin'
   | 'docker-compose-plugin';
 
+/**
+ * One archive serving a candidate. `official` is whether it is the official
+ * repository's archive for the host release; null when it is the official
+ * repository's URI but the host release is not known, so the archive cannot be
+ * told from another release's. A URI with credentials counts as the official
+ * one when its host and path are.
+ */
+export type CandidateSource =
+  | { uri: 'https://download.docker.com/linux/ubuntu'; official: boolean | null }
+  | { uri: string; official: false };
+
 export interface DockerPackage {
   name: DockerPackageName;
   installedVersion: string | null;
   candidateVersion: string | null;
   /**
    * Archives apt lists under the candidate version itself, classified when
-   * parsed; empty when none is known. The URI is redacted (`redactUri`) and
-   * `official` says whether the archive is the official repository's for the
-   * host release. Nothing else apt prints is kept, because facts are hashed and
+   * parsed; empty when none is known. Nothing but the redacted URI
+   * (`redactUri`) and the classification is kept, because facts are hashed and
    * returned and a suite or component path can carry a repository credential.
    */
-  candidateSources?: Array<{ uri: string; official: boolean }>;
+  candidateSources?: CandidateSource[];
 }
 
 export interface RepositoryObservation {

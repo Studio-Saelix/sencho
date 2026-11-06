@@ -1088,7 +1088,7 @@ describe('round 1 follow-ups', () => {
     it('make the package source unknown and withhold the plan, with the reason', () => {
       const facts = makeFacts({
         docker: fresh,
-        packages: parseAptPolicy(unknownArchive),
+        packages: parseAptPolicy(unknownArchive, 'noble'),
         repo: assemble([osRelease, probe('docker_repo', verifiedRepo), probe('apt_policy', unknownArchive)]).repo,
       });
       const row = check(facts, 'apt_source');
@@ -1099,7 +1099,7 @@ describe('round 1 follow-ups', () => {
 
     it('are reported on a working installation instead of calling the source missing', () => {
       const facts = makeFacts({
-        packages: parseAptPolicy(unknownArchive),
+        packages: parseAptPolicy(unknownArchive, 'noble'),
         repo: assemble([osRelease, probe('docker_repo', verifiedRepo), probe('apt_policy', unknownArchive)]).repo,
       });
       const row = check(facts, 'apt_source');

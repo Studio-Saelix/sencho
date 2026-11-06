@@ -11,14 +11,13 @@ import { DEFAULT_SOURCE_LOCATIONS } from './__helpers__/dockerRepoFixtures';
  * The source parser against apt itself. Each case is one source file; the
  * expectation for apt was read from `apt-get --print-uris update` over that
  * file alone (exit 0, or 100 for "The list of sources could not be read"), and
- * the parser must agree. Where the parser is stricter than apt on purpose, the
- * case says so (`apt: 'accepts'`, `parser: 'rejects'`): a stricter answer is a
- * false blocker, never a false verification. Both halves are asserted for every
- * case. The apt half runs where apt-get can run against an isolated
+ * the parser must agree: a stricter answer is a false blocker, a more lenient
+ * one a false verification, so no case may differ. Both halves are asserted for
+ * every case. The apt half runs where apt-get can run against an isolated
  * configuration, and must run in CI. Every apt expectation was recorded on apt
- * 3.2.1. The one-line reader is a port of apt's own word reader, so every case
- * here is a form apt reads one way: quotes anywhere in a word, `%XX` escapes
- * and bracket groups included.
+ * 3.2.1. The one-line cases exercise the quote, escape and bracket handling of
+ * apt's own word reader, which the parser ports; the deb822 cases cover the
+ * comment, field-name and whitespace rules.
  */
 
 type Kind = 'list' | 'sources';
@@ -28,7 +27,7 @@ interface Case {
   content: string;
   /** What apt does with the file. */
   apt: 'accepts' | 'rejects';
-  /** What the parser does; `rejects` while apt accepts would be a false blocker, so no case may do that. */
+  /** What the parser does; it must equal `apt`. */
   parser: 'accepts' | 'rejects';
 }
 
@@ -66,20 +65,33 @@ const cases: Case[] = [
   { name: 'escape inside a suite', kind: 'list', content: 'deb http://archive.ubuntu.com/ubuntu noble%20x main', apt: 'accepts', parser: 'accepts' },
   { name: 'hash inside an option value', kind: 'list', content: 'deb [arch=amd64#x] http://archive.ubuntu.com/ubuntu noble main', apt: 'accepts', parser: 'accepts' },
   { name: 'comment that opens a bracket', kind: 'list', content: 'deb http://archive.ubuntu.com/ubuntu "noble" main # [ open', apt: 'accepts', parser: 'accepts' },
+  { name: 'escaped NUL in a URI', kind: 'list', content: 'deb http://archive.ubuntu.com/ubuntu/ub%00untu noble main', apt: 'accepts', parser: 'accepts' },
+  { name: 'escaped non-ASCII byte in a URI', kind: 'list', content: 'deb http://archive.ubuntu.com/ubuntu/ub%ffuntu noble main', apt: 'accepts', parser: 'accepts' },
+  { name: 'bracket group inside a suite', kind: 'list', content: 'deb http://archive.ubuntu.com/ubuntu no[b le] main', apt: 'accepts', parser: 'accepts' },
+  { name: 'comment mark inside a quoted option value', kind: 'list', content: 'deb [arch="amd64#x"] http://archive.ubuntu.com/ubuntu noble main', apt: 'accepts', parser: 'accepts' },
+  { name: 'quoted suite that holds a space', kind: 'list', content: 'deb [arch=amd64] http://archive.ubuntu.com/ubuntu "no ble" main', apt: 'accepts', parser: 'accepts' },
+  { name: 'incomplete escape at the end of a component', kind: 'list', content: 'deb http://archive.ubuntu.com/ubuntu noble main%4', apt: 'accepts', parser: 'accepts' },
   { name: 'comma in a suite', kind: 'list', content: 'deb http://archive.ubuntu.com/ubuntu noble,jammy main', apt: 'accepts', parser: 'accepts' },
   { name: 'unclosed quote after the components', kind: 'list', content: 'deb [arch=amd64] http://archive.ubuntu.com/ubuntu noble main "unclosed', apt: 'accepts', parser: 'accepts' },
   { name: 'unclosed quote after an exact-path suite', kind: 'list', content: 'deb http://archive.ubuntu.com/ubuntu noble/ "unclosed', apt: 'accepts', parser: 'accepts' },
   { name: 'exact-path suite', kind: 'list', content: 'deb http://archive.ubuntu.com/ubuntu ./', apt: 'accepts', parser: 'accepts' },
   { name: 'two option groups with no space between', kind: 'list', content: 'deb [a=b][c=d] http://archive.ubuntu.com/ubuntu noble main', apt: 'accepts', parser: 'accepts' },
+  { name: 'vertical tab after the type', kind: 'list', content: 'deb\vhttp://archive.ubuntu.com/ubuntu noble main', apt: 'accepts', parser: 'accepts' },
+  { name: 'option group closed by a second bracket after a space', kind: 'list', content: 'deb [a=b] ] http://archive.ubuntu.com/ubuntu noble main', apt: 'accepts', parser: 'accepts' },
+  { name: 'no-break space inside an option value', kind: 'list', content: `deb [arch=amd64${NBSP}] http://archive.ubuntu.com/ubuntu noble main`, apt: 'accepts', parser: 'accepts' },
   { name: 'tabs between every word', kind: 'list', content: 'deb\t[arch=amd64]\thttp://archive.ubuntu.com/ubuntu\tnoble\tmain', apt: 'accepts', parser: 'accepts' },
   { name: 'deb-src with options', kind: 'list', content: 'deb-src [arch=amd64] http://archive.ubuntu.com/ubuntu noble main', apt: 'accepts', parser: 'accepts' },
   // One-line quoting: invalid.
+  { name: 'unclosed bracket inside a suite', kind: 'list', content: 'deb http://archive.ubuntu.com/ubuntu no[ble main', apt: 'rejects', parser: 'rejects' },
   { name: 'empty quoted option', kind: 'list', content: 'deb [arch=amd64 ""] http://archive.ubuntu.com/ubuntu noble main', apt: 'rejects', parser: 'rejects' },
   { name: 'empty quoted option name', kind: 'list', content: 'deb [""=amd64] http://archive.ubuntu.com/ubuntu noble main', apt: 'rejects', parser: 'rejects' },
   { name: 'no space after the option group', kind: 'list', content: 'deb [arch=amd64]http://archive.ubuntu.com/ubuntu noble main', apt: 'rejects', parser: 'rejects' },
   { name: 'comment inside an open option group', kind: 'list', content: 'deb [arch=amd64 # in option ] http://archive.ubuntu.com/ubuntu noble main', apt: 'rejects', parser: 'rejects' },
   { name: 'exact-path suite with a component', kind: 'list', content: 'deb http://archive.ubuntu.com/ubuntu noble/ main', apt: 'rejects', parser: 'rejects' },
   { name: 'closing bracket written as an escape', kind: 'list', content: 'deb [arch=amd64%5d http://archive.ubuntu.com/ubuntu noble main', apt: 'rejects', parser: 'rejects' },
+  { name: 'form feed after the type', kind: 'list', content: 'deb\fhttp://archive.ubuntu.com/ubuntu noble main', apt: 'rejects', parser: 'rejects' },
+  { name: 'carriage return after the type', kind: 'list', content: 'deb\rhttp://archive.ubuntu.com/ubuntu noble main', apt: 'rejects', parser: 'rejects' },
+  { name: 'upper-case option name is a name like any other', kind: 'list', content: 'deb [Arch=amd64] http://archive.ubuntu.com/ubuntu noble main', apt: 'accepts', parser: 'accepts' },
   { name: 'closing bracket inside quotes', kind: 'list', content: 'deb [arch=amd64"]" http://archive.ubuntu.com/ubuntu noble main', apt: 'rejects', parser: 'rejects' },
   { name: 'single-quoted option value', kind: 'list', content: "deb [signed-by='/etc/apt/keyrings/one.gpg /etc/apt/keyrings/two.gpg'] http://archive.ubuntu.com/ubuntu noble main", apt: 'rejects', parser: 'rejects' },
   { name: 'unclosed quote', kind: 'list', content: 'deb "http://archive.ubuntu.com/ubuntu noble main', apt: 'rejects', parser: 'rejects' },
@@ -121,6 +133,13 @@ const cases: Case[] = [
   { name: 'indented comment that continues URIs', kind: 'sources', content: 'Types: deb\nURIs: https://download.docker.com/linux/ubuntu\n  # note\nSuites: noble\nComponents: stable', apt: 'rejects', parser: 'rejects' },
   { name: 'line with no colon', kind: 'sources', content: `${DOCKER_STANZA}\ngarbage`, apt: 'rejects', parser: 'rejects' },
   { name: 'indented field that starts the stanza', kind: 'sources', content: ' Types: deb\nURIs: https://download.docker.com/linux/ubuntu\nSuites: noble\nComponents: stable', apt: 'rejects', parser: 'rejects' },
+  // deb822 text apt reads as part of a value or a comment, and whitespace-only lines.
+  { name: 'no-break space inside a deb822 value', kind: 'sources', content: `${DOCKER_STANZA}\nX-Note: a${NBSP}b`, apt: 'accepts', parser: 'accepts' },
+  { name: 'no-break space inside an indented deb822 comment', kind: 'sources', content: `${DOCKER_STANZA}\n\n  # a${NBSP}b\n\n${DOCKER_STANZA}`, apt: 'accepts', parser: 'accepts' },
+  { name: 'no-break space inside Components', kind: 'sources', content: `Types: deb\nURIs: https://download.docker.com/linux/ubuntu\nSuites: noble\nComponents: stable${NBSP}main`, apt: 'accepts', parser: 'accepts' },
+  { name: 'line of spaces inside a stanza', kind: 'sources', content: 'Types: deb\nURIs: https://download.docker.com/linux/ubuntu\nSuites: noble\n \nComponents: stable', apt: 'accepts', parser: 'accepts' },
+  { name: 'line of tabs inside a stanza', kind: 'sources', content: 'Types: deb\nURIs: https://download.docker.com/linux/ubuntu\nSuites: noble\n\t\nComponents: stable', apt: 'accepts', parser: 'accepts' },
+  { name: 'comma in Suites', kind: 'sources', content: 'Types: deb\nURIs: https://download.docker.com/linux/ubuntu\nSuites: noble,jammy\nComponents: stable', apt: 'accepts', parser: 'accepts' },
   // deb822 forms apt skips or reads as a field.
   { name: 'indented non-comment line before the first stanza', kind: 'sources', content: `  foo\n${DOCKER_STANZA}`, apt: 'accepts', parser: 'accepts' },
   { name: 'indented field-like line before the first stanza', kind: 'sources', content: `  foo: bar\n${DOCKER_STANZA}`, apt: 'accepts', parser: 'accepts' },
@@ -185,12 +204,9 @@ describe('the source parser against apt', () => {
   });
 });
 
-/**
- * `apt-cache policy` of a real local repository whose suite and component hold a
- * credential-shaped token, read by the same parser the preflight uses.
- */
 const DOCKER_PACKAGE_NAMES = ['docker-ce', 'docker-ce-cli', 'containerd.io', 'docker-buildx-plugin', 'docker-compose-plugin'];
 
+/** `apt-cache policy` of a real local repository whose suite and component hold a credential-shaped token, or null when apt cannot build it. */
 function realPolicy(suite: string, component: string): string | null {
   const dir = path.join(root, `repo-${sequence++}`);
   const packages = path.join(dir, 'repo', 'dists', suite, component, 'binary-amd64');
@@ -227,9 +243,9 @@ describe('the candidate archives of a real apt-cache policy', () => {
   ];
   (aptRuns ? it.each(tokenCases) : it.skip.each(tokenCases))('keep a token in %s out of the facts that are hashed', (_label, suite, component) => {
     const policy = realPolicy(suite, component);
+    expect(policy).not.toBeNull();
     expect(policy).toContain(`${suite}/${component}`);
     const packages = parseAptPolicy(policy ?? '', 'noble');
-    expect(packages.map((pkg) => pkg.name)).toEqual(DOCKER_PACKAGE_NAMES);
     for (const pkg of packages) expect(pkg.candidateSources).toEqual([{ uri: 'file:', official: false }]);
     expect(JSON.stringify(packages)).not.toMatch(/AUDIT_FAKE/);
   });

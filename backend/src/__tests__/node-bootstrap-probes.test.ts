@@ -183,7 +183,7 @@ describe('bootstrap probe parsers', () => {
       '  Installed: 2.29.7-1~ubuntu.24.04~noble',
       '  Candidate: 2.29.7-1~ubuntu.24.04~noble',
     ].join('\n');
-    const packages = parseAptPolicy(policy);
+    const packages = parseAptPolicy(policy, 'noble');
     expect(packages.find((pkg) => pkg.name === 'docker-ce')).toMatchObject({
       installedVersion: null,
       candidateVersion: '5:27.3.1-1~ubuntu.24.04~noble',
