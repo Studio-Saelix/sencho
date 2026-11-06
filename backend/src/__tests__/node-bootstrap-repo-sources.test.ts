@@ -13,7 +13,7 @@ import {
   parseRepoProbeOutput,
 } from '../services/nodeBootstrap/probes';
 import { buildBootstrapEvidence, repoVerified } from '../services/nodeBootstrap/evidence';
-import { buildBootstrapPlan } from '../services/nodeBootstrap/planBuilder';
+import { buildBootstrapPlan, canonicalJson } from '../services/nodeBootstrap/planBuilder';
 import type { SshCommandResult } from '../services/nodeBootstrap/sshProbeClient';
 import type { BootstrapCheck, BootstrapFacts } from '../services/nodeBootstrap/types';
 import { makeFacts } from './__helpers__/bootstrapFacts';
@@ -355,7 +355,7 @@ describe('sources outside docker.list and docker.sources', () => {
         keyBlock(GPG_PATH, DOCKER_KEY_GPG),
       );
       expect(result.sourceVerified).toBe(false);
-      expect(result.problem).toMatch(/different signed-by values for .* noble/i);
+      expect(result.problem).toMatch(/different signed-by values for one source on https:\/\/download\.docker\.com\/linux\/ubuntu/);
     });
 
     it('rejects a deb-src twin that names another keyring, and a trailing-slash twin', () => {
@@ -425,7 +425,8 @@ describe('sources outside docker.list and docker.sources', () => {
       const unrelated = 'Types: deb nonsense\nURIs: http://archive.ubuntu.com/ubuntu\nSuites: noble\nComponents: main';
       const result = parse('amd64', block(CUSTOM_SOURCES, `${unrelated}\n\n${stanza({})}`), dockerAscBlock());
       expect(result.sourceVerified).toBe(false);
-      expect(result.problem).toContain('nonsense');
+      expect(result.problem).toContain('the stanza at line 1 has a Types value that apt does not know');
+      expect(result.problem).not.toContain('nonsense');
     });
 
     it.each(['deb', 'deb-src', 'deb deb-src', 'deb-src  deb', 'deb\tdeb-src'])('still verifies the valid deb822 types %j', (types) => {
@@ -469,6 +470,10 @@ describe('sources outside docker.list and docker.sources', () => {
       ['two option brackets', 'deb [arch=amd64] [trusted=no] http://archive.ubuntu.com/ubuntu noble main'],
       ['a URI with no scheme', 'deb archive.ubuntu.com/ubuntu noble main'],
       ['a bare path as the URI', 'deb /srv/repo noble main'],
+      ['an unterminated quote', 'deb http://archive.ubuntu.com/ubuntu "noble main'],
+      ['a quoted URI with no scheme', 'deb "archive.ubuntu.com/ubuntu" noble main'],
+      ['an option value in single quotes, which apt does not read as a quote', "deb [signed-by='/etc/apt/keyrings/one.gpg /etc/apt/keyrings/two.gpg'] http://archive.ubuntu.com/ubuntu noble main"],
+      ['a quote that opens in the middle of an option value', 'deb [signed-by=/etc/apt/keyrings/one.gpg"two three"] http://archive.ubuntu.com/ubuntu noble main'],
     ];
     const deb822Cases: Array<[string, string]> = [
       ['a bare word', 'garbage'],
@@ -486,6 +491,9 @@ describe('sources outside docker.list and docker.sources', () => {
       ['an enabled stanza with empty Components', unrelatedStanza('Suites: noble\nComponents:')],
       ['an exact-path suite with components', unrelatedStanza('Suites: ./\nComponents: main')],
       ['a stanza that mixes an exact-path suite with a named one', unrelatedStanza('Suites: ./ noble')],
+      // An indented line after an open field continues it, a comment included, so it is part of the value.
+      ['an indented comment that continues a Types value', 'Types: deb\n  # note\nURIs: http://archive.ubuntu.com/ubuntu\nSuites: noble\nComponents: main'],
+      ['an indented comment that continues a URIs value', 'Types: deb\nURIs: http://archive.ubuntu.com/ubuntu\n  # note\nSuites: noble\nComponents: main'],
     ];
     const files: Array<[string, string, string, Array<[string, string]>]> = [
       ['docker.list', LIST_FILE, listGood, listCases],
@@ -531,11 +539,11 @@ describe('sources outside docker.list and docker.sources', () => {
       expect(() => planFor(facts)).toThrow();
     });
 
-    it('names the offending line, so the operator can find it', () => {
+    it('names the offending line by its position and never repeats what it says', () => {
       const result = parse('amd64', block(CUSTOM_LIST, `${listGood}\ndeb archive.ubuntu.com/ubuntu noble main`), dockerAscBlock());
-      expect(result.problem).toContain('"deb archive.ubuntu.com/ubuntu noble main"');
+      expect(result.problem).toBe(`${CUSTOM_LIST}: line 2 is not a valid apt entry, which apt rejects`);
       const deb822 = parse('amd64', block(CUSTOM_SOURCES, `${stanza({})}\n\nBroken suite value`), dockerAscBlock());
-      expect(deb822.problem).toContain('"Broken suite value"');
+      expect(deb822.problem).toBe(`${CUSTOM_SOURCES}: line 7 is not a valid apt entry, which apt rejects`);
     });
 
     it('counts a malformed file that mentions Docker only in a comment, and not one that never mentions it', () => {
@@ -551,10 +559,9 @@ describe('sources outside docker.list and docker.sources', () => {
     });
 
     // Values the parser does not model (a Signed-By that is neither a path nor
-    // a fingerprint, an unterminated quote). apt-cache policy is the backstop.
+    // a fingerprint). apt-cache policy is the backstop.
     it.each([
       ['a Signed-By value that is not a path or fingerprint', CUSTOM_LIST, `${listGood}\ndeb [signed-by=foo] http://archive.ubuntu.com/ubuntu noble main`],
-      ['an unterminated quote', CUSTOM_LIST, `${listGood}\ndeb http://archive.ubuntu.com/ubuntu "noble main`],
       ['a deb822 Signed-By value that is not a path or fingerprint', CUSTOM_SOURCES, `${stanza({})}\n\n${unrelatedStanza('Suites: noble\nComponents: main\nSigned-By: foo')}`],
     ])('does not trust %s once apt-cache policy fails', (_label, file, content) => {
       const text = [block(file, content), dockerAscBlock()].join('\n');
@@ -587,6 +594,37 @@ describe('sources outside docker.list and docker.sources', () => {
       ['comments, CRLF and a continuation line', CUSTOM_SOURCES, `# note\n${stanza({})}\n# note\n\nTypes: deb\r\nURIs: http://archive.ubuntu.com/ubuntu\r\nSuites: noble\r\nComponents: main\r\n  universe`],
     ];
 
+    // Quoting, comments and field names that real apt (3.2.1, isolated) reads without error.
+    const unrelatedOne = (rest: string) => `deb ${rest}`;
+    const acceptedLists: Array<[string, string]> = [
+      ['a double-quoted URI', unrelatedOne('"http://archive.ubuntu.com/ubuntu" noble main')],
+      ['a double-quoted suite and component', unrelatedOne('http://archive.ubuntu.com/ubuntu "noble" "main"')],
+      ['a double-quoted option value holding two keyrings', unrelatedOne('[signed-by="/etc/apt/keyrings/ubuntu-one.gpg /etc/apt/keyrings/ubuntu-two.gpg"] http://archive.ubuntu.com/ubuntu noble main')],
+      ['a double-quoted option value beside another option', unrelatedOne('[arch=amd64 signed-by="/etc/apt/keyrings/ubuntu-one.gpg"] http://archive.ubuntu.com/ubuntu noble main')],
+      ['a double-quoted URI that holds credentials', unrelatedOne('"https://operator:secret@private.example/r" noble main')],
+    ];
+    // The Docker stanza itself, so docker.sources (which is checked whatever it points at) takes them too.
+    const acceptedStanzas: Array<[string, string]> = [
+      ['an indented comment before the first stanza', `  # note\n${stanza({})}`],
+      ['a tab-indented comment before the first stanza', `\t# note\n${stanza({})}`],
+      ['a custom field whose name holds a plus sign', stanza({ 'X+Note': 'kept' })],
+      ['a custom field whose name holds an at sign', stanza({ 'X@Note': 'kept' })],
+      ['a custom field whose name holds a slash', stanza({ 'X-Note/foo': 'kept' })],
+      ['a custom field whose name holds a space', stanza({ 'X Note': 'kept' })],
+    ];
+    const acceptedBesideStanza: Array<[string, string]> = [
+      ['an indented comment between two stanzas', `${stanza({})}\n\n  # note\n\n${unrelatedStanza('Suites: noble\nComponents: main')}`],
+      ['a custom field in an unrelated stanza', `${stanza({})}\n\n${unrelatedStanza('Suites: noble\nComponents: main\nX+Note: kept')}`],
+    ];
+    // docker.list and docker.sources are checked whatever they point at, so an unrelated entry belongs in the other files.
+    const lineFiles: Array<[string, string]> = [['an arbitrary .list', CUSTOM_LIST], ['the main source list', MAIN_LIST]];
+    const stanzaFiles: Array<[string, string]> = [['docker.sources', SOURCES_FILE], ['an arbitrary .sources', CUSTOM_SOURCES]];
+    accepted.push(
+      ...lineFiles.flatMap(([fileLabel, file]) => acceptedLists.map(([label, extra]): [string, string, string] => [`${label} in ${fileLabel}`, file, `${listGood}\n${extra}`])),
+      ...stanzaFiles.flatMap(([fileLabel, file]) => acceptedStanzas.map(([label, content]): [string, string, string] => [`${label} in ${fileLabel}`, file, content])),
+      ...acceptedBesideStanza.map(([label, content]): [string, string, string] => [`${label} in an arbitrary .sources`, CUSTOM_SOURCES, content]),
+    );
+
     it.each(accepted)('still verifies %s, which apt accepts', (_label, file, content) => {
       const result = parse('amd64', block(file, content), dockerAscBlock());
       expect(result.sourceVerified).toBe(true);
@@ -608,6 +646,137 @@ describe('sources outside docker.list and docker.sources', () => {
       const healthy = makeFacts({ packagesComplete: false, packages: NO_CANDIDATES, repo: failed.repo });
       expect(aptSource(healthy).status).toBe('warn');
       expect(stageIds(healthy)).not.toContain('docker_repository');
+    });
+
+    describe('a quoted official source', () => {
+      const keys = [dockerAscBlock(), keyBlock(GPG_PATH, DOCKER_KEY_GPG)];
+      const allLineFiles: Array<[string, string]> = [['docker.list', LIST_FILE], ...lineFiles];
+      it.each([
+        ['a quoted URI', `deb [arch=amd64 signed-by=${DOCKER_ASC_PATH}] "${OFFICIAL}" noble stable`],
+        ['a quoted keyring list naming two Docker keyrings', `deb [arch=amd64 signed-by="${DOCKER_ASC_PATH} ${GPG_PATH}"] ${OFFICIAL} noble stable`],
+        ['a quoted keyring list and a quoted URI', `deb [signed-by="${DOCKER_ASC_PATH} ${GPG_PATH}"] "${OFFICIAL}" noble stable`],
+      ])('verifies %s in every one-line file', (_label, line) => {
+        for (const [, file] of allLineFiles) {
+          const result = parse('amd64', block(file, line), ...keys);
+          expect(result.sourceVerified).toBe(true);
+          expect(result.problem).toBeNull();
+        }
+      });
+
+      it('still rejects a quoted keyring list that names a keyring that is not Docker\'s', () => {
+        const line = `deb [signed-by="${DOCKER_ASC_PATH} /etc/apt/keyrings/other.gpg"] ${OFFICIAL} noble stable`;
+        for (const [, file] of allLineFiles) {
+          expect(parse('amd64', block(file, line), ...keys).sourceVerified).toBe(false);
+        }
+      });
+    });
+
+    // A repository credential can sit in a URI's userinfo, query or path, or in a
+    // word apt reads as a suite or a type. None of it may leave the parser in a
+    // reason, a returned check, the plan or the facts that are hashed.
+    describe('credentials in a source file stay out of every result', () => {
+      const PASSWORD = 'AUDIT_FAKE_REPO_PASSWORD';
+      const QUERY_TOKEN = 'AUDIT_FAKE_QUERY_TOKEN';
+      const PATH_TOKEN = 'AUDIT_FAKE_PATH_TOKEN';
+      const SECRETS = [PASSWORD, QUERY_TOKEN, PATH_TOKEN];
+      const SIGNED = `signed-by=${DOCKER_ASC_PATH}`;
+      const leaks = (value: unknown) => SECRETS.filter((secret) => JSON.stringify(value).includes(secret));
+
+      /** Everything a preflight returns or stores that a source line could reach. */
+      function surfaces(facts: BootstrapFacts) {
+        return {
+          evidence: evidenceFor(facts),
+          facts: canonicalJson(facts),
+          plan: planWithheld(facts) ? null : planFor(facts),
+        };
+      }
+
+      const listCases: Array<[string, string]> = [
+        ['a missing component after userinfo', `deb https://operator:${PASSWORD}@private.example/r noble`],
+        ['a missing component after a query token', `deb https://private.example/r?token=${QUERY_TOKEN} noble`],
+        ['a missing component after a path token', `deb https://private.example/${PATH_TOKEN} noble`],
+        ['a URI with no scheme', `deb private.example/${PATH_TOKEN}?token=${QUERY_TOKEN} noble main`],
+        ['an unclosed quote', `deb "https://operator:${PASSWORD}@private.example/r noble main`],
+        ['an option with no value', `deb [${PASSWORD}] https://private.example/r noble main`],
+        ['Docker\'s host with a trailing dot, userinfo and a query', `deb [${SIGNED}] https://operator:${PASSWORD}@download.docker.com./linux/ubuntu?token=${QUERY_TOKEN} noble stable`],
+        ['the official URI with userinfo and a suite that is a token', `deb [${SIGNED}] https://operator:${PASSWORD}@download.docker.com/linux/ubuntu?token=${QUERY_TOKEN} ${PATH_TOKEN} stable`],
+      ];
+      const stanzaCases: Array<[string, string]> = [
+        ['a line apt cannot parse', `https/operator ${PASSWORD}`],
+        ['a Types value that is a URL', `Types: deb https://operator:${PASSWORD}@private.example/r?token=${QUERY_TOKEN}`],
+        ['a Types value that is a token', `Types: ${PATH_TOKEN}`],
+        ['a URI with no scheme', `Types: deb\nURIs: private.example/${PATH_TOKEN}?token=${QUERY_TOKEN}\nSuites: noble\nComponents: main`],
+        ['a credentialed URI with no components', `Types: deb\nURIs: https://operator:${PASSWORD}@private.example/r\nSuites: noble`],
+        ['Docker\'s host with a trailing dot, userinfo and a query', stanza({ URIs: `https://operator:${PASSWORD}@download.docker.com./linux/ubuntu?token=${QUERY_TOKEN}` })],
+        ['the official URI with userinfo and a suite that is a token', stanza({ URIs: `https://operator:${PASSWORD}@download.docker.com/linux/ubuntu?token=${QUERY_TOKEN}`, Suites: PATH_TOKEN })],
+      ];
+      // Only docker.list and docker.sources are checked whatever they point at.
+      const wrongRepository: Array<[string, string, string]> = [
+        ['a wrong repository with userinfo, path and query in docker.list', LIST_FILE, `deb [${SIGNED}] https://operator:${PASSWORD}@private.example/${PATH_TOKEN}/ubuntu?token=${QUERY_TOKEN} noble stable`],
+        ['a wrong repository with userinfo, path and query in docker.sources', SOURCES_FILE, stanza({ URIs: `https://operator:${PASSWORD}@private.example/${PATH_TOKEN}/ubuntu?token=${QUERY_TOKEN}` })],
+      ];
+      const credentialLineFiles: Array<[string, string]> = [['docker.list', LIST_FILE], ...lineFiles];
+      const cases: Array<[string, string, string]> = [
+        ...credentialLineFiles.flatMap(([fileLabel, file]) => listCases.map(([label, bad]): [string, string, string] => [`${label} in ${fileLabel}`, file, `${listGood}\n${bad}`])),
+        ...stanzaFiles.flatMap(([fileLabel, file]) => stanzaCases.map(([label, bad]): [string, string, string] => [`${label} in ${fileLabel}`, file, `${stanza({})}\n\n${bad}`])),
+        ...wrongRepository.map(([label, file, bad]): [string, string, string] => [label, file, `${file === LIST_FILE ? listGood : stanza({})}\n\n${bad}`]),
+      ];
+
+      it.each(cases)('keeps the credentials of %s out of the parse, the evidence, the facts and the plan', (_label, file, content) => {
+        const text = [block(file, content), dockerAscBlock()].join('\n');
+        const result = parse('amd64', block(file, content), dockerAscBlock());
+        expect(result.sourceVerified).toBe(false);
+        expect(result.problem).toContain(file);
+        expect(leaks(result)).toEqual([]);
+
+        const fresh = freshHost(text);
+        expect(leaks(surfaces(fresh))).toEqual([]);
+        for (const policy of [{}, APT_REJECTED]) {
+          const assembled = assemble([probe('docker_repo', text), probe('apt_policy', '', policy)]);
+          expect(leaks(assembled.repo)).toEqual([]);
+          const healthy = makeFacts({ packagesComplete: assembled.packagesComplete, packages: NO_CANDIDATES, repo: assembled.repo });
+          expect(leaks(surfaces(healthy))).toEqual([]);
+        }
+      });
+
+      it('still tells the operator which file and which position to look at', () => {
+        const list = parse('amd64', block(CUSTOM_LIST, `${listGood}\ndeb https://operator:${PASSWORD}@private.example/r noble`), dockerAscBlock());
+        expect(list.problem).toBe(`${CUSTOM_LIST}: line 2 is not a valid apt entry, which apt rejects`);
+        const unknownType = parse('amd64', block(CUSTOM_SOURCES, `${stanza({})}\n\nTypes: ${PATH_TOKEN}\nURIs: http://archive.ubuntu.com/ubuntu\nSuites: noble\nComponents: main`), dockerAscBlock());
+        expect(unknownType.problem).toBe(`${CUSTOM_SOURCES}: the stanza at line 7 has a Types value that apt does not know, which apt rejects`);
+        const wrong = parse('amd64', block(LIST_FILE, wrongRepository[0][2]), dockerAscBlock());
+        expect(wrong.problem).toBe(`${LIST_FILE}: the source points at https://private.example, not ${OFFICIAL}`);
+      });
+
+      it('keeps the credentials of two entries that disagree on the keyring out of the conflict reason', () => {
+        const result = parse(
+          'amd64',
+          block(LIST_FILE, `deb [arch=amd64 ${SIGNED}] https://operator:${PASSWORD}@download.docker.com/linux/ubuntu?token=${QUERY_TOKEN} noble stable`),
+          block(CUSTOM_SOURCES, stanza({ URIs: `https://operator:${PASSWORD}@download.docker.com/linux/ubuntu?token=${QUERY_TOKEN}`, 'Signed-By': GPG_PATH })),
+          dockerAscBlock(),
+          keyBlock(GPG_PATH, DOCKER_KEY_GPG),
+        );
+        expect(result.sourceVerified).toBe(false);
+        expect(result.problem).toMatch(/different signed-by values for one source on https:\/\/download\.docker\.com\/linux\/ubuntu/);
+        expect(leaks(result)).toEqual([]);
+      });
+
+      it('keeps the credentials of a candidate archive out of the facts that are hashed', () => {
+        const foreign = `        500 https://operator:${PASSWORD}@private.example/${PATH_TOKEN}/ubuntu?token=${QUERY_TOKEN} noble/stable amd64 Packages`;
+        const policy = [
+          'docker-ce:', '  Installed: (none)', '  Candidate: 5:27.3.1-1', '  Version table:',
+          '     5:27.3.1-1 500', foreign,
+        ].join('\n');
+        expect(leaks(parseAptPolicy(policy))).toEqual([]);
+        const text = [block(LIST_FILE, listGood), dockerAscBlock()].join('\n');
+        const assembled = assemble([probe('docker_repo', text), probe('apt_policy', policy)]);
+        const facts = makeFacts({ docker: FRESH_DOCKER, packages: parseAptPolicy(policy), repo: assembled.repo });
+        expect(leaks(canonicalJson(facts))).toEqual([]);
+        // Redacting the URI must not turn a foreign archive into the official one, or the reverse.
+        expect(assembled.repo.candidateSourceVerified).toBe(false);
+        const official = parseAptPolicy(OFFICIAL_CANDIDATE).find((pkg) => pkg.name === 'docker-ce');
+        expect(official?.candidateSources).toEqual([{ uri: OFFICIAL, release: 'noble/stable' }]);
+      });
     });
   });
 

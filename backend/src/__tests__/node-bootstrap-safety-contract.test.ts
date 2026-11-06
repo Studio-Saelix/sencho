@@ -708,7 +708,7 @@ describe('repository provenance (S5-R)', () => {
         '        500 http://archive.ubuntu.com/ubuntu noble/universe amd64 Packages',
       ]);
       const ce = parseAptPolicy(text).find((pkg) => pkg.name === 'docker-ce');
-      expect(ce?.candidateSources).toEqual([{ uri: 'http://archive.ubuntu.com/ubuntu', release: 'noble/universe' }]);
+      expect(ce?.candidateSources).toEqual([{ uri: 'http://archive.ubuntu.com', release: 'noble/universe' }]);
       const facts = assemble([
         probe('os_release', 'ID=ubuntu\nVERSION_ID="24.04"\nVERSION_CODENAME=noble'),
         probe('docker_info', '27.3.1|/var/lib/docker'),

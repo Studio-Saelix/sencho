@@ -582,7 +582,9 @@ interface ParsedSourceFile {
   /**
    * What makes the file unusable: content apt rejects (a line or stanza it
    * cannot parse, in a disabled stanza too for a Types it does not know) and a
-   * Docker-host URI that is not the official repository's host.
+   * Docker-host URI that is not the official repository's host. Each reason
+   * names a line or stanza by position and never repeats what the file says,
+   * because a source line can carry a repository credential.
    */
   invalid: string[];
   /** True when the file holds no active line or stanza at all. */
@@ -623,9 +625,20 @@ function suiteComponentProblem(suites: string[], components: string[]): string |
 /** A URI apt can parse starts with a scheme (`https:`, `file:`, `cdrom:`). */
 const URI_SCHEME = /^[A-Za-z][A-Za-z0-9+.-]*:/;
 
-/** A source line for a reason, shortened and quoted, so the operator can find it. */
-function quotedLine(line: string): string {
-  return JSON.stringify(line.length > 80 ? `${line.slice(0, 80)}…` : line);
+/**
+ * A URI as a diagnostic or a stored fact may show it. A source URI can carry a
+ * credential in its userinfo, query or path, so only the scheme and host are
+ * kept, plus the path on Docker's own public host, which the official-repository
+ * checks need.
+ */
+function redactUri(uri: string): string {
+  try {
+    const url = new URL(uri);
+    const origin = url.host ? `${url.protocol}//${url.host}` : url.protocol;
+    return url.hostname.toLowerCase() === DOCKER_HOST ? `${origin}${url.pathname}` : origin;
+  } catch {
+    return '(unparsable URI)';
+  }
 }
 
 /** Docker's host as a URI host (after a scheme, an option bracket or whitespace), not a path segment on another host. */
@@ -635,77 +648,108 @@ function mentionsDockerHost(text: string): boolean {
   return DOCKER_HOST_MENTION.test(text);
 }
 
+/** An apt word: whitespace-separated, or wrapped in double quotes to hold spaces. */
+const APT_WORD = /\s*("[^"]+"|[^\s"]+)(?=\s|$)/y;
+/** One `key=value` option of a one-line entry, the value optionally wrapped in double quotes. */
+const LIST_OPTION = /\s*([^\s="]+)=("[^"]+"|[^\s"]+)(?=\s|$)/y;
+
+const unquote = (word: string) => word.replace(/^"([^"]+)"$/, '$1');
+
+/** Every match of a sticky pattern across the text; null when anything but whitespace is left over. */
+function matchAll(pattern: RegExp, text: string): RegExpExecArray[] | null {
+  pattern.lastIndex = 0;
+  const matches: RegExpExecArray[] = [];
+  let end = 0;
+  for (let match = pattern.exec(text); match; match = pattern.exec(text)) {
+    matches.push(match);
+    end = pattern.lastIndex;
+  }
+  return text.slice(end).trim() === '' ? matches : null;
+}
+
 function parseListSource(content: string): ParsedSourceFile {
   const active = content.split('\n')
     // A '#' that starts a word begins a comment, so a trailing comment is not part of the entry.
-    .map((line) => line.replace(/(^|\s)#.*$/, '').trim())
-    .filter(Boolean);
+    .map((text, index) => ({ number: index + 1, text: text.replace(/(^|\s)#.*$/, '').trim() }))
+    .filter((line) => line.text);
   const entries: AptSourceEntry[] = [];
   const invalid: string[] = [];
-  for (const line of active) {
-    const match = /^(deb|deb-src)\s+(\[[^\]]*\]\s+)?(\S+)\s+(\S+)(?:\s+(.+))?$/.exec(line);
-    const optionParts = (match?.[2] ?? '').trim().replace(/^\[|\]$/g, '').trim().split(/\s+/).filter(Boolean);
-    const suites = match?.[4].split(/[,\s]+/).filter(Boolean) ?? [];
-    const components = (match?.[5] ?? '').split(/\s+/).filter(Boolean);
+  for (const { number, text: line } of active) {
+    const head = /^(deb|deb-src)\s+(?:\[([^\]]*)\]\s+)?(.+)$/.exec(line);
+    const optionMatches = head ? matchAll(LIST_OPTION, head[2] ?? '') : null;
+    const words = head ? matchAll(APT_WORD, head[3]) : null;
+    const [uri = '', suite = '', ...components] = (words ?? []).map((word) => unquote(word[1]));
+    const suites = suite.split(/[,\s]+/).filter(Boolean);
     // apt rejects the whole source list at a line it cannot parse, so one
     // beside a valid Docker entry is as fatal as one in a file of its own: no
     // URI scheme (an unclosed option bracket leaves one behind), an option with
-    // no value, or suites and components that do not fit.
+    // no value, an unclosed quote, or suites and components that do not fit.
     if (
-      !match
-      || !URI_SCHEME.test(match[3])
-      || optionParts.some((part) => !/^[^=]+=.+$/.test(part))
+      !head
+      || !optionMatches
+      || !words
+      || words.length < 2
+      || !URI_SCHEME.test(uri)
       || suiteComponentProblem(suites, components)
     ) {
-      invalid.push(`the source file has a line that is not a valid apt entry, which apt rejects: ${quotedLine(line)}`);
+      invalid.push(`line ${number} is not a valid apt entry, which apt rejects`);
       continue;
     }
     // A line that names Docker's host but whose URI is not read as that host
     // (a trailing dot, a host inside another URI) is not one apt will use as written.
-    if (mentionsDockerHost(line) && !isDockerHostUri(match[3])) {
-      invalid.push(`the source file has a line that names Docker's host in a URI that is not the official repository's host: ${quotedLine(line)}`);
+    if (mentionsDockerHost(line) && !isDockerHostUri(uri)) {
+      invalid.push(`line ${number} names Docker's host in a URI that is not the official repository's host`);
       continue;
     }
     const options = new Map<string, string>();
-    for (const part of optionParts) {
-      const at = part.indexOf('=');
-      options.set(oneLineOptionName(part.slice(0, at)), part.slice(at + 1));
-    }
-    entries.push({ type: match[1] as 'deb' | 'deb-src', uris: [match[3]], suites, components, options });
+    for (const [, key, value] of optionMatches) options.set(oneLineOptionName(key), unquote(value));
+    entries.push({ type: head[1] as 'deb' | 'deb-src', uris: [uri], suites, components, options });
   }
   return { entries, invalid, empty: active.length === 0 };
 }
 
-function parseDeb822(content: string): { paragraphs: Array<Record<string, string>>; unparsed: string[] } {
-  const paragraphs: Array<Record<string, string>> = [];
-  const unparsed: string[] = [];
-  let current: Record<string, string> | null = null;
+interface Deb822Stanza {
+  /** The line the stanza starts on, which is how a reason names it. */
+  line: number;
+  fields: Record<string, string>;
+}
+
+function parseDeb822(content: string): { paragraphs: Deb822Stanza[]; unparsed: number[] } {
+  const paragraphs: Deb822Stanza[] = [];
+  const unparsed: number[] = [];
+  let current: Deb822Stanza | null = null;
   let lastKey: string | null = null;
-  for (const rawLine of content.split('\n')) {
+  const close = () => {
+    if (current && Object.keys(current.fields).length > 0) paragraphs.push(current);
+    current = null;
+    lastKey = null;
+  };
+  for (const [index, rawLine] of content.split('\n').entries()) {
+    const number = index + 1;
     if (!rawLine.trim()) {
-      if (current && Object.keys(current).length > 0) paragraphs.push(current);
-      current = null;
-      lastKey = null;
+      close();
       continue;
     }
     if (rawLine.startsWith('#')) continue;
-    // An indented line continues the open field; with none open (a stanza that
-    // starts indented) apt rejects it, so it is not read as a field here.
+    // An indented line continues the open field. With none open, an indented
+    // comment is a comment and anything else apt rejects, so it is not read as a field.
     if (/^\s/.test(rawLine)) {
-      if (current && lastKey) current[lastKey] = `${current[lastKey]} ${rawLine.trim()}`;
-      else unparsed.push(rawLine.trim());
+      if (current && lastKey) current.fields[lastKey] = `${current.fields[lastKey]} ${rawLine.trim()}`;
+      else if (!/^\s+#/.test(rawLine)) unparsed.push(number);
       continue;
     }
-    const match = /^([A-Za-z0-9_.-]+):\s*(.*)$/.exec(rawLine.trim());
+    // apt takes everything up to the colon as the field name, so a custom field
+    // such as `X+Note`, `X-Note/foo` or `X Note` is as good as `Types`.
+    const match = /^([^\s:][^:]*?)\s*:\s*(.*)$/.exec(rawLine.trim());
     if (!match) {
-      unparsed.push(rawLine.trim());
+      unparsed.push(number);
       continue;
     }
-    current ??= {};
+    current ??= { line: number, fields: {} };
     lastKey = match[1].toLowerCase();
-    current[lastKey] = match[2];
+    current.fields[lastKey] = match[2];
   }
-  if (current && Object.keys(current).length > 0) paragraphs.push(current);
+  close();
   return { paragraphs, unparsed };
 }
 
@@ -715,18 +759,18 @@ function parseDeb822Source(content: string): ParsedSourceFile {
   const invalid: string[] = [];
   // apt rejects the whole source list at a line that is not "Field: value" or a
   // comment, wherever it stands in the file.
-  if (unparsed.length > 0) invalid.push(`the deb822 source has a line that is not a valid apt entry, which apt rejects: ${quotedLine(unparsed[0])}`);
-  for (const paragraph of paragraphs) {
+  if (unparsed.length > 0) invalid.push(`line ${unparsed[0]} is not a valid apt entry, which apt rejects`);
+  for (const { line, fields: paragraph } of paragraphs) {
+    const where = `the stanza at line ${line}`;
     // apt reads the Types field as exact, case-sensitive, whitespace-separated
     // words and rejects the whole source list at any other token, in a disabled
     // stanza as well, so no token is dropped here and a stanza without the field
     // is not skipped.
     const typeWords = (paragraph.types ?? '').split(/\s+/).filter(Boolean);
-    const unknownType = typeWords.find((word) => word !== 'deb' && word !== 'deb-src');
     if (paragraph.types === undefined) {
-      invalid.push('the deb822 source has a stanza with no Types field, which apt rejects');
-    } else if (unknownType !== undefined) {
-      invalid.push(`the deb822 source has the Types value "${unknownType}", which apt does not know and rejects`);
+      invalid.push(`${where} has no Types field, which apt rejects`);
+    } else if (typeWords.some((word) => word !== 'deb' && word !== 'deb-src')) {
+      invalid.push(`${where} has a Types value that apt does not know, which apt rejects`);
     }
     // A disabled stanza cannot supply packages to apt.
     if (paragraph.enabled !== undefined && FALSE_OPTION_VALUES.has(paragraph.enabled.trim().toLowerCase())) continue;
@@ -740,14 +784,14 @@ function parseDeb822Source(content: string): ParsedSourceFile {
     else if (uris.some((uri) => !URI_SCHEME.test(uri))) stanzaProblem = 'a URI with no scheme';
     else if (suites.length === 0) stanzaProblem = 'no Suites';
     else stanzaProblem = suiteComponentProblem(suites, components);
-    if (stanzaProblem) invalid.push(`the deb822 source has an enabled stanza with ${stanzaProblem}, which apt rejects`);
+    if (stanzaProblem) invalid.push(`${where} is enabled with ${stanzaProblem}, which apt rejects`);
     const options = new Map(Object.entries(paragraph));
     const types = typeWords.filter((type): type is 'deb' | 'deb-src' => type === 'deb' || type === 'deb-src');
     // A stanza for Docker's host with an empty Types field (apt reads no source
     // from it), or a URI that names the host without being read as it (a
     // trailing dot), is not a source to ignore.
     const namesHost = mentionsDockerHost(paragraph.uris ?? '');
-    if (namesHost && (types.length === 0 || !uris.some(isDockerHostUri))) invalid.push('the deb822 source has a stanza that is not a valid apt entry');
+    if (namesHost && (types.length === 0 || !uris.some(isDockerHostUri))) invalid.push(`${where} names Docker's host but is not a valid apt entry`);
     for (const type of types) entries.push({ type, uris, suites, components, options });
   }
   return { entries, invalid, empty: paragraphs.length === 0 };
@@ -804,7 +848,7 @@ function weakenedSigningCheck(options: Map<string, string>): SourceCheck | null 
 /** The checks a binary entry of Docker's repository must pass; null when it passes. */
 function checkBinaryEntry(entry: AptSourceEntry, codename: string, arch: string, keys: KeyringState): SourceCheck | null {
   if (entry.uris.length !== 1 || normalizeUri(entry.uris[0]) !== OFFICIAL_DOCKER_URI) {
-    return fail(`the source points at ${entry.uris.join(' ') || 'no URI'}, not ${OFFICIAL_DOCKER_URI}`);
+    return fail(`the source points at ${entry.uris.map(redactUri).join(' ') || 'no URI'}, not ${OFFICIAL_DOCKER_URI}`);
   }
   if (!entry.components.includes('stable')) return fail('the source does not enable the stable component');
   const weakened = weakenedSigningCheck(entry.options);
@@ -817,7 +861,7 @@ function checkBinaryEntry(entry: AptSourceEntry, codename: string, arch: string,
   if (!supported) return fail(`the source does not provide packages for the ${arch} architecture`);
   // Last, so that a contradiction found above is not hidden by an unknown release.
   if (!codename) return unknownCheck('the host release is unknown, so the source suite cannot be checked');
-  if (!entry.suites.includes(codename)) return fail(`the suite is ${entry.suites.join(' ') || 'missing'}, not ${codename}`);
+  if (!entry.suites.includes(codename)) return fail(`the source suite is not the host release ${codename}`);
   return null;
 }
 
@@ -825,6 +869,8 @@ function checkBinaryEntry(entry: AptSourceEntry, codename: string, arch: string,
 interface SigningSetting {
   path: string;
   target: string;
+  /** The source as a diagnostic may name it: the host, with no suite or credential. */
+  label: string;
   option: string;
   value: string;
 }
@@ -875,12 +921,13 @@ function verifySourceFile(
     for (const uri of entry.uris) {
       for (const suite of entry.suites) {
         const target = `${normalizeUri(uri)} ${suite}`;
-        if (signedBy) verdict.signing.push({ path: file.path, target, option: 'signed-by', value: signedBy });
+        const label = redactUri(uri);
+        if (signedBy) verdict.signing.push({ path: file.path, target, label, option: 'signed-by', value: signedBy });
         for (const option of SOURCE_AGREEMENT_OPTIONS) {
           const value = entry.options.get(option)?.trim().toLowerCase();
           let compared = value ?? 'unset';
           if (option === 'trusted' && value !== undefined && weakensSignatures(value)) compared = 'yes';
-          verdict.signing.push({ path: file.path, target, option, value: compared });
+          verdict.signing.push({ path: file.path, target, label, option, value: compared });
         }
       }
     }
@@ -904,7 +951,7 @@ function signingConflict(verdicts: SourceFileVerdict[]): string | null {
       if (!earlier) {
         seen.set(key, { path: item.path, value: item.value });
       } else if (earlier.value !== item.value) {
-        return `${earlier.path} and ${item.path} set different ${item.option} values for ${item.target}, which apt rejects`;
+        return `${earlier.path} and ${item.path} set different ${item.option} values for one source on ${item.label}, which apt rejects`;
       }
     }
   }
@@ -1053,7 +1100,8 @@ export function parseAptPolicy(text: string): DockerPackage[] {
       // The installed-package record is not an archive.
       if (location === '/var/lib/dpkg/status') continue;
       if (tableVersion === current.candidateVersion) {
-        current.candidateSources.push({ uri: location, release: tokens[2] ?? null });
+        // The URI is stored redacted: facts are hashed and returned, and a source URI can carry a credential.
+        current.candidateSources.push({ uri: redactUri(location), release: tokens[2] ?? null });
       }
     }
   }

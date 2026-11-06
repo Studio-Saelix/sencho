@@ -1099,6 +1099,51 @@ describe('bootstrap service failure handling', () => {
       expect(statusOf(result, 'apt_source')).toBe('blocked');
       expect(result.plan).toBeNull();
     });
+
+    describe('for a repository credential in a source file', () => {
+      const SECRETS = ['AUDIT_FAKE_REPO_PASSWORD', 'AUDIT_FAKE_QUERY_TOKEN', 'AUDIT_FAKE_PATH_TOKEN'];
+      const credentialed = 'https://operator:AUDIT_FAKE_REPO_PASSWORD@private.example/AUDIT_FAKE_PATH_TOKEN/r?token=AUDIT_FAKE_QUERY_TOKEN';
+      const good = `deb [signed-by=${DOCKER_ASC_PATH}] https://download.docker.com/linux/ubuntu noble stable`;
+      const repo = (file: string, content: string) => [
+        DEFAULT_SOURCE_LOCATIONS,
+        `SOURCE_BEGIN=${file}`,
+        content,
+        `SOURCE_END=${file}`,
+        dockerAscBlock(),
+      ].join('\n');
+      const failedPolicy = { apt_policy: '' };
+      const freshFailures = { docker_cli: 1, docker_info: 1, docker_info_sudo: 1, compose_version: 1, compose_version_sudo: 1, apt_policy: 100 };
+      const sources: Array<[string, string]> = [
+        ['a malformed line in docker.list', repo('/etc/apt/sources.list.d/docker.list', `${good}\ndeb ${credentialed} noble`)],
+        ['a malformed line in an arbitrary .list', repo('/etc/apt/sources.list.d/other.list', `${good}\ndeb ${credentialed} noble`)],
+        ['a malformed line in the main list', repo('/etc/apt/sources.list', `${good}\ndeb ${credentialed} noble`)],
+        ['a wrong repository in docker.list', repo('/etc/apt/sources.list.d/docker.list', `deb [signed-by=${DOCKER_ASC_PATH}] ${credentialed} noble stable`)],
+        ['an unknown type in docker.sources', repo('/etc/apt/sources.list.d/docker.sources', `Types: deb ${credentialed}\nURIs: https://download.docker.com/linux/ubuntu\nSuites: noble\nComponents: stable`)],
+        ['an unparsable line in an arbitrary .sources', repo('/etc/apt/sources.list.d/other.sources', `Types: deb\nURIs: https://download.docker.com/linux/ubuntu\nSuites: noble\nComponents: stable\n\n${credentialed.replace(/:/g, ' ')}`)],
+        ['a suite that is a token in an arbitrary .list', repo('/etc/apt/sources.list.d/other.list', `deb [signed-by=${DOCKER_ASC_PATH}] https://download.docker.com/linux/ubuntu AUDIT_FAKE_PATH_TOKEN stable`)],
+      ];
+
+      it.each(sources)('keeps it out of the response for %s on a working installation', async (_label, docker_repo) => {
+        const result = await preflightWith({ docker_repo, ...failedPolicy }, { apt_policy: 100 });
+        expect(statusOf(result, 'apt_source')).toBe('warn');
+        for (const secret of SECRETS) expect(JSON.stringify(result)).not.toContain(secret);
+      });
+
+      it.each(sources)('keeps it out of the response for %s on a fresh host', async (_label, docker_repo) => {
+        const result = await preflightWith({ docker_info: '', docker_cli: '', compose_version: '', apt_policy: '', docker_repo }, freshFailures);
+        expect(result.plan).toBeNull();
+        for (const secret of SECRETS) expect(JSON.stringify(result)).not.toContain(secret);
+      });
+
+      it('keeps the credential of a candidate archive out of the response', async () => {
+        const apt_policy = [
+          'docker-ce:', '  Installed: (none)', '  Candidate: 5:27.3.1-1', '  Version table:',
+          '     5:27.3.1-1 500', `        500 ${credentialed} noble/stable amd64 Packages`,
+        ].join('\n');
+        const result = await preflightWith({ docker_repo: repo('/etc/apt/sources.list.d/docker.list', good), apt_policy });
+        for (const secret of SECRETS) expect(JSON.stringify(result)).not.toContain(secret);
+      });
+    });
   });
 
   it('reports the mount as unknown when /etc/fstab could not be read', async () => {
