@@ -197,7 +197,7 @@ const DEFAULT_SOURCE_LIST = '/etc/apt/sources.list';
 const DEFAULT_SOURCE_PARTS = '/etc/apt/sources.list.d';
 const REPO_KEY_PATHS = ['/etc/apt/keyrings/docker.asc', '/etc/apt/keyrings/docker.gpg', '/usr/share/keyrings/docker-archive-keyring.gpg'];
 
-/** The file names that would clash with the plan's own docker.list: they are checked whatever they say. Keep in step with the case pattern in the probe script. */
+/** The file names the preflight always reads and checks whatever they say: the plan's own docker.list, and docker.sources, the deb822 name Docker documents. Keep in step with the case pattern in the probe script. */
 const CONVENTIONAL_SOURCE_FILE = /(?:^|\/)docker\.(?:list|sources)$/;
 
 /**
@@ -244,7 +244,7 @@ const APT_SOURCE_LOCATIONS_PRELUDE = [
  * and each `.list` and `.sources` file in the source directories, named as apt
  * accepts them. The locations are shell words spliced in as written (the
  * production call passes the variables the prelude sets), not paths to quote.
- * Only a file that mentions Docker's host (or is one the plan writes) is
+ * Only a file that mentions Docker's host (or is docker.list or docker.sources) is
  * printed, which keeps unrelated sources out of the capped output; a file or a
  * directory that cannot be read is reported as unreadable, never as absent. The
  * keyrings are read in full (up to the key cap).
@@ -645,6 +645,8 @@ function parseListSource(content: string): ParsedSourceFile {
   for (const line of active) {
     const match = /^(deb|deb-src)\s+(\[[^\]]*\]\s+)?(\S+)\s+(\S+)(?:\s+(.+))?$/.exec(line);
     const optionParts = (match?.[2] ?? '').trim().replace(/^\[|\]$/g, '').trim().split(/\s+/).filter(Boolean);
+    const suites = match?.[4].split(/[,\s]+/).filter(Boolean) ?? [];
+    const components = (match?.[5] ?? '').split(/\s+/).filter(Boolean);
     // apt rejects the whole source list at a line it cannot parse, so one
     // beside a valid Docker entry is as fatal as one in a file of its own: no
     // URI scheme (an unclosed option bracket leaves one behind), an option with
@@ -653,7 +655,7 @@ function parseListSource(content: string): ParsedSourceFile {
       !match
       || !URI_SCHEME.test(match[3])
       || optionParts.some((part) => !/^[^=]+=.+$/.test(part))
-      || suiteComponentProblem(match[4].split(/[,\s]+/).filter(Boolean), (match[5] ?? '').split(/\s+/).filter(Boolean))
+      || suiteComponentProblem(suites, components)
     ) {
       invalid.push(`the source file has a line that is not a valid apt entry, which apt rejects: ${quotedLine(line)}`);
       continue;
@@ -669,13 +671,7 @@ function parseListSource(content: string): ParsedSourceFile {
       const at = part.indexOf('=');
       options.set(oneLineOptionName(part.slice(0, at)), part.slice(at + 1));
     }
-    entries.push({
-      type: match[1] as 'deb' | 'deb-src',
-      uris: [match[3]],
-      suites: match[4].split(/[,\s]+/).filter(Boolean),
-      components: (match[5] ?? '').split(/\s+/).filter(Boolean),
-      options,
-    });
+    entries.push({ type: match[1] as 'deb' | 'deb-src', uris: [match[3]], suites, components, options });
   }
   return { entries, invalid, empty: active.length === 0 };
 }
@@ -717,7 +713,6 @@ function parseDeb822Source(content: string): ParsedSourceFile {
   const { paragraphs, unparsed } = parseDeb822(content);
   const entries: AptSourceEntry[] = [];
   const invalid: string[] = [];
-  const invalidStanza = 'the deb822 source has a stanza that is not a valid apt entry';
   // apt rejects the whole source list at a line that is not "Field: value" or a
   // comment, wherever it stands in the file.
   if (unparsed.length > 0) invalid.push(`the deb822 source has a line that is not a valid apt entry, which apt rejects: ${quotedLine(unparsed[0])}`);
@@ -740,10 +735,11 @@ function parseDeb822Source(content: string): ParsedSourceFile {
     const components = (paragraph.components ?? '').split(/[,\s]+/).filter(Boolean);
     // apt rejects the whole source list at an enabled stanza with no URIs or
     // Suites, or with components that do not fit its suites.
-    const stanzaProblem = uris.length === 0 ? 'no URIs'
-      : uris.some((uri) => !URI_SCHEME.test(uri)) ? 'a URI with no scheme'
-        : suites.length === 0 ? 'no Suites'
-          : suiteComponentProblem(suites, components);
+    let stanzaProblem: string | null;
+    if (uris.length === 0) stanzaProblem = 'no URIs';
+    else if (uris.some((uri) => !URI_SCHEME.test(uri))) stanzaProblem = 'a URI with no scheme';
+    else if (suites.length === 0) stanzaProblem = 'no Suites';
+    else stanzaProblem = suiteComponentProblem(suites, components);
     if (stanzaProblem) invalid.push(`the deb822 source has an enabled stanza with ${stanzaProblem}, which apt rejects`);
     const options = new Map(Object.entries(paragraph));
     const types = typeWords.filter((type): type is 'deb' | 'deb-src' => type === 'deb' || type === 'deb-src');
@@ -751,16 +747,8 @@ function parseDeb822Source(content: string): ParsedSourceFile {
     // from it), or a URI that names the host without being read as it (a
     // trailing dot), is not a source to ignore.
     const namesHost = mentionsDockerHost(paragraph.uris ?? '');
-    if (namesHost && (types.length === 0 || !uris.some(isDockerHostUri))) invalid.push(invalidStanza);
-    for (const type of types) {
-      entries.push({
-        type,
-        uris,
-        suites,
-        components,
-        options,
-      });
-    }
+    if (namesHost && (types.length === 0 || !uris.some(isDockerHostUri))) invalid.push('the deb822 source has a stanza that is not a valid apt entry');
+    for (const type of types) entries.push({ type, uris, suites, components, options });
   }
   return { entries, invalid, empty: paragraphs.length === 0 };
 }
@@ -842,7 +830,7 @@ interface SigningSetting {
 }
 
 interface SourceFileVerdict {
-  /** The file holds a Docker source entry, content apt rejects, or is one the plan writes. */
+  /** The file holds a Docker source entry, content apt rejects, or is docker.list or docker.sources. */
   relevant: boolean;
   problems: SourceCheck[];
   /** Relevant binary entries, for the whole-configuration checks. */
