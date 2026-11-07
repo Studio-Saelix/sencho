@@ -828,6 +828,27 @@ describe('registryReferenceDiscovery', () => {
     expect(childEnv.DOCKER_CONTEXT).toBe(process.env.DOCKER_CONTEXT ?? undefined);
   });
 
+  it('resolves an include path from the process environment the render child inherits', async () => {
+    const dir = path.join(process.env.TMPDIR || '/tmp', `sencho-refdisc-procenv-${Date.now()}`);
+    fs.mkdirSync(path.join(dir, 'deps'), { recursive: true });
+    fs.writeFileSync(
+      path.join(dir, 'compose.yaml'),
+      'include:\n  - ${SENCHO_REFDISC_DIR}/base.yaml\nservices:\n  app:\n    image: ghcr.io/org/private-app:latest\n',
+    );
+    fs.writeFileSync(path.join(dir, 'deps', 'base.yaml'), nestedAliasBomb(12));
+    const previous = process.env.SENCHO_REFDISC_DIR;
+    process.env.SENCHO_REFDISC_DIR = 'deps';
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      await discoverRegistryReferences(dir, {}, 'app');
+      expect(mockSpawn).not.toHaveBeenCalled();
+    } finally {
+      warn.mockRestore();
+      if (previous === undefined) delete process.env.SENCHO_REFDISC_DIR;
+      else process.env.SENCHO_REFDISC_DIR = previous;
+    }
+  });
+
   it('does not render Compose when an extends dependency is over the alias budget', async () => {
     const dir = path.join(process.env.TMPDIR || '/tmp', `sencho-refdisc-dep-${Date.now()}`);
     fs.mkdirSync(path.join(dir, 'sub'), { recursive: true });

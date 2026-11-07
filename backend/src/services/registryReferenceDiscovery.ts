@@ -452,9 +452,9 @@ async function renderComposeEffectiveModel(
   }
   args.push('config', '--format', 'json');
   try {
-    // The child is spawned with `envVars` rather than this process's
-    // environment, so COMPOSE_FILE and COMPOSE_PATH_SEPARATOR come from that
-    // map when the caller resolved a different interpolation environment.
+    // The child is spawned with `{ ...process.env, ...envVars }`, and the
+    // guard layers `envVars` above `process.env` the same way, so
+    // COMPOSE_FILE and an include path's variables resolve as the child does.
     await assertComposeInputsWithinExpansionLimits({
       cwd,
       invocation: args,

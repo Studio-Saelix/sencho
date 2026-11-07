@@ -23,6 +23,7 @@
  * for Compose to report, so this guard never changes how an ordinary broken
  * stack fails.
  */
+import { createHash } from 'crypto';
 import path from 'path';
 import { isAlias, isCollection, isPair, parseAllDocuments, visit } from 'yaml';
 import type { Document, Node } from 'yaml';
@@ -41,6 +42,15 @@ import { readComposeInputWithinCap } from './composeInputReadSink';
  * many orders of magnitude (the reported file reaches 9^12 nodes).
  */
 export const MAX_EXPANDED_NODES = 250_000;
+
+/**
+ * Expanded-node budget for one invocation across every input it resolves.
+ * Compose merges all its inputs into one model, so a project of many
+ * individually-acceptable files still grows with their sum; this bound keeps a
+ * large graph from handing the CLI an unbounded total. Ordinary multi-file
+ * stacks stay far below it.
+ */
+export const MAX_TOTAL_EXPANDED_NODES = MAX_EXPANDED_NODES * 4;
 
 /**
  * Source cap for one input. A compose file this large is already unusable, and
@@ -99,6 +109,14 @@ function sizeRefusalForFile(label: string): ComposeExpansionRefusal {
   );
 }
 
+function totalRefusalForFile(label: string): ComposeExpansionRefusal {
+  return new ComposeExpansionRefusal(
+    `The compose inputs for this run expand to more than ${MAX_TOTAL_EXPANDED_NODES.toLocaleString('en-US')} nodes in total through nested YAML aliases, ` +
+    `and "${label}" is the file that crossed the limit. Docker Compose expands aliases without a limit and can run the host out of memory, ` +
+    'so Sencho refused to run it. Remove the alias chains or split the project so services do not reuse the same nested anchors.',
+  );
+}
+
 function envFileRefusal(label: string): ComposeExpansionRefusal {
   return new ComposeExpansionRefusal(
     `Sencho could not read the env file "${label}" the way Docker Compose does, so it could not determine which compose files the run would load. ` +
@@ -127,9 +145,13 @@ function dependencyBoundRefusal(label: string, bound: string): ComposeExpansionR
   return dependencyRefusal(label, `crosses ${bound}.`);
 }
 
-function saturateAdd(total: number, amount: number): number {
+function saturateAt(total: number, amount: number, limit: number): number {
   const sum = total + amount;
-  return sum > MAX_EXPANDED_NODES ? MAX_EXPANDED_NODES + 1 : sum;
+  return sum > limit ? limit + 1 : sum;
+}
+
+function saturateAdd(total: number, amount: number): number {
+  return saturateAt(total, amount, MAX_EXPANDED_NODES);
 }
 
 /**
@@ -212,13 +234,15 @@ function countExpandedNodes(
  * Compose accepts a stream of YAML documents, so every document is measured
  * and the file's budget covers their sum. A parser mismatch is never treated
  * as a safe syntax failure: this uses the same document-stream parser Compose
- * does, not a single-document one.
+ * does, not a single-document one. Compose expands each valid document as it
+ * reaches it, so a document before the first parse error is still measured;
+ * the error itself and everything after it stop the stream.
  */
 export function assertComposeSourceWithinExpansionLimits(source: string, label: string): void {
   const documents = parseAllDocuments(source, { prettyErrors: false, merge: true });
-  if (documents.some((doc) => doc.errors.length > 0)) return;
   let expanded = 0;
   for (const doc of documents) {
+    if (doc.errors.length > 0) break;
     if (!doc.contents) continue;
     const targets = resolveAliasTargets(doc);
     expanded = saturateAdd(expanded, countExpandedNodes(doc.contents, targets, new Map(), new Set()));
@@ -348,13 +372,20 @@ interface LoadedSelectionEnv {
   context: GuardEnvContext;
   /** True when --env-file or COMPOSE_ENV_FILES picked the sources. */
   explicitSources: boolean;
+  /**
+   * True when the process environment disables Compose's own `.env` file. The
+   * selected compose inputs are still read, and an included project's `.env`
+   * is still loaded; only the top-level project `.env` is skipped.
+   */
+  disabled: boolean;
 }
 
 /**
  * Load the env files Compose reads before it selects the compose files: an
  * explicit `--env-file` list, then `COMPOSE_ENV_FILES`, then the project
  * directory's `.env`. A missing explicit file means Compose stops before it
- * reads any compose file, so there is nothing to measure.
+ * reads any compose file, so there is nothing to measure. An invalid
+ * COMPOSE_DISABLE_ENV_FILE value stops Compose the same way.
  */
 async function loadSelectionEnv(
   cwd: string,
@@ -379,9 +410,18 @@ async function loadSelectionEnv(
     } else {
       const disabledRaw = processEnv('COMPOSE_DISABLE_ENV_FILE');
       if (disabledRaw !== undefined) {
+        const disabled = parseGoBoolean(disabledRaw);
         // An unparsable value makes Compose fail before it reads a compose
-        // file; either way the default `.env` is not read.
-        if (parseGoBoolean(disabledRaw) !== false) return null;
+        // file. A valid `true` only skips the `.env`; Compose still selects and
+        // reads the compose files, so they must still be measured.
+        if (disabled === null) return null;
+        if (disabled) {
+          return {
+            context: { processEnv, values: new Map() },
+            explicitSources: false,
+            disabled: true,
+          };
+        }
       }
       sources.push({ path: path.resolve(selectionBase, '.env'), label: '.env', required: false });
     }
@@ -397,7 +437,7 @@ async function loadSelectionEnv(
     contents.push(entry);
   }
   const base: GuardEnvContext = { processEnv, values: new Map() };
-  return { context: withAdditionalEnvFiles(base, contents), explicitSources };
+  return { context: withAdditionalEnvFiles(base, contents), explicitSources, disabled: false };
 }
 
 /**
@@ -429,7 +469,6 @@ interface IncludeGroup {
   paths: string[];
   envFiles: string[];
   projectDirectory: string | null;
-  interpolate: boolean;
 }
 
 interface ExtendsGroup {
@@ -461,7 +500,7 @@ function dependencyGroups(doc: Document): DependencyGroup[] | null {
     const entries = Array.isArray(data.include) ? data.include : [data.include];
     for (const entry of entries) {
       if (typeof entry === 'string') {
-        groups.push({ kind: 'include', paths: [entry], envFiles: [], projectDirectory: null, interpolate: true });
+        groups.push({ kind: 'include', paths: [entry], envFiles: [], projectDirectory: null });
         continue;
       }
       if (!isRecord(entry)) continue;
@@ -472,7 +511,6 @@ function dependencyGroups(doc: Document): DependencyGroup[] | null {
         paths,
         envFiles: asStringList(entry.env_file),
         projectDirectory: asString(entry.project_directory) ?? null,
-        interpolate: entry.interpolation !== false,
       });
     }
   }
@@ -506,6 +544,27 @@ interface PendingInput {
 
 function inputLabel(cwd: string, filePath: string): string {
   return path.relative(cwd, filePath) || path.basename(filePath);
+}
+
+/**
+ * The parts of a file's traversal context that can change which dependencies it
+ * declares. The same file reached twice with a different environment or
+ * project directory is a different set of inputs, so it is not deduplicated.
+ * The values are hashed rather than kept as text: a large env file read for a
+ * project with many includes must not be duplicated once per visited file.
+ */
+function inputContextKey(filePath: string, projectBase: string, env: GuardEnvContext): string {
+  const digest = createHash('sha256');
+  digest.update(filePath);
+  digest.update('\0');
+  digest.update(projectBase);
+  for (const [name, value] of env.values) {
+    digest.update('\0');
+    digest.update(name);
+    digest.update('\0');
+    digest.update(value);
+  }
+  return digest.digest('base64url');
 }
 
 /** Read the first auto-discovered input that exists, as Compose would. */
@@ -546,15 +605,17 @@ async function assertInputClosure(args: {
     content: file.content,
   }));
   const visited = new Set<string>();
+  let totalExpanded = 0;
 
   while (queue.length > 0) {
     const input = queue.shift() as PendingInput;
     const filePath = path.resolve(input.path);
-    if (visited.has(filePath)) continue;
-    visited.add(filePath);
+    const contextKey = inputContextKey(filePath, input.projectBase, input.env);
+    if (visited.has(contextKey)) continue;
+    visited.add(contextKey);
     const label = inputLabel(args.cwd, filePath);
     if (visited.size > MAX_COMPOSE_DEPENDENCY_FILES) {
-      throw dependencyBoundRefusal(label, `more than ${MAX_COMPOSE_DEPENDENCY_FILES} compose files`);
+      throw dependencyBoundRefusal(label, `more than ${MAX_COMPOSE_DEPENDENCY_FILES} resolved compose inputs`);
     }
     if (input.depth > MAX_COMPOSE_DEPENDENCY_DEPTH) {
       throw dependencyBoundRefusal(label, `an include/extends chain deeper than ${MAX_COMPOSE_DEPENDENCY_DEPTH}`);
@@ -571,19 +632,23 @@ async function assertInputClosure(args: {
     }
 
     const documents = parseAllDocuments(content, { prettyErrors: false, merge: true });
-    // Compose's parser stops on a syntax error in the stream, so it never
-    // expands that stream either.
-    if (documents.some((doc) => doc.errors.length > 0)) continue;
-
+    // Compose expands a valid document as it reaches it and stops at the first
+    // document it cannot parse. Measuring up to that point catches a bomb in
+    // an earlier document, which Compose expands before it reports the later
+    // syntax error; a bomb after the error is never reached.
     let expanded = 0;
     for (const doc of documents) {
+      if (doc.errors.length > 0) break;
       if (!doc.contents) continue;
       const targets = resolveAliasTargets(doc);
       expanded = saturateAdd(expanded, countExpandedNodes(doc.contents, targets, new Map(), new Set()));
       if (expanded > MAX_EXPANDED_NODES) throw refusalForFile(label);
     }
+    totalExpanded = saturateAt(totalExpanded, expanded, MAX_TOTAL_EXPANDED_NODES);
+    if (totalExpanded > MAX_TOTAL_EXPANDED_NODES) throw totalRefusalForFile(label);
 
     for (const doc of documents) {
+      if (doc.errors.length > 0) break;
       const groups = dependencyGroups(doc);
       if (groups === null) continue;
       for (const group of groups) {
@@ -634,9 +699,12 @@ async function assertInputClosure(args: {
             if (entry === null) continue;
             additionalEnv.push(entry);
           }
-        } else if (group.interpolate) {
+        } else {
           // An included project's interpolation env defaults to its own `.env`;
-          // it only fills names the inherited environment leaves unset.
+          // it only fills names the inherited environment leaves unset. Compose
+          // loads it for an entry with `interpolation: false` too (the option
+          // does not change which environment file the included project reads),
+          // so the guard cannot skip it without missing a path it interpolates.
           const projectEnv = path.resolve(childBase, '.env');
           const entry = await readEnvFileEntry(projectEnv, inputLabel(args.cwd, projectEnv));
           if (entry !== null) additionalEnv.push(entry);
@@ -662,13 +730,15 @@ async function assertInputClosure(args: {
  * Refuse to run Docker Compose when one of the files it will read expands past
  * the alias budget. `invocation` is the exact argv (or its global-flag prefix)
  * the caller is about to spawn: its `-f`, `--env-file`, and
- * `--project-directory` values decide what Compose reads, and `env` is the
- * environment the child receives.
+ * `--project-directory` values decide what Compose reads, together with the
+ * `COMPOSE_FILE`, `COMPOSE_PATH_SEPARATOR`, `COMPOSE_ENV_FILES`, and
+ * `COMPOSE_DISABLE_ENV_FILE` variables in `env`, which is the environment the
+ * child receives.
  *
  * A missing or non-regular input is left for Compose to report, so an ordinary
  * broken stack fails exactly as it did. A dependency the guard cannot read
- * (a remote include, or a graph past the traversal bounds) is refused, because
- * Compose would expand it unmeasured.
+ * (a remote include or extends, or a graph past the traversal bounds) is
+ * refused, because Compose would expand it unmeasured.
  *
  * The measurement is taken immediately before the caller spawns Compose, but a
  * file rewritten in the gap between the two is not re-checked. A writer who can
@@ -678,11 +748,16 @@ async function assertInputClosure(args: {
 export async function assertComposeInputsWithinExpansionLimits(opts: {
   cwd: string;
   invocation: readonly string[];
+  /**
+   * Values layered above this process's environment, matching a child spawned
+   * with `{ ...process.env, ...overrides }`. A name the override leaves unset
+   * comes from `process.env`, exactly as it does for the child.
+   */
   env?: ComposeEnvLookup;
 }): Promise<void> {
   const cwd = path.resolve(opts.cwd);
   const invocation = opts.invocation;
-  const processEnv = opts.env ?? ((name: string) => process.env[name]);
+  const processEnv: ComposeEnvLookup = (name) => opts.env?.(name) ?? process.env[name];
 
   const explicitFiles = composeFileArgsFromInvocation(invocation).map((file) => path.resolve(cwd, file));
   const envFileArgs = flagValues(invocation, '--env-file', '--env-file');
@@ -706,12 +781,13 @@ export async function assertComposeInputsWithinExpansionLimits(opts: {
   // A default `.env` that disables itself still selects the compose files, but
   // Compose drops its other assignments from interpolation and skips the
   // selected project's `.env`. An explicit --env-file or COMPOSE_ENV_FILES
-  // source is unaffected by the setting, so only the default source is
-  // restricted. Keep only the selection variables so dependency paths resolve
-  // with the same (mostly empty) environment Compose uses.
+  // source is unaffected by the setting, and a process environment that
+  // disables the file is already reflected in `selection.disabled`. Keep only
+  // the selection variables so dependency paths resolve with the same (mostly
+  // empty) environment Compose uses.
   let rootEnv = selection.context;
-  let skipProjectEnv = selection.explicitSources;
-  if (!selection.explicitSources && processEnv('COMPOSE_DISABLE_ENV_FILE') === undefined) {
+  let skipProjectEnv = selection.explicitSources || selection.disabled;
+  if (!selection.explicitSources && !selection.disabled && processEnv('COMPOSE_DISABLE_ENV_FILE') === undefined) {
     const disabledByFile = lookup('COMPOSE_DISABLE_ENV_FILE');
     if (disabledByFile !== undefined) {
       const disabled = parseGoBoolean(disabledByFile);
@@ -754,8 +830,8 @@ export async function assertComposeInputsWithinExpansionLimits(opts: {
 
   // A selected project directory other than the one the env files came from
   // adds that directory's `.env` for interpolation, but only names the earlier
-  // environment leaves unset. An explicit env source replaces it, and a file
-  // that disabled itself skips it too.
+  // environment leaves unset. An explicit env source replaces it, and a process
+  // environment or file that disabled the env file skips it too.
   if (!skipProjectEnv && projectDir !== selectionBase) {
     const projectEnv = path.resolve(projectDir, '.env');
     const entry = await readEnvFileEntry(projectEnv, inputLabel(cwd, projectEnv));
