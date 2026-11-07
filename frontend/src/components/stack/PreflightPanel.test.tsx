@@ -7,8 +7,9 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { render, screen, fireEvent, waitFor, within } from '@testing-library/react';
 
 vi.mock('@/lib/api', () => ({ apiFetch: vi.fn() }));
-vi.mock('@/components/ui/toast-store', () => ({ toast: { success: vi.fn(), error: vi.fn() } }));
-vi.mock('@/context/NodeContext', () => ({ useNodes: () => ({ activeNode: { id: 1 } }) }));
+vi.mock('@/components/ui/toast-store', () => ({ toast: { success: vi.fn(), error: vi.fn(), info: vi.fn() } }));
+let activeNodeId = 1;
+vi.mock('@/context/NodeContext', () => ({ useNodes: () => ({ activeNode: { id: activeNodeId } }) }));
 
 import { apiFetch } from '@/lib/api';
 import { toast } from '@/components/ui/toast-store';
@@ -78,7 +79,7 @@ function jsonRes(body: unknown, ok = true) {
   return { ok, status: ok ? 200 : 500, json: async () => body, text: async () => '' } as unknown as Response;
 }
 
-beforeEach(() => { vi.clearAllMocks(); localStorage.clear(); });
+beforeEach(() => { vi.clearAllMocks(); localStorage.clear(); activeNodeId = 1; });
 
 describe('PreflightPanel', () => {
   it('shows the never-run empty state', async () => {
@@ -419,7 +420,282 @@ describe('PreflightPanel', () => {
     // The service chip still says "web"; the old sourcePath line is gone.
     expect(screen.queryAllByText('web')).toHaveLength(1);
     fireEvent.click(link);
-    expect(onOpenLocation).toHaveBeenCalledWith(expect.objectContaining({ file: 'compose.override.yaml', line: 14 }));
+    await waitFor(() => {
+      expect(onOpenLocation).toHaveBeenCalledWith(expect.objectContaining({ file: 'compose.override.yaml', line: 14 }));
+    });
+  });
+
+  it('re-reads the report before opening a location and opens nothing when the fresh read dropped it', async () => {
+    const onOpenLocation = vi.fn();
+    const located = report({
+      status: 'warning', highestSeverity: 'warning',
+      findings: [{
+        ruleId: 'image-latest', severity: 'warning', title: 'Image uses a moving tag', message: 'latest tag',
+        service: 'web', sourcePath: 'web',
+        location: { file: 'compose.override.yaml', path: 'services.web.image', line: 14, column: 12, endLine: 14, endColumn: 22 },
+      }],
+    });
+    const dropped = report({
+      status: 'warning', highestSeverity: 'warning',
+      findings: [{
+        ruleId: 'image-latest', severity: 'warning', title: 'Image uses a moving tag', message: 'latest tag',
+        service: 'web', sourcePath: 'web',
+      }],
+    });
+    vi.mocked(apiFetch)
+      .mockResolvedValueOnce(jsonRes(located))
+      .mockResolvedValueOnce(jsonRes(dropped));
+    render(<PreflightPanel stackName="web" onOpenLocation={onOpenLocation} />);
+    fireEvent.click(await screen.findByRole('button', { name: 'Open compose.override.yaml at line 14' }));
+    await waitFor(() => {
+      expect(screen.queryByRole('button', { name: /^Open / })).toBeNull();
+    });
+    expect(onOpenLocation).not.toHaveBeenCalled();
+    expect(toast.info).toHaveBeenCalled();
+  });
+
+  it('opens the refreshed range when the file moved the finding', async () => {
+    const onOpenLocation = vi.fn();
+    const before = report({
+      status: 'warning', highestSeverity: 'warning',
+      findings: [{
+        ruleId: 'image-latest', severity: 'warning', title: 'Image uses a moving tag', message: 'latest tag',
+        service: 'web', sourcePath: 'web',
+        location: { file: 'compose.override.yaml', path: 'services.web.image', line: 14, column: 12, endLine: 14, endColumn: 22 },
+      }],
+    });
+    const after = report({
+      status: 'warning', highestSeverity: 'warning',
+      findings: [{
+        ruleId: 'image-latest', severity: 'warning', title: 'Image uses a moving tag', message: 'latest tag',
+        service: 'web', sourcePath: 'web',
+        location: { file: 'compose.override.yaml', path: 'services.web.image', line: 17, column: 12, endLine: 17, endColumn: 22 },
+      }],
+    });
+    vi.mocked(apiFetch)
+      .mockResolvedValueOnce(jsonRes(before))
+      .mockResolvedValueOnce(jsonRes(after));
+    render(<PreflightPanel stackName="web" onOpenLocation={onOpenLocation} />);
+    fireEvent.click(await screen.findByRole('button', { name: 'Open compose.override.yaml at line 14' }));
+    await waitFor(() => {
+      expect(onOpenLocation).toHaveBeenCalledWith(expect.objectContaining({ file: 'compose.override.yaml', line: 17 }));
+    });
+    expect(onOpenLocation).not.toHaveBeenCalledWith(expect.objectContaining({ line: 14 }));
+  });
+
+  it('opens the clicked row when two findings share an identity', async () => {
+    const onOpenLocation = vi.fn();
+    const shared = {
+      ruleId: 'bind-path-missing', severity: 'high' as const,
+      title: 'Bind mount path is missing',
+      message: 'The host path "/data" for service "web" does not exist.',
+      service: 'web', sourcePath: '/data',
+    };
+    vi.mocked(apiFetch)
+      .mockResolvedValueOnce(jsonRes(report({
+        status: 'high', highestSeverity: 'high',
+        findings: [
+          { ...shared, location: { file: 'compose.yaml', line: 4, column: 7, endLine: 4, endColumn: 18 } },
+          { ...shared, location: { file: 'compose.yaml', line: 9, column: 7, endLine: 9, endColumn: 18 } },
+        ],
+      })))
+      .mockResolvedValueOnce(jsonRes(report({
+        status: 'high', highestSeverity: 'high',
+        findings: [
+          { ...shared, location: { file: 'compose.yaml', line: 12, column: 7, endLine: 12, endColumn: 18 } },
+          { ...shared, location: { file: 'compose.yaml', line: 9, column: 7, endLine: 9, endColumn: 18 } },
+        ],
+      })));
+    render(<PreflightPanel stackName="web" onOpenLocation={onOpenLocation} />);
+    fireEvent.click(await screen.findByRole('button', { name: 'Open compose.yaml at line 9' }));
+    await waitFor(() => {
+      expect(onOpenLocation).toHaveBeenCalledWith(expect.objectContaining({ line: 9 }));
+    });
+    expect(onOpenLocation).not.toHaveBeenCalledWith(expect.objectContaining({ line: 12 }));
+  });
+
+  it('ignores a superseded click response that arrives after a later one', async () => {
+    const onOpenLocation = vi.fn();
+    const initial = report({
+      status: 'high', highestSeverity: 'high',
+      findings: [
+        {
+          ruleId: 'image-latest', severity: 'warning', title: 'First', message: 'first',
+          service: 'web', location: { file: 'compose.yaml', line: 4, column: 7, endLine: 4, endColumn: 18 },
+        },
+        {
+          ruleId: 'privileged', severity: 'high', title: 'Second', message: 'second',
+          service: 'web', location: { file: 'compose.yaml', line: 9, column: 7, endLine: 9, endColumn: 18 },
+        },
+      ],
+    });
+    const afterFirst = report({
+      status: 'high', highestSeverity: 'high',
+      findings: [
+        {
+          ruleId: 'image-latest', severity: 'warning', title: 'First', message: 'first',
+          service: 'web', location: { file: 'compose.yaml', line: 5, column: 7, endLine: 5, endColumn: 18 },
+        },
+        {
+          ruleId: 'privileged', severity: 'high', title: 'Second', message: 'second',
+          service: 'web', location: { file: 'compose.yaml', line: 9, column: 7, endLine: 9, endColumn: 18 },
+        },
+      ],
+    });
+    const afterSecond = report({
+      status: 'high', highestSeverity: 'high',
+      findings: [
+        {
+          ruleId: 'image-latest', severity: 'warning', title: 'First', message: 'first',
+          service: 'web', location: { file: 'compose.yaml', line: 4, column: 7, endLine: 4, endColumn: 18 },
+        },
+        {
+          ruleId: 'privileged', severity: 'high', title: 'Second', message: 'second',
+          service: 'web', location: { file: 'compose.yaml', line: 12, column: 7, endLine: 12, endColumn: 18 },
+        },
+      ],
+    });
+    let resolveFirst!: (value: Response) => void;
+    let resolveSecond!: (value: Response) => void;
+    const firstPending = new Promise<Response>((resolve) => { resolveFirst = resolve; });
+    const secondPending = new Promise<Response>((resolve) => { resolveSecond = resolve; });
+    vi.mocked(apiFetch)
+      .mockResolvedValueOnce(jsonRes(initial))
+      .mockReturnValueOnce(firstPending)
+      .mockReturnValueOnce(secondPending);
+    render(<PreflightPanel stackName="web" onOpenLocation={onOpenLocation} />);
+    fireEvent.click(await screen.findByRole('button', { name: 'Open compose.yaml at line 4' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Open compose.yaml at line 9' }));
+    resolveSecond(jsonRes(afterSecond));
+    await waitFor(() => {
+      expect(onOpenLocation).toHaveBeenCalledWith(expect.objectContaining({ line: 12 }));
+    });
+    resolveFirst(jsonRes(afterFirst));
+    await new Promise(resolve => setTimeout(resolve, 0));
+    expect(onOpenLocation).toHaveBeenCalledTimes(1);
+  });
+
+  it('drops a click response from a stack the panel no longer shows', async () => {
+    const onOpenLocation = vi.fn();
+    const web = report({
+      status: 'warning', highestSeverity: 'warning',
+      findings: [{
+        ruleId: 'image-latest', severity: 'warning', title: 'Image uses a moving tag', message: 'latest tag',
+        service: 'web', location: { file: 'compose.override.yaml', line: 14, column: 12, endLine: 14, endColumn: 22 },
+      }],
+    });
+    const api = report({ stack: 'api', status: 'pass' });
+    let resolvePending!: (value: Response) => void;
+    const pending = new Promise<Response>((resolve) => { resolvePending = resolve; });
+    vi.mocked(apiFetch)
+      .mockResolvedValueOnce(jsonRes(web))
+      .mockReturnValueOnce(pending)
+      .mockResolvedValueOnce(jsonRes(api));
+    const { rerender } = render(<PreflightPanel stackName="web" onOpenLocation={onOpenLocation} />);
+    fireEvent.click(await screen.findByRole('button', { name: 'Open compose.override.yaml at line 14' }));
+    rerender(<PreflightPanel stackName="api" onOpenLocation={onOpenLocation} />);
+    expect(await screen.findByText('No issues found in the effective model.')).toBeInTheDocument();
+    resolvePending(jsonRes(web));
+    await new Promise(resolve => setTimeout(resolve, 0));
+    expect(onOpenLocation).not.toHaveBeenCalled();
+    expect(screen.queryByText('Image uses a moving tag')).toBeNull();
+  });
+
+  it('drops a click response from a node the panel no longer shows', async () => {
+    const onOpenLocation = vi.fn();
+    const firstNode = report({
+      status: 'warning', highestSeverity: 'warning',
+      findings: [{
+        ruleId: 'image-latest', severity: 'warning', title: 'Image uses a moving tag', message: 'latest tag',
+        service: 'web', location: { file: 'compose.override.yaml', line: 14, column: 12, endLine: 14, endColumn: 22 },
+      }],
+    });
+    const secondNode = report({ status: 'pass' });
+    let resolvePending!: (value: Response) => void;
+    const pending = new Promise<Response>((resolve) => { resolvePending = resolve; });
+    vi.mocked(apiFetch)
+      .mockResolvedValueOnce(jsonRes(firstNode))
+      .mockReturnValueOnce(pending)
+      .mockResolvedValueOnce(jsonRes(secondNode));
+    const { rerender } = render(<PreflightPanel stackName="web" onOpenLocation={onOpenLocation} />);
+    fireEvent.click(await screen.findByRole('button', { name: 'Open compose.override.yaml at line 14' }));
+    activeNodeId = 2;
+    rerender(<PreflightPanel stackName="web" onOpenLocation={onOpenLocation} />);
+    expect(await screen.findByText('No issues found in the effective model.')).toBeInTheDocument();
+    resolvePending(jsonRes(firstNode));
+    await new Promise(resolve => setTimeout(resolve, 0));
+    expect(onOpenLocation).not.toHaveBeenCalled();
+    expect(screen.queryByText('Image uses a moving tag')).toBeNull();
+  });
+
+  it('opens nothing when the panel unmounts before the read returns', async () => {
+    const onOpenLocation = vi.fn();
+    const located = report({
+      status: 'warning', highestSeverity: 'warning',
+      findings: [{
+        ruleId: 'image-latest', severity: 'warning', title: 'Image uses a moving tag', message: 'latest tag',
+        service: 'web', location: { file: 'compose.override.yaml', line: 14, column: 12, endLine: 14, endColumn: 22 },
+      }],
+    });
+    let resolvePending!: (value: Response) => void;
+    const pending = new Promise<Response>((resolve) => { resolvePending = resolve; });
+    vi.mocked(apiFetch)
+      .mockResolvedValueOnce(jsonRes(located))
+      .mockReturnValueOnce(pending);
+    const { unmount } = render(<PreflightPanel stackName="web" onOpenLocation={onOpenLocation} />);
+    fireEvent.click(await screen.findByRole('button', { name: 'Open compose.override.yaml at line 14' }));
+    unmount();
+    resolvePending(jsonRes(located));
+    await new Promise(resolve => setTimeout(resolve, 0));
+    expect(onOpenLocation).not.toHaveBeenCalled();
+  });
+
+  it('opens nothing when the location cannot be confirmed', async () => {
+    const onOpenLocation = vi.fn();
+    vi.mocked(apiFetch)
+      .mockResolvedValueOnce(jsonRes(report({
+        status: 'warning', highestSeverity: 'warning',
+        findings: [{
+          ruleId: 'image-latest', severity: 'warning', title: 'Image uses a moving tag', message: 'latest tag',
+          service: 'web', sourcePath: 'web',
+          location: { file: 'compose.override.yaml', path: 'services.web.image', line: 14, column: 12, endLine: 14, endColumn: 22 },
+        }],
+      })))
+      .mockResolvedValueOnce(jsonRes(null, false));
+    render(<PreflightPanel stackName="web" onOpenLocation={onOpenLocation} />);
+    fireEvent.click(await screen.findByRole('button', { name: 'Open compose.override.yaml at line 14' }));
+    await waitFor(() => {
+      expect(toast.error).toHaveBeenCalledWith('Could not confirm this location is still current.');
+    });
+    expect(onOpenLocation).not.toHaveBeenCalled();
+  });
+
+  it('revalidates a note finding location on use', async () => {
+    const onOpenLocation = vi.fn();
+    const located = report({
+      status: 'pass', activeCount: 0,
+      findings: [{
+        ruleId: 'healthcheck-inherited', severity: 'info', title: 'Healthcheck inherited from image',
+        message: 'Service "web" does not declare a healthcheck in Compose.', service: 'web',
+        location: { file: 'compose.yaml', line: 6, column: 5, endLine: 6, endColumn: 18 },
+      }],
+    });
+    const dropped = report({
+      status: 'pass', activeCount: 0,
+      findings: [{
+        ruleId: 'healthcheck-inherited', severity: 'info', title: 'Healthcheck inherited from image',
+        message: 'Service "web" does not declare a healthcheck in Compose.', service: 'web',
+      }],
+    });
+    vi.mocked(apiFetch)
+      .mockResolvedValueOnce(jsonRes(located))
+      .mockResolvedValueOnce(jsonRes(dropped));
+    render(<PreflightPanel stackName="web" onOpenLocation={onOpenLocation} />);
+    fireEvent.click(await screen.findByRole('button', { name: 'Open compose.yaml at line 6' }));
+    await waitFor(() => {
+      expect(screen.queryByRole('button', { name: /^Open / })).toBeNull();
+    });
+    expect(onOpenLocation).not.toHaveBeenCalled();
   });
 
   it('keeps the plain sourcePath line for a finding without a location', async () => {

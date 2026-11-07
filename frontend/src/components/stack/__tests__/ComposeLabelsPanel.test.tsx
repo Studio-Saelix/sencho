@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { render, screen, within } from '@testing-library/react';
+import { fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import ComposeLabelsPanel from '../ComposeLabelsPanel';
 import { LABEL_DISAMBIGUATION_COPY } from '@/lib/labelInventory';
@@ -14,11 +14,13 @@ vi.mock('@/context/AuthContext', () => ({
 
 let senchoLabelsSupported = true;
 let policySupported = true;
+let activeNodeId = 1;
 // `null` models a node info fetch that failed or has not resolved: no version, no capabilities.
 let nodeMeta: { version: string | null } | null = { version: '0.99.0' };
 vi.mock('@/context/NodeContext', () => ({
   useNodes: () => ({
     activeNodeMeta: nodeMeta,
+    activeNode: { id: activeNodeId },
     hasCapability: (cap: string) => {
       if (cap === 'sencho-labels-v1') return senchoLabelsSupported;
       if (cap === 'sencho-label-policy-v1') return policySupported;
@@ -59,6 +61,7 @@ describe('ComposeLabelsPanel', () => {
   beforeEach(() => {
     senchoLabelsSupported = true;
     policySupported = true;
+    activeNodeId = 1;
     nodeMeta = { version: '0.99.0' };
     vi.mocked(apiFetch).mockResolvedValue({
       ok: true,
@@ -409,6 +412,7 @@ describe('ComposeLabelsPanel io.sencho.* status', () => {
   beforeEach(() => {
     senchoLabelsSupported = true;
     policySupported = true;
+    activeNodeId = 1;
     nodeMeta = { version: '0.99.0' };
     vi.mocked(apiFetch).mockResolvedValue({ ok: true, json: async () => senchoInventory } as Response);
   });
@@ -621,11 +625,230 @@ describe('ComposeLabelsPanel io.sencho.* status', () => {
     const fileLink = within(card).getByRole('button', { name: 'Open app.labels at line 2' });
     const inlineLink = within(card).getByRole('button', { name: 'Open compose.yaml at line 6' });
     fileLink.click();
+    await waitFor(() => {
+      expect(onOpenLocation).toHaveBeenCalledWith(expect.objectContaining({ file: 'app.labels', line: 2 }));
+    });
     inlineLink.click();
-    expect(onOpenLocation).toHaveBeenCalledWith(expect.objectContaining({ file: 'app.labels', line: 2 }));
-    expect(onOpenLocation).toHaveBeenCalledWith(expect.objectContaining({ file: 'compose.yaml', line: 6 }));
+    await waitFor(() => {
+      expect(onOpenLocation).toHaveBeenCalledWith(expect.objectContaining({ file: 'compose.yaml', line: 6 }));
+    });
     // One link per acting origin: the ambiguous row has a reason word only.
     expect(within(card).getAllByTestId('source-location-link')).toHaveLength(2);
+  });
+
+  it('re-reads the inventory before opening a label location and opens nothing when the origin moved away', async () => {
+    const located = {
+      stackName: 'demo', renderable: true, partial: false, generatedAt: Date.now(),
+      services: [{
+        service: 'web',
+        declaredLabels: [{ key: 'from.file', value: '1', source: 'compose' as const }],
+        replicas: [],
+        authored: {
+          'from.file': { source: 'label-file', file: 'app.labels', line: 2, column: 1, endLine: 2, endColumn: 12 },
+        },
+      }],
+    };
+    const dropped = {
+      stackName: 'demo', renderable: true, partial: false, generatedAt: Date.now(),
+      services: [{
+        service: 'web',
+        declaredLabels: [{ key: 'from.file', value: '1', source: 'compose' as const }],
+        replicas: [],
+        authored: {},
+      }],
+    };
+    vi.mocked(apiFetch)
+      .mockResolvedValueOnce({ ok: true, json: async () => located } as Response)
+      .mockResolvedValueOnce({ ok: true, json: async () => dropped } as Response);
+    const onOpenLocation = vi.fn();
+    render(<ComposeLabelsPanel stackName="demo" onOpenLocation={onOpenLocation} />);
+    fireEvent.click(await screen.findByRole('button', { name: 'Open app.labels at line 2' }));
+    await waitFor(() => {
+      expect(screen.queryByTestId('source-location-link')).toBeNull();
+    });
+    expect(onOpenLocation).not.toHaveBeenCalled();
+  });
+
+  it('opens the refreshed label range when the file moved it', async () => {
+    const before = {
+      stackName: 'demo', renderable: true, partial: false, generatedAt: Date.now(),
+      services: [{
+        service: 'web',
+        declaredLabels: [{ key: 'inline.key', value: '2', source: 'compose' as const }],
+        replicas: [],
+        authored: {
+          'inline.key': { source: 'inline', file: 'compose.yaml', line: 6, column: 7, endLine: 6, endColumn: 14 },
+        },
+      }],
+    };
+    const after = {
+      stackName: 'demo', renderable: true, partial: false, generatedAt: Date.now(),
+      services: [{
+        service: 'web',
+        declaredLabels: [{ key: 'inline.key', value: '2', source: 'compose' as const }],
+        replicas: [],
+        authored: {
+          'inline.key': { source: 'inline', file: 'compose.yaml', line: 9, column: 7, endLine: 9, endColumn: 14 },
+        },
+      }],
+    };
+    vi.mocked(apiFetch)
+      .mockResolvedValueOnce({ ok: true, json: async () => before } as Response)
+      .mockResolvedValueOnce({ ok: true, json: async () => after } as Response);
+    const onOpenLocation = vi.fn();
+    render(<ComposeLabelsPanel stackName="demo" onOpenLocation={onOpenLocation} />);
+    fireEvent.click(await screen.findByRole('button', { name: 'Open compose.yaml at line 6' }));
+    await waitFor(() => {
+      expect(onOpenLocation).toHaveBeenCalledWith(expect.objectContaining({ file: 'compose.yaml', line: 9 }));
+    });
+    expect(onOpenLocation).not.toHaveBeenCalledWith(expect.objectContaining({ line: 6 }));
+  });
+
+  it('ignores a superseded label click response that arrives after a later one', async () => {
+    const inventory = (labelFileLine: number, inlineLine: number) => ({
+      stackName: 'demo', renderable: true, partial: false, generatedAt: Date.now(),
+      services: [{
+        service: 'web',
+        declaredLabels: [
+          { key: 'from.file', value: '1', source: 'compose' as const },
+          { key: 'inline.key', value: '2', source: 'compose' as const },
+        ],
+        replicas: [],
+        authored: {
+          'from.file': { source: 'label-file', file: 'app.labels', line: labelFileLine, column: 1, endLine: labelFileLine, endColumn: 12 },
+          'inline.key': { source: 'inline', file: 'compose.yaml', line: inlineLine, column: 7, endLine: inlineLine, endColumn: 14 },
+        },
+      }],
+    });
+    let resolveFirst!: (value: Response) => void;
+    let resolveSecond!: (value: Response) => void;
+    const firstPending = new Promise<Response>((resolve) => { resolveFirst = resolve; });
+    const secondPending = new Promise<Response>((resolve) => { resolveSecond = resolve; });
+    vi.mocked(apiFetch)
+      .mockResolvedValueOnce({ ok: true, json: async () => inventory(2, 6) } as Response)
+      .mockReturnValueOnce(firstPending)
+      .mockReturnValueOnce(secondPending);
+    const onOpenLocation = vi.fn();
+    render(<ComposeLabelsPanel stackName="demo" onOpenLocation={onOpenLocation} />);
+    fireEvent.click(await screen.findByRole('button', { name: 'Open app.labels at line 2' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Open compose.yaml at line 6' }));
+    resolveSecond({ ok: true, json: async () => inventory(2, 9) } as Response);
+    await waitFor(() => {
+      expect(onOpenLocation).toHaveBeenCalledWith(expect.objectContaining({ file: 'compose.yaml', line: 9 }));
+    });
+    resolveFirst({ ok: true, json: async () => inventory(3, 6) } as Response);
+    await new Promise(resolve => setTimeout(resolve, 0));
+    expect(onOpenLocation).toHaveBeenCalledTimes(1);
+  });
+
+  it('drops a label click response from a stack the panel no longer shows', async () => {
+    const demo = {
+      stackName: 'demo', renderable: true, partial: false, generatedAt: Date.now(),
+      services: [{
+        service: 'web',
+        declaredLabels: [{ key: 'from.file', value: '1', source: 'compose' as const }],
+        replicas: [],
+        authored: {
+          'from.file': { source: 'label-file', file: 'app.labels', line: 2, column: 1, endLine: 2, endColumn: 12 },
+        },
+      }],
+    };
+    const other = {
+      stackName: 'other', renderable: true, partial: false, generatedAt: Date.now(),
+      services: [],
+    };
+    let resolvePending!: (value: Response) => void;
+    const pending = new Promise<Response>((resolve) => { resolvePending = resolve; });
+    vi.mocked(apiFetch)
+      .mockResolvedValueOnce({ ok: true, json: async () => demo } as Response)
+      .mockReturnValueOnce(pending)
+      .mockResolvedValueOnce({ ok: true, json: async () => other } as Response);
+    const onOpenLocation = vi.fn();
+    const { rerender } = render(<ComposeLabelsPanel stackName="demo" onOpenLocation={onOpenLocation} />);
+    fireEvent.click(await screen.findByRole('button', { name: 'Open app.labels at line 2' }));
+    rerender(<ComposeLabelsPanel stackName="other" onOpenLocation={onOpenLocation} />);
+    expect(await screen.findByText('No Compose or runtime labels found for this stack.')).toBeInTheDocument();
+    resolvePending({ ok: true, json: async () => demo } as Response);
+    await new Promise(resolve => setTimeout(resolve, 0));
+    expect(onOpenLocation).not.toHaveBeenCalled();
+    expect(screen.queryByTestId('source-location-link')).toBeNull();
+  });
+
+  it('drops a label click response from a node the panel no longer shows', async () => {
+    const located = {
+      stackName: 'demo', renderable: true, partial: false, generatedAt: Date.now(),
+      services: [{
+        service: 'web',
+        declaredLabels: [{ key: 'from.file', value: '1', source: 'compose' as const }],
+        replicas: [],
+        authored: {
+          'from.file': { source: 'label-file', file: 'app.labels', line: 2, column: 1, endLine: 2, endColumn: 12 },
+        },
+      }],
+    };
+    let resolvePending!: (value: Response) => void;
+    const pending = new Promise<Response>((resolve) => { resolvePending = resolve; });
+    vi.mocked(apiFetch)
+      .mockResolvedValueOnce({ ok: true, json: async () => located } as Response)
+      .mockReturnValueOnce(pending);
+    const onOpenLocation = vi.fn();
+    const { rerender } = render(<ComposeLabelsPanel stackName="demo" onOpenLocation={onOpenLocation} />);
+    fireEvent.click(await screen.findByRole('button', { name: 'Open app.labels at line 2' }));
+    activeNodeId = 2;
+    rerender(<ComposeLabelsPanel stackName="demo" onOpenLocation={onOpenLocation} />);
+    resolvePending({ ok: true, json: async () => located } as Response);
+    await new Promise(resolve => setTimeout(resolve, 0));
+    expect(onOpenLocation).not.toHaveBeenCalled();
+  });
+
+  it('opens nothing when the panel unmounts before a label read returns', async () => {
+    const located = {
+      stackName: 'demo', renderable: true, partial: false, generatedAt: Date.now(),
+      services: [{
+        service: 'web',
+        declaredLabels: [{ key: 'from.file', value: '1', source: 'compose' as const }],
+        replicas: [],
+        authored: {
+          'from.file': { source: 'label-file', file: 'app.labels', line: 2, column: 1, endLine: 2, endColumn: 12 },
+        },
+      }],
+    };
+    let resolvePending!: (value: Response) => void;
+    const pending = new Promise<Response>((resolve) => { resolvePending = resolve; });
+    vi.mocked(apiFetch)
+      .mockResolvedValueOnce({ ok: true, json: async () => located } as Response)
+      .mockReturnValueOnce(pending);
+    const onOpenLocation = vi.fn();
+    const { unmount } = render(<ComposeLabelsPanel stackName="demo" onOpenLocation={onOpenLocation} />);
+    fireEvent.click(await screen.findByRole('button', { name: 'Open app.labels at line 2' }));
+    unmount();
+    resolvePending({ ok: true, json: async () => located } as Response);
+    await new Promise(resolve => setTimeout(resolve, 0));
+    expect(onOpenLocation).not.toHaveBeenCalled();
+  });
+
+  it('opens nothing when a label location cannot be confirmed', async () => {
+    const located = {
+      stackName: 'demo', renderable: true, partial: false, generatedAt: Date.now(),
+      services: [{
+        service: 'web',
+        declaredLabels: [{ key: 'from.file', value: '1', source: 'compose' as const }],
+        replicas: [],
+        authored: {
+          'from.file': { source: 'label-file', file: 'app.labels', line: 2, column: 1, endLine: 2, endColumn: 12 },
+        },
+      }],
+    };
+    vi.mocked(apiFetch)
+      .mockResolvedValueOnce({ ok: true, json: async () => located } as Response)
+      .mockResolvedValueOnce({ ok: false, json: async () => ({}) } as Response);
+    const onOpenLocation = vi.fn();
+    render(<ComposeLabelsPanel stackName="demo" onOpenLocation={onOpenLocation} />);
+    fireEvent.click(await screen.findByRole('button', { name: 'Open app.labels at line 2' }));
+    await waitFor(() => {
+      expect(vi.mocked(apiFetch)).toHaveBeenCalledTimes(2);
+    });
+    expect(onOpenLocation).not.toHaveBeenCalled();
   });
 
   it('renders no authored control when every authored entry is rejected', async () => {

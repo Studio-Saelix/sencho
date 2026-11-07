@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { Info, Lock, Search, SlidersHorizontal } from 'lucide-react';
 import { apiFetch } from '@/lib/api';
 import { toast } from '@/components/ui/toast-store';
@@ -53,6 +53,20 @@ const AUTHORED_AMBIGUITY_LABELS: Record<NonNullable<LabelAuthoredOrigin['ambigui
   'outside-boundary': 'outside stack',
 };
 
+/** The actionable range of an authored origin, or null when there is none. */
+function usableOriginLocation(origin: LabelAuthoredOrigin | undefined): AuthoredLocation | null {
+  if (!origin || origin.ambiguity) return null;
+  if (origin.file === undefined || origin.line === undefined || origin.column === undefined
+    || origin.endLine === undefined || origin.endColumn === undefined) return null;
+  return {
+    file: origin.file,
+    line: origin.line,
+    column: origin.column,
+    endLine: origin.endLine,
+    endColumn: origin.endColumn,
+  };
+}
+
 function AuthoredLabelOrigin({
   origin,
   onOpen,
@@ -67,15 +81,8 @@ function AuthoredLabelOrigin({
       </span>
     );
   }
-  if (origin.file === undefined || origin.line === undefined || origin.column === undefined
-    || origin.endLine === undefined || origin.endColumn === undefined) return null;
-  const location: AuthoredLocation = {
-    file: origin.file,
-    line: origin.line,
-    column: origin.column,
-    endLine: origin.endLine,
-    endColumn: origin.endColumn,
-  };
+  const location = usableOriginLocation(origin);
+  if (!location) return null;
   return (
     <span className="inline-flex flex-wrap items-center gap-2">
       {origin.source === 'label-file' && (
@@ -99,7 +106,7 @@ function LabelRow({
   authored?: LabelAuthoredOrigin;
   nodeEvaluatesPolicy: boolean;
   onReveal?: () => void;
-  onOpenLocation?: (location: AuthoredLocation) => void;
+  onOpenLocation?: (key: string) => void;
 }) {
   const { isAdmin } = useAuth();
   const policyState = policyLabelRowState(label, nodeEvaluatesPolicy);
@@ -118,7 +125,12 @@ function LabelRow({
       <span className="rounded border border-muted px-1.5 py-0.5 font-mono text-[10px] text-stat-subtitle">
         {SOURCE_LABELS[label.source]}
       </span>
-      {authored && <AuthoredLabelOrigin origin={authored} onOpen={onOpenLocation} />}
+      {authored && (
+        <AuthoredLabelOrigin
+          origin={authored}
+          onOpen={onOpenLocation ? () => onOpenLocation(label.key) : undefined}
+        />
+      )}
       {policyState === 'not-evaluated' ? (
         <>
           <span
@@ -173,7 +185,8 @@ export default function ComposeLabelsPanel({
   onOpenLocation?: (location: AuthoredLocation) => void;
 }) {
   const { isAdmin } = useAuth();
-  const { hasCapability, activeNodeMeta } = useNodes();
+  const { hasCapability, activeNodeMeta, activeNode } = useNodes();
+  const activeNodeId = activeNode?.id;
   // A failed or pending node info fetch has no version; only a node that answered and lacks the capability is old.
   const nodeLacksSenchoLabels = activeNodeMeta?.version != null && !hasCapability(SENCHO_LABELS_V1_CAPABILITY);
   // An older node does not evaluate the behavioral labels; that is a capability
@@ -186,18 +199,31 @@ export default function ComposeLabelsPanel({
   const [search, setSearch] = useState('');
   const [excludedSources, setExcludedSources] = useState<Set<LabelSource>>(new Set());
   const [hiddenServices, setHiddenServices] = useState<Set<string>>(new Set());
+  const locationRequest = useRef(0);
+  // The click-time read belongs to the stack and node it was opened on. A
+  // pending response must not land in the panel after the operator moves on.
+  const locationScope = useRef({ stackName, activeNodeId });
+  useLayoutEffect(() => {
+    locationScope.current = { stackName, activeNodeId };
+  }, [stackName, activeNodeId]);
+  const mounted = useRef(true);
+  useEffect(() => {
+    mounted.current = true;
+    return () => { mounted.current = false; };
+  }, []);
+
+  const requestInventory = useCallback(async (reveal = revealSecrets): Promise<StackLabelInventory> => {
+    const qs = reveal ? '?reveal=1' : '';
+    const res = await apiFetch(`/stacks/${stackName}/label-inventory${qs}`);
+    if (!res.ok) throw new Error('Failed to load Compose label inventory');
+    return withReadBehaviors(await res.json() as StackLabelInventory);
+  }, [stackName, revealSecrets]);
 
   const fetchInventory = useCallback(async (reveal = revealSecrets) => {
     setLoading(true);
     setLoadError(false);
     try {
-      const qs = reveal ? '?reveal=1' : '';
-      const res = await apiFetch(`/stacks/${stackName}/label-inventory${qs}`);
-      if (!res.ok) {
-        setLoadError(true);
-        throw new Error('Failed to load Compose label inventory');
-      }
-      setInventory(withReadBehaviors(await res.json() as StackLabelInventory));
+      setInventory(await requestInventory(reveal));
     } catch (err) {
       // A body the panel cannot read is a failed load, not an empty inventory.
       setLoadError(true);
@@ -206,7 +232,39 @@ export default function ComposeLabelsPanel({
     } finally {
       setLoading(false);
     }
-  }, [stackName, revealSecrets]);
+  }, [requestInventory, revealSecrets]);
+
+  /**
+   * Re-read the inventory before opening an authored origin. The rendered
+   * range is a fact about the read that produced it, so a file edited while
+   * the panel stays open would otherwise send the click to an unrelated line.
+   * A re-read that no longer locates the label opens nothing, and a later
+   * click supersedes an earlier one still in flight.
+   */
+  const openLabelLocation = async (service: string, key: string) => {
+    if (!onOpenLocation) return;
+    const request = ++locationRequest.current;
+    const scope = { stackName, activeNodeId };
+    try {
+      const fresh = await requestInventory(revealSecrets);
+      if (request !== locationRequest.current
+        || !mounted.current
+        || locationScope.current.stackName !== scope.stackName
+        || locationScope.current.activeNodeId !== scope.activeNodeId) return;
+      setInventory(fresh);
+      setLoadError(false);
+      const location = usableOriginLocation(
+        fresh.services.find(candidate => candidate.service === service)?.authored?.[key],
+      );
+      if (!location) {
+        toast.info('This location is no longer current. Reopen the panel to refresh it.');
+        return;
+      }
+      onOpenLocation(location);
+    } catch {
+      toast.error('Could not confirm this location is still current.');
+    }
+  };
 
   useEffect(() => {
     void fetchInventory();
@@ -432,7 +490,9 @@ export default function ComposeLabelsPanel({
                   authored={svc.authored?.[label.key]}
                   nodeEvaluatesPolicy={nodeEvaluatesPolicy}
                   onReveal={isAdmin && !revealSecrets ? handleReveal : undefined}
-                  onOpenLocation={onOpenLocation}
+                  onOpenLocation={onOpenLocation
+                    ? (key) => { void openLabelLocation(svc.service, key); }
+                    : undefined}
                 />
               ))}
             </div>

@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import {
   Check, TriangleAlert, ShieldAlert, Info, RefreshCw, Stethoscope, X,
   ChevronDown, ChevronRight, type LucideIcon,
@@ -53,6 +53,33 @@ interface PreflightReport {
   acknowledgedCount: number;
   findings: PreflightFinding[];
   coverage?: AssuranceCoverage;
+}
+
+/** A finding's stable identity across two reads: a read can only drop or move
+ *  its location, while a new run can replace the finding altogether. */
+function sameFinding(a: PreflightFinding, b: PreflightFinding): boolean {
+  return a.ruleId === b.ruleId
+    && (a.service ?? null) === (b.service ?? null)
+    && (a.sourcePath ?? null) === (b.sourcePath ?? null)
+    && a.message === b.message;
+}
+
+function sameRange(a: AuthoredLocation | undefined, b: AuthoredLocation | undefined): boolean {
+  if (!a || !b) return a === b;
+  return a.file === b.file && a.line === b.line && a.column === b.column
+    && a.endLine === b.endLine && a.endColumn === b.endColumn;
+}
+
+/** The finding a click belongs to in a fresh report. When several stored
+ *  findings render the same identity (for example one bind source mounted at
+ *  two targets), the clicked range is the only discriminator: the click opens
+ *  nothing unless it still picks exactly one candidate. A sole survivor is
+ *  unambiguous and is returned as it is. */
+function freshFinding(report: PreflightReport, finding: PreflightFinding): PreflightFinding | undefined {
+  const candidates = report.findings.filter(candidate => sameFinding(candidate, finding));
+  if (candidates.length <= 1) return candidates[0];
+  const anchored = candidates.filter(candidate => sameRange(candidate.location, finding.location));
+  return anchored.length === 1 ? anchored[0] : undefined;
 }
 
 const LABEL_CLASS = 'font-mono text-[10px] uppercase tracking-[0.18em] text-stat-subtitle';
@@ -158,7 +185,7 @@ function FindingRow({
   finding: PreflightFinding;
   canEdit: boolean;
   onAcknowledge?: (finding: PreflightFinding) => void;
-  onOpenLocation?: (location: AuthoredLocation) => void;
+  onOpenLocation?: (finding: PreflightFinding) => void;
 }) {
   return (
     <div className="border-t border-muted py-2 first:border-t-0">
@@ -188,7 +215,7 @@ function FindingRow({
       )}
       {finding.location && onOpenLocation ? (
         <div className="mt-0.5">
-          <SourceLocationLink location={finding.location} onOpen={onOpenLocation} />
+          <SourceLocationLink location={finding.location} onOpen={() => onOpenLocation(finding)} />
         </div>
       ) : finding.sourcePath ? (
         <div className="mt-0.5 font-mono text-[10px] text-stat-subtitle">{finding.sourcePath}</div>
@@ -264,18 +291,62 @@ export default function PreflightPanel({
   const [clearTarget, setClearTarget] = useState<PreflightFinding | null>(null);
   const [clearing, setClearing] = useState(false);
   const [ackSectionOpen, setAckSectionOpen] = useState(false);
+  const locationRequest = useRef(0);
+  // The click-time read belongs to the stack and node it was opened on. A
+  // pending response must not land in the panel after the operator moves on.
+  const locationScope = useRef({ stackName, nodeId });
+  useLayoutEffect(() => {
+    locationScope.current = { stackName, nodeId };
+  }, [stackName, nodeId]);
+  const mounted = useRef(true);
+  useEffect(() => {
+    mounted.current = true;
+    return () => { mounted.current = false; };
+  }, []);
+
+  const loadReport = async (): Promise<PreflightReport> => {
+    const res = await apiFetch(`/stacks/${stackName}/preflight`);
+    if (!res.ok) throw new Error('Failed to load the preflight report.');
+    return (await res.json()) as PreflightReport;
+  };
 
   const refreshReport = async () => {
     try {
-      const res = await apiFetch(`/stacks/${stackName}/preflight`);
-      if (!res.ok) {
-        toast.error('Failed to refresh the preflight report.');
-        return;
-      }
-      setReport((await res.json()) as PreflightReport);
+      setReport(await loadReport());
       setLoadError(false);
     } catch {
       toast.error('Failed to refresh the preflight report.');
+    }
+  };
+
+  /**
+   * A rendered link is a fact about the report as it was read, not about the
+   * file now. Re-read the report on the way to the editor so the click opens
+   * the range the current file actually has; when the fresh read can no longer
+   * locate the finding, open nothing rather than a stale line. A later click
+   * supersedes an earlier one still in flight, so an out-of-order response
+   * cannot reopen the range the operator moved away from.
+   */
+  const openFindingLocation = async (finding: PreflightFinding) => {
+    if (!onOpenLocation) return;
+    const request = ++locationRequest.current;
+    const scope = { stackName, nodeId };
+    try {
+      const fresh = await loadReport();
+      if (request !== locationRequest.current
+        || !mounted.current
+        || locationScope.current.stackName !== scope.stackName
+        || locationScope.current.nodeId !== scope.nodeId) return;
+      setReport(fresh);
+      setLoadError(false);
+      const current = freshFinding(fresh, finding);
+      if (!current?.location) {
+        toast.info('This location is no longer current. Run preflight again to restore it.');
+        return;
+      }
+      onOpenLocation(current.location);
+    } catch {
+      toast.error('Could not confirm this location is still current.');
     }
   };
 
@@ -488,7 +559,7 @@ export default function PreflightPanel({
                     key={`note-${f.ruleId}-${f.service ?? ''}-${i}`}
                     finding={f}
                     canEdit={false}
-                    onOpenLocation={onOpenLocation}
+                    onOpenLocation={(target) => { void openFindingLocation(target); }}
                   />
                 ))}
               </div>
@@ -508,7 +579,7 @@ export default function PreflightPanel({
                       finding={f}
                       canEdit={canEdit}
                       onAcknowledge={openAckDialog}
-                      onOpenLocation={onOpenLocation}
+                      onOpenLocation={(target) => { void openFindingLocation(target); }}
                     />
                   ))}
                 </div>
