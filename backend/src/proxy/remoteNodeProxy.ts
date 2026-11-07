@@ -31,6 +31,9 @@ import {
   PROXY_DEPLOY_ACTOR_HEADER,
   PROXY_SCOPED_STACK_NAME_HEADER,
   PROXY_SCOPED_STACK_ACTIONS_HEADER,
+  PROXY_HUB_NODE_ID_HEADER,
+  PROXY_HUB_NODE_NAME_HEADER,
+  hubNodeHeaderValues,
 } from '../services/license-headers';
 import { LicenseService } from '../services/LicenseService';
 import { isProxyExemptPath } from '../helpers/proxyExemptPaths';
@@ -83,6 +86,7 @@ import {
 } from '../helpers/registryDeliveryBodyLimits';
 import { classifyRegistryDeliveryOp } from '../helpers/registryOpClassifier';
 import { preflightRecoveryRequest } from '../services/recovery/remoteSupport';
+import type { RestoreMode } from '../services/recovery/types';
 import { augmentRemoteProxyWithRegistryDelivery, evaluateRegistryDeliveryProxyGate } from '../helpers/registryDeliveryProxy';
 
 /**
@@ -374,6 +378,17 @@ export function createRemoteProxyMiddleware(): RequestHandler {
       proxyReq.setHeader(PROXY_DEPLOY_SOURCE_HEADER, 'manual');
       if (req.user?.username) {
         proxyReq.setHeader(PROXY_DEPLOY_ACTOR_HEADER, req.user.username);
+      }
+      // The node as this hub knows it: always strip client-supplied values, then
+      // set from the registry, so a remote that names its node in a response (the
+      // overwrite preview) names the hub's record rather than its own `Local`.
+      proxyReq.removeHeader(PROXY_HUB_NODE_ID_HEADER);
+      proxyReq.removeHeader(PROXY_HUB_NODE_NAME_HEADER);
+      const hubRecord = typeof req.nodeId === 'number' ? NodeRegistry.getInstance().getNode(req.nodeId) : undefined;
+      const hubValues = hubRecord ? hubNodeHeaderValues(hubRecord) : null;
+      if (hubValues) {
+        proxyReq.setHeader(PROXY_HUB_NODE_ID_HEADER, hubValues.id);
+        proxyReq.setHeader(PROXY_HUB_NODE_NAME_HEADER, hubValues.name);
       }
       // Scoped stack evidence: always strip client-supplied values, then
       // attach hub-built evidence when the gate stashed elevation for this hop.
@@ -793,7 +808,7 @@ export function createRemoteProxyMiddleware(): RequestHandler {
       // described one way and refused another. A node with the engine passes
       // through and answers for itself, including `503` while boot is running.
       if (isRecoveryProxyPath(req.path) && !isRecoveryDescriptorPath(req.path)) {
-        const preflight = await preflightRecoveryRequest(req.nodeId);
+        const preflight = await preflightRecoveryRequest(req.nodeId, requiredRestoreModeFor(req.method, req.path));
         if (!preflight.ok) {
           res.status(preflight.httpStatus).json({
             error: preflight.message,
@@ -1365,6 +1380,20 @@ function isRecoveryProxyPath(path: string): boolean {
 /** The descriptor route is the one recovery path that must always reach the node. */
 function isRecoveryDescriptorPath(path: string): boolean {
   return /^\/recovery\/node\/?(?:\?|$)/i.test(path);
+}
+
+/**
+ * The restore shape a recovery path needs the node to have advertised. Only the
+ * overwrite routes narrow the preflight: every other recovery route works
+ * against `new_volume`, which every node with the engine already speaks.
+ */
+export function requiredRestoreModeFor(method: string, path: string): RestoreMode | undefined {
+  if (method.toUpperCase() !== 'POST') return undefined;
+  // The resolve route belongs to the same feature: a node that never advertised
+  // the overwrite has no intent a resolve could act on.
+  return /^\/recovery\/(?:points\/[^/]+\/overwrite(?:\/preview)?|restores\/[^/]+\/resolve)\/?(?:\?|$)/i.test(path)
+    ? 'staged_overwrite'
+    : undefined;
 }
 
 /** A recovery URL with its `/api` prefix still on, as the proxy's error hook sees it. */

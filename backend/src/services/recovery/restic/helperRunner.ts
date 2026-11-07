@@ -37,7 +37,7 @@ export const HELPER_SOURCE_MOUNT = '/data';
 /** Where the restore target is mounted. */
 export const HELPER_RESTORE_MOUNT = '/restore';
 
-export type HelperProfile = 'probe' | 'config' | 'init' | 'backup' | 'check' | 'restore' | 'unlock';
+export type HelperProfile = 'probe' | 'config' | 'init' | 'backup' | 'check' | 'restore' | 'unlock' | 'materialize' | 'swap';
 
 /**
  * What a profile allows. `source`/`target` name the extra mount a profile
@@ -76,11 +76,15 @@ const BACKUP_SCRATCH = 'size=512m,mode=1777';
  * each entry, so any change here is a visible change to the privilege boundary.
  */
 export const HELPER_PROFILES: Readonly<Record<HelperProfile, HelperProfileSpec>> = Object.freeze({
-  // Reads one directory's device, inode, owner and mode. Only the source root is
-  // mounted, and only read-only.
+  // Reads one directory's device, inode, owner and mode and its free space, and on
+  // request the names of the restore work directories at its root. Only the source
+  // root is mounted, and only read-only. A root owned by an application user
+  // (Postgres, MariaDB) with mode 0700 or 2750 refuses a plain root's directory
+  // listing, so the listing needs read and traverse like a capture does. The
+  // capability grants no write, and the only mount stays read-only.
   probe: {
     user: '0:0',
-    capAdd: [],
+    capAdd: ['DAC_READ_SEARCH'],
     repositoryReadOnly: true,
     needsRepository: false,
     source: 'read_only',
@@ -167,6 +171,45 @@ export const HELPER_PROFILES: Readonly<Record<HelperProfile, HelperProfileSpec>>
     pidsLimit: 256,
     memoryBytes: GIB,
     timeoutMs: 120_000,
+  },
+  // The restore step of a staged overwrite. It writes the point into a work
+  // directory inside the live volume, whose root belongs to the application
+  // (postgres, mariadb and redis chown it to their own user and leave it
+  // unwritable by anyone else), so creating that directory needs DAC_OVERRIDE on top of
+  // what the restore profile has. The restore profile stays without it: a restore
+  // into a new volume writes a root Sencho created itself.
+  materialize: {
+    user: '0:0',
+    capAdd: ['CHOWN', 'FOWNER', 'FSETID', 'DAC_OVERRIDE', 'DAC_READ_SEARCH'],
+    repositoryReadOnly: true,
+    needsRepository: true,
+    source: null,
+    target: 'read_write',
+    tmpfs: { '/tmp': 'size=64m,mode=1777' },
+    pidsLimit: 256,
+    memoryBytes: GIB,
+    timeoutMs: null,
+  },
+  // The journaled rename swap. It renames entries in a root the application
+  // owns and deletes the work directory afterwards, so it needs the ownership
+  // and permission overrides the restore profile has plus DAC_OVERRIDE. FSETID
+  // is what keeps the setgid bit of the root, the captured one on a commit and
+  // the original one on a rollback: without it the kernel clears that bit on the
+  // chmod that applies the root's mode whenever the root's group is not the
+  // helper's own (group 0). No repository is mounted and the
+  // target is the only writable mount, so the extra privilege stays inside one
+  // application volume.
+  swap: {
+    user: '0:0',
+    capAdd: ['CHOWN', 'FOWNER', 'FSETID', 'DAC_OVERRIDE', 'DAC_READ_SEARCH'],
+    repositoryReadOnly: true,
+    needsRepository: false,
+    source: null,
+    target: 'read_write',
+    tmpfs: { '/tmp': 'size=64m,mode=1777' },
+    pidsLimit: 256,
+    memoryBytes: GIB,
+    timeoutMs: null,
   },
 });
 

@@ -345,6 +345,48 @@ export class RecoveryOperationStore {
   }
 
   /**
+   * Replace the `completion_unknown` ending of an operation with the ending its
+   * owner has since proven, and release its storage lock.
+   *
+   * Boot reconciliation cannot know how an interrupted restore ended, so it
+   * parks the operation as `completion_unknown` and turns its locks stale. The
+   * restore's own reconciler later proves the data (original or fully swapped)
+   * and restarts the workloads; the operation must then say so, or the storage
+   * stays closed behind a lock nobody can usefully review. Only an operation
+   * reading `completion_unknown` with the class `interrupted` is settled this
+   * way, whether boot parked it or the live pipeline ended it so (the class is
+   * the same); any other ending stands. The caller passes an ending it has
+   * proven, never `completion_unknown`.
+   *
+   * The repository lock is not released here. Boot decides it once the previous
+   * process's helpers are gone and restic is unlocked, and a restore proven in
+   * the volume says nothing about a helper that may still write to the
+   * repository. One left by a restore a running process ended unproven therefore
+   * waits for the next start or a reviewed release.
+   */
+  settleReconciled(id: string, outcome: OperationFinish, now = Date.now()): RecoveryOperation {
+    if (!isTerminal(outcome.state) || outcome.state === 'completion_unknown') {
+      throw new RecoveryError('invalid_request');
+    }
+    let errorClass: RecoveryErrorClass | null = null;
+    if (outcome.state === 'failed' || outcome.state === 'partial') {
+      errorClass = outcome.errorClass;
+      if (!isRecoveryErrorClass(errorClass)) throw new RecoveryError('invalid_request');
+    }
+    const db = recoveryDb();
+    return db.transaction((): RecoveryOperation => {
+      const current = this.require(id);
+      if (current.state !== 'completion_unknown' || current.errorClass !== 'interrupted') return current;
+      db.prepare(`
+        UPDATE recovery_operations SET state = ?, error_class = ?, updated_at = ?, completed_at = ?
+        WHERE id = ? AND state = 'completion_unknown' AND error_class = 'interrupted'
+      `).run(outcome.state, errorClass, now, now, id);
+      db.prepare("DELETE FROM recovery_locks WHERE owner_operation_id = ? AND scope = 'storage'").run(id);
+      return this.require(id);
+    }).immediate();
+  }
+
+  /**
    * Take the lock for one storage (keyed by its storage key, which is the same
    * for every generation) or one repository (keyed by its id); a key that names
    * neither is refused, so a lock taken on the wrong id cannot sit beside the

@@ -496,3 +496,69 @@ describe('restart reconciliation', () => {
     expect(points.RecoveryPointStore.getInstance().get(p.id)?.status).toBe('pending');
   });
 });
+
+describe('settling an interrupted operation with what its owner proved', () => {
+  /** A restore that a dead process left holding both locks, as boot reconciliation leaves it. */
+  function interrupted(locator: string) {
+    const before = new ops.RecoveryOperationStore(`epoch-${locator}`);
+    const st = storage(locator);
+    const repo = repository(`${locator}_repo`);
+    const op = before.start({ idempotencyKey: key(), kind: 'restore', storageId: st.id, actor: 'admin', transport: 'local' }).operation;
+    before.markRunning(op.id);
+    before.acquireLock('storage', st.storageKey, op.id);
+    before.acquireLock('repository', repo.id, op.id);
+    const after = new ops.RecoveryOperationStore(`epoch-${locator}-next`);
+    after.reconcileAtStartup(5_000);
+    return { after, op, st, repo };
+  }
+
+  it('rewrites completion_unknown to the proven ending and frees the storage lock only', () => {
+    const { after, op, st, repo } = interrupted('settle_proven');
+    const settled = after.settleReconciled(op.id, { state: 'failed', errorClass: 'interrupted' }, 6_000);
+    expect(settled).toMatchObject({ state: 'failed', errorClass: 'interrupted', completedAt: 6_000 });
+    expect(after.getLock('storage', st.storageKey)).toBeNull();
+    // Whether a helper of the dead process may still write is boot's decision, not this one's.
+    expect(after.getLock('repository', repo.id)).toMatchObject({ staleSince: expect.any(Number) });
+  });
+
+  it.each([
+    [{ state: 'succeeded' as const }, null],
+    [{ state: 'cancelled' as const }, null],
+    [{ state: 'partial' as const, errorClass: 'cleanup_failed' as const }, 'cleanup_failed'],
+  ])('accepts %j', (ending, errorClass) => {
+    const { after, op } = interrupted(`settle_ok_${ending.state}`);
+    expect(after.settleReconciled(op.id, ending)).toMatchObject({ state: ending.state, errorClass });
+  });
+
+  it('refuses an ending that is not proven, a live state and an unknown class', () => {
+    const { after, op } = interrupted('settle_refused');
+    expect(classOf(() => after.settleReconciled(op.id, { state: 'completion_unknown' }))).toBe('invalid_request');
+    expect(classOf(() => after.settleReconciled(op.id, { state: 'running' } as never))).toBe('invalid_request');
+    expect(classOf(() => after.settleReconciled(op.id, { state: 'failed', errorClass: 'not-a-class' } as never))).toBe('invalid_request');
+    expect(after.get(op.id)?.state).toBe('completion_unknown');
+  });
+
+  it('refuses an operation that does not exist', () => {
+    const { after } = interrupted('settle_missing');
+    expect(classOf(() => after.settleReconciled('no-such-operation', { state: 'succeeded' }))).toBe('invalid_request');
+  });
+
+  it('leaves an ending another process reported, and an ending it already settled, alone', () => {
+    const s = new ops.RecoveryOperationStore('epoch-settle-live');
+    const st = storage('settle_live');
+    const op = s.start({ idempotencyKey: key(), kind: 'restore', storageId: st.id, actor: 'admin', transport: 'local' }).operation;
+    s.markRunning(op.id);
+    s.finish(op.id, { state: 'failed', errorClass: 'node_error' });
+    expect(s.settleReconciled(op.id, { state: 'succeeded' })).toMatchObject({ state: 'failed', errorClass: 'node_error' });
+
+    const { after, op: parked } = interrupted('settle_twice');
+    after.settleReconciled(parked.id, { state: 'succeeded' }, 6_000);
+    expect(after.settleReconciled(parked.id, { state: 'failed', errorClass: 'interrupted' }, 7_000))
+      .toMatchObject({ state: 'succeeded', completedAt: 6_000 });
+  });
+
+  it('holds the write lock from its first statement, like every other read-then-write here', () => {
+    const { after, op } = interrupted('settle_immediate');
+    expect(holdsWriteLockFromBegin(() => after.settleReconciled(op.id, { state: 'succeeded' }))).toBe(true);
+  });
+});

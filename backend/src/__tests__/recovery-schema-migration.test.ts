@@ -19,7 +19,7 @@ import {
 const RECOVERY_TABLES = [
   'recovery_locks', 'recovery_operations', 'recovery_point_verifications', 'recovery_point_holds',
   'recovery_points', 'recovery_repositories', 'recovery_storage_dependents', 'recovery_storage_identities',
-  'recovery_restore_intents', 'recovery_repository_checks',
+  'recovery_restore_intents', 'recovery_repository_checks', 'recovery_restore_fence_members',
 ];
 
 let tmpDir: string;
@@ -120,6 +120,91 @@ describe('applyRecoverySchema', () => {
       .toEqual({ id: 'op-old', request_digest: null });
     // And the migration is repeatable.
     expect(applyRecoverySchema(db).kind).toBe('current');
+  });
+
+  it('upgrades a v2 database in place: the new phases, columns, fence table and hold kind', () => {
+    const db = freshDb();
+    applyRecoverySchema(db);
+    // Recreate the two tables as v2 left them. A CHECK cannot be altered, so this
+    // is exactly what the migration has to rebuild.
+    db.exec('DROP TABLE recovery_restore_fence_members');
+    db.exec('DROP INDEX IF EXISTS idx_recovery_restore_target_live');
+    db.exec('DROP INDEX IF EXISTS idx_recovery_restore_intents_phase');
+    db.exec('DROP TABLE recovery_restore_intents');
+    db.exec(`
+      CREATE TABLE recovery_restore_intents (
+        id TEXT PRIMARY KEY,
+        operation_id TEXT NOT NULL UNIQUE REFERENCES recovery_operations(id),
+        point_id TEXT NOT NULL REFERENCES recovery_points(id),
+        target_mode TEXT NOT NULL CHECK (target_mode IN ('new_volume','new_path','staged_overwrite')),
+        target_volume TEXT NULL,
+        path_scope TEXT NULL,
+        phase TEXT NOT NULL CHECK (phase IN (
+          'recorded','staging','staged_verified','swapping','committed','rolled_back','completion_unknown'
+        )),
+        files_restored INTEGER NULL,
+        bytes_restored INTEGER NULL,
+        verified INTEGER NULL,
+        xattr_warnings INTEGER NULL,
+        actor TEXT NOT NULL,
+        process_epoch TEXT NOT NULL,
+        created_at INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL,
+        CHECK (target_mode = 'new_path' OR target_volume IS NOT NULL)
+      );
+      CREATE UNIQUE INDEX idx_recovery_restore_target_live
+        ON recovery_restore_intents(target_volume)
+        WHERE target_volume IS NOT NULL AND phase NOT IN ('committed','rolled_back','completion_unknown');
+    `);
+    db.exec('DROP TABLE recovery_point_holds');
+    db.exec(`
+      CREATE TABLE recovery_point_holds (
+        point_id TEXT NOT NULL REFERENCES recovery_points(id),
+        holder_kind TEXT NOT NULL CHECK (holder_kind IN (
+          'deploy_checkpoint','recovery_policy','mobility','drain','last_known_good','operator'
+        )),
+        holder_ref TEXT NOT NULL,
+        created_at INTEGER NOT NULL,
+        PRIMARY KEY (point_id, holder_kind, holder_ref)
+      );
+    `);
+    db.prepare('INSERT OR REPLACE INTO system_state (key, value) VALUES (?, ?)').run(RECOVERY_SCHEMA_STATE_KEY, '2');
+    db.exec(`
+      INSERT INTO recovery_storage_identities
+        (id, authority_id, owner_node_key, kind, locator, storage_key, generation, generation_token, state, first_seen_at, last_seen_at)
+        VALUES ('s1', 'a', 'docker-engine:a', 'named_volume', 'data', 'k', 1, 't', 'current', 1, 1);
+      INSERT INTO recovery_repositories (id, authority_id, owner_node_key, kind, locator, failure_domain, created_at)
+        VALUES ('r1', 'a', 'docker-engine:a', 'local_volume', 'repo', 'same_failure_domain', 1);
+      INSERT INTO recovery_operations (id, idempotency_key, kind, actor, transport, state, process_epoch, created_at, updated_at)
+        VALUES ('op1', 'k1', 'restore', 'admin', 'local', 'running', 'e', 1, 1);
+      INSERT INTO recovery_points
+        (id, schema_version, storage_id, storage_generation, kind, repository_id, snapshot_id, status, consistency,
+         capture_json, trigger_kind, actor, source_operation_id, source_node_key, engine_id, capability_version, started_at, completed_at)
+        VALUES ('p1', 2, 's1', 1, 'root', 'r1', 'snap', 'succeeded', 'crash_consistent_live',
+         '{"fileCount":1,"byteCount":1,"skippedCount":0}', 'manual', 'admin', 'op1', 'docker-engine:a', 'restic', 1, 1, 2);
+      INSERT INTO recovery_restore_intents
+        (id, operation_id, point_id, target_mode, target_volume, phase, files_restored, bytes_restored, verified,
+         actor, process_epoch, created_at, updated_at)
+        VALUES ('i1', 'op1', 'p1', 'staged_overwrite', 'data', 'swapping', 4, 4096, 1, 'admin', 'e', 1, 2);
+      INSERT INTO recovery_point_holds (point_id, holder_kind, holder_ref, created_at)
+        VALUES ('p1', 'operator', 'note', 1);
+    `);
+
+    expect(applyRecoverySchema(db)).toEqual({ kind: 'current', version: RECOVERY_SCHEMA_VERSION });
+
+    // The intent survived with its evidence and gained the v3 columns.
+    expect(db.prepare("SELECT phase, files_restored, verified, fence_state, staging_volume, pre_restore_point_id FROM recovery_restore_intents WHERE id = 'i1'").get())
+      .toEqual({ phase: 'swapping', files_restored: 4, verified: 1, fence_state: 'none', staging_volume: null, pre_restore_point_id: null });
+    // The one-live-intent index came back with the rebuilt table.
+    expect((db.prepare("SELECT name FROM sqlite_master WHERE type = 'index' AND name = 'idx_recovery_restore_target_live'").get() as { name?: string } | undefined)?.name)
+      .toBe('idx_recovery_restore_target_live');
+    // The hold survived, its trigger still fires, and the new kind is accepted.
+    expect(db.prepare("SELECT holder_kind FROM recovery_point_holds WHERE point_id = 'p1'").get()).toEqual({ holder_kind: 'operator' });
+    expect(() => db.prepare("DELETE FROM recovery_points WHERE id = 'p1'").run()).toThrow(/held/);
+    expect(() => db.prepare("INSERT INTO recovery_point_holds (point_id, holder_kind, holder_ref, created_at) VALUES ('p1', 'restore_intent', 'i1', 2)").run())
+      .not.toThrow();
+    // The new phase values are accepted by the rebuilt CHECK.
+    expect(() => db.prepare("UPDATE recovery_restore_intents SET phase = 'fenced' WHERE id = 'i1'").run()).not.toThrow();
   });
 
   it('is applied by DatabaseService at boot', async () => {

@@ -180,6 +180,8 @@ export const AUDIT_ROUTE_SUMMARIES: Record<string, string> = {
   'POST /recovery/storage/points': 'Created a recovery point',
   'POST /recovery/points/*/verify': 'Verified recovery point',
   'POST /recovery/points/*/restore': 'Restored recovery point',
+  // The three routes of a restore over an existing volume are worded by
+  // `overwriteRouteSummary`, which reads the status and the body.
   'POST /recovery/operations/*/cancel': 'Cancelled recovery operation',
   'POST /recovery/locks/release': 'Released a stale recovery lock',
 };
@@ -188,15 +190,74 @@ export const AUDIT_ROUTE_SUMMARIES: Record<string, string> = {
 const SORTED_PATTERNS = Object.entries(AUDIT_ROUTE_SUMMARIES)
   .sort((a, b) => b[0].split('/').length - a[0].split('/').length);
 
+/** What a restore over an existing volume's routes are called, by what the request did. */
+const OVERWRITE_ROUTE_WORDING = {
+  preview: { done: 'Previewed a restore over the existing volume', not: 'Preview of a restore over the existing volume' },
+  overwrite: { done: 'Started a restore over the existing volume', not: 'Restore over the existing volume' },
+  // A resolve is worded by its action, because `release_fence` accepts an
+  // unproven volume and the log is how that is reviewed; it must not read like a
+  // retry. An action the body does not carry (a refused request, or one a hub
+  // forwarded to a remote node without reading it) gets the neutral wording.
+  retry: { done: 'Retried a restore over the existing volume', not: 'Retry of a restore over the existing volume' },
+  release_fence: { done: 'Released the fence of a restore over the existing volume', not: 'Release of a restore fence' },
+  resolve: { done: 'Resolved a restore over the existing volume', not: 'Resolve of a restore over the existing volume' },
+} as const;
+
+function safeDecode(segment: string): string {
+  try {
+    return decodeURIComponent(segment);
+  } catch {
+    return segment;
+  }
+}
+
+/**
+ * The three routes of a restore over an existing volume, worded by what the
+ * request did: a preview changes nothing, an admitted overwrite has started but
+ * not finished, and a request that was not served says so with its status
+ * (`refused` for a 4xx, `failed` for a 5xx) instead of claiming the action. A
+ * trailing slash is the same route to the router, so it is the same here. Null for
+ * every other route, which uses the table above.
+ */
+function overwriteRouteSummary(normalized: string, statusCode: number | undefined, body: unknown): string | null {
+  let wording: { done: string; not: string };
+  let id: string;
+  const point = /^recovery\/points\/([^/]+)\/overwrite(\/preview)?\/?$/.exec(normalized);
+  const resolve = /^recovery\/restores\/([^/]+)\/resolve\/?$/.exec(normalized);
+  if (point) {
+    wording = point[2] ? OVERWRITE_ROUTE_WORDING.preview : OVERWRITE_ROUTE_WORDING.overwrite;
+    id = point[1];
+  } else if (resolve) {
+    const action = body && typeof body === 'object' ? (body as { action?: unknown }).action : undefined;
+    wording = action === 'retry' || action === 'release_fence'
+      ? OVERWRITE_ROUTE_WORDING[action]
+      : OVERWRITE_ROUTE_WORDING.resolve;
+    id = resolve[1];
+  } else {
+    return null;
+  }
+  let summary = wording.done;
+  if (typeof statusCode === 'number' && statusCode >= 400) {
+    const verdict = statusCode >= 500 ? 'failed' : 'refused';
+    summary = `${wording.not} ${verdict} (${statusCode})`;
+  }
+  return `${summary}: ${safeDecode(id)}`;
+}
+
 /**
  * Resolve a human-readable summary for an audit log entry.
  *
- * Tries wildcard patterns first (most specific by segment count), then
- * falls back to prefix matching. Returns a generic method+path string
- * if no pattern matches.
+ * The routes of a restore over an existing volume are worded first, from the
+ * status and the request body (`overwriteRouteSummary`). Every other route tries
+ * wildcard patterns (most specific by segment count), then falls back to prefix
+ * matching, and returns a generic method+path string if nothing matches. `body`
+ * is whatever the request parsed to; it is undefined for a request a hub
+ * forwarded to a remote node without reading it.
  */
-export function getAuditSummary(method: string, apiPath: string, statusCode?: number): string {
+export function getAuditSummary(method: string, apiPath: string, statusCode?: number, body?: unknown): string {
   const normalized = apiPath.replace(/^\//, '');
+  const overwrite = method === 'POST' ? overwriteRouteSummary(normalized, statusCode, body) : null;
+  if (overwrite) return overwrite;
   // Do not claim a successful action when the request was rejected, blocked,
   // or conflict-resolved. Per-user preference writes carry machine codes in
   // the response body, so the status code is the only honest signal here.

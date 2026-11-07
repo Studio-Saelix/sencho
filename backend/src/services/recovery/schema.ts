@@ -16,9 +16,9 @@ import type Database from 'better-sqlite3';
  * Two invariants are enforced by the database rather than by callers:
  *   - a recovery point is immutable once its status leaves `pending`;
  *   - a point with a hold (deploy checkpoint, policy, mobility, drain, last
- *     known good, operator) cannot be deleted.
+ *     known good, operator, restore intent) cannot be deleted.
  */
-export const RECOVERY_SCHEMA_VERSION = 2;
+export const RECOVERY_SCHEMA_VERSION = 3;
 export const RECOVERY_SCHEMA_STATE_KEY = 'recovery_schema_version';
 /** Stable authority id for every storage and repository record this instance owns. */
 export const RECOVERY_AUTHORITY_STATE_KEY = 'recovery_authority_id';
@@ -29,7 +29,82 @@ export const RECOVERY_AUTHORITY_STATE_KEY = 'recovery_authority_id';
  */
 export const RECOVERY_ACTIVE_REPOSITORY_STATE_KEY = 'recovery_active_repository_id';
 
-export const RECOVERY_SCHEMA_SQL = `
+/**
+ * The restore-intent columns that exist in every version. A rebuild copies
+ * exactly these, so a column added later needs either a default here or its own
+ * migration step.
+ */
+export const RESTORE_INTENT_CARRIED_COLUMNS = [
+  'id', 'operation_id', 'point_id', 'target_mode', 'target_volume', 'path_scope',
+  'phase', 'files_restored', 'bytes_restored', 'verified', 'xattr_warnings',
+  'actor', 'process_epoch', 'created_at', 'updated_at',
+] as const;
+
+/**
+ * The live restore-intent row. `staged_overwrite` (schema v3) adds the staging
+ * volume, the generation token the operator confirmed, the pre-restore point,
+ * the fence state and the sanitized failure class. `swapped` is the commit
+ * point, and it is part of the phase CHECK because a CHECK cannot be altered.
+ */
+function restoreIntentsSql(table: string): string {
+  return `
+CREATE TABLE IF NOT EXISTS ${table} (
+  id TEXT PRIMARY KEY,
+  operation_id TEXT NOT NULL UNIQUE REFERENCES recovery_operations(id),
+  point_id TEXT NOT NULL REFERENCES recovery_points(id),
+  target_mode TEXT NOT NULL CHECK (target_mode IN ('new_volume','new_path','staged_overwrite')),
+  target_volume TEXT NULL,
+  path_scope TEXT NULL,
+  phase TEXT NOT NULL CHECK (phase IN (
+    'recorded','staging','staged_verified','fenced','protecting','materializing',
+    'swapping','swapped','committed','rolled_back','completion_unknown'
+  )),
+  staging_volume TEXT NULL,
+  expected_generation_token TEXT NULL,
+  -- The stacks whose models declare the target volume, JSON array of names. A
+  -- stack can declare it without a running container, and a deploy of that stack
+  -- must still be refused while the fence is held.
+  dependent_stacks_json TEXT NULL,
+  pre_restore_point_id TEXT NULL REFERENCES recovery_points(id),
+  fence_state TEXT NOT NULL DEFAULT 'none' CHECK (fence_state IN ('none','held','released','release_failed')),
+  outcome_class TEXT NULL,
+  files_restored INTEGER NULL,
+  bytes_restored INTEGER NULL,
+  verified INTEGER NULL,
+  xattr_warnings INTEGER NULL,
+  actor TEXT NOT NULL,
+  process_epoch TEXT NOT NULL,
+  created_at INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL,
+  CHECK (target_mode = 'new_path' OR target_volume IS NOT NULL)
+);`;
+}
+
+const RESTORE_INTENT_INDEXES = `
+-- One live restore per target volume: two intents for the same name cannot both
+-- think they wrote it, and the loser is refused before it touches Docker.
+CREATE UNIQUE INDEX IF NOT EXISTS idx_recovery_restore_target_live
+  ON recovery_restore_intents(target_volume)
+  WHERE target_volume IS NOT NULL AND phase NOT IN ('committed','rolled_back','completion_unknown');
+CREATE INDEX IF NOT EXISTS idx_recovery_restore_intents_phase
+  ON recovery_restore_intents(phase);
+`;
+
+function pointHoldsSql(table: string): string {
+  return `
+CREATE TABLE IF NOT EXISTS ${table} (
+  point_id TEXT NOT NULL REFERENCES recovery_points(id),
+  holder_kind TEXT NOT NULL CHECK (holder_kind IN (
+    'deploy_checkpoint','recovery_policy','mobility','drain','last_known_good','operator','restore_intent'
+  )),
+  holder_ref TEXT NOT NULL,
+  created_at INTEGER NOT NULL,
+  PRIMARY KEY (point_id, holder_kind, holder_ref)
+);`;
+}
+
+/** Every table that is identical in every schema version this build writes. */
+const RECOVERY_CORE_SQL = `
 CREATE TABLE IF NOT EXISTS recovery_storage_identities (
   id TEXT PRIMARY KEY,
   authority_id TEXT NOT NULL,
@@ -101,20 +176,12 @@ CREATE TABLE IF NOT EXISTS recovery_points (
 CREATE INDEX IF NOT EXISTS idx_recovery_points_storage
   ON recovery_points(storage_id, kind, status);
 
+${pointHoldsSql('recovery_point_holds')}
+
 CREATE TRIGGER IF NOT EXISTS recovery_points_immutable
   BEFORE UPDATE ON recovery_points
   WHEN OLD.status <> 'pending'
   BEGIN SELECT RAISE(ABORT, 'recovery point is immutable'); END;
-
-CREATE TABLE IF NOT EXISTS recovery_point_holds (
-  point_id TEXT NOT NULL REFERENCES recovery_points(id),
-  holder_kind TEXT NOT NULL CHECK (holder_kind IN (
-    'deploy_checkpoint','recovery_policy','mobility','drain','last_known_good','operator'
-  )),
-  holder_ref TEXT NOT NULL,
-  created_at INTEGER NOT NULL,
-  PRIMARY KEY (point_id, holder_kind, holder_ref)
-);
 
 CREATE TRIGGER IF NOT EXISTS recovery_points_held
   BEFORE DELETE ON recovery_points
@@ -166,37 +233,26 @@ CREATE TABLE IF NOT EXISTS recovery_locks (
   PRIMARY KEY (scope, resource_key)
 );
 
--- Restore intents (schema v2). Written before any byte moves, so a restart can
--- tell a restore that never started from one that half-wrote a volume. Only the
--- new-volume mode is implemented; the other two shapes are refused by the route
--- and kept in the CHECK so a later slice can add them without a rewrite.
-CREATE TABLE IF NOT EXISTS recovery_restore_intents (
-  id TEXT PRIMARY KEY,
-  operation_id TEXT NOT NULL UNIQUE REFERENCES recovery_operations(id),
-  point_id TEXT NOT NULL REFERENCES recovery_points(id),
-  target_mode TEXT NOT NULL CHECK (target_mode IN ('new_volume','new_path','staged_overwrite')),
-  target_volume TEXT NULL,
-  path_scope TEXT NULL,
-  phase TEXT NOT NULL CHECK (phase IN (
-    'recorded','staging','staged_verified','swapping','committed','rolled_back','completion_unknown'
-  )),
-  files_restored INTEGER NULL,
-  bytes_restored INTEGER NULL,
-  verified INTEGER NULL,
-  xattr_warnings INTEGER NULL,
-  actor TEXT NOT NULL,
-  process_epoch TEXT NOT NULL,
-  created_at INTEGER NOT NULL,
-  updated_at INTEGER NOT NULL,
-  CHECK (target_mode <> 'new_volume' OR target_volume IS NOT NULL)
+${restoreIntentsSql('recovery_restore_intents')}
+${RESTORE_INTENT_INDEXES}
+
+-- One row per container this restore stopped, written before the first Docker
+-- mutation so a restart of Sencho or of the daemon can always release the
+-- fence exactly. project_name is the Compose project label, because a caller
+-- can key the same workload by either spelling.
+CREATE TABLE IF NOT EXISTS recovery_restore_fence_members (
+  intent_id TEXT NOT NULL REFERENCES recovery_restore_intents(id),
+  container_id TEXT NOT NULL,
+  container_name TEXT NOT NULL,
+  stack_name TEXT NULL,
+  project_name TEXT NULL,
+  restart_policy_json TEXT NOT NULL,
+  was_running INTEGER NOT NULL,
+  released_at INTEGER NULL,
+  PRIMARY KEY (intent_id, container_id)
 );
--- One live restore per target volume: two intents for the same name cannot both
--- think they created it, and the loser is refused before it touches Docker.
-CREATE UNIQUE INDEX IF NOT EXISTS idx_recovery_restore_target_live
-  ON recovery_restore_intents(target_volume)
-  WHERE target_volume IS NOT NULL AND phase NOT IN ('committed','rolled_back','completion_unknown');
-CREATE INDEX IF NOT EXISTS idx_recovery_restore_intents_phase
-  ON recovery_restore_intents(phase);
+CREATE INDEX IF NOT EXISTS idx_recovery_fence_stack
+  ON recovery_restore_fence_members(stack_name, project_name);
 
 -- Repository-wide integrity checks (schema v2). restic's check covers the whole
 -- repository and its data is deduplicated, so one result is evidence about every
@@ -232,6 +288,44 @@ function columnExists(db: Database.Database, table: string, column: string): boo
   return rows.some((row) => row.name === column);
 }
 
+function tableSql(db: Database.Database, table: string): string | null {
+  const row = db.prepare("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = ?")
+    .get(table) as { sql: string | null } | undefined;
+  return row?.sql ?? null;
+}
+
+/**
+ * SQLite's generalized ALTER TABLE procedure. A CHECK constraint cannot be
+ * altered, so the table is rebuilt under a temporary name inside the caller's
+ * transaction, its rows copied, and the new table renamed into place. Foreign
+ * keys are off for the whole migration, so dropping the old table cannot cascade
+ * into a child table.
+ */
+function rebuildTable(
+  db: Database.Database,
+  input: {
+    table: string;
+    newTable: string;
+    createSql: string;
+    carriedColumns: readonly string[];
+    /** Indexes the old table's drop removed. */
+    after: string;
+  },
+): void {
+  db.exec(input.createSql);
+  const columns = input.carriedColumns.join(', ');
+  db.exec(`INSERT INTO ${input.newTable} (${columns}) SELECT ${columns} FROM ${input.table}`);
+  db.exec(`DROP TABLE ${input.table}`);
+  db.exec(`ALTER TABLE ${input.newTable} RENAME TO ${input.table}`);
+  if (input.after) db.exec(input.after);
+}
+
+/** True when a table's definition already names what this version adds. */
+function definitionHas(db: Database.Database, table: string, marker: string): boolean {
+  const sql = tableSql(db, table);
+  return sql !== null && sql.includes(marker);
+}
+
 /**
  * Apply the recovery schema to `db`. Idempotent: safe on every boot, on a
  * fresh database, and on one an earlier build already migrated.
@@ -246,19 +340,61 @@ export function applyRecoverySchema(db: Database.Database): RecoverySchemaOutcom
   }
   if (stored > RECOVERY_SCHEMA_VERSION) return { kind: 'newer', storedVersion: stored };
 
-  db.transaction(() => {
-    db.exec(RECOVERY_SCHEMA_SQL);
-    for (const added of ADDED_COLUMNS) {
-      if (!columnExists(db, added.table, added.column)) {
-        db.exec(`ALTER TABLE ${added.table} ADD COLUMN ${added.column} ${added.definition}`);
+  // The rebuild procedure needs the pragmas, and they cannot change inside a
+  // transaction, so they are set here and restored however the migration ends.
+  const foreignKeysOn = db.pragma('foreign_keys', { simple: true }) === 1;
+  if (foreignKeysOn) db.pragma('foreign_keys = OFF');
+  try {
+    db.transaction(() => {
+      db.exec(RECOVERY_CORE_SQL);
+      for (const added of ADDED_COLUMNS) {
+        if (!columnExists(db, added.table, added.column)) {
+          db.exec(`ALTER TABLE ${added.table} ADD COLUMN ${added.column} ${added.definition}`);
+        }
       }
-    }
-    db.prepare('INSERT OR REPLACE INTO system_state (key, value) VALUES (?, ?)')
-      .run(RECOVERY_SCHEMA_STATE_KEY, String(RECOVERY_SCHEMA_VERSION));
-    // Created once and never rotated: every storage and repository record this
-    // instance owns is keyed by it, so changing it would orphan them all.
-    db.prepare('INSERT OR IGNORE INTO system_state (key, value) VALUES (?, ?)')
-      .run(RECOVERY_AUTHORITY_STATE_KEY, randomUUID());
-  })();
+
+      // v3: the overwrite phases, the staging/fence columns and the hold kind.
+      // A fresh database already has both shapes from the CREATE statements in
+      // RECOVERY_CORE_SQL, so each rebuild is guarded by what the stored
+      // definition names.
+      if (!definitionHas(db, 'recovery_restore_intents', "'swapped'")) {
+        db.exec('PRAGMA legacy_alter_table = ON');
+        rebuildTable(db, {
+          table: 'recovery_restore_intents',
+          newTable: 'recovery_restore_intents_v3',
+          createSql: restoreIntentsSql('recovery_restore_intents_v3'),
+          carriedColumns: RESTORE_INTENT_CARRIED_COLUMNS,
+          after: RESTORE_INTENT_INDEXES,
+        });
+        db.exec('PRAGMA legacy_alter_table = OFF');
+      }
+      if (!definitionHas(db, 'recovery_point_holds', 'restore_intent')) {
+        db.exec('PRAGMA legacy_alter_table = ON');
+        rebuildTable(db, {
+          table: 'recovery_point_holds',
+          newTable: 'recovery_point_holds_v3',
+          createSql: pointHoldsSql('recovery_point_holds_v3'),
+          carriedColumns: ['point_id', 'holder_kind', 'holder_ref', 'created_at'],
+          after: '',
+        });
+        db.exec('PRAGMA legacy_alter_table = OFF');
+      }
+
+      // A rebuild that lost a row's parent would make every later store read
+      // succeed against a record it cannot join; that is a failed migration, not
+      // a schema this build may write.
+      const violations = db.prepare('PRAGMA foreign_key_check').all() as unknown[];
+      if (violations.length > 0) throw new Error('Recovery schema migration left an orphaned row');
+
+      db.prepare('INSERT OR REPLACE INTO system_state (key, value) VALUES (?, ?)')
+        .run(RECOVERY_SCHEMA_STATE_KEY, String(RECOVERY_SCHEMA_VERSION));
+      // Created once and never rotated: every storage and repository record this
+      // instance owns is keyed by it, so changing it would orphan them all.
+      db.prepare('INSERT OR IGNORE INTO system_state (key, value) VALUES (?, ?)')
+        .run(RECOVERY_AUTHORITY_STATE_KEY, randomUUID());
+    })();
+  } finally {
+    if (foreignKeysOn) db.pragma('foreign_keys = ON');
+  }
   return { kind: 'current', version: RECOVERY_SCHEMA_VERSION };
 }

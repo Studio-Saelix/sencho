@@ -37,6 +37,53 @@ export const PROXY_DEPLOY_ACTOR_HEADER = 'x-sencho-deploy-actor';
 export const PROXY_SCOPED_STACK_NAME_HEADER = 'x-sencho-scoped-stack-name';
 export const PROXY_SCOPED_STACK_ACTIONS_HEADER = 'x-sencho-scoped-stack-actions';
 
+/**
+ * The hub's own record of the node a proxied request is for. A remote instance
+ * numbers its nodes from one and names itself `Local`, so a response that names
+ * "this node" (the overwrite preview) would otherwise tell a hub operator that the
+ * target is the control node. The hub strips any client value, sets the id and the
+ * URL-encoded name from its registry, and the remote trusts them only under
+ * node_proxy / pilot_tunnel machine auth.
+ */
+export const PROXY_HUB_NODE_ID_HEADER = 'x-sencho-hub-node-id';
+export const PROXY_HUB_NODE_NAME_HEADER = 'x-sencho-hub-node-name';
+
+/** Longest node name, in characters, a hub sends and a remote accepts. */
+const HUB_NODE_NAME_MAX = 128;
+
+/**
+ * The pair of header values for one hub node record, or null when the name cannot
+ * be sent (a lone surrogate, which no URL encoding represents). The name is cut by
+ * character, not by UTF-16 unit, so an emoji at the boundary is kept whole or
+ * dropped whole. Null means no header: the remote then names itself, and the
+ * request itself is never refused for the name of its node.
+ */
+export function hubNodeHeaderValues(node: { id: number; name: string }): { id: string; name: string } | null {
+  try {
+    return { id: String(node.id), name: encodeURIComponent(Array.from(node.name).slice(0, HUB_NODE_NAME_MAX).join('')) };
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Read the pair back. A pair that is absent, malformed or not a positive integer
+ * id is absent, never an error: the remote then names itself, which is what it
+ * did before a hub sent the headers.
+ */
+export function parseHubNodeHeaders(idRaw: unknown, nameRaw: unknown): { id: number; name: string } | null {
+  if (typeof idRaw !== 'string' || typeof nameRaw !== 'string') return null;
+  if (!/^[1-9]\d{0,9}$/.test(idRaw)) return null;
+  let name: string;
+  try {
+    name = decodeURIComponent(nameRaw);
+  } catch {
+    return null;
+  }
+  if (name.length === 0 || Array.from(name).length > HUB_NODE_NAME_MAX) return null;
+  return { id: Number(idRaw), name };
+}
+
 export const DEPLOY_SOURCES = [
   'manual',
   'rollback',
