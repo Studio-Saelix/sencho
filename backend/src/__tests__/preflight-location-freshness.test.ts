@@ -45,17 +45,19 @@ function writeStack(files: Record<string, string>): void {
   for (const [name, content] of Object.entries(files)) fs.writeFileSync(path.join(stackDir(), name), content);
 }
 
-function stubDocker(): void {
+function stubDocker(renderable = true): void {
   vi.spyOn(ComposeService, 'getInstance').mockReturnValue({
     renderConfig: vi.fn().mockResolvedValue({
-      rendered: JSON.stringify({
-        name: STACK,
-        services: { api: { image: 'nginx:latest', privileged: true } },
-        networks: {},
-        volumes: {},
-      }),
+      rendered: renderable
+        ? JSON.stringify({
+          name: STACK,
+          services: { api: { image: 'nginx:latest', privileged: true } },
+          networks: {},
+          volumes: {},
+        })
+        : null,
       stderr: '',
-      code: 0,
+      code: renderable ? 0 : 1,
       timedOut: false,
     }),
     composeVersion: vi.fn().mockResolvedValue('2.30.0'),
@@ -152,6 +154,19 @@ describe('stored Doctor location freshness', () => {
 
     fs.rmSync(path.join(stackDir(), 'compose.override.yaml'));
     expect(locationOf(await doctor().getLatest(nodeId, STACK), 'image-latest')?.location).toBeUndefined();
+  });
+
+  it('does not attach a run-time location when the located file could not be read', async () => {
+    writeStack({
+      'compose.yaml': 'include:\n  - missing.yaml\nservices:\n  api:\n    image: nginx:1\n',
+    });
+    stubDocker(false);
+    const run = await doctor().runPreflight(nodeId, STACK, 'tester');
+    const renderFailed = locationOf(run, 'render-failed');
+    expect(renderFailed).toBeTruthy();
+    // The missing include has only a fallback line 1 and no content digest, so
+    // the run must not offer a link that a later read would drop.
+    expect(renderFailed?.location).toBeUndefined();
   });
 
   it('drops a location stored without a file digest, as an older row cannot prove the range', async () => {

@@ -63,14 +63,17 @@ function sortNormalized(findings: AssuranceFinding[]): AssuranceFinding[] {
 }
 
 /** Attach the digest of the file a location points into, so a later read can
- *  prove the range still applies to the content it was computed against. */
+ *  prove the range still applies to the content it was computed against. A
+ *  location whose file has no digest (unreadable, too large, or not read at
+ *  all) is not actionable: a fallback line 1 would be a wrong line, so it is
+ *  dropped here as well as on a later read. */
 function withFileHash(
   project: AuthoredProject | null,
   location: AuthoredLocation | undefined,
 ): AuthoredLocation | undefined {
-  if (!location || !project) return location;
+  if (!location || !project) return undefined;
   const fileHash = project.files.find(file => file.file === location.file)?.contentHash;
-  return fileHash === undefined ? location : { ...location, fileHash };
+  return fileHash === undefined ? undefined : { ...location, fileHash };
 }
 
 /** Project one finding onto the Doctor wire shape, without a decision. The wire
