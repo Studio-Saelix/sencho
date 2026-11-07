@@ -19,107 +19,46 @@
   [![Latest release](https://img.shields.io/github/v/release/studio-saelix/sencho?label=release)](https://github.com/studio-saelix/sencho/releases)
   [![Docker Pulls](https://img.shields.io/docker/pulls/saelix/sencho)](https://hub.docker.com/r/saelix/sencho)
   [![CI](https://github.com/studio-saelix/sencho/actions/workflows/ci.yml/badge.svg)](https://github.com/studio-saelix/sencho/actions/workflows/ci.yml)
-  [![CodeQL](https://github.com/studio-saelix/sencho/actions/workflows/codeql.yml/badge.svg)](https://github.com/studio-saelix/sencho/actions/workflows/codeql.yml)
   [![License](https://img.shields.io/badge/license-AGPL--3.0-blue)](LICENSE)
-  [![Last commit](https://img.shields.io/github/last-commit/studio-saelix/sencho)](https://github.com/studio-saelix/sencho/commits/main)
-  [![Open issues](https://img.shields.io/github/issues/studio-saelix/sencho)](https://github.com/studio-saelix/sencho/issues)
-  [![Website](https://img.shields.io/website?url=https%3A%2F%2Fsencho.io&label=website)](https://sencho.io)
-  [![Docs](https://img.shields.io/website?url=https%3A%2F%2Fdocs.sencho.io&label=docs)](https://docs.sencho.io)
-  [![Roadmap](https://img.shields.io/website?url=https%3A%2F%2Fsencho.io%2Froadmap&label=roadmap)](https://sencho.io/roadmap)
 </div>
 
 <br />
 
-<img src="docs/images/hero.png" alt="Sencho stack detail view showing the Drift tab for the cloudflared stack">
+<picture>
+  <source media="(prefers-color-scheme: light)" srcset="docs/images/readme/hero-light.png">
+  <img src="docs/images/readme/hero-dim.png" alt="Sencho Home: a healthy fleet with stack health, recent alerts, and node heartbeat">
+</picture>
 
 ---
 
 ## What Sencho is
 
-Sencho is a Docker Compose control plane for DevOps engineers, platform teams, system administrators and homelab users who run services on Compose and need a real operational surface: a graphical interface that does not give up file-on-disk workflows, and the ability to manage more than one machine without SSH gymnastics or a VPN.
+Sencho is a Docker Compose control plane for DevOps engineers, platform teams, system administrators and homelab users. It gives you a graphical interface for deploying, editing, watching and recovering Compose stacks, without giving up file-on-disk workflows: your compose files stay on the host and remain the source of truth.
 
-It runs as a single container on your hardware and provides a UI for common Compose operations: deploying, editing files, watching logs, restarting containers, browsing volumes, and recovering from failures. Your compose files stay on the host filesystem and remain the source of truth.
+It runs as a single container. To manage more machines, install Sencho on each one and connect them with an API token; the primary dashboard then proxies authenticated HTTP and WebSocket requests across your fleet. There is no SSH and no remote Docker socket, and nodes behind NAT can connect outbound with the Pilot Agent.
 
-Multi-node was part of the architecture from the start, not bolted on later: every Sencho instance is the same autonomous node, whether it runs alone or as one of many in a fleet. To manage another machine, you install a second Sencho on it and connect them with a long-lived API token; the primary dashboard then acts as an authenticated HTTP and WebSocket proxy across your fleet. Use TLS, a VPN, or a private network for any untrusted link. Each node still uses its local Docker socket (see Quick start), but Sencho does not require SSH and does not expose a remote Docker socket on the network. For nodes behind NAT or strict firewalls, the Pilot Agent establishes a single outbound WebSocket tunnel to the primary, so the remote host opens no inbound port at all.
+Sencho is free, open-source software under AGPLv3. Everything described here is included in the Community tier, with unlimited nodes and users.
 
-Sencho is free, open-source software under AGPLv3. Everything below is included in the Community tier with unlimited nodes and users.
+## Highlights
 
----
+- **Your Compose files stay yours.** Edit with a diff preview before you save, deploy, and roll back to any earlier deploy. [Stack management](https://docs.sencho.io/features/stack-management)
+- **Many machines, no SSH.** One dashboard for every node, with [Fleet view](https://docs.sencho.io/features/fleet-view), remote updates and the [Pilot Agent](https://docs.sencho.io/features/pilot-agent) for hosts behind NAT. [Multi-node](https://docs.sencho.io/features/multi-node)
+- **Deploys you can undo.** [Atomic deployments](https://docs.sencho.io/features/atomic-deployments) roll back on failure, and [health-gated updates](https://docs.sencho.io/features/health-gated-updates) hold a rollout until your health checks pass.
+- **Git-driven fleets.** Sync stacks from a repository, roll out [Blueprints](https://docs.sencho.io/features/blueprint-model) across nodes, and see [drift](https://docs.sencho.io/features/stack-drift) the moment a running stack stops matching its source. [GitOps](https://docs.sencho.io/features/gitops-overview)
+- **Know what you run.** Vulnerability scanning with Trivy, scan policies that can block a deploy, and [Compose Doctor](https://docs.sencho.io/features/compose-doctor) preflight checks. [Security](https://docs.sencho.io/features/security)
+- **Get back to working.** A [recovery guide](https://docs.sencho.io/operations/recovery) for when Sencho, a deploy, sign-in, Docker or a node fails.
 
-## Capabilities
+There is more: SSO and RBAC, alerts and notification routing, scheduled operations, a host console, an App Store, and a REST API. See the [full feature guide](https://docs.sencho.io/features/overview).
 
-### Stacks
-- Full Compose lifecycle: create, deploy, restart, stop, take down, pull
-- Atomic deployments with automatic rollback on failure
-- Monaco editor with diff preview before save and one-click rollback to any prior deploy
-- [Health-gated updates](https://docs.sencho.io/features/health-gated-updates) that hold a rollout until health checks pass, with stalled-update detection and in-app recovery
-- [Git-sourced stacks](https://docs.sencho.io/features/git-sources) pulled and synced from any repository, with ordered multi-file Compose
-- [File explorer](https://docs.sencho.io/features/stack-file-explorer) for compose, env, and supporting files, with move and rename across directories
-- [Drift detection](https://docs.sencho.io/features/stack-drift) that compares running containers against the effective Compose model and flags exactly what changed
-- [Environment and secrets guardrails](https://docs.sencho.io/features/environment-guardrails) that inventory every variable a stack uses and flag missing or duplicate values, without ever exposing a value
-- [Storage portability](https://docs.sencho.io/features/compose-storage) checks that show whether a stack's mounts can move cleanly to another node before you move it
-- [Compose Doctor](https://docs.sencho.io/features/compose-doctor) preflight checks that catch compose problems before deploy
-- [Stack labels](https://docs.sencho.io/features/stack-labels) for grouping and bulk operations
-- [App Store](https://docs.sencho.io/features/app-store) with LinuxServer.io templates by default, or any custom Portainer-compatible registry
+## Works with AI clients
 
-### Observability
-- Aggregated [log search and stream](https://docs.sencho.io/features/global-observability) across every container in the fleet
-- Live container stats, health checks, and image-update notifications on a configurable cadence, with links from each image to its registry and source
-- Threshold alerts for CPU, memory, and network
-- Read-only [audit log](https://docs.sencho.io/features/audit-log) of every action, with a 14-day recent-activity window
-- [Network topology](https://docs.sencho.io/features/fleet-view) view of containers, networks, and nodes
-- Documentation-drift flags when a [stack dossier](https://docs.sencho.io/features/stack-dossier) diverges from the running stack
-
-### Fleet
-- Multi-node management via authenticated HTTP and WebSocket proxy
-- [Fleet view](https://docs.sencho.io/features/fleet-view) with grid and topology layouts
-- [Fleet snapshots](https://docs.sencho.io/features/fleet-backups) of compose and env across the fleet
-- [Fleet Federation](https://docs.sencho.io/features/fleet-federation): cordon nodes and pin Blueprints to specific hosts
-- [Fleet Actions](https://docs.sencho.io/features/fleet-actions): bulk label operations, fleet-wide stop-by-label, and fleet-wide prune
-- [Fleet Dossier](https://docs.sencho.io/features/fleet-dossier): export the whole fleet as a single browsable Markdown archive
-- [Fleet Secrets](https://docs.sencho.io/features/fleet-secrets): author environment-variable bundles once, push them to labeled nodes' stacks, with an audit trail of every change
-- [Fleet Sync](https://docs.sencho.io/features/fleet-sync): push scan policies, CVE suppressions, and misconfig acknowledgements from a control instance to its replicas
-- [Docker Label Audit](https://docs.sencho.io/features/docker-label-audit) across every node, for labels that drive external automation
-- [Remote updates](https://docs.sencho.io/features/remote-updates): pull the latest image and recreate any node in the fleet from the Fleet view, no SSH session required
-- Node labels and grouping
-- [Pilot Agent](https://docs.sencho.io/features/pilot-agent) for nodes behind NAT or strict firewalls
-- Node compatibility checks before deploying
-
-### Automation
-- [Auto-heal policies](https://docs.sencho.io/features/auto-heal-policies) for failed containers
-- [Auto-update policies](https://docs.sencho.io/features/auto-update-policies) for image rollouts
-- [Scheduled operations](https://docs.sencho.io/features/scheduled-operations) on cron
-- [Webhooks](https://docs.sencho.io/features/webhooks) on stack lifecycle events
-- [Blueprints](https://docs.sencho.io/features/blueprint-model): declarative fleet templates with drift detection
-
-### Security
-- [SSO](https://docs.sencho.io/features/sso): custom OIDC and presets for Google, GitHub, and Okta
-- [Two-factor authentication](https://docs.sencho.io/features/two-factor-authentication) with TOTP and backup codes
-- [RBAC](https://docs.sencho.io/features/rbac) with five built-in roles and stack or node scoped assignments
-- [Security overview](https://docs.sencho.io/features/security) with a chart-led scan summary, sortable images, and searchable scan history
-- [Vulnerability scanning](https://docs.sencho.io/features/vulnerability-scanning) via Trivy, with on-demand node-wide scans, VEX-based suppression, SARIF export, and SBOM upload
-- [Compose network inspector](https://docs.sencho.io/features/compose-networking) with an exposure-intent guard for unintended published ports
-- Node-wide network inventory, topology, and exposure findings across every stack on a node
-- [Scan policies](https://docs.sencho.io/features/vulnerability-scanning#scan-policies) that set severity thresholds and can block a deploy
-- [Private registries](https://docs.sencho.io/features/private-registries) for Docker Hub, GHCR, and custom registries, plus [deploy enforcement](https://docs.sencho.io/features/deploy-enforcement) for non-compliant images
-- [API tokens](https://docs.sencho.io/features/api-tokens) for automation
-
-### Operations
-- Off-site stack archives via [custom S3-compatible storage](https://docs.sencho.io/operations/backup)
-- [Notification routing](https://docs.sencho.io/features/alerts-notifications#notification-routing) to Slack, Discord, and any generic webhook
-- [Global search](https://docs.sencho.io/features/global-search) across pages, nodes, and every stack in the fleet
-- [Resources view](https://docs.sencho.io/features/resources) for images, volumes, and networks with scoped prune actions
-- [Host console](https://docs.sencho.io/features/host-console): an interactive terminal on the host OS in the browser, no SSH session required
+[sencho-mcp](https://github.com/Studio-Saelix/sencho-mcp) is a read-only [Model Context Protocol](https://modelcontextprotocol.io) server for your Sencho hub. An MCP client can ask about nodes, stacks, container health and update readiness through five observation tools. It uses an Observe Only token that cannot change anything, read secrets or open a shell. See the [MCP server guide](https://docs.sencho.io/features/mcp).
 
 ---
-
-### Before you install
-
-Sencho talks to Docker through the host's `/var/run/docker.sock`. Mounting this socket grants Sencho the same privilege as `sudo docker` on the host. This is the same model used by Portainer, Dockge, Komodo, and other Compose dashboards. If your threat model requires stricter isolation, see [running with a non-root container user](https://docs.sencho.io/getting-started/configuration#container-user) and front Sencho with a reverse proxy that enforces authentication.
 
 ## Quick start
 
-Sencho runs in a single container.
+Sencho talks to Docker through the host's `/var/run/docker.sock`. Mounting it grants Sencho the same privilege as `sudo docker` on the host, which is the model Portainer, Dockge and Komodo use too. See [running with a non-root container user](https://docs.sencho.io/getting-started/configuration#container-user) if you need stricter isolation.
 
 ```yaml
 services:
@@ -143,9 +82,7 @@ services:
 docker compose up -d
 ```
 
-Open `http://your-server:1852` and create your admin account.
-
-Always front Sencho with a TLS-terminating reverse proxy in production. See the [self-hosting guide](https://docs.sencho.io/operations/self-hosting) for hardening, environment variables, and reverse-proxy examples.
+Open `http://your-server:1852` and create your admin account. In production, put Sencho behind a TLS-terminating reverse proxy; the [self-hosting guide](https://docs.sencho.io/operations/self-hosting) covers hardening, environment variables and reverse-proxy examples.
 
 <details>
 <summary>Run with <code>docker run</code> instead</summary>
@@ -163,15 +100,7 @@ docker run -d --name sencho \
 
 </details>
 
-For the full walkthrough, see the [quickstart guide](https://docs.sencho.io/getting-started/quickstart).
-
----
-
-## Adding remote nodes
-
-To manage a second machine, install Sencho on it the same way, then add it from the primary dashboard with its URL and a long-lived API token. The primary proxies authenticated HTTP and WebSocket requests to the remote instance. The remote node does not run SSH for Sencho, does not expose its Docker socket on the network, and does not run a separate agent process. The local Sencho on each node manages its own Docker through the standard socket mount described in Quick start. Nodes behind NAT or strict firewalls can opt into the Pilot Agent for outbound-only connectivity.
-
-See the [multi-node guide](https://docs.sencho.io/features/multi-node) for the full token-bearer flow.
+For the full walkthrough, see the [quickstart guide](https://docs.sencho.io/getting-started/quickstart). To manage a second machine, install Sencho on it the same way and add it from the primary dashboard; see the [multi-node guide](https://docs.sencho.io/features/multi-node).
 
 ---
 
@@ -179,34 +108,8 @@ See the [multi-node guide](https://docs.sencho.io/features/multi-node) for the f
 
 | | |
 |---|---|
-| ![Stacks](docs/images/stacks-dim.png) | ![Editor](docs/images/editor-dim.png) |
-| ![Fleet](docs/images/fleet-dim.png) | ![Logs](docs/images/logs-dim.png) |
-| ![Security overview](docs/images/overview/security-overview-dim.png) | ![Blueprints and drift](docs/images/overview/blueprint-deployments-dim.png) |
-| ![Scheduled Operations](docs/images/overview/scheduled-operations-dim.png) | ![Compose Doctor](docs/images/overview/compose-doctor-dim.png) |
-
-<details>
-<summary>Same screens in OLED</summary>
-
-| | |
-|---|---|
-| ![Stacks](docs/images/stacks-oled.png) | ![Editor](docs/images/editor-oled.png) |
-| ![Fleet](docs/images/fleet-oled.png) | ![Logs](docs/images/logs-oled.png) |
-| ![Security overview](docs/images/overview/security-overview-oled.png) | ![Blueprints and drift](docs/images/overview/blueprint-deployments-oled.png) |
-| ![Scheduled Operations](docs/images/overview/scheduled-operations-oled.png) | ![Compose Doctor](docs/images/overview/compose-doctor-oled.png) |
-
-</details>
-
-<details>
-<summary>Same screens in Light</summary>
-
-| | |
-|---|---|
-| ![Stacks](docs/images/stacks-light.png) | ![Editor](docs/images/editor-light.png) |
-| ![Fleet](docs/images/fleet-light.png) | ![Logs](docs/images/logs-light.png) |
-| ![Security overview](docs/images/overview/security-overview-light.png) | ![Blueprints and drift](docs/images/overview/blueprint-deployments-light.png) |
-| ![Scheduled Operations](docs/images/overview/scheduled-operations-light.png) | ![Compose Doctor](docs/images/overview/compose-doctor-light.png) |
-
-</details>
+| ![Stack detail with live logs and the Anatomy panel](docs/images/readme/stack.png) | ![Fleet overview with three nodes](docs/images/readme/fleet.png) |
+| ![Security overview with scan summary and top findings](docs/images/readme/security.png) | ![Networking overview with exposure findings](docs/images/readme/networking.png) |
 
 ---
 
@@ -214,25 +117,20 @@ See the [multi-node guide](https://docs.sencho.io/features/multi-node) for the f
 
 Sencho does not emit telemetry, analytics, or crash reports, and makes no outbound calls to Sencho-controlled endpoints. Stack metadata, container inventory, and user activity never leave your instance. The web UI, including its typefaces, is served by the instance.
 
----
-
 ## Admiral
 
-**Admiral** is Studio Saelix's paid business assurance plan on top of everything in Community: Hardened Build, priority support, and governance depth (LDAP / Active Directory, full audit log export and anomaly detection, and related organizational controls). Built-in RBAC (five roles and scoped assignments) is included on Community. AWS ECR registry credentials currently require Admiral as well; that access rule is temporary availability, not the reason Admiral exists. See [sencho.io/pricing](https://sencho.io/pricing) for current plan details.
+**Admiral** is Studio Saelix's paid business assurance plan on top of everything in Community: Hardened Build, priority support, and governance depth such as LDAP / Active Directory and full audit log export. See [sencho.io/pricing](https://sencho.io/pricing) for current plan details.
 
 ---
 
 ## Documentation, community, and license
 
-- **Documentation:** [docs.sencho.io](https://docs.sencho.io)
-- **Blog:** [sencho.io/blog](https://sencho.io/blog)
-- **If something breaks:** the [Recovery guide](https://docs.sencho.io/operations/recovery) covers getting back to a working state when Sencho, a deploy, sign-in, Docker, or a node fails.
+- **Documentation:** [docs.sencho.io](https://docs.sencho.io) · **Blog:** [sencho.io/blog](https://sencho.io/blog)
+- **If something breaks:** the [Recovery guide](https://docs.sencho.io/operations/recovery)
 - **Community:** [GitHub Discussions](https://github.com/studio-saelix/sencho/discussions)
 - **Contributing:** [CONTRIBUTING.md](CONTRIBUTING.md)
 - **Security:** [SECURITY.md](SECURITY.md). Do not open public issues for security vulnerabilities.
-- **License:** [GNU Affero General Public License v3.0](LICENSE) (`AGPL-3.0-only`). Copyright (c) 2026 Studio Saelix. Sencho is free software; see [LICENSE](LICENSE) and [Licensing](https://docs.sencho.io/features/licensing) for terms. Studio Saelix trademarks are described in [TRADEMARKS.md](TRADEMARKS.md).
-
----
+- **License:** [GNU Affero General Public License v3.0](LICENSE) (`AGPL-3.0-only`). Copyright (c) 2026 Studio Saelix. See [Licensing](https://docs.sencho.io/features/licensing) for terms and [TRADEMARKS.md](TRADEMARKS.md) for trademarks.
 
 <div align="center">
 
