@@ -98,6 +98,20 @@ describe('parseContentNodeLine', () => {
     expect(parseContentNodeLine('not json at all')).toBeNull();
   });
 
+  it('drops a record whose name is not its path\'s last segment', () => {
+    const disagreeing = '{"name":"other","type":"file","path":"/data/etc/realfile","size":1,"message_type":"node"}';
+    expect(parseContentNodeLine(disagreeing)).toBeNull();
+  });
+
+  it('refuses a negative or fractional size and fractional ids', () => {
+    const negative = '{"name":"x","type":"file","path":"/data/x","size":-1,"message_type":"node"}';
+    const fractional = '{"name":"x","type":"file","path":"/data/x","size":1.5,"message_type":"node"}';
+    expect(parseContentNodeLine(negative)?.size).toBeNull();
+    expect(parseContentNodeLine(fractional)?.size).toBeNull();
+    const badUid = '{"name":"x","type":"file","path":"/data/x","size":1,"uid":1.5,"message_type":"node"}';
+    expect(parseContentNodeLine(badUid)?.uid).toBeNull();
+  });
+
   it('drops a record that names a path outside the captured root', () => {
     const outside = '{"name":"passwd","type":"file","path":"/etc/passwd","size":1,"message_type":"node"}';
     expect(parseContentNodeLine(outside)).toBeNull();
@@ -198,6 +212,13 @@ describe('classifyContentRun', () => {
     expect(classifyContentRun({ ...base, exitCode: 130, aborted: true, externalAborted: true }))
       .toEqual({ status: 'cancelled' });
     expect(classifyContentRun({ ...base, aborted: true })).toEqual({ status: 'cancelled' });
+  });
+
+  it('reads a kill with no caller abort behind it as the run\'s own deadline', () => {
+    // The 10-minute listing bound SIGKILLs the helper without aborting anyone's
+    // signal; that is the node failing to answer, not the client leaving.
+    expect(classifyContentRun({ ...base, exitCode: null, killed: true }))
+      .toEqual({ status: 'failed', errorClass: 'node_error' });
   });
 
   it('maps restic\'s repository exit codes', () => {

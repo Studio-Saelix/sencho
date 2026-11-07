@@ -612,12 +612,12 @@ describe('GET /api/recovery/points/:pointId/contents/download', () => {
     expect(directory.status).toBe(400);
     expect(directory.body).toMatchObject({ errorClass: 'invalid_request', reason: 'not_a_file' });
 
-    for (const query of ['', '?path=']) {
+    for (const query of ['', '?path=', '?path=/']) {
       const root = await request(app)
         .get(`/api/recovery/points/${pointId}/contents/download${query}`)
         .set('Cookie', adminCookie);
       expect(root.status, query).toBe(400);
-      expect(root.body.errorClass, query).toBe('invalid_request');
+      expect(root.body, query).toMatchObject({ errorClass: 'invalid_request', reason: 'not_a_file' });
     }
   });
 
@@ -726,6 +726,57 @@ describe('GET /api/recovery/points/:pointId/contents/download', () => {
       maxBytes: BIG - 1,
     });
     expect(streamed).toBe(false);
+  });
+
+  it('answers a classified dump failure with no byte written as its own class', async () => {
+    const pointId = seedPoint();
+    await stubDocker();
+    service().markReadyForTests();
+    useEngine(contentEngine({
+      dumpFile: async () => ({ ok: false as const, errorClass: 'repository_unavailable' as const }),
+    }));
+
+    const res = await request(app)
+      .get(`/api/recovery/points/${pointId}/contents/download?path=notes.md`)
+      .set('Cookie', adminCookie);
+    expect(res.status).toBe(503);
+    expect(res.body).toMatchObject({ errorClass: 'repository_unavailable', code: 'REPOSITORY_UNAVAILABLE' });
+    expect(res.headers['content-disposition']).toBeUndefined();
+    expect(res.headers['content-type']).toContain('application/json');
+  });
+
+  it('answers a dump that throws before its first byte as JSON, not as an empty attachment', async () => {
+    const pointId = seedPoint();
+    await stubDocker();
+    service().markReadyForTests();
+    const { RecoveryError } = await import('../services/recovery/redaction');
+    useEngine(contentEngine({
+      dumpFile: async () => {
+        throw new RecoveryError('node_error');
+      },
+    }));
+
+    const res = await request(app)
+      .get(`/api/recovery/points/${pointId}/contents/download?path=notes.md`)
+      .set('Cookie', adminCookie);
+    expect(res.status).toBe(503);
+    expect(res.body).toMatchObject({ errorClass: 'node_error', code: 'NODE_ERROR' });
+    expect(res.headers['content-disposition']).toBeUndefined();
+  });
+
+  it('serves a file whose name is not ASCII without breaking the header', async () => {
+    const pointId = seedPoint();
+    await stubDocker();
+    service().markReadyForTests();
+    useEngine(engineForFile('日本語.txt', 3, Buffer.from('abc')));
+
+    const res = await request(app)
+      .get(`/api/recovery/points/${pointId}/contents/download?path=unicode`)
+      .set('Cookie', adminCookie);
+    expect(res.status).toBe(200);
+    const disposition = String(res.headers['content-disposition']);
+    expect(disposition).toContain("filename*=UTF-8''%E6%97%A5%E6%9C%AC%E8%AA%9E.txt");
+    expect(() => new Response('', { headers: { 'Content-Disposition': disposition } })).not.toThrow();
   });
 
   it('breaks the connection when the body ends short, so a partial file is never read as whole', async () => {

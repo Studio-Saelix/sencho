@@ -40,6 +40,7 @@ import type {
   PointContentReader,
   RecoveryContentEntry,
   RecoveryContents,
+  RecoveryErrorClass,
   RecoveryPoint,
   RestoreEvidence,
   RestoreIntent,
@@ -449,7 +450,7 @@ function logContentFailure(
   what: 'list' | 'dump',
   request: ContentReadRequest,
   result: { exitCode: number | null; stderrTail: string },
-  errorClass: string,
+  errorClass: RecoveryErrorClass,
   secret: string,
 ): void {
   console.warn(

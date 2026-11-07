@@ -212,7 +212,10 @@ export function classifyContentRun(input: {
   truncated: boolean;
 }): ContentRunOutcome {
   if (input.truncated) return { status: 'ok' };
-  if (input.externalAborted || input.aborted || input.killed) return { status: 'cancelled' };
+  if (input.externalAborted || input.aborted) return { status: 'cancelled' };
+  // A SIGKILL with no abort behind it is the run's own deadline, not a caller
+  // leaving. It is a failure of this node's read, and it is logged as one.
+  if (input.killed) return { status: 'failed', errorClass: 'node_error' };
   switch (input.exitCode) {
     case 0:
       return { status: 'ok' };

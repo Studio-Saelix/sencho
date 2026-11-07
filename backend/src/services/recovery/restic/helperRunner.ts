@@ -147,12 +147,12 @@ export const HELPER_PROFILES: Readonly<Record<HelperProfile, HelperProfileSpec>>
     timeoutMs: null,
   },
   // `restic ls` and `restic dump`: read one saved point's contents. Only the
-  // repository is mounted, read-only, and nothing else is: the bytes come out of
-  // the repository, so no application volume is attached and no capability is
-  // needed. The output is the data itself, which is why the run streams it
-  // instead of collecting it. No deadline: listing a large tree loads the index
-  // before the first entry and a dump runs as long as the file does, so both end
-  // on the caller's cancellation or when restic exits.
+  // repository is mounted, read-only; no application volume is attached, because
+  // the bytes come out of the repository, so no capability is needed. The output
+  // is the data itself, which is why the run streams it instead of collecting it.
+  // The profile sets no deadline. A listing run passes its own 10-minute bound
+  // (it loads the index before the first entry); a dump runs as long as the file
+  // does and ends on the caller's cancellation or when restic exits.
   read: {
     user: '0:0',
     capAdd: [],
@@ -565,10 +565,10 @@ export class RecoveryHelperRunner {
       // stderr stay separate even though they share one socket.
       this.deps.docker.modem.demuxStream(stream, stdout, stderr);
       await container.start();
-      // An abort that lands while the container is still being created has no
-      // live process to signal. Send the kill again now that one exists, or the
-      // helper would run to completion with nobody reading it.
-      if (aborted) {
+      // An abort or a deadline that lands while the container is still being
+      // created has no live process to signal. Send the kill again now that one
+      // exists, or the helper would run to completion with nobody waiting for it.
+      if (aborted || killed) {
         killed = true;
         void kill('SIGKILL');
       }
@@ -577,19 +577,21 @@ export class RecoveryHelperRunner {
       // see EOF, or `cat config` waits forever for more input.
       stream.end();
       const exitInfo = await container.wait();
-      // A sink that paused the stream for backpressure (a slow client) has
-      // already filled the daemon's pipe, so the process may be gone while its
-      // last buffered output is still on the socket. Resume before waiting for
-      // the stream to end, or those bytes are lost and a complete file reads
-      // short.
       if (pausedBySink) {
+        // The sink paused the stream for backpressure (a slow client), so the
+        // process may be gone while its last bytes are still on the socket.
+        // Resume, and wait for the stream itself rather than the 1 s flush
+        // window: the process cannot hold the operation open any more, and
+        // stopping early would lose the tail of a file the client asked for.
         pausedBySink = false;
         stream.resume();
+        await ended;
+      } else {
+        // The exit code is the run's result. The stream only carries output that
+        // is still being flushed, so a stream that never closes cannot hold the
+        // operation open after the process is gone.
+        await Promise.race([ended, delay(HELPER_STREAM_FLUSH_MS)]);
       }
-      // The exit code is the run's result. The stream only carries output that is
-      // still being flushed, so a stream that never closes cannot hold the
-      // operation open after the process is gone.
-      await Promise.race([ended, delay(HELPER_STREAM_FLUSH_MS)]);
       return typeof exitInfo?.StatusCode === 'number' ? exitInfo.StatusCode : null;
     })();
 

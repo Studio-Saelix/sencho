@@ -151,6 +151,17 @@ describe('ResticEngine.listContents', () => {
     expect(warn.mock.calls[0].join(' ')).toContain('something specific');
   });
 
+  it('redacts the repository password from the failure log', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    const { runner } = runnerReturning(() => ({
+      exitCode: 1,
+      stderrTail: 'Fatal: open /repo: permission denied (password repository-password)',
+    }));
+    await engineWith(runner).listContents(READ(''), readContext());
+    const printed = warn.mock.calls.map((call) => call.join(' ')).join('\n');
+    expect(printed).not.toContain('repository-password');
+  });
+
   it('reads a cancelled run as interrupted, not as a failure', async () => {
     const { runner } = runnerReturning(() => ({ exitCode: 130, aborted: true }));
     expect(await engineWith(runner).listContents(READ(''), readContext()))
@@ -208,8 +219,17 @@ interface StreamingDocker {
 function streamingDocker(onWait: (attach: PassThrough) => void): StreamingDocker {
   const attach = new PassThrough();
   // The runner closes stdin when the password is written; a real hijacked
-  // duplex keeps its readable side open at the same time.
-  attach.end = ((): PassThrough => attach) as unknown as PassThrough['end'];
+  // duplex keeps its readable side open at the same time. Only that first close
+  // is swallowed, so the test can still end the stream it writes.
+  const realEnd = attach.end.bind(attach);
+  let stdinClosed = false;
+  attach.end = ((...args: unknown[]) => {
+    if (!stdinClosed) {
+      stdinClosed = true;
+      return attach;
+    }
+    return (realEnd as (...rest: unknown[]) => PassThrough)(...args);
+  }) as unknown as PassThrough['end'];
   const killed: string[] = [];
   const removed: string[] = [];
   const container = {
@@ -263,6 +283,9 @@ describe('the helper runner under a streamed body', () => {
         if (paused) return;
         paused = true;
         control.pause();
+        // The route resumes on the response's 'drain'. After the process exits
+        // the runner waits for the tail, so the test has to drain too.
+        setTimeout(() => control.resume(), 10);
       },
     });
 

@@ -1546,7 +1546,10 @@ components:
       properties:
         error:
           type: string
-          description: Fixed, sanitized sentence for this class. Never raw engine output.
+          description: |
+            Fixed, sanitized sentence for this class, sometimes narrowed to the
+            exact case (an unknown point id says so rather than reusing the
+            path-not-found sentence). Never raw engine output.
         errorClass:
           type: string
           enum: [invalid_request, permission_denied, capability_unavailable, update_required, schema_unsupported, identity_unknown, lock_held, lock_stale, repository_unavailable, repository_key_unavailable, source_unreadable, integrity_mismatch, attributes_not_restored, interrupted, transport_unreachable, node_refused, node_error, internal, precondition_failed, dependents_changed, fence_unavailable, pre_restore_failed, insufficient_space, cleanup_failed, not_cancellable, not_found, payload_too_large]
@@ -1867,15 +1870,17 @@ components:
               enum: [root, path]
             status:
               type: string
-              enum: [pending, succeeded, partial, failed, completion_unknown]
-            snapshotId: { type: ["string", "null"] }
-            completedAt: { type: ["integer", "null"] }
+              enum: [succeeded, partial]
+              description: |
+                Only a point with a snapshot can be read. Any other status answers
+                `400 invalid_request` with `reason: no_snapshot`.
+            snapshotId: { type: string }
+            completedAt: { type: integer }
             consistency:
               type: string
               enum: [crash_consistent_live, crash_consistent_stopped, unknown]
             capture:
-              type: ["object", "null"]
-              description: Null only for a point with no snapshot, which these routes never serve.
+              type: object
               required: [fileCount, byteCount, skippedCount]
               properties:
                 fileCount: { type: integer }
@@ -1883,6 +1888,10 @@ components:
                 skippedCount: { type: integer }
             exclusions:
               type: array
+              description: |
+                The paths the capture left out, up to 200. `capture.skippedCount`
+                is the real total, which may be larger.
+              maxItems: 200
               items:
                 type: object
                 required: [path, reason]
@@ -1905,7 +1914,7 @@ components:
                 verifiedAt: { type: ["integer", "null"] }
             complete: { type: boolean }
             storage:
-              type: ["object", "null"]
+              type: object
               required: [id, kind, locator, generation, state]
               properties:
                 id: { type: string }
@@ -6357,16 +6366,17 @@ paths:
         Lists one directory of a saved recovery point, or returns one entry's
         metadata, without restoring anything. `?path=` is relative to the point
         root; an empty or absent value is the root, a leading slash is read as the
-        root, and `..` is refused rather than resolved. The answer carries the
+        root, and `..` is refused rather than resolved. A directory with more
+        entries than `limits.maxEntries` answers `truncated`: the entries past the
+        cap are not returned, and this read has no cursor to fetch them. The answer carries the
         point's evidence beside the entries, so a partial point, a skipped path or
         an unverified point is never presented as a complete copy.
 
         The read runs on the node that owns the storage, through a read-only helper
         that mounts only the repository. It creates no operation and takes no lock.
-        A directory larger than `limits.maxEntries` answers `truncated`: ask for a
-        subdirectory to see the rest. A node whose engine is still starting answers
-        `503 capability_unavailable` with `reason: engine_starting`; a node that
-        cannot read its repository answers `503 repository_unavailable` or
+        A node whose engine is still starting answers `503
+        capability_unavailable` with `reason: engine_starting`; a node that cannot
+        read its repository answers `503 repository_unavailable` or
         `repository_key_unavailable`, and one whose point names a missing path
         answers `404 not_found`.
       parameters:

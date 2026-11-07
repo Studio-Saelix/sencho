@@ -12,9 +12,12 @@ import type {
  * latest verification and its storage identity.
  *
  * A point that skipped a path, or whose most recent check did not verify, is
- * never reported `complete`, whatever else the record says: the data is readable
- * and still not a verified copy. The input is the narrowed point the read path
- * has already proven, so a status a browse cannot serve is not representable.
+ * never reported `complete`, whatever else the record says. The data is still
+ * readable: `integrity` reports the check on its own, and `complete` is the
+ * conjunction, so a partial point with a verified check reads as readable and
+ * incomplete rather than as either a clean copy or an unverified one. The input
+ * is the narrowed point the read path has already proven, so a status a browse
+ * cannot serve is not representable.
  */
 export interface PointContentsEvidence {
   id: string;
@@ -33,21 +36,24 @@ export interface PointContentsEvidence {
   };
   /** The capture counted everything and the latest check verified. Never true for a partial point. */
   complete: boolean;
+  /** The storage the point describes; a read refuses a point without one. */
   storage: {
     id: string;
     kind: StorageIdentity['kind'];
     locator: string;
     generation: number;
     state: StorageIdentity['state'];
-  } | null;
+  };
 }
 
 export function describePointContentsEvidence(
   point: Extract<RecoveryPoint, { status: 'succeeded' | 'partial' }>,
-  storage: StorageIdentity | null,
+  storage: StorageIdentity,
   verifications: readonly IntegrityVerification[],
 ): PointContentsEvidence {
-  const latest = latestVerificationOf(verifications);
+  // A verification filed under another point never verifies this one, whatever
+  // list the caller passed.
+  const latest = latestVerificationOf(verifications.filter((v) => v.pointId === point.id));
   return {
     id: point.id,
     kind: point.kind,
@@ -63,14 +69,12 @@ export function describePointContentsEvidence(
       verifiedAt: latest?.verifiedAt ?? null,
     },
     complete: isCompletePoint(point) && latest?.result === 'verified',
-    storage: storage
-      ? {
-          id: storage.id,
-          kind: storage.kind,
-          locator: storage.locator,
-          generation: storage.generation,
-          state: storage.state,
-        }
-      : null,
+    storage: {
+      id: storage.id,
+      kind: storage.kind,
+      locator: storage.locator,
+      generation: storage.generation,
+      state: storage.state,
+    },
   };
 }

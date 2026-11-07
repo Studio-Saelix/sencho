@@ -260,6 +260,7 @@ function populateSource(volume: string): void {
     'set -e',
     'mkdir -p tree/sub setgid secretdir',
     'printf "alpha" > a.txt',
+    ': > empty.bin',
     'dd if=/dev/urandom of=tree/big.bin bs=1024 count=64 2>/dev/null',
     'truncate -s 1048576 sparse.bin',
     'ln -s a.txt link-rel',
@@ -458,6 +459,10 @@ describeIf('recovery round trip against real Docker', () => {
       // short success: this is how a missing chunk reaches the caller.
       const short = await engine.dumpFile(read('a.txt'), 6, () => undefined, readContext('integration-contents-short'));
       expect(short).toEqual({ ok: false, errorClass: 'integrity_mismatch' });
+
+      // An empty file is a real download with a zero-byte body, not a refusal.
+      const emptyDump = await engine.dumpFile(read('empty.bin'), 0, () => undefined, readContext('integration-contents-empty-dump'));
+      expect(emptyDump).toEqual({ ok: true, evidence: { bytes: 0 } });
     } finally {
       removeVolume(source);
     }

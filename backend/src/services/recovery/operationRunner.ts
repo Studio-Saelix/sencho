@@ -1028,9 +1028,9 @@ export class RecoveryEngineService {
     await this.requireStorageAccess(storage, input.authorize);
     if (!point) {
       // A point id names nothing. The sentence says so, rather than reusing the
-      // path-not-found one, so an operator can tell a deleted point from a stale
-      // path.
-      throw new RecoveryError('not_found', { detail: 'The recovery point no longer exists on this node.' });
+      // path-not-found one, so an operator can tell the id from a stale path. It
+      // does not claim the point was deleted: the node cannot know that.
+      throw new RecoveryError('not_found', { detail: 'No recovery point on this node has that id.' });
     }
     this.requireReady();
     if (point.status !== 'succeeded' && point.status !== 'partial') {

@@ -219,7 +219,7 @@ export const RECOVERY_REFUSAL_REASONS = [
   'confirmation_mismatch',
   'no_fence',
   'fence_released',
-  /** The point has no snapshot: it failed, or was interrupted before it finalized. */
+  /** The point has no snapshot to read: it is still capturing, failed, or was interrupted. */
   'no_snapshot',
   /** The requested entry is a directory or a special file, never a file body. */
   'not_a_file',
@@ -613,7 +613,7 @@ export type RecoveryContentKind = 'directory' | 'file' | 'other';
 /**
  * One read of a point: what the requested path is, its metadata, and (for a
  * directory) the entries it holds. `truncated` means more entries exist than
- * this read lists; the caller asks for a subdirectory to see the rest.
+ * this read lists; the ones past the cap are not returned by this read.
  */
 export interface RecoveryContents {
   /** Root-relative path this read answered: '' is the point root. */

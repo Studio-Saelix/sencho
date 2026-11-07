@@ -650,9 +650,14 @@ function contentPathOf(req: Request): string {
   return raw;
 }
 
-/** A download's file name, quoted for the header and encoded for other locales. */
+/**
+ * A download's file name: an ASCII-only quoted fallback for old clients and the
+ * RFC 5987 form for every other one. Node refuses a header value with a
+ * character above Latin-1, so the fallback replaces anything outside printable
+ * ASCII rather than throwing the whole answer away.
+ */
 function contentDisposition(name: string): string {
-  const safe = name.replace(/[\\"\r\n]/g, '');
+  const safe = name.replace(/[^\x20-\x7e]/g, '_').replace(/[\\"]/g, '');
   return `attachment; filename="${safe}"; filename*=UTF-8''${encodeURIComponent(name)}`;
 }
 
@@ -699,7 +704,7 @@ recoveryRouter.get('/points/:pointId/contents/download', handle(async (req, res)
   // A download names one file. No path means the root, which is a directory,
   // so the request is refused here rather than after a helper run.
   const path = contentPathOf(req);
-  if (path === '') throw new RecoveryError('invalid_request');
+  if (path === '') throw new RecoveryError('invalid_request', { reason: 'not_a_file' });
 
   const controller = new AbortController();
   let clientGone = false;
@@ -750,6 +755,17 @@ recoveryRouter.get('/points/:pointId/contents/download', handle(async (req, res)
       });
       if (clientGone) return;
       if (!result.ok) {
+        if (!wroteAny && !res.headersSent) {
+          // Nothing of the body was written, so the failure can be answered as
+          // itself (409 integrity_mismatch, 503 repository_unavailable) instead of
+          // as a reset connection.
+          res.removeHeader('Content-Disposition');
+          res.removeHeader('Content-Length');
+          res.removeHeader('Content-Type');
+          res.removeHeader('Cache-Control');
+          res.removeHeader('X-Content-Type-Options');
+          throw new RecoveryError(result.errorClass);
+        }
         // Part of the body is already on the wire: a JSON error cannot replace it,
         // and ending normally would present a short file as a complete one.
         res.destroy();
