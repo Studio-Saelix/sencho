@@ -359,9 +359,9 @@ export function AutoPill({
  * A newer tag, including a blocked major bump, has no update Sencho can apply:
  * the only resolution is the tag in the Compose file, so the row offers that
  * destination as its verb in place of a disabled Apply. An uncertain check and
- * a review-required stack keep the disabled Apply, whose reason the Risk badge
- * and tooltip carry, and a session without edit authority keeps it too rather
- * than get a verb that does nothing.
+ * a review-required stack keep the disabled Apply (the Risk badge says why, and
+ * so does the Apply tooltip for a review-required stack), and a session without
+ * edit authority keeps it too rather than get a verb that does nothing.
  */
 function useComposeEditVerb(card: StackCard): boolean {
   const { can } = useAuth();
@@ -1138,6 +1138,10 @@ export function MobileReadinessCard({
     || applying
     || applyingService !== null;
   const composeEditVerb = useComposeEditVerb(card);
+  let applyTitle: string | undefined;
+  if (blocked) applyTitle = preview?.summary.blocked_reason ?? undefined;
+  else if (verificationOnly) applyTitle = 'Digest verification failed';
+  else if (reviewRequired) applyTitle = 'Another image in this stack failed digest verification; apply the confirmed service individually or resolve verification first.';
   const changelog = preview?.changelog ?? 'No changelog available from the registry yet.';
   const dot = changelog.indexOf('.');
   const lead = dot > 0 ? changelog.slice(0, dot + 1) : '';
@@ -1236,22 +1240,22 @@ export function MobileReadinessCard({
                 ))}
               </div>
             )}
-            <div className="flex items-center justify-between gap-[10px] pt-0.5">
+            <div className="flex flex-wrap items-center justify-between gap-[10px] pt-0.5">
               <span className={`font-mono text-[11px] ${blocked || reviewRequired ? 'text-destructive' : 'text-stat-subtitle'}`}>
                 {isPolicySkipped(unattendedPolicy)
                   ? 'Skipped by update policy'
                   : nextRun ? <>{formatClock(nextRun)} · {formatRelative(nextRun)}</> : (blocked || reviewRequired ? 'Held for review' : 'No schedule')}
               </span>
               {composeEditVerb ? (
-                <OpenEditorButton stack={stack} nodeId={nodeId} title={blocked ? p.summary.blocked_reason ?? undefined : undefined} />
+                <OpenEditorButton stack={stack} nodeId={nodeId} title={applyTitle} className="ml-auto" />
               ) : (
                 <Button
                   size="sm"
                   variant={blocked || verificationOnly || reviewRequired ? 'outline' : 'default'}
                   onClick={() => onApply(stack, nodeId)}
                   disabled={applyDisabled}
-                  title={reviewRequired ? 'Another image in this stack failed digest verification; apply the confirmed service individually or resolve verification first.' : undefined}
-                  className="gap-1.5"
+                  title={applyTitle}
+                  className="ml-auto gap-1.5"
                 >
                   <Play className="h-3.5 w-3.5" strokeWidth={1.5} aria-hidden="true" />
                   {applying ? 'Applying...' : 'Apply now'}

@@ -1,8 +1,9 @@
 /**
  * MobileReadinessCard is the one-up phone card for the Updates readiness board.
- * Its Apply button is disabled when the update is blocked (major bump),
- * digest verification failed without a confirmed update, or an apply is
- * already in flight; manual apply works regardless of schedule. The Auto: Off
+ * Its Apply button is disabled when digest verification failed without a
+ * confirmed update, or an apply is already in flight; manual apply works
+ * regardless of schedule. A blocked major bump or a newer tag offers Open
+ * stack editor in its place when the session can edit the stack. The Auto: Off
  * pill still reflects the absence of a covering auto-update schedule.
  */
 import { describe, it, expect, vi, afterEach } from 'vitest';
@@ -400,6 +401,66 @@ it('keeps the disabled Apply on the phone card when the session cannot edit the 
   }
 });
 
+
+type PhonePreview = NonNullable<StackCard['preview']>;
+
+function tagOnlyPhonePreview(
+  summary: Partial<PhonePreview['summary']> = {},
+  extraImages: PhonePreview['images'] = [],
+  imageStatus: 'ok' | 'partial' | 'failed' = 'ok',
+): PhonePreview {
+  return {
+    stack_name: 'nextcloud',
+    images: [{
+      service: 'app', image: 'nextcloud:27.1.4', current_tag: '27.1.4', next_tag: '27.1.5',
+      has_update: true, digest_update: false, tag_update: true, semver_bump: 'patch', check_status: imageStatus,
+    }, ...extraImages],
+    summary: {
+      has_update: true, primary_image: 'nextcloud', current_tag: '27.1.4', next_tag: '27.1.5',
+      semver_bump: 'patch', update_kind: 'tag', blocked: false, blocked_reason: null, check_status: 'ok',
+      ...summary,
+    },
+    rollback_target: null,
+    changelog: 'Fixes.',
+  };
+}
+
+it('keeps the disabled Apply on the phone card for an uncertain check', () => {
+  render(<MobileReadinessCard card={card({ preview: tagOnlyPhonePreview({ check_status: 'partial' }, [], 'partial') })} onApply={vi.fn()} />);
+  expect(apply()).toBeDisabled();
+  expect(screen.queryByRole('button', { name: /Open stack editor/i })).toBeNull();
+});
+
+it('keeps the disabled Apply and its reason on the phone card for a review-required stack', () => {
+  render(
+    <MobileReadinessCard
+      card={card({
+        preview: tagOnlyPhonePreview({}, [{
+          service: 'db', image: 'postgres:16', current_tag: '16', next_tag: '16', has_update: false,
+          digest_update: false, tag_update: false, semver_bump: 'none', check_status: 'ok', digest_error: 'registry timeout',
+        }]),
+      })}
+      onApply={vi.fn()}
+    />,
+  );
+  expect(apply()).toBeDisabled();
+  expect(apply()).toHaveAttribute('title', expect.stringContaining('failed digest verification'));
+  expect(screen.queryByRole('button', { name: /Open stack editor/i })).toBeNull();
+});
+
+it('opens the phone card\'s own stack on its own node from Open stack editor', () => {
+  const opened: CustomEvent[] = [];
+  const listener = (e: Event) => opened.push(e as CustomEvent);
+  window.addEventListener(SENCHO_OPEN_STACK_EVENT, listener);
+  try {
+    render(<MobileReadinessCard card={card({ nodeId: 2, preview: tagOnlyPhonePreview() })} onApply={vi.fn()} />);
+    fireEvent.click(screen.getByRole('button', { name: 'Open stack editor for nextcloud' }));
+  } finally {
+    window.removeEventListener(SENCHO_OPEN_STACK_EVENT, listener);
+  }
+  expect(opened).toHaveLength(1);
+  expect(opened[0].detail).toMatchObject({ stackName: 'nextcloud', nodeId: 2, destination: 'editor' });
+});
 
 it('offers Open stack editor, with the reason, when the update is blocked (major bump)', () => {
   render(
@@ -1770,14 +1831,29 @@ describe('AutoUpdateReadinessView check-failed advisory', () => {
       await screen.findAllByText(/Preview failed/i);
 
       expect(screen.queryByRole('button', editorVerb)).toBeNull();
+      expect(screen.queryByRole('button', { name: /Apply now/i })).toBeNull();
     });
 
-    it('keeps the disabled Apply for an uncertain check', async () => {
-      mockNginx(nginxPreview({ check_status: 'partial' }, { check_status: 'partial' }));
+    it.each(['partial', 'failed'] as const)('keeps the disabled Apply for an uncertain check (%s)', async (status) => {
+      mockNginx(nginxPreview({ check_status: status }, { check_status: status }));
 
       await renderBoard(view);
 
       expect(await screen.findByRole('button', { name: /Apply now/i })).toBeDisabled();
+      expect(screen.queryByRole('button', editorVerb)).toBeNull();
+    });
+
+    it('keeps the disabled Apply, with the reason, for a blocked major whose check is uncertain', async () => {
+      mockNginx(nginxPreview(
+        { semver_bump: 'major', blocked: true, blocked_reason: BLOCKED_REASON, check_status: 'partial' },
+        { semver_bump: 'major', check_status: 'partial' },
+      ));
+
+      await renderBoard(view);
+      const apply = await screen.findByRole('button', { name: /Apply now/i });
+
+      expect(apply).toBeDisabled();
+      expect(apply).toHaveAttribute('title', BLOCKED_REASON);
       expect(screen.queryByRole('button', editorVerb)).toBeNull();
     });
 
