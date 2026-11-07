@@ -90,30 +90,28 @@ const SUMMARY_SEVERITIES = ['CRITICAL', 'HIGH', 'MEDIUM', 'LOW', 'UNKNOWN'] as c
 
 type DeltaSummary = {
   tone: StatusTone;
-  title: 'Regressed' | 'Improved' | 'Mixed' | 'No net change';
+  title: 'Regressed' | 'Improved' | 'Fewer findings' | 'Mixed' | 'No net change';
   line: string;
 };
 
-function sumCounts(counts: Record<VulnSeverity, number>): number {
-  return SUMMARY_SEVERITIES.reduce((total, sev) => total + counts[sev], 0);
-}
-
 /**
  * The one Answer for the diff. It compares counts per severity, not CVE
- * identity: a net-new CRITICAL is the only destructive reading, any other net
- * increase warns, and only decreases read as an improvement. Severities with no
- * net change are left out of the sentence. When the nets cancel but findings
- * still came and went, it says how many instead of claiming nothing changed,
- * and warns if a new CRITICAL or HIGH is among them. A new CRITICAL inside an
- * otherwise improving diff reads as mixed and is named, since its net can be
- * zero. A result cut off at the row limit never reads as an improvement,
- * because a row missing from one scan but present in the other would show up
- * as a resolved finding.
+ * identity, and never states a verdict the counts do not support:
+ * - A net-new CRITICAL is the only destructive reading; any other net increase
+ *   warns; only decreases read as an improvement.
+ * - A new CRITICAL or HIGH whose net is hidden by an offsetting resolved one is
+ *   named in the sentence, and an improvement that carries one reads as mixed.
+ * - When the nets cancel but findings still came and went, it says how many
+ *   instead of claiming nothing changed.
+ * - A result cut off at the row limit cannot be called an improvement or
+ *   unchanged: a row missing from one scan but present in the other would
+ *   show up as a resolved finding, so it reads "Fewer findings" in a neutral
+ *   tone and names the limit when it reports no change.
  */
 function summarizeDelta(
   added: Record<VulnSeverity, number>,
   removed: Record<VulnSeverity, number>,
-  truncated: boolean,
+  rowLimit: number | null,
 ): DeltaSummary {
   const parts: string[] = [];
   let anyUp = false;
@@ -125,30 +123,34 @@ function summarizeDelta(
     else anyDown = true;
     parts.push(`${net > 0 ? '+' : ''}${net} ${sev.toLowerCase()}`);
   }
-  const net = `Net change: ${parts.join(', ')}.`;
-  const addedTotal = sumCounts(added);
-  const removedTotal = sumCounts(removed);
+  const hidden: string[] = [];
+  if (added.CRITICAL > 0 && added.CRITICAL - removed.CRITICAL <= 0) hidden.push(`${added.CRITICAL} new critical`);
+  if (added.HIGH > 0 && added.HIGH - removed.HIGH <= 0) hidden.push(`${added.HIGH} new high`);
+  const hiddenNote = hidden.length > 0 ? ` ${hidden.join(', ')}.` : '';
+  const net = `Net change: ${parts.join(', ')}.${hiddenNote}`;
+  const addedTotal = Object.values(added).reduce((total, n) => total + n, 0);
+  const removedTotal = Object.values(removed).reduce((total, n) => total + n, 0);
 
-  let summary: DeltaSummary;
-  if (added.CRITICAL - removed.CRITICAL > 0) {
-    summary = { tone: 'destructive', title: 'Regressed', line: net };
-  } else if (anyUp) {
-    summary = { tone: 'warning', title: 'Regressed', line: net };
-  } else if (anyDown && added.CRITICAL > 0) {
-    summary = { tone: 'warning', title: 'Mixed', line: `${net} ${added.CRITICAL} new critical.` };
-  } else if (anyDown) {
-    summary = { tone: 'success', title: 'Improved', line: net };
-  } else if (addedTotal + removedTotal > 0) {
-    summary = {
-      tone: added.CRITICAL + added.HIGH > 0 ? 'warning' : 'neutral',
-      title: 'No net change',
-      line: `${addedTotal} added, ${removedTotal} removed.`,
-    };
-  } else {
-    summary = { tone: 'neutral', title: 'No net change', line: 'No findings changed.' };
+  if (added.CRITICAL - removed.CRITICAL > 0) return { tone: 'destructive', title: 'Regressed', line: net };
+  if (anyUp) return { tone: 'warning', title: 'Regressed', line: net };
+  if (anyDown && hidden.length > 0) return { tone: 'warning', title: 'Mixed', line: net };
+  if (anyDown) {
+    return rowLimit === null
+      ? { tone: 'success', title: 'Improved', line: net }
+      : { tone: 'neutral', title: 'Fewer findings', line: net };
   }
-  if (truncated && summary.tone === 'success') return { ...summary, tone: 'neutral' };
-  return summary;
+  if (addedTotal + removedTotal > 0) {
+    return {
+      tone: hidden.length > 0 ? 'warning' : 'neutral',
+      title: 'No net change',
+      line: `${addedTotal} added, ${removedTotal} removed.${hiddenNote}`,
+    };
+  }
+  return {
+    tone: 'neutral',
+    title: 'No net change',
+    line: rowLimit === null ? 'No findings changed.' : `No change in the first ${rowLimit} findings.`,
+  };
 }
 
 /** Holds roughly the loaded layout (the Answer, the scans, the filters and some rows) so the sheet does not jump when data arrives. */
@@ -231,10 +233,9 @@ export function ScanComparisonSheet({
 
   const meta = data ? `#${data.scanA.id} → #${data.scanB.id}` : (loading ? 'Loading…' : '');
 
-  const summary = useMemo(
-    () => (addedCounts && removedCounts ? summarizeDelta(addedCounts, removedCounts, data?.truncated === true) : null),
-    [addedCounts, removedCounts, data?.truncated],
-  );
+  const summary = addedCounts && removedCounts
+    ? summarizeDelta(addedCounts, removedCounts, data?.truncated ? (data.row_limit ?? 1000) : null)
+    : null;
 
   return (
     <SystemSheet
@@ -250,20 +251,23 @@ export function ScanComparisonSheet({
       {data && !loading && summary && (
         <>
           <SheetSection title="Change" hideHeader>
-            <StatusPath
-              answer={{
-                tone: summary.tone,
-                title: summary.title,
-                line: summary.line,
-                detail: crossImage
-                  ? 'You are comparing scans from two different image identities. Package-level changes may reflect image differences rather than CVE drift.'
-                  : null,
-                marker: data.truncated
-                  ? `partial · first ${data.row_limit ?? 1000} findings per scan, so this may be incomplete`
-                  : undefined,
-              }}
-              stages={[]}
-            />
+            {/* A cut-off comparison was announced as an alert before; keep that for the one state that can mislead. */}
+            <div role={data.truncated ? 'alert' : undefined}>
+              <StatusPath
+                answer={{
+                  tone: summary.tone,
+                  title: summary.title,
+                  line: summary.line,
+                  detail: crossImage
+                    ? 'You are comparing scans from two different image identities. Package-level changes may reflect image differences rather than CVE drift.'
+                    : null,
+                  marker: data.truncated
+                    ? `partial · first ${data.row_limit ?? 1000} findings per scan, so this may be incomplete`
+                    : undefined,
+                }}
+                stages={[]}
+              />
+            </div>
           </SheetSection>
 
           <SheetSection title="Scans">
