@@ -371,37 +371,6 @@ it('offers Open stack editor instead of Apply for tag-only advisory updates', ()
   expect(screen.queryByRole('button', { name: /Apply now/i })).toBeNull();
 });
 
-it('keeps the disabled Apply on the phone card when the session cannot edit the stack', () => {
-  authState.can = (action) => action !== 'stack:edit';
-  try {
-    render(
-      <MobileReadinessCard
-        card={card({
-          preview: {
-            stack_name: 'nextcloud',
-            images: [{
-              service: 'app', image: 'nextcloud:27.1.4', current_tag: '27.1.4', next_tag: '27.1.5',
-              has_update: true, digest_update: false, tag_update: true, semver_bump: 'patch', check_status: 'ok',
-            }],
-            summary: {
-              has_update: true, primary_image: 'nextcloud', current_tag: '27.1.4', next_tag: '27.1.5',
-              semver_bump: 'patch', update_kind: 'tag', blocked: false, blocked_reason: null, check_status: 'ok',
-            },
-            rollback_target: null,
-            changelog: 'Fixes.',
-          },
-        })}
-        onApply={vi.fn()}
-      />,
-    );
-    expect(apply()).toBeDisabled();
-    expect(screen.queryByRole('button', { name: /Open stack editor/i })).toBeNull();
-  } finally {
-    authState.can = () => true;
-  }
-});
-
-
 type PhonePreview = NonNullable<StackCard['preview']>;
 
 function tagOnlyPhonePreview(
@@ -424,6 +393,29 @@ function tagOnlyPhonePreview(
     changelog: 'Fixes.',
   };
 }
+
+async function openStackEventsDuring(act: () => void | Promise<void>): Promise<CustomEvent[]> {
+  const opened: CustomEvent[] = [];
+  const listener = (e: Event) => opened.push(e as CustomEvent);
+  window.addEventListener(SENCHO_OPEN_STACK_EVENT, listener);
+  try {
+    await act();
+  } finally {
+    window.removeEventListener(SENCHO_OPEN_STACK_EVENT, listener);
+  }
+  return opened;
+}
+
+it('keeps the disabled Apply on the phone card when the session cannot edit the stack', () => {
+  authState.can = (action) => action !== 'stack:edit';
+  try {
+    render(<MobileReadinessCard card={card({ preview: tagOnlyPhonePreview() })} onApply={vi.fn()} />);
+    expect(apply()).toBeDisabled();
+    expect(screen.queryByRole('button', { name: /Open stack editor/i })).toBeNull();
+  } finally {
+    authState.can = () => true;
+  }
+});
 
 it('keeps the disabled Apply on the phone card for an uncertain check', () => {
   render(<MobileReadinessCard card={card({ preview: tagOnlyPhonePreview({ check_status: 'partial' }, [], 'partial') })} onApply={vi.fn()} />);
@@ -448,16 +440,11 @@ it('keeps the disabled Apply and its reason on the phone card for a review-requi
   expect(screen.queryByRole('button', { name: /Open stack editor/i })).toBeNull();
 });
 
-it('opens the phone card\'s own stack on its own node from Open stack editor', () => {
-  const opened: CustomEvent[] = [];
-  const listener = (e: Event) => opened.push(e as CustomEvent);
-  window.addEventListener(SENCHO_OPEN_STACK_EVENT, listener);
-  try {
+it('opens the phone card\'s own stack on its own node from Open stack editor', async () => {
+  const opened = await openStackEventsDuring(() => {
     render(<MobileReadinessCard card={card({ nodeId: 2, preview: tagOnlyPhonePreview() })} onApply={vi.fn()} />);
     fireEvent.click(screen.getByRole('button', { name: 'Open stack editor for nextcloud' }));
-  } finally {
-    window.removeEventListener(SENCHO_OPEN_STACK_EVENT, listener);
-  }
+  });
   expect(opened).toHaveLength(1);
   expect(opened[0].detail).toMatchObject({ stackName: 'nextcloud', nodeId: 2, destination: 'editor' });
 });
@@ -1759,15 +1746,10 @@ describe('AutoUpdateReadinessView check-failed advisory', () => {
 
     it('offers Open stack editor for a tag-only advisory and opens that stack on its node', async () => {
       mockNginx();
-      const opened: CustomEvent[] = [];
-      const listener = (e: Event) => opened.push(e as CustomEvent);
-      window.addEventListener(SENCHO_OPEN_STACK_EVENT, listener);
-      try {
+      const opened = await openStackEventsDuring(async () => {
         await renderBoard(view);
         fireEvent.click(await screen.findByRole('button', { name: 'Open stack editor for nginx' }));
-      } finally {
-        window.removeEventListener(SENCHO_OPEN_STACK_EVENT, listener);
-      }
+      });
 
       expect(screen.queryByRole('button', { name: /Apply now/i })).toBeNull();
       expect(opened).toHaveLength(1);
@@ -1808,15 +1790,10 @@ describe('AutoUpdateReadinessView check-failed advisory', () => {
         if (action === 'stack:edit') asked.push([type, id, nodeId]);
         return !(action === 'stack:edit' && nodeId === 1);
       };
-      const opened: CustomEvent[] = [];
-      const listener = (e: Event) => opened.push(e as CustomEvent);
-      window.addEventListener(SENCHO_OPEN_STACK_EVENT, listener);
-      try {
+      const opened = await openStackEventsDuring(async () => {
         await renderBoard(view);
         fireEvent.click(await screen.findByRole('button', editorVerb));
-      } finally {
-        window.removeEventListener(SENCHO_OPEN_STACK_EVENT, listener);
-      }
+      });
 
       expect(asked).toContainEqual(['stack', 'nginx', 1]);
       expect(asked).toContainEqual(['stack', 'nginx', 2]);

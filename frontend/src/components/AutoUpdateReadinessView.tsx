@@ -374,6 +374,13 @@ function useComposeEditVerb(card: StackCard): boolean {
     && can('stack:edit', 'stack', stack, nodeId);
 }
 
+function applyTitleFor(preview: UpdatePreview | null): string | undefined {
+  if (preview?.summary.blocked) return preview.summary.blocked_reason ?? undefined;
+  if (isVerificationOnlyPreview(preview)) return 'Digest verification failed';
+  if (isReviewRequiredUpdatePreview(preview)) return 'Another image in this stack failed digest verification; apply the confirmed service individually or resolve verification first.';
+  return undefined;
+}
+
 function OpenEditorButton({ stack, nodeId, title, className }: { stack: string; nodeId: number; title?: string; className?: string }) {
   return (
     <Button
@@ -415,7 +422,6 @@ function StackReadinessCard({
   const nextRun = scheduledTask?.next_run_at ?? null;
   const autoPillShown = isPolicySkipped(unattendedPolicy) || !autoUpdateEnabled;
   const composeEditVerb = useComposeEditVerb(card);
-  const verificationOnly = isVerificationOnlyPreview(preview);
   const reviewRequired = isReviewRequiredUpdatePreview(preview);
   // Full-stack apply is held for review when another image in the same stack
   // failed digest verification: applying would pull/recreate that image as
@@ -478,10 +484,7 @@ function StackReadinessCard({
           const blockedReason = p.summary.blocked_reason;
           const verificationFailed = Boolean(p.summary.verification_failed);
           const verificationError = p.summary.verification_error;
-          let applyTitle: string | undefined;
-          if (blocked) applyTitle = blockedReason ?? undefined;
-          else if (verificationOnly) applyTitle = 'Digest verification failed';
-          else if (reviewRequired) applyTitle = 'Another image in this stack failed digest verification; apply the confirmed service individually or resolve verification first.';
+          const applyTitle = applyTitleFor(p);
 
           let headline: ReactNode;
           if (verificationFailed && !p.summary.has_update) {
@@ -871,16 +874,12 @@ function ReadinessTableRow({
   const hasDetail = previewLoaded && !verificationNote && preview !== null;
   const blocked = preview?.summary.blocked ?? false;
   const reviewRequired = isReviewRequiredUpdatePreview(preview);
-  const verificationOnly = isVerificationOnlyPreview(preview);
   const updatingImages = preview?.images.filter(i => i.has_update) ?? [];
   const showServiceApply = canServiceUpdate && declaredServiceCount(preview) > 1 && updatingImages.length > 0;
   const nextRun = scheduledTask?.next_run_at ?? null;
   const applyDisabled = !isActionableUpdatePreview(preview) || applying || applyingService !== null;
   const composeEditVerb = useComposeEditVerb(card);
-  let applyTitle: string | undefined;
-  if (blocked) applyTitle = preview?.summary.blocked_reason ?? undefined;
-  else if (verificationOnly) applyTitle = 'Digest verification failed';
-  else if (reviewRequired) applyTitle = 'Another image in this stack failed digest verification; apply the confirmed service individually or resolve verification first.';
+  const applyTitle = applyTitleFor(preview);
 
   let change: ReactNode;
   if (loading) {
@@ -1138,10 +1137,7 @@ export function MobileReadinessCard({
     || applying
     || applyingService !== null;
   const composeEditVerb = useComposeEditVerb(card);
-  let applyTitle: string | undefined;
-  if (blocked) applyTitle = preview?.summary.blocked_reason ?? undefined;
-  else if (verificationOnly) applyTitle = 'Digest verification failed';
-  else if (reviewRequired) applyTitle = 'Another image in this stack failed digest verification; apply the confirmed service individually or resolve verification first.';
+  const applyTitle = applyTitleFor(preview);
   const changelog = preview?.changelog ?? 'No changelog available from the registry yet.';
   const dot = changelog.indexOf('.');
   const lead = dot > 0 ? changelog.slice(0, dot + 1) : '';
