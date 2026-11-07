@@ -119,9 +119,9 @@ export interface SecretPushPlanEntry {
 
 /**
  * A previewed push: the bundle version and per-target env-file digests the
- * apply must present. A target with no digest (unreachable, or no file) is
- * absent from the apply map, so a target that becomes readable later is
- * refused rather than written unreviewed.
+ * apply must present. Every previewed target is listed with its digest, or
+ * null when the preview could not read it; the apply refuses any target set
+ * that no longer matches or any node whose digest moved.
  */
 export interface SecretPushPreview {
     version: number;
@@ -970,11 +970,11 @@ export class SecretsService {
         envFileBasename: string;
         /** The bundle version the preview computed its diff from. */
         expectedVersion: number;
-        /** nodeId -> digest of the env file the preview read. */
-        expectedFingerprints: Record<string, string>;
+        /** Every target the preview resolved, with the digest it read (or null). */
+        expectedTargets: Array<{ nodeId: number; fingerprint: string | null }>;
         user: string;
     }): Promise<{ pushId: string; results: SecretPushResultEntry[] }> {
-        const { selector, stackName, envFileBasename, expectedVersion, expectedFingerprints, user } = input;
+        const { selector, stackName, envFileBasename, expectedVersion, expectedTargets, user } = input;
         if (activePushes.has(id)) {
             throw new PushBusyError(id);
         }
@@ -1000,6 +1000,15 @@ export class SecretsService {
         // stampeding any single remote that's targeted by multiple labels.
         activePushes.add(id);
         try {
+            // The apply must target exactly the nodes the preview resolved. A
+            // node that dropped out or appeared would make the reviewed diff
+            // wrong even if every surviving file is unchanged.
+            const expectedById = new Map(expectedTargets.map(target => [target.nodeId, target.fingerprint]));
+            if (expectedById.size !== matched.length) throw new PushTargetChangedError();
+            for (const node of matched) {
+                if (!expectedById.has(node.id)) throw new PushTargetChangedError();
+            }
+
             // Read every target before writing any, so a stale preview refuses the
             // whole push instead of leaving some nodes on unreviewed values.
             type TargetRead = { ok: true; read: ResolvedRead | null } | { ok: false; error: unknown };
@@ -1016,17 +1025,16 @@ export class SecretsService {
                 // An unreadable target is reported as a per-node failure; it is
                 // never written, so it needs no digest check here.
                 if (!state.ok) continue;
-                const expected = Object.prototype.hasOwnProperty.call(expectedFingerprints, String(node.id))
-                    ? expectedFingerprints[String(node.id)]
-                    : undefined;
+                const expected = expectedById.get(node.id);
                 if (!state.read) {
                     // The preview read a file for this node and it is gone now.
-                    if (expected !== undefined) throw new PushTargetChangedError();
+                    if (expected !== null) throw new PushTargetChangedError();
                     continue;
                 }
-                // A readable target with no previewed digest was never previewed;
-                // a different digest means someone changed it after the preview.
-                if (expected === undefined || fingerprintSource(state.read.text) !== expected) {
+                // A readable target the preview could not read was never
+                // reviewed; a different digest means someone changed it after
+                // the preview.
+                if (expected === null || expected === undefined || fingerprintSource(state.read.text) !== expected) {
                     throw new PushTargetChangedError();
                 }
             }

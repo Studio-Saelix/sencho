@@ -330,13 +330,9 @@ describe('SecretsService.readImportOverlay (local node)', () => {
 
 // ---- executePush against the local node ----
 
-/** The digests an apply must present, taken from the preview it sends. */
-function fingerprintsFor(targets: Array<{ nodeId: number; fingerprint: string | null }>): Record<string, string> {
-    const out: Record<string, string> = {};
-    for (const target of targets) {
-        if (target.fingerprint) out[String(target.nodeId)] = target.fingerprint;
-    }
-    return out;
+/** The target list an apply must present, taken from the preview it sends. */
+function expectedTargetsFor(targets: Array<{ nodeId: number; fingerprint: string | null }>): Array<{ nodeId: number; fingerprint: string | null }> {
+    return targets.map(({ nodeId, fingerprint }) => ({ nodeId, fingerprint }));
 }
 
 describe('SecretsService.executePush (local node)', () => {
@@ -366,7 +362,7 @@ describe('SecretsService.executePush (local node)', () => {
             stackName: 'targetstack',
             envFileBasename: '.env',
             expectedVersion: plan.version,
-            expectedFingerprints: fingerprintsFor(plan.targets),
+            expectedTargets: expectedTargetsFor(plan.targets),
             user: TEST_USERNAME,
         });
 
@@ -402,7 +398,7 @@ describe('SecretsService.executePush (local node)', () => {
             stackName: 'targetstack',
             envFileBasename: 'nonexistent.env',
             expectedVersion: plan.version,
-            expectedFingerprints: fingerprintsFor(plan.targets),
+            expectedTargets: expectedTargetsFor(plan.targets),
             user: TEST_USERNAME,
         });
 
@@ -480,7 +476,7 @@ describe('SecretsService.executePush (remote node)', () => {
             stackName: 'app',
             envFileBasename: '.env',
             expectedVersion: plan.version,
-            expectedFingerprints: fingerprintsFor(plan.targets),
+            expectedTargets: expectedTargetsFor(plan.targets),
             user: TEST_USERNAME,
         })).rejects.toMatchObject({ name: 'PushTargetChangedError' });
         expect(writes).toHaveLength(0);
@@ -497,7 +493,7 @@ describe('SecretsService.executePush (remote node)', () => {
             stackName: 'app',
             envFileBasename: '.env',
             expectedVersion: plan.version,
-            expectedFingerprints: fingerprintsFor(plan.targets),
+            expectedTargets: expectedTargetsFor(plan.targets),
             user: TEST_USERNAME,
         });
 
@@ -684,7 +680,7 @@ describe('Routes /api/secrets Community Admin access', () => {
                 stackName: 'pushstack',
                 envFileBasename: '.env',
                 expectedVersion: preview.body.version,
-                expectedFingerprints: fingerprintsFor(preview.body.targets),
+                expectedTargets: expectedTargetsFor(preview.body.targets),
             });
         expect(push.status).toBe(200);
         expect(push.body.pushId).toBeTruthy();
@@ -806,7 +802,7 @@ describe('SecretsService.executePush developer_mode diagnostics', () => {
             stackName: 'devmodestack',
             envFileBasename: '.env',
             expectedVersion: plan.version,
-            expectedFingerprints: fingerprintsFor(plan.targets),
+            expectedTargets: expectedTargetsFor(plan.targets),
             user: TEST_USERNAME,
         });
     }

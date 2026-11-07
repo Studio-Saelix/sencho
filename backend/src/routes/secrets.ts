@@ -112,19 +112,24 @@ function parsePushBody(body: unknown): PushBody | { error: string } {
 }
 
 /**
- * nodeId -> raw env-file digest the preview answered with. A target that had
- * no digest at preview is omitted, so an apply that finds it readable refuses
- * rather than writing a file the operator never reviewed.
+ * The previewed target set and per-node env-file digests. Every matched target
+ * must appear here with the digest the preview read (or null when it could not
+ * read it), so a target that disappeared, appeared, or changed is refused.
  */
-function parseExpectedFingerprints(value: unknown): Record<string, string> | null {
-    if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
-    const fingerprints: Record<string, string> = {};
-    for (const [nodeId, digest] of Object.entries(value as Record<string, unknown>)) {
-        if (!/^[1-9][0-9]*$/.test(nodeId)) return null;
-        if (typeof digest !== 'string' || !/^[a-f0-9]{64}$/.test(digest)) return null;
-        fingerprints[nodeId] = digest;
+function parseExpectedTargets(value: unknown): Array<{ nodeId: number; fingerprint: string | null }> | null {
+    if (!Array.isArray(value)) return null;
+    const seen = new Set<number>();
+    const targets: Array<{ nodeId: number; fingerprint: string | null }> = [];
+    for (const raw of value) {
+        if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return null;
+        const { nodeId, fingerprint } = raw as { nodeId?: unknown; fingerprint?: unknown };
+        if (typeof nodeId !== 'number' || !Number.isInteger(nodeId) || nodeId < 1) return null;
+        if (fingerprint !== null && (typeof fingerprint !== 'string' || !/^[a-f0-9]{64}$/.test(fingerprint))) return null;
+        if (seen.has(nodeId)) return null;
+        seen.add(nodeId);
+        targets.push({ nodeId, fingerprint });
     }
-    return fingerprints;
+    return targets;
 }
 
 interface ImportBody { nodeId: number; stackName: string; envFileBasename: string }
@@ -573,17 +578,17 @@ secretsRouter.post('/:id/push', authMiddleware, async (req: Request, res: Respon
             res.status(400).json({ error: parsed.error });
             return;
         }
-        const { expectedVersion, expectedFingerprints } = req.body as {
-            expectedVersion?: unknown; expectedFingerprints?: unknown;
+        const { expectedVersion, expectedTargets } = req.body as {
+            expectedVersion?: unknown; expectedTargets?: unknown;
         };
         const version = parseVersion(expectedVersion);
         if (version === null) {
             res.status(400).json({ error: 'expectedVersion must be the bundle version the preview showed' });
             return;
         }
-        const fingerprints = parseExpectedFingerprints(expectedFingerprints);
-        if (fingerprints === null) {
-            res.status(400).json({ error: 'expectedFingerprints must map each previewed node id to its env-file digest' });
+        const targets = parseExpectedTargets(expectedTargets);
+        if (targets === null) {
+            res.status(400).json({ error: 'expectedTargets must list each previewed node and its env-file digest' });
             return;
         }
         const secret = DatabaseService.getInstance().getSecret(id);
@@ -597,7 +602,7 @@ secretsRouter.post('/:id/push', authMiddleware, async (req: Request, res: Respon
                 stackName: parsed.stackName,
                 envFileBasename: parsed.envFileBasename,
                 expectedVersion: version,
-                expectedFingerprints: fingerprints,
+                expectedTargets: targets,
                 user: getActor(req),
             });
             const failedCount = result.results.filter(r => r.status === 'failed').length;

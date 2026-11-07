@@ -59,13 +59,9 @@ function clearSecretsTables(): void {
     db.prepare('DELETE FROM secrets').run();
 }
 
-/** The digests an apply must present, taken from the preview it sends. */
-function fingerprintsFrom(targets: Array<{ nodeId: number; fingerprint: string | null }>): Record<string, string> {
-    const out: Record<string, string> = {};
-    for (const target of targets) {
-        if (target.fingerprint) out[String(target.nodeId)] = target.fingerprint;
-    }
-    return out;
+/** The target list an apply must present, taken from the preview it sends. */
+function expectedTargetsFrom(targets: Array<{ nodeId: number; fingerprint: string | null }>): Array<{ nodeId: number; fingerprint: string | null }> {
+    return targets.map(({ nodeId, fingerprint }) => ({ nodeId, fingerprint }));
 }
 
 let bundleId: number;
@@ -649,7 +645,7 @@ describe('an unreadable stored payload is an error, never an empty bundle', () =
         };
         const calls: Array<[string, Record<string, unknown>]> = [
             [`/api/secrets/${bundleId}/push/preview`, body],
-            [`/api/secrets/${bundleId}/push`, { ...body, expectedVersion: 1, expectedFingerprints: {} }],
+            [`/api/secrets/${bundleId}/push`, { ...body, expectedVersion: 1, expectedTargets: [] }],
         ];
         for (const [path, payload] of calls) {
             const res = await request(app)
@@ -806,7 +802,7 @@ describe('a push applies exactly the previewed bundle version and target env', (
                 stackName: 'stale-push',
                 envFileBasename: '.env',
                 expectedVersion: plan.version,
-                expectedFingerprints: fingerprintsFrom(plan.targets),
+                expectedTargets: expectedTargetsFrom(plan.targets),
             });
         expect(push.status).toBe(409);
         expect(push.body.code).toBe('VERSION_CONFLICT');
@@ -830,7 +826,7 @@ describe('a push applies exactly the previewed bundle version and target env', (
                 stackName: 'moving-push',
                 envFileBasename: '.env',
                 expectedVersion: plan.version,
-                expectedFingerprints: fingerprintsFrom(plan.targets),
+                expectedTargets: expectedTargetsFrom(plan.targets),
             });
         expect(push.status).toBe(409);
         expect(push.body.code).toBe('PUSH_TARGET_CHANGED');
@@ -852,11 +848,73 @@ describe('a push applies exactly the previewed bundle version and target env', (
                 stackName: 'unpreviewed-push',
                 envFileBasename: '.env',
                 expectedVersion: plan.version,
-                expectedFingerprints: {},
+                expectedTargets: [],
             });
         expect(push.status).toBe(409);
         expect(push.body.code).toBe('PUSH_TARGET_CHANGED');
         expect(fs.readFileSync(path.join(stackDir, '.env'), 'utf-8')).toBe('FIRST=one\n');
+    });
+
+    it('refuses a push whose matched target set shrank after the preview', async () => {
+        const stackDir = seedStack('shrinking-push', 'FIRST=one\n');
+        const localNode = DatabaseService.getInstance().getNodes().find(n => n.type === 'local')!;
+        const plan = await preview({ type: 'nodes', ids: [localNode.id] }, 'shrinking-push');
+
+        const push = await request(app)
+            .post(`/api/secrets/${bundleId}/push`)
+            .set('Authorization', `Bearer ${adminToken()}`)
+            .send({
+                selector: { type: 'nodes', ids: [] },
+                stackName: 'shrinking-push',
+                envFileBasename: '.env',
+                expectedVersion: plan.version,
+                expectedTargets: expectedTargetsFrom(plan.targets),
+            });
+        expect(push.status).toBe(409);
+        expect(push.body.code).toBe('PUSH_TARGET_CHANGED');
+        expect(fs.readFileSync(path.join(stackDir, '.env'), 'utf-8')).toBe('FIRST=one\n');
+    });
+
+    it('refuses an expected target that the selector did not resolve', async () => {
+        const stackDir = seedStack('growing-push', 'FIRST=one\n');
+        const localNode = DatabaseService.getInstance().getNodes().find(n => n.type === 'local')!;
+        const plan = await preview({ type: 'nodes', ids: [localNode.id] }, 'growing-push');
+
+        const push = await request(app)
+            .post(`/api/secrets/${bundleId}/push`)
+            .set('Authorization', `Bearer ${adminToken()}`)
+            .send({
+                selector: { type: 'nodes', ids: [localNode.id] },
+                stackName: 'growing-push',
+                envFileBasename: '.env',
+                expectedVersion: plan.version,
+                expectedTargets: [...expectedTargetsFrom(plan.targets), { nodeId: 999999, fingerprint: 'a'.repeat(64) }],
+            });
+        expect(push.status).toBe(409);
+        expect(push.body.code).toBe('PUSH_TARGET_CHANGED');
+        expect(fs.readFileSync(path.join(stackDir, '.env'), 'utf-8')).toBe('FIRST=one\n');
+    });
+
+    it('refuses when a previewed env file disappeared before the push', async () => {
+        const stackDir = seedStack('vanishing-push', 'FIRST=one\n');
+        const localNode = DatabaseService.getInstance().getNodes().find(n => n.type === 'local')!;
+        const selector = { type: 'nodes' as const, ids: [localNode.id] };
+        const plan = await preview(selector, 'vanishing-push');
+
+        fs.unlinkSync(path.join(stackDir, '.env'));
+        const push = await request(app)
+            .post(`/api/secrets/${bundleId}/push`)
+            .set('Authorization', `Bearer ${adminToken()}`)
+            .send({
+                selector,
+                stackName: 'vanishing-push',
+                envFileBasename: '.env',
+                expectedVersion: plan.version,
+                expectedTargets: expectedTargetsFrom(plan.targets),
+            });
+        expect(push.status).toBe(409);
+        expect(push.body.code).toBe('PUSH_TARGET_CHANGED');
+        expect(fs.existsSync(path.join(stackDir, '.env'))).toBe(false);
     });
 
     it('rejects a missing, non-integer, or zero expectedVersion', async () => {
@@ -865,7 +923,7 @@ describe('a push applies exactly the previewed bundle version and target env', (
             selector: { type: 'nodes', ids: [localNode.id] },
             stackName: 'version-guard-push',
             envFileBasename: '.env',
-            expectedFingerprints: {},
+            expectedTargets: [],
         };
         for (const expectedVersion of [undefined, 1.5, 0, '1', -1]) {
             const res = await request(app)
@@ -876,7 +934,7 @@ describe('a push applies exactly the previewed bundle version and target env', (
         }
     });
 
-    it('rejects a missing or malformed expectedFingerprints map', async () => {
+    it('rejects a missing or malformed expectedTargets list', async () => {
         const localNode = DatabaseService.getInstance().getNodes().find(n => n.type === 'local')!;
         const base = {
             selector: { type: 'nodes', ids: [localNode.id] },
@@ -884,11 +942,20 @@ describe('a push applies exactly the previewed bundle version and target env', (
             envFileBasename: '.env',
             expectedVersion: 1,
         };
-        for (const expectedFingerprints of [undefined, [], { '1': 'not-a-digest' }, { zero: 'a'.repeat(64) }]) {
+        const malformed = [
+            undefined,
+            {},
+            'node-1',
+            [{ nodeId: '1', fingerprint: 'a'.repeat(64) }],
+            [{ nodeId: 1, fingerprint: 'not-a-digest' }],
+            [{ nodeId: 1 }, { nodeId: 1, fingerprint: null }],
+            [{ nodeId: 0, fingerprint: null }],
+        ];
+        for (const expectedTargets of malformed) {
             const res = await request(app)
                 .post(`/api/secrets/${bundleId}/push`)
                 .set('Authorization', `Bearer ${adminToken()}`)
-                .send({ ...base, expectedFingerprints });
+                .send({ ...base, expectedTargets });
             expect(res.status).toBe(400);
         }
     });
@@ -903,7 +970,7 @@ describe('a push applies exactly the previewed bundle version and target env', (
                 stackName: 'version-mismatch-push',
                 envFileBasename: '.env',
                 expectedVersion: 99,
-                expectedFingerprints: {},
+                expectedTargets: [],
             });
         expect(res.status).toBe(409);
         expect(res.body.code).toBe('VERSION_CONFLICT');
@@ -1108,7 +1175,7 @@ describe('hostile key names and escape attempts are refused', () => {
                 stackName: 'symlink-import',
                 envFileBasename: '.env',
                 expectedVersion: pushPreview.body.version,
-                expectedFingerprints: fingerprintsFrom(pushPreview.body.targets),
+                expectedTargets: expectedTargetsFrom(pushPreview.body.targets),
             });
         expect(push.status).toBe(200);
         expect(push.body.results[0].status).toBe('failed');

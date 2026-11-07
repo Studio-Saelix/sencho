@@ -277,8 +277,8 @@ export interface PushInput {
 /** The apply presents exactly the plan the preview answered with. */
 export interface PushApplyInput extends PushInput {
     expectedVersion: number;
-    /** nodeId (as a string) -> digest of the env file the preview read. */
-    expectedFingerprints: Record<string, string>;
+    /** Every previewed target, with the digest the preview read (or null). */
+    expectedTargets: Array<{ nodeId: number; fingerprint: string | null }>;
 }
 
 export async function previewPush(id: number, input: PushInput): Promise<SecretPushPreview> {

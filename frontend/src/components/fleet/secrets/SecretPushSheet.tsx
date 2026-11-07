@@ -182,16 +182,15 @@ export function SecretPushSheet({ open, onOpenChange, secret }: Props) {
         }
         setPushLoading(true);
         // Send exactly what the preview showed: its inputs, its bundle version,
-        // and each target's env-file digest.
-        const expectedFingerprints: Record<string, string> = {};
-        for (const target of preview.targets) {
-            if (target.fingerprint) expectedFingerprints[String(target.nodeId)] = target.fingerprint;
-        }
+        // and every target's env-file digest (null when the preview could not read it).
         try {
             const result = await executePush(secret.id, {
                 ...preview.input,
                 expectedVersion: preview.version,
-                expectedFingerprints,
+                expectedTargets: preview.targets.map((target) => ({
+                    nodeId: target.nodeId,
+                    fingerprint: target.fingerprint,
+                })),
             });
             setResults(result.results);
             setStage('results');

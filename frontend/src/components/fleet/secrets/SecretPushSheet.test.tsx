@@ -175,7 +175,7 @@ describe('SecretPushSheet', () => {
             stackName: 'my-app',
             envFileBasename: '.env',
             expectedVersion: 2,
-            expectedFingerprints: { '1': 'a'.repeat(64) },
+            expectedTargets: [{ nodeId: 1, fingerprint: 'a'.repeat(64) }],
         });
     });
 
