@@ -32,6 +32,10 @@ import { getErrorMessage } from '../utils/errors';
 import { sanitizeForLog } from '../utils/safeLog';
 import { describeSpawnError } from '../utils/spawnErrors';
 import { authoredComposeFileArgs, authoredComposeEnvFileArgs } from '../utils/authoredComposeArgs';
+import {
+  assertComposeInputsWithinExpansionLimits,
+  composeFileArgsFromInvocation,
+} from '../helpers/composeExpansionGuard';
 import { isFullySyntheticHoldImage } from '../utils/senchoRollbackHold';
 import { mapWithConcurrency } from '../utils/mapWithConcurrency';
 import { isValidDockerNetworkName } from './network/dockerNetworkName';
@@ -2897,6 +2901,12 @@ class DockerController {
   private async fetchComposePsContainers(stackName: string, stackDir: string): Promise<ComposePsContainer[]> {
     const filePrefix = authoredComposeFileArgs(stackName, this.nodeId);
     const envFileArgs = await authoredComposeEnvFileArgs(stackName, this.nodeId);
+    // `compose ps` composes the project too, so the same expansion bound
+    // applies before the CLI reads the files.
+    await assertComposeInputsWithinExpansionLimits({
+      cwd: stackDir,
+      files: composeFileArgsFromInvocation([...filePrefix, ...envFileArgs]),
+    });
     const { stdout, stderr } = await execFileAsync(
       'docker',
       ['compose', ...filePrefix, ...envFileArgs, 'ps', '--format', 'json', '-a'],

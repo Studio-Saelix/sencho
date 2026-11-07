@@ -381,6 +381,25 @@ describe('runPreflight', () => {
     expect(report.renderError).not.toContain(SECRET);
   });
 
+  it('shows Sencho\'s own refusal when a file is not handed to Compose', async () => {
+    const refusal = 'Compose file "compose.yaml" expands to more than 250,000 nodes through nested YAML aliases. '
+      + 'Docker Compose expands aliases without a limit and can run the host out of memory, so Sencho refused to run it.';
+    stubDocker(null);
+    vi.mocked(ComposeService.getInstance).mockReturnValue({
+      renderConfig: vi.fn().mockResolvedValue({
+        rendered: null, stderr: '', code: null, timedOut: false, refusal,
+      }),
+      composeVersion: vi.fn().mockResolvedValue(null),
+    } as unknown as ComposeService);
+
+    const report = await doctor().runPreflight(nodeId, STACK, null);
+
+    expect(report.status).toBe('unrenderable');
+    expect(report.renderable).toBe(false);
+    expect(report.renderError).toBe(refusal);
+    expect(report.findings.map(f => f.ruleId)).toEqual(['render-failed']);
+  });
+
   it('getLatest round-trips an unrenderable run from the database', async () => {
     stubDocker(null, 'boom');
     await doctor().runPreflight(nodeId, STACK, null);

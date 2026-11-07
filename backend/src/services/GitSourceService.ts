@@ -95,6 +95,12 @@ import { getRegistryDeliveryContext, getRegistryDeliveryLockContext } from '../h
 import { copyPreparedPayloadDirectory } from '../helpers/registryDeliveryMaterialize';
 import { runDockerCompose as spawnDockerCompose } from '../helpers/dockerComposeRunner';
 import {
+    assertComposeInputsWithinExpansionLimits,
+    assertComposeSourceWithinExpansionLimits,
+    composeFileArgsFromInvocation,
+    ComposeExpansionRefusal,
+} from '../helpers/composeExpansionGuard';
+import {
     capabilityUnderstatesEncryption,
     classifyInventoryEncryption,
     buildSecretCapability,
@@ -1857,6 +1863,14 @@ export class GitSourceService {
         // Cheap syntax pre-check per file
         for (const file of composeFiles) {
             try {
+                assertComposeSourceWithinExpansionLimits(file.content, file.path);
+            } catch (err) {
+                if (err instanceof ComposeExpansionRefusal) {
+                    return { ok: false, error: err.message };
+                }
+                throw err;
+            }
+            try {
                 const parsed = YAML.parse(file.content);
                 if (parsed === null || parsed === undefined) {
                     return { ok: false, error: `Compose file ${file.path} is empty.` };
@@ -2083,6 +2097,17 @@ export class GitSourceService {
             return { ok: false, error: (err as Error).message || 'Invalid project env file configuration.' };
         }
         args.push('config', '--quiet');
+        try {
+            await assertComposeInputsWithinExpansionLimits({
+                cwd: candidateAbs,
+                files: composeFileArgsFromInvocation(args),
+            });
+        } catch (err) {
+            if (err instanceof ComposeExpansionRefusal) {
+                return { ok: false, error: err.message };
+            }
+            throw err;
+        }
         const result = await this.runDockerCompose(args, candidateAbs, 30_000);
         if (result.code === 0) return { ok: true };
         const timeoutHint = result.stderr.includes('Validation timed out') ? ' (docker compose config timed out after 30s)' : '';

@@ -10,6 +10,11 @@ import {
 import { parsePullReference, pullReferenceHost } from '../helpers/registryPullReference';
 import { sanitizeForLog } from '../utils/safeLog';
 import { getErrorMessage } from '../utils/errors';
+import {
+  assertComposeInputsWithinExpansionLimits,
+  composeFileArgsFromInvocation,
+  ComposeExpansionRefusal,
+} from '../helpers/composeExpansionGuard';
 
 const MAX_DOCKERFILE_BYTES = 1_048_576;
 const RENDER_TIMEOUT_MS = 20_000;
@@ -447,6 +452,20 @@ async function renderComposeEffectiveModel(
     args.push('-f', containment.canonical);
   }
   args.push('config', '--format', 'json');
+  try {
+    await assertComposeInputsWithinExpansionLimits({
+      cwd,
+      files: composeFileArgsFromInvocation(args),
+    });
+  } catch (err) {
+    if (err instanceof ComposeExpansionRefusal) {
+      // The per-file union below finds the same references without rendering,
+      // so a refused file degrades to that union instead of reaching Compose.
+      console.warn('[registryReferenceDiscovery] Compose render refused:', sanitizeForLog(err.message));
+      return null;
+    }
+    throw err;
+  }
   const child = spawn('docker', args, {
     cwd,
     env: {

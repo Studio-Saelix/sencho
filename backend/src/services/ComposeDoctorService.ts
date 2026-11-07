@@ -363,12 +363,13 @@ export class ComposeDoctorService {
       } else {
         // The raw stderr from `docker compose config` can echo file content
         // (and therefore secrets), so it is never stored. We surface only safe,
-        // structural signals: the names of any required variables Compose
+        // structural signals: Sencho's own refusal for an input it would not
+        // hand to Compose, the names of any required variables Compose
         // reported as missing, otherwise a generic nudge.
         const missing = parseMissingRequiredVars(result.stderr);
-        renderError = missing.length
+        renderError = result.refusal ?? (missing.length
           ? `Required variable${missing.length > 1 ? 's' : ''} ${missing.join(', ')} ${missing.length > 1 ? 'have' : 'has'} no value, so the effective model cannot be rendered.`
-          : 'Sencho could not render the effective Compose model. Check the compose and env files for a YAML syntax error, an unresolved include or merge, or a required variable with no value, then re-run.';
+          : 'Sencho could not render the effective Compose model. Check the compose and env files for a YAML syntax error, an unresolved include or merge, or a required variable with no value, then re-run.');
       }
     } catch (err) {
       // Spawn failure (docker unavailable). Spawn errors carry no file content;

@@ -40,6 +40,11 @@ import {
   authoredComposeEnvFileArgs,
   composeEnvFilesFromProcess,
 } from '../utils/authoredComposeArgs';
+import {
+  assertComposeInputsWithinExpansionLimits,
+  composeFileArgsFromInvocation,
+  ComposeExpansionRefusal,
+} from '../helpers/composeExpansionGuard';
 import type { RollbackInvocationRecord } from '../types/rollbackGeneration';
 import { parseMissingRequiredVars } from '../helpers/envVarParse';
 import { redactSensitiveText, sanitizeForLog } from '../utils/safeLog';
@@ -336,10 +341,12 @@ export class ComposeService {
           const result = await this.renderConfig(stackName, stackDirOverride ? { stackDirOverride } : undefined);
           if (result.rendered) return result.rendered;
           // The guard refuses what it cannot see, so say why the render failed. The
-          // diagnostics are withheld for an overlay render (they quote secrets).
-          const why = result.timedOut ? 'docker compose config timed out'
-            : result.withheld ? 'docker compose config failed; its diagnostics are withheld'
-              : renderErrorLine(result.stderr) || `docker compose config exited with code ${result.code ?? 'unknown'}`;
+          // diagnostics are withheld for an overlay render (they quote secrets);
+          // Sencho's own refusal names the file and the reason, so it is safe.
+          const why = result.refusal ? result.refusal
+            : result.timedOut ? 'docker compose config timed out'
+              : result.withheld ? 'docker compose config failed; its diagnostics are withheld'
+                : renderErrorLine(result.stderr) || `docker compose config exited with code ${result.code ?? 'unknown'}`;
           throw new Error(why);
         },
         configHash: (service) => this.composeConfigHash(stackName, service, stackDirOverride),
@@ -657,6 +664,12 @@ export class ComposeService {
       args.push('-f', overridePath);
     }
     this.pinProjectNameForOverride(stackName, args, stackDirOverride);
+    // Every command built here runs Compose, which expands YAML aliases with
+    // no bound, so the inputs are measured before the CLI can see them.
+    await assertComposeInputsWithinExpansionLimits({
+      cwd: stackDirOverride ?? path.join(this.baseDir, stackName),
+      files: composeFileArgsFromInvocation(args),
+    });
     return args;
   }
 
@@ -3182,6 +3195,10 @@ export class ComposeService {
     if (useCaptured && invocation.meshEnabled) {
       await this.appendCapturedMeshLayer(stackName, fileAndEnvPrefix);
     }
+    await assertComposeInputsWithinExpansionLimits({
+      cwd: stackDir,
+      files: composeFileArgsFromInvocation(fileAndEnvPrefix),
+    });
     const stdout = await this.captureCompose([...fileAndEnvPrefix, 'config', '--images'], stackDir);
     const seen = new Set<string>();
     const images: string[] = [];
@@ -3295,6 +3312,10 @@ export class ComposeService {
       throw err instanceof Error ? err : new Error(String(err));
     }
     const envFileArgs = await authoredComposeEnvFileArgs(stackName, this.nodeId);
+    await assertComposeInputsWithinExpansionLimits({
+      cwd: stackDir,
+      files: composeFileArgsFromInvocation(filePrefix),
+    });
     const child = spawn('docker', ['compose', ...filePrefix, ...envFileArgs, 'config'], {
       cwd: stackDir,
       env: {
@@ -3400,7 +3421,7 @@ export class ComposeService {
   public async renderConfig(
     stackName: string,
     opts?: { stackDirOverride?: string; composePrefix?: string[] },
-  ): Promise<{ rendered: string | null; stderr: string; code: number | null; timedOut: boolean; withheld?: boolean }> {
+  ): Promise<{ rendered: string | null; stderr: string; code: number | null; timedOut: boolean; withheld?: boolean; refusal?: string }> {
     if (!isValidStackName(stackName)) {
       throw new Error('Invalid stack path');
     }
@@ -3462,6 +3483,28 @@ export class ComposeService {
     const cwdResolved = path.resolve(stackDir);
     if (!cwdResolved.startsWith(allowedRoot + path.sep)) {
       throw new Error('Invalid stack path');
+    }
+    try {
+      await assertComposeInputsWithinExpansionLimits({
+        cwd: cwdResolved,
+        files: composeFileArgsFromInvocation(composeArgs),
+      });
+    } catch (err) {
+      if (err instanceof ComposeExpansionRefusal) {
+        // The refusal is Sencho's own text, so it is safe to hand back where a
+        // Compose diagnostic would have gone. It is kept apart from `stderr`
+        // because everything reading that field treats it as Compose's words,
+        // which can quote interpolated secrets.
+        return {
+          rendered: null,
+          stderr: '',
+          code: null,
+          timedOut: false,
+          refusal: err.message,
+          ...(withholdDiagnostics ? { withheld: true } : {}),
+        };
+      }
+      throw err;
     }
     const child = spawn('docker', composeArgs, {
       cwd: cwdResolved,

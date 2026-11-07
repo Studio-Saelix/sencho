@@ -107,6 +107,11 @@ async function renderModel(
         return { model: null, renderError: 'Sencho could not parse the rendered Compose model.' };
       }
     }
+    // A refusal is Sencho's own text: it names the file and never carries a
+    // value from it, so it can be shown where Compose's words would be withheld.
+    if (result.refusal) {
+      return { model: null, renderError: result.refusal };
+    }
     // A render that resolved its model from decrypted secret files reports the
     // gate's own withholding instead of Compose's words, which would carry
     // interpolated plaintext into the refusal. The deploy's missing-variable
