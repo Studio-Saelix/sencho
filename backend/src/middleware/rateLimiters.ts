@@ -264,3 +264,15 @@ export const trivyInstallLimiter = rateLimit({
   keyGenerator: rateLimitKeyGenerator,
   message: { error: 'Too many install requests. Try again later.' },
 });
+
+// Bootstrap preflight limiter. Each attempt opens an SSH connection to a
+// user-supplied host, so the ceiling is deliberately low in production.
+// The capabilities read is not limited beyond the global API limiter.
+export const bootstrapLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: process.env.NODE_ENV === 'production' ? 10 : 100,
+  standardHeaders: true,
+  legacyHeaders: false,
+  keyGenerator: rateLimitKeyGenerator,
+  message: { error: 'Too many bootstrap attempts. Please try again later.' },
+});
