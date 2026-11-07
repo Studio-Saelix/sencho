@@ -3,6 +3,7 @@ import {
   RecoveryHelperRunner,
   resticCommand,
   type HelperProfile,
+  type HelperRunResult,
   type HelperRunSpec,
 } from './helperRunner';
 import {
@@ -40,7 +41,6 @@ import type {
   PointContentReader,
   RecoveryContentEntry,
   RecoveryContents,
-  RecoveryErrorClass,
   RecoveryPoint,
   RestoreEvidence,
   RestoreIntent,
@@ -323,7 +323,7 @@ export class ResticEngine implements BackupEngine, PointContentReader {
     if (ctx.signal.aborted) controller.abort();
     else ctx.signal.addEventListener('abort', onExternalAbort, { once: true });
 
-    let result: Awaited<ReturnType<RecoveryHelperRunner['run']>>;
+    let result: HelperRunResult;
     try {
       result = await this.deps.runner.run({
         profile: 'read',
@@ -352,18 +352,8 @@ export class ResticEngine implements BackupEngine, PointContentReader {
       ctx.signal.removeEventListener('abort', onExternalAbort);
     }
 
-    const outcome = classifyContentRun({
-      exitCode: result.exitCode,
-      aborted: result.aborted,
-      killed: result.killed,
-      externalAborted: ctx.signal.aborted,
-      truncated,
-    });
-    if (outcome.status === 'cancelled') return { ok: false, errorClass: 'interrupted' };
-    if (outcome.status === 'failed') {
-      logContentFailure('list', request, result, outcome.errorClass, this.deps.secret);
-      return { ok: false, errorClass: outcome.errorClass };
-    }
+    const failure = this.contentFailure('list', request, result, ctx.signal, truncated);
+    if (failure) return failure;
     const contents = contentListingFor({ path: request.path, self, entries, truncated });
     if (!contents) return { ok: false, errorClass: 'not_found' };
     return { ok: true, evidence: contents };
@@ -406,18 +396,8 @@ export class ResticEngine implements BackupEngine, PointContentReader {
         sink(chunk, control);
       },
     });
-    const outcome = classifyContentRun({
-      exitCode: result.exitCode,
-      aborted: result.aborted,
-      killed: result.killed,
-      externalAborted: ctx.signal.aborted,
-      truncated: false,
-    });
-    if (outcome.status === 'cancelled') return { ok: false, errorClass: 'interrupted' };
-    if (outcome.status === 'failed') {
-      logContentFailure('dump', request, result, outcome.errorClass, this.deps.secret);
-      return { ok: false, errorClass: outcome.errorClass };
-    }
+    const failure = this.contentFailure('dump', request, result, ctx.signal, false);
+    if (failure) return failure;
     if (bytes !== expectedBytes) {
       console.warn(
         '[Recovery] Dump of snapshot %s returned %d of %d bytes: %s',
@@ -431,6 +411,41 @@ export class ResticEngine implements BackupEngine, PointContentReader {
     return { ok: true, evidence: { bytes } };
   }
 
+  /**
+   * A read run's exit in Sencho's terms: null when it produced its output.
+   *
+   * The one place a read failure's cause survives: the helper container is
+   * removed when it exits and the API answers a sanitized class, so the
+   * node-local log is the only record that tells a missing snapshot from an
+   * unreadable repository. It is written here rather than at each call site.
+   */
+  private contentFailure(
+    what: 'list' | 'dump',
+    request: ContentReadRequest,
+    result: HelperRunResult,
+    signal: AbortSignal,
+    truncated: boolean,
+  ): EngineResult<never> | null {
+    const outcome = classifyContentRun({
+      exitCode: result.exitCode,
+      aborted: result.aborted,
+      killed: result.killed,
+      externalAborted: signal.aborted,
+      truncated,
+    });
+    if (outcome.status === 'ok') return null;
+    if (outcome.status === 'cancelled') return { ok: false, errorClass: 'interrupted' };
+    console.warn(
+      '[Recovery] Content %s for snapshot %s failed with %s, exit %s: %s',
+      what,
+      sanitizeForLog(request.snapshotId),
+      outcome.errorClass,
+      result.exitCode ?? 'none',
+      helperFailureNote(result.stderrTail, [], [this.deps.secret]),
+    );
+    return { ok: false, errorClass: outcome.errorClass };
+  }
+
   private async observeInUse(volumeName: string): Promise<InUseObservation | null> {
     try {
       return await this.deps.observeInUse(volumeName);
@@ -439,28 +454,6 @@ export class ResticEngine implements BackupEngine, PointContentReader {
       return null;
     }
   }
-}
-
-/**
- * The one place a read failure's cause survives: the helper container is removed
- * when it exits and the API answers a sanitized class, so the node-local log is
- * the only record that tells a missing snapshot from an unreadable repository.
- */
-function logContentFailure(
-  what: 'list' | 'dump',
-  request: ContentReadRequest,
-  result: { exitCode: number | null; stderrTail: string },
-  errorClass: RecoveryErrorClass,
-  secret: string,
-): void {
-  console.warn(
-    '[Recovery] Content %s for snapshot %s failed with %s, exit %s: %s',
-    what,
-    sanitizeForLog(request.snapshotId),
-    errorClass,
-    result.exitCode ?? 'none',
-    helperFailureNote(result.stderrTail, [], [secret]),
-  );
 }
 
 export interface ResticEngineDeps {

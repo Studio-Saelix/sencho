@@ -55,10 +55,8 @@ export function canonicalizeContentPath(raw: unknown): string {
 
 /** The path inside the snapshot that a root-relative path names. */
 export function contentSnapshotPath(relative: string): string {
-  if (relative === '') return HELPER_SOURCE_MOUNT;
   const canonical = canonicalizeContentPath(relative);
-  if (canonical === '') return HELPER_SOURCE_MOUNT;
-  return `${HELPER_SOURCE_MOUNT}/${canonical}`;
+  return canonical === '' ? HELPER_SOURCE_MOUNT : `${HELPER_SOURCE_MOUNT}/${canonical}`;
 }
 
 /** Entry type restic reports, mapped to the three shapes a browser acts on. */

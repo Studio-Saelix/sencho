@@ -981,16 +981,12 @@ export class RecoveryEngineService {
     // A point is browsed, never followed: a symlink's target is not in this
     // point, and resolving one is how a link out of the root becomes a read of a
     // host file. A directory and a special file have no file body at all.
-    if (listing.kind === 'other') {
+    if (listing.kind !== 'file' || !listing.entry || listing.entry.type !== 'file') {
       throw new RecoveryError('invalid_request', {
-        reason: listing.entry?.type === 'symlink' ? 'symlink_not_followed' : 'not_a_file',
+        reason: listing.kind === 'other' && listing.entry?.type === 'symlink' ? 'symlink_not_followed' : 'not_a_file',
       });
     }
-    if (listing.kind !== 'file' || !listing.entry) {
-      throw new RecoveryError('invalid_request', { reason: 'not_a_file' });
-    }
     const entry = listing.entry;
-    if (entry.type !== 'file') throw new RecoveryError('invalid_request', { reason: 'not_a_file' });
     // A file record without a size cannot be bounded or checked for a short
     // body. restic always reports one; this is a refusal, not a guess.
     if (entry.size === null) throw new RecoveryError('invalid_request', { reason: 'size_unknown' });

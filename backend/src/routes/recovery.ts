@@ -758,12 +758,7 @@ recoveryRouter.get('/points/:pointId/contents/download', handle(async (req, res)
         if (!wroteAny && !res.headersSent) {
           // Nothing of the body was written, so the failure can be answered as
           // itself (409 integrity_mismatch, 503 repository_unavailable) instead of
-          // as a reset connection.
-          res.removeHeader('Content-Disposition');
-          res.removeHeader('Content-Length');
-          res.removeHeader('Content-Type');
-          res.removeHeader('Cache-Control');
-          res.removeHeader('X-Content-Type-Options');
+          // as a reset connection. The catch below drops the file headers.
           throw new RecoveryError(result.errorClass);
         }
         // Part of the body is already on the wire: a JSON error cannot replace it,

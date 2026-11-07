@@ -1,4 +1,4 @@
-import { isCompletePoint, latestVerificationOf } from './coverage';
+import { isCompletePoint, latestVerificationFor } from './coverage';
 import type {
   CaptureSummary,
   IntegrityVerification,
@@ -53,7 +53,7 @@ export function describePointContentsEvidence(
 ): PointContentsEvidence {
   // A verification filed under another point never verifies this one, whatever
   // list the caller passed.
-  const latest = latestVerificationOf(verifications.filter((v) => v.pointId === point.id));
+  const latest = latestVerificationFor(point.id, verifications);
   return {
     id: point.id,
     kind: point.kind,

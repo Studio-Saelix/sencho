@@ -63,12 +63,19 @@ export interface CoverageVerdict {
   roots: RootCoverage[];
 }
 
-/** The most recent verification in one point's list; on a tie, the one that did not verify wins. */
-export function latestVerificationOf(
+/**
+ * The most recent verification of one point in a list; on a tie, the one that
+ * did not verify wins. A verification filed under another point is ignored even
+ * when it sits in this point's list, so a row that disagrees cannot verify
+ * anything.
+ */
+export function latestVerificationFor(
+  pointId: string,
   verifications: readonly IntegrityVerification[],
 ): IntegrityVerification | null {
   let latest: IntegrityVerification | null = null;
   for (const v of verifications) {
+    if (v.pointId !== pointId) continue;
     if (!latest || v.verifiedAt > latest.verifiedAt
       || (v.verifiedAt === latest.verifiedAt && latest.result === 'verified' && v.result !== 'verified')) {
       latest = v;
@@ -78,22 +85,10 @@ export function latestVerificationOf(
 }
 
 /**
- * The same answer for one point in a map of many. A verification filed under
- * another point is ignored even when it sits in this point's list, so a row that
- * disagrees with its own key cannot verify anything.
- */
-export function latestVerificationFor(
-  pointId: string,
-  verifications: ReadonlyMap<string, readonly IntegrityVerification[]>,
-): IntegrityVerification | null {
-  return latestVerificationOf((verifications.get(pointId) ?? []).filter((v) => v.pointId === pointId));
-}
-
-/**
  * A point that counted everything it recorded and left nothing out but policy
  * exclusions. Verification is a separate fact: this predicate says the capture
  * itself is complete, and a surface that also needs a verified check combines it
- * with `latestVerificationOf(...).result === 'verified'` (see `pointEvidence.ts`).
+ * with `latestVerificationFor(...).result === 'verified'` (see `pointEvidence.ts`).
  */
 export const isCompletePoint = (p: RecoveryPoint): boolean =>
   p.status === 'succeeded' && p.capture.skippedCount === 0
@@ -141,9 +136,9 @@ export function evaluateRootCoverage(root: RootCoverageInput, now: number, fresh
     return result('failed_only');
   }
 
-  const verified = complete.filter((p) => latestVerificationFor(p.id, root.verifications)?.result === 'verified');
+  const verified = complete.filter((p) => latestVerificationFor(p.id, root.verifications.get(p.id) ?? [])?.result === 'verified');
   if (verified.length === 0) {
-    const newest = latestVerificationFor(complete[0].id, root.verifications);
+    const newest = latestVerificationFor(complete[0].id, root.verifications.get(complete[0].id) ?? []);
     return result(newest?.result === 'mismatch' ? 'integrity_mismatch' : 'unverified');
   }
 
