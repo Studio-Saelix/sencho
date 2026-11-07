@@ -52,6 +52,7 @@ import { RestoreFenceStore } from './restoreFence';
 import { describePointContentsEvidence, type PointContentsEvidence } from './pointEvidence';
 import {
   MAX_CONTENT_DOWNLOAD_BYTES,
+  MAX_CONTENT_DOWNLOAD_IDLE_MS,
   MAX_CONTENT_ENTRIES,
   canonicalizeContentPath,
 } from './restic/resticContents';
@@ -130,7 +131,7 @@ export interface AdmissionResult {
 export interface PointContentsReadResult {
   point: PointContentsEvidence;
   contents: RecoveryContents;
-  limits: { maxEntries: number; maxDownloadBytes: number };
+  limits: { maxEntries: number; maxDownloadBytes: number; maxIdleMs: number };
 }
 
 /** A download proven to be a regular file, with the run that streams its bytes. */
@@ -955,7 +956,11 @@ export class RecoveryEngineService {
     return {
       point: resolved.evidence,
       contents: contents.evidence,
-      limits: { maxEntries: MAX_CONTENT_ENTRIES, maxDownloadBytes: MAX_CONTENT_DOWNLOAD_BYTES },
+      limits: {
+        maxEntries: MAX_CONTENT_ENTRIES,
+        maxDownloadBytes: MAX_CONTENT_DOWNLOAD_BYTES,
+        maxIdleMs: MAX_CONTENT_DOWNLOAD_IDLE_MS,
+      },
     };
   }
 

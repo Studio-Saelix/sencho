@@ -46,7 +46,10 @@ import {
   RecoveryError,
 } from '../services/recovery/redaction';
 import { ROOT_COVERAGE_FRESHNESS_MS } from '../services/recovery/types';
-import { MAX_CONTENT_DOWNLOAD_BYTES } from '../services/recovery/restic/resticContents';
+import {
+  MAX_CONTENT_DOWNLOAD_BYTES,
+  MAX_CONTENT_DOWNLOAD_IDLE_MS,
+} from '../services/recovery/restic/resticContents';
 import type {
   RecoveryErrorClass,
   RecoveryOperation,
@@ -651,6 +654,15 @@ function contentPathOf(req: Request): string {
 }
 
 /**
+ * Test seam: how long a download body may stall before it is stopped. Production
+ * never sets this; the fixed bound is the one the API answers with in `limits`.
+ */
+let downloadIdleMsOverride: number | null = null;
+export function setDownloadIdleMsForTests(ms: number | null): void {
+  downloadIdleMsOverride = ms;
+}
+
+/**
  * A download's file name: an ASCII-only quoted fallback for old clients and the
  * RFC 5987 form for every other one. Node refuses a header value with a
  * character above Latin-1, so the fallback replaces anything outside printable
@@ -707,13 +719,32 @@ recoveryRouter.get('/points/:pointId/contents/download', handle(async (req, res)
   if (path === '') throw new RecoveryError('invalid_request', { reason: 'not_a_file' });
 
   const controller = new AbortController();
-  let clientGone = false;
-  const onClose = (): void => {
-    if (res.writableFinished) return;
-    clientGone = true;
+  let abandoned = false;
+  const abandon = (): void => {
+    abandoned = true;
     controller.abort();
   };
+  const onClose = (): void => {
+    if (res.writableFinished) return;
+    abandon();
+  };
   res.once('close', onClose);
+  // Idle bound: a repository that stops producing bytes, and a client that stays
+  // connected without reading, both leave the transfer motionless. Either ends
+  // the read after the bound instead of holding a helper and a socket forever.
+  let idleTimer: NodeJS.Timeout | undefined;
+  const stopIdleWatch = (): void => {
+    if (idleTimer) clearTimeout(idleTimer);
+    idleTimer = undefined;
+  };
+  const watchIdle = (): void => {
+    stopIdleWatch();
+    idleTimer = setTimeout(() => {
+      abandon();
+      if (!res.destroyed && !res.writableEnded) res.destroy();
+    }, downloadIdleMsOverride ?? MAX_CONTENT_DOWNLOAD_IDLE_MS);
+    idleTimer.unref?.();
+  };
   try {
     const download = await engineService(req).prepareContentDownload({
       pointId: paramOf(req, 'pointId'),
@@ -739,21 +770,25 @@ recoveryRouter.get('/points/:pointId/contents/download', handle(async (req, res)
     }
 
     let wroteAny = false;
+    watchIdle();
     try {
       const result = await download.stream((chunk, control) => {
-        if (clientGone || res.writableEnded || res.destroyed) {
+        if (abandoned || res.writableEnded || res.destroyed) {
           control.pause();
           return;
         }
         wroteAny = true;
+        watchIdle();
         if (!res.write(chunk)) {
           control.pause();
           res.once('drain', () => {
-            if (!clientGone) control.resume();
+            if (abandoned) return;
+            watchIdle();
+            control.resume();
           });
         }
       });
-      if (clientGone) return;
+      if (abandoned) return;
       if (!result.ok) {
         if (!wroteAny && !res.headersSent) {
           // Nothing of the body was written, so the failure can be answered as
@@ -781,6 +816,7 @@ recoveryRouter.get('/points/:pointId/contents/download', handle(async (req, res)
       throw err;
     }
   } finally {
+    stopIdleWatch();
     res.off('close', onClose);
   }
 }));

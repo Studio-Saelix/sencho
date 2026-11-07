@@ -31,6 +31,13 @@ export const MAX_CONTENT_ENTRIES = 2_000;
 export const MAX_CONTENT_DOWNLOAD_BYTES = 1024 * 1024 * 1024;
 /** Longest path a request may name. Well above any real name, well below a body. */
 export const MAX_CONTENT_PATH_LENGTH = 4_096;
+/**
+ * How long a file body may go without a byte before the read is stopped. A
+ * stalled repository mount and a client that stays connected but stops reading
+ * both look the same from here, and neither may hold a helper forever. The bound
+ * is idle time, not total time: a slow transfer that keeps moving is never cut.
+ */
+export const MAX_CONTENT_DOWNLOAD_IDLE_MS = 2 * 60 * 1000;
 
 /**
  * A requested path, canonical and root-relative. '' is the point root.

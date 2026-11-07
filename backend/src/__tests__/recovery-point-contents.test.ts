@@ -14,7 +14,10 @@ import jwt from 'jsonwebtoken';
 import request from 'supertest';
 import { setupTestDb, cleanupTestDb, loginAsTestAdmin, TEST_JWT_SECRET } from './helpers/setupTestDb';
 import { PROXY_ROLE_HEADER } from '../services/license-headers';
-import { MAX_CONTENT_DOWNLOAD_BYTES } from '../services/recovery/restic/resticContents';
+import {
+  MAX_CONTENT_DOWNLOAD_BYTES,
+  MAX_CONTENT_DOWNLOAD_IDLE_MS,
+} from '../services/recovery/restic/resticContents';
 
 vi.mock('../services/ComposeService', () => ({
   ComposeService: {
@@ -252,6 +255,8 @@ afterAll(async () => {
 });
 
 beforeEach(async () => {
+  const { setDownloadIdleMsForTests } = await import('../routes/recovery');
+  setDownloadIdleMsForTests(null);
   await service().whenIdleForTests();
   engine.RecoveryEngineService.resetForTests();
   vi.restoreAllMocks();
@@ -293,7 +298,11 @@ describe('GET /api/recovery/points/:pointId/contents', () => {
     });
     expect(res.body.contents).toMatchObject({ path: '', kind: 'directory', entry: null, truncated: false });
     expect(res.body.contents.entries.map((e: { path: string }) => e.path)).toEqual(['etc', 'notes.md']);
-    expect(res.body.limits).toEqual({ maxEntries: 2000, maxDownloadBytes: BIG - 1 });
+    expect(res.body.limits).toEqual({
+      maxEntries: 2000,
+      maxDownloadBytes: BIG - 1,
+      maxIdleMs: MAX_CONTENT_DOWNLOAD_IDLE_MS,
+    });
   });
 
   it('lists one directory', async () => {
@@ -795,6 +804,41 @@ describe('GET /api/recovery/points/:pointId/contents/download', () => {
       .set('Cookie', adminCookie)
       .then(() => 'completed', (err: Error) => err.message);
     expect(outcome).not.toBe('completed');
+  });
+
+  it('stops a body that stops moving, so a stalled read cannot hold a helper', async () => {
+    const pointId = seedPoint();
+    await stubDocker();
+    service().markReadyForTests();
+    const { setDownloadIdleMsForTests } = await import('../routes/recovery');
+    setDownloadIdleMsForTests(50);
+    let aborted: (() => void) | null = null;
+    const sawAbort = new Promise<void>((resolve) => { aborted = resolve; });
+    useEngine(contentEngine({
+      dumpFile: async (sink, ctx) => {
+        sink(Buffer.from('x'.repeat(1024)), NO_CONTROL);
+        return new Promise((resolve) => {
+          ctx.signal.addEventListener('abort', () => {
+            aborted?.();
+            resolve({ ok: false, errorClass: 'interrupted' });
+          }, { once: true });
+        });
+      },
+    }));
+
+    try {
+      const outcome = await request(app)
+        .get(`/api/recovery/points/${pointId}/contents/download?path=notes.md`)
+        .set('Cookie', adminCookie)
+        .then(() => 'completed', (err: Error) => err.message);
+      expect(outcome).not.toBe('completed');
+      expect(await Promise.race([
+        sawAbort.then(() => 'aborted'),
+        new Promise<string>((resolve) => setTimeout(() => resolve('still running'), 2_000)),
+      ])).toBe('aborted');
+    } finally {
+      setDownloadIdleMsForTests(null);
+    }
   });
 
   it('cancels the helper when the client disconnects mid-download', async () => {

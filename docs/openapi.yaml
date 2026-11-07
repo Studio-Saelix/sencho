@@ -1952,7 +1952,7 @@ components:
                 large has to be read another way.
         limits:
           type: object
-          required: [maxEntries, maxDownloadBytes]
+          required: [maxEntries, maxDownloadBytes, maxIdleMs]
           properties:
             maxEntries:
               type: integer
@@ -1960,6 +1960,13 @@ components:
             maxDownloadBytes:
               type: integer
               example: 1073741824
+            maxIdleMs:
+              type: integer
+              description: |
+                How long a file body may go without a byte before the download is
+                stopped. Idle time, not total time: a slow transfer that keeps
+                moving is never cut.
+              example: 120000
 
     RecoveryRootCoverage:
       type: object
