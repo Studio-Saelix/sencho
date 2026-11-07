@@ -21,6 +21,27 @@ interface DismissedSectionProps {
   forceOpen?: boolean;
 }
 
+/** The dismissed findings with who dismissed each, when, and for how long, and a Restore where the account may. */
+export function DismissedList({ items, id, className, flush = false }: { items: DismissedItem[]; id?: string; className?: string; /** Drops the card chrome, for a body that already sits in a sheet section (sheets never nest cards). */ flush?: boolean }) {
+  return (
+    <ul id={id} className={cn(!flush && 'rounded-lg border border-muted bg-card/40 px-3 py-1', className)}>
+      {items.map(item => (
+        <li key={item.id} className="flex flex-wrap items-center justify-between gap-2 border-t border-muted py-2 first:border-t-0">
+          <div className="min-w-0 opacity-80">
+            <div className="text-[12px] font-medium text-foreground/80">{item.title}</div>
+            <div className="mt-0.5 font-mono text-[10px] text-stat-subtitle">{item.meta}</div>
+          </div>
+          {item.onRestore && (
+            <Button variant="ghost" size="sm" className="h-7 text-xs text-brand hover:text-brand max-md:min-h-11" disabled={item.restoring} onClick={item.onRestore}>
+              Restore
+            </Button>
+          )}
+        </li>
+      ))}
+    </ul>
+  );
+}
+
 /**
  * The quiet "N dismissed" row under a findings list. Closed by default, always
  * counted, and the only place a dismissed finding is still readable and
@@ -47,21 +68,7 @@ export function DismissedSection({ items, forceOpen = false }: DismissedSectionP
       </button>
       <AutoHeight deps={[expanded, items.length]} transition={heightTransition}>
         {expanded && (
-          <ul id={listId} className="mt-1.5 rounded-lg border border-muted bg-card/40 px-3 py-1">
-            {items.map(item => (
-              <li key={item.id} className="flex flex-wrap items-center justify-between gap-2 border-t border-muted py-2 first:border-t-0">
-                <div className="min-w-0 opacity-80">
-                  <div className="text-[12px] font-medium text-foreground/80">{item.title}</div>
-                  <div className="mt-0.5 font-mono text-[10px] text-stat-subtitle">{item.meta}</div>
-                </div>
-                {item.onRestore && (
-                  <Button variant="ghost" size="sm" className="h-7 text-xs text-brand hover:text-brand max-md:min-h-11" disabled={item.restoring} onClick={item.onRestore}>
-                    Restore
-                  </Button>
-                )}
-              </li>
-            ))}
-          </ul>
+          <DismissedList id={listId} items={items} className="mt-1.5" />
         )}
       </AutoHeight>
     </section>
