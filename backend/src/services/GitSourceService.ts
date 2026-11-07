@@ -97,7 +97,6 @@ import { runDockerCompose as spawnDockerCompose } from '../helpers/dockerCompose
 import {
     assertComposeInputsWithinExpansionLimits,
     assertComposeSourceWithinExpansionLimits,
-    composeFileArgsFromInvocation,
     ComposeExpansionRefusal,
 } from '../helpers/composeExpansionGuard';
 import {
@@ -1919,6 +1918,19 @@ export class GitSourceService {
                 await fsPromises.writeFile(envFile, envContent, 'utf-8');
                 args.push('--env-file', envFile);
             }
+            // The pre-check above measures the selected sources. This second
+            // check runs over the written layout with the real guard, so an
+            // include/extends dependency the validation dir can reach is
+            // measured too, and a remote dependency the guard cannot read is
+            // refused before Compose starts.
+            try {
+                await assertComposeInputsWithinExpansionLimits({ cwd: dir, invocation: args });
+            } catch (err) {
+                if (err instanceof ComposeExpansionRefusal) {
+                    return { ok: false, error: err.message };
+                }
+                throw err;
+            }
             args.push('config', '--quiet');
             const result = await this.runDockerCompose(args, dir, 10_000);
             if (result.code === 0) return { ok: true };
@@ -2100,7 +2112,7 @@ export class GitSourceService {
         try {
             await assertComposeInputsWithinExpansionLimits({
                 cwd: candidateAbs,
-                files: composeFileArgsFromInvocation(args),
+                invocation: args,
             });
         } catch (err) {
             if (err instanceof ComposeExpansionRefusal) {

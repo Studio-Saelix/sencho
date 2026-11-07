@@ -51,7 +51,6 @@ const {
   mockRecordRegistryDeliveryEvent,
   mockPreparedSourceFinalize,
   mockAssertComposeInputs,
-  mockComposeFileArgsFromInvocation,
   MockComposeExpansionRefusal,
 } = vi.hoisted(() => {
   const mockCleanupDockerAuthTempDir = vi.fn();
@@ -63,9 +62,6 @@ const {
   }
   return {
   mockAssertComposeInputs: vi.fn<(opts: unknown) => Promise<void>>().mockResolvedValue(undefined),
-  // Real extraction is covered by the helper's own tests; the call sites only
-  // need a stable list.
-  mockComposeFileArgsFromInvocation: vi.fn<(args: readonly string[]) => string[]>(() => []),
   MockComposeExpansionRefusal,
   mockSpawn: vi.fn(),
   mockGetContainersByStack: vi.fn().mockResolvedValue([]),
@@ -285,7 +281,6 @@ vi.mock('../services/recoveryHeldImages', () => ({
 // refuses.
 vi.mock('../helpers/composeExpansionGuard', () => ({
   assertComposeInputsWithinExpansionLimits: mockAssertComposeInputs,
-  composeFileArgsFromInvocation: mockComposeFileArgsFromInvocation,
   ComposeExpansionRefusal: MockComposeExpansionRefusal,
 }));
 
@@ -2462,6 +2457,11 @@ describe('ComposeService - alias-expansion guard on mutating invocations', () =>
 
     await expect(ComposeService.getInstance(1).validateExactComposeInvocation('my-stack'))
       .rejects.toThrow('nested YAML aliases');
+    // The guard sees the whole invocation, so its env selection and project
+    // directory are the ones the child would run with, not just the -f list.
+    expect(mockAssertComposeInputs).toHaveBeenCalledWith(expect.objectContaining({
+      invocation: expect.arrayContaining(['compose', 'config', '--quiet']),
+    }));
     expect(mockSpawn).not.toHaveBeenCalled();
   });
 

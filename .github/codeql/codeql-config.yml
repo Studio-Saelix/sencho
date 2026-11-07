@@ -16,12 +16,14 @@ data_extensions:
 paths-ignore:
   - e2e/**
   # Compose input read: a read-only, non-blocking descriptor with an fstat and a
-  # hard byte cap, on a path the caller has contained to the invocation
-  # directory. Nothing is created or modified, but js/insecure-temporary-file
-  # flags every fs.open whose path can reach the OS temp directory, and Git
-  # source validation runs the guard over a throwaway directory. The module is a
-  # filesystem sink by design; excluding it keeps the alias-counting guard (and
-  # its path containment checks) analyzed.
+  # hard byte cap, on a compose input the invocation selected (an `-f` file, a
+  # `COMPOSE_FILE` entry, or a discovered name) or one its `include`/`extends`
+  # graph declares. Compose reads those same paths, including a dependency
+  # outside the stack directory. Nothing is created or modified, but
+  # js/insecure-temporary-file flags every fs.open whose path can reach the OS
+  # temp directory, and Git source validation runs the guard over a throwaway
+  # directory. The module is a filesystem sink by design; excluding it keeps the
+  # alias-counting guard (and its input-resolution logic) analyzed.
   - backend/src/helpers/composeInputReadSink.ts
   # Per-fetch SSH credential sinks: canonicalized admin-trusted deploy keys and
   # known_hosts lines written mode-0600 inside an operation workspace. CodeQL

@@ -34,7 +34,6 @@ import { describeSpawnError } from '../utils/spawnErrors';
 import { authoredComposeFileArgs, authoredComposeEnvFileArgs } from '../utils/authoredComposeArgs';
 import {
   assertComposeInputsWithinExpansionLimits,
-  composeFileArgsFromInvocation,
 } from '../helpers/composeExpansionGuard';
 import { isFullySyntheticHoldImage } from '../utils/senchoRollbackHold';
 import { mapWithConcurrency } from '../utils/mapWithConcurrency';
@@ -2902,10 +2901,11 @@ class DockerController {
     const filePrefix = authoredComposeFileArgs(stackName, this.nodeId);
     const envFileArgs = await authoredComposeEnvFileArgs(stackName, this.nodeId);
     // `compose ps` composes the project too, so the same expansion bound
-    // applies before the CLI reads the files.
+    // applies before the CLI reads the files, including a COMPOSE_FILE
+    // selection and a project directory the env decides.
     await assertComposeInputsWithinExpansionLimits({
       cwd: stackDir,
-      files: composeFileArgsFromInvocation([...filePrefix, ...envFileArgs]),
+      invocation: [...filePrefix, ...envFileArgs],
     });
     const { stdout, stderr } = await execFileAsync(
       'docker',

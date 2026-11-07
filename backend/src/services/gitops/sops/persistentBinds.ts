@@ -5,7 +5,6 @@ import * as YAML from 'yaml';
 import { isValidRelativeStackPath } from '../../../utils/validation';
 import {
   assertComposeInputsWithinExpansionLimits,
-  composeFileArgsFromInvocation,
   ComposeExpansionRefusal,
 } from '../../../helpers/composeExpansionGuard';
 
@@ -384,7 +383,7 @@ async function readModel(
   try {
     await assertComposeInputsWithinExpansionLimits({
       cwd: overlay,
-      files: composeFileArgsFromInvocation(composeArgs),
+      invocation: composeArgs,
     });
   } catch (err) {
     if (err instanceof ComposeExpansionRefusal) {

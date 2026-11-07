@@ -23,6 +23,21 @@ function mockRenderSuccess(renderedJson: string): void {
   mockSpawn.mockImplementation(() => makeRenderProc(renderedJson, 0));
 }
 
+/** The reported nested alias shape: each level references the last nine times. */
+function nestedAliasBomb(levels: number): string {
+  const lines = ['x0: &a0 [lol, lol, lol, lol, lol, lol, lol, lol, lol]'];
+  for (let level = 1; level <= levels; level += 1) {
+    const refs = Array.from({ length: 9 }, () => `*a${level - 1}`).join(', ');
+    lines.push(`x${level}: &a${level} [${refs}]`);
+  }
+  lines.push('services:', '  web:', '    image: nginx:alpine');
+  return `${lines.join('\n')}\n`;
+}
+
+function encodeUtf16Le(text: string): Buffer {
+  return Buffer.concat([Buffer.from([0xff, 0xfe]), Buffer.from(text, 'utf16le')]);
+}
+
 describe('registryReferenceDiscovery', () => {
   beforeEach(() => {
     mockSpawn.mockReset();
@@ -811,5 +826,66 @@ describe('registryReferenceDiscovery', () => {
     expect(childEnv.DOCKER_CONFIG).toBe(process.env.DOCKER_CONFIG ?? undefined);
     expect(childEnv.DOCKER_HOST).toBe(process.env.DOCKER_HOST ?? undefined);
     expect(childEnv.DOCKER_CONTEXT).toBe(process.env.DOCKER_CONTEXT ?? undefined);
+  });
+
+  it('does not render Compose when an extends dependency is over the alias budget', async () => {
+    const dir = path.join(process.env.TMPDIR || '/tmp', `sencho-refdisc-dep-${Date.now()}`);
+    fs.mkdirSync(path.join(dir, 'sub'), { recursive: true });
+    fs.writeFileSync(
+      path.join(dir, 'compose.yaml'),
+      'services:\n  app:\n    extends:\n      file: sub/base.yaml\n      service: base\n',
+    );
+    fs.writeFileSync(path.join(dir, 'sub', 'base.yaml'), nestedAliasBomb(12));
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      await discoverRegistryReferences(dir, {}, 'app');
+      expect(mockSpawn).not.toHaveBeenCalled();
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  it('does not render Compose when the selected file is a UTF-16 alias bomb', async () => {
+    const dir = path.join(process.env.TMPDIR || '/tmp', `sencho-refdisc-utf16-${Date.now()}`);
+    fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(path.join(dir, 'compose.yaml'), encodeUtf16Le(nestedAliasBomb(12)));
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      await discoverRegistryReferences(dir, {}, 'app');
+      expect(mockSpawn).not.toHaveBeenCalled();
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  it('does not render Compose when a later document of the stream is an alias bomb', async () => {
+    const dir = path.join(process.env.TMPDIR || '/tmp', `sencho-refdisc-stream-${Date.now()}`);
+    fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(
+      path.join(dir, 'compose.yaml'),
+      `services:\n  app:\n    image: ghcr.io/org/private-app:latest\n---\n${nestedAliasBomb(12)}`,
+    );
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      await discoverRegistryReferences(dir, {}, 'app');
+      expect(mockSpawn).not.toHaveBeenCalled();
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  it('renders a safe multi-document stream', async () => {
+    const dir = path.join(process.env.TMPDIR || '/tmp', `sencho-refdisc-safestream-${Date.now()}`);
+    fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(
+      path.join(dir, 'compose.yaml'),
+      'services:\n  app:\n    image: ghcr.io/org/private-app:latest\n---\nservices:\n  db:\n    image: postgres:16\n',
+    );
+    mockRenderSuccess(JSON.stringify({
+      services: { app: { image: 'ghcr.io/org/private-app:latest' } },
+    }));
+
+    await discoverRegistryReferences(dir, {}, 'app');
+    expect(mockSpawn).toHaveBeenCalledTimes(1);
   });
 });

@@ -42,7 +42,6 @@ import {
 } from '../utils/authoredComposeArgs';
 import {
   assertComposeInputsWithinExpansionLimits,
-  composeFileArgsFromInvocation,
   ComposeExpansionRefusal,
 } from '../helpers/composeExpansionGuard';
 import type { RollbackInvocationRecord } from '../types/rollbackGeneration';
@@ -602,10 +601,11 @@ export class ComposeService {
     args.push(...action);
     // Every command built here runs Compose, which expands YAML aliases with
     // no bound. The check is last, after every layer is appended, so it sees
-    // exactly the files the CLI is about to read.
+    // exactly the files, env selection, and project directory the CLI is about
+    // to read.
     await assertComposeInputsWithinExpansionLimits({
       cwd: stackDirOverride ?? path.join(this.baseDir, stackName),
-      files: composeFileArgsFromInvocation(args),
+      invocation: args,
     });
     return args;
   }
@@ -2276,10 +2276,11 @@ export class ComposeService {
     out.push(...action);
     // A captured recovery invocation builds its file set without the authored
     // prefix, so the check has to run here as well: a restored generation can
-    // name a compose layer that was never validated by this guard.
+    // name a compose layer that was never validated by this guard. Its captured
+    // env selection and project directory travel in the same argv.
     await assertComposeInputsWithinExpansionLimits({
       cwd: stackDirOverride ?? path.join(this.baseDir, stackName),
-      files: composeFileArgsFromInvocation(out),
+      invocation: out,
     });
     return out;
   }
@@ -3205,7 +3206,7 @@ export class ComposeService {
     }
     await assertComposeInputsWithinExpansionLimits({
       cwd: stackDir,
-      files: composeFileArgsFromInvocation(fileAndEnvPrefix),
+      invocation: fileAndEnvPrefix,
     });
     const stdout = await this.captureCompose([...fileAndEnvPrefix, 'config', '--images'], stackDir);
     const seen = new Set<string>();
@@ -3320,11 +3321,12 @@ export class ComposeService {
       throw err instanceof Error ? err : new Error(String(err));
     }
     const envFileArgs = await authoredComposeEnvFileArgs(stackName, this.nodeId);
+    const renderArgs = ['compose', ...filePrefix, ...envFileArgs];
     await assertComposeInputsWithinExpansionLimits({
       cwd: stackDir,
-      files: composeFileArgsFromInvocation(filePrefix),
+      invocation: renderArgs,
     });
-    const child = spawn('docker', ['compose', ...filePrefix, ...envFileArgs, 'config'], {
+    const child = spawn('docker', [...renderArgs, 'config'], {
       cwd: stackDir,
       env: {
         ...process.env,
@@ -3495,7 +3497,7 @@ export class ComposeService {
     try {
       await assertComposeInputsWithinExpansionLimits({
         cwd: cwdResolved,
-        files: composeFileArgsFromInvocation(composeArgs),
+        invocation: composeArgs,
       });
     } catch (err) {
       if (err instanceof ComposeExpansionRefusal) {

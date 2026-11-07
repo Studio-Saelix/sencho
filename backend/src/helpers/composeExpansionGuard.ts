@@ -1,5 +1,5 @@
 /**
- * Refuse a compose file before Docker Compose expands its YAML aliases.
+ * Refuse a compose input before Docker Compose expands its YAML aliases.
  *
  * `docker compose` resolves every alias into a full structure, with no bound
  * on the result. A small file whose anchors reference each other (a "billion
@@ -8,21 +8,31 @@
  * until it is rebooted, then freezes again on the next render because the file
  * is still on disk.
  *
- * This module reads the top-level files the invocation names, the same inputs
- * the CLI is handed, and counts the nodes their expansion produces using the
- * `yaml` package's AST. That package keeps alias targets as shared references
- * instead of copying them, so the count is linear in the file and never
- * materializes the expansion itself. A file over the budget is refused with a
- * clear message and the CLI is never started.
+ * This module measures the files the invocation will hand to the CLI: the
+ * `-f` files or, when none are named, the files Compose selects from
+ * `COMPOSE_FILE` or its own discovery. It then follows the whole YAML
+ * dependency graph Compose loads from them (`include:` and `extends.file`),
+ * resolving paths in the same project directory Compose uses. It counts the
+ * nodes each document expands to using the `yaml` package's AST. That package
+ * keeps alias targets as shared references instead of copying them, so the
+ * count is linear in the file and an over-budget expansion is refused before
+ * it is materialized. A file over the budget is refused with a clear message
+ * and the CLI is never started.
  *
  * Only alias expansion is measured. A syntax error or a missing file is left
  * for Compose to report, so this guard never changes how an ordinary broken
  * stack fails.
  */
-import { promises as fsPromises } from 'fs';
 import path from 'path';
-import { isAlias, isCollection, isPair, parseDocument, visit } from 'yaml';
+import { isAlias, isCollection, isPair, parseAllDocuments, visit } from 'yaml';
 import type { Document, Node } from 'yaml';
+import {
+  ComposeEnvFileError,
+  ComposeEnvFiles,
+  DEFAULT_PATH_SEPARATOR,
+  expandComposeEnvTemplate,
+  type ComposeEnvLookup,
+} from '../utils/composeDotenv';
 import { readComposeInputWithinCap } from './composeInputReadSink';
 
 /**
@@ -37,6 +47,14 @@ export const MAX_EXPANDED_NODES = 250_000;
  * refusing it keeps the read itself bounded.
  */
 export const MAX_COMPOSE_INPUT_BYTES = 16 * 1024 * 1024;
+
+/**
+ * Bounds on the include/extends graph. An ordinary project is far below both;
+ * a graph beyond them cannot be established safely, so it is refused rather
+ * than walked without a limit.
+ */
+export const MAX_COMPOSE_DEPENDENCY_DEPTH = 32;
+export const MAX_COMPOSE_DEPENDENCY_FILES = 512;
 
 /** Compose's auto-discovery names, in the order Compose looks for them. */
 const DISCOVERED_COMPOSE_NAMES = [
@@ -79,6 +97,34 @@ function sizeRefusalForFile(label: string): ComposeExpansionRefusal {
     `Compose file "${label}" is larger than ${MAX_COMPOSE_INPUT_BYTES / (1024 * 1024)} MiB, so Sencho did not hand it to Docker Compose. ` +
     'Split it into smaller files or reduce its size, then try again.',
   );
+}
+
+function envFileRefusal(label: string): ComposeExpansionRefusal {
+  return new ComposeExpansionRefusal(
+    `Sencho could not read the env file "${label}" the way Docker Compose does, so it could not determine which compose files the run would load. ` +
+    'Fix the env file, then try again.',
+  );
+}
+
+function dependencyRefusal(label: string, detail: string): ComposeExpansionRefusal {
+  return new ComposeExpansionRefusal(
+    `Compose file "${label}" ${detail} Docker Compose expands aliases without a limit and can run the host out of memory, ` +
+    'so Sencho refused to run a file whose expansion it cannot bound.',
+  );
+}
+
+function remoteDependencyRefusal(label: string, kind: 'include' | 'extends'): ComposeExpansionRefusal {
+  // The URL itself is not repeated: an include URL can carry credentials, and
+  // this message reaches API and Doctor surfaces.
+  return dependencyRefusal(
+    label,
+    `has a remote ${kind} that Sencho cannot read before Docker Compose does. ` +
+    'Vendor the file beside the compose file and reference it locally.',
+  );
+}
+
+function dependencyBoundRefusal(label: string, bound: string): ComposeExpansionRefusal {
+  return dependencyRefusal(label, `crosses ${bound}.`);
 }
 
 function saturateAdd(total: number, amount: number): number {
@@ -160,97 +206,469 @@ function countExpandedNodes(
 
 /**
  * Throw when one compose source expands past the budget. A source that does
- * not parse is left alone: Compose reports its own syntax error.
+ * not parse is left alone: Compose reports its own syntax error, and a parser
+ * that stops on the stream never expands it.
+ *
+ * Compose accepts a stream of YAML documents, so every document is measured
+ * and the file's budget covers their sum. A parser mismatch is never treated
+ * as a safe syntax failure: this uses the same document-stream parser Compose
+ * does, not a single-document one.
  */
 export function assertComposeSourceWithinExpansionLimits(source: string, label: string): void {
-  const doc = parseDocument(source, { prettyErrors: false });
-  // A document with syntax errors is Compose's to report. Its parser stops on
-  // them too, so there is no expansion to measure.
-  if (doc.errors.length > 0) return;
-  const root = doc.contents;
-  if (!root) return;
-  const targets = resolveAliasTargets(doc);
-  const expanded = countExpandedNodes(root, targets, new Map(), new Set());
-  if (expanded > MAX_EXPANDED_NODES) {
-    throw refusalForFile(label);
+  const documents = parseAllDocuments(source, { prettyErrors: false, merge: true });
+  if (documents.some((doc) => doc.errors.length > 0)) return;
+  let expanded = 0;
+  for (const doc of documents) {
+    if (!doc.contents) continue;
+    const targets = resolveAliasTargets(doc);
+    expanded = saturateAdd(expanded, countExpandedNodes(doc.contents, targets, new Map(), new Set()));
+    if (expanded > MAX_EXPANDED_NODES) throw refusalForFile(label);
   }
 }
 
 /** `-f` / `--file` values of a Compose invocation, in order. */
 export function composeFileArgsFromInvocation(invocation: readonly string[]): string[] {
-  const files: string[] = [];
-  for (let i = 0; i < invocation.length; i += 1) {
-    const arg = invocation[i];
-    if (arg === '-f' || arg === '--file') {
-      const next = invocation[i + 1];
-      if (next) files.push(next);
-      i += 1;
-    } else if (arg.startsWith('--file=')) {
-      files.push(arg.slice('--file='.length));
-    }
-  }
-  return files;
+  return flagValues(invocation, '-f', '--file');
 }
 
-async function firstExisting(cwd: string, names: readonly string[]): Promise<string | null> {
-  for (const name of names) {
-    const candidate = path.resolve(cwd, name);
-    // Canonical inline js/path-injection barrier at the access sink: the
-    // candidate must stay inside the directory Compose is invoked in. The name
-    // is a constant, so this only states the invariant CodeQL cannot infer.
-    if (!candidate.startsWith(cwd + path.sep)) continue;
-    try {
-      await fsPromises.access(candidate);
-      return candidate;
-    } catch {
-      // The next candidate is the one Compose would pick.
+/** Values of one Compose global flag, in order, for `--flag value` and `--flag=value`. */
+function flagValues(invocation: readonly string[], short: string, long: string): string[] {
+  const values: string[] = [];
+  for (let i = 0; i < invocation.length; i += 1) {
+    const arg = invocation[i];
+    if (arg === short || arg === long) {
+      const next = invocation[i + 1];
+      if (next !== undefined && next !== '') values.push(next);
+      i += 1;
+    } else if (arg.startsWith(`${long}=`)) {
+      const value = arg.slice(long.length + 1);
+      if (value !== '') values.push(value);
     }
+  }
+  return values;
+}
+
+function lastFlagValue(invocation: readonly string[], long: string): string | undefined {
+  const values = flagValues(invocation, long, long);
+  return values.length > 0 ? values[values.length - 1] : undefined;
+}
+
+/** The interpolation environment Compose builds from a run's env files. */
+interface GuardEnvContext {
+  /** Process-level environment, which Compose always puts above file values. */
+  processEnv: ComposeEnvLookup;
+  /** Values the env files assigned, in read order (later files win). */
+  values: Map<string, string>;
+}
+
+interface EnvFileText {
+  text: string;
+  label: string;
+}
+
+function lookupEnv(context: GuardEnvContext): ComposeEnvLookup {
+  return (name) => {
+    const fromProcess = context.processEnv(name);
+    return fromProcess !== undefined ? fromProcess : context.values.get(name);
+  };
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+function asString(value: unknown): string | undefined {
+  if (typeof value === 'string') return value;
+  if (typeof value === 'number') return String(value);
+  return undefined;
+}
+
+function asStringList(value: unknown): string[] {
+  if (typeof value === 'string') return [value];
+  if (typeof value === 'number') return [String(value)];
+  if (Array.isArray(value)) {
+    return value.map(asString).filter((item): item is string => item !== undefined);
+  }
+  return [];
+}
+
+/**
+ * Add env files to an inherited environment. Compose lets the environment a
+ * run already has win: a project `.env` (included projects included) and an
+ * include entry's `env_file` only supply names that were not set before them.
+ * Files added here still resolve references through the environment earlier
+ * files and lines built, the same way Compose reads them.
+ */
+function withAdditionalEnvFiles(context: GuardEnvContext, contents: readonly EnvFileText[]): GuardEnvContext {
+  if (contents.length === 0) return context;
+  const reader = new ComposeEnvFiles(lookupEnv(context));
+  for (const entry of contents) {
+    try {
+      reader.read(entry.text);
+    } catch (err) {
+      if (err instanceof ComposeEnvFileError) throw envFileRefusal(entry.label);
+      throw err;
+    }
+  }
+  const child: GuardEnvContext = {
+    processEnv: context.processEnv,
+    values: new Map(context.values),
+  };
+  const inherited = lookupEnv(context);
+  for (const name of reader.assignedNames()) {
+    if (inherited(name) === undefined) {
+      const value = reader.assigned(name);
+      if (value !== undefined) child.values.set(name, value);
+    }
+  }
+  return child;
+}
+
+/** Parse a Go boolean the way Compose checks COMPOSE_DISABLE_ENV_FILE. */
+function parseGoBoolean(raw: string): boolean | null {
+  switch (raw) {
+    case '1': case 't': case 'T': case 'TRUE': case 'true': case 'True':
+      return true;
+    case '0': case 'f': case 'F': case 'FALSE': case 'false': case 'False':
+      return false;
+    default:
+      return null;
+  }
+}
+
+/** Read one env input, or null when it is missing or not a regular file. */
+async function readEnvFileEntry(filePath: string, label: string): Promise<EnvFileText | null> {
+  const read = await readComposeInputWithinCap(filePath, MAX_COMPOSE_INPUT_BYTES);
+  if (read.tooLarge) throw sizeRefusalForFile(label);
+  if (read.content === null) return null;
+  return { text: read.content, label };
+}
+
+interface LoadedSelectionEnv {
+  context: GuardEnvContext;
+  /** True when --env-file or COMPOSE_ENV_FILES picked the sources. */
+  explicitSources: boolean;
+}
+
+/**
+ * Load the env files Compose reads before it selects the compose files: an
+ * explicit `--env-file` list, then `COMPOSE_ENV_FILES`, then the project
+ * directory's `.env`. A missing explicit file means Compose stops before it
+ * reads any compose file, so there is nothing to measure.
+ */
+async function loadSelectionEnv(
+  cwd: string,
+  selectionBase: string,
+  envFileArgs: readonly string[],
+  processEnv: ComposeEnvLookup,
+): Promise<LoadedSelectionEnv | null> {
+  const sources: Array<{ path: string; label: string; required: boolean }> = [];
+  let explicitSources = false;
+  if (envFileArgs.length > 0) {
+    explicitSources = true;
+    for (const file of envFileArgs) {
+      sources.push({ path: path.resolve(cwd, file), label: file, required: true });
+    }
+  } else {
+    const listed = (processEnv('COMPOSE_ENV_FILES') ?? '').split(',').filter((entry) => entry.length > 0);
+    if (listed.length > 0) {
+      explicitSources = true;
+      for (const file of listed) {
+        sources.push({ path: path.resolve(cwd, file), label: file, required: true });
+      }
+    } else {
+      const disabledRaw = processEnv('COMPOSE_DISABLE_ENV_FILE');
+      if (disabledRaw !== undefined) {
+        // An unparsable value makes Compose fail before it reads a compose
+        // file; either way the default `.env` is not read.
+        if (parseGoBoolean(disabledRaw) !== false) return null;
+      }
+      sources.push({ path: path.resolve(selectionBase, '.env'), label: '.env', required: false });
+    }
+  }
+
+  const contents: EnvFileText[] = [];
+  for (const source of sources) {
+    const entry = await readEnvFileEntry(source.path, source.label);
+    if (entry === null) {
+      if (source.required) return null;
+      continue;
+    }
+    contents.push(entry);
+  }
+  const base: GuardEnvContext = { processEnv, values: new Map() };
+  return { context: withAdditionalEnvFiles(base, contents), explicitSources };
+}
+
+/**
+ * True when a path names a remote include (`https://…`). It cannot be read
+ * locally, so its expansion cannot be bounded.
+ */
+function isRemotePath(value: string): boolean {
+  return /^[a-zA-Z][a-zA-Z0-9+.-]*:\/\//.test(value);
+}
+
+function resolveDependencyPath(value: string, base: string): string {
+  // A `~` prefix is a literal directory name to Compose's loader, not a home
+  // reference, so it is resolved against the project base like any relative path.
+  return path.isAbsolute(value) ? path.resolve(value) : path.resolve(base, value);
+}
+
+/** Interpolate one path declaration; null means Compose fails on it too. */
+function interpolatePath(raw: string, context: GuardEnvContext): string | null {
+  try {
+    return expandComposeEnvTemplate(raw, lookupEnv(context));
+  } catch (err) {
+    if (err instanceof ComposeEnvFileError) return null;
+    throw err;
+  }
+}
+
+interface IncludeGroup {
+  kind: 'include';
+  paths: string[];
+  envFiles: string[];
+  projectDirectory: string | null;
+  interpolate: boolean;
+}
+
+interface ExtendsGroup {
+  kind: 'extends';
+  paths: string[];
+}
+
+type DependencyGroup = IncludeGroup | ExtendsGroup;
+
+/**
+ * Read the include/extends declarations from one parsed document. Returns null
+ * when the document cannot be decoded: an unresolved alias or merge makes
+ * Compose fail that document too, so it never expands it.
+ */
+function dependencyGroups(doc: Document): DependencyGroup[] | null {
+  let data: unknown;
+  try {
+    // The expansion was already bounded above, so materializing it cannot
+    // exceed the budget; disabling the library's alias cap keeps an ordinary
+    // file with many anchors from turning into a false error.
+    data = doc.toJS({ maxAliasCount: -1 });
+  } catch {
+    return null;
+  }
+  if (!isRecord(data)) return [];
+
+  const groups: DependencyGroup[] = [];
+  if (data.include !== undefined) {
+    const entries = Array.isArray(data.include) ? data.include : [data.include];
+    for (const entry of entries) {
+      if (typeof entry === 'string') {
+        groups.push({ kind: 'include', paths: [entry], envFiles: [], projectDirectory: null, interpolate: true });
+        continue;
+      }
+      if (!isRecord(entry)) continue;
+      const paths = asStringList(entry.path);
+      if (paths.length === 0) continue;
+      groups.push({
+        kind: 'include',
+        paths,
+        envFiles: asStringList(entry.env_file),
+        projectDirectory: asString(entry.project_directory) ?? null,
+        interpolate: entry.interpolation !== false,
+      });
+    }
+  }
+
+  if (isRecord(data.services)) {
+    for (const service of Object.values(data.services)) {
+      if (!isRecord(service) || !isRecord(service.extends)) continue;
+      const file = service.extends.file;
+      if (typeof file === 'string' && file.length > 0) {
+        groups.push({ kind: 'extends', paths: [file] });
+      }
+    }
+  }
+  return groups;
+}
+
+interface ResolvedInputFile {
+  path: string;
+  /** Content already read during discovery, to avoid a second read. */
+  content?: string;
+}
+
+interface PendingInput {
+  path: string;
+  /** Directory include/extends declarations in this file resolve against. */
+  projectBase: string;
+  env: GuardEnvContext;
+  depth: number;
+  content?: string;
+}
+
+function inputLabel(cwd: string, filePath: string): string {
+  return path.relative(cwd, filePath) || path.basename(filePath);
+}
+
+/** Read the first auto-discovered input that exists, as Compose would. */
+async function firstDiscoveredInput(base: string, names: readonly string[]): Promise<ResolvedInputFile | null> {
+  for (const name of names) {
+    const candidate = path.resolve(base, name);
+    const read = await readComposeInputWithinCap(candidate, MAX_COMPOSE_INPUT_BYTES);
+    if (read.tooLarge) throw sizeRefusalForFile(name);
+    if (read.content !== null) return { path: candidate, content: read.content };
   }
   return null;
 }
 
-/**
- * The files Compose will read for this invocation. Naming any `-f` file turns
- * off Compose's discovery, override included, so an explicit list is measured
- * exactly as given. With no `-f`, Compose selects the first existing base name
- * and the first existing override name; a same-named file it does not select is
- * not read here either.
- */
-async function resolveInputFiles(cwd: string, explicitFiles: readonly string[]): Promise<string[]> {
-  if (explicitFiles.length > 0) {
-    return explicitFiles.map((file) => path.resolve(cwd, file));
-  }
-  const base = await firstExisting(cwd, DISCOVERED_COMPOSE_NAMES);
-  if (!base) return [];
-  const override = await firstExisting(cwd, DISCOVERED_OVERRIDE_NAMES);
-  return override ? [base, override] : [base];
+/** The files Compose discovers when the invocation names none. */
+async function discoverInputFiles(base: string): Promise<ResolvedInputFile[]> {
+  const baseFile = await firstDiscoveredInput(base, DISCOVERED_COMPOSE_NAMES);
+  if (!baseFile) return [];
+  const override = await firstDiscoveredInput(base, DISCOVERED_OVERRIDE_NAMES);
+  return override ? [baseFile, override] : [baseFile];
 }
 
 /**
- * Read at most the source cap from one file inside `allowedRoot`. The byte-level
- * read lives in `composeInputReadSink`; this function owns the containment
- * decision and the refusal, so the guard's own module shapes the message.
+ * Walk the selected inputs and every YAML dependency they declare, refusing a
+ * file whose expansion passes the budget and a dependency graph that cannot be
+ * resolved within the traversal bounds.
  */
-async function readIfRegularFile(filePath: string, label: string, allowedRoot: string): Promise<string | null> {
-  // Canonical inline js/path-injection barrier, kept in the same scope as the
-  // filesystem access below. CodeQL credits a check that dominates the sink and
-  // not one separated from it by a function boundary, so the resolution and the
-  // containment test are repeated here even though the caller also validates.
-  const target = path.resolve(filePath);
-  if (!target.startsWith(allowedRoot + path.sep)) return null;
+async function assertInputClosure(args: {
+  cwd: string;
+  rootEnv: GuardEnvContext;
+  projectDir: string;
+  files: readonly ResolvedInputFile[];
+}): Promise<void> {
+  const queue: PendingInput[] = args.files.map((file) => ({
+    path: file.path,
+    projectBase: args.projectDir,
+    env: args.rootEnv,
+    depth: 0,
+    content: file.content,
+  }));
+  const visited = new Set<string>();
 
-  const read = await readComposeInputWithinCap(target, MAX_COMPOSE_INPUT_BYTES);
-  if (read.tooLarge) throw sizeRefusalForFile(label);
-  return read.content;
+  while (queue.length > 0) {
+    const input = queue.shift() as PendingInput;
+    const filePath = path.resolve(input.path);
+    if (visited.has(filePath)) continue;
+    visited.add(filePath);
+    const label = inputLabel(args.cwd, filePath);
+    if (visited.size > MAX_COMPOSE_DEPENDENCY_FILES) {
+      throw dependencyBoundRefusal(label, `more than ${MAX_COMPOSE_DEPENDENCY_FILES} compose files`);
+    }
+    if (input.depth > MAX_COMPOSE_DEPENDENCY_DEPTH) {
+      throw dependencyBoundRefusal(label, `an include/extends chain deeper than ${MAX_COMPOSE_DEPENDENCY_DEPTH}`);
+    }
+
+    let content = input.content;
+    if (content === undefined) {
+      const read = await readComposeInputWithinCap(filePath, MAX_COMPOSE_INPUT_BYTES);
+      if (read.tooLarge) throw sizeRefusalForFile(label);
+      // Missing, unreadable as a file, or a non-regular input: Compose reports
+      // it next, so there is no expansion to measure here.
+      if (read.content === null) continue;
+      content = read.content;
+    }
+
+    const documents = parseAllDocuments(content, { prettyErrors: false, merge: true });
+    // Compose's parser stops on a syntax error in the stream, so it never
+    // expands that stream either.
+    if (documents.some((doc) => doc.errors.length > 0)) continue;
+
+    let expanded = 0;
+    for (const doc of documents) {
+      if (!doc.contents) continue;
+      const targets = resolveAliasTargets(doc);
+      expanded = saturateAdd(expanded, countExpandedNodes(doc.contents, targets, new Map(), new Set()));
+      if (expanded > MAX_EXPANDED_NODES) throw refusalForFile(label);
+    }
+
+    for (const doc of documents) {
+      const groups = dependencyGroups(doc);
+      if (groups === null) continue;
+      for (const group of groups) {
+        if (group.kind === 'extends') {
+          for (const raw of group.paths) {
+            const target = interpolatePath(raw, input.env);
+            if (target === null) continue;
+            if (isRemotePath(target)) throw remoteDependencyRefusal(label, 'extends');
+            const resolved = resolveDependencyPath(target, input.projectBase);
+            queue.push({
+              path: resolved,
+              projectBase: path.dirname(resolved),
+              env: input.env,
+              depth: input.depth + 1,
+            });
+          }
+          continue;
+        }
+
+        const targets: string[] = [];
+        for (const raw of group.paths) {
+          const target = interpolatePath(raw, input.env);
+          if (target === null) continue;
+          if (isRemotePath(target)) throw remoteDependencyRefusal(label, 'include');
+          targets.push(resolveDependencyPath(target, input.projectBase));
+        }
+        if (targets.length === 0) continue;
+
+        let childBase: string;
+        if (group.projectDirectory !== null) {
+          const rawDirectory = interpolatePath(group.projectDirectory, input.env);
+          if (rawDirectory === null) continue;
+          if (isRemotePath(rawDirectory)) throw remoteDependencyRefusal(label, 'include');
+          childBase = resolveDependencyPath(rawDirectory, input.projectBase);
+        } else {
+          childBase = path.dirname(targets[0]);
+        }
+
+        const additionalEnv: EnvFileText[] = [];
+        if (group.envFiles.length > 0) {
+          for (const raw of group.envFiles) {
+            const target = interpolatePath(raw, input.env);
+            if (target === null) continue;
+            const resolved = resolveDependencyPath(target, input.projectBase);
+            const entry = await readEnvFileEntry(resolved, inputLabel(args.cwd, resolved));
+            // A missing explicit include env file makes Compose fail before it
+            // loads the included project.
+            if (entry === null) continue;
+            additionalEnv.push(entry);
+          }
+        } else if (group.interpolate) {
+          // An included project's interpolation env defaults to its own `.env`;
+          // it only fills names the inherited environment leaves unset.
+          const projectEnv = path.resolve(childBase, '.env');
+          const entry = await readEnvFileEntry(projectEnv, inputLabel(args.cwd, projectEnv));
+          if (entry !== null) additionalEnv.push(entry);
+        }
+
+        const childEnv = additionalEnv.length > 0
+          ? withAdditionalEnvFiles(input.env, additionalEnv)
+          : input.env;
+        for (const target of targets) {
+          queue.push({
+            path: target,
+            projectBase: childBase,
+            env: childEnv,
+            depth: input.depth + 1,
+          });
+        }
+      }
+    }
+  }
 }
 
 /**
  * Refuse to run Docker Compose when one of the files it will read expands past
- * the alias budget. `files` are the invocation's `-f` values (relative to
- * `cwd`); an empty list means Compose discovers its own files.
+ * the alias budget. `invocation` is the exact argv (or its global-flag prefix)
+ * the caller is about to spawn: its `-f`, `--env-file`, and
+ * `--project-directory` values decide what Compose reads, and `env` is the
+ * environment the child receives.
  *
- * Only a regular file is read. A missing or non-regular input is left for
- * Compose to report, so an ordinary broken stack fails exactly as it did.
+ * A missing or non-regular input is left for Compose to report, so an ordinary
+ * broken stack fails exactly as it did. A dependency the guard cannot read
+ * (a remote include, or a graph past the traversal bounds) is refused, because
+ * Compose would expand it unmeasured.
  *
  * The measurement is taken immediately before the caller spawns Compose, but a
  * file rewritten in the gap between the two is not re-checked. A writer who can
@@ -259,13 +677,90 @@ async function readIfRegularFile(filePath: string, label: string, allowedRoot: s
  */
 export async function assertComposeInputsWithinExpansionLimits(opts: {
   cwd: string;
-  files?: readonly string[];
+  invocation: readonly string[];
+  env?: ComposeEnvLookup;
 }): Promise<void> {
   const cwd = path.resolve(opts.cwd);
-  for (const filePath of await resolveInputFiles(cwd, opts.files ?? [])) {
-    const label = path.relative(cwd, filePath) || path.basename(filePath);
-    const content = await readIfRegularFile(filePath, label, cwd);
-    if (content === null) continue;
-    assertComposeSourceWithinExpansionLimits(content, label);
+  const invocation = opts.invocation;
+  const processEnv = opts.env ?? ((name: string) => process.env[name]);
+
+  const explicitFiles = composeFileArgsFromInvocation(invocation).map((file) => path.resolve(cwd, file));
+  const envFileArgs = flagValues(invocation, '--env-file', '--env-file');
+  const projectDirectoryArg = lastFlagValue(invocation, '--project-directory');
+  const configuredProjectDir = projectDirectoryArg !== undefined
+    ? path.resolve(cwd, projectDirectoryArg)
+    : null;
+
+  // Compose decides the default env-file directory before it reads the env:
+  // an explicit --project-directory, else the first -f file's directory, else
+  // the working directory.
+  const selectionBase = configuredProjectDir
+    ?? (explicitFiles.length > 0 ? path.dirname(explicitFiles[0]) : cwd);
+  const selection = await loadSelectionEnv(cwd, selectionBase, envFileArgs, processEnv);
+  // A missing explicit env file, an unreadable env file, or an invalid
+  // COMPOSE_DISABLE_ENV_FILE makes Compose fail before it reads a compose
+  // input, so there is no expansion to measure.
+  if (selection === null) return;
+
+  const lookup = lookupEnv(selection.context);
+  // A default `.env` that disables itself still selects the compose files, but
+  // Compose drops its other assignments from interpolation and skips the
+  // selected project's `.env`. An explicit --env-file or COMPOSE_ENV_FILES
+  // source is unaffected by the setting, so only the default source is
+  // restricted. Keep only the selection variables so dependency paths resolve
+  // with the same (mostly empty) environment Compose uses.
+  let rootEnv = selection.context;
+  let skipProjectEnv = selection.explicitSources;
+  if (!selection.explicitSources && processEnv('COMPOSE_DISABLE_ENV_FILE') === undefined) {
+    const disabledByFile = lookup('COMPOSE_DISABLE_ENV_FILE');
+    if (disabledByFile !== undefined) {
+      const disabled = parseGoBoolean(disabledByFile);
+      // An invalid value makes Compose fail before any compose input is read.
+      if (disabled === null) return;
+      if (disabled) {
+        const kept = new Map<string, string>();
+        for (const name of ['COMPOSE_FILE', 'COMPOSE_PATH_SEPARATOR', 'COMPOSE_DISABLE_ENV_FILE']) {
+          const value = lookup(name);
+          if (value !== undefined) kept.set(name, value);
+        }
+        rootEnv = { processEnv, values: kept };
+        skipProjectEnv = true;
+      }
+    }
   }
+
+  let inputFiles: ResolvedInputFile[];
+  if (explicitFiles.length > 0) {
+    // Naming any -f file turns Compose discovery and COMPOSE_FILE off.
+    inputFiles = explicitFiles.map((file) => ({ path: file }));
+  } else {
+    const composeFile = lookup('COMPOSE_FILE');
+    if (composeFile !== undefined) {
+      // An empty value makes Compose reject the run; `filepath.SplitList` drops
+      // empty entries, so a list of only separators has nothing to measure.
+      const separator = lookup('COMPOSE_PATH_SEPARATOR') || DEFAULT_PATH_SEPARATOR;
+      const entries = composeFile.split(separator).filter((entry) => entry.length > 0);
+      if (entries.length === 0) return;
+      // COMPOSE_FILE entries resolve against the working directory, not the
+      // project directory (the project directory is derived from them).
+      inputFiles = entries.map((entry) => ({ path: path.resolve(cwd, entry) }));
+    } else {
+      inputFiles = await discoverInputFiles(selectionBase);
+    }
+  }
+
+  const projectDir = configuredProjectDir
+    ?? (inputFiles.length > 0 ? path.dirname(inputFiles[0].path) : selectionBase);
+
+  // A selected project directory other than the one the env files came from
+  // adds that directory's `.env` for interpolation, but only names the earlier
+  // environment leaves unset. An explicit env source replaces it, and a file
+  // that disabled itself skips it too.
+  if (!skipProjectEnv && projectDir !== selectionBase) {
+    const projectEnv = path.resolve(projectDir, '.env');
+    const entry = await readEnvFileEntry(projectEnv, inputLabel(cwd, projectEnv));
+    if (entry !== null) rootEnv = withAdditionalEnvFiles(rootEnv, [entry]);
+  }
+
+  await assertInputClosure({ cwd, rootEnv, projectDir, files: inputFiles });
 }

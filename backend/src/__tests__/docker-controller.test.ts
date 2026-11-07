@@ -44,7 +44,6 @@ const { mockDocker, composeDirRef, mockExecFileAsync, mockAssertComposeInputs, M
 // below drives it to prove the ps path is behind it.
 vi.mock('../helpers/composeExpansionGuard', () => ({
   assertComposeInputsWithinExpansionLimits: mockAssertComposeInputs,
-  composeFileArgsFromInvocation: () => [] as string[],
   ComposeExpansionRefusal: MockComposeExpansionRefusal,
 }));
 

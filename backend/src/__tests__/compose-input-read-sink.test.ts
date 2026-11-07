@@ -48,6 +48,57 @@ describe('readComposeInputWithinCap', () => {
     });
   });
 
+  it('decodes a UTF-16LE file with a byte-order mark', async () => {
+    const file = path.join(dir, 'compose.yaml');
+    await fsPromises.writeFile(file, Buffer.concat([
+      Buffer.from([0xff, 0xfe]),
+      Buffer.from('services:\n', 'utf16le'),
+    ]));
+
+    await expect(readComposeInputWithinCap(file, 1024)).resolves.toEqual({
+      content: 'services:\n',
+      tooLarge: false,
+    });
+  });
+
+  it('decodes a UTF-16BE file with a byte-order mark', async () => {
+    const file = path.join(dir, 'compose.yaml');
+    const body = Buffer.from('services:\n', 'utf16le');
+    body.swap16();
+    await fsPromises.writeFile(file, Buffer.concat([Buffer.from([0xfe, 0xff]), body]));
+
+    await expect(readComposeInputWithinCap(file, 1024)).resolves.toEqual({
+      content: 'services:\n',
+      tooLarge: false,
+    });
+  });
+
+  it('drops a UTF-8 byte-order mark', async () => {
+    const file = path.join(dir, 'compose.yaml');
+    await fsPromises.writeFile(file, Buffer.concat([
+      Buffer.from([0xef, 0xbb, 0xbf]),
+      Buffer.from('services:\n', 'utf8'),
+    ]));
+
+    await expect(readComposeInputWithinCap(file, 1024)).resolves.toEqual({
+      content: 'services:\n',
+      tooLarge: false,
+    });
+  });
+
+  it('applies the byte cap to an encoded file, not its decoded length', async () => {
+    const file = path.join(dir, 'compose.yaml');
+    await fsPromises.writeFile(file, Buffer.concat([
+      Buffer.from([0xff, 0xfe]),
+      Buffer.from('x'.repeat(32), 'utf16le'),
+    ]));
+
+    await expect(readComposeInputWithinCap(file, 16)).resolves.toEqual({
+      content: null,
+      tooLarge: true,
+    });
+  });
+
   it('reports a file larger than the cap without reading it', async () => {
     const file = path.join(dir, 'compose.yaml');
     await fsPromises.writeFile(file, 'x'.repeat(32));

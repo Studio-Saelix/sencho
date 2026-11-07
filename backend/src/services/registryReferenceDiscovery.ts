@@ -12,7 +12,6 @@ import { sanitizeForLog } from '../utils/safeLog';
 import { getErrorMessage } from '../utils/errors';
 import {
   assertComposeInputsWithinExpansionLimits,
-  composeFileArgsFromInvocation,
   ComposeExpansionRefusal,
 } from '../helpers/composeExpansionGuard';
 
@@ -453,9 +452,13 @@ async function renderComposeEffectiveModel(
   }
   args.push('config', '--format', 'json');
   try {
+    // The child is spawned with `envVars` rather than this process's
+    // environment, so COMPOSE_FILE and COMPOSE_PATH_SEPARATOR come from that
+    // map when the caller resolved a different interpolation environment.
     await assertComposeInputsWithinExpansionLimits({
       cwd,
-      files: composeFileArgsFromInvocation(args),
+      invocation: args,
+      env: (name) => envVars[name],
     });
   } catch (err) {
     if (err instanceof ComposeExpansionRefusal) {
