@@ -73,9 +73,9 @@ Once the cause is resolved, the next check (on the interval, or via **Recheck**)
 
 1. Open **Update** from the top nav strip.
 2. Skim the table. The badge tells you the risk at a glance: `Safe · patch` is green, `Review · minor` is amber, `Blocked · major` is red, a digest-only rebuild on a non-semver tag shows the gray `Digest rebuild` badge, `Check uncertain` appears when the last preview check was incomplete or failed, and `Newer tag · edit Compose` marks a higher tag that requires editing the Compose pin.
-3. For a **Digest rebuild** (same Compose tag, new registry content), click **Apply now** on its row to pull and recreate the stack immediately. **Apply now** stays disabled for tag-only advisories and for uncertain checks.
+3. For a **Digest rebuild** (same Compose tag, new registry content), click **Apply now** on its row to pull and recreate the stack immediately. A tag-only advisory shows **Open stack editor** in place of **Apply now**, and an uncertain check keeps **Apply now** disabled.
 4. For a higher pinned semver tag (a version diff such as `1.2.3` → `1.2.4`, including major bumps), edit the Compose `image:` reference to the next tag, then deploy the stack from the editor. **Apply now** and the lifecycle **Update** action pull the currently pinned tag only; they do not rewrite the pin.
-5. For a major bump, review the changelog preview and upstream release notes before changing the pin and deploying. **Apply now** is disabled on blocked cards.
+5. For a major bump, review the changelog preview and upstream release notes before changing the pin and deploying. A blocked card shows **Open stack editor** in place of **Apply now**.
 
 On multi-service stacks, the Updates view can also apply a single service when that service has a confirmed same-tag digest update. Scheduled auto-update, webhook pull, and bulk update always refresh the full stack, subject to each service's update policy.
 6. Use **Recheck** in the hero to force an immediate registry poll across every reachable node. A 2-minute per-node cooldown applies, and the toast tells you how many nodes were triggered, rate-limited, or failed.
@@ -88,12 +88,12 @@ On multi-service stacks, the Updates view can also apply a single service when t
 |-------|-------|-----------------|
 | `Safe · patch` | Green (Shield icon) | Patch-level semver bump (e.g. `1.2.3` to `1.2.4`). Resolve by editing the Compose pin, then deploying. |
 | `Review · minor` | Amber (AlertTriangle icon) | Minor semver bump (e.g. `1.2.3` to `1.3.0`). Resolve by editing the Compose pin, then deploying. |
-| `Blocked · major` | Red (ShieldAlert icon) | Major semver bump (e.g. `1.2.3` to `2.0.0`). **Apply now** is disabled; the row's details surface the reason "Major version jumps require human review before applying." After review, edit the Compose pin, then deploy. |
+| `Blocked · major` | Red (ShieldAlert icon) | Major semver bump (e.g. `1.2.3` to `2.0.0`). The row shows **Open stack editor** in place of **Apply now**, and its details surface the reason "Major version jumps require human review before applying." After review, edit the Compose pin, then deploy. |
 | `Digest rebuild` | Gray | Non-semver tag (e.g. `main`, `stable`) with an updated digest (tag name unchanged; content changed; see [Tags vs digests](/features/vulnerability-scanning#tags-vs-digests)). **Apply now** pulls this rebuild. |
 | `Check uncertain` | Amber | Preview check incomplete or failed; **Apply now** stays disabled until a full successful check. |
-| `Newer tag · edit Compose` | Amber | A higher tag exists than the Compose pin; edit Compose (do not use **Apply now**). |
+| `Newer tag · edit Compose` | Amber | A higher tag exists than the Compose pin; the row shows **Open stack editor** so you can edit the Compose pin. |
 
-Blocked major bumps still surface in scheduled check runs so you stay informed, but **Apply now** stays disabled until you review them, change the Compose pin, and deploy.
+Blocked major bumps still surface in scheduled check runs so you stay informed, but the row shows **Open stack editor** instead of **Apply now**: review them, change the Compose pin, and deploy.
 
 A separate inline `Rebuild available` label replaces the version diff when only the digest changed (same tag, new image). The risk badge on those cards still reflects the underlying semver classification reported by the registry.
 
@@ -164,7 +164,7 @@ A stack that mixes registry images and `build:` services still gets a card, scor
   <Accordion title='Card shows "No changelog available"'>
     Sencho reads changelog metadata from the registry's manifest and OCI annotations. Registries that do not publish this metadata (most private registries and many self-hosted ones) render the update without a changelog. The risk badge is still accurate because it is computed from the tag itself.
   </Accordion>
-  <Accordion title='Apply now is disabled with a "Blocked · major" tooltip'>
+  <Accordion title='A blocked major shows Open stack editor instead of Apply now'>
     The stack has a major version bump and is blocked on the readiness board by policy: major updates never auto-apply without human review. After reviewing the upstream release notes, edit the Compose `image:` pin to the reviewed next tag, then deploy the stack from the editor. **Apply now** and lifecycle **Update** pull the currently pinned tag only; they do not bump the pin.
   </Accordion>
   <Accordion title='Card stays stuck on "Checking registry..."'>

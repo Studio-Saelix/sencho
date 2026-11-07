@@ -6,7 +6,7 @@ import { Badge } from '@/components/ui/badge';
 import { SegmentedControl } from '@/components/ui/segmented-control';
 import { SortableTableHead } from '@/components/ui/sortable-table';
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table';
-import { RefreshCw, Shield, AlertTriangle, ShieldAlert, CircleSlash, Clock, Play, CalendarClock, Monitor, Globe, ChevronRight } from 'lucide-react';
+import { RefreshCw, Shield, AlertTriangle, ShieldAlert, CircleSlash, Clock, Play, CalendarClock, Monitor, Globe, ChevronRight, SquarePen } from 'lucide-react';
 import { toast } from '@/components/ui/toast-store';
 import { apiFetch, fetchForNode } from '@/lib/api';
 import { formatTimeAgo } from '@/lib/relativeTime';
@@ -37,7 +37,7 @@ import type { ScheduledTask } from '@/types/scheduling';
 import { SERVICE_SCOPED_UPDATE_CAPABILITY } from '@/lib/capabilities';
 import { requestServiceUpdate } from '@/lib/serviceUpdate';
 import { openEndpointRefusalInEditor } from '@/lib/endpointRefusalHandoff';
-import { toastUpdatePolicyRefusal } from '@/lib/updatePolicyRefusal';
+import { openStackEditor, toastUpdatePolicyRefusal } from '@/lib/updatePolicyRefusal';
 import { useDeployFeedback } from '@/context/DeployFeedbackContext';
 import { useStackUpdate } from '@/hooks/useStackUpdate';
 
@@ -355,6 +355,36 @@ export function AutoPill({
   );
 }
 
+/**
+ * A newer tag, including a blocked major bump, has no update Sencho can apply:
+ * the only resolution is the tag in the Compose file, so the row offers that
+ * destination as its verb in place of a disabled Apply. A session without edit
+ * authority keeps the plain disabled Apply rather than a verb that does nothing.
+ */
+function useComposeEditVerb(card: StackCard): boolean {
+  const { can } = useAuth();
+  const { preview, nodeId, stack } = card;
+  return !!preview
+    && isTagOnlyAdvisory(preview)
+    && !isActionableUpdatePreview(preview)
+    && can('stack:edit', 'stack', stack, nodeId);
+}
+
+function OpenEditorButton({ stack, nodeId, className }: { stack: string; nodeId: number; className?: string }) {
+  return (
+    <Button
+      size="sm"
+      variant="outline"
+      onClick={() => openStackEditor(nodeId, stack)}
+      aria-label={`Open stack editor for ${stack}`}
+      className={cn('gap-1.5', className)}
+    >
+      <SquarePen className="h-3.5 w-3.5" strokeWidth={1.5} aria-hidden="true" />
+      Open stack editor
+    </Button>
+  );
+}
+
 function StackReadinessCard({
   card,
   canServiceUpdate = false,
@@ -378,6 +408,8 @@ function StackReadinessCard({
   // build-only), not preview.images.length (shared tags collapse that list).
   const showServiceApply = canServiceUpdate && declaredServiceCount(preview) > 1 && updatingImageCount > 0;
   const nextRun = scheduledTask?.next_run_at ?? null;
+  const autoPillShown = isPolicySkipped(unattendedPolicy) || !autoUpdateEnabled;
+  const composeEditVerb = useComposeEditVerb(card);
   const verificationOnly = isVerificationOnlyPreview(preview);
   const reviewRequired = isReviewRequiredUpdatePreview(preview);
   // Full-stack apply is held for review when another image in the same stack
@@ -495,7 +527,7 @@ function StackReadinessCard({
               </div>
 
               {blocked && blockedReason && (
-                <div className="rounded border border-destructive/25 bg-destructive/5 px-3 py-2 text-[11px] text-destructive/90">
+                <div className="text-[11px] text-destructive/90">
                   {blockedReason}
                 </div>
               )}
@@ -520,35 +552,37 @@ function StackReadinessCard({
               )}
 
               <div className="mt-auto flex items-center justify-between gap-3 pt-1">
-                <div className="flex items-center gap-1.5 font-mono text-[11px] text-stat-subtitle">
-                  {isPolicySkipped(unattendedPolicy) ? (
-                    <>
-                      <CircleSlash className="h-3.5 w-3.5" strokeWidth={1.5} aria-hidden="true" />
-                      <span data-testid="readiness-schedule">Skipped by update policy</span>
-                    </>
-                  ) : nextRun ? (
-                    <>
-                      <CalendarClock className="h-3.5 w-3.5" strokeWidth={1.5} aria-hidden="true" />
-                      <span>Scheduled · <span className="text-stat-value">{formatClock(nextRun)}</span></span>
-                      <span className="text-stat-subtitle/70">· {formatRelative(nextRun)}</span>
-                    </>
-                  ) : (
-                    <>
-                      <Clock className="h-3.5 w-3.5" strokeWidth={1.5} aria-hidden="true" />
-                      <span>No schedule</span>
-                    </>
-                  )}
-                </div>
-                <Button
-                  size="sm"
-                  onClick={() => onApply(stack, nodeId)}
-                  disabled={applyDisabled}
-                  title={applyTitle}
-                  className="gap-1.5"
-                >
-                  <Play className="h-3.5 w-3.5" strokeWidth={1.5} aria-hidden="true" />
-                  {applying ? 'Applying...' : 'Apply now'}
-                </Button>
+                {/* The header pill already says Off or skipped; the footer states only a schedule. */}
+                {!autoPillShown && (
+                  <div className="flex items-center gap-1.5 font-mono text-[11px] text-stat-subtitle">
+                    {nextRun ? (
+                      <>
+                        <CalendarClock className="h-3.5 w-3.5" strokeWidth={1.5} aria-hidden="true" />
+                        <span>Scheduled · <span className="text-stat-value">{formatClock(nextRun)}</span></span>
+                        <span className="text-stat-subtitle/70">· {formatRelative(nextRun)}</span>
+                      </>
+                    ) : (
+                      <>
+                        <Clock className="h-3.5 w-3.5" strokeWidth={1.5} aria-hidden="true" />
+                        <span>No schedule</span>
+                      </>
+                    )}
+                  </div>
+                )}
+                {composeEditVerb ? (
+                  <OpenEditorButton stack={stack} nodeId={nodeId} className="ml-auto" />
+                ) : (
+                  <Button
+                    size="sm"
+                    onClick={() => onApply(stack, nodeId)}
+                    disabled={applyDisabled}
+                    title={applyTitle}
+                    className="ml-auto gap-1.5"
+                  >
+                    <Play className="h-3.5 w-3.5" strokeWidth={1.5} aria-hidden="true" />
+                    {applying ? 'Applying...' : 'Apply now'}
+                  </Button>
+                )}
               </div>
             </>
           );
@@ -728,21 +762,9 @@ function ReadinessHero({
             </span>
           )}
         </div>
-        <div className="flex items-center gap-3">
-          {total > 0 && (
-            <div className="text-right">
-              <div className="font-mono tabular-nums text-2xl text-stat-value">
-                {ready}<span className="text-stat-subtitle/60"> / {total}</span>
-              </div>
-              <div className="font-mono text-[10px] uppercase tracking-[0.18em] text-stat-subtitle">
-                Ready
-              </div>
-            </div>
-          )}
-          {canRefresh && (
-            <RecheckButton holdBusyWidth refreshing={refreshing} onClick={onRefresh} />
-          )}
-        </div>
+        {canRefresh && (
+          <RecheckButton holdBusyWidth refreshing={refreshing} onClick={onRefresh} />
+        )}
       </div>
     </div>
   );
@@ -849,6 +871,7 @@ function ReadinessTableRow({
   const showServiceApply = canServiceUpdate && declaredServiceCount(preview) > 1 && updatingImages.length > 0;
   const nextRun = scheduledTask?.next_run_at ?? null;
   const applyDisabled = !isActionableUpdatePreview(preview) || applying || applyingService !== null;
+  const composeEditVerb = useComposeEditVerb(card);
   let applyTitle: string | undefined;
   if (blocked) applyTitle = preview?.summary.blocked_reason ?? undefined;
   else if (verificationOnly) applyTitle = 'Digest verification failed';
@@ -955,7 +978,9 @@ function ReadinessTableRow({
           {schedule}
         </TableCell>
         <TableCell className="text-right">
-          {hasDetail && (
+          {hasDetail && (composeEditVerb ? (
+            <OpenEditorButton stack={stack} nodeId={nodeId} />
+          ) : (
             <Button
               size="sm"
               onClick={() => onApply(stack, nodeId)}
@@ -967,7 +992,7 @@ function ReadinessTableRow({
               <Play className="h-3.5 w-3.5" strokeWidth={1.5} aria-hidden="true" />
               {applying ? 'Applying...' : 'Apply now'}
             </Button>
-          )}
+          ))}
         </TableCell>
       </TableRow>
       {hasDetail && expanded && preview && (
@@ -987,7 +1012,7 @@ function ReadinessTableRow({
               {preview.changelog ?? 'No changelog available from the registry yet.'}
             </div>
             {blocked && preview.summary.blocked_reason && (
-              <div className="rounded border border-destructive/25 bg-destructive/5 px-3 py-2 text-[11px] text-destructive/90">
+              <div className="text-[11px] text-destructive/90">
                 {preview.summary.blocked_reason}
               </div>
             )}
@@ -1271,7 +1296,7 @@ function MobileNodeSection({
 function CheckFailuresNotice({ failures }: { failures: { stack: string; reason: string | null }[] }) {
   if (failures.length === 0) return null;
   return (
-    <div className="rounded-lg border border-warning/30 bg-warning/5 p-3">
+    <div className="rounded-lg border border-card-border p-3">
       <div className="flex items-center gap-2 font-mono text-[11px] text-warning">
         <AlertTriangle className="h-3.5 w-3.5" strokeWidth={1.5} aria-hidden="true" />
         {failures.length} stack{failures.length !== 1 ? 's' : ''} could not be checked

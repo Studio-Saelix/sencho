@@ -20,7 +20,8 @@ vi.mock('@/components/ui/toast-store', () => ({
   toast: { error: vi.fn(), success: vi.fn(), warning: vi.fn(), info: vi.fn(), loading: vi.fn(), dismiss: vi.fn() },
 }));
 vi.mock('@/hooks/use-is-mobile', () => ({ useIsMobile: () => false }));
-vi.mock('@/context/AuthContext', () => ({ useAuth: () => ({ can: () => true }) }));
+const authState = vi.hoisted(() => ({ can: ((): boolean => true) as (action: string) => boolean }));
+vi.mock('@/context/AuthContext', () => ({ useAuth: () => ({ can: (action: string) => authState.can(action) }) }));
 vi.mock('@/context/DeployFeedbackContext', () => ({
   useDeployFeedback: () => ({
     runWithLog: async (_params: unknown, fn: (started: Promise<void>, ds: string) => Promise<unknown>) =>
@@ -580,6 +581,28 @@ describe('AutoUpdateReadinessView desktop Apply now', () => {
     expect(screen.getByText(/0 of 1 ready to apply automatically/)).toBeInTheDocument();
   });
 
+  it('says a stack has no schedule once, in the pill, and counts ready updates once in the hero', async () => {
+    mockedFetch.mockImplementation((url: string) => {
+      if (url === '/image-updates/fleet') {
+        return Promise.resolve({ ok: true, json: async () => ({ '1': { nextcloud: true } }) });
+      }
+      if (url.startsWith('/scheduled-tasks')) {
+        return Promise.resolve({ ok: true, json: async () => [] });
+      }
+      return Promise.resolve({ ok: true, json: async () => ({}) });
+    });
+    mockedFetchForNode.mockResolvedValue({ ok: true, json: async () => card().preview });
+
+    render(<AutoUpdateReadinessView />);
+    await screen.findByTestId('readiness-table');
+    fireEvent.click(screen.getByRole('radio', { name: 'Cards' }));
+
+    expect(await screen.findByTestId('auto-pill')).toHaveTextContent('Auto: Off');
+    expect(screen.queryByText('No schedule')).toBeNull();
+    expect(screen.getAllByText(/0 of 1 ready to apply automatically/)).toHaveLength(1);
+    expect(screen.queryByText('Ready')).toBeNull();
+  });
+
   it('does not present a next run on the card for a stack the schedule will skip', async () => {
     mockedFetch.mockImplementation((url: string) => {
       if (url === '/image-updates/fleet') {
@@ -615,8 +638,9 @@ describe('AutoUpdateReadinessView desktop Apply now', () => {
     await screen.findByTestId('readiness-table');
     fireEvent.click(screen.getByRole('radio', { name: 'Cards' }));
 
-    expect(await screen.findByText('Skipped by update policy')).toBeInTheDocument();
+    expect(await screen.findByTestId('auto-pill')).toHaveAttribute('data-state', 'skipped');
     expect(screen.queryByText(/Scheduled ·/)).toBeNull();
+    expect(screen.queryByText('Skipped by update policy')).toBeNull();
   });
 
   it('shows the recorded policy skip for a stack on a remote node', async () => {
@@ -658,8 +682,9 @@ describe('AutoUpdateReadinessView desktop Apply now', () => {
     await screen.findByTestId('readiness-table');
     fireEvent.click(screen.getByRole('radio', { name: 'Cards' }));
 
-    expect(await screen.findByText('Skipped by update policy')).toBeInTheDocument();
+    expect(await screen.findByTestId('auto-pill')).toHaveAttribute('data-state', 'skipped');
     expect(screen.queryByText(/Scheduled ·/)).toBeNull();
+    expect(screen.queryByText('Skipped by update policy')).toBeNull();
     expect(screen.getByText(/0 of 1 ready to apply automatically/)).toBeInTheDocument();
   });
 
@@ -712,7 +737,8 @@ describe('AutoUpdateReadinessView desktop Apply now', () => {
     // The node-scoped key keeps the local allow and the remote skip apart even
     // though both nodes run a stack with the same name.
     expect(await screen.findAllByText(/Scheduled ·/)).toHaveLength(1);
-    expect(screen.getByText('Skipped by update policy')).toBeInTheDocument();
+    expect(screen.getByTestId('auto-pill')).toHaveAttribute('data-state', 'skipped');
+    expect(screen.queryByText('Skipped by update policy')).toBeNull();
   });
 
   it('applies a single service and refreshes the authoritative update preview', async () => {
@@ -1549,7 +1575,7 @@ describe('AutoUpdateReadinessView check-failed advisory', () => {
     expect(screen.queryByText(/ready to apply automatically/)).toBeNull();
   });
 
-  it('keeps a tag-only advisory card on load instead of treating it as cleared', async () => {
+  function mockTagOnlyNginx() {
     mockedFetch.mockImplementation((url: string) => {
       if (url === '/image-updates/fleet') {
         return Promise.resolve({ ok: true, json: async () => ({ '1': { nginx: true } }) });
@@ -1609,13 +1635,62 @@ describe('AutoUpdateReadinessView check-failed advisory', () => {
       }
       return Promise.resolve({ ok: true, json: async () => null });
     });
+  }
+
+  it('keeps a tag-only advisory card on load instead of treating it as cleared', async () => {
+    mockTagOnlyNginx();
 
     render(<AutoUpdateReadinessView />);
 
     expect(await screen.findByText(/1 update pending/)).toBeInTheDocument();
     expect(screen.getAllByText('nginx').length).toBeGreaterThan(0);
     expect(screen.queryByText(/Everything is up to date/)).toBeNull();
-    expect(screen.getByRole('button', { name: /Apply now/i })).toBeDisabled();
+    expect(screen.queryByRole('button', { name: /Apply now/i })).toBeNull();
+  });
+
+  it('offers Open stack editor for a tag-only advisory and opens that stack on its node', async () => {
+    mockTagOnlyNginx();
+    const opened: CustomEvent[] = [];
+    const listener = (e: Event) => opened.push(e as CustomEvent);
+    window.addEventListener(SENCHO_OPEN_STACK_EVENT, listener);
+
+    render(<AutoUpdateReadinessView />);
+    fireEvent.click(await screen.findByRole('button', { name: 'Open stack editor for nginx' }));
+    window.removeEventListener(SENCHO_OPEN_STACK_EVENT, listener);
+
+    expect(opened).toHaveLength(1);
+    expect(opened[0].detail).toMatchObject({ stackName: 'nginx', nodeId: 1, destination: 'editor' });
+  });
+
+  it('offers Open stack editor on a blocked major bump and still states the reason', async () => {
+    mockTagOnlyNginx();
+    mockedFetchForNode.mockResolvedValue({
+      ok: true,
+      json: async () => {
+        const p = card().preview!;
+        return {
+          ...p,
+          images: [{ ...p.images[0], digest_update: false, tag_update: true, semver_bump: 'major' }],
+          summary: { ...p.summary, semver_bump: 'major', update_kind: 'tag', blocked: true, blocked_reason: 'Major version jumps require human review before applying.' },
+        };
+      },
+    });
+
+    render(<AutoUpdateReadinessView />);
+    expect(await screen.findByRole('button', { name: /Open stack editor/i })).toBeEnabled();
+    expect(screen.queryByRole('button', { name: /Apply now/i })).toBeNull();
+  });
+
+  it('keeps the disabled Apply, with no editor verb, when the session cannot edit the stack', async () => {
+    mockTagOnlyNginx();
+    authState.can = (action: string) => action !== 'stack:edit';
+    try {
+      render(<AutoUpdateReadinessView />);
+      expect(await screen.findByRole('button', { name: /Apply now/i })).toBeDisabled();
+      expect(screen.queryByRole('button', { name: /Open stack editor/i })).toBeNull();
+    } finally {
+      authState.can = () => true;
+    }
   });
 
   it('keeps a sticky card instead of silently clearing it when a remote sends a legacy preview missing verification_failed entirely', async () => {
