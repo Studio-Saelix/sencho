@@ -37,16 +37,18 @@ RUN git init --quiet . \
 # versions match the floors the main Dockerfile already carries where they
 # overlap, so one triage covers both binaries:
 #   github.com/klauspost/compress v1.18.7  CVE-2026-63209 (dictionary integer overflow)
-#   golang.org/x/crypto v0.57.0            CVE-2026-56854 (ssh source-address bypass)
-#   golang.org/x/net v0.60.0               CVE-2026-46600, CVE-2026-78669 (dnsmessage, http2 DoS)
-#   golang.org/x/text v0.42.0              CVE-2026-56851, CVE-2026-56852 (slice, UTF-8 DoS)
+#   golang.org/x/crypto v0.58.0            CVE-2026-56854 (ssh source-address bypass)
+#   golang.org/x/net v0.62.0               CVE-2026-46600, CVE-2026-78669, CVE-2026-78661 (dnsmessage, http2, html DoS)
+#   golang.org/x/text v0.43.0              CVE-2026-56851, CVE-2026-56852 (slice, UTF-8 DoS)
+# x/net v0.62.0's own go.mod requires exactly that x/crypto and x/text, so the
+# three move together.
 #   google.golang.org/grpc v1.84.0         CVE-2026-84304, CVE-2026-84445, GHSA-hrxh-6v49-42gf
 # `go mod tidy` drops any floor restic does not actually import, so the binary
 # gains no module it did not already have.
 RUN go get github.com/klauspost/compress@v1.18.7 \
-           golang.org/x/crypto@v0.57.0 \
-           golang.org/x/net@v0.60.0 \
-           golang.org/x/text@v0.42.0 \
+           golang.org/x/crypto@v0.58.0 \
+           golang.org/x/net@v0.62.0 \
+           golang.org/x/text@v0.43.0 \
            google.golang.org/grpc@v1.84.0 \
  && go mod tidy
 
