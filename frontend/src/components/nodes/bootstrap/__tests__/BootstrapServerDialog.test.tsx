@@ -207,7 +207,10 @@ describe('BootstrapServerDialog live key change on a host with no pin', () => {
       replacePinnedFingerprint: null,
       reviewedPinnedFingerprint: null,
     });
-    await waitFor(() => expect(screen.queryByTestId('host-key-changed-since-review')).not.toBeInTheDocument());
+    // A trusted key is pinned, so the prompt and its notice are gone.
+    await waitFor(() => expect(screen.queryByLabelText(/I trust the new host key/)).not.toBeInTheDocument());
+    expect(screen.queryByTestId('host-key-changed-since-review')).not.toBeInTheDocument();
+    expect(await screen.findByText('This key matches the pin for this host.')).toBeInTheDocument();
   });
 });
 

@@ -137,7 +137,6 @@ function DialogBody({ wizard }: { wizard: UseNodeBootstrap }) {
             blocked={result.blocked}
             hostKeyTrust={hostKey?.trust ?? 'unknown'}
             pinnedFingerprint={hostKey?.pinnedFingerprint ?? null}
-            supersededFingerprint={supersededFingerprint}
             trusted={trusted}
             onTrustedChange={setTrusted}
             replacing={replacing}

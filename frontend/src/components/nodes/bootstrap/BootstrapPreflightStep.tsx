@@ -79,7 +79,6 @@ export function BootstrapPreflightStep({
   blocked,
   hostKeyTrust,
   pinnedFingerprint,
-  supersededFingerprint,
   trusted,
   onTrustedChange,
   replacing,
@@ -89,7 +88,6 @@ export function BootstrapPreflightStep({
   blocked: boolean;
   hostKeyTrust: 'trusted' | 'unknown' | 'changed';
   pinnedFingerprint: string | null;
-  supersededFingerprint: string | null;
   trusted: boolean;
   onTrustedChange: (trusted: boolean) => void;
   replacing: boolean;
@@ -153,7 +151,7 @@ export function BootstrapPreflightStep({
             algorithm={inspection.hostKey.algorithm}
             fingerprint={inspection.hostKey.fingerprint}
             knownHostsLine={inspection.hostKey.knownHostsLine}
-            supersededFingerprint={supersededFingerprint}
+            supersededFingerprint={null}
             trusted={trusted}
             onTrustedChange={onTrustedChange}
           />

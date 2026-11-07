@@ -173,7 +173,7 @@ The Agent installation directory has no settings field. It is chosen only here.
 
 | What you see | What to do |
 | --- | --- |
-| `HOST_KEY_MISMATCH` | The live key differs from the pinned one, or another preflight replaced the pin after your host key check. Compare the fingerprints on the host before replacing the pin. |
+| `HOST_KEY_MISMATCH` | The live key differs from the pinned one, or another preflight replaced the pin after your host key check. Compare the fingerprints on the host before replacing the pin. If the pin was removed while the preflight ran, the dialog asks you to trust the host key again, as for a new host. |
 | `HOST_KEY_UNTRUSTED` | Trust the key first. If the host's key changed between the check and the preflight, the dialog shows the live fingerprint next to the one you reviewed (a host with no pin) or the pin (a pinned host). On a pinned host, tick the replacement confirmation only when you know the host was rebuilt; on an unpinned host, trust the new key only when you know why it changed. |
 | `SSH_AUTH_FAILED` | Check the SSH user and that the public half of the key is in the user's `authorized_keys`. |
 | `SSH_KEY_PASSPHRASE_REQUIRED` | The key is encrypted. Enter its passphrase. |

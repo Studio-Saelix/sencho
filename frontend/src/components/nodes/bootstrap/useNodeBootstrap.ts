@@ -84,8 +84,9 @@ export function useNodeBootstrap({ open, api }: UseNodeBootstrapOptions) {
   const [hostKey, setHostKey] = useState<BootstrapHostKeyResult | null>(null);
   const [trusted, setTrusted] = useState(false);
   const [replacing, setReplacing] = useState(false);
-  // The key the operator reviewed when a live change on a host with no pin
-  // replaced it; null whenever the shown key is the one they reviewed.
+  // Set only when a live key change on a host with no pin replaced the key the
+  // operator reviewed. Null in every other case, including a live change on a
+  // pinned host, which shows the pin instead.
   const [supersededFingerprint, setSupersededFingerprint] = useState<string | null>(null);
   const [result, setResult] = useState<BootstrapPreflightResult | null>(null);
   const [busy, setBusy] = useState<BusyKind>(null);
@@ -354,8 +355,10 @@ export function useNodeBootstrap({ open, api }: UseNodeBootstrapOptions) {
       if (caught instanceof BootstrapApiError
         && (caught.code === 'HOST_KEY_MISMATCH' || caught.code === 'HOST_KEY_UNTRUSTED')) {
         // The pin or the live key changed underneath the keyscan. Keep the
-        // identity the server reported, show the pin, and require an explicit
-        // replacement confirmation before another run.
+        // identity the server reported and clear the earlier consent. A pinned
+        // host shows the pin and needs an explicit replacement confirmation; a
+        // host with no pin asks for first trust of the key it presents now; a
+        // pin equal to the live key needs nothing further.
         const pinned = stringDetail(caught, 'pinnedFingerprint');
         const observed = stringDetail(caught, 'observedFingerprint');
         const observedAlgorithm = stringDetail(caught, 'observedAlgorithm');

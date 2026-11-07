@@ -1042,6 +1042,35 @@ describe('bootstrap service failure handling', () => {
     expect(entries.some((entry) => entry.summary.startsWith('bootstrap.trust.replaced'))).toBe(false);
   });
 
+  it('tells the operator to trust the key again when the pin was removed mid-run', async () => {
+    const db = DatabaseService.getInstance();
+    const host = 'cas-removed.example.com';
+    const observed = 'SHA256:observed000000000000000000000000000000000';
+    pin(host, observed);
+    const transport: BootstrapTransport = {
+      captureHostKey: async () => ({ algorithm: 'ssh-ed25519', fingerprint: observed, knownHostsLine: 'line' }),
+      runCommands: async (_session, commands, options) => {
+        options?.onHostKey?.({ algorithm: 'ssh-ed25519', fingerprint: observed, knownHostsLine: 'line' });
+        // The pin disappears after the run read it (only a migration deletes one).
+        vi.spyOn(db, 'getNodeBootstrapTrust').mockReturnValue(undefined);
+        return commands.map((command) => ok(command.id));
+      },
+    };
+    try {
+      await expect(makeService(transport).preflight(
+        base(host, { expectedFingerprint: observed }),
+        { hubUrl: hub, audit },
+      )).rejects.toMatchObject({
+        status: 409,
+        code: 'HOST_KEY_MISMATCH',
+        message: expect.stringContaining('removed while the preflight was running'),
+        details: { pinnedFingerprint: null, expectedFingerprint: observed },
+      });
+    } finally {
+      vi.restoreAllMocks();
+    }
+  });
+
   it.each([
     ['a pin that appeared during the run where there was none', null],
     ['a pin that changed during the run to the key now observed', 'SHA256:original0000000000000000000000000000000'],

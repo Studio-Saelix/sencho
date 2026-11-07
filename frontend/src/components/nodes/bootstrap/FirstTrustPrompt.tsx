@@ -2,8 +2,10 @@ import { HostKeyCompare } from './HostKeyCompare';
 
 /**
  * The consent for a host that has no stored pin. When the live key differs from
- * the one the operator reviewed, both identities stay on screen and the wording
- * says the new key will be pinned, because no pin exists to replace.
+ * the one the operator reviewed, both identities are shown and the wording says
+ * the new key will be pinned, because no pin exists to replace. A live change
+ * discards the inspection, so only the dialog's no-result view passes a
+ * reviewed key; the inspection view always shows the key that was reviewed.
  */
 export function FirstTrustPrompt({
   algorithm,

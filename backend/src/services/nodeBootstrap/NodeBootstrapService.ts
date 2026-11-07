@@ -660,7 +660,9 @@ export class NodeBootstrapService {
         409,
         'HOST_KEY_MISMATCH',
         pinChanged
-          ? 'The pinned key changed while the preflight was running. Review the current pin and confirm the replacement again.'
+          ? (pinned === null
+            ? 'The pinned key was removed while the preflight was running. Trust the host key again to continue.'
+            : 'The pinned key changed while the preflight was running. Review the current pin and confirm the replacement again.')
           : 'The host key does not match the pinned key. Confirm the replacement to continue.',
         { details: { pinnedFingerprint: pinned, expectedFingerprint } },
       );

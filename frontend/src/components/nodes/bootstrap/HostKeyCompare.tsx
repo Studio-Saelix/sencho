@@ -21,7 +21,7 @@ export function HostKeyCompare({ algorithm, knownHostsLine }: { algorithm: strin
   return (
     <div className="mt-2 space-y-1">
       <p className="text-xs text-muted-foreground">
-        Compare it with <code className="font-mono">ssh-keygen -lf {hostKeyFilePath(algorithm)}</code> on the server.
+        Compare the observed key with <code className="font-mono">ssh-keygen -lf {hostKeyFilePath(algorithm)}</code> on the server.
       </p>
       {line && (
         <code

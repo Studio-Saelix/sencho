@@ -577,6 +577,50 @@ describe('useNodeBootstrap stale responses and request ownership', () => {
       await waitFor(() => expect(hook.current.supersededFingerprint).toBeNull());
     });
 
+    it('keeps the reviewed key and the withheld consent through an edit that is not to the SSH target', async () => {
+      const api = fakeApi();
+      const hook = await reachLiveChange(api);
+      await act(async () => { hook.current.setField('privateKey', '-----BEGIN OPENSSH PRIVATE KEY-----other'); });
+      expect(hook.current.supersededFingerprint).toBe('SHA256:abc');
+      expect(hook.current.hostKey).toMatchObject({ fingerprint: 'SHA256:live', trust: 'unknown' });
+      expect(hook.current.trusted).toBe(false);
+    });
+
+    it.each([
+      ['the same key the operator reviewed', { pinnedFingerprint: null, expectedFingerprint: 'SHA256:abc', observedFingerprint: 'SHA256:abc', observedAlgorithm: 'ssh-ed25519' }],
+      ['no key at all', { pinnedFingerprint: null, expectedFingerprint: 'SHA256:abc', observedFingerprint: null, observedAlgorithm: null }],
+    ])('names no reviewed key when the transport reports %s', async (_label, details) => {
+      const api = fakeApi();
+      api.preflight.mockRejectedValueOnce(new BootstrapApiError('The host key changed before the preflight connected.', 'HOST_KEY_UNTRUSTED', null, details));
+      const { result: hook } = renderHook(() => useNodeBootstrap({ open: true, api }));
+      await act(async () => { fillTarget(hook.current); });
+      await act(async () => { await hook.current.checkHostKey(); });
+      await act(async () => { hook.current.setTrusted(true); });
+      await act(async () => { await hook.current.runPreflight(); });
+      expect(hook.current.hostKey).toMatchObject({
+        fingerprint: 'SHA256:abc', algorithm: 'ssh-ed25519', knownHostsLine: HOST_KEY.knownHostsLine, trust: 'unknown', pinnedFingerprint: null,
+      });
+      expect(hook.current.supersededFingerprint).toBeNull();
+      expect(hook.current.trusted).toBe(false);
+    });
+
+    it('names no reviewed key when a pinned host changes its key live', async () => {
+      const api = fakeApi();
+      api.hostKey.mockResolvedValue({ ...HOST_KEY, trust: 'trusted', pinnedFingerprint: 'SHA256:abc' });
+      api.preflight.mockRejectedValueOnce(new BootstrapApiError(
+        'The host key changed before the preflight connected.',
+        'HOST_KEY_UNTRUSTED',
+        null,
+        { pinnedFingerprint: 'SHA256:abc', expectedFingerprint: 'SHA256:abc', observedFingerprint: 'SHA256:live', observedAlgorithm: 'ssh-rsa' },
+      ));
+      const { result: hook } = renderHook(() => useNodeBootstrap({ open: true, api }));
+      await act(async () => { fillTarget(hook.current); });
+      await act(async () => { await hook.current.checkHostKey(); });
+      await act(async () => { await hook.current.runPreflight(); });
+      expect(hook.current.hostKey).toMatchObject({ trust: 'changed', pinnedFingerprint: 'SHA256:abc', fingerprint: 'SHA256:live' });
+      expect(hook.current.supersededFingerprint).toBeNull();
+    });
+
     it('treats a pin that vanished mid-run as first trust of the scanned key', async () => {
       const api = fakeApi();
       api.preflight.mockRejectedValueOnce(new BootstrapApiError(
