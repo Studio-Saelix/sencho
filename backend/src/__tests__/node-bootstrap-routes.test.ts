@@ -1777,8 +1777,8 @@ describe('bootstrap service target identity: DNS names are case-insensitive', ()
       // Read the table directly: getAuditLogs would flush the buffer first and hide a lost row.
       const row = db().getDb().prepare("SELECT summary FROM audit_log WHERE summary LIKE 'bootstrap.trust.conflict: host=legacy-audit.example.com:22%'").get() as { summary: string } | undefined;
       expect(row?.summary).toContain('host=legacy-audit.example.com:22');
-      expect(row?.summary).toContain(pinnedKey);
-      expect(row?.summary).toContain(liveKey);
+      expect(row?.summary).toContain(`${pinnedKey} (approved by admin at 1970-01-01T00:00:00.005Z)`);
+      expect(row?.summary).toContain(`${liveKey} (approved by admin at 1970-01-01T00:00:00.009Z)`);
     });
 
     it('prefers the lower-case row when two spellings of one key were approved at the same time', () => {

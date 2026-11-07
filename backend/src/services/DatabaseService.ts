@@ -6503,8 +6503,10 @@ stmt.run('gitops_schema_version', '1');
      * changed-key confirmation, and a replacement resets the approval time, so
      * neither "oldest" nor "newest" is known to be the key the operator last
      * chose. Neither is trusted: the host is dropped, and the next preflight
-     * asks for a fresh trust decision. Every dropped key is logged and written
-     * to the audit log, which is flushed before returning. Idempotent.
+     * asks for a fresh trust decision. Every dropped key is logged and audited
+     * with who approved it and when; the audit row is written in the same
+     * transaction as the drop, so neither can be lost without the other.
+     * Idempotent.
      */
     private migrateNodeBootstrapTrustHostCase(): void {
         const rows = this.db.prepare(
@@ -6517,7 +6519,11 @@ stmt.run('gitops_schema_version', '1');
             `INSERT INTO node_bootstrap_trust (host, port, fingerprint, algorithm, approved_by, approved_at, last_seen_at)
              VALUES (?, ?, ?, ?, ?, ?, ?)`
         );
-        const conflicts: Array<{ key: string; fingerprints: string[] }> = [];
+        const audit = this.db.prepare(
+            `INSERT INTO audit_log (timestamp, username, method, path, status_code, node_id, ip_address, summary)
+             VALUES (?, 'system', 'MIGRATION', 'node_bootstrap_trust', 409, NULL, 'local', ?)`
+        );
+        const conflicts: Array<{ key: string; dropped: string }> = [];
         this.db.transaction(() => {
             const groups = new Map<string, NodeBootstrapTrust[]>();
             for (const row of rows) {
@@ -6528,9 +6534,12 @@ stmt.run('gitops_schema_version', '1');
             }
             for (const row of rows) remove.run(row.host, row.port);
             for (const [key, group] of groups) {
-                const fingerprints = [...new Set(group.map((row) => row.fingerprint))];
-                if (fingerprints.length > 1) {
-                    conflicts.push({ key, fingerprints });
+                if (new Set(group.map((row) => row.fingerprint)).size > 1) {
+                    const dropped = group
+                        .map((row) => `${sanitizeForLog(row.fingerprint)} (approved by ${sanitizeForLog(row.approved_by)} at ${Number.isFinite(new Date(row.approved_at).getTime()) ? new Date(row.approved_at).toISOString() : row.approved_at})`)
+                        .join(', ');
+                    audit.run(Date.now(), `bootstrap.trust.conflict: host=${sanitizeForLog(key)} dropped=${dropped}`);
+                    conflicts.push({ key, dropped });
                     continue;
                 }
                 const oldest = group[0];
@@ -6539,22 +6548,8 @@ stmt.run('gitops_schema_version', '1');
             }
         })();
         for (const conflict of conflicts) {
-            const dropped = conflict.fingerprints.map((fingerprint) => sanitizeForLog(fingerprint)).join(', ');
-            console.warn(`[Bootstrap] Conflicting host key pins for ${sanitizeForLog(conflict.key)}: dropped ${dropped}. The next preflight asks for a fresh trust decision.`);
-            this.insertAuditLog({
-                timestamp: Date.now(),
-                username: 'system',
-                method: 'MIGRATION',
-                path: 'node_bootstrap_trust',
-                status_code: 409,
-                node_id: null,
-                ip_address: 'local',
-                summary: `bootstrap.trust.conflict: host=${sanitizeForLog(conflict.key)} dropped=${dropped}`,
-            });
+            console.warn(`[Bootstrap] Conflicting host key pins for ${sanitizeForLog(conflict.key)}: dropped ${conflict.dropped}. The next preflight asks for a fresh trust decision.`);
         }
-        // The audit buffer flushes on a timer that does not keep the process
-        // alive, and this migration never runs again once the rows are folded.
-        if (conflicts.length > 0) this.flushAuditLogBuffer();
     }
 
     public upsertNodeBootstrapTrust(record: NodeBootstrapTrust): void {

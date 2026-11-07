@@ -65,7 +65,7 @@ ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub
 
 An RSA or ECDSA host key points at `ssh_host_rsa_key.pub` or `ssh_host_ecdsa_key.pub` instead.
 
-- **New host:** tick **I trust this host key** to proceed. The fingerprint is pinned for this host and port. Host names are not case-sensitive: `Server.example.com` and `server.example.com` share one pin.
+- **New host:** tick **I trust this host key** to proceed. The fingerprint is pinned for this host and port. Host names are not case-sensitive: `Server.example.com` and `server.example.com` share one pin. A database from an earlier build can hold both spellings with different keys. Sencho trusts neither: it drops the pins for that host, writes each dropped key, who approved it and when to the audit log (`bootstrap.trust.conflict`), and the next check asks for a fresh trust decision.
 - **Known host:** a key that matches the pin proceeds without a prompt.
 - **Changed key:** Sencho blocks the preflight and shows both fingerprints. Replacing the pin is a separate, explicit action, and both fingerprints are recorded in the audit log. The confirmation covers the pinned key shown in the dialog: if another preflight replaced the pin with a different key after your host key check, Sencho refuses with `HOST_KEY_MISMATCH` and the dialog shows the current pin to review again.
 

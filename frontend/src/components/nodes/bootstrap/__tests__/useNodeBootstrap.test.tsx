@@ -481,6 +481,24 @@ describe('useNodeBootstrap stale responses and request ownership', () => {
     );
   });
 
+  it('shows the scanned key as trusted when the pin changed mid-run to exactly that key', async () => {
+    const api = fakeApi();
+    api.hostKey.mockResolvedValue({ ...HOST_KEY, trust: 'changed', pinnedFingerprint: 'SHA256:scanned' });
+    api.preflight.mockRejectedValueOnce(new BootstrapApiError(
+      'The pinned key changed while the preflight was running.',
+      'HOST_KEY_MISMATCH',
+      null,
+      { pinnedFingerprint: HOST_KEY.fingerprint, expectedFingerprint: HOST_KEY.fingerprint },
+    ));
+    const { result: hook } = renderHook(() => useNodeBootstrap({ open: true, api }));
+    await act(async () => { fillTarget(hook.current); });
+    await act(async () => { await hook.current.checkHostKey(); });
+    await act(async () => { hook.current.setReplacing(true); });
+    await act(async () => { await hook.current.runPreflight(); });
+    expect(hook.current.hostKey).toMatchObject({ trust: 'trusted', pinnedFingerprint: HOST_KEY.fingerprint });
+    expect(hook.current.trusted).toBe(true);
+  });
+
   it('marks the key trusted once a confirmed replacement succeeded', async () => {
     const api = fakeApi();
     api.hostKey.mockResolvedValue({ ...HOST_KEY, trust: 'changed', pinnedFingerprint: 'SHA256:old' });

@@ -354,7 +354,8 @@ export function useNodeBootstrap({ open, api }: UseNodeBootstrapOptions) {
         const observedAlgorithm = stringDetail(caught, 'observedAlgorithm');
         // The live key can be the very pin the server now holds (another
         // preflight replaced it): nothing is left to replace.
-        const matchesPin = observed !== null && observed === pinned;
+        const liveKey = caught.code === 'HOST_KEY_UNTRUSTED' && observed ? observed : hostKeyRef.current?.fingerprint ?? null;
+        const pinIsLive = pinned !== null && pinned === liveKey;
         // Drop a previous inspection so the dialog shows the live observation,
         // not the key from the earlier run.
         setResult(null);
@@ -369,14 +370,14 @@ export function useNodeBootstrap({ open, api }: UseNodeBootstrapOptions) {
               fingerprint: observed,
               algorithm: observedAlgorithm ?? 'unknown',
               knownHostsLine: '',
-              trust: matchesPin ? 'trusted' : 'changed',
+              trust: pinIsLive ? 'trusted' : 'changed',
               pinnedFingerprint: pinned,
             };
           }
-          return { ...current, trust: 'changed', pinnedFingerprint: pinned };
+          return { ...current, trust: pinIsLive ? 'trusted' : 'changed', pinnedFingerprint: pinned };
         });
         setReplacing(false);
-        setTrusted(matchesPin);
+        setTrusted(pinIsLive);
       }
       setError(caught instanceof Error ? caught.message : 'The preflight failed.');
     } finally {
