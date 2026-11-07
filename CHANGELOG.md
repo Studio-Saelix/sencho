@@ -4,6 +4,33 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.98.3](https://github.com/Studio-Saelix/sencho/compare/v0.98.2...v0.98.3) (2026-11-07)
+
+
+### Highlights
+
+<!-- highlights-hash: 5ab7098a8bcc7f4e -->
+
+Assurance checks now run through a canonical rule registry with normalized findings, so results are consistent regardless of which check produced them. Recovery also gains the ability to restore a point over its own volume, which removes the need to work around the original volume when rolling back.
+
+Security evaluation for updates now inspects the image that will actually be pulled rather than the one currently installed, so a pending update is judged on what it will bring in. Network references are validated before the legacy inspect call, which turns malformed references into clear errors instead of confusing failures.
+
+A few smaller fixes round things out. The Encrypt archives switch now shows as on while its passphrase is still pending, matching what the setting will do once saved. Recheck and the first load of the updates view now give delay-gated feedback so the interface does not flash or report too early. The x/net dependency floor is raised to v0.62.0 in the recovery helper and the source-built CLI binaries.
+
+### Added
+
+* **assurance:** canonical rule registry and normalized findings ([#2241](https://github.com/Studio-Saelix/sencho/issues/2241)) ([ae1ac25](https://github.com/Studio-Saelix/sencho/commit/ae1ac25afda560a5edd07d3eebc4ec5006b0b98d))
+* **recovery:** restore a point over its own volume ([#2240](https://github.com/Studio-Saelix/sencho/issues/2240)) ([07c410d](https://github.com/Studio-Saelix/sencho/commit/07c410d495d3d3f224ff0af8e36047216c358eb1))
+
+
+### Fixed
+
+* **docker:** raise the x/net floor to v0.62.0 in the recovery helper and the source-built CLI binaries ([#2263](https://github.com/Studio-Saelix/sencho/issues/2263)) ([79d51d8](https://github.com/Studio-Saelix/sencho/commit/79d51d8598425b7162fdbb4d9fa300de23d433e2))
+* **networking:** validate network references before the legacy inspect call ([#2250](https://github.com/Studio-Saelix/sencho/issues/2250)) ([10fdbb4](https://github.com/Studio-Saelix/sencho/commit/10fdbb4daa552213250733c0048512c4c4211ea0))
+* **security:** evaluate the image an update will pull, not the one installed ([#2245](https://github.com/Studio-Saelix/sencho/issues/2245)) ([dd93d5f](https://github.com/Studio-Saelix/sencho/commit/dd93d5fffa46ef0bcf9a6886d756ab7fd4aa368c))
+* **settings:** show the Encrypt archives switch on while its passphrase is pending ([#2242](https://github.com/Studio-Saelix/sencho/issues/2242)) ([d23ac69](https://github.com/Studio-Saelix/sencho/commit/d23ac6982dd80a289c0a7c814dc79da58d6343f4))
+* **updates:** delay-gated feedback for Recheck and the first load ([#2252](https://github.com/Studio-Saelix/sencho/issues/2252)) ([f70b028](https://github.com/Studio-Saelix/sencho/commit/f70b0289a2aa1a08baf92c11daeecbb55d02ebb8))
+
 ## [0.98.2](https://github.com/Studio-Saelix/sencho/compare/v0.98.1...v0.98.2) (2026-11-03)
 
 
