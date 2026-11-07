@@ -201,7 +201,10 @@ export function SecretPushSheet({ open, onOpenChange, secret }: Props) {
         } catch (err) {
             const apiError = err as Error & { status?: number; code?: string };
             if (apiError.status === 409 && apiError.code === 'PUSH_TARGET_CHANGED') {
-                toast.error('A target env file changed since you previewed it. Preview again before pushing.');
+                // The backend names the cause (file changed, node unreadable,
+                // target set moved), so show its message rather than one fixed
+                // sentence that would misreport most of them.
+                toast.error(apiError.message || 'The targets changed since you previewed the push. Preview again before pushing.');
                 setPreview(null);
                 setStage('target');
             } else if (apiError.status === 409 && apiError.code === 'VERSION_CONFLICT') {

@@ -410,7 +410,11 @@ describe('SecretsService.executePush (local node)', () => {
             expectedVersion: plan.version,
             expectedTargets: expectedTargetsFor(plan.targets),
             user: TEST_USERNAME,
-        })).rejects.toMatchObject({ name: 'PushTargetChangedError' });
+        })).rejects.toMatchObject({
+            name: 'PushTargetChangedError',
+            reason: 'changed',
+            message: expect.stringMatching(/env file changed since you previewed/),
+        });
 
         expect(fs.readFileSync(path.join(otherStack, '.env'), 'utf-8')).toBe('EXISTING=keep\n');
         expect(db.listSecretPushes(id)).toHaveLength(0);
@@ -521,7 +525,11 @@ describe('SecretsService.executePush (remote node)', () => {
             expectedVersion: plan.version,
             expectedTargets: expectedTargetsFor(plan.targets),
             user: TEST_USERNAME,
-        })).rejects.toMatchObject({ name: 'PushTargetChangedError' });
+        })).rejects.toMatchObject({
+            name: 'PushTargetChangedError',
+            reason: 'changed',
+            message: expect.stringMatching(/env file changed since you previewed/),
+        });
         expect(writes).toHaveLength(0);
     });
 
@@ -560,7 +568,11 @@ describe('SecretsService.executePush (remote node)', () => {
             expectedVersion: plan.version,
             expectedTargets: expectedTargetsFor(plan.targets),
             user: TEST_USERNAME,
-        })).rejects.toMatchObject({ name: 'PushTargetChangedError' });
+        })).rejects.toMatchObject({
+            name: 'PushTargetChangedError',
+            reason: 'unreachable',
+            message: expect.stringMatching(/could not be read since you previewed/),
+        });
         expect(writes).toHaveLength(0);
     });
 
@@ -604,6 +616,43 @@ describe('SecretsService.executePush (remote node)', () => {
         }
     });
 
+    it('marks only the target that became unreadable during the push as failed', async () => {
+        const db = DatabaseService.getInstance();
+        const address = server.address() as AddressInfo;
+        const secondRemoteId = db.addNode({
+            name: 'secrets-remote-unreadable-midpush',
+            type: 'remote',
+            mode: 'proxy',
+            compose_dir: '/tmp/compose',
+            is_default: false,
+            api_url: `http://127.0.0.1:${address.port}`,
+            api_token: 'remote-token',
+        });
+        try {
+            const svc = SecretsService.getInstance();
+            const { id } = svc.create({ name: 'push-remote-unreadable-midpush', kv: { REMOTE_ONLY: 'new' }, user: TEST_USERNAME });
+            const selector = { type: 'nodes' as const, ids: [remoteId, secondRemoteId] };
+            const plan = await svc.previewPushDiff(id, selector, 'app', '.env');
+            afterWrite = () => { remoteReadFails = true; };
+
+            const result = await svc.executePush(id, {
+                selector,
+                stackName: 'app',
+                envFileBasename: '.env',
+                expectedVersion: plan.version,
+                expectedTargets: expectedTargetsFor(plan.targets),
+                user: TEST_USERNAME,
+            });
+
+            expect(result.results.map(r => r.status)).toEqual(['ok', 'failed']);
+            expect(result.results[1].error).toMatch(/could not be read during the push/);
+            expect(result.results[1].error).not.toMatch(/changed/);
+            expect(writes).toHaveLength(1);
+        } finally {
+            db.deleteNode(secondRemoteId);
+        }
+    });
+
     it('refuses a pilot target whose env file changed after the preview', async () => {
         const db = DatabaseService.getInstance();
         const address = server.address() as AddressInfo;
@@ -636,7 +685,54 @@ describe('SecretsService.executePush (remote node)', () => {
                 expectedVersion: plan.version,
                 expectedTargets: expectedTargetsFor(plan.targets),
                 user: TEST_USERNAME,
-            })).rejects.toMatchObject({ name: 'PushTargetChangedError' });
+            })).rejects.toMatchObject({
+                name: 'PushTargetChangedError',
+                reason: 'changed',
+                message: expect.stringMatching(/env file changed since you previewed/),
+            });
+            expect(writes).toHaveLength(0);
+        } finally {
+            PilotTunnelManager.getInstance().closeTunnel(pilotId);
+            db.deleteNode(pilotId);
+        }
+    });
+
+    it('refuses a pilot target that becomes unreadable after the preview', async () => {
+        const db = DatabaseService.getInstance();
+        const address = server.address() as AddressInfo;
+        const pilotId = db.addNode({
+            name: 'secrets-pilot-unreadable',
+            type: 'remote',
+            mode: 'pilot_agent',
+            compose_dir: '/tmp/compose',
+            is_default: false,
+            api_url: '',
+            api_token: '',
+        });
+        const bridge = {
+            getLoopbackUrl: () => `http://127.0.0.1:${address.port}`,
+            close: () => undefined,
+        };
+        PilotTunnelManager.getInstance().injectBridgeForTest(pilotId, bridge as never, 'pilot');
+        try {
+            const svc = SecretsService.getInstance();
+            const { id } = svc.create({ name: 'push-pilot-unreadable', kv: { REMOTE_ONLY: 'new' }, user: TEST_USERNAME });
+            const selector = { type: 'nodes' as const, ids: [pilotId] };
+            const plan = await svc.previewPushDiff(id, selector, 'app', '.env');
+
+            remoteReadFails = true;
+            await expect(svc.executePush(id, {
+                selector,
+                stackName: 'app',
+                envFileBasename: '.env',
+                expectedVersion: plan.version,
+                expectedTargets: expectedTargetsFor(plan.targets),
+                user: TEST_USERNAME,
+            })).rejects.toMatchObject({
+                name: 'PushTargetChangedError',
+                reason: 'unreachable',
+                message: expect.stringMatching(/could not be read since you previewed/),
+            });
             expect(writes).toHaveLength(0);
         } finally {
             PilotTunnelManager.getInstance().closeTunnel(pilotId);
@@ -666,7 +762,11 @@ describe('SecretsService.executePush (remote node)', () => {
             expectedVersion: plan.version,
             expectedTargets: expectedTargetsFor(plan.targets),
             user: TEST_USERNAME,
-        })).rejects.toMatchObject({ name: 'PushTargetChangedError' });
+        })).rejects.toMatchObject({
+            name: 'PushTargetChangedError',
+            reason: 'changed',
+            message: expect.stringMatching(/env file changed since you previewed/),
+        });
 
         expect(writes).toHaveLength(0);
         expect(fs.readFileSync(path.join(stackDir, '.env'), 'utf-8')).toBe('LOCAL_ONLY=old\n');

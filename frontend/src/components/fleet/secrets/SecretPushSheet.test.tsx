@@ -201,6 +201,53 @@ describe('SecretPushSheet', () => {
         });
         expect(screen.queryByText('central')).not.toBeInTheDocument();
         expect(vi.mocked(toast.error)).toHaveBeenCalledWith(
+            'A target env file changed since you previewed the push. Preview again before pushing.',
+        );
+    });
+
+    it('shows the backend cause when the matched node set moved after preview', async () => {
+        vi.mocked(executePush).mockRejectedValue(Object.assign(
+            new Error('The set of nodes matching the target changed since you previewed the push. Preview again before pushing.'),
+            { status: 409, code: 'PUSH_TARGET_CHANGED' },
+        ));
+
+        renderSheet();
+        await fillAndPreview();
+        await waitFor(() => {
+            expect(screen.getByText('central')).toBeInTheDocument();
+        });
+
+        await userEvent.click(screen.getByRole('button', { name: /push to 1 node/i }));
+
+        await waitFor(() => {
+            expect(screen.getByPlaceholderText('my-app')).toBeInTheDocument();
+        });
+        expect(vi.mocked(toast.error)).toHaveBeenCalledWith(
+            'The set of nodes matching the target changed since you previewed the push. Preview again before pushing.',
+        );
+    });
+
+    it('shows the backend cause when a target node became unreadable after preview', async () => {
+        vi.mocked(executePush).mockRejectedValue(Object.assign(
+            new Error('A target env file could not be read since you previewed the push. Preview again before pushing.'),
+            { status: 409, code: 'PUSH_TARGET_CHANGED' },
+        ));
+
+        renderSheet();
+        await fillAndPreview();
+        await waitFor(() => {
+            expect(screen.getByText('central')).toBeInTheDocument();
+        });
+
+        await userEvent.click(screen.getByRole('button', { name: /push to 1 node/i }));
+
+        await waitFor(() => {
+            expect(screen.getByPlaceholderText('my-app')).toBeInTheDocument();
+        });
+        expect(vi.mocked(toast.error)).toHaveBeenCalledWith(
+            'A target env file could not be read since you previewed the push. Preview again before pushing.',
+        );
+        expect(vi.mocked(toast.error)).not.toHaveBeenCalledWith(
             'A target env file changed since you previewed it. Preview again before pushing.',
         );
     });

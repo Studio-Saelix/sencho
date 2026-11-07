@@ -205,17 +205,43 @@ export class SecretSourceChangedError extends Error {
 }
 
 /**
- * A previewed target env file moved, disappeared, became unreadable, or became
- * readable where the preview could not read it. Thrown before any target is
- * written; the preview is the only review an operator gets over masked values,
- * so a push whose targets no longer match it writes nothing. A change detected
- * during the write loop fails that node instead, because earlier targets may
- * already be written.
+ * Why the targets a push presents no longer match the preview. The copy names
+ * the cause, because "a file changed" is wrong when a node went offline or the
+ * matched node set moved, and an operator acts differently on each.
+ */
+export type PushTargetChangedReason = 'target-set' | 'unreachable' | 'missing' | 'readable' | 'changed';
+
+const PUSH_TARGET_CHANGED_MESSAGES: Record<PushTargetChangedReason, string> = {
+    'target-set': 'The set of nodes matching the target changed since you previewed the push. Preview again before pushing.',
+    unreachable: 'A target env file could not be read since you previewed the push. Preview again before pushing.',
+    missing: 'A target env file is no longer part of this stack since you previewed the push. Preview again before pushing.',
+    readable: 'A target env file was unreadable when you previewed the push but is readable now. Preview again before pushing.',
+    changed: 'A target env file changed since you previewed the push. Preview again before pushing.',
+};
+
+/** Per-node failures during the write loop reuse the same causes with their own tense. */
+const PUSH_TARGET_FAILED_MESSAGES: Record<Exclude<PushTargetChangedReason, 'target-set'>, string> = {
+    unreachable: 'A target env file could not be read during the push. Preview again before pushing.',
+    missing: 'A target env file is no longer part of this stack during the push. Preview again before pushing.',
+    readable: 'A target env file was unreadable when you previewed the push but is readable now. Preview again before pushing.',
+    changed: 'A target env file changed during the push. Preview again before pushing.',
+};
+
+/**
+ * The previewed targets moved, disappeared, became unreadable, became readable
+ * where the preview could not read them, or the matched node set itself moved.
+ * Thrown before any target is written; the preview is the only review an
+ * operator gets over masked values, so a push whose targets no longer match it
+ * writes nothing. A change detected during the write loop fails that node
+ * instead, because earlier targets may already be written.
  */
 export class PushTargetChangedError extends Error {
-    constructor() {
-        super('A target env file changed since you previewed the push. Preview again before pushing.');
+    readonly reason: PushTargetChangedReason;
+
+    constructor(reason: PushTargetChangedReason) {
+        super(PUSH_TARGET_CHANGED_MESSAGES[reason]);
         this.name = 'PushTargetChangedError';
+        this.reason = reason;
     }
 }
 
@@ -1024,10 +1050,10 @@ export class SecretsService {
             // Length plus size rejects duplicates even for a direct service caller
             // that skipped the route's own duplicate check.
             if (expectedTargets.length !== matched.length || expectedById.size !== matched.length) {
-                throw new PushTargetChangedError();
+                throw new PushTargetChangedError('target-set');
             }
             for (const node of matched) {
-                if (!expectedById.has(node.id)) throw new PushTargetChangedError();
+                if (!expectedById.has(node.id)) throw new PushTargetChangedError('target-set');
             }
 
             // Read every target before writing any, so a stale preview refuses the
@@ -1048,21 +1074,24 @@ export class SecretsService {
                 // contents are unverified, so refuse the whole push rather than
                 // write the nodes that happen to be reachable.
                 if (!state.ok) {
-                    if (expected !== null) throw new PushTargetChangedError();
+                    if (expected !== null) throw new PushTargetChangedError('unreachable');
                     // It was unreadable at preview too, so there is nothing the
                     // operator reviewed to protect; report it per node below.
                     continue;
                 }
                 if (!state.read) {
                     // The preview resolved this target and it no longer resolves.
-                    if (expected !== null) throw new PushTargetChangedError();
+                    if (expected !== null) throw new PushTargetChangedError('missing');
                     continue;
                 }
                 // A readable target the preview could not read was never
                 // reviewed; a different digest means the stack, env file, or
                 // contents changed after the preview.
-                if (expected === null || expected === undefined || fingerprintTarget(stackName, envFileBasename, state.read.text) !== expected) {
-                    throw new PushTargetChangedError();
+                if (expected === null || expected === undefined) {
+                    throw new PushTargetChangedError('readable');
+                }
+                if (fingerprintTarget(stackName, envFileBasename, state.read.text) !== expected) {
+                    throw new PushTargetChangedError('changed');
                 }
             }
 
@@ -1095,26 +1124,28 @@ export class SecretsService {
                     try {
                         read = await readExistingEnv(node, stackName, envFileBasename);
                     } catch {
-                        readError = 'A target env file could not be read during the push. Preview again before pushing.';
+                        readError = PUSH_TARGET_FAILED_MESSAGES.unreachable;
                     }
                     const expected = expectedById.get(node.id);
                     if (readError) {
                         result.status = 'failed';
                         result.error = readError;
                     } else if (!read) {
-                        if (expected !== null) {
-                            result.status = 'failed';
-                            result.error = 'A target env file changed during the push. Preview again before pushing.';
-                        } else {
+                        result.status = 'failed';
+                        result.error = expected !== null
+                            ? PUSH_TARGET_FAILED_MESSAGES.missing
                             // Still unresolved, exactly as at preview: a per-node
                             // failure, because there is no reviewed file to protect.
-                            result.status = 'failed';
-                            result.error = `env file '${envFileBasename}' not found`;
-                        }
-                    } else if (expected === null || expected === undefined
-                        || fingerprintTarget(stackName, envFileBasename, read.text) !== expected) {
+                            : `env file '${envFileBasename}' not found`;
+                    } else if (expected === null || expected === undefined) {
+                        // The preview could not read this target, so it never
+                        // reviewed these contents: fail only this node rather
+                        // than write values the operator never saw.
                         result.status = 'failed';
-                        result.error = 'A target env file changed during the push. Preview again before pushing.';
+                        result.error = PUSH_TARGET_FAILED_MESSAGES.readable;
+                    } else if (fingerprintTarget(stackName, envFileBasename, read.text) !== expected) {
+                        result.status = 'failed';
+                        result.error = PUSH_TARGET_FAILED_MESSAGES.changed;
                     } else {
                         try {
                             const existing = parseEnv(read.text);

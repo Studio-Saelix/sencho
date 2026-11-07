@@ -830,6 +830,7 @@ describe('a push applies exactly the previewed bundle version and target env', (
             });
         expect(push.status).toBe(409);
         expect(push.body.code).toBe('PUSH_TARGET_CHANGED');
+        expect(push.body.error).toMatch(/env file changed since you previewed/);
         expect(fs.readFileSync(path.join(stackDir, '.env'), 'utf-8')).toBe('FIRST=one\nSNUCK_IN=two\n');
         expect(DatabaseService.getInstance().listSecretPushes(bundleId)).toHaveLength(0);
     });
@@ -852,6 +853,7 @@ describe('a push applies exactly the previewed bundle version and target env', (
             });
         expect(push.status).toBe(409);
         expect(push.body.code).toBe('PUSH_TARGET_CHANGED');
+        expect(push.body.error).toMatch(/set of nodes matching the target changed/);
         expect(fs.readFileSync(path.join(stackDir, '.env'), 'utf-8')).toBe('FIRST=one\n');
     });
 
@@ -872,6 +874,7 @@ describe('a push applies exactly the previewed bundle version and target env', (
             });
         expect(push.status).toBe(409);
         expect(push.body.code).toBe('PUSH_TARGET_CHANGED');
+        expect(push.body.error).toMatch(/set of nodes matching the target changed/);
         expect(fs.readFileSync(path.join(stackDir, '.env'), 'utf-8')).toBe('FIRST=one\n');
     });
 
@@ -892,6 +895,7 @@ describe('a push applies exactly the previewed bundle version and target env', (
             });
         expect(push.status).toBe(409);
         expect(push.body.code).toBe('PUSH_TARGET_CHANGED');
+        expect(push.body.error).toMatch(/set of nodes matching the target changed/);
         expect(fs.readFileSync(path.join(stackDir, '.env'), 'utf-8')).toBe('FIRST=one\n');
     });
 
@@ -914,6 +918,9 @@ describe('a push applies exactly the previewed bundle version and target env', (
             });
         expect(push.status).toBe(409);
         expect(push.body.code).toBe('PUSH_TARGET_CHANGED');
+        // A push reads a missing env file as empty, so a deleted target is a
+        // content change from the previewed digest, not a "no such target".
+        expect(push.body.error).toMatch(/env file changed since you previewed/);
         expect(fs.existsSync(path.join(stackDir, '.env'))).toBe(false);
     });
 
@@ -1219,6 +1226,7 @@ describe('hostile key names and escape attempts are refused', () => {
             });
         expect(push.status).toBe(409);
         expect(push.body.code).toBe('PUSH_TARGET_CHANGED');
+        expect(push.body.error).toMatch(/unreadable when you previewed the push but is readable now/);
         expect(fs.readFileSync(path.join(stackDir, '.env'), 'utf-8')).toBe('FIRST=one\n');
         expect(DatabaseService.getInstance().listSecretPushes(bundleId)).toHaveLength(0);
     });
@@ -1257,6 +1265,7 @@ describe('hostile key names and escape attempts are refused', () => {
             });
         expect(push.status).toBe(409);
         expect(push.body.code).toBe('PUSH_TARGET_CHANGED');
+        expect(push.body.error).toMatch(/no longer part of this stack since you previewed/);
         expect(fs.readFileSync(path.join(stackDir, 'app.env'), 'utf-8')).toBe('FIRST=one\n');
         expect(DatabaseService.getInstance().listSecretPushes(bundleId)).toHaveLength(0);
     });
