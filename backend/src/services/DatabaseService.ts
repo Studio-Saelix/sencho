@@ -6522,7 +6522,9 @@ stmt.run('gitops_schema_version', '1');
             const groups = new Map<string, NodeBootstrapTrust[]>();
             for (const row of rows) {
                 const key = `${row.host.toLowerCase()}:${row.port}`;
-                groups.set(key, [...(groups.get(key) ?? []), row]);
+                const group = groups.get(key);
+                if (group) group.push(row);
+                else groups.set(key, [row]);
             }
             for (const row of rows) remove.run(row.host, row.port);
             for (const [key, group] of groups) {
@@ -6537,8 +6539,8 @@ stmt.run('gitops_schema_version', '1');
             }
         })();
         for (const conflict of conflicts) {
-            const keys = conflict.fingerprints.map((fingerprint) => sanitizeForLog(fingerprint)).join(', ');
-            console.warn(`[Bootstrap] Conflicting host key pins for ${sanitizeForLog(conflict.key)}: dropped ${keys}. The next preflight asks for a fresh trust decision.`);
+            const dropped = conflict.fingerprints.map((fingerprint) => sanitizeForLog(fingerprint)).join(', ');
+            console.warn(`[Bootstrap] Conflicting host key pins for ${sanitizeForLog(conflict.key)}: dropped ${dropped}. The next preflight asks for a fresh trust decision.`);
             this.insertAuditLog({
                 timestamp: Date.now(),
                 username: 'system',
@@ -6547,7 +6549,7 @@ stmt.run('gitops_schema_version', '1');
                 status_code: 409,
                 node_id: null,
                 ip_address: 'local',
-                summary: `bootstrap.trust.conflict: host=${sanitizeForLog(conflict.key)} dropped=${keys}`,
+                summary: `bootstrap.trust.conflict: host=${sanitizeForLog(conflict.key)} dropped=${dropped}`,
             });
         }
         // The audit buffer flushes on a timer that does not keep the process
