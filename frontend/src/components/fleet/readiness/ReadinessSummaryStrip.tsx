@@ -24,11 +24,13 @@ function worstState(counts: Record<DomainState, number>): DomainState {
  * counts by state, and when the check ran. One flat line, not a second
  * masthead; the Fleet masthead above it stays the page's only hero.
  */
-export function ReadinessSummaryStrip({ data, checking, dismissedCount = 0 }: {
+export function ReadinessSummaryStrip({ data, checking, dismissedCount = 0, onOpenDismissed }: {
   data: FleetReadinessResponse;
   checking: boolean;
   /** Findings a team dismissal still covers. They stay out of the finding count and are named beside it. */
   dismissedCount?: number;
+  /** Opens the dismissed list; the count is the control that reaches it. */
+  onOpenDismissed?: () => void;
 }) {
   const now = useNow(1000);
   const counts = data.summary.nodes;
@@ -44,7 +46,6 @@ export function ReadinessSummaryStrip({ data, checking, dismissedCount = 0 }: {
     unverified > 0 ? `${unverified} unverified` : null,
     `${counts.healthy} of ${total} healthy`,
     `${findingCount} ${findingCount === 1 ? 'finding' : 'findings'}`,
-    dismissedCount > 0 ? `${dismissedCount} dismissed` : null,
   ].filter((part): part is string => part !== null);
 
   return (
@@ -54,7 +55,22 @@ export function ReadinessSummaryStrip({ data, checking, dismissedCount = 0 }: {
           <span aria-hidden className={cn('h-2 w-2 shrink-0 rounded-full', TONE_DOT[tone])} />
           <span className={cn('text-sm font-medium', TONE_TEXT[tone])}>{HEADLINE[worst]}</span>
         </div>
-        <span className="font-mono text-[11px] tabular-nums text-stat-subtitle">{parts.join(' · ')}</span>
+        <span className="font-mono text-[11px] tabular-nums text-stat-subtitle">
+          {parts.join(' · ')}
+          {dismissedCount > 0 && (
+            <>
+              {' · '}
+              <button
+                type="button"
+                aria-haspopup="dialog"
+                onClick={onOpenDismissed}
+                className="rounded-sm underline decoration-dotted underline-offset-4 transition-colors hover:text-stat-value focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand/50 max-md:min-h-11"
+              >
+                {dismissedCount} dismissed
+              </button>
+            </>
+          )}
+        </span>
         <span className="font-mono text-[11px] tabular-nums text-stat-subtitle ml-auto max-md:ml-0">
           {checking ? 'checking' : `checked ${formatAgeShort(now - data.generatedAt)} ago`}
         </span>
