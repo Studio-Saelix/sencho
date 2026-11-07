@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [0.98.3](https://github.com/Studio-Saelix/sencho/compare/v0.98.2...v0.98.3) (2026-11-07)
 
 
+### Highlights
+
+<!-- highlights-hash: 5ab7098a8bcc7f4e -->
+
+Assurance checks now run through a canonical rule registry with normalized findings, so results are consistent regardless of which check produced them. Recovery also gains the ability to restore a point over its own volume, which removes the need to work around the original volume when rolling back.
+
+Security evaluation for updates now inspects the image that will actually be pulled rather than the one currently installed, so a pending update is judged on what it will bring in. Network references are validated before the legacy inspect call, which turns malformed references into clear errors instead of confusing failures.
+
+A few smaller fixes round things out. The Encrypt archives switch now shows as on while its passphrase is still pending, matching what the setting will do once saved. Recheck and the first load of the updates view now give delay-gated feedback so the interface does not flash or report too early. The x/net dependency floor is raised to v0.62.0 in the recovery helper and the source-built CLI binaries.
+
 ### Added
 
 * **assurance:** canonical rule registry and normalized findings ([#2241](https://github.com/Studio-Saelix/sencho/issues/2241)) ([ae1ac25](https://github.com/Studio-Saelix/sencho/commit/ae1ac25afda560a5edd07d3eebc4ec5006b0b98d))
