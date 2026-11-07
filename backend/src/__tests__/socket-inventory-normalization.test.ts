@@ -655,7 +655,7 @@ describe('socket inventory malformed label and network metadata', () => {
     expect(inventoryOf(rows).status).toBe('partial');
   });
 
-  it.each([7, null, {}])(
+  it.each([7, null, {}, '', '   '])(
     'marks present but unreadable inspect scalars (%j) incomplete and keeps the listing fallback',
     async bad => {
       const rows = await rowsFrom(listed(), inspected({
@@ -675,6 +675,152 @@ describe('socket inventory malformed label and network metadata', () => {
       expect(inventoryOf(rows).status).toBe('partial');
     },
   );
+});
+
+describe('socket inventory empty scalar metadata', () => {
+  it.each(['', '   '])(
+    'preserves the readable listing image when inspect reports %j',
+    async blank => {
+      const rows = await rowsFrom(
+        listed({
+          Names: ['/helper'],
+          Image: 'tecnativa/docker-socket-proxy:latest',
+          ImageID: 'sha256:image1',
+          State: 'running',
+          Status: 'Up 2 hours',
+          Ports: [],
+        }),
+        inspected({
+          Image: blank,
+          Config: { Image: blank, Labels: {}, Env: [], ExposedPorts: {} },
+          State: { Status: blank },
+        }),
+      );
+      // An empty inspect scalar is unreadable, not a replacement: the listing
+      // image is the only reason this row is relevant, so losing it would make
+      // a known proxy vanish from a complete-looking snapshot.
+      expect(rows[0]).toMatchObject({
+        image: 'tecnativa/docker-socket-proxy:latest',
+        imageId: 'sha256:image1',
+        state: 'running',
+        health: null,
+        metadataTruncated: true,
+      });
+
+      const inventory = inventoryOf(rows);
+      expect(inventory.containers).toHaveLength(1);
+      expect(inventory.counts.matchedContainers).toBe(1);
+      expect(inventory.containers[0]).toMatchObject({
+        image: 'tecnativa/docker-socket-proxy:latest',
+        role: 'undetermined',
+        metadataTruncated: true,
+      });
+      expect(inventory.status).toBe('partial');
+    },
+  );
+
+  it.each(['', '   '])(
+    'keeps an empty listing image and state visible as unreadable evidence (%j)',
+    async blank => {
+      const rows = await rowsFrom(
+        listed({ State: blank, Status: blank, Image: blank, ImageID: blank }),
+        new Error('inspect unavailable'),
+      );
+      expect(rows[0]).toMatchObject({
+        state: 'unknown',
+        status: '',
+        image: '',
+        imageId: '',
+        metadataTruncated: true,
+      });
+      expect(inventoryOf(rows).status).toBe('partial');
+    },
+  );
+
+  it.each(['', '   '])(
+    'marks an empty listing name incomplete instead of reading it as a clean absence (%j)',
+    async blank => {
+      const rows = await rowsFrom(listed({ Names: [blank] }), inspected());
+      expect(rows[0]).toMatchObject({ name: '', metadataTruncated: true });
+      expect(inventoryOf(rows).status).toBe('partial');
+    },
+  );
+
+  it.each(['', '   '])(
+    'does not read an empty inspect health status (%j) as no healthcheck',
+    async blank => {
+      const rows = await rowsFrom(
+        listed(),
+        inspected({ State: { Status: 'running', Health: { Status: blank } } }),
+      );
+      expect(rows[0]).toMatchObject({ health: null, metadataTruncated: true });
+      expect(inventoryOf(rows).status).toBe('partial');
+    },
+  );
+
+  it('marks a present health object without a status as unreadable', async () => {
+    const rows = await rowsFrom(
+      listed(),
+      inspected({ State: { Status: 'running', Health: {} } }),
+    );
+    expect(rows[0]).toMatchObject({ health: null, metadataTruncated: true });
+    expect(inventoryOf(rows).status).toBe('partial');
+  });
+});
+
+describe('socket inventory prototype-named labels', () => {
+  // A JSON-parsed object and a `KEY=value` array are the two Docker label
+  // shapes. A plain `{}` routes a `__proto__` assignment through the inherited
+  // setter and drops a readable label from a complete snapshot.
+  const protoLabelObject = () => JSON.parse('{"__proto__":"readable"}') as Record<string, unknown>;
+
+  it.each([
+    ['listing object', protoLabelObject(), {}],
+    ['listing array', ['__proto__=readable'], {}],
+    ['inspect object', { 'com.docker.compose.project': 'alpha' }, protoLabelObject()],
+    ['inspect array', { 'com.docker.compose.project': 'alpha' }, ['__proto__=readable']],
+  ])('preserves a prototype-named label from the %s', async (_label, listedLabels, inspectedLabels) => {
+    const rows = await rowsFrom(
+      listed({ Labels: listedLabels }),
+      inspected({
+        Config: {
+          Image: 'alpine:3',
+          Labels: inspectedLabels,
+          Env: [],
+          ExposedPorts: {},
+        },
+        Mounts: [{ Type: 'bind', Source: SOCKET, Destination: SOCKET, RW: false }],
+      }),
+    );
+    expect(Object.entries(rows[0].labels)).toContainEqual(['__proto__', 'readable']);
+    expect(rows[0].metadataTruncated).toBe(false);
+
+    const inventory = inventoryOf(rows);
+    expect(inventory.containers[0].labels).toContainEqual({ key: '__proto__', value: 'readable' });
+    expect(inventory.status).toBe('complete');
+  });
+
+  it('merges a prototype-named inspect label beside a readable listing label', async () => {
+    const rows = await rowsFrom(
+      listed({ Labels: { 'com.docker.compose.project': 'alpha' } }),
+      inspected({
+        Config: {
+          Image: 'alpine:3',
+          Labels: protoLabelObject(),
+          Env: [],
+          ExposedPorts: {},
+        },
+        Mounts: [{ Type: 'bind', Source: SOCKET, Destination: SOCKET, RW: false }],
+      }),
+    );
+    expect(Object.entries(rows[0].labels)).toEqual(expect.arrayContaining([
+      ['com.docker.compose.project', 'alpha'],
+      ['__proto__', 'readable'],
+    ]));
+    expect(inventoryOf(rows).containers[0].labels).toEqual(expect.arrayContaining([
+      { key: '__proto__', value: 'readable' },
+    ]));
+  });
 });
 
 describe('socket inventory unreadable enclosing metadata', () => {
@@ -1059,5 +1205,109 @@ describe('socket inventory fallback preserves binding multiplicity', () => {
 
     expect(rows[0].ports.length).toBe(64);
     expect(rows[0].metadataTruncated).toBe(true);
+  });
+
+  it.each([
+    ['tcp then udp', 'tcp', 'udp'],
+    ['udp then tcp', 'udp', 'tcp'],
+    ['tcp then sctp', 'tcp', 'sctp'],
+  ])(
+    'keeps both readable listing protocols when the inspect protocol is unreadable (%s)',
+    async (_label, first, second) => {
+      const rows = await rowsFrom(
+        listed({
+          Ports: [
+            { IP: '0.0.0.0', PrivatePort: 2375, PublicPort: 8080, Type: first },
+            { IP: '::', PrivatePort: 2375, PublicPort: 9090, Type: second },
+          ],
+        }),
+        inspected({
+          NetworkSettings: {
+            Ports: { '2375/': [{ HostIp: '127.0.0.1', HostPort: '9999' }] },
+            Networks: {},
+          },
+        }),
+      );
+
+      // An unreadable inspect protocol cannot identify which protocol-specific
+      // listing binding it supersedes, so both readable wildcard bindings stay.
+      const inventory = inventoryOf(rows);
+      expect(inventory.containers[0].publishedPorts.map(port => ({
+        publicPort: port.publicPort,
+        protocol: port.protocol,
+        allInterfaces: port.allInterfaces,
+      }))).toEqual([
+        { publicPort: 9999, protocol: null, allInterfaces: false },
+        { publicPort: 8080, protocol: first, allInterfaces: true },
+        { publicPort: 9090, protocol: second, allInterfaces: true },
+      ]);
+      expect(rows[0].metadataTruncated).toBe(true);
+      expect(inventory.status).toBe('partial');
+    },
+  );
+
+  it('repairs an unreadable inspect address in place at the overall port cap', async () => {
+    const inspectPorts: Record<string, Array<{ HostIp: string | null; HostPort: string }>> = {
+      '2375/tcp': [{ HostIp: null, HostPort: '8080' }],
+    };
+    for (let index = 1; index < 64; index += 1) {
+      inspectPorts[`${3000 + index}/tcp`] = [{ HostIp: '0.0.0.0', HostPort: '' }];
+    }
+    const rows = await rowsFrom(
+      listed({ Ports: [{ IP: '0.0.0.0', PrivatePort: 2375, PublicPort: 8080, Type: 'tcp' }] }),
+      inspected({ NetworkSettings: { Ports: inspectPorts, Networks: {} } }),
+    );
+
+    expect(rows[0].ports).toHaveLength(64);
+    expect(rows[0].ports[0]).toEqual({
+      privatePort: 2375, publicPort: 8080, ip: '0.0.0.0', protocol: 'tcp',
+    });
+    expect(rows[0].metadataTruncated).toBe(true);
+    expect(inventoryOf(rows).containers[0].publishedPorts).toEqual([
+      { privatePort: 2375, publicPort: 8080, ip: '0.0.0.0', allInterfaces: true, protocol: 'tcp' },
+    ]);
+  });
+
+  it('repairs an unreadable inspect protocol in place at the overall port cap', async () => {
+    const inspectPorts: Record<string, Array<{ HostIp: string; HostPort: string }>> = {
+      '2375/': [{ HostIp: '0.0.0.0', HostPort: '8080' }],
+    };
+    for (let index = 1; index < 64; index += 1) {
+      inspectPorts[`${3000 + index}/tcp`] = [{ HostIp: '0.0.0.0', HostPort: '' }];
+    }
+    const rows = await rowsFrom(
+      listed({ Ports: [{ IP: '0.0.0.0', PrivatePort: 2375, PublicPort: 8080, Type: 'tcp' }] }),
+      inspected({ NetworkSettings: { Ports: inspectPorts, Networks: {} } }),
+    );
+
+    expect(rows[0].ports).toHaveLength(64);
+    expect(rows[0].ports[0]).toEqual({
+      privatePort: 2375, publicPort: 8080, ip: '0.0.0.0', protocol: 'tcp',
+    });
+    expect(rows[0].metadataTruncated).toBe(true);
+    expect(inventoryOf(rows).containers[0].publishedPorts[0].protocol).toBe('tcp');
+  });
+
+  it('repairs an unreadable inspect public port in place at the overall port cap', async () => {
+    const inspectPorts: Record<string, Array<{ HostIp: string; HostPort: string | null }>> = {
+      '2375/tcp': [{ HostIp: '0.0.0.0', HostPort: null }],
+    };
+    for (let index = 1; index < 64; index += 1) {
+      inspectPorts[`${3000 + index}/tcp`] = [{ HostIp: '0.0.0.0', HostPort: '' }];
+    }
+    const rows = await rowsFrom(
+      listed({ Ports: [{ IP: '0.0.0.0', PrivatePort: 2375, PublicPort: 8080, Type: 'tcp' }] }),
+      inspected({ NetworkSettings: { Ports: inspectPorts, Networks: {} } }),
+    );
+
+    expect(rows[0].ports).toHaveLength(64);
+    expect(rows[0].ports[0]).toEqual({
+      privatePort: 2375, publicPort: 8080, ip: '0.0.0.0', protocol: 'tcp',
+    });
+    expect(rows[0].metadataTruncated).toBe(true);
+    expect(inventoryOf(rows).containers[0].publishedPorts[0]).toMatchObject({
+      publicPort: 8080,
+      allInterfaces: true,
+    });
   });
 });

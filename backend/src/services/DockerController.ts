@@ -2422,19 +2422,19 @@ class DockerController {
 
     const rows = await mapWithConcurrency(listed, 8, async (raw): Promise<SocketInventoryContainerRow> => {
       const listedRow = asRecord(raw);
-      const listedId = readContainerString(listedRow?.Id);
+      const listedId = readUsableContainerString(listedRow?.Id);
       const id = listedId ?? '';
       const listedNames = listedRow?.Names;
-      const listedName = readContainerString(Array.isArray(listedNames) ? listedNames[0] : undefined);
+      const listedName = readUsableContainerString(Array.isArray(listedNames) ? listedNames[0] : undefined);
       const name = (listedName ?? '').replace(/^\//, '');
       const listedLabels = normalizeDockerLabels(listedRow?.Labels);
-      const listedStateValue = readContainerString(listedRow?.State);
+      const listedStateValue = readUsableContainerString(listedRow?.State);
       const listedState = listedStateValue ?? 'unknown';
-      const listedStatusValue = readContainerString(listedRow?.Status);
+      const listedStatusValue = readUsableContainerString(listedRow?.Status);
       const listedStatus = listedStatusValue ?? '';
-      const listedImageValue = readContainerString(listedRow?.Image);
+      const listedImageValue = readUsableContainerString(listedRow?.Image);
       const listedImage = listedImageValue ?? '';
-      const listedImageIdValue = readContainerString(listedRow?.ImageID);
+      const listedImageIdValue = readUsableContainerString(listedRow?.ImageID);
       const listedImageId = listedImageIdValue ?? '';
       const listedPorts = normalizeDockerPorts(listedRow?.Ports);
       const listedNetworkSettings = asRecord(listedRow?.NetworkSettings);
@@ -2506,26 +2506,32 @@ class DockerController {
 
           const inspectedLabels = normalizeDockerLabels(config?.Labels);
           labels = { ...listedLabels.labels, ...inspectedLabels.labels };
-          // An explicit null is present but unreadable, not an absent field.
-          if (stateInfo?.Status !== undefined && typeof stateInfo.Status !== 'string') {
+          // A scalar that is present but empty or whitespace is unreadable
+          // evidence, not a replacement: it must not erase a readable listing
+          // value, and it must keep the row from reading complete. An explicit
+          // null or a non-string is unreadable for the same reason.
+          const inspectedState = readUsableContainerString(stateInfo?.Status);
+          if (stateInfo?.Status !== undefined && inspectedState === null) {
             inspectFieldIncomplete = true;
           }
-          state = readContainerString(stateInfo?.Status) ?? state;
-          if (readContainerString(stateInfo?.Status) !== null) {
+          state = inspectedState ?? state;
+          if (inspectedState !== null) {
             listedStateIncomplete = false;
           }
-          if (config?.Image !== undefined && typeof config.Image !== 'string') {
+          const inspectedImage = readUsableContainerString(config?.Image);
+          if (config?.Image !== undefined && inspectedImage === null) {
             inspectFieldIncomplete = true;
           }
-          image = readContainerString(config?.Image) ?? image;
-          if (readContainerString(config?.Image) !== null) {
+          image = inspectedImage ?? image;
+          if (inspectedImage !== null) {
             listedImageIncomplete = false;
           }
-          if (info.Image !== undefined && typeof info.Image !== 'string') {
+          const inspectedImageId = readUsableContainerString(info.Image);
+          if (info.Image !== undefined && inspectedImageId === null) {
             inspectFieldIncomplete = true;
           }
-          imageId = readContainerString(info.Image) ?? imageId;
-          if (readContainerString(info.Image) !== null) {
+          imageId = inspectedImageId ?? imageId;
+          if (inspectedImageId !== null) {
             listedImageIdIncomplete = false;
           }
           const healthValue = stateInfo?.Health;
@@ -2535,11 +2541,14 @@ class DockerController {
           if (healthValue !== undefined && healthInfo === null) {
             inspectFieldIncomplete = true;
           }
+          // A Health map without a readable Status cannot prove an absent
+          // healthcheck either: `{}` is unreadable evidence, not no evidence.
           const rawHealth = healthInfo?.Status;
-          if (rawHealth !== undefined && typeof rawHealth !== 'string') {
+          const inspectedHealth = readUsableContainerString(rawHealth);
+          if (healthInfo !== null && (rawHealth === undefined || inspectedHealth === null)) {
             inspectFieldIncomplete = true;
           }
-          health = readContainerString(rawHealth);
+          health = inspectedHealth;
           const inspectedMounts = normalizeDockerMounts(info.Mounts);
           mounts = inspectedMounts.mounts;
           const inspectedExposed = normalizeDockerExposedPorts(config?.ExposedPorts);
@@ -4043,6 +4052,19 @@ function readContainerString(value: unknown): string | null {
 }
 
 /**
+ * A scalar that must carry usable evidence. Docker reports a readable image,
+ * image ID, state, status, name, or health status as a non-empty string, so an
+ * empty or whitespace-only value is unreadable metadata rather than a fact: it
+ * must not replace a readable fallback, and it must keep the row incomplete.
+ * The shared reader stays permissive for fields where an empty string is
+ * legitimate (a wildcard bind address, an empty label value).
+ */
+function readUsableContainerString(value: unknown): string | null {
+  const text = readContainerString(value);
+  return text !== null && text.trim().length > 0 ? text : null;
+}
+
+/**
  * A host address Docker reports for a binding or network: the empty string (a
  * wildcard binding, or a network with no address) or a literal IP. Any other
  * string is malformed metadata, not an address, and must never be presented as
@@ -4112,7 +4134,10 @@ interface NormalizedLabels {
 }
 
 function normalizeDockerLabels(value: unknown): NormalizedLabels {
-  const out: Record<string, string> = {};
+  // A null-prototype dictionary keeps every own string key, including
+  // `__proto__`: a plain `{}` routes that assignment through the inherited
+  // setter and silently drops a readable label.
+  const out: Record<string, string> = Object.create(null) as Record<string, string>;
   let count = 0;
   let incomplete = false;
   const put = (key: unknown, raw: unknown) => {
@@ -4393,18 +4418,32 @@ function normalizeInspectPorts(
   // distinct listing public port for that spec is kept.
   const specKey = (port: { privatePort: number | null; protocol: string | null }) =>
     `${port.privatePort}/${port.protocol ?? '*'}`;
+  // Inspect can only supersede a listing binding when it identifies it. A
+  // missing public port or an unreadable protocol leaves the binding it would
+  // replace unknown, so readable listing evidence is kept beside it instead of
+  // being dropped as a stale duplicate.
   const unreadableBindingSpecs = new Set(
-    ports.filter(port => port.publicPort === null).map(specKey),
+    ports
+      .filter(port => port.publicPort === null || port.protocol === null)
+      .map(specKey),
   );
   const hasUnreadableBinding = (port: { privatePort: number | null; protocol: string | null }) =>
     unreadableBindingSpecs.has(specKey(port))
     || (port.protocol !== null && unreadableBindingSpecs.has(`${port.privatePort}/*`));
   let restored = false;
-  for (const candidate of fallback) {
+  // A matching or in-place repair at the cap needs no additional slot, so
+  // capacity is enforced only when a binding is appended. An exact-cap inspect
+  // list must still get its unreadable address, protocol, or public port
+  // repaired from the listing.
+  const appendPort = (port: SocketInventoryPortRow): boolean => {
     if (ports.length >= 64) {
       truncated = true;
-      break;
+      return false;
     }
+    ports.push(port);
+    return true;
+  };
+  for (const candidate of fallback) {
     // A listing entry whose private port is unreadable already marks the row
     // incomplete; it carries no spec to restore.
     if (candidate.privatePort === null) continue;
@@ -4416,8 +4455,7 @@ function normalizeInspectPorts(
       && (candidate.protocol === null || port.protocol === null || port.protocol === candidate.protocol);
     const sameSpecPorts = ports.filter(sameSpec);
     if (sameSpecPorts.length === 0) {
-      ports.push({ ...candidate });
-      restored = true;
+      if (appendPort({ ...candidate })) restored = true;
       continue;
     }
     // The spec is present. An exposed-only list entry adds nothing to it.
@@ -4472,13 +4510,12 @@ function normalizeInspectPorts(
     // public port is inspect's authoritative replacement for the spec, so the
     // stale listing entry is not duplicated.
     if (sameSpecPorts.some(port => port.publicPort === candidate.publicPort)) {
-      ports.push({ ...candidate });
-      restored = true;
+      if (appendPort({ ...candidate })) restored = true;
     } else if (hasUnreadableBinding(candidate)) {
-      // Inspect had no readable published binding for this spec, so this
-      // distinct listing public port is evidence rather than a stale duplicate.
-      ports.push({ ...candidate });
-      restored = true;
+      // Inspect had no readable published binding for this spec (or could not
+      // identify its protocol), so this distinct listing public port is
+      // evidence rather than a stale duplicate.
+      if (appendPort({ ...candidate })) restored = true;
     }
   }
   return { ports, truncated, incomplete: incomplete || restored };
