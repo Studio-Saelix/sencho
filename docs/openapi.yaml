@@ -1549,7 +1549,7 @@ components:
           description: Fixed, sanitized sentence for this class. Never raw engine output.
         errorClass:
           type: string
-          enum: [invalid_request, permission_denied, capability_unavailable, update_required, schema_unsupported, identity_unknown, lock_held, lock_stale, repository_unavailable, repository_key_unavailable, source_unreadable, integrity_mismatch, attributes_not_restored, interrupted, transport_unreachable, node_refused, node_error, internal, precondition_failed, dependents_changed, fence_unavailable, pre_restore_failed, insufficient_space, cleanup_failed, not_cancellable]
+          enum: [invalid_request, permission_denied, capability_unavailable, update_required, schema_unsupported, identity_unknown, lock_held, lock_stale, repository_unavailable, repository_key_unavailable, source_unreadable, integrity_mismatch, attributes_not_restored, interrupted, transport_unreachable, node_refused, node_error, internal, precondition_failed, dependents_changed, fence_unavailable, pre_restore_failed, insufficient_space, cleanup_failed, not_cancellable, not_found, payload_too_large]
         code:
           type: string
           description: The error class upper-cased, for a client to switch on.
@@ -1568,6 +1568,9 @@ components:
             now: it came from another preview, or the containers or the repository changed
             since the preview), `no_fence` (`release_fence` on a restore that never stopped a workload),
             and `fence_released` (`release_fence` on a restore whose fence is already released).
+            The point-contents routes add `no_snapshot` (the point failed or was interrupted,
+            so it holds nothing to read), `symlink_not_followed` (a symlink is never followed out
+            of a point), and `not_a_file` (a directory or a special file has no file body).
 
     RecoveryOperation:
       type: object
@@ -1596,7 +1599,7 @@ components:
             success and is never retried silently.
         errorClass:
           type: ["string", "null"]
-          enum: [invalid_request, permission_denied, capability_unavailable, update_required, schema_unsupported, identity_unknown, lock_held, lock_stale, repository_unavailable, repository_key_unavailable, source_unreadable, integrity_mismatch, attributes_not_restored, interrupted, transport_unreachable, node_refused, node_error, internal, precondition_failed, dependents_changed, fence_unavailable, pre_restore_failed, insufficient_space, cleanup_failed, not_cancellable, null]
+          enum: [invalid_request, permission_denied, capability_unavailable, update_required, schema_unsupported, identity_unknown, lock_held, lock_stale, repository_unavailable, repository_key_unavailable, source_unreadable, integrity_mismatch, attributes_not_restored, interrupted, transport_unreachable, node_refused, node_error, internal, precondition_failed, dependents_changed, fence_unavailable, pre_restore_failed, insufficient_space, cleanup_failed, not_cancellable, not_found, payload_too_large, null]
         errorDetail: { type: ["string", "null"] }
         processEpoch: { type: string }
         createdAt: { type: integer }
@@ -1806,6 +1809,141 @@ components:
         verifiedAt: { type: integer }
         operationId: { type: ["string", "null"] }
 
+    RecoveryContentEntry:
+      type: object
+      description: |
+        One entry inside a saved point. `path` is relative to the point root, so it
+        never names the helper mount and never starts with a slash.
+      required: [path, name, type, size, permissions, mode, uid, gid, mtime]
+      properties:
+        path:
+          type: string
+          description: Root-relative path, such as `etc/app/config.txt`.
+        name: { type: string }
+        type:
+          type: string
+          enum: [file, directory, symlink, other]
+          description: |
+            `other` covers a device, a socket, a FIFO and anything else restic
+            records that is neither a file, a directory nor a symlink. It can be
+            listed and inspected, never downloaded.
+        size:
+          type: ["integer", "null"]
+          description: Bytes for a regular file; null for every other type.
+        permissions:
+          type: ["string", "null"]
+          example: "-rw-r-----"
+        mode: { type: ["integer", "null"] }
+        uid: { type: ["integer", "null"] }
+        gid: { type: ["integer", "null"] }
+        mtime:
+          type: ["integer", "null"]
+          description: Milliseconds since the epoch, as recorded in the point.
+
+    RecoveryPointContents:
+      type: object
+      description: |
+        One read of a saved point. A directory answers its immediate entries; a
+        file or another entry answers its own metadata with no entries. The point
+        root has no entry of its own, because its name in the record is the
+        helper's mount.
+      required: [point, contents, limits]
+      properties:
+        point:
+          type: object
+          description: |
+            What the point is, beside what it holds. `complete` is true only when
+            the point succeeded with nothing skipped and its latest check verified:
+            a `partial` point never reads as complete, whatever its check said.
+          required: [id, kind, status, snapshotId, completedAt, consistency, capture, exclusions, integrity, complete, storage]
+          properties:
+            id: { type: string }
+            kind:
+              type: string
+              enum: [root, path]
+            status:
+              type: string
+              enum: [pending, succeeded, partial, failed, completion_unknown]
+            snapshotId: { type: ["string", "null"] }
+            completedAt: { type: ["integer", "null"] }
+            consistency:
+              type: string
+              enum: [crash_consistent_live, crash_consistent_stopped, unknown]
+            capture:
+              type: ["object", "null"]
+              properties:
+                fileCount: { type: integer }
+                byteCount: { type: integer }
+                skippedCount: { type: integer }
+            exclusions:
+              type: array
+              items:
+                type: object
+                required: [path, reason]
+                properties:
+                  path: { type: string }
+                  reason:
+                    type: string
+                    enum: [policy_excluded, permission_denied, unreadable, vanished, unsupported_type]
+            integrity:
+              type: object
+              required: [result, method, verifiedAt]
+              properties:
+                result:
+                  type: string
+                  enum: [verified, mismatch, error, unverified]
+                  description: The latest check. `unverified` means no check was recorded.
+                method:
+                  type: ["string", "null"]
+                  enum: [engine_check_metadata, engine_check_read_data, null]
+                verifiedAt: { type: ["integer", "null"] }
+            complete: { type: boolean }
+            storage:
+              type: ["object", "null"]
+              properties:
+                id: { type: string }
+                kind:
+                  type: string
+                  enum: [named_volume, bind_root]
+                locator: { type: string }
+                generation: { type: integer }
+                state:
+                  type: string
+                  enum: [current, superseded]
+        contents:
+          type: object
+          required: [path, kind, entry, entries, truncated]
+          properties:
+            path:
+              type: string
+              description: Root-relative path this read answered; the empty string is the point root.
+            kind:
+              type: string
+              enum: [directory, file, other]
+            entry:
+              oneOf:
+                - $ref: "#/components/schemas/RecoveryContentEntry"
+                - type: "null"
+            entries:
+              type: array
+              items:
+                $ref: "#/components/schemas/RecoveryContentEntry"
+            truncated:
+              type: boolean
+              description: |
+                More entries exist than this read lists. Ask for a subdirectory to
+                see the rest; the cap is `limits.maxEntries`.
+        limits:
+          type: object
+          required: [maxEntries, maxDownloadBytes]
+          properties:
+            maxEntries:
+              type: integer
+              example: 2000
+            maxDownloadBytes:
+              type: integer
+              example: 1073741824
+
     RecoveryRootCoverage:
       type: object
       required: [storageKey, reason, coveringPointId]
@@ -1980,6 +2118,25 @@ components:
         application/json:
           schema:
             $ref: "#/components/schemas/RecoveryError"
+    RecoveryNotFound:
+      description: The point, or the path inside it, names nothing.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/RecoveryError"
+    RecoveryPayloadTooLarge:
+      description: |
+        The file is larger than this build downloads from a point. The answer names
+        the file's `size` and the `maxBytes` served; restore the point instead.
+      content:
+        application/json:
+          schema:
+            allOf:
+              - $ref: "#/components/schemas/RecoveryError"
+              - type: object
+                properties:
+                  size: { type: integer }
+                  maxBytes: { type: integer }
     RecoveryInternalError:
       description: The recovery operation failed.
       content:
@@ -6182,6 +6339,128 @@ paths:
           $ref: "#/components/responses/RecoveryConflict"
         "500":
           $ref: "#/components/responses/RecoveryInternalError"
+
+  /api/recovery/points/{pointId}/contents:
+    get:
+      operationId: browseRecoveryPointContents
+      tags: [Recovery]
+      summary: Browse a saved point's contents
+      description: |
+        Lists one directory of a saved recovery point, or returns one entry's
+        metadata, without restoring anything. `?path=` is relative to the point
+        root; an empty or absent value is the root, a leading slash is read as the
+        root, and `..` is refused rather than resolved. The answer carries the
+        point's evidence beside the entries, so a partial point, a skipped path or
+        an unverified point is never presented as a complete copy.
+
+        The read runs on the node that owns the storage, through a read-only helper
+        that mounts only the repository. It creates no operation and takes no lock.
+        A directory larger than `limits.maxEntries` answers `truncated`: ask for a
+        subdirectory to see the rest. A node whose engine is still starting answers
+        `503 capability_unavailable` with `reason: engine_starting`; a node that
+        cannot read its repository answers `503 repository_unavailable` or
+        `repository_key_unavailable`, and one whose point names a missing path
+        answers `404 not_found`.
+      parameters:
+        - name: pointId
+          in: path
+          required: true
+          description: The point id, from a storage's point list.
+          schema:
+            type: string
+        - name: path
+          in: query
+          required: false
+          description: Root-relative path to read. Absent or empty is the point root.
+          schema:
+            type: string
+            example: etc/app
+        - $ref: "#/components/parameters/nodeId"
+      responses:
+        "200":
+          description: The point's evidence and one directory or entry.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RecoveryPointContents"
+        "400":
+          $ref: "#/components/responses/RecoveryBadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/RecoveryForbidden"
+        "404":
+          $ref: "#/components/responses/RecoveryNotFound"
+        "500":
+          $ref: "#/components/responses/RecoveryInternalError"
+        "503":
+          $ref: "#/components/responses/RecoveryUnavailable"
+
+  /api/recovery/points/{pointId}/contents/download:
+    get:
+      operationId: downloadRecoveryPointContent
+      tags: [Recovery]
+      summary: Download one file from a saved point
+      description: |
+        Streams one regular file out of a saved recovery point. The node that owns
+        the storage reads it from the repository and the bytes pass through to the
+        caller at the caller's pace, so memory stays flat however large the file is
+        and a client that disconnects cancels the read. `Content-Length` is the
+        size the point recorded.
+
+        Only a regular file is served: a symlink is never followed (`reason:
+        symlink_not_followed`), and a directory or a special file has no file body
+        (`reason: not_a_file`). A file larger than `limits.maxDownloadBytes` is
+        refused with `413 payload_too_large` before any byte moves, and the answer
+        carries its `size` and the `maxBytes` this build serves. A body that ends
+        before that length, because a chunk is missing or the helper stopped, is
+        closed rather than completed, so a client never receives a truncated file
+        as a whole one.
+      parameters:
+        - name: pointId
+          in: path
+          required: true
+          schema:
+            type: string
+        - name: path
+          in: query
+          required: true
+          description: Root-relative path of one regular file.
+          schema:
+            type: string
+            example: etc/app/config.txt
+        - $ref: "#/components/parameters/nodeId"
+      responses:
+        "200":
+          description: The file body.
+          headers:
+            Content-Disposition:
+              description: An attachment naming the file.
+              schema:
+                type: string
+            Content-Length:
+              description: The size the point recorded for the file.
+              schema:
+                type: integer
+          content:
+            application/octet-stream:
+              schema:
+                type: string
+                format: binary
+        "400":
+          $ref: "#/components/responses/RecoveryBadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/RecoveryForbidden"
+        "404":
+          $ref: "#/components/responses/RecoveryNotFound"
+        "413":
+          $ref: "#/components/responses/RecoveryPayloadTooLarge"
+        "500":
+          $ref: "#/components/responses/RecoveryInternalError"
+        "503":
+          $ref: "#/components/responses/RecoveryUnavailable"
 
   /api/recovery/storage/points:
     post:

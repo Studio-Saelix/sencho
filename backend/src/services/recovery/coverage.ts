@@ -64,7 +64,7 @@ export interface CoverageVerdict {
 }
 
 /** The most recent verification; on a tie, the one that did not verify wins. */
-function latestVerification(
+export function latestVerificationFor(
   pointId: string,
   verifications: ReadonlyMap<string, readonly IntegrityVerification[]>,
 ): IntegrityVerification | null {
@@ -80,7 +80,12 @@ function latestVerification(
   return latest;
 }
 
-const isComplete = (p: RecoveryPoint): boolean =>
+/**
+ * A point that counted everything it recorded and left nothing out but policy
+ * exclusions. The one definition every surface uses; a point that fails it is
+ * never reported as complete or verified, whatever restic's check said.
+ */
+export const isCompletePoint = (p: RecoveryPoint): boolean =>
   p.status === 'succeeded' && p.capture.skippedCount === 0
   && p.exclusions.every((e) => e.reason === 'policy_excluded');
 
@@ -117,7 +122,7 @@ export function evaluateRootCoverage(root: RootCoverageInput, now: number, fresh
   }
 
   const complete = currentGen
-    .filter(isComplete)
+    .filter(isCompletePoint)
     .sort((a, b) => (b.completedAt ?? 0) - (a.completedAt ?? 0));
   if (complete.length === 0) {
     if (currentGen.some((p) => p.status === 'pending')) return result('in_progress');
@@ -126,9 +131,9 @@ export function evaluateRootCoverage(root: RootCoverageInput, now: number, fresh
     return result('failed_only');
   }
 
-  const verified = complete.filter((p) => latestVerification(p.id, root.verifications)?.result === 'verified');
+  const verified = complete.filter((p) => latestVerificationFor(p.id, root.verifications)?.result === 'verified');
   if (verified.length === 0) {
-    const newest = latestVerification(complete[0].id, root.verifications);
+    const newest = latestVerificationFor(complete[0].id, root.verifications);
     return result(newest?.result === 'mismatch' ? 'integrity_mismatch' : 'unverified');
   }
 

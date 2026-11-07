@@ -95,6 +95,10 @@ describe('recovery helper profiles', () => {
     expect(HELPER_PROFILES.config.capAdd).toEqual([]);
     expect(HELPER_PROFILES.init.capAdd).toEqual([]);
     expect(HELPER_PROFILES.check.capAdd).toEqual([]);
+    // Reading a point's contents mounts the repository read-only and nothing
+    // else: the bytes come out of the repository, so no application volume is
+    // attached and no capability is needed.
+    expect(HELPER_PROFILES.read.capAdd).toEqual([]);
     expect(HELPER_PROFILES.unlock.capAdd).toEqual([]);
     expect(HELPER_PROFILES.backup.capAdd).toEqual(['DAC_READ_SEARCH']);
     // --verify reads restored files back after their ownership is applied.
@@ -180,7 +184,7 @@ describe('recovery helper profiles', () => {
   });
 
   it('keeps the repository read-only wherever restic only reads it', () => {
-    for (const profile of ['probe', 'config', 'check', 'restore'] as const) {
+    for (const profile of ['probe', 'config', 'check', 'read', 'restore'] as const) {
       const mounts = specFor(profile).hostConfig.Mounts as Array<Record<string, unknown>>;
       const repository = mounts.find((m) => m.Target === HELPER_REPOSITORY_MOUNT);
       if (repository) expect(repository.ReadOnly, profile).toBe(true);

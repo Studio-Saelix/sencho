@@ -378,6 +378,83 @@ describeIf('recovery round trip against real Docker', () => {
     }
   }, 300_000);
 
+  it('lists a saved point, stats an entry and dumps a file\'s exact bytes', async () => {
+    const source = volumeName('sencho-it-contents');
+    try {
+      createVolume(source);
+      populateSource(source);
+      const token = await tokenFor(source);
+      const engine = engineFor(source);
+      const capture = await engine.createPoint(
+        {
+          storage: storageFor(source, token),
+          repository: RecoveryRepositoryStore.getInstance().get(repositoryId) as never,
+          trigger: 'manual',
+          actor: 'integration',
+          kind: 'root',
+        },
+        context('integration-contents-capture'),
+      );
+      expect(capture.ok).toBe(true);
+      if (!capture.ok) return;
+
+      const read = (path: string) => ({ snapshotId: capture.evidence.snapshotId, repositoryId, path });
+      const readContext = (operationId: string) => ({ operationId, signal: new AbortController().signal });
+
+      const root = await engine.listContents(read(''), readContext('integration-contents-root'));
+      expect(root.ok).toBe(true);
+      if (!root.ok) return;
+      expect(root.evidence.kind).toBe('directory');
+      // The point root is not an entry: its record is named after the mount.
+      expect(root.evidence.entry).toBeNull();
+      const names = root.evidence.entries.map((entry) => entry.name);
+      expect(names).toEqual(expect.arrayContaining(['a.txt', 'tree', 'secretdir', 'link-rel', 'hardlink', 'sparse.bin', 'setgid']));
+      expect(root.evidence.entries.find((entry) => entry.name === 'a.txt')).toMatchObject({ type: 'file', size: 5 });
+      expect(root.evidence.entries.find((entry) => entry.name === 'link-rel')).toMatchObject({ type: 'symlink', size: null });
+
+      const tree = await engine.listContents(read('tree'), readContext('integration-contents-tree'));
+      expect(tree.ok).toBe(true);
+      if (!tree.ok) return;
+      expect(tree.evidence.kind).toBe('directory');
+      expect(tree.evidence.entry).toMatchObject({ name: 'tree', type: 'directory' });
+      expect(tree.evidence.entries.map((entry) => entry.name).sort()).toEqual(['big.bin', 'sub']);
+
+      // A subdirectory of a tree that holds an empty directory still answers it.
+      const empty = await engine.listContents(read('tree/sub'), readContext('integration-contents-empty'));
+      expect(empty.ok && empty.evidence.kind).toBe('directory');
+      expect(empty.ok && empty.evidence.entries).toEqual([]);
+
+      const file = await engine.listContents(read('a.txt'), readContext('integration-contents-file'));
+      expect(file.ok).toBe(true);
+      if (!file.ok) return;
+      expect(file.evidence).toMatchObject({ kind: 'file', entries: [], truncated: false });
+      expect(file.evidence.entry).toMatchObject({ path: 'a.txt', type: 'file', size: 5, permissions: '-rw-r--r--' });
+
+      const missing = await engine.listContents(read('nope'), readContext('integration-contents-missing'));
+      expect(missing).toEqual({ ok: false, errorClass: 'not_found' });
+
+      const symlink = await engine.listContents(read('link-rel'), readContext('integration-contents-link'));
+      expect(symlink.ok && symlink.evidence.kind).toBe('other');
+
+      const chunks: Buffer[] = [];
+      const dump = await engine.dumpFile(
+        read('a.txt'),
+        5,
+        (chunk) => { chunks.push(chunk); },
+        readContext('integration-contents-dump'),
+      );
+      expect(dump).toEqual({ ok: true, evidence: { bytes: 5 } });
+      expect(Buffer.concat(chunks).toString()).toBe('alpha');
+
+      // A body shorter than the metadata promised is an integrity answer, never a
+      // short success: this is how a missing chunk reaches the caller.
+      const short = await engine.dumpFile(read('a.txt'), 6, () => undefined, readContext('integration-contents-short'));
+      expect(short).toEqual({ ok: false, errorClass: 'integrity_mismatch' });
+    } finally {
+      removeVolume(source);
+    }
+  }, 300_000);
+
   it('captures and restores a gigabyte of incompressible data, which a 64 MiB scratch could not', async () => {
     const source = volumeName('sencho-it-big');
     const target = volumeName('sencho-it-big-dst');

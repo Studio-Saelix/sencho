@@ -46,6 +46,8 @@ const ERROR_DETAIL: Record<RecoveryErrorClass, string> = {
   cleanup_failed:
     'The restored data is in place, but the temporary restore directory could not be removed. The workloads stay stopped until this is resolved.',
   not_cancellable: 'This operation can no longer be cancelled.',
+  not_found: 'The recovery point holds nothing at that path.',
+  payload_too_large: 'The file is larger than this Sencho build downloads from a recovery point.',
 };
 
 export function errorDetailFor(errorClass: RecoveryErrorClass): string {

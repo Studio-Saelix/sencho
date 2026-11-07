@@ -46,6 +46,7 @@ import {
   RecoveryError,
 } from '../services/recovery/redaction';
 import { ROOT_COVERAGE_FRESHNESS_MS } from '../services/recovery/types';
+import { MAX_CONTENT_DOWNLOAD_BYTES } from '../services/recovery/restic/resticContents';
 import type {
   RecoveryErrorClass,
   RecoveryOperation,
@@ -102,6 +103,8 @@ export const ERROR_STATUS: Readonly<Record<RecoveryErrorClass, number>> = {
   insufficient_space: 507,
   cleanup_failed: 500,
   not_cancellable: 409,
+  not_found: 404,
+  payload_too_large: 413,
 };
 
 /** The machine code a client switches on, one per class. */
@@ -150,18 +153,29 @@ export function logInternalFailure(method: string, path: string, err: unknown): 
 }
 
 /** Run a handler and turn every thrown recovery error into its documented answer. */
+function sendThrown(req: Request, res: Response, err: unknown): void {
+  const errorClass = classifyRecoveryError(err);
+  if (errorClass === 'internal') {
+    logInternalFailure(req.method, req.path, err);
+  }
+  // A response whose headers are already on the wire cannot carry a JSON error.
+  // The body is partial by definition, so the only honest end is to break the
+  // connection rather than let a client read a truncated body as a whole one.
+  if (res.headersSent) {
+    res.destroy();
+    return;
+  }
+  const extra: Record<string, unknown> = {};
+  if (err instanceof RecoveryError && err.reason !== undefined) extra.reason = err.reason;
+  sendRecoveryError(res, errorClass, extra, err instanceof RecoveryError ? err.detail : undefined);
+}
+
 function handle(fn: (req: Request, res: Response) => Promise<void> | void) {
   return async (req: Request, res: Response): Promise<void> => {
     try {
       await fn(req, res);
     } catch (err) {
-      const errorClass = classifyRecoveryError(err);
-      if (errorClass === 'internal') {
-        logInternalFailure(req.method, req.path, err);
-      }
-      const extra: Record<string, unknown> = {};
-      if (err instanceof RecoveryError && err.reason !== undefined) extra.reason = err.reason;
-      sendRecoveryError(res, errorClass, extra, err instanceof RecoveryError ? err.detail : undefined);
+      sendThrown(req, res, err);
     }
   };
 }
@@ -620,6 +634,117 @@ recoveryRouter.post('/points/:pointId/restore', handle(async (req, res) => {
     },
   });
   res.status(result.replayed ? 200 : 202).json({ operation: result.operation });
+}));
+
+// --- Browsing a saved point -------------------------------------------------
+
+/**
+ * The `path` query parameter: absent or empty is the point root, a repeated
+ * parameter is refused, and anything else is canonicalized by the service (a
+ * leading slash means the point root, `..` is refused).
+ */
+function contentPathOf(req: Request): string {
+  const raw: unknown = req.query.path;
+  if (raw === undefined) return '';
+  if (typeof raw !== 'string') throw new RecoveryError('invalid_request');
+  return raw;
+}
+
+/** A download's file name, quoted for the header and encoded for other locales. */
+function contentDisposition(name: string): string {
+  const safe = name.replace(/[\\"\r\n]/g, '');
+  return `attachment; filename="${safe}"; filename*=UTF-8''${encodeURIComponent(name)}`;
+}
+
+/**
+ * One directory of a saved point, or one entry's metadata.
+ *
+ * Read-only and node-local: the node that owns the storage answers, so a hub
+ * proxying the request authorizes nothing itself. `?path=` is relative to the
+ * point root. The answer carries the point's own evidence beside the entries, so
+ * a point that skipped data, or whose check did not verify, is never shown as a
+ * complete copy.
+ */
+recoveryRouter.get('/points/:pointId/contents', handle(async (req, res) => {
+  const controller = new AbortController();
+  const onClose = (): void => {
+    if (res.writableFinished) return;
+    controller.abort();
+  };
+  res.once('close', onClose);
+  try {
+    const result = await engineService(req).readPointContents({
+      pointId: paramOf(req, 'pointId'),
+      path: contentPathOf(req),
+      authorize: authorizeWith(req, 'read'),
+      signal: controller.signal,
+    });
+    res.json(result);
+  } finally {
+    res.off('close', onClose);
+  }
+}));
+
+/**
+ * Download one regular file out of a saved point.
+ *
+ * The bytes stream from the helper through this node to the caller, at the
+ * caller's pace: memory stays flat however large the file is. A symlink, a
+ * directory and a special file are refused before any byte moves, as is a file
+ * past the download bound. A client that disconnects cancels the helper. A run
+ * that ends after the headers, for any other reason, breaks the connection so a
+ * partial body is never read as a whole one.
+ */
+recoveryRouter.get('/points/:pointId/contents/download', handle(async (req, res) => {
+  const controller = new AbortController();
+  let clientGone = false;
+  const onClose = (): void => {
+    if (res.writableFinished) return;
+    clientGone = true;
+    controller.abort();
+  };
+  res.once('close', onClose);
+  try {
+    const download = await engineService(req).prepareContentDownload({
+      pointId: paramOf(req, 'pointId'),
+      path: contentPathOf(req),
+      authorize: authorizeWith(req, 'read'),
+      signal: controller.signal,
+    });
+    const size = download.entry.size ?? 0;
+    if (size > MAX_CONTENT_DOWNLOAD_BYTES) {
+      sendRecoveryError(res, 'payload_too_large', { size, maxBytes: MAX_CONTENT_DOWNLOAD_BYTES });
+      return;
+    }
+    res.setHeader('Content-Type', 'application/octet-stream');
+    res.setHeader('Content-Length', String(size));
+    res.setHeader('Content-Disposition', contentDisposition(download.entry.name));
+    res.setHeader('Cache-Control', 'no-store');
+    res.setHeader('X-Content-Type-Options', 'nosniff');
+
+    const result = await download.stream((chunk, control) => {
+      if (clientGone || res.writableEnded || res.destroyed) {
+        control.pause();
+        return;
+      }
+      if (!res.write(chunk)) {
+        control.pause();
+        res.once('drain', () => {
+          if (!clientGone) control.resume();
+        });
+      }
+    });
+    if (clientGone) return;
+    if (!result.ok) {
+      // Part of the body is already on the wire: a JSON error cannot replace it,
+      // and ending normally would present a short file as a complete one.
+      res.destroy();
+      return;
+    }
+    res.end();
+  } finally {
+    res.off('close', onClose);
+  }
 }));
 
 // --- Restore over the existing volume ---------------------------------------

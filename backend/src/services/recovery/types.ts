@@ -198,7 +198,11 @@ export type RecoveryErrorClass =
   /** The data was committed but the work directory could not be removed. */
   | 'cleanup_failed'
   /** The operation has passed its commit point and cannot be rolled back. */
-  | 'not_cancellable';
+  | 'not_cancellable'
+  /** A point, a storage record or a path inside a point names nothing. */
+  | 'not_found'
+  /** A file in a point is larger than the download bound this build serves. */
+  | 'payload_too_large';
 
 /**
  * Every `reason` token a recovery refusal can carry beside its class. A
@@ -215,6 +219,12 @@ export const RECOVERY_REFUSAL_REASONS = [
   'confirmation_mismatch',
   'no_fence',
   'fence_released',
+  /** The point has no snapshot: it failed, or was interrupted before it finalized. */
+  'no_snapshot',
+  /** The requested entry is a directory or a special file, never a file body. */
+  'not_a_file',
+  /** The requested entry is a symlink. A point is browsed, never followed. */
+  'symlink_not_followed',
 ] as const;
 export type RecoveryRefusalReason = (typeof RECOVERY_REFUSAL_REASONS)[number];
 
@@ -564,4 +574,96 @@ export interface BackupEngine {
     ctx: EngineExecutionContext,
   ): Promise<EngineResult<{ result: 'verified' | 'mismatch' }>>;
   restore(intent: RestoreIntent, ctx: EngineExecutionContext): Promise<EngineResult<RestoreEvidence>>;
+}
+
+// --- Point contents (read-only browse and download) -------------------------
+
+/**
+ * One entry inside a saved point, as restic records it. `path` is relative to
+ * the point root, so it never names the helper's mount (`/data`) and never
+ * starts with a slash. The point root itself is not an entry: it has no name,
+ * size or mode of its own in the record.
+ */
+export interface RecoveryContentEntry {
+  path: string;
+  name: string;
+  type: 'file' | 'directory' | 'symlink' | 'other';
+  /** Bytes for a regular file; null for every other type. */
+  size: number | null;
+  /** The permission string restic reports, such as `-rw-r--r--`. */
+  permissions: string | null;
+  mode: number | null;
+  uid: number | null;
+  gid: number | null;
+  /** Milliseconds since the epoch, or null when the record carries no valid time. */
+  mtime: number | null;
+}
+
+export type RecoveryContentKind = 'directory' | 'file' | 'other';
+
+/**
+ * One read of a point: what the requested path is, its metadata, and (for a
+ * directory) the entries it holds. `truncated` means more entries exist than
+ * this read lists; the caller asks for a subdirectory to see the rest.
+ */
+export interface RecoveryContents {
+  /** Root-relative path this read answered: '' is the point root. */
+  path: string;
+  kind: RecoveryContentKind;
+  entry: RecoveryContentEntry | null;
+  entries: RecoveryContentEntry[];
+  truncated: boolean;
+}
+
+/** What a content read needs from the engine. Paths are already canonical. */
+export interface ContentReadRequest {
+  snapshotId: string;
+  repositoryId: string;
+  /** Root-relative path: '' is the point root. */
+  path: string;
+}
+
+/**
+ * Context for a read. Reads create no operation row and hold no lock: they are
+ * bounded, cancellable observations of an immutable snapshot.
+ */
+export interface ContentReadContext {
+  /** Correlation id for the helper container and the node-local log. */
+  operationId: string;
+  signal: AbortSignal;
+}
+
+/** Backpressure control a chunk sink uses when its destination is saturated. */
+export interface ContentChunkControl {
+  pause(): void;
+  resume(): void;
+}
+
+/** Receives raw file bytes in order. */
+export type ContentChunkSink = (chunk: Buffer, control: ContentChunkControl) => void;
+
+export interface ContentDump {
+  bytes: number;
+}
+
+/**
+ * The read half of the engine contract: what a saved point holds, without
+ * restoring it. Kept apart from `BackupEngine` because a read needs no lock,
+ * writes no operation and returns bytes to a caller rather than evidence to a
+ * store. A node's engine may implement it; a caller that needs it refuses
+ * `capability_unavailable` when the registered engine does not.
+ */
+export interface PointContentReader {
+  /** One directory's entries, or one entry's metadata. */
+  listContents(request: ContentReadRequest, ctx: ContentReadContext): Promise<EngineResult<RecoveryContents>>;
+  /**
+   * Stream one regular file's bytes. `expectedBytes` is what the metadata read
+   * reported, so the caller can refuse a short or overlong body.
+   */
+  dumpFile(
+    request: ContentReadRequest,
+    expectedBytes: number,
+    sink: ContentChunkSink,
+    ctx: ContentReadContext,
+  ): Promise<EngineResult<ContentDump>>;
 }

@@ -49,11 +49,23 @@ import {
   type ResolveAction,
 } from './overwriteRestore';
 import { RestoreFenceStore } from './restoreFence';
+import { describePointContentsEvidence, type PointContentsEvidence } from './pointEvidence';
+import {
+  MAX_CONTENT_DOWNLOAD_BYTES,
+  MAX_CONTENT_ENTRIES,
+  canonicalizeContentPath,
+} from './restic/resticContents';
 import type {
   BackupEngine,
+  ContentChunkSink,
+  ContentDump,
   EngineExecutionContext,
+  EngineResult,
   IntegrityMethod,
   OperationFinish,
+  PointContentReader,
+  RecoveryContentEntry,
+  RecoveryContents,
   RecoveryErrorClass,
   RecoveryOperation,
   RecoveryProgress,
@@ -112,6 +124,19 @@ export interface AdmissionResult {
   replayed: boolean;
   /** The restore intent an overwrite created, so a client can resolve it later. */
   intentId?: string;
+}
+
+/** What one browse read answers: the point's evidence, the contents and the bounds. */
+export interface PointContentsReadResult {
+  point: PointContentsEvidence;
+  contents: RecoveryContents;
+  limits: { maxEntries: number; maxDownloadBytes: number };
+}
+
+/** A download proven to be a regular file, with the run that streams its bytes. */
+export interface PointContentDownload {
+  entry: RecoveryContentEntry;
+  stream: (sink: ContentChunkSink) => Promise<EngineResult<ContentDump>>;
 }
 
 /**
@@ -901,6 +926,131 @@ export class RecoveryEngineService {
         console.warn('[Recovery] Could not settle the operation of restore %s:', sanitizeForLog(input.intentId), errorMessageForLog(err));
       }
     }
+  }
+
+  // --- Point contents (read-only) -------------------------------------------
+
+  /**
+   * Browse one saved point: a directory's entries, or one entry's metadata,
+   * together with the evidence that says what the point is.
+   *
+   * Authorized like the points list (`stack:read` on every dependent stack,
+   * re-resolved for this request) and executed on this node through the read
+   * helper profile. A read writes no operation row and takes no lock: a snapshot
+   * is immutable, so two reads cannot disagree, and a read never holds up a
+   * capture.
+   */
+  async readPointContents(input: {
+    pointId: string;
+    path: string;
+    authorize: (context: { storageKey: string | null; dependents: readonly StorageDependent[] }) => boolean;
+    signal?: AbortSignal;
+  }): Promise<PointContentsReadResult> {
+    const resolved = await this.resolveContentRead(input);
+    const contents = await resolved.engine.listContents(
+      { snapshotId: resolved.snapshotId, repositoryId: resolved.repository.id, path: resolved.path },
+      { operationId: resolved.operationId, signal: resolved.signal },
+    );
+    if (!contents.ok) throw new RecoveryError(contents.errorClass);
+    return {
+      point: resolved.evidence,
+      contents: contents.evidence,
+      limits: { maxEntries: MAX_CONTENT_ENTRIES, maxDownloadBytes: MAX_CONTENT_DOWNLOAD_BYTES },
+    };
+  }
+
+  /**
+   * Prepare one file's download. The metadata read proves the path is a regular
+   * file and gives its size, so the caller can send `Content-Length` and refuse
+   * an oversized file before a byte moves; `stream` then runs the dump.
+   */
+  async prepareContentDownload(input: {
+    pointId: string;
+    path: string;
+    authorize: (context: { storageKey: string | null; dependents: readonly StorageDependent[] }) => boolean;
+    signal: AbortSignal;
+  }): Promise<PointContentDownload> {
+    const resolved = await this.resolveContentRead(input);
+    const read = { snapshotId: resolved.snapshotId, repositoryId: resolved.repository.id, path: resolved.path };
+    const stat = await resolved.engine.listContents(read, {
+      operationId: resolved.operationId,
+      signal: resolved.signal,
+    });
+    if (!stat.ok) throw new RecoveryError(stat.errorClass);
+    const listing = stat.evidence;
+    // A point is browsed, never followed: a symlink's target is not in this
+    // point, and resolving one is how a link out of the root becomes a read of a
+    // host file. A directory and a special file have no file body at all.
+    if (listing.kind === 'other') {
+      throw new RecoveryError('invalid_request', {
+        reason: listing.entry?.type === 'symlink' ? 'symlink_not_followed' : 'not_a_file',
+      });
+    }
+    if (listing.kind !== 'file') throw new RecoveryError('invalid_request', { reason: 'not_a_file' });
+    const entry = listing.entry;
+    if (!entry || entry.type !== 'file' || entry.size === null) {
+      throw new RecoveryError('invalid_request', { reason: 'not_a_file' });
+    }
+    const size = entry.size;
+    return {
+      entry,
+      stream: (sink) => resolved.engine.dumpFile(read, size, sink, {
+        operationId: resolved.operationId,
+        signal: resolved.signal,
+      }),
+    };
+  }
+
+  /**
+   * Resolve and authorize one content read. Access is checked first, so a caller
+   * who may not read the storage is refused even while the engine is starting,
+   * and an unknown id is answered as a denial unless the caller may know ids.
+   */
+  private async resolveContentRead(input: {
+    pointId: string;
+    path: string;
+    authorize: (context: { storageKey: string | null; dependents: readonly StorageDependent[] }) => boolean;
+    signal?: AbortSignal;
+  }): Promise<{
+    snapshotId: string;
+    path: string;
+    repository: RepositoryDescriptor;
+    engine: BackupEngine & PointContentReader;
+    evidence: PointContentsEvidence;
+    operationId: string;
+    signal: AbortSignal;
+  }> {
+    const point = this.points.get(input.pointId);
+    const storage = point ? StorageIdentityStore.getInstance().getById(point.storageId) : null;
+    await this.requireStorageAccess(storage, input.authorize);
+    if (!point) throw new RecoveryError('not_found');
+    this.requireReady();
+    if (point.status !== 'succeeded' && point.status !== 'partial') {
+      throw new RecoveryError('invalid_request', { reason: 'no_snapshot' });
+    }
+    if (!point.snapshotId) throw new RecoveryError('invalid_request', { reason: 'no_snapshot' });
+    if (!storage) throw new RecoveryError('identity_unknown');
+    const repository = this.repositories.get(point.repositoryId);
+    if (!repository) throw new RecoveryError('repository_unavailable');
+
+    const path = canonicalizeContentPath(input.path);
+    const signal = input.signal ?? new AbortController().signal;
+    const operationId = `read-${randomUUID()}`;
+    const engine = this.buildEngine(repository, operationId, signal);
+    const reader = engine as BackupEngine & Partial<PointContentReader>;
+    if (typeof reader.listContents !== 'function' || typeof reader.dumpFile !== 'function') {
+      throw new RecoveryError('capability_unavailable');
+    }
+    const verifications = this.points.verificationsForPoints([point.id]).get(point.id) ?? [];
+    return {
+      snapshotId: point.snapshotId,
+      path,
+      repository,
+      engine: reader as BackupEngine & PointContentReader,
+      evidence: describePointContentsEvidence(point, storage, verifications),
+      operationId,
+      signal,
+    };
   }
 
   /** The deps every overwrite entry point needs, so the three cannot drift. */

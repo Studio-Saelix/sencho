@@ -175,6 +175,22 @@ curl -X POST https://your-sencho-instance:1852/api/recovery/points/5b1c8b7e-2f60
 
 The request answers `202` with an operation. The result is appended as a verification record on every point in the repository, and a new check never rewrites an older one. A check that could not run is recorded as an error, which is not a pass. A check that finds damage ends the operation `failed` with `integrity_mismatch`: the check ran, and what it found is that the repository is not intact.
 
+## Browse or download a point's contents
+
+A saved point is useful before you restore it. You can list what it holds, read one entry's metadata, and download a single file, all without writing anything to a volume.
+
+Browsing is read-only and directory by directory. Each entry carries its name, path, type, size, permission string, owner and modification time, so you can confirm a point holds the data you expect before deciding to restore it. The answer also carries the point's own facts: its status, the consistency label the capture observed, the paths it skipped, the latest integrity check, and whether the point is complete. A point that skipped a path, or whose latest check did not verify, is readable and is never labelled complete.
+
+- **Permission:** browsing and downloading need the same access as reading the volume: `stack:read` on every stack that uses it. The check runs again for every request, so a volume that gained a stack since you last looked is checked against the new set.
+- **Symlinks are listed, never followed.** A link inside a point points to somewhere in the point, not on the host, and following it would read data the point does not hold. Downloading a link is refused.
+- **Directories and special files are listed, not downloadable.** A device, socket or FIFO has no file body.
+- **One directory at a time, up to 2,000 entries.** A larger directory answers `truncated: true` and lists the first 2,000. Open a subdirectory to see the rest.
+- **Downloads stream.** The bytes travel from the node at the pace of the client, so memory stays flat however large the file is. A download larger than 1 GiB is refused with `413 payload_too_large` before it starts; restore the point instead for anything that large. If the client disconnects, the read on the node stops.
+- **A short body is closed, not completed.** If a chunk is missing, or the read stops for any other reason after the headers, the connection is broken. A truncated file is never delivered as if it were whole.
+- **Partial data stays partial.** A `partial` point can be browsed: it holds the bytes it captured. The answer says so, with `complete: false` and the skipped paths listed.
+
+A point that failed, or was interrupted before it recorded a snapshot, holds nothing to read and answers `400 invalid_request` with `reason: "no_snapshot"`. A point in a repository that has been replaced can still be browsed while that repository and its key exist, which is one more reason not to delete a repository you may need.
+
 ## Restore to a new volume
 
 A restore always writes into a volume Sencho creates for the purpose. It never overwrites the source volume, and it never writes into a volume that already exists.
@@ -580,6 +596,52 @@ curl https://your-sencho-instance:1852/api/recovery/storage/d0b4e4c2-6a2e-4d31-9
 
 `storage.generation` changes when the volume is recreated. Points keep the generation they captured, which is how an older point stops counting against newer bytes.
 
+### Browse a point's contents
+
+Two read calls answer what a point holds. Neither creates an operation, takes a lock or writes anything.
+
+| Route | Answers |
+| --- | --- |
+| `GET /api/recovery/points/:pointId/contents?path=/etc` | `200` with the point's evidence, the entries of that directory, and the read limits. A file path answers that file's metadata with no entries. |
+| `GET /api/recovery/points/:pointId/contents/download?path=/etc/app/config.txt` | `200` with the file body as an attachment, or `413 payload_too_large` with the file's `size` and the build's `maxBytes`. |
+
+```bash
+curl "https://your-sencho-instance:1852/api/recovery/points/5b1c8b7e-2f60-4a63-8f38-0f7f1d2c3a44/contents?path=/etc" \
+  -H "Authorization: Bearer $SENCHO_TOKEN"
+```
+
+```json
+{
+  "point": {
+    "id": "5b1c8b7e-2f60-4a63-8f38-0f7f1d2c3a44",
+    "kind": "root",
+    "status": "succeeded",
+    "snapshotId": "06b26c23623ad2ca29348b531a5cb303b5a91f73e96bbd24ceb79f99e4385f81",
+    "consistency": "crash_consistent_stopped",
+    "capture": { "fileCount": 1284, "byteCount": 91234567, "skippedCount": 0 },
+    "exclusions": [],
+    "integrity": { "result": "verified", "method": "engine_check_metadata", "verifiedAt": 1761900005120 },
+    "complete": true,
+    "storage": { "id": "9a4e...", "locator": "app_data", "generation": 1, "state": "current" }
+  },
+  "contents": {
+    "path": "etc",
+    "kind": "directory",
+    "entry": { "path": "etc", "name": "etc", "type": "directory", "size": null, "permissions": "drwxr-xr-x" },
+    "entries": [
+      { "path": "etc/app", "name": "app", "type": "directory", "size": null, "permissions": "drwxr-xr-x" },
+      { "path": "etc/config.txt", "name": "config.txt", "type": "file", "size": 12, "permissions": "-rw-r--r--" }
+    ],
+    "truncated": false
+  },
+  "limits": { "maxEntries": 2000, "maxDownloadBytes": 1073741824 }
+}
+```
+
+The point root has no entry of its own: restic names it after the mount inside the helper, which is not part of the point. `?path=` is relative to the root, so `/etc` and `etc` name the same entry, and `..` is refused rather than resolved. An absent or empty `path` reads the root.
+
+A read starts a helper on the node that owns the repository, so it answers `503 capability_unavailable` with `reason: "engine_starting"` while that node is starting, and `503 repository_unavailable` or `repository_key_unavailable` when the repository or its key cannot be opened. A path the point does not hold answers `404 not_found`. On a remote node the request is forwarded to that node, which does the work; a node that cannot be reached is refused by the control instance before the request is sent.
+
 ### Release a stale lock
 
 A stale lock means an interrupted operation may have left a restore half written. Releasing a storage lock is a reviewed act, so it is not automatic, with one exception: when a restore over an existing volume has proven the volume (see [After a crash](#after-a-crash)), its operation settles and releases the storage lock itself. Startup releases the repository lock of interrupted work, as described below. A live lock belongs to its owner and cannot be released here.
@@ -623,7 +685,7 @@ The preview needs the access that restoring the volume's stacks requires, and th
 
 ### Error responses
 
-Every error from these routes has the same shape, except the `403 SCOPE_DENIED` that an API token of the wrong scope gets before the request reaches a route: that body carries `error` and `code` only, with no `errorClass`. `code` is the upper-cased error class, so a client can switch on one field. A refusal can also carry a `reason`, a stable token for the specific cause: `engine_starting`, `repository_not_initialized`, `repository_replaced`, `generation_changed`, `confirmation_mismatch`, `wrong_route`, `no_fence`, or `fence_released`.
+Every error from these routes has the same shape, except the `403 SCOPE_DENIED` that an API token of the wrong scope gets before the request reaches a route: that body carries `error` and `code` only, with no `errorClass`. `code` is the upper-cased error class, so a client can switch on one field. A refusal can also carry a `reason`, a stable token for the specific cause: `engine_starting`, `repository_not_initialized`, `repository_replaced`, `generation_changed`, `confirmation_mismatch`, `wrong_route`, `no_fence`, `fence_released`, `no_snapshot`, `symlink_not_followed`, or `not_a_file`.
 
 ```json
 {
@@ -637,7 +699,9 @@ Every error from these routes has the same shape, except the `403 SCOPE_DENIED` 
 |--------|---------------|
 | `400` | `invalid_request` |
 | `403` | `permission_denied` |
+| `404` | `not_found` |
 | `409` | `update_required`, `identity_unknown`, `lock_held`, `lock_stale`, `integrity_mismatch`, `interrupted`, `precondition_failed`, `dependents_changed`, `not_cancellable` |
+| `413` | `payload_too_large` |
 | `422` | `source_unreadable`, `attributes_not_restored`, `pre_restore_failed` (these end an operation; they are not request errors) |
 | `500` | `internal`, `cleanup_failed` (only as the class of an operation, never of a request) |
 | `503` | `capability_unavailable`, `schema_unsupported`, `repository_unavailable`, `repository_key_unavailable`, `transport_unreachable`, `node_refused`, `node_error`, `fence_unavailable` |

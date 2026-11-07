@@ -92,6 +92,9 @@ const LONG_LIVED_READS: ReadonlyArray<RegExp> = [
   /^\/security\/scans\/[^/]+\/sarif\/?$/,
   /^\/stacks\/[^/]+\/files\/download\/?$/,
   /^\/stacks\/[^/]+\/files\/bulk-download\/?$/,
+  // A saved recovery point's file body: the node streams it out of the
+  // repository and the operator waits for the bytes, not for a page.
+  /^\/recovery\/points\/[^/]+\/contents\/download\/?$/,
 ];
 
 /**
@@ -112,6 +115,9 @@ const SLOW_READS: ReadonlyArray<RegExp> = [
   // Import scan and update preview walk a repository / inspect images.
   /^\/stacks\/import\/scan\/?$/,
   /^\/stacks\/[^/]+\/update-preview\/?$/,
+  // Browsing a saved point starts a helper that opens the repository and loads
+  // its index, which is seconds of work before the first entry on a real one.
+  /^\/recovery\/points\/[^/]+\/contents\/?$/,
 ];
 
 /**

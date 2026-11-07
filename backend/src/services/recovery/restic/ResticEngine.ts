@@ -18,14 +18,28 @@ import { sanitizeForLog } from '../../../utils/safeLog';
 import { consistencyFromObservations, type InUseObservation } from '../volumeSources';
 import { RECOVERY_CONTRACT_VERSION } from '../types';
 import { RECOVERY_WORK_DIR_GLOB } from '../restoreIntents';
+import {
+  classifyContentRun,
+  contentListingFor,
+  contentSnapshotPath,
+  MAX_CONTENT_ENTRIES,
+  parseContentNodeLine,
+} from './resticContents';
 import type {
   BackupEngine,
+  ContentChunkSink,
+  ContentDump,
+  ContentReadContext,
+  ContentReadRequest,
   CreatePointRequest,
   EngineExecutionContext,
   EngineProbe,
   EngineResult,
   IntegrityMethod,
   PointCaptureEvidence,
+  PointContentReader,
+  RecoveryContentEntry,
+  RecoveryContents,
   RecoveryPoint,
   RestoreEvidence,
   RestoreIntent,
@@ -48,7 +62,7 @@ import type {
 /** The engine id stamped on every point this adapter captures. */
 export const RESTIC_ENGINE_ID = 'restic';
 
-export class ResticEngine implements BackupEngine {
+export class ResticEngine implements BackupEngine, PointContentReader {
   readonly engineId = RESTIC_ENGINE_ID;
   readonly contractVersion = RECOVERY_CONTRACT_VERSION;
   readonly storageKinds: readonly StorageKind[] = ['named_volume'];
@@ -265,6 +279,139 @@ export class ResticEngine implements BackupEngine {
         xattrWarnings: outcome.status === 'partial' ? outcome.xattrWarnings : 0,
       },
     };
+  }
+
+  // --- Point contents -------------------------------------------------------
+
+  /**
+   * One read of a saved point: a directory's entries, or one entry's metadata.
+   *
+   * `restic ls --json` walks to the requested path and prints the path's own
+   * node followed by its immediate children, so the read is bounded by the
+   * directory rather than by the whole tree. A directory past the entry cap
+   * stops the run by aborting it: the listing is truncated on purpose, and the
+   * SIGINT it causes says nothing about the repository.
+   */
+  async listContents(
+    request: ContentReadRequest,
+    ctx: ContentReadContext,
+  ): Promise<EngineResult<RecoveryContents>> {
+    const repository = this.deps.repositoryFor(request.repositoryId);
+    if (!repository) return { ok: false, errorClass: 'repository_unavailable' };
+    if (!request.snapshotId) return { ok: false, errorClass: 'invalid_request' };
+    let snapshotPath: string;
+    try {
+      snapshotPath = contentSnapshotPath(request.path);
+    } catch {
+      return { ok: false, errorClass: 'invalid_request' };
+    }
+
+    const entries: RecoveryContentEntry[] = [];
+    let self: RecoveryContentEntry | null = null;
+    let truncated = false;
+    const controller = new AbortController();
+    const onExternalAbort = (): void => controller.abort();
+    if (ctx.signal.aborted) controller.abort();
+    else ctx.signal.addEventListener('abort', onExternalAbort, { once: true });
+
+    let result: Awaited<ReturnType<RecoveryHelperRunner['run']>>;
+    try {
+      result = await this.deps.runner.run({
+        profile: 'read',
+        operationId: ctx.operationId,
+        cmd: resticCommand('/repo', ['ls', request.snapshotId, snapshotPath, '--json', '--no-lock', '--quiet']),
+        mounts: { repository: repository.locator },
+        stdinSecret: this.deps.secret,
+        signal: controller.signal,
+        onStdoutLine: (line) => {
+          const entry = parseContentNodeLine(line);
+          if (!entry) return;
+          if (entry.path === request.path) {
+            self = entry;
+            return;
+          }
+          if (entries.length >= MAX_CONTENT_ENTRIES) {
+            truncated = true;
+            controller.abort();
+            return;
+          }
+          entries.push(entry);
+        },
+      });
+    } finally {
+      ctx.signal.removeEventListener('abort', onExternalAbort);
+    }
+
+    const outcome = classifyContentRun({
+      exitCode: result.exitCode,
+      aborted: result.aborted,
+      killed: result.killed,
+      externalAborted: ctx.signal.aborted,
+      truncated,
+    });
+    if (outcome.status === 'cancelled') return { ok: false, errorClass: 'interrupted' };
+    if (outcome.status === 'failed') return { ok: false, errorClass: outcome.errorClass };
+    const contents = contentListingFor({ path: request.path, self, entries, truncated });
+    if (!contents) return { ok: false, errorClass: 'not_found' };
+    return { ok: true, evidence: contents };
+  }
+
+  /**
+   * Stream one regular file out of a saved point.
+   *
+   * The caller sends the headers from the metadata read and then hands the body
+   * to its sink. The byte count is checked against what the metadata promised, so
+   * a body that stopped early (a missing chunk, a helper killed mid-file) is an
+   * integrity failure rather than a short success.
+   */
+  async dumpFile(
+    request: ContentReadRequest,
+    expectedBytes: number,
+    sink: ContentChunkSink,
+    ctx: ContentReadContext,
+  ): Promise<EngineResult<ContentDump>> {
+    const repository = this.deps.repositoryFor(request.repositoryId);
+    if (!repository) return { ok: false, errorClass: 'repository_unavailable' };
+    if (!request.snapshotId) return { ok: false, errorClass: 'invalid_request' };
+    let snapshotPath: string;
+    try {
+      snapshotPath = contentSnapshotPath(request.path);
+    } catch {
+      return { ok: false, errorClass: 'invalid_request' };
+    }
+
+    let bytes = 0;
+    const result = await this.deps.runner.run({
+      profile: 'read',
+      operationId: ctx.operationId,
+      cmd: resticCommand('/repo', ['dump', request.snapshotId, snapshotPath, '--no-lock', '--quiet']),
+      mounts: { repository: repository.locator },
+      stdinSecret: this.deps.secret,
+      signal: ctx.signal,
+      onStdoutChunk: (chunk, control) => {
+        bytes += chunk.length;
+        sink(chunk, control);
+      },
+    });
+    const outcome = classifyContentRun({
+      exitCode: result.exitCode,
+      aborted: result.aborted,
+      killed: result.killed,
+      externalAborted: ctx.signal.aborted,
+      truncated: false,
+    });
+    if (outcome.status === 'cancelled') return { ok: false, errorClass: 'interrupted' };
+    if (outcome.status === 'failed') return { ok: false, errorClass: outcome.errorClass };
+    if (bytes !== expectedBytes) {
+      console.warn(
+        '[Recovery] Dump of snapshot %s returned %d of %d bytes',
+        sanitizeForLog(request.snapshotId),
+        bytes,
+        expectedBytes,
+      );
+      return { ok: false, errorClass: 'integrity_mismatch' };
+    }
+    return { ok: true, evidence: { bytes } };
   }
 
   private async observeInUse(volumeName: string): Promise<InUseObservation | null> {

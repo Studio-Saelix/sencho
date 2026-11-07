@@ -1,7 +1,7 @@
 import type Docker from 'dockerode';
 import { Writable } from 'stream';
-import { errorMessageForLog } from '../../../utils/safeLog';
-import type { RecoveryErrorClass } from '../types';
+import { errorMessageForLog, sanitizeForLog } from '../../../utils/safeLog';
+import type { ContentChunkSink, RecoveryErrorClass } from '../types';
 import { RecoveryError } from '../redaction';
 import { RECOVERY_HELPER_RESTIC_PATH } from './helperImage';
 
@@ -37,7 +37,7 @@ export const HELPER_SOURCE_MOUNT = '/data';
 /** Where the restore target is mounted. */
 export const HELPER_RESTORE_MOUNT = '/restore';
 
-export type HelperProfile = 'probe' | 'config' | 'init' | 'backup' | 'check' | 'restore' | 'unlock' | 'materialize' | 'swap';
+export type HelperProfile = 'probe' | 'config' | 'init' | 'backup' | 'check' | 'read' | 'restore' | 'unlock' | 'materialize' | 'swap';
 
 /**
  * What a profile allows. `source`/`target` name the extra mount a profile
@@ -146,6 +146,25 @@ export const HELPER_PROFILES: Readonly<Record<HelperProfile, HelperProfileSpec>>
     memoryBytes: GIB,
     timeoutMs: null,
   },
+  // `restic ls` and `restic dump`: read one saved point's contents. Only the
+  // repository is mounted, read-only, and nothing else is: the bytes come out of
+  // the repository, so no application volume is attached and no capability is
+  // needed. The output is the data itself, which is why the run streams it
+  // instead of collecting it. No deadline: listing a large tree loads the index
+  // before the first entry and a dump runs as long as the file does, so both end
+  // on the caller's cancellation or when restic exits.
+  read: {
+    user: '0:0',
+    capAdd: [],
+    repositoryReadOnly: true,
+    needsRepository: true,
+    source: null,
+    target: null,
+    tmpfs: { '/tmp': 'size=64m,mode=1777' },
+    pidsLimit: 256,
+    memoryBytes: GIB,
+    timeoutMs: null,
+  },
   // `--verify` reads restored files back after their ownership is applied, so the
   // profile needs the capability that made them unreadable to a plain root.
   restore: {
@@ -239,6 +258,13 @@ export interface HelperRunSpec {
    * capture with unreadable files as clean. The listener decides what is JSON.
    */
   onStderrLine?: (line: string) => void;
+  /**
+   * Called with raw stdout bytes instead of parsed lines, for a run whose output
+   * *is* the data (`restic dump`). The sink applies backpressure: after it calls
+   * `control.pause()`, the helper's output stream stops until `resume()`, so a
+   * large file moves at the destination's pace and is never buffered whole.
+   */
+  onStdoutChunk?: ContentChunkSink;
 }
 
 export interface HelperRunResult {
@@ -465,9 +491,50 @@ export class RecoveryHelperRunner {
       }
     };
 
+    let attachStream: NodeJS.ReadableStream | null = null;
+    let pausedBySink = false;
+    // The chunk sink's backpressure control. Pausing the attach stream stops the
+    // demuxer's data events, so a slow destination leaves at most one socket
+    // chunk buffered rather than a whole file.
+    const sinkControl = {
+      pause: (): void => {
+        if (pausedBySink) return;
+        pausedBySink = true;
+        attachStream?.pause();
+      },
+      resume: (): void => {
+        if (!pausedBySink) return;
+        pausedBySink = false;
+        attachStream?.resume();
+      },
+    };
+
+    const onAbort = (): void => {
+      if (aborted) return;
+      aborted = true;
+      void kill('SIGINT');
+      graceTimer = setTimeout(() => {
+        killed = true;
+        void kill('SIGKILL');
+      }, HELPER_ABORT_GRACE_MS);
+      graceTimer.unref?.();
+    };
+
+    const lineSplitter = request.onStdoutLine ? new LineSplitter(request.onStdoutLine) : null;
     const stdout = new Writable({
       write: (chunk: Buffer, _enc, cb) => {
-        if (request.onStdoutLine) splitter.write(chunk);
+        if (request.onStdoutChunk) {
+          try {
+            request.onStdoutChunk(chunk, sinkControl);
+          } catch (err) {
+            // A sink that throws (the client vanished mid-body) must not escape
+            // into the demuxer's data handler; end the run instead.
+            console.error('[Recovery] Content sink failed for operation %s:', sanitizeForLog(request.operationId), errorMessageForLog(err));
+            onAbort();
+          }
+        } else {
+          lineSplitter?.write(chunk);
+        }
         cb();
       },
     });
@@ -486,21 +553,10 @@ export class RecoveryHelperRunner {
         cb();
       },
     });
-    const splitter = new LineSplitter(request.onStdoutLine ?? ((): void => {}));
-
-    const onAbort = (): void => {
-      if (aborted) return;
-      aborted = true;
-      void kill('SIGINT');
-      graceTimer = setTimeout(() => {
-        killed = true;
-        void kill('SIGKILL');
-      }, HELPER_ABORT_GRACE_MS);
-      graceTimer.unref?.();
-    };
 
     const runPromise = (async (): Promise<number | null> => {
       const stream = await container.attach({ stream: true, stdin: true, stdout: true, stderr: true, hijack: true });
+      attachStream = stream;
       const ended = new Promise<void>((resolve) => {
         stream.once('end', () => resolve());
         stream.once('close', () => resolve());
@@ -537,7 +593,7 @@ export class RecoveryHelperRunner {
     let exitCode: number | null;
     try {
       exitCode = await runPromise;
-      splitter.end();
+      lineSplitter?.end();
       stderrSplitter.end();
     } catch (err) {
       console.error('[Recovery] Helper run failed for operation %s:', request.operationId, errorMessageForLog(err));
