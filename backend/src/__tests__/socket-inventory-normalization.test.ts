@@ -797,13 +797,14 @@ describe('socket inventory unreadable enclosing metadata', () => {
 describe('socket inventory unreadable listing scalars', () => {
   it('marks unreadable listing identity, state, and name incomplete when inspect cannot replace them', async () => {
     const rows = await rowsFrom(
-      listed({ Names: 7, State: 5, Image: 5, ImageID: 5 }),
+      listed({ Names: 7, State: 5, Status: 5, Image: 5, ImageID: 5 }),
       new Error('inspect unavailable'),
     );
 
     expect(rows[0]).toMatchObject({
       name: '',
       state: 'unknown',
+      status: '',
       image: '',
       imageId: '',
       metadataTruncated: true,
@@ -1007,6 +1008,36 @@ describe('socket inventory fallback preserves binding multiplicity', () => {
     expect(rows[0].metadataTruncated).toBe(true);
     const inventory = inventoryOf(rows);
     expect(inventory.containers[0].publishedPorts.map(port => port.allInterfaces)).toEqual([true, true]);
+  });
+
+  it('keeps every distinct listing public port when inspect cannot read the published binding', async () => {
+    const rows = await rowsFrom(
+      listed({
+        Ports: [
+          { IP: '127.0.0.1', PrivatePort: 2375, PublicPort: 8080, Type: 'tcp' },
+          { IP: '0.0.0.0', PrivatePort: 2375, PublicPort: 9090, Type: 'tcp' },
+        ],
+      }),
+      inspected({
+        NetworkSettings: {
+          Ports: { '2375/tcp': [{ HostIp: null, HostPort: null }] },
+          Networks: {},
+        },
+      }),
+    );
+
+    expect(rows[0].ports).toEqual([
+      { privatePort: 2375, publicPort: 8080, ip: '127.0.0.1', protocol: 'tcp' },
+      { privatePort: 2375, publicPort: 9090, ip: '0.0.0.0', protocol: 'tcp' },
+    ]);
+    expect(rows[0].metadataTruncated).toBe(true);
+    expect(inventoryOf(rows).containers[0].publishedPorts.map(port => ({
+      publicPort: port.publicPort,
+      allInterfaces: port.allInterfaces,
+    }))).toEqual([
+      { publicPort: 8080, allInterfaces: false },
+      { publicPort: 9090, allInterfaces: true },
+    ]);
   });
 
   it('does not let fallback restoration exceed the overall port cap', async () => {

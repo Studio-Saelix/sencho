@@ -2430,7 +2430,8 @@ class DockerController {
       const listedLabels = normalizeDockerLabels(listedRow?.Labels);
       const listedStateValue = readContainerString(listedRow?.State);
       const listedState = listedStateValue ?? 'unknown';
-      const listedStatus = readContainerString(listedRow?.Status) ?? '';
+      const listedStatusValue = readContainerString(listedRow?.Status);
+      const listedStatus = listedStatusValue ?? '';
       const listedImageValue = readContainerString(listedRow?.Image);
       const listedImage = listedImageValue ?? '';
       const listedImageIdValue = readContainerString(listedRow?.ImageID);
@@ -2450,6 +2451,9 @@ class DockerController {
       let listedStateIncomplete = listedRow?.State !== undefined && listedStateValue === null;
       let listedImageIncomplete = listedRow?.Image !== undefined && listedImageValue === null;
       let listedImageIdIncomplete = listedRow?.ImageID !== undefined && listedImageIdValue === null;
+      // No inspect field replaces the listing status, so an unreadable status is
+      // the value actually reported and must keep the row from reading complete.
+      const listedStatusIncomplete = listedRow?.Status !== undefined && listedStatusValue === null;
       const rawListedLabels = Array.isArray(listedRow?.Labels)
         ? listedRow.Labels.length
         : Object.keys(asRecord(listedRow?.Labels) ?? {}).length;
@@ -2617,7 +2621,8 @@ class DockerController {
       // Listing fields that an inspect result did not replace are the values
       // actually reported, so their unreadability makes the row incomplete.
       metadataTruncated = metadataTruncated || listedStructureIncomplete
-        || listedStateIncomplete || listedImageIncomplete || listedImageIdIncomplete;
+        || listedStateIncomplete || listedImageIncomplete || listedImageIdIncomplete
+        || listedStatusIncomplete;
 
       const composeProject = labels['com.docker.compose.project'] ?? null;
       const service = labels['com.docker.compose.service'] ?? null;
@@ -4383,6 +4388,17 @@ function normalizeInspectPorts(
   // differs. Restore every distinct list binding inspect does not already carry,
   // fill an unreadable inspect address from the list rather than dropping it,
   // and flag the row incomplete; a readable inspect binding still wins in place.
+  // A spec whose inspect binding has no readable public port cannot mark a
+  // listing binding on a different public port as a stale duplicate, so every
+  // distinct listing public port for that spec is kept.
+  const specKey = (port: { privatePort: number | null; protocol: string | null }) =>
+    `${port.privatePort}/${port.protocol ?? '*'}`;
+  const unreadableBindingSpecs = new Set(
+    ports.filter(port => port.publicPort === null).map(specKey),
+  );
+  const hasUnreadableBinding = (port: { privatePort: number | null; protocol: string | null }) =>
+    unreadableBindingSpecs.has(specKey(port))
+    || (port.protocol !== null && unreadableBindingSpecs.has(`${port.privatePort}/*`));
   let restored = false;
   for (const candidate of fallback) {
     if (ports.length >= 64) {
@@ -4456,6 +4472,11 @@ function normalizeInspectPorts(
     // public port is inspect's authoritative replacement for the spec, so the
     // stale listing entry is not duplicated.
     if (sameSpecPorts.some(port => port.publicPort === candidate.publicPort)) {
+      ports.push({ ...candidate });
+      restored = true;
+    } else if (hasUnreadableBinding(candidate)) {
+      // Inspect had no readable published binding for this spec, so this
+      // distinct listing public port is evidence rather than a stale duplicate.
       ports.push({ ...candidate });
       restored = true;
     }
