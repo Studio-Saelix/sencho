@@ -67,11 +67,11 @@ export interface SecretPushPlanEntry {
     changed: number;
     unchanged: number;
     removedInformational: number;
-    /** Digest of the env file the preview read, or null when it could not. */
+    /** Digest of the previewed stack, env file and contents, or null when it could not be read. */
     fingerprint: string | null;
 }
 
-/** The reviewed push plan: the bundle version and per-target file digests. */
+/** The reviewed push plan: the bundle version and per-target stack/file/content digests. */
 export interface SecretPushPreview {
     version: number;
     targets: SecretPushPlanEntry[];

@@ -113,15 +113,16 @@ export interface SecretPushPlanEntry {
     changed: number;
     unchanged: number;
     removedInformational: number;
-    /** Digest of the env file the preview read, or null when it could not. */
+    /** Digest of the previewed stack, env file and contents, or null when it could not be read. */
     fingerprint: string | null;
 }
 
 /**
- * A previewed push: the bundle version and per-target env-file digests the
- * apply must present. Every previewed target is listed with its digest, or
- * null when the preview could not read it; the apply refuses any target set
- * that no longer matches or any node whose digest moved.
+ * A previewed push: the bundle version and per-target proofs the apply must
+ * present. Every previewed target is listed with its digest, or null when the
+ * preview could not read it; the apply refuses any target set that no longer
+ * matches or any target whose stack, env file, or contents moved, including
+ * one the preview could not read that is readable now.
  */
 export interface SecretPushPreview {
     version: number;
@@ -204,9 +205,12 @@ export class SecretSourceChangedError extends Error {
 }
 
 /**
- * A target env file moved, or became readable after the preview never saw it.
- * The preview is the only review an operator gets over masked values, so a
- * push whose targets no longer match it writes nothing.
+ * A previewed target env file moved, disappeared, became unreadable, or became
+ * readable where the preview could not read it. Thrown before any target is
+ * written; the preview is the only review an operator gets over masked values,
+ * so a push whose targets no longer match it writes nothing. A change detected
+ * during the write loop fails that node instead, because earlier targets may
+ * already be written.
  */
 export class PushTargetChangedError extends Error {
     constructor() {
@@ -349,9 +353,22 @@ export function computeDiff(existing: SecretKv, overlay: SecretKv): SecretDiffEn
     return result;
 }
 
-/** Digest of the raw env file the preview read, so an apply can prove it reviewed the same source. */
+/** Digest of the raw env file the preview read, so an import can prove it reviewed the same source. */
 function fingerprintSource(text: string): string {
     return crypto.createHash('sha256').update(text, 'utf-8').digest('hex');
+}
+
+/**
+ * Digest of a push target's identity (stack and env file) plus the bytes the
+ * preview read. A push to a different stack or env file cannot reuse a digest
+ * even when the new file happens to hold identical contents, so the apply
+ * cannot bind a preview to a different target. The digest narrows, but cannot
+ * eliminate, a concurrent write between the check and the write.
+ */
+function fingerprintTarget(stackName: string, envFileBasename: string, text: string): string {
+    return crypto.createHash('sha256')
+        .update(`${stackName}\0${envFileBasename}\0${text}`, 'utf-8')
+        .digest('hex');
 }
 
 function aggregateDiff(diff: SecretDiffEntry[]): { added: number; changed: number; unchanged: number; removedInformational: number } {
@@ -920,7 +937,7 @@ export class SecretsService {
 
     async previewPushDiff(id: number, selector: BlueprintSelector, stackName: string, envFileBasename: string): Promise<SecretPushPreview> {
         const db = DatabaseService.getInstance();
-        // Read the version row once so the digest the client must present and
+        // Read the version row once so the version the client must present and
         // the overlay the diff was computed from are the same version.
         const versionRow = db.getCurrentSecretVersion(id);
         if (!versionRow) throw new SecretPayloadError();
@@ -951,7 +968,7 @@ export class SecretsService {
                     entry.error = `env file '${envFileBasename}' not found`;
                     return entry;
                 }
-                entry.fingerprint = fingerprintSource(read.text);
+                entry.fingerprint = fingerprintTarget(stackName, envFileBasename, read.text);
                 const diff = computeDiff(parseEnv(read.text), overlay);
                 entry.diff = maskDiff(diff);
                 Object.assign(entry, aggregateDiff(diff));
@@ -970,7 +987,7 @@ export class SecretsService {
         envFileBasename: string;
         /** The bundle version the preview computed its diff from. */
         expectedVersion: number;
-        /** Every target the preview resolved, with the digest it read (or null). */
+        /** Every target the preview resolved, with the digest of its stack, env file and contents (or null). */
         expectedTargets: Array<{ nodeId: number; fingerprint: string | null }>;
         user: string;
     }): Promise<{ pushId: string; results: SecretPushResultEntry[] }> {
@@ -1004,7 +1021,11 @@ export class SecretsService {
             // node that dropped out or appeared would make the reviewed diff
             // wrong even if every surviving file is unchanged.
             const expectedById = new Map(expectedTargets.map(target => [target.nodeId, target.fingerprint]));
-            if (expectedById.size !== matched.length) throw new PushTargetChangedError();
+            // Length plus size rejects duplicates even for a direct service caller
+            // that skipped the route's own duplicate check.
+            if (expectedTargets.length !== matched.length || expectedById.size !== matched.length) {
+                throw new PushTargetChangedError();
+            }
             for (const node of matched) {
                 if (!expectedById.has(node.id)) throw new PushTargetChangedError();
             }
@@ -1022,19 +1043,25 @@ export class SecretsService {
             }
             for (const node of matched) {
                 const state = reads.get(node.id)!;
-                // An unreadable target is reported as a per-node failure; it is
-                // never written, so it needs no digest check here.
-                if (!state.ok) continue;
                 const expected = expectedById.get(node.id);
+                // The preview read this target and it cannot be read now: its
+                // contents are unverified, so refuse the whole push rather than
+                // write the nodes that happen to be reachable.
+                if (!state.ok) {
+                    if (expected !== null) throw new PushTargetChangedError();
+                    // It was unreadable at preview too, so there is nothing the
+                    // operator reviewed to protect; report it per node below.
+                    continue;
+                }
                 if (!state.read) {
-                    // The preview read a file for this node and it is gone now.
+                    // The preview resolved this target and it no longer resolves.
                     if (expected !== null) throw new PushTargetChangedError();
                     continue;
                 }
                 // A readable target the preview could not read was never
-                // reviewed; a different digest means someone changed it after
-                // the preview.
-                if (expected === null || expected === undefined || fingerprintSource(state.read.text) !== expected) {
+                // reviewed; a different digest means the stack, env file, or
+                // contents changed after the preview.
+                if (expected === null || expected === undefined || fingerprintTarget(stackName, envFileBasename, state.read.text) !== expected) {
                     throw new PushTargetChangedError();
                 }
             }
@@ -1051,20 +1078,57 @@ export class SecretsService {
                     unchanged: 0,
                 };
                 const state = reads.get(node.id)!;
-                try {
-                    if (!state.ok) throw state.error;
-                    const read = state.read;
-                    if (!read) throw new Error(`env file '${envFileBasename}' not found`);
-                    const existing = parseEnv(read.text);
-                    const agg = aggregateDiff(computeDiff(existing, overlay));
-                    const newText = serializeEnv(applyOverlay(existing, overlay));
-                    await writeEnvForNode(node, stackName, read.absolutePath, newText);
-                    result.added = agg.added;
-                    result.changed = agg.changed;
-                    result.unchanged = agg.unchanged;
-                } catch (err) {
+                if (!state.ok) {
+                    // The preview could not read this node either, so there is no
+                    // reviewed file to protect; keep it a per-node failure.
                     result.status = 'failed';
-                    result.error = getErrorMessage(err, 'push failed');
+                    result.error = getErrorMessage(state.error, 'push failed');
+                } else {
+                    // Re-read and re-check immediately before writing so a target
+                    // that moved while earlier targets were written is not written
+                    // from the preflight snapshot. A change detected here fails only
+                    // this node; a stale preview is already refused before the write
+                    // loop starts. The check and the write are still separate
+                    // operations, so a change landing between them can race the write.
+                    let read: ResolvedRead | null = null;
+                    let readError: string | null = null;
+                    try {
+                        read = await readExistingEnv(node, stackName, envFileBasename);
+                    } catch {
+                        readError = 'A target env file could not be read during the push. Preview again before pushing.';
+                    }
+                    const expected = expectedById.get(node.id);
+                    if (readError) {
+                        result.status = 'failed';
+                        result.error = readError;
+                    } else if (!read) {
+                        if (expected !== null) {
+                            result.status = 'failed';
+                            result.error = 'A target env file changed during the push. Preview again before pushing.';
+                        } else {
+                            // Still unresolved, exactly as at preview: a per-node
+                            // failure, because there is no reviewed file to protect.
+                            result.status = 'failed';
+                            result.error = `env file '${envFileBasename}' not found`;
+                        }
+                    } else if (expected === null || expected === undefined
+                        || fingerprintTarget(stackName, envFileBasename, read.text) !== expected) {
+                        result.status = 'failed';
+                        result.error = 'A target env file changed during the push. Preview again before pushing.';
+                    } else {
+                        try {
+                            const existing = parseEnv(read.text);
+                            const agg = aggregateDiff(computeDiff(existing, overlay));
+                            const newText = serializeEnv(applyOverlay(existing, overlay));
+                            await writeEnvForNode(node, stackName, read.absolutePath, newText);
+                            result.added = agg.added;
+                            result.changed = agg.changed;
+                            result.unchanged = agg.unchanged;
+                        } catch (err) {
+                            result.status = 'failed';
+                            result.error = getErrorMessage(err, 'push failed');
+                        }
+                    }
                 }
                 results.push(result);
                 rows.push({

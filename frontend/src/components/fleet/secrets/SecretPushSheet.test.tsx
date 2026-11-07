@@ -161,6 +161,9 @@ describe('SecretPushSheet', () => {
     });
 
     it('sends the previewed version and per-target digests, not the live fields', async () => {
+        // The live bundle is at version 2; the preview answered with version 3,
+        // so the request must carry the previewed version.
+        vi.mocked(previewPush).mockResolvedValue(previewPlan({ version: 3 }));
         renderSheet();
         await fillAndPreview();
         await waitFor(() => {
@@ -174,7 +177,7 @@ describe('SecretPushSheet', () => {
             selector: { type: 'labels', any: ['app'], all: [] },
             stackName: 'my-app',
             envFileBasename: '.env',
-            expectedVersion: 2,
+            expectedVersion: 3,
             expectedTargets: [{ nodeId: 1, fingerprint: 'a'.repeat(64) }],
         });
     });
@@ -200,5 +203,49 @@ describe('SecretPushSheet', () => {
         expect(vi.mocked(toast.error)).toHaveBeenCalledWith(
             'A target env file changed since you previewed it. Preview again before pushing.',
         );
+    });
+
+    it('drops the plan and returns to Target when the bundle changed after preview', async () => {
+        vi.mocked(executePush).mockRejectedValue(Object.assign(
+            new Error('This bundle changed since you opened it. Reload it and apply your edit again.'),
+            { status: 409, code: 'VERSION_CONFLICT', currentVersion: 3 },
+        ));
+
+        renderSheet();
+        await fillAndPreview();
+        await waitFor(() => {
+            expect(screen.getByText('central')).toBeInTheDocument();
+        });
+
+        await userEvent.click(screen.getByRole('button', { name: /push to 1 node/i }));
+
+        await waitFor(() => {
+            expect(screen.getByPlaceholderText('my-app')).toBeInTheDocument();
+        });
+        expect(screen.queryByText('central')).not.toBeInTheDocument();
+        expect(vi.mocked(toast.error)).toHaveBeenCalledWith(
+            'This bundle changed since you previewed it. Preview again before pushing.',
+        );
+    });
+
+    it('keeps the preview when another push for the bundle is already running', async () => {
+        vi.mocked(executePush).mockRejectedValue(Object.assign(
+            new Error('A push for this secret is already running'),
+            { status: 409, code: 'PUSH_BUSY' },
+        ));
+
+        renderSheet();
+        await fillAndPreview();
+        await waitFor(() => {
+            expect(screen.getByText('central')).toBeInTheDocument();
+        });
+
+        await userEvent.click(screen.getByRole('button', { name: /push to 1 node/i }));
+
+        await waitFor(() => {
+            expect(vi.mocked(toast.error)).toHaveBeenCalledWith('A push for this secret is already running');
+        });
+        expect(screen.getByText('central')).toBeInTheDocument();
+        expect(screen.getByRole('button', { name: /push to 1 node/i })).toBeInTheDocument();
     });
 });

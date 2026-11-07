@@ -1182,6 +1182,85 @@ describe('hostile key names and escape attempts are refused', () => {
         expect(JSON.stringify(push.body)).not.toContain('STOLEN');
     });
 
+    it('refuses a push when a target the preview could not read becomes readable', async () => {
+        const composeDir = process.env.COMPOSE_DIR!;
+        const stackDir = path.join(composeDir, 'late-readable');
+        fs.mkdirSync(stackDir, { recursive: true });
+        const outside = path.join(composeDir, '..', 'late-readable-outside.env');
+        fs.writeFileSync(outside, 'FIRST=one\n');
+        fs.symlinkSync(outside, path.join(stackDir, '.env'));
+        fs.writeFileSync(
+            path.join(stackDir, 'compose.yaml'),
+            'services:\n  app:\n    image: nginx\n    env_file:\n      - .env\n',
+        );
+        const localNode = DatabaseService.getInstance().getNodes().find(n => n.type === 'local')!;
+        const selector = { type: 'nodes' as const, ids: [localNode.id] };
+
+        const preview = await request(app)
+            .post(`/api/secrets/${bundleId}/push/preview`)
+            .set('Authorization', `Bearer ${adminToken()}`)
+            .send({ selector, stackName: 'late-readable', envFileBasename: '.env' });
+        expect(preview.status).toBe(200);
+        expect(preview.body.targets[0].fingerprint).toBeNull();
+
+        // The file is now readable, but the preview never reviewed its contents.
+        fs.unlinkSync(path.join(stackDir, '.env'));
+        fs.writeFileSync(path.join(stackDir, '.env'), 'FIRST=one\n');
+
+        const push = await request(app)
+            .post(`/api/secrets/${bundleId}/push`)
+            .set('Authorization', `Bearer ${adminToken()}`)
+            .send({
+                selector,
+                stackName: 'late-readable',
+                envFileBasename: '.env',
+                expectedVersion: preview.body.version,
+                expectedTargets: expectedTargetsFrom(preview.body.targets),
+            });
+        expect(push.status).toBe(409);
+        expect(push.body.code).toBe('PUSH_TARGET_CHANGED');
+        expect(fs.readFileSync(path.join(stackDir, '.env'), 'utf-8')).toBe('FIRST=one\n');
+        expect(DatabaseService.getInstance().listSecretPushes(bundleId)).toHaveLength(0);
+    });
+
+    it('refuses a push when a previewed env file no longer resolves', async () => {
+        const composeDir = process.env.COMPOSE_DIR!;
+        const stackDir = path.join(composeDir, 'unresolved-push');
+        fs.mkdirSync(stackDir, { recursive: true });
+        fs.writeFileSync(path.join(stackDir, 'app.env'), 'FIRST=one\n');
+        fs.writeFileSync(path.join(stackDir, 'other.env'), 'OTHER=two\n');
+        const compose = (envFile: string) => `services:\n  app:\n    image: nginx\n    env_file:\n      - ${envFile}\n`;
+        fs.writeFileSync(path.join(stackDir, 'compose.yaml'), compose('app.env'));
+        const localNode = DatabaseService.getInstance().getNodes().find(n => n.type === 'local')!;
+        const selector = { type: 'nodes' as const, ids: [localNode.id] };
+
+        const preview = await request(app)
+            .post(`/api/secrets/${bundleId}/push/preview`)
+            .set('Authorization', `Bearer ${adminToken()}`)
+            .send({ selector, stackName: 'unresolved-push', envFileBasename: 'app.env' });
+        expect(preview.status).toBe(200);
+        expect(preview.body.targets[0].fingerprint).toMatch(/^[a-f0-9]{64}$/);
+
+        // The stack no longer declares app.env, so the previewed target no
+        // longer resolves even though the file is still on disk.
+        fs.writeFileSync(path.join(stackDir, 'compose.yaml'), compose('other.env'));
+
+        const push = await request(app)
+            .post(`/api/secrets/${bundleId}/push`)
+            .set('Authorization', `Bearer ${adminToken()}`)
+            .send({
+                selector,
+                stackName: 'unresolved-push',
+                envFileBasename: 'app.env',
+                expectedVersion: preview.body.version,
+                expectedTargets: expectedTargetsFrom(preview.body.targets),
+            });
+        expect(push.status).toBe(409);
+        expect(push.body.code).toBe('PUSH_TARGET_CHANGED');
+        expect(fs.readFileSync(path.join(stackDir, 'app.env'), 'utf-8')).toBe('FIRST=one\n');
+        expect(DatabaseService.getInstance().listSecretPushes(bundleId)).toHaveLength(0);
+    });
+
     it('refuses an env file in a sibling directory that shares the root name prefix', async () => {
         const composeDir = process.env.COMPOSE_DIR!;
         const stackDir = path.join(composeDir, 'prefix-import');

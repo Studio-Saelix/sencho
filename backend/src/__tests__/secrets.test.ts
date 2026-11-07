@@ -21,6 +21,7 @@ import jwt from 'jsonwebtoken';
 import { setupTestDb, cleanupTestDb, TEST_USERNAME, TEST_JWT_SECRET } from './helpers/setupTestDb';
 import { getAuditSummary } from '../utils/audit-summaries';
 import { parseEnv, serializeEnv, applyOverlay, computeDiff, SecretOpError } from '../services/SecretsService';
+import { PilotTunnelManager } from '../services/PilotTunnelManager';
 
 let tmpDir: string;
 let app: import('express').Express;
@@ -385,6 +386,36 @@ describe('SecretsService.executePush (local node)', () => {
         expect(pushes[0].push_id).toBe(result.pushId);
     });
 
+    it('refuses a push whose target stack changed even when the env contents are identical', async () => {
+        const composeDir = process.env.COMPOSE_DIR!;
+        const previewedStack = path.join(composeDir, 'binding-previewed');
+        const otherStack = path.join(composeDir, 'binding-other');
+        for (const stackDir of [previewedStack, otherStack]) {
+            fs.mkdirSync(stackDir, { recursive: true });
+            fs.writeFileSync(path.join(stackDir, '.env'), 'EXISTING=keep\n');
+            fs.writeFileSync(path.join(stackDir, 'compose.yaml'), 'services:\n  app:\n    image: nginx\n');
+        }
+
+        const db = DatabaseService.getInstance();
+        const localNode = db.getNodes().find(n => n.type === 'local')!;
+        const svc = SecretsService.getInstance();
+        const { id } = svc.create({ name: 'push-stack-binding', kv: { EXISTING: 'new' }, user: TEST_USERNAME });
+        const selector = { type: 'nodes' as const, ids: [localNode.id] };
+        const plan = await svc.previewPushDiff(id, selector, 'binding-previewed', '.env');
+
+        await expect(svc.executePush(id, {
+            selector,
+            stackName: 'binding-other',
+            envFileBasename: '.env',
+            expectedVersion: plan.version,
+            expectedTargets: expectedTargetsFor(plan.targets),
+            user: TEST_USERNAME,
+        })).rejects.toMatchObject({ name: 'PushTargetChangedError' });
+
+        expect(fs.readFileSync(path.join(otherStack, '.env'), 'utf-8')).toBe('EXISTING=keep\n');
+        expect(db.listSecretPushes(id)).toHaveLength(0);
+    });
+
     it('marks a node failed when the env file is not declared and continues', async () => {
         const db = DatabaseService.getInstance();
         const localNode = db.getNodes().find(n => n.type === 'local')!;
@@ -412,6 +443,8 @@ describe('SecretsService.executePush (remote node)', () => {
     let remoteId: number;
     let remoteEnv = 'REMOTE_ONLY=old\n';
     let writes: string[] = [];
+    let remoteReadFails = false;
+    let afterWrite: (() => void) | null = null;
 
     beforeAll(async () => {
         server = http.createServer((req, res) => {
@@ -422,6 +455,11 @@ describe('SecretsService.executePush (remote node)', () => {
                 return;
             }
             if (req.method === 'GET' && url.pathname.endsWith('/env')) {
+                if (remoteReadFails) {
+                    res.statusCode = 500;
+                    res.end('read failed');
+                    return;
+                }
                 res.setHeader('X-Env-Exists', 'true');
                 res.end(remoteEnv);
                 return;
@@ -433,6 +471,9 @@ describe('SecretsService.executePush (remote node)', () => {
                     writes.push(body);
                     res.setHeader('Content-Type', 'application/json');
                     res.end('{"ok":true}');
+                    const mutate = afterWrite;
+                    afterWrite = null;
+                    mutate?.();
                 });
                 return;
             }
@@ -460,6 +501,8 @@ describe('SecretsService.executePush (remote node)', () => {
     beforeEach(() => {
         remoteEnv = 'REMOTE_ONLY=old\n';
         writes = [];
+        remoteReadFails = false;
+        afterWrite = null;
     });
 
     it('refuses a remote target whose env file changed after the preview', async () => {
@@ -501,6 +544,133 @@ describe('SecretsService.executePush (remote node)', () => {
         expect(writes).toHaveLength(1);
         const content = (JSON.parse(writes[0]) as { content: string }).content;
         expect(parseEnv(content)).toEqual({ REMOTE_ONLY: 'new' });
+    });
+
+    it('refuses the push when a previewed target becomes unreadable before the apply', async () => {
+        const svc = SecretsService.getInstance();
+        const { id } = svc.create({ name: 'push-remote-unreadable', kv: { REMOTE_ONLY: 'new' }, user: TEST_USERNAME });
+        const selector = { type: 'nodes' as const, ids: [remoteId] };
+        const plan = await svc.previewPushDiff(id, selector, 'app', '.env');
+
+        remoteReadFails = true;
+        await expect(svc.executePush(id, {
+            selector,
+            stackName: 'app',
+            envFileBasename: '.env',
+            expectedVersion: plan.version,
+            expectedTargets: expectedTargetsFor(plan.targets),
+            user: TEST_USERNAME,
+        })).rejects.toMatchObject({ name: 'PushTargetChangedError' });
+        expect(writes).toHaveLength(0);
+    });
+
+    it('fails only the target that changed while earlier targets were being written', async () => {
+        const db = DatabaseService.getInstance();
+        const address = server.address() as AddressInfo;
+        const secondRemoteId = db.addNode({
+            name: 'secrets-remote-2',
+            type: 'remote',
+            mode: 'proxy',
+            compose_dir: '/tmp/compose',
+            is_default: false,
+            api_url: `http://127.0.0.1:${address.port}`,
+            api_token: 'remote-token',
+        });
+        try {
+            const svc = SecretsService.getInstance();
+            const { id } = svc.create({ name: 'push-remote-race', kv: { REMOTE_ONLY: 'new' }, user: TEST_USERNAME });
+            const selector = { type: 'nodes' as const, ids: [remoteId, secondRemoteId] };
+            const plan = await svc.previewPushDiff(id, selector, 'app', '.env');
+            afterWrite = () => { remoteEnv = 'REMOTE_ONLY=old\nCHANGED_DURING_PUSH=1\n'; };
+
+            const result = await svc.executePush(id, {
+                selector,
+                stackName: 'app',
+                envFileBasename: '.env',
+                expectedVersion: plan.version,
+                expectedTargets: expectedTargetsFor(plan.targets),
+                user: TEST_USERNAME,
+            });
+
+            // The first node wrote its reviewed snapshot; the second was
+            // re-read, found changed, and failed instead of writing stale data.
+            expect(result.results.map(r => r.status)).toEqual(['ok', 'failed']);
+            expect(result.results[1].error).toMatch(/changed during the push/);
+            expect(writes).toHaveLength(1);
+            expect(parseEnv((JSON.parse(writes[0]) as { content: string }).content)).toEqual({ REMOTE_ONLY: 'new' });
+            expect(db.listSecretPushes(id)).toHaveLength(2);
+        } finally {
+            db.deleteNode(secondRemoteId);
+        }
+    });
+
+    it('refuses a pilot target whose env file changed after the preview', async () => {
+        const db = DatabaseService.getInstance();
+        const address = server.address() as AddressInfo;
+        const pilotId = db.addNode({
+            name: 'secrets-pilot',
+            type: 'remote',
+            mode: 'pilot_agent',
+            compose_dir: '/tmp/compose',
+            is_default: false,
+            api_url: '',
+            api_token: '',
+        });
+        const bridge = {
+            getLoopbackUrl: () => `http://127.0.0.1:${address.port}`,
+            close: () => undefined,
+        };
+        PilotTunnelManager.getInstance().injectBridgeForTest(pilotId, bridge as never, 'pilot');
+        try {
+            const svc = SecretsService.getInstance();
+            const { id } = svc.create({ name: 'push-pilot-drift', kv: { REMOTE_ONLY: 'new' }, user: TEST_USERNAME });
+            const selector = { type: 'nodes' as const, ids: [pilotId] };
+            const plan = await svc.previewPushDiff(id, selector, 'app', '.env');
+            expect(plan.targets[0].fingerprint).toMatch(/^[a-f0-9]{64}$/);
+
+            remoteEnv = 'REMOTE_ONLY=old\nSNUCK_IN=two\n';
+            await expect(svc.executePush(id, {
+                selector,
+                stackName: 'app',
+                envFileBasename: '.env',
+                expectedVersion: plan.version,
+                expectedTargets: expectedTargetsFor(plan.targets),
+                user: TEST_USERNAME,
+            })).rejects.toMatchObject({ name: 'PushTargetChangedError' });
+            expect(writes).toHaveLength(0);
+        } finally {
+            PilotTunnelManager.getInstance().closeTunnel(pilotId);
+            db.deleteNode(pilotId);
+        }
+    });
+
+    it('refuses before writing any target when one of several moved after the preview', async () => {
+        const db = DatabaseService.getInstance();
+        const localNode = db.getNodes().find(n => n.type === 'local')!;
+        const composeDir = process.env.COMPOSE_DIR!;
+        const stackDir = path.join(composeDir, 'multi-target-push');
+        fs.mkdirSync(stackDir, { recursive: true });
+        fs.writeFileSync(path.join(stackDir, '.env'), 'LOCAL_ONLY=old\n');
+        fs.writeFileSync(path.join(stackDir, 'compose.yaml'), 'services:\n  app:\n    image: nginx\n');
+
+        const svc = SecretsService.getInstance();
+        const { id } = svc.create({ name: 'push-multi-target', kv: { LOCAL_ONLY: 'new', REMOTE_ONLY: 'new' }, user: TEST_USERNAME });
+        const selector = { type: 'nodes' as const, ids: [localNode.id, remoteId] };
+        const plan = await svc.previewPushDiff(id, selector, 'multi-target-push', '.env');
+
+        remoteEnv = 'REMOTE_ONLY=old\nSNUCK_IN=two\n';
+        await expect(svc.executePush(id, {
+            selector,
+            stackName: 'multi-target-push',
+            envFileBasename: '.env',
+            expectedVersion: plan.version,
+            expectedTargets: expectedTargetsFor(plan.targets),
+            user: TEST_USERNAME,
+        })).rejects.toMatchObject({ name: 'PushTargetChangedError' });
+
+        expect(writes).toHaveLength(0);
+        expect(fs.readFileSync(path.join(stackDir, '.env'), 'utf-8')).toBe('LOCAL_ONLY=old\n');
+        expect(db.listSecretPushes(id)).toHaveLength(0);
     });
 });
 

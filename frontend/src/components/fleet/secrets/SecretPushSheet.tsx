@@ -182,7 +182,7 @@ export function SecretPushSheet({ open, onOpenChange, secret }: Props) {
         }
         setPushLoading(true);
         // Send exactly what the preview showed: its inputs, its bundle version,
-        // and every target's env-file digest (null when the preview could not read it).
+        // and every target's digest (null when the preview could not read it).
         try {
             const result = await executePush(secret.id, {
                 ...preview.input,
@@ -204,7 +204,7 @@ export function SecretPushSheet({ open, onOpenChange, secret }: Props) {
                 toast.error('A target env file changed since you previewed it. Preview again before pushing.');
                 setPreview(null);
                 setStage('target');
-            } else if (apiError.status === 409) {
+            } else if (apiError.status === 409 && apiError.code === 'VERSION_CONFLICT') {
                 toast.error('This bundle changed since you previewed it. Preview again before pushing.');
                 setPreview(null);
                 setStage('target');

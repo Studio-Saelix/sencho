@@ -112,7 +112,7 @@ function parsePushBody(body: unknown): PushBody | { error: string } {
 }
 
 /**
- * The previewed target set and per-node env-file digests. Every matched target
+ * The previewed target set and per-node target digests. Every matched target
  * must appear here with the digest the preview read (or null when it could not
  * read it), so a target that disappeared, appeared, or changed is refused.
  */
@@ -588,7 +588,7 @@ secretsRouter.post('/:id/push', authMiddleware, async (req: Request, res: Respon
         }
         const targets = parseExpectedTargets(expectedTargets);
         if (targets === null) {
-            res.status(400).json({ error: 'expectedTargets must list each previewed node and its env-file digest' });
+            res.status(400).json({ error: 'expectedTargets must list each previewed node and its target digest' });
             return;
         }
         const secret = DatabaseService.getInstance().getSecret(id);
@@ -611,7 +611,7 @@ secretsRouter.post('/:id/push', authMiddleware, async (req: Request, res: Respon
             res.json(result);
         } catch (err) {
             if (err instanceof PushBusyError) {
-                res.status(409).json({ error: 'A push for this secret is already running' });
+                res.status(409).json({ code: 'PUSH_BUSY', error: 'A push for this secret is already running' });
                 return;
             }
             throw err;
