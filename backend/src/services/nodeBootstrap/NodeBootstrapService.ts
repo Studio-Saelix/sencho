@@ -93,6 +93,7 @@ export interface BootstrapPreflightRequest {
   privateKey: string;
   passphrase?: string | null;
   expectedFingerprint?: string | null;
+  /** The new key the operator approved; it replaces the stored pin only together with `reviewedPinnedFingerprint`. */
   replacePinnedFingerprint?: string | null;
   /**
    * The stored pin the operator saw being replaced. A replacement only counts
@@ -172,12 +173,17 @@ export function validateInstallPaths(composeDirRaw: string, agentDirRaw: string)
 }
 
 
-/** What the operator confirmed when replacing a pinned key. */
+/** A replacement the operator confirmed: the new key, and the pin they saw it replace. */
 interface PinReplacement {
-  /** The new key the operator approved. */
-  fingerprint: string | null;
-  /** The pin the operator saw being replaced. */
-  reviewedPin: string | null;
+  fingerprint: string;
+  reviewedPin: string;
+}
+
+/** A confirmation needs both halves; one without the other is no confirmation. */
+function parseReplacement(input: BootstrapPreflightRequest): PinReplacement | null {
+  const fingerprint = input.replacePinnedFingerprint?.trim();
+  const reviewedPin = input.reviewedPinnedFingerprint?.trim();
+  return fingerprint && reviewedPin ? { fingerprint, reviewedPin } : null;
 }
 
 /**
@@ -188,9 +194,9 @@ interface PinReplacement {
 function confirmsReplacementOf(
   currentPin: string,
   expectedFingerprint: string | null,
-  replacement: PinReplacement,
+  replacement: PinReplacement | null,
 ): boolean {
-  return replacement.fingerprint !== null
+  return replacement !== null
     && replacement.fingerprint === expectedFingerprint
     && replacement.reviewedPin === currentPin;
 }
@@ -321,10 +327,7 @@ export class NodeBootstrapService {
       input.agentDir ?? DEFAULT_AGENT_DIR,
     );
     const expectedFingerprint = input.expectedFingerprint?.trim() || null;
-    const replacement = {
-      fingerprint: input.replacePinnedFingerprint?.trim() || null,
-      reviewedPin: input.reviewedPinnedFingerprint?.trim() || null,
-    };
+    const replacement = parseReplacement(input);
     const hubCheck = validateHubUrl(context.hubUrl);
     if (!hubCheck.ok) {
       throw new BootstrapError(
@@ -588,23 +591,29 @@ export class NodeBootstrapService {
     target: BootstrapTargetInput,
     pin: NodeBootstrapTrust | undefined,
     expectedFingerprint: string | null,
-    replacement: PinReplacement,
+    replacement: PinReplacement | null,
     audit: AuditContext,
   ): void {
     if (pin) {
       const replaced = confirmsReplacementOf(pin.fingerprint, expectedFingerprint, replacement);
       if (!expectedFingerprint || (pin.fingerprint !== expectedFingerprint && !replaced)) {
+        // A confirmation that names another pin than the current one is a stale
+        // review, not a missing one: say so, and keep the reviewed pin on record.
+        const stale = replacement !== null && replacement.fingerprint === expectedFingerprint;
         this.recordAudit(audit, 'bootstrap.trust.mismatch', {
           target: target.targetName,
           host: target.host,
           port: target.port,
           pinned: pin.fingerprint,
           expected: expectedFingerprint,
+          reviewed: stale ? replacement?.reviewedPin : null,
         }, 409);
         throw new BootstrapError(
           409,
           'HOST_KEY_MISMATCH',
-          'The host key does not match the pinned key. Confirm the replacement to continue.',
+          stale
+            ? 'The pinned key changed since you reviewed it. Review the current pin and confirm the replacement again.'
+            : 'The host key does not match the pinned key. Confirm the replacement to continue.',
           { details: { pinnedFingerprint: pin.fingerprint, expectedFingerprint } },
         );
       }
@@ -619,8 +628,10 @@ export class NodeBootstrapService {
 
   /**
    * Compare-and-swap the pin against the record read at the start of this
-   * locked run. A pin that changed underneath the request is never overwritten
-   * without confirming the replacement of the key that is current now.
+   * locked run. A pin that changed after this request read it always fails the
+   * request: the operator reviews the pin that is current now and runs again. A
+   * key that differs from an unchanged pin passes only when the confirmation
+   * names that pin (`confirmsReplacementOf`).
    */
   private persistTrust(
     target: BootstrapTargetInput,
@@ -628,7 +639,7 @@ export class NodeBootstrapService {
     context: AuditContext,
     initialPin: NodeBootstrapTrust | undefined,
     expectedFingerprint: string | null,
-    replacement: PinReplacement,
+    replacement: PinReplacement | null,
   ): void {
     if (!hostKey.fingerprint) return;
     const current = this.deps.db.getNodeBootstrapTrust(target.host, target.port);
@@ -682,7 +693,9 @@ export class NodeBootstrapService {
   }
 
   private async withTargetLock<T>(host: string, port: number, run: () => Promise<T>): Promise<T> {
-    const key = `${host}:${port}`;
+    // Callers pass the canonical host; folding here keeps the lock key in step
+    // with the trust store, which folds the same way.
+    const key = `${host.toLowerCase()}:${port}`;
     if (this.inFlight.has(key)) {
       throw new BootstrapError(409, 'BOOTSTRAP_IN_PROGRESS', 'A preflight for this host is already running.');
     }

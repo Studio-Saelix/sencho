@@ -538,11 +538,11 @@ describe('bootstrap SSH transport teardown', () => {
    * therefore reads the client socket the moment the result is delivered, before
    * any close handshake could have finished.
    */
-  function captureClients(): Array<{ _sock?: net.Socket }> {
-    const clients: Array<{ _sock?: net.Socket }> = [];
+  function captureClients(): Array<{ username: string | undefined; client: { _sock?: net.Socket } }> {
+    const clients: Array<{ username: string | undefined; client: { _sock?: net.Socket } }> = [];
     const connect = Client.prototype.connect;
     vi.spyOn(Client.prototype, 'connect').mockImplementation(function (this: Client, config) {
-      clients.push(this as unknown as { _sock?: net.Socket });
+      clients.push({ username: config.username, client: this as unknown as { _sock?: net.Socket } });
       return connect.call(this, config);
     });
     return clients;
@@ -564,9 +564,10 @@ describe('bootstrap SSH transport teardown', () => {
       commands,
       run,
     );
-    const sessions = clients.filter((entry) => entry._sock);
+    // The fingerprint capture the shared client may run first is a different connection.
+    const sessions = clients.filter((entry) => entry.username === 'ubuntu' && entry.client._sock);
     expect(sessions).toHaveLength(1);
-    expect(sessions[0]._sock?.destroyed).toBe(true);
+    expect(sessions[0].client._sock?.destroyed).toBe(true);
     return results;
   }
 

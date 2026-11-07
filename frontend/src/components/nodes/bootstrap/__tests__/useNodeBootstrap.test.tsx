@@ -418,6 +418,32 @@ describe('useNodeBootstrap stale responses and request ownership', () => {
     expect(hook.current.busy).toBeNull();
   });
 
+  it('names the pin the server reported when the live key changed between the scan and the connection', async () => {
+    const api = fakeApi();
+    api.hostKey.mockResolvedValue({ ...HOST_KEY, trust: 'trusted', pinnedFingerprint: 'SHA256:abc' });
+    api.preflight.mockRejectedValueOnce(new BootstrapApiError(
+      'The host key changed before the preflight connected.',
+      'HOST_KEY_UNTRUSTED',
+      null,
+      { pinnedFingerprint: 'SHA256:pinned', observedFingerprint: 'SHA256:live', observedAlgorithm: 'ssh-rsa' },
+    ));
+    const { result: hook } = renderHook(() => useNodeBootstrap({ open: true, api }));
+    await act(async () => { fillTarget(hook.current); });
+    await act(async () => { await hook.current.checkHostKey(); });
+    await act(async () => { await hook.current.runPreflight(); });
+    await act(async () => { hook.current.setReplacing(true); });
+    await act(async () => { await hook.current.runPreflight(); });
+    expect(api.preflight).toHaveBeenNthCalledWith(
+      2,
+      expect.objectContaining({
+        expectedFingerprint: 'SHA256:live',
+        replacePinnedFingerprint: 'SHA256:live',
+        reviewedPinnedFingerprint: 'SHA256:pinned',
+      }),
+      expect.anything(),
+    );
+  });
+
   it('marks the key trusted once a confirmed replacement succeeded', async () => {
     const api = fakeApi();
     api.hostKey.mockResolvedValue({ ...HOST_KEY, trust: 'changed', pinnedFingerprint: 'SHA256:old' });
@@ -510,7 +536,36 @@ describe('useNodeBootstrap preflight replies that land after the configuration c
     await act(async () => { settles[0].resolve(result()); await pending; });
     expect(hook.result.current.step).toBe('preflight');
     expect(hook.result.current.result).toBeNull();
-    expect(hook.result.current.invalidated).not.toBeNull();
+    expect(hook.result.current.invalidated).toBe(field === 'composeDir' ? 'paths' : 'key');
+  });
+
+  it('ignores a late preflight reply after the host key was checked again without an edit', async () => {
+    const { api, settles } = pendingApi();
+    const { hook, pending } = await startPreflightThenGoBack(api);
+    await act(async () => { await hook.result.current.checkHostKey(); });
+    expect(hook.result.current.step).toBe('preflight');
+    await act(async () => { settles[0].resolve(result()); await pending(); });
+    expect(hook.result.current.result).toBeNull();
+    expect(hook.result.current.step).toBe('preflight');
+    expect(hook.result.current.busy).toBeNull();
+  });
+
+  it('ignores a late preflight reply after the dialog was closed and reopened', async () => {
+    const { api, settles } = pendingApi();
+    let open = true;
+    const hook = renderHook(() => useNodeBootstrap({ open, api }));
+    await act(async () => { fillTarget(hook.result.current); });
+    await act(async () => { await hook.result.current.checkHostKey(); });
+    let pending: Promise<void> | null = null;
+    act(() => { pending = hook.result.current.runPreflight(); });
+    open = false;
+    hook.rerender();
+    open = true;
+    hook.rerender();
+    await act(async () => { settles[0].resolve(result()); await pending; });
+    expect(hook.result.current.result).toBeNull();
+    expect(hook.result.current.step).toBe('preflight');
+    expect(hook.result.current.busy).toBeNull();
   });
 
   it('lets only the newest of two overlapping preflights apply, whichever settles first', async () => {

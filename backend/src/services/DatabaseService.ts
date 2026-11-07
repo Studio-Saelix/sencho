@@ -6497,15 +6497,17 @@ stmt.run('gitops_schema_version', '1');
     }
 
     /**
-     * Fold pins stored under a mixed-case host into the lower-case row. Two
-     * spellings of one host that hold different keys are conflicting decisions:
-     * the most recently approved pin is kept (a changed-key check then reports
-     * the other key as a change) and the conflict is logged, never dropped
-     * without a trace. Idempotent.
+     * Fold pins stored under a mixed-case host into the lower-case row. A second
+     * spelling that holds a different key is a pin that never went through a
+     * changed-key confirmation, so the oldest approval stays trusted (ties go to
+     * the lower-case row) and the other key must be confirmed as a change the
+     * next time it is seen. Each dropped key is logged and written to the audit
+     * log. Idempotent.
      */
     private migrateNodeBootstrapTrustHostCase(): void {
         const rows = this.db.prepare(
-            'SELECT host, port, fingerprint, algorithm, approved_by, approved_at, last_seen_at FROM node_bootstrap_trust ORDER BY approved_at DESC, last_seen_at DESC, host'
+            `SELECT host, port, fingerprint, algorithm, approved_by, approved_at, last_seen_at FROM node_bootstrap_trust
+             ORDER BY approved_at ASC, (host = lower(host)) DESC, last_seen_at DESC, host`
         ).all() as NodeBootstrapTrust[];
         if (!rows.some((row) => row.host !== row.host.toLowerCase())) return;
         const remove = this.db.prepare('DELETE FROM node_bootstrap_trust WHERE host = ? AND port = ?');
@@ -6513,24 +6515,40 @@ stmt.run('gitops_schema_version', '1');
             `INSERT INTO node_bootstrap_trust (host, port, fingerprint, algorithm, approved_by, approved_at, last_seen_at)
              VALUES (?, ?, ?, ?, ?, ?, ?)`
         );
+        const dropped: Array<{ key: string; keptFingerprint: string; droppedFingerprint: string }> = [];
         this.db.transaction(() => {
             const kept = new Map<string, NodeBootstrapTrust>();
             for (const row of rows) {
                 const key = `${row.host.toLowerCase()}:${row.port}`;
                 const winner = kept.get(key);
                 if (!winner) {
-                    kept.set(key, row);
-                } else if (winner.fingerprint !== row.fingerprint) {
-                    console.warn(
-                        `[Bootstrap] Conflicting host key pins for ${sanitizeForLog(key)}: kept ${sanitizeForLog(winner.fingerprint)}, dropped ${sanitizeForLog(row.fingerprint)} (older approval).`,
-                    );
+                    kept.set(key, { ...row, host: row.host.toLowerCase() });
+                } else if (winner.fingerprint === row.fingerprint) {
+                    winner.last_seen_at = Math.max(winner.last_seen_at, row.last_seen_at);
+                } else {
+                    dropped.push({ key, keptFingerprint: winner.fingerprint, droppedFingerprint: row.fingerprint });
                 }
             }
             for (const row of rows) remove.run(row.host, row.port);
             for (const row of kept.values()) {
-                insert.run(row.host.toLowerCase(), row.port, row.fingerprint, row.algorithm, row.approved_by, row.approved_at, row.last_seen_at);
+                insert.run(row.host, row.port, row.fingerprint, row.algorithm, row.approved_by, row.approved_at, row.last_seen_at);
             }
         })();
+        for (const conflict of dropped) {
+            console.warn(
+                `[Bootstrap] Conflicting host key pins for ${sanitizeForLog(conflict.key)}: kept ${sanitizeForLog(conflict.keptFingerprint)} (oldest approval), dropped ${sanitizeForLog(conflict.droppedFingerprint)}.`,
+            );
+            this.insertAuditLog({
+                timestamp: Date.now(),
+                username: 'system',
+                method: 'MIGRATION',
+                path: 'node_bootstrap_trust',
+                status_code: 409,
+                node_id: null,
+                ip_address: 'local',
+                summary: `bootstrap.trust.conflict: host=${sanitizeForLog(conflict.key)} kept=${sanitizeForLog(conflict.keptFingerprint)} dropped=${sanitizeForLog(conflict.droppedFingerprint)}`,
+            });
+        }
     }
 
     public upsertNodeBootstrapTrust(record: NodeBootstrapTrust): void {

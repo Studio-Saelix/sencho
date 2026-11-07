@@ -120,4 +120,12 @@ describe('bootstrap target identity', () => {
     expect(validateHost('192.168.1.50')).toBe('192.168.1.50');
     expect(validateTarget({ host: 'SERVER.example.com', username: 'ubuntu', targetName: 'x' }).host).toBe('server.example.com');
   });
+
+  it.each(['1.2.3.04', '0x7f.1', '10.1', 'host.123', '300.1.1.1', '1.2.3.0x4'])('rejects %s as a legacy spelling of an IPv4 address', (host) => {
+    expect(() => validateHost(host)).toThrow(/dotted form|DNS name/);
+  });
+
+  it.each(['example.com', 'a1.example.com', '123.example.com', 'node-1', 'x0x.example.org'])('still accepts %s', (host) => {
+    expect(validateHost(host)).toBe(host);
+  });
 });

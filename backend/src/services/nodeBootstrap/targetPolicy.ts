@@ -52,6 +52,12 @@ export function validateHost(raw: unknown): string {
   if (net.isIP(host) !== 4 && !HOSTNAME_PATTERN.test(host)) {
     throw new TargetValidationError('host', 'Host must be a DNS name or an IPv4 address.');
   }
+  // A top-level domain is never numeric, so a name ending in digits or `0x…` is
+  // a legacy spelling of an IPv4 address (`1.2.3.04`, `0x7f.1`). Refusing it
+  // keeps one server from holding a pin under each spelling.
+  if (net.isIP(host) !== 4 && /^(?:\d+|0x[0-9a-f]*)$/i.test(host.slice(host.lastIndexOf('.') + 1))) {
+    throw new TargetValidationError('host', 'Host must be a DNS name or an IPv4 address in dotted form.');
+  }
   return host.toLowerCase();
 }
 

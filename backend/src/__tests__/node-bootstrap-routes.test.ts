@@ -1,5 +1,7 @@
 import { describe, it, expect, beforeAll, afterAll, beforeEach, afterEach, vi } from 'vitest';
+import fs from 'fs';
 import os from 'os';
+import path from 'path';
 import request from 'supertest';
 import jwt from 'jsonwebtoken';
 import { setupTestDb, cleanupTestDb, TEST_USERNAME, TEST_JWT_SECRET } from './helpers/setupTestDb';
@@ -1045,6 +1047,47 @@ describe('bootstrap service failure handling', () => {
     expect(entries.some((entry) => entry.summary.startsWith('bootstrap.trust.replaced'))).toBe(false);
   });
 
+  it('tells a stale confirmation apart from a missing one, in the message and the audit row', async () => {
+    const db = DatabaseService.getInstance();
+    const stale = 'stale-message.example.com';
+    const missing = 'missing-message.example.com';
+    const current = 'SHA256:pinnedC00000000000000000000000000000000';
+    const live = 'SHA256:observedB0000000000000000000000000000000';
+    pin(stale, current);
+    pin(missing, current);
+    await expect(makeService(new FakeTransport(probeOutputs(), live)).preflight(
+      base(stale, { expectedFingerprint: live, replacePinnedFingerprint: live, reviewedPinnedFingerprint: 'SHA256:old' }),
+      { hubUrl: hub, audit },
+    )).rejects.toThrow(/changed since you reviewed it/);
+    await expect(makeService(new FakeTransport(probeOutputs(), live)).preflight(
+      base(missing, { expectedFingerprint: live }),
+      { hubUrl: hub, audit },
+    )).rejects.toThrow(/Confirm the replacement to continue/);
+    const staleRow = db.getAuditLogs({ search: stale, limit: 20 }).entries.find((entry) => entry.summary.startsWith('bootstrap.trust.mismatch'));
+    const missingRow = db.getAuditLogs({ search: missing, limit: 20 }).entries.find((entry) => entry.summary.startsWith('bootstrap.trust.mismatch'));
+    expect(staleRow?.summary).toContain('reviewed=SHA256:old');
+    expect(missingRow?.summary).not.toContain('reviewed=');
+  });
+
+  it('treats a reviewed pin without a replacement fingerprint, and the reverse, as no confirmation', async () => {
+    const db = DatabaseService.getInstance();
+    const host = 'half-confirm.example.com';
+    const current = 'SHA256:pinnedA00000000000000000000000000000000';
+    const live = 'SHA256:observedB0000000000000000000000000000000';
+    pin(host, current);
+    for (const extra of [
+      { reviewedPinnedFingerprint: current },
+      { replacePinnedFingerprint: live },
+      { replacePinnedFingerprint: live, reviewedPinnedFingerprint: '  ' },
+    ]) {
+      await expect(makeService(new FakeTransport(probeOutputs(), live)).preflight(
+        base(host, { expectedFingerprint: live, ...extra }),
+        { hubUrl: hub, audit },
+      )).rejects.toMatchObject({ code: 'HOST_KEY_MISMATCH' });
+    }
+    expect(db.getNodeBootstrapTrust(host, 22)?.fingerprint).toBe(current);
+  });
+
   it('replaces the pin when the confirmation names the current pin, and audits the replacement', async () => {
     const db = DatabaseService.getInstance();
     const host = 'current-confirm.example.com';
@@ -1629,14 +1672,66 @@ describe('bootstrap service target identity: DNS names are case-insensitive', ()
       expect(rowsFor('legacy-same.example.com')).toEqual([{ host: 'legacy-same.example.com', fingerprint: pinnedKey }]);
     });
 
-    it('keeps the most recently approved key when spellings disagree, and says so in the log', () => {
+    it('keeps the oldest approval when spellings disagree, so the newer key must be confirmed as a change', () => {
       const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
       insertRaw('legacy-conflict.example.com', pinnedKey, 5);
       insertRaw('Legacy-Conflict.example.com', liveKey, 9);
       migrate();
-      expect(rowsFor('legacy-conflict.example.com')).toEqual([{ host: 'legacy-conflict.example.com', fingerprint: liveKey }]);
+      expect(rowsFor('legacy-conflict.example.com')).toEqual([{ host: 'legacy-conflict.example.com', fingerprint: pinnedKey }]);
       expect(warn.mock.calls.some((call) => String(call[0]).includes('Conflicting host key pins')
-        && String(call[0]).includes(pinnedKey))).toBe(true);
+        && String(call[0]).includes(liveKey))).toBe(true);
+    });
+
+    it('records each dropped key in the audit log', () => {
+      vi.spyOn(console, 'warn').mockImplementation(() => {});
+      insertRaw('legacy-audit.example.com', pinnedKey, 5);
+      insertRaw('LEGACY-audit.example.com', liveKey, 9);
+      migrate();
+      db().flushAuditLogBuffer();
+      const { entries } = db().getAuditLogs({ search: 'legacy-audit.example.com', limit: 20 });
+      const row = entries.find((entry) => entry.summary.startsWith('bootstrap.trust.conflict'));
+      expect(row?.summary).toContain(`kept=${pinnedKey}`);
+      expect(row?.summary).toContain(`dropped=${liveKey}`);
+    });
+
+    it('prefers the lower-case row when two spellings were approved at the same time', () => {
+      vi.spyOn(console, 'warn').mockImplementation(() => {});
+      insertRaw('Legacy-Tie.example.com', liveKey, 5);
+      insertRaw('legacy-tie.example.com', pinnedKey, 5);
+      migrate();
+      expect(rowsFor('legacy-tie.example.com')).toEqual([{ host: 'legacy-tie.example.com', fingerprint: pinnedKey }]);
+    });
+
+    it('keeps the latest sighting when duplicate spellings hold the same key', () => {
+      insertRaw('legacy-seen.example.com', pinnedKey, 5);
+      db().getDb().prepare('UPDATE node_bootstrap_trust SET last_seen_at = 7 WHERE host = ?').run('legacy-seen.example.com');
+      insertRaw('LEGACY-seen.example.com', pinnedKey, 9);
+      db().getDb().prepare('UPDATE node_bootstrap_trust SET last_seen_at = 20 WHERE host = ?').run('LEGACY-seen.example.com');
+      migrate();
+      expect(db().getNodeBootstrapTrust('legacy-seen.example.com', 22)).toMatchObject({ approved_at: 5, last_seen_at: 20 });
+    });
+
+    it('runs when the database opens, so a pin stored by an earlier build stays reachable', () => {
+      const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'sencho-trust-case-'));
+      const previous = process.env.DATA_DIR;
+      const open = () => new (DatabaseService as unknown as new () => DatabaseService)();
+      try {
+        process.env.DATA_DIR = dir;
+        const first = open();
+        first.getDb().prepare(
+          `INSERT INTO node_bootstrap_trust (host, port, fingerprint, algorithm, approved_by, approved_at, last_seen_at)
+           VALUES ('Boot-Case.Example.com', 22, ?, 'ssh-ed25519', 'admin', 5, 5)`,
+        ).run(pinnedKey);
+        first.getDb().close();
+        const reopened = open();
+        expect(reopened.getNodeBootstrapTrust('boot-case.example.com', 22)?.fingerprint).toBe(pinnedKey);
+        expect(reopened.getDb().prepare('SELECT host FROM node_bootstrap_trust').all()).toEqual([{ host: 'boot-case.example.com' }]);
+        reopened.getDb().close();
+      } finally {
+        if (previous === undefined) delete process.env.DATA_DIR;
+        else process.env.DATA_DIR = previous;
+        fs.rmSync(dir, { recursive: true, force: true });
+      }
     });
 
     it('is a no-op once every host is lower case', () => {

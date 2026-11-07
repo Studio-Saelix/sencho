@@ -97,8 +97,8 @@ export function useNodeBootstrap({ open, api }: UseNodeBootstrapOptions) {
   // its own controller is still here, so any edit that discards the inspection
   // (and any newer request) supersedes it even if the reply is already on the way.
   const preflightRef = useRef<AbortController | null>(null);
-  // Bumped whenever the SSH endpoint changes, so a keyscan response for the
-  // previous host, port or user can never populate the current form.
+  // Bumped whenever the SSH endpoint changes, so a keyscan or preflight response
+  // for the previous host, port or user can never populate the current form.
   const targetGenerationRef = useRef(0);
   const dirtyFieldsRef = useRef<Set<keyof BootstrapForm>>(new Set());
   const resultRef = useRef<BootstrapPreflightResult | null>(null);
