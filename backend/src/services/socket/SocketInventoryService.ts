@@ -119,8 +119,10 @@ export interface SocketInventoryContainer {
   publishedPorts: SocketInventoryPort[];
   exposedPorts: string[];
   networks: SocketInventoryNetwork[];
-  privileged: boolean;
-  readonlyRootfs: boolean;
+  /** null when the security fact was present but could not be read. */
+  privileged: boolean | null;
+  /** null when the security fact was present but could not be read. */
+  readonlyRootfs: boolean | null;
   infrastructureLabel: boolean;
   isSencho: boolean;
   isSenchoEndpointProvider: boolean;

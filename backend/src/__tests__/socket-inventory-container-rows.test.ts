@@ -230,7 +230,7 @@ describe('listContainersForSocketInventory', () => {
           Image: 'tecnativa/docker-socket-proxy:latest',
           Labels: {},
           Env: Array.from({ length: 400 }, (_, index) => `KEY_${index}=value`),
-          ExposedPorts: Object.fromEntries(Array.from({ length: 100 }, (_, index) => [`${index}/tcp`, {}])),
+          ExposedPorts: Object.fromEntries(Array.from({ length: 100 }, (_, index) => [`${index + 1}/tcp`, {}])),
         },
         NetworkSettings: {
           Ports: {},

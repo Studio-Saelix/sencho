@@ -632,8 +632,12 @@ components:
             properties:
               name: { type: string }
               id: { type: [string, "null"] }
-        privileged: { type: boolean }
-        readonlyRootfs: { type: boolean }
+        privileged:
+          type: [boolean, "null"]
+          description: Whether the container is privileged. null when HostConfig did not provide a readable boolean, so the fact is not a proven negative.
+        readonlyRootfs:
+          type: [boolean, "null"]
+          description: Whether the container root filesystem is read-only. null when HostConfig did not provide a readable boolean, so the fact is not a proven negative.
         infrastructureLabel: { type: boolean }
         isSencho: { type: boolean }
         isSenchoEndpointProvider: { type: boolean }

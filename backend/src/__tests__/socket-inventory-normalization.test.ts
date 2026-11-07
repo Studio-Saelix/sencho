@@ -676,3 +676,312 @@ describe('socket inventory malformed label and network metadata', () => {
     },
   );
 });
+
+describe('socket inventory unreadable enclosing metadata', () => {
+  it.each([
+    ['Config is null', null],
+    ['Config is a scalar', 'not-a-map'],
+    ['Config is an array', []],
+  ])('marks a row incomplete when %s', async (_label, config) => {
+    const rows = await rowsFrom(listed(), inspected({ Config: config }));
+
+    // The columns Config owns must not read as cleanly empty facts.
+    expect(rows[0]).toMatchObject({
+      labels: {},
+      apiGroups: [],
+      exposedPorts: [],
+      metadataTruncated: true,
+    });
+
+    const inventory = inventoryOf(rows);
+    expect(inventory.containers[0]).toMatchObject({
+      labels: [],
+      apiGroups: [],
+      exposedPorts: [],
+      metadataTruncated: true,
+    });
+    expect(inventory.status).toBe('partial');
+  });
+
+  it.each([
+    ['State is null', null],
+    ['State is a scalar', 7],
+    ['State is an array', []],
+  ])('keeps listing state and marks the row incomplete when %s', async (_label, state) => {
+    const rows = await rowsFrom(listed(), inspected({ State: state }));
+
+    expect(rows[0]).toMatchObject({
+      state: 'running',
+      health: null,
+      metadataTruncated: true,
+    });
+    expect(inventoryOf(rows).status).toBe('partial');
+  });
+
+  it.each([5, 'healthy', true, []])(
+    'does not read a non-map State.Health (%j) as an absent health fact',
+    async health => {
+      const rows = await rowsFrom(listed(), inspected({
+        State: { Status: 'running', Health: health },
+      }));
+
+      expect(rows[0]).toMatchObject({ health: null, metadataTruncated: true });
+      expect(inventoryOf(rows).status).toBe('partial');
+    },
+  );
+
+  it.each([
+    ['NetworkSettings is null', null],
+    ['NetworkSettings is a scalar', 7],
+    ['NetworkSettings is an array', []],
+  ])('keeps readable listing port and network evidence but marks the row incomplete when %s', async (_label, settings) => {
+    const rows = await rowsFrom(
+      listed({
+        Ports: [{ IP: '0.0.0.0', PrivatePort: 2375, PublicPort: 8080, Type: 'tcp' }],
+        NetworkSettings: { Networks: { alpha: { NetworkID: 'net1', IPAddress: '172.18.0.2' } } },
+      }),
+      inspected({ NetworkSettings: settings }),
+    );
+
+    expect(rows[0].ports).toEqual([
+      { privatePort: 2375, publicPort: 8080, ip: '0.0.0.0', protocol: 'tcp' },
+    ]);
+    expect(rows[0].networks).toEqual([{ name: 'alpha', id: 'net1', ipAddress: '172.18.0.2' }]);
+    expect(rows[0].metadataTruncated).toBe(true);
+    expect(inventoryOf(rows).status).toBe('partial');
+  });
+
+  it.each([
+    ['HostConfig is null', null],
+    ['HostConfig is a scalar', 7],
+    ['HostConfig is an array', []],
+  ])('does not assert security negatives when %s', async (_label, hostConfig) => {
+    const rows = await rowsFrom(listed(), inspected({ HostConfig: hostConfig }));
+
+    expect(rows[0]).toMatchObject({
+      privileged: null,
+      readonlyRootfs: null,
+      metadataTruncated: true,
+    });
+    expect(inventoryOf(rows).status).toBe('partial');
+  });
+
+  it('does not read non-boolean security facts as proven negatives', async () => {
+    const rows = await rowsFrom(listed(), inspected({
+      HostConfig: { Privileged: 'true', ReadonlyRootfs: 'true' },
+    }));
+
+    expect(rows[0]).toMatchObject({
+      privileged: null,
+      readonlyRootfs: null,
+      metadataTruncated: true,
+    });
+    const inventory = inventoryOf(rows);
+    expect(inventory.containers[0]).toMatchObject({ privileged: null, readonlyRootfs: null });
+    expect(inventory.status).toBe('partial');
+  });
+
+  it('keeps a readable security boolean beside an unreadable one', async () => {
+    const rows = await rowsFrom(listed(), inspected({
+      HostConfig: { Privileged: true, ReadonlyRootfs: 'false' },
+    }));
+
+    expect(rows[0]).toMatchObject({
+      privileged: true,
+      readonlyRootfs: null,
+      metadataTruncated: true,
+    });
+  });
+});
+
+describe('socket inventory unreadable listing scalars', () => {
+  it('marks unreadable listing identity, state, and name incomplete when inspect cannot replace them', async () => {
+    const rows = await rowsFrom(
+      listed({ Names: 7, State: 5, Image: 5, ImageID: 5 }),
+      new Error('inspect unavailable'),
+    );
+
+    expect(rows[0]).toMatchObject({
+      name: '',
+      state: 'unknown',
+      image: '',
+      imageId: '',
+      metadataTruncated: true,
+    });
+    expect(inventoryOf(rows).status).toBe('partial');
+  });
+
+  it('does not call a row incomplete once a readable inspect value replaces an unreadable listing scalar', async () => {
+    const rows = await rowsFrom(
+      listed({ State: 5, Image: 5, ImageID: 5 }),
+      inspected(),
+    );
+
+    expect(rows[0]).toMatchObject({
+      state: 'running',
+      image: 'alpine:3',
+      imageId: 'sha256:image1',
+      metadataTruncated: false,
+    });
+  });
+
+  it('marks an unreadable listing network parent incomplete', async () => {
+    const rows = await rowsFrom(
+      listed({ NetworkSettings: 'not-a-map' }),
+      inspected({ NetworkSettings: { Ports: {}, Networks: {} } }),
+    );
+
+    expect(rows[0].metadataTruncated).toBe(true);
+    expect(inventoryOf(rows).status).toBe('partial');
+  });
+});
+
+describe('socket inventory port specification validation', () => {
+  it('marks an empty listing protocol incomplete instead of presenting it', async () => {
+    const rows = await rowsFrom(
+      listed({ Ports: [{ IP: '0.0.0.0', PrivatePort: 2375, PublicPort: 8080, Type: '' }] }),
+      new Error('inspect unavailable'),
+    );
+
+    expect(rows[0].ports).toEqual([
+      { privatePort: 2375, publicPort: 8080, ip: '0.0.0.0', protocol: 'tcp' },
+    ]);
+    expect(rows[0].metadataTruncated).toBe(true);
+    expect(inventoryOf(rows).status).toBe('partial');
+  });
+
+  it('drops malformed exposed-port specifications and marks the row incomplete', async () => {
+    const rows = await rowsFrom(listed({ Ports: [] }), inspected({
+      Config: {
+        Image: 'alpine:3',
+        Labels: {},
+        Env: [],
+        ExposedPorts: {
+          '2375junk/tcp': {},
+          '2375/tcp': {},
+          '8080/': {},
+          '53/udp': {},
+        },
+      },
+    }));
+
+    expect(rows[0].exposedPorts).toEqual(['2375/tcp', '53/udp']);
+    expect(rows[0].metadataTruncated).toBe(true);
+    const inventory = inventoryOf(rows);
+    expect(inventory.containers[0].exposedPorts).toEqual(['2375/tcp', '53/udp']);
+    expect(inventory.status).toBe('partial');
+  });
+});
+
+describe('socket inventory fallback preserves binding multiplicity', () => {
+  it('restores a wildcard listing binding beside a readable loopback inspect binding', async () => {
+    const rows = await rowsFrom(
+      listed({ Ports: [{ IP: '0.0.0.0', PrivatePort: 2375, PublicPort: 8080, Type: 'tcp' }] }),
+      inspected({
+        NetworkSettings: {
+          Ports: {
+            '2375/tcp': [
+              { HostIp: '127.0.0.1', HostPort: '8080' },
+              { HostIp: {}, HostPort: '8080' },
+            ],
+          },
+          Networks: {},
+        },
+      }),
+    );
+
+    expect(rows[0].ports).toEqual([
+      { privatePort: 2375, publicPort: 8080, ip: '127.0.0.1', protocol: 'tcp' },
+      { privatePort: 2375, publicPort: 8080, ip: '0.0.0.0', protocol: 'tcp' },
+    ]);
+    expect(rows[0].metadataTruncated).toBe(true);
+
+    const inventory = inventoryOf(rows);
+    expect(inventory.containers[0].publishedPorts).toEqual([
+      { privatePort: 2375, publicPort: 8080, ip: '127.0.0.1', allInterfaces: false, protocol: 'tcp' },
+      { privatePort: 2375, publicPort: 8080, ip: '0.0.0.0', allInterfaces: true, protocol: 'tcp' },
+    ]);
+    expect(inventory.status).toBe('partial');
+  });
+
+  it.each([
+    [
+      'loopback then wildcard',
+      [
+        { IP: '127.0.0.1', PrivatePort: 2375, PublicPort: 8080, Type: 'tcp' },
+        { IP: '0.0.0.0', PrivatePort: 2375, PublicPort: 8080, Type: 'tcp' },
+      ],
+      ['127.0.0.1', '0.0.0.0'],
+    ],
+    [
+      'wildcard then loopback',
+      [
+        { IP: '0.0.0.0', PrivatePort: 2375, PublicPort: 8080, Type: 'tcp' },
+        { IP: '127.0.0.1', PrivatePort: 2375, PublicPort: 8080, Type: 'tcp' },
+      ],
+      ['0.0.0.0', '127.0.0.1'],
+    ],
+  ])('keeps both listing addresses when inspect reads only one unreadable binding (%s)', async (_label, ports, expected) => {
+    const rows = await rowsFrom(
+      listed({ Ports: ports }),
+      inspected({
+        NetworkSettings: {
+          Ports: { '2375/tcp': [{ HostIp: null, HostPort: '8080' }] },
+          Networks: {},
+        },
+      }),
+    );
+
+    expect(rows[0].ports.map(port => port.ip)).toEqual(expected);
+    expect(rows[0].metadataTruncated).toBe(true);
+    expect(inventoryOf(rows).status).toBe('partial');
+  });
+
+  it('keeps IPv4 and IPv6 wildcard bindings as separate evidence', async () => {
+    const rows = await rowsFrom(
+      listed({
+        Ports: [
+          { IP: '0.0.0.0', PrivatePort: 2375, PublicPort: 8080, Type: 'tcp' },
+          { IP: '::', PrivatePort: 2375, PublicPort: 8080, Type: 'tcp' },
+        ],
+      }),
+      inspected({
+        NetworkSettings: {
+          Ports: {
+            '2375/tcp': [
+              { HostIp: {}, HostPort: '8080' },
+              { HostIp: {}, HostPort: '8080' },
+            ],
+          },
+          Networks: {},
+        },
+      }),
+    );
+
+    expect(rows[0].ports.map(port => port.ip)).toEqual(['0.0.0.0', '::']);
+    expect(rows[0].metadataTruncated).toBe(true);
+    const inventory = inventoryOf(rows);
+    expect(inventory.containers[0].publishedPorts.map(port => port.allInterfaces)).toEqual([true, true]);
+  });
+
+  it('does not let fallback restoration exceed the overall port cap', async () => {
+    const listedPorts = Array.from({ length: 70 }, (_, index) => ({
+      IP: '0.0.0.0',
+      PrivatePort: 2000 + index,
+      PublicPort: 3000 + index,
+      Type: 'tcp',
+    }));
+    const rows = await rowsFrom(
+      listed({ Ports: listedPorts }),
+      inspected({
+        NetworkSettings: {
+          Ports: { '9999/tcp': [{ HostIp: '0.0.0.0', HostPort: '9999' }] },
+          Networks: {},
+        },
+      }),
+    );
+
+    expect(rows[0].ports.length).toBe(64);
+    expect(rows[0].metadataTruncated).toBe(true);
+  });
+});

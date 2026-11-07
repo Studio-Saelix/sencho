@@ -21,7 +21,10 @@ export const socketRouter = Router();
  * only ever "discovery completed", never "no Docker access".
  */
 socketRouter.get('/inventory', async (req: Request, res: Response): Promise<void> => {
-  if (!requirePermission(req, res, 'node:read')) return;
+  // Authorize the exact target node: a global Deployer with a Node Admin
+  // assignment on this node holds node:read through that grant, and the shared
+  // engine only sees scoped assignments when the resource is supplied.
+  if (!requirePermission(req, res, 'node:read', 'node', String(req.nodeId))) return;
   try {
     const inventory = await withTimeout(
       loadSocketInventory(req.nodeId),

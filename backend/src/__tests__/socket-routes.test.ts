@@ -30,6 +30,8 @@ let PilotTunnelManager: typeof import('../services/PilotTunnelManager').PilotTun
 let adminCookie: string;
 let viewerCookie: string;
 let deployerCookie: string;
+let scopedDeployerCookie: string;
+let scopedDeployerId: number;
 let remoteServer: http.Server;
 let remoteBase: string;
 let remoteNodeId: number;
@@ -38,6 +40,7 @@ let deniedNodeId: number;
 let legacyNodeId: number;
 let unreachableNodeId: number;
 const remoteHops: string[] = [];
+const remoteRoles: Array<{ path: string; role: string | undefined }> = [];
 
 const inventory = {
   schemaVersion: 1,
@@ -81,10 +84,22 @@ beforeAll(async () => {
   }
   viewerCookie = await loginAs('socket-viewer', 'socketpass');
   deployerCookie = await loginAs('socket-deployer', 'socketpass');
+  scopedDeployerId = db.addUser({
+    username: 'socket-scoped-deployer',
+    password_hash: await bcrypt.hash('socketpass', 1),
+    role: 'deployer',
+  });
+  scopedDeployerCookie = await loginAs('socket-scoped-deployer', 'socketpass');
 
   remoteServer = http.createServer((req, res) => {
     const path = req.url ?? '';
     remoteHops.push(path);
+    remoteRoles.push({
+      path,
+      role: typeof req.headers['x-sencho-actor-role'] === 'string'
+        ? req.headers['x-sencho-actor-role']
+        : undefined,
+    });
     res.setHeader('content-type', 'application/json');
     if (path.endsWith('/api/meta')) {
       res.end(JSON.stringify({
@@ -136,6 +151,8 @@ beforeEach(() => {
   loadSocketInventoryMock.mockResolvedValue(inventory);
   resetRequestedTimeoutBudgets();
   remoteHops.length = 0;
+  remoteRoles.length = 0;
+  DatabaseService.getInstance().deleteRoleAssignmentsByUser(scopedDeployerId);
 });
 
 afterEach(() => {
@@ -168,6 +185,34 @@ describe('GET /api/socket/inventory', () => {
     const res = await request(app)
       .get('/api/socket/inventory')
       .set('Cookie', deployerCookie);
+    expect(res.status).toBe(403);
+    expect(loadSocketInventoryMock).not.toHaveBeenCalled();
+  });
+
+  it('serves a global deployer authorized through a Node Admin grant on this node', async () => {
+    DatabaseService.getInstance().addRoleAssignment({
+      user_id: scopedDeployerId,
+      role: 'node-admin',
+      resource_type: 'node',
+      resource_id: '1',
+    });
+    const res = await request(app)
+      .get('/api/socket/inventory')
+      .set('Cookie', scopedDeployerCookie);
+    expect(res.status).toBe(200);
+    expect(loadSocketInventoryMock).toHaveBeenCalledWith(1);
+  });
+
+  it('refuses a global deployer whose node grant is on a different node', async () => {
+    DatabaseService.getInstance().addRoleAssignment({
+      user_id: scopedDeployerId,
+      role: 'node-admin',
+      resource_type: 'node',
+      resource_id: '999',
+    });
+    const res = await request(app)
+      .get('/api/socket/inventory')
+      .set('Cookie', scopedDeployerCookie);
     expect(res.status).toBe(403);
     expect(loadSocketInventoryMock).not.toHaveBeenCalled();
   });
@@ -297,5 +342,115 @@ describe('GET /api/socket/inventory remote transports', () => {
     expect(res.status).toBe(502);
     expect(res.body.containers).toBeUndefined();
     expect(loadSocketInventoryMock).not.toHaveBeenCalled();
+  });
+
+  it('forwards a matching node-scoped grant for a proxy request', async () => {
+    DatabaseService.getInstance().addRoleAssignment({
+      user_id: scopedDeployerId,
+      role: 'node-admin',
+      resource_type: 'node',
+      resource_id: String(remoteNodeId),
+    });
+    const res = await request(app)
+      .get('/api/socket/inventory')
+      .set('Cookie', scopedDeployerCookie)
+      .set('x-node-id', String(remoteNodeId));
+    expect(res.status).toBe(200);
+    expect(remoteHops).toContain('/remote/api/socket/inventory');
+    expect(remoteRoles).toContainEqual({
+      path: '/remote/api/socket/inventory',
+      role: 'node-admin',
+    });
+    expect(loadSocketInventoryMock).not.toHaveBeenCalled();
+  });
+
+  it('does not elevate a different user or a later request on the same node', async () => {
+    DatabaseService.getInstance().addRoleAssignment({
+      user_id: scopedDeployerId,
+      role: 'node-admin',
+      resource_type: 'node',
+      resource_id: String(remoteNodeId),
+    });
+    const scoped = await request(app)
+      .get('/api/socket/inventory')
+      .set('Cookie', scopedDeployerCookie)
+      .set('x-node-id', String(remoteNodeId));
+    expect(scoped.status).toBe(200);
+
+    const denied = await request(app)
+      .get('/api/socket/inventory')
+      .set('Cookie', deployerCookie)
+      .set('x-node-id', String(remoteNodeId));
+    expect(denied.status).toBe(403);
+    expect(remoteHops.filter(path => path === '/remote/api/socket/inventory')).toHaveLength(1);
+  });
+
+  it('refuses a node-scoped grant held on a different node before forwarding', async () => {
+    DatabaseService.getInstance().addRoleAssignment({
+      user_id: scopedDeployerId,
+      role: 'node-admin',
+      resource_type: 'node',
+      resource_id: String(pilotNodeId),
+    });
+    const res = await request(app)
+      .get('/api/socket/inventory')
+      .set('Cookie', scopedDeployerCookie)
+      .set('x-node-id', String(remoteNodeId));
+    expect(res.status).toBe(403);
+    expect(remoteHops).not.toContain('/remote/api/socket/inventory');
+  });
+
+  it('forwards a matching node-scoped grant through the Pilot tunnel', async () => {
+    DatabaseService.getInstance().addRoleAssignment({
+      user_id: scopedDeployerId,
+      role: 'node-admin',
+      resource_type: 'node',
+      resource_id: String(pilotNodeId),
+    });
+    const tunnel = vi.spyOn(PilotTunnelManager.getInstance(), 'getLoopbackUrl')
+      .mockReturnValue(`${remoteBase}/remote`);
+    const res = await request(app)
+      .get('/api/socket/inventory')
+      .set('Cookie', scopedDeployerCookie)
+      .set('x-node-id', String(pilotNodeId));
+    expect(tunnel).toHaveBeenCalledWith(pilotNodeId);
+    expect(res.status).toBe(200);
+    expect(remoteRoles).toContainEqual({
+      path: '/remote/api/socket/inventory',
+      role: 'node-admin',
+    });
+    expect(loadSocketInventoryMock).not.toHaveBeenCalled();
+  });
+
+  it('forwards a global viewer role unchanged', async () => {
+    const res = await request(app)
+      .get('/api/socket/inventory')
+      .set('Cookie', viewerCookie)
+      .set('x-node-id', String(remoteNodeId));
+    expect(res.status).toBe(200);
+    expect(remoteRoles).toContainEqual({
+      path: '/remote/api/socket/inventory',
+      role: 'viewer',
+    });
+  });
+
+  it('forwards a global node-admin role unchanged', async () => {
+    const db = DatabaseService.getInstance();
+    const userId = db.addUser({
+      username: 'socket-node-admin',
+      password_hash: await bcrypt.hash('socketpass', 1),
+      role: 'node-admin',
+    });
+    const cookie = await loginAs('socket-node-admin', 'socketpass');
+    const res = await request(app)
+      .get('/api/socket/inventory')
+      .set('Cookie', cookie)
+      .set('x-node-id', String(remoteNodeId));
+    expect(res.status).toBe(200);
+    expect(remoteRoles).toContainEqual({
+      path: '/remote/api/socket/inventory',
+      role: 'node-admin',
+    });
+    db.deleteUser(userId);
   });
 });
