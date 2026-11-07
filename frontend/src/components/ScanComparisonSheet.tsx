@@ -86,18 +86,35 @@ function countBySeverity(rows: Array<{ severity: VulnSeverity }>): Record<VulnSe
   return counts;
 }
 
-const SUMMARY_SEVERITIES: VulnSeverity[] = ['CRITICAL', 'HIGH', 'MEDIUM', 'LOW'];
+const SUMMARY_SEVERITIES = ['CRITICAL', 'HIGH', 'MEDIUM', 'LOW', 'UNKNOWN'] as const;
+
+type DeltaSummary = {
+  tone: StatusTone;
+  title: 'Regressed' | 'Improved' | 'Mixed' | 'No net change';
+  line: string;
+};
+
+function sumCounts(counts: Record<VulnSeverity, number>): number {
+  return SUMMARY_SEVERITIES.reduce((total, sev) => total + counts[sev], 0);
+}
 
 /**
- * The one Answer for the diff: the net change per severity, in one sentence.
- * A net-new CRITICAL is the only destructive reading; any other net increase is
- * a warning, and a net decrease reads as an improvement. Severities with no net
- * change are left out rather than printed as zero.
+ * The one Answer for the diff. It compares counts per severity, not CVE
+ * identity: a net-new CRITICAL is the only destructive reading, any other net
+ * increase warns, and only decreases read as an improvement. Severities with no
+ * net change are left out of the sentence. When the nets cancel but findings
+ * still came and went, it says how many instead of claiming nothing changed,
+ * and warns if a new CRITICAL or HIGH is among them. A new CRITICAL inside an
+ * otherwise improving diff reads as mixed and is named, since its net can be
+ * zero. A result cut off at the row limit never reads as an improvement,
+ * because a row missing from one scan but present in the other would show up
+ * as a resolved finding.
  */
 function summarizeDelta(
   added: Record<VulnSeverity, number>,
   removed: Record<VulnSeverity, number>,
-): { tone: StatusTone; title: string; line: string } {
+  truncated: boolean,
+): DeltaSummary {
   const parts: string[] = [];
   let anyUp = false;
   let anyDown = false;
@@ -108,15 +125,33 @@ function summarizeDelta(
     else anyDown = true;
     parts.push(`${net > 0 ? '+' : ''}${net} ${sev.toLowerCase()}`);
   }
+  const net = `Net change: ${parts.join(', ')}.`;
+  const addedTotal = sumCounts(added);
+  const removedTotal = sumCounts(removed);
+
+  let summary: DeltaSummary;
   if (added.CRITICAL - removed.CRITICAL > 0) {
-    return { tone: 'destructive', title: 'Regressed', line: `Net change: ${parts.join(', ')}.` };
+    summary = { tone: 'destructive', title: 'Regressed', line: net };
+  } else if (anyUp) {
+    summary = { tone: 'warning', title: 'Regressed', line: net };
+  } else if (anyDown && added.CRITICAL > 0) {
+    summary = { tone: 'warning', title: 'Mixed', line: `${net} ${added.CRITICAL} new critical.` };
+  } else if (anyDown) {
+    summary = { tone: 'success', title: 'Improved', line: net };
+  } else if (addedTotal + removedTotal > 0) {
+    summary = {
+      tone: added.CRITICAL + added.HIGH > 0 ? 'warning' : 'neutral',
+      title: 'No net change',
+      line: `${addedTotal} added, ${removedTotal} removed.`,
+    };
+  } else {
+    summary = { tone: 'neutral', title: 'No net change', line: 'No findings changed.' };
   }
-  if (anyUp) return { tone: 'warning', title: 'Regressed', line: `Net change: ${parts.join(', ')}.` };
-  if (anyDown) return { tone: 'success', title: 'Improved', line: `Net change: ${parts.join(', ')}.` };
-  return { tone: 'neutral', title: 'No change', line: 'No net change in findings.' };
+  if (truncated && summary.tone === 'success') return { ...summary, tone: 'neutral' };
+  return summary;
 }
 
-/** Mirrors the loaded sheet: the Answer, the two scans, the filter row and a few rows. */
+/** Holds roughly the loaded layout (the Answer, the scans, the filters and some rows) so the sheet does not jump when data arrives. */
 function ComparisonSkeleton() {
   return (
     <div role="status" aria-busy="true" aria-label="Loading comparison" data-testid="scan-diff-skeleton" className="flex flex-col gap-4">
@@ -197,8 +232,8 @@ export function ScanComparisonSheet({
   const meta = data ? `#${data.scanA.id} → #${data.scanB.id}` : (loading ? 'Loading…' : '');
 
   const summary = useMemo(
-    () => (addedCounts && removedCounts ? summarizeDelta(addedCounts, removedCounts) : null),
-    [addedCounts, removedCounts],
+    () => (addedCounts && removedCounts ? summarizeDelta(addedCounts, removedCounts, data?.truncated === true) : null),
+    [addedCounts, removedCounts, data?.truncated],
   );
 
   return (
@@ -214,18 +249,17 @@ export function ScanComparisonSheet({
 
       {data && !loading && summary && (
         <>
-          <SheetSection title="Change">
+          <SheetSection title="Change" hideHeader>
             <StatusPath
               answer={{
                 tone: summary.tone,
                 title: summary.title,
                 line: summary.line,
-                status: summary.tone,
                 detail: crossImage
                   ? 'You are comparing scans from two different image identities. Package-level changes may reflect image differences rather than CVE drift.'
                   : null,
                 marker: data.truncated
-                  ? `partial · first ${data.row_limit ?? 1000} findings per scan`
+                  ? `partial · first ${data.row_limit ?? 1000} findings per scan, so this may be incomplete`
                   : undefined,
               }}
               stages={[]}

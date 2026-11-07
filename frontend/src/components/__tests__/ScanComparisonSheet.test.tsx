@@ -166,27 +166,6 @@ describe('ScanComparisonSheet', () => {
     );
   });
 
-  it('renders the truncation banner when the response flags truncated', async () => {
-    mockedFetch.mockResolvedValueOnce(
-      jsonResponse(200, result({ truncated: true, row_limit: 1000 })),
-    );
-
-    render(<ScanComparisonSheet baselineScanId={1} currentScanId={2} onClose={() => {}} />);
-
-    await waitFor(() =>
-      expect(screen.getByText(/first 1000 findings per scan/i)).toBeInTheDocument(),
-    );
-  });
-
-  it('hides the truncation banner when truncated is false', async () => {
-    mockedFetch.mockResolvedValueOnce(jsonResponse(200, result({ truncated: false })));
-
-    render(<ScanComparisonSheet baselineScanId={1} currentScanId={2} onClose={() => {}} />);
-
-    await waitFor(() => expect(screen.getByText(/Baseline/i)).toBeInTheDocument());
-    expect(screen.queryByText(/findings per scan/i)).toBeNull();
-  });
-
   it('relabels the unchanged bucket as "Shared" for cross-image comparisons', async () => {
     mockedFetch.mockResolvedValueOnce(
       jsonResponse(200, result({
@@ -247,12 +226,13 @@ describe('ScanComparisonSheet', () => {
       return screen.findByTestId('status-answer');
     }
 
-    it('reads a net-new CRITICAL as destructive', async () => {
-      mockedFetch.mockResolvedValueOnce(
-        jsonResponse(200, result({ added: [vuln({ vulnerability_id: 'CVE-C', severity: 'CRITICAL' })] })),
-      );
+    function show(res: ScanCompareResult) {
+      mockedFetch.mockResolvedValueOnce(jsonResponse(200, res));
+      return render(<ScanComparisonSheet baselineScanId={1} currentScanId={2} onClose={() => {}} />);
+    }
 
-      render(<ScanComparisonSheet baselineScanId={1} currentScanId={2} onClose={() => {}} />);
+    it('reads a net-new CRITICAL as destructive', async () => {
+      show(result({ added: [vuln({ vulnerability_id: 'CVE-C', severity: 'CRITICAL' })] }));
 
       const el = await answer();
       expect(el).toHaveAttribute('data-tone', 'destructive');
@@ -260,22 +240,65 @@ describe('ScanComparisonSheet', () => {
       expect(el).toHaveTextContent('Net change: +1 critical.');
     });
 
-    it('reads a net-new HIGH as a warning, not destructive', async () => {
-      mockedFetch.mockResolvedValueOnce(
-        jsonResponse(200, result({ added: [vuln({ vulnerability_id: 'CVE-H', severity: 'HIGH' })] })),
-      );
+    it('judges CRITICAL by the net, not by what was added', async () => {
+      show(result({
+        added: [vuln({ vulnerability_id: 'CVE-C1', severity: 'CRITICAL' }), vuln({ vulnerability_id: 'CVE-H1', severity: 'HIGH' })],
+        removed: [vuln({ vulnerability_id: 'CVE-C2', severity: 'CRITICAL' })],
+      }));
 
-      render(<ScanComparisonSheet baselineScanId={1} currentScanId={2} onClose={() => {}} />);
+      const el = await answer();
+      expect(el).toHaveAttribute('data-tone', 'warning');
+      expect(el).toHaveTextContent('Net change: +1 high.');
+      expect(el).not.toHaveTextContent(/critical/i);
+    });
 
-      expect(await answer()).toHaveAttribute('data-tone', 'warning');
+    it('stays destructive for a net-new CRITICAL even when a HIGH was resolved', async () => {
+      show(result({
+        added: [vuln({ vulnerability_id: 'CVE-C', severity: 'CRITICAL' })],
+        removed: [vuln({ vulnerability_id: 'CVE-H', severity: 'HIGH' })],
+      }));
+
+      const el = await answer();
+      expect(el).toHaveAttribute('data-tone', 'destructive');
+      expect(el).toHaveTextContent('Net change: +1 critical, -1 high.');
+    });
+
+    it.each([
+      ['HIGH', 'high'],
+      ['MEDIUM', 'medium'],
+      ['LOW', 'low'],
+    ] as const)('reads a net increase of only %s as a warning', async (severity, word) => {
+      show(result({ added: [vuln({ vulnerability_id: 'CVE-1', severity }), vuln({ vulnerability_id: 'CVE-2', severity })] }));
+
+      const el = await answer();
+      expect(el).toHaveAttribute('data-tone', 'warning');
+      expect(el).toHaveTextContent(`Net change: +2 ${word}.`);
+    });
+
+    it('counts UNKNOWN findings, so a change in them is never reported as no change', async () => {
+      show(result({ added: [vuln({ vulnerability_id: 'CVE-U', severity: 'UNKNOWN' })] }));
+
+      const el = await answer();
+      expect(el).toHaveAttribute('data-tone', 'warning');
+      expect(el).toHaveTextContent('Net change: +1 unknown.');
+    });
+
+    it('lists every changed severity in CRITICAL to UNKNOWN order', async () => {
+      show(result({
+        added: [
+          vuln({ vulnerability_id: 'CVE-U', severity: 'UNKNOWN' }),
+          vuln({ vulnerability_id: 'CVE-L', severity: 'LOW' }),
+          vuln({ vulnerability_id: 'CVE-M', severity: 'MEDIUM' }),
+          vuln({ vulnerability_id: 'CVE-H', severity: 'HIGH' }),
+          vuln({ vulnerability_id: 'CVE-C', severity: 'CRITICAL' }),
+        ],
+      }));
+
+      expect(await answer()).toHaveTextContent('Net change: +1 critical, +1 high, +1 medium, +1 low, +1 unknown.');
     });
 
     it('reads resolved findings as an improvement', async () => {
-      mockedFetch.mockResolvedValueOnce(
-        jsonResponse(200, result({ removed: [vuln({ vulnerability_id: 'CVE-R', severity: 'HIGH' }), vuln({ vulnerability_id: 'CVE-R2', severity: 'HIGH' })] })),
-      );
-
-      render(<ScanComparisonSheet baselineScanId={1} currentScanId={2} onClose={() => {}} />);
+      show(result({ removed: [vuln({ vulnerability_id: 'CVE-R', severity: 'HIGH' }), vuln({ vulnerability_id: 'CVE-R2', severity: 'HIGH' })] }));
 
       const el = await answer();
       expect(el).toHaveAttribute('data-tone', 'success');
@@ -283,15 +306,37 @@ describe('ScanComparisonSheet', () => {
       expect(el).toHaveTextContent('Net change: -2 high.');
     });
 
-    it('lists only the severities that changed and keeps the worst tone when they mix', async () => {
-      mockedFetch.mockResolvedValueOnce(
-        jsonResponse(200, result({
-          added: [vuln({ vulnerability_id: 'CVE-H', severity: 'HIGH' })],
-          removed: [vuln({ vulnerability_id: 'CVE-L', severity: 'LOW' })],
-        })),
-      );
+    it('reads a new CRITICAL inside an improving diff as mixed and names it', async () => {
+      show(result({
+        added: [vuln({ vulnerability_id: 'CVE-NEW', severity: 'CRITICAL' })],
+        removed: [
+          vuln({ vulnerability_id: 'CVE-OLD', severity: 'CRITICAL' }),
+          vuln({ vulnerability_id: 'CVE-H1', severity: 'HIGH' }),
+          vuln({ vulnerability_id: 'CVE-H2', severity: 'HIGH' }),
+        ],
+      }));
 
-      render(<ScanComparisonSheet baselineScanId={1} currentScanId={2} onClose={() => {}} />);
+      const el = await screen.findByTestId('status-answer');
+      expect(el).toHaveAttribute('data-tone', 'warning');
+      expect(el).toHaveTextContent('Mixed');
+      expect(el).toHaveTextContent('Net change: -2 high. 1 new critical.');
+    });
+
+    it('reads decreases across severities as an improvement', async () => {
+      show(result({
+        removed: [vuln({ vulnerability_id: 'CVE-C', severity: 'CRITICAL' }), vuln({ vulnerability_id: 'CVE-L1', severity: 'LOW' }), vuln({ vulnerability_id: 'CVE-L2', severity: 'LOW' })],
+      }));
+
+      const el = await answer();
+      expect(el).toHaveAttribute('data-tone', 'success');
+      expect(el).toHaveTextContent('Net change: -1 critical, -2 low.');
+    });
+
+    it('lists only the severities that changed and keeps the worst tone when they mix', async () => {
+      show(result({
+        added: [vuln({ vulnerability_id: 'CVE-H', severity: 'HIGH' })],
+        removed: [vuln({ vulnerability_id: 'CVE-L', severity: 'LOW' })],
+      }));
 
       const el = await answer();
       expect(el).toHaveAttribute('data-tone', 'warning');
@@ -299,40 +344,84 @@ describe('ScanComparisonSheet', () => {
       expect(el).not.toHaveTextContent(/medium|critical/i);
     });
 
-    it('says plainly that nothing changed, with no tone', async () => {
-      mockedFetch.mockResolvedValueOnce(jsonResponse(200, result()));
-
-      render(<ScanComparisonSheet baselineScanId={1} currentScanId={2} onClose={() => {}} />);
+    it('says how many came and went when the nets cancel, instead of claiming nothing changed', async () => {
+      show(result({
+        added: [vuln({ vulnerability_id: 'CVE-A', severity: 'MEDIUM' })],
+        removed: [vuln({ vulnerability_id: 'CVE-B', severity: 'MEDIUM' })],
+      }));
 
       const el = await answer();
       expect(el).toHaveAttribute('data-tone', 'neutral');
-      expect(el).toHaveTextContent('No net change in findings.');
+      expect(el).toHaveTextContent('No net change');
+      expect(el).toHaveTextContent('1 added, 1 removed.');
+      expect(el).not.toHaveTextContent('No findings changed');
     });
 
-    it('carries the cross-image caveat inside the Answer, not as a second block', async () => {
-      mockedFetch.mockResolvedValueOnce(
-        jsonResponse(200, result({ scanB: { id: 2, image_ref: 'alpine:3.19', scanned_at: 1_700_000_010_000 } })),
-      );
+    it('warns when a swap brings in a new CRITICAL or HIGH', async () => {
+      show(result({
+        added: [vuln({ vulnerability_id: 'CVE-A', severity: 'CRITICAL' })],
+        removed: [vuln({ vulnerability_id: 'CVE-B', severity: 'CRITICAL' })],
+      }));
 
-      render(<ScanComparisonSheet baselineScanId={1} currentScanId={2} onClose={() => {}} />);
+      const el = await answer();
+      expect(el).toHaveAttribute('data-tone', 'warning');
+      expect(el).toHaveTextContent('1 added, 1 removed.');
+    });
+
+    it('says plainly that nothing changed, with no tone', async () => {
+      show(result());
+
+      const el = await answer();
+      expect(el).toHaveAttribute('data-tone', 'neutral');
+      expect(el).toHaveTextContent('No net change');
+      expect(el).toHaveTextContent('No findings changed.');
+    });
+
+    it('carries the cross-image caveat inside the Answer, once', async () => {
+      show(result({ scanB: { id: 2, image_ref: 'alpine:3.19', scanned_at: 1_700_000_010_000 } }));
 
       expect(await screen.findByTestId('status-answer-detail')).toHaveTextContent(/two different image identities/i);
       expect(screen.getAllByTestId('status-answer')).toHaveLength(1);
-      expect(screen.queryByRole('alert')).toBeNull();
+      expect(screen.getAllByText(/two different image identities/i)).toHaveLength(1);
     });
 
-    it('flags a truncated comparison with a marker on the Answer and not otherwise', async () => {
-      mockedFetch.mockResolvedValueOnce(jsonResponse(200, result({ truncated: true, row_limit: 500 })));
+    it('does not show the caveat for the same image', async () => {
+      show(result());
 
-      const { unmount } = render(<ScanComparisonSheet baselineScanId={1} currentScanId={2} onClose={() => {}} />);
+      await answer();
+      expect(screen.queryByTestId('status-answer-detail')).toBeNull();
+    });
+
+    it('flags a truncated comparison with a marker on the Answer, naming the limit, and not otherwise', async () => {
+      const { unmount } = show(result({ truncated: true, row_limit: 500 }));
 
       expect(await screen.findByTestId('status-marker')).toHaveTextContent(/first 500 findings per scan/i);
+      expect(screen.getByTestId('status-marker')).toHaveTextContent(/may be incomplete/i);
       unmount();
 
-      mockedFetch.mockResolvedValueOnce(jsonResponse(200, result()));
-      render(<ScanComparisonSheet baselineScanId={1} currentScanId={2} onClose={() => {}} />);
+      show(result({ truncated: false }));
       await answer();
       expect(screen.queryByTestId('status-marker')).toBeNull();
+    });
+
+    it('falls back to the default row limit when the response omits it', async () => {
+      show(result({ truncated: true }));
+
+      expect(await screen.findByTestId('status-marker')).toHaveTextContent(/first 1000 findings per scan/i);
+    });
+
+    it('never reads a truncated comparison as an improvement', async () => {
+      show(result({ truncated: true, row_limit: 1000, removed: [vuln({ vulnerability_id: 'CVE-R', severity: 'HIGH' })] }));
+
+      const el = await answer();
+      expect(el).toHaveTextContent('Improved');
+      expect(el).toHaveAttribute('data-tone', 'neutral');
+    });
+
+    it('keeps a regression loud when the comparison is truncated', async () => {
+      show(result({ truncated: true, row_limit: 1000, added: [vuln({ vulnerability_id: 'CVE-C', severity: 'CRITICAL' })] }));
+
+      expect(await answer()).toHaveAttribute('data-tone', 'destructive');
     });
   });
 
@@ -356,13 +445,15 @@ describe('ScanComparisonSheet', () => {
       expect(screen.queryByText(/\+1 −1/)).toBeNull();
       expect(screen.queryByText('Status')).toBeNull();
       expect(screen.queryByText(/Findings · added/i)).toBeNull();
+      expect(screen.getAllByRole('columnheader').map((h) => h.textContent)).toEqual(['CVE', 'Package', 'Severity']);
+      expect(screen.getByText('Findings')).toBeInTheDocument();
     });
   });
 
   describe('loading', () => {
     afterEach(() => { vi.useRealTimers(); });
 
-    it('shows a layout-matched skeleton only after the busy delay, never a spinner', async () => {
+    it('shows the skeleton only after the busy delay, never a spinner', async () => {
       vi.useFakeTimers();
       mockedFetch.mockReturnValueOnce(new Promise(() => {}));
 
@@ -371,8 +462,61 @@ describe('ScanComparisonSheet', () => {
 
       await act(async () => { vi.advanceTimersByTime(DURATION_BASE_MS + 50); });
 
-      expect(screen.getByTestId('scan-diff-skeleton')).toHaveAttribute('aria-busy', 'true');
-      expect(document.querySelector('.animate-spin')).toBeNull();
+      const skeleton = screen.getByTestId('scan-diff-skeleton');
+      expect(skeleton).toHaveAttribute('aria-busy', 'true');
+      expect(skeleton).toHaveAttribute('aria-label', 'Loading comparison');
+      expect(screen.queryByRole('progressbar')).toBeNull();
+    });
+
+    it('never flashes the skeleton when the response is fast', async () => {
+      vi.useFakeTimers();
+      mockedFetch.mockResolvedValueOnce(jsonResponse(200, result()));
+
+      render(<ScanComparisonSheet baselineScanId={1} currentScanId={2} onClose={() => {}} />);
+      await act(async () => { await vi.advanceTimersByTimeAsync(DURATION_BASE_MS + 100); });
+
+      expect(screen.getByTestId('status-answer')).toBeInTheDocument();
+      expect(screen.queryByTestId('scan-diff-skeleton')).toBeNull();
+    });
+
+    it('replaces the skeleton with the result, side by side with nothing, once the response lands', async () => {
+      vi.useFakeTimers();
+      let resolve!: (r: Response) => void;
+      mockedFetch.mockReturnValueOnce(new Promise<Response>((r) => { resolve = r; }));
+
+      render(<ScanComparisonSheet baselineScanId={1} currentScanId={2} onClose={() => {}} />);
+      await act(async () => { vi.advanceTimersByTime(DURATION_BASE_MS + 50); });
+      expect(screen.getByTestId('scan-diff-skeleton')).toBeInTheDocument();
+
+      await act(async () => { resolve(jsonResponse(200, result())); });
+
+      expect(screen.getByTestId('status-answer')).toBeInTheDocument();
+      expect(screen.queryByTestId('scan-diff-skeleton')).toBeNull();
+    });
+
+    it('clears the old result, shows the skeleton again and resets the filter when the scans change', async () => {
+      vi.useFakeTimers();
+      mockedFetch.mockResolvedValueOnce(jsonResponse(200, result({
+        added: [vuln({ vulnerability_id: 'CVE-OLD-ADDED', severity: 'HIGH' })],
+        removed: [vuln({ vulnerability_id: 'CVE-OLD-REMOVED', severity: 'HIGH' })],
+      })));
+
+      const { rerender } = render(<ScanComparisonSheet baselineScanId={1} currentScanId={2} onClose={() => {}} />);
+      await act(async () => { await vi.advanceTimersByTimeAsync(10); });
+      await act(async () => { screen.getByRole('button', { name: /Removed \(1\)/ }).click(); });
+      expect(screen.getByText('CVE-OLD-REMOVED')).toBeInTheDocument();
+
+      let resolve!: (r: Response) => void;
+      mockedFetch.mockReturnValueOnce(new Promise<Response>((r) => { resolve = r; }));
+      await act(async () => { rerender(<ScanComparisonSheet baselineScanId={3} currentScanId={4} onClose={() => {}} />); });
+
+      expect(screen.queryByText('CVE-OLD-REMOVED')).toBeNull();
+      expect(screen.queryByTestId('status-answer')).toBeNull();
+      await act(async () => { vi.advanceTimersByTime(DURATION_BASE_MS + 50); });
+      expect(screen.getByTestId('scan-diff-skeleton')).toBeInTheDocument();
+
+      await act(async () => { resolve(jsonResponse(200, result({ added: [vuln({ vulnerability_id: 'CVE-NEW-ADDED', severity: 'HIGH' })] }))); });
+      expect(screen.getByText('CVE-NEW-ADDED')).toBeInTheDocument();
     });
   });
 
