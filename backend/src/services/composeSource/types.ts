@@ -98,6 +98,10 @@ export interface AuthoredFileSource {
   state: SourceFileState;
   nodes: ReadonlyMap<string, AuthoredNode>;
   diagnostics: AuthoredDiagnostic[];
+  /** sha256 of the UTF-8 content this build read, when it read the file. A
+   *  location persisted from this build carries it so a later read can prove
+   *  the file has not changed since. */
+  contentHash?: string;
 }
 
 export interface LabelContribution {
@@ -131,6 +135,9 @@ export type LabelAmbiguity =
 export interface ServiceAuthoredLabels {
   service: string;
   contributions: LabelContribution[];
+  /** The same contributions grouped by key, in the same order. Built once with
+   *  the model so a per-key consumer never scans the whole service list. */
+  contributionsByKey: Map<string, LabelContribution[]>;
   winners: Record<string, LabelContribution>;
   sharedFiles: string[];
   ambiguity: Record<string, LabelAmbiguity>;
@@ -229,6 +236,9 @@ export interface AuthoredLocation {
   column: number;
   endLine: number;
   endColumn: number;
+  /** sha256 of the file content the range was computed against. Persisted
+   *  with the location so a read can tell whether the range still applies. */
+  fileHash?: string;
 }
 
 /** A parsed label-file entry. The entry's value text never leaves the parser. */

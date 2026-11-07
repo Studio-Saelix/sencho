@@ -112,6 +112,34 @@ describe('authored label origins in the stack inventory', () => {
     expect(api.authored?.a).toEqual({ ambiguity: 'unparsed-source' });
   });
 
+  it('builds origins for many inline winners without a per-key contribution scan', async () => {
+    // The inline map is capped by the parser's node budget; the label file is
+    // not, so it carries the bulk of the contributions. Every inline winner is
+    // an override, which is the branch that used to rescan the whole list.
+    const inlineCount = 10_000;
+    const fileCount = 30_000;
+    const labels = Object.fromEntries(Array.from({ length: inlineCount }, (_, index) => [`key.${index}`, `value${index}`]));
+    writeStack('label-large-inline', {
+      'compose.yaml': `services:\n  api:\n    image: nginx:1\n    label_file: app.labels\n    labels:\n${
+        Object.entries(labels).map(([key, value]) => `      "${key}": "${value}"`).join('\n')
+      }\n`,
+      'app.labels': `${Array.from({ length: fileCount }, (_, index) => `key.${index}=file${index}`).join('\n')}\n`,
+    });
+    stubRender({ api: labels });
+    stubDocker();
+    const started = performance.now();
+    const inventory = await buildStackLabelInventory(nodeId, 'label-large-inline');
+    const elapsed = performance.now() - started;
+    const api = inventory.services.find(service => service.service === 'api')!;
+    expect(Object.keys(api.authored ?? {})).toHaveLength(inlineCount);
+    expect(api.authored?.['key.0']).toMatchObject({
+      source: 'inline', file: 'compose.yaml', overridden: true,
+    });
+    // The old read scanned every contribution once per key (quadratic). A map
+    // built with the model keeps this linear; the margin absorbs CI noise.
+    expect(elapsed).toBeLessThan(2_000);
+  }, 30_000);
+
   it('omits authored origins when a service extends an unresolvable base', async () => {
     writeStack('label-extends-cycle', {
       'compose.yaml': [

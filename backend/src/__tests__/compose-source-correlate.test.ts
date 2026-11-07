@@ -219,13 +219,15 @@ describe('resolveEditOrigin', () => {
 
   it('refuses a label-file winner when a later outside label file could override it', () => {
     const base = project([{ file: 'compose.yaml', source: 'services:\n  api:\n    image: nginx:1\n' }]);
+    const contribution = {
+      key: 'a', source: 'label-file' as const, file: 'app.labels',
+      range: { line: 1, column: 1, endLine: 1, endColumn: 4 },
+      fileIndex: 0, layerIndex: 0, writability: 'writable' as const, hasInterpolation: false, overridden: false, via: 'own' as const,
+    };
     const labels = new Map([['api', {
       service: 'api',
-      contributions: [{
-        key: 'a', source: 'label-file' as const, file: 'app.labels',
-        range: { line: 1, column: 1, endLine: 1, endColumn: 4 },
-        fileIndex: 0, layerIndex: 0, writability: 'writable' as const, hasInterpolation: false, overridden: false, via: 'own' as const,
-      }],
+      contributions: [contribution],
+      contributionsByKey: new Map([['a', [contribution]]]),
       winners: {
         a: {
           key: 'a', source: 'label-file' as const, file: 'app.labels',
@@ -247,6 +249,7 @@ describe('resolveEditOrigin', () => {
     const labels = new Map([['api', {
       service: 'api',
       contributions: [],
+      contributionsByKey: new Map(),
       winners: {},
       sharedFiles: [],
       ambiguity: { a: 'duplicate-key' as const },

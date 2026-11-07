@@ -23,7 +23,8 @@ import {
   findFingerprintCollisions, normalizeDoctorHit, normalizeStoredFinding, serializeSourceLocation,
   withDecision, type AssuranceFinding,
 } from './assurance/finding';
-import { buildAuthoredProject, locateFinding, type AuthoredProject } from './composeSource';
+import { buildAuthoredProject, locateFinding, type AuthoredLocation, type AuthoredProject } from './composeSource';
+import { dropStaleStoredLocations } from './assurance/locationFreshness';
 import { assuranceRuleOrder, getAssuranceRule } from './assurance/ruleRegistry';
 import { collectServiceHealthcheckEvidence } from './healthcheck/collectServiceHealthcheckEvidence';
 import {
@@ -59,6 +60,17 @@ function compareFindings(
 
 function sortNormalized(findings: AssuranceFinding[]): AssuranceFinding[] {
   return [...findings].sort(compareFindings);
+}
+
+/** Attach the digest of the file a location points into, so a later read can
+ *  prove the range still applies to the content it was computed against. */
+function withFileHash(
+  project: AuthoredProject | null,
+  location: AuthoredLocation | undefined,
+): AuthoredLocation | undefined {
+  if (!location || !project) return location;
+  const fileHash = project.files.find(file => file.file === location.file)?.contentHash;
+  return fileHash === undefined ? location : { ...location, fileHash };
 }
 
 /** Project one finding onto the Doctor wire shape, without a decision. The wire
@@ -219,7 +231,7 @@ export class ComposeDoctorService {
     const normalized = sortNormalized(hits.map(hit => {
       const rule = getAssuranceRule(hit.ruleId);
       if (!rule) throw new Error(`Compose Doctor rule "${hit.ruleId}" is missing from the assurance registry`);
-      return normalizeDoctorHit(nodeId, stackName, hit, rule, locateFinding(authored, hit, ctx.model));
+      return normalizeDoctorHit(nodeId, stackName, hit, rule, withFileHash(authored, locateFinding(authored, hit, ctx.model)));
     }));
     const collisions = findFingerprintCollisions(normalized);
     if (collisions.length > 0) {
@@ -263,18 +275,21 @@ export class ComposeDoctorService {
    * rather than a parallel model. A fresh `runPreflight` decides its findings the
    * same way (`decideFindings`).
    */
-  getLatestAssurance(nodeId: number, stackName: string): {
+  async getLatestAssurance(nodeId: number, stackName: string): Promise<{
     run: PreflightRunRow | null;
     findings: AssuranceFinding[];
     coverage: AssuranceCoverage;
-  } {
+  }> {
     const run = DatabaseService.getInstance().getLatestPreflightRun(nodeId, stackName);
     if (!run) return { run: null, findings: [], coverage: unrecordedCoverage() };
     const { acks, ackCtx } = loadAcknowledgementInputs(nodeId, stackName, run.rendered_hash, run.service_images);
+    // A range is only actionable while the file it names still has the content
+    // the run hashed; an edited file drops the link until the next run.
+    const stored = await dropStaleStoredLocations(nodeId, stackName, this.readNormalized(nodeId, stackName, run.id));
     return {
       run,
       // One clock reading for the whole read.
-      findings: decideFindings(this.readNormalized(nodeId, stackName, run.id), ackCtx, acks, Date.now()),
+      findings: decideFindings(stored, ackCtx, acks, Date.now()),
       coverage: parseCoverage(run.coverage),
     };
   }
@@ -288,8 +303,8 @@ export class ComposeDoctorService {
   }
 
   /** Read the last stored run for a stack, mapped to the report shape. */
-  getLatest(nodeId: number, stackName: string): PreflightReport {
-    const { run, findings: decided, coverage } = this.getLatestAssurance(nodeId, stackName);
+  async getLatest(nodeId: number, stackName: string): Promise<PreflightReport> {
+    const { run, findings: decided, coverage } = await this.getLatestAssurance(nodeId, stackName);
     if (!run) {
       return {
         stack: stackName, ranAt: null, ranBy: null, renderable: true, renderError: null,

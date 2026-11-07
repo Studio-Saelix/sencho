@@ -332,7 +332,7 @@ function authoredOriginsFor(
       const winner = serviceLabels.winners[key];
       if (!winner) continue;
       const overridden = winner.source === 'inline'
-        && serviceLabels.contributions.some(contribution => contribution.key === key && contribution.source === 'label-file');
+        && (serviceLabels.contributionsByKey.get(key)?.some(contribution => contribution.source === 'label-file') ?? false);
       out[key] = {
         source: winner.source,
         file: result.origin.file,

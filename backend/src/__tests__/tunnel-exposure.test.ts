@@ -518,7 +518,7 @@ describe('live Networking findings for tunnels', () => {
     expect(findings.filter(f => f.kind === 'exposure-unclassified' && f.service === 'web')).toHaveLength(1);
   });
 
-  it('merges the cached Doctor connector finding into the live connector card', () => {
+  it('merges the cached Doctor connector finding into the live connector card', async () => {
     withIntents([{ service: '', intent: 'public' }]);
     const live = buildNodeNetworkingFindings(1, null, [facts], []);
     const doctorFindings = runRules(ctx(model, { stackIntent: 'public' }))
@@ -526,7 +526,7 @@ describe('live Networking findings for tunnels', () => {
     vi.spyOn(ComposeDoctorService, 'getInstance').mockReturnValue({
       getLatest: vi.fn().mockReturnValue({ status: 'info', ranAt: 1, findings: doctorFindings }),
     } as unknown as ComposeDoctorService);
-    const merged = applyDoctorNetworkingFindings(live, { nodeId: 1, stackNames: ['proj'], stackFacts: [facts], snapshot: null });
+    const merged = await applyDoctorNetworkingFindings(live, { nodeId: 1, stackNames: ['proj'], stackFacts: [facts], snapshot: null });
     const cards = merged.filter(f => f.kind === 'tunnel-exposure');
     expect(cards).toHaveLength(2);
     expect(cards.every(c => c.sources.includes('doctor') && c.sources.includes('live'))).toBe(true);
@@ -1106,7 +1106,7 @@ describe('secrets never reach a tunnel output', () => {
 describe('cached Doctor tunnel findings', () => {
   afterEach(() => vi.restoreAllMocks());
 
-  it('retires a cached tunnel finding once the current facts no longer show the tunnel', () => {
+  it('retires a cached tunnel finding once the current facts no longer show the tunnel', async () => {
     const before = render({ cloudflared: { image: 'cloudflare/cloudflared' }, app });
     const cached = runRules(ctx(before, { stackIntent: 'internal' }))
       .filter(f => f.ruleId === 'tunnel-exposure' || f.ruleId === 'exposure-internal-tunneled');
@@ -1118,18 +1118,18 @@ describe('cached Doctor tunnel findings', () => {
       nodeId: 1, stackNames: ['proj'], stackFacts: [assembleStackNetworkFacts('proj', model, null, null)], snapshot: null,
     });
 
-    const stillThere = applyDoctorNetworkingFindings([], options(before));
+    const stillThere = await applyDoctorNetworkingFindings([], options(before));
     expect(stillThere.map(f => f.kind).sort()).toEqual(['exposure-intent-mismatch', 'tunnel-exposure']);
 
-    const removed = applyDoctorNetworkingFindings([], options(render({ app })));
+    const removed = await applyDoctorNetworkingFindings([], options(render({ app })));
     expect(removed).toEqual([]);
 
     // Same service name, no longer a connector: both cards retire.
-    const replaced = applyDoctorNetworkingFindings([], options(render({ cloudflared: { image: 'nginx:1.27' }, app })));
+    const replaced = await applyDoctorNetworkingFindings([], options(render({ cloudflared: { image: 'nginx:1.27' }, app })));
     expect(replaced).toEqual([]);
   });
 
-  it('retires a cached connector card once the live connector reads differently', () => {
+  it('retires a cached connector card once the live connector reads differently', async () => {
     const model = render({ cloudflared: { image: 'cloudflare/cloudflared' }, app });
     const cached = runRules(ctx(model)).filter(f => f.ruleId === 'tunnel-exposure');
     vi.spyOn(ComposeDoctorService, 'getInstance').mockReturnValue({
@@ -1138,12 +1138,12 @@ describe('cached Doctor tunnel findings', () => {
     const options = (meshManaged: boolean) => ({
       nodeId: 1, stackNames: ['proj'], stackFacts: [assembleStackNetworkFacts('proj', model, null, null, undefined, meshManaged)], snapshot: null,
     });
-    expect(applyDoctorNetworkingFindings([], options(false)).map(f => f.kind)).toEqual(['tunnel-exposure']);
+    expect((await applyDoctorNetworkingFindings([], options(false))).map(f => f.kind)).toEqual(['tunnel-exposure']);
     // The stack was opted into Mesh after the Doctor run, so the cached message is stale.
-    expect(applyDoctorNetworkingFindings([], options(true))).toEqual([]);
+    expect(await applyDoctorNetworkingFindings([], options(true))).toEqual([]);
   });
 
-  it('retires a cached internal-but-tunneled card once the service\'s tunnel path changes', () => {
+  it('retires a cached internal-but-tunneled card once the service\'s tunnel path changes', async () => {
     const sidecar = render({ cloudflared: { image: 'cloudflare/cloudflared', network_mode: 'service:app' }, app });
     const cached = runRules(ctx(sidecar, { stackIntent: 'internal' })).filter(f => f.ruleId === 'exposure-internal-tunneled');
     expect(cached.map(f => [f.service, f.severity])).toEqual([['app', 'warning']]);
@@ -1153,9 +1153,9 @@ describe('cached Doctor tunnel findings', () => {
     const merged = (model: EffectiveModel) => applyDoctorNetworkingFindings([], {
       nodeId: 1, stackNames: ['proj'], stackFacts: [assembleStackNetworkFacts('proj', model, null, null)], snapshot: null,
     });
-    expect(merged(sidecar).map(f => f.kind)).toEqual(['exposure-intent-mismatch']);
+    expect((await merged(sidecar)).map(f => f.kind)).toEqual(['exposure-intent-mismatch']);
     // The sidecar moved onto a shared network: the cached cloudflared-namespace card no longer describes it.
-    expect(merged(render({ cloudflared: { image: 'cloudflare/cloudflared' }, app }))).toEqual([]);
+    expect(await merged(render({ cloudflared: { image: 'cloudflare/cloudflared' }, app }))).toEqual([]);
   });
 });
 

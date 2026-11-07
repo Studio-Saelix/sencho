@@ -148,7 +148,7 @@ describe('runPreflight', () => {
     const stored = db().getLatestPreflightRun(nodeId, STACK);
     expect(stored?.status).toBe('high');
     expect(db().getPreflightFindings(stored!.id).length).toBe(report.findings.length);
-    const latest = doctor().getLatest(nodeId, STACK);
+    const latest = await doctor().getLatest(nodeId, STACK);
     expect(latest.findings.length).toBe(report.findings.length);
     expect(latest.ranBy).toBe('tester');
   });
@@ -225,7 +225,7 @@ describe('runPreflight', () => {
     await doctor().runPreflight(nodeId, STACK, null);
     const allRuns = db().getDb().prepare('SELECT * FROM preflight_runs WHERE node_id = ? AND stack_name = ?').all(nodeId, STACK);
     expect(allRuns).toHaveLength(1);
-    expect(doctor().getLatest(nodeId, STACK).status).toBe('pass');
+    expect((await doctor().getLatest(nodeId, STACK)).status).toBe('pass');
   });
 
   it('treats inherited healthcheck as a note that does not block All Clear', async () => {
@@ -385,7 +385,7 @@ describe('runPreflight', () => {
     stubDocker(null, 'boom');
     await doctor().runPreflight(nodeId, STACK, null);
     vi.restoreAllMocks(); // getLatest is a pure DB read; no docker needed
-    const latest = doctor().getLatest(nodeId, STACK);
+    const latest = await doctor().getLatest(nodeId, STACK);
     expect(latest.renderable).toBe(false);
     expect(latest.status).toBe('unrenderable');
     expect(latest.renderError).toBeTruthy();
@@ -462,8 +462,8 @@ describe('runPreflight', () => {
 });
 
 describe('getLatest', () => {
-  it('returns a never-run sentinel before any run', () => {
-    const r = doctor().getLatest(nodeId, 'nostackyet');
+  it('returns a never-run sentinel before any run', async () => {
+    const r = await doctor().getLatest(nodeId, 'nostackyet');
     expect(r.status).toBe('never-run');
     expect(r.ranAt).toBeNull();
     expect(r.findings).toEqual([]);
@@ -497,7 +497,7 @@ describe('preflight acknowledgements', () => {
       created_by: 'tester',
       created_at: Date.now(),
     });
-    const latest = doctor().getLatest(nodeId, STACK);
+    const latest = await doctor().getLatest(nodeId, STACK);
     expect(latest.acknowledgedCount).toBe(1);
     expect(latest.activeCount).toBe(latest.findings.length - 1);
     expect(latest.status).toBe('high');
@@ -527,7 +527,7 @@ describe('preflight acknowledgements', () => {
       expect(fresh.acknowledgedCount).toBe(1);
       expect(fresh.findings.filter(finding => finding.acknowledged).map(finding => finding.ruleId))
         .toEqual(['port-exposed-all-interfaces']);
-      const stored = doctor().getLatest(nodeId, STACK);
+      const stored = await doctor().getLatest(nodeId, STACK);
       expect(stored.findings).toEqual(fresh.findings);
       expect(stored.activeStatus).toBe(fresh.activeStatus);
       expect(stored.activeCount).toBe(fresh.activeCount);
@@ -577,7 +577,7 @@ describe('preflight acknowledgements', () => {
       stubDocker(model('nginx:1.27'));
       await doctor().runPreflight(nodeId, STACK, 'tester');
       db().upsertPreflightAcknowledgement(ack({ expiry_mode: 'until_image_change', anchor_image_ref: 'nginx:1.27' }));
-      expect(doctor().getLatest(nodeId, STACK).acknowledgedCount).toBe(1);
+      expect((await doctor().getLatest(nodeId, STACK)).acknowledgedCount).toBe(1);
 
       // The image changed, and storing the new run fails: the stored run still
       // records the old image, which must not keep the acknowledgement alive.
@@ -606,7 +606,7 @@ describe('node deletion cleanup', () => {
 });
 
 describe('exposure state feeds the exposure rules end to end', () => {
-  const ruleIds = (stack: string) => doctor().getLatest(nodeId, stack).findings.map(f => f.ruleId);
+  const ruleIds = async (stack: string) => (await doctor().getLatest(nodeId, stack)).findings.map(f => f.ruleId);
 
   afterEach(() => {
     db().deleteStackExposureIntents(nodeId, 'expe2e');
@@ -619,7 +619,7 @@ describe('exposure state feeds the exposure rules end to end', () => {
     db().setStackExposureIntent(nodeId, 'expe2e', '', 'internal', 'tester');
     stubDocker({ name: 'expe2e', services: { web: { image: 'nginx:latest', ports: [{ target: 80, published: '8080', protocol: 'tcp' }] } }, networks: {}, volumes: {} });
     await doctor().runPreflight(nodeId, 'expe2e', 'tester');
-    expect(ruleIds('expe2e')).toContain('exposure-internal-published');
+    expect(await ruleIds('expe2e')).toContain('exposure-internal-published');
   });
 
   it('fires exposure-port-vs-dossier from the dossier access URLs', async () => {
@@ -630,7 +630,7 @@ describe('exposure state feeds the exposure rules end to end', () => {
     });
     stubDocker({ name: 'expe2e', services: { web: { image: 'nginx:latest', ports: [{ target: 80, published: '8080', protocol: 'tcp' }] } }, networks: {}, volumes: {} });
     await doctor().runPreflight(nodeId, 'expe2e', 'tester');
-    expect(ruleIds('expe2e')).toContain('exposure-port-vs-dossier');
+    expect(await ruleIds('expe2e')).toContain('exposure-port-vs-dossier');
   });
 });
 
@@ -786,12 +786,12 @@ describe('Compose Assurance contract persistence', () => {
       expect(typeof row.subject_kind).toBe('string');
       expect(typeof row.subject_key).toBe('string');
     }
-    const normalized = doctor().getLatestAssurance(nodeId, STACK);
+    const normalized = await doctor().getLatestAssurance(nodeId, STACK);
     expect(normalized.coverage.state).toBe('complete');
     expect(normalized.findings.every(finding => finding.identity.basis === 'structured')).toBe(true);
   });
 
-  it('reads a legacy row as unrecorded coverage, a legacy identity, and redacted text', () => {
+  it('reads a legacy row as unrecorded coverage, a legacy identity, and redacted text', async () => {
     const legacy = 'assurance-legacy';
     db().replacePreflightRun(
       { id: 'legacy-run', node_id: nodeId, stack_name: legacy, source_hash: null, rendered_hash: null, service_images: null, status: 'high', highest_severity: 'high', created_at: 2, created_by: 'tester' },
@@ -809,18 +809,18 @@ describe('Compose Assurance contract persistence', () => {
       }],
     );
 
-    const report = doctor().getLatest(nodeId, legacy);
+    const report = await doctor().getLatest(nodeId, legacy);
     expect(report.coverage.state).toBe('unrecorded');
     expect(report.findings[0].message).not.toContain('user:pass');
     expect(report.findings[0].sourcePath).not.toContain('user:pass');
 
-    const normalized = doctor().getLatestAssurance(nodeId, legacy);
+    const normalized = await doctor().getLatestAssurance(nodeId, legacy);
     expect(normalized.coverage.state).toBe('unrecorded');
     expect(normalized.findings[0].identity.basis).toBe('legacy');
     expect(normalized.findings[0].ruleVersion).toBeNull();
   });
 
-  it('does not throw on a stored rule id that is no longer registered', () => {
+  it('does not throw on a stored rule id that is no longer registered', async () => {
     const legacy = 'assurance-retired';
     db().replacePreflightRun(
       { id: 'retired-run', node_id: nodeId, stack_name: legacy, source_hash: null, rendered_hash: null, service_images: null, status: 'warning', highest_severity: 'warning', created_at: 2, created_by: 'tester', coverage: null },
@@ -830,7 +830,7 @@ describe('Compose Assurance contract persistence', () => {
         created_at: 2, rule_version: null, subject_kind: null, subject_key: null,
       }],
     );
-    const normalized = doctor().getLatestAssurance(nodeId, legacy);
+    const normalized = await doctor().getLatestAssurance(nodeId, legacy);
     expect(normalized.findings[0].ruleId).toBe('a-retired-rule');
     expect(normalized.findings[0].findingClass).toBe('information');
     expect(normalized.findings[0].ruleVersion).toBeNull();
@@ -848,7 +848,7 @@ describe('Compose Assurance contract persistence', () => {
       expiry_mode: 'forever' as const, expires_at: null, anchor_rendered_hash: null, anchor_image_ref: null,
       created_by: 'tester', created_at: Date.now(), ...over,
     });
-    const decidedPairs = () => doctor().getLatestAssurance(nodeId, stack).findings
+    const decidedPairs = async () => (await doctor().getLatestAssurance(nodeId, stack)).findings
       .filter(finding => finding.decision)
       .map(finding => [finding.ruleId, finding.scope.service, finding.decision?.expiry.mode]);
 
@@ -873,32 +873,32 @@ describe('Compose Assurance contract persistence', () => {
       );
     });
 
-    it('attaches a decision only to the finding it was matched for', () => {
+    it('attaches a decision only to the finding it was matched for', async () => {
       db().upsertPreflightAcknowledgement(ack('privileged', 'db'));
-      const { findings } = doctor().getLatestAssurance(nodeId, stack);
+      const { findings } = await doctor().getLatestAssurance(nodeId, stack);
       expect(findings).toHaveLength(4);
-      expect(decidedPairs()).toEqual([['privileged', 'db', 'forever']]);
+      expect(await decidedPairs()).toEqual([['privileged', 'db', 'forever']]);
       expect(findings.find(finding => finding.decision)?.decision?.reason).toBe('privileged db');
       // The wire report agrees finding for finding.
-      expect(doctor().getLatest(nodeId, stack).findings.filter(finding => finding.acknowledged)
+      expect((await doctor().getLatest(nodeId, stack)).findings.filter(finding => finding.acknowledged)
         .map(finding => [finding.ruleId, finding.service])).toEqual([['privileged', 'db']]);
     });
 
-    it('applies a stack-wide acknowledgement anchored to the stored rendered hash', () => {
+    it('applies a stack-wide acknowledgement anchored to the stored rendered hash', async () => {
       db().upsertPreflightAcknowledgement(ack('no-restart-policy', null, { expiry_mode: 'until_compose_change', anchor_rendered_hash: 'hash-1' }));
-      expect(decidedPairs()).toEqual([['no-restart-policy', 'web', 'until_compose_change']]);
+      expect(await decidedPairs()).toEqual([['no-restart-policy', 'web', 'until_compose_change']]);
       // An anchor from a different Compose version no longer applies.
       db().upsertPreflightAcknowledgement(ack('no-restart-policy', null, { expiry_mode: 'until_compose_change', anchor_rendered_hash: 'hash-0' }));
-      expect(decidedPairs()).toEqual([]);
+      expect(await decidedPairs()).toEqual([]);
     });
 
-    it('does not apply an expired acknowledgement or one for another rule', () => {
+    it('does not apply an expired acknowledgement or one for another rule', async () => {
       db().upsertPreflightAcknowledgement(ack('privileged', 'web', { expiry_mode: 'days', expires_at: Date.now() - 1000 }));
       db().upsertPreflightAcknowledgement(ack('image-latest', 'web'));
-      expect(decidedPairs()).toEqual([]);
+      expect(await decidedPairs()).toEqual([]);
     });
 
-    it('lands each decision on its finding whatever order the rows are stored in', () => {
+    it('lands each decision on its finding whatever order the rows are stored in', async () => {
       db().upsertPreflightAcknowledgement(ack('privileged', 'db'));
       db().upsertPreflightAcknowledgement(ack('no-restart-policy', 'web'));
       const stored = [
@@ -908,21 +908,22 @@ describe('Compose Assurance contract persistence', () => {
         row('f-warn', 'no-restart-policy', 'warning', 'web'),
       ];
       const run = { id: 'ack-run', node_id: nodeId, stack_name: stack, source_hash: null, rendered_hash: 'hash-1', service_images: null, status: 'high', highest_severity: 'high', created_at: 2, created_by: 'tester', coverage: null };
-      const outcomes = [stored, [...stored].reverse(), [stored[2], stored[3], stored[0], stored[1]]].map(rows => {
+      const outcomes = [];
+      for (const rows of [stored, [...stored].reverse(), [stored[2], stored[3], stored[0], stored[1]]]) {
         db().replacePreflightRun(run, rows);
-        return {
-          normalized: decidedPairs(),
-          wire: doctor().getLatest(nodeId, stack).findings
+        outcomes.push({
+          normalized: await decidedPairs(),
+          wire: (await doctor().getLatest(nodeId, stack)).findings
             .filter(finding => finding.acknowledged).map(finding => [finding.ruleId, finding.service]),
-        };
-      });
+        });
+      }
       for (const outcome of outcomes) {
         expect(outcome.normalized.map(pair => pair.slice(0, 2))).toEqual([['privileged', 'db'], ['no-restart-policy', 'web']]);
         expect(outcome.wire).toEqual([['privileged', 'db'], ['no-restart-policy', 'web']]);
       }
     });
 
-    it('carries every acknowledgement field to the wire exactly as the normalized read decided it', () => {
+    it('carries every acknowledgement field to the wire exactly as the normalized read decided it', async () => {
       const soon = Date.now() + 86_400_000;
       db().replacePreflightRun(
         { id: 'ack-run', node_id: nodeId, stack_name: stack, source_hash: null, rendered_hash: 'hash-1', service_images: JSON.stringify({ db: 'postgres:16' }), status: 'high', highest_severity: 'high', created_at: 2, created_by: 'tester', coverage: null },
@@ -939,8 +940,8 @@ describe('Compose Assurance contract persistence', () => {
       db().upsertPreflightAcknowledgement(ack('no-restart-policy', 'web', { expiry_mode: 'until_compose_change', anchor_rendered_hash: 'hash-1' }));
       db().upsertPreflightAcknowledgement(ack('image-latest', 'db', { expiry_mode: 'until_image_change', anchor_image_ref: 'postgres:16' }));
 
-      const wire = doctor().getLatest(nodeId, stack).findings;
-      const { findings } = doctor().getLatestAssurance(nodeId, stack);
+      const wire = (await doctor().getLatest(nodeId, stack)).findings;
+      const { findings } = await doctor().getLatestAssurance(nodeId, stack);
       expect(wire).toHaveLength(findings.length);
       // Finding for finding, in the same order, the wire fields are the decision's.
       findings.forEach((finding, index) => {
@@ -1006,7 +1007,7 @@ describe('Compose Assurance contract persistence', () => {
 
       const run = db().getLatestPreflightRun(nodeId, STACK);
       expect((JSON.parse(run!.coverage!) as { state: string }).state).toBe('partial');
-      expect(doctor().getLatest(nodeId, STACK).coverage.state).toBe('partial');
+      expect((await doctor().getLatest(nodeId, STACK)).coverage.state).toBe('partial');
     } finally {
       envSourceFailure.fail = false;
     }
@@ -1022,7 +1023,7 @@ describe('Compose Assurance contract persistence', () => {
       getDocker: vi.fn(() => ({ listContainers: vi.fn().mockResolvedValue([]) })),
     } as unknown as DockerController);
     const run = await doctor().runPreflight(nodeId, STACK, 'tester');
-    const read = doctor().getLatest(nodeId, STACK);
+    const read = await doctor().getLatest(nodeId, STACK);
     expect(run.renderable).toBe(false);
     expect(JSON.stringify(run)).not.toContain('s3cretPASS');
     expect(JSON.stringify(read)).not.toContain('s3cretPASS');
@@ -1040,7 +1041,7 @@ describe('Compose Assurance contract persistence', () => {
       const envSkips = report.coverage.skipped.filter(entry => entry.missing.includes('env-context'));
       expect(envSkips.map(entry => entry.ruleId)).toEqual(expect.arrayContaining(['env-unset', 'env-file-missing']));
       // The same on a later read of the stored run.
-      expect(doctor().getLatest(nodeId, STACK).coverage).toEqual(report.coverage);
+      expect((await doctor().getLatest(nodeId, STACK)).coverage).toEqual(report.coverage);
       return report;
     };
 

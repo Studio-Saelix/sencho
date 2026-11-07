@@ -49,6 +49,10 @@ export interface AssuranceLocation {
   column?: number;
   endLine?: number;
   endColumn?: number;
+  /** sha256 of the file content the range was computed against. A stored
+   *  location without it, or whose file no longer hashes to it, is not shown:
+   *  a wrong line is worse than no line. */
+  fileHash?: string;
 }
 
 export interface AssuranceEvidenceRef {
@@ -262,7 +266,9 @@ export function normalizeDoctorHit(
   stackName: string,
   hit: RuleHit,
   rule: AssuranceRule,
-  authoredLocation?: { file: string; path?: string; line: number; column: number; endLine: number; endColumn: number },
+  authoredLocation?: {
+    file: string; path?: string; line: number; column: number; endLine: number; endColumn: number; fileHash?: string;
+  },
 ): AssuranceFinding {
   const scope: AssuranceScope = {
     nodeId,
@@ -281,6 +287,7 @@ export function normalizeDoctorHit(
       column: authoredLocation.column,
       endLine: authoredLocation.endLine,
       endColumn: authoredLocation.endColumn,
+      ...(authoredLocation.fileHash !== undefined ? { fileHash: authoredLocation.fileHash } : {}),
     }
     : sourcePath !== undefined ? { path: sourcePath } : undefined;
   return {
@@ -314,6 +321,11 @@ function isPositiveInt(value: unknown): value is number {
   return typeof value === 'number' && Number.isInteger(value) && value > 0;
 }
 
+/** A sha256 digest as the hasher writes it: 64 lowercase hex characters. */
+export function isFileHash(value: unknown): value is string {
+  return typeof value === 'string' && /^[0-9a-f]{64}$/.test(value);
+}
+
 function isRelativeStackPath(file: string): boolean {
   if (file.length === 0 || file.includes('\0') || file.includes('\\')) return false;
   if (file.startsWith('/') || /^[A-Za-z]:/.test(file)) return false;
@@ -345,6 +357,7 @@ export function parseStoredSourceLocation(raw: string | null | undefined): Assur
     && !value.authoredPath.includes('\0')
     ? value.authoredPath
     : undefined;
+  const fileHash = isFileHash(value.fileHash) ? value.fileHash : undefined;
   return {
     file: value.file,
     ...(authoredPath !== undefined ? { authoredPath } : {}),
@@ -352,6 +365,7 @@ export function parseStoredSourceLocation(raw: string | null | undefined): Assur
     column: value.column,
     endLine: value.endLine,
     endColumn: value.endColumn,
+    ...(fileHash !== undefined ? { fileHash } : {}),
   };
 }
 
@@ -372,6 +386,7 @@ export function serializeSourceLocation(location: AssuranceLocation | undefined)
     column: location.column,
     endLine: location.endLine,
     endColumn: location.endColumn,
+    ...(isFileHash(location.fileHash) ? { fileHash: location.fileHash } : {}),
   });
 }
 

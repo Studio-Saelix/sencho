@@ -74,7 +74,7 @@ async function computeNodeNetworkingAggregate(
   // and merge, BEFORE inventory enrichment / overview / topology all consume
   // the same unified list, so counts and findingIds never disagree.
   const liveFindings = buildNodeNetworkingFindings(nodeId, snapshot, stackFacts, baseRows);
-  const findings = rankFindings(applyDoctorNetworkingFindings(liveFindings, {
+  const findings = rankFindings(await applyDoctorNetworkingFindings(liveFindings, {
     nodeId, stackNames: stacks, stackFacts, snapshot,
   }));
   const networks = snapshot ? enrichNetworkRows(nodeId, baseRows, stackFacts, snapshot, findings) : [];

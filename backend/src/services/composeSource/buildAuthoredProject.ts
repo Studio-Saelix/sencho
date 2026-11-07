@@ -12,6 +12,7 @@ import path from 'path';
 import { FileSystemService } from '../FileSystemService';
 import { getErrorMessage } from '../../utils/errors';
 import { sanitizeForLog } from '../../utils/safeLog';
+import { sha256Hex } from '../../utils/hashing';
 
 import { parseComposeDocument, parseLabelFile, MAX_COMPOSE_PARSE_BYTES, diagnosticMessage } from './parseComposeDocument';
 import { resolveProjectInputs, stackRelativePath } from './resolveProjectInputs';
@@ -87,7 +88,7 @@ function strongerWritability(a: SourceWritability, b: SourceWritability): Source
 async function readProjectFile(
   state: BuildState,
   relPath: string,
-): Promise<{ content?: string; state: 'parsed' | 'unreadable' | 'too-large' }> {
+): Promise<{ content?: string; contentHash?: string; state: 'parsed' | 'unreadable' | 'too-large' }> {
   if (state.files.length >= MAX_PROJECT_FILES || state.bytes >= MAX_PROJECT_BYTES) {
     addPartial(state, 'bounds-exceeded');
     addDiagnostic(state, relPath, 'bounds-exceeded');
@@ -110,7 +111,7 @@ async function readProjectFile(
       return { state: 'unreadable' };
     }
     state.bytes += bytes;
-    return { content: read.content, state: 'parsed' };
+    return { content: read.content, contentHash: sha256Hex(read.content), state: 'parsed' };
   } catch (error) {
     addDiagnostic(state, relPath, 'unreadable');
     console.warn('[ComposeSource] Could not read %s for %s:',
@@ -243,6 +244,7 @@ async function loadComposeFile(
     state: parsed.state,
     nodes: parsed.nodes,
     diagnostics: parsed.diagnostics,
+    ...(read.contentHash !== undefined ? { contentHash: read.contentHash } : {}),
   });
   if (parsed.state !== 'parsed') addPartial(state, parsed.state);
 
@@ -383,6 +385,7 @@ async function loadLabelFile(state: BuildState, relPath: string, writability: So
   const entry: AuthoredFileSource = {
     file: relPath, kind: 'label-file', writability, layerIndex: state.nextLayer++,
     state: stateName, nodes: new Map(), diagnostics: parsed.diagnostics,
+    ...(read.contentHash !== undefined ? { contentHash: read.contentHash } : {}),
   };
   state.loadedLabelFiles.set(relPath, entry);
   state.files.push(entry);
@@ -515,6 +518,7 @@ function assembleLabels(state: BuildState): Map<string, ServiceAuthoredLabels> {
     const created: ServiceAuthoredLabels = {
       service,
       contributions: [],
+      contributionsByKey: new Map(),
       winners: {},
       sharedFiles: [],
       ambiguity: {},
@@ -645,6 +649,13 @@ function assembleLabels(state: BuildState): Map<string, ServiceAuthoredLabels> {
       svc.winners[key] = winner;
     }
     svc.contributions = sorted;
+    const byKey = new Map<string, LabelContribution[]>();
+    for (const contribution of sorted) {
+      const list = byKey.get(contribution.key) ?? [];
+      list.push(contribution);
+      byKey.set(contribution.key, list);
+    }
+    svc.contributionsByKey = byKey;
   }
 
   return labels;

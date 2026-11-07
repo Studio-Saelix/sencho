@@ -445,7 +445,7 @@ export function correlateLabel(project: AuthoredProject, service: string, key: s
     return refusal(project, path, [], 'ambiguous-unparsed-source', 'unparsed-source',
       'A later compose layer could not be parsed.');
   }
-  const contributions = labels.contributions.filter(contribution => contribution.key === key);
+  const contributions = labels.contributionsByKey.get(key) ?? [];
   const origin: CorrelationOrigin = {
     file: winner.file,
     writability: winner.writability,

@@ -231,6 +231,28 @@ describe('authored label contributions', () => {
     expect(correlateLabel(project, 'api', 'a').reason).toBe('inline-overrides-label-file');
   });
 
+  it('correlates every key of a large label file without rescanning the service list per key', async () => {
+    const count = 30_000;
+    const entries = Array.from({ length: count }, (_, index) => `key.${index}=value${index}`).join('\n');
+    writeStack('large-label-correlate', {
+      'compose.yaml': 'services:\n  api:\n    image: nginx:1\n    label_file: app.labels\n',
+      'app.labels': `${entries}\n`,
+    });
+    const project = await buildAuthoredProject(nodeId, 'large-label-correlate');
+    const keys = Object.keys(project.labels.get('api')!.winners);
+    expect(keys).toHaveLength(count);
+    const started = performance.now();
+    for (const key of keys) {
+      const result = correlateLabel(project, 'api', key);
+      if (result.reason !== 'label-file' || result.origin?.file !== 'app.labels') {
+        throw new Error(`unexpected correlation for ${key}: ${result.reason}`);
+      }
+    }
+    // The old per-key filter was quadratic (3.9 s for this input). Linear
+    // lookup keeps the loop well under this bound; the margin absorbs CI noise.
+    expect(performance.now() - started).toBeLessThan(1_500);
+  }, 30_000);
+
   it('resolves an extends declaration written through an alias', async () => {
     writeStack('extends-alias', {
       'compose.yaml': [
