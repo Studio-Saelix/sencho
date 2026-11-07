@@ -114,9 +114,8 @@ RUN if [ "$TARGETARCH" = "$BUILDARCH" ]; then \
 # and x/net/idna). x/net v0.55.0 is flagged for
 # CVE-2026-46600 (dnsmessage denial of service), and v0.58.0 for
 # CVE-2026-78669 (HTTP/2 SETTINGS-flood denial of service), fixed in v0.60.0,
-# and v0.60.0 for CVE-2026-78661 (x/net/html denial of service on crafted
-# input), fixed in v0.62.0, whose minimum golang.org/x/text is v0.43.0.
-# x/text v0.37.0 is flagged for
+# and v0.60.0 for CVE-2026-78661 (x/net/html denial of service on crafted input),
+# fixed in v0.62.0, whose minimum golang.org/x/text is v0.43.0. x/text v0.37.0 is flagged for
 # CVE-2026-56852 (norm.Iter infinite loop on crafted input). grpc v1.80.0 is
 # flagged for GHSA-hrxh-6v49-42gf (xDS RBAC / HTTP/2), and grpc v1.82.1 for
 # CVE-2026-84304 (unauthenticated peer OOM via fragmented HTTP/2 DATA frames
