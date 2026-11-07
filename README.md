@@ -41,7 +41,7 @@ Sencho is free, open-source software under AGPLv3. Everything described here is 
 
 ## Highlights
 
-- **Your Compose files stay yours.** Edit with a diff preview before you save, deploy, and roll back to any earlier deploy. [Stack management](https://docs.sencho.io/features/stack-management)
+- **Your Compose files stay yours.** Edit with a diff preview before you save, deploy, and roll back a bad deploy to the last good configuration. [Stack management](https://docs.sencho.io/features/stack-management)
 - **Many machines, no SSH.** One dashboard for every node, with [Fleet view](https://docs.sencho.io/features/fleet-view), remote updates and the [Pilot Agent](https://docs.sencho.io/features/pilot-agent) for hosts behind NAT. [Multi-node](https://docs.sencho.io/features/multi-node)
 - **Deploys you can undo.** [Atomic deployments](https://docs.sencho.io/features/atomic-deployments) roll back on failure, and [health-gated updates](https://docs.sencho.io/features/health-gated-updates) hold a rollout until your health checks pass.
 - **Git-driven fleets.** Sync stacks from a repository, roll out [Blueprints](https://docs.sencho.io/features/blueprint-model) across nodes, and see [drift](https://docs.sencho.io/features/stack-drift) the moment a running stack stops matching its source. [GitOps](https://docs.sencho.io/features/gitops-overview)
