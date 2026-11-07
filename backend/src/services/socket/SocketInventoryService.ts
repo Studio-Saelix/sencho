@@ -87,7 +87,8 @@ export interface SocketInventoryPort {
    * uncertainty is never reported as a wildcard.
    */
   allInterfaces: boolean;
-  protocol: string;
+  /** The reported transport, null when it was present but unreadable. */
+  protocol: string | null;
 }
 
 export interface SocketInventoryNetwork {
@@ -448,7 +449,7 @@ function normalizePorts(row: SocketInventoryContainerRow): {
       // they reach the API so one container cannot inflate the response.
       ip: port.ip === null ? null : safeText(port.ip, 64),
       allInterfaces: bindsAllInterfaces(port.ip),
-      protocol: safeText(port.protocol, 32),
+      protocol: port.protocol === null ? null : safeText(port.protocol, 32),
     })),
     truncated: published.length > MAX_PORTS,
   };

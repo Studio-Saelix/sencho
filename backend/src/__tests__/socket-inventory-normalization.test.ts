@@ -498,7 +498,7 @@ describe('socket inventory malformed port metadata', () => {
       },
     }));
     expect(rows[0].ports).toEqual([
-      { privatePort: 2375, publicPort: 8080, ip: '0.0.0.0', protocol: 'tcp' },
+      { privatePort: 2375, publicPort: 8080, ip: '0.0.0.0', protocol: null },
     ]);
     expect(rows[0].metadataTruncated).toBe(true);
   });
@@ -844,10 +844,27 @@ describe('socket inventory port specification validation', () => {
     );
 
     expect(rows[0].ports).toEqual([
-      { privatePort: 2375, publicPort: 8080, ip: '0.0.0.0', protocol: 'tcp' },
+      { privatePort: 2375, publicPort: 8080, ip: '0.0.0.0', protocol: null },
     ]);
     expect(rows[0].metadataTruncated).toBe(true);
     expect(inventoryOf(rows).status).toBe('partial');
+  });
+
+  it('keeps a readable listing protocol when the inspect protocol is unreadable', async () => {
+    const rows = await rowsFrom(
+      listed({ Ports: [{ IP: '0.0.0.0', PrivatePort: 2375, PublicPort: 8080, Type: 'tcp' }] }),
+      inspected({
+        NetworkSettings: {
+          Ports: { '2375/': [{ HostIp: '0.0.0.0', HostPort: '8080' }] },
+          Networks: {},
+        },
+      }),
+    );
+
+    expect(rows[0].ports).toEqual([
+      { privatePort: 2375, publicPort: 8080, ip: '0.0.0.0', protocol: 'tcp' },
+    ]);
+    expect(rows[0].metadataTruncated).toBe(true);
   });
 
   it('keeps an unknown listing protocol as reported instead of rewriting it to tcp', async () => {

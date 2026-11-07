@@ -620,7 +620,9 @@ components:
                 type: [string, "null"]
                 description: The binding address, or null when Docker did not provide a readable one (missing, non-string, or not an IP address). A non-null empty string or `0.0.0.0`/`::` means every interface.
               allInterfaces: { type: boolean }
-              protocol: { type: string }
+              protocol:
+                type: [string, "null"]
+                description: The reported transport, or null when it was present but unreadable. An unknown non-empty value is kept as reported and marks the row incomplete.
         exposedPorts:
           type: array
           items: { type: string }

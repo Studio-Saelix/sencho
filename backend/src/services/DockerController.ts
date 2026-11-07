@@ -346,7 +346,8 @@ export interface SocketInventoryPortRow {
   publicPort: number | null;
   /** The binding address, null when Docker did not provide a readable one. */
   ip: string | null;
-  protocol: string;
+  /** The reported transport, null when it was present but unreadable. */
+  protocol: string | null;
 }
 
 export interface SocketInventoryNetworkRow {
@@ -4249,11 +4250,13 @@ function normalizeDockerPorts(value: unknown): NormalizedPorts {
     // response would report as a proven wildcard binding.
     if (publicPort !== null && rawIp === null) incomplete = true;
     if (port.IP !== undefined && rawIp === null) incomplete = true;
-    const protocol = readPortProtocol(port.Type);
-    // A present-but-unreadable protocol (an explicit null, a non-string, or an
-    // empty string) is not a clean `tcp` default. An unknown non-empty protocol
-    // is kept as reported rather than rewritten to `tcp`, and still marks the
-    // row incomplete.
+    // An absent Type is Docker's default transport. A present-but-unreadable
+    // protocol is null, never a clean `tcp` default; an unknown non-empty
+    // protocol is kept as reported rather than rewritten to `tcp`. Both mark
+    // the row incomplete.
+    const protocol = port.Type === undefined
+      ? { protocol: 'tcp', recognized: true }
+      : readPortProtocol(port.Type);
     if (port.Type !== undefined && (protocol === null || !protocol.recognized)) {
       incomplete = true;
     }
@@ -4261,7 +4264,7 @@ function normalizeDockerPorts(value: unknown): NormalizedPorts {
       privatePort,
       publicPort,
       ip: rawIp,
-      protocol: protocol?.protocol ?? 'tcp',
+      protocol: protocol?.protocol ?? null,
     });
   }
   return { ports, incomplete };
@@ -4302,12 +4305,13 @@ function normalizeInspectPorts(
     const privatePort = parsePortString(rawPrivatePort);
     if (privatePort === null) incomplete = true;
     const rawProtocol = slash > 0 ? spec.slice(slash + 1) : 'tcp';
-    const protocol = readPortProtocol(rawProtocol);
-    // An empty protocol is unreadable, and an unknown non-empty protocol is not
-    // a Docker transport. Keep the binding (and its exposure) and the reported
-    // value, but never rewrite it to `tcp` or let the row read complete.
-    if (protocol === null || !protocol.recognized) incomplete = true;
-    const protocolName = protocol?.protocol ?? 'tcp';
+    // A spec without a protocol is Docker's default transport. An empty
+    // protocol is unreadable, and an unknown non-empty protocol is not a Docker
+    // transport. Keep the binding (and its exposure) and the reported value, but
+    // never rewrite it to `tcp` or let the row read complete.
+    const protocol = slash > 0 ? readPortProtocol(rawProtocol) : { protocol: 'tcp', recognized: true };
+    if (slash > 0 && (protocol === null || !protocol.recognized)) incomplete = true;
+    const protocolName = protocol?.protocol ?? null;
     const targets = Array.isArray(rawBindings) ? rawBindings : [];
     if (rawBindings !== undefined && rawBindings !== null && !Array.isArray(rawBindings)) {
       incomplete = true;
@@ -4388,8 +4392,12 @@ function normalizeInspectPorts(
     // A listing entry whose private port is unreadable already marks the row
     // incomplete; it carries no spec to restore.
     if (candidate.privatePort === null) continue;
+    // An unreadable protocol on either side cannot identify a distinct spec:
+    // match it against the same private port so a readable inspect binding is
+    // not duplicated when it already carries the evidence.
     const sameSpec = (port: SocketInventoryPortRow) =>
-      port.privatePort === candidate.privatePort && port.protocol === candidate.protocol;
+      port.privatePort === candidate.privatePort
+      && (candidate.protocol === null || port.protocol === null || port.protocol === candidate.protocol);
     const sameSpecPorts = ports.filter(sameSpec);
     if (sameSpecPorts.length === 0) {
       ports.push({ ...candidate });
@@ -4398,9 +4406,16 @@ function normalizeInspectPorts(
     }
     // The spec is present. An exposed-only list entry adds nothing to it.
     if (candidate.publicPort === null) continue;
-    const exact = sameSpecPorts.some(port =>
+    const exactPort = sameSpecPorts.find(port =>
       port.publicPort === candidate.publicPort && port.ip === candidate.ip);
-    if (exact) continue;
+    if (exactPort) {
+      // An unreadable inspect protocol does not erase the readable listing one.
+      if (exactPort.protocol === null && candidate.protocol !== null) {
+        exactPort.protocol = candidate.protocol;
+        restored = true;
+      }
+      continue;
+    }
     if (candidate.ip !== null) {
       // Inspect has this public port but could not read its address. The
       // listing's readable address is still evidence, so keep it in place of
@@ -4411,6 +4426,9 @@ function normalizeInspectPorts(
         port.publicPort === candidate.publicPort && port.ip === null);
       if (unreadableSamePort) {
         unreadableSamePort.ip = candidate.ip;
+        if (unreadableSamePort.protocol === null && candidate.protocol !== null) {
+          unreadableSamePort.protocol = candidate.protocol;
+        }
         restored = true;
         continue;
       }
@@ -4426,6 +4444,9 @@ function normalizeInspectPorts(
       // kept only when the listing address itself is unreadable.
       nullMatch.publicPort = candidate.publicPort;
       nullMatch.ip = candidate.ip ?? nullMatch.ip;
+      if (nullMatch.protocol === null && candidate.protocol !== null) {
+        nullMatch.protocol = candidate.protocol;
+      }
       restored = true;
       continue;
     }

@@ -1229,7 +1229,7 @@ describe('buildSocketInventory response bounds', () => {
     const [port] = inventory.containers[0].publishedPorts;
     expect(port.ip).not.toBeNull();
     expect(port.ip?.length ?? 0).toBeLessThanOrEqual(64);
-    expect(port.protocol.length).toBeLessThanOrEqual(32);
+    expect(port.protocol?.length ?? 0).toBeLessThanOrEqual(32);
     expect(port.allInterfaces).toBe(false);
   });
 });
