@@ -595,6 +595,15 @@ describe('bootstrap SSH transport teardown', () => {
     expect(results[0]).toMatchObject({ timedOut: true, error: 'COMMAND_TIMEOUT' });
   });
 
+  it('destroys the connection when the session watchdog fires before any command timeout', async () => {
+    const results = await runAndExpectTornDown(
+      { hangCommand: 'sleep' },
+      [{ id: 'hang', command: 'sleep 60' }, { id: 'after', command: 'uname -m' }],
+      { perCommandMs: 5_000, totalMs: 150 },
+    );
+    expect(results.map((entry) => entry.timedOut)).toEqual([true, true]);
+  });
+
   it('destroys the connection after a command whose exec acknowledgement never arrives', async () => {
     const results = await runAndExpectTornDown(
       { withholdExec: 'sleep' },

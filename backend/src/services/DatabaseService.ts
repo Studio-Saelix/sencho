@@ -6497,12 +6497,14 @@ stmt.run('gitops_schema_version', '1');
     }
 
     /**
-     * Fold pins stored under a mixed-case host into the lower-case row. A second
-     * spelling that holds a different key is a pin that never went through a
-     * changed-key confirmation, so the oldest approval stays trusted (ties go to
-     * the lower-case row) and the other key must be confirmed as a change the
-     * next time it is seen. Each dropped key is logged and written to the audit
-     * log. Idempotent.
+     * Fold pins stored under a mixed-case host into the lower-case row. Spellings
+     * that hold the same key merge into the oldest approval. Spellings that hold
+     * different keys cannot be ranked: the later pin never went through a
+     * changed-key confirmation, and a replacement resets the approval time, so
+     * neither "oldest" nor "newest" is known to be the key the operator last
+     * chose. Neither is trusted: the host is dropped, and the next preflight
+     * asks for a fresh trust decision. Every dropped key is logged and written
+     * to the audit log, which is flushed before returning. Idempotent.
      */
     private migrateNodeBootstrapTrustHostCase(): void {
         const rows = this.db.prepare(
@@ -6515,29 +6517,28 @@ stmt.run('gitops_schema_version', '1');
             `INSERT INTO node_bootstrap_trust (host, port, fingerprint, algorithm, approved_by, approved_at, last_seen_at)
              VALUES (?, ?, ?, ?, ?, ?, ?)`
         );
-        const dropped: Array<{ key: string; keptFingerprint: string; droppedFingerprint: string }> = [];
+        const conflicts: Array<{ key: string; fingerprints: string[] }> = [];
         this.db.transaction(() => {
-            const kept = new Map<string, NodeBootstrapTrust>();
+            const groups = new Map<string, NodeBootstrapTrust[]>();
             for (const row of rows) {
                 const key = `${row.host.toLowerCase()}:${row.port}`;
-                const winner = kept.get(key);
-                if (!winner) {
-                    kept.set(key, { ...row, host: row.host.toLowerCase() });
-                } else if (winner.fingerprint === row.fingerprint) {
-                    winner.last_seen_at = Math.max(winner.last_seen_at, row.last_seen_at);
-                } else {
-                    dropped.push({ key, keptFingerprint: winner.fingerprint, droppedFingerprint: row.fingerprint });
-                }
+                groups.set(key, [...(groups.get(key) ?? []), row]);
             }
             for (const row of rows) remove.run(row.host, row.port);
-            for (const row of kept.values()) {
-                insert.run(row.host, row.port, row.fingerprint, row.algorithm, row.approved_by, row.approved_at, row.last_seen_at);
+            for (const [key, group] of groups) {
+                const fingerprints = [...new Set(group.map((row) => row.fingerprint))];
+                if (fingerprints.length > 1) {
+                    conflicts.push({ key, fingerprints });
+                    continue;
+                }
+                const oldest = group[0];
+                const lastSeen = Math.max(...group.map((row) => row.last_seen_at));
+                insert.run(oldest.host.toLowerCase(), oldest.port, oldest.fingerprint, oldest.algorithm, oldest.approved_by, oldest.approved_at, lastSeen);
             }
         })();
-        for (const conflict of dropped) {
-            console.warn(
-                `[Bootstrap] Conflicting host key pins for ${sanitizeForLog(conflict.key)}: kept ${sanitizeForLog(conflict.keptFingerprint)} (oldest approval), dropped ${sanitizeForLog(conflict.droppedFingerprint)}.`,
-            );
+        for (const conflict of conflicts) {
+            const keys = conflict.fingerprints.map((fingerprint) => sanitizeForLog(fingerprint)).join(', ');
+            console.warn(`[Bootstrap] Conflicting host key pins for ${sanitizeForLog(conflict.key)}: dropped ${keys}. The next preflight asks for a fresh trust decision.`);
             this.insertAuditLog({
                 timestamp: Date.now(),
                 username: 'system',
@@ -6546,9 +6547,12 @@ stmt.run('gitops_schema_version', '1');
                 status_code: 409,
                 node_id: null,
                 ip_address: 'local',
-                summary: `bootstrap.trust.conflict: host=${sanitizeForLog(conflict.key)} kept=${sanitizeForLog(conflict.keptFingerprint)} dropped=${sanitizeForLog(conflict.droppedFingerprint)}`,
+                summary: `bootstrap.trust.conflict: host=${sanitizeForLog(conflict.key)} dropped=${keys}`,
             });
         }
+        // The audit buffer flushes on a timer that does not keep the process
+        // alive, and this migration never runs again once the rows are folded.
+        if (conflicts.length > 0) this.flushAuditLogBuffer();
     }
 
     public upsertNodeBootstrapTrust(record: NodeBootstrapTrust): void {

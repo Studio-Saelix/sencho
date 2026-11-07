@@ -305,7 +305,8 @@ export function useNodeBootstrap({ open, api }: UseNodeBootstrapOptions) {
     if (!hostKey) return;
     const revision = configRevision;
     const generation = targetGenerationRef.current;
-    const confirmReplacement = confirmReplace || replacing;
+    // A replacement names the key and the pin it replaces, or it is not sent.
+    const reviewedPin = confirmReplace || replacing ? hostKey.pinnedFingerprint : null;
     abortRef.current?.abort();
     const controller = new AbortController();
     abortRef.current = controller;
@@ -322,8 +323,8 @@ export function useNodeBootstrap({ open, api }: UseNodeBootstrapOptions) {
         privateKey: form.privateKey,
         passphrase: form.passphrase ? form.passphrase : null,
         expectedFingerprint: hostKey.fingerprint,
-        replacePinnedFingerprint: confirmReplacement ? hostKey.fingerprint : null,
-        reviewedPinnedFingerprint: confirmReplacement ? hostKey.pinnedFingerprint : null,
+        replacePinnedFingerprint: reviewedPin ? hostKey.fingerprint : null,
+        reviewedPinnedFingerprint: reviewedPin,
         targetName: form.targetName.trim(),
         composeDir: form.composeDir,
         agentDir: form.agentDir,
@@ -351,6 +352,9 @@ export function useNodeBootstrap({ open, api }: UseNodeBootstrapOptions) {
         const pinned = stringDetail(caught, 'pinnedFingerprint');
         const observed = stringDetail(caught, 'observedFingerprint');
         const observedAlgorithm = stringDetail(caught, 'observedAlgorithm');
+        // The live key can be the very pin the server now holds (another
+        // preflight replaced it): nothing is left to replace.
+        const matchesPin = observed !== null && observed === pinned;
         // Drop a previous inspection so the dialog shows the live observation,
         // not the key from the earlier run.
         setResult(null);
@@ -365,14 +369,14 @@ export function useNodeBootstrap({ open, api }: UseNodeBootstrapOptions) {
               fingerprint: observed,
               algorithm: observedAlgorithm ?? 'unknown',
               knownHostsLine: '',
-              trust: 'changed',
+              trust: matchesPin ? 'trusted' : 'changed',
               pinnedFingerprint: pinned,
             };
           }
           return { ...current, trust: 'changed', pinnedFingerprint: pinned };
         });
         setReplacing(false);
-        setTrusted(false);
+        setTrusted(matchesPin);
       }
       setError(caught instanceof Error ? caught.message : 'The preflight failed.');
     } finally {

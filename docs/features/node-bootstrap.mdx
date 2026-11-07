@@ -157,6 +157,7 @@ The Agent installation directory has no settings field. It is chosen only here.
 
 - Ubuntu 22.04 and 24.04 on x86_64 only.
 - A target that is this Sencho instance is refused: an address on the hub's own network interfaces, or the address of the hub URL (`SENCHO_PUBLIC_URL` when it is set and valid, otherwise the host in your request), which is how a Docker or NAT deployment is told apart from the server it runs on. The hub URL check needs that name to resolve from the hub and ignores ports, so a server that shares the hub's public address is refused as well.
+- The host is a DNS name or an IPv4 address in dotted form (`10.0.0.4`). Legacy spellings such as `10.1`, `1.2.3.04` or `0x7f.1` are refused, so one server never holds two pins.
 - IPv6 targets, SSH agent forwarding, password authentication and passworded sudo are not supported in this release.
 - The preflight never changes firewall, SSH server, Docker daemon, user or group configuration.
 - Only the Docker daemon on the host's own socket (`/var/run/docker.sock`) is inspected, and every Docker command in the preflight and the plan is pinned to it with the default context. Rootless installs, custom sockets and remote Docker contexts are reported as blocked. A host where Docker is installed but stopped is blocked too: containers and volumes cannot be inventoried until the service runs.

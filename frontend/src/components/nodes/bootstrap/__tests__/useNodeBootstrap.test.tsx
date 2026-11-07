@@ -444,6 +444,43 @@ describe('useNodeBootstrap stale responses and request ownership', () => {
     );
   });
 
+  it('sends neither half of a replacement when there is no pin to name', async () => {
+    const api = fakeApi();
+    const { result: hook } = renderHook(() => useNodeBootstrap({ open: true, api }));
+    await act(async () => { fillTarget(hook.current); });
+    await act(async () => { await hook.current.checkHostKey(); });
+    await act(async () => { hook.current.setReplacing(true); });
+    await act(async () => { await hook.current.runPreflight(); });
+    expect(api.preflight).toHaveBeenCalledWith(
+      expect.objectContaining({ replacePinnedFingerprint: null, reviewedPinnedFingerprint: null }),
+      expect.anything(),
+    );
+  });
+
+  it('shows the live key as trusted, not as a change, when the server now pins that very key', async () => {
+    const api = fakeApi();
+    api.hostKey.mockResolvedValue({ ...HOST_KEY, trust: 'changed', pinnedFingerprint: 'SHA256:scanned' });
+    api.preflight.mockRejectedValueOnce(new BootstrapApiError(
+      'The pinned key changed since you reviewed it.',
+      'HOST_KEY_UNTRUSTED',
+      null,
+      { pinnedFingerprint: 'SHA256:live', observedFingerprint: 'SHA256:live', observedAlgorithm: 'ssh-ed25519' },
+    ));
+    const { result: hook } = renderHook(() => useNodeBootstrap({ open: true, api }));
+    await act(async () => { fillTarget(hook.current); });
+    await act(async () => { await hook.current.checkHostKey(); });
+    await act(async () => { hook.current.setReplacing(true); });
+    await act(async () => { await hook.current.runPreflight(); });
+    expect(hook.current.hostKey).toMatchObject({ trust: 'trusted', fingerprint: 'SHA256:live', pinnedFingerprint: 'SHA256:live' });
+    expect(hook.current.trusted).toBe(true);
+    await act(async () => { await hook.current.runPreflight(); });
+    expect(api.preflight).toHaveBeenNthCalledWith(
+      2,
+      expect.objectContaining({ expectedFingerprint: 'SHA256:live', replacePinnedFingerprint: null, reviewedPinnedFingerprint: null }),
+      expect.anything(),
+    );
+  });
+
   it('marks the key trusted once a confirmed replacement succeeded', async () => {
     const api = fakeApi();
     api.hostKey.mockResolvedValue({ ...HOST_KEY, trust: 'changed', pinnedFingerprint: 'SHA256:old' });
@@ -599,6 +636,39 @@ describe('useNodeBootstrap preflight replies that land after the configuration c
     await act(async () => { settles[0].resolve(result()); await pending(); });
     expect(hook.result.current.result).toBe(newest);
     expect(hook.result.current.step).toBe('preflight');
+  });
+
+  it('raises no banner for an edit made after a preflight that failed or finished', async () => {
+    const { api, settles } = pendingApi();
+    const hook = renderHook(() => useNodeBootstrap({ open: true, api }));
+    await act(async () => { fillTarget(hook.result.current); });
+    await act(async () => { await hook.result.current.checkHostKey(); });
+    let pending: Promise<void> | null = null;
+    act(() => { pending = hook.result.current.runPreflight(); });
+    await act(async () => {
+      settles[0].reject(new BootstrapApiError('Authentication failed.', 'SSH_AUTH_FAILED', null, {}));
+      await pending;
+    });
+    expect(hook.result.current.result).toBeNull();
+    await act(async () => { hook.result.current.setField('privateKey', 'new-key'); });
+    expect(hook.result.current.invalidated).toBeNull();
+  });
+
+  it('does not let a superseded request that fails after the newer one started disturb it', async () => {
+    const { api, settles } = pendingApi();
+    const { hook, pending } = await startPreflightThenGoBack(api);
+    await act(async () => { hook.result.current.setField('composeDir', '/srv/stacks'); });
+    let second: Promise<void> | null = null;
+    act(() => { second = hook.result.current.runPreflight(); });
+    await act(async () => {
+      settles[0].reject(new BootstrapApiError('The preflight failed.', 'HOST_KEY_MISMATCH', null, { pinnedFingerprint: 'SHA256:other' }));
+      await pending();
+    });
+    expect(hook.result.current.error).toBeNull();
+    expect(hook.result.current.busy).toBe('preflight');
+    expect(hook.result.current.hostKey?.pinnedFingerprint).toBe(HOST_KEY.fingerprint);
+    await act(async () => { settles[1].resolve(result()); await second; });
+    expect(hook.result.current.step).toBe('plan');
   });
 
   it('still applies a reply for the current configuration', async () => {

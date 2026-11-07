@@ -598,7 +598,7 @@ export class NodeBootstrapService {
       const replaced = confirmsReplacementOf(pin.fingerprint, expectedFingerprint, replacement);
       if (!expectedFingerprint || (pin.fingerprint !== expectedFingerprint && !replaced)) {
         // A confirmation that names another pin than the current one is a stale
-        // review, not a missing one: say so, and keep the reviewed pin on record.
+        // review, not a missing one: say so, and record the reviewed pin in the audit row.
         const stale = replacement !== null && replacement.fingerprint === expectedFingerprint;
         this.recordAudit(audit, 'bootstrap.trust.mismatch', {
           target: target.targetName,
@@ -606,7 +606,7 @@ export class NodeBootstrapService {
           port: target.port,
           pinned: pin.fingerprint,
           expected: expectedFingerprint,
-          reviewed: stale ? replacement?.reviewedPin : null,
+          reviewed: stale ? replacement.reviewedPin : null,
         }, 409);
         throw new BootstrapError(
           409,
@@ -660,7 +660,7 @@ export class NodeBootstrapService {
         409,
         'HOST_KEY_MISMATCH',
         pinChanged
-          ? 'The pinned key changed while the preflight was running. Confirm the replacement and run it again.'
+          ? 'The pinned key changed while the preflight was running. Review the current pin and confirm the replacement again.'
           : 'The host key does not match the pinned key. Confirm the replacement to continue.',
         { details: { pinnedFingerprint: pinned, expectedFingerprint } },
       );

@@ -39,7 +39,10 @@ const preflightSchema = z.object({
   targetName: z.string(),
   composeDir: z.string().optional(),
   agentDir: z.string().optional(),
-});
+}).refine(
+  (body) => Boolean(body.replacePinnedFingerprint?.trim()) === Boolean(body.reviewedPinnedFingerprint?.trim()),
+  { message: 'A host key replacement names both the new key and the pin it replaces.', path: ['reviewedPinnedFingerprint'] },
+);
 
 function guard(req: Request, res: Response): boolean {
   if (!requireUserSession(req, res)) return false;
