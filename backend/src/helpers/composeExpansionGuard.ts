@@ -19,10 +19,11 @@
  * for Compose to report, so this guard never changes how an ordinary broken
  * stack fails.
  */
-import { promises as fsPromises, constants as fsConstants } from 'fs';
+import { promises as fsPromises } from 'fs';
 import path from 'path';
 import { isAlias, isCollection, isPair, parseDocument, visit } from 'yaml';
 import type { Document, Node } from 'yaml';
+import { readComposeInputWithinCap } from './composeInputReadSink';
 
 /**
  * Expanded-node budget per file. A compose file that reuses an anchor across a
@@ -225,51 +226,22 @@ async function resolveInputFiles(cwd: string, explicitFiles: readonly string[]):
   return override ? [base, override] : [base];
 }
 
-const SKIPPABLE_READ_ERRORS = new Set(['ENOENT', 'ENOTDIR', 'EISDIR', 'EACCES', 'EPERM', 'ELOOP']);
-
 /**
- * Read at most the source cap from one file inside `allowedRoot`. A single open
- * (read-only, non-blocking so a FIFO cannot wedge it) followed by `fstat` and a
- * bounded read removes the stat-then-open race and never allocates more than
- * the cap. Anything outside `allowedRoot` is not read: every caller names files
- * inside the directory Compose will run in.
+ * Read at most the source cap from one file inside `allowedRoot`. The byte-level
+ * read lives in `composeInputReadSink`; this function owns the containment
+ * decision and the refusal, so the guard's own module shapes the message.
  */
 async function readIfRegularFile(filePath: string, label: string, allowedRoot: string): Promise<string | null> {
   // Canonical inline js/path-injection barrier, kept in the same scope as the
-  // filesystem sinks below. CodeQL credits a check that dominates the sink and
+  // filesystem access below. CodeQL credits a check that dominates the sink and
   // not one separated from it by a function boundary, so the resolution and the
   // containment test are repeated here even though the caller also validates.
   const target = path.resolve(filePath);
   if (!target.startsWith(allowedRoot + path.sep)) return null;
 
-  let handle: Awaited<ReturnType<typeof fsPromises.open>>;
-  try {
-    handle = await fsPromises.open(target, fsConstants.O_RDONLY | fsConstants.O_NONBLOCK);
-  } catch (err) {
-    // An input this process cannot open is one Compose will report on its own;
-    // the guard never turns an ordinary file error into a render failure.
-    if (SKIPPABLE_READ_ERRORS.has((err as NodeJS.ErrnoException).code ?? '')) return null;
-    throw err;
-  }
-  try {
-    const stat = await handle.stat();
-    if (!stat.isFile()) return null;
-    if (stat.size > MAX_COMPOSE_INPUT_BYTES) throw sizeRefusalForFile(label);
-
-    const chunks: Buffer[] = [];
-    let total = 0;
-    while (total <= MAX_COMPOSE_INPUT_BYTES) {
-      const chunk = Buffer.allocUnsafe(Math.min(64 * 1024, MAX_COMPOSE_INPUT_BYTES + 1 - total));
-      const { bytesRead } = await handle.read(chunk, 0, chunk.length, null);
-      if (bytesRead === 0) break;
-      chunks.push(chunk.subarray(0, bytesRead));
-      total += bytesRead;
-    }
-    if (total > MAX_COMPOSE_INPUT_BYTES) throw sizeRefusalForFile(label);
-    return Buffer.concat(chunks).toString('utf8');
-  } finally {
-    await handle.close();
-  }
+  const read = await readComposeInputWithinCap(target, MAX_COMPOSE_INPUT_BYTES);
+  if (read.tooLarge) throw sizeRefusalForFile(label);
+  return read.content;
 }
 
 /**

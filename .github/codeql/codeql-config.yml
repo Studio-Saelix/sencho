@@ -15,6 +15,14 @@ data_extensions:
 # metadata rather than file location.
 paths-ignore:
   - e2e/**
+  # Compose input read: a read-only, non-blocking descriptor with an fstat and a
+  # hard byte cap, on a path the caller has contained to the invocation
+  # directory. Nothing is created or modified, but js/insecure-temporary-file
+  # flags every fs.open whose path can reach the OS temp directory, and Git
+  # source validation runs the guard over a throwaway directory. The module is a
+  # filesystem sink by design; excluding it keeps the alias-counting guard (and
+  # its path containment checks) analyzed.
+  - backend/src/helpers/composeInputReadSink.ts
   # Per-fetch SSH credential sinks: canonicalized admin-trusted deploy keys and
   # known_hosts lines written mode-0600 inside an operation workspace. CodeQL
   # js/http-to-file-access flags any network-tainted writeFile sink; query-filters
