@@ -600,6 +600,13 @@ export class ComposeService {
       refuseIfUnreadable || action.includes('up') || action.includes('create'),
     );
     args.push(...action);
+    // Every command built here runs Compose, which expands YAML aliases with
+    // no bound. The check is last, after every layer is appended, so it sees
+    // exactly the files the CLI is about to read.
+    await assertComposeInputsWithinExpansionLimits({
+      cwd: stackDirOverride ?? path.join(this.baseDir, stackName),
+      files: composeFileArgsFromInvocation(args),
+    });
     return args;
   }
 
@@ -664,12 +671,6 @@ export class ComposeService {
       args.push('-f', overridePath);
     }
     this.pinProjectNameForOverride(stackName, args, stackDirOverride);
-    // Every command built here runs Compose, which expands YAML aliases with
-    // no bound, so the inputs are measured before the CLI can see them.
-    await assertComposeInputsWithinExpansionLimits({
-      cwd: stackDirOverride ?? path.join(this.baseDir, stackName),
-      files: composeFileArgsFromInvocation(args),
-    });
     return args;
   }
 
@@ -2273,6 +2274,13 @@ export class ComposeService {
       action.includes('up') || action.includes('create'),
     );
     out.push(...action);
+    // A captured recovery invocation builds its file set without the authored
+    // prefix, so the check has to run here as well: a restored generation can
+    // name a compose layer that was never validated by this guard.
+    await assertComposeInputsWithinExpansionLimits({
+      cwd: stackDirOverride ?? path.join(this.baseDir, stackName),
+      files: composeFileArgsFromInvocation(out),
+    });
     return out;
   }
 

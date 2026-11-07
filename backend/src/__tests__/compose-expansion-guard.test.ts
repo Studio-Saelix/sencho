@@ -85,6 +85,11 @@ describe('assertComposeSourceWithinExpansionLimits', () => {
       .not.toThrow();
   });
 
+  it('leaves a syntax error for Compose even when the same document also holds a bomb', () => {
+    const source = `${nestedAliasBomb(12)}  broken: [\n`;
+    expect(() => assertComposeSourceWithinExpansionLimits(source, 'compose.yaml')).not.toThrow();
+  });
+
   it('accepts an empty document', () => {
     expect(() => assertComposeSourceWithinExpansionLimits('', 'compose.yaml')).not.toThrow();
   });
@@ -121,6 +126,12 @@ describe('assertComposeInputsWithinExpansionLimits', () => {
       cwd: dir,
       files: ['custom.yaml'],
     })).resolves.toBeUndefined();
+  });
+
+  it('reads only the file Compose selects, not a lower-priority name it ignores', async () => {
+    await fsPromises.writeFile(path.join(dir, 'compose.yaml'), 'services:\n  web:\n    image: nginx:alpine\n');
+    await fsPromises.writeFile(path.join(dir, 'docker-compose.yml'), nestedAliasBomb(12));
+    await expect(assertComposeInputsWithinExpansionLimits({ cwd: dir })).resolves.toBeUndefined();
   });
 
   it('skips a file that does not exist and lets Compose report it', async () => {

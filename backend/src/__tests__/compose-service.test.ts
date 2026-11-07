@@ -341,6 +341,7 @@ vi.mock('../services/network/resolveMissingExternalNetworks', () => ({
 }));
 
 import { ComposeService, getComposeRollbackInfo, type GitOpsDeployHandle } from '../services/ComposeService';
+import type { RollbackInvocationRecord } from '../types/rollbackGeneration';
 import { DriftLedgerService } from '../services/DriftLedgerService';
 
 const originalComposeTimeout = process.env.SENCHO_COMPOSE_COMMAND_TIMEOUT_MS;
@@ -2461,6 +2462,26 @@ describe('ComposeService - alias-expansion guard on mutating invocations', () =>
 
     await expect(ComposeService.getInstance(1).validateExactComposeInvocation('my-stack'))
       .rejects.toThrow('nested YAML aliases');
+    expect(mockSpawn).not.toHaveBeenCalled();
+  });
+
+  it('refuses a captured recovery invocation, which bypasses the authored prefix', async () => {
+    mockSpawn.mockClear();
+    mockAssertComposeInputs.mockRejectedValueOnce(
+      new MockComposeExpansionRefusal('Compose file "compose.yaml" expands to more than 250,000 nodes through nested YAML aliases.'),
+    );
+    const invocation = {
+      composeArgsPrefix: ['-p', 'my-stack'],
+      projectDirectory: null,
+      projectName: 'my-stack',
+    } as unknown as RollbackInvocationRecord;
+
+    await expect(ComposeService.getInstance(1).buildComposeArgsWithRecoveryOverride(
+      'my-stack',
+      ['up', '-d'],
+      null,
+      invocation,
+    )).rejects.toThrow('nested YAML aliases');
     expect(mockSpawn).not.toHaveBeenCalled();
   });
 });

@@ -159,6 +159,9 @@ function countExpandedNodes(
  */
 export function assertComposeSourceWithinExpansionLimits(source: string, label: string): void {
   const doc = parseDocument(source, { prettyErrors: false });
+  // A document with syntax errors is Compose's to report. Its parser stops on
+  // them too, so there is no expansion to measure.
+  if (doc.errors.length > 0) return;
   const root = doc.contents;
   if (!root) return;
   const targets = resolveAliasTargets(doc);
@@ -184,30 +187,49 @@ export function composeFileArgsFromInvocation(invocation: readonly string[]): st
   return files;
 }
 
+async function firstExisting(cwd: string, names: readonly string[]): Promise<string | null> {
+  for (const name of names) {
+    const candidate = path.resolve(cwd, name);
+    try {
+      await fsPromises.access(candidate);
+      return candidate;
+    } catch {
+      // The next candidate is the one Compose would pick.
+    }
+  }
+  return null;
+}
+
 /**
- * The files Compose will read for this invocation: the explicit `-f` values,
- * or its auto-discovery names when none is named (plus the default override,
- * which Compose still loads next to a default base file).
+ * The files Compose will read for this invocation: the explicit `-f` values, or
+ * the first auto-discovered name plus the first override name, which is exactly
+ * what Compose selects. An unused same-named file is not read by Compose, so it
+ * is not read here either.
  */
-function resolveInputFiles(cwd: string, explicitFiles: readonly string[]): string[] {
+async function resolveInputFiles(cwd: string, explicitFiles: readonly string[]): Promise<string[]> {
   if (explicitFiles.length === 0) {
-    return [...DISCOVERED_COMPOSE_NAMES, ...DISCOVERED_OVERRIDE_NAMES]
-      .map((name) => path.resolve(cwd, name));
+    const base = await firstExisting(cwd, DISCOVERED_COMPOSE_NAMES);
+    if (!base) return [];
+    const override = await firstExisting(cwd, DISCOVERED_OVERRIDE_NAMES);
+    return override ? [base, override] : [base];
   }
   const resolved = explicitFiles.map((file) => path.resolve(cwd, file));
   const namesSingleDefaultBase = explicitFiles.length === 1
     && (DISCOVERED_COMPOSE_NAMES as readonly string[]).includes(path.basename(explicitFiles[0]));
   if (namesSingleDefaultBase) {
-    for (const name of DISCOVERED_OVERRIDE_NAMES) {
-      const candidate = path.resolve(cwd, name);
-      if (!resolved.includes(candidate)) resolved.push(candidate);
-    }
+    const override = await firstExisting(cwd, DISCOVERED_OVERRIDE_NAMES);
+    if (override && !resolved.includes(override)) resolved.push(override);
   }
   return resolved;
 }
 
-const SKIPPABLE_READ_ERRORS = new Set(['ENOENT', 'ENOTDIR', 'EISDIR', 'EACCES', 'EPERM']);
+const SKIPPABLE_READ_ERRORS = new Set(['ENOENT', 'ENOTDIR', 'EISDIR', 'EACCES', 'EPERM', 'ELOOP']);
 
+/**
+ * Read at most the source cap. A stat first keeps a huge file from being
+ * allocated at all; the bounded read keeps a file that grows between the stat
+ * and the read from doing the same.
+ */
 async function readIfRegularFile(filePath: string, label: string): Promise<string | null> {
   let stat: Awaited<ReturnType<typeof fsPromises.stat>>;
   try {
@@ -219,18 +241,30 @@ async function readIfRegularFile(filePath: string, label: string): Promise<strin
     throw err;
   }
   if (!stat.isFile()) return null;
-  // Checked before the read so a huge file is refused without allocating it.
   if (stat.size > MAX_COMPOSE_INPUT_BYTES) throw sizeRefusalForFile(label);
-  let content: string;
+
+  let handle: Awaited<ReturnType<typeof fsPromises.open>>;
   try {
-    content = await fsPromises.readFile(filePath, 'utf8');
+    handle = await fsPromises.open(filePath, 'r');
   } catch (err) {
     if (SKIPPABLE_READ_ERRORS.has((err as NodeJS.ErrnoException).code ?? '')) return null;
     throw err;
   }
-  // The file can grow between the stat and the read; bound what was actually read.
-  if (Buffer.byteLength(content, 'utf8') > MAX_COMPOSE_INPUT_BYTES) throw sizeRefusalForFile(label);
-  return content;
+  try {
+    const chunks: Buffer[] = [];
+    let total = 0;
+    while (total <= MAX_COMPOSE_INPUT_BYTES) {
+      const chunk = Buffer.allocUnsafe(Math.min(64 * 1024, MAX_COMPOSE_INPUT_BYTES + 1 - total));
+      const { bytesRead } = await handle.read(chunk, 0, chunk.length, null);
+      if (bytesRead === 0) break;
+      chunks.push(chunk.subarray(0, bytesRead));
+      total += bytesRead;
+    }
+    if (total > MAX_COMPOSE_INPUT_BYTES) throw sizeRefusalForFile(label);
+    return Buffer.concat(chunks).toString('utf8');
+  } finally {
+    await handle.close();
+  }
 }
 
 /**
@@ -240,13 +274,18 @@ async function readIfRegularFile(filePath: string, label: string): Promise<strin
  *
  * Only a regular file is read. A missing or non-regular input is left for
  * Compose to report, so an ordinary broken stack fails exactly as it did.
+ *
+ * The measurement is taken immediately before the caller spawns Compose, but a
+ * file rewritten in the gap between the two is not re-checked. A writer who can
+ * replace a stack's files can also write a bomb into them directly, which no
+ * in-process check can prevent.
  */
 export async function assertComposeInputsWithinExpansionLimits(opts: {
   cwd: string;
   files?: readonly string[];
 }): Promise<void> {
   const cwd = path.resolve(opts.cwd);
-  for (const filePath of resolveInputFiles(cwd, opts.files ?? [])) {
+  for (const filePath of await resolveInputFiles(cwd, opts.files ?? [])) {
     const label = path.relative(cwd, filePath) || path.basename(filePath);
     const content = await readIfRegularFile(filePath, label);
     if (content === null) continue;
