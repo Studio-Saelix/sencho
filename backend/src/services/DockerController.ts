@@ -2525,7 +2525,9 @@ class DockerController {
           }
           const healthValue = stateInfo?.Health;
           const healthInfo = asRecord(healthValue);
-          if (healthValue !== undefined && healthValue !== null && healthInfo === null) {
+          // A present Health that is not a map (including an explicit null) is
+          // unreadable, not proof that the container has no healthcheck.
+          if (healthValue !== undefined && healthInfo === null) {
             inspectFieldIncomplete = true;
           }
           const rawHealth = healthInfo?.Status;
@@ -4069,11 +4071,16 @@ function parsePortString(value: string): number | null {
 /** Docker port protocols. Anything else is unreadable metadata, not a protocol. */
 const KNOWN_PORT_PROTOCOLS = new Set(['tcp', 'udp', 'sctp']);
 
-/** A port protocol, canonicalized to the transport name Docker reports. */
-function readPortProtocol(value: unknown): string | null {
-  if (typeof value !== 'string') return null;
-  const normalized = value.toLowerCase();
-  return KNOWN_PORT_PROTOCOLS.has(normalized) ? normalized : null;
+/**
+ * A port protocol as reported, canonicalized to lower case. `recognized` is
+ * false for a non-empty protocol Docker does not publish, so callers can keep
+ * the reported value (never invent `tcp`) while marking the row incomplete.
+ * null means the value itself is unreadable (missing, non-string, or empty).
+ */
+function readPortProtocol(value: unknown): { protocol: string; recognized: boolean } | null {
+  if (typeof value !== 'string' || value.length === 0) return null;
+  const protocol = value.toLowerCase();
+  return { protocol, recognized: KNOWN_PORT_PROTOCOLS.has(protocol) };
 }
 
 /**
@@ -4086,9 +4093,10 @@ function normalizeExposedPortSpec(spec: string): string | null {
   const rawPrivatePort = slash > 0 ? spec.slice(0, slash) : spec;
   const privatePort = parsePortString(rawPrivatePort);
   if (privatePort === null) return null;
-  const protocol = slash > 0 ? readPortProtocol(spec.slice(slash + 1)) : 'tcp';
-  if (protocol === null) return null;
-  return `${privatePort}/${protocol}`;
+  if (slash <= 0) return `${privatePort}/tcp`;
+  const protocol = readPortProtocol(spec.slice(slash + 1));
+  if (protocol === null || !protocol.recognized) return null;
+  return `${privatePort}/${protocol.protocol}`;
 }
 
 interface NormalizedLabels {
@@ -4242,14 +4250,18 @@ function normalizeDockerPorts(value: unknown): NormalizedPorts {
     if (publicPort !== null && rawIp === null) incomplete = true;
     if (port.IP !== undefined && rawIp === null) incomplete = true;
     const protocol = readPortProtocol(port.Type);
-    // A present-but-unreadable protocol (an explicit null, a non-string, an
-    // empty string, or an unknown transport) is not a clean `tcp` default.
-    if (port.Type !== undefined && protocol === null) incomplete = true;
+    // A present-but-unreadable protocol (an explicit null, a non-string, or an
+    // empty string) is not a clean `tcp` default. An unknown non-empty protocol
+    // is kept as reported rather than rewritten to `tcp`, and still marks the
+    // row incomplete.
+    if (port.Type !== undefined && (protocol === null || !protocol.recognized)) {
+      incomplete = true;
+    }
     ports.push({
       privatePort,
       publicPort,
       ip: rawIp,
-      protocol: protocol ?? 'tcp',
+      protocol: protocol?.protocol ?? 'tcp',
     });
   }
   return { ports, incomplete };
@@ -4291,10 +4303,11 @@ function normalizeInspectPorts(
     if (privatePort === null) incomplete = true;
     const rawProtocol = slash > 0 ? spec.slice(slash + 1) : 'tcp';
     const protocol = readPortProtocol(rawProtocol);
-    // An empty or unknown protocol is unreadable evidence; keep the binding
-    // (and its exposure) but never present the malformed transport as valid.
-    if (protocol === null) incomplete = true;
-    const protocolName = protocol ?? 'tcp';
+    // An empty protocol is unreadable, and an unknown non-empty protocol is not
+    // a Docker transport. Keep the binding (and its exposure) and the reported
+    // value, but never rewrite it to `tcp` or let the row read complete.
+    if (protocol === null || !protocol.recognized) incomplete = true;
+    const protocolName = protocol?.protocol ?? 'tcp';
     const targets = Array.isArray(rawBindings) ? rawBindings : [];
     if (rawBindings !== undefined && rawBindings !== null && !Array.isArray(rawBindings)) {
       incomplete = true;

@@ -718,7 +718,7 @@ describe('socket inventory unreadable enclosing metadata', () => {
     expect(inventoryOf(rows).status).toBe('partial');
   });
 
-  it.each([5, 'healthy', true, []])(
+  it.each([null, 5, 'healthy', true, []])(
     'does not read a non-map State.Health (%j) as an absent health fact',
     async health => {
       const rows = await rowsFrom(listed(), inspected({
@@ -848,6 +848,34 @@ describe('socket inventory port specification validation', () => {
     ]);
     expect(rows[0].metadataTruncated).toBe(true);
     expect(inventoryOf(rows).status).toBe('partial');
+  });
+
+  it('keeps an unknown listing protocol as reported instead of rewriting it to tcp', async () => {
+    const rows = await rowsFrom(
+      listed({ Ports: [{ IP: '0.0.0.0', PrivatePort: 2375, PublicPort: 8080, Type: 'icmp' }] }),
+      new Error('inspect unavailable'),
+    );
+
+    expect(rows[0].ports).toEqual([
+      { privatePort: 2375, publicPort: 8080, ip: '0.0.0.0', protocol: 'icmp' },
+    ]);
+    expect(rows[0].metadataTruncated).toBe(true);
+    expect(inventoryOf(rows).containers[0].publishedPorts[0].protocol).toBe('icmp');
+  });
+
+  it('keeps an unknown inspect protocol as reported instead of rewriting it to tcp', async () => {
+    const rows = await rowsFrom(listed({ Ports: [] }), inspected({
+      NetworkSettings: {
+        Ports: { '2375/icmp': [{ HostIp: '0.0.0.0', HostPort: '8080' }] },
+        Networks: {},
+      },
+    }));
+
+    expect(rows[0].ports).toEqual([
+      { privatePort: 2375, publicPort: 8080, ip: '0.0.0.0', protocol: 'icmp' },
+    ]);
+    expect(rows[0].metadataTruncated).toBe(true);
+    expect(inventoryOf(rows).containers[0].publishedPorts[0].protocol).toBe('icmp');
   });
 
   it('drops malformed exposed-port specifications and marks the row incomplete', async () => {
