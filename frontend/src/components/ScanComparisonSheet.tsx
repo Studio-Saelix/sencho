@@ -2,6 +2,8 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { SystemSheet, SheetSection } from '@/components/ui/system-sheet';
 import { ScrollArea } from '@/components/ui/scroll-area';
 import { Button } from '@/components/ui/button';
+import { Skeleton } from '@/components/ui/skeleton';
+import { StatusPath } from '@/components/ui/status-path';
 import {
   Table,
   TableBody,
@@ -14,13 +16,11 @@ import {
   ArrowRight,
   ChevronLeft,
   ChevronRight,
-  Loader2,
   MinusCircle,
   PlusCircle,
   ShieldCheck,
   ShieldOff,
   Equal,
-  AlertTriangle,
 } from 'lucide-react';
 import { apiFetch } from '@/lib/api';
 import { toast } from '@/components/ui/toast-store';
@@ -28,6 +28,8 @@ import { cn } from '@/lib/utils';
 import { cveUrl } from '@/lib/cveUrl';
 import { formatShortDigest } from '@/lib/formatDigest';
 import { SEVERITY_ROW_TINT } from '@/lib/severityStyles';
+import type { StatusTone } from '@/lib/statusTone';
+import { useVisualBusy } from '@/hooks/useVisualBusy';
 import { SeverityChip } from './VulnerabilityScanSheet';
 import type {
   ScanCompareResult,
@@ -84,27 +86,50 @@ function countBySeverity(rows: Array<{ severity: VulnSeverity }>): Record<VulnSe
   return counts;
 }
 
-type DeltaTone = 'success' | 'warning' | 'destructive' | 'muted';
+const SUMMARY_SEVERITIES: VulnSeverity[] = ['CRITICAL', 'HIGH', 'MEDIUM', 'LOW'];
 
-const DELTA_TONE_CLASS: Record<DeltaTone, string> = {
-  destructive: 'text-destructive border-destructive/40 bg-destructive/10',
-  warning: 'text-warning border-warning/40 bg-warning/10',
-  success: 'text-success border-success/40 bg-success/10',
-  muted: 'text-muted-foreground border-border bg-muted/30',
-};
-
-function formatDelta(
-  severity: VulnSeverity,
-  added: number,
-  removed: number,
-): { text: string; tone: DeltaTone } {
-  const net = added - removed;
-  if (net > 0) {
-    const tone: DeltaTone = severity === 'CRITICAL' ? 'destructive' : 'warning';
-    return { text: `+${net}`, tone };
+/**
+ * The one Answer for the diff: the net change per severity, in one sentence.
+ * A net-new CRITICAL is the only destructive reading; any other net increase is
+ * a warning, and a net decrease reads as an improvement. Severities with no net
+ * change are left out rather than printed as zero.
+ */
+function summarizeDelta(
+  added: Record<VulnSeverity, number>,
+  removed: Record<VulnSeverity, number>,
+): { tone: StatusTone; title: string; line: string } {
+  const parts: string[] = [];
+  let anyUp = false;
+  let anyDown = false;
+  for (const sev of SUMMARY_SEVERITIES) {
+    const net = added[sev] - removed[sev];
+    if (net === 0) continue;
+    if (net > 0) anyUp = true;
+    else anyDown = true;
+    parts.push(`${net > 0 ? '+' : ''}${net} ${sev.toLowerCase()}`);
   }
-  if (net < 0) return { text: `${net}`, tone: 'success' };
-  return { text: '0', tone: 'muted' };
+  if (added.CRITICAL - removed.CRITICAL > 0) {
+    return { tone: 'destructive', title: 'Regressed', line: `Net change: ${parts.join(', ')}.` };
+  }
+  if (anyUp) return { tone: 'warning', title: 'Regressed', line: `Net change: ${parts.join(', ')}.` };
+  if (anyDown) return { tone: 'success', title: 'Improved', line: `Net change: ${parts.join(', ')}.` };
+  return { tone: 'neutral', title: 'No change', line: 'No net change in findings.' };
+}
+
+/** Mirrors the loaded sheet: the Answer, the two scans, the filter row and a few rows. */
+function ComparisonSkeleton() {
+  return (
+    <div role="status" aria-busy="true" aria-label="Loading comparison" data-testid="scan-diff-skeleton" className="flex flex-col gap-4">
+      <Skeleton className="h-14 w-full" />
+      <Skeleton className="h-10 w-full" />
+      <Skeleton className="h-7 w-72" />
+      <div className="flex flex-col gap-2">
+        {Array.from({ length: 6 }).map((_, i) => (
+          <Skeleton key={i} className="h-9 w-full" />
+        ))}
+      </div>
+    </div>
+  );
 }
 
 export function ScanComparisonSheet({
@@ -150,6 +175,7 @@ export function ScanComparisonSheet({
   }, [baselineScanId, currentScanId, load]);
 
   const open = baselineScanId != null && currentScanId != null;
+  const { showBusy } = useVisualBusy(loading);
 
   const addedCounts = useMemo(() => (data ? countBySeverity(data.added) : null), [data]);
   const removedCounts = useMemo(() => (data ? countBySeverity(data.removed) : null), [data]);
@@ -168,13 +194,12 @@ export function ScanComparisonSheet({
   const pageItems = rows.slice(safePage * PAGE_SIZE, (safePage + 1) * PAGE_SIZE);
   const needsPagination = rows.length > PAGE_SIZE;
 
-  const meta = data
-    ? `#${data.scanA.id} → #${data.scanB.id} · +${data.added.length} −${data.removed.length}`
-    : (loading ? 'Loading…' : '');
+  const meta = data ? `#${data.scanA.id} → #${data.scanB.id}` : (loading ? 'Loading…' : '');
 
-  const footerContext = data
-    ? `${scanCompareLabel(data.scanA)} → ${scanCompareLabel(data.scanB)}`
-    : undefined;
+  const summary = useMemo(
+    () => (addedCounts && removedCounts ? summarizeDelta(addedCounts, removedCounts) : null),
+    [addedCounts, removedCounts],
+  );
 
   return (
     <SystemSheet
@@ -183,19 +208,32 @@ export function ScanComparisonSheet({
       crumb={['Security', 'Scans', 'Compare']}
       name="Diff"
       meta={meta}
-      footerContext={footerContext}
       size="xl"
     >
-      {loading && (
-        <div className="flex items-center justify-center py-12">
-          <Loader2 className="w-6 h-6 animate-spin text-muted-foreground" strokeWidth={1.5} />
-        </div>
-      )}
+      {loading && showBusy && <ComparisonSkeleton />}
 
-      {data && !loading && (
+      {data && !loading && summary && (
         <>
+          <SheetSection title="Change">
+            <StatusPath
+              answer={{
+                tone: summary.tone,
+                title: summary.title,
+                line: summary.line,
+                status: summary.tone,
+                detail: crossImage
+                  ? 'You are comparing scans from two different image identities. Package-level changes may reflect image differences rather than CVE drift.'
+                  : null,
+                marker: data.truncated
+                  ? `partial · first ${data.row_limit ?? 1000} findings per scan`
+                  : undefined,
+              }}
+              stages={[]}
+            />
+          </SheetSection>
+
           <SheetSection title="Scans">
-            <div className="flex items-center gap-3 text-xs font-mono tabular-nums mb-3">
+            <div className="flex items-center gap-3 text-xs font-mono tabular-nums">
               <div className="flex-1 min-w-0">
                 <div className="font-mono text-[10px] uppercase tracking-[0.18em] text-stat-subtitle">Baseline</div>
                 <div className="text-stat-value truncate">{scanCompareLabel(data.scanA)}</div>
@@ -208,52 +246,9 @@ export function ScanComparisonSheet({
                 <div className="text-stat-subtitle tabular-nums">{new Date(data.scanB.scanned_at).toLocaleString()}</div>
               </div>
             </div>
-
-            {crossImage && (
-              <div className="flex items-start gap-2 rounded border border-warning/40 bg-warning/10 px-3 py-2 mb-3 text-xs text-warning">
-                <AlertTriangle className="w-3.5 h-3.5 shrink-0 mt-[1px]" strokeWidth={1.5} />
-                <span>
-                  You are comparing scans from two different image identities. Package-level changes may reflect image differences rather than CVE drift.
-                </span>
-              </div>
-            )}
-
-            {data.truncated && (
-              <div
-                role="alert"
-                className="flex items-start gap-2 rounded border border-warning/40 bg-warning/10 px-3 py-2 mb-3 text-xs text-warning"
-              >
-                <AlertTriangle className="w-3.5 h-3.5 shrink-0 mt-[1px]" strokeWidth={1.5} />
-                <span>
-                  Showing the first {data.row_limit ?? 1000} findings per scan. One or both scans exceed this limit, so the comparison may be incomplete.
-                </span>
-              </div>
-            )}
-
-            {addedCounts && removedCounts && (
-              <div className="flex flex-wrap gap-2">
-                {(['CRITICAL', 'HIGH', 'MEDIUM', 'LOW'] as VulnSeverity[]).map((sev) => {
-                  const delta = formatDelta(sev, addedCounts[sev], removedCounts[sev]);
-                  return (
-                    <span
-                      key={sev}
-                      aria-label={`${sev} delta ${delta.text}`}
-                      data-tone={delta.tone}
-                      className={cn(
-                        'inline-flex items-center gap-1.5 rounded border px-2 py-1 text-xs font-mono tabular-nums shadow-card-bevel',
-                        DELTA_TONE_CLASS[delta.tone],
-                      )}
-                    >
-                      <span className="uppercase tracking-[0.18em] text-[10px]">{sev}</span>
-                      <span>{delta.text}</span>
-                    </span>
-                  );
-                })}
-              </div>
-            )}
           </SheetSection>
 
-          <SheetSection title={`Findings · ${filter}`}>
+          <SheetSection title="Findings">
             <div className="flex items-center gap-1 flex-wrap mb-3">
               <Button
                 variant={filter === 'added' ? 'default' : 'ghost'}
@@ -336,7 +331,6 @@ export function ScanComparisonSheet({
                       <TableHead className="w-[180px] text-[10px] uppercase tracking-[0.18em] font-mono text-stat-subtitle">CVE</TableHead>
                       <TableHead className="text-[10px] uppercase tracking-[0.18em] font-mono text-stat-subtitle">Package</TableHead>
                       <TableHead className="w-[100px] text-[10px] uppercase tracking-[0.18em] font-mono text-stat-subtitle">Severity</TableHead>
-                      <TableHead className="w-[110px] text-[10px] uppercase tracking-[0.18em] font-mono text-stat-subtitle">Status</TableHead>
                     </TableRow>
                   </TableHeader>
                   <TableBody>
@@ -377,26 +371,6 @@ export function ScanComparisonSheet({
                           </TableCell>
                           <TableCell>
                             <SeverityChip severity={v.severity} />
-                          </TableCell>
-                          <TableCell className="font-mono text-xs">
-                            {filter === 'added' && (
-                              <span className="inline-flex items-center gap-1 text-destructive">
-                                <PlusCircle className="w-3 h-3" strokeWidth={1.5} />
-                                Added
-                              </span>
-                            )}
-                            {filter === 'removed' && (
-                              <span className="inline-flex items-center gap-1 text-success">
-                                <MinusCircle className="w-3 h-3" strokeWidth={1.5} />
-                                Removed
-                              </span>
-                            )}
-                            {filter === 'unchanged' && (
-                              <span className="inline-flex items-center gap-1 text-muted-foreground">
-                                <Equal className="w-3 h-3" strokeWidth={1.5} />
-                                {crossImage ? 'Shared' : 'Unchanged'}
-                              </span>
-                            )}
                           </TableCell>
                         </TableRow>
                       );
