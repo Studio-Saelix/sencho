@@ -291,6 +291,9 @@ export function useNodeBootstrap({ open, api }: UseNodeBootstrapOptions) {
       setTrusted(response.trust === 'trusted');
       setReplacing(false);
       setSupersededFingerprint(null);
+      // The target banner asks for exactly this check, so it is done. The
+      // key, paths and name banners ask for a preflight and stay up.
+      setInvalidated((current) => (current === 'target' ? null : current));
       setStep('preflight');
     } catch (caught: unknown) {
       if (isAbort(caught)) return;

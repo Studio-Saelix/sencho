@@ -184,6 +184,67 @@ describe('useNodeBootstrap', () => {
     expect(hook.current.invalidated).toBeNull();
   });
 
+  describe('the banner that asks for a host key check', () => {
+    async function editedAfterResult(field: 'username' | 'host' | 'port', value: string, api = fakeApi()) {
+      const hook = renderHook(() => useNodeBootstrap({ open: true, api }));
+      await act(async () => { fillTarget(hook.result.current); });
+      await act(async () => { await hook.result.current.checkHostKey(); });
+      await act(async () => { await hook.result.current.runPreflight(); });
+      await act(async () => { hook.result.current.setField(field, value); });
+      expect(hook.result.current.invalidated).toBe('target');
+      return hook;
+    }
+
+    it.each([
+      ['username', 'deploy'],
+      ['host', 'other.example.com'],
+      ['port', '2222'],
+    ] as const)('clears once the host key was checked again after a %s edit', async (field, value) => {
+      const hook = await editedAfterResult(field, value);
+      await act(async () => { await hook.result.current.checkHostKey(); });
+      expect(hook.result.current.hostKey).not.toBeNull();
+      expect(hook.result.current.step).toBe('preflight');
+      expect(hook.result.current.invalidated).toBeNull();
+    });
+
+    it('stays up when the host key check fails', async () => {
+      const api = fakeApi();
+      const hook = await editedAfterResult('username', 'deploy', api);
+      api.hostKey.mockRejectedValueOnce(new BootstrapApiError('Host unreachable.', 'HOST_UNREACHABLE', null, {}));
+      await act(async () => { await hook.result.current.checkHostKey(); });
+      expect(hook.result.current.hostKey).toBeNull();
+      expect(hook.result.current.invalidated).toBe('target');
+    });
+
+    it('stays up when the check is for a target that was edited again while it was in flight', async () => {
+      let resolveKey: ((value: import('../types').BootstrapHostKeyResult) => void) | null = null;
+      const api = fakeApi();
+      const hook = await editedAfterResult('username', 'deploy', api);
+      api.hostKey.mockImplementationOnce(() => new Promise((resolve) => { resolveKey = resolve; }));
+      let pending: Promise<void> | null = null;
+      act(() => { pending = hook.result.current.checkHostKey(); });
+      await act(async () => { hook.result.current.setField('username', 'other'); });
+      await act(async () => { resolveKey?.(HOST_KEY); await pending; });
+      expect(hook.result.current.hostKey).toBeNull();
+      expect(hook.result.current.invalidated).toBe('target');
+    });
+
+    it.each([
+      ['privateKey', 'new-key', 'key'],
+      ['composeDir', '/srv/stacks', 'paths'],
+      ['targetName', 'other-name', 'name'],
+    ] as const)('leaves the %s banner up when the host key is checked again, because it asks for a preflight', async (field, value, reason) => {
+      const api = fakeApi();
+      const hook = renderHook(() => useNodeBootstrap({ open: true, api }));
+      await act(async () => { fillTarget(hook.result.current); });
+      await act(async () => { await hook.result.current.checkHostKey(); });
+      await act(async () => { await hook.result.current.runPreflight(); });
+      await act(async () => { hook.result.current.setField(field, value); });
+      await act(async () => { await hook.result.current.checkHostKey(); });
+      expect(hook.result.current.invalidated).toBe(reason);
+    });
+  });
+
   it('shows no banner for an edit made before any preflight result exists', async () => {
     const api = fakeApi();
     const { result: hook } = renderHook(() => useNodeBootstrap({ open: true, api }));

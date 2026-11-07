@@ -293,6 +293,16 @@ describe('BootstrapServerDialog stale-result banner', () => {
     expect(screen.queryByText(/Paths changed/)).not.toBeInTheDocument();
   });
 
+  it('drops the SSH target banner once the host key was checked again', async () => {
+    const user = await reachResult();
+    await user.type(screen.getByLabelText('Host'), 'x');
+    expect(await screen.findByText(/The SSH target changed\./)).toBeInTheDocument();
+    await user.type(screen.getByLabelText('Host'), '{Backspace}');
+    await user.click(screen.getByRole('button', { name: 'Check host key' }));
+    expect(await screen.findByRole('button', { name: 'Run preflight' })).toBeInTheDocument();
+    expect(screen.queryByText(/The SSH target changed\./)).not.toBeInTheDocument();
+  });
+
   it('says the SSH key changed after the private key is edited', async () => {
     const user = await reachResult();
     await user.type(screen.getByLabelText('Private key'), 'x');
