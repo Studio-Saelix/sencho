@@ -358,8 +358,10 @@ export function AutoPill({
 /**
  * A newer tag, including a blocked major bump, has no update Sencho can apply:
  * the only resolution is the tag in the Compose file, so the row offers that
- * destination as its verb in place of a disabled Apply. A session without edit
- * authority keeps the plain disabled Apply rather than a verb that does nothing.
+ * destination as its verb in place of a disabled Apply. An uncertain check and
+ * a review-required stack keep the disabled Apply, whose reason the Risk badge
+ * and tooltip carry, and a session without edit authority keeps it too rather
+ * than get a verb that does nothing.
  */
 function useComposeEditVerb(card: StackCard): boolean {
   const { can } = useAuth();
@@ -367,15 +369,18 @@ function useComposeEditVerb(card: StackCard): boolean {
   return !!preview
     && isTagOnlyAdvisory(preview)
     && !isActionableUpdatePreview(preview)
+    && !isPreviewUncertain(preview)
+    && !isReviewRequiredUpdatePreview(preview)
     && can('stack:edit', 'stack', stack, nodeId);
 }
 
-function OpenEditorButton({ stack, nodeId, className }: { stack: string; nodeId: number; className?: string }) {
+function OpenEditorButton({ stack, nodeId, title, className }: { stack: string; nodeId: number; title?: string; className?: string }) {
   return (
     <Button
       size="sm"
       variant="outline"
       onClick={() => openStackEditor(nodeId, stack)}
+      title={title}
       aria-label={`Open stack editor for ${stack}`}
       className={cn('gap-1.5', className)}
     >
@@ -552,7 +557,7 @@ function StackReadinessCard({
               )}
 
               <div className="mt-auto flex items-center justify-between gap-3 pt-1">
-                {/* The header pill already says Off or skipped; the footer states only a schedule. */}
+                {/* The header pill already says Off or skipped; the footer states only the schedule, or its absence. */}
                 {!autoPillShown && (
                   <div className="flex items-center gap-1.5 font-mono text-[11px] text-stat-subtitle">
                     {nextRun ? (
@@ -570,7 +575,7 @@ function StackReadinessCard({
                   </div>
                 )}
                 {composeEditVerb ? (
-                  <OpenEditorButton stack={stack} nodeId={nodeId} className="ml-auto" />
+                  <OpenEditorButton stack={stack} nodeId={nodeId} title={applyTitle} className="ml-auto" />
                 ) : (
                   <Button
                     size="sm"
@@ -979,7 +984,7 @@ function ReadinessTableRow({
         </TableCell>
         <TableCell className="text-right">
           {hasDetail && (composeEditVerb ? (
-            <OpenEditorButton stack={stack} nodeId={nodeId} />
+            <OpenEditorButton stack={stack} nodeId={nodeId} title={applyTitle} />
           ) : (
             <Button
               size="sm"
@@ -1132,6 +1137,7 @@ export function MobileReadinessCard({
   const applyDisabled = !isActionableUpdatePreview(preview)
     || applying
     || applyingService !== null;
+  const composeEditVerb = useComposeEditVerb(card);
   const changelog = preview?.changelog ?? 'No changelog available from the registry yet.';
   const dot = changelog.indexOf('.');
   const lead = dot > 0 ? changelog.slice(0, dot + 1) : '';
@@ -1236,17 +1242,21 @@ export function MobileReadinessCard({
                   ? 'Skipped by update policy'
                   : nextRun ? <>{formatClock(nextRun)} · {formatRelative(nextRun)}</> : (blocked || reviewRequired ? 'Held for review' : 'No schedule')}
               </span>
-              <Button
-                size="sm"
-                variant={blocked || verificationOnly || reviewRequired ? 'outline' : 'default'}
-                onClick={() => onApply(stack, nodeId)}
-                disabled={applyDisabled}
-                title={reviewRequired ? 'Another image in this stack failed digest verification; apply the confirmed service individually or resolve verification first.' : undefined}
-                className="gap-1.5"
-              >
-                <Play className="h-3.5 w-3.5" strokeWidth={1.5} aria-hidden="true" />
-                {applying ? 'Applying...' : 'Apply now'}
-              </Button>
+              {composeEditVerb ? (
+                <OpenEditorButton stack={stack} nodeId={nodeId} title={blocked ? p.summary.blocked_reason ?? undefined : undefined} />
+              ) : (
+                <Button
+                  size="sm"
+                  variant={blocked || verificationOnly || reviewRequired ? 'outline' : 'default'}
+                  onClick={() => onApply(stack, nodeId)}
+                  disabled={applyDisabled}
+                  title={reviewRequired ? 'Another image in this stack failed digest verification; apply the confirmed service individually or resolve verification first.' : undefined}
+                  className="gap-1.5"
+                >
+                  <Play className="h-3.5 w-3.5" strokeWidth={1.5} aria-hidden="true" />
+                  {applying ? 'Applying...' : 'Apply now'}
+                </Button>
+              )}
             </div>
           </>
         );
