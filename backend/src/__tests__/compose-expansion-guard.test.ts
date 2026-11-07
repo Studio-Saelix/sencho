@@ -110,13 +110,13 @@ describe('assertComposeInputsWithinExpansionLimits', () => {
       .rejects.toBeInstanceOf(ComposeExpansionRefusal);
   });
 
-  it('reads the default override beside a named default base file', async () => {
+  it('does not read a default override beside an explicit -f, which Compose also skips', async () => {
     await fsPromises.writeFile(path.join(dir, 'compose.yaml'), 'services:\n  web:\n    image: nginx:alpine\n');
     await fsPromises.writeFile(path.join(dir, 'compose.override.yaml'), nestedAliasBomb(12));
     await expect(assertComposeInputsWithinExpansionLimits({
       cwd: dir,
       files: ['compose.yaml'],
-    })).rejects.toBeInstanceOf(ComposeExpansionRefusal);
+    })).resolves.toBeUndefined();
   });
 
   it('does not read a default override beside an explicitly renamed file', async () => {
@@ -129,8 +129,15 @@ describe('assertComposeInputsWithinExpansionLimits', () => {
   });
 
   it('reads only the file Compose selects, not a lower-priority name it ignores', async () => {
+    await fsPromises.writeFile(path.join(dir, 'docker-compose.yml'), 'services:\n  web:\n    image: nginx:alpine\n');
+    await fsPromises.writeFile(path.join(dir, 'docker-compose.yaml'), nestedAliasBomb(12));
+    await expect(assertComposeInputsWithinExpansionLimits({ cwd: dir })).resolves.toBeUndefined();
+  });
+
+  it('reads only the override Compose selects', async () => {
     await fsPromises.writeFile(path.join(dir, 'compose.yaml'), 'services:\n  web:\n    image: nginx:alpine\n');
-    await fsPromises.writeFile(path.join(dir, 'docker-compose.yml'), nestedAliasBomb(12));
+    await fsPromises.writeFile(path.join(dir, 'compose.override.yml'), 'services:\n  extra:\n    image: nginx:alpine\n');
+    await fsPromises.writeFile(path.join(dir, 'compose.override.yaml'), nestedAliasBomb(12));
     await expect(assertComposeInputsWithinExpansionLimits({ cwd: dir })).resolves.toBeUndefined();
   });
 

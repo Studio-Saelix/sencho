@@ -41,16 +41,20 @@ export const MAX_COMPOSE_INPUT_BYTES = 16 * 1024 * 1024;
 const DISCOVERED_COMPOSE_NAMES = [
   'compose.yaml',
   'compose.yml',
-  'docker-compose.yaml',
   'docker-compose.yml',
+  'docker-compose.yaml',
 ] as const;
 
-/** Auto-discovered override names, matching FileSystemService and Compose. */
+/**
+ * Auto-discovered override names, in Compose's own order. The `docker-compose`
+ * family and both override pairs prefer `.yml` over `.yaml`; only the
+ * `compose.yaml` base name prefers `.yaml`.
+ */
 const DISCOVERED_OVERRIDE_NAMES = [
-  'compose.override.yaml',
   'compose.override.yml',
-  'docker-compose.override.yaml',
+  'compose.override.yaml',
   'docker-compose.override.yml',
+  'docker-compose.override.yaml',
 ] as const;
 
 /** Raised when an input cannot be handed to Docker Compose safely. */
@@ -201,26 +205,20 @@ async function firstExisting(cwd: string, names: readonly string[]): Promise<str
 }
 
 /**
- * The files Compose will read for this invocation: the explicit `-f` values, or
- * the first auto-discovered name plus the first override name, which is exactly
- * what Compose selects. An unused same-named file is not read by Compose, so it
- * is not read here either.
+ * The files Compose will read for this invocation. Naming any `-f` file turns
+ * off Compose's discovery, override included, so an explicit list is measured
+ * exactly as given. With no `-f`, Compose selects the first existing base name
+ * and the first existing override name; a same-named file it does not select is
+ * not read here either.
  */
 async function resolveInputFiles(cwd: string, explicitFiles: readonly string[]): Promise<string[]> {
-  if (explicitFiles.length === 0) {
-    const base = await firstExisting(cwd, DISCOVERED_COMPOSE_NAMES);
-    if (!base) return [];
-    const override = await firstExisting(cwd, DISCOVERED_OVERRIDE_NAMES);
-    return override ? [base, override] : [base];
+  if (explicitFiles.length > 0) {
+    return explicitFiles.map((file) => path.resolve(cwd, file));
   }
-  const resolved = explicitFiles.map((file) => path.resolve(cwd, file));
-  const namesSingleDefaultBase = explicitFiles.length === 1
-    && (DISCOVERED_COMPOSE_NAMES as readonly string[]).includes(path.basename(explicitFiles[0]));
-  if (namesSingleDefaultBase) {
-    const override = await firstExisting(cwd, DISCOVERED_OVERRIDE_NAMES);
-    if (override && !resolved.includes(override)) resolved.push(override);
-  }
-  return resolved;
+  const base = await firstExisting(cwd, DISCOVERED_COMPOSE_NAMES);
+  if (!base) return [];
+  const override = await firstExisting(cwd, DISCOVERED_OVERRIDE_NAMES);
+  return override ? [base, override] : [base];
 }
 
 const SKIPPABLE_READ_ERRORS = new Set(['ENOENT', 'ENOTDIR', 'EISDIR', 'EACCES', 'EPERM', 'ELOOP']);
