@@ -66,8 +66,9 @@ ARG TARGETARCH
 
 WORKDIR /src
 COPY probe/go.mod ./
-COPY probe/main.go ./
+COPY probe/*.go ./
 RUN CGO_ENABLED=0 GOOS=linux GOARCH="${TARGETARCH}" go vet ./... \
+ && CGO_ENABLED=0 GOOS=linux GOARCH="${TARGETARCH}" go test ./... \
  && CGO_ENABLED=0 GOOS=linux GOARCH="${TARGETARCH}" \
     go build -trimpath -ldflags "-s -w -buildid=" -o /out/sencho-recovery-probe .
 

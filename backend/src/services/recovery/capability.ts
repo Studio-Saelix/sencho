@@ -8,6 +8,7 @@ import {
 import type {
   BackupEngine,
   RecoveryNodeDescriptor,
+  RestoreMode,
   VolumeProtectionStatus,
 } from './types';
 
@@ -81,7 +82,14 @@ export function getLocalVolumeProtectionStatus(): VolumeProtectionStatus {
 }
 
 export function buildLocalRecoveryNodeDescriptor(): RecoveryNodeDescriptor {
-  return { contractVersion: RECOVERY_CONTRACT_VERSION, volumeProtection: getLocalVolumeProtectionStatus() };
+  return {
+    contractVersion: RECOVERY_CONTRACT_VERSION,
+    volumeProtection: getLocalVolumeProtectionStatus(),
+    // What this build can execute, not what it is healthy enough to do right
+    // now: a node whose recovery gate is closed still speaks these shapes, and
+    // its own routes answer `503` with the reason.
+    restoreModes: ['new_volume', 'staged_overwrite'],
+  };
 }
 
 const NODE_UNAVAILABLE_REASONS: ReadonlySet<string> = new Set([
@@ -115,46 +123,106 @@ function nodeReportedStatus(version: number, state: unknown, reason: unknown): V
   return null;
 }
 
-/** Parse an untrusted descriptor from another node; null when it is not one. */
+/** The restore shapes a descriptor may name, in the order the hub prefers them. */
+const RESTORE_MODES: readonly RestoreMode[] = ['new_volume', 'staged_overwrite'];
+
+/**
+ * Parse an untrusted descriptor from another node; null when it is not one.
+ *
+ * `restoreModes` is read from a whitelist and a descriptor that omits it is read
+ * as `['new_volume']`, which is what a node that never heard of the field can
+ * do. A list that names anything else is refused rather than narrowed silently,
+ * because a hub that guessed would send a destructive request to a node that
+ * cannot carry it out.
+ */
 export function parseRecoveryNodeDescriptor(data: unknown): RecoveryNodeDescriptor | null {
   if (!data || typeof data !== 'object' || Array.isArray(data)) return null;
-  const { contractVersion, volumeProtection } = data as Record<string, unknown>;
+  const { contractVersion, volumeProtection, restoreModes } = data as Record<string, unknown>;
   if (typeof contractVersion !== 'number' || !Number.isInteger(contractVersion) || contractVersion < 1) return null;
   if (!volumeProtection || typeof volumeProtection !== 'object') return null;
   const vp = volumeProtection as Record<string, unknown>;
   if (vp.capability !== VOLUME_PROTECTION_CAPABILITY) return null;
   if (typeof vp.version !== 'number' || !Number.isInteger(vp.version)) return null;
   const reported = nodeReportedStatus(vp.version, vp.state, vp.reason);
-  return reported ? { contractVersion, volumeProtection: reported } : null;
+  if (!reported) return null;
+  const modes = parseRestoreModes(restoreModes);
+  if (modes === null) return null;
+  return { contractVersion, volumeProtection: reported, restoreModes: modes };
+}
+
+/** The modes a descriptor names, or null when the list is not one this build reads. */
+function parseRestoreModes(value: unknown): RestoreMode[] | null {
+  if (value === undefined) return ['new_volume'];
+  if (!Array.isArray(value)) return null;
+  const modes: RestoreMode[] = [];
+  for (const item of value) {
+    if (typeof item !== 'string' || !RESTORE_MODES.includes(item as RestoreMode)) return null;
+    if (!modes.includes(item as RestoreMode)) modes.push(item as RestoreMode);
+  }
+  return modes;
 }
 
 /**
- * The hub's view of a remote node's volume protection, from its descriptor
- * read. An old node answers 404 for the descriptor route: update required. A
- * node that cannot be reached is unknown; one that answers with a refusal or an
- * error is unknown too, but says so, so a revoked token does not read as a
- * network fault.
+ * The hub's view of a remote node's volume protection and restore shapes, from
+ * its descriptor read. An old node answers 404 for the descriptor route: update
+ * required. A node that cannot be reached is unknown; one that answers with a
+ * refusal or an error is unknown too, but says so, so a revoked token does not
+ * read as a network fault.
+ *
+ * `restoreModes` is null whenever the status is not the node's own answer: a hub
+ * that cannot read the descriptor must not assume what the node can execute.
  */
-export function resolveRemoteVolumeProtection(read: NodeProxyJsonRead): VolumeProtectionStatus {
+export interface RemoteRecoveryRead {
+  status: VolumeProtectionStatus;
+  restoreModes: RestoreMode[] | null;
+}
+
+export function resolveRemoteRecoveryRead(read: NodeProxyJsonRead): RemoteRecoveryRead {
   switch (read.kind) {
     case 'route_missing':
-      return { ...KEY, state: 'update_required', reason: 'node_contract_older' };
+      return { status: { ...KEY, state: 'update_required', reason: 'node_contract_older' }, restoreModes: null };
     case 'no_target':
     case 'transport':
-      return { ...KEY, state: 'unknown', reason: 'node_unreachable' };
+      return { status: { ...KEY, state: 'unknown', reason: 'node_unreachable' }, restoreModes: null };
     case 'http':
-      return read.status === 401 || read.status === 403
-        ? { ...KEY, state: 'unknown', reason: 'node_refused' }
-        : { ...KEY, state: 'unknown', reason: 'node_error' };
+      return {
+        status: read.status === 401 || read.status === 403
+          ? { ...KEY, state: 'unknown', reason: 'node_refused' }
+          : { ...KEY, state: 'unknown', reason: 'node_error' },
+        restoreModes: null,
+      };
     case 'ok':
       break;
   }
   const descriptor = parseRecoveryNodeDescriptor(read.data);
-  if (!descriptor) return { ...KEY, state: 'unknown', reason: 'descriptor_invalid' };
-  if (descriptor.contractVersion < RECOVERY_CONTRACT_VERSION) return { ...KEY, state: 'update_required', reason: 'node_contract_older' };
-  if (descriptor.contractVersion > RECOVERY_CONTRACT_VERSION) return { ...KEY, state: 'update_required', reason: 'hub_contract_older' };
+  if (!descriptor) {
+    return { status: { ...KEY, state: 'unknown', reason: 'descriptor_invalid' }, restoreModes: null };
+  }
+  if (descriptor.contractVersion !== RECOVERY_CONTRACT_VERSION) {
+    return {
+      status: {
+        ...KEY,
+        state: 'update_required',
+        reason: descriptor.contractVersion < RECOVERY_CONTRACT_VERSION ? 'node_contract_older' : 'hub_contract_older',
+      },
+      restoreModes: null,
+    };
+  }
   const vp = descriptor.volumeProtection;
-  if (vp.version < VOLUME_PROTECTION_CAPABILITY_VERSION) return { ...KEY, state: 'update_required', reason: 'node_contract_older' };
-  if (vp.version > VOLUME_PROTECTION_CAPABILITY_VERSION) return { ...KEY, state: 'update_required', reason: 'hub_contract_older' };
-  return vp;
+  if (vp.version !== VOLUME_PROTECTION_CAPABILITY_VERSION) {
+    return {
+      status: {
+        ...KEY,
+        state: 'update_required',
+        reason: vp.version < VOLUME_PROTECTION_CAPABILITY_VERSION ? 'node_contract_older' : 'hub_contract_older',
+      },
+      restoreModes: null,
+    };
+  }
+  return { status: vp, restoreModes: descriptor.restoreModes };
+}
+
+/** The status alone, for callers that only describe the node. */
+export function resolveRemoteVolumeProtection(read: NodeProxyJsonRead): VolumeProtectionStatus {
+  return resolveRemoteRecoveryRead(read).status;
 }

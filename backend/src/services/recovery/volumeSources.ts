@@ -155,6 +155,16 @@ export interface ProbeReport {
   uid: number;
   gid: number;
   mode: number;
+  /** Bytes available to a write, when the probe reported statfs. */
+  free: number | null;
+  /**
+   * The root entries that are one of Sencho's restore work directories, when the
+   * probe was asked to list them: at most 8, matched by name only (the prefix plus
+   * an intent UUID; a file with that name is listed too). A prefixed entry of any
+   * other shape is user data and is not listed. `null` means the probe was not
+   * asked, or answered without the field, which is not the same as an empty volume.
+   */
+  workDirs: string[] | null;
 }
 
 /** Parse the probe's one JSON line. Anything else is not a report. */
@@ -169,15 +179,74 @@ export function parseProbeReport(line: string): ProbeReport | null {
     for (const key of nums) {
       if (typeof record[key] !== 'number' || !Number.isSafeInteger(record[key])) return null;
     }
+    const free = record.free;
+    if (free !== undefined && (typeof free !== 'number' || !Number.isSafeInteger(free) || free < 0)) return null;
+    const workDirs = record.work_dirs;
+    if (workDirs !== undefined && (!Array.isArray(workDirs) || workDirs.some((name) => typeof name !== 'string'))) return null;
     return {
       dev: record.dev as number,
       ino: record.ino as number,
       uid: record.uid as number,
       gid: record.gid as number,
       mode: record.mode as number,
+      free: typeof free === 'number' ? free : null,
+      workDirs: Array.isArray(workDirs) ? (workDirs as string[]) : null,
     };
   } catch {
-    // Anything that is not one JSON object of integers is not a probe report.
+    // Anything that is not one JSON object of integers, with an optional list of
+    // names, is not a probe report.
+    return null;
+  }
+}
+
+/**
+ * Read the probe's report for one volume. It reads metadata and statfs only,
+ * never a file, so it is safe on a live volume.
+ */
+export async function probeVolumeReport(input: {
+  runner: RecoveryHelperRunner;
+  operationId: string;
+  volumeName: string;
+  profile?: HelperProfile;
+  /** Also list the restore work directories at the root (one directory listing). */
+  listWorkDirs?: boolean;
+}): Promise<ProbeReport> {
+  const lines: string[] = [];
+  const result = await input.runner.run({
+    profile: input.profile ?? 'probe',
+    operationId: input.operationId,
+    cmd: input.listWorkDirs
+      ? [RECOVERY_HELPER_PROBE_PATH, '/data', '--work-dirs']
+      : [RECOVERY_HELPER_PROBE_PATH, '/data'],
+    mounts: { source: input.volumeName },
+    onStdoutLine: (line) => {
+      if (lines.length === 0) lines.push(line);
+    },
+  });
+  if (result.exitCode !== 0) {
+    // Keep the probe's own reason as the cause so the node log names the real
+    // failure (a refused directory listing, for instance) instead of only the
+    // class. The cause never reaches an API answer: those carry `errorClass` and
+    // the fixed `detail` sentence.
+    const error = new RecoveryError(result.exitCode === null ? 'capability_unavailable' : 'identity_unknown');
+    const cause = probeFailureCause(lines[0]);
+    if (cause) error.cause = new Error(cause);
+    throw error;
+  }
+  const report = parseProbeReport(lines[0] ?? '');
+  if (!report) throw new RecoveryError('identity_unknown');
+  return report;
+}
+
+/** The probe's `{"error": ...}` line, kept for the log only. */
+function probeFailureCause(line: string | undefined): string | null {
+  if (!line) return null;
+  try {
+    const parsed: unknown = JSON.parse(line);
+    if (!parsed || typeof parsed !== 'object') return null;
+    const reason = (parsed as Record<string, unknown>).error;
+    return typeof reason === 'string' && reason.length > 0 ? reason : null;
+  } catch {
     return null;
   }
 }
@@ -196,21 +265,7 @@ export async function probeGenerationToken(input: {
   createdAt: string | null;
   profile?: HelperProfile;
 }): Promise<string> {
-  const lines: string[] = [];
-  const result = await input.runner.run({
-    profile: input.profile ?? 'probe',
-    operationId: input.operationId,
-    cmd: [RECOVERY_HELPER_PROBE_PATH, '/data'],
-    mounts: { source: input.volumeName },
-    onStdoutLine: (line) => {
-      if (lines.length === 0) lines.push(line);
-    },
-  });
-  if (result.exitCode !== 0) {
-    throw new RecoveryError(result.exitCode === null ? 'capability_unavailable' : 'identity_unknown');
-  }
-  const report = parseProbeReport(lines[0] ?? '');
-  if (!report) throw new RecoveryError('identity_unknown');
+  const report = await probeVolumeReport(input);
   return `${input.createdAt ?? 'unknown'}|${report.dev}:${report.ino}`;
 }
 

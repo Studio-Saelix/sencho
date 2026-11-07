@@ -1,6 +1,8 @@
 import {
+  HELPER_RESTORE_MOUNT,
   RecoveryHelperRunner,
   resticCommand,
+  type HelperProfile,
   type HelperRunSpec,
 } from './helperRunner';
 import {
@@ -8,11 +10,14 @@ import {
   applyRestoreLine,
   classifyBackupRun,
   classifyRestoreRun,
+  helperFailureNote,
   newBackupAccumulator,
   newRestoreAccumulator,
 } from './resticOutput';
+import { sanitizeForLog } from '../../../utils/safeLog';
 import { consistencyFromObservations, type InUseObservation } from '../volumeSources';
 import { RECOVERY_CONTRACT_VERSION } from '../types';
+import { RECOVERY_WORK_DIR_GLOB } from '../restoreIntents';
 import type {
   BackupEngine,
   CreatePointRequest,
@@ -81,7 +86,15 @@ export class ResticEngine implements BackupEngine {
     ];
 
     const accumulator = newBackupAccumulator();
-    const args = ['backup', '/data', '--json', '--host', 'sencho'];
+    // A staged overwrite's work directory holds the replaced data and a copy of the
+    // restored data, not the volume's own content. A point that carried one would
+    // put it back on restore, and the next overwrite of that volume would refuse it.
+    // The pattern is anchored at the volume root and matches only the intent-id
+    // shape Sencho creates, so a user's top-level entry with the prefix and any
+    // other name is captured like any other data. Restic does not report an
+    // excluded path as a skipped one, so the preview tells the operator that a
+    // point does not carry the directory.
+    const args = ['backup', '/data', '--json', '--host', 'sencho', '--exclude', `/data/${RECOVERY_WORK_DIR_GLOB}`];
     for (const tag of tags) args.push('--tag', tag);
     const parent = this.deps.parentSnapshot(request.storage, request.repository.id);
     if (parent) args.push('--parent', parent);
@@ -114,7 +127,16 @@ export class ResticEngine implements BackupEngine {
       stderrTail: helperResult.stderrTail,
     });
     if (outcome.status === 'cancelled') return { ok: false, errorClass: 'interrupted' };
-    if (outcome.status === 'failed') return { ok: false, errorClass: outcome.errorClass };
+    if (outcome.status === 'failed') {
+      console.warn(
+        '[Recovery] Backup helper for operation %s failed with %s, exit %s: %s',
+        sanitizeForLog(ctx.operationId),
+        outcome.errorClass,
+        helperResult.exitCode ?? 'none',
+        helperFailureNote(helperResult.stderrTail, [], [this.deps.secret]),
+      );
+      return { ok: false, errorClass: outcome.errorClass };
+    }
 
     // The generation token is re-read after the capture: a volume recreated
     // while it was being read gives a point that describes bytes that no longer
@@ -160,24 +182,43 @@ export class ResticEngine implements BackupEngine {
   }
 
   async restore(intent: RestoreIntent, ctx: EngineExecutionContext): Promise<EngineResult<RestoreEvidence>> {
-    if (intent.target.mode !== 'new_volume') return { ok: false, errorClass: 'invalid_request' };
     const repository = this.deps.repositoryFor(intent.repositoryId);
     if (!repository) return { ok: false, errorClass: 'repository_unavailable' };
     if (!intent.snapshotId) return { ok: false, errorClass: 'invalid_request' };
 
+    let args: string[];
+    let profile: Extract<HelperProfile, 'restore' | 'materialize'> = 'restore';
+    if (intent.target.mode === 'new_volume') {
+      // `snapshot:/data` puts the captured root's contents at the target root,
+      // which is the right shape for a volume Sencho created.
+      // A point captured before the capture excluded work directories can carry one
+      // at its root, which would make the new volume refuse its first overwrite.
+      args = ['restore', `${intent.snapshotId}:/data`, '--target', HELPER_RESTORE_MOUNT, '--exclude', `/${RECOVERY_WORK_DIR_GLOB}`];
+    } else if (intent.target.mode === 'staged_overwrite') {
+      // The whole snapshot, into a work directory inside the live volume. That
+      // gives `.../incoming/data/...`, so the captured root's own owner and mode
+      // arrive as an ordinary entry the swap can apply to the volume root.
+      const workDir = intent.target.workDir;
+      if (!/^\.sencho-restore-[0-9a-f-]{36}\/incoming$/.test(workDir)) {
+        return { ok: false, errorClass: 'invalid_request' };
+      }
+      args = [
+        'restore', intent.snapshotId, '--target', `${HELPER_RESTORE_MOUNT}/${workDir}`,
+        '--exclude', `/data/${RECOVERY_WORK_DIR_GLOB}`,
+      ];
+      // The live root may belong to the application, which a plain root cannot write.
+      profile = 'materialize';
+    } else {
+      return { ok: false, errorClass: 'invalid_request' };
+    }
+
     const accumulator = newRestoreAccumulator();
     const spec: HelperRunSpec = {
-      profile: 'restore',
+      profile,
       operationId: ctx.operationId,
       // `--no-lock`: the repository mount is read-only and Sencho's repository
       // lock is the mutual exclusion, so restic must not try to write a lock.
-      cmd: resticCommand('/repo', [
-        'restore', `${intent.snapshotId}:/data`,
-        '--target', '/restore',
-        '--verify',
-        '--json',
-        '--no-lock',
-      ]),
+      cmd: resticCommand('/repo', [...args, '--verify', '--json', '--no-lock']),
       mounts: { repository: repository.locator, target: intent.target.volumeName },
       stdinSecret: this.deps.secret,
       signal: ctx.signal,
@@ -202,7 +243,19 @@ export class ResticEngine implements BackupEngine {
       stderrTail: result.stderrTail,
     });
     if (outcome.status === 'cancelled') return { ok: false, errorClass: 'interrupted' };
-    if (outcome.status === 'failed') return { ok: false, errorClass: outcome.errorClass };
+    if (outcome.status === 'failed') {
+      // The helper container is removed when it exits and the API answers the
+      // class only, so this line is the one place the cause survives.
+      console.warn(
+        '[Recovery] Restore helper (%s) for operation %s failed with %s, exit %s: %s',
+        profile,
+        sanitizeForLog(ctx.operationId),
+        outcome.errorClass,
+        result.exitCode ?? 'none',
+        helperFailureNote(result.stderrTail, accumulator.sampleErrors, [this.deps.secret]),
+      );
+      return { ok: false, errorClass: outcome.errorClass };
+    }
     return {
       ok: true,
       evidence: {

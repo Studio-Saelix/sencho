@@ -437,6 +437,134 @@ describe('create point', () => {
   });
 });
 
+describe('a capture while an overwrite of the volume is open', () => {
+  /** An overwrite of VOLUME at `phase`, with the operation it ended and the storage lock released, as a `partial` restore leaves them. */
+  async function seedOpenOverwrite(
+    seeded: Awaited<ReturnType<typeof seedProtectableVolume>>,
+    phase: 'swapped' | 'committed' | 'rolled_back' | 'completion_unknown',
+    fenceState: 'held' | 'released' | 'release_failed',
+    volume = VOLUME,
+  ) {
+    const point = points.RecoveryPointStore.getInstance().begin({
+      kind: 'root',
+      storageId: seeded.storage.id,
+      expectedGenerationToken: 'token-1',
+      repositoryId: seeded.repositoryId,
+      trigger: 'manual',
+      actor: 'alice',
+      sourceOperationId: 'op-src',
+      sourceNodeKey: ENGINE_KEY,
+      engineId: 'restic',
+    });
+    points.RecoveryPointStore.getInstance().finalize(point.id, {
+      status: 'succeeded',
+      evidence: {
+        snapshotId: 'snap-1',
+        capture: { fileCount: 3, byteCount: 300, skippedCount: 0 },
+        exclusions: [],
+        consistency: 'crash_consistent_live',
+      },
+    });
+    const operationId = `op-restore-${phase}-${fenceState}-${volume}`;
+    const db = recoveryDbModule.recoveryDb();
+    db.prepare(`INSERT INTO recovery_operations (id, idempotency_key, kind, storage_id, point_id, actor, transport, state, error_class, process_epoch, created_at, updated_at)
+      VALUES (?, ?, 'restore', ?, ?, 'alice', 'local', 'partial', 'cleanup_failed', 'old', 1, 1)`)
+      .run(operationId, `key-${operationId}`, seeded.storage.id, point.id);
+    const intent = intents.RestoreIntentStore.getInstance().recordOverwrite({
+      operationId,
+      pointId: point.id,
+      targetVolume: volume,
+      actor: 'alice',
+      processEpoch: 'old',
+      stagingVolume: 'sencho-recovery-stage-test',
+      expectedGenerationToken: 'token-1',
+    });
+    db.prepare('UPDATE recovery_restore_intents SET phase = ?, fence_state = ? WHERE id = ?').run(phase, fenceState, intent.id);
+    return intent;
+  }
+
+  const captureRequest = (key: string) => ({
+    nodeId, volumeName: VOLUME, actor: 'alice', idempotencyKey: key,
+    requestDigest: runner.sha256Digest(['create_point', VOLUME]), transport: 'local' as const, authorize: allowAll,
+  });
+
+  for (const [phase, fenceState] of [
+    ['swapped', 'held'],
+    ['swapped', 'released'],
+    ['committed', 'held'],
+    ['committed', 'release_failed'],
+    ['rolled_back', 'release_failed'],
+    ['completion_unknown', 'held'],
+  ] as const) {
+    it(`refuses a capture while a restore at ${phase} still has its fence ${fenceState}, and leaves nothing behind`, async () => {
+      stubDocker(fakeDocker({ volumes: [{ name: VOLUME, labels: {} }] }));
+      const seeded = await seedProtectableVolume();
+      await seedOpenOverwrite(seeded, phase, fenceState);
+      runner.RecoveryEngineService.setEngineFactoryForTests(() => engineReturning({}) as never);
+      service().markReadyForTests();
+      const pointsBefore = recoveryDbModule.recoveryDb().prepare('SELECT COUNT(*) AS n FROM recovery_points').get();
+      const operationsBefore = recoveryDbModule.recoveryDb().prepare('SELECT COUNT(*) AS n FROM recovery_operations').get();
+
+      await expect(service().admitCreatePoint(captureRequest('key-owed'))).rejects.toMatchObject({ errorClass: 'lock_held' });
+
+      expect(recoveryDbModule.recoveryDb().prepare('SELECT COUNT(*) AS n FROM recovery_points').get()).toEqual(pointsBefore);
+      expect(recoveryDbModule.recoveryDb().prepare('SELECT COUNT(*) AS n FROM recovery_operations').get()).toEqual(operationsBefore);
+      expect(operations.RecoveryOperationStore.getInstance().getLock('storage', seeded.storage.storageKey)).toBeNull();
+    });
+  }
+
+  it('captures once the restore has settled and its fence is released, with the same key', async () => {
+    stubDocker(fakeDocker({ volumes: [{ name: VOLUME, labels: {} }] }));
+    const seeded = await seedProtectableVolume();
+    const intent = await seedOpenOverwrite(seeded, 'swapped', 'held');
+    runner.RecoveryEngineService.setEngineFactoryForTests(() => engineReturning({}) as never);
+    service().markReadyForTests();
+    await expect(service().admitCreatePoint(captureRequest('key-after'))).rejects.toMatchObject({ errorClass: 'lock_held' });
+
+    recoveryDbModule.recoveryDb().prepare("UPDATE recovery_restore_intents SET phase = 'committed', fence_state = 'released' WHERE id = ?").run(intent.id);
+    const admitted = await service().admitCreatePoint(captureRequest('key-after'));
+    expect(admitted.replayed).toBe(false);
+    await service().whenIdleForTests();
+    expect(operations.RecoveryOperationStore.getInstance().get(admitted.operation.id)?.state).toBe('succeeded');
+  });
+
+  it('still answers a replay of an earlier capture while a restore is open', async () => {
+    stubDocker(fakeDocker({ volumes: [{ name: VOLUME, labels: {} }] }));
+    const seeded = await seedProtectableVolume();
+    runner.RecoveryEngineService.setEngineFactoryForTests(() => engineReturning({}) as never);
+    service().markReadyForTests();
+    const first = await service().admitCreatePoint(captureRequest('key-replay'));
+    await service().whenIdleForTests();
+    await seedOpenOverwrite(seeded, 'swapped', 'released');
+
+    const replay = await service().admitCreatePoint(captureRequest('key-replay'));
+    expect(replay.replayed).toBe(true);
+    expect(replay.operation.id).toBe(first.operation.id);
+  });
+
+  it('does not refuse a capture for a restore that settled and released its fence', async () => {
+    stubDocker(fakeDocker({ volumes: [{ name: VOLUME, labels: {} }] }));
+    const seeded = await seedProtectableVolume();
+    await seedOpenOverwrite(seeded, 'rolled_back', 'released');
+    runner.RecoveryEngineService.setEngineFactoryForTests(() => engineReturning({}) as never);
+    service().markReadyForTests();
+    const admitted = await service().admitCreatePoint(captureRequest('key-settled'));
+    expect(admitted.replayed).toBe(false);
+    await service().whenIdleForTests();
+  });
+
+  it('does not refuse a capture for an open restore of another volume', async () => {
+    stubDocker(fakeDocker({ volumes: [{ name: VOLUME, labels: {} }] }));
+    const seeded = await seedProtectableVolume();
+    await seedOpenOverwrite(seeded, 'swapped', 'held', 'other_volume');
+    runner.RecoveryEngineService.setEngineFactoryForTests(() => engineReturning({}) as never);
+    service().markReadyForTests();
+    const admitted = await service().admitCreatePoint(captureRequest('key-other'));
+    expect(admitted.replayed).toBe(false);
+    await service().whenIdleForTests();
+  });
+});
+
 describe('repository provisioning', () => {
   const HELPER_PIN = 'SENCHO_RECOVERY_HELPER_IMAGE';
   let previousPin: string | undefined;
