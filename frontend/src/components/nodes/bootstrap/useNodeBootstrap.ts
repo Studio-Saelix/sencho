@@ -6,7 +6,7 @@ import {
   fetchBootstrapCapabilities,
   runBootstrapPreflight,
 } from './bootstrapApi';
-import { invalidationForField, strongerInvalidation } from './invalidation';
+import { invalidationForField, strongestInvalidation } from './invalidation';
 import { pathSeparationError, validateBootstrapPath, type BootstrapPathKind } from './pathValidation';
 import type {
   BootstrapCapabilities,
@@ -95,7 +95,8 @@ export function useNodeBootstrap({ open, api }: UseNodeBootstrapOptions) {
   const [configRevision, setConfigRevision] = useState(0);
   const [resultRevision, setResultRevision] = useState<number | null>(null);
   const [advancedOpen, setAdvancedOpen] = useState(false);
-  const [invalidated, setInvalidated] = useState<BootstrapInvalidation | null>(null);
+  const [invalidations, setInvalidations] = useState<readonly BootstrapInvalidation[]>([]);
+  const invalidated = strongestInvalidation(invalidations);
   const abortRef = useRef<AbortController | null>(null);
   // The live preflight request, if any. A preflight reply is applied only while
   // its own controller is still here, so any edit that discards the inspection
@@ -153,7 +154,7 @@ export function useNodeBootstrap({ open, api }: UseNodeBootstrapOptions) {
     setFieldErrors([]);
     setResultRevision(null);
     setAdvancedOpen(false);
-    setInvalidated(null);
+    setInvalidations([]);
     dirtyFieldsRef.current.clear();
   }, [capabilities.defaults.agentDir, capabilities.defaults.composeDir]);
 
@@ -167,7 +168,7 @@ export function useNodeBootstrap({ open, api }: UseNodeBootstrapOptions) {
       preflightRef.current = null;
       setForm((current) => ({ ...current, privateKey: '', passphrase: '' }));
       setBusy(null);
-      setInvalidated(null);
+      setInvalidations([]);
       return;
     }
     const controller = new AbortController();
@@ -199,7 +200,7 @@ export function useNodeBootstrap({ open, api }: UseNodeBootstrapOptions) {
     const reason = invalidationForField(field);
     const toTarget = reason === 'target';
     const hadResult = resultRef.current !== null || discardedInFlight;
-    setInvalidated((current) => (hadResult || current ? strongerInvalidation(current, reason) : current));
+    setInvalidations((current) => (hadResult || current.length > 0 ? [...new Set([...current, reason])] : current));
     setResult(null);
     setResultRevision(null);
     // The pin is a host property, so an edit that is not to the SSH target made
@@ -293,7 +294,7 @@ export function useNodeBootstrap({ open, api }: UseNodeBootstrapOptions) {
       setSupersededFingerprint(null);
       // The target banner asks for exactly this check, so it is done. The
       // key, paths and name banners ask for a preflight and stay up.
-      setInvalidated((current) => (current === 'target' ? null : current));
+      setInvalidations((current) => current.filter((reason) => reason !== 'target'));
       setStep('preflight');
     } catch (caught: unknown) {
       if (isAbort(caught)) return;
@@ -342,7 +343,7 @@ export function useNodeBootstrap({ open, api }: UseNodeBootstrapOptions) {
       if (!isCurrent()) return;
       setResult(response);
       setResultRevision(revision);
-      setInvalidated(null);
+      setInvalidations([]);
       // The server pinned (or replaced) the reviewed key as part of this run.
       setHostKey((current) => (
         current ? { ...current, trust: 'trusted', pinnedFingerprint: current.fingerprint } : current

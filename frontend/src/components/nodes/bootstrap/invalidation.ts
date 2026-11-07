@@ -21,12 +21,14 @@ export function invalidationForField(field: keyof BootstrapForm): BootstrapInval
   }
 }
 
-export function strongerInvalidation(
-  current: BootstrapInvalidation | null,
-  next: BootstrapInvalidation,
-): BootstrapInvalidation {
-  if (!current) return next;
-  return RANK[next] > RANK[current] ? next : current;
+// Every reason raised since the last result is kept, so clearing the SSH target
+// reason after a host key check lets a key, paths or name reason still show.
+export function strongestInvalidation(reasons: readonly BootstrapInvalidation[]): BootstrapInvalidation | null {
+  let strongest: BootstrapInvalidation | null = null;
+  for (const reason of reasons) {
+    if (strongest === null || RANK[reason] > RANK[strongest]) strongest = reason;
+  }
+  return strongest;
 }
 
 // Keep in step with the banner table in docs/features/node-bootstrap.mdx.

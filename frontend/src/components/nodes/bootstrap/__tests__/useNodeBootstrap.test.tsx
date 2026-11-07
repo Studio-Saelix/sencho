@@ -245,6 +245,31 @@ describe('useNodeBootstrap', () => {
     });
   });
 
+  it.each([
+    [[['composeDir', '/srv/a']], 'paths'],
+    [[['privateKey', 'new-key']], 'key'],
+    [[['targetName', 'other-name']], 'name'],
+    [[['composeDir', '/srv/a'], ['privateKey', 'new-key']], 'key'],
+  ] as const)('shows the banner of an earlier non-target edit %j (%s) once the host key check clears the target banner', async (edits, reason) => {
+    const api = fakeApi();
+    const hook = renderHook(() => useNodeBootstrap({ open: true, api }));
+    await act(async () => { fillTarget(hook.result.current); });
+    await act(async () => { await hook.result.current.checkHostKey(); });
+    await act(async () => { await hook.result.current.runPreflight(); });
+    for (const [field, value] of edits) {
+      await act(async () => { hook.result.current.setField(field, value); });
+    }
+    await act(async () => { hook.result.current.setField('username', 'deploy'); });
+    for (const [field, value] of edits) {
+      await act(async () => { hook.result.current.setField(field, `${value}-2`); });
+    }
+    expect(hook.result.current.invalidated).toBe('target');
+    await act(async () => { await hook.result.current.checkHostKey(); });
+    expect(hook.result.current.invalidated).toBe(reason);
+    await act(async () => { await hook.result.current.runPreflight(); });
+    expect(hook.result.current.invalidated).toBeNull();
+  });
+
   it('shows no banner for an edit made before any preflight result exists', async () => {
     const api = fakeApi();
     const { result: hook } = renderHook(() => useNodeBootstrap({ open: true, api }));

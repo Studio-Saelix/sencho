@@ -303,6 +303,17 @@ describe('BootstrapServerDialog stale-result banner', () => {
     expect(screen.queryByText(/The SSH target changed\./)).not.toBeInTheDocument();
   });
 
+  it('shows the key banner again after the host key check when the key was edited before the host', async () => {
+    const user = await reachResult();
+    await user.type(screen.getByLabelText('Private key'), 'x');
+    await user.type(screen.getByLabelText('Host'), 'x');
+    expect(await screen.findByText(/The SSH target changed\./)).toBeInTheDocument();
+    await user.type(screen.getByLabelText('Host'), '{Backspace}');
+    await user.click(screen.getByRole('button', { name: 'Check host key' }));
+    expect(await screen.findByText(/The SSH key changed\. The previous preflight and plan no longer apply/)).toBeInTheDocument();
+    expect(screen.queryByText(/The SSH target changed\./)).not.toBeInTheDocument();
+  });
+
   it('says the SSH key changed after the private key is edited', async () => {
     const user = await reachResult();
     await user.type(screen.getByLabelText('Private key'), 'x');
