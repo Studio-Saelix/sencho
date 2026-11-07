@@ -59,6 +59,15 @@ function clearSecretsTables(): void {
     db.prepare('DELETE FROM secrets').run();
 }
 
+/** The digests an apply must present, taken from the preview it sends. */
+function fingerprintsFrom(targets: Array<{ nodeId: number; fingerprint: string | null }>): Record<string, string> {
+    const out: Record<string, string> = {};
+    for (const target of targets) {
+        if (target.fingerprint) out[String(target.nodeId)] = target.fingerprint;
+    }
+    return out;
+}
+
 let bundleId: number;
 
 beforeAll(async () => {
@@ -390,7 +399,7 @@ describe('PATCH /api/secrets/:id writes one key and keeps the rest', () => {
 });
 
 describe('push and import previews carry change classes only', () => {
-    it('omits before/after values from the push preview', async () => {
+    it('omits before/after values from the push preview and returns the reviewed digests', async () => {
         const composeDir = process.env.COMPOSE_DIR!;
         const stackDir = path.join(composeDir, 'masked-push');
         fs.mkdirSync(stackDir, { recursive: true });
@@ -403,8 +412,10 @@ describe('push and import previews carry change classes only', () => {
             .set('Authorization', `Bearer ${adminToken()}`)
             .send({ selector: { type: 'nodes', ids: [localNode.id] }, stackName: 'masked-push', envFileBasename: '.env' });
         expect(res.status).toBe(200);
-        const entry = res.body[0];
+        expect(res.body.version).toBe(1);
+        const entry = res.body.targets[0];
         expect(entry.changed).toBe(1);
+        expect(entry.fingerprint).toMatch(/^[a-f0-9]{64}$/);
         expect(entry.diff).toEqual(expect.arrayContaining([{ key: 'API_KEY', status: 'changed' }]));
         const body = JSON.stringify(res.body);
         expect(body).not.toContain('old-api');
@@ -636,11 +647,15 @@ describe('an unreadable stored payload is an error, never an empty bundle', () =
             stackName: 'unreadable-push',
             envFileBasename: '.env',
         };
-        for (const path of [`/api/secrets/${bundleId}/push/preview`, `/api/secrets/${bundleId}/push`]) {
+        const calls: Array<[string, Record<string, unknown>]> = [
+            [`/api/secrets/${bundleId}/push/preview`, body],
+            [`/api/secrets/${bundleId}/push`, { ...body, expectedVersion: 1, expectedFingerprints: {} }],
+        ];
+        for (const [path, payload] of calls) {
             const res = await request(app)
                 .post(path)
                 .set('Authorization', `Bearer ${adminToken()}`)
-                .send(body);
+                .send(payload);
             expect(res.status).toBe(500);
             expect(res.body.code).toBe('SECRET_PAYLOAD_UNREADABLE');
             expect(JSON.stringify(res.body)).not.toContain('super-secret-api');
@@ -747,6 +762,152 @@ describe('an import source that does not exist is reported, not read as empty', 
             .send({ nodeId: 99999, stackName: 'anything', envFileBasename: '.env' });
         expect(res.status).toBe(404);
         expect(res.body.code).toBe('IMPORT_SOURCE_NOT_FOUND');
+    });
+});
+
+describe('a push applies exactly the previewed bundle version and target env', () => {
+    function seedStack(name: string, envText: string): string {
+        const composeDir = process.env.COMPOSE_DIR!;
+        const stackDir = path.join(composeDir, name);
+        fs.mkdirSync(stackDir, { recursive: true });
+        fs.writeFileSync(path.join(stackDir, '.env'), envText);
+        fs.writeFileSync(path.join(stackDir, 'compose.yaml'), 'services:\n  app:\n    image: nginx\n');
+        return stackDir;
+    }
+
+    async function preview(selector: { type: 'nodes'; ids: number[] }, stackName: string) {
+        const res = await request(app)
+            .post(`/api/secrets/${bundleId}/push/preview`)
+            .set('Authorization', `Bearer ${adminToken()}`)
+            .send({ selector, stackName, envFileBasename: '.env' });
+        expect(res.status).toBe(200);
+        return res.body as { version: number; targets: Array<{ nodeId: number; fingerprint: string | null }> };
+    }
+
+    it('refuses a push whose bundle moved after the preview', async () => {
+        const stackDir = seedStack('stale-push', 'EXISTING_ONE=old\n');
+        const localNode = DatabaseService.getInstance().getNodes().find(n => n.type === 'local')!;
+        const selector = { type: 'nodes' as const, ids: [localNode.id] };
+        const plan = await preview(selector, 'stale-push');
+        expect(plan.version).toBe(1);
+
+        const patched = await request(app)
+            .patch(`/api/secrets/${bundleId}`)
+            .set('Authorization', `Bearer ${adminToken()}`)
+            .send({ expectedVersion: 1, ops: [{ op: 'set', key: 'EXISTING_ONE', value: 'CHANGED_AFTER_PREVIEW' }] });
+        expect(patched.status).toBe(200);
+        expect(patched.body.version).toBe(2);
+
+        const push = await request(app)
+            .post(`/api/secrets/${bundleId}/push`)
+            .set('Authorization', `Bearer ${adminToken()}`)
+            .send({
+                selector,
+                stackName: 'stale-push',
+                envFileBasename: '.env',
+                expectedVersion: plan.version,
+                expectedFingerprints: fingerprintsFrom(plan.targets),
+            });
+        expect(push.status).toBe(409);
+        expect(push.body.code).toBe('VERSION_CONFLICT');
+        expect(push.body.currentVersion).toBe(2);
+        expect(fs.readFileSync(path.join(stackDir, '.env'), 'utf-8')).toBe('EXISTING_ONE=old\n');
+        expect(DatabaseService.getInstance().listSecretPushes(bundleId)).toHaveLength(0);
+    });
+
+    it('refuses a push whose target env file changed after the preview', async () => {
+        const stackDir = seedStack('moving-push', 'FIRST=one\n');
+        const localNode = DatabaseService.getInstance().getNodes().find(n => n.type === 'local')!;
+        const selector = { type: 'nodes' as const, ids: [localNode.id] };
+        const plan = await preview(selector, 'moving-push');
+
+        fs.writeFileSync(path.join(stackDir, '.env'), 'FIRST=one\nSNUCK_IN=two\n');
+        const push = await request(app)
+            .post(`/api/secrets/${bundleId}/push`)
+            .set('Authorization', `Bearer ${adminToken()}`)
+            .send({
+                selector,
+                stackName: 'moving-push',
+                envFileBasename: '.env',
+                expectedVersion: plan.version,
+                expectedFingerprints: fingerprintsFrom(plan.targets),
+            });
+        expect(push.status).toBe(409);
+        expect(push.body.code).toBe('PUSH_TARGET_CHANGED');
+        expect(fs.readFileSync(path.join(stackDir, '.env'), 'utf-8')).toBe('FIRST=one\nSNUCK_IN=two\n');
+        expect(DatabaseService.getInstance().listSecretPushes(bundleId)).toHaveLength(0);
+    });
+
+    it('refuses a push to a readable target the preview never read', async () => {
+        const stackDir = seedStack('unpreviewed-push', 'FIRST=one\n');
+        const localNode = DatabaseService.getInstance().getNodes().find(n => n.type === 'local')!;
+        const selector = { type: 'nodes' as const, ids: [localNode.id] };
+        const plan = await preview(selector, 'unpreviewed-push');
+
+        const push = await request(app)
+            .post(`/api/secrets/${bundleId}/push`)
+            .set('Authorization', `Bearer ${adminToken()}`)
+            .send({
+                selector,
+                stackName: 'unpreviewed-push',
+                envFileBasename: '.env',
+                expectedVersion: plan.version,
+                expectedFingerprints: {},
+            });
+        expect(push.status).toBe(409);
+        expect(push.body.code).toBe('PUSH_TARGET_CHANGED');
+        expect(fs.readFileSync(path.join(stackDir, '.env'), 'utf-8')).toBe('FIRST=one\n');
+    });
+
+    it('rejects a missing, non-integer, or zero expectedVersion', async () => {
+        const localNode = DatabaseService.getInstance().getNodes().find(n => n.type === 'local')!;
+        const base = {
+            selector: { type: 'nodes', ids: [localNode.id] },
+            stackName: 'version-guard-push',
+            envFileBasename: '.env',
+            expectedFingerprints: {},
+        };
+        for (const expectedVersion of [undefined, 1.5, 0, '1', -1]) {
+            const res = await request(app)
+                .post(`/api/secrets/${bundleId}/push`)
+                .set('Authorization', `Bearer ${adminToken()}`)
+                .send({ ...base, expectedVersion });
+            expect(res.status).toBe(400);
+        }
+    });
+
+    it('rejects a missing or malformed expectedFingerprints map', async () => {
+        const localNode = DatabaseService.getInstance().getNodes().find(n => n.type === 'local')!;
+        const base = {
+            selector: { type: 'nodes', ids: [localNode.id] },
+            stackName: 'fingerprint-guard-push',
+            envFileBasename: '.env',
+            expectedVersion: 1,
+        };
+        for (const expectedFingerprints of [undefined, [], { '1': 'not-a-digest' }, { zero: 'a'.repeat(64) }]) {
+            const res = await request(app)
+                .post(`/api/secrets/${bundleId}/push`)
+                .set('Authorization', `Bearer ${adminToken()}`)
+                .send({ ...base, expectedFingerprints });
+            expect(res.status).toBe(400);
+        }
+    });
+
+    it('refuses a current bundle version that does not match the one presented', async () => {
+        const localNode = DatabaseService.getInstance().getNodes().find(n => n.type === 'local')!;
+        const res = await request(app)
+            .post(`/api/secrets/${bundleId}/push`)
+            .set('Authorization', `Bearer ${adminToken()}`)
+            .send({
+                selector: { type: 'nodes', ids: [localNode.id] },
+                stackName: 'version-mismatch-push',
+                envFileBasename: '.env',
+                expectedVersion: 99,
+                expectedFingerprints: {},
+            });
+        expect(res.status).toBe(409);
+        expect(res.body.code).toBe('VERSION_CONFLICT');
+        expect(res.body.currentVersion).toBe(1);
     });
 });
 
@@ -935,13 +1096,20 @@ describe('hostile key names and escape attempts are refused', () => {
             .set('Authorization', `Bearer ${adminToken()}`)
             .send({ selector: { type: 'nodes', ids: [localNode.id] }, stackName: 'symlink-import', envFileBasename: '.env' });
         expect(pushPreview.status).toBe(200);
-        expect(pushPreview.body[0].reachable).toBe(false);
+        expect(pushPreview.body.targets[0].reachable).toBe(false);
+        expect(pushPreview.body.targets[0].fingerprint).toBeNull();
         expect(JSON.stringify(pushPreview.body)).not.toContain('STOLEN');
 
         const push = await request(app)
             .post(`/api/secrets/${bundleId}/push`)
             .set('Authorization', `Bearer ${adminToken()}`)
-            .send({ selector: { type: 'nodes', ids: [localNode.id] }, stackName: 'symlink-import', envFileBasename: '.env' });
+            .send({
+                selector: { type: 'nodes', ids: [localNode.id] },
+                stackName: 'symlink-import',
+                envFileBasename: '.env',
+                expectedVersion: pushPreview.body.version,
+                expectedFingerprints: fingerprintsFrom(pushPreview.body.targets),
+            });
         expect(push.status).toBe(200);
         expect(push.body.results[0].status).toBe('failed');
         expect(JSON.stringify(push.body)).not.toContain('STOLEN');

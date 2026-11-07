@@ -67,6 +67,14 @@ export interface SecretPushPlanEntry {
     changed: number;
     unchanged: number;
     removedInformational: number;
+    /** Digest of the env file the preview read, or null when it could not. */
+    fingerprint: string | null;
+}
+
+/** The reviewed push plan: the bundle version and per-target file digests. */
+export interface SecretPushPreview {
+    version: number;
+    targets: SecretPushPlanEntry[];
 }
 
 export interface SecretPushResultEntry {
@@ -266,16 +274,23 @@ export interface PushInput {
     envFileBasename: string;
 }
 
-export async function previewPush(id: number, input: PushInput): Promise<SecretPushPlanEntry[]> {
+/** The apply presents exactly the plan the preview answered with. */
+export interface PushApplyInput extends PushInput {
+    expectedVersion: number;
+    /** nodeId (as a string) -> digest of the env file the preview read. */
+    expectedFingerprints: Record<string, string>;
+}
+
+export async function previewPush(id: number, input: PushInput): Promise<SecretPushPreview> {
     const res = await apiFetch(`/secrets/${id}/push/preview`, {
         method: 'POST',
         body: JSON.stringify(input),
         localOnly: true,
     });
-    return expectJson<SecretPushPlanEntry[]>(res, 'Failed to preview push');
+    return expectJson<SecretPushPreview>(res, 'Failed to preview push');
 }
 
-export async function executePush(id: number, input: PushInput): Promise<{ pushId: string; results: SecretPushResultEntry[] }> {
+export async function executePush(id: number, input: PushApplyInput): Promise<{ pushId: string; results: SecretPushResultEntry[] }> {
     const res = await apiFetch(`/secrets/${id}/push`, {
         method: 'POST',
         body: JSON.stringify(input),

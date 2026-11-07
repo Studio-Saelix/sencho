@@ -13,6 +13,8 @@
  */
 import { describe, it, expect, beforeAll, afterAll, beforeEach, afterEach, vi } from 'vitest';
 import request from 'supertest';
+import http from 'http';
+import type { AddressInfo } from 'net';
 import path from 'path';
 import fs from 'fs';
 import jwt from 'jsonwebtoken';
@@ -328,6 +330,15 @@ describe('SecretsService.readImportOverlay (local node)', () => {
 
 // ---- executePush against the local node ----
 
+/** The digests an apply must present, taken from the preview it sends. */
+function fingerprintsFor(targets: Array<{ nodeId: number; fingerprint: string | null }>): Record<string, string> {
+    const out: Record<string, string> = {};
+    for (const target of targets) {
+        if (target.fingerprint) out[String(target.nodeId)] = target.fingerprint;
+    }
+    return out;
+}
+
 describe('SecretsService.executePush (local node)', () => {
     beforeEach(() => {
         const composeDir = process.env.COMPOSE_DIR!;
@@ -348,13 +359,16 @@ describe('SecretsService.executePush (local node)', () => {
             user: TEST_USERNAME,
         });
 
-        const result = await svc.executePush(
-            id,
-            { type: 'nodes', ids: [localNode.id] },
-            'targetstack',
-            '.env',
-            TEST_USERNAME,
-        );
+        const selector = { type: 'nodes' as const, ids: [localNode.id] };
+        const plan = await svc.previewPushDiff(id, selector, 'targetstack', '.env');
+        const result = await svc.executePush(id, {
+            selector,
+            stackName: 'targetstack',
+            envFileBasename: '.env',
+            expectedVersion: plan.version,
+            expectedFingerprints: fingerprintsFor(plan.targets),
+            user: TEST_USERNAME,
+        });
 
         expect(result.results).toHaveLength(1);
         expect(result.results[0].status).toBe('ok');
@@ -381,16 +395,116 @@ describe('SecretsService.executePush (local node)', () => {
         const svc = SecretsService.getInstance();
         const { id } = svc.create({ name: 'push-bad-file', kv: { X: '1' }, user: TEST_USERNAME });
 
-        const result = await svc.executePush(
-            id,
-            { type: 'nodes', ids: [localNode.id] },
-            'targetstack',
-            'nonexistent.env',
-            TEST_USERNAME,
-        );
+        const selector = { type: 'nodes' as const, ids: [localNode.id] };
+        const plan = await svc.previewPushDiff(id, selector, 'targetstack', 'nonexistent.env');
+        const result = await svc.executePush(id, {
+            selector,
+            stackName: 'targetstack',
+            envFileBasename: 'nonexistent.env',
+            expectedVersion: plan.version,
+            expectedFingerprints: fingerprintsFor(plan.targets),
+            user: TEST_USERNAME,
+        });
 
         expect(result.results[0].status).toBe('failed');
         expect(result.results[0].error).toMatch(/not found/);
+    });
+});
+
+describe('SecretsService.executePush (remote node)', () => {
+    let server: http.Server;
+    let remoteId: number;
+    let remoteEnv = 'REMOTE_ONLY=old\n';
+    let writes: string[] = [];
+
+    beforeAll(async () => {
+        server = http.createServer((req, res) => {
+            const url = new URL(req.url ?? '/', 'http://127.0.0.1');
+            if (req.method === 'GET' && url.pathname.endsWith('/envs')) {
+                res.setHeader('Content-Type', 'application/json');
+                res.end(JSON.stringify({ envFiles: ['/srv/app/.env'] }));
+                return;
+            }
+            if (req.method === 'GET' && url.pathname.endsWith('/env')) {
+                res.setHeader('X-Env-Exists', 'true');
+                res.end(remoteEnv);
+                return;
+            }
+            if (req.method === 'PUT' && url.pathname.endsWith('/env')) {
+                let body = '';
+                req.on('data', (chunk) => { body += chunk; });
+                req.on('end', () => {
+                    writes.push(body);
+                    res.setHeader('Content-Type', 'application/json');
+                    res.end('{"ok":true}');
+                });
+                return;
+            }
+            res.statusCode = 404;
+            res.end();
+        });
+        await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+        const address = server.address() as AddressInfo;
+        remoteId = DatabaseService.getInstance().addNode({
+            name: 'secrets-remote',
+            type: 'remote',
+            mode: 'proxy',
+            compose_dir: '/tmp/compose',
+            is_default: false,
+            api_url: `http://127.0.0.1:${address.port}`,
+            api_token: 'remote-token',
+        });
+    });
+
+    afterAll(async () => {
+        DatabaseService.getInstance().deleteNode(remoteId);
+        await new Promise<void>((resolve) => server.close(() => resolve()));
+    });
+
+    beforeEach(() => {
+        remoteEnv = 'REMOTE_ONLY=old\n';
+        writes = [];
+    });
+
+    it('refuses a remote target whose env file changed after the preview', async () => {
+        const svc = SecretsService.getInstance();
+        const { id } = svc.create({ name: 'push-remote-drift', kv: { REMOTE_ONLY: 'new' }, user: TEST_USERNAME });
+        const selector = { type: 'nodes' as const, ids: [remoteId] };
+
+        const plan = await svc.previewPushDiff(id, selector, 'app', '.env');
+        expect(plan.targets[0].fingerprint).toMatch(/^[a-f0-9]{64}$/);
+
+        remoteEnv = 'REMOTE_ONLY=old\nSNUCK_IN=two\n';
+        await expect(svc.executePush(id, {
+            selector,
+            stackName: 'app',
+            envFileBasename: '.env',
+            expectedVersion: plan.version,
+            expectedFingerprints: fingerprintsFor(plan.targets),
+            user: TEST_USERNAME,
+        })).rejects.toMatchObject({ name: 'PushTargetChangedError' });
+        expect(writes).toHaveLength(0);
+    });
+
+    it('writes a remote target that still matches the previewed digest', async () => {
+        const svc = SecretsService.getInstance();
+        const { id } = svc.create({ name: 'push-remote-ok', kv: { REMOTE_ONLY: 'new' }, user: TEST_USERNAME });
+        const selector = { type: 'nodes' as const, ids: [remoteId] };
+
+        const plan = await svc.previewPushDiff(id, selector, 'app', '.env');
+        const result = await svc.executePush(id, {
+            selector,
+            stackName: 'app',
+            envFileBasename: '.env',
+            expectedVersion: plan.version,
+            expectedFingerprints: fingerprintsFor(plan.targets),
+            user: TEST_USERNAME,
+        });
+
+        expect(result.results[0].status).toBe('ok');
+        expect(writes).toHaveLength(1);
+        const content = (JSON.parse(writes[0]) as { content: string }).content;
+        expect(parseEnv(content)).toEqual({ REMOTE_ONLY: 'new' });
     });
 });
 
@@ -555,15 +669,23 @@ describe('Routes /api/secrets Community Admin access', () => {
             .set('Authorization', `Bearer ${adminToken()}`)
             .send({ selector: { type: 'nodes', ids: [localNode.id] }, stackName: 'pushstack', envFileBasename: '.env' });
         expect(preview.status).toBe(200);
-        expect(Array.isArray(preview.body)).toBe(true);
-        expect(preview.body.length).toBeGreaterThanOrEqual(1);
-        expect(preview.body[0].reachable).toBe(true);
+        expect(typeof preview.body.version).toBe('number');
+        expect(Array.isArray(preview.body.targets)).toBe(true);
+        expect(preview.body.targets.length).toBeGreaterThanOrEqual(1);
+        expect(preview.body.targets[0].reachable).toBe(true);
+        expect(preview.body.targets[0].fingerprint).toMatch(/^[a-f0-9]{64}$/);
 
-        // Execute push
+        // Execute push exactly as previewed
         const push = await request(app)
             .post(`/api/secrets/${id}/push`)
             .set('Authorization', `Bearer ${adminToken()}`)
-            .send({ selector: { type: 'nodes', ids: [localNode.id] }, stackName: 'pushstack', envFileBasename: '.env' });
+            .send({
+                selector: { type: 'nodes', ids: [localNode.id] },
+                stackName: 'pushstack',
+                envFileBasename: '.env',
+                expectedVersion: preview.body.version,
+                expectedFingerprints: fingerprintsFor(preview.body.targets),
+            });
         expect(push.status).toBe(200);
         expect(push.body.pushId).toBeTruthy();
         expect(push.body.results).toHaveLength(1);
@@ -677,7 +799,16 @@ describe('SecretsService.executePush developer_mode diagnostics', () => {
         const localNode = db.getNodes().find(n => n.type === 'local')!;
         const svc = SecretsService.getInstance();
         const { id } = svc.create({ name, kv: { TOKEN: 'supersecretvalue' }, user: TEST_USERNAME });
-        await svc.executePush(id, { type: 'nodes', ids: [localNode.id] }, 'devmodestack', '.env', TEST_USERNAME);
+        const selector = { type: 'nodes' as const, ids: [localNode.id] };
+        const plan = await svc.previewPushDiff(id, selector, 'devmodestack', '.env');
+        await svc.executePush(id, {
+            selector,
+            stackName: 'devmodestack',
+            envFileBasename: '.env',
+            expectedVersion: plan.version,
+            expectedFingerprints: fingerprintsFor(plan.targets),
+            user: TEST_USERNAME,
+        });
     }
 
     it('emits [Secrets:diag] only when developer_mode is on, and never the secret value', async () => {

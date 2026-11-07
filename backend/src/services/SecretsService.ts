@@ -113,6 +113,19 @@ export interface SecretPushPlanEntry {
     changed: number;
     unchanged: number;
     removedInformational: number;
+    /** Digest of the env file the preview read, or null when it could not. */
+    fingerprint: string | null;
+}
+
+/**
+ * A previewed push: the bundle version and per-target env-file digests the
+ * apply must present. A target with no digest (unreachable, or no file) is
+ * absent from the apply map, so a target that becomes readable later is
+ * refused rather than written unreviewed.
+ */
+export interface SecretPushPreview {
+    version: number;
+    targets: SecretPushPlanEntry[];
 }
 
 export interface SecretPushResultEntry {
@@ -187,6 +200,18 @@ export class SecretSourceChangedError extends Error {
     constructor() {
         super('The env file changed since you previewed it. Preview again before importing.');
         this.name = 'SecretSourceChangedError';
+    }
+}
+
+/**
+ * A target env file moved, or became readable after the preview never saw it.
+ * The preview is the only review an operator gets over masked values, so a
+ * push whose targets no longer match it writes nothing.
+ */
+export class PushTargetChangedError extends Error {
+    constructor() {
+        super('A target env file changed since you previewed the push. Preview again before pushing.');
+        this.name = 'PushTargetChangedError';
     }
 }
 
@@ -893,14 +918,18 @@ export class SecretsService {
         return { version, added: agg.added, changed: agg.changed, unchanged: agg.unchanged };
     }
 
-    async previewPushDiff(id: number, selector: BlueprintSelector, stackName: string, envFileBasename: string): Promise<SecretPushPlanEntry[]> {
+    async previewPushDiff(id: number, selector: BlueprintSelector, stackName: string, envFileBasename: string): Promise<SecretPushPreview> {
         const db = DatabaseService.getInstance();
-        const overlay = this.getDecryptedKv(id);
+        // Read the version row once so the digest the client must present and
+        // the overlay the diff was computed from are the same version.
+        const versionRow = db.getCurrentSecretVersion(id);
+        if (!versionRow) throw new SecretPayloadError();
+        const overlay = decryptKv(versionRow.encrypted_payload);
         const matched = NodeLabelService.getInstance().matchSelector(selector, db.getNodes());
         if (isDebugEnabled()) console.log(`[Secrets:diag] preview id=${id} targets=${matched.length}`);
 
         // Preview is read-only and per-node; fan out in parallel for snappier wizard UX.
-        return Promise.all(matched.map(async (node): Promise<SecretPushPlanEntry> => {
+        const targets = await Promise.all(matched.map(async (node): Promise<SecretPushPlanEntry> => {
             const entry: SecretPushPlanEntry = {
                 nodeId: node.id,
                 nodeName: node.name,
@@ -913,6 +942,7 @@ export class SecretsService {
                 changed: 0,
                 unchanged: 0,
                 removedInformational: 0,
+                fingerprint: null,
             };
             try {
                 const read = await readExistingEnv(node, stackName, envFileBasename);
@@ -921,6 +951,7 @@ export class SecretsService {
                     entry.error = `env file '${envFileBasename}' not found`;
                     return entry;
                 }
+                entry.fingerprint = fingerprintSource(read.text);
                 const diff = computeDiff(parseEnv(read.text), overlay);
                 entry.diff = maskDiff(diff);
                 Object.assign(entry, aggregateDiff(diff));
@@ -930,9 +961,20 @@ export class SecretsService {
             }
             return entry;
         }));
+        return { version: versionRow.version, targets };
     }
 
-    async executePush(id: number, selector: BlueprintSelector, stackName: string, envFileBasename: string, user: string): Promise<{ pushId: string; results: SecretPushResultEntry[] }> {
+    async executePush(id: number, input: {
+        selector: BlueprintSelector;
+        stackName: string;
+        envFileBasename: string;
+        /** The bundle version the preview computed its diff from. */
+        expectedVersion: number;
+        /** nodeId -> digest of the env file the preview read. */
+        expectedFingerprints: Record<string, string>;
+        user: string;
+    }): Promise<{ pushId: string; results: SecretPushResultEntry[] }> {
+        const { selector, stackName, envFileBasename, expectedVersion, expectedFingerprints, user } = input;
         if (activePushes.has(id)) {
             throw new PushBusyError(id);
         }
@@ -941,6 +983,11 @@ export class SecretsService {
         if (!secret) throw new Error('Secret not found');
         const versionRow = db.getCurrentSecretVersion(id);
         if (!versionRow) throw new Error('Secret has no current version');
+        // The bundle is the source of every value this push writes. Refuse a
+        // version the operator did not preview before reading or writing a target.
+        if (versionRow.version !== expectedVersion) {
+            throw new SecretVersionConflictError(versionRow.version);
+        }
         const overlay = decryptKv(versionRow.encrypted_payload);
         const matched = NodeLabelService.getInstance().matchSelector(selector, db.getNodes());
         const pushId = crypto.randomUUID();
@@ -953,6 +1000,37 @@ export class SecretsService {
         // stampeding any single remote that's targeted by multiple labels.
         activePushes.add(id);
         try {
+            // Read every target before writing any, so a stale preview refuses the
+            // whole push instead of leaving some nodes on unreviewed values.
+            type TargetRead = { ok: true; read: ResolvedRead | null } | { ok: false; error: unknown };
+            const reads = new Map<number, TargetRead>();
+            for (const node of matched) {
+                try {
+                    reads.set(node.id, { ok: true, read: await readExistingEnv(node, stackName, envFileBasename) });
+                } catch (err) {
+                    reads.set(node.id, { ok: false, error: err });
+                }
+            }
+            for (const node of matched) {
+                const state = reads.get(node.id)!;
+                // An unreadable target is reported as a per-node failure; it is
+                // never written, so it needs no digest check here.
+                if (!state.ok) continue;
+                const expected = Object.prototype.hasOwnProperty.call(expectedFingerprints, String(node.id))
+                    ? expectedFingerprints[String(node.id)]
+                    : undefined;
+                if (!state.read) {
+                    // The preview read a file for this node and it is gone now.
+                    if (expected !== undefined) throw new PushTargetChangedError();
+                    continue;
+                }
+                // A readable target with no previewed digest was never previewed;
+                // a different digest means someone changed it after the preview.
+                if (expected === undefined || fingerprintSource(state.read.text) !== expected) {
+                    throw new PushTargetChangedError();
+                }
+            }
+
             for (const node of matched) {
                 const result: SecretPushResultEntry = {
                     nodeId: node.id,
@@ -964,8 +1042,10 @@ export class SecretsService {
                     changed: 0,
                     unchanged: 0,
                 };
+                const state = reads.get(node.id)!;
                 try {
-                    const read = await readExistingEnv(node, stackName, envFileBasename);
+                    if (!state.ok) throw state.error;
+                    const read = state.read;
                     if (!read) throw new Error(`env file '${envFileBasename}' not found`);
                     const existing = parseEnv(read.text);
                     const agg = aggregateDiff(computeDiff(existing, overlay));

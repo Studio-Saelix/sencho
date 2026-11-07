@@ -4,6 +4,7 @@ import { requireAdmin, requireUserSession, requireBody } from '../middleware/tie
 import {
     SecretsService,
     PushBusyError,
+    PushTargetChangedError,
     RevealTargetError,
     SecretOpError,
     SecretPayloadError,
@@ -110,6 +111,22 @@ function parsePushBody(body: unknown): PushBody | { error: string } {
     return { selector, stackName, envFileBasename: basename };
 }
 
+/**
+ * nodeId -> raw env-file digest the preview answered with. A target that had
+ * no digest at preview is omitted, so an apply that finds it readable refuses
+ * rather than writing a file the operator never reviewed.
+ */
+function parseExpectedFingerprints(value: unknown): Record<string, string> | null {
+    if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
+    const fingerprints: Record<string, string> = {};
+    for (const [nodeId, digest] of Object.entries(value as Record<string, unknown>)) {
+        if (!/^[1-9][0-9]*$/.test(nodeId)) return null;
+        if (typeof digest !== 'string' || !/^[a-f0-9]{64}$/.test(digest)) return null;
+        fingerprints[nodeId] = digest;
+    }
+    return fingerprints;
+}
+
 interface ImportBody { nodeId: number; stackName: string; envFileBasename: string }
 
 function parseImportBody(body: unknown): ImportBody | { error: string } {
@@ -165,6 +182,10 @@ function sendServiceError(res: Response, err: unknown, fallback: string): void {
     }
     if (err instanceof SecretSourceChangedError) {
         res.status(409).json({ error: err.message, code: 'IMPORT_SOURCE_CHANGED' });
+        return;
+    }
+    if (err instanceof PushTargetChangedError) {
+        res.status(409).json({ error: err.message, code: 'PUSH_TARGET_CHANGED' });
         return;
     }
     if (err instanceof SecretPayloadError) {
@@ -552,13 +573,33 @@ secretsRouter.post('/:id/push', authMiddleware, async (req: Request, res: Respon
             res.status(400).json({ error: parsed.error });
             return;
         }
+        const { expectedVersion, expectedFingerprints } = req.body as {
+            expectedVersion?: unknown; expectedFingerprints?: unknown;
+        };
+        const version = parseVersion(expectedVersion);
+        if (version === null) {
+            res.status(400).json({ error: 'expectedVersion must be the bundle version the preview showed' });
+            return;
+        }
+        const fingerprints = parseExpectedFingerprints(expectedFingerprints);
+        if (fingerprints === null) {
+            res.status(400).json({ error: 'expectedFingerprints must map each previewed node id to its env-file digest' });
+            return;
+        }
         const secret = DatabaseService.getInstance().getSecret(id);
         if (!secret) {
             res.status(404).json({ error: 'Secret not found' });
             return;
         }
         try {
-            const result = await SecretsService.getInstance().executePush(id, parsed.selector, parsed.stackName, parsed.envFileBasename, getActor(req));
+            const result = await SecretsService.getInstance().executePush(id, {
+                selector: parsed.selector,
+                stackName: parsed.stackName,
+                envFileBasename: parsed.envFileBasename,
+                expectedVersion: version,
+                expectedFingerprints: fingerprints,
+                user: getActor(req),
+            });
             const failedCount = result.results.filter(r => r.status === 'failed').length;
             console.log(`[Secrets] Push ${sanitizeForLog(secret.name)} v${secret.current_version}: ${result.results.length} node(s), ${failedCount} failed`);
             if (failedCount > 0) console.warn(`[Secrets] Push ${sanitizeForLog(secret.name)} v${secret.current_version}: ${failedCount} node(s) failed`);

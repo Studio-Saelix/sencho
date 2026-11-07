@@ -4,7 +4,7 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
-import type { SecretPushPlanEntry, SecretPushResultEntry } from '@/lib/secretsApi';
+import type { SecretPushPlanEntry, SecretPushPreview, SecretPushResultEntry } from '@/lib/secretsApi';
 
 vi.mock('@/lib/secretsApi', async (importOriginal) => {
     const actual = await importOriginal<typeof import('@/lib/secretsApi')>();
@@ -39,8 +39,13 @@ function planEntry(overrides: Partial<SecretPushPlanEntry> = {}): SecretPushPlan
         reachable: true, stackExists: true,
         diff: [{ key: 'DB_PASSWORD', status: 'changed' }],
         added: 0, changed: 1, unchanged: 4, removedInformational: 0,
+        fingerprint: 'a'.repeat(64),
         ...overrides,
     };
+}
+
+function previewPlan(overrides: Partial<SecretPushPreview> = {}): SecretPushPreview {
+    return { version: 2, targets: [planEntry()], ...overrides };
 }
 
 function resultEntry(overrides: Partial<SecretPushResultEntry> = {}): SecretPushResultEntry {
@@ -55,7 +60,7 @@ const secret = { id: 7, name: 'db-creds', description: '', currentVersion: 2, ke
 
 beforeEach(() => {
     vi.mocked(listDistinctLabels).mockResolvedValue(['app', 'web', 'db']);
-    vi.mocked(previewPush).mockResolvedValue([planEntry()]);
+    vi.mocked(previewPush).mockResolvedValue(previewPlan());
     vi.mocked(executePush).mockResolvedValue({ pushId: 'p1', results: [resultEntry()] });
 });
 
@@ -102,7 +107,7 @@ describe('SecretPushSheet', () => {
     });
 
     it('discards a stale in-flight preview response when inputs change', async () => {
-        let resolvePreview!: (value: SecretPushPlanEntry[]) => void;
+        let resolvePreview!: (value: SecretPushPreview) => void;
         vi.mocked(previewPush).mockReturnValue(new Promise((r) => { resolvePreview = r; }));
 
         renderSheet();
@@ -120,7 +125,7 @@ describe('SecretPushSheet', () => {
         await userEvent.type(screen.getByDisplayValue('my-app'), '-changed');
 
         // Resolve stale preview
-        resolvePreview([planEntry({ nodeName: 'stale-result' })]);
+        resolvePreview(previewPlan({ targets: [planEntry({ nodeName: 'stale-result' })] }));
         await waitFor(() => {
             expect(screen.queryByText('stale-result')).not.toBeInTheDocument();
         });
@@ -129,7 +134,7 @@ describe('SecretPushSheet', () => {
 
     it('always surfaces push results even when inputs change mid-flight', async () => {
         // Real preview so Push button appears
-        vi.mocked(previewPush).mockResolvedValue([planEntry()]);
+        vi.mocked(previewPush).mockResolvedValue(previewPlan());
 
         let resolvePush!: (v: { pushId: string; results: SecretPushResultEntry[] }) => void;
         vi.mocked(executePush).mockReturnValue(new Promise((r) => { resolvePush = r; }));
@@ -153,5 +158,47 @@ describe('SecretPushSheet', () => {
             expect(screen.getByText('push-result')).toBeInTheDocument();
         });
         expect(vi.mocked(toast.success)).toHaveBeenCalled();
+    });
+
+    it('sends the previewed version and per-target digests, not the live fields', async () => {
+        renderSheet();
+        await fillAndPreview();
+        await waitFor(() => {
+            expect(screen.getByText('central')).toBeInTheDocument();
+        });
+
+        await userEvent.click(screen.getByRole('button', { name: /push to 1 node/i }));
+
+        await waitFor(() => expect(vi.mocked(executePush)).toHaveBeenCalled());
+        expect(vi.mocked(executePush)).toHaveBeenCalledWith(7, {
+            selector: { type: 'labels', any: ['app'], all: [] },
+            stackName: 'my-app',
+            envFileBasename: '.env',
+            expectedVersion: 2,
+            expectedFingerprints: { '1': 'a'.repeat(64) },
+        });
+    });
+
+    it('drops the plan and returns to Target when a target changed after preview', async () => {
+        vi.mocked(executePush).mockRejectedValue(Object.assign(
+            new Error('A target env file changed since you previewed the push. Preview again before pushing.'),
+            { status: 409, code: 'PUSH_TARGET_CHANGED' },
+        ));
+
+        renderSheet();
+        await fillAndPreview();
+        await waitFor(() => {
+            expect(screen.getByText('central')).toBeInTheDocument();
+        });
+
+        await userEvent.click(screen.getByRole('button', { name: /push to 1 node/i }));
+
+        await waitFor(() => {
+            expect(screen.getByPlaceholderText('my-app')).toBeInTheDocument();
+        });
+        expect(screen.queryByText('central')).not.toBeInTheDocument();
+        expect(vi.mocked(toast.error)).toHaveBeenCalledWith(
+            'A target env file changed since you previewed it. Preview again before pushing.',
+        );
     });
 });
