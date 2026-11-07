@@ -116,6 +116,55 @@ async function rowsFrom(
   return rows;
 }
 
+describe('socket inventory directory socket mounts', () => {
+  it.each(['/var/run', '/run', '/var', '/'])(
+    'reports an inspected bind of %s that contains the socket as undetermined',
+    async source => {
+      const rows = await rowsFrom(listed(), inspected({
+        Mounts: [{ Type: 'bind', Source: source, Destination: '/hostrun', RW: false }],
+      }));
+      expect(rows[0].metadataTruncated).toBe(false);
+
+      const inventory = inventoryOf(rows);
+      expect(inventory.containers).toHaveLength(1);
+      expect(inventory.containers[0]).toMatchObject({
+        role: 'undetermined',
+        classification: 'unknown',
+      });
+      expect(inventory.containers[0].socketMounts).toEqual([
+        { source, destination: '/hostrun', readOnly: true },
+      ]);
+      expect(inventory.containers[0].evidence).toContain('socket-mount-directory');
+      expect(inventory.counts.undetermined).toBe(1);
+      expect(inventory.status).toBe('partial');
+    },
+  );
+
+  it.each(['/var/run/', ' /var ', '/run///'])(
+    'normalizes the inspected source %j before matching the socket directory',
+    async source => {
+      const rows = await rowsFrom(listed(), inspected({
+        Mounts: [{ Type: 'bind', Source: source, Destination: '/hostrun', RW: false }],
+      }));
+      const inventory = inventoryOf(rows);
+      expect(inventory.containers[0]).toMatchObject({
+        role: 'undetermined',
+        classification: 'unknown',
+      });
+      expect(inventory.containers[0].evidence).toContain('socket-mount-directory');
+    },
+  );
+
+  it('leaves an inspected bind of a directory that cannot contain the socket out', async () => {
+    const rows = await rowsFrom(listed(), inspected({
+      Mounts: [{ Type: 'bind', Source: '/srv/data', Destination: '/data', RW: true }],
+    }));
+    const inventory = inventoryOf(rows);
+    expect(inventory.containers).toHaveLength(0);
+    expect(inventory.status).toBe('complete');
+  });
+});
+
 describe('socket inventory malformed mount metadata', () => {
   it.each([
     ['', 'undetermined'],

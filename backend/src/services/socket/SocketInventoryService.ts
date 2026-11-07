@@ -29,6 +29,7 @@ import {
 import { FleetSyncService } from '../FleetSyncService';
 import {
   hasSocketProxyNameHint,
+  isDockerSocketDirectoryMount,
   isDockerSocketPath,
   socketProxyProviderForImage,
   type SocketProviderType,
@@ -52,6 +53,17 @@ const MAX_NETWORKS = 16;
 const MAX_EVIDENCE = 8;
 
 const DEFAULT_DOCKER_SOCKET = '/var/run/docker.sock';
+
+/**
+ * Conventional host paths for the local Docker daemon socket. They are consulted
+ * as possible access even when the client uses another endpoint: the host may
+ * still serve a socket there, and reporting a directory mount of one of their
+ * ancestors as undetermined is safer than dropping it.
+ */
+const CANONICAL_DOCKER_SOCKET_PATHS: readonly string[] = [
+  DEFAULT_DOCKER_SOCKET,
+  '/run/docker.sock',
+];
 
 export type SocketRole = 'proxy' | 'direct-socket-consumer' | 'undetermined';
 export type SocketClassification = 'detected' | 'candidate' | 'unknown';
@@ -455,25 +467,51 @@ function normalizePorts(row: SocketInventoryContainerRow): {
   };
 }
 
+interface SocketMountMatch {
+  mount: SocketInventoryMountRow;
+  /** The source or destination names a Docker socket path. */
+  namesSocket: boolean;
+  /** The host source is a directory that contains a Docker socket path. */
+  directory: boolean;
+}
+
 /**
  * Socket mounts on a container, before presentation truncation. A `docker.sock`
  * source or target is certain. A mount that shares the host socket path Sencho
  * itself uses is certain too, which covers a proxy that listens on a custom
- * unix socket path. Classification reads the full list; the response projection
- * bounds it and marks the row incomplete.
+ * unix socket path. A bind of a directory that contains the socket (`/var/run`,
+ * `/run`, `/var`, `/`, or a custom socket's parent) is possible socket access:
+ * the container can open the socket through it without naming it. Classification
+ * reads the full list; the response projection bounds it and marks the row
+ * incomplete.
  */
 function socketMountsFor(
   row: SocketInventoryContainerRow,
   endpointBindSource: string | null,
-): SocketInventoryMountRow[] {
-  return row.mounts
+): SocketMountMatch[] {
+  const socketPaths: string[] = endpointBindSource
+    ? [...CANONICAL_DOCKER_SOCKET_PATHS, endpointBindSource]
+    : [...CANONICAL_DOCKER_SOCKET_PATHS];
+  const matches: SocketMountMatch[] = [];
+  for (const mount of row.mounts) {
     // An unreadable mount type is a possible bind: read it as one when its
     // source or destination names a Docker socket rather than dropping it.
-    .filter(mount => mount.type === 'bind' || mount.type === 'unknown')
-    .filter(mount => isDockerSocketPath(mount.source)
+    if (mount.type !== 'bind' && mount.type !== 'unknown') continue;
+    const namesSocket = isDockerSocketPath(mount.source)
       || isDockerSocketPath(mount.destination)
       || (endpointBindSource !== null
-        && (mount.source === endpointBindSource || mount.destination === endpointBindSource)));
+        && (mount.source === endpointBindSource || mount.destination === endpointBindSource));
+    if (namesSocket) {
+      matches.push({ mount, namesSocket: true, directory: false });
+      continue;
+    }
+    // Only the host source can contain the host socket. A destination directory
+    // is whatever the source supplies at that path, not proof of host access.
+    if (isDockerSocketDirectoryMount(mount.source, socketPaths)) {
+      matches.push({ mount, namesSocket: false, directory: true });
+    }
+  }
+  return matches;
 }
 
 function classifyRow(
@@ -491,12 +529,28 @@ function classifyRow(
     } | null;
   },
 ): ClassifiedRow | null {
-  const socketMounts = socketMountsFor(row, ctx.endpointBindSource);
+  const socketMatches = socketMountsFor(row, ctx.endpointBindSource);
+  const socketMounts = socketMatches.map(match => match.mount);
   // An unknown mount type is a possible bind, so the mount is kept visible. It
   // is not proof of a direct consumer: a tmpfs or another mount kind the daemon
   // mislabeled would look identical, so a socket mount whose type could not be
   // read stays undetermined rather than asserted.
   const unreadableMountType = socketMounts.some(mount => mount.type === 'unknown');
+  // Access is proven only by a mount that names the socket with a readable
+  // type. A directory that contains the socket, or a socket-naming mount whose
+  // type could not be read, grants possible access but not proof the container
+  // uses it: with neither, the row is undetermined rather than a direct
+  // consumer. A stronger signal (a provider image, a proxy name, enabled API
+  // groups) can still classify it as a proxy.
+  const provesSocketAccess = socketMatches.some(match =>
+    match.namesSocket && match.mount.type !== 'unknown');
+  const possibleSocketAccessOnly = socketMatches.length > 0 && !provesSocketAccess;
+  const socketEvidence = [
+    'socket-bind-mount',
+    ...(possibleSocketAccessOnly && socketMatches.some(match => match.directory)
+      ? ['socket-mount-directory']
+      : []),
+  ];
   const imageProvider = socketProxyProviderForImage(row.image);
   const nameHint = hasSocketProxyNameHint([row.name, row.service]);
   const apiGroups = [...row.apiGroups];
@@ -548,7 +602,7 @@ function classifyRow(
         socketMounts,
         apiGroups,
         evidence: [
-          'socket-bind-mount',
+          ...socketEvidence,
           'known-provider-image',
           ...(readOnlyMount ? [] : ['socket-mount-writable']),
         ],
@@ -565,7 +619,7 @@ function classifyRow(
         providerType: 'generic-socket-proxy',
         socketMounts,
         apiGroups,
-        evidence: ['socket-bind-mount', 'known-provider-image'],
+        evidence: [...socketEvidence, 'known-provider-image'],
         infrastructureLabel,
         isSencho,
       });
@@ -577,7 +631,7 @@ function classifyRow(
         providerType: 'generic-socket-proxy',
         socketMounts,
         apiGroups,
-        evidence: ['socket-bind-mount', 'socket-proxy-name-hint'],
+        evidence: [...socketEvidence, 'socket-proxy-name-hint'],
         infrastructureLabel,
         isSencho,
       });
@@ -589,7 +643,7 @@ function classifyRow(
         providerType: 'generic-socket-proxy',
         socketMounts,
         apiGroups,
-        evidence: ['socket-bind-mount', 'enabled-api-groups'],
+        evidence: [...socketEvidence, 'enabled-api-groups'],
         infrastructureLabel,
         isSencho,
       });
@@ -603,19 +657,19 @@ function classifyRow(
         providerType: imageProvider,
         socketMounts,
         apiGroups,
-        evidence: ['socket-bind-mount', 'docker-api-port-published'],
+        evidence: [...socketEvidence, 'docker-api-port-published'],
         infrastructureLabel,
         isSencho,
       });
     }
     return buildClassified(row, {
-      role: unreadableMountType ? 'undetermined' : 'direct-socket-consumer',
-      classification: unreadableMountType ? 'unknown' : 'detected',
+      role: possibleSocketAccessOnly ? 'undetermined' : 'direct-socket-consumer',
+      classification: possibleSocketAccessOnly ? 'unknown' : 'detected',
       providerType: null,
       socketMounts,
       apiGroups,
       evidence: [
-        'socket-bind-mount',
+        ...socketEvidence,
         ...(unreadableMountType ? ['socket-mount-type-unknown'] : []),
         ...(readOnlyMount ? [] : ['socket-mount-writable']),
       ],

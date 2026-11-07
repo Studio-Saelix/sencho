@@ -107,6 +107,9 @@ const SLOW_READS: ReadonlyArray<RegExp> = [
   /^\/system\/docker-df\/?$/,
   // The full resources inventory, including the volume df section.
   /^\/system\/resources\/?$/,
+  // Socket inventory: inspects each listed container up to its bound, with a
+  // 15 s route budget.
+  /^\/socket\/inventory\/?$/,
   // The volume browser: may pull a helper image on first use.
   /^\/volumes\/[^/]+\/(?:list|stat|read)\/?$/,
   // Import scan and update preview walk a repository / inspect images.

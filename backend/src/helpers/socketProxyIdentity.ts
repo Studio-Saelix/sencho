@@ -101,12 +101,43 @@ export function hasSocketProxyNameHint(names: readonly (string | null | undefine
     && name.toLowerCase().replace(/[_.]/g, '-').includes('socket-proxy'));
 }
 
+/** A trimmed, forward-slash path with trailing slashes removed; `/` stays `/`. */
+function normalizedSocketPath(value: string): string {
+  const trimmed = value.trim().replace(/\\/g, '/');
+  return trimmed === '/' ? '/' : trimmed.replace(/\/+$/, '');
+}
+
 /** True when a path is a Docker socket bind source or target. */
 export function isDockerSocketPath(value: string | null | undefined): boolean {
   if (typeof value !== 'string') return false;
-  const normalized = value.trim().replace(/\\/g, '/').replace(/\/+$/, '');
+  const normalized = normalizedSocketPath(value);
   if (!normalized) return false;
   return normalized === 'docker.sock' || normalized.endsWith('/docker.sock');
+}
+
+/**
+ * True when a bind source is an absolute host directory that contains one of the
+ * Docker socket paths, so a container mounting it can open the socket through
+ * that directory (`/var/run`, `/run`, `/var`, or `/` for the default socket).
+ *
+ * This is possible access, not proof that the container uses the socket: a
+ * directory mount exposes everything in it, so the caller treats it as
+ * undetermined unless stronger evidence (a socket path it names itself, or a
+ * recognised proxy identity) settles the row. A relative path is not a known
+ * absolute host path, so it proves nothing here.
+ */
+export function isDockerSocketDirectoryMount(
+  value: string | null | undefined,
+  socketPaths: readonly string[],
+): boolean {
+  if (typeof value !== 'string') return false;
+  const directory = normalizedSocketPath(value);
+  if (!directory.startsWith('/')) return false;
+  return socketPaths.some(socketPath => {
+    const socket = normalizedSocketPath(socketPath);
+    if (!socket.startsWith('/')) return false;
+    return directory === '/' || socket.startsWith(`${directory}/`);
+  });
 }
 
 /**

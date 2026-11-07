@@ -340,6 +340,186 @@ describe('buildSocketInventory classification', () => {
     });
   });
 
+  it.each(['/var/run', '/run', '/var', '/'])(
+    'reports a bind of directory %s that contains the socket as undetermined',
+    directory => {
+      const inventory = buildSocketInventory(input({
+        containers: [row({
+          id: 'dirmount1',
+          name: 'dirmount',
+          image: 'alpine:3',
+          mounts: [socketMount(directory, '/hostrun', true)],
+        })],
+      }));
+
+      expect(inventory.containers).toHaveLength(1);
+      expect(inventory.containers[0]).toMatchObject({
+        role: 'undetermined',
+        classification: 'unknown',
+        providerType: null,
+      });
+      // The mount stays visible: the operator has to see what exposes access.
+      expect(inventory.containers[0].socketMounts).toEqual([
+        { source: directory, destination: '/hostrun', readOnly: true },
+      ]);
+      expect(inventory.containers[0].evidence).toContain('socket-mount-directory');
+      expect(inventory.containers[0].evidence).not.toContain('socket-mount-type-unknown');
+      expect(inventory.counts).toMatchObject({
+        matchedContainers: 1,
+        directSocketConsumers: 0,
+        undetermined: 1,
+      });
+      expect(inventory.status).toBe('partial');
+    },
+  );
+
+  it.each(['/var/lib', '/srv', '/va', '/var/runs'])(
+    'does not report a bind of directory %s that cannot contain the socket',
+    directory => {
+      const inventory = buildSocketInventory(input({
+        containers: [row({
+          id: 'data1',
+          name: 'data',
+          mounts: [socketMount(directory, '/data', false)],
+        })],
+      }));
+      expect(inventory.containers).toHaveLength(0);
+    },
+  );
+
+  it('does not treat a destination directory as proof of host socket access', () => {
+    // The host source is a plain directory; mounting it at /var/run is not
+    // evidence that a Docker socket is behind it. Only the source can prove it.
+    const inventory = buildSocketInventory(input({
+      containers: [row({
+        id: 'dest-dir1',
+        name: 'dest-dir',
+        mounts: [socketMount('/srv/app', '/var/run', false)],
+      })],
+    }));
+    expect(inventory.containers).toHaveLength(0);
+  });
+
+  it.each(['var/run', './var/run', 'run'])(
+    'does not treat the relative bind source %j as host socket access',
+    source => {
+      const inventory = buildSocketInventory(input({
+        containers: [row({
+          id: 'relative1',
+          name: 'relative',
+          mounts: [socketMount(source, '/hostrun', false)],
+        })],
+      }));
+      expect(inventory.containers).toHaveLength(0);
+    },
+  );
+
+  it('reports a bind of the directory holding a custom endpoint socket as undetermined', () => {
+    const custom = '/srv/docker/run/docker.sock';
+    const inventory = buildSocketInventory(input({
+      containers: [row({
+        id: 'custom-dir1',
+        name: 'custom-dir',
+        mounts: [socketMount('/srv/docker', '/hostrun', true)],
+      })],
+      endpoint: describeDockerEndpoint(`unix://${custom}`),
+      self: {
+        state: 'resolved',
+        reason: null,
+        containerId: 'sencho1',
+        containerName: 'sencho',
+        bindMounts: [{ source: custom, destination: custom }],
+      },
+    }));
+
+    expect(inventory.containers[0]).toMatchObject({
+      role: 'undetermined',
+      classification: 'unknown',
+    });
+    expect(inventory.containers[0].evidence).toContain('socket-mount-directory');
+    expect(inventory.status).toBe('partial');
+  });
+
+  it('still calls a provider image that mounts the socket directory a proxy', () => {
+    const inventory = buildSocketInventory(input({
+      containers: [row({
+        id: 'dirproxy1',
+        name: 'dir-proxy',
+        image: 'tecnativa/docker-socket-proxy:latest',
+        mounts: [socketMount('/var/run', '/var/run', true)],
+      })],
+    }));
+
+    expect(inventory.containers[0]).toMatchObject({
+      role: 'proxy',
+      classification: 'detected',
+      providerType: 'tecnativa',
+    });
+    expect(inventory.containers[0].evidence).toContain('socket-mount-directory');
+    expect(inventory.counts.undetermined).toBe(0);
+  });
+
+  it('keeps a directory mount of unreadable type as undetermined with both reasons', () => {
+    const directoryMount = { ...socketMount('/var/run', '/hostrun', true), type: 'unknown' };
+    const inventory = buildSocketInventory(input({
+      containers: [row({ id: 'unknown-dir1', name: 'unknown-dir', mounts: [directoryMount] })],
+    }));
+
+    expect(inventory.containers[0]).toMatchObject({
+      role: 'undetermined',
+      classification: 'unknown',
+    });
+    expect(inventory.containers[0].evidence).toContain('socket-mount-directory');
+    expect(inventory.containers[0].evidence).toContain('socket-mount-type-unknown');
+    expect(inventory.counts.undetermined).toBe(1);
+  });
+
+  it('stays a direct consumer when a certain socket mount accompanies a directory mount', () => {
+    const inventory = buildSocketInventory(input({
+      containers: [row({
+        id: 'both1',
+        name: 'both',
+        mounts: [
+          socketMount('/var/run', '/hostrun', true),
+          socketMount(SOCKET, SOCKET, true),
+        ],
+      })],
+    }));
+
+    expect(inventory.containers[0]).toMatchObject({
+      role: 'direct-socket-consumer',
+      classification: 'detected',
+    });
+    expect(inventory.containers[0].evidence).not.toContain('socket-mount-directory');
+    expect(inventory.counts.directSocketConsumers).toBe(1);
+  });
+
+  it('keeps a proven consumer when an unreadable-type directory mount sits beside it', () => {
+    // The readable socket bind proves direct consumption. The second mount is a
+    // directory whose type could not be read: possible access, but it must not
+    // downgrade evidence that already proves the socket is used.
+    const unknownDirectory = { ...socketMount('/var/run', '/hostrun', true), type: 'unknown' };
+    const inventory = buildSocketInventory(input({
+      containers: [row({
+        id: 'proven1',
+        name: 'proven',
+        mounts: [
+          socketMount(SOCKET, SOCKET, true),
+          unknownDirectory,
+        ],
+      })],
+    }));
+
+    expect(inventory.containers[0]).toMatchObject({
+      role: 'direct-socket-consumer',
+      classification: 'detected',
+    });
+    expect(inventory.containers[0].evidence).not.toContain('socket-mount-directory');
+    expect(inventory.containers[0].evidence).toContain('socket-mount-type-unknown');
+    expect(inventory.counts.directSocketConsumers).toBe(1);
+    expect(inventory.counts.undetermined).toBe(0);
+  });
+
   it('does not call a lookalike image a proxy, and keeps a generic socket-proxy a candidate', () => {
     const lookalike = buildSocketInventory(input({
       containers: [row({
