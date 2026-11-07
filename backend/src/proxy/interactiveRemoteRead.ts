@@ -116,7 +116,8 @@ const SLOW_READS: ReadonlyArray<RegExp> = [
   /^\/stacks\/import\/scan\/?$/,
   /^\/stacks\/[^/]+\/update-preview\/?$/,
   // Browsing a saved point starts a helper that opens the repository and loads
-  // its index, which is seconds of work before the first entry on a real one.
+  // its index, and the route builds the whole listing before it answers, so the
+  // 30 s budget covers the run rather than only the first entry.
   /^\/recovery\/points\/[^/]+\/contents\/?$/,
 ];
 

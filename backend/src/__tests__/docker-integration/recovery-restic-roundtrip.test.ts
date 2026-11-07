@@ -435,6 +435,14 @@ describeIf('recovery round trip against real Docker', () => {
 
       const symlink = await engine.listContents(read('link-rel'), readContext('integration-contents-link'));
       expect(symlink.ok && symlink.evidence.kind).toBe('other');
+      // A link is stored with its target verbatim, so an absolute one is listed
+      // as a link and never resolved to the host path it names.
+      const absolute = await engine.listContents(read('link-abs'), readContext('integration-contents-abs'));
+      expect(absolute.ok && absolute.evidence.kind).toBe('other');
+      expect(absolute.ok && absolute.evidence.entry).toMatchObject({ type: 'symlink', path: 'link-abs' });
+      // A link in the middle of a path is not a way through it.
+      const throughLink = await engine.listContents(read('link-rel/anything'), readContext('integration-contents-through'));
+      expect(throughLink).toEqual({ ok: false, errorClass: 'not_found' });
 
       const chunks: Buffer[] = [];
       const dump = await engine.dumpFile(

@@ -10,8 +10,11 @@
  */
 import { describe, it, expect, beforeAll, afterAll, beforeEach, vi } from 'vitest';
 import http from 'http';
+import jwt from 'jsonwebtoken';
 import request from 'supertest';
-import { setupTestDb, cleanupTestDb, loginAsTestAdmin } from './helpers/setupTestDb';
+import { setupTestDb, cleanupTestDb, loginAsTestAdmin, TEST_JWT_SECRET } from './helpers/setupTestDb';
+import { PROXY_ROLE_HEADER } from '../services/license-headers';
+import { MAX_CONTENT_DOWNLOAD_BYTES } from '../services/recovery/restic/resticContents';
 
 vi.mock('../services/ComposeService', () => ({
   ComposeService: {
@@ -38,7 +41,9 @@ let nodeId: number;
 
 const SNAPSHOT = 'a'.repeat(64);
 const STACK = 'app';
-const BIG = 1024 * 1024 * 1024 + 1;
+const MAX_BYTES = MAX_CONTENT_DOWNLOAD_BYTES;
+const BIG = MAX_BYTES + 1;
+const NO_CONTROL = { pause: () => undefined, resume: () => undefined };
 
 function service() {
   return engine.RecoveryEngineService.getInstance(nodeId);
@@ -200,6 +205,32 @@ function useEngine(fake: ReturnType<typeof contentEngine> | null): void {
   engine.RecoveryEngineService.setEngineFactoryForTests(fake ? () => fake as never : null);
 }
 
+/** An engine that answers one file entry, whatever its path, and streams `body`. */
+function engineForFile(name: string, size: number | null, body?: Buffer) {
+  return contentEngine({
+    listContents: () => ({
+      ok: true as const,
+      evidence: {
+        path: name,
+        kind: 'file' as const,
+        entry: entry(name, name, 'file', size),
+        entries: [],
+        truncated: false,
+      },
+    }),
+    dumpFile: async (sink) => {
+      if (body && body.length > 0) sink(body, NO_CONTROL);
+      return { ok: true as const, evidence: { bytes: body?.length ?? 0 } };
+    },
+  });
+}
+
+/** A bearer for a hub hop, as the control instance forwards one. */
+function machineRequest(scope: 'node_proxy' | 'pilot_tunnel') {
+  const token = jwt.sign({ scope }, TEST_JWT_SECRET, { expiresIn: '5m' });
+  return { Authorization: `Bearer ${token}`, [PROXY_ROLE_HEADER]: 'viewer' } as Record<string, string>;
+}
+
 beforeAll(async () => {
   tmpDir = await setupTestDb();
   const index = await import('../index');
@@ -328,6 +359,67 @@ describe('GET /api/recovery/points/:pointId/contents', () => {
     });
   });
 
+  it('never reports a succeeded point complete when its latest check found damage', async () => {
+    const pointId = seedPoint();
+    points.RecoveryPointStore.getInstance().recordVerification(pointId, 'engine_check_read_data', 'mismatch', null);
+    await stubDocker();
+    service().markReadyForTests();
+    useEngine(contentEngine());
+
+    const res = await request(app).get(`/api/recovery/points/${pointId}/contents`).set('Cookie', adminCookie);
+    expect(res.status).toBe(200);
+    expect(res.body.point).toMatchObject({
+      status: 'succeeded',
+      integrity: { result: 'mismatch', method: 'engine_check_read_data' },
+      complete: false,
+    });
+  });
+
+  it('reports a point with no recorded check as unverified and incomplete', async () => {
+    const repositoryId = seedRepository();
+    const storage = identityStore.StorageIdentityStore.getInstance().observe({
+      ownerNodeKey: 'docker-engine:contents', kind: 'named_volume', locator: 'app_data', generationToken: 't1',
+      dependents: [{ stackName: STACK, serviceName: null }],
+    });
+    const point = points.RecoveryPointStore.getInstance().begin({
+      kind: 'root', storageId: storage.id, expectedGenerationToken: 't1', repositoryId,
+      trigger: 'manual', actor: 'admin', sourceOperationId: 'op-src',
+      sourceNodeKey: 'docker-engine:contents', engineId: 'restic',
+    });
+    points.RecoveryPointStore.getInstance().finalize(point.id, {
+      status: 'succeeded',
+      evidence: {
+        snapshotId: SNAPSHOT,
+        capture: { fileCount: 1, byteCount: 4, skippedCount: 0 },
+        exclusions: [],
+        consistency: 'unknown',
+      },
+    });
+    await stubDocker();
+    service().markReadyForTests();
+    useEngine(contentEngine());
+
+    const res = await request(app).get(`/api/recovery/points/${point.id}/contents`).set('Cookie', adminCookie);
+    expect(res.status).toBe(200);
+    expect(res.body.point).toMatchObject({
+      integrity: { result: 'unverified', method: null, verifiedAt: null },
+      complete: false,
+    });
+  });
+
+  it('answers a read with no operation and no lock, as the operator page says', async () => {
+    const pointId = seedPoint();
+    await stubDocker();
+    service().markReadyForTests();
+    useEngine(contentEngine());
+
+    await request(app).get(`/api/recovery/points/${pointId}/contents`).set('Cookie', adminCookie).expect(200);
+    await request(app).get(`/api/recovery/points/${pointId}/contents/download?path=notes.md`).set('Cookie', adminCookie).expect(200);
+    const db = recoveryDbModule.recoveryDb();
+    expect(db.prepare('SELECT COUNT(*) AS n FROM recovery_operations').get()).toEqual({ n: 0 });
+    expect(db.prepare('SELECT COUNT(*) AS n FROM recovery_locks').get()).toEqual({ n: 0 });
+  });
+
   it('refuses a path that leaves the point root', async () => {
     const pointId = seedPoint();
     await stubDocker();
@@ -442,20 +534,32 @@ describe('GET /api/recovery/points/:pointId/contents', () => {
     await stubDocker();
     service().markReadyForTests();
     let listed = false;
-    const fake = contentEngine({
+    let streamed = false;
+    useEngine(contentEngine({
       listContents: () => {
         listed = true;
         return { ok: false as const, errorClass: 'not_found' as const };
       },
-    });
-    useEngine(fake);
+      dumpFile: async () => {
+        streamed = true;
+        return { ok: false as const, errorClass: 'internal' as const };
+      },
+    }));
 
     await expect(service().readPointContents({
       pointId,
       path: '',
       authorize: () => false,
+      signal: new AbortController().signal,
+    })).rejects.toMatchObject({ errorClass: 'permission_denied' });
+    await expect(service().prepareContentDownload({
+      pointId,
+      path: 'notes.md',
+      authorize: () => false,
+      signal: new AbortController().signal,
     })).rejects.toMatchObject({ errorClass: 'permission_denied' });
     expect(listed).toBe(false);
+    expect(streamed).toBe(false);
   });
 });
 
@@ -496,19 +600,106 @@ describe('GET /api/recovery/points/:pointId/contents/download', () => {
     expect(res.body).toMatchObject({ errorClass: 'invalid_request', reason: 'symlink_not_followed' });
   });
 
-  it('refuses a directory', async () => {
+  it('refuses a directory, and requires a path because the root is one', async () => {
     const pointId = seedPoint();
     await stubDocker();
     service().markReadyForTests();
     useEngine(contentEngine());
 
-    for (const path of ['', 'etc']) {
-      const res = await request(app)
-        .get(`/api/recovery/points/${pointId}/contents/download?path=${path}`)
+    const directory = await request(app)
+      .get(`/api/recovery/points/${pointId}/contents/download?path=etc`)
+      .set('Cookie', adminCookie);
+    expect(directory.status).toBe(400);
+    expect(directory.body).toMatchObject({ errorClass: 'invalid_request', reason: 'not_a_file' });
+
+    for (const query of ['', '?path=']) {
+      const root = await request(app)
+        .get(`/api/recovery/points/${pointId}/contents/download${query}`)
         .set('Cookie', adminCookie);
-      expect(res.status, path).toBe(400);
-      expect(res.body, path).toMatchObject({ errorClass: 'invalid_request', reason: 'not_a_file' });
+      expect(root.status, query).toBe(400);
+      expect(root.body.errorClass, query).toBe('invalid_request');
     }
+  });
+
+  it('refuses a regular file whose record carries no size', async () => {
+    const pointId = seedPoint();
+    await stubDocker();
+    service().markReadyForTests();
+    useEngine(engineForFile('nosize.bin', null));
+
+    const res = await request(app)
+      .get(`/api/recovery/points/${pointId}/contents/download?path=nosize.bin`)
+      .set('Cookie', adminCookie);
+    expect(res.status).toBe(400);
+    expect(res.body).toMatchObject({ errorClass: 'invalid_request', reason: 'size_unknown' });
+  });
+
+  it('serves an empty file and refuses only a size past the bound, not one at it', async () => {
+    const pointId = seedPoint();
+    await stubDocker();
+    service().markReadyForTests();
+
+    // A HEAD answers the metadata without streaming, so the boundary can be
+    // checked without moving a gigabyte.
+    const headAtBound = await (async () => {
+      useEngine(engineForFile('at.bin', MAX_BYTES));
+      return request(app)
+        .head(`/api/recovery/points/${pointId}/contents/download?path=at.bin`)
+        .set('Cookie', adminCookie);
+    })();
+    expect(headAtBound.status).toBe(200);
+    expect(headAtBound.headers['content-length']).toBe(String(MAX_BYTES));
+
+    useEngine(engineForFile('below.bin', MAX_BYTES - 1));
+    const headBelow = await request(app)
+      .head(`/api/recovery/points/${pointId}/contents/download?path=below.bin`)
+      .set('Cookie', adminCookie);
+    expect(headBelow.status).toBe(200);
+    expect(headBelow.headers['content-length']).toBe(String(MAX_BYTES - 1));
+
+    useEngine(engineForFile('empty.bin', 0, Buffer.alloc(0)));
+    const empty = await request(app)
+      .get(`/api/recovery/points/${pointId}/contents/download?path=empty.bin`)
+      .set('Cookie', adminCookie);
+    expect(empty.status).toBe(200);
+    expect(empty.headers['content-length']).toBe('0');
+    expect(Buffer.isBuffer(empty.body) ? empty.body.length : 0).toBe(0);
+  });
+
+  it('answers a HEAD from the metadata without running the dump', async () => {
+    const pointId = seedPoint();
+    await stubDocker();
+    service().markReadyForTests();
+    let streamed = false;
+    useEngine(contentEngine({
+      dumpFile: async () => {
+        streamed = true;
+        return { ok: true as const, evidence: { bytes: 7 } };
+      },
+    }));
+
+    const res = await request(app)
+      .head(`/api/recovery/points/${pointId}/contents/download?path=notes.md`)
+      .set('Cookie', adminCookie);
+    expect(res.status).toBe(200);
+    expect(res.headers['content-length']).toBe('7');
+    expect(res.headers['content-disposition']).toContain('attachment');
+    expect(streamed).toBe(false);
+  });
+
+  it('keeps a hostile entry name out of the response headers', async () => {
+    const pointId = seedPoint();
+    await stubDocker();
+    service().markReadyForTests();
+    useEngine(engineForFile('a"\r\nX-Injected: 1', 3, Buffer.from('abc')));
+
+    const res = await request(app)
+      .get(`/api/recovery/points/${pointId}/contents/download?path=evil`)
+      .set('Cookie', adminCookie);
+    expect(res.status).toBe(200);
+    const disposition = String(res.headers['content-disposition']);
+    expect(disposition).not.toMatch(/[\r\n]/);
+    expect(res.headers['x-injected']).toBeUndefined();
   });
 
   it('refuses a file past the download bound before any byte moves', async () => {
@@ -601,9 +792,62 @@ describe('GET /api/recovery/points/:pointId/contents/download', () => {
 });
 
 describe('a point\'s contents over the node proxy and the Pilot tunnel', () => {
-  it('is a slow read for the listing and an unbounded download for the file body', async () => {
+  it('classifies the two read paths and ignores the query string', async () => {
     const { remoteReadTimeoutMs, SLOW_REMOTE_READ_TIMEOUT_MS } = await import('../proxy/interactiveRemoteRead');
     expect(remoteReadTimeoutMs('GET', '/recovery/points/p1/contents')).toBe(SLOW_REMOTE_READ_TIMEOUT_MS);
+    expect(remoteReadTimeoutMs('GET', '/recovery/points/p1/contents?path=/etc')).toBe(SLOW_REMOTE_READ_TIMEOUT_MS);
+    expect(remoteReadTimeoutMs('GET', '/recovery/points/p1/contents/')).toBe(SLOW_REMOTE_READ_TIMEOUT_MS);
     expect(remoteReadTimeoutMs('GET', '/recovery/points/p1/contents/download')).toBeNull();
+    expect(remoteReadTimeoutMs('GET', '/recovery/points/p1/contents/download?path=x.bin')).toBeNull();
+  });
+
+  it('marks the download as a streaming response, so a hop never cuts the body short', async () => {
+    const { isStreamingOrDownloadResponse } = await import('../proxy/interactiveRemoteRead');
+    expect(isStreamingOrDownloadResponse({ 'content-disposition': 'attachment; filename="a.bin"' })).toBe(true);
+    expect(isStreamingOrDownloadResponse({ 'content-type': 'application/json' })).toBe(false);
+  });
+
+  it('answers the same for a local session and for a hop over either transport', async () => {
+    const pointId = seedPoint();
+    await stubDocker();
+    service().markReadyForTests();
+    useEngine(contentEngine());
+
+    const listing = `/api/recovery/points/${pointId}/contents?path=etc`;
+    const local = await request(app).get(listing).set('Cookie', adminCookie);
+    expect(local.status).toBe(200);
+
+    const download = `/api/recovery/points/${pointId}/contents/download?path=notes.md`;
+    const localBody = await request(app)
+      .get(download)
+      .set('Cookie', adminCookie)
+      .buffer(true)
+      .parse((response, callback) => {
+        const chunks: Buffer[] = [];
+        response.on('data', (chunk: Buffer) => chunks.push(chunk));
+        response.on('end', () => callback(null, Buffer.concat(chunks)));
+      });
+    expect(localBody.status).toBe(200);
+
+    for (const scope of ['node_proxy', 'pilot_tunnel'] as const) {
+      const headers = machineRequest(scope);
+      const relayed = await request(app).get(listing).set(headers);
+      expect(relayed.status, scope).toBe(local.status);
+      expect(relayed.body, scope).toEqual(local.body);
+
+      const relayedBody = await request(app)
+        .get(download)
+        .set(headers)
+        .buffer(true)
+        .parse((response, callback) => {
+          const chunks: Buffer[] = [];
+          response.on('data', (chunk: Buffer) => chunks.push(chunk));
+          response.on('end', () => callback(null, Buffer.concat(chunks)));
+        });
+      expect(relayedBody.status, scope).toBe(200);
+      expect((relayedBody.body as Buffer).equals(localBody.body as Buffer), scope).toBe(true);
+      expect(relayedBody.headers['content-length'], scope).toBe(localBody.headers['content-length']);
+      expect(relayedBody.headers['content-disposition'], scope).toBe(localBody.headers['content-disposition']);
+    }
   });
 });

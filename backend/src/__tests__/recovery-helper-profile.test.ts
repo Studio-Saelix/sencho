@@ -147,6 +147,26 @@ describe('recovery helper profiles', () => {
     expect(hostConfig.CapAdd).toEqual(capAdd);
   });
 
+  it('gives the read profile the repository alone, read-only and without a deadline', () => {
+    expect(HELPER_PROFILES.read).toEqual({
+      user: '0:0',
+      capAdd: [],
+      repositoryReadOnly: true,
+      needsRepository: true,
+      source: null,
+      target: null,
+      tmpfs: { '/tmp': 'size=64m,mode=1777' },
+      pidsLimit: 256,
+      memoryBytes: 1024 * 1024 * 1024,
+      timeoutMs: null,
+    });
+    const { hostConfig } = specFor('read');
+    // No application volume is attached: the bytes come out of the repository.
+    expect(hostConfig.Mounts).toEqual([
+      { Type: 'volume', Source: 'repo-vol', Target: HELPER_REPOSITORY_MOUNT, ReadOnly: true, VolumeOptions: { NoCopy: true } },
+    ]);
+  });
+
   it('gives the swap profile exactly one writable mount and no repository', () => {
     expect(HELPER_PROFILES.swap).toEqual({
       user: '0:0',

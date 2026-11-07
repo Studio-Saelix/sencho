@@ -208,8 +208,10 @@ describe('classifyContentRun', () => {
     expect(classifyContentRun({ ...base, exitCode: null })).toEqual({ status: 'failed', errorClass: 'internal' });
   });
 
-  it('reads any other failure as an integrity answer, not a request one', () => {
+  it('reads a data failure as an integrity answer and a runtime crash as the node\'s', () => {
     expect(classifyContentRun({ ...base, exitCode: 1 })).toEqual({ status: 'failed', errorClass: 'integrity_mismatch' });
-    expect(classifyContentRun({ ...base, exitCode: 2 })).toEqual({ status: 'failed', errorClass: 'integrity_mismatch' });
+    expect(classifyContentRun({ ...base, exitCode: 3 })).toEqual({ status: 'failed', errorClass: 'integrity_mismatch' });
+    // Exit 2 is the helper's own Go runtime failing, which says nothing about the data.
+    expect(classifyContentRun({ ...base, exitCode: 2 })).toEqual({ status: 'failed', errorClass: 'node_error' });
   });
 });

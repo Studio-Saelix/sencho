@@ -1568,9 +1568,11 @@ components:
             now: it came from another preview, or the containers or the repository changed
             since the preview), `no_fence` (`release_fence` on a restore that never stopped a workload),
             and `fence_released` (`release_fence` on a restore whose fence is already released).
-            The point-contents routes add `no_snapshot` (the point failed or was interrupted,
-            so it holds nothing to read), `symlink_not_followed` (a symlink is never followed out
-            of a point), and `not_a_file` (a directory or a special file has no file body).
+            The point-contents routes add `no_snapshot` (the point is still capturing, failed, or
+            was interrupted, so it holds nothing to read), `symlink_not_followed` (a symlink is
+            never followed out of a point), `not_a_file` (a directory or a special file has no file
+            body), and `size_unknown` (a regular file whose record carries no size cannot be
+            streamed with a bound or checked for a short body).
 
     RecoveryOperation:
       type: object
@@ -1833,7 +1835,9 @@ components:
         permissions:
           type: ["string", "null"]
           example: "-rw-r-----"
-        mode: { type: ["integer", "null"] }
+        mode:
+          type: ["integer", "null"]
+          description: The mode restic recorded, as a number. `permissions` is the same bits as text.
         uid: { type: ["integer", "null"] }
         gid: { type: ["integer", "null"] }
         mtime:
@@ -1871,6 +1875,8 @@ components:
               enum: [crash_consistent_live, crash_consistent_stopped, unknown]
             capture:
               type: ["object", "null"]
+              description: Null only for a point with no snapshot, which these routes never serve.
+              required: [fileCount, byteCount, skippedCount]
               properties:
                 fileCount: { type: integer }
                 byteCount: { type: integer }
@@ -1900,6 +1906,7 @@ components:
             complete: { type: boolean }
             storage:
               type: ["object", "null"]
+              required: [id, kind, locator, generation, state]
               properties:
                 id: { type: string }
                 kind:
@@ -1931,8 +1938,9 @@ components:
             truncated:
               type: boolean
               description: |
-                More entries exist than this read lists. Ask for a subdirectory to
-                see the rest; the cap is `limits.maxEntries`.
+                More entries exist than this read lists. The entries past
+                `limits.maxEntries` are not returned by this read; a directory that
+                large has to be read another way.
         limits:
           type: object
           required: [maxEntries, maxDownloadBytes]
@@ -6391,6 +6399,8 @@ paths:
           $ref: "#/components/responses/RecoveryForbidden"
         "404":
           $ref: "#/components/responses/RecoveryNotFound"
+        "409":
+          $ref: "#/components/responses/RecoveryConflict"
         "500":
           $ref: "#/components/responses/RecoveryInternalError"
         "503":
@@ -6425,7 +6435,9 @@ paths:
         - name: path
           in: query
           required: true
-          description: Root-relative path of one regular file.
+          description: |
+            Root-relative path of one regular file. Required: the point root is a
+            directory, so an absent or empty value answers `400 invalid_request`.
           schema:
             type: string
             example: etc/app/config.txt
@@ -6457,6 +6469,8 @@ paths:
           $ref: "#/components/responses/RecoveryNotFound"
         "413":
           $ref: "#/components/responses/RecoveryPayloadTooLarge"
+        "409":
+          $ref: "#/components/responses/RecoveryConflict"
         "500":
           $ref: "#/components/responses/RecoveryInternalError"
         "503":

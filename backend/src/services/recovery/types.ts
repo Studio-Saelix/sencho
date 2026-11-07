@@ -199,7 +199,7 @@ export type RecoveryErrorClass =
   | 'cleanup_failed'
   /** The operation has passed its commit point and cannot be rolled back. */
   | 'not_cancellable'
-  /** A point, a storage record or a path inside a point names nothing. */
+  /** A point id, or a path inside a point, names nothing. */
   | 'not_found'
   /** A file in a point is larger than the download bound this build serves. */
   | 'payload_too_large';
@@ -225,6 +225,8 @@ export const RECOVERY_REFUSAL_REASONS = [
   'not_a_file',
   /** The requested entry is a symlink. A point is browsed, never followed. */
   'symlink_not_followed',
+  /** A regular file whose record carries no size cannot be streamed with a bound. */
+  'size_unknown',
 ] as const;
 export type RecoveryRefusalReason = (typeof RECOVERY_REFUSAL_REASONS)[number];
 
@@ -581,8 +583,9 @@ export interface BackupEngine {
 /**
  * One entry inside a saved point, as restic records it. `path` is relative to
  * the point root, so it never names the helper's mount (`/data`) and never
- * starts with a slash. The point root itself is not an entry: it has no name,
- * size or mode of its own in the record.
+ * starts with a slash. The point root itself is not listed as an entry: restic
+ * records it with the mount's own name, which is not part of the point, so a
+ * read of the root answers its children with no entry of their own.
  */
 export interface RecoveryContentEntry {
   path: string;
@@ -598,6 +601,12 @@ export interface RecoveryContentEntry {
   /** Milliseconds since the epoch, or null when the record carries no valid time. */
   mtime: number | null;
 }
+
+/**
+ * A regular file with its size, the only entry a download serves. The read path
+ * proves both facts before it hands one back, so a caller never re-derives them.
+ */
+export type RecoveryFileEntry = RecoveryContentEntry & { type: 'file'; size: number };
 
 export type RecoveryContentKind = 'directory' | 'file' | 'other';
 
@@ -643,6 +652,7 @@ export interface ContentChunkControl {
 export type ContentChunkSink = (chunk: Buffer, control: ContentChunkControl) => void;
 
 export interface ContentDump {
+  /** Bytes actually streamed to the sink. */
   bytes: number;
 }
 

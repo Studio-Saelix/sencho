@@ -63,15 +63,12 @@ export interface CoverageVerdict {
   roots: RootCoverage[];
 }
 
-/** The most recent verification; on a tie, the one that did not verify wins. */
-export function latestVerificationFor(
-  pointId: string,
-  verifications: ReadonlyMap<string, readonly IntegrityVerification[]>,
+/** The most recent verification in one point's list; on a tie, the one that did not verify wins. */
+export function latestVerificationOf(
+  verifications: readonly IntegrityVerification[],
 ): IntegrityVerification | null {
-  const list = verifications.get(pointId) ?? [];
   let latest: IntegrityVerification | null = null;
-  for (const v of list) {
-    if (v.pointId !== pointId) continue;
+  for (const v of verifications) {
     if (!latest || v.verifiedAt > latest.verifiedAt
       || (v.verifiedAt === latest.verifiedAt && latest.result === 'verified' && v.result !== 'verified')) {
       latest = v;
@@ -81,9 +78,22 @@ export function latestVerificationFor(
 }
 
 /**
+ * The same answer for one point in a map of many. A verification filed under
+ * another point is ignored even when it sits in this point's list, so a row that
+ * disagrees with its own key cannot verify anything.
+ */
+export function latestVerificationFor(
+  pointId: string,
+  verifications: ReadonlyMap<string, readonly IntegrityVerification[]>,
+): IntegrityVerification | null {
+  return latestVerificationOf((verifications.get(pointId) ?? []).filter((v) => v.pointId === pointId));
+}
+
+/**
  * A point that counted everything it recorded and left nothing out but policy
- * exclusions. The one definition every surface uses; a point that fails it is
- * never reported as complete or verified, whatever restic's check said.
+ * exclusions. Verification is a separate fact: this predicate says the capture
+ * itself is complete, and a surface that also needs a verified check combines it
+ * with `latestVerificationOf(...).result === 'verified'` (see `pointEvidence.ts`).
  */
 export const isCompletePoint = (p: RecoveryPoint): boolean =>
   p.status === 'succeeded' && p.capture.skippedCount === 0

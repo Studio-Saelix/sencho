@@ -69,8 +69,9 @@ function entryType(raw: unknown): RecoveryContentEntry['type'] {
   return 'other';
 }
 
-function finiteNumber(value: unknown): number | null {
-  return typeof value === 'number' && Number.isFinite(value) ? value : null;
+/** A byte count, a mode, a uid or a gid: a non-negative integer, never a fraction. */
+function nonNegativeInteger(value: unknown): number | null {
+  return typeof value === 'number' && Number.isInteger(value) && value >= 0 ? value : null;
 }
 
 function stringOrNull(value: unknown): string | null {
@@ -122,17 +123,25 @@ export function parseContentNodeLine(line: string): RecoveryContentEntry | null 
   }
   if (relative.split('/').includes('..')) return null;
 
+  // The name is the last segment of the recorded path. A record that disagrees
+  // is dropped rather than trusted, because the name is what a download puts in
+  // its Content-Disposition header. The point root is the one exception: its
+  // record is named after the mount, and the listing hides that entry anyway.
+  if (relative !== '') {
+    const segments = relative.split('/');
+    if (segments[segments.length - 1] !== name) return null;
+  }
+
   const type = entryType(record.type);
-  const size = type === 'file' ? finiteNumber(record.size) : null;
   return {
     path: relative,
     name,
     type,
-    size: size !== null && size >= 0 ? size : null,
+    size: type === 'file' ? nonNegativeInteger(record.size) : null,
     permissions: stringOrNull(record.permissions),
-    mode: finiteNumber(record.mode),
-    uid: finiteNumber(record.uid),
-    gid: finiteNumber(record.gid),
+    mode: nonNegativeInteger(record.mode),
+    uid: nonNegativeInteger(record.uid),
+    gid: nonNegativeInteger(record.gid),
     mtime: millisOrNull(record.mtime),
   };
 }
@@ -188,8 +197,12 @@ export type ContentRunOutcome =
  *
  * `truncated` wins over everything: the listing stopped itself at its entry cap,
  * so the helper's SIGINT and its exit code say nothing about the repository.
- * Exit 1 is the repository failing to produce a tree or a blob it recorded,
- * which is an integrity answer, not a request one.
+ * Exit 1 is restic's generic failure: the repository could not produce a tree or
+ * a blob the point recorded, or a snapshot this repository no longer holds. The
+ * node-local log line names which, so an operator is not sent looking for
+ * corruption when the snapshot is simply gone. Exit 2 is the Go runtime failing,
+ * which says nothing about the data and is the node's problem. Exit 3 (a backup
+ * that skipped source data) does not occur for a read.
  */
 export function classifyContentRun(input: {
   exitCode: number | null;
@@ -211,6 +224,8 @@ export function classifyContentRun(input: {
       return { status: 'failed', errorClass: 'repository_key_unavailable' };
     case 130:
       return { status: 'cancelled' };
+    case 2:
+      return { status: 'failed', errorClass: 'node_error' };
     case null:
       return { status: 'failed', errorClass: 'internal' };
     default:

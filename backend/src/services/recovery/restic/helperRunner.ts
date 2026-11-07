@@ -565,11 +565,27 @@ export class RecoveryHelperRunner {
       // stderr stay separate even though they share one socket.
       this.deps.docker.modem.demuxStream(stream, stdout, stderr);
       await container.start();
+      // An abort that lands while the container is still being created has no
+      // live process to signal. Send the kill again now that one exists, or the
+      // helper would run to completion with nobody reading it.
+      if (aborted) {
+        killed = true;
+        void kill('SIGKILL');
+      }
       if (request.stdinSecret !== undefined) stream.write(request.stdinSecret);
       // Always close stdin: the helper reads the password from it and then must
       // see EOF, or `cat config` waits forever for more input.
       stream.end();
       const exitInfo = await container.wait();
+      // A sink that paused the stream for backpressure (a slow client) has
+      // already filled the daemon's pipe, so the process may be gone while its
+      // last buffered output is still on the socket. Resume before waiting for
+      // the stream to end, or those bytes are lost and a complete file reads
+      // short.
+      if (pausedBySink) {
+        pausedBySink = false;
+        stream.resume();
+      }
       // The exit code is the run's result. The stream only carries output that is
       // still being flushed, so a stream that never closes cannot hold the
       // operation open after the process is gone.

@@ -696,6 +696,11 @@ recoveryRouter.get('/points/:pointId/contents', handle(async (req, res) => {
  * partial body is never read as a whole one.
  */
 recoveryRouter.get('/points/:pointId/contents/download', handle(async (req, res) => {
+  // A download names one file. No path means the root, which is a directory,
+  // so the request is refused here rather than after a helper run.
+  const path = contentPathOf(req);
+  if (path === '') throw new RecoveryError('invalid_request');
+
   const controller = new AbortController();
   let clientGone = false;
   const onClose = (): void => {
@@ -707,11 +712,11 @@ recoveryRouter.get('/points/:pointId/contents/download', handle(async (req, res)
   try {
     const download = await engineService(req).prepareContentDownload({
       pointId: paramOf(req, 'pointId'),
-      path: contentPathOf(req),
+      path,
       authorize: authorizeWith(req, 'read'),
       signal: controller.signal,
     });
-    const size = download.entry.size ?? 0;
+    const size = download.entry.size;
     if (size > MAX_CONTENT_DOWNLOAD_BYTES) {
       sendRecoveryError(res, 'payload_too_large', { size, maxBytes: MAX_CONTENT_DOWNLOAD_BYTES });
       return;
@@ -721,27 +726,49 @@ recoveryRouter.get('/points/:pointId/contents/download', handle(async (req, res)
     res.setHeader('Content-Disposition', contentDisposition(download.entry.name));
     res.setHeader('Cache-Control', 'no-store');
     res.setHeader('X-Content-Type-Options', 'nosniff');
-
-    const result = await download.stream((chunk, control) => {
-      if (clientGone || res.writableEnded || res.destroyed) {
-        control.pause();
-        return;
-      }
-      if (!res.write(chunk)) {
-        control.pause();
-        res.once('drain', () => {
-          if (!clientGone) control.resume();
-        });
-      }
-    });
-    if (clientGone) return;
-    if (!result.ok) {
-      // Part of the body is already on the wire: a JSON error cannot replace it,
-      // and ending normally would present a short file as a complete one.
-      res.destroy();
+    // A HEAD answers the same metadata and reads nothing: Node discards a body
+    // for HEAD, so running the dump would read the whole file for no output.
+    if (req.method === 'HEAD') {
+      res.end();
       return;
     }
-    res.end();
+
+    let wroteAny = false;
+    try {
+      const result = await download.stream((chunk, control) => {
+        if (clientGone || res.writableEnded || res.destroyed) {
+          control.pause();
+          return;
+        }
+        wroteAny = true;
+        if (!res.write(chunk)) {
+          control.pause();
+          res.once('drain', () => {
+            if (!clientGone) control.resume();
+          });
+        }
+      });
+      if (clientGone) return;
+      if (!result.ok) {
+        // Part of the body is already on the wire: a JSON error cannot replace it,
+        // and ending normally would present a short file as a complete one.
+        res.destroy();
+        return;
+      }
+      res.end();
+    } catch (err) {
+      // The dump failed before its first byte. The file headers set above would
+      // turn the JSON error into an empty attachment, so they are removed and the
+      // handler's own error answer takes over.
+      if (!wroteAny && !res.headersSent) {
+        res.removeHeader('Content-Disposition');
+        res.removeHeader('Content-Length');
+        res.removeHeader('Content-Type');
+        res.removeHeader('Cache-Control');
+        res.removeHeader('X-Content-Type-Options');
+      }
+      throw err;
+    }
   } finally {
     res.off('close', onClose);
   }

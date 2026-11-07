@@ -1,4 +1,4 @@
-import { isCompletePoint, latestVerificationFor } from './coverage';
+import { isCompletePoint, latestVerificationOf } from './coverage';
 import type {
   CaptureSummary,
   IntegrityVerification,
@@ -8,29 +8,30 @@ import type {
 } from './types';
 
 /**
- * What a surface showing a point's contents says about the point itself.
+ * What a browse answer says about the point itself: built from the point, its
+ * latest verification and its storage identity.
  *
- * One shape, built once from the point, its latest verification and its storage
- * identity, so browse and download never describe the same point differently. A
- * point that skipped a path, or whose most recent check did not verify, is never
- * reported `complete`, whatever else the record says: the data is readable and
- * still not a verified copy.
+ * A point that skipped a path, or whose most recent check did not verify, is
+ * never reported `complete`, whatever else the record says: the data is readable
+ * and still not a verified copy. The input is the narrowed point the read path
+ * has already proven, so a status a browse cannot serve is not representable.
  */
 export interface PointContentsEvidence {
   id: string;
   kind: 'root' | 'path';
-  status: RecoveryPoint['status'];
-  snapshotId: string | null;
-  completedAt: number | null;
+  /** Only a point a browse can serve: it has a snapshot and a capture. */
+  status: 'succeeded' | 'partial';
+  snapshotId: string;
+  completedAt: number;
   consistency: RecoveryPoint['consistency'];
-  capture: CaptureSummary | null;
+  capture: CaptureSummary;
   exclusions: PointExclusion[];
   integrity: {
     result: 'verified' | 'mismatch' | 'error' | 'unverified';
     method: IntegrityVerification['method'] | null;
     verifiedAt: number | null;
   };
-  /** Nothing skipped, and the latest check verified. Never true for a partial point. */
+  /** The capture counted everything and the latest check verified. Never true for a partial point. */
   complete: boolean;
   storage: {
     id: string;
@@ -42,13 +43,11 @@ export interface PointContentsEvidence {
 }
 
 export function describePointContentsEvidence(
-  point: RecoveryPoint,
+  point: Extract<RecoveryPoint, { status: 'succeeded' | 'partial' }>,
   storage: StorageIdentity | null,
   verifications: readonly IntegrityVerification[],
 ): PointContentsEvidence {
-  const byPoint = new Map<string, IntegrityVerification[]>();
-  byPoint.set(point.id, [...verifications]);
-  const latest = latestVerificationFor(point.id, byPoint);
+  const latest = latestVerificationOf(verifications);
   return {
     id: point.id,
     kind: point.kind,

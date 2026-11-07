@@ -62,6 +62,14 @@ import type {
 /** The engine id stamped on every point this adapter captures. */
 export const RESTIC_ENGINE_ID = 'restic';
 
+/**
+ * How long one listing may take. A directory read loads the repository index
+ * before the first entry, and a repository on a stalled mount would otherwise
+ * hold a helper and a response forever. A file body has no deadline: it moves at
+ * the client's pace and ends when the client leaves.
+ */
+const CONTENT_LISTING_TIMEOUT_MS = 10 * 60 * 1000;
+
 export class ResticEngine implements BackupEngine, PointContentReader {
   readonly engineId = RESTIC_ENGINE_ID;
   readonly contractVersion = RECOVERY_CONTRACT_VERSION;
@@ -323,6 +331,7 @@ export class ResticEngine implements BackupEngine, PointContentReader {
         mounts: { repository: repository.locator },
         stdinSecret: this.deps.secret,
         signal: controller.signal,
+        timeoutMs: CONTENT_LISTING_TIMEOUT_MS,
         onStdoutLine: (line) => {
           const entry = parseContentNodeLine(line);
           if (!entry) return;
@@ -350,7 +359,10 @@ export class ResticEngine implements BackupEngine, PointContentReader {
       truncated,
     });
     if (outcome.status === 'cancelled') return { ok: false, errorClass: 'interrupted' };
-    if (outcome.status === 'failed') return { ok: false, errorClass: outcome.errorClass };
+    if (outcome.status === 'failed') {
+      logContentFailure('list', request, result, outcome.errorClass, this.deps.secret);
+      return { ok: false, errorClass: outcome.errorClass };
+    }
     const contents = contentListingFor({ path: request.path, self, entries, truncated });
     if (!contents) return { ok: false, errorClass: 'not_found' };
     return { ok: true, evidence: contents };
@@ -401,13 +413,17 @@ export class ResticEngine implements BackupEngine, PointContentReader {
       truncated: false,
     });
     if (outcome.status === 'cancelled') return { ok: false, errorClass: 'interrupted' };
-    if (outcome.status === 'failed') return { ok: false, errorClass: outcome.errorClass };
+    if (outcome.status === 'failed') {
+      logContentFailure('dump', request, result, outcome.errorClass, this.deps.secret);
+      return { ok: false, errorClass: outcome.errorClass };
+    }
     if (bytes !== expectedBytes) {
       console.warn(
-        '[Recovery] Dump of snapshot %s returned %d of %d bytes',
+        '[Recovery] Dump of snapshot %s returned %d of %d bytes: %s',
         sanitizeForLog(request.snapshotId),
         bytes,
         expectedBytes,
+        helperFailureNote(result.stderrTail, [], [this.deps.secret]),
       );
       return { ok: false, errorClass: 'integrity_mismatch' };
     }
@@ -422,6 +438,28 @@ export class ResticEngine implements BackupEngine, PointContentReader {
       return null;
     }
   }
+}
+
+/**
+ * The one place a read failure's cause survives: the helper container is removed
+ * when it exits and the API answers a sanitized class, so the node-local log is
+ * the only record that tells a missing snapshot from an unreadable repository.
+ */
+function logContentFailure(
+  what: 'list' | 'dump',
+  request: ContentReadRequest,
+  result: { exitCode: number | null; stderrTail: string },
+  errorClass: string,
+  secret: string,
+): void {
+  console.warn(
+    '[Recovery] Content %s for snapshot %s failed with %s, exit %s: %s',
+    what,
+    sanitizeForLog(request.snapshotId),
+    errorClass,
+    result.exitCode ?? 'none',
+    helperFailureNote(result.stderrTail, [], [secret]),
+  );
 }
 
 export interface ResticEngineDeps {

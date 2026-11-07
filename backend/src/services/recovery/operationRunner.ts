@@ -64,9 +64,9 @@ import type {
   IntegrityMethod,
   OperationFinish,
   PointContentReader,
-  RecoveryContentEntry,
   RecoveryContents,
   RecoveryErrorClass,
+  RecoveryFileEntry,
   RecoveryOperation,
   RecoveryProgress,
   RepositoryDescriptor,
@@ -135,7 +135,7 @@ export interface PointContentsReadResult {
 
 /** A download proven to be a regular file, with the run that streams its bytes. */
 export interface PointContentDownload {
-  entry: RecoveryContentEntry;
+  entry: RecoveryFileEntry;
   stream: (sink: ContentChunkSink) => Promise<EngineResult<ContentDump>>;
 }
 
@@ -944,7 +944,7 @@ export class RecoveryEngineService {
     pointId: string;
     path: string;
     authorize: (context: { storageKey: string | null; dependents: readonly StorageDependent[] }) => boolean;
-    signal?: AbortSignal;
+    signal: AbortSignal;
   }): Promise<PointContentsReadResult> {
     const resolved = await this.resolveContentRead(input);
     const contents = await resolved.engine.listContents(
@@ -986,15 +986,18 @@ export class RecoveryEngineService {
         reason: listing.entry?.type === 'symlink' ? 'symlink_not_followed' : 'not_a_file',
       });
     }
-    if (listing.kind !== 'file') throw new RecoveryError('invalid_request', { reason: 'not_a_file' });
-    const entry = listing.entry;
-    if (!entry || entry.type !== 'file' || entry.size === null) {
+    if (listing.kind !== 'file' || !listing.entry) {
       throw new RecoveryError('invalid_request', { reason: 'not_a_file' });
     }
-    const size = entry.size;
+    const entry = listing.entry;
+    if (entry.type !== 'file') throw new RecoveryError('invalid_request', { reason: 'not_a_file' });
+    // A file record without a size cannot be bounded or checked for a short
+    // body. restic always reports one; this is a refusal, not a guess.
+    if (entry.size === null) throw new RecoveryError('invalid_request', { reason: 'size_unknown' });
+    const download: RecoveryFileEntry = { ...entry, type: 'file', size: entry.size };
     return {
-      entry,
-      stream: (sink) => resolved.engine.dumpFile(read, size, sink, {
+      entry: download,
+      stream: (sink) => resolved.engine.dumpFile(read, download.size, sink, {
         operationId: resolved.operationId,
         signal: resolved.signal,
       }),
@@ -1010,7 +1013,7 @@ export class RecoveryEngineService {
     pointId: string;
     path: string;
     authorize: (context: { storageKey: string | null; dependents: readonly StorageDependent[] }) => boolean;
-    signal?: AbortSignal;
+    signal: AbortSignal;
   }): Promise<{
     snapshotId: string;
     path: string;
@@ -1023,7 +1026,12 @@ export class RecoveryEngineService {
     const point = this.points.get(input.pointId);
     const storage = point ? StorageIdentityStore.getInstance().getById(point.storageId) : null;
     await this.requireStorageAccess(storage, input.authorize);
-    if (!point) throw new RecoveryError('not_found');
+    if (!point) {
+      // A point id names nothing. The sentence says so, rather than reusing the
+      // path-not-found one, so an operator can tell a deleted point from a stale
+      // path.
+      throw new RecoveryError('not_found', { detail: 'The recovery point no longer exists on this node.' });
+    }
     this.requireReady();
     if (point.status !== 'succeeded' && point.status !== 'partial') {
       throw new RecoveryError('invalid_request', { reason: 'no_snapshot' });
@@ -1034,12 +1042,17 @@ export class RecoveryEngineService {
     if (!repository) throw new RecoveryError('repository_unavailable');
 
     const path = canonicalizeContentPath(input.path);
-    const signal = input.signal ?? new AbortController().signal;
+    const signal = input.signal;
     const operationId = `read-${randomUUID()}`;
     const engine = this.buildEngine(repository, operationId, signal);
     const reader = engine as BackupEngine & Partial<PointContentReader>;
     if (typeof reader.listContents !== 'function' || typeof reader.dumpFile !== 'function') {
-      throw new RecoveryError('capability_unavailable');
+      // The node protects volumes but its engine predates this read path. The
+      // shared sentence would say volume protection is unavailable, which is not
+      // what happened, so this refusal says what it means.
+      throw new RecoveryError('capability_unavailable', {
+        detail: 'The recovery engine on this node cannot read saved point contents.',
+      });
     }
     const verifications = this.points.verificationsForPoints([point.id]).get(point.id) ?? [];
     return {
