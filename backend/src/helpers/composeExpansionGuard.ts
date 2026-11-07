@@ -19,7 +19,7 @@
  * for Compose to report, so this guard never changes how an ordinary broken
  * stack fails.
  */
-import { promises as fsPromises } from 'fs';
+import { promises as fsPromises, constants as fsConstants } from 'fs';
 import path from 'path';
 import { isAlias, isCollection, isPair, parseDocument, visit } from 'yaml';
 import type { Document, Node } from 'yaml';
@@ -194,6 +194,10 @@ export function composeFileArgsFromInvocation(invocation: readonly string[]): st
 async function firstExisting(cwd: string, names: readonly string[]): Promise<string | null> {
   for (const name of names) {
     const candidate = path.resolve(cwd, name);
+    // Canonical inline js/path-injection barrier at the access sink: the
+    // candidate must stay inside the directory Compose is invoked in. The name
+    // is a constant, so this only states the invariant CodeQL cannot infer.
+    if (!candidate.startsWith(cwd + path.sep)) continue;
     try {
       await fsPromises.access(candidate);
       return candidate;
@@ -224,31 +228,34 @@ async function resolveInputFiles(cwd: string, explicitFiles: readonly string[]):
 const SKIPPABLE_READ_ERRORS = new Set(['ENOENT', 'ENOTDIR', 'EISDIR', 'EACCES', 'EPERM', 'ELOOP']);
 
 /**
- * Read at most the source cap. A stat first keeps a huge file from being
- * allocated at all; the bounded read keeps a file that grows between the stat
- * and the read from doing the same.
+ * Read at most the source cap from one file inside `allowedRoot`. A single open
+ * (read-only, non-blocking so a FIFO cannot wedge it) followed by `fstat` and a
+ * bounded read removes the stat-then-open race and never allocates more than
+ * the cap. Anything outside `allowedRoot` is not read: every caller names files
+ * inside the directory Compose will run in.
  */
-async function readIfRegularFile(filePath: string, label: string): Promise<string | null> {
-  let stat: Awaited<ReturnType<typeof fsPromises.stat>>;
+async function readIfRegularFile(filePath: string, label: string, allowedRoot: string): Promise<string | null> {
+  // Canonical inline js/path-injection barrier, kept in the same scope as the
+  // filesystem sinks below. CodeQL credits a check that dominates the sink and
+  // not one separated from it by a function boundary, so the resolution and the
+  // containment test are repeated here even though the caller also validates.
+  const target = path.resolve(filePath);
+  if (!target.startsWith(allowedRoot + path.sep)) return null;
+
+  let handle: Awaited<ReturnType<typeof fsPromises.open>>;
   try {
-    stat = await fsPromises.stat(filePath);
+    handle = await fsPromises.open(target, fsConstants.O_RDONLY | fsConstants.O_NONBLOCK);
   } catch (err) {
-    // An input this process cannot stat is one Compose will report on its own;
+    // An input this process cannot open is one Compose will report on its own;
     // the guard never turns an ordinary file error into a render failure.
     if (SKIPPABLE_READ_ERRORS.has((err as NodeJS.ErrnoException).code ?? '')) return null;
     throw err;
   }
-  if (!stat.isFile()) return null;
-  if (stat.size > MAX_COMPOSE_INPUT_BYTES) throw sizeRefusalForFile(label);
+  try {
+    const stat = await handle.stat();
+    if (!stat.isFile()) return null;
+    if (stat.size > MAX_COMPOSE_INPUT_BYTES) throw sizeRefusalForFile(label);
 
-  let handle: Awaited<ReturnType<typeof fsPromises.open>>;
-  try {
-    handle = await fsPromises.open(filePath, 'r');
-  } catch (err) {
-    if (SKIPPABLE_READ_ERRORS.has((err as NodeJS.ErrnoException).code ?? '')) return null;
-    throw err;
-  }
-  try {
     const chunks: Buffer[] = [];
     let total = 0;
     while (total <= MAX_COMPOSE_INPUT_BYTES) {
@@ -285,7 +292,7 @@ export async function assertComposeInputsWithinExpansionLimits(opts: {
   const cwd = path.resolve(opts.cwd);
   for (const filePath of await resolveInputFiles(cwd, opts.files ?? [])) {
     const label = path.relative(cwd, filePath) || path.basename(filePath);
-    const content = await readIfRegularFile(filePath, label);
+    const content = await readIfRegularFile(filePath, label, cwd);
     if (content === null) continue;
     assertComposeSourceWithinExpansionLimits(content, label);
   }
