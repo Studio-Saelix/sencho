@@ -3,7 +3,7 @@ import { Badge } from '@/components/ui/badge';
 import { StatusPath, type StatusPathStage } from '@/components/ui/status-path';
 import type { StatusTone } from '@/lib/statusTone';
 import { BootstrapPathSummary } from './BootstrapPathSummary';
-import { HostKeyCompare } from './HostKeyCompare';
+import { FirstTrustPrompt } from './FirstTrustPrompt';
 import type { BootstrapCheck, BootstrapInspection, BootstrapStatus } from './types';
 
 const STATUS_TONE: Record<BootstrapStatus, StatusTone> = {
@@ -79,6 +79,7 @@ export function BootstrapPreflightStep({
   blocked,
   hostKeyTrust,
   pinnedFingerprint,
+  supersededFingerprint,
   trusted,
   onTrustedChange,
   replacing,
@@ -88,6 +89,7 @@ export function BootstrapPreflightStep({
   blocked: boolean;
   hostKeyTrust: 'trusted' | 'unknown' | 'changed';
   pinnedFingerprint: string | null;
+  supersededFingerprint: string | null;
   trusted: boolean;
   onTrustedChange: (trusted: boolean) => void;
   replacing: boolean;
@@ -125,9 +127,7 @@ export function BootstrapPreflightStep({
         {hostKeyTrust === 'changed' && (
           <div className="mt-2 rounded-lg border border-destructive/30 bg-destructive/5 p-2.5">
             <p className="text-xs text-destructive">
-              {pinnedFingerprint
-                ? 'This key differs from the pinned key. Only replace it if you know the host was rebuilt.'
-                : 'This key differs from the key you reviewed. Review the new fingerprint before you continue.'}
+              This key differs from the pinned key. Only replace it if you know the host was rebuilt.
             </p>
             {pinnedFingerprint && (
               <p className="mt-1 break-all font-mono text-[10px] text-stat-subtitle">Pinned: {pinnedFingerprint}</p>
@@ -149,18 +149,14 @@ export function BootstrapPreflightStep({
         )}
 
         {hostKeyTrust === 'unknown' && (
-          <>
-            <HostKeyCompare algorithm={inspection.hostKey.algorithm} knownHostsLine={inspection.hostKey.knownHostsLine} />
-            <label className="mt-2 flex cursor-pointer items-start gap-2 text-xs text-muted-foreground">
-              <input
-                type="checkbox"
-                className="mt-0.5"
-                checked={trusted}
-                onChange={(event) => onTrustedChange(event.target.checked)}
-              />
-              I trust this host key.
-            </label>
-          </>
+          <FirstTrustPrompt
+            algorithm={inspection.hostKey.algorithm}
+            fingerprint={inspection.hostKey.fingerprint}
+            knownHostsLine={inspection.hostKey.knownHostsLine}
+            supersededFingerprint={supersededFingerprint}
+            trusted={trusted}
+            onTrustedChange={onTrustedChange}
+          />
         )}
 
         {hostKeyTrust === 'trusted' && (

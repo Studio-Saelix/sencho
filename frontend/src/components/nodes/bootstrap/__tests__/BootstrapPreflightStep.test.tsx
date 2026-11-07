@@ -51,6 +51,7 @@ function renderStep(props: Partial<React.ComponentProps<typeof BootstrapPrefligh
       blocked
       hostKeyTrust="trusted"
       pinnedFingerprint={null}
+      supersededFingerprint={null}
       trusted
       onTrustedChange={vi.fn()}
       replacing={false}
@@ -76,10 +77,19 @@ describe('BootstrapPreflightStep with facts that could not be established', () =
     expect(screen.queryByTestId('bootstrap-unknown-checks')).not.toBeInTheDocument();
   });
 
-  it('offers a pin-free wording when the changed key was never pinned', () => {
-    renderStep({ hostKeyTrust: 'changed', pinnedFingerprint: null, trusted: false });
-    expect(screen.getByText(/differs from the key you reviewed/)).toBeInTheDocument();
-    expect(screen.queryByText(/differs from the pinned key/)).not.toBeInTheDocument();
+  it('asks for first trust of the new key when the live key changed on a host with no pin', () => {
+    renderStep({ hostKeyTrust: 'unknown', supersededFingerprint: 'SHA256:reviewed', trusted: false });
+    expect(screen.getByTestId('host-key-changed-since-review')).toHaveTextContent('Reviewed: SHA256:reviewed');
+    expect(screen.getByTestId('host-key-changed-since-review')).toHaveTextContent('Observed now: SHA256:abc');
+    expect(screen.getByLabelText('I trust the new host key and want it pinned for this host.')).not.toBeChecked();
+    expect(screen.queryByText(/pinned key/)).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /Replace the pinned key/ })).not.toBeInTheDocument();
+  });
+
+  it('keeps the plain first-trust wording when the key is the one that was reviewed', () => {
+    renderStep({ hostKeyTrust: 'unknown', supersededFingerprint: null, trusted: false });
+    expect(screen.queryByTestId('host-key-changed-since-review')).not.toBeInTheDocument();
+    expect(screen.getByLabelText('I trust this host key.')).toBeInTheDocument();
   });
 
   it('keeps the pinned wording when a pin exists', () => {

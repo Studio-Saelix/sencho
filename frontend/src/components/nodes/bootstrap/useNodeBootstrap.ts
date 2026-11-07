@@ -84,6 +84,9 @@ export function useNodeBootstrap({ open, api }: UseNodeBootstrapOptions) {
   const [hostKey, setHostKey] = useState<BootstrapHostKeyResult | null>(null);
   const [trusted, setTrusted] = useState(false);
   const [replacing, setReplacing] = useState(false);
+  // The key the operator reviewed when a live change on a host with no pin
+  // replaced it; null whenever the shown key is the one they reviewed.
+  const [supersededFingerprint, setSupersededFingerprint] = useState<string | null>(null);
   const [result, setResult] = useState<BootstrapPreflightResult | null>(null);
   const [busy, setBusy] = useState<BusyKind>(null);
   const [error, setError] = useState<string | null>(null);
@@ -142,6 +145,7 @@ export function useNodeBootstrap({ open, api }: UseNodeBootstrapOptions) {
     setHostKey(null);
     setTrusted(false);
     setReplacing(false);
+    setSupersededFingerprint(null);
     setResult(null);
     setBusy(null);
     setError(null);
@@ -222,6 +226,7 @@ export function useNodeBootstrap({ open, api }: UseNodeBootstrapOptions) {
       setHostKey(null);
       setTrusted(false);
       setReplacing(false);
+      setSupersededFingerprint(null);
       // The superseded request no longer owns the busy flag.
       setBusy(null);
       clearResult(field, discardedInFlight);
@@ -284,6 +289,7 @@ export function useNodeBootstrap({ open, api }: UseNodeBootstrapOptions) {
       setHostKey(response);
       setTrusted(response.trust === 'trusted');
       setReplacing(false);
+      setSupersededFingerprint(null);
       setStep('preflight');
     } catch (caught: unknown) {
       if (isAbort(caught)) return;
@@ -338,6 +344,7 @@ export function useNodeBootstrap({ open, api }: UseNodeBootstrapOptions) {
         current ? { ...current, trust: 'trusted', pinnedFingerprint: current.fingerprint } : current
       ));
       setReplacing(false);
+      setSupersededFingerprint(null);
       setStep(response.plan ? 'plan' : 'preflight');
     } catch (caught: unknown) {
       if (isAbort(caught)) return;
@@ -356,6 +363,11 @@ export function useNodeBootstrap({ open, api }: UseNodeBootstrapOptions) {
         // preflight replaced it): nothing is left to replace.
         const liveKey = caught.code === 'HOST_KEY_UNTRUSTED' && observed ? observed : hostKeyRef.current?.fingerprint ?? null;
         const pinIsLive = pinned !== null && pinned === liveKey;
+        // A key can only be "changed" against a stored pin. Without one the
+        // host is being trusted for the first time, so the dialog asks for
+        // that, not for a replacement of a pin that does not exist.
+        const nextTrust: BootstrapHostKeyResult['trust'] = pinned === null ? 'unknown' : pinIsLive ? 'trusted' : 'changed';
+        const liveKeyChanged = caught.code === 'HOST_KEY_UNTRUSTED' && observed !== null && observed !== hostKey.fingerprint;
         // Drop a previous inspection so the dialog shows the live observation,
         // not the key from the earlier run.
         setResult(null);
@@ -363,19 +375,22 @@ export function useNodeBootstrap({ open, api }: UseNodeBootstrapOptions) {
         setStep('preflight');
         setHostKey((current) => {
           if (!current) return current;
-          if (caught.code === 'HOST_KEY_UNTRUSTED' && observed) {
+          if (liveKeyChanged && observed) {
             // Everything captured earlier described the previous key.
             return {
               ...current,
               fingerprint: observed,
               algorithm: observedAlgorithm ?? 'unknown',
               knownHostsLine: '',
-              trust: pinIsLive ? 'trusted' : 'changed',
+              trust: nextTrust,
               pinnedFingerprint: pinned,
             };
           }
-          return { ...current, trust: pinIsLive ? 'trusted' : 'changed', pinnedFingerprint: pinned };
+          return { ...current, trust: nextTrust, pinnedFingerprint: pinned };
         });
+        // Keep the key the operator reviewed on screen next to the one the
+        // host presents now, so the first-trust prompt can name both.
+        setSupersededFingerprint(liveKeyChanged && pinned === null ? hostKey.fingerprint : null);
         setReplacing(false);
         setTrusted(pinIsLive);
       }
@@ -422,6 +437,7 @@ export function useNodeBootstrap({ open, api }: UseNodeBootstrapOptions) {
     setTrusted,
     replacing,
     setReplacing,
+    supersededFingerprint,
     result,
     resultIsCurrent,
     invalidated,

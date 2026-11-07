@@ -163,6 +163,54 @@ describe('BootstrapServerDialog live host-key mismatch', () => {
   });
 });
 
+describe('BootstrapServerDialog live key change on a host with no pin', () => {
+  const REVIEWED = 'SHA256:reviewedkey0000000000000000000000000';
+  const LIVE = 'SHA256:livechangedkey0000000000000000000000000';
+
+  it('shows both keys, asks for first trust of the new one, and pins it without a replacement', async () => {
+    vi.mocked(checkBootstrapHostKey).mockResolvedValue({
+      ...CHANGED_KEY, trust: 'unknown', pinnedFingerprint: null, fingerprint: REVIEWED,
+    });
+    vi.mocked(runBootstrapPreflight).mockRejectedValueOnce(new BootstrapApiError(
+      'The host key changed before the preflight connected.',
+      'HOST_KEY_UNTRUSTED',
+      null,
+      { pinnedFingerprint: null, expectedFingerprint: REVIEWED, observedFingerprint: LIVE, observedAlgorithm: 'ssh-ed25519' },
+    ));
+    render(<BootstrapServerDialog open onOpenChange={() => {}} />);
+    const user = await fillTarget();
+    await user.click(screen.getByRole('button', { name: 'Check host key' }));
+    await user.click(await screen.findByLabelText('I trust this host key.'));
+    await user.click(screen.getByRole('button', { name: 'Run preflight' }));
+
+    const notice = await screen.findByTestId('host-key-changed-since-review');
+    expect(notice).toHaveTextContent(`Reviewed: ${REVIEWED}`);
+    expect(notice).toHaveTextContent(`Observed now: ${LIVE}`);
+    expect(notice).toHaveTextContent('No key is pinned for this host yet');
+    // Nothing is pinned, so nothing may be described as replaced.
+    expect(screen.queryByText(/replaces the pinned key/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/differs from the pinned key/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/Pinned:/)).not.toBeInTheDocument();
+
+    // The earlier consent covered the reviewed key, so a fresh one is required.
+    const run = screen.getByRole('button', { name: 'Run preflight' });
+    expect(run).toBeDisabled();
+    const consent = screen.getByLabelText('I trust the new host key and want it pinned for this host.');
+    expect(consent).not.toBeChecked();
+    await user.click(consent);
+    expect(run).toBeEnabled();
+    await user.click(run);
+
+    await waitFor(() => expect(runBootstrapPreflight).toHaveBeenCalledTimes(2));
+    expect(vi.mocked(runBootstrapPreflight).mock.calls[1][0]).toMatchObject({
+      expectedFingerprint: LIVE,
+      replacePinnedFingerprint: null,
+      reviewedPinnedFingerprint: null,
+    });
+    await waitFor(() => expect(screen.queryByTestId('host-key-changed-since-review')).not.toBeInTheDocument());
+  });
+});
+
 describe('BootstrapServerDialog preflight pin mismatch', () => {
   it('keeps the keyscan fingerprint, shows the pin, and sends the confirmed replacement', async () => {
     vi.mocked(checkBootstrapHostKey).mockResolvedValue({ ...CHANGED_KEY, trust: 'trusted', pinnedFingerprint: CHANGED_KEY.fingerprint });

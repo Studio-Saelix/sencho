@@ -7,6 +7,7 @@ import { cn } from '@/lib/utils';
 import { BootstrapTargetStep } from './BootstrapTargetStep';
 import { BootstrapPreflightStep } from './BootstrapPreflightStep';
 import { BootstrapPlanStep } from './BootstrapPlanStep';
+import { FirstTrustPrompt } from './FirstTrustPrompt';
 import { HostKeyCompare } from './HostKeyCompare';
 import { INVALIDATION_MESSAGE } from './invalidation';
 import { useNodeBootstrap, type UseNodeBootstrap } from './useNodeBootstrap';
@@ -106,7 +107,7 @@ function FooterActions({ wizard, onClose }: { wizard: UseNodeBootstrap; onClose:
 }
 
 function DialogBody({ wizard }: { wizard: UseNodeBootstrap }) {
-  const { step, result, resultIsCurrent, invalidated, error, hostKey, trusted, setTrusted, replacing, setReplacing, runPreflight, busy } = wizard;
+  const { step, result, resultIsCurrent, invalidated, error, hostKey, trusted, setTrusted, replacing, setReplacing, supersededFingerprint, runPreflight, busy } = wizard;
 
   return (
     <ModalBody className="max-h-[65vh] overflow-y-auto">
@@ -136,6 +137,7 @@ function DialogBody({ wizard }: { wizard: UseNodeBootstrap }) {
             blocked={result.blocked}
             hostKeyTrust={hostKey?.trust ?? 'unknown'}
             pinnedFingerprint={hostKey?.pinnedFingerprint ?? null}
+            supersededFingerprint={supersededFingerprint}
             trusted={trusted}
             onTrustedChange={setTrusted}
             replacing={replacing}
@@ -150,13 +152,14 @@ function DialogBody({ wizard }: { wizard: UseNodeBootstrap }) {
               <code className="mt-1 block break-all font-mono text-[12px] text-stat-value">{hostKey.fingerprint}</code>
               <p className="mt-1 font-mono text-[10px] text-stat-subtitle">{hostKey.algorithm} · dialed {hostKey.address}</p>
               {hostKey.trust === 'unknown' && (
-                <>
-                  <HostKeyCompare algorithm={hostKey.algorithm} knownHostsLine={hostKey.knownHostsLine} />
-                  <label className="mt-2 flex cursor-pointer items-start gap-2 text-xs text-muted-foreground">
-                    <input type="checkbox" className="mt-0.5" checked={trusted} onChange={(event) => setTrusted(event.target.checked)} />
-                    I trust this host key.
-                  </label>
-                </>
+                <FirstTrustPrompt
+                  algorithm={hostKey.algorithm}
+                  fingerprint={hostKey.fingerprint}
+                  knownHostsLine={hostKey.knownHostsLine}
+                  supersededFingerprint={supersededFingerprint}
+                  trusted={trusted}
+                  onTrustedChange={setTrusted}
+                />
               )}
               {hostKey.trust === 'changed' && (
                 <div className="mt-2 rounded-lg border border-destructive/30 bg-destructive/5 p-2.5">
