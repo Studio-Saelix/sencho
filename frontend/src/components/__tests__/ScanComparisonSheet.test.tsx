@@ -392,7 +392,7 @@ describe('ScanComparisonSheet', () => {
       expect(el).not.toHaveTextContent('No findings changed');
     });
 
-    it('warns when a swap brings in a new CRITICAL or HIGH', async () => {
+    it('warns when a swap brings in a new CRITICAL', async () => {
       show(result({
         added: [vuln({ vulnerability_id: 'CVE-A', severity: 'CRITICAL' })],
         removed: [vuln({ vulnerability_id: 'CVE-B', severity: 'CRITICAL' })],
@@ -401,6 +401,46 @@ describe('ScanComparisonSheet', () => {
       const el = await answer();
       expect(el).toHaveAttribute('data-tone', 'warning');
       expect(el).toHaveTextContent('1 added, 1 removed. 1 new critical.');
+    });
+
+    it('names a new HIGH that a larger resolved HIGH count hides, and reads it as mixed', async () => {
+      show(result({
+        added: [vuln({ vulnerability_id: 'CVE-H1', severity: 'HIGH' }), vuln({ vulnerability_id: 'CVE-H2', severity: 'HIGH' })],
+        removed: [
+          vuln({ vulnerability_id: 'CVE-H3', severity: 'HIGH' }),
+          vuln({ vulnerability_id: 'CVE-H4', severity: 'HIGH' }),
+          vuln({ vulnerability_id: 'CVE-H5', severity: 'HIGH' }),
+          vuln({ vulnerability_id: 'CVE-L', severity: 'LOW' }),
+        ],
+      }));
+
+      const el = await answer();
+      expect(el).toHaveAttribute('data-tone', 'warning');
+      expect(el).toHaveTextContent('Mixed');
+      expect(el).toHaveTextContent('Net change: -1 high, -1 low. 2 new high.');
+    });
+
+    it('names a hidden HIGH even beside a net-new CRITICAL', async () => {
+      show(result({
+        added: [vuln({ vulnerability_id: 'CVE-C', severity: 'CRITICAL' }), vuln({ vulnerability_id: 'CVE-H1', severity: 'HIGH' })],
+        removed: [vuln({ vulnerability_id: 'CVE-H2', severity: 'HIGH' })],
+      }));
+
+      const el = await answer();
+      expect(el).toHaveAttribute('data-tone', 'destructive');
+      expect(el).toHaveTextContent('Net change: +1 critical. 1 new high.');
+    });
+
+    it('counts an UNKNOWN swap as findings that came and went', async () => {
+      show(result({
+        added: [vuln({ vulnerability_id: 'CVE-U1', severity: 'UNKNOWN' })],
+        removed: [vuln({ vulnerability_id: 'CVE-U2', severity: 'UNKNOWN' })],
+      }));
+
+      const el = await answer();
+      expect(el).toHaveAttribute('data-tone', 'neutral');
+      expect(el).toHaveTextContent('1 added, 1 removed.');
+      expect(el).not.toHaveTextContent('No findings changed');
     });
 
     it('warns when a swap brings in a HIGH too', async () => {
@@ -495,7 +535,26 @@ describe('ScanComparisonSheet', () => {
       expect(await answer()).toHaveAttribute('data-tone', tone);
     });
 
-    it('announces a truncated comparison as an alert, and only that', async () => {
+    it('keeps the Mixed reading, not just its tone, when the comparison is truncated', async () => {
+      show(result({
+        truncated: true,
+        row_limit: 1000,
+        added: [vuln({ vulnerability_id: 'CVE-C1', severity: 'CRITICAL' })],
+        removed: [vuln({ vulnerability_id: 'CVE-C2', severity: 'CRITICAL' }), vuln({ vulnerability_id: 'CVE-L', severity: 'LOW' })],
+      }));
+
+      const el = await answer();
+      expect(el).toHaveTextContent('Mixed');
+      expect(el).not.toHaveTextContent('Fewer findings');
+    });
+
+    it('names the default row limit in the no-change reading when the response omits it', async () => {
+      show(result({ truncated: true }));
+
+      expect(await answer()).toHaveTextContent('No change in the first 1000 findings.');
+    });
+
+    it('announces a truncated comparison as an alert', async () => {
       const { unmount } = show(result({ truncated: true, row_limit: 1000 }));
       expect(await screen.findByRole('alert')).toHaveTextContent(/partial/i);
       unmount();
@@ -601,6 +660,8 @@ describe('ScanComparisonSheet', () => {
 
       expect(screen.queryByText('CVE-OLD-REMOVED')).toBeNull();
       expect(screen.queryByTestId('status-answer')).toBeNull();
+      expect(screen.queryByText('#1 → #2')).toBeNull();
+      expect(screen.getByText('Loading…')).toBeInTheDocument();
       await act(async () => { vi.advanceTimersByTime(DURATION_BASE_MS + 50); });
       expect(screen.getByTestId('scan-diff-skeleton')).toBeInTheDocument();
 

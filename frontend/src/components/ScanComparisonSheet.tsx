@@ -103,10 +103,12 @@ type DeltaSummary = {
  *   named in the sentence, and an improvement that carries one reads as mixed.
  * - When the nets cancel but findings still came and went, it says how many
  *   instead of claiming nothing changed.
- * - A result cut off at the row limit cannot be called an improvement or
- *   unchanged: a row missing from one scan but present in the other would
- *   show up as a resolved finding, so it reads "Fewer findings" in a neutral
- *   tone and names the limit when it reports no change.
+ * - A cut-off scan can fake either direction: a row missing from the current
+ *   scan reads as resolved, one missing from the baseline reads as added. So a
+ *   result cut off at the row limit is never called an improvement or
+ *   unchanged: it reads "Fewer findings" in a neutral tone when nothing severe
+ *   is hidden, and names the limit when it reports no change. An increase
+ *   stays loud, because missing a regression costs more than a false alarm.
  */
 function summarizeDelta(
   added: Record<VulnSeverity, number>,
@@ -251,7 +253,7 @@ export function ScanComparisonSheet({
       {data && !loading && summary && (
         <>
           <SheetSection title="Change" hideHeader>
-            {/* A cut-off comparison was announced as an alert before; keep that for the one state that can mislead. */}
+            {/* Announce a cut-off comparison to assistive tech: its Answer may be incomplete. */}
             <div role={data.truncated ? 'alert' : undefined}>
               <StatusPath
                 answer={{
