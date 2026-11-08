@@ -375,6 +375,27 @@ describe('buildAuthoredProject resolution', () => {
     expect(image.reason).toBe('ambiguous-unparsed-source');
   });
 
+  it('keeps the primary file service names when an alias or merge chain exceeds the follow cap', async () => {
+    const aliasLines = ['x-0: &a0 [true]'];
+    for (let level = 1; level < 20; level += 1) aliasLines.push(`x-${level}: &a${level} [*a${level - 1}]`);
+    aliasLines.push('services:', '  web:', '    image: nginx:1', '');
+    writeStack('alias-service-names', { 'compose.yaml': aliasLines.join('\n') });
+    const aliased = await buildAuthoredProject(nodeId, 'alias-service-names');
+    const aliasPrimary = aliased.files.find(file => file.kind === 'compose-primary')!;
+    // The chain is refused for locations, but the file still declares web.
+    expect(aliasPrimary.state).toBe('parse-failed');
+    expect(aliasPrimary.serviceNames).toEqual(['web']);
+
+    const mergeLines = ['x-1: &x1 {privileged: true}'];
+    for (let level = 2; level <= 20; level += 1) mergeLines.push(`x-${level}: &x${level} {<<: *x${level - 1}}`);
+    mergeLines.push('services:', '  web:', '    <<: *x20', '    image: nginx:1', '');
+    writeStack('merge-service-names', { 'compose.yaml': mergeLines.join('\n') });
+    const merged = await buildAuthoredProject(nodeId, 'merge-service-names');
+    const mergePrimary = merged.files.find(file => file.kind === 'compose-primary')!;
+    expect(mergePrimary.state).toBe('parse-failed');
+    expect(mergePrimary.serviceNames).toEqual(['web']);
+  });
+
   it('records the mesh override as a generated layer, never reads it', async () => {
     writeStack('mesh-stack', { 'compose.yaml': 'services:\n  api:\n    image: nginx:1\n' });
     DatabaseService.getInstance().getDb().prepare(

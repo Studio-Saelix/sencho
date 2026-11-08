@@ -244,6 +244,7 @@ async function loadComposeFile(
     state: parsed.state,
     nodes: parsed.nodes,
     diagnostics: parsed.diagnostics,
+    ...(parsed.serviceNamesKnown ? { serviceNames: parsed.serviceNames } : {}),
     ...(read.contentHash !== undefined ? { contentHash: read.contentHash } : {}),
   });
   if (parsed.state !== 'parsed') addPartial(state, parsed.state);

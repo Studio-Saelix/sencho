@@ -129,6 +129,14 @@ export interface ParsedComposeDocument {
   inlineLabels: InlineLabelDeclaration[];
   /** Service keys declared in this file, in declaration order. */
   serviceNames: string[];
+  /**
+   * Whether `serviceNames` is the complete set this file declares. False when
+   * the reader stopped before it understood the document (malformed YAML, the
+   * size cap, a non-map root): an empty list then means "unknown", never
+   * "zero services". A document refused only for a deep alias/merge chain is
+   * still mapped, so its top-level service keys stay known.
+   */
+  serviceNamesKnown: boolean;
 }
 
 export interface ParseComposeDocumentInput {
@@ -594,8 +602,10 @@ function collectDeclarations(
  * paths, env_file entries, label lists, extends). It follows aliases and merge
  * keys under the same cycle/work budget as the node walk, because a declaration
  * behind an alias is still a declaration: dropping it would let an earlier file
- * look decisive. If a value cannot be projected, the document is marked
- * `parse-failed` through the truncating diagnostics, never silently narrowed.
+ * look decisive. A cycle or an unresolved anchor is a truncating diagnostic;
+ * the depth bound only limits how deep a projected VALUE is followed, not the
+ * top-level keys a caller enumerates (a deep merge chain still yields its
+ * service names).
  */
 function valueToPlain(
   ctx: WalkContext,
@@ -670,6 +680,7 @@ export function parseComposeDocument(input: ParseComposeDocumentInput): ParsedCo
     labelFiles: [],
     inlineLabels: [],
     serviceNames: [],
+    serviceNamesKnown: false,
   };
 
   if (Buffer.byteLength(input.source, 'utf8') > MAX_COMPOSE_PARSE_BYTES) {
@@ -713,6 +724,7 @@ export function parseComposeDocument(input: ParseComposeDocumentInput): ParsedCo
   // documented paths (`services.api.image`, `networks.edge`, ...).
   walkMap(ctx, doc.contents as YAMLMap, '', 'own', 0);
   collectDeclarations(ctx, doc.contents as YAMLMap, empty);
+  empty.serviceNamesKnown = true;
 
   for (const diagnostic of ctx.diagnostics) diagnostic.file = input.file;
   for (const declaration of empty.includes) declaration.range = declaration.range ?? undefined;
@@ -771,9 +783,11 @@ export function parseComposeDocument(input: ParseComposeDocumentInput): ParsedCo
 
 /**
  * Env-file-like label file: `key=value` per line, `#` comments and blank lines
- * ignored, split at the first `=`. One layer of matching quotes is stripped for
- * value comparison only; this reader never keeps the value. Anything outside
- * that subset is a fixed per-line diagnostic, never a guess.
+ * ignored, split at the first `=`. Compose accepts an `export ` prefix on an
+ * env-file line, so it is accepted here and never becomes part of the key. One
+ * layer of matching quotes is stripped for value comparison only; this reader
+ * never keeps the value. Anything outside that subset is a fixed per-line
+ * diagnostic, never a guess.
  */
 export function parseLabelFile(file: string, source: string): ParsedLabelFile {
   const diagnostics: AuthoredDiagnostic[] = [];
@@ -794,14 +808,22 @@ export function parseLabelFile(file: string, source: string): ParsedLabelFile {
     const trimmed = rawLine.trim();
     if (trimmed === '' || trimmed.startsWith('#')) continue;
 
-    const eq = rawLine.indexOf('=');
-    if (eq <= 0) {
+    // Compose strips an env-file `export` keyword; it is syntax, not part of
+    // the key. Leading whitespace is allowed before it, and a tab may separate
+    // it from the key.
+    const exportPrefix = /^\s*export[ \t]+/.exec(rawLine);
+    const prefixLength = exportPrefix ? exportPrefix[0].length : 0;
+    const eq = rawLine.indexOf('=', prefixLength);
+    if (eq <= prefixLength) {
       addDiagnostic(diagnostics, file, 'unsupported-syntax', {
         line: index + 1, column: 1, endLine: index + 1, endColumn: Math.max(1, rawLine.length),
       });
       continue;
     }
-    const key = rawLine.slice(0, eq).trim();
+    const keyPart = rawLine.slice(prefixLength, eq);
+    const key = keyPart.trim();
+    const keyLead = keyPart.length - keyPart.trimStart().length;
+    const keyStart = prefixLength + keyLead;
     const rawValue = rawLine.slice(eq + 1);
     if (key === '' || !isSupportedLabelText(key) || !isSupportedLabelText(rawValue)) {
       addDiagnostic(diagnostics, file, 'unsupported-syntax', {
@@ -815,8 +837,18 @@ export function parseLabelFile(file: string, source: string): ParsedLabelFile {
     seen.add(key);
     entries.push({
       key,
-      range: { line: index + 1, column: 1, endLine: index + 1, endColumn: Math.max(1, rawLine.length + 1) },
-      keyRange: { line: index + 1, column: 1, endLine: index + 1, endColumn: eq + 1 },
+      range: {
+        line: index + 1,
+        column: keyStart + 1,
+        endLine: index + 1,
+        endColumn: Math.max(keyStart + 1, rawLine.length + 1),
+      },
+      keyRange: {
+        line: index + 1,
+        column: keyStart + 1,
+        endLine: index + 1,
+        endColumn: Math.max(keyStart + 1, eq + 1),
+      },
       valueRange: {
         line: index + 1,
         column: eq + 2,

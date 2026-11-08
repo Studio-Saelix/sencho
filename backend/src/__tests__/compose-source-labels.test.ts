@@ -50,6 +50,21 @@ describe('authored label contributions', () => {
     expect(correlateLabel(project, 'api', 'a').reason).toBe('inline-overrides-label-file');
   });
 
+  it('gives an export-prefixed label-file entry the same acting origin as a plain one', async () => {
+    writeStack('export-label', {
+      'compose.yaml': 'services:\n  api:\n    image: nginx:1\n    label_file: app.labels\n',
+      'app.labels': 'export ex=3\nplain=1\n',
+    });
+    const project = await buildAuthoredProject(nodeId, 'export-label');
+    const result = correlateLabel(project, 'api', 'ex');
+    expect(result.reason).toBe('label-file');
+    expect(result.origin).toMatchObject({ file: 'app.labels', range: { line: 1, column: 8 } });
+    expect(resolveEditOrigin(project, 'services.api.labels.ex')).toMatchObject({
+      ok: true,
+      origin: { file: 'app.labels', range: { line: 1 } },
+    });
+  });
+
   it('marks a file used by two services shared', async () => {
     writeStack('shared-label', {
       'compose.yaml': 'services:\n  api:\n    image: nginx:1\n    label_file: app.labels\n  web:\n    image: nginx:1\n    label_file: app.labels\n',

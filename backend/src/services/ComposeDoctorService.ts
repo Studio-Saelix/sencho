@@ -219,17 +219,18 @@ export class ComposeDoctorService {
       console.warn('[ComposeDoctor] Source unreadable for %s; source-derived checks skipped:',
         sanitizeForLog(stackName), sanitizeForLog(getErrorMessage(err, 'unknown')));
     }
-    const sourceReadable = source !== null;
     // renderedHash is the parsed-SOURCE-model hash (the same `rendered_hash`
     // meaning the drift ledger uses), deliberately not a hash of docker's
     // rendered output, which inlines resolved env values and must never be hashed.
     const hashes = source !== null
       ? computeStackHashes(source)
       : { sourceHash: null as string | null, renderedHash: null as string | null };
-    const sourceServiceNames = source !== null ? parseComposeDependencies(source).services.map(s => s.name) : [];
-
-    const ctx = await this.buildContext(nodeId, stackName, sourceServiceNames, sourceReadable);
     const authored = await this.loadAuthoredProject(nodeId, stackName);
+    const sourceServiceNames = source !== null ? this.sourceServiceNames(source, authored) : null;
+
+    // An unknown source service set must stay unknown: treating it as empty
+    // makes every rendered service look like it was pulled in from elsewhere.
+    const ctx = await this.buildContext(nodeId, stackName, sourceServiceNames ?? [], sourceServiceNames !== null);
     const { findings: hits, coverage } = runAssuranceRules(ctx);
     const normalized = sortNormalized(hits.map(hit => {
       const rule = getAssuranceRule(hit.ruleId);
@@ -349,6 +350,23 @@ export class ComposeDoctorService {
         sanitizeForLog(stackName), sanitizeForLog(getErrorMessage(error, 'unknown')));
       return null;
     }
+  }
+
+  /**
+   * The services the primary authored file declares, or null when that cannot
+   * be known. The YAML library's alias-expansion budget makes the light
+   * `parseComposeDependencies` parser report a whole file as unparseable, and
+   * an empty list would read as "zero services" to `effective-model-expanded`.
+   * The authored parser follows aliases and merge keys under its own depth cap
+   * and still knows the top-level keys when it refuses the rest, so it answers
+   * first; the light parser is only a fallback for a model this run could not
+   * build.
+   */
+  private sourceServiceNames(source: string, authored: AuthoredProject | null): string[] | null {
+    const primary = authored?.files.find(file => file.kind === 'compose-primary');
+    if (primary?.serviceNames !== undefined) return primary.serviceNames;
+    const declared = parseComposeDependencies(source);
+    return declared.parseError ? null : declared.services.map(service => service.name);
   }
 
   private async buildContext(nodeId: number, stackName: string, sourceServiceNames: string[], sourceReadable: boolean): Promise<PreflightContext> {

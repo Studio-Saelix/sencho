@@ -327,17 +327,20 @@ function locatePort(project: AuthoredProject, hit: RuleHit, model: EffectiveMode
   }
   if (identities.size > 1) return undefined;
 
-  const latestLayer = byLayer.size === 0 ? undefined : Math.max(...byLayer.keys());
-  if (latestLayer === undefined) return undefined;
-  const latest = byLayer.get(latestLayer) ?? [];
-  // The effective model cannot tell two same-layer items apart (for example two
-  // broad publications on one host port with different targets): refuse.
-  if (latest.length !== 1) return undefined;
-  if (hasLaterUnparsedLayer(project, latestLayer)) return undefined;
-  // An interpolated or aliased item at or after the matched layer could resolve
-  // to the same publication, so the literal item is not provably the source.
-  if (hasUnresolvedSequenceItem(scopes, 'ports', latestLayer, true)) return undefined;
-  return itemLocation(latest, `services.${hit.service}.ports`);
+  // `ports` appends across Compose layers, so every matching authored item is a
+  // live declaration of the publication the hit names. Selecting the latest
+  // layer would silently discard an earlier identical declaration; the field is
+  // locatable only when exactly one authored item can be its source.
+  const matches = [...byLayer.values()].flat();
+  if (matches.length !== 1) return undefined;
+  // A later scalar replaces an earlier one, but `ports` appends: an unparsed
+  // layer anywhere in the project could contribute another copy of this
+  // publication, so no single layer is decisive.
+  if (hasUnparsedComposeLayer(project)) return undefined;
+  // An interpolated or aliased item in any layer could resolve to the same
+  // publication; the literal item is not provably its only source.
+  if (hasUnresolvedSequenceItem(scopes, 'ports', 0, true)) return undefined;
+  return itemLocation(matches, `services.${hit.service}.ports`);
 }
 
 /** Locate the single `volumes` item a bind hit names, else the sequence key. */
@@ -386,24 +389,32 @@ function locateEnvFile(project: AuthoredProject, hit: RuleHit): AuthoredLocation
     const scopes = serviceScopes(project, hit.service);
     if (fieldHasTag(scopes, 'env_file')) return undefined;
     const count = scopedSequenceCount(scopes, 'env_file');
-    const matches: Array<{ index: number; layerIndex: number }> = [];
+    const matches: ItemCandidate[] = [];
     for (let index = 0; index < count; index += 1) {
       for (const scope of scopes) {
         const prefix = `services.${scope.declaredService}.env_file[${index}]`;
-        const text = authoredScalarOf(scope.file.nodes.get(prefix))
-          ?? authoredScalarOf(scope.file.nodes.get(`${prefix}.path`));
+        const shortNode = scope.file.nodes.get(prefix);
+        const longNode = scope.file.nodes.get(`${prefix}.path`);
+        const text = authoredScalarOf(shortNode) ?? authoredScalarOf(longNode);
         if (text !== undefined && (text === path || text.endsWith(`/${path}`) || path.endsWith(`/${text}`))) {
-          matches.push({ index, layerIndex: scope.layerIndex });
+          const node = longNode ?? shortNode;
+          if (node) {
+            matches.push({
+              file: scope.file.file, node, layerIndex: scope.layerIndex,
+              writability: scope.file.writability, index,
+            });
+          }
         }
       }
     }
     if (matches.length > 0) {
-      const latest = Math.max(...matches.map(match => match.layerIndex));
-      const latestMatches = matches.filter(match => match.layerIndex === latest);
-      if (latestMatches.length !== 1) return undefined;
-      if (hasLaterUnparsedLayer(project, latest)) return undefined;
-      if (hasUnresolvedSequenceItem(scopes, 'env_file', latest, true)) return undefined;
-      return toLocation(correlateField(project, hit.service, `env_file[${latestMatches[0].index}]`));
+      // `env_file` entries append across layers, so an identical path declared
+      // twice is two live declarations of the missing file. A single authored
+      // entry must match before the location may name a file.
+      if (matches.length !== 1) return undefined;
+      if (hasUnparsedComposeLayer(project)) return undefined;
+      if (hasUnresolvedSequenceItem(scopes, 'env_file', 0, true)) return undefined;
+      return itemLocation(matches, `services.${hit.service}.env_file`);
     }
     // The hit names a missing env file no authored entry matches.
     return undefined;

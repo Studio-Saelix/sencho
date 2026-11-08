@@ -89,6 +89,22 @@ describe('authored label origins in the stack inventory', () => {
     expect(JSON.stringify(api.authored)).not.toContain('secret-file-value');
   });
 
+  it('gives an export-prefixed label-file entry an authored origin', async () => {
+    writeStack('label-export', {
+      'compose.yaml': 'services:\n  api:\n    image: nginx:1\n    label_file: lf.env\n',
+      'lf.env': 'export ex=3\nplain=1\n',
+    });
+    stubRender({ api: { ex: '3', plain: '1' } });
+    stubDocker();
+    const inventory = await buildStackLabelInventory(nodeId, 'label-export');
+    const api = inventory.services.find(service => service.service === 'api')!;
+    expect(api.authored?.ex).toMatchObject({
+      source: 'label-file', file: 'lf.env', line: 1, column: 8,
+    });
+    expect(api.authored?.ex?.ambiguity).toBeUndefined();
+    expect(api.authored?.plain).toMatchObject({ source: 'label-file', file: 'lf.env', line: 2 });
+  });
+
   it('marks an inline override of a label-file entry without a value', async () => {
     writeStack('label-override', {
       'compose.yaml': 'services:\n  api:\n    image: nginx:1\n    label_file: app.labels\n    labels:\n      a: inline\n',

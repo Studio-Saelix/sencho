@@ -49,6 +49,8 @@ describe('parseComposeDocument', () => {
     const parsed = parse(`services:\n  api:\n    image: ${'a'.repeat(MAX_COMPOSE_PARSE_BYTES)}\n`);
     expect(parsed.state).toBe('too-large');
     expect(parsed.diagnostics[0]?.code).toBe('too-large');
+    // A cap that stopped the read does not mean the file declares no services.
+    expect(parsed.serviceNamesKnown).toBe(false);
   });
 
   it('detects !reset and !override markers without failing the parse', () => {
@@ -78,6 +80,23 @@ describe('parseComposeDocument', () => {
     expect(parsed.inlineLabels).toContainEqual(expect.objectContaining({
       service: 'app', key: 'team', form: 'map', hasInterpolation: false,
     }));
+  });
+
+  it('keeps the top-level service names known when an alias chain exceeds the follow cap', () => {
+    const lines: string[] = [];
+    for (let level = 0; level < 20; level += 1) {
+      lines.push(level === 0
+        ? 'x-0: &a0 [true]'
+        : `x-${level}: &a${level} [*a${level - 1}]`);
+    }
+    lines.push('services:', '  web:', '    image: nginx:1.27', '    privileged: true', '');
+    const parsed = parse(lines.join('\n'));
+    // The chain is refused, so locations are not defensible...
+    expect(parsed.state).toBe('parse-failed');
+    expect(parsed.diagnostics.map(entry => entry.code)).toContain('too-deep');
+    // ...but the file still declares web, and Doctor must not call it foreign.
+    expect(parsed.serviceNames).toEqual(['web']);
+    expect(parsed.serviceNamesKnown).toBe(true);
   });
 
   it('marks an inline label whose value is an alias as unresolved', () => {
@@ -270,6 +289,23 @@ describe('parseLabelFile', () => {
     const parsed = parseLabelFile('app.labels', 'a=1\na=2\nnonsense\n"unclosed=1\n');
     expect(parsed.duplicateKeys.has('a')).toBe(true);
     expect(parsed.diagnostics.filter(entry => entry.code === 'unsupported-syntax')).toHaveLength(2);
+  });
+
+  it('accepts an env-file export prefix and keeps the range on the key', () => {
+    const parsed = parseLabelFile('app.labels', 'export ex=3\n  export\tspaced = 4\nplain=1\n');
+    expect(parsed.entries.map(entry => entry.key)).toEqual(['ex', 'spaced', 'plain']);
+    expect(parsed.diagnostics).toEqual([]);
+    expect(parsed.entries[0].range).toEqual({ line: 1, column: 8, endLine: 1, endColumn: 12 });
+    expect(parsed.entries[0].keyRange).toEqual({ line: 1, column: 8, endLine: 1, endColumn: 10 });
+    expect(parsed.entries[0].valueRange).toEqual({ line: 1, column: 11, endLine: 1, endColumn: 12 });
+    expect(parsed.entries[1].key).toBe('spaced');
+    expect(parsed.entries[1].range.column).toBeGreaterThan(1);
+  });
+
+  it('treats an export-prefixed entry as the same key for duplicate detection and interpolation', () => {
+    const parsed = parseLabelFile('app.labels', 'export a=1\na=2\nexport token=${SECRET}\n');
+    expect(parsed.duplicateKeys.has('a')).toBe(true);
+    expect(parsed.entries.find(entry => entry.key === 'token')?.hasInterpolation).toBe(true);
   });
 
   it('flags interpolation syntax without resolving it', () => {

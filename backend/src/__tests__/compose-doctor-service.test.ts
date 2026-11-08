@@ -381,6 +381,41 @@ describe('runPreflight', () => {
     expect(report.renderError).not.toContain(SECRET);
   });
 
+  it('does not call a declared service foreign when an alias or merge chain exceeds the follow cap', async () => {
+    const aliasStack = 'doctor-alias-chain';
+    const aliasLines = ['x-0: &a0 [true]'];
+    for (let level = 1; level < 20; level += 1) aliasLines.push(`x-${level}: &a${level} [*a${level - 1}]`);
+    aliasLines.push('services:', '  web:', '    image: nginx:1.27', '    network_mode: none', '    restart: always', '    privileged: true', '');
+    const aliasDir = path.join(process.env.COMPOSE_DIR as string, aliasStack);
+    fs.mkdirSync(aliasDir, { recursive: true });
+    fs.writeFileSync(path.join(aliasDir, 'compose.yaml'), aliasLines.join('\n'));
+
+    const mergeStack = 'doctor-merge-chain';
+    const mergeLines = ['x-1: &x1 {privileged: true}'];
+    for (let level = 2; level <= 20; level += 1) mergeLines.push(`x-${level}: &x${level} {<<: *x${level - 1}}`);
+    mergeLines.push('services:', '  web:', '    <<: *x20', '    image: nginx:1.27', '    network_mode: none', '    restart: always', '');
+    const mergeDir = path.join(process.env.COMPOSE_DIR as string, mergeStack);
+    fs.mkdirSync(mergeDir, { recursive: true });
+    fs.writeFileSync(path.join(mergeDir, 'compose.yaml'), mergeLines.join('\n'));
+
+    try {
+      for (const stack of [aliasStack, mergeStack]) {
+        stubDocker({
+          name: stack,
+          services: { web: { image: 'nginx:1.27', network_mode: 'none', restart: 'always', privileged: true } },
+          networks: {},
+          volumes: {},
+        });
+        const report = await doctor().runPreflight(nodeId, stack, 'tester');
+        expect(report.renderable).toBe(true);
+        expect(report.findings.map(finding => finding.ruleId)).not.toContain('effective-model-expanded');
+      }
+    } finally {
+      fs.rmSync(aliasDir, { recursive: true, force: true });
+      fs.rmSync(mergeDir, { recursive: true, force: true });
+    }
+  });
+
   it('getLatest round-trips an unrenderable run from the database', async () => {
     stubDocker(null, 'boom');
     await doctor().runPreflight(nodeId, STACK, null);

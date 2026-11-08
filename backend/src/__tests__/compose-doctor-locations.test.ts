@@ -124,9 +124,9 @@ describe('Compose Doctor authored locations', () => {
     expect(listHit).toMatchObject({ file: 'compose.yaml', line: 9 });
   });
 
-  it('reports the winning layer and its own index for a moved port item', async () => {
+  it('reports the override file and its own index for a port only it declares', async () => {
     writeStack('doctor-port-index', {
-      'compose.yaml': 'services:\n  api:\n    image: nginx:1\n    ports:\n      - "8080:80"\n      - "9000:80"\n',
+      'compose.yaml': 'services:\n  api:\n    image: nginx:1\n    ports:\n      - "8080:80"\n',
       'compose.override.yaml': 'services:\n  api:\n    ports:\n      - "9000:80"\n',
     });
     const project = await buildAuthoredProject(nodeId, 'doctor-port-index');
@@ -134,6 +134,101 @@ describe('Compose Doctor authored locations', () => {
       service: 'api', sourcePath: 'api', subject: { kind: 'port', key: '9000/tcp' },
     }));
     expect(port).toMatchObject({ file: 'compose.override.yaml', line: 4, path: 'services.api.ports[0]' });
+  });
+
+  it('refuses a port declared identically in the base and the override', async () => {
+    writeStack('doctor-port-duplicate', {
+      'compose.yaml': 'services:\n  api:\n    image: nginx:1\n    ports:\n      - "8080:80"\n',
+      'compose.override.yaml': 'services:\n  api:\n    ports:\n      - "8080:80"\n',
+    });
+    const project = await buildAuthoredProject(nodeId, 'doctor-port-duplicate');
+    const port = locateFinding(project, hit('port-exposed-all-interfaces', {
+      service: 'api', sourcePath: 'api', subject: { kind: 'port', key: '8080/tcp' },
+    }));
+    // Compose dedupes the identical publication, but both files authored it:
+    // exactly one item must match before the location may name a file.
+    expect(port).toBeUndefined();
+  });
+
+  it('refuses an unquoted base port and a quoted override of the same value', async () => {
+    writeStack('doctor-port-duplicate-quoting', {
+      'compose.yaml': 'services:\n  api:\n    image: nginx:1\n    ports:\n      - 22:22\n',
+      'compose.override.yaml': 'services:\n  api:\n    ports:\n      - "22:22"\n',
+    });
+    const project = await buildAuthoredProject(nodeId, 'doctor-port-duplicate-quoting');
+    const port = locateFinding(project, hit('port-exposed-all-interfaces', {
+      service: 'api', sourcePath: 'api', subject: { kind: 'port', key: '22/tcp' },
+    }));
+    expect(port).toBeUndefined();
+  });
+
+  it('refuses a port declared in long form in both layers', async () => {
+    writeStack('doctor-port-duplicate-long', {
+      'compose.yaml': 'services:\n  api:\n    image: nginx:1\n    ports:\n      - target: 80\n        published: "8080"\n',
+      'compose.override.yaml': 'services:\n  api:\n    ports:\n      - "8080:80"\n',
+    });
+    const project = await buildAuthoredProject(nodeId, 'doctor-port-duplicate-long');
+    const port = locateFinding(project, hit('port-exposed-all-interfaces', {
+      service: 'api', sourcePath: 'api', subject: { kind: 'port', key: '8080/tcp' },
+    }));
+    expect(port).toBeUndefined();
+  });
+
+  it('refuses the same duplicated port for a port-conflict hit', async () => {
+    writeStack('doctor-port-conflict-duplicate', {
+      'compose.yaml': 'services:\n  api:\n    image: nginx:1\n    ports:\n      - "8080:80"\n',
+      'compose.override.yaml': 'services:\n  api:\n    ports:\n      - "8080:80"\n',
+    });
+    const project = await buildAuthoredProject(nodeId, 'doctor-port-conflict-duplicate');
+    const conflict = locateFinding(project, hit('port-conflict-node', {
+      service: 'api', sourcePath: 'api', subject: { kind: 'port', key: '8080/tcp' },
+    }));
+    expect(conflict).toBeUndefined();
+  });
+
+  it('refuses the same duplicated port for a subjectless sensitive exposure', async () => {
+    writeStack('doctor-sensitive-duplicate', {
+      'compose.yaml': 'services:\n  db:\n    image: postgres:16\n    ports:\n      - "5432:5432"\n',
+      'compose.override.yaml': 'services:\n  db:\n    ports:\n      - "5432:5432"\n',
+    });
+    const project = await buildAuthoredProject(nodeId, 'doctor-sensitive-duplicate');
+    const model = {
+      services: [{
+        name: 'db',
+        ports: [{ startPort: 5432, endPort: 5432, hostIp: '', protocol: 'tcp' }],
+      }],
+    } as unknown as EffectiveModel;
+    const broad = locateFinding(project, hit('sensitive-service-broad-exposure', {
+      service: 'db', sourcePath: 'db',
+    }), model);
+    expect(broad).toBeUndefined();
+  });
+
+  it('refuses a port range declared in both layers', async () => {
+    writeStack('doctor-port-duplicate-range', {
+      'compose.yaml': 'services:\n  api:\n    image: nginx:1\n    ports:\n      - "8080-8081:80-81"\n',
+      'compose.override.yaml': 'services:\n  api:\n    ports:\n      - "8080-8081:80-81"\n',
+    });
+    const project = await buildAuthoredProject(nodeId, 'doctor-port-duplicate-range');
+    const port = locateFinding(project, hit('port-exposed-all-interfaces', {
+      service: 'api', sourcePath: 'api', subject: { kind: 'port', key: '8080-8081/tcp' },
+    }));
+    expect(port).toBeUndefined();
+  });
+
+  it('refuses a port location when another project layer has a truncated alias graph', async () => {
+    const overrideLines = ['x-0: &a0 [true]'];
+    for (let level = 1; level < 20; level += 1) overrideLines.push(`x-${level}: &a${level} [*a${level - 1}]`);
+    writeStack('doctor-port-alias-layer', {
+      'compose.yaml': 'services:\n  api:\n    image: nginx:1\n    ports:\n      - "8080:80"\n',
+      'compose.override.yaml': `${overrideLines.join('\n')}\n`,
+    });
+    const project = await buildAuthoredProject(nodeId, 'doctor-port-alias-layer');
+    expect(project.files.find(file => file.file === 'compose.override.yaml')?.state).toBe('parse-failed');
+    const port = locateFinding(project, hit('port-exposed-all-interfaces', {
+      service: 'api', sourcePath: 'api', subject: { kind: 'port', key: '8080/tcp' },
+    }));
+    expect(port).toBeUndefined();
   });
 
   it('locates the broad publication, not a loopback override on the same host port', async () => {
@@ -412,6 +507,30 @@ describe('Compose Doctor authored locations', () => {
       service: 'api', sourcePath: 'b.env',
     }));
     expect(missing).toBeUndefined();
+  });
+
+  it('refuses an env-file path declared in both layers', async () => {
+    writeStack('doctor-env-file-duplicate', {
+      'compose.yaml': 'services:\n  api:\n    image: nginx:1\n    env_file:\n      - gone.env\n',
+      'compose.override.yaml': 'services:\n  api:\n    env_file:\n      - gone.env\n',
+    });
+    const project = await buildAuthoredProject(nodeId, 'doctor-env-file-duplicate');
+    const missing = locateFinding(project, hit('env-file-missing', {
+      service: 'api', sourcePath: 'gone.env',
+    }));
+    expect(missing).toBeUndefined();
+  });
+
+  it('locates a unique env-file entry even when its index differs across layers', async () => {
+    writeStack('doctor-env-file-index', {
+      'compose.yaml': 'services:\n  api:\n    image: nginx:1\n    env_file:\n      - a.env\n      - gone.env\n',
+      'compose.override.yaml': 'services:\n  api:\n    env_file:\n      - b.env\n',
+    });
+    const project = await buildAuthoredProject(nodeId, 'doctor-env-file-index');
+    const missing = locateFinding(project, hit('env-file-missing', {
+      service: 'api', sourcePath: 'gone.env',
+    }));
+    expect(missing).toMatchObject({ file: 'compose.yaml', line: 6, path: 'services.api.env_file[1]' });
   });
 
   it('never carries an interpolated canary in the model JSON, the finding, or the wire', async () => {
