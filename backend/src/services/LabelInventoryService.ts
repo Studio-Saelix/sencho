@@ -318,7 +318,12 @@ export async function buildNodeLabelInventory(
   };
 }
 
-function authoredOriginsFor(
+/**
+ * The authored origin of each declared key. Exported so the large-input
+ * regression test can prove a per-key lookup never scans the flat
+ * contribution list; callers use it only through the stack inventory.
+ */
+export function authoredOriginsFor(
   project: AuthoredProject | null,
   service: string,
   keys: string[],

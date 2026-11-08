@@ -6,7 +6,8 @@ import { setupTestDb, cleanupTestDb } from './helpers/setupTestDb';
 import { ComposeService } from '../services/ComposeService';
 import DockerController from '../services/DockerController';
 import { NodeRegistry } from '../services/NodeRegistry';
-import { buildStackLabelInventory } from '../services/LabelInventoryService';
+import { authoredOriginsFor, buildStackLabelInventory } from '../services/LabelInventoryService';
+import { buildAuthoredProject } from '../services/composeSource';
 
 let tmpDir: string;
 let nodeId: number;
@@ -143,17 +144,26 @@ describe('authored label origins in the stack inventory', () => {
     });
     stubRender({ api: labels });
     stubDocker();
-    const started = performance.now();
-    const inventory = await buildStackLabelInventory(nodeId, 'label-large-inline');
-    const elapsed = performance.now() - started;
-    const api = inventory.services.find(service => service.service === 'api')!;
-    expect(Object.keys(api.authored ?? {})).toHaveLength(inlineCount);
-    expect(api.authored?.['key.0']).toMatchObject({
-      source: 'inline', file: 'compose.yaml', overridden: true,
+    const project = await buildAuthoredProject(nodeId, 'label-large-inline');
+    const serviceLabels = project.labels.get('api')!;
+    const contributions = serviceLabels.contributions;
+    // The old read scanned the service's whole contribution list once per key
+    // (quadratic). A map built with the model keeps this linear, so reading the
+    // flat list after the model is built is a regression: make that read throw
+    // instead of asserting a wall-clock threshold that CI load can push over.
+    Object.defineProperty(serviceLabels, 'contributions', {
+      configurable: true,
+      get() { throw new Error('per-key whole-list scan'); },
     });
-    // The old read scanned every contribution once per key (quadratic). A map
-    // built with the model keeps this linear; the margin absorbs CI noise.
-    expect(elapsed).toBeLessThan(2_000);
+    try {
+      const origins = authoredOriginsFor(project, 'api', Object.keys(labels));
+      expect(Object.keys(origins ?? {})).toHaveLength(inlineCount);
+      expect(origins?.['key.0']).toMatchObject({
+        source: 'inline', file: 'compose.yaml', overridden: true,
+      });
+    } finally {
+      Object.defineProperty(serviceLabels, 'contributions', { configurable: true, value: contributions });
+    }
   }, 30_000);
 
   it('omits authored origins when a service extends an unresolvable base', async () => {
