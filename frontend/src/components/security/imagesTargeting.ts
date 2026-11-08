@@ -108,25 +108,14 @@ function contextRank(context: ImageExposureContext): number {
 
 /** Pre-cap aggregates over the contexts (the rule the server's summary uses). */
 function summarizeContexts(contexts: readonly ImageExposureContext[]): ImageExposureContextSummary {
-  let hasConflict = false;
-  let hasUnclassified = false;
-  let hasUnavailable = false;
-  let sawComplete = false;
-  let allKnownIntentional = true;
-
-  for (const context of contexts) {
-    if (context.intentConflict) hasConflict = true;
-    if (context.intentStatus === 'unset') hasUnclassified = true;
-    if (context.intentStatus === 'unavailable') {
-      hasUnavailable = true;
-      continue;
-    }
-    sawComplete = true;
-    if (!isIntentionalSet(context)) allKnownIntentional = false;
-  }
-
-  if (!sawComplete) allKnownIntentional = false;
-  return { hasConflict, hasUnclassified, hasUnavailable, allKnownIntentional };
+  const sawComplete = contexts.some((context) => context.intentStatus !== 'unavailable');
+  return {
+    hasConflict: contexts.some((context) => context.intentConflict === true),
+    hasUnclassified: contexts.some((context) => context.intentStatus === 'unset'),
+    hasUnavailable: contexts.some((context) => context.intentStatus === 'unavailable'),
+    allKnownIntentional: sawComplete
+      && contexts.every((context) => context.intentStatus === 'unavailable' || isIntentionalSet(context)),
+  };
 }
 
 /**
@@ -166,14 +155,11 @@ export function applySavedIntents(
   intents: readonly IntentEntry[],
 ): Record<string, ScanSummary> {
   let changed = false;
-  const next: Record<string, ScanSummary> = {};
+  const next: Record<string, ScanSummary> = { ...summaries };
 
   for (const [imageRef, summary] of Object.entries(summaries)) {
     const contexts = summary.exposure_contexts;
-    if (summary.publicly_exposed !== true || !contexts || contexts.length === 0) {
-      next[imageRef] = summary;
-      continue;
-    }
+    if (summary.publicly_exposed !== true || !contexts || contexts.length === 0) continue;
     let touched = false;
     const patched = contexts.map((context) => {
       if (context.stackName !== stackName) return context;
@@ -182,10 +168,7 @@ export function applySavedIntents(
       touched = true;
       return after;
     });
-    if (!touched) {
-      next[imageRef] = summary;
-      continue;
-    }
+    if (!touched) continue;
     changed = true;
     next[imageRef] = {
       ...summary,
