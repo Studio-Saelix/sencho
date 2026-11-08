@@ -667,6 +667,12 @@ components:
               redacted: { type: boolean }
         evidence:
           type: array
+          description: >-
+            Reason tokens for the row. `docker-api-port-published` means a
+            Docker API port (2375 or 2376) has a host binding, and
+            `docker-api-port-exposed` means one is exposed on the container
+            without any host binding; the published token takes precedence when
+            both would apply.
           items: { type: string }
         inspectFailed: { type: boolean }
         metadataTruncated:

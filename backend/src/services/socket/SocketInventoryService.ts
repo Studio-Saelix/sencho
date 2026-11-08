@@ -514,6 +514,50 @@ function socketMountsFor(
   return matches;
 }
 
+function isDockerApiPortNumber(port: number | null): boolean {
+  return port === 2375 || port === 2376;
+}
+
+/** An `exposedPorts` entry such as `2375/tcp` names a Docker API port. */
+function isDockerApiExposedPortSpec(spec: string): boolean {
+  const slash = spec.lastIndexOf('/');
+  const rawPort = slash > 0 ? spec.slice(0, slash) : spec;
+  return /^\d+$/.test(rawPort) && isDockerApiPortNumber(Number(rawPort));
+}
+
+/**
+ * Docker API port facts for a row's evidence. A port with a host binding is
+ * published. A private Docker API port without one, or an `exposedPorts` entry
+ * when the port list is missing it, is exposed only. The tokens are mutually
+ * exclusive: publishing a port also exposes it, so `docker-api-port-published`
+ * states the stronger, host-reachable fact and the exposed token is reserved
+ * for a row with no published Docker API port at all.
+ */
+function dockerApiPortFacts(row: SocketInventoryContainerRow): {
+  any: boolean;
+  evidence: string[];
+} {
+  let published = false;
+  let exposedOnly = false;
+  for (const port of row.ports) {
+    if (isDockerApiPortNumber(port.publicPort)
+      || (isDockerApiPortNumber(port.privatePort) && port.publicPort !== null)) {
+      published = true;
+    }
+    if (isDockerApiPortNumber(port.privatePort) && port.publicPort === null) {
+      exposedOnly = true;
+    }
+  }
+  exposedOnly = exposedOnly || row.exposedPorts.some(isDockerApiExposedPortSpec);
+  return {
+    any: published || exposedOnly,
+    evidence: [
+      ...(published ? ['docker-api-port-published'] : []),
+      ...(!published && exposedOnly ? ['docker-api-port-exposed'] : []),
+    ],
+  };
+}
+
 function classifyRow(
   row: SocketInventoryContainerRow,
   ctx: {
@@ -567,9 +611,8 @@ function classifyRow(
     || (provider.project !== null && provider.service !== null
       && row.composeProject === provider.project && row.service === provider.service)
   );
-  const dockerApiPort = row.ports.some(port =>
-    port.privatePort === 2375 || port.privatePort === 2376
-    || port.publicPort === 2375 || port.publicPort === 2376);
+  const dockerApiPorts = dockerApiPortFacts(row);
+  const dockerApiPort = dockerApiPorts.any;
   const readOnlyMount = socketMounts.length > 0 && socketMounts.every(mount => mount.readOnly);
 
   // An uninspectable container could be the only proxy on the node. It stays
@@ -586,7 +629,7 @@ function classifyRow(
         'inspect-failed',
         ...(imageProvider ? ['known-provider-image'] : []),
         ...(nameHint ? ['socket-proxy-name-hint'] : []),
-        ...(dockerApiPort ? ['docker-api-port-published'] : []),
+        ...dockerApiPorts.evidence,
       ],
       infrastructureLabel,
       isSencho,
@@ -658,7 +701,7 @@ function classifyRow(
         providerType: imageProvider,
         socketMounts,
         apiGroups,
-        evidence: [...socketEvidence, 'docker-api-port-published'],
+        evidence: [...socketEvidence, ...dockerApiPorts.evidence],
         infrastructureLabel,
         isSencho,
       });
@@ -691,7 +734,7 @@ function classifyRow(
       evidence: [
         ...(imageProvider ? ['known-provider-image'] : []),
         ...(nameHint ? ['socket-proxy-name-hint'] : []),
-        ...(dockerApiPort ? ['docker-api-port-published'] : []),
+        ...dockerApiPorts.evidence,
         'no-socket-bind-observed',
       ],
       infrastructureLabel,
