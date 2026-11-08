@@ -520,6 +520,103 @@ describe('buildSocketInventory classification', () => {
     expect(inventory.counts.undetermined).toBe(0);
   });
 
+  it('keeps writable directory access visible in the row evidence', () => {
+    const inventory = buildSocketInventory(input({
+      containers: [row({
+        id: 'writable-dir1',
+        name: 'writable-dir',
+        mounts: [socketMount('/var/run', '/hostrun', false)],
+      })],
+    }));
+
+    expect(inventory.containers[0]).toMatchObject({
+      role: 'undetermined',
+      classification: 'unknown',
+    });
+    expect(inventory.containers[0].evidence).toContain('socket-mount-directory');
+    expect(inventory.containers[0].evidence).toContain('socket-mount-writable');
+  });
+
+  it('keeps directory evidence on the name-hint and API-group proxy branches', () => {
+    const byName = buildSocketInventory(input({
+      containers: [row({
+        id: 'hint-dir1',
+        name: 'my-socket-proxy',
+        mounts: [socketMount('/var/run', '/hostrun', true)],
+      })],
+    }));
+    expect(byName.containers[0]).toMatchObject({
+      role: 'proxy',
+      classification: 'candidate',
+      providerType: 'generic-socket-proxy',
+    });
+    expect(byName.containers[0].evidence).toContain('socket-mount-directory');
+
+    const byGroups = buildSocketInventory(input({
+      containers: [row({
+        id: 'groups-dir1',
+        name: 'fwd',
+        mounts: [socketMount('/var/run', '/hostrun', true)],
+        apiGroups: ['CONTAINERS', 'IMAGES'],
+      })],
+    }));
+    expect(byGroups.containers[0]).toMatchObject({
+      role: 'proxy',
+      classification: 'candidate',
+      providerType: 'generic-socket-proxy',
+    });
+    expect(byGroups.containers[0].evidence).toContain('socket-mount-directory');
+  });
+
+  it('keeps a directory mount undetermined when a Docker API port is exposed', () => {
+    // The classifier checks private as well as published ports, so an
+    // unpublished 2375 still leaves the row undetermined rather than a direct
+    // consumer.
+    const inventory = buildSocketInventory(input({
+      containers: [row({
+        id: 'api-port-dir1',
+        name: 'api-port-dir',
+        mounts: [socketMount('/var/run', '/hostrun', true)],
+        ports: [{ privatePort: 2375, publicPort: null, ip: null, protocol: 'tcp' }],
+      })],
+    }));
+
+    expect(inventory.containers[0]).toMatchObject({
+      role: 'undetermined',
+      classification: 'unknown',
+    });
+    expect(inventory.containers[0].evidence).toContain('socket-mount-directory');
+    expect(inventory.containers[0].evidence).toContain('docker-api-port-published');
+  });
+
+  it('uses a tcp provider socket source as the custom ancestor for directory mounts', () => {
+    const inventory = buildSocketInventory(input({
+      containers: [row({
+        id: 'provider-dir1',
+        name: 'provider-dir',
+        mounts: [socketMount('/srv/docker', '/hostrun', true)],
+      })],
+      endpoint: describeDockerEndpoint('tcp://proxy:2375'),
+      endpointProvider: {
+        state: 'resolved',
+        provider: {
+          containerId: 'proxy1',
+          containerName: 'proxy',
+          project: null,
+          service: null,
+          workingDir: null,
+          socketBindSource: '/srv/docker/run/docker.sock',
+        },
+      },
+    }));
+
+    expect(inventory.containers[0]).toMatchObject({
+      role: 'undetermined',
+      classification: 'unknown',
+    });
+    expect(inventory.containers[0].evidence).toContain('socket-mount-directory');
+  });
+
   it('does not call a lookalike image a proxy, and keeps a generic socket-proxy a candidate', () => {
     const lookalike = buildSocketInventory(input({
       containers: [row({
