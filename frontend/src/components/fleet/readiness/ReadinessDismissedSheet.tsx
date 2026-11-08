@@ -1,5 +1,5 @@
-import { SystemSheet, SheetSection } from '@/components/ui/system-sheet';
-import { DismissedList, type DismissedItem } from '@/components/ui/dismissed-section';
+import type { RefObject } from 'react';
+import { DismissedSheet, type DismissedItem } from '@/components/ui/dismissed-sheet';
 import type { FindingDismissal } from '@/types/findingDismissal';
 import type { DismissedFinding } from '@/lib/findingDismissals';
 import type { FleetReadinessNode, ReadinessFinding } from '@/types/readiness';
@@ -16,6 +16,10 @@ interface ReadinessDismissedSheetProps {
   canDismiss: (finding: ReadinessFinding) => boolean;
   onRestore: (dismissal: FindingDismissal) => void;
   isRestoring: (dismissal: FindingDismissal) => boolean;
+  /** The summary count that opens this sheet, so closing returns focus to it. */
+  openerRef?: RefObject<HTMLButtonElement | null>;
+  /** The readiness summary region, focused when the last restore removes the count. */
+  fallbackFocusRef?: RefObject<HTMLElement | null>;
 }
 
 /**
@@ -23,7 +27,7 @@ interface ReadinessDismissedSheetProps {
  * with Restore. Opens from the dismissed count in the readiness status row, so
  * a long list never pushes the node matrix down the page.
  */
-export function ReadinessDismissedSheet({ open, onOpenChange, dismissed, nodes, now, canDismiss, onRestore, isRestoring }: ReadinessDismissedSheetProps) {
+export function ReadinessDismissedSheet({ open, onOpenChange, dismissed, nodes, now, canDismiss, onRestore, isRestoring, openerRef, fallbackFocusRef }: ReadinessDismissedSheetProps) {
   const nodeNames = new Map(nodes.map(node => [node.id, node.name]));
   const items: DismissedItem[] = dismissed.map(({ finding, dismissal }) => ({
     id: dismissal.id,
@@ -33,19 +37,5 @@ export function ReadinessDismissedSheet({ open, onOpenChange, dismissed, nodes, 
     restoring: isRestoring(dismissal),
   }));
 
-  return (
-    <SystemSheet
-      open={open}
-      onOpenChange={onOpenChange}
-      crumb={['Fleet', 'Readiness']}
-      name="Dismissed findings"
-      meta={`${items.length} set aside · still counted, never hidden`}
-    >
-      <SheetSection title={`Dismissed · ${items.length}`}>
-        {items.length > 0
-          ? <DismissedList items={items} flush />
-          : <p className="py-8 text-center text-sm text-muted-foreground">Nothing is dismissed.</p>}
-      </SheetSection>
-    </SystemSheet>
-  );
+  return <DismissedSheet open={open} onOpenChange={onOpenChange} openerRef={openerRef} fallbackFocusRef={fallbackFocusRef} crumb={['Fleet', 'Readiness']} items={items} />;
 }
