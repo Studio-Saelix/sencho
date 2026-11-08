@@ -124,6 +124,13 @@ function envFileRefusal(label: string): ComposeExpansionRefusal {
   );
 }
 
+function envFileHomeRefusal(label: string): ComposeExpansionRefusal {
+  return new ComposeExpansionRefusal(
+    `Sencho cannot resolve the env file path "${label}" the way Docker Compose does, so it could not determine which compose files the run would load. ` +
+    'Use an absolute path, then try again.',
+  );
+}
+
 function dependencyRefusal(label: string, detail: string): ComposeExpansionRefusal {
   return new ComposeExpansionRefusal(
     `Compose file "${label}" ${detail} Docker Compose expands aliases without a limit and can run the host out of memory, ` +
@@ -446,14 +453,16 @@ async function loadSelectionEnv(
   if (envFileArgs.length > 0) {
     explicitSources = true;
     for (const file of envFileArgs) {
-      sources.push({ path: path.resolve(cwd, expandUserPath(file, processEnv('HOME'))), label: file, required: true });
+      if (file.startsWith('~')) throw envFileHomeRefusal(file);
+      sources.push({ path: path.resolve(cwd, file), label: file, required: true });
     }
   } else {
     const listed = (processEnv('COMPOSE_ENV_FILES') ?? '').split(',').filter((entry) => entry.length > 0);
     if (listed.length > 0) {
       explicitSources = true;
       for (const file of listed) {
-        sources.push({ path: path.resolve(cwd, expandUserPath(file, processEnv('HOME'))), label: file, required: true });
+        if (file.startsWith('~')) throw envFileHomeRefusal(file);
+        sources.push({ path: path.resolve(cwd, file), label: file, required: true });
       }
     } else {
       const disabledRaw = processEnv('COMPOSE_DISABLE_ENV_FILE');
@@ -511,9 +520,9 @@ function resolveDependencyPath(value: string, base: string): string {
   return path.isAbsolute(value) ? path.resolve(value) : path.resolve(base, value);
 }
 
-/** Expand a leading `~/` the way Compose's env-file path expansion does. */
+/** Expand a leading `~` the way Compose's extends path expansion does. */
 function expandUserPath(value: string, home: string | undefined): string {
-  if (home && (value === '~' || value.startsWith('~/'))) {
+  if (home && value.startsWith('~')) {
     return path.join(home, value.slice(1).replace(/^[\\/]/, ''));
   }
   return value;
@@ -530,9 +539,11 @@ function resolveExtendsPath(
   expandHome: boolean,
   home: string | undefined,
 ): string {
-  if (expandHome && (value === '~' || value.startsWith('~/'))) {
+  if (expandHome && value.startsWith('~') && home) {
     return expandUserPath(value, home);
   }
+  // With no HOME, Compose warns and keeps the path literal, so it is resolved
+  // against the declaring file's project base like any relative path.
   return resolveDependencyPath(value, base);
 }
 
@@ -781,9 +792,6 @@ async function assertInputClosure(args: {
             const target = interpolatePath(raw, input.env);
             if (target === null) continue;
             if (isRemoteComposeRef(target)) throw remoteDependencyRefusal(label, 'extends');
-            if (input.viaExtends && target.startsWith('~') && target !== '~' && !target.startsWith('~/')) {
-              throw unresolvedIncludePathRefusal(label, 'has a ~user extends path.');
-            }
             const resolved = resolveExtendsPath(
               target,
               input.projectBase,

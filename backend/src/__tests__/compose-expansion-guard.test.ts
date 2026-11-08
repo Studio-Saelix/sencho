@@ -1151,28 +1151,26 @@ describe('assertComposeInputsWithinExpansionLimits - review round regressions', 
       .resolves.toBeUndefined();
   });
 
-  it('expands a ~ env-file path from HOME', async () => {
+  it('refuses a ~ env-file path it cannot resolve the way Compose does', async () => {
+    await expect(assertComposeInputsWithinExpansionLimits({
+      cwd: dir,
+      invocation: ['compose', '--env-file', '~/vars.env', 'config'],
+    })).rejects.toThrow(/cannot resolve the env file path/);
+  });
+
+  it('expands a ~user extends path from the child HOME', async () => {
     const previousHome = process.env.HOME;
     process.env.HOME = path.join(dir, 'home');
     try {
-      await write('home/vars.env', 'COMPOSE_FILE=selected.yaml\n');
-      await write('selected.yaml', nestedAliasBomb(12));
-      await write('compose.yaml', SAFE_COMPOSE);
-      await expect(assertComposeInputsWithinExpansionLimits({
-        cwd: dir,
-        invocation: ['compose', '--env-file', '~/vars.env', 'config'],
-      })).rejects.toBeInstanceOf(ComposeExpansionRefusal);
+      await write('compose.yaml', 'services:\n  web:\n    extends:\n      file: sub/a.yaml\n      service: base\n');
+      await write('sub/a.yaml', 'services:\n  base:\n    extends:\n      file: ~someone/b.yaml\n      service: deeper\n');
+      await write('home/someone/b.yaml', nestedAliasBomb(12));
+      await expect(assertComposeInputsWithinExpansionLimits({ cwd: dir, invocation: ['compose', 'config'] }))
+        .rejects.toBeInstanceOf(ComposeExpansionRefusal);
     } finally {
       if (previousHome === undefined) delete process.env.HOME;
       else process.env.HOME = previousHome;
     }
-  });
-
-  it('refuses a ~user extends path in a nested extends', async () => {
-    await write('compose.yaml', 'services:\n  web:\n    extends:\n      file: sub/a.yaml\n      service: base\n');
-    await write('sub/a.yaml', 'services:\n  base:\n    extends:\n      file: ~someone/b.yaml\n      service: deeper\n');
-    await expect(assertComposeInputsWithinExpansionLimits({ cwd: dir, invocation: ['compose', 'config'] }))
-      .rejects.toThrow(/~user extends path/);
   });
 
   it('refuses a bare-host git include reference', async () => {
@@ -1239,6 +1237,21 @@ describe('assertComposeInputsWithinExpansionLimits - review round regressions', 
       await write('compose.yaml', 'services:\n  web:\n    extends:\n      file: sub/a.yaml\n      service: base\n');
       await write('sub/a.yaml', 'services:\n  base:\n    extends:\n      file: ~/b.yaml\n      service: deeper\n');
       await write('home/b.yaml', nestedAliasBomb(12));
+      await expect(assertComposeInputsWithinExpansionLimits({ cwd: dir, invocation: ['compose', 'config'] }))
+        .rejects.toBeInstanceOf(ComposeExpansionRefusal);
+    } finally {
+      if (previousHome === undefined) delete process.env.HOME;
+      else process.env.HOME = previousHome;
+    }
+  });
+
+  it('keeps a nested extends ~ path literal when HOME is unset', async () => {
+    const previousHome = process.env.HOME;
+    delete process.env.HOME;
+    try {
+      await write('compose.yaml', 'services:\n  web:\n    extends:\n      file: sub/a.yaml\n      service: base\n');
+      await write('sub/a.yaml', 'services:\n  base:\n    extends:\n      file: ~/b.yaml\n      service: deeper\n');
+      await write('sub/~/b.yaml', nestedAliasBomb(12));
       await expect(assertComposeInputsWithinExpansionLimits({ cwd: dir, invocation: ['compose', 'config'] }))
         .rejects.toBeInstanceOf(ComposeExpansionRefusal);
     } finally {
