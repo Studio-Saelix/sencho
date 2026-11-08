@@ -1,6 +1,7 @@
 import { createHash, randomUUID } from 'crypto';
 import type Docker from 'dockerode';
 import DockerController from '../DockerController';
+import { DatabaseService } from '../DatabaseService';
 import { errorMessageForLog, sanitizeForLog } from '../../utils/safeLog';
 import type { LocalVolumeProtectionHealth } from './capability';
 import {
@@ -24,6 +25,7 @@ import { getRecoveryAuthorityId } from './recoveryDb';
 import { RestoreIntentStore, reconcileRestoreIntentsAtStartup } from './restoreIntents';
 import { StorageIdentityStore } from './storageIdentity';
 import SelfIdentityService from '../SelfIdentityService';
+import { StackOpLockService } from '../StackOpLockService';
 import {
   describeStoredLocator,
   describeVolumeLocator,
@@ -32,6 +34,21 @@ import {
   probeGenerationToken,
   resolveVolumeDependents,
 } from './volumeSources';
+import {
+  prepareOverwriteAdmission,
+  previewOverwrite as buildOverwritePreview,
+  overwriteIntentScope,
+  recordOverwriteIntent,
+  reconcileOverwriteIntentsAtStartup,
+  settleInterruptedOverwriteOperations,
+  resolveOverwriteIntent,
+  runOverwritePipeline,
+  type OverwriteDeps,
+  type OverwriteIntentScope,
+  type OverwritePreview,
+  type ResolveAction,
+} from './overwriteRestore';
+import { RestoreFenceStore } from './restoreFence';
 import type {
   BackupEngine,
   EngineExecutionContext,
@@ -93,6 +110,8 @@ const HEALTH_TTL_MS = 60_000;
 export interface AdmissionResult {
   operation: RecoveryOperation;
   replayed: boolean;
+  /** The restore intent an overwrite created, so a client can resolve it later. */
+  intentId?: string;
 }
 
 /**
@@ -176,6 +195,29 @@ export class RecoveryEngineService {
 
   isReady(): boolean {
     return this.boot.ready;
+  }
+
+  /**
+   * Whether a boot sequence is running. One that is running may still prove an
+   * interrupted overwrite and settle its operation. One that ended, with or
+   * without opening the gate, will prove nothing more until the next start, so
+   * what an operation reads then is the answer; and an engine whose boot never
+   * started (no usable recovery schema, no node to run on) has nothing to wait
+   * for either.
+   */
+  isSettlingAtBoot(): boolean {
+    return this.boot.startedAt !== null && this.boot.finishedAt === null;
+  }
+
+  /** Test seam: put the boot gate in a given state without running the sequence. */
+  setBootStateForTests(state: 'settling' | 'failed' | 'idle'): void {
+    const now = Date.now();
+    this.boot = {
+      ready: false,
+      startedAt: state === 'idle' ? null : now,
+      finishedAt: state === 'failed' ? now : null,
+      reason: 'engine_starting',
+    };
   }
 
   // --- Health ---------------------------------------------------------------
@@ -338,6 +380,36 @@ export class RecoveryEngineService {
           intents.rolledBack, intents.unknown,
         );
       }
+      // Staged overwrites are settled by their own reconciler: they own a fence
+      // and a swap journal, and a new-volume intent was skipped above. A node
+      // whose daemon or compose directory cannot be read here keeps the intents
+      // unsettled and still finishes boot, which is the truthful state.
+      try {
+        const overwrites = await reconcileOverwriteIntentsAtStartup(
+          await this.overwriteDeps({
+            actor: 'system:restore-reconcile',
+            authorizeStack: () => true,
+            authorizeGlobal: () => true,
+          }),
+        );
+        if (overwrites.rolledBack > 0 || overwrites.committed > 0 || overwrites.unknown > 0) {
+          console.log(
+            '[Recovery] Overwrite restores reconciled: %d rolled back, %d committed, %d unknown',
+            overwrites.rolledBack, overwrites.committed, overwrites.unknown,
+          );
+        }
+      } catch (err) {
+        console.warn('[Recovery] Overwrite reconciliation could not finish:', errorMessageForLog(err));
+      }
+      // Whatever the reconciler proved, even when it stopped part way, the
+      // operation says the same: an operation parked as `completion_unknown` for
+      // a restore that has since settled would keep its storage lock stale.
+      try {
+        const settled = settleInterruptedOverwriteOperations(this.intents, this.operations);
+        if (settled > 0) console.log('[Recovery] Settled %d overwrite operations the reconciler proved', settled);
+      } catch (err) {
+        console.warn('[Recovery] Overwrite operations could not be settled:', errorMessageForLog(err));
+      }
       await this.refreshHealth();
     } catch (err) {
       // Boot problems never stop Sencho; they keep recovery closed, which is the
@@ -488,17 +560,31 @@ export class RecoveryEngineService {
         { scope: 'storage', resourceKey: observed.storageKey },
         { scope: 'repository', resourceKey: repository.id },
       ],
-      (operation) => this.points.begin({
-        kind: 'root',
-        storageId: observed.id,
-        expectedGenerationToken: generationToken,
-        repositoryId: repository.id,
-        trigger: 'manual',
-        actor: input.actor,
-        sourceOperationId: operation.id,
-        sourceNodeKey: ownerNodeKey,
-        engineId: RESTIC_ENGINE_ID,
-      }),
+      (operation) => {
+        // An overwrite that has not settled, or whose fence is still held, owns the
+        // volume: its workloads are stopped and the volume may be between states, with
+        // its hidden work directory (a full copy of the replaced data, and the journal)
+        // in it. A capture skips that directory but would record a half-swapped volume.
+        // Its storage lock is not enough: a restore that ended `partial` has released
+        // it. This runs inside the admission, so a replay of an earlier request is
+        // answered before it and the check cannot race a restore being admitted.
+        if (RestoreFenceStore.getInstance().liveIntentForVolume(input.volumeName)) {
+          throw new RecoveryError('lock_held', {
+            detail: 'A restore of this volume has not finished or still holds its fence, and its working copy may still be in the volume. Resolve the restore, then capture again.',
+          });
+        }
+        return this.points.begin({
+          kind: 'root',
+          storageId: observed.id,
+          expectedGenerationToken: generationToken,
+          repositoryId: repository.id,
+          trigger: 'manual',
+          actor: input.actor,
+          sourceOperationId: operation.id,
+          sourceNodeKey: ownerNodeKey,
+          engineId: RESTIC_ENGINE_ID,
+        });
+      },
     );
     if (started.replayed || !started.setup) return { operation: started.operation, replayed: true };
 
@@ -631,6 +717,262 @@ export class RecoveryEngineService {
     const intent = started.setup;
     this.schedule(operationId, () => this.runRestore(operationId, intent.id, point.id, repository));
     return { operation: this.operations.get(operationId) ?? started.operation, replayed: false };
+  }
+
+  /**
+   * Every fact the overwrite confirmation screen needs, from one observation.
+   * Writes nothing, starts nothing, and is authorized like the overwrite itself
+   * so a caller who may not run it is not shown which stacks it would stop.
+   */
+  async previewOverwrite(input: {
+    pointId: string;
+    actor: string;
+    transport: RecoveryOperation['transport'];
+    hubNode?: { id: number; name: string };
+    authorizeStack: (stackName: string) => boolean;
+    authorizeGlobal: () => boolean;
+  }): Promise<OverwritePreview> {
+    // Access first: a caller who may not restore this volume is told so even
+    // while the engine is still starting.
+    await this.requireStorageAccessForIntent(input.pointId, input);
+    this.requireReady();
+    return buildOverwritePreview({ ...(await this.overwriteDeps(input)), hubNode: input.hubNode }, input.pointId);
+  }
+
+  /**
+   * Admit a restore over the point's own volume.
+   *
+   * The confirmation token recomputed here is the whole point: it is bound to the
+   * point, the storage generation, the repository and the exact container set, so
+   * a state that moved since the preview writes no row and the operator is told
+   * to preview again. The operation, both locks and the intent exist together.
+   */
+  async admitOverwrite(input: {
+    pointId: string;
+    confirmationToken: string;
+    confirmVolumeName: string;
+    actor: string;
+    idempotencyKey: string;
+    requestDigest: string;
+    transport: RecoveryOperation['transport'];
+    authorizeStack: (stackName: string) => boolean;
+    authorizeGlobal: () => boolean;
+  }): Promise<AdmissionResult> {
+    this.requireReady();
+    const repository = this.requireActiveRepository();
+    const deps = await this.overwriteDeps(input);
+
+    // A replay is answered before the observation: by then the first attempt has
+    // fenced the workloads and recorded an intent, and re-observing would refuse
+    // its own work as a changed precondition.
+    const replay = this.operations.findReplay({
+      idempotencyKey: input.idempotencyKey,
+      kind: 'restore',
+      actor: input.actor,
+      transport: input.transport,
+      requestDigest: input.requestDigest,
+      pointId: input.pointId,
+    });
+    if (replay) return { operation: replay, replayed: true, intentId: this.intents.getByOperation(replay.id)?.id };
+
+    const admitted = await prepareOverwriteAdmission(deps, {
+      pointId: input.pointId,
+      confirmationToken: input.confirmationToken,
+      confirmVolumeName: input.confirmVolumeName,
+    });
+    this.requireRepositoryStillActive(repository.id);
+
+    // The stacks whose containers the fence will own. A lifecycle request on one
+    // of them must lose to this restore, and this restore must lose to a
+    // lifecycle that is already running, which is what the lock vocabulary says
+    // without a second rule.
+    // Every stack whose model declares the volume, including one that has no
+    // container right now: a deploy of it would start one on half-swapped data.
+    const stacks = admitted.stacks;
+    const stackLocks = StackOpLockService.getInstance();
+    const heldStacks: string[] = [];
+    const releaseStacks = (): void => {
+      for (const name of heldStacks) stackLocks.release(this.nodeId, name);
+    };
+
+    const intentId = randomUUID();
+    let started;
+    try {
+      for (const stackName of stacks) {
+        const acquired = stackLocks.tryAcquire(this.nodeId, stackName, 'data_restore', input.actor);
+        if (!acquired.acquired) {
+          throw new RecoveryError('lock_held', {
+            detail: 'A stack that uses this volume is already changing. Wait for it to finish, then preview again.',
+          });
+        }
+        heldStacks.push(stackName);
+      }
+      started = this.operations.admit(
+        {
+          idempotencyKey: input.idempotencyKey,
+          kind: 'restore',
+          storageId: admitted.storage.id,
+          pointId: admitted.point.id,
+          actor: input.actor,
+          transport: input.transport,
+          requestDigest: input.requestDigest,
+        },
+        [
+          { scope: 'storage', resourceKey: admitted.storageKey },
+          { scope: 'repository', resourceKey: repository.id },
+        ],
+        // One implementation of the admission rows: the intent, the source hold
+        // and the exact fence set, written inside the operation's transaction.
+        (operation) => recordOverwriteIntent(deps, {
+          intentId,
+          operationId: operation.id,
+          pointId: admitted.point.id,
+          targetVolume: admitted.storage.locator,
+          actor: input.actor,
+          processEpoch: this.processEpoch,
+          expectedGenerationToken: admitted.liveGenerationToken,
+          fenceMembers: admitted.fenceMembers,
+          dependentStacks: admitted.stacks,
+        }),
+      );
+    } catch (err) {
+      releaseStacks();
+      throw err;
+    }
+    const intent = started.setup;
+    if (started.replayed || !intent) {
+      releaseStacks();
+      return { operation: started.operation, replayed: true };
+    }
+
+    const operationId = started.operation.id;
+    this.schedule(operationId, async () => {
+      try {
+        await this.runOverwrite(operationId, intent.id, repository, deps);
+      } finally {
+        releaseStacks();
+      }
+    });
+    return { operation: this.operations.get(operationId) ?? started.operation, replayed: false };
+  }
+
+  /** The operator's answer to an overwrite that did not settle. */
+  async resolveOverwrite(input: {
+    intentId: string;
+    action: ResolveAction;
+    actor: string;
+    authorizeStack: (stackName: string) => boolean;
+    authorizeGlobal: () => boolean;
+  }): Promise<{ outcome: string }> {
+    const intent = this.intents.get(input.intentId);
+    // An id that names nothing is answered the same way a record the caller may
+    // not touch is, unless the caller holds the action node-wide.
+    if (!intent || intent.targetMode !== 'staged_overwrite') {
+      await this.requireStorageAccessForIntent('', input);
+      throw new RecoveryError('invalid_request');
+    }
+    // The stacks the fence stopped, not only the stacks that use the volume now.
+    await this.requireStorageAccessForIntent(
+      intent.pointId,
+      input,
+      overwriteIntentScope(intent, RestoreFenceStore.getInstance()),
+    );
+    this.requireReady();
+    const operation = intent.operationId ? this.operations.get(intent.operationId) : null;
+    // A decision taken while this process is still working on the intent would
+    // race the pipeline. The answer is a wait, not a second writer.
+    if (operation && this.work.has(operation.id)) throw new RecoveryError('lock_held');
+    if (operation && (operation.state === 'queued' || operation.state === 'running')) {
+      throw new RecoveryError('lock_held');
+    }
+    try {
+      return await resolveOverwriteIntent(await this.overwriteDeps(input), {
+        intentId: input.intentId,
+        action: input.action,
+      });
+    } finally {
+      // The restore may have settled even when the answer is a refusal (a retry
+      // that proved the data and then could not release the fence): its
+      // operation follows what is proven. This never replaces the answer; an
+      // operation left behind is settled by the next retry or start.
+      try {
+        settleInterruptedOverwriteOperations(this.intents, this.operations, input.intentId);
+      } catch (err) {
+        console.warn('[Recovery] Could not settle the operation of restore %s:', sanitizeForLog(input.intentId), errorMessageForLog(err));
+      }
+    }
+  }
+
+  /** The deps every overwrite entry point needs, so the three cannot drift. */
+  private async overwriteDeps(input: {
+    actor: string;
+    transport?: RecoveryOperation['transport'];
+    authorizeStack: (stackName: string) => boolean;
+    authorizeGlobal: () => boolean;
+  }): Promise<OverwriteDeps> {
+    return {
+      nodeId: this.nodeId,
+      nodeName: DatabaseService.getInstance().getNode(this.nodeId)?.name ?? 'this node',
+      transport: input.transport ?? 'local',
+      docker: this.docker(),
+      runner: () => this.helperRunner(),
+      points: this.points,
+      repositories: this.repositories,
+      intents: this.intents,
+      fence: RestoreFenceStore.getInstance(),
+      ownerNodeKey: await ownerNodeKeyFor(this.nodeId, this.docker()),
+      knownStackNames: await knownStacksFor(this.nodeId),
+      actor: input.actor,
+      authorizeStack: input.authorizeStack,
+      authorizeGlobal: input.authorizeGlobal,
+    };
+  }
+
+  private async requireStorageAccessForIntent(
+    pointId: string,
+    authorize: {
+      authorizeStack: (stackName: string) => boolean;
+      authorizeGlobal: () => boolean;
+    },
+    recorded?: OverwriteIntentScope,
+  ): Promise<void> {
+    const point = this.points.get(pointId);
+    const storage = point ? StorageIdentityStore.getInstance().getById(point.storageId) : null;
+    await this.requireStorageAccess(storage, (context) => {
+      if (context.storageKey === null) return authorize.authorizeGlobal();
+      for (const dependent of context.dependents) {
+        if (!authorize.authorizeStack(dependent.stackName)) return false;
+      }
+      // An intent adds the stacks its fence owns to the live and stored ones, so
+      // a dependency dropped since cannot narrow the check.
+      if (recorded?.unowned && !authorize.authorizeGlobal()) return false;
+      for (const stackName of recorded?.stacks ?? []) {
+        if (!authorize.authorizeStack(stackName)) return false;
+      }
+      return true;
+    });
+  }
+
+  /** Run one staged overwrite and settle its operation exactly once. */
+  private async runOverwrite(
+    operationId: string,
+    intentId: string,
+    repository: RepositoryDescriptor,
+    deps: OverwriteDeps,
+  ): Promise<void> {
+    const signal = this.work.get(operationId)?.controller.signal ?? new AbortController().signal;
+    const engine = this.buildEngine(repository, operationId, signal);
+    const intent = this.intents.get(intentId);
+    await runOverwritePipeline({
+      deps: { ...deps, docker: this.docker(), runner: () => this.helperRunner() },
+      operationId,
+      intentId,
+      repository,
+      engine,
+      context: this.engineContext(operationId, intent?.pointId ?? null, signal, repository),
+      finish: (outcome) => this.operations.finish(operationId, outcome),
+      onProgress: (progress) => this.onProgress(operationId, progress),
+    });
   }
 
   /**

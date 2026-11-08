@@ -1,0 +1,724 @@
+/**
+ * Docker-backed: the real helper image, the real restic, real volumes.
+ *
+ * The unit suites script the helper and the daemon, and the Go suite proves the
+ * swap on a real filesystem. This one proves the combination the operator gets:
+ * a point materialized into the hidden work directory inside a live volume, the
+ * real probe swapping it in, the originals deleted before a restart, and a
+ * damaged repository failing before a live entry or a container is touched.
+ *
+ * Skipped when Docker is unavailable, or when the helper image has not been
+ * built and pinned for the run (`SENCHO_RECOVERY_HELPER_IMAGE`, set by the
+ * integration job to the image id it built).
+ */
+import { describe, it, expect, beforeAll, afterAll } from 'vitest';
+import { execFileSync } from 'child_process';
+import { randomUUID } from 'crypto';
+import type Docker from 'dockerode';
+import { setupTestDb, cleanupTestDb } from '../helpers/setupTestDb';
+import { RecoveryHelperRunner } from '../../services/recovery/restic/helperRunner';
+import { ResticEngine } from '../../services/recovery/restic/ResticEngine';
+import {
+  RepositoryProvisioner,
+  checkRepository,
+} from '../../services/recovery/localRepository';
+import { RecoveryRepositoryStore } from '../../services/recovery/repositories';
+import { RecoveryPointStore } from '../../services/recovery/recoveryPoints';
+import { RestoreIntentStore } from '../../services/recovery/restoreIntents';
+import { StorageIdentityStore } from '../../services/recovery/storageIdentity';
+import { getRecoveryAuthorityId } from '../../services/recovery/recoveryDb';
+import { RestoreFenceStore, applyRestoreFence, releaseRestoreFence } from '../../services/recovery/restoreFence';
+import { runSwapStep, swapIncomingDir } from '../../services/recovery/volumeSwap';
+import { observeVolumeInUse, probeGenerationToken, probeVolumeReport } from '../../services/recovery/volumeSources';
+import DockerController from '../../services/DockerController';
+import type { EngineExecutionContext, StorageIdentity } from '../../services/recovery/types';
+
+function dockerAvailable(): boolean {
+  try {
+    execFileSync('docker', ['info'], { stdio: 'ignore', timeout: 10_000 });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+const HELPER_IMAGE = process.env.SENCHO_RECOVERY_HELPER_IMAGE ?? '';
+const BUSYBOX = 'busybox:1.36.1';
+const hasDocker = dockerAvailable();
+const hasHelper = HELPER_IMAGE !== '';
+const describeIf = hasDocker && hasHelper ? describe : describe.skip;
+
+function docker(args: string[], input?: string): string {
+  return execFileSync('docker', args, {
+    encoding: 'utf8',
+    timeout: 300_000,
+    input,
+    maxBuffer: 8 * 1024 * 1024,
+  });
+}
+
+function volumeName(prefix: string): string {
+  return `${prefix}-${randomUUID().slice(0, 8)}`;
+}
+
+const createdVolumes = new Set<string>();
+const createdContainers = new Set<string>();
+
+function createVolume(name: string, labels: Record<string, string> = {}): void {
+  const labelArgs = Object.entries(labels).flatMap(([key, value]) => ['--label', `${key}=${value}`]);
+  docker(['volume', 'create', ...labelArgs, name]);
+  createdVolumes.add(name);
+}
+
+function removeVolume(name: string): void {
+  try {
+    docker(['volume', 'rm', '--force', name]);
+  } catch {
+    // Already gone.
+  }
+}
+
+function removeContainer(name: string): void {
+  try {
+    docker(['rm', '-f', name]);
+  } catch {
+    // Already gone.
+  }
+}
+
+function runInVolume(volume: string, script: string, mount = '/data'): string {
+  return docker(['run', '--rm', '--network', 'none', '-v', `${volume}:${mount}`, BUSYBOX, 'sh', '-c', `cd ${mount} && ${script}`]);
+}
+
+/** Paths, ownership, modes and contents, so a swap that loses metadata fails. */
+const MANIFEST_SCRIPT = [
+  'cd /data',
+  'find . -mindepth 1 -not -path "./.sencho-restore-*" | sort | while read -r p; do',
+  '  if [ -L "$p" ]; then',
+  '    printf "%s L %s\\n" "$p" "$(readlink "$p")"',
+  '  elif [ -f "$p" ]; then',
+  '    printf "%s F %s %s\\n" "$p" "$(stat -c "%u:%g %a %h" "$p")" "$(sha256sum "$p" | cut -d" " -f1)"',
+  '  elif [ -d "$p" ]; then',
+  '    printf "%s D %s\\n" "$p" "$(stat -c "%u:%g %a" "$p")"',
+  '  fi',
+  'done',
+  'printf "ROOT %s\\n" "$(stat -c "%u:%g %a" /data)"',
+].join('\n');
+
+function populateSource(volume: string): void {
+  runInVolume(volume, [
+    'set -e',
+    'mkdir -p tree secretdir',
+    'printf "alpha" > a.txt',
+    'dd if=/dev/urandom of=tree/big.bin bs=1024 count=16 2>/dev/null',
+    'ln -s a.txt link-rel',
+    'ln -s nowhere link-dangling',
+    'ln a.txt hardlink',
+    'printf "secret" > secretdir/s.txt',
+    'chown -R 999:999 secretdir',
+    'chmod 700 secretdir',
+    'chmod 600 secretdir/s.txt',
+    'chown 999:999 tree/big.bin',
+    'chmod 640 tree/big.bin',
+    'chmod 750 /data',
+  ].join('\n'));
+}
+
+let tmpDir: string;
+let nodeId: number;
+let repositoryVolume: string;
+let repositoryId: string;
+let secret: string;
+let owner: string;
+
+function runner(): RecoveryHelperRunner {
+  return new RecoveryHelperRunner({
+    docker: DockerController.getInstance(nodeId).getDocker() as Docker,
+    authorityId: getRecoveryAuthorityId(),
+    processEpoch: 'integration-epoch',
+    imageRef: HELPER_IMAGE,
+  });
+}
+
+function context(operationId: string): EngineExecutionContext {
+  return {
+    operationId,
+    pointId: 'integration-point',
+    lock: {
+      scope: 'repository',
+      resourceKey: repositoryId,
+      ownerOperationId: operationId,
+      processEpoch: 'integration-epoch',
+      acquiredAt: Date.now(),
+      staleSince: null,
+    },
+    signal: new AbortController().signal,
+    onProgress: () => undefined,
+  };
+}
+
+function storageFor(volume: string, token: string): StorageIdentity {
+  return {
+    id: randomUUID(),
+    authorityId: getRecoveryAuthorityId(),
+    ownerNodeKey: owner,
+    kind: 'named_volume',
+    locator: volume,
+    storageKey: randomUUID().replace(/-/g, ''),
+    generation: 1,
+    generationToken: token,
+    lineageParentId: null,
+    state: 'current',
+    firstSeenAt: Date.now(),
+    lastSeenAt: Date.now(),
+  };
+}
+
+function engine(): ResticEngine {
+  const helper = runner();
+  const dockerClient = DockerController.getInstance(nodeId).getDocker() as Docker;
+  return new ResticEngine({
+    runner: helper,
+    secret,
+    helperImageRef: HELPER_IMAGE,
+    inspectHelperImage: async () => ({ state: 'present' }),
+    parentSnapshot: () => null,
+    readGenerationToken: async (name) => {
+      const inspected = await dockerClient.getVolume(name).inspect() as { CreatedAt?: string };
+      return probeGenerationToken({
+        runner: helper,
+        operationId: 'integration-probe',
+        volumeName: name,
+        createdAt: inspected.CreatedAt ?? null,
+      });
+    },
+    observeInUse: (name) => observeVolumeInUse(dockerClient, name),
+    repositoryFor: () => ({ id: repositoryId, locator: repositoryVolume }),
+    runCheck: async (repositoryVolumeName, method, ctx) =>
+      checkRepository(
+        { runner: helper, repositoryVolume: repositoryVolumeName, secret, operationId: ctx.operationId },
+        method,
+      ),
+  });
+}
+
+async function capture(volume: string): Promise<{ snapshotId: string; token: string }> {
+  const inspected = await DockerController.getInstance(nodeId).getDocker().getVolume(volume).inspect() as { CreatedAt?: string };
+  const token = await probeGenerationToken({
+    runner: runner(),
+    operationId: 'integration-probe',
+    volumeName: volume,
+    createdAt: inspected.CreatedAt ?? null,
+  });
+  const result = await engine().createPoint(
+    {
+      storage: storageFor(volume, token),
+      repository: RecoveryRepositoryStore.getInstance().get(repositoryId) as never,
+      trigger: 'manual',
+      actor: 'integration',
+      kind: 'root',
+    },
+    context('integration-capture'),
+  );
+  if (!result.ok) throw new Error(`capture failed: ${result.errorClass}`);
+  expect(result.evidence.capture.skippedCount).toBe(0);
+  return { snapshotId: result.evidence.snapshotId, token };
+}
+
+beforeAll(async () => {
+  if (!hasDocker || !hasHelper) return;
+  tmpDir = await setupTestDb();
+  const { DatabaseService } = await import('../../services/DatabaseService');
+  nodeId = DatabaseService.getInstance().getDefaultNode()?.id ?? 1;
+  docker(['pull', BUSYBOX], undefined);
+  owner = `docker-engine:it-overwrite-${randomUUID().slice(0, 8)}`;
+  const provisioned = await new RepositoryProvisioner().provision(
+    {
+      nodeId,
+      docker: DockerController.getInstance(nodeId).getDocker() as Docker,
+      authorityId: getRecoveryAuthorityId(),
+      ownerNodeKey: owner,
+      runner: runner(),
+      operationId: 'integration-provision',
+    },
+    { generation: 1 },
+  );
+  createdVolumes.add(provisioned.repository.locator);
+  repositoryId = provisioned.repository.id;
+  repositoryVolume = provisioned.repository.locator;
+  secret = RecoveryRepositoryStore.getInstance().readSecret(repositoryId);
+});
+
+afterAll(() => {
+  if (!hasDocker || !hasHelper) return;
+  for (const name of createdContainers) removeContainer(name);
+  for (const volume of createdVolumes) removeVolume(volume);
+  createdVolumes.clear();
+  createdContainers.clear();
+  cleanupTestDb(tmpDir);
+});
+
+describeIf('staged overwrite against real Docker', () => {
+  it('materializes inside the volume, swaps through the journal and deletes the originals', async () => {
+    const source = volumeName('sencho-it-ow-src');
+    const target = volumeName('sencho-it-ow-dst');
+    const intentId = randomUUID();
+    try {
+      createVolume(source);
+      populateSource(source);
+      const before = runInVolume(source, MANIFEST_SCRIPT);
+      const point = await capture(source);
+
+      createVolume(target);
+      runInVolume(target, ['set -e', 'printf "old" > a.txt', 'mkdir -p conf', 'printf "old" > conf/keep', 'chmod 700 /data'].join('\n'));
+
+      const workDir = swapIncomingDir(intentId);
+      const materialize = await engine().restore(
+        {
+          id: intentId,
+          operationId: 'integration-materialize',
+          pointId: 'integration-point',
+          repositoryId,
+          snapshotId: point.snapshotId,
+          target: {
+            mode: 'staged_overwrite',
+            storageId: 'storage',
+            expectedGenerationToken: point.token,
+            workDir,
+            volumeName: target,
+          },
+          pathScope: null,
+          phase: 'materializing',
+          actor: 'integration',
+          createdAt: Date.now(),
+        },
+        context('integration-materialize'),
+      );
+      expect(materialize.ok).toBe(true);
+      if (!materialize.ok) return;
+      expect(materialize.evidence.verified).toBe(true);
+      // The live entries are untouched while the copy sits in the work directory.
+      expect(runInVolume(target, 'cat a.txt')).toBe('old');
+
+      const prepared = await runSwapStep({
+        runner: runner(),
+        operationId: 'integration-swap',
+        volumeName: target,
+        intentId,
+        action: 'prepare',
+      });
+      expect(prepared.ok).toBe(true);
+      expect(prepared.report?.status).toBe('planned');
+
+      const committed = await runSwapStep({
+        runner: runner(),
+        operationId: 'integration-swap',
+        volumeName: target,
+        intentId,
+        action: 'commit',
+      });
+      expect(committed.ok).toBe(true);
+      expect(committed.report?.status).toBe('swapped');
+      expect(runInVolume(target, MANIFEST_SCRIPT)).toBe(before);
+      // The originals are still inside the work directory until cleanup.
+      expect(runInVolume(target, `cat .sencho-restore-${intentId}/original/a.txt`)).toBe('old');
+
+      const cleaned = await runSwapStep({
+        runner: runner(),
+        operationId: 'integration-swap',
+        volumeName: target,
+        intentId,
+        action: 'cleanup',
+      });
+      expect(cleaned.ok).toBe(true);
+      expect(runInVolume(target, `test ! -e .sencho-restore-${intentId} && echo gone`).trim()).toBe('gone');
+      expect(runInVolume(target, MANIFEST_SCRIPT)).toBe(before);
+    } finally {
+      removeVolume(source);
+      removeVolume(target);
+    }
+  }, 300_000);
+
+  // The in-volume copy of an overwrite, as the engine runs it.
+  async function materializeInto(
+    target: string,
+    point: { snapshotId: string; token: string },
+    intentId: string,
+    operationId: string,
+  ): Promise<void> {
+    const materialize = await engine().restore(
+      {
+        id: intentId,
+        operationId,
+        pointId: 'integration-point',
+        repositoryId,
+        snapshotId: point.snapshotId,
+        target: {
+          mode: 'staged_overwrite',
+          storageId: 'storage',
+          expectedGenerationToken: point.token,
+          workDir: swapIncomingDir(intentId),
+          volumeName: target,
+        },
+        pathScope: null,
+        phase: 'materializing',
+        actor: 'integration',
+        createdAt: Date.now(),
+      },
+      context(operationId),
+    );
+    expect(materialize.ok).toBe(true);
+    if (!materialize.ok) return;
+    expect(materialize.evidence.verified).toBe(true);
+  }
+
+  // The layout of the volumes this feature exists for: the root belongs to the
+  // application user and is closed to everyone else, so root without
+  // DAC_OVERRIDE cannot create the work directory in it. The first two failed
+  // the copy before the `materialize` profile existed. The last two capture a
+  // root with the setgid bit for a group other than the helper's own group 0 (the
+  // second also carries the sticky bit, which the kernel never strips). The
+  // kernel clears the setgid bit from the chmod that applies the root's mode
+  // unless the swap helper holds FSETID; a captured root with group 0 keeps the
+  // bit either way, which is why root-owned fixtures never showed it. The live
+  // root of the last case is root-owned only so that nothing but FSETID is under
+  // test.
+  for (const live of [
+    { name: 'postgres-style 999:999 0700', chown: '999:999', mode: '700', captured: null },
+    { name: 'mariadb-style 77:77 2750', chown: '77:77', mode: '2750', captured: null },
+    { name: 'a setgid captured root 999:999 2750 over a postgres-style 70:70 0700 root', chown: '70:70', mode: '700', captured: { chown: '999:999', mode: '2750' } },
+    { name: 'a setgid and sticky captured root 70:70 3770 over a root-owned root', chown: '0:0', mode: '755', captured: { chown: '70:70', mode: '3770' } },
+  ]) {
+    it(`overwrites a volume whose live or captured root is owned by an application user (${live.name}) and keeps the captured root mtime, owner and mode`, async () => {
+      const source = volumeName('sencho-it-own-src');
+      const target = volumeName('sencho-it-own-dst');
+      const intentId = randomUUID();
+      try {
+        createVolume(source);
+        populateSource(source);
+        if (live.captured) runInVolume(source, `chown ${live.captured.chown} /data && chmod ${live.captured.mode} /data`);
+        runInVolume(source, 'touch -d "2021-03-04 05:06:07" /data');
+        const before = runInVolume(source, MANIFEST_SCRIPT);
+        if (live.captured) expect(before).toContain(`ROOT ${live.captured.chown} ${live.captured.mode}\n`);
+        const capturedMtime = runInVolume(source, 'stat -c %Y /data').trim();
+        const point = await capture(source);
+
+        createVolume(target);
+        runInVolume(target, [
+          'set -e',
+          'printf "old" > a.txt',
+          'mkdir -p conf',
+          'printf "old" > conf/keep',
+          `chown ${live.chown} /data a.txt conf conf/keep`,
+          `chmod ${live.mode} /data`,
+        ].join('\n'));
+
+        await materializeInto(target, point, intentId, 'integration-owned-root');
+        expect(runInVolume(target, 'cat a.txt')).toBe('old');
+
+        for (const action of ['prepare', 'commit', 'cleanup'] as const) {
+          const step = await runSwapStep({
+            runner: runner(),
+            operationId: 'integration-owned-root',
+            volumeName: target,
+            intentId,
+            action,
+          });
+          expect(step.ok, action).toBe(true);
+        }
+        expect(runInVolume(target, MANIFEST_SCRIPT)).toBe(before);
+        // The clean-up removed the work directory, which moves the root's mtime;
+        // the captured one has to be what the operator is left with.
+        expect(runInVolume(target, 'stat -c %Y /data').trim()).toBe(capturedMtime);
+      } finally {
+        removeVolume(source);
+        removeVolume(target);
+      }
+    }, 300_000);
+  }
+
+  // The rollback puts the original root's owner and mode back through the same
+  // chmod the commit uses, so a live root with the setgid bit and a group that is
+  // not the helper's loses it there too without FSETID.
+  it('rolls an uncommitted swap back to the live root with its owner and setgid mode', async () => {
+    const source = volumeName('sencho-it-rb-src');
+    const target = volumeName('sencho-it-rb-dst');
+    const intentId = randomUUID();
+    try {
+      createVolume(source);
+      populateSource(source);
+      const point = await capture(source);
+
+      createVolume(target);
+      runInVolume(target, [
+        'set -e',
+        'printf "old" > a.txt',
+        'mkdir -p conf',
+        'printf "old" > conf/keep',
+        'chown 77:77 /data a.txt conf conf/keep',
+        'chmod 2750 /data',
+      ].join('\n'));
+      const before = runInVolume(target, MANIFEST_SCRIPT);
+      expect(before).toContain('ROOT 77:77 2750\n');
+
+      await materializeInto(target, point, intentId, 'integration-rollback');
+      for (const action of ['prepare', 'rollback'] as const) {
+        const step = await runSwapStep({
+          runner: runner(),
+          operationId: 'integration-rollback',
+          volumeName: target,
+          intentId,
+          action,
+        });
+        expect(step.ok, action).toBe(true);
+        if (action === 'rollback') expect(step.report?.status).toBe('rolled_back');
+      }
+      expect(runInVolume(target, MANIFEST_SCRIPT)).toBe(before);
+      expect(runInVolume(target, 'ls -A | grep -c sencho-restore || true').trim()).toBe('0');
+    } finally {
+      removeVolume(source);
+      removeVolume(target);
+    }
+  }, 300_000);
+
+  it('lists a leftover work directory and keeps it out of a capture and out of its restores', async () => {
+    const source = volumeName('sencho-it-ow-left');
+    const fresh = volumeName('sencho-it-ow-left-new');
+    const staged = volumeName('sencho-it-ow-left-stg');
+    const stale = `.sencho-restore-${randomUUID()}`;
+    const intentId = randomUUID();
+    try {
+      createVolume(source);
+      runInVolume(source, [
+        'set -e', 'printf keep > a.txt',
+        `mkdir -p ${stale}/original sub/.sencho-restore-nested`,
+        `printf x > ${stale}/original/b`, 'printf y > sub/.sencho-restore-nested/c',
+      ].join('\n'));
+
+      // The preview's probe names the root directory and not the nested one.
+      const report = await probeVolumeReport({
+        runner: runner(), operationId: 'integration-probe', volumeName: source, listWorkDirs: true,
+      });
+      expect(report.workDirs).toEqual([stale]);
+      const plain = await probeVolumeReport({ runner: runner(), operationId: 'integration-probe', volumeName: source });
+      expect(plain.workDirs).toBeNull();
+
+      // The point does not carry it; the nested entry is the volume's own data and stays.
+      const point = await capture(source);
+      createVolume(fresh);
+      const restored = await engine().restore(
+        {
+          id: randomUUID(), operationId: 'integration-new', pointId: 'integration-point', repositoryId,
+          snapshotId: point.snapshotId, target: { mode: 'new_volume', volumeName: fresh },
+          pathScope: null, phase: 'materializing', actor: 'integration', createdAt: Date.now(),
+        },
+        context('integration-new'),
+      );
+      expect(restored.ok).toBe(true);
+      expect(runInVolume(fresh, 'find . -mindepth 1 | sort').trim().split('\n')).toEqual([
+        './a.txt', './sub', './sub/.sencho-restore-nested', './sub/.sencho-restore-nested/c',
+      ]);
+
+      // The staged copy is the same snapshot, restored whole into a work directory of the volume.
+      createVolume(staged);
+      const materialized = await engine().restore(
+        {
+          id: intentId, operationId: 'integration-staged', pointId: 'integration-point', repositoryId,
+          snapshotId: point.snapshotId,
+          target: {
+            mode: 'staged_overwrite', storageId: 'storage', expectedGenerationToken: point.token,
+            workDir: swapIncomingDir(intentId), volumeName: staged,
+          },
+          pathScope: null, phase: 'materializing', actor: 'integration', createdAt: Date.now(),
+        },
+        context('integration-staged'),
+      );
+      expect(materialized.ok).toBe(true);
+      expect(runInVolume(staged, `ls -A .sencho-restore-${intentId}/incoming/data`).trim().split('\n').sort())
+        .toEqual(['a.txt', 'sub']);
+    } finally {
+      removeVolume(source);
+      removeVolume(fresh);
+      removeVolume(staged);
+    }
+  }, 300_000);
+
+  it('lists a work directory in a volume root an application user owns and closes to others', async () => {
+    // Postgres and MariaDB chown the volume root to their own user and leave it
+    // 0700 or 2750. The preview must read that root, or it reports the target
+    // eligible and the swap refuses the leftover only after the workloads stopped.
+    for (const mode of ['0700', '2750']) {
+      const source = volumeName(`sencho-it-ow-own-${mode}`);
+      const stale = `.sencho-restore-${randomUUID()}`;
+      try {
+        createVolume(source);
+        runInVolume(source, [
+          'set -e',
+          'printf keep > a.txt',
+          `mkdir -p ${stale}/original`,
+          `printf x > ${stale}/original/b`,
+          `chown 999:999 /data ${stale}`,
+          `chmod ${mode} /data`,
+        ].join('\n'));
+
+        const report = await probeVolumeReport({
+          runner: runner(), operationId: 'integration-probe', volumeName: source, listWorkDirs: true,
+        });
+        expect(report.workDirs, mode).toEqual([stale]);
+        const plain = await probeVolumeReport({ runner: runner(), operationId: 'integration-probe', volumeName: source });
+        expect(plain.workDirs, mode).toBeNull();
+      } finally {
+        removeVolume(source);
+      }
+    }
+  }, 120_000);
+
+  it('fails the copy when repository data is missing, with the live volume unchanged', async () => {
+    const source = volumeName('sencho-it-dmg-src');
+    const target = volumeName('sencho-it-dmg-dst');
+    const intentId = randomUUID();
+    try {
+      createVolume(source);
+      populateSource(source);
+      const point = await capture(source);
+      // Every data file, not one: a local restic repository keeps its packs under
+      // data/<xx>/, and restic only fails a restore when the data it needs is
+      // missing, so one arbitrary pack could hold nothing this snapshot reads.
+      // The index and the snapshot stay, so the loss is data and not history.
+      docker(['run', '--rm', '--network', 'none', '-v', `${repositoryVolume}:/repo`, BUSYBOX, 'sh', '-c',
+        'rm -f /repo/data/*/*']);
+
+      createVolume(target);
+      runInVolume(target, ['set -e', 'printf "keep-me" > keep.txt', 'chmod 755 /data'].join('\n'));
+      const before = runInVolume(target, MANIFEST_SCRIPT);
+
+      const materialize = await engine().restore(
+        {
+          id: intentId,
+          operationId: 'integration-damaged',
+          pointId: 'integration-point',
+          repositoryId,
+          snapshotId: point.snapshotId,
+          target: {
+            mode: 'staged_overwrite',
+            storageId: 'storage',
+            expectedGenerationToken: point.token,
+            workDir: swapIncomingDir(intentId),
+            volumeName: target,
+          },
+          pathScope: null,
+          phase: 'materializing',
+          actor: 'integration',
+          createdAt: Date.now(),
+        },
+        context('integration-damaged'),
+      );
+      expect(materialize.ok).toBe(false);
+      expect(runInVolume(target, MANIFEST_SCRIPT)).toBe(before);
+    } finally {
+      removeVolume(source);
+      removeVolume(target);
+    }
+  }, 300_000);
+
+  it('pins restart policies before stopping, and restores them on release', async () => {
+    const volume = volumeName('sencho-it-fence');
+    const runningName = `sencho-it-fence-run-${randomUUID().slice(0, 8)}`;
+    const stoppedName = `sencho-it-fence-stop-${randomUUID().slice(0, 8)}`;
+    try {
+      createVolume(volume);
+      docker(['run', '-d', '--name', runningName, '--restart', 'always', '--network', 'none',
+        '-v', `${volume}:/data`, BUSYBOX, 'sh', '-c', 'sleep 600']);
+      createdContainers.add(runningName);
+      docker(['create', '--name', stoppedName, '--restart', 'unless-stopped', '--network', 'none',
+        '-v', `${volume}:/data`, BUSYBOX, 'sh', '-c', 'sleep 600']);
+      createdContainers.add(stoppedName);
+
+      // The intent row the fence records against.
+      const operationId = randomUUID();
+      const db = (await import('../../services/recovery/recoveryDb')).recoveryDb();
+      const storage = StorageIdentityStore.getInstance().observe({
+        ownerNodeKey: owner,
+        kind: 'named_volume',
+        locator: volume,
+        generationToken: await probeGenerationToken({
+          runner: runner(),
+          operationId: 'integration-fence-token',
+          volumeName: volume,
+          createdAt: null,
+        }),
+        dependents: [],
+      });
+      const point = RecoveryPointStore.getInstance().begin({
+        kind: 'root',
+        storageId: storage.id,
+        expectedGenerationToken: storage.generationToken,
+        repositoryId,
+        trigger: 'manual',
+        actor: 'integration',
+        sourceOperationId: 'integration-source',
+        sourceNodeKey: owner,
+        engineId: 'restic',
+      });
+      RecoveryPointStore.getInstance().finalize(point.id, {
+        status: 'succeeded',
+        evidence: {
+          snapshotId: 'snap', capture: { fileCount: 1, byteCount: 1, skippedCount: 0 },
+          exclusions: [], consistency: 'crash_consistent_live',
+        },
+      });
+      db.prepare(`INSERT INTO recovery_operations (id, idempotency_key, kind, storage_id, point_id, actor, transport, state, process_epoch, created_at, updated_at)
+        VALUES (?, ?, 'restore', ?, ?, 'integration', 'local', 'running', 'e', 1, 1)`)
+        .run(operationId, randomUUID(), storage.id, point.id);
+      const intent = RestoreIntentStore.getInstance().recordOverwrite({
+        operationId,
+        pointId: point.id,
+        targetVolume: volume,
+        actor: 'integration',
+        processEpoch: 'e',
+        stagingVolume: `sencho-recovery-stage-${randomUUID()}`,
+        expectedGenerationToken: storage.generationToken,
+      });
+
+      const dockerClient = DockerController.getInstance(nodeId).getDocker() as Docker;
+      const listed = await dockerClient.listContainers({ all: true }) as Array<{
+        Id: string; Names?: string[]; Mounts?: Array<{ Type?: string; Name?: string }>;
+      }>;
+      const mounting = listed.filter((item) => (item.Mounts ?? []).some((m) => m.Type === 'volume' && m.Name === volume));
+      expect(mounting).toHaveLength(2);
+      const members = [];
+      for (const item of mounting) {
+        const inspected = await dockerClient.getContainer(item.Id).inspect() as {
+          State?: { Running?: boolean }; HostConfig?: { RestartPolicy?: { Name?: string } };
+        };
+        members.push({
+          containerId: item.Id,
+          containerName: (item.Names?.[0] ?? item.Id).replace(/^\//, ''),
+          stackName: null,
+          projectName: null,
+          restartPolicy: inspected.HostConfig?.RestartPolicy ?? { Name: 'no' },
+          wasRunning: inspected.State?.Running === true,
+        });
+      }
+      RestoreFenceStore.getInstance().recordMembers(intent.id, members);
+      await applyRestoreFence(intent.id, dockerClient, RestoreFenceStore.getInstance().listMembers(intent.id));
+
+      const runningId = docker(['inspect', '-f', '{{.State.Running}}', runningName]).trim();
+      const stoppedId = docker(['inspect', '-f', '{{.State.Running}}', stoppedName]).trim();
+      expect(runningId).toBe('false');
+      expect(stoppedId).toBe('false');
+      expect(docker(['inspect', '-f', '{{.HostConfig.RestartPolicy.Name}}', runningName]).trim()).toBe('no');
+      expect(docker(['inspect', '-f', '{{.HostConfig.RestartPolicy.Name}}', stoppedName]).trim()).toBe('no');
+
+      await releaseRestoreFence(intent.id, dockerClient, RestoreFenceStore.getInstance().listMembers(intent.id), { restart: true });
+      expect(docker(['inspect', '-f', '{{.State.Running}}', runningName]).trim()).toBe('true');
+      expect(docker(['inspect', '-f', '{{.State.Running}}', stoppedName]).trim()).toBe('false');
+      expect(docker(['inspect', '-f', '{{.HostConfig.RestartPolicy.Name}}', runningName]).trim()).toBe('always');
+      expect(docker(['inspect', '-f', '{{.HostConfig.RestartPolicy.Name}}', stoppedName]).trim()).toBe('unless-stopped');
+    } finally {
+      removeContainer(runningName);
+      removeContainer(stoppedName);
+      removeVolume(volume);
+    }
+  }, 300_000);
+});

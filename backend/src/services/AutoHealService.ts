@@ -10,6 +10,7 @@ import { PROXY_TIER_HEADER } from './license-headers';
 import { isDebugEnabled } from '../utils/debug';
 import { getErrorMessage } from '../utils/errors';
 import { isDockerEndpointProtectedError } from '../helpers/dockerEndpointError';
+import { isDataRestoreFenceError } from '../helpers/dataRestoreFenceError';
 import { safeRemoteFetch } from '../utils/outboundTarget';
 
 // Dockerode listContainers shape (subset used here)
@@ -544,7 +545,11 @@ export class AutoHealService {
             // A refusal because the guard could not read Docker (`unresolved`) is
             // transient and counts like any failed restart. Either way the attempt
             // is recorded and notified as failed.
-            const refused = isDockerEndpointProtectedError(err) && err.reason !== 'unresolved';
+            // A restart a data restore's fence refuses is the same kind of answer: it
+            // holds until the restore is resolved, and counting it would switch the
+            // stack's policy off for the hours a parked restore can take.
+            const refused = (isDockerEndpointProtectedError(err) && err.reason !== 'unresolved')
+                || isDataRestoreFenceError(err);
             if (!refused) db.incrementConsecutiveFailures(policy.id!);
             // Re-read to get updated consecutive_failures count
             const updated = db.getAutoHealPolicy(policy.id!);

@@ -3265,11 +3265,21 @@ class DockerController {
     }
   }
 
+  /**
+   * Run a start or restart unless a staged overwrite has fenced a volume the
+   * container mounts. The fence is checked and the start registered in one
+   * step, so a start cannot slip between the check and a fence being installed
+   * (see `startUnderFence`). Docker is asked only when a fence is live.
+   */
+  private async startUnderFence<T>(containerId: string, start: () => Promise<T>): Promise<T> {
+    const { startContainerUnderFence } = await import('./recovery/restoreFence');
+    return startContainerUnderFence(this.docker, containerId, start);
+  }
+
   // State-safe: silently ignores 304 "already started" errors
   public async startContainer(containerId: string) {
     try {
-      const container = this.docker.getContainer(containerId);
-      await container.start();
+      await this.startUnderFence(containerId, () => this.docker.getContainer(containerId).start());
     } catch (error: any) {
       if (error?.statusCode === 304) {
         // Container already running - not an error
@@ -3329,8 +3339,7 @@ class DockerController {
 
   public async restartContainer(containerId: string, options?: RestartContainerOptions) {
     await this.assertNotDockerEndpointContainer(containerId, 'restart', options);
-    const container = this.docker.getContainer(containerId);
-    await container.restart();
+    await this.startUnderFence(containerId, () => this.docker.getContainer(containerId).restart());
   }
 
   public async getOrphanContainers(knownStackNames: string[]) {

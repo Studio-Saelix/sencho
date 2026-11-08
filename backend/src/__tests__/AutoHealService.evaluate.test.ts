@@ -347,6 +347,45 @@ describe('AutoHealService.evaluate', () => {
         expect(history[0].error).toContain('owns a network, pid, or ipc namespace');
     });
 
+    it('does not count a restart a data restore fence refused toward auto-disable, so a parked restore cannot switch the policy off', async () => {
+        const { DataRestoreFenceError } = await import('../helpers/dataRestoreFenceError');
+        const db = DatabaseService.getInstance();
+        // One more counted failure would reach auto_disable_after_failures (2) and switch the policy off.
+        const policy = makePolicy(db, { consecutive_failures: 1 });
+        vi.spyOn(LicenseService.getInstance(), 'getTier').mockReturnValue('paid');
+        const restartContainer = vi.fn().mockRejectedValue(new DataRestoreFenceError('vpn-data'));
+        vi.spyOn(DockerController, 'getInstance').mockReturnValue({
+            getAllContainers: vi.fn().mockResolvedValue([{
+                Id: 'vpn-1',
+                Names: ['/heal-stack-vpn-1'],
+                Labels: {
+                    'com.docker.compose.project': 'heal-stack',
+                    'com.docker.compose.service': 'vpn',
+                },
+                State: 'running',
+                Status: 'Up 1 minute (unhealthy)',
+            }]),
+            restartContainer,
+        } as unknown as ReturnType<typeof DockerController.getInstance>);
+        vi.spyOn(DockerEventManager.getInstance(), 'getService').mockReturnValue({
+            getContainerState: () => undefined,
+        } as unknown as ReturnType<ReturnType<typeof DockerEventManager.getInstance>['getService']>);
+
+        const service = resetAutoHealSingleton();
+        (service as unknown as { observedUnhealthySince: Map<string, number> }).observedUnhealthySince
+            .set('1:vpn-1', Date.now() - 2 * 60_000);
+
+        await service.evaluate();
+
+        expect(restartContainer).toHaveBeenCalledWith('vpn-1', { endpointGuard: 'allow-provider-restart' });
+        const updated = db.getAutoHealPolicy(policy.id!);
+        expect(updated).toMatchObject({ enabled: 1, consecutive_failures: 1 });
+        const history = db.getAutoHealHistory(policy.id!);
+        expect(history).toHaveLength(1);
+        expect(history[0]).toMatchObject({ action: 'failed', success: 0 });
+        expect(history[0].error).toContain('vpn-data');
+    });
+
     it('counts a restart the guard refused because it could not read Docker toward auto-disable, since that clears on its own and is a real failure until it does', async () => {
         const { DockerEndpointProtectedError } = await import('../helpers/dockerEndpointError');
         const db = DatabaseService.getInstance();

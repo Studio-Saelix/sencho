@@ -105,8 +105,8 @@ RUN if [ "$TARGETARCH" = "$BUILDARCH" ]; then \
 # TARGET. The fetch pulls only the v29.4.1 commit, minimising transfer size.
 # docker/cli uses CalVer and ships vendor.mod instead of go.mod to avoid
 # SemVer compliance requirements. We copy vendor.mod -> go.mod, drop the
-# committed vendor tree, bump golang.org/x/net to v0.60.0, golang.org/x/text
-# to v0.42.0, google.golang.org/grpc to v1.83.2,
+# committed vendor tree, bump golang.org/x/net to v0.62.0, golang.org/x/text
+# to v0.43.0, google.golang.org/grpc to v1.83.2,
 # github.com/moby/go-archive to v0.3.0, and github.com/go-jose/go-jose/v4 to
 # v4.1.6, and build with -mod=mod so the patched modules are resolved from the
 # module proxy. x/net v0.53.0 is flagged for six HIGH advisories
@@ -114,7 +114,8 @@ RUN if [ "$TARGETARCH" = "$BUILDARCH" ]; then \
 # and x/net/idna). x/net v0.55.0 is flagged for
 # CVE-2026-46600 (dnsmessage denial of service), and v0.58.0 for
 # CVE-2026-78669 (HTTP/2 SETTINGS-flood denial of service), fixed in v0.60.0,
-# whose minimum golang.org/x/text is v0.42.0. x/text v0.37.0 is flagged for
+# and v0.60.0 for CVE-2026-78661 (x/net/html denial of service on crafted input),
+# fixed in v0.62.0, whose minimum golang.org/x/text is v0.43.0. x/text v0.37.0 is flagged for
 # CVE-2026-56852 (norm.Iter infinite loop on crafted input). grpc v1.80.0 is
 # flagged for GHSA-hrxh-6v49-42gf (xDS RBAC / HTTP/2), and grpc v1.82.1 for
 # CVE-2026-84304 (unauthenticated peer OOM via fragmented HTTP/2 DATA frames
@@ -153,8 +154,8 @@ RUN mkdir -p /build
 
 RUN cp vendor.mod go.mod && cp vendor.sum go.sum && \
     rm -rf vendor && \
-    go get golang.org/x/net@v0.60.0 \
-           golang.org/x/text@v0.42.0 \
+    go get golang.org/x/net@v0.62.0 \
+           golang.org/x/text@v0.43.0 \
            google.golang.org/grpc@v1.83.2 \
            github.com/moby/go-archive@v0.3.0 \
            github.com/go-jose/go-jose/v4@v4.1.6 && \
@@ -195,11 +196,12 @@ RUN cp vendor.mod go.mod && cp vendor.sum go.sum && \
 # triage.
 #
 # Three floors remain, because v5.6.0 still resolves earlier versions of them:
-# golang.org/x/net v0.60.0, from v0.58.0, for CVE-2026-46600 (dnsmessage denial
-# of service) and CVE-2026-78669 (HTTP/2 SETTINGS-flood denial of service);
-# golang.org/x/text v0.42.0, from v0.41.0, for CVE-2026-56852 (norm.Iter
-# infinite loop on crafted input); and golang.org/x/crypto v0.57.0, from
-# v0.56.0, for CVE-2026-56854 (SSH host-key verification bypass). x/net v0.60.0
+# golang.org/x/net v0.62.0, from v0.58.0, for CVE-2026-46600 (dnsmessage denial
+# of service), CVE-2026-78669 (HTTP/2 SETTINGS-flood denial of service) and
+# CVE-2026-78661 (x/net/html denial of service on crafted input);
+# golang.org/x/text v0.43.0, from v0.41.0, for CVE-2026-56852 (norm.Iter
+# infinite loop on crafted input); and golang.org/x/crypto v0.58.0, from
+# v0.56.0, for CVE-2026-56854 (SSH host-key verification bypass). x/net v0.62.0
 # requires exactly those x/text and x/crypto minimums, which is why the three
 # move together.
 # Base image pinned by digest (same image as cli-builder above) so both
@@ -223,15 +225,15 @@ WORKDIR /src/docker-compose
 
 RUN mkdir -p /build
 
-# Carry three floors above what v5.6.0 resolves: golang.org/x/net v0.60.0
-# (CVE-2026-46600, CVE-2026-78669), golang.org/x/text v0.42.0
-# (CVE-2026-56852), and golang.org/x/crypto v0.57.0 (CVE-2026-56854). x/net
-# v0.60.0's own go.mod requires those exact x/text and x/crypto minimums.
+# Carry three floors above what v5.6.0 resolves: golang.org/x/net v0.62.0
+# (CVE-2026-46600, CVE-2026-78669, CVE-2026-78661), golang.org/x/text v0.43.0
+# (CVE-2026-56852), and golang.org/x/crypto v0.58.0 (CVE-2026-56854). x/net
+# v0.62.0's own go.mod requires those exact x/text and x/crypto minimums.
 # Every other floor this stage used to carry is now resolved by the tag itself.
 RUN --mount=type=cache,id=go-mod,sharing=locked,target=/go/pkg/mod \
-    go get golang.org/x/text@v0.42.0 \
-           golang.org/x/net@v0.60.0 \
-           golang.org/x/crypto@v0.57.0 && \
+    go get golang.org/x/text@v0.43.0 \
+           golang.org/x/net@v0.62.0 \
+           golang.org/x/crypto@v0.58.0 && \
     go mod tidy
 
 # Build target is ./cmd (the package main with plugin.Run), per docker/compose's

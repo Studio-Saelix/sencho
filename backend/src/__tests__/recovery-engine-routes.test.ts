@@ -128,8 +128,9 @@ beforeEach(async () => {
   vi.restoreAllMocks();
   const db = recoveryDbModule.recoveryDb();
   for (const table of [
-    'recovery_restore_intents', 'recovery_repository_checks', 'recovery_locks', 'recovery_operations',
-    'recovery_point_verifications', 'recovery_points', 'recovery_repositories',
+    'recovery_restore_fence_members', 'recovery_restore_intents', 'recovery_repository_checks', 'recovery_locks',
+    'recovery_operations', 'recovery_point_verifications', 'recovery_point_holds', 'recovery_points',
+    'recovery_repositories',
     'recovery_storage_dependents', 'recovery_storage_identities',
   ]) {
     db.prepare(`DELETE FROM ${table}`).run();
@@ -486,8 +487,12 @@ describe('GET /api/recovery/operations/:id', () => {
       requestDigest: engine.sha256Digest(['repository_init', 'provision']),
     });
     const res = await request(app).post(`/api/recovery/operations/${operation.operation.id}/cancel`).set('Cookie', adminCookie);
-    expect(res.status).toBe(400);
-    expect(res.body.reason).toBe('not_cancellable');
+    expect(res.status).toBe(409);
+    expect(res.body.errorClass).toBe('not_cancellable');
+    expect(res.body.code).toBe('NOT_CANCELLABLE');
+    // A repository operation is not a restore, and the answer must not say it is.
+    expect(res.body.error).toMatch(/repository provisioning/i);
+    expect(res.body.error).not.toMatch(/restore/i);
   });
 });
 
@@ -549,8 +554,8 @@ describe('an id or state is not reported to a caller who may not act on it', () 
 
     // The administrator still gets the state answer, and the unknown id its 400.
     const admin = await request(app).post(`/api/recovery/operations/${operationId}/cancel`).set('Cookie', adminCookie);
-    expect(admin.status).toBe(400);
-    expect(admin.body.reason).toBe('not_cancellable');
+    expect(admin.status).toBe(409);
+    expect(admin.body.errorClass).toBe('not_cancellable');
     const adminMissing = await request(app).post(`/api/recovery/operations/${unknown()}/cancel`).set('Cookie', adminCookie);
     expect(adminMissing.status).toBe(400);
     expect(adminMissing.body.reason).toBeUndefined();
@@ -1181,6 +1186,416 @@ describe('audit summaries', () => {
     expect(getAuditSummary('POST', 'recovery/storage/points')).toBe('Created a recovery point');
     expect(getAuditSummary('POST', 'recovery/points/abc/verify')).toBe('Verified recovery point: abc');
     expect(getAuditSummary('POST', 'recovery/points/abc/restore')).toBe('Restored recovery point: abc');
+    expect(getAuditSummary('POST', 'recovery/points/abc/overwrite')).toBe('Started a restore over the existing volume: abc');
     expect(getAuditSummary('POST', 'recovery/locks/release')).toBe('Released a stale recovery lock');
+  });
+
+  it('records a preview as a preview, not as a restore', async () => {
+    // A preview changes nothing, so it is never worded as a restore.
+    const { getAuditSummary } = await import('../utils/audit-summaries');
+    expect(getAuditSummary('POST', 'recovery/points/abc/overwrite/preview', 200))
+      .toBe('Previewed a restore over the existing volume: abc');
+    expect(getAuditSummary('POST', 'recovery/points/abc/overwrite/preview', 403))
+      .toBe('Preview of a restore over the existing volume refused (403): abc');
+  });
+
+  it('tells retry from release_fence, and a refusal from an action', async () => {
+    const { getAuditSummary } = await import('../utils/audit-summaries');
+    const retry = getAuditSummary('POST', 'recovery/restores/intent-1/resolve', 200, { action: 'retry' });
+    const release = getAuditSummary('POST', 'recovery/restores/intent-1/resolve', 200, { action: 'release_fence' });
+    expect(retry).toBe('Retried a restore over the existing volume: intent-1');
+    expect(release).toBe('Released the fence of a restore over the existing volume: intent-1');
+    expect(retry).not.toBe(release);
+    expect(getAuditSummary('POST', 'recovery/restores/intent-1/resolve', 409, { action: 'release_fence' }))
+      .toBe('Release of a restore fence refused (409): intent-1');
+    expect(getAuditSummary('POST', 'recovery/restores/intent-1/resolve', 409, { action: 'retry' }))
+      .toBe('Retry of a restore over the existing volume refused (409): intent-1');
+    // A body without a known action (a refused 400, or a request a hub forwarded
+    // to a remote node without reading it) still words the route without claiming one.
+    expect(getAuditSummary('POST', 'recovery/restores/intent-1/resolve', 400, { action: 'other' }))
+      .toBe('Resolve of a restore over the existing volume refused (400): intent-1');
+    expect(getAuditSummary('POST', 'recovery/restores/intent-1/resolve', 200))
+      .toBe('Resolved a restore over the existing volume: intent-1');
+    expect(getAuditSummary('POST', 'recovery/restores/intent-1/resolve', 200, { action: '__proto__' }))
+      .toBe('Resolved a restore over the existing volume: intent-1');
+    expect(getAuditSummary('POST', 'recovery/restores/intent-1/resolve', 200, [{ action: 'retry' }]))
+      .toBe('Resolved a restore over the existing volume: intent-1');
+  });
+
+  it('does not word a request that was not served as a restore', async () => {
+    const { getAuditSummary } = await import('../utils/audit-summaries');
+    expect(getAuditSummary('POST', 'recovery/points/abc/overwrite', 409))
+      .toBe('Restore over the existing volume refused (409): abc');
+    // A server error is a failure, not a refusal.
+    expect(getAuditSummary('POST', 'recovery/points/abc/overwrite', 503))
+      .toBe('Restore over the existing volume failed (503): abc');
+    expect(getAuditSummary('POST', 'recovery/restores/intent-1/resolve', 500, { action: 'retry' }))
+      .toBe('Retry of a restore over the existing volume failed (500): intent-1');
+    expect(getAuditSummary('POST', 'recovery/points/abc/overwrite', 202))
+      .toBe('Started a restore over the existing volume: abc');
+  });
+
+  it('words a trailing slash and a malformed escape like the route the router served', async () => {
+    // Express serves `/overwrite/` as `/overwrite`, and a path segment that does
+    // not decode must not drop the audit row.
+    const { getAuditSummary } = await import('../utils/audit-summaries');
+    expect(getAuditSummary('POST', 'recovery/points/abc/overwrite/', 202))
+      .toBe('Started a restore over the existing volume: abc');
+    expect(getAuditSummary('POST', 'recovery/points/abc/overwrite/preview/', 200))
+      .toBe('Previewed a restore over the existing volume: abc');
+    expect(getAuditSummary('POST', 'recovery/restores/intent-1/resolve/', 200, { action: 'retry' }))
+      .toBe('Retried a restore over the existing volume: intent-1');
+    expect(getAuditSummary('POST', 'recovery/points/%E0%A4%A/overwrite', 202))
+      .toBe('Started a restore over the existing volume: %E0%A4%A');
+  });
+});
+
+describe('the audit log row of a restore resolve', () => {
+  // The unit tests above call the summary directly. This one goes through the
+  // real middleware, so a body that never reaches the summary fails here. An
+  // unknown intent answers 400, so the rows are the refused wording of each action.
+  async function auditRowFor(action: string): Promise<{ intentId: string; summary: string | undefined }> {
+    service().markReadyForTests();
+    const intentId = randomUUID();
+    const res = await request(app).post(`/api/recovery/restores/${intentId}/resolve`).set('Cookie', adminCookie).send({ action });
+    expect(res.status).toBe(400);
+    const { DatabaseService } = await import('../services/DatabaseService');
+    const { entries } = DatabaseService.getInstance().getAuditLogs({ search: intentId });
+    return {
+      intentId,
+      summary: entries.find((entry) => entry.path === `/api/recovery/restores/${intentId}/resolve`)?.summary,
+    };
+  }
+
+  it('names the action the request carried, so a retry and a release_fence read differently', async () => {
+    const retry = await auditRowFor('retry');
+    const release = await auditRowFor('release_fence');
+    expect(retry.summary).toBe(`Retry of a restore over the existing volume refused (400): ${retry.intentId}`);
+    expect(release.summary).toBe(`Release of a restore fence refused (400): ${release.intentId}`);
+  });
+});
+
+describe('restore over the existing volume', () => {
+  const token = 'a'.repeat(64);
+
+  it('refuses the preview to a caller who may not restore, before it describes anything', async () => {
+    const res = await request(app).post('/api/recovery/points/p1/overwrite/preview').set('Cookie', viewerCookie).send({});
+    expect(res.status).toBe(403);
+    expect(res.body).toMatchObject({ errorClass: 'permission_denied', code: 'PERMISSION_DENIED' });
+  });
+
+  it('answers the preview 503 while the engine is starting', async () => {
+    const res = await request(app).post('/api/recovery/points/p1/overwrite/preview').set('Cookie', adminCookie).send({});
+    expect(res.status).toBe(503);
+    expect(res.body).toMatchObject({ errorClass: 'capability_unavailable', reason: 'engine_starting' });
+  });
+
+  it('rejects a confirmation that is not a token, and a body without one', async () => {
+    service().markReadyForTests();
+    for (const body of [
+      { idempotencyKey: randomUUID(), confirmVolumeName: 'app_data' },
+      { idempotencyKey: randomUUID(), confirmationToken: 'not-a-token', confirmVolumeName: 'app_data' },
+      { idempotencyKey: randomUUID(), confirmationToken: token },
+    ]) {
+      const res = await request(app).post('/api/recovery/points/p1/overwrite').set('Cookie', adminCookie).send(body);
+      expect(res.status).toBe(400);
+      expect(res.body.errorClass).toBe('invalid_request');
+    }
+  });
+
+  it('rejects a typed volume name Docker could not have created', async () => {
+    service().markReadyForTests();
+    const res = await request(app).post('/api/recovery/points/p1/overwrite').set('Cookie', adminCookie)
+      .send({ idempotencyKey: randomUUID(), confirmationToken: token, confirmVolumeName: '../escape' });
+    expect(res.status).toBe(400);
+  });
+
+  it('refuses the resolve route to a caller who may not restore, and an unknown action', async () => {
+    const viewer = await request(app).post('/api/recovery/restores/i1/resolve').set('Cookie', viewerCookie)
+      .send({ action: 'retry' });
+    expect(viewer.status).toBe(403);
+    const bad = await request(app).post('/api/recovery/restores/i1/resolve').set('Cookie', adminCookie)
+      .send({ action: 'explode' });
+    expect(bad.status).toBe(400);
+  });
+
+  it('keeps the restore-to-new route refusing the overwrite mode, and says where to go', async () => {
+    service().markReadyForTests();
+    const res = await request(app).post('/api/recovery/points/p1/restore').set('Cookie', adminCookie)
+      .send({ idempotencyKey: randomUUID(), targetVolumeName: 'fresh', targetMode: 'staged_overwrite' });
+    expect(res.status).toBe(400);
+    expect(res.body.errorClass).toBe('invalid_request');
+    expect(res.body.reason).toBe('wrong_route');
+    expect(res.body.error).toContain('overwrite route');
+  });
+});
+
+describe('an overwrite is authorized against the stacks its fence stopped', () => {
+  /**
+   * A point of `app_data`, whose stored dependents are `alpha` only, and an
+   * overwrite intent that recorded `alpha` and `beta` and stopped `beta`. `beta` has
+   * since dropped the volume, so neither the stored nor the live dependents name it.
+   */
+  async function seedStoppedStacks(): Promise<{ intentId: string; operationId: string }> {
+    service().markReadyForTests();
+    const pointId = await seedPoint();
+    const point = points.RecoveryPointStore.getInstance().get(pointId)!;
+    identityStore.StorageIdentityStore.getInstance().observe({
+      ownerNodeKey: 'docker-engine:routes',
+      kind: 'named_volume',
+      locator: 'app_data',
+      generationToken: 't1',
+      dependents: [{ stackName: 'alpha', serviceName: null }],
+    });
+    await stubDocker(['app_data']);
+    const db = recoveryDbModule.recoveryDb();
+    const operationId = randomUUID();
+    db.prepare(`INSERT INTO recovery_operations
+      (id, idempotency_key, kind, storage_id, point_id, actor, transport, state, process_epoch, created_at, updated_at)
+      VALUES (?, ?, 'restore', ?, ?, 'admin', 'local', 'failed', 'e', 1, 1)`)
+      .run(operationId, randomUUID(), point.storageId, pointId);
+    const { RestoreIntentStore } = await import('../services/recovery/restoreIntents');
+    const { RestoreFenceStore } = await import('../services/recovery/restoreFence');
+    const intent = RestoreIntentStore.getInstance().recordOverwrite({
+      operationId,
+      pointId,
+      targetVolume: 'app_data',
+      actor: 'admin',
+      processEpoch: 'e',
+      stagingVolume: 'sencho-recovery-stage-routes',
+      expectedGenerationToken: 't1',
+      dependentStacks: ['alpha', 'beta'],
+    });
+    RestoreFenceStore.getInstance().recordMembers(intent.id, [{
+      containerId: 'c-beta', containerName: 'beta-web-1', stackName: 'beta', projectName: 'beta',
+      restartPolicy: { Name: 'always' }, wasRunning: true,
+    }]);
+    return { intentId: intent.id, operationId };
+  }
+
+  async function userEditing(name: string, stacks: string[]): Promise<string> {
+    const user = await loginNewUser(name, 'viewer');
+    for (const stack of stacks) {
+      DatabaseService.getInstance().addRoleAssignment({
+        user_id: user.userId, role: 'node-admin', resource_type: 'stack', resource_id: stack, node_id: nodeId,
+      });
+    }
+    return user.cookie;
+  }
+
+  it('refuses resolve to a caller who may edit the current dependent but not a stack the fence stopped', async () => {
+    const { intentId } = await seedStoppedStacks();
+    const alphaOnly = await userEditing('edits-alpha-only-resolve', ['alpha']);
+    for (const action of ['retry', 'release_fence']) {
+      const res = await request(app).post(`/api/recovery/restores/${intentId}/resolve`)
+        .set('Cookie', alphaOnly).send({ action });
+      expect(res.status, action).toBe(403);
+      expect(res.body.errorClass).toBe('permission_denied');
+    }
+    // Nothing moved: the denied call did not reach the reconciler.
+    const { RestoreIntentStore } = await import('../services/recovery/restoreIntents');
+    expect(RestoreIntentStore.getInstance().get(intentId)?.phase).toBe('recorded');
+
+    const both = await userEditing('edits-both-resolve', ['alpha', 'beta']);
+    const allowed = await request(app).post(`/api/recovery/restores/${intentId}/resolve`)
+      .set('Cookie', both).send({ action: 'retry' });
+    expect(allowed.status).toBe(200);
+    expect(RestoreIntentStore.getInstance().get(intentId)?.phase).toBe('rolled_back');
+  });
+
+  it('holds resolve to the node-wide check when the fence stopped a container no stack owns', async () => {
+    const { intentId } = await seedStoppedStacks();
+    const { RestoreFenceStore } = await import('../services/recovery/restoreFence');
+    RestoreFenceStore.getInstance().recordMembers(intentId, [{
+      containerId: 'c-loose', containerName: 'loose-1', stackName: null, projectName: null,
+      restartPolicy: { Name: 'no' }, wasRunning: true,
+    }]);
+    const both = await userEditing('edits-both-loose', ['alpha', 'beta']);
+    const res = await request(app).post(`/api/recovery/restores/${intentId}/resolve`)
+      .set('Cookie', both).send({ action: 'retry' });
+    expect(res.status).toBe(403);
+    const admin = await request(app).post(`/api/recovery/restores/${intentId}/resolve`)
+      .set('Cookie', adminCookie).send({ action: 'retry' });
+    expect(admin.status).toBe(200);
+  });
+
+  it('holds resolve to a stack only the intent recorded, one with no container and no longer declaring the volume', async () => {
+    const { intentId } = await seedStoppedStacks();
+    // `gamma` is in the intent's own record and nowhere else: no fence member,
+    // no stored dependent, no live model.
+    recoveryDbModule.recoveryDb().prepare('UPDATE recovery_restore_intents SET dependent_stacks_json = ? WHERE id = ?')
+      .run(JSON.stringify(['alpha', 'beta', 'gamma']), intentId);
+    const alphaBeta = await userEditing('edits-alpha-beta-gamma-gap', ['alpha', 'beta']);
+    const denied = await request(app).post(`/api/recovery/restores/${intentId}/resolve`)
+      .set('Cookie', alphaBeta).send({ action: 'retry' });
+    expect(denied.status).toBe(403);
+    const all = await userEditing('edits-all-three', ['alpha', 'beta', 'gamma']);
+    const allowed = await request(app).post(`/api/recovery/restores/${intentId}/resolve`)
+      .set('Cookie', all).send({ action: 'retry' });
+    expect(allowed.status).toBe(200);
+  });
+
+  it('holds cancelling to the node-wide check when the fence stopped a container no stack owns', async () => {
+    const { operationId, intentId } = await seedStoppedStacks();
+    const { RestoreFenceStore } = await import('../services/recovery/restoreFence');
+    RestoreFenceStore.getInstance().recordMembers(intentId, [{
+      containerId: 'c-loose', containerName: 'loose-1', stackName: null, projectName: null,
+      restartPolicy: { Name: 'no' }, wasRunning: true,
+    }]);
+    const both = await userEditing('edits-both-cancel-loose', ['alpha', 'beta']);
+    const denied = await request(app).post(`/api/recovery/operations/${operationId}/cancel`).set('Cookie', both);
+    expect(denied.status).toBe(403);
+    const admin = await request(app).post(`/api/recovery/operations/${operationId}/cancel`).set('Cookie', adminCookie);
+    expect(admin.status).not.toBe(403);
+  });
+
+  it('holds cancelling the operation to the same set', async () => {
+    const { operationId } = await seedStoppedStacks();
+    const alphaOnly = await userEditing('edits-alpha-only-cancel', ['alpha']);
+    const denied = await request(app).post(`/api/recovery/operations/${operationId}/cancel`).set('Cookie', alphaOnly);
+    expect(denied.status).toBe(403);
+    const both = await userEditing('edits-both-cancel', ['alpha', 'beta']);
+    const allowed = await request(app).post(`/api/recovery/operations/${operationId}/cancel`).set('Cookie', both);
+    expect(allowed.status).not.toBe(403);
+  });
+
+  it('refuses to cancel a restore whose swap started, saying it is about the restore', async () => {
+    const { operationId, intentId } = await seedStoppedStacks();
+    for (const phase of ['swapping', 'swapped']) {
+      recoveryDbModule.recoveryDb().prepare('UPDATE recovery_restore_intents SET phase = ? WHERE id = ?').run(phase, intentId);
+      const res = await request(app).post(`/api/recovery/operations/${operationId}/cancel`).set('Cookie', adminCookie);
+      expect(res.status, phase).toBe(409);
+      expect(res.body.errorClass, phase).toBe('not_cancellable');
+      expect(res.body.error, phase).toMatch(/This restore has passed the point/);
+    }
+  });
+
+  // Boot parks what a dead process left as `completion_unknown`; the overwrite
+  // reconciler then proves the volume and the operation takes that ending. Until boot
+  // has finished the parked ending is provisional, so a read must not report it.
+  describe('an interrupted overwrite whose boot reconciliation has not finished', () => {
+    async function seedParked(overrides: { errorClass?: string } = {}): Promise<{ operationId: string; intentId: string }> {
+      const { operationId, intentId } = await seedStoppedStacks();
+      recoveryDbModule.recoveryDb().prepare(
+        "UPDATE recovery_operations SET state = 'completion_unknown', error_class = ? WHERE id = ?",
+      ).run(overrides.errorClass ?? 'interrupted', operationId);
+      // A fresh service that is in the middle of its boot sequence.
+      engine.RecoveryEngineService.resetForTests();
+      service().setBootStateForTests('settling');
+      return { operationId, intentId };
+    }
+
+    it('is not reported by a read, or by a cancel that would echo it', async () => {
+      const { operationId } = await seedParked();
+      const read = await request(app).get(`/api/recovery/operations/${operationId}`).set('Cookie', adminCookie);
+      expect(read.status).toBe(503);
+      expect(read.body).toMatchObject({ errorClass: 'capability_unavailable', reason: 'engine_starting' });
+      expect(JSON.stringify(read.body)).not.toContain('completion_unknown');
+      const cancel = await request(app).post(`/api/recovery/operations/${operationId}/cancel`).set('Cookie', adminCookie);
+      expect(cancel.status).toBe(503);
+      expect(JSON.stringify(cancel.body)).not.toContain('completion_unknown');
+    });
+
+    it('is held before the phase of the intent is described, so a cancel does not report how far it got', async () => {
+      const { operationId, intentId } = await seedParked();
+      recoveryDbModule.recoveryDb().prepare('UPDATE recovery_restore_intents SET phase = ? WHERE id = ?').run('swapping', intentId);
+      const cancel = await request(app).post(`/api/recovery/operations/${operationId}/cancel`).set('Cookie', adminCookie);
+      expect(cancel.status).toBe(503);
+      expect(cancel.body.errorClass).toBe('capability_unavailable');
+    });
+
+    it('is held back for a caller who may read it, and a cancel checks access before it', async () => {
+      const { operationId } = await seedParked();
+      const viewer = await request(app).get(`/api/recovery/operations/${operationId}`).set('Cookie', viewerCookie);
+      expect(viewer.status).toBe(503);
+      // Access first: a caller who may not touch the restore is told nothing about its state.
+      const alphaOnly = await userEditing('edits-alpha-only-parked', ['alpha']);
+      const denied = await request(app).post(`/api/recovery/operations/${operationId}/cancel`).set('Cookie', alphaOnly);
+      expect(denied.status).toBe(403);
+      expect(JSON.stringify(denied.body)).not.toContain('engine_starting');
+    });
+
+    it('keeps its stale storage lock until the reconciler has proven the volume', async () => {
+      const { operationId } = await seedParked();
+      const storage = identityStore.StorageIdentityStore.getInstance().getCurrent(
+        (await import('../services/recovery/storageIdentity')).StorageIdentityStore.getInstance()
+          .getById(operations.RecoveryOperationStore.getInstance().get(operationId)!.storageId!)!.storageKey,
+      )!;
+      operations.RecoveryOperationStore.getInstance();
+      recoveryDbModule.recoveryDb().prepare(
+        `INSERT INTO recovery_locks (scope, resource_key, owner_operation_id, process_epoch, acquired_at, stale_since)
+         VALUES ('storage', ?, ?, 'e', 1, 2)`,
+      ).run(storage.storageKey, operationId);
+      const during = await request(app).post('/api/recovery/locks/release').set('Cookie', adminCookie)
+        .send({ scope: 'storage', resourceKey: storage.storageKey });
+      expect(during.status).toBe(503);
+      expect(during.body).toMatchObject({ errorClass: 'capability_unavailable', reason: 'engine_starting' });
+      expect(operations.RecoveryOperationStore.getInstance().getLock('storage', storage.storageKey)).not.toBeNull();
+      // Once boot has ended the reviewed release works as it always did.
+      service().setBootStateForTests('failed');
+      const after = await request(app).post('/api/recovery/locks/release').set('Cookie', adminCookie)
+        .send({ scope: 'storage', resourceKey: storage.storageKey });
+      expect(after.status).toBe(200);
+    });
+
+    it('answers what boot proved once the operation is settled', async () => {
+      const { operationId } = await seedParked();
+      operations.RecoveryOperationStore.getInstance().settleReconciled(operationId, { state: 'failed', errorClass: 'interrupted' });
+      service().markReadyForTests();
+      const settled = await request(app).get(`/api/recovery/operations/${operationId}`).set('Cookie', adminCookie);
+      expect(settled.status).toBe(200);
+      expect(settled.body.operation).toMatchObject({ state: 'failed', errorClass: 'interrupted' });
+    });
+
+    it('reports an unproven ending once boot has finished and stays unproven', async () => {
+      const { operationId } = await seedParked();
+      service().markReadyForTests();
+      const res = await request(app).get(`/api/recovery/operations/${operationId}`).set('Cookie', adminCookie);
+      expect(res.status).toBe(200);
+      expect(res.body.operation).toMatchObject({ state: 'completion_unknown', errorClass: 'interrupted' });
+    });
+
+    it('reports the parked ending when boot failed before it reached the reconciler, since nothing will settle it', async () => {
+      const { operationId } = await seedParked();
+      service().setBootStateForTests('failed');
+      const res = await request(app).get(`/api/recovery/operations/${operationId}`).set('Cookie', adminCookie);
+      expect(res.status).toBe(200);
+      expect(res.body.operation).toMatchObject({ state: 'completion_unknown', errorClass: 'interrupted' });
+    });
+
+    it('reports it when no boot sequence ever started, since there is nothing to wait for', async () => {
+      const { operationId } = await seedParked();
+      service().setBootStateForTests('idle');
+      const res = await request(app).get(`/api/recovery/operations/${operationId}`).set('Cookie', adminCookie);
+      expect(res.status).toBe(200);
+    });
+
+    it('does not hold back a new-volume restore, whose operation boot never settles later', async () => {
+      const { operationId, intentId } = await seedParked();
+      recoveryDbModule.recoveryDb().prepare("UPDATE recovery_restore_intents SET target_mode = 'new_volume' WHERE id = ?").run(intentId);
+      const res = await request(app).get(`/api/recovery/operations/${operationId}`).set('Cookie', adminCookie);
+      expect(res.status).toBe(200);
+    });
+
+    it('does not hold back an overwrite that ended unproven for a reason other than an interruption', async () => {
+      const { operationId } = await seedParked({ errorClass: 'node_error' });
+      const res = await request(app).get(`/api/recovery/operations/${operationId}`).set('Cookie', adminCookie);
+      expect(res.status).toBe(200);
+    });
+
+    it('does not hold back an interrupted operation that is not a restore', async () => {
+      const pointId = await seedPoint();
+      const point = points.RecoveryPointStore.getInstance().get(pointId)!;
+      const captureId = randomUUID();
+      recoveryDbModule.recoveryDb().prepare(`INSERT INTO recovery_operations
+        (id, idempotency_key, kind, storage_id, point_id, actor, transport, state, error_class, process_epoch, created_at, updated_at)
+        VALUES (?, ?, 'create_point', ?, ?, 'admin', 'local', 'completion_unknown', 'interrupted', 'e', 1, 1)`)
+        .run(captureId, randomUUID(), point.storageId, pointId);
+      engine.RecoveryEngineService.resetForTests();
+      service().setBootStateForTests('settling');
+      const res = await request(app).get(`/api/recovery/operations/${captureId}`).set('Cookie', adminCookie);
+      expect(res.status).toBe(200);
+      expect(res.body.operation).toMatchObject({ state: 'completion_unknown' });
+    });
   });
 });
