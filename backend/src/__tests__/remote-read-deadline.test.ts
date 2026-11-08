@@ -180,6 +180,9 @@ describe('interactive remote read deadline', () => {
       expect(remoteReadTimeoutMs('GET', '/socket/inventory/')).toBe(SLOW_REMOTE_READ_TIMEOUT_MS);
       expect(remoteReadTimeoutMs('GET', '/socket/inventory?x=1')).toBe(SLOW_REMOTE_READ_TIMEOUT_MS);
       expect(remoteReadTimeoutMs('HEAD', '/socket/inventory')).toBe(SLOW_REMOTE_READ_TIMEOUT_MS);
+      // Express routes and the remote proxy's inventory gate are
+      // case-insensitive, so an upper-case spelling must get the same budget.
+      expect(remoteReadTimeoutMs('GET', '/SOCKET/INVENTORY')).toBe(SLOW_REMOTE_READ_TIMEOUT_MS);
       expect(remoteReadTimeoutMs('GET', '/volumes/app_data/list')).toBe(SLOW_REMOTE_READ_TIMEOUT_MS);
       expect(remoteReadTimeoutMs('GET', '/volumes/app_data/read?path=x')).toBe(SLOW_REMOTE_READ_TIMEOUT_MS);
       expect(remoteReadTimeoutMs('GET', '/stacks/import/scan?path=/srv')).toBe(SLOW_REMOTE_READ_TIMEOUT_MS);
