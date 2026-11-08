@@ -1578,6 +1578,121 @@ describe('applySavedIntents hidden contexts kept on the row', () => {
   });
 });
 
+describe('applySavedIntents contexts settled away and saved again', () => {
+  const tunnel = (serviceName: string): ImageExposureContext => ({
+    stackName: 'web',
+    serviceName,
+    exposureReason: 'tunnel',
+    tunnel: { connector: 'edge', provider: 'cloudflared', scope: 'public-edge', path: 'shared-network' },
+    intentStatus: 'unset',
+  });
+  /** One listed unverified tunnel context and one the cap hides. */
+  const start = (): Record<string, ScanSummary> => ({
+    'exp:1': exposedSummary('exp:1', [tunnel('edge-api')], {
+      exposure_context_count: 2,
+      exposure_contexts_truncated: true,
+      exposure_context_summary: {
+        hasConflict: false, hasUnclassified: true, hasUnavailable: false, allKnownIntentional: false,
+      },
+    }),
+  });
+
+  it('restores the count a settled context took instead of consuming the hidden remainder', () => {
+    const settled = applySavedIntents(start(), 'web', [{ service: 'edge-api', intent: 'internal' }]);
+    expect(settled['exp:1']?.exposure_context_count).toBe(1);
+    expect(settled['exp:1']?.exposure_contexts).toHaveLength(0);
+
+    // A second save of the same service, still in flight, no longer settles it.
+    const again = applySavedIntents(
+      settled,
+      'web',
+      [{ service: 'edge-api', intent: 'public' }],
+      { imageRef: 'exp:1', context: tunnel('edge-api') },
+    )['exp:1']!;
+    expect(again.exposure_context_count).toBe(2);
+    expect(again.exposure_contexts).toHaveLength(1);
+    // One context is still hidden, so what it may hold is still reported.
+    expect(again.exposure_contexts_truncated).toBe(true);
+    expect(again.exposure_context_hidden?.unclassified).toBe(true);
+    expect(again.exposure_context_summary?.hasUnclassified).toBe(true);
+    expect(again.exposure_context_settled).toBeUndefined();
+  });
+
+  it('does nothing when a settled context settles again', () => {
+    const settled = applySavedIntents(start(), 'web', [{ service: 'edge-api', intent: 'internal' }]);
+    const again = applySavedIntents(
+      settled,
+      'web',
+      [{ service: 'edge-api', intent: 'same-node' }],
+      { imageRef: 'exp:1', context: tunnel('edge-api') },
+    );
+    expect(again).toBe(settled);
+  });
+
+  it('exposes the image again when its only settled context is saved with another intent', () => {
+    const only: Record<string, ScanSummary> = { 'exp:1': exposedSummary('exp:1', [tunnel('edge-api')]) };
+    const settled = applySavedIntents(only, 'web', [{ service: 'edge-api', intent: 'internal' }]);
+    expect(settled['exp:1']?.publicly_exposed).toBe(false);
+
+    const again = applySavedIntents(
+      settled,
+      'web',
+      [{ service: 'edge-api', intent: 'public' }],
+      { imageRef: 'exp:1', context: tunnel('edge-api') },
+    )['exp:1']!;
+    expect(again.publicly_exposed).toBe(true);
+    expect(again.exposure_context_count).toBe(1);
+    expect(standingExposureContexts(again)).toMatchObject([{ serviceName: 'edge-api', exposureIntent: 'public' }]);
+  });
+});
+
+describe('applySavedIntents hidden saves it must not invent', () => {
+  it('adds no context for a save the image does not hide', () => {
+    const before = {
+      'exp:1': exposedSummary('exp:1', [unsetContext('web', 'api')], { exposure_context_count: 1 }),
+    };
+    const after = applySavedIntents(
+      before,
+      'web',
+      [{ service: 'api', intent: 'public' }, { service: 'other', intent: 'public' }],
+      { imageRef: 'exp:1', context: unsetContext('web', 'other') },
+    )['exp:1']!;
+    expect(after.exposure_contexts).toHaveLength(1);
+    expect(after.exposure_context_count).toBe(1);
+  });
+
+  it('keeps two hidden services conflicting under restrictive intents and clears the remainder', () => {
+    const visible = Array.from({ length: 20 }, (_, index) => ctx({
+      stackName: 'web', serviceName: `svc${index}`, intentStatus: 'set', exposureIntent: 'public',
+    }));
+    const base = {
+      'exp:1': exposedSummary('exp:1', visible, {
+        exposure_context_count: 22,
+        exposure_contexts_truncated: true,
+        exposure_context_summary: {
+          hasConflict: false, hasUnclassified: true, hasUnavailable: false, allKnownIntentional: false,
+        },
+      }),
+    };
+    const rows = Array.from({ length: 20 }, (_, index) => ({ service: `svc${index}`, intent: 'public' as const }));
+    const hiddenCtx = (name: string): ImageExposureContext => ({
+      stackName: 'web', serviceName: name, exposureReason: 'published-port', intentStatus: 'unset',
+    });
+    let summaries = applySavedIntents(base, 'web', [...rows, { service: 'h1', intent: 'internal' }], {
+      imageRef: 'exp:1', context: hiddenCtx('h1'),
+    });
+    summaries = applySavedIntents(summaries, 'web', [...rows, { service: 'h1', intent: 'internal' }, { service: 'h2', intent: 'same-node' }], {
+      imageRef: 'exp:1', context: hiddenCtx('h2'),
+    });
+    const after = summaries['exp:1']!;
+    expect(after.exposure_contexts_truncated).toBe(false);
+    expect(after.exposure_context_hidden).toBeUndefined();
+    // Certain exposure under a restrictive intent is a real mismatch, not a leftover warning.
+    expect(after.exposure_context_summary).toMatchObject({ hasConflict: true, hasUnclassified: false });
+    expect(standingExposureContexts(after).filter((c) => c.intentConflict)).toHaveLength(2);
+  });
+});
+
 describe('applySavedIntents resolves a warning once every hidden context is saved', () => {
   type Warning = 'conflict' | 'unclassified' | 'unavailable';
   const visibleContext = (warning: Warning, index: number): ImageExposureContext => ({

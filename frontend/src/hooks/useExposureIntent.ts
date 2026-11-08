@@ -16,8 +16,10 @@ let saveOrder = 0;
 
 /**
  * A number for the save about to start, larger than every earlier one. Replies
- * can land in any order, so a surface that adopts a save compares it against
- * the saves it already adopted and drops a reply from before them.
+ * can land in any order, so a surface that adopts saves compares it against the
+ * newest it already adopted and, for an older one, builds on the newer rows
+ * instead of its own. It orders when requests began, which matches the order the
+ * server applied them only when they were not reordered in flight.
  */
 export function nextSaveOrder(): number {
   saveOrder += 1;

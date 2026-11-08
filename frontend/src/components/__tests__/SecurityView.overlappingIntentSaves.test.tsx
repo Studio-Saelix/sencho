@@ -1,11 +1,11 @@
 /**
  * Saves that overlap: a reply lands whenever it lands, and must not undo a
- * confirmed save the operator made after it began. The follow-up summary reread
- * fails throughout, so every row shows only what the saves themselves proved.
+ * confirmed save the operator made after it began. Once a save is sent, node 1's
+ * summary reread fails, so its rows show only what the saves themselves proved.
  * A reply for a node the operator has since left is not theirs to apply.
  */
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { render, screen, waitFor } from '@testing-library/react';
+import { act, render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 
 const apiFetchMock = vi.fn();
@@ -30,7 +30,27 @@ vi.mock('@/hooks/useNodeDismissals', () => ({
 }));
 const viewport = vi.hoisted(() => ({ mobile: false }));
 vi.mock('@/hooks/use-is-mobile', () => ({ useIsMobile: () => viewport.mobile }));
-vi.mock('@/components/security/OverviewTab', () => ({ OverviewTab: () => null }));
+vi.mock('@/components/security/OverviewTab', () => ({
+  OverviewTab: ({ onNavigate }: { onNavigate: (tab: string, filter?: undefined, targeting?: unknown) => void }) => (
+    <button
+      type="button"
+      onClick={() => onNavigate('images', undefined, {
+        kind: 'public_exposure',
+        label: 'Network exposed images',
+        imageRefs: ['exp:1'],
+        targets: ['hidden1', 'hidden2'].map((serviceName) => ({
+          imageRef: 'exp:1',
+          stackName: 'web',
+          serviceName,
+          exposureReason: 'published-port',
+          intentStatus: 'unset',
+        })),
+      })}
+    >
+      go to hidden images
+    </button>
+  ),
+}));
 vi.mock('@/components/security/FindingsTab', () => ({ FindingsTab: () => null }));
 vi.mock('@/components/security/ScanPolicyManager', () => ({ ScanPolicyManager: () => null }));
 vi.mock('@/components/security/ScannerSetupTab', () => ({ ScannerSetupTab: () => null }));
@@ -74,6 +94,9 @@ function unclassified(imageRef: string, stackName: string, serviceName: string):
   };
 }
 
+/** Set by a test that goes back to node 1 and needs its summaries to load. */
+const rereadsHealed = { value: false };
+
 interface PendingPut { stack: string; service: string; release: () => void }
 
 /**
@@ -83,14 +106,20 @@ interface PendingPut { stack: string; service: string; release: () => void }
  * been sent, node 1's summaries reread answers 503, so its rows show only the
  * saves.
  */
-function mockApi(summariesByNode: Record<number, ScanSummary[]>, hold: (stack: string, service: string) => boolean) {
+function mockApi(
+  summariesByNode: Record<number, ScanSummary[]>,
+  hold: (stack: string, service: string) => boolean,
+  seed: Record<string, Intents> = {},
+) {
   const puts: PendingPut[] = [];
-  const server = new Map<string, Map<string, string>>();
+  const server = new Map<string, Map<string, string>>(
+    Object.entries(seed).map(([stack, rows]) => [stack, new Map(rows.map((row) => [row.service, row.intent]))]),
+  );
   let saved = false;
   apiFetchMock.mockImplementation((url: string, init?: RequestInit) => {
     if (url === '/security/overview') return jsonOk(overview);
     if (url === '/security/image-summaries') {
-      if (saved && nodeState.id === 1) {
+      if (saved && nodeState.id === 1 && !rereadsHealed.value) {
         return Promise.resolve({ ok: false, status: 503, headers: new Headers(), json: async () => ({ error: 'unavailable' }) } as unknown as Response);
       }
       return jsonOk(Object.fromEntries((summariesByNode[nodeState.id] ?? []).map((s) => [s.image_ref, s])));
@@ -121,6 +150,7 @@ function mockApi(summariesByNode: Record<number, ScanSummary[]>, hold: (stack: s
 beforeEach(() => {
   viewport.mobile = false;
   nodeState.id = 1;
+  rereadsHealed.value = false;
   apiFetchMock.mockReset();
   toasts.error.mockReset();
   toasts.success.mockReset();
@@ -204,10 +234,98 @@ describe.each([['desktop', false], ['phone', true]])('overlapping intent saves o
 
     puts[0]!.release();
     await waitFor(() => expect(toasts.success).toHaveBeenCalled());
+    // Give a reread, had one been started, the chance to be issued.
+    await act(async () => { await new Promise((resolve) => setTimeout(resolve, 50)); });
 
     // The save belongs to node 1: node 2 keeps its row and is not reread for it.
     expect(screen.getByText('Intent: not classified')).toBeInTheDocument();
     expect(screen.queryByText('Intent: LAN')).not.toBeInTheDocument();
     expect(summaryReads()).toBe(readsBefore);
+  });
+
+  it('does not read another node\'s save after the operator goes there and back', async () => {
+    const puts = mockApi(
+      {
+        1: [unclassified('app:1', 'web', 'api'), unclassified('app:2', 'web', 'worker')],
+        2: [unclassified('app:1', 'web', 'api'), unclassified('app:2', 'web', 'worker')],
+      },
+      (_stack, service) => service === 'api',
+    );
+    const { rerender } = render(<SecurityView activeTab="images" onTabChange={vi.fn()} />);
+    expect(await screen.findAllByText('Intent: not classified')).toHaveLength(2);
+
+    await chooseLan('Network exposed: set intent for web/api');
+    await waitFor(() => expect(puts).toHaveLength(1));
+
+    // Node 2 saves a different service of a stack with the same name.
+    nodeState.id = 2;
+    rerender(<SecurityView activeTab="images" onTabChange={vi.fn()} />);
+    expect(await screen.findAllByText('Intent: not classified')).toHaveLength(2);
+    await chooseLan('Network exposed: set intent for web/worker');
+    await waitFor(() => expect(toasts.success).toHaveBeenCalledTimes(1));
+
+    // Back on node 1, whose first reply is still on its way.
+    rereadsHealed.value = true;
+    nodeState.id = 1;
+    rerender(<SecurityView activeTab="images" onTabChange={vi.fn()} />);
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Network exposed: set intent for web/api' })).toBeInTheDocument());
+    rereadsHealed.value = false;
+    puts[0]!.release();
+    await waitFor(() => expect(toasts.success).toHaveBeenCalledTimes(2));
+
+    // Node 1 saved web/api only; node 2's worker save is not its own.
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Network exposed: change intent for web/api' })).toBeInTheDocument());
+    expect(screen.getByRole('button', { name: 'Network exposed: set intent for web/worker' })).toBeInTheDocument();
+  });
+
+  it('keeps a hidden service saved by a reply that lands after a later save', async () => {
+    // Twenty classified services and two the cap hides, reached through targeting.
+    const capped: ScanSummary = {
+      ...unclassified('exp:1', 'web', 'svc0'),
+      exposure_contexts: Array.from({ length: 20 }, (_, index) => ({
+        stackName: 'web',
+        serviceName: `svc${index}`,
+        exposureReason: 'published-port' as const,
+        intentStatus: 'set' as const,
+        exposureIntent: 'public' as const,
+      })),
+      exposure_context_count: 22,
+      exposure_contexts_truncated: true,
+      exposure_context_summary: {
+        hasConflict: false, hasUnclassified: false, hasUnavailable: false, allKnownIntentional: true,
+      },
+    };
+    const seed = { web: Array.from({ length: 20 }, (_, index) => ({ service: `svc${index}`, intent: 'public' })) };
+    const puts = mockApi({ 1: [capped] }, (_stack, service) => service === 'hidden1', seed);
+    const { rerender } = render(<SecurityView activeTab="overview" onTabChange={vi.fn()} />);
+    await userEvent.click(await screen.findByRole('button', { name: 'go to hidden images' }));
+    rerender(<SecurityView activeTab="images" onTabChange={vi.fn()} />);
+
+    const openList = async () => {
+      if (screen.queryAllByRole('button', { name: /^(Set|Change) intent for web\// }).length === 0) {
+        await userEvent.click(await screen.findByRole('button', { name: 'Network exposed: choose a service' }));
+      }
+    };
+    await openList();
+    await userEvent.click(await screen.findByRole('button', { name: 'Set intent for web/hidden1' }));
+    await userEvent.click(await screen.findByRole('button', { name: 'lan' }));
+    await waitFor(() => expect(puts).toHaveLength(1));
+    await userEvent.keyboard('{Escape}');
+
+    await openList();
+    await userEvent.click(await screen.findByRole('button', { name: 'Set intent for web/hidden2' }));
+    await userEvent.click(await screen.findByRole('button', { name: 'lan' }));
+    await waitFor(() => expect(toasts.success).toHaveBeenCalledTimes(1));
+
+    // The first reply holds the stack as it was before the second save, and it
+    // alone knows its own hidden service.
+    puts[0]!.release();
+    await waitFor(() => expect(toasts.success).toHaveBeenCalledTimes(2));
+    await waitFor(() => expect(screen.queryByText(/not classified/)).not.toBeInTheDocument());
+
+    await openList();
+    expect(await screen.findByRole('button', { name: 'Change intent for web/hidden1' })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Change intent for web/hidden2' })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Change intent for web/svc0' })).toBeInTheDocument();
   });
 });

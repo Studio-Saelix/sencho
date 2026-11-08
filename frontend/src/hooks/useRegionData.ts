@@ -39,11 +39,12 @@ export interface RegionData<T> {
    */
   apply: (data: T) => void;
   /**
-   * Adopt a change derived from the payload on screen when the call runs, not
-   * when the caller's closure was made, so a response that lands late cannot
-   * rebuild its change on a stale snapshot and undo a newer one. Like `apply`
-   * it abandons an in-flight read; nothing happens before a first payload or
-   * for another scope.
+   * Adopt a change derived from the newest payload when React applies it, not
+   * from the payload the caller's closure saw, so a response that lands late
+   * cannot rebuild its change on a stale snapshot and undo a newer one. `change`
+   * must be pure. Like `apply` it abandons an in-flight read without starting
+   * another, so the caller refreshes afterwards; nothing happens before a first
+   * payload or for another scope.
    */
   update: (change: (current: T) => T) => void;
 }

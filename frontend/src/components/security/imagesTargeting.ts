@@ -81,8 +81,8 @@ export interface SavedIntentTarget {
 export type IntentSavedHandler = (
   stackName: string,
   intents: IntentEntry[],
-  saved?: SavedIntentTarget,
-  order?: number,
+  saved: SavedIntentTarget,
+  order: number,
 ) => void;
 
 /** The intent a service ends up with after a save: its own row, else the stack row, else unset. */
@@ -195,15 +195,22 @@ function summaryAfterSavedIntents(
   };
 }
 
+/** Identity of a context within one image. */
+function contextKey(context: ImageExposureContext): string {
+  return `${context.stackName}\0${context.serviceName}`;
+}
+
 /** The contexts after one save: the saved stack's rows take the effective intent,
  *  an unverified tunnel reach settled by a conflicting intent drops out, and
- *  every other row stays. Reports whether anything changed. */
+ *  every other row stays. Reports whether anything changed and which contexts
+ *  dropped out. */
 function patchContextsAfterSave(
   contexts: readonly ImageExposureContext[],
   stackName: string,
   intents: readonly IntentEntry[],
-): { patched: ImageExposureContext[]; changed: boolean } {
+): { patched: ImageExposureContext[]; changed: boolean; settled: string[] } {
   let changed = false;
+  const settled: string[] = [];
   const patched: ImageExposureContext[] = [];
   for (const context of contexts) {
     if (context.stackName !== stackName) {
@@ -213,6 +220,7 @@ function patchContextsAfterSave(
     const intent = effectiveIntentFromSave(context.serviceName, intents);
     if (settledAwayByIntent(context, intent)) {
       changed = true;
+      settled.push(contextKey(context));
       continue;
     }
     const after = contextWithSavedIntent(context, intent);
@@ -223,12 +231,13 @@ function patchContextsAfterSave(
     changed = true;
     patched.push(after);
   }
-  return { patched, changed };
+  return { patched, changed, settled };
 }
 
-/** What a save of a service outside the display slice leaves behind: the
+/** What a save of a service outside the listed contexts leaves behind: the
  *  service's own context with its new intent, or nothing when the server's
- *  tunnel settlement stops counting it as exposed. */
+ *  tunnel settlement stops counting it as exposed. Undefined when the save names
+ *  another stack, or a service already listed (the listed-context patch covers it). */
 type HiddenSaveOutcome = { settled: true } | { settled: false; context: ImageExposureContext };
 
 function hiddenSaveOutcome(
@@ -253,7 +262,12 @@ function hiddenSaveOutcome(
  *  intent, so its evidence and action stay on the row. It leaves the hidden
  *  remainder (the declared count minus the listed contexts), which is how a
  *  warning the remainder may hold resolves: once every context beyond the list
- *  has been confirmed or settled, nothing is left to hold it. */
+ *  has been confirmed or settled, nothing is left to hold it.
+ *
+ *  A context settled away is remembered (`exposure_context_settled`), because it
+ *  no longer looks different from a hidden one: saving it again with an intent
+ *  that no longer settles it brings it back and restores the count it took,
+ *  instead of consuming the hidden remainder. */
 function summaryAfterSave(
   summary: ScanSummary,
   imageRef: string,
@@ -262,7 +276,10 @@ function summaryAfterSave(
   saved?: SavedIntentTarget,
 ): ScanSummary | null {
   const contexts = summary.exposure_contexts;
-  if (summary.publicly_exposed !== true || contexts === undefined) return null;
+  const settledBefore = summary.exposure_context_settled ?? [];
+  const savedKey = saved?.imageRef === imageRef ? contextKey(saved.context) : undefined;
+  const returning = savedKey !== undefined && settledBefore.includes(savedKey);
+  if (contexts === undefined || (summary.publicly_exposed !== true && !returning)) return null;
   const declaredCount = summary.exposure_context_count;
   const wasHiddenCount = declaredCount !== undefined ? declaredCount - contexts.length : 0;
   const truncated = summary.exposure_contexts_truncated === true || wasHiddenCount > 0;
@@ -272,22 +289,35 @@ function summaryAfterSave(
     ? summary.exposure_context_hidden
       ?? (contexts.length > 0 ? hiddenRemainderEvidence(summary, contexts) : undefined)
     : undefined;
-  const { patched, changed } = patchContextsAfterSave(contexts, stackName, intents);
-  const hiddenSave = saved?.imageRef === imageRef && truncated
+  const { patched, changed, settled } = patchContextsAfterSave(contexts, stackName, intents);
+  const outcome = saved !== undefined && savedKey !== undefined && (truncated || returning)
     ? hiddenSaveOutcome(contexts, stackName, intents, saved)
     : undefined;
+  // A context that was already settled away and settles again changes nothing.
+  const hiddenSave = returning && outcome?.settled === true ? undefined : outcome;
   if (!changed && hiddenSave === undefined) return null;
 
+  const rejoined = returning && hiddenSave !== undefined && !hiddenSave.settled;
   const nextContexts = hiddenSave !== undefined && !hiddenSave.settled
     ? [...patched, hiddenSave.context]
     : patched;
   const removed = contexts.length - patched.length + (hiddenSave?.settled === true ? 1 : 0);
-  const nextCount = declaredCount !== undefined ? Math.max(0, declaredCount - removed) : undefined;
-  // Without a count the remainder cannot be followed, so the cap flag stands.
+  const nextCount = declaredCount !== undefined
+    ? Math.max(0, declaredCount - removed + (rejoined ? 1 : 0))
+    : undefined;
+  const nextSettled = [...new Set([
+    ...settledBefore.filter((key) => !(rejoined && key === savedKey)),
+    ...settled,
+    ...(hiddenSave?.settled === true && savedKey !== undefined ? [savedKey] : []),
+  ])];
+  // The count and the contexts that remain listed must both say nothing is
+  // left before the image stops reading as exposed.
+  // Without a usable count (absent, or none hidden by it) the remainder cannot
+  // be followed, so the cap flag stands.
   const stillTruncated = nextCount !== undefined && wasHiddenCount > 0
     ? nextCount > nextContexts.length
     : truncated;
-  const exposed = nextCount !== undefined ? nextCount > 0 : nextContexts.length > 0 || stillTruncated;
+  const exposed = nextContexts.length > 0 || (nextCount !== undefined ? nextCount > 0 : stillTruncated);
   if (!exposed) {
     // Every exposed service of this image settled away: the server would no
     // longer report the image as exposed at all.
@@ -298,6 +328,7 @@ function summaryAfterSave(
       exposure_context_count: 0,
       exposure_contexts_truncated: false,
       exposure_context_hidden: undefined,
+      exposure_context_settled: nextSettled,
       ...(summary.exposure_context_summary
         ? {
           exposure_context_summary: {
@@ -314,6 +345,7 @@ function summaryAfterSave(
   const nextHidden = stillTruncated ? hidden : undefined;
   return {
     ...summary,
+    publicly_exposed: true,
     exposure_contexts: nextContexts,
     ...(nextCount !== undefined ? { exposure_context_count: nextCount } : {}),
     ...(summary.exposure_context_summary
@@ -323,6 +355,7 @@ function summaryAfterSave(
       ? { exposure_contexts_truncated: stillTruncated }
       : {}),
     exposure_context_hidden: nextHidden,
+    exposure_context_settled: nextSettled.length > 0 ? nextSettled : undefined,
   };
 }
 

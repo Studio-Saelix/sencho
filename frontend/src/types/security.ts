@@ -247,6 +247,8 @@ export interface ScanSummary {
   exposure_context_summary?: ImageExposureContextSummary;
   /** States the capped remainder may hold, kept by the in-place save projection. */
   exposure_context_hidden?: ImageExposureContextHidden;
+  /** Contexts (`stack\0service`) the save projection stopped counting as exposed, kept so a later save of one is not mistaken for a hidden context. Set only by the frontend. */
+  exposure_context_settled?: string[];
 }
 
 export interface ScanPolicy {

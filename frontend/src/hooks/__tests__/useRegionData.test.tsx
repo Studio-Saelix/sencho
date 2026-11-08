@@ -331,4 +331,28 @@ describe('useRegionData', () => {
     expect(change).not.toHaveBeenCalled();
     expect(result.current.data).toEqual(['node-2']);
   });
+
+  it('leaves the read of the scope on screen alone when another scope changes it', async () => {
+    const { load, pending } = deferredLoader<string[]>();
+    const { result, rerender } = renderHook(
+      ({ scope }: { scope: number }) => useRegionData(scope, load),
+      { initialProps: { scope: 1 } },
+    );
+
+    await waitFor(() => expect(pending).toHaveLength(1));
+    act(() => pending[0].resolve(['node-1']));
+    await waitFor(() => expect(result.current.data).toEqual(['node-1']));
+    const updateNodeOne = result.current.update;
+    rerender({ scope: 2 });
+    await waitFor(() => expect(pending).toHaveLength(2));
+    act(() => pending[1].resolve(['node-2']));
+    await waitFor(() => expect(result.current.data).toEqual(['node-2']));
+
+    // Node 2 refreshes, and a node 1 change arrives while that read is in flight.
+    act(() => { void result.current.refresh(); });
+    await waitFor(() => expect(pending).toHaveLength(3));
+    act(() => updateNodeOne((current) => [...current, 'late']));
+    await act(async () => { pending[2].resolve(['node-2 fresh']); });
+    expect(result.current.data).toEqual(['node-2 fresh']);
+  });
 });
