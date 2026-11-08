@@ -402,30 +402,164 @@ describe('DockerEventService - die classification', () => {
         expect(mockDispatchAlert).not.toHaveBeenCalled();
     });
 
-    it('clears crash dedup when container starts again', async () => {
+    it('alerts once for a restart loop that keeps crash-looping', async () => {
         service = new DockerEventService(1, 'local');
         await service.start();
 
-        // First crash
+        // Docker emits start on every restart-policy restart; each lap is a
+        // fraction of the recovery threshold, so it stays one incident.
+        for (let lap = 0; lap < 3; lap++) {
+            stream.push({
+                Type: 'container',
+                Action: 'die',
+                Actor: { ID: 'c-loop', Attributes: { exitCode: '1', name: 'web' } },
+            });
+            await vi.advanceTimersByTimeAsync(600);
+            stream.push({ Type: 'container', Action: 'start', Actor: { ID: 'c-loop', Attributes: { name: 'web' } } });
+            await vi.advanceTimersByTimeAsync(2_000);
+        }
+
+        const crashCalls = mockDispatchAlert.mock.calls.filter(c =>
+            typeof c[2] === 'string' && c[2].includes('Crash'));
+        expect(crashCalls).toHaveLength(1);
+    });
+
+    it('alerts again when a container crashed after a stable run', async () => {
+        service = new DockerEventService(1, 'local');
+        await service.start();
+
         stream.push({
             Type: 'container',
             Action: 'die',
-            Actor: { ID: 'c7', Attributes: { exitCode: '1', name: 'web' } },
+            Actor: { ID: 'c-rec', Attributes: { exitCode: '1', name: 'web' } },
         });
         await vi.advanceTimersByTimeAsync(600);
         expect(mockDispatchAlert).toHaveBeenCalledTimes(1);
 
-        // Start event clears dedup
-        stream.push({ Type: 'container', Action: 'start', Actor: { ID: 'c7' } });
-
-        // Second crash should fire again
+        // It recovered and ran for the full threshold before dying again, so
+        // this is a new incident rather than another lap.
+        stream.push({ Type: 'container', Action: 'start', Actor: { ID: 'c-rec', Attributes: { name: 'web' } } });
+        await vi.advanceTimersByTimeAsync(5 * 60_000);
         stream.push({
             Type: 'container',
             Action: 'die',
-            Actor: { ID: 'c7', Attributes: { exitCode: '2', name: 'web' } },
+            Actor: { ID: 'c-rec', Attributes: { exitCode: '2', name: 'web' } },
         });
         await vi.advanceTimersByTimeAsync(600);
+
         expect(mockDispatchAlert).toHaveBeenCalledTimes(2);
+    });
+
+    it('measures uptime from a restart that lands inside the die grace window', async () => {
+        service = new DockerEventService(1, 'local');
+        await service.start();
+
+        // Nothing tracked yet, so classifyDie creates the state 500 ms after the
+        // die and the restart-policy start arrives first. That start is still the
+        // uptime baseline, or a container that genuinely recovered stays muted.
+        stream.push({
+            Type: 'container',
+            Action: 'die',
+            Actor: { ID: 'c-race', Attributes: { exitCode: '1', name: 'web' } },
+        });
+        await vi.advanceTimersByTimeAsync(100);
+        stream.push({ Type: 'container', Action: 'start', Actor: { ID: 'c-race', Attributes: { name: 'web' } } });
+        await vi.advanceTimersByTimeAsync(600);
+        expect(mockDispatchAlert).toHaveBeenCalledTimes(1);
+
+        await vi.advanceTimersByTimeAsync(5 * 60_000);
+        stream.push({
+            Type: 'container',
+            Action: 'die',
+            Actor: { ID: 'c-race', Attributes: { exitCode: '2', name: 'web' } },
+        });
+        await vi.advanceTimersByTimeAsync(600);
+
+        expect(mockDispatchAlert).toHaveBeenCalledTimes(2);
+    });
+
+    it('treats exactly the recovery threshold as a stable run and one tick under as a loop', async () => {
+        service = new DockerEventService(1, 'local');
+        await service.start();
+
+        const crash = (id: string, exitCode: string) => ({
+            Type: 'container',
+            Action: 'die',
+            Actor: { ID: id, Attributes: { exitCode, name: 'web' } },
+        });
+
+        // Boundary: exactly 5 minutes of uptime alerts.
+        stream.push(crash('c-exact', '1'));
+        await vi.advanceTimersByTimeAsync(600);
+        stream.push({ Type: 'container', Action: 'start', Actor: { ID: 'c-exact', Attributes: { name: 'web' } } });
+        await vi.advanceTimersByTimeAsync(5 * 60_000);
+        stream.push(crash('c-exact', '1'));
+        await vi.advanceTimersByTimeAsync(600);
+        expect(mockDispatchAlert).toHaveBeenCalledTimes(2);
+
+        // One tick under stays inside the loop's dedup window.
+        stream.push(crash('c-under', '1'));
+        await vi.advanceTimersByTimeAsync(600);
+        stream.push({ Type: 'container', Action: 'start', Actor: { ID: 'c-under', Attributes: { name: 'web' } } });
+        await vi.advanceTimersByTimeAsync(5 * 60_000 - 1);
+        stream.push(crash('c-under', '1'));
+        await vi.advanceTimersByTimeAsync(600);
+        expect(mockDispatchAlert).toHaveBeenCalledTimes(3);
+    });
+
+    it('alerts a looping container once more after the dedup window expires', async () => {
+        service = new DockerEventService(1, 'local');
+        await service.start();
+
+        stream.push({
+            Type: 'container',
+            Action: 'die',
+            Actor: { ID: 'c-hour', Attributes: { exitCode: '1', name: 'web' } },
+        });
+        await vi.advanceTimersByTimeAsync(600);
+        expect(mockDispatchAlert).toHaveBeenCalledTimes(1);
+
+        // Still looping (start each lap) an hour later: the window has expired,
+        // so the loop surfaces again once rather than never.
+        await vi.advanceTimersByTimeAsync(61 * 60_000);
+        stream.push({ Type: 'container', Action: 'start', Actor: { ID: 'c-hour', Attributes: { name: 'web' } } });
+        await vi.advanceTimersByTimeAsync(2_000);
+        stream.push({
+            Type: 'container',
+            Action: 'die',
+            Actor: { ID: 'c-hour', Attributes: { exitCode: '1', name: 'web' } },
+        });
+        await vi.advanceTimersByTimeAsync(600);
+
+        expect(mockDispatchAlert).toHaveBeenCalledTimes(2);
+    });
+
+    it('keeps the Auto-Heal crash signal through a restart and stamps it on a deduped crash', async () => {
+        service = new DockerEventService(1, 'local');
+        await service.start();
+
+        stream.push({
+            Type: 'container',
+            Action: 'die',
+            Actor: { ID: 'c-heal', Attributes: { exitCode: '1', name: 'web' } },
+        });
+        await vi.advanceTimersByTimeAsync(600);
+        expect(service.getContainerState('c-heal')?.crashedAt).toBeTypeOf('number');
+
+        // Restart clears the heal signal, as Auto-Heal timing expects today.
+        stream.push({ Type: 'container', Action: 'start', Actor: { ID: 'c-heal', Attributes: { name: 'web' } } });
+        expect(service.getContainerState('c-heal')?.crashedAt).toBeUndefined();
+
+        // The next lap is deduped for alerts but still stamps the heal signal.
+        await vi.advanceTimersByTimeAsync(1_000);
+        stream.push({
+            Type: 'container',
+            Action: 'die',
+            Actor: { ID: 'c-heal', Attributes: { exitCode: '1', name: 'web' } },
+        });
+        await vi.advanceTimersByTimeAsync(600);
+        expect(service.getContainerState('c-heal')?.crashedAt).toBeTypeOf('number');
+        expect(mockDispatchAlert).toHaveBeenCalledTimes(1);
     });
 });
 

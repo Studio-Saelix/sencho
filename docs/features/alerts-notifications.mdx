@@ -392,7 +392,7 @@ Real-time on the Docker event stream:
 - **Healthcheck failure** at `error`/`monitor_alert`: `Healthcheck failed: <name> is unhealthy.` Emitted only on the transition into Docker `unhealthy` (not on every repeated unhealthy event).
 - **Mass exit** kicks in when a daemon-disconnect gap is followed by 20% or more of containers exiting on reconnect, in which case a single `info`/`system` summary `Docker daemon interruption detected: N containers exited during connection gap.` is emitted instead of N crash alerts.
 - **Rate limit** caps combined crash and health dispatches at 20 per fixed 60-second window per node. Overflow does not write individual history rows; at the end of the window Sencho emits a single `warning`/`monitor_alert` roll-up such as `N additional container crash alerts were rate-limited in the last minute.`, `N additional container health alerts were rate-limited in the last minute.`, or `N additional container alerts were rate-limited in the last minute (X crash, Y health).`
-- **Crash dedup** is 60 minutes per container after a non-rate-suppressed crash dispatch. Cleared when that container starts again.
+- **Crash dedup** is 60 minutes per container after a non-rate-suppressed crash dispatch. A restart does not clear it, because Docker emits `start` on every restart-policy restart; otherwise a crash loop would alert on every lap. The dedup lifts once the container has stayed up for 5 minutes and then crashes again, which counts as a new incident. A container in a crash loop therefore alerts once per hour, and one that genuinely recovered and later failed alerts right away.
 - **Health dedup** is 60 minutes per container after a health alert that was persisted to notification history. It survives healthy/starting recovery and the 10-minute prune of in-memory container tracking state (dedup lives in a separate map), and clears only when the window expires or the Sencho process restarts.
 
 ### Daemon connectivity
@@ -517,7 +517,7 @@ The **Host Alerts** panel carries the **Host thresholds** rows (CPU limit, RAM l
 | Notification fanout to channels | One attempt by default; optional 0-3 extra in-process attempts with a fixed 1s delay; 10-second timeout per attempt; no durable queue |
 | Bell live updates | Pushed live over the notifications WebSocket per node |
 | Bell safety-net reconcile | 60 seconds |
-| Crash dedup window per container | 60 minutes (cleared on container start) |
+| Crash dedup window per container | 60 minutes (holds across restart-policy restarts; lifts after 5 minutes of uptime) |
 | Health dedup window per container | 60 minutes after a persisted health alert; survives recovery; process-local |
 | Crash/health rate-limit window | 20 alerts per fixed 60 seconds per node, then a single typed roll-up (overflow individuals are not persisted) |
 

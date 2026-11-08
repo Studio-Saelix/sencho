@@ -54,6 +54,15 @@ const RATE_WINDOW_MS = 60_000;
 const CRASH_DEDUP_MS = 60 * 60_000;
 
 /**
+ * Uptime a container must reach after a restart before its next crash counts as
+ * a new incident rather than another lap of the same loop. Docker's restart
+ * backoff caps at one minute, so a container crashing in a loop never gets here
+ * and stays deduped for the full window; one that ran five minutes and then died
+ * genuinely recovered first.
+ */
+const CRASH_RECOVERY_UPTIME_MS = 5 * 60_000;
+
+/**
  * Dedup window for repeat health alerts of the same container. Same duration as
  * crash dedup, but stored outside containerState so the 10-minute prune cannot
  * shrink the advertised 60-minute window. Unlike crash dedup, recovery (start /
@@ -147,6 +156,15 @@ export class DockerEventService {
 
     /** Pending die timers keyed by container ID (for the 500ms grace window). */
     private pendingDieTimers: Map<string, NodeJS.Timeout> = new Map();
+
+    /**
+     * Last observed `start` event time per container id, kept outside
+     * containerState. classifyDie creates the state only after the grace window,
+     * so a start that lands inside it finds nothing to update; the crash-loop
+     * dedup still needs an uptime measurement to tell a recovered container from
+     * another lap. Bounded by pruneStaleState, cleared on destroy.
+     */
+    private lastStartEventAt = new Map<string, number>();
 
     /**
      * Shared fixed-window rate limiter for crash and health alerts (per local
@@ -486,7 +504,7 @@ export class DockerEventService {
             case 'health_status':
                 return this.onHealthStatus(id, action, event);
             case 'start':
-                return this.onStart(id);
+                return this.onStart(id, event);
             case 'destroy':
                 return this.onDestroy(id);
         }
@@ -624,23 +642,35 @@ export class DockerEventService {
             && state.healthStatus === 'unhealthy';
     }
 
-    private onStart(id: string): void {
+    private onStart(id: string, event: DockerEventPayload): void {
+        // Recorded before the state lookup: a start inside the die grace window
+        // arrives before classifyDie has created the state, and the crash-loop
+        // dedup must still measure uptime from it.
+        const startedAt = this.eventTimeMs(event);
+        this.lastStartEventAt.set(id, startedAt);
         const state = this.containerState.get(id);
         if (!state) return;
         // Container came back: clear transient flags but keep identity.
+        // `lastCrashAlertAt` deliberately survives: Docker emits `start` on
+        // every restart-policy restart, so clearing it here would let a crash
+        // loop re-alert on every lap. classifyDie is where a crash that
+        // follows a genuinely stable run earns its own alert.
         state.lastKillAt = undefined;
         state.oomPending = undefined;
-        state.lastCrashAlertAt = undefined;
         state.crashedAt = undefined;
         state.unhealthySince = undefined;
         state.healthStatus = 'starting';
-        state.lastStartAt = Date.now();
+        // Event time, not arrival time: the supersede check and the crash-loop
+        // stability measure both compare this against a `die` event's own
+        // timestamp, so reading both from one clock keeps them in agreement.
+        state.lastStartAt = startedAt;
         state.lastActivityAt = Date.now();
         this.healthAlertPendingRetry.delete(id);
     }
 
     private onDestroy(id: string): void {
         this.containerState.delete(id);
+        this.lastStartEventAt.delete(id);
         const pending = this.pendingDieTimers.get(id);
         if (pending) {
             clearTimeout(pending);
@@ -690,7 +720,12 @@ export class DockerEventService {
         // Dedup early: crashloops repeatedly reach this point with exit 137,
         // and the OOM fallback below issues a Docker inspect. Skipping the
         // inspect on deduped crashes avoids hammering the daemon.
-        if (this.isWithinAlertDedupWindow(state.lastCrashAlertAt, now, CRASH_DEDUP_MS)) {
+        //
+        // The stamp survives restarts (see onStart) and only stops suppressing
+        // once the container has stayed up long enough to count as recovered, so
+        // a loop alerts once per window instead of once per lap.
+        if (this.isWithinAlertDedupWindow(state.lastCrashAlertAt, now, CRASH_DEDUP_MS)
+            && !this.hasStableRunSinceStart(this.lastStartEventAt.get(id) ?? state.lastStartAt, dieAt)) {
             return;
         }
 
@@ -801,6 +836,17 @@ export class DockerEventService {
         windowMs: number,
     ): boolean {
         return lastAlertAt !== undefined && now - lastAlertAt < windowMs;
+    }
+
+    /**
+     * Whether the container ran long enough after its last start for a fresh
+     * crash to be a new incident. A container we never saw start (its state was
+     * created from the die itself) has no evidence of stability, so it stays
+     * inside the loop's dedup window.
+     */
+    private hasStableRunSinceStart(lastStartAt: number | undefined, dieAt: number): boolean {
+        if (lastStartAt === undefined) return false;
+        return dieAt - lastStartAt >= CRASH_RECOVERY_UPTIME_MS;
     }
 
     private buildRateLimitSummaryMessage(crash: number, health: number): string {
@@ -915,6 +961,14 @@ export class DockerEventService {
             const dedupCutoff = Date.now() - HEALTH_DEDUP_MS;
             for (const [id, at] of this.healthAlertDedupAt) {
                 if (at < dedupCutoff) this.healthAlertDedupAt.delete(id);
+            }
+        }
+        // Start evidence only matters while a crash dedup window it could lift
+        // is open, so it expires with that window.
+        if (this.lastStartEventAt.size > 0) {
+            const startCutoff = Date.now() - CRASH_DEDUP_MS;
+            for (const [id, at] of this.lastStartEventAt) {
+                if (at < startCutoff) this.lastStartEventAt.delete(id);
             }
         }
     }
