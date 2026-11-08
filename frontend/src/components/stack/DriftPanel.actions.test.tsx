@@ -313,6 +313,17 @@ describe('DriftPanel dismissals', () => {
     expect(vi.mocked(apiFetch)).toHaveBeenCalledWith('/stacks/web/drift/dismissals/7', { method: 'DELETE', localOnly: false });
   });
 
+  it('closes the dismissed sheet when the stack changes, so it does not reopen on the next stack', async () => {
+    const f = finding('ports-mismatch', 'web');
+    mockReads(report([f], { dismissals: [dismissal(f)] }));
+    const view = renderPanel();
+    fireEvent.click(await screen.findByRole('button', { name: /1 dismissed/ }));
+    expect(screen.getByRole('dialog')).toBeInTheDocument();
+    view.rerender(<DriftPanel stackName="other" onRedeploy={onRedeploy} onEditCompose={onEditCompose} onOpenGitSource={onOpenGitSource} />);
+    await screen.findByRole('button', { name: /1 dismissed/ });
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
+  });
+
   it('offers no Dismiss on a managed-path conflict', async () => {
     mockReads(report([finding('managed-path-conflict', '')]));
     renderPanel();

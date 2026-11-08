@@ -13,10 +13,10 @@ export interface DismissedItem {
   restoring?: boolean;
 }
 
-/** The dismissed findings with who dismissed each, when, and for how long, and a Restore where the account may. */
-export function DismissedList({ items, id, className, flush = false }: { items: DismissedItem[]; id?: string; className?: string; /** Drops the card chrome, for a body that already sits in a sheet section (sheets never nest cards). */ flush?: boolean }) {
+/** The dismissed findings with who dismissed each, when, and for how long, and a Restore where the account may. Sits flat in a sheet section: sheets never nest cards. */
+function DismissedList({ items }: { items: DismissedItem[] }) {
   return (
-    <ul id={id} className={cn(!flush && 'rounded-lg border border-muted bg-card/40 px-3 py-1', className)}>
+    <ul>
       {items.map(item => (
         <li key={item.id} className="flex flex-wrap items-center justify-between gap-2 border-t border-muted py-2 first:border-t-0">
           <div className="min-w-0 opacity-80">
@@ -59,9 +59,11 @@ export function DismissedCountButton({ count, onClick, className }: { count: num
 interface DismissedSheetProps {
   open: boolean;
   onOpenChange: (open: boolean) => void;
-  /** The trip to this list, per the sheet header recipe (for example `['Fleet', 'Readiness']`). */
+  /** The trip to this list: the surface, then the view (for example `['Fleet', 'Readiness']`). */
   crumb: string[];
   items: DismissedItem[];
+  /** The list is being re-read, so `items` is not yet the whole answer: say so instead of reading as empty. */
+  loading?: boolean;
 }
 
 /**
@@ -70,19 +72,21 @@ interface DismissedSheetProps {
  * The list is never narrowed by the surface's filters, so it matches the count
  * that opened it.
  */
-export function DismissedSheet({ open, onOpenChange, crumb, items }: DismissedSheetProps) {
+export function DismissedSheet({ open, onOpenChange, crumb, items, loading = false }: DismissedSheetProps) {
   return (
     <SystemSheet
       open={open}
       onOpenChange={onOpenChange}
       crumb={crumb}
       name="Dismissed findings"
-      meta={`${items.length} set aside · still counted, never hidden`}
+      meta={loading ? 'Updating…' : `${items.length} set aside · still counted, never hidden`}
     >
-      <SheetSection title={`Dismissed · ${items.length}`}>
-        {items.length > 0
-          ? <DismissedList items={items} flush />
-          : <p className="py-8 text-center text-sm text-muted-foreground">Nothing is dismissed.</p>}
+      <SheetSection title={loading ? 'Dismissed' : `Dismissed · ${items.length}`}>
+        {loading
+          ? <p className="py-8 text-center text-sm text-muted-foreground">Updating the list…</p>
+          : items.length > 0
+            ? <DismissedList items={items} />
+            : <p className="py-8 text-center text-sm text-muted-foreground">Nothing is dismissed.</p>}
       </SheetSection>
     </SystemSheet>
   );

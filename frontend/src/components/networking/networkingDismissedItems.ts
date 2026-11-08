@@ -7,7 +7,7 @@ function dismissedMeta(item: DismissedNetworkingFinding, now: number): string {
   return item.dismissal === null ? 'acknowledged in Compose Doctor' : describeDismissal(item.dismissal, now);
 }
 
-/** The dismissed findings as sheet rows, shared by the Findings tab and the Overview block. */
+/** The dismissed findings as sheet rows; one sheet serves both the Overview and Findings tabs. */
 export function networkingDismissedItems(dismissed: NetworkingDismissedList): DismissedItem[] {
   return dismissed.items.map(item => ({
     id: item.dismissal?.id ?? `ack:${item.finding.id}`,

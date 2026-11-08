@@ -30,8 +30,8 @@ export function ReadinessSummaryStrip({ data, checking, dismissedCount = 0, onOp
   checking: boolean;
   /** Findings a team dismissal still covers. They stay out of the finding count and are named beside it. */
   dismissedCount?: number;
-  /** Opens the dismissed list; the count is the control that reaches it. */
-  onOpenDismissed?: () => void;
+  /** Opens the dismissed sheet; the count is the control that reaches it, so it is always wired. */
+  onOpenDismissed: () => void;
 }) {
   const now = useNow(1000);
   const counts = data.summary.nodes;
@@ -58,7 +58,7 @@ export function ReadinessSummaryStrip({ data, checking, dismissedCount = 0, onOp
         </div>
         <span className="font-mono text-[11px] tabular-nums text-stat-subtitle">
           {parts.join(' · ')}
-          {dismissedCount > 0 && onOpenDismissed && (
+          {dismissedCount > 0 && (
             <>
               {' · '}
               <DismissedCountButton count={dismissedCount} onClick={onOpenDismissed} />

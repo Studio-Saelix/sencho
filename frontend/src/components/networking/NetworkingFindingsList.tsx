@@ -37,7 +37,7 @@ export function NetworkingFindingsList({
 }: {
   findings: NetworkingFinding[];
   dismissed?: NetworkingDismissedList;
-  /** Opens the dismissed sheet; the dismissed count above the list is the control that reaches it. */
+  /** Opens the dismissed sheet; the dismissed count in this tab is the control that reaches it. */
   onOpenDismissed: () => void;
   loading: boolean;
   controls: NetworkingFindingControls;

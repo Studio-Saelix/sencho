@@ -39,11 +39,12 @@ function overview(findings: object[]): Response {
 
 const acknowledged = {
   id: 'f1', kind: 'unknown-exposure', severity: 'medium', title: 'Port exposure unclear for stack app-1', message: 'm',
-  stack: 'app-1', evidence: [], recommendedActions: [], sources: [], doctorFindings: [],
+  stack: 'app-1', evidence: [], recommendedActions: [], sources: [],
+  doctorFindings: [{ ruleId: 'rule-a', message: 'm', acknowledgement: { id: 9 } }],
   fingerprint: 'fp1', count: 1, dismissPolicy: 'any', acknowledged: true,
 };
 
-beforeEach(() => apiFetchMock.mockReset());
+beforeEach(() => { apiFetchMock.mockReset(); });
 
 describe('NetworkingView dismissed sheet', () => {
   it('opens from the Overview count, crumbed to Overview', async () => {
@@ -57,6 +58,55 @@ describe('NetworkingView dismissed sheet', () => {
     expect(screen.getByText('Port exposure unclear for stack app-1')).toBeInTheDocument();
     expect(screen.getByText('acknowledged in Compose Doctor')).toBeInTheDocument();
     expect(screen.getByRole('button', { name: 'Restore' })).toBeInTheDocument();
+  });
+
+  it('opens from the Findings count, crumbed to Findings', async () => {
+    apiFetchMock.mockResolvedValue(overview([acknowledged]));
+    const user = userEvent.setup();
+    render(<NetworkingView />);
+
+    await user.click(await screen.findByRole('tab', { name: /Findings/ }));
+    await user.click(await screen.findByRole('button', { name: '1 dismissed' }));
+    expect(within(await screen.findByRole('dialog')).getByText('Findings')).toBeInTheDocument();
+    expect(screen.getByText('Port exposure unclear for stack app-1')).toBeInTheDocument();
+  });
+
+  it('restores an acknowledged finding from the sheet and says it is updating while the list is re-read', async () => {
+    let finishRead: (response: Response) => void = () => {};
+    let reads = 0;
+    apiFetchMock.mockImplementation((_path: string, options?: RequestInit) => {
+      if (options?.method === 'DELETE') return Promise.resolve(new Response(null, { status: 204 }));
+      reads += 1;
+      return reads === 1 ? Promise.resolve(overview([acknowledged])) : new Promise<Response>(resolve => { finishRead = resolve; });
+    });
+    const user = userEvent.setup();
+    render(<NetworkingView />);
+
+    await user.click(await screen.findByRole('button', { name: '1 dismissed' }));
+    await user.click(await screen.findByRole('button', { name: 'Restore' }));
+    expect(apiFetchMock).toHaveBeenCalledWith('/stacks/app-1/preflight/acknowledgements/9', expect.objectContaining({ method: 'DELETE' }));
+    expect(await screen.findByText('Updating the list…')).toBeInTheDocument();
+    expect(screen.queryByText('Nothing is dismissed.')).toBeNull();
+    finishRead(overview([]));
+    expect(await screen.findByText('Nothing is dismissed.')).toBeInTheDocument();
+  });
+
+  it('does not reopen the sheet by itself after a failed re-read recovers', async () => {
+    let reads = 0;
+    apiFetchMock.mockImplementation((_path: string, options?: RequestInit) => {
+      if (options?.method === 'DELETE') return Promise.resolve(new Response(null, { status: 204 }));
+      reads += 1;
+      if (reads === 2) return Promise.resolve(new Response('{}', { status: 502 }));
+      return Promise.resolve(overview([acknowledged]));
+    });
+    const user = userEvent.setup();
+    render(<NetworkingView />);
+
+    await user.click(await screen.findByRole('button', { name: '1 dismissed' }));
+    await user.click(await screen.findByRole('button', { name: 'Restore' }));
+    await user.click(await screen.findByRole('button', { name: /retry/i }));
+    await screen.findByRole('button', { name: '1 dismissed' });
+    expect(screen.queryByRole('dialog')).toBeNull();
   });
 
   it('shows no count when nothing is dismissed', async () => {

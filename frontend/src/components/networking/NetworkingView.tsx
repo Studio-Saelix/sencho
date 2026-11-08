@@ -151,9 +151,16 @@ export function NetworkingView({ headerActions }: NetworkingViewProps) {
     }
   }, [confirmDeleteNetwork]);
 
+  // The sheet lists this node's findings, so it never outlives the node it was opened on.
+  const sheetNodeRef = useRef(nodeId);
+
   useEffect(() => {
     const controller = new AbortController();
     let stale = false;
+    if (sheetNodeRef.current !== nodeId) {
+      sheetNodeRef.current = nodeId;
+      setDismissedOpen(false);
+    }
     setLoading(true);
     setUnsupported(false);
     setLoadFailure(null);
@@ -167,13 +174,16 @@ export function NetworkingView({ headerActions }: NetworkingViewProps) {
       try {
         const response = await apiFetch('/networking/overview', { nodeId, signal: controller.signal });
         if (response.status === 404) {
-          if (!stale) setUnsupported(true);
+          if (!stale) { setUnsupported(true); setDismissedOpen(false); }
           return;
         }
         if (!response.ok) {
           // An unreachable or timed-out node is a state, not a thrown error: the
           // page names it and offers a retry instead of drawing zeroed cards.
-          if (!stale) setLoadFailure(classifyRemoteReadFailure(response) ?? 'http');
+          if (!stale) {
+            setLoadFailure(classifyRemoteReadFailure(response) ?? 'http');
+            setDismissedOpen(false);
+          }
           return;
         }
         const body = await response.json() as Partial<NetworkingOverviewEnvelope>;
@@ -200,6 +210,7 @@ export function NetworkingView({ headerActions }: NetworkingViewProps) {
           // before the caller sees the response. Classify it so the page names
           // the cause instead of generic transport copy.
           setLoadFailure(classifyRemoteReadError(error));
+          setDismissedOpen(false);
         }
       } finally {
         if (!stale) setLoading(false);
@@ -712,6 +723,7 @@ export function NetworkingView({ headerActions }: NetworkingViewProps) {
         onOpenChange={setDismissedOpen}
         crumb={['Networking', tab === 'overview' ? 'Overview' : 'Findings']}
         items={networkingDismissedItems(dismissedList)}
+        loading={loading}
       />
 
       <CreateNetworkDialog
