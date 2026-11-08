@@ -257,7 +257,7 @@ export default function ComposeLabelsPanel({
         fresh.services.find(candidate => candidate.service === service)?.authored?.[key],
       );
       if (!location) {
-        toast.info('This location is no longer current. Reopen the panel to refresh it.');
+        toast.info('This location is no longer current. The label list was refreshed and no longer shows a link for this label.');
         return;
       }
       onOpenLocation(location);

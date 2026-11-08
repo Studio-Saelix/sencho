@@ -8,6 +8,10 @@ vi.mock('@/lib/api', () => ({
   apiFetch: vi.fn(),
 }));
 
+vi.mock('@/components/ui/toast-store', () => ({
+  toast: { success: vi.fn(), error: vi.fn(), info: vi.fn() },
+}));
+
 vi.mock('@/context/AuthContext', () => ({
   useAuth: () => ({ isAdmin: true }),
 }));
@@ -30,6 +34,7 @@ vi.mock('@/context/NodeContext', () => ({
 }));
 
 import { apiFetch } from '@/lib/api';
+import { toast } from '@/components/ui/toast-store';
 
 const mockInventory = {
   stackName: 'demo',
@@ -414,6 +419,8 @@ describe('ComposeLabelsPanel io.sencho.* status', () => {
     policySupported = true;
     activeNodeId = 1;
     nodeMeta = { version: '0.99.0' };
+    vi.mocked(toast.info).mockClear();
+    vi.mocked(toast.error).mockClear();
     vi.mocked(apiFetch).mockResolvedValue({ ok: true, json: async () => senchoInventory } as Response);
   });
 
@@ -667,6 +674,11 @@ describe('ComposeLabelsPanel io.sencho.* status', () => {
       expect(screen.queryByTestId('source-location-link')).toBeNull();
     });
     expect(onOpenLocation).not.toHaveBeenCalled();
+    // The panel refreshed its own list before the toast, so the toast states
+    // that fact instead of telling the operator to reopen the panel.
+    expect(toast.info).toHaveBeenCalledWith(
+      'This location is no longer current. The label list was refreshed and no longer shows a link for this label.',
+    );
   });
 
   it('opens the refreshed label range when the file moved it', async () => {
