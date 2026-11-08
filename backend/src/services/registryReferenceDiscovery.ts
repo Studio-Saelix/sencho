@@ -451,14 +451,25 @@ async function renderComposeEffectiveModel(
     args.push('-f', containment.canonical);
   }
   args.push('config', '--format', 'json');
+  // The deploy child receives project vars only through --env-file
+  // interpolation, never as process env, so these docker-control vars are
+  // pinned to the server's values and a project env file cannot redirect the
+  // CLI binary, its credential config dir, or the daemon endpoint. The guard
+  // gets this exact environment, including a pinned value that is absent, so
+  // it resolves an include path the same way the child does.
+  const childEnv: NodeJS.ProcessEnv = {
+    ...process.env,
+    ...envVars,
+    DOCKER_CONFIG: process.env.DOCKER_CONFIG,
+    DOCKER_HOST: process.env.DOCKER_HOST,
+    DOCKER_CONTEXT: process.env.DOCKER_CONTEXT,
+    PATH: process.env.PATH || '/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin',
+  };
   try {
-    // The child is spawned with `{ ...process.env, ...envVars }`, and the
-    // guard layers `envVars` above `process.env` the same way, so
-    // COMPOSE_FILE and an include path's variables resolve as the child does.
     await assertComposeInputsWithinExpansionLimits({
       cwd,
       invocation: args,
-      env: (name) => envVars[name],
+      env: (name) => childEnv[name],
     });
   } catch (err) {
     if (err instanceof ComposeExpansionRefusal) {
@@ -471,18 +482,7 @@ async function renderComposeEffectiveModel(
   }
   const child = spawn('docker', args, {
     cwd,
-    env: {
-      ...process.env,
-      ...envVars,
-      // The deploy child receives project vars only through --env-file
-      // interpolation, never as process env, so these docker-control vars are
-      // pinned to the server's values and a project env file cannot redirect
-      // the CLI binary, its credential config dir, or the daemon endpoint.
-      DOCKER_CONFIG: process.env.DOCKER_CONFIG,
-      DOCKER_HOST: process.env.DOCKER_HOST,
-      DOCKER_CONTEXT: process.env.DOCKER_CONTEXT,
-      PATH: process.env.PATH || '/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin',
-    },
+    env: childEnv,
   });
   return new Promise<string | null>((resolve) => {
     let stdout = '';

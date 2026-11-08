@@ -849,6 +849,31 @@ describe('registryReferenceDiscovery', () => {
     }
   });
 
+  it('resolves an include path with the docker-control variables the render child pins', async () => {
+    const dir = path.join(process.env.TMPDIR || '/tmp', `sencho-refdisc-pinned-${Date.now()}`);
+    fs.mkdirSync(path.join(dir, 'safe'), { recursive: true });
+    fs.writeFileSync(
+      path.join(dir, 'compose.yaml'),
+      'include:\n  - ${DOCKER_CONFIG:-.}/dep.yaml\nservices:\n  app:\n    image: ghcr.io/org/private-app:latest\n',
+    );
+    fs.writeFileSync(path.join(dir, 'safe', 'dep.yaml'), 'services:\n  dep:\n    image: nginx:alpine\n');
+    fs.writeFileSync(path.join(dir, 'dep.yaml'), nestedAliasBomb(12));
+    const previous = process.env.DOCKER_CONFIG;
+    delete process.env.DOCKER_CONFIG;
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      // The project env asks for the safe directory, but the render child pins
+      // DOCKER_CONFIG to the server's (unset) value, so Compose reads the
+      // project-level dep.yaml. The guard must resolve the same path.
+      await discoverRegistryReferences(dir, { DOCKER_CONFIG: 'safe' }, 'app');
+      expect(mockSpawn).not.toHaveBeenCalled();
+    } finally {
+      warn.mockRestore();
+      if (previous === undefined) delete process.env.DOCKER_CONFIG;
+      else process.env.DOCKER_CONFIG = previous;
+    }
+  });
+
   it('does not render Compose when an extends dependency is over the alias budget', async () => {
     const dir = path.join(process.env.TMPDIR || '/tmp', `sencho-refdisc-dep-${Date.now()}`);
     fs.mkdirSync(path.join(dir, 'sub'), { recursive: true });

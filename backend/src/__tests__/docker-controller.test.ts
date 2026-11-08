@@ -47,6 +47,13 @@ vi.mock('../helpers/composeExpansionGuard', () => ({
   ComposeExpansionRefusal: MockComposeExpansionRefusal,
 }));
 
+// The ps path builds its compose prefix from these helpers; a fixed prefix lets
+// the test assert the guard sees the whole invocation, not only the -f values.
+vi.mock('../utils/authoredComposeArgs', () => ({
+  authoredComposeFileArgs: () => ['-f', 'compose.yaml'],
+  authoredComposeEnvFileArgs: async () => ['--env-file', '.env'],
+}));
+
 vi.mock('../services/NodeRegistry', () => ({
   NodeRegistry: {
     getInstance: () => ({
@@ -3034,6 +3041,10 @@ describe('DockerController - missing stack directory', () => {
     const dc = DockerController.getInstance(1);
     await expect(dc.getContainersByStack('my-stack')).resolves.toEqual([]);
 
+    expect(mockAssertComposeInputs).toHaveBeenCalledWith({
+      cwd: expect.any(String),
+      invocation: ['-f', 'compose.yaml', '--env-file', '.env'],
+    });
     expect(mockExecFileAsync).not.toHaveBeenCalled();
     errSpy.mockRestore();
   });

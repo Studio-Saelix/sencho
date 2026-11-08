@@ -179,4 +179,20 @@ describe('ComposeService live caller uses the real guard', () => {
     expect(result.refusal).toContain('nested YAML aliases');
     expect(mockSpawn).not.toHaveBeenCalled();
   });
+
+  it('refuses a bomb through listStackImages without spawning Compose', async () => {
+    await writeStackFile('compose.yaml', nestedAliasBomb(12));
+
+    await expect(ComposeService.getInstance(1).listStackImages('stack'))
+      .rejects.toThrow(/nested YAML aliases/);
+    expect(mockSpawn).not.toHaveBeenCalled();
+  });
+
+  it('refuses a bomb through renderComposeYaml without spawning Compose', async () => {
+    await writeStackFile('compose.yaml', nestedAliasBomb(12));
+
+    await expect(ComposeService.getInstance(1).renderComposeYaml('stack'))
+      .rejects.toThrow(/nested YAML aliases/);
+    expect(mockSpawn).not.toHaveBeenCalled();
+  });
 });

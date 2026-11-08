@@ -109,14 +109,25 @@ describe('readComposeInputWithinCap', () => {
     });
   });
 
+  it('reports a file that grows past the cap after the stat', async () => {
+    const handle = fakeHandle({
+      stat: vi.fn().mockResolvedValue({ isFile: () => true, size: 0 }),
+      read: vi.fn().mockResolvedValue({ bytesRead: 17 }),
+    });
+    vi.spyOn(fsPromises, 'open').mockResolvedValueOnce(handle);
+
+    await expect(readComposeInputWithinCap(path.join(dir, 'compose.yaml'), 16))
+      .resolves.toEqual({ content: null, tooLarge: true });
+  });
+
   it('skips a missing file', async () => {
     await expect(readComposeInputWithinCap(path.join(dir, 'missing.yaml'), 1024))
       .resolves.toEqual({ content: null, tooLarge: false });
   });
 
-  it('skips a directory', async () => {
+  it('marks a directory as a non-regular input', async () => {
     await expect(readComposeInputWithinCap(dir, 1024))
-      .resolves.toEqual({ content: null, tooLarge: false });
+      .resolves.toEqual({ content: null, tooLarge: false, nonRegular: true });
   });
 
   it('skips a broken symlink', async () => {

@@ -455,6 +455,48 @@ describe('assertComposeInputsWithinExpansionLimits - COMPOSE_FILE selection', ()
     })).resolves.toBeUndefined();
   });
 
+  it('lets an explicit --env-file win over COMPOSE_ENV_FILES', async () => {
+    await write('safe.yaml', SAFE_COMPOSE);
+    await write('selected.yaml', nestedAliasBomb(12));
+    await write('explicit.env', 'COMPOSE_FILE=safe.yaml\n');
+    await write('listed.env', 'COMPOSE_FILE=selected.yaml\n');
+    process.env.COMPOSE_ENV_FILES = 'listed.env';
+    await expect(assertComposeInputsWithinExpansionLimits({
+      cwd: dir,
+      invocation: ['compose', '--env-file', 'explicit.env', 'config'],
+    })).resolves.toBeUndefined();
+  });
+
+  it('lets COMPOSE_ENV_FILES win over the project .env', async () => {
+    await write('safe.yaml', SAFE_COMPOSE);
+    await write('selected.yaml', nestedAliasBomb(12));
+    await write('.env', 'COMPOSE_FILE=safe.yaml\n');
+    await write('listed.env', 'COMPOSE_FILE=selected.yaml\n');
+    process.env.COMPOSE_ENV_FILES = 'listed.env';
+    await expect(assertComposeInputsWithinExpansionLimits({ cwd: dir, invocation: ['compose', 'config'] }))
+      .rejects.toBeInstanceOf(ComposeExpansionRefusal);
+  });
+
+  it('reads the project .env, not the -f file directory .env, when --project-directory is set', async () => {
+    await write('project/.env', 'DIR=deep\n');
+    await write('sub/.env', 'DIR=safe\n');
+    await write('sub/compose.yaml', 'include:\n  - ${DIR}/bomb.yaml\nservices:\n  web:\n    image: nginx:alpine\n');
+    await write('project/deep/bomb.yaml', nestedAliasBomb(12));
+    await expect(assertComposeInputsWithinExpansionLimits({
+      cwd: dir,
+      invocation: ['compose', '--project-directory', 'project', '-f', 'sub/compose.yaml', 'config'],
+    })).rejects.toBeInstanceOf(ComposeExpansionRefusal);
+  });
+
+  it('lets a process COMPOSE_DISABLE_ENV_FILE=false keep the project .env values', async () => {
+    process.env.COMPOSE_DISABLE_ENV_FILE = 'false';
+    await write('.env', 'COMPOSE_DISABLE_ENV_FILE=true\nDIR=deep\n');
+    await write('compose.yaml', 'include:\n  - ${DIR}/bomb.yaml\nservices:\n  web:\n    image: nginx:alpine\n');
+    await write('deep/bomb.yaml', nestedAliasBomb(12));
+    await expect(assertComposeInputsWithinExpansionLimits({ cwd: dir, invocation: ['compose', 'config'] }))
+      .rejects.toBeInstanceOf(ComposeExpansionRefusal);
+  });
+
   it('reads the project .env from the first -f file directory', async () => {
     await write('sub/compose.yaml', 'include:\n  - ${DIR}/bomb.yaml\nservices:\n  web:\n    image: nginx:alpine\n');
     await write('sub/.env', 'DIR=deep\n');
@@ -955,7 +997,205 @@ describe('composeFileArgsFromInvocation', () => {
     ])).toEqual(['a.yaml', 'b.yaml', 'c.yaml']);
   });
 
+  it('reads -f= and -fvalue forms', () => {
+    expect(composeFileArgsFromInvocation([
+      'compose', '-f=a.yaml', '-fb.yaml', 'config',
+    ])).toEqual(['a.yaml', 'b.yaml']);
+  });
+
+  it('skips another global flag value before -f', () => {
+    expect(composeFileArgsFromInvocation([
+      'compose', '--project-name', 'demo', '-f', 'a.yaml', 'config',
+    ])).toEqual(['a.yaml']);
+  });
+
+  it('does not read a command flag after the subcommand', () => {
+    expect(composeFileArgsFromInvocation(['compose', 'logs', '-f', 'web'])).toEqual([]);
+  });
+
   it('returns nothing when the invocation lets Compose discover its files', () => {
     expect(composeFileArgsFromInvocation(['compose', 'config', '--format', 'json'])).toEqual([]);
+  });
+});
+
+describe('assertComposeInputsWithinExpansionLimits - review round regressions', () => {
+  it('still measures the selected files when an explicit env file is /dev/null', async () => {
+    await write('compose.yaml', nestedAliasBomb(12));
+    await expect(assertComposeInputsWithinExpansionLimits({
+      cwd: dir,
+      invocation: ['compose', '--env-file', os.devNull, '-f', 'compose.yaml', 'config'],
+    })).rejects.toBeInstanceOf(ComposeExpansionRefusal);
+  });
+
+  it('keeps every COMPOSE_* value from a self-disabling .env for dependency paths', async () => {
+    await write('.env', 'COMPOSE_DISABLE_ENV_FILE=true\nCOMPOSE_DIR=sub\n');
+    await write('compose.yaml', 'include:\n  - ${COMPOSE_DIR}/bomb.yaml\nservices:\n  web:\n    image: nginx:alpine\n');
+    await write('sub/bomb.yaml', nestedAliasBomb(12));
+    await expect(assertComposeInputsWithinExpansionLimits({ cwd: dir, invocation: ['compose', 'config'] }))
+      .rejects.toBeInstanceOf(ComposeExpansionRefusal);
+  });
+
+  it('refuses a bomb named by a job extends.file', async () => {
+    await write('compose.yaml', [
+      'jobs:',
+      '  task:',
+      '    extends:',
+      '      file: base.yaml',
+      '      service: base',
+      '    triggers:',
+      '      manual: true',
+      'services:',
+      '  web:',
+      '    image: nginx:alpine',
+    ].join('\n'));
+    await write('base.yaml', nestedAliasBomb(12));
+    await expect(assertComposeInputsWithinExpansionLimits({ cwd: dir, invocation: ['compose', 'config'] }))
+      .rejects.toBeInstanceOf(ComposeExpansionRefusal);
+  });
+
+  it('treats an empty include project_directory as absent', async () => {
+    await write('compose.yaml', [
+      'include:',
+      '  - path: app/main.yaml',
+      '    project_directory: ""',
+      'services:',
+      '  web:',
+      '    image: nginx:alpine',
+    ].join('\n'));
+    await write('app/main.yaml', 'services:\n  inner:\n    extends:\n      file: base.yaml\n      service: base\n');
+    await write('app/base.yaml', nestedAliasBomb(12));
+    await expect(assertComposeInputsWithinExpansionLimits({ cwd: dir, invocation: ['compose', 'config'] }))
+      .rejects.toBeInstanceOf(ComposeExpansionRefusal);
+  });
+
+  it('treats an interpolated empty include project_directory as absent', async () => {
+    await write('.env', 'PROJDIR=\n');
+    await write('compose.yaml', [
+      'include:',
+      '  - path: app/main.yaml',
+      '    project_directory: ${PROJDIR}',
+      'services:',
+      '  web:',
+      '    image: nginx:alpine',
+    ].join('\n'));
+    await write('app/main.yaml', 'services:\n  inner:\n    extends:\n      file: base.yaml\n      service: base\n');
+    await write('app/base.yaml', nestedAliasBomb(12));
+    await expect(assertComposeInputsWithinExpansionLimits({ cwd: dir, invocation: ['compose', 'config'] }))
+      .rejects.toBeInstanceOf(ComposeExpansionRefusal);
+  });
+
+  it('counts every occurrence of a repeated dependency toward the total budget', async () => {
+    const includes = Array.from({ length: 16 }, () => '  - shared.yaml').join('\n');
+    await write('compose.yaml', `include:\n${includes}\nservices:\n  web:\n    image: nginx:alpine\n`);
+    // Each occurrence is under the per-file budget; sixteen are not under the
+    // per-invocation budget.
+    await write('shared.yaml', nestedAliasBomb(4));
+    await expect(assertComposeInputsWithinExpansionLimits({ cwd: dir, invocation: ['compose', 'config'] }))
+      .rejects.toThrow(/expand to more than 1,000,000 nodes in total/);
+  });
+
+  it('discovers a compose file in a parent directory', async () => {
+    await write('compose.yaml', nestedAliasBomb(12));
+    await write('stack/.keep', '');
+    await expect(assertComposeInputsWithinExpansionLimits({
+      cwd: path.join(dir, 'stack'),
+      invocation: ['compose', 'config'],
+    })).rejects.toBeInstanceOf(ComposeExpansionRefusal);
+  });
+
+  it('discovers an override beside a parent compose file', async () => {
+    await write('compose.yaml', SAFE_COMPOSE);
+    await write('compose.override.yml', nestedAliasBomb(12));
+    await write('stack/.keep', '');
+    await expect(assertComposeInputsWithinExpansionLimits({
+      cwd: path.join(dir, 'stack'),
+      invocation: ['compose', 'config'],
+    })).rejects.toBeInstanceOf(ComposeExpansionRefusal);
+  });
+
+  it('refuses a bare-host git include reference', async () => {
+    await write('compose.yaml', 'include:\n  - github.com/org/repo\nservices:\n  web:\n    image: nginx:alpine\n');
+    await expect(assertComposeInputsWithinExpansionLimits({ cwd: dir, invocation: ['compose', 'config'] }))
+      .rejects.toThrow(/remote include/);
+  });
+
+  it('refuses an SCP-like git extends reference', async () => {
+    await write('compose.yaml', [
+      'services:',
+      '  web:',
+      '    extends:',
+      '      file: git@github.com:org/repo.git',
+      '      service: base',
+    ].join('\n'));
+    await expect(assertComposeInputsWithinExpansionLimits({ cwd: dir, invocation: ['compose', 'config'] }))
+      .rejects.toThrow(/remote extends/);
+  });
+
+  it('refuses a remote top-level -f reference without echoing it', async () => {
+    let message = '';
+    try {
+      await assertComposeInputsWithinExpansionLimits({
+        cwd: dir,
+        invocation: ['compose', '-f', 'https://user:secret@example.com/bomb.git', 'config'],
+      });
+    } catch (err) {
+      message = (err as Error).message;
+    }
+    expect(message).toContain('remote Git or OCI');
+    expect(message).not.toContain('secret');
+  });
+
+  it('refuses a remote COMPOSE_FILE reference', async () => {
+    process.env.COMPOSE_FILE = 'github.com/org/repo';
+    await expect(assertComposeInputsWithinExpansionLimits({ cwd: dir, invocation: ['compose', 'config'] }))
+      .rejects.toThrow(/remote Git or OCI/);
+  });
+
+  it('reads a bomb named by -f= and -fvalue forms', async () => {
+    await write('compose.yaml', SAFE_COMPOSE);
+    await write('selected.yaml', nestedAliasBomb(12));
+    for (const form of ['-f=selected.yaml', '-fselected.yaml']) {
+      await expect(assertComposeInputsWithinExpansionLimits({
+        cwd: dir,
+        invocation: ['compose', form, 'config'],
+      })).rejects.toBeInstanceOf(ComposeExpansionRefusal);
+    }
+  });
+
+  it('does not treat a command flag after the subcommand as a compose file', async () => {
+    await write('compose.yaml', nestedAliasBomb(12));
+    await expect(assertComposeInputsWithinExpansionLimits({
+      cwd: dir,
+      invocation: ['compose', 'logs', '-f', 'web'],
+    })).rejects.toBeInstanceOf(ComposeExpansionRefusal);
+  });
+
+  it('expands ~ in a nested extends path from the child HOME', async () => {
+    const previousHome = process.env.HOME;
+    process.env.HOME = path.join(dir, 'home');
+    try {
+      await write('compose.yaml', 'services:\n  web:\n    extends:\n      file: sub/a.yaml\n      service: base\n');
+      await write('sub/a.yaml', 'services:\n  base:\n    extends:\n      file: ~/b.yaml\n      service: deeper\n');
+      await write('home/b.yaml', nestedAliasBomb(12));
+      await expect(assertComposeInputsWithinExpansionLimits({ cwd: dir, invocation: ['compose', 'config'] }))
+        .rejects.toBeInstanceOf(ComposeExpansionRefusal);
+    } finally {
+      if (previousHome === undefined) delete process.env.HOME;
+      else process.env.HOME = previousHome;
+    }
+  });
+
+  it('keeps a top-level extends ~ path literal', async () => {
+    await write('compose.yaml', 'services:\n  web:\n    extends:\n      file: ~/b.yaml\n      service: deeper\n');
+    await write('~/b.yaml', nestedAliasBomb(12));
+    await expect(assertComposeInputsWithinExpansionLimits({ cwd: dir, invocation: ['compose', 'config'] }))
+      .rejects.toBeInstanceOf(ComposeExpansionRefusal);
+  });
+
+  it('follows an include in a document with reset tags', async () => {
+    await write('compose.yaml', 'include:\n  - bomb.yaml\nservices:\n  web:\n    ports: !reset []\n');
+    await write('bomb.yaml', nestedAliasBomb(12));
+    await expect(assertComposeInputsWithinExpansionLimits({ cwd: dir, invocation: ['compose', 'config'] }))
+      .rejects.toBeInstanceOf(ComposeExpansionRefusal);
   });
 });

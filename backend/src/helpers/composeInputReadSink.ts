@@ -12,14 +12,19 @@
  * module is listed under `paths-ignore` in the CodeQL config with the same
  * reasoning.
  *
- * An input that is missing, is not a regular file, or cannot be read as one is
- * reported as skipped: Compose reads the same file next and reports the real
- * error. Any other read failure is rethrown, so a file this guard could not
+ * An input that is missing or cannot be read as one is reported as skipped:
+ * Compose reads the same file next and reports the real error. A path that
+ * exists but is not a regular file is marked `nonRegular`, so an env-file caller
+ * can treat `/dev/null` as the empty file Compose reads instead of treating it
+ * as missing. Any other read failure is rethrown, so a file this guard could not
  * inspect is never handed to Compose unmeasured.
  *
  * Compose's YAML parser accepts UTF-8 and BOM-marked UTF-16LE/UTF-16BE, so the
  * bytes are decoded the same way. Decoding everything as UTF-8 would measure a
  * string the CLI never parses, and a UTF-16 alias bomb would pass the guard.
+ * The decoder is shared with env-file reads; Compose's dotenv reader rejects a
+ * UTF-16 env file, so decoding one only makes the guard over-read it and can
+ * refuse a file Compose would reject, never the reverse.
  */
 import { promises as fsPromises, constants as fsConstants } from 'fs';
 
@@ -59,6 +64,12 @@ export interface ComposeInputRead {
   content: string | null;
   /** True when the file is larger than the cap and the caller must refuse it. */
   tooLarge: boolean;
+  /**
+   * True when the path exists but is not a regular file. Compose reads such a
+   * path itself (a character device like `/dev/null` is empty, a FIFO can
+   * block), so an env-file caller must not treat it as a missing file.
+   */
+  nonRegular?: true;
 }
 
 /**
@@ -92,7 +103,7 @@ export async function readComposeInputWithinCap(
   }
   try {
     const stat = await handle.stat();
-    if (!stat.isFile()) return { content: null, tooLarge: false };
+    if (!stat.isFile()) return { content: null, tooLarge: false, nonRegular: true };
     if (stat.size > maxBytes) return { content: null, tooLarge: true };
 
     const chunks: Buffer[] = [];
