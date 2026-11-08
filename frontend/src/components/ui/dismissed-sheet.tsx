@@ -1,4 +1,4 @@
-import type { ReactNode } from 'react';
+import { forwardRef, type ReactNode, type RefObject } from 'react';
 import { Button } from '@/components/ui/button';
 import { SystemSheet, SheetSection } from '@/components/ui/system-sheet';
 import { cn } from '@/lib/utils';
@@ -38,11 +38,19 @@ function DismissedList({ items }: { items: DismissedItem[] }) {
  * The `N dismissed` count in a status line, as the control that opens the
  * dismissed sheet. Renders nothing at zero. Dismissed findings stay counted and
  * reachable: a dismissal moves a finding aside, it never hides that one exists.
+ *
+ * The ref reaches the real button so the sheet can return keyboard focus to the
+ * exact count that opened it.
  */
-export function DismissedCountButton({ count, onClick, className }: { count: number; onClick: () => void; className?: string }) {
+export const DismissedCountButton = forwardRef<HTMLButtonElement, {
+  count: number;
+  onClick: () => void;
+  className?: string;
+}>(function DismissedCountButton({ count, onClick, className }, ref) {
   if (count === 0) return null;
   return (
     <button
+      ref={ref}
       type="button"
       aria-haspopup="dialog"
       onClick={onClick}
@@ -54,6 +62,13 @@ export function DismissedCountButton({ count, onClick, className }: { count: num
       {count} dismissed
     </button>
   );
+});
+
+/** Focus a target only while it is still in the document; a removed opener cannot take focus. */
+function focusIfMounted(target: HTMLElement | null | undefined): boolean {
+  if (!target || !target.isConnected) return false;
+  target.focus();
+  return document.activeElement === target;
 }
 
 interface DismissedSheetProps {
@@ -64,6 +79,13 @@ interface DismissedSheetProps {
   items: DismissedItem[];
   /** The list is being re-read, so `items` is not yet the whole answer: say so instead of reading as empty. */
   loading?: boolean;
+  /** The count that opened the sheet. Every close control returns keyboard focus here while it is still mounted. */
+  openerRef?: RefObject<HTMLButtonElement | null>;
+  /**
+   * The surviving target when restoring the last item removes the count. Focus
+   * moves here instead of falling through to the page body.
+   */
+  fallbackFocusRef?: RefObject<HTMLElement | null>;
 }
 
 /**
@@ -72,11 +94,21 @@ interface DismissedSheetProps {
  * The list is never narrowed by the surface's filters, so it matches the count
  * that opened it.
  */
-export function DismissedSheet({ open, onOpenChange, crumb, items, loading = false }: DismissedSheetProps) {
+export function DismissedSheet({ open, onOpenChange, crumb, items, loading = false, openerRef, fallbackFocusRef }: DismissedSheetProps) {
+  // Radix returns focus to a registered trigger, and this count is not one. Take
+  // over its close-auto-focus instead: the exact opener first, then the surface's
+  // surviving region once restoring the last item has unmounted the count.
+  const handleCloseAutoFocus = (event: Event) => {
+    event.preventDefault();
+    if (focusIfMounted(openerRef?.current)) return;
+    focusIfMounted(fallbackFocusRef?.current);
+  };
+
   return (
     <SystemSheet
       open={open}
       onOpenChange={onOpenChange}
+      onCloseAutoFocus={handleCloseAutoFocus}
       crumb={crumb}
       name="Dismissed findings"
       meta={loading ? 'Updating…' : `${items.length} set aside · still counted, never hidden`}

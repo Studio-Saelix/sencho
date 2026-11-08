@@ -434,6 +434,23 @@ describe('OverviewTab remediation affordances', () => {
       await user.click(screen.getByRole('button', { name: /restore/i }));
       expect(dismissalState.restore).toHaveBeenCalledWith(7);
     });
+
+    it('returns focus to the count after Escape closes the dismissed sheet', async () => {
+      const user = userEvent.setup();
+      dismissalState.dismissals = [{
+        id: 7, nodeId: 1, surface: 'security', findingKey: 'security:1:needs_review:all', fingerprint: 'fp-1',
+        severity: 'review', count: 2, mode: 'until_change', expiresAt: null, createdBy: 'alice', createdAt: Date.now(),
+      }];
+      renderOverview([dismissable()], { canManageNode: true });
+      const opener = screen.getByRole('button', { name: /1 dismissed/i });
+      opener.focus();
+      await user.keyboard('{Enter}');
+      await screen.findByRole('dialog');
+
+      await user.keyboard('{Escape}');
+
+      await waitFor(() => expect(opener).toHaveFocus());
+    });
   });
 });
 

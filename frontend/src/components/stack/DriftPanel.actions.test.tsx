@@ -5,6 +5,7 @@
  */
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { render, screen, fireEvent, waitFor, within } from '@testing-library/react';
+import userEvent from '@testing-library/user-event';
 
 vi.mock('@/lib/api', () => ({ apiFetch: vi.fn(), fetchForNode: vi.fn() }));
 vi.mock('@/components/ui/toast-store', () => ({ toast: { success: vi.fn(), error: vi.fn(), info: vi.fn() } }));
@@ -311,6 +312,21 @@ describe('DriftPanel dismissals', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Restore' }));
     await waitFor(() => expect(screen.getByTestId('drift-finding')).toBeInTheDocument());
     expect(vi.mocked(apiFetch)).toHaveBeenCalledWith('/stacks/web/drift/dismissals/7', { method: 'DELETE', localOnly: false });
+  });
+
+  it('returns focus to the count after Escape closes the dismissed sheet', async () => {
+    const user = userEvent.setup();
+    const f = finding('ports-mismatch', 'web');
+    mockReads(report([f], { dismissals: [dismissal(f)] }));
+    renderPanel();
+    const opener = await screen.findByRole('button', { name: /1 dismissed/ });
+    opener.focus();
+    await user.keyboard('{Enter}');
+    await screen.findByRole('dialog');
+
+    await user.keyboard('{Escape}');
+
+    await waitFor(() => expect(opener).toHaveFocus());
   });
 
   it('closes the dismissed sheet when the stack changes, so it does not reopen on the next stack', async () => {

@@ -1,9 +1,40 @@
 import { describe, it, expect, vi } from 'vitest';
-import { render, screen } from '@testing-library/react';
+import { useRef, useState } from 'react';
+import { render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { DismissedCountButton, DismissedSheet, type DismissedItem } from '../dismissed-sheet';
 
 const item = (over: Partial<DismissedItem> = {}): DismissedItem => ({ id: 1, title: 'Port exposure unclear', meta: 'dismissed by alice', ...over });
+
+/** The real arrangement on every surface: a count outside the sheet, and a region that outlives a restore. */
+function FocusHarness({ initialItems }: { initialItems: DismissedItem[] }) {
+  const [open, setOpen] = useState(false);
+  const [items, setItems] = useState(initialItems);
+  const openerRef = useRef<HTMLButtonElement>(null);
+  const fallbackRef = useRef<HTMLDivElement>(null);
+  return (
+    <div>
+      <DismissedCountButton ref={openerRef} count={items.length} onClick={() => setOpen(true)} />
+      <div ref={fallbackRef} tabIndex={-1} data-testid="surviving-region">Surface that survives</div>
+      <DismissedSheet
+        open={open}
+        onOpenChange={setOpen}
+        openerRef={openerRef}
+        fallbackFocusRef={fallbackRef}
+        crumb={['Networking', 'Findings']}
+        items={items.map(row => ({ ...row, onRestore: () => setItems(current => current.filter(candidate => candidate.id !== row.id)) }))}
+      />
+    </div>
+  );
+}
+
+async function openWithKeyboard(user: ReturnType<typeof userEvent.setup>) {
+  const opener = screen.getByRole('button', { name: '1 dismissed' });
+  opener.focus();
+  await user.keyboard('{Enter}');
+  await screen.findByRole('dialog');
+  return opener;
+}
 
 describe('DismissedCountButton', () => {
   it('renders nothing at zero', () => {
@@ -53,5 +84,38 @@ describe('DismissedSheet', () => {
   it('says so when nothing is dismissed', () => {
     render(<DismissedSheet open onOpenChange={() => {}} crumb={['Security', 'Overview']} items={[]} />);
     expect(screen.getByText('Nothing is dismissed.')).toBeInTheDocument();
+  });
+});
+
+describe('DismissedSheet focus return', () => {
+  it.each([
+    ['Escape', async (user: ReturnType<typeof userEvent.setup>) => { await user.keyboard('{Escape}'); }],
+    ['the Close control', async (user: ReturnType<typeof userEvent.setup>) => {
+      await user.click(screen.getByRole('button', { name: 'Close' }));
+    }],
+    ['the first breadcrumb', async (user: ReturnType<typeof userEvent.setup>) => {
+      await user.click(screen.getByRole('button', { name: 'Networking' }));
+    }],
+  ])('returns focus to the originating count after %s', async (_control, close) => {
+    const user = userEvent.setup();
+    render(<FocusHarness initialItems={[item()]} />);
+    const opener = await openWithKeyboard(user);
+
+    await close(user);
+
+    await waitFor(() => expect(opener).toHaveFocus());
+  });
+
+  it('returns focus to the surviving region when restoring the last item removes the count', async () => {
+    const user = userEvent.setup();
+    render(<FocusHarness initialItems={[item()]} />);
+    await openWithKeyboard(user);
+
+    await user.click(screen.getByRole('button', { name: 'Restore' }));
+    expect(screen.queryByRole('button', { name: /dismissed/ })).toBeNull();
+
+    await user.keyboard('{Escape}');
+
+    await waitFor(() => expect(screen.getByTestId('surviving-region')).toHaveFocus());
   });
 });

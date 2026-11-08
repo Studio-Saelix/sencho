@@ -104,6 +104,12 @@ export function NetworkingView({ headerActions }: NetworkingViewProps) {
 
   const [tab, setTab] = useState<NetworkingTab>('overview');
   const [dismissedOpen, setDismissedOpen] = useState(false);
+  // The count that opened the sheet, plus a surviving tab region: closing returns
+  // focus to the exact count, or to the tab panel when restoring the last item
+  // removes that count.
+  const dismissedOpenerRef = useRef<HTMLButtonElement>(null);
+  const overviewFocusRef = useRef<HTMLDivElement>(null);
+  const findingsFocusRef = useRef<HTMLDivElement>(null);
   const [loading, setLoading] = useState(true);
   const [unsupported, setUnsupported] = useState(false);
   const [loadFailure, setLoadFailure] = useState<RemoteReadFailure | null>(null);
@@ -484,7 +490,7 @@ export function NetworkingView({ headerActions }: NetworkingViewProps) {
             <div className="flex items-center gap-3">
               {!isLegacy && (
                 <span className="font-mono text-[11px] text-stat-subtitle">
-                  <DismissedCountButton count={partition.dismissed.length} onClick={() => setDismissedOpen(true)} />
+                  <DismissedCountButton ref={dismissedOpenerRef} count={partition.dismissed.length} onClick={() => setDismissedOpen(true)} />
                 </span>
               )}
               {partition.active.length > 5 && (
@@ -666,7 +672,7 @@ export function NetworkingView({ headerActions }: NetworkingViewProps) {
           </div>
         )}
 
-        <TabsContent value="overview" className="mt-4">
+        <TabsContent ref={overviewFocusRef} value="overview" className="mt-4">
           {loading ? <p className="text-sm text-muted-foreground">Loading overview…</p> : overviewCards}
           {overview && overview.renderFailedStacks.length > 0 && (
             <p className="mt-3 text-sm text-warning">
@@ -709,11 +715,12 @@ export function NetworkingView({ headerActions }: NetworkingViewProps) {
           )}
         </TabsContent>
 
-        <TabsContent value="findings" className="mt-4">
+        <TabsContent ref={findingsFocusRef} value="findings" className="mt-4">
           <NetworkingFindingsList
             findings={partition.active}
             dismissed={dismissedList}
             onOpenDismissed={() => setDismissedOpen(true)}
+            dismissedOpenerRef={dismissedOpenerRef}
             loading={loading}
             controls={findingControls}
             disabled={isLegacy}
@@ -724,6 +731,8 @@ export function NetworkingView({ headerActions }: NetworkingViewProps) {
       <DismissedSheet
         open={dismissedOpen}
         onOpenChange={setDismissedOpen}
+        openerRef={dismissedOpenerRef}
+        fallbackFocusRef={tab === 'findings' ? findingsFocusRef : overviewFocusRef}
         crumb={['Networking', tab === 'overview' ? 'Overview' : 'Findings']}
         items={networkingDismissedItems(dismissedList)}
         loading={loading}

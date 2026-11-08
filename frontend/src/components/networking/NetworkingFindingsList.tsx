@@ -1,3 +1,4 @@
+import type { Ref } from 'react';
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table';
 import { ScrollArea } from '@/components/ui/scroll-area';
 import { DismissedCountButton } from '@/components/ui/dismissed-sheet';
@@ -31,6 +32,7 @@ export function NetworkingFindingsList({
   findings,
   dismissed,
   onOpenDismissed,
+  dismissedOpenerRef,
   loading,
   controls,
   disabled = false,
@@ -39,6 +41,8 @@ export function NetworkingFindingsList({
   dismissed?: NetworkingDismissedList;
   /** Opens the dismissed sheet; the dismissed count in this tab is the control that reaches it. */
   onOpenDismissed: () => void;
+  /** The count button itself, so the shared sheet can return keyboard focus to it on close. */
+  dismissedOpenerRef?: Ref<HTMLButtonElement>;
   loading: boolean;
   controls: NetworkingFindingControls;
   disabled?: boolean;
@@ -47,7 +51,7 @@ export function NetworkingFindingsList({
   const dismissedCount = dismissed?.items.length ?? 0;
   const dismissedCountRow = dismissedCount > 0 && (
     <p className="font-mono text-[11px] text-stat-subtitle">
-      <DismissedCountButton count={dismissedCount} onClick={onOpenDismissed} />
+      <DismissedCountButton ref={dismissedOpenerRef} count={dismissedCount} onClick={onOpenDismissed} />
     </p>
   );
   if (findings.length === 0) {

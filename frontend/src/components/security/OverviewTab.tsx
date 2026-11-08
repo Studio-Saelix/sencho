@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useRef, useState } from 'react';
 import { RefreshCw, ShieldOff } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Skeleton } from '@/components/ui/skeleton';
@@ -216,6 +216,10 @@ function ReviewQueueCard({
   posture?: SecurityOverview['posture'];
 }) {
   const [dismissedOpen, setDismissedOpen] = useState(false);
+  // The count is the sheet's opener; the review-queue card survives a restore, so
+  // it is where focus lands if restoring the last item removes the count.
+  const dismissedOpenerRef = useRef<HTMLButtonElement>(null);
+  const reviewQueueRef = useRef<HTMLDivElement>(null);
   // The title follows the posture word, so it reads every reason; the list shows the active ones.
   const hasBlockers = allReasons.some((r) => r.severity === 'blocker');
   const blockers = reasons.active.filter((r) => r.severity === 'blocker');
@@ -227,11 +231,11 @@ function ReviewQueueCard({
       : 'Review queue';
 
   return (
-    <div className="rounded-lg border border-card-border border-t-card-border-top bg-card shadow-card-bevel p-4">
+    <div ref={reviewQueueRef} tabIndex={-1} className="rounded-lg border border-card-border border-t-card-border-top bg-card shadow-card-bevel p-4">
       <div className="mb-3 flex items-center justify-between gap-2">
         <h3 className="font-mono text-[10px] uppercase tracking-[0.22em] text-stat-subtitle">{title}</h3>
         <span className="font-mono text-[11px] text-stat-subtitle">
-          <DismissedCountButton count={reasons.dismissedItems.length} onClick={() => setDismissedOpen(true)} />
+          <DismissedCountButton ref={dismissedOpenerRef} count={reasons.dismissedItems.length} onClick={() => setDismissedOpen(true)} />
         </span>
       </div>
       <div className="space-y-3">
@@ -248,7 +252,14 @@ function ReviewQueueCard({
           <p className="text-sm text-muted-foreground">Nothing needs attention right now.</p>
         )}
       </div>
-      <DismissedSheet open={dismissedOpen} onOpenChange={setDismissedOpen} crumb={['Security', 'Overview']} items={reasons.dismissedItems} />
+      <DismissedSheet
+        open={dismissedOpen}
+        onOpenChange={setDismissedOpen}
+        openerRef={dismissedOpenerRef}
+        fallbackFocusRef={reviewQueueRef}
+        crumb={['Security', 'Overview']}
+        items={reasons.dismissedItems}
+      />
     </div>
   );
 }

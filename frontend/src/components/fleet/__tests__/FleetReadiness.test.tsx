@@ -666,6 +666,21 @@ describe('FleetReadiness dismissals', () => {
     expect(vi.mocked(apiFetch)).toHaveBeenCalledWith('/fleet/dismissals/7', { method: 'DELETE', localOnly: true });
   });
 
+  it('returns focus to the summary count after Escape closes the dismissed sheet', async () => {
+    const user = userEvent.setup();
+    mockResponse(board({ dismissals: [dismissalFor(STOPPED)] }));
+    renderReadiness();
+
+    const opener = await screen.findByRole('button', { name: /1 dismissed/ });
+    opener.focus();
+    await user.keyboard('{Enter}');
+    await screen.findByRole('dialog');
+
+    await user.keyboard('{Escape}');
+
+    await waitFor(() => expect(opener).toHaveFocus());
+  });
+
   it('restores from the dismissed list', async () => {
     mockServer(() => ({ ok: true, status: 204, json: async () => ({}) }) as Response, board({ dismissals: [dismissalFor(STOPPED)] }));
     renderReadiness();

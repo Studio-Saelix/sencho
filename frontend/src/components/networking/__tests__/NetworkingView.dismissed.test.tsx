@@ -140,6 +140,62 @@ describe('NetworkingView dismissed sheet', () => {
     await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull());
   });
 
+  it('returns focus to the Overview count after Escape closes the sheet', async () => {
+    apiFetchMock.mockResolvedValue(overview([acknowledged]));
+    const user = userEvent.setup();
+    render(<NetworkingView />);
+
+    const opener = await screen.findByRole('button', { name: '1 dismissed' });
+    opener.focus();
+    await user.keyboard('{Enter}');
+    await screen.findByRole('dialog');
+
+    await user.keyboard('{Escape}');
+
+    await waitFor(() => expect(opener).toHaveFocus());
+  });
+
+  it('returns focus to the Findings count after the Close control closes the sheet', async () => {
+    apiFetchMock.mockResolvedValue(overview([acknowledged]));
+    const user = userEvent.setup();
+    render(<NetworkingView />);
+
+    await user.click(await screen.findByRole('tab', { name: /Findings/ }));
+    const opener = await screen.findByRole('button', { name: '1 dismissed' });
+    opener.focus();
+    await user.keyboard('{Enter}');
+    await screen.findByRole('dialog');
+
+    await user.click(screen.getByRole('button', { name: 'Close' }));
+
+    await waitFor(() => expect(opener).toHaveFocus());
+  });
+
+  it('moves focus to the Findings tab when restoring the last item removes the count', async () => {
+    let finishRead: (response: Response) => void = () => {};
+    let reads = 0;
+    apiFetchMock.mockImplementation((path: string, options?: RequestInit) => {
+      if (options?.method === 'DELETE' || path !== '/networking/overview') return Promise.resolve(new Response(null, { status: 204 }));
+      reads += 1;
+      return reads === 1 ? Promise.resolve(overview([acknowledged])) : new Promise<Response>(resolve => { finishRead = resolve; });
+    });
+    const user = userEvent.setup();
+    render(<NetworkingView />);
+
+    await user.click(await screen.findByRole('tab', { name: /Findings/ }));
+    const opener = await screen.findByRole('button', { name: '1 dismissed' });
+    opener.focus();
+    await user.keyboard('{Enter}');
+    await user.click(await screen.findByRole('button', { name: 'Restore' }));
+    finishRead(overview([]));
+    await screen.findByText('Nothing is dismissed.');
+    expect(screen.queryByRole('button', { name: /dismissed/ })).toBeNull();
+
+    await user.keyboard('{Escape}');
+
+    await waitFor(() => expect(screen.getByRole('tabpanel')).toHaveFocus());
+  });
+
   it('shows no count when nothing is dismissed', async () => {
     apiFetchMock.mockResolvedValue(overview([]));
     render(<NetworkingView />);

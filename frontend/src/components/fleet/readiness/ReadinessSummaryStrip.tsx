@@ -1,3 +1,4 @@
+import type { Ref } from 'react';
 import { cn } from '@/lib/utils';
 import { formatAgeShort } from '@/lib/relativeTime';
 import { DOMAIN_STATE_ORDER, type DomainState, type FleetReadinessResponse } from '@/types/readiness';
@@ -25,13 +26,17 @@ function worstState(counts: Record<DomainState, number>): DomainState {
  * counts by state, and when the check ran. One flat line, not a second
  * masthead; the Fleet masthead above it stays the page's only hero.
  */
-export function ReadinessSummaryStrip({ data, checking, dismissedCount = 0, onOpenDismissed }: {
+export function ReadinessSummaryStrip({ data, checking, dismissedCount = 0, onOpenDismissed, dismissedOpenerRef, focusRef }: {
   data: FleetReadinessResponse;
   checking: boolean;
   /** Findings a team dismissal still covers. They stay out of the finding count and are named beside it. */
   dismissedCount?: number;
   /** Opens the dismissed sheet; the count is the only way into the dismissed sheet. */
   onOpenDismissed: () => void;
+  /** The count button itself, so the shared sheet can return keyboard focus to it on close. */
+  dismissedOpenerRef?: Ref<HTMLButtonElement>;
+  /** The summary region, focused when restoring the last item removes the count. */
+  focusRef?: Ref<HTMLElement>;
 }) {
   const now = useNow(1000);
   const counts = data.summary.nodes;
@@ -50,7 +55,7 @@ export function ReadinessSummaryStrip({ data, checking, dismissedCount = 0, onOp
   ].filter((part): part is string => part !== null);
 
   return (
-    <section aria-label="Readiness summary" className="border-b border-card-border pb-3">
+    <section ref={focusRef} tabIndex={-1} aria-label="Readiness summary" className="border-b border-card-border pb-3">
       <div className="flex flex-wrap items-center gap-x-4 gap-y-1">
         <div className="flex items-center gap-2">
           <span aria-hidden className={cn('h-2 w-2 shrink-0 rounded-full', TONE_DOT[tone])} />
@@ -61,7 +66,7 @@ export function ReadinessSummaryStrip({ data, checking, dismissedCount = 0, onOp
           {dismissedCount > 0 && (
             <>
               {' · '}
-              <DismissedCountButton count={dismissedCount} onClick={onOpenDismissed} />
+              <DismissedCountButton ref={dismissedOpenerRef} count={dismissedCount} onClick={onOpenDismissed} />
             </>
           )}
         </span>
