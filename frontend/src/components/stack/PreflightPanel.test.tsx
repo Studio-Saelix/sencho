@@ -518,6 +518,41 @@ describe('PreflightPanel', () => {
     expect(toast.info).not.toHaveBeenCalled();
   });
 
+  it('asks the operator to choose when the refreshed report has several matching findings', async () => {
+    const onOpenLocation = vi.fn();
+    const shared = {
+      ruleId: 'bind-path-missing', severity: 'high' as const,
+      title: 'Bind mount path is missing',
+      message: 'The host path "/data" for service "web" does not exist.',
+      service: 'web', sourcePath: '/data',
+    };
+    vi.mocked(apiFetch)
+      .mockResolvedValueOnce(jsonRes(report({
+        status: 'high', highestSeverity: 'high',
+        findings: [
+          { ...shared, location: { file: 'compose.yaml', line: 4, column: 7, endLine: 4, endColumn: 18 } },
+          { ...shared, location: { file: 'compose.yaml', line: 9, column: 7, endLine: 9, endColumn: 18 } },
+        ],
+      })))
+      .mockResolvedValueOnce(jsonRes(report({
+        status: 'high', highestSeverity: 'high',
+        findings: [
+          { ...shared, location: { file: 'compose.yaml', line: 12, column: 7, endLine: 12, endColumn: 18 } },
+          { ...shared, location: { file: 'compose.yaml', line: 15, column: 7, endLine: 15, endColumn: 18 } },
+        ],
+      })));
+    render(<PreflightPanel stackName="web" onOpenLocation={onOpenLocation} />);
+    fireEvent.click(await screen.findByRole('button', { name: 'Open compose.yaml at line 9' }));
+    await waitFor(() => {
+      expect(toast.info).toHaveBeenCalledWith(
+        'The report now has more than one matching finding. Choose the link from the current report.',
+      );
+    });
+    expect(onOpenLocation).not.toHaveBeenCalled();
+    // The refreshed panel keeps both links, so the toast must not claim they vanished.
+    expect(screen.getAllByRole('button', { name: /^Open / })).toHaveLength(2);
+  });
+
   it('ignores a superseded click response that arrives after a later one', async () => {
     const onOpenLocation = vi.fn();
     const initial = report({
@@ -577,6 +612,7 @@ describe('PreflightPanel', () => {
     resolveFirst(jsonRes(afterFirst));
     await new Promise(resolve => setTimeout(resolve, 0));
     expect(onOpenLocation).toHaveBeenCalledTimes(1);
+    expect(toast.info).not.toHaveBeenCalled();
   });
 
   it('drops a click response from a stack the panel no longer shows', async () => {
@@ -603,6 +639,7 @@ describe('PreflightPanel', () => {
     await new Promise(resolve => setTimeout(resolve, 0));
     expect(onOpenLocation).not.toHaveBeenCalled();
     expect(screen.queryByText('Image uses a moving tag')).toBeNull();
+    expect(toast.info).not.toHaveBeenCalled();
   });
 
   it('drops a click response from a node the panel no longer shows', async () => {
@@ -630,6 +667,7 @@ describe('PreflightPanel', () => {
     await new Promise(resolve => setTimeout(resolve, 0));
     expect(onOpenLocation).not.toHaveBeenCalled();
     expect(screen.queryByText('Image uses a moving tag')).toBeNull();
+    expect(toast.info).not.toHaveBeenCalled();
   });
 
   it('opens nothing when the panel unmounts before the read returns', async () => {
@@ -652,6 +690,7 @@ describe('PreflightPanel', () => {
     resolvePending(jsonRes(located));
     await new Promise(resolve => setTimeout(resolve, 0));
     expect(onOpenLocation).not.toHaveBeenCalled();
+    expect(toast.info).not.toHaveBeenCalled();
   });
 
   it('opens nothing when the location cannot be confirmed', async () => {

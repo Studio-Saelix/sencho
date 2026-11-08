@@ -74,12 +74,21 @@ function sameRange(a: AuthoredLocation | undefined, b: AuthoredLocation | undefi
  *  findings render the same identity (for example one bind source mounted at
  *  two targets), the clicked range is the only discriminator: the click opens
  *  nothing unless it still picks exactly one candidate. A sole survivor is
- *  unambiguous and is returned as it is. */
-function freshFinding(report: PreflightReport, finding: PreflightFinding): PreflightFinding | undefined {
+ *  unambiguous and is returned as it is; several survivors are ambiguous and
+ *  the caller must ask the operator to choose from the refreshed report. */
+type FreshFinding =
+  | { kind: 'found'; finding: PreflightFinding }
+  | { kind: 'missing' }
+  | { kind: 'ambiguous' };
+
+function freshFinding(report: PreflightReport, finding: PreflightFinding): FreshFinding {
   const candidates = report.findings.filter(candidate => sameFinding(candidate, finding));
-  if (candidates.length <= 1) return candidates[0];
+  if (candidates.length === 0) return { kind: 'missing' };
+  if (candidates.length === 1) return { kind: 'found', finding: candidates[0] };
   const anchored = candidates.filter(candidate => sameRange(candidate.location, finding.location));
-  return anchored.length === 1 ? anchored[0] : undefined;
+  return anchored.length === 1
+    ? { kind: 'found', finding: anchored[0] }
+    : { kind: 'ambiguous' };
 }
 
 const LABEL_CLASS = 'font-mono text-[10px] uppercase tracking-[0.18em] text-stat-subtitle';
@@ -340,11 +349,17 @@ export default function PreflightPanel({
       setReport(fresh);
       setLoadError(false);
       const current = freshFinding(fresh, finding);
-      if (!current?.location) {
+      if (current.kind === 'ambiguous') {
+        // The report shows links for several findings that share this identity,
+        // so the click cannot pick one; the operator can choose a visible link.
+        toast.info('The report now has more than one matching finding. Choose the link from the current report.');
+        return;
+      }
+      if (current.kind === 'missing' || !current.finding.location) {
         toast.info('This location is no longer current. The report was refreshed and no longer shows a link for this finding.');
         return;
       }
-      onOpenLocation(current.location);
+      onOpenLocation(current.finding.location);
     } catch {
       toast.error('Could not confirm this location is still current.');
     }
