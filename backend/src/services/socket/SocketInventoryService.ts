@@ -480,7 +480,7 @@ interface SocketMountMatch {
  * source or target is certain. A mount that shares the host socket path Sencho
  * itself uses is certain too, which covers a proxy that listens on a custom
  * unix socket path. A bind of a directory that contains the socket (`/var/run`,
- * `/run`, `/var`, `/`, or a custom socket's parent) is possible socket access:
+ * `/run`, `/var`, `/`, or the visible parent of a custom socket) is possible socket access:
  * the container can open the socket through it without naming it. Classification
  * reads the full list; the response projection bounds it and marks the row
  * incomplete.

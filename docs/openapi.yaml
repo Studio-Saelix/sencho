@@ -601,12 +601,13 @@ components:
             Bind (or unreadable-type) mounts that can expose the Docker socket.
             A readable bind that names the socket in its source or destination
             is treated as a socket mount, so it makes the row a direct consumer
-            unless a proxy identity claims it or a published Docker API port
-            leaves it `undetermined`; an unreadable mount type on its own
-            leaves the row `undetermined`. A bind whose host source is an
-            ancestor directory of a known socket path (`/var/run`, `/run`,
-            `/var`, `/`, or an ancestor of a custom endpoint socket) is listed
-            too; on its own it makes the row `undetermined`, because the
+            unless a proxy identity claims it or a Docker API port (published
+            or exposed) leaves it `undetermined`; an unreadable mount type on
+            its own leaves the row `undetermined`. A bind whose host source is
+            an ancestor directory of a known socket path (`/var/run`, `/run`,
+            `/var`, `/`, or an ancestor of a custom endpoint socket when its
+            host bind source is visible) is listed too; on its own it makes the
+            row `undetermined`, because the
             container can reach the socket but there is no evidence it uses it.
             A destination directory alone is not treated as host access.
           items:
