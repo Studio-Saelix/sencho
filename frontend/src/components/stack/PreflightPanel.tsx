@@ -72,23 +72,24 @@ function sameRange(a: AuthoredLocation | undefined, b: AuthoredLocation | undefi
 
 /** The finding a click belongs to in a fresh report. When several stored
  *  findings render the same identity (for example one bind source mounted at
- *  two targets), the clicked range is the only discriminator: the click opens
- *  nothing unless it still picks exactly one candidate. A sole survivor is
- *  unambiguous and is returned as it is; several survivors are ambiguous and
- *  the caller must ask the operator to choose from the refreshed report. */
+ *  two targets), the clicked range is the only discriminator: a candidate
+ *  anchored at the clicked range opens that range, even when several rows
+ *  share it. With no anchor the click cannot choose, so the caller asks the
+ *  operator to choose from the refreshed report. */
 type FreshFinding =
   | { kind: 'found'; finding: PreflightFinding }
   | { kind: 'missing' }
-  | { kind: 'ambiguous' };
+  | { kind: 'ambiguous'; hasLink: boolean };
 
 function freshFinding(report: PreflightReport, finding: PreflightFinding): FreshFinding {
   const candidates = report.findings.filter(candidate => sameFinding(candidate, finding));
   if (candidates.length === 0) return { kind: 'missing' };
   if (candidates.length === 1) return { kind: 'found', finding: candidates[0] };
+  // Every anchored candidate has the clicked range, so opening any of them
+  // lands on the same place; only a range that anchors none is ambiguous.
   const anchored = candidates.filter(candidate => sameRange(candidate.location, finding.location));
-  return anchored.length === 1
-    ? { kind: 'found', finding: anchored[0] }
-    : { kind: 'ambiguous' };
+  if (anchored.length > 0) return { kind: 'found', finding: anchored[0] };
+  return { kind: 'ambiguous', hasLink: candidates.some(candidate => candidate.location !== undefined) };
 }
 
 const LABEL_CLASS = 'font-mono text-[10px] uppercase tracking-[0.18em] text-stat-subtitle';
@@ -350,9 +351,11 @@ export default function PreflightPanel({
       setLoadError(false);
       const current = freshFinding(fresh, finding);
       if (current.kind === 'ambiguous') {
-        // The report shows links for several findings that share this identity,
-        // so the click cannot pick one; the operator can choose a visible link.
-        toast.info('The report now has more than one matching finding. Choose the link from the current report.');
+        // Several findings share the identity and the clicked range picks none
+        // of them; name a visible link only when the refreshed report has one.
+        toast.info(current.hasLink
+          ? 'The report now has more than one matching finding. Choose the link from the current report.'
+          : 'The report was refreshed; several findings match and none shows a link.');
         return;
       }
       if (current.kind === 'missing' || !current.finding.location) {
