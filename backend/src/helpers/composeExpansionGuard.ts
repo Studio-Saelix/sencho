@@ -141,6 +141,12 @@ function remoteDependencyRefusal(label: string, kind: 'include' | 'extends'): Co
   );
 }
 
+function unresolvedIncludePathRefusal(label: string, detail: string): ComposeExpansionRefusal {
+  return new ComposeExpansionRefusal(
+    `Compose file "${label}" ${detail} Sencho cannot establish the path Docker Compose resolves it to, so it refused to run a file whose expansion it cannot bound.`,
+  );
+}
+
 function remoteInputRefusal(): ComposeExpansionRefusal {
   // The reference itself is not repeated: a git URL can carry credentials.
   return new ComposeExpansionRefusal(
@@ -440,14 +446,14 @@ async function loadSelectionEnv(
   if (envFileArgs.length > 0) {
     explicitSources = true;
     for (const file of envFileArgs) {
-      sources.push({ path: path.resolve(cwd, file), label: file, required: true });
+      sources.push({ path: path.resolve(cwd, expandUserPath(file, processEnv('HOME'))), label: file, required: true });
     }
   } else {
     const listed = (processEnv('COMPOSE_ENV_FILES') ?? '').split(',').filter((entry) => entry.length > 0);
     if (listed.length > 0) {
       explicitSources = true;
       for (const file of listed) {
-        sources.push({ path: path.resolve(cwd, file), label: file, required: true });
+        sources.push({ path: path.resolve(cwd, expandUserPath(file, processEnv('HOME'))), label: file, required: true });
       }
     } else {
       const disabledRaw = processEnv('COMPOSE_DISABLE_ENV_FILE');
@@ -492,7 +498,10 @@ async function loadSelectionEnv(
 function isRemoteComposeRef(value: string): boolean {
   if (/^[a-zA-Z][a-zA-Z0-9+.-]*:\/\//.test(value)) return true;
   if (/^[^/@\s]+@[^/:\s]+:/.test(value)) return true;
-  return /^[A-Za-z0-9][A-Za-z0-9.-]*\.[A-Za-z]{2,}\//.test(value);
+  // Compose's git loader accepts a bare `github.com/owner/repo` ref. Other
+  // dotted first segments (`apps.web/dep.yaml`, `gitlab.com/...`) are local
+  // paths, so they must stay local here too.
+  return /^github\.com\//.test(value);
 }
 
 function resolveDependencyPath(value: string, base: string): string {
@@ -502,15 +511,27 @@ function resolveDependencyPath(value: string, base: string): string {
   return path.isAbsolute(value) ? path.resolve(value) : path.resolve(base, value);
 }
 
+/** Expand a leading `~/` the way Compose's env-file path expansion does. */
+function expandUserPath(value: string, home: string | undefined): string {
+  if (home && (value === '~' || value.startsWith('~/'))) {
+    return path.join(home, value.slice(1).replace(/^[\\/]/, ''));
+  }
+  return value;
+}
+
 /**
  * Resolve one `extends.file` value. Compose expands a leading `~` in a path
  * declared by a file it reached through `extends`, but keeps it literal in the
  * main file and in an included project's main file.
  */
-function resolveExtendsPath(value: string, base: string, expandHome: boolean): string {
+function resolveExtendsPath(
+  value: string,
+  base: string,
+  expandHome: boolean,
+  home: string | undefined,
+): string {
   if (expandHome && (value === '~' || value.startsWith('~/'))) {
-    const home = process.env.HOME;
-    if (home) return path.resolve(home, value.slice(1).replace(/^[\\/]/, ''));
+    return expandUserPath(value, home);
   }
   return resolveDependencyPath(value, base);
 }
@@ -760,7 +781,15 @@ async function assertInputClosure(args: {
             const target = interpolatePath(raw, input.env);
             if (target === null) continue;
             if (isRemoteComposeRef(target)) throw remoteDependencyRefusal(label, 'extends');
-            const resolved = resolveExtendsPath(target, input.projectBase, input.viaExtends);
+            if (input.viaExtends && target.startsWith('~') && target !== '~' && !target.startsWith('~/')) {
+              throw unresolvedIncludePathRefusal(label, 'has a ~user extends path.');
+            }
+            const resolved = resolveExtendsPath(
+              target,
+              input.projectBase,
+              input.viaExtends,
+              input.env.processEnv('HOME'),
+            );
             queue.push({
               path: resolved,
               projectBase: path.dirname(resolved),
@@ -791,6 +820,13 @@ async function assertInputClosure(args: {
             childBase = path.dirname(targets[0]);
           } else {
             if (isRemoteComposeRef(rawDirectory)) throw remoteDependencyRefusal(label, 'include');
+            // Compose resolves a relative project_directory in an included
+            // project against a working directory derived from the include
+            // chain, which can differ from the absolute project base here.
+            // Refuse rather than measure a different file than Compose loads.
+            if (input.depth > 0 && !path.isAbsolute(rawDirectory)) {
+              throw unresolvedIncludePathRefusal(label, 'has a relative project_directory inside an included project.');
+            }
             childBase = resolveDependencyPath(rawDirectory, input.projectBase);
           }
         } else {
@@ -802,6 +838,9 @@ async function assertInputClosure(args: {
           for (const raw of group.envFiles) {
             const target = interpolatePath(raw, input.env);
             if (target === null) continue;
+            if (input.depth > 0 && !path.isAbsolute(target)) {
+              throw unresolvedIncludePathRefusal(label, 'has a relative env_file inside an included project.');
+            }
             const resolved = resolveDependencyPath(target, input.projectBase);
             const entry = await readEnvFileEntry(resolved, inputLabel(args.cwd, resolved));
             // A missing explicit include env file makes Compose fail before it

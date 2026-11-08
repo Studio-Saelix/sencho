@@ -1113,6 +1113,68 @@ describe('assertComposeInputsWithinExpansionLimits - review round regressions', 
     })).rejects.toBeInstanceOf(ComposeExpansionRefusal);
   });
 
+  it('measures a local include path with a dotted directory name', async () => {
+    await write('compose.yaml', 'include:\n  - apps.web/bomb.yaml\nservices:\n  web:\n    image: nginx:alpine\n');
+    await write('apps.web/bomb.yaml', nestedAliasBomb(12));
+    await expect(assertComposeInputsWithinExpansionLimits({ cwd: dir, invocation: ['compose', 'config'] }))
+      .rejects.toThrow(/nested YAML aliases/);
+  });
+
+  it('measures a local -f path with a dotted directory name', async () => {
+    await write('apps.web/bomb.yaml', nestedAliasBomb(12));
+    await expect(assertComposeInputsWithinExpansionLimits({
+      cwd: dir,
+      invocation: ['compose', '-f', 'apps.web/bomb.yaml', 'config'],
+    })).rejects.toThrow(/nested YAML aliases/);
+  });
+
+  it('refuses a relative project_directory inside an included project', async () => {
+    await write('compose.yaml', 'include:\n  - path: sub/main.yaml\n    project_directory: deep\nservices:\n  web:\n    image: nginx:alpine\n');
+    await write('sub/main.yaml', 'include:\n  - path: sub2/main2.yaml\n    project_directory: ../deep2\nservices:\n  level1:\n    image: nginx:alpine\n');
+    await write('deep2/nested/dep.yaml', nestedAliasBomb(12));
+    await expect(assertComposeInputsWithinExpansionLimits({ cwd: dir, invocation: ['compose', 'config'] }))
+      .rejects.toThrow(/relative project_directory inside an included project/);
+  });
+
+  it('refuses a relative env_file inside an included project', async () => {
+    await write('compose.yaml', 'include:\n  - path: sub/main.yaml\n    project_directory: deep\nservices:\n  web:\n    image: nginx:alpine\n');
+    await write('sub/main.yaml', 'include:\n  - path: sub2/main2.yaml\n    env_file: vars.env\nservices:\n  level1:\n    image: nginx:alpine\n');
+    await expect(assertComposeInputsWithinExpansionLimits({ cwd: dir, invocation: ['compose', 'config'] }))
+      .rejects.toThrow(/relative env_file inside an included project/);
+  });
+
+  it('accepts a first-level relative project_directory with a safe nested include', async () => {
+    await write('compose.yaml', 'include:\n  - path: sub/main.yaml\n    project_directory: deep\nservices:\n  web:\n    image: nginx:alpine\n');
+    await write('sub/main.yaml', 'include:\n  - sub2/main2.yaml\nservices:\n  level1:\n    image: nginx:alpine\n');
+    await write('deep/sub2/main2.yaml', SAFE_COMPOSE);
+    await expect(assertComposeInputsWithinExpansionLimits({ cwd: dir, invocation: ['compose', 'config'] }))
+      .resolves.toBeUndefined();
+  });
+
+  it('expands a ~ env-file path from HOME', async () => {
+    const previousHome = process.env.HOME;
+    process.env.HOME = path.join(dir, 'home');
+    try {
+      await write('home/vars.env', 'COMPOSE_FILE=selected.yaml\n');
+      await write('selected.yaml', nestedAliasBomb(12));
+      await write('compose.yaml', SAFE_COMPOSE);
+      await expect(assertComposeInputsWithinExpansionLimits({
+        cwd: dir,
+        invocation: ['compose', '--env-file', '~/vars.env', 'config'],
+      })).rejects.toBeInstanceOf(ComposeExpansionRefusal);
+    } finally {
+      if (previousHome === undefined) delete process.env.HOME;
+      else process.env.HOME = previousHome;
+    }
+  });
+
+  it('refuses a ~user extends path in a nested extends', async () => {
+    await write('compose.yaml', 'services:\n  web:\n    extends:\n      file: sub/a.yaml\n      service: base\n');
+    await write('sub/a.yaml', 'services:\n  base:\n    extends:\n      file: ~someone/b.yaml\n      service: deeper\n');
+    await expect(assertComposeInputsWithinExpansionLimits({ cwd: dir, invocation: ['compose', 'config'] }))
+      .rejects.toThrow(/~user extends path/);
+  });
+
   it('refuses a bare-host git include reference', async () => {
     await write('compose.yaml', 'include:\n  - github.com/org/repo\nservices:\n  web:\n    image: nginx:alpine\n');
     await expect(assertComposeInputsWithinExpansionLimits({ cwd: dir, invocation: ['compose', 'config'] }))
