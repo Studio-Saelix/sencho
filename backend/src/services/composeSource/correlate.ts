@@ -567,10 +567,10 @@ type AuthoredPathSplit =
 /**
  * Split `services.<name>.<field>` using the project's own service names. A
  * Compose service name may contain dots, so the same text can name a field of
- * `api` or the service `api.image`. An interpretation is viable only when the
- * project actually authors that node; when both are viable the path cannot say
- * which structure was meant, so the edit origin is refused with the reason that
- * names the uncertainty.
+ * `api` or the service `api.image`. An interpretation is viable when the
+ * project authors that node or its file cannot be read; when more than one is
+ * viable the path cannot say which structure was meant, so the edit origin is
+ * refused with the reason that names the uncertainty.
  */
 function splitAuthoredPath(project: AuthoredProject, path: string): AuthoredPathSplit | null {
   const prefix = 'services.';

@@ -2280,10 +2280,10 @@ export function useStackActions(options: UseStackActionsOptions) {
   /**
    * Open a reported authored location. One click, one handler: the compose tab
    * when the file is the loaded primary compose file, the Files tab otherwise.
-   * A range was computed against one disk revision, so the compose surface
-   * re-reads the file and applies the range only to that revision: a clean
-   * stale buffer is refreshed, while unsaved edits are preserved and the
-   * selection is left alone. The Files surface rereads the same path in
+   * A range belongs to one file revision, so the compose surface re-reads the
+   * file and applies the range only when the buffer equals the content read
+   * here: a clean stale buffer is refreshed, while unsaved edits are preserved
+   * and the selection is left alone. The Files surface rereads the same path in
    * FileViewer, and its existing discard confirmation covers a dirty viewer.
    */
   const openAuthoredLocation = (location: AuthoredLocation) => {

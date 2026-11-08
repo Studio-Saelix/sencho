@@ -122,6 +122,11 @@ describe('parseComposeDocument', () => {
     expect(tooDeep.serviceNamesKnown).toBe(false);
   });
 
+  it('detects interpolation after an escaped dollar in a map value', () => {
+    const parsed = parse('services:\n  api:\n    image: nginx:1\n    labels:\n      token: "$$$FOO"\n');
+    expect(parsed.inlineLabels[0]).toMatchObject({ key: 'token', hasInterpolation: true, form: 'map' });
+  });
+
   it('marks an inline label whose value is an alias as unresolved', () => {
     const parsed = parse([
       'x-value: &value override',
@@ -252,7 +257,35 @@ describe('parseComposeDocument', () => {
       '',
     ].join('\n'));
     expect(parsed.serviceNames).toEqual(['api']);
+    expect(parsed.serviceNamesKnown).toBe(true);
     expect(authoredNodeKey([''])).not.toBe(authoredNodeKey([]));
+  });
+
+  it('does not let a nested empty-key services map make a partial service list look complete', () => {
+    const lines = ['x-1: &x1', '  web:', '    image: nginx:1'];
+    for (let level = 2; level <= 20; level += 1) {
+      lines.push(`x-${level}: &x${level} {<<: *x${level - 1}}`);
+    }
+    lines.push(
+      'services:',
+      '  <<: *x20',
+      '"":',
+      '  services:',
+      '    ghost:',
+      '      image: nginx:1',
+      '',
+    );
+    const parsed = parse(lines.join('\n'));
+    // The real services map walk was truncated by the merge depth; the nested
+    // map must not flip the completeness flag, or Doctor would call ghost
+    // foreign while treating a partial list as complete.
+    expect(parsed.serviceNamesKnown).toBe(false);
+  });
+
+  it('refuses an anchored key that cannot become a scalar key', () => {
+    const parsed = parse('x-key: &k {a: b}\nservices:\n  api:\n    image: nginx:1\n    labels:\n      ? *k\n      : inline\n');
+    expect(parsed.state).toBe('parse-failed');
+    expect(parsed.diagnostics.some(entry => entry.code === 'unsupported-syntax')).toBe(true);
   });
 
   it('keeps UTF-16 column parity on a multibyte line', () => {

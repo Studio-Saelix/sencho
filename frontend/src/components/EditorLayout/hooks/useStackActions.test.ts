@@ -4587,6 +4587,38 @@ describe('useStackActions.openAuthoredLocation', () => {
     expect(editorState.setPendingReveal).toHaveBeenLastCalledWith(null);
   });
 
+  it('clears a pending reveal when the node changes', async () => {
+    vi.mocked(apiFetch).mockResolvedValue(new Response('disk content', { status: 200 }));
+    const { result, rerender, activeNodeHolder, editorState } = setup({
+      editorState: { content: 'disk content', originalContent: 'disk content' },
+    });
+
+    await act(async () => {
+      result.current.openAuthoredLocation(location);
+    });
+    expect(editorState.setPendingReveal).toHaveBeenCalledWith(expect.objectContaining({
+      target: { surface: 'compose', file: 'compose.yaml' },
+    }));
+
+    activeNodeHolder.current = { id: 2, name: 'Remote', type: 'remote' } as Parameters<typeof useStackActions>[0]['activeNode'];
+    rerender();
+    expect(editorState.setPendingReveal).toHaveBeenLastCalledWith(null);
+  });
+
+  it('clears a pending reveal when the compose read fails', async () => {
+    vi.mocked(apiFetch).mockRejectedValue(new Error('unreachable'));
+    const { result, editorState } = setup({
+      editorState: { content: 'disk content', originalContent: 'disk content' },
+    });
+
+    await act(async () => {
+      result.current.openAuthoredLocation(location);
+    });
+
+    expect(editorState.setPendingReveal).toHaveBeenCalledWith(null);
+    expect(toast.error).toHaveBeenCalledWith(expect.stringMatching(/could not confirm/i));
+  });
+
   it('clears a pending reveal when the stack changes', async () => {
     vi.mocked(apiFetch).mockResolvedValue(new Response('disk content', { status: 200 }));
     const { result, rerender, stackListState, editorState } = setup({

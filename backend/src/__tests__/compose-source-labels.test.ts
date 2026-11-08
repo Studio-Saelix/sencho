@@ -4,7 +4,8 @@ import path from 'path';
 
 import { setupTestDb, cleanupTestDb } from './helpers/setupTestDb';
 import { NodeRegistry } from '../services/NodeRegistry';
-import { buildAuthoredProject, correlateLabel, resolveEditOrigin } from '../services/composeSource';
+import { buildAuthoredProject, correlateField, correlateLabel, resolveEditOrigin } from '../services/composeSource';
+import { authoredOriginsFor } from '../services/LabelInventoryService';
 
 let tmpDir: string;
 let nodeId: number;
@@ -362,6 +363,26 @@ describe('authored label contributions', () => {
     });
     const project = await buildAuthoredProject(nodeId, 'tagged-environment');
     expect(resolveEditOrigin(project, 'services.api.environment.OLD').ok).toBe(false);
+  });
+
+  it('resolves a dotted label key through the field path', async () => {
+    writeStack('label-dotted-field', {
+      'compose.yaml': 'services:\n  api:\n    image: nginx:1\n    labels:\n      io.sencho.url: http://example.test\n',
+    });
+    const project = await buildAuthoredProject(nodeId, 'label-dotted-field');
+    expect(correlateField(project, 'api', 'labels.io.sencho.url').origin).toMatchObject({
+      file: 'compose.yaml', range: { line: 5 },
+    });
+  });
+
+  it('returns an authored origin for a label named __proto__', async () => {
+    writeStack('label-proto-origin', {
+      'compose.yaml': 'services:\n  api:\n    image: nginx:1\n    labels:\n      __proto__: value\n',
+    });
+    const project = await buildAuthoredProject(nodeId, 'label-proto-origin');
+    const origins = authoredOriginsFor(project, 'api', ['__proto__']);
+    expect(Object.prototype.hasOwnProperty.call(origins, '__proto__')).toBe(true);
+    expect(origins?.['__proto__']?.file).toBe('compose.yaml');
   });
 
   it('locates inline map and list forms by their real ranges', async () => {

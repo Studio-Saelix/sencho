@@ -290,7 +290,8 @@ export class ComposeDoctorService {
     if (!run) return { run: null, findings: [], coverage: unrecordedCoverage() };
     const { acks, ackCtx } = loadAcknowledgementInputs(nodeId, stackName, run.rendered_hash, run.service_images);
     // A range is only actionable while the file it names still has the content
-    // the run hashed; an edited file drops the link until the next run.
+    // the run hashed; an edited file drops the link until its content matches
+    // the run again.
     const stored = await dropStaleStoredLocations(nodeId, stackName, this.readNormalized(nodeId, stackName, run.id));
     return {
       run,

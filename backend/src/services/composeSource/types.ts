@@ -57,7 +57,9 @@ export type AuthoredNodeKind = 'mapping' | 'sequence' | 'scalar' | 'alias';
  * `['services','api.image']` (a service whose name contains a dot) are
  * different identities even though their display paths look alike.
  */
-export type AuthoredPathSegment = string | number;export interface AuthoredNode {
+export type AuthoredPathSegment = string | number;
+
+export interface AuthoredNode {
   /** Dot path for display and the edit-origin contract, e.g. `services.api.image`
    *  or `services.api.ports[0]`. Not an identity: a service name may contain a
    *  dot, so internal lookup uses `segments`. */

@@ -385,9 +385,10 @@ export function EditorView(props: EditorViewProps) {
     }, []);
 
     // Apply a requested authored location once the compose editor is on screen
-    // and showing the content revision the range came from, then clear it. A
-    // clean stale buffer is refreshed by the caller before the request is set;
-    // an edited buffer does not match the revision and is never re-selected.
+    // and showing the content revision the request is bound to, then clear it.
+    // A clean stale buffer is refreshed by the caller before the request is
+    // set; an edited buffer does not match the revision and is never
+    // re-selected.
     useEffect(() => {
         if (!pendingReveal || pendingReveal.target.surface !== 'compose' || activeTab !== 'compose' || !editingCompose) return;
         if (pendingReveal.revision !== undefined && safeContent !== pendingReveal.revision) return;

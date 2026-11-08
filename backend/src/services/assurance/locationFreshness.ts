@@ -1,9 +1,10 @@
 /**
  * A persisted authored location is a fact about one run: the file held that
  * text at that line when the run read it. Once the file changes, the range no
- * longer names what the finding reports, so the link is dropped until the next
- * run rather than opening an unrelated line. The finding itself stays; only
- * the coordinates go.
+ * longer names what the finding reports, so the link is dropped rather than
+ * opening an unrelated line. The finding itself stays; only the coordinates
+ * go. The link returns if the file's content matches the run again, without a
+ * new run.
  *
  * The check reads each located file once per call and compares its sha256 with
  * the digest stored beside the range. A missing digest (a row stored before

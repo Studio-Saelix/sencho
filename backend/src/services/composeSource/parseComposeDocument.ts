@@ -105,6 +105,15 @@ export function hasInterpolationSyntax(text: string): boolean {
   return INTERPOLATION.test(text);
 }
 
+/**
+ * Compose collapses `$$` to one literal dollar before interpolation, so an
+ * escaped dollar must not be mistaken for a variable start (`$$$FOO` still
+ * interpolates `FOO`).
+ */
+export function hasEffectiveInterpolation(text: string): boolean {
+  return hasInterpolationSyntax(text.replace(/\$\$/g, ''));
+}
+
 export interface IncludeDeclaration {
   paths: string[];
   projectDirectory?: string;
@@ -151,7 +160,7 @@ export interface InlineLabelDeclaration {
   hasInterpolation: boolean;
   /** The list-form key text is interpolated, so Compose may resolve it to any
    *  effective key. A map key is a YAML key and is never interpolated. */
-  keyHasInterpolation?: boolean;
+  keyHasInterpolation: boolean;
   /** The declaration point is an alias whose value cannot be attributed to this key. */
   unresolved?: boolean;
 }
@@ -447,7 +456,7 @@ function walkValue(
     return;
   }
   if (isMap(node)) {
-    walkMap(ctx, node as YAMLMap, path, segments, via, depth);
+    walkMap(ctx, node as YAMLMap, segments, via, depth);
     return;
   }
   if (isSeq(node)) {
@@ -528,7 +537,6 @@ function mergedPairs(ctx: WalkContext, value: Node | null | undefined, depth: nu
 function walkMap(
   ctx: WalkContext,
   map: YAMLMap,
-  path: string,
   segments: readonly AuthoredPathSegment[],
   via: 'own' | 'merge' | 'alias',
   depth: number,
@@ -563,7 +571,9 @@ function walkMap(
     if (!merged.complete) keysComplete = false;
     for (const entry of merged.pairs) emit(entry.pair, 'merge');
   }
-  if (path === 'services') ctx.servicesWalked = keysComplete && !ctx.boundsExceeded;
+  if (segments.length === 1 && segments[0] === 'services') {
+    ctx.servicesWalked = keysComplete && !ctx.boundsExceeded;
+  }
 }
 
 function addDiagnostic(
@@ -681,16 +691,15 @@ function collectDeclarations(
             // literal dollar in the effective key. The key itself is unknown
             // only when a real variable (not an escaped dollar) is present.
             const key = rawKey.replace(/\$\$/g, '$');
-            const interpolationProbe = rawKey.replace(/\$\$/g, '');
             result.inlineLabels.push({
               service,
               key,
               range: { line: 1, column: 1, endLine: 1, endColumn: 1 },
               form: 'list',
-              hasInterpolation: hasInterpolationSyntax(text.replace(/\$\$/g, '')),
+              hasInterpolation: hasEffectiveInterpolation(text),
               // Compose interpolates the whole list item, so a variable in the
               // key portion can resolve to any effective label key.
-              keyHasInterpolation: hasInterpolationSyntax(interpolationProbe),
+              keyHasInterpolation: hasEffectiveInterpolation(rawKey),
             });
           }
         } else {
@@ -700,8 +709,9 @@ function collectDeclarations(
               key: labelKey,
               range: { line: 1, column: 1, endLine: 1, endColumn: 1 },
               form: 'map',
-              hasInterpolation: hasInterpolationSyntax(labelKey)
-                || (typeof labelValue === 'string' && hasInterpolationSyntax(labelValue)),
+              // A YAML mapping key is never interpolated; only its value is.
+              hasInterpolation: typeof labelValue === 'string' && hasEffectiveInterpolation(labelValue),
+              keyHasInterpolation: false,
             });
           }
         }
@@ -854,7 +864,7 @@ export function parseComposeDocument(input: ParseComposeDocumentInput): ParsedCo
 
   // The root itself is not a compose declaration, so its children are the
   // documented paths (`services.api.image`, `networks.edge`, ...).
-  walkMap(ctx, doc.contents as YAMLMap, '', [], 'own', 0);
+  walkMap(ctx, doc.contents as YAMLMap, [], 'own', 0);
   collectDeclarations(ctx, doc.contents as YAMLMap, empty);
   // The walk owns the service-name list: it follows aliases and merge keys and
   // records each key as it is enumerated, so a chain that is too deep only
