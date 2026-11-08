@@ -568,15 +568,15 @@ describe('buildSocketInventory classification', () => {
     expect(byGroups.containers[0].evidence).toContain('socket-mount-directory');
   });
 
-  it('keeps a directory mount undetermined when a Docker API port is exposed', () => {
+  it('keeps a readable socket mount undetermined when a Docker API port is exposed', () => {
     // The classifier checks private as well as published ports, so an
-    // unpublished 2375 still leaves the row undetermined rather than a direct
-    // consumer.
+    // unpublished 2375 turns a socket-naming mount from a direct consumer into
+    // an undetermined row.
     const inventory = buildSocketInventory(input({
       containers: [row({
-        id: 'api-port-dir1',
-        name: 'api-port-dir',
-        mounts: [socketMount('/var/run', '/hostrun', true)],
+        id: 'api-port1',
+        name: 'api-port',
+        mounts: [socketMount(SOCKET, SOCKET, true)],
         ports: [{ privatePort: 2375, publicPort: null, ip: null, protocol: 'tcp' }],
       })],
     }));
@@ -585,8 +585,9 @@ describe('buildSocketInventory classification', () => {
       role: 'undetermined',
       classification: 'unknown',
     });
-    expect(inventory.containers[0].evidence).toContain('socket-mount-directory');
+    expect(inventory.containers[0].evidence).toContain('socket-bind-mount');
     expect(inventory.containers[0].evidence).toContain('docker-api-port-published');
+    expect(inventory.counts.directSocketConsumers).toBe(0);
   });
 
   it('uses a tcp provider socket source as the custom ancestor for directory mounts', () => {

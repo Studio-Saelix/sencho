@@ -480,7 +480,7 @@ interface SocketMountMatch {
  * source or target is certain. A mount that shares the host socket path Sencho
  * itself uses is certain too, which covers a proxy that listens on a custom
  * unix socket path. A bind of a directory that contains the socket (`/var/run`,
- * `/run`, `/var`, `/`, or the visible parent of a custom socket) is possible socket access:
+ * `/run`, `/var`, `/`, or a visible ancestor directory of a custom socket) is possible socket access:
  * the container can open the socket through it without naming it. Classification
  * reads the full list; the response projection bounds it and marks the row
  * incomplete.
@@ -649,8 +649,9 @@ function classifyRow(
       });
     }
     if (dockerApiPort) {
-      // The socket is mounted and a Docker API port is published, but nothing
-      // proves this is a proxy. Say so instead of guessing in either direction.
+      // The socket is mounted and a Docker API port is exposed or published,
+      // but nothing proves this is a proxy. Say so instead of guessing in
+      // either direction.
       return buildClassified(row, {
         role: 'undetermined',
         classification: 'unknown',
