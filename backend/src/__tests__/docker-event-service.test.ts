@@ -526,6 +526,80 @@ describe('DockerEventService - die classification', () => {
         expect(oomAlerts()).toBe(2);
     });
 
+    it('does not alert twice when an identical die overlaps an in-flight OOM inspect', async () => {
+        service = new DockerEventService(1, 'local');
+        await service.start();
+
+        let resolveInspect!: (value: unknown) => void;
+        mockInspect.mockImplementation(() => new Promise(resolve => { resolveInspect = resolve; }));
+
+        const oomDie = {
+            Type: 'container',
+            Action: 'die',
+            Actor: { ID: 'c-oom-overlap', Attributes: { exitCode: '137', name: 'hog' } },
+            time: 1_302,
+        };
+
+        stream.push({ Type: 'container', Action: 'start', Actor: { ID: 'c-oom-overlap', Attributes: { name: 'hog' } }, time: 1_000 });
+        await vi.advanceTimersByTimeAsync(5 * 60_000);
+        stream.push(oomDie);
+        // The 500 ms grace window elapsed and classification is parked on the
+        // OOM inspect, before it can stamp the incident.
+        await vi.advanceTimersByTimeAsync(600);
+
+        // The same die is redelivered while that inspect is still in flight.
+        stream.push(oomDie);
+        await vi.advanceTimersByTimeAsync(600);
+
+        resolveInspect({ State: { OOMKilled: true, ExitCode: 137 } });
+        await vi.advanceTimersByTimeAsync(0);
+        await Promise.resolve();
+        await Promise.resolve();
+
+        const oomAlerts = mockDispatchAlert.mock.calls.filter(c =>
+            typeof c[2] === 'string' && c[2].includes('OOM Kill'));
+        expect(oomAlerts).toHaveLength(1);
+        expect(mockInspect).toHaveBeenCalledTimes(1);
+    });
+
+    it('drops a redelivered die that overlaps a different in-flight die', async () => {
+        service = new DockerEventService(1, 'local');
+        await service.start();
+
+        const resolvers: Array<(value: unknown) => void> = [];
+        mockInspect.mockImplementation(() => new Promise(resolve => { resolvers.push(resolve); }));
+
+        const oomDie = (atSeconds: number) => ({
+            Type: 'container',
+            Action: 'die',
+            Actor: { ID: 'c-oom-ab', Attributes: { exitCode: '137', name: 'hog' } },
+            time: atSeconds,
+        });
+
+        stream.push({ Type: 'container', Action: 'start', Actor: { ID: 'c-oom-ab', Attributes: { name: 'hog' } }, time: 1_000 });
+        await vi.advanceTimersByTimeAsync(5 * 60_000);
+
+        stream.push(oomDie(1_302));
+        await vi.advanceTimersByTimeAsync(600);
+        // A distinct die starts while the first inspect is still parked.
+        stream.push(oomDie(1_303));
+        await vi.advanceTimersByTimeAsync(600);
+        // The first die is redelivered while both are in flight.
+        stream.push(oomDie(1_302));
+        await vi.advanceTimersByTimeAsync(600);
+
+        expect(mockInspect).toHaveBeenCalledTimes(2);
+        for (const resolve of resolvers) resolve({ State: { OOMKilled: true, ExitCode: 137 } });
+        await vi.advanceTimersByTimeAsync(0);
+        await Promise.resolve();
+        await Promise.resolve();
+
+        const oomAlerts = mockDispatchAlert.mock.calls.filter(c =>
+            typeof c[2] === 'string' && c[2].includes('OOM Kill'));
+        expect(oomAlerts).toHaveLength(2);
+        expect(mockInspect).toHaveBeenCalledTimes(2);
+    });
+
     it('keeps a stable-run alert eligible when the dispatch was rate-suppressed', async () => {
         service = new DockerEventService(1, 'local');
         await service.start();
@@ -636,6 +710,20 @@ describe('DockerEventService - die classification', () => {
             Actor: { ID: 'c-hour', Attributes: { exitCode: '1', name: 'web' } },
         });
         await vi.advanceTimersByTimeAsync(600);
+        expect(mockDispatchAlert).toHaveBeenCalledTimes(1);
+
+        // Keep looping through the hour (a start and a short die each lap) and
+        // stay silent for every lap inside the window.
+        for (let lap = 0; lap < 10; lap++) {
+            stream.push({ Type: 'container', Action: 'start', Actor: { ID: 'c-hour', Attributes: { name: 'web' } } });
+            await vi.advanceTimersByTimeAsync(2_000);
+            stream.push({
+                Type: 'container',
+                Action: 'die',
+                Actor: { ID: 'c-hour', Attributes: { exitCode: '1', name: 'web' } },
+            });
+            await vi.advanceTimersByTimeAsync(600);
+        }
         expect(mockDispatchAlert).toHaveBeenCalledTimes(1);
 
         // Still looping (start each lap) an hour later: the window has expired,

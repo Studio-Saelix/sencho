@@ -164,6 +164,15 @@ export class DockerEventService {
     private pendingDieTimers: Map<string, NodeJS.Timeout> = new Map();
 
     /**
+     * Die events currently being classified, keyed by container id and die
+     * timestamp. A duplicate delivery that overlaps an in-flight classification
+     * (the OOM inspect awaits before dispatch) would otherwise pass the dedup
+     * gate before the first one stamps, and dispatch a second alert for the
+     * same incident.
+     */
+    private inFlightDies = new Set<string>();
+
+    /**
      * Last observed `start` event time per container id, kept outside
      * containerState. classifyDie creates the state only after the grace window,
      * so a start that lands inside it finds nothing to update; the crash-loop
@@ -689,6 +698,19 @@ export class DockerEventService {
     }
 
     private async classifyDie(id: string, event: DockerEventPayload, dieAt: number): Promise<void> {
+        // Drop an identical die that arrives while its own classification is
+        // still running; a distinct die (different timestamp) still classifies.
+        const key = `${id}:${dieAt}`;
+        if (this.inFlightDies.has(key)) return;
+        this.inFlightDies.add(key);
+        try {
+            await this.classifyDieEvent(id, event, dieAt);
+        } finally {
+            this.inFlightDies.delete(key);
+        }
+    }
+
+    private async classifyDieEvent(id: string, event: DockerEventPayload, dieAt: number): Promise<void> {
         const state = this.getOrCreateState(id, event);
         const exitCodeStr = event.Actor?.Attributes?.exitCode;
         const parsedExit = exitCodeStr !== undefined ? parseInt(exitCodeStr, 10) : undefined;
