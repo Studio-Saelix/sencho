@@ -5,6 +5,7 @@ import {
 import { Tabs, TabsContent, TabsList, TabsTrigger, TabsHighlight, TabsHighlightItem } from '@/components/ui/tabs';
 import { PageMasthead, type MastheadMetadataItem } from '@/components/ui/PageMasthead';
 import { Button } from '@/components/ui/button';
+import { IconBusyButton } from '@/components/ui/icon-busy-button';
 import { Card, CardContent } from '@/components/ui/card';
 import { LockCard } from '@/components/ui/LockCard';
 import { DismissedCountButton, DismissedSheet } from '@/components/ui/dismissed-sheet';
@@ -648,16 +649,15 @@ export function NetworkingView({ headerActions }: NetworkingViewProps) {
               <TooltipProvider>
                 <Tooltip>
                   <TooltipTrigger asChild>
-                    <Button
+                    <IconBusyButton
                       variant="outline"
                       size="sm"
+                      icon={RefreshCw}
                       onClick={() => setReloadKey(k => k + 1)}
-                      disabled={loading}
+                      pending={loading}
                       className="h-9 w-9 p-0"
                       aria-label="Refresh"
-                    >
-                      <RefreshCw className={`w-4 h-4 ${loading ? 'animate-spin' : ''}`} />
-                    </Button>
+                    />
                   </TooltipTrigger>
                   <TooltipContent>Refresh</TooltipContent>
                 </Tooltip>

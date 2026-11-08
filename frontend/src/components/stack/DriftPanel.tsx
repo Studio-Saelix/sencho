@@ -11,6 +11,7 @@ import { formatTimeAgo } from '@/lib/relativeTime';
 import { useNodes } from '@/context/NodeContext';
 import { useAuth } from '@/context/AuthContext';
 import { Button } from '@/components/ui/button';
+import { IconBusyButton } from '@/components/ui/icon-busy-button';
 import { ConfirmModal } from '@/components/ui/modal';
 import { DismissedCountButton, DismissedSheet } from '@/components/ui/dismissed-sheet';
 import { useFindingDismissal } from '@/hooks/useFindingDismissal';
@@ -59,6 +60,7 @@ interface StackDriftReport {
 const LABEL_CLASS = 'font-mono text-[10px] uppercase tracking-[0.18em] text-stat-subtitle';
 const ACTION_CLASS =
   'inline-flex items-center gap-1 font-mono text-[10px] uppercase tracking-wide text-stat-subtitle hover:text-brand transition-colors disabled:opacity-40';
+const ACTION_BUTTON_CLASS = cn(ACTION_CLASS, 'h-auto rounded-none p-0 font-normal hover:bg-transparent [&_svg]:size-3');
 const CARD_CLASS = 'rounded-lg border px-3 py-2.5';
 
 const STATUS_META: Record<StackDriftStatus, { label: string; icon: LucideIcon; tone: string; line: string }> = {
@@ -527,15 +529,15 @@ export default function DriftPanel({ stackName, onRedeploy, onEditCompose, onOpe
     <div data-testid="drift-panel" className="flex-1 min-h-0 overflow-y-auto px-3 py-3 flex flex-col gap-4">
       <div className="flex items-center justify-between gap-2">
         <span className={LABEL_CLASS}>compose vs runtime</span>
-        <button
-          type="button"
+        <IconBusyButton
           data-testid="drift-recheck-btn"
+          variant="ghost"
+          icon={RefreshCw}
+          label="re-check"
+          pending={busy}
           onClick={recheck}
-          disabled={busy}
-          className={ACTION_CLASS}
-        >
-          <RefreshCw className={cn('h-3 w-3', busy && 'animate-spin')} strokeWidth={1.5} /> re-check
-        </button>
+          className={ACTION_BUTTON_CLASS}
+        />
       </div>
 
       {loadError ? (

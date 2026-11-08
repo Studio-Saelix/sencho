@@ -20,7 +20,7 @@ import { Container, Network, Loader2, RefreshCw } from 'lucide-react';
 import { Badge } from '@/components/ui/badge';
 import { TogglePill } from '@/components/ui/toggle-pill';
 import { Label } from '@/components/ui/label';
-import { Button } from '@/components/ui/button';
+import { IconBusyButton } from '@/components/ui/icon-busy-button';
 import { cn } from '@/lib/utils';
 import {
     DEFAULT_TOPOLOGY_FILTERS, filterTopologyNetworks, isMissingTopologyNetwork, normalizeTopologyResponse,
@@ -448,16 +448,15 @@ export default function NetworkTopologyView({
                         </span>
                     ))}
                 </div>
-                <Button
+                <IconBusyButton
                     variant="ghost"
                     size="icon"
-                    className="ml-auto h-7 w-7"
+                    icon={RefreshCw}
+                    className="ml-auto h-7 w-7 [&_svg]:size-3.5"
                     onClick={() => fetchTopology()}
-                    disabled={loading}
+                    pending={loading}
                     aria-label="Refresh topology"
-                >
-                    <RefreshCw className={cn('w-3.5 h-3.5', loading && 'animate-spin')} strokeWidth={1.5} />
-                </Button>
+                />
             </div>
             <div className="h-[500px] w-full">
                 <ReactFlow
