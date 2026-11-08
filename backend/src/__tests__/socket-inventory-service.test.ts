@@ -579,7 +579,6 @@ describe('buildSocketInventory classification', () => {
         name: 'api-port',
         mounts: [socketMount(SOCKET, SOCKET, true)],
         ports: [{ privatePort: 2375, publicPort: null, ip: null, protocol: 'tcp' }],
-        exposedPorts: ['2375/tcp'],
       })],
     }));
 
@@ -595,18 +594,49 @@ describe('buildSocketInventory classification', () => {
   });
 
   it('reads a Docker API port from exposedPorts when the port list omits it', () => {
-    const inventory = buildSocketInventory(input({
+    for (const spec of ['2375/tcp', '2376/tcp']) {
+      const inventory = buildSocketInventory(input({
+        containers: [row({
+          id: `api-exposed-list-${spec}`,
+          name: 'api-exposed-list',
+          mounts: [socketMount(SOCKET, SOCKET, true)],
+          exposedPorts: [spec],
+        })],
+      }));
+
+      expect(inventory.containers[0].role).toBe('undetermined');
+      expect(inventory.containers[0].evidence).toContain('docker-api-port-exposed');
+      expect(inventory.containers[0].evidence).not.toContain('docker-api-port-published');
+    }
+  });
+
+  it('emits no Docker API port token for a non-Docker or non-TCP port', () => {
+    const nonDocker = buildSocketInventory(input({
       containers: [row({
-        id: 'api-exposed-list1',
-        name: 'api-exposed-list',
+        id: 'app-port1',
+        name: 'app-port',
         mounts: [socketMount(SOCKET, SOCKET, true)],
-        exposedPorts: ['2376/tcp'],
+        ports: [{ privatePort: 8080, publicPort: null, ip: null, protocol: 'tcp' }],
+        exposedPorts: ['8080/tcp'],
       })],
     }));
+    expect(nonDocker.containers[0].role).toBe('direct-socket-consumer');
+    expect(nonDocker.containers[0].evidence).not.toContain('docker-api-port-exposed');
+    expect(nonDocker.containers[0].evidence).not.toContain('docker-api-port-published');
 
-    expect(inventory.containers[0].role).toBe('undetermined');
-    expect(inventory.containers[0].evidence).toContain('docker-api-port-exposed');
-    expect(inventory.containers[0].evidence).not.toContain('docker-api-port-published');
+    // The Docker API is TCP; a UDP port that happens to number 2375 is not it.
+    const udp = buildSocketInventory(input({
+      containers: [row({
+        id: 'app-udp1',
+        name: 'app-udp',
+        mounts: [socketMount(SOCKET, SOCKET, true)],
+        ports: [{ privatePort: 2375, publicPort: null, ip: null, protocol: 'udp' }],
+        exposedPorts: ['2375/udp'],
+      })],
+    }));
+    expect(udp.containers[0].role).toBe('direct-socket-consumer');
+    expect(udp.containers[0].evidence).not.toContain('docker-api-port-exposed');
+    expect(udp.containers[0].evidence).not.toContain('docker-api-port-published');
   });
 
   it('keeps the published token when a Docker API port has a host binding', () => {
@@ -653,7 +683,7 @@ describe('buildSocketInventory classification', () => {
   });
 
   it('uses the matching port token on an uninspectable row', () => {
-    const inventory = buildSocketInventory(input({
+    const exposed = buildSocketInventory(input({
       containers: [row({
         id: 'api-failed1',
         name: 'api-failed',
@@ -663,9 +693,22 @@ describe('buildSocketInventory classification', () => {
       })],
     }));
 
-    expect(inventory.containers[0].evidence).toContain('inspect-failed');
-    expect(inventory.containers[0].evidence).toContain('docker-api-port-exposed');
-    expect(inventory.containers[0].evidence).not.toContain('docker-api-port-published');
+    expect(exposed.containers[0].evidence).toContain('inspect-failed');
+    expect(exposed.containers[0].evidence).toContain('docker-api-port-exposed');
+    expect(exposed.containers[0].evidence).not.toContain('docker-api-port-published');
+
+    const published = buildSocketInventory(input({
+      containers: [row({
+        id: 'api-failed2',
+        name: 'api-failed-published',
+        inspectFailed: true,
+        ports: [{ privatePort: 2376, publicPort: 2376, ip: '0.0.0.0', protocol: 'tcp' }],
+      })],
+    }));
+
+    expect(published.containers[0].evidence).toContain('inspect-failed');
+    expect(published.containers[0].evidence).toContain('docker-api-port-published');
+    expect(published.containers[0].evidence).not.toContain('docker-api-port-exposed');
   });
 
   it('uses a tcp provider socket source as the custom ancestor for directory mounts', () => {

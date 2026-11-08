@@ -518,20 +518,29 @@ function isDockerApiPortNumber(port: number | null): boolean {
   return port === 2375 || port === 2376;
 }
 
-/** An `exposedPorts` entry such as `2375/tcp` names a Docker API port. */
+/** The Docker API is TCP; an unreadable protocol stays possible, a known other one does not. */
+function isDockerApiTransport(protocol: string | null): boolean {
+  return protocol === null || protocol === 'tcp';
+}
+
+/** An `exposedPorts` entry such as `2375/tcp` names a TCP Docker API port. */
 function isDockerApiExposedPortSpec(spec: string): boolean {
   const slash = spec.lastIndexOf('/');
   const rawPort = slash > 0 ? spec.slice(0, slash) : spec;
-  return /^\d+$/.test(rawPort) && isDockerApiPortNumber(Number(rawPort));
+  if (!/^\d+$/.test(rawPort) || !isDockerApiPortNumber(Number(rawPort))) return false;
+  // Normalized entries always carry a protocol; a spec without one is Docker's
+  // tcp default.
+  return slash <= 0 || spec.slice(slash + 1).toLowerCase() === 'tcp';
 }
 
 /**
- * Docker API port facts for a row's evidence. A port with a host binding is
- * published. A private Docker API port without one, or an `exposedPorts` entry
- * when the port list is missing it, is exposed only. The tokens are mutually
- * exclusive: publishing a port also exposes it, so `docker-api-port-published`
- * states the stronger, host-reachable fact and the exposed token is reserved
- * for a row with no published Docker API port at all.
+ * Docker API port facts for a row's evidence and classification. The Docker API
+ * is TCP, so a known non-TCP transport is ignored. A TCP port number 2375 or
+ * 2376 with a readable host binding is published; a private one without a
+ * readable binding, or a matching `exposedPorts` entry, is exposed only. The
+ * tokens are mutually exclusive: publishing a port also exposes it, so
+ * `docker-api-port-published` states the stronger, host-reachable fact and the
+ * exposed token is reserved for a row with no published Docker API port at all.
  */
 function dockerApiPortFacts(row: SocketInventoryContainerRow): {
   any: boolean;
@@ -540,6 +549,7 @@ function dockerApiPortFacts(row: SocketInventoryContainerRow): {
   let published = false;
   let exposedOnly = false;
   for (const port of row.ports) {
+    if (!isDockerApiTransport(port.protocol)) continue;
     if (isDockerApiPortNumber(port.publicPort)
       || (isDockerApiPortNumber(port.privatePort) && port.publicPort !== null)) {
       published = true;
