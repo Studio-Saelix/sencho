@@ -589,6 +589,42 @@ describe('PreflightPanel', () => {
     expect(screen.queryByRole('button', { name: /^Open / })).toBeNull();
   });
 
+  it('says nothing shows a link when every matching refresh is acknowledged', async () => {
+    const onOpenLocation = vi.fn();
+    const shared = {
+      ruleId: 'bind-path-missing', severity: 'high' as const,
+      title: 'Bind mount path is missing',
+      message: 'The host path "/data" for service "web" does not exist.',
+      service: 'web', sourcePath: '/data',
+    };
+    vi.mocked(apiFetch)
+      .mockResolvedValueOnce(jsonRes(report({
+        status: 'high', highestSeverity: 'high',
+        findings: [
+          { ...shared, location: { file: 'compose.yaml', line: 4, column: 7, endLine: 4, endColumn: 18 } },
+          { ...shared, location: { file: 'compose.yaml', line: 9, column: 7, endLine: 9, endColumn: 18 } },
+        ],
+      })))
+      .mockResolvedValueOnce(jsonRes(report({
+        status: 'high', highestSeverity: 'high',
+        findings: [
+          { ...shared, acknowledged: true, location: { file: 'compose.yaml', line: 12, column: 7, endLine: 12, endColumn: 18 } },
+          { ...shared, acknowledged: true, location: { file: 'compose.yaml', line: 15, column: 7, endLine: 15, endColumn: 18 } },
+        ],
+      })));
+    render(<PreflightPanel stackName="web" onOpenLocation={onOpenLocation} />);
+    fireEvent.click(await screen.findByRole('button', { name: 'Open compose.yaml at line 9' }));
+    await waitFor(() => {
+      expect(toast.info).toHaveBeenCalledWith(
+        'The report was refreshed; several findings match and none shows a link.',
+      );
+    });
+    expect(toast.info).toHaveBeenCalledTimes(1);
+    expect(onOpenLocation).not.toHaveBeenCalled();
+    // Acknowledged rows carry no Open button even when the payload keeps their location.
+    expect(screen.queryByRole('button', { name: /^Open / })).toBeNull();
+  });
+
   it('opens the shared range when several refreshed findings anchor to the clicked line', async () => {
     const onOpenLocation = vi.fn();
     const shared = {

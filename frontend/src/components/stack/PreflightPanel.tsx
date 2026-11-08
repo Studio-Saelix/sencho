@@ -74,8 +74,8 @@ function sameRange(a: AuthoredLocation | undefined, b: AuthoredLocation | undefi
  *  findings render the same identity (for example one bind source mounted at
  *  two targets), the clicked range is the only discriminator: a candidate
  *  anchored at the clicked range opens that range, even when several rows
- *  share it. With no anchor the click cannot choose, so the caller asks the
- *  operator to choose from the refreshed report. */
+ *  share it. With no anchor the click cannot choose, so the caller says
+ *  whether the refreshed report still has a link to choose from. */
 type FreshFinding =
   | { kind: 'found'; finding: PreflightFinding }
   | { kind: 'missing' }
@@ -89,7 +89,7 @@ function freshFinding(report: PreflightReport, finding: PreflightFinding): Fresh
   // lands on the same place; only a range that anchors none is ambiguous.
   const anchored = candidates.filter(candidate => sameRange(candidate.location, finding.location));
   if (anchored.length > 0) return { kind: 'found', finding: anchored[0] };
-  return { kind: 'ambiguous', hasLink: candidates.some(candidate => candidate.location !== undefined) };
+  return { kind: 'ambiguous', hasLink: candidates.some(candidate => candidate.location !== undefined && !candidate.acknowledged) };
 }
 
 const LABEL_CLASS = 'font-mono text-[10px] uppercase tracking-[0.18em] text-stat-subtitle';
