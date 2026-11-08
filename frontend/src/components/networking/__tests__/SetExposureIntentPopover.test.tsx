@@ -30,7 +30,7 @@ describe('SetExposureIntentPopover', () => {
     await waitFor(() => expect(onSaved).toHaveBeenCalledWith([
       { service: '', intent: 'lan' },
       { service: 'app', intent: 'internal' },
-    ]));
+    ], expect.any(Number)));
     const [path, init] = api.apiFetch.mock.calls[1] as [string, RequestInit & { nodeId?: number }];
     expect(path).toBe('/stacks/web/exposure');
     expect(init.method).toBe('PUT');
@@ -71,5 +71,36 @@ describe('SetExposureIntentPopover', () => {
     await userEvent.click(screen.getByRole('button', { name: 'Network exposed' }));
     expect(await screen.findByRole('button', { name: 'lan' })).toBeInTheDocument();
     expect(screen.getByText('Open stack networking')).toBeInTheDocument();
+  });
+
+  it('numbers a save when its request starts, so a reply that lands late still reads as the earlier one', async () => {
+    let releaseFirst!: () => void;
+    const firstPut = new Promise<Response>((resolve) => {
+      releaseFirst = () => resolve(json({ intents: [{ service: 'a', intent: 'lan' }] }));
+    });
+    api.apiFetch.mockImplementation((_path: string, init?: RequestInit) => {
+      if (init?.method !== 'PUT') return Promise.resolve(json({ intents: [] }));
+      const { service } = JSON.parse(init.body as string) as { service: string };
+      return service === 'a' ? firstPut : Promise.resolve(json({ intents: [{ service: 'b', intent: 'lan' }] }));
+    });
+    const onSaved = vi.fn();
+    render(
+      <>
+        <SetExposureIntentPopover stack="web" service="a" nodeId={2} onSaved={onSaved} trigger={<button type="button">first</button>} />
+        <SetExposureIntentPopover stack="web" service="b" nodeId={2} onSaved={onSaved} trigger={<button type="button">second</button>} />
+      </>,
+    );
+
+    await userEvent.click(screen.getByRole('button', { name: 'first' }));
+    await userEvent.click(await screen.findByRole('button', { name: 'lan' }));
+    await userEvent.keyboard('{Escape}');
+    await userEvent.click(screen.getByRole('button', { name: 'second' }));
+    await userEvent.click(await screen.findByRole('button', { name: 'lan' }));
+    await waitFor(() => expect(onSaved).toHaveBeenCalledTimes(1));
+    releaseFirst();
+    await waitFor(() => expect(onSaved).toHaveBeenCalledTimes(2));
+
+    const [secondOrder, firstOrder] = onSaved.mock.calls.map((call) => call[1] as number);
+    expect(firstOrder).toBeLessThan(secondOrder!);
   });
 });

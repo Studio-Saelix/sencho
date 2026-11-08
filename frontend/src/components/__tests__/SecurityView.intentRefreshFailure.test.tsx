@@ -28,7 +28,8 @@ vi.mock('@/context/DeployFeedbackContext', () => ({ useDeployFeedback: () => ({ 
 vi.mock('@/hooks/useNodeDismissals', () => ({
   useNodeDismissals: () => ({ dismissals: [], dismiss: vi.fn(), restore: vi.fn(), isPending: () => false }),
 }));
-vi.mock('@/hooks/use-is-mobile', () => ({ useIsMobile: () => false }));
+const viewport = vi.hoisted(() => ({ mobile: false }));
+vi.mock('@/hooks/use-is-mobile', () => ({ useIsMobile: () => viewport.mobile }));
 vi.mock('@/components/security/OverviewTab', () => ({
   OverviewTab: ({ onNavigate }: { onNavigate: (tab: string, filter?: undefined, targeting?: unknown) => void }) => (
     <>
@@ -89,6 +90,25 @@ vi.mock('@/components/security/OverviewTab', () => ({
         })}
       >
         go to hidden images
+      </button>
+      <button
+        type="button"
+        onClick={() => onNavigate('images', undefined, {
+          kind: 'public_exposure',
+          label: 'Exposure conflicts with declared intent',
+          imageRefs: ['exp:1'],
+          targets: [{
+            imageRef: 'exp:1',
+            stackName: 'web',
+            serviceName: 'hidden',
+            exposureReason: 'published-port',
+            intentStatus: 'set',
+            exposureIntent: 'internal',
+            intentConflict: true,
+          }],
+        })}
+      >
+        go to hidden conflict
       </button>
     </>
   ),
@@ -272,6 +292,7 @@ function mockApi(options: {
 }
 
 beforeEach(() => {
+  viewport.mobile = false;
   apiFetchMock.mockReset();
   toasts.error.mockReset();
   toasts.success.mockReset();
@@ -453,5 +474,68 @@ describe('SecurityView after a save whose summary reread fails', () => {
 
     await waitFor(() => expect(toasts.error).toHaveBeenCalledWith('Could not refresh security data'));
     expect(screen.getByText('Intent mismatch: internal (+20)')).toBeInTheDocument();
+  });
+
+  describe.each([['desktop', false], ['phone', true]])('a saved service the summary cap hides on %s', (_name, mobile) => {
+    async function saveHidden(intent: string) {
+      viewport.mobile = mobile;
+      mockApi({
+        summaries: hiddenCappedSummary,
+        failSummariesAfterSave: true,
+        savedIntents: [
+          ...Array.from({ length: 20 }, (_, index) => ({ service: `svc${index}`, intent: 'public' })),
+          { service: 'hidden', intent },
+        ],
+      });
+      const { rerender } = render(<SecurityView activeTab="overview" onTabChange={vi.fn()} />);
+      await userEvent.click(await screen.findByRole('button', { name: 'go to hidden images' }));
+      rerender(<SecurityView activeTab="images" onTabChange={vi.fn()} />);
+      expect(await screen.findByText('Intent: not classified')).toBeInTheDocument();
+      await userEvent.click(screen.getByRole('button', { name: 'Network exposed: set intent for web/hidden' }));
+      await userEvent.click(await screen.findByRole('button', { name: intent }));
+      await waitFor(() => expect(toasts.error).toHaveBeenCalledWith('Could not refresh security data'));
+    }
+
+    it('keeps its confirmed intent and a Change intent action when the reread fails', async () => {
+      await saveHidden('public');
+
+      // Every service is classified now, so the warning the hidden one could hold is gone.
+      expect(screen.queryByText(/not classified/)).not.toBeInTheDocument();
+      await userEvent.click(screen.getByRole('button', { name: 'Network exposed: choose a service' }));
+      expect(await screen.findByRole('button', { name: 'Change intent for web/hidden' })).toBeInTheDocument();
+      expect(screen.getByRole('button', { name: 'Change intent for web/svc0' })).toBeInTheDocument();
+    });
+
+    it('keeps the action after a save from the conflict banner', async () => {
+      viewport.mobile = mobile;
+      mockApi({
+        summaries: hiddenCappedSummary,
+        failSummariesAfterSave: true,
+        savedIntents: [
+          ...Array.from({ length: 20 }, (_, index) => ({ service: `svc${index}`, intent: 'public' })),
+          { service: 'hidden', intent: 'public' },
+        ],
+      });
+      const { rerender } = render(<SecurityView activeTab="overview" onTabChange={vi.fn()} />);
+      await userEvent.click(await screen.findByRole('button', { name: 'go to hidden conflict' }));
+      rerender(<SecurityView activeTab="images" onTabChange={vi.fn()} />);
+
+      expect(await screen.findByText('Exposure conflicts with declared intent')).toBeInTheDocument();
+      await userEvent.click(screen.getAllByRole('button', { name: 'Change intent' })[0]!);
+      await userEvent.click(await screen.findByRole('button', { name: 'public' }));
+      await waitFor(() => expect(toasts.error).toHaveBeenCalledWith('Could not refresh security data'));
+
+      expect(screen.queryByText('Exposure conflicts with declared intent')).not.toBeInTheDocument();
+      await userEvent.click(screen.getByRole('button', { name: 'Network exposed: choose a service' }));
+      expect(await screen.findByRole('button', { name: 'Change intent for web/hidden' })).toBeInTheDocument();
+    });
+
+    it('keeps a conflicting saved service listed with its action', async () => {
+      await saveHidden('internal');
+
+      expect(screen.getByText('Intent mismatch: internal (+20)')).toBeInTheDocument();
+      await userEvent.click(screen.getByRole('button', { name: 'Network exposed: choose a service' }));
+      expect(await screen.findByRole('button', { name: 'Change intent for web/hidden' })).toBeInTheDocument();
+    });
   });
 });

@@ -38,6 +38,14 @@ export interface RegionData<T> {
    * completing, for example) without starting a request of its own.
    */
   apply: (data: T) => void;
+  /**
+   * Adopt a change derived from the payload on screen when the call runs, not
+   * when the caller's closure was made, so a response that lands late cannot
+   * rebuild its change on a stale snapshot and undo a newer one. Like `apply`
+   * it abandons an in-flight read; nothing happens before a first payload or
+   * for another scope.
+   */
+  update: (change: (current: T) => T) => void;
 }
 
 export interface RegionOptions {
@@ -77,6 +85,10 @@ export function useRegionData<T>(
   const loadRef = useRef(load);
   const onErrorRef = useRef(options.onError);
   const [stored, setStored] = useState<StoredRegion<T>>({ scope, status: 'loading', data: null, error: null });
+  // The region on screen, written during render so `update` can tell whether
+  // there is a payload to change without reading state through its closure.
+  const storedRef = useRef(stored);
+  storedRef.current = stored;
   const [attempt, setAttempt] = useState(0);
   const generationRef = useRef(0);
   // Whether the scope on screen already has a payload, read at failure time so a
@@ -180,8 +192,22 @@ export function useRegionData<T>(
     setStored({ scope, status: 'ready', data, error: null });
   }, [scope]);
 
+  const update = useCallback((change: (current: T) => T) => {
+    const onScreen = storedRef.current;
+    if (scopeRef.current !== scope || onScreen.scope !== scope || onScreen.data === null) return;
+    generationRef.current += 1;
+    controllerRef.current?.abort();
+    controllerRef.current = null;
+    // Functional, so two changes landing in one tick each build on the other.
+    setStored((prev) => (
+      prev.scope === scope && prev.data !== null
+        ? { scope, status: 'ready', data: change(prev.data), error: null }
+        : prev
+    ));
+  }, [scope]);
+
   if (stored.scope !== scope) {
-    return { data: null, status: 'loading', error: null, refresh, apply };
+    return { data: null, status: 'loading', error: null, refresh, apply, update };
   }
-  return { data: stored.data, status: stored.status, error: stored.error, refresh, apply };
+  return { data: stored.data, status: stored.status, error: stored.error, refresh, apply, update };
 }

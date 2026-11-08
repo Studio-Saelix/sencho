@@ -75,11 +75,14 @@ export interface SavedIntentTarget {
 
 /** A confirmed save hands the owner the stack's intents so the affected rows can
  *  keep showing them until a reread replaces the summaries. A context the server
- *  settles away on that save stops counting as exposed instead. */
+ *  settles away on that save stops counting as exposed instead. `order` is the
+ *  save's start order (see `nextSaveOrder`): a reply that began before one
+ *  already adopted for the stack must not undo it. */
 export type IntentSavedHandler = (
   stackName: string,
   intents: IntentEntry[],
   saved?: SavedIntentTarget,
+  order?: number,
 ) => void;
 
 /** The intent a service ends up with after a save: its own row, else the stack row, else unset. */
@@ -223,70 +226,34 @@ function patchContextsAfterSave(
   return { patched, changed };
 }
 
-/** What a save of a service outside the display slice proves about the hidden
- *  remainder: that service's own state after the save, and whether it stopped
- *  counting as exposed. The visible patch cannot see that row, but the save's
- *  own context and effective intent can settle it, classify it, resolve its
- *  state, or show that it is still unclassified. */
-interface HiddenSaveState {
-  conflict: boolean;
-  unclassified: boolean;
-  /** The conflicting intent the save proved, for the row's label. */
-  conflictIntent?: ExposureIntent;
-  /** True when the saved context no longer counts as exposed. */
-  settled: boolean;
-}
+/** What a save of a service outside the display slice leaves behind: the
+ *  service's own context with its new intent, or nothing when the server's
+ *  tunnel settlement stops counting it as exposed. */
+type HiddenSaveOutcome = { settled: true } | { settled: false; context: ImageExposureContext };
 
-function hiddenSaveState(
+function hiddenSaveOutcome(
   contexts: readonly ImageExposureContext[],
   stackName: string,
   intents: readonly IntentEntry[],
   saved: SavedIntentTarget,
-): HiddenSaveState | undefined {
+): HiddenSaveOutcome | undefined {
   const { context } = saved;
   if (context.stackName !== stackName) return undefined;
   if (contexts.some((row) => row.stackName === stackName && row.serviceName === context.serviceName)) {
     return undefined;
   }
   const intent = effectiveIntentFromSave(context.serviceName, intents);
-  if (settledAwayByIntent(context, intent)) {
-    return { conflict: false, unclassified: false, settled: true };
-  }
-  if (intent === null || intent === 'unknown') {
-    return { conflict: false, unclassified: true, settled: false };
-  }
-  if (CONFLICT.has(intent)) {
-    return { conflict: true, unclassified: false, conflictIntent: intent, settled: false };
-  }
-  return { conflict: false, unclassified: false, settled: false };
+  if (settledAwayByIntent(context, intent)) return { settled: true };
+  return { settled: false, context: contextWithSavedIntent(context, intent) };
 }
 
-/** The hidden remainder after a save named one of its contexts. With exactly
- *  one hidden context, the save settles that whole remainder; with more, states
- *  it does not prove may still sit in another hidden context. */
-function hiddenAfterSave(
-  hidden: ImageExposureContextHidden,
-  state: HiddenSaveState,
-  onlyHidden: boolean,
-): ImageExposureContextHidden {
-  if (onlyHidden) {
-    return {
-      conflict: state.conflict,
-      unclassified: state.unclassified,
-      unavailable: false,
-      ...(state.conflictIntent ? { conflictIntent: state.conflictIntent } : {}),
-    };
-  }
-  const conflictIntent = state.conflictIntent ?? hidden.conflictIntent;
-  return {
-    conflict: hidden.conflict || state.conflict,
-    unclassified: hidden.unclassified || state.unclassified,
-    unavailable: hidden.unavailable,
-    ...(conflictIntent ? { conflictIntent } : {}),
-  };
-}
-
-/** One image's summary after the save, or null when the save changes nothing in it. */
+/** One image's summary after the save, or null when the save changes nothing in it.
+ *
+ *  A saved service the cap hides joins the listed contexts with its confirmed
+ *  intent, so its evidence and action stay on the row. It leaves the hidden
+ *  remainder (the declared count minus the listed contexts), which is how a
+ *  warning the remainder may hold resolves: once every context beyond the list
+ *  has been confirmed or settled, nothing is left to hold it. */
 function summaryAfterSave(
   summary: ScanSummary,
   imageRef: string,
@@ -297,8 +264,8 @@ function summaryAfterSave(
   const contexts = summary.exposure_contexts;
   if (summary.publicly_exposed !== true || contexts === undefined) return null;
   const declaredCount = summary.exposure_context_count;
-  const truncated = summary.exposure_contexts_truncated === true
-    || (declaredCount ?? contexts.length) > contexts.length;
+  const wasHiddenCount = declaredCount !== undefined ? declaredCount - contexts.length : 0;
+  const truncated = summary.exposure_contexts_truncated === true || wasHiddenCount > 0;
   // A projected summary may have settled every displayed context, leaving its
   // captured hidden remainder as the only evidence there is.
   const hidden = summary.exposure_context_summary
@@ -306,15 +273,22 @@ function summaryAfterSave(
       ?? (contexts.length > 0 ? hiddenRemainderEvidence(summary, contexts) : undefined)
     : undefined;
   const { patched, changed } = patchContextsAfterSave(contexts, stackName, intents);
-  const onlyHidden = declaredCount === contexts.length + 1;
   const hiddenSave = saved?.imageRef === imageRef && truncated
-    ? hiddenSaveState(contexts, stackName, intents, saved)
+    ? hiddenSaveOutcome(contexts, stackName, intents, saved)
     : undefined;
   if (!changed && hiddenSave === undefined) return null;
 
-  const onlyHiddenSettled = onlyHidden && hiddenSave?.settled === true;
+  const nextContexts = hiddenSave !== undefined && !hiddenSave.settled
+    ? [...patched, hiddenSave.context]
+    : patched;
   const removed = contexts.length - patched.length + (hiddenSave?.settled === true ? 1 : 0);
-  if (patched.length === 0 && (onlyHiddenSettled || !truncated)) {
+  const nextCount = declaredCount !== undefined ? Math.max(0, declaredCount - removed) : undefined;
+  // Without a count the remainder cannot be followed, so the cap flag stands.
+  const stillTruncated = nextCount !== undefined && wasHiddenCount > 0
+    ? nextCount > nextContexts.length
+    : truncated;
+  const exposed = nextCount !== undefined ? nextCount > 0 : nextContexts.length > 0 || stillTruncated;
+  if (!exposed) {
     // Every exposed service of this image settled away: the server would no
     // longer report the image as exposed at all.
     return {
@@ -337,27 +311,18 @@ function summaryAfterSave(
     };
   }
 
-  const nextHidden = hidden === undefined
-    ? undefined
-    : hiddenSave === undefined
-      ? hidden
-      : hiddenAfterSave(hidden, hiddenSave, onlyHidden);
-  // A settled last hidden context leaves no remainder to warn about.
-  const keepHidden = nextHidden !== undefined && !onlyHiddenSettled;
+  const nextHidden = stillTruncated ? hidden : undefined;
   return {
     ...summary,
-    exposure_contexts: patched,
-    ...(declaredCount !== undefined
-      ? { exposure_context_count: Math.max(0, declaredCount - removed) }
-      : {}),
+    exposure_contexts: nextContexts,
+    ...(nextCount !== undefined ? { exposure_context_count: nextCount } : {}),
     ...(summary.exposure_context_summary
-      ? { exposure_context_summary: summaryAfterSavedIntents(summary, patched, keepHidden ? nextHidden : undefined) }
+      ? { exposure_context_summary: summaryAfterSavedIntents(summary, nextContexts, nextHidden) }
       : {}),
-    ...(keepHidden
-      ? { exposure_contexts_truncated: true, exposure_context_hidden: nextHidden }
-      : onlyHiddenSettled
-        ? { exposure_contexts_truncated: false, exposure_context_hidden: undefined }
-        : truncated ? { exposure_contexts_truncated: true } : {}),
+    ...(stillTruncated || summary.exposure_contexts_truncated !== undefined
+      ? { exposure_contexts_truncated: stillTruncated }
+      : {}),
+    exposure_context_hidden: nextHidden,
   };
 }
 
@@ -367,10 +332,11 @@ function summaryAfterSave(
  * summaries fails. Attached contexts of the saved stack take the new effective
  * intent (service row, else stack row); an unverified tunnel reach settled by
  * `internal` or `same-node` stops counting as exposed, as on the server. A saved
- * service that the cap hides settles or classifies its own hidden context, and
- * resolves the captured remainder once it was the last one. Every other stack
- * and every image untouched by the stack keeps its summary. Returns the input
- * when nothing changed.
+ * service that the cap hides joins the listed contexts with its confirmed
+ * intent (or drops out when settled), and the captured remainder resolves once
+ * every context beyond the list has been confirmed or settled. Every other
+ * stack and every image untouched by the stack keeps its summary. Returns the
+ * input when nothing changed.
  */
 export function applySavedIntents(
   summaries: Record<string, ScanSummary>,
@@ -457,9 +423,8 @@ function isIntentionalSet(c: ExposureIntentSource): boolean {
 }
 
 /** The label a conflict line shows. A conflict named by a visible context uses
- *  its intent; one known only from the aggregate, or from a hidden save, has no
- *  visible context and falls back to `internal` unless a hidden save recorded
- *  its intent. */
+ *  its intent; one known only from the aggregate has no visible context and
+ *  falls back to `internal`. */
 function conflictEvidenceLine(intent: ExposureIntent | undefined): string {
   return `Intent mismatch: ${intent ? intentDisplayLabel(intent) : 'internal'}`;
 }
@@ -476,20 +441,16 @@ function formatIntentEvidence(t: ExposureIntentSource): string | null {
 
 /**
  * Prefer aggregate summary flags for the primary conclusion when present,
- * then fall back to the best ranked context line. A conflict known only from a
- * hidden save carries its intent in `hiddenConflictIntent`.
+ * then fall back to the best ranked context line.
  */
 function primaryLineFromContexts(
   contexts: ExposureIntentSource[],
   summary?: ImageExposureContextSummary,
-  hiddenConflictIntent?: ExposureIntent,
 ): string | null {
   if (contexts.length === 0) return null;
 
   if (summary?.hasConflict) {
-    return conflictEvidenceLine(
-      contexts.find((c) => c.intentConflict)?.exposureIntent ?? hiddenConflictIntent,
-    );
+    return conflictEvidenceLine(contexts.find((c) => c.intentConflict)?.exposureIntent);
   }
   if (summary?.hasUnclassified) {
     return 'Intent: not classified';
@@ -544,19 +505,18 @@ export function standingIntentEvidence(summary: ScanSummary): string | null {
   const contexts = summary.exposure_contexts ?? [];
   const flags = summary.exposure_context_summary;
   const total = summary.exposure_context_count ?? contexts.length;
-  const hiddenConflictIntent = summary.exposure_context_hidden?.conflictIntent;
 
   if (contexts.length === 0) {
     // A save can settle every displayed context while the capped remainder may
     // still hold a warning; report that remainder instead of dropping it. The
     // count can be unknown when truncation is flagged without a total.
     if (!flags) return null;
-    if (flags.hasConflict) return withExtras(conflictEvidenceLine(hiddenConflictIntent), total);
+    if (flags.hasConflict) return withExtras(conflictEvidenceLine(undefined), total);
     if (flags.hasUnclassified) return withExtras('Intent: not classified', total);
     return null;
   }
 
-  const primaryLine = primaryLineFromContexts(contexts, flags, hiddenConflictIntent);
+  const primaryLine = primaryLineFromContexts(contexts, flags);
   if (!primaryLine) return null;
 
   // When truncated, +N includes hidden contexts (count - displayed) plus other

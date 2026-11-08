@@ -142,9 +142,11 @@ intent from a popover without leaving Security; the popover also links to the st
 for changes that belong in Compose. With several services the label lists them and each row
 carries the same action; where the intent cannot be set from here, the label opens the stack's
 networking instead. A confirmed save is reflected on the row even when the follow-up refresh
-fails, and a later successful refresh replaces it; a warning that may involve services the row
-does not list stays visible until a refresh or a save of the last hidden service resolves it. Intentional exposure raises the security
-relevance of vulnerable findings
+fails, and a later successful refresh replaces it. Saves made one after another each stay
+reflected, whichever reply arrives first. A service the row's list was too short to show joins
+the list once you save it, with its action. A warning that may involve services the row does not
+list stays visible until a refresh, or until you have saved every one of those services from here.
+Intentional exposure raises the security relevance of vulnerable findings
 but does not by itself keep the masthead on Action needed. Open the image, remediate, or triage
 individual findings (Accepted risk and related decisions). There is no image-level "accept residual
 risk" control. Compose Doctor acknowledgements are a separate triage surface and do not clear

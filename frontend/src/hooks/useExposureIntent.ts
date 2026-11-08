@@ -12,6 +12,18 @@ export function asIntents(body: unknown): IntentEntry[] | null {
   return Array.isArray(list) ? (list as IntentEntry[]) : null;
 }
 
+let saveOrder = 0;
+
+/**
+ * A number for the save about to start, larger than every earlier one. Replies
+ * can land in any order, so a surface that adopts a save compares it against
+ * the saves it already adopted and drops a reply from before them.
+ */
+export function nextSaveOrder(): number {
+  saveOrder += 1;
+  return saveOrder;
+}
+
 async function serverError(res: Response, fallback: string): Promise<string> {
   const body: unknown = await res.json().catch(() => null);
   return typeof body === 'object' && body !== null && 'error' in body && typeof body.error === 'string' && body.error !== '' ? body.error : fallback;

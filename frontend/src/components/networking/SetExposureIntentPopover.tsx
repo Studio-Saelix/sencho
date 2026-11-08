@@ -2,7 +2,7 @@ import { useEffect, useState, type ReactElement, type ReactNode } from 'react';
 import { Button } from '@/components/ui/button';
 import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover';
 import { toast } from '@/components/ui/toast-store';
-import { useExposureIntent, type IntentEntry } from '@/hooks/useExposureIntent';
+import { nextSaveOrder, useExposureIntent, type IntentEntry } from '@/hooks/useExposureIntent';
 import type { NetworkingFinding } from '@/types/networking';
 import { ExposureIntentPicker } from './ExposureIntentPicker';
 
@@ -17,8 +17,10 @@ type SetExposureIntentPopoverProps = PopoverTriggerProps & {
   service: string | undefined;
   nodeId: number | undefined;
   /** The save was confirmed; the stack's intents after it are handed over so the
-   *  surface can keep showing the confirmed result even if its reread fails. */
-  onSaved: (saved: IntentEntry[]) => void;
+   *  surface can keep showing the confirmed result even if its reread fails.
+   *  `order` is when the request began (see `nextSaveOrder`), for a surface that
+   *  must not let a late reply undo a later save. */
+  onSaved: (saved: IntentEntry[], order: number) => void;
   /** A named way out for the work that lives elsewhere, under the picker. */
   footer?: ReactNode;
   /** Which edge of the trigger the popover lines up with; a trigger at the row's start passes `start`. */
@@ -44,11 +46,12 @@ export function SetExposureIntentPopover(props: SetExposureIntentPopoverProps) {
   const current = intents?.find(entry => entry.service === scope)?.intent ?? null;
 
   const choose = async (intent: Parameters<typeof save>[1]): Promise<void> => {
+    const order = nextSaveOrder();
     const saved = await save(scope, intent);
     if (saved === null) return;
     toast.success(intent === null ? 'Exposure intent cleared.' : `Exposure intent set to ${intent}.`);
     setOpen(false);
-    onSaved(saved);
+    onSaved(saved, order);
   };
 
   return (

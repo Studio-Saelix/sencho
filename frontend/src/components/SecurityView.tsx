@@ -311,16 +311,34 @@ export function SecurityView({ activeTab, onTabChange, headerActions }: Security
   // The confirmed save is adopted into those summaries first, so a save whose
   // reread fails still shows the saved intent and action for the contexts the
   // backend keeps exposed, instead of the evidence it replaced.
-  const summariesData = summariesRegion.data;
-  const applySummaries = summariesRegion.apply;
-  const onIntentSaved = useCallback((stackName: string, intents: IntentEntry[], saved?: SavedIntentTarget) => {
-    if (summariesData !== null) {
-      const patched = applySavedIntents(summariesData, stackName, intents, saved);
-      if (patched !== summariesData) applySummaries(patched);
-    }
+  const updateSummaries = summariesRegion.update;
+  const activeNodeId = activeNode?.id;
+  const activeNodeIdRef = useRef(activeNodeId);
+  useEffect(() => {
+    activeNodeIdRef.current = activeNodeId;
+  }, [activeNodeId]);
+  // The newest save adopted per stack: when it began and the stack's intents it returned.
+  const adoptedSaveRef = useRef(new Map<string, { order: number; intents: IntentEntry[] }>());
+  const onIntentSaved = useCallback((
+    stackName: string,
+    intents: IntentEntry[],
+    saved?: SavedIntentTarget,
+    order?: number,
+  ) => {
+    // A save confirmed for a node the operator has since left says nothing about
+    // the node on screen.
+    if (activeNodeIdRef.current !== activeNodeId) return;
+    // A save lands whenever its reply does, possibly after a later save to the
+    // same stack was adopted. Its rows predate that save and would undo it, so
+    // the stack's newest rows stand and this reply only adds what it alone knows.
+    const newest = adoptedSaveRef.current.get(stackName);
+    const stale = order !== undefined && newest !== undefined && order < newest.order;
+    if (order !== undefined && !stale) adoptedSaveRef.current.set(stackName, { order, intents });
+    const current = stale ? newest.intents : intents;
+    updateSummaries((summaries) => applySavedIntents(summaries, stackName, current, saved));
     setImagesTargeting(afterIntentSaved);
     reloadOverview();
-  }, [summariesData, applySummaries, reloadOverview]);
+  }, [activeNodeId, updateSummaries, reloadOverview]);
 
   const reasons = useSecurityReasons({
     overview: nodeOverview,
