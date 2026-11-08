@@ -14,6 +14,7 @@ import { TARGET_ACTION } from './readinessMeta';
 import type { FleetReadinessState } from './readiness/useFleetReadiness';
 import { ReadinessSummaryStrip } from './readiness/ReadinessSummaryStrip';
 import { ReadinessNodeMatrix } from './readiness/ReadinessNodeMatrix';
+import { ReadinessDismissedSheet } from './readiness/ReadinessDismissedSheet';
 import { ReadinessFindingsTable } from './readiness/ReadinessFindingsTable';
 import { ALL, EMPTY_FINDINGS_FILTER, type FindingsFilter } from './readiness/findingsFilter';
 import { useNow } from './readiness/useNow';
@@ -97,6 +98,7 @@ export function FleetReadiness({
   // A fast answer never flashes the skeleton; the pane just holds its height.
   const { showBusy } = useVisualBusy(!data && error === null);
   const [filter, setFilter] = useState<FindingsFilter>(EMPTY_FINDINGS_FILTER);
+  const [dismissedOpen, setDismissedOpen] = useState(false);
   const findingsRef = useRef<HTMLDivElement>(null);
   // Relative "seen Xm ago" stamps in the matrix move with the clock.
   const now = useNow(30_000);
@@ -218,14 +220,11 @@ export function FleetReadiness({
         </FleetEmptyState>
       ) : (
         <>
-          <ReadinessSummaryStrip data={data} checking={checking} dismissedCount={partition.dismissed.length} />
+          <ReadinessSummaryStrip data={data} checking={checking} dismissedCount={partition.dismissed.length} onOpenDismissed={() => setDismissedOpen(true)} />
           <div ref={findingsRef} className="scroll-mt-4">
             <ReadinessFindingsTable
               findings={partition.active}
-              dismissed={partition.dismissed}
-              onRestore={dismissal => { void restore(dismissal.id); }}
-              isRestoring={dismissal => isPending(dismissal.id)}
-              now={now}
+              dismissedCount={partition.dismissed.length}
               canDismiss={canDismiss}
               onDismiss={(finding, mode, days) => { void dismiss(finding, mode, days); }}
               isDismissing={finding => isPending(finding.id)}
@@ -248,6 +247,16 @@ export function FleetReadiness({
           />
         </>
       )}
+      <ReadinessDismissedSheet
+        open={dismissedOpen}
+        onOpenChange={setDismissedOpen}
+        dismissed={partition.dismissed}
+        nodes={data.nodes}
+        now={now}
+        canDismiss={canDismiss}
+        onRestore={dismissal => { void restore(dismissal.id); }}
+        isRestoring={dismissal => isPending(dismissal.id)}
+      />
       {overlays}
     </div>
   );

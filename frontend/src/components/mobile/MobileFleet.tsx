@@ -508,6 +508,10 @@ export function MobileFleet({ headerActions, onInspectNode, onInspectStack }: Mo
               })}
             </div>
           )}
+
+          <p className="px-1 py-2 font-mono text-[10px] text-stat-subtitle">
+            Bootstrap a new server from a desktop browser.
+          </p>
         </div>
       </div>
       {overlays}

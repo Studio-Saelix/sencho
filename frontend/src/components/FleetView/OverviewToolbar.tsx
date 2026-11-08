@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import {
     Search, ArrowUpDown, AlertTriangle, Play, Square,
-    LayoutGrid, Network, SlidersHorizontal, ChartNetwork, RefreshCcwDot,
+    LayoutGrid, Network, SlidersHorizontal,
 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
@@ -12,8 +12,9 @@ import { MultiSelectCombobox } from '@/components/ui/multi-select-combobox';
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip';
 import { SegmentedControl, type SegmentedControlOption } from '@/components/ui/segmented-control';
 import { LabelDot } from '../LabelPill';
+import { NodeManagementMenu } from './NodeManagementMenu';
 import type { LabelColor } from '../label-types';
-import type { ViewMode, SortField, FilterStatus, FilterType, FilterNetworking, FleetPreferences, FleetPaletteEntry } from './types';
+import type { ViewMode, SortField, FilterStatus, FilterType, FilterNetworking, FleetPreferences, FleetPaletteEntry, NodeManagementActions } from './types';
 
 const FILTER_SECTION_LABEL_CLASS = 'text-[10px] leading-3 font-mono uppercase tracking-[0.18em] text-stat-subtitle';
 
@@ -51,9 +52,7 @@ interface OverviewToolbarProps {
     labelFilters: Set<string>;
     onLabelFiltersChange: (filters: Set<string>) => void;
     onClearFilters: () => void;
-    onAddNode?: () => void;
-    onCheckUpdates?: () => void;
-    checkingUpdates?: boolean;
+    nodeManagement?: NodeManagementActions;
 }
 
 export function OverviewToolbar({
@@ -67,9 +66,7 @@ export function OverviewToolbar({
     labelFilters,
     onLabelFiltersChange,
     onClearFilters,
-    onAddNode,
-    onCheckUpdates,
-    checkingUpdates,
+    nodeManagement,
 }: OverviewToolbarProps) {
     const showGridControls = viewMode === 'grid';
     const activeFilterCount =
@@ -271,45 +268,7 @@ export function OverviewToolbar({
                 className="ml-auto shrink-0 shadow-card-bevel"
             />
 
-            {onCheckUpdates && (
-                <TooltipProvider>
-                    <Tooltip>
-                        <TooltipTrigger asChild>
-                            <Button
-                                variant="outline"
-                                size="sm"
-                                className="h-9 gap-2 shrink-0"
-                                onClick={onCheckUpdates}
-                                disabled={checkingUpdates}
-                                aria-label="Check for node updates"
-                            >
-                                <RefreshCcwDot className={`w-4 h-4 ${checkingUpdates ? 'animate-spin' : ''}`} />
-                                Node Update
-                            </Button>
-                        </TooltipTrigger>
-                        <TooltipContent>Check for node updates</TooltipContent>
-                    </Tooltip>
-                </TooltipProvider>
-            )}
-
-            {onAddNode && (
-                <TooltipProvider>
-                    <Tooltip>
-                        <TooltipTrigger asChild>
-                            <Button
-                                variant="outline"
-                                size="sm"
-                                className="h-9 w-9 p-0 shrink-0"
-                                onClick={onAddNode}
-                                aria-label="Manage nodes"
-                            >
-                                <ChartNetwork className="w-4 h-4" strokeWidth={1.5} />
-                            </Button>
-                        </TooltipTrigger>
-                        <TooltipContent>Manage nodes</TooltipContent>
-                    </Tooltip>
-                </TooltipProvider>
-            )}
+            {nodeManagement && <NodeManagementMenu actions={nodeManagement} />}
         </div>
     );
 }

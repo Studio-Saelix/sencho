@@ -59,6 +59,7 @@ import { securityRouter } from './routes/security';
 import { dashboardRouter } from './routes/dashboard';
 import { containersRouter, portsRouter } from './routes/containers';
 import { nodesRouter } from './routes/nodes';
+import { nodeBootstrapRouter } from './routes/nodeBootstrap';
 import { stacksRouter } from './routes/stacks';
 import { stackObservationRouter } from './routes/stackObservation';
 import { stackActivityRouter } from './routes/stackActivity';
@@ -184,6 +185,9 @@ app.use('/api/diagnostics', diagnosticsRouter);
 app.use('/api/dependency-map', dependencyMapRouter);
 app.use('/api/networking', networkingRouter);
 app.use('/api/registry-delivery', registryDeliveryRouter);
+// Read-only bootstrap preflight. Mounted ahead of the nodes router so its exact
+// paths are not matched by `/api/nodes/:id`.
+app.use('/api/nodes/bootstrap', nodeBootstrapRouter);
 app.use('/api/nodes', nodesRouter);
 app.use('/api/stacks', stackActivityRouter);
 // Read-only AI observation projections; ahead of the generic stacks router so

@@ -85,7 +85,13 @@ describe('recovery helper profiles', () => {
   });
 
   it('adds exactly the capabilities each profile was justified for', () => {
-    expect(HELPER_PROFILES.probe.capAdd).toEqual([]);
+    // The probe lists the restore work directories at a volume root that an
+    // application user may own with mode 0700 or 2750. A plain root under
+    // CapDrop ALL is refused that listing, which would let an overwrite stop the
+    // workloads and only fail at the swap. DAC_READ_SEARCH is read and traverse
+    // only, and the source mount stays read-only.
+    expect(HELPER_PROFILES.probe.capAdd).toEqual(['DAC_READ_SEARCH']);
+    expect(HELPER_PROFILES.probe.capAdd).not.toContain('DAC_OVERRIDE');
     expect(HELPER_PROFILES.config.capAdd).toEqual([]);
     expect(HELPER_PROFILES.init.capAdd).toEqual([]);
     expect(HELPER_PROFILES.check.capAdd).toEqual([]);
@@ -93,6 +99,67 @@ describe('recovery helper profiles', () => {
     expect(HELPER_PROFILES.backup.capAdd).toEqual(['DAC_READ_SEARCH']);
     // --verify reads restored files back after their ownership is applied.
     expect(HELPER_PROFILES.restore.capAdd).toEqual(['CHOWN', 'FOWNER', 'FSETID', 'DAC_READ_SEARCH']);
+    // The in-volume copy of an overwrite creates its work directory in a root an
+    // application may own and close to everyone else (a database data directory),
+    // which uid 0 can only write with DAC_OVERRIDE. Only this profile and the
+    // swap have it beside the restore's set, so a restore into a new volume stays
+    // narrower.
+    expect(HELPER_PROFILES.materialize.capAdd).toEqual(['CHOWN', 'FOWNER', 'FSETID', 'DAC_OVERRIDE', 'DAC_READ_SEARCH']);
+    expect(HELPER_PROFILES.restore.capAdd).not.toContain('DAC_OVERRIDE');
+    // The rename swap moves entries in a root the application owns and deletes
+    // the work directory afterwards, so it needs the restore's ownership and
+    // permission overrides plus DAC_OVERRIDE. That is the materialize profile's
+    // set, and it is confined to one application volume with no repository mount
+    // and no network.
+    expect(HELPER_PROFILES.swap.capAdd).toEqual(['CHOWN', 'FOWNER', 'FSETID', 'DAC_OVERRIDE', 'DAC_READ_SEARCH']);
+  });
+
+  // The kernel clears the setgid bit on a chmod by a process that is not in the
+  // file's group and lacks FSETID. Every profile that writes mode bits onto a
+  // volume (the restore, the in-volume copy and the swap's root metadata) has to
+  // carry it, so a restored setgid directory or root keeps group inheritance.
+  it('gives every profile that writes into a volume FSETID, so a setgid mode survives', () => {
+    const writers = Object.entries(HELPER_PROFILES)
+      .filter(([, profile]) => profile.target === 'read_write')
+      .map(([name]) => name)
+      .sort();
+    expect(writers).toEqual(['materialize', 'restore', 'swap']);
+    for (const name of writers) {
+      expect(HELPER_PROFILES[name as keyof typeof HELPER_PROFILES].capAdd, name).toContain('FSETID');
+      expect(specFor(name as HelperProfile).hostConfig.CapAdd, name).toContain('FSETID');
+    }
+  });
+
+  it('gives the materialize profile the restore profile\'s shape: the repository read-only and one writable target', () => {
+    const { capAdd, ...rest } = HELPER_PROFILES.materialize;
+    const { capAdd: restoreCaps, ...restoreRest } = HELPER_PROFILES.restore;
+    expect(rest).toEqual(restoreRest);
+    expect(capAdd).toEqual([...restoreCaps.slice(0, 3), 'DAC_OVERRIDE', 'DAC_READ_SEARCH']);
+    const { hostConfig } = specFor('materialize');
+    expect(hostConfig.Mounts).toEqual([
+      { Type: 'volume', Source: 'repo-vol', Target: HELPER_REPOSITORY_MOUNT, ReadOnly: true, VolumeOptions: { NoCopy: true } },
+      { Type: 'volume', Source: 'dst-vol', Target: HELPER_RESTORE_MOUNT, ReadOnly: false, VolumeOptions: { NoCopy: true } },
+    ]);
+    expect(hostConfig.CapAdd).toEqual(capAdd);
+  });
+
+  it('gives the swap profile exactly one writable mount and no repository', () => {
+    expect(HELPER_PROFILES.swap).toEqual({
+      user: '0:0',
+      capAdd: ['CHOWN', 'FOWNER', 'FSETID', 'DAC_OVERRIDE', 'DAC_READ_SEARCH'],
+      repositoryReadOnly: true,
+      needsRepository: false,
+      source: null,
+      target: 'read_write',
+      tmpfs: { '/tmp': 'size=64m,mode=1777' },
+      pidsLimit: 256,
+      memoryBytes: 1024 * 1024 * 1024,
+      timeoutMs: null,
+    });
+    const { hostConfig } = specFor('swap');
+    expect(hostConfig.Mounts).toEqual([
+      { Type: 'volume', Source: 'dst-vol', Target: HELPER_RESTORE_MOUNT, ReadOnly: false, VolumeOptions: { NoCopy: true } },
+    ]);
   });
 
   it('mounts the source read-only and only the restore target writable', () => {

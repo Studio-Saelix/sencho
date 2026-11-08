@@ -245,7 +245,7 @@ describe('restart truth', () => {
     const operation = store.get(operationId);
     expect(operation).toMatchObject({ state: 'completion_unknown', errorClass: 'interrupted' });
     const lock = store.getLock('repository', repositoryId);
-    expect(lock?.staleSince).not.toBeNull();
+    expect(lock).toMatchObject({ staleSince: expect.any(Number) });
   });
 
   it('refuses to move a dead process\'s operation to running', () => {

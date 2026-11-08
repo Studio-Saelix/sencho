@@ -36,6 +36,8 @@ declare global {
       deployContext?: import('../services/network/missingExternalNetworksError').DeployInvocationContext;
       /** Verified JWT scope for machine credentials (`node_proxy` / `pilot_tunnel`). */
       machineAuthScope?: 'node_proxy' | 'pilot_tunnel';
+      /** How the forwarding hub knows this node, trusted only under machine auth. Never set from browser sessions. */
+      hubNode?: { id: number; name: string };
       /**
        * Hub-bound stack-scoped action evidence, trusted only when set under
        * machine auth (`node_proxy` / `pilot_tunnel`). Never set from browser sessions.

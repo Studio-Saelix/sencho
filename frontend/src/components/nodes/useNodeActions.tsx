@@ -289,6 +289,14 @@ export function useNodeActions(opts: UseNodeActionsOptions = {}): UseNodeActions
     setDeleteOpen(true);
   }, []);
 
+  const editingNode = editingNodeId !== null ? nodes.find((node) => node.id === editingNodeId) ?? null : null;
+  const isPilotForm = formData.type === 'remote' && formData.mode === 'pilot_agent';
+  // A connected Pilot's Compose directory is a deployed bind mount. Changing it
+  // through an ordinary save would leave the running agent on the old path, so
+  // the field is locked and the change is a separate relocation operation.
+  const composeDirLocked = (isEdit: boolean) => isEdit && isPilotForm && editingNode?.pilot_last_seen != null;
+  const pilotNeverConnected = (isEdit: boolean) => isEdit && isPilotForm && editingNode !== null && editingNode.pilot_last_seen == null;
+
   const renderFormFields = (isEdit: boolean) => (
     <div className="space-y-4 py-4">
       <div className="space-y-2">
@@ -439,12 +447,20 @@ export function useNodeActions(opts: UseNodeActionsOptions = {}): UseNodeActions
           placeholder={defaultComposeDir(formData.type, formData.mode)}
           value={formData.compose_dir}
           onChange={(e) => setFormData({ ...formData, compose_dir: e.target.value })}
+          disabled={composeDirLocked(isEdit)}
         />
         <p className="text-xs text-muted-foreground">
-          {formData.type === 'remote' && formData.mode === 'pilot_agent'
-            ? 'Absolute host path for compose stacks. The generated agent mounts this same path inside the container.'
-            : 'The root directory where compose stack folders live on this node.'}
+          {composeDirLocked(isEdit)
+            ? 'Compose directory is fixed after the Pilot connects. Moving it is a separate relocation operation.'
+            : isPilotForm
+              ? 'Absolute host path for compose stacks. The generated agent mounts this same path inside the container.'
+              : 'The root directory where compose stack folders live on this node.'}
         </p>
+        {pilotNeverConnected(isEdit) && (
+          <p className="text-xs text-warning">
+            This Pilot has not connected yet. Changing the directory here does not move an already deployed agent; regenerate its enrollment token after saving.
+          </p>
+        )}
       </div>
     </div>
   );

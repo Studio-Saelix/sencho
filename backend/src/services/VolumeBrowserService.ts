@@ -3,6 +3,7 @@ import { pipeline } from 'stream/promises';
 import path from 'path';
 import { createHash } from 'crypto';
 import DockerController from './DockerController';
+import { DataRestoreFenceError } from '../helpers/dataRestoreFenceError';
 
 const HELPER_IMAGE = 'alpine:3.20';
 const VOLUME_MOUNT = '/v';
@@ -535,6 +536,13 @@ export class VolumeBrowserService {
 
   private async assertVolumeExists(volumeName: string): Promise<void> {
     if (!isValidVolumeName(volumeName)) throw new ExecError('Invalid volume name', 400);
+    // A staged overwrite owns this volume until it settles. Browsing or editing
+    // the data root while the swap moves entries would fight the fence that keeps
+    // every workload off it, so the whole surface is refused, not only writes.
+    const { RestoreFenceStore } = await import('./recovery/restoreFence');
+    if (RestoreFenceStore.getInstance().isVolumeFenced(volumeName)) {
+      throw new DataRestoreFenceError(volumeName, 'browse');
+    }
     const docker = DockerController.getInstance(this.nodeId).getDocker();
     try {
       await docker.getVolume(volumeName).inspect();
@@ -629,7 +637,11 @@ export class VolumeBrowserService {
         stream.once('close', () => resolve());
       });
       docker.modem.demuxStream(stream, stdoutStream, stderrStream);
-      await container.start();
+      // The helper mounts the volume, so it is a start like any other: refused
+      // once an overwrite fences the volume, and waited for if it was already
+      // on its way when the fence went up.
+      const { startUnderFence } = await import('./recovery/restoreFence');
+      await startUnderFence([volumeName], () => container.start(), 'browse');
       if (wantStdin && opts.stdin) {
         // Feed the file content to the container's stdin, then close it so the
         // helper's `cat > file` sees EOF and exits.

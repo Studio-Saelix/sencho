@@ -62,6 +62,16 @@ function allowedWithoutStack(req: Request, access: RecoveryAccess, action: Permi
   return checkPermission(req, action, 'node', String(req.nodeId));
 }
 
+/**
+ * The node-wide decision for one access, on its own. A route that has to check a
+ * set of stacks one by one and then fall back for a workload no stack owns needs
+ * exactly this, and it must be the same rule a storage with no dependent stack
+ * gets, or a container started by hand would be the one thing the check misses.
+ */
+export function authorizeNodeWide(req: Request, access: RecoveryAccess): boolean {
+  return allowedWithoutStack(req, access, RECOVERY_ACCESS_ACTION[access]);
+}
+
 export function authorizeStorageAccess(
   req: Request,
   access: RecoveryAccess,

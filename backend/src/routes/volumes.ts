@@ -4,6 +4,7 @@ import { DatabaseService } from '../services/DatabaseService';
 import { requirePermission } from '../middleware/permissions';
 import { sanitizeForLog } from '../utils/safeLog';
 import { isDebugEnabled } from '../utils/debug';
+import { isDataRestoreFenceError } from '../helpers/dataRestoreFenceError';
 
 export const volumesRouter = Router();
 
@@ -16,6 +17,9 @@ function readPathParam(req: Request): string {
 function mapServiceError(error: unknown, res: Response, fallback: string): Response {
   if (error instanceof PathTraversalError) return res.status(400).json({ error: error.message });
   if (error instanceof VolumeNotFoundError) return res.status(404).json({ error: error.message });
+  // The volume is owned by a restore in progress. 409 with a code the client can
+  // switch on, because "try again after the restore" is actionable and 404 is not.
+  if (isDataRestoreFenceError(error)) return res.status(409).json({ error: error.message, code: error.code });
   if (error instanceof HelperImageError) return res.status(503).json({ error: error.message });
   if (error instanceof ExecError) return res.status(error.status).json({ error: error.message });
   console.error(`[Volumes] ${fallback}:`, error);

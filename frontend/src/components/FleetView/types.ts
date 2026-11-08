@@ -114,3 +114,16 @@ export interface FleetPaletteEntry {
     name: string;
     color: LabelColor;
 }
+
+/** One contract for the Fleet toolbar's node-management menu. */
+export interface NodeManagementActions {
+    /** Visible when the session has global node:manage. */
+    canConnectExisting: boolean;
+    /** Visible to admins only. */
+    canBootstrapServer: boolean;
+    /** Locks the update item while a check is in flight. */
+    checkingUpdates: boolean;
+    onConnectExisting: () => void;
+    onBootstrapServer: () => void;
+    onCheckUpdates: () => void;
+}
