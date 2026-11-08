@@ -673,7 +673,7 @@ components:
             binding address itself may be unreadable), and
             `docker-api-port-exposed` means one is exposed on the container with
             no readable host port; the published token takes precedence when
-            both would apply. A known non-TCP transport is not a Docker API
+            both would apply. A reported non-TCP transport is not a Docker API
             port.
           items: { type: string }
         inspectFailed: { type: boolean }

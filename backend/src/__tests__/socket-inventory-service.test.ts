@@ -667,6 +667,26 @@ describe('buildSocketInventory classification', () => {
     expect(udp.containers[0].evidence).not.toContain('docker-api-port-published');
   });
 
+  it('chooses the token from the Docker API port, not from another published port', () => {
+    // An unrelated published application port must not turn an exposed-only
+    // Docker API port into a published one.
+    const inventory = buildSocketInventory(input({
+      containers: [row({
+        id: 'api-mixed1',
+        name: 'api-mixed',
+        mounts: [socketMount(SOCKET, SOCKET, true)],
+        ports: [
+          { privatePort: 2375, publicPort: null, ip: null, protocol: 'tcp' },
+          { privatePort: 8080, publicPort: 8080, ip: '0.0.0.0', protocol: 'tcp' },
+        ],
+      })],
+    }));
+
+    expect(inventory.containers[0].role).toBe('undetermined');
+    expect(inventory.containers[0].evidence).toContain('docker-api-port-exposed');
+    expect(inventory.containers[0].evidence).not.toContain('docker-api-port-published');
+  });
+
   it('keeps an unreadable protocol as possible Docker API access', () => {
     // A protocol the adapter could not read is not proof of a non-TCP
     // transport, so the port stays a possible Docker API port.
