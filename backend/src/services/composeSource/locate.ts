@@ -259,6 +259,21 @@ function volumeItemTarget(file: AuthoredFileSource, declaredService: string, ind
   return authoredScalarOf(file.nodes.get(`services.${declaredService}.volumes[${index}].target`)) ?? null;
 }
 
+/** The authored source of one `volumes` sequence item, or null when unnamed. */
+function volumeItemSource(file: AuthoredFileSource, declaredService: string, index: number): string | null {
+  const item = file.nodes.get(`services.${declaredService}.volumes[${index}]`);
+  if (item) {
+    const text = authoredScalarOf(item);
+    if (text !== undefined) {
+      const parts = text.split(':');
+      if (parts.length === 1) return null;
+      const offset = /^[A-Za-z]$/.test(parts[0]) ? 1 : 0;
+      return parts[offset] ?? null;
+    }
+  }
+  return authoredScalarOf(file.nodes.get(`services.${declaredService}.volumes[${index}].source`)) ?? null;
+}
+
 /** A location on the latest layer that declares a matching sequence item. */
 function itemLocation(candidates: ItemCandidate[], basePath: string): AuthoredLocation | undefined {
   if (candidates.length === 0) return undefined;
@@ -344,7 +359,7 @@ function locateVolume(project: AuthoredProject, hit: RuleHit): AuthoredLocation 
   if (hasUnresolvedService(project, hit.service)) return undefined;
   if (hit.subject?.kind === 'bind') {
     const target = hit.subject.key;
-    const matches: ItemCandidate[] = [];
+    const matches: Array<ItemCandidate & { source: string | null }> = [];
     const scopes = serviceScopes(project, hit.service);
     if (fieldHasTag(scopes, 'volumes')) return undefined;
     let matchedIndex: number | undefined;
@@ -353,7 +368,10 @@ function locateVolume(project: AuthoredProject, hit: RuleHit): AuthoredLocation 
         if (volumeItemTarget(scope.file, scope.declaredService, index) !== target) continue;
         const node = scope.file.nodes.get(`services.${scope.declaredService}.volumes[${index}]`);
         if (node) {
-          matches.push({ file: scope.file.file, node, layerIndex: scope.layerIndex, writability: scope.file.writability, index });
+          matches.push({
+            file: scope.file.file, node, layerIndex: scope.layerIndex, writability: scope.file.writability, index,
+            source: volumeItemSource(scope.file, scope.declaredService, index),
+          });
           matchedIndex = index;
         }
       }
@@ -361,10 +379,18 @@ function locateVolume(project: AuthoredProject, hit: RuleHit): AuthoredLocation 
     if (matches.length > 0 && matchedIndex !== undefined) {
       const latest = Math.max(...matches.map(match => match.layerIndex));
       if (hasLaterUnparsedLayer(project, latest)) return undefined;
+      const latestMatches = matches.filter(match => match.layerIndex === latest);
       // Two declarations in the winning layer with the same target are not
       // distinguishable from the hit; an unresolved item there could be the
       // one that actually produced the effective bind.
-      if (matches.filter(match => match.layerIndex === latest).length !== 1) return undefined;
+      if (latestMatches.length !== 1) return undefined;
+      // Compose replaces a mount by target, so a later declaration with a
+      // different source is the effective one. An earlier declaration with
+      // the SAME source is textually equivalent, though, and the effective
+      // model cannot say which one produced the mount: refuse.
+      const winner = latestMatches[0];
+      if (winner.source !== null && matches.some(match =>
+        match.layerIndex < latest && match.source === winner.source)) return undefined;
       if (hasUnresolvedSequenceItem(scopes, 'volumes', latest, true)) return undefined;
       return itemLocation(matches, `services.${hit.service}.volumes`);
     }

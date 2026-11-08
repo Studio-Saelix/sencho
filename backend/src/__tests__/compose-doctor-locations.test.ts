@@ -266,6 +266,30 @@ describe('Compose Doctor authored locations', () => {
     expect(port).toBeUndefined();
   });
 
+  it('refuses an identical bind mount declared in both layers', async () => {
+    writeStack('doctor-bind-duplicate', {
+      'compose.yaml': 'services:\n  api:\n    image: nginx:1\n    volumes:\n      - ./data:/data\n',
+      'compose.override.yaml': 'services:\n  api:\n    volumes:\n      - ./data:/data\n',
+    });
+    const project = await buildAuthoredProject(nodeId, 'doctor-bind-duplicate');
+    const bind = locateFinding(project, hit('bind-path-missing', {
+      service: 'api', sourcePath: './data', subject: { kind: 'bind', key: '/data' },
+    }));
+    expect(bind).toBeUndefined();
+  });
+
+  it('locates an override that changes the source of a mount target', async () => {
+    writeStack('doctor-bind-override-source', {
+      'compose.yaml': 'services:\n  api:\n    image: nginx:1\n    volumes:\n      - ./base:/data\n',
+      'compose.override.yaml': 'services:\n  api:\n    volumes:\n      - ./own:/data\n',
+    });
+    const project = await buildAuthoredProject(nodeId, 'doctor-bind-override-source');
+    const bind = locateFinding(project, hit('bind-path-missing', {
+      service: 'api', sourcePath: './own', subject: { kind: 'bind', key: '/data' },
+    }));
+    expect(bind).toMatchObject({ file: 'compose.override.yaml', line: 4 });
+  });
+
   it('locates the broad publication, not a loopback override on the same host port', async () => {
     writeStack('doctor-port-broad', {
       'compose.yaml': 'services:\n  api:\n    image: nginx:1\n    ports:\n      - "8080:80"\n',
