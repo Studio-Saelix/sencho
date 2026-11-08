@@ -160,6 +160,30 @@ describe('SecretPushSheet', () => {
         expect(vi.mocked(toast.success)).toHaveBeenCalled();
     });
 
+    it('locks the push action while the push is in flight so it cannot run twice', async () => {
+        let resolvePush!: (v: { pushId: string; results: SecretPushResultEntry[] }) => void;
+        vi.mocked(executePush).mockReturnValue(new Promise((r) => { resolvePush = r; }));
+
+        renderSheet();
+        await fillAndPreview();
+        await waitFor(() => {
+            expect(screen.getByText('central')).toBeInTheDocument();
+        });
+
+        await userEvent.click(screen.getByRole('button', { name: /push to 1 node/i }));
+
+        const pushing = await screen.findByRole('button', { name: /pushing/i });
+        expect(pushing).toBeDisabled();
+        expect(pushing).toHaveAttribute('aria-busy', 'true');
+        await userEvent.click(pushing);
+        expect(vi.mocked(executePush)).toHaveBeenCalledTimes(1);
+
+        resolvePush({ pushId: 'p1', results: [resultEntry()] });
+        await waitFor(() => {
+            expect(screen.queryByRole('button', { name: /pushing/i })).not.toBeInTheDocument();
+        });
+    });
+
     it('sends the previewed version and per-target digests, not the live fields', async () => {
         // The live bundle is at version 2; the preview answered with version 3,
         // so the request must carry the previewed version.
