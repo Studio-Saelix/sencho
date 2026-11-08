@@ -34,8 +34,10 @@ import { SuppressionsPanel } from './settings/SuppressionsPanel';
 import { MisconfigAckPanel } from './settings/MisconfigAckPanel';
 import { OverviewTab, type ChartLoadState, type OverviewLoadError } from './security/OverviewTab';
 import { useSecurityReasons } from './security/useSecurityReasons';
+import type { IntentEntry } from '@/hooks/useExposureIntent';
 import {
   afterIntentSaved,
+  applySavedIntents,
   type ImagesTargetingInput,
   type ImagesTargetingState,
 } from './security/imagesTargeting';
@@ -305,10 +307,19 @@ export function SecurityView({ activeTab, onTabChange, headerActions }: Security
   // operator arrived; an intent saved from the list makes it stale (the conflict
   // banner, the mismatch hint, the verb), so the snapshot goes and the rows read
   // the reloaded summaries instead. The listed images stay for the rest of a batch.
-  const onIntentSaved = useCallback(() => {
+  // The confirmed save is adopted into those summaries first, so a save whose
+  // reread fails still shows the saved intent and action instead of the evidence
+  // it replaced.
+  const summariesData = summariesRegion.data;
+  const applySummaries = summariesRegion.apply;
+  const onIntentSaved = useCallback((stackName: string, intents: IntentEntry[]) => {
+    if (summariesData !== null) {
+      const patched = applySavedIntents(summariesData, stackName, intents);
+      if (patched !== summariesData) applySummaries(patched);
+    }
     setImagesTargeting(afterIntentSaved);
     reloadOverview();
-  }, [reloadOverview]);
+  }, [summariesData, applySummaries, reloadOverview]);
 
   const reasons = useSecurityReasons({
     overview: nodeOverview,

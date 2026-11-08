@@ -12,6 +12,7 @@ import { formatTimeAgo } from '@/lib/relativeTime';
 import type { SecurityTab } from '@/lib/events';
 import type { ImageExposureContext, ScanSummary, SecurityOverview, ScanDetailTab, VulnerabilityScan } from '@/types/security';
 import { NetworkExposedControl } from './ExposureNetworking';
+import type { IntentSavedHandler } from './imagesTargeting';
 
 export interface SecurityMobileTab {
   value: SecurityTab;
@@ -141,8 +142,8 @@ export function ImageScanRow({
   /** Stack/service contexts behind the Network exposed label: used to set the exposure intent in place, or to open the stack's networking when the session cannot. */
   exposureContexts?: ImageExposureContext[];
   nodeId?: number;
-  /** An exposure intent was set from the label, so the scan summaries should be re-read. */
-  onIntentSaved: () => void;
+  /** A confirmed save, with the stack's intents after it, so the row can show it before the reread lands. */
+  onIntentSaved: IntentSavedHandler;
 }) {
   // Use the shared classifier so the count tags agree with the leading dot: a
   // medium/low-only image is not "clean", it is its highest severity.

@@ -1,3 +1,5 @@
+import type { ExposureIntent } from '@/types/networking';
+import type { IntentEntry } from '@/hooks/useExposureIntent';
 import type {
   ImageExposureContext,
   ImageExposureContextSummary,
@@ -54,6 +56,148 @@ export type ExposureIntentSource =
 
 /** Intents that mean the operator deliberately classified exposure. */
 const INTENTIONAL = new Set(['public', 'lan', 'reverse-proxy', 'temporary']);
+
+/** Intents a publicly exposed service contradicts. */
+const CONFLICT = new Set(['internal', 'same-node']);
+
+/** A confirmed save hands the owner the stack's intents so the affected rows can
+ *  keep showing them until a reread replaces the summaries. */
+export type IntentSavedHandler = (stackName: string, intents: IntentEntry[]) => void;
+
+/** The intent a service ends up with after a save: its own row, else the stack row, else unset. */
+function effectiveIntentFromSave(service: string, intents: readonly IntentEntry[]): ExposureIntent | null {
+  const own = intents.find((entry) => entry.service === service);
+  if (own !== undefined) return own.intent;
+  return intents.find((entry) => entry.service === '')?.intent ?? null;
+}
+
+/** One context as the save response settles it, following the server's rules:
+ *  an absent or `unknown` intent is unset, and `internal`/`same-node` conflict. */
+function contextWithSavedIntent(context: ImageExposureContext, intent: ExposureIntent | null): ImageExposureContext {
+  const base: Omit<ImageExposureContext, 'intentStatus' | 'exposureIntent' | 'intentConflict'> = {
+    stackName: context.stackName,
+    serviceName: context.serviceName,
+    exposureReason: context.exposureReason,
+    ...(context.tunnel ? { tunnel: context.tunnel } : {}),
+  };
+  if (intent === null || intent === 'unknown') {
+    return { ...base, intentStatus: 'unset' };
+  }
+  return {
+    ...base,
+    exposureIntent: intent,
+    intentStatus: 'set',
+    ...(CONFLICT.has(intent) ? { intentConflict: true } : {}),
+  };
+}
+
+/** Whether two renderings of one context state the same intent evidence. */
+function sameIntentEvidence(before: ImageExposureContext, after: ImageExposureContext): boolean {
+  return before.intentStatus === after.intentStatus
+    && before.exposureIntent === after.exposureIntent
+    && (before.intentConflict === true) === (after.intentConflict === true);
+}
+
+/** Server rank for exposure contexts: conflict, unset, unavailable, then set. */
+function contextRank(context: ImageExposureContext): number {
+  if (context.intentConflict) return 0;
+  if (context.intentStatus === 'unset') return 1;
+  if (context.intentStatus === 'unavailable') return 2;
+  return 3;
+}
+
+/** Pre-cap aggregates over the contexts (the rule the server's summary uses). */
+function summarizeContexts(contexts: readonly ImageExposureContext[]): ImageExposureContextSummary {
+  let hasConflict = false;
+  let hasUnclassified = false;
+  let hasUnavailable = false;
+  let sawComplete = false;
+  let allKnownIntentional = true;
+
+  for (const context of contexts) {
+    if (context.intentConflict) hasConflict = true;
+    if (context.intentStatus === 'unset') hasUnclassified = true;
+    if (context.intentStatus === 'unavailable') {
+      hasUnavailable = true;
+      continue;
+    }
+    sawComplete = true;
+    if (!isIntentionalSet(context)) allKnownIntentional = false;
+  }
+
+  if (!sawComplete) allKnownIntentional = false;
+  return { hasConflict, hasUnclassified, hasUnavailable, allKnownIntentional };
+}
+
+/**
+ * Aggregate for the patched list. A capped list still hides contexts the old
+ * summary describes; only a state the visible list proves gone is dropped, so a
+ * conflict or unset that may remain in the hidden remainder stays reported.
+ */
+function summaryAfterSavedIntents(
+  summary: ScanSummary,
+  before: readonly ImageExposureContext[],
+  after: readonly ImageExposureContext[],
+): ImageExposureContextSummary {
+  const recomputed = summarizeContexts(after);
+  const old = summary.exposure_context_summary;
+  const count = summary.exposure_context_count ?? before.length;
+  const truncated = summary.exposure_contexts_truncated === true || count > after.length;
+  if (!truncated || old === undefined) return recomputed;
+  const maxVisibleRank = before.reduce((rank, context) => Math.max(rank, contextRank(context)), -1);
+  return {
+    hasConflict: recomputed.hasConflict || (maxVisibleRank === 0 && old.hasConflict),
+    hasUnclassified: recomputed.hasUnclassified || (maxVisibleRank <= 1 && old.hasUnclassified),
+    hasUnavailable: old.hasUnavailable,
+    allKnownIntentional: old.allKnownIntentional && recomputed.allKnownIntentional,
+  };
+}
+
+/**
+ * Adopt a confirmed save's intents into the standing summaries, so the intent
+ * evidence and the row's action reflect the save even when the reread of those
+ * summaries fails. Contexts of the saved stack take the new effective intent
+ * (service row, else stack row); every other stack and every image untouched by
+ * the stack keeps its summary. Returns the input when nothing changed.
+ */
+export function applySavedIntents(
+  summaries: Record<string, ScanSummary>,
+  stackName: string,
+  intents: readonly IntentEntry[],
+): Record<string, ScanSummary> {
+  let changed = false;
+  const next: Record<string, ScanSummary> = {};
+
+  for (const [imageRef, summary] of Object.entries(summaries)) {
+    const contexts = summary.exposure_contexts;
+    if (summary.publicly_exposed !== true || !contexts || contexts.length === 0) {
+      next[imageRef] = summary;
+      continue;
+    }
+    let touched = false;
+    const patched = contexts.map((context) => {
+      if (context.stackName !== stackName) return context;
+      const after = contextWithSavedIntent(context, effectiveIntentFromSave(context.serviceName, intents));
+      if (sameIntentEvidence(context, after)) return context;
+      touched = true;
+      return after;
+    });
+    if (!touched) {
+      next[imageRef] = summary;
+      continue;
+    }
+    changed = true;
+    next[imageRef] = {
+      ...summary,
+      exposure_contexts: patched,
+      ...(summary.exposure_context_summary
+        ? { exposure_context_summary: summaryAfterSavedIntents(summary, contexts, patched) }
+        : {}),
+    };
+  }
+
+  return changed ? next : summaries;
+}
 
 function uniqueImageRefs(targets: PostureTarget[]): string[] {
   return [...new Set(targets.map((t) => t.imageRef))];

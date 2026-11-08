@@ -72,13 +72,13 @@ export function useExposureIntent(stackName: string, nodeId?: number) {
     }
   }, [stackName, nodeId]);
 
-  const save = useCallback(async (service: string, intent: ExposureIntent | null): Promise<boolean> => {
+  const save = useCallback(async (service: string, intent: ExposureIntent | null): Promise<IntentEntry[] | null> => {
     setSaving(true);
     try {
       const next = await saveExposureIntent(stackName, service, intent, nodeId);
-      if (next === null) return false;
+      if (next === null) return null;
       setIntents(next);
-      return true;
+      return next;
     } finally {
       setSaving(false);
     }

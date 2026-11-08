@@ -27,7 +27,10 @@ describe('SetExposureIntentPopover', () => {
     await userEvent.click(screen.getByRole('button', { name: 'Set exposure intent' }));
     await userEvent.click(await screen.findByRole('button', { name: 'internal' }));
 
-    await waitFor(() => expect(onSaved).toHaveBeenCalledTimes(1));
+    await waitFor(() => expect(onSaved).toHaveBeenCalledWith([
+      { service: '', intent: 'lan' },
+      { service: 'app', intent: 'internal' },
+    ]));
     const [path, init] = api.apiFetch.mock.calls[1] as [string, RequestInit & { nodeId?: number }];
     expect(path).toBe('/stacks/web/exposure');
     expect(init.method).toBe('PUT');

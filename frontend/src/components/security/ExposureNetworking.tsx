@@ -6,6 +6,7 @@ import { cn } from '@/lib/utils';
 import { SENCHO_OPEN_STACK_EVENT, type SenchoOpenStackDetail } from '@/lib/events';
 import { tunnelPathLabel } from '@/lib/tunnelExposure';
 import type { ImageExposureContext } from '@/types/security';
+import type { IntentSavedHandler } from './imagesTargeting';
 
 function openNetworking(nodeId: number | undefined, stackName: string) {
   if (nodeId === undefined) return;
@@ -49,7 +50,7 @@ function OpenNetworkingLink({ nodeId, stackName }: { nodeId: number; stackName: 
 function ContextIntentPopover({ ctx, nodeId, onIntentSaved, trigger, align }: {
   ctx: ImageExposureContext;
   nodeId: number;
-  onIntentSaved: () => void;
+  onIntentSaved: IntentSavedHandler;
   trigger: ReactElement;
   align?: 'start' | 'end';
 }) {
@@ -58,7 +59,7 @@ function ContextIntentPopover({ ctx, nodeId, onIntentSaved, trigger, align }: {
       stack={ctx.stackName}
       service={ctx.serviceName}
       nodeId={nodeId}
-      onSaved={onIntentSaved}
+      onSaved={(saved) => onIntentSaved(ctx.stackName, saved)}
       trigger={trigger}
       align={align}
       footer={<OpenNetworkingLink nodeId={nodeId} stackName={ctx.stackName} />}
@@ -74,7 +75,7 @@ function NetworkingContextList({
 }: {
   contexts: ImageExposureContext[];
   nodeId: number;
-  onIntentSaved: () => void;
+  onIntentSaved: IntentSavedHandler;
   showConflictHint?: boolean;
 }) {
   const intentVerb = useIntentVerb(nodeId);
@@ -146,8 +147,8 @@ export function NetworkExposedControl({
 }: {
   contexts: ImageExposureContext[];
   nodeId?: number;
-  /** An intent was saved from the popover, so the exposure conclusions should be re-read. */
-  onIntentSaved: () => void;
+  /** A confirmed save, with the stack's intents after it, so the exposure conclusions can reflect it before the reread lands. */
+  onIntentSaved: IntentSavedHandler;
   className?: string;
 }) {
   const intentVerb = useIntentVerb(nodeId ?? 0);
@@ -229,7 +230,7 @@ export function ViewNetworkingAction({
 }: {
   contexts: ImageExposureContext[];
   nodeId?: number;
-  onIntentSaved: () => void;
+  onIntentSaved: IntentSavedHandler;
 }) {
   const intentVerb = useIntentVerb(nodeId ?? 0);
   if (contexts.length === 0 || nodeId === undefined) return null;

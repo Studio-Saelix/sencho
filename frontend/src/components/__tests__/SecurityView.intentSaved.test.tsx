@@ -52,11 +52,11 @@ vi.mock('@/components/security/OverviewTab', () => ({
   ),
 }));
 vi.mock('@/components/security/ImagesTab', () => ({
-  ImagesTab: ({ targeting, onIntentSaved }: { targeting?: { kind: string; targets: object[] } | null; onIntentSaved: () => void }) => (
+  ImagesTab: ({ targeting, onIntentSaved }: { targeting?: { kind: string; targets: object[] } | null; onIntentSaved: (stackName: string, intents: Array<{ service: string; intent: string }>) => void }) => (
     <div>
       <span data-testid="targeting">{targeting?.kind ?? 'none'}</span>
       <span data-testid="snapshot">{JSON.stringify(targeting?.targets ?? [])}</span>
-      <button type="button" onClick={onIntentSaved}>intent saved</button>
+      <button type="button" onClick={() => onIntentSaved('web', [{ service: 'api', intent: 'public' }])}>intent saved</button>
     </div>
   ),
 }));

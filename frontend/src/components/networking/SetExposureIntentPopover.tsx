@@ -2,7 +2,7 @@ import { useEffect, useState, type ReactElement, type ReactNode } from 'react';
 import { Button } from '@/components/ui/button';
 import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover';
 import { toast } from '@/components/ui/toast-store';
-import { useExposureIntent } from '@/hooks/useExposureIntent';
+import { useExposureIntent, type IntentEntry } from '@/hooks/useExposureIntent';
 import type { NetworkingFinding } from '@/types/networking';
 import { ExposureIntentPicker } from './ExposureIntentPicker';
 
@@ -16,8 +16,9 @@ type SetExposureIntentPopoverProps = PopoverTriggerProps & {
   /** The service the finding is about; absent classifies the whole stack. */
   service: string | undefined;
   nodeId: number | undefined;
-  /** The intent was saved, so whatever was concluded from it should be re-read. */
-  onSaved: () => void;
+  /** The save was confirmed; the stack's intents after it are handed over so the
+   *  surface can keep showing the confirmed result even if its reread fails. */
+  onSaved: (saved: IntentEntry[]) => void;
   /** A named way out for the work that lives elsewhere, under the picker. */
   footer?: ReactNode;
   /** Which edge of the trigger the popover lines up with; a trigger at the row's start passes `start`. */
@@ -43,10 +44,11 @@ export function SetExposureIntentPopover(props: SetExposureIntentPopoverProps) {
   const current = intents?.find(entry => entry.service === scope)?.intent ?? null;
 
   const choose = async (intent: Parameters<typeof save>[1]): Promise<void> => {
-    if (!(await save(scope, intent))) return;
+    const saved = await save(scope, intent);
+    if (saved === null) return;
     toast.success(intent === null ? 'Exposure intent cleared.' : `Exposure intent set to ${intent}.`);
     setOpen(false);
-    onSaved();
+    onSaved(saved);
   };
 
   return (

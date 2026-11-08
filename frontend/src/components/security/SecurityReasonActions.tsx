@@ -96,8 +96,8 @@ function ServiceIntentRow({ target, nodeId, onResolved }: { target: StackService
           canEdit
           disabled={saving}
           onChange={intent => {
-            void save(target.service, intent).then(ok => {
-              if (!ok) return;
+            void save(target.service, intent).then(saved => {
+              if (saved === null) return;
               toast.success(intent === null ? 'Exposure intent cleared.' : `Exposure intent set to ${intent}.`);
               onResolved();
             });

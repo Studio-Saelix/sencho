@@ -15,7 +15,7 @@ import { cn } from '@/lib/utils';
 import { useIsMobile } from '@/hooks/use-is-mobile';
 import { ImageScanRow, ImageFilterChips, type ImageFilterChip } from './SecurityMobile';
 import { NetworkExposedControl, ViewNetworkingAction } from './ExposureNetworking';
-import type { ImagesTargetingState } from './imagesTargeting';
+import type { ImagesTargetingState, IntentSavedHandler } from './imagesTargeting';
 import {
   intentionalBannerKind,
   standingExposureContexts,
@@ -145,7 +145,7 @@ function IntentionalExposureBanner({
   unavailableCount: number;
   contexts: ImageExposureContext[];
   nodeId?: number;
-  onIntentSaved: () => void;
+  onIntentSaved: IntentSavedHandler;
   onClear?: () => void;
 }) {
   const title = kind === 'absolute'
@@ -198,8 +198,8 @@ interface ImagesTabProps {
   posturePartial?: boolean;
   /** Active node id: the node an exposure intent is saved on and permission-checked against, and the target of Networking navigation. */
   nodeId?: number;
-  /** An exposure intent was set from an exposure control, so the scan summaries should be re-read. */
-  onIntentSaved: () => void;
+  /** A confirmed save, with the stack's intents after it, so the scan summaries can reflect it before the reread lands. */
+  onIntentSaved: IntentSavedHandler;
 }
 
 /** Latest-scan index for real images (stack/config scans live in Compose risks). */

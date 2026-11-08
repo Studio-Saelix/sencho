@@ -79,7 +79,7 @@ describe('onIntentSaved wiring', () => {
     await userEvent.click(screen.getByRole('button', { name: 'Network exposed: set intent for web/api' }));
     await pickLan();
 
-    await waitFor(() => expect(onIntentSaved).toHaveBeenCalledTimes(1));
+    await waitFor(() => expect(onIntentSaved).toHaveBeenCalledWith('web', [{ service: 'api', intent: 'lan' }]));
   });
 
   it('reports a save made from the conflict banner action', async () => {
@@ -91,7 +91,7 @@ describe('onIntentSaved wiring', () => {
     await userEvent.click(screen.getAllByRole('button', { name: 'Change intent' })[0]!);
     await pickLan();
 
-    await waitFor(() => expect(onIntentSaved).toHaveBeenCalledTimes(1));
+    await waitFor(() => expect(onIntentSaved).toHaveBeenCalledWith('web', [{ service: 'api', intent: 'lan' }]));
   });
 
   it('reports a save made from the intentional banner action', async () => {
@@ -104,11 +104,10 @@ describe('onIntentSaved wiring', () => {
     await userEvent.click(screen.getAllByRole('button', { name: 'Change intent' })[0]!);
     await pickLan();
 
-    await waitFor(() => expect(onIntentSaved).toHaveBeenCalledTimes(1));
+    await waitFor(() => expect(onIntentSaved).toHaveBeenCalledWith('web', [{ service: 'api', intent: 'public' }]));
   });
 
   it('reports a save made from a row of the multi-context list', async () => {
-    api.apiFetch.mockResolvedValueOnce(json({ intents: [] }));
     api.apiFetch.mockResolvedValueOnce(json({ intents: [{ service: 'worker', intent: 'lan' }] }));
     const onIntentSaved = vi.fn();
     const other: ImageExposureContext = { stackName: 'jobs', serviceName: 'worker', exposureReason: 'published-port', intentStatus: 'unset' };
@@ -118,7 +117,7 @@ describe('onIntentSaved wiring', () => {
     await userEvent.click(await screen.findByRole('button', { name: 'Set intent for jobs/worker' }));
     await pickLan();
 
-    await waitFor(() => expect(onIntentSaved).toHaveBeenCalledTimes(1));
+    await waitFor(() => expect(onIntentSaved).toHaveBeenCalledWith('jobs', [{ service: 'worker', intent: 'lan' }]));
     const [path] = api.apiFetch.mock.calls[1] as [string];
     expect(path).toBe('/stacks/jobs/exposure');
   });
@@ -134,7 +133,7 @@ describe('onIntentSaved wiring', () => {
     await userEvent.click(screen.getByRole('button', { name: 'Network exposed: set intent for web/api' }));
     await pickLan();
 
-    await waitFor(() => expect(onIntentSaved).toHaveBeenCalledTimes(1));
+    await waitFor(() => expect(onIntentSaved).toHaveBeenCalledWith('web', [{ service: 'api', intent: 'lan' }]));
     expect(onInspect).not.toHaveBeenCalled();
   });
 });

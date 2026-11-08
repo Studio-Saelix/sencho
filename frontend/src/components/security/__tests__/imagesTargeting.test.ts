@@ -5,6 +5,7 @@ import {
   standingIntentEvidence,
   intentionalBannerKind,
   afterIntentSaved,
+  applySavedIntents,
   type ImagesTargetingState,
 } from '../imagesTargeting';
 import type { ImageExposureContext, PostureTarget, ScanSummary } from '@/types/security';
@@ -305,3 +306,169 @@ describe('afterIntentSaved', () => {
   });
 });
 
+describe('applySavedIntents', () => {
+  function unsetContext(stackName: string, serviceName: string): ImageExposureContext {
+    return ctx({ stackName, serviceName, intentStatus: 'unset' });
+  }
+
+  function exposedSummary(
+    imageRef: string,
+    contexts: ImageExposureContext[],
+    extra: Partial<ScanSummary> = {},
+  ): ScanSummary {
+    return summary({
+      image_ref: imageRef,
+      publicly_exposed: true,
+      exposure_contexts: contexts,
+      exposure_context_count: contexts.length,
+      exposure_context_summary: {
+        hasConflict: false,
+        hasUnclassified: false,
+        hasUnavailable: false,
+        allKnownIntentional: false,
+      },
+      ...extra,
+    });
+  }
+
+  it('adopts a saved service intent and clears the unclassified aggregate', () => {
+    const before = {
+      'exp:1': exposedSummary('exp:1', [unsetContext('web', 'api')], {
+        exposure_context_summary: {
+          hasConflict: false,
+          hasUnclassified: true,
+          hasUnavailable: false,
+          allKnownIntentional: false,
+        },
+      }),
+    };
+
+    const after = applySavedIntents(before, 'web', [{ service: 'api', intent: 'public' }]);
+
+    expect(after['exp:1']?.exposure_contexts?.[0]).toMatchObject({
+      intentStatus: 'set',
+      exposureIntent: 'public',
+    });
+    expect(after['exp:1']?.exposure_context_summary).toEqual({
+      hasConflict: false,
+      hasUnclassified: false,
+      hasUnavailable: false,
+      allKnownIntentional: true,
+    });
+    expect(standingIntentEvidence(after['exp:1']!)).toBe('Intent: public');
+  });
+
+  it('carries a stack intent to another service and image that inherit it', () => {
+    const before = {
+      'web:1': exposedSummary('web:1', [unsetContext('web', 'api')]),
+      'worker:1': exposedSummary('worker:1', [unsetContext('web', 'worker')]),
+      'db:1': exposedSummary('db:1', [unsetContext('db', 'postgres')]),
+    };
+
+    const after = applySavedIntents(before, 'web', [{ service: '', intent: 'lan' }]);
+
+    expect(after['web:1']?.exposure_contexts?.[0]).toMatchObject({ intentStatus: 'set', exposureIntent: 'lan' });
+    expect(after['worker:1']?.exposure_contexts?.[0]).toMatchObject({ intentStatus: 'set', exposureIntent: 'lan' });
+    expect(after['db:1']).toBe(before['db:1']);
+    expect(standingIntentEvidence(after['worker:1']!)).toBe('Intent: LAN');
+  });
+
+  it('keeps a service override when the stack intent changes', () => {
+    const before = {
+      'exp:1': exposedSummary('exp:1', [unsetContext('web', 'api'), unsetContext('web', 'worker')]),
+    };
+
+    const after = applySavedIntents(before, 'web', [
+      { service: '', intent: 'lan' },
+      { service: 'api', intent: 'public' },
+    ]);
+
+    expect(after['exp:1']?.exposure_contexts).toEqual([
+      expect.objectContaining({ serviceName: 'api', exposureIntent: 'public' }),
+      expect.objectContaining({ serviceName: 'worker', exposureIntent: 'lan' }),
+    ]);
+  });
+
+  it('returns a cleared service to the stack intent', () => {
+    const before = {
+      'exp:1': exposedSummary('exp:1', [
+        ctx({ stackName: 'web', serviceName: 'api', intentStatus: 'set', exposureIntent: 'public' }),
+        ctx({ stackName: 'web', serviceName: 'worker', intentStatus: 'set', exposureIntent: 'internal', intentConflict: true }),
+      ]),
+    };
+
+    // The response no longer carries a service row for api: it inherits the stack intent.
+    const after = applySavedIntents(before, 'web', [{ service: '', intent: 'lan' }]);
+
+    expect(after['exp:1']?.exposure_contexts).toEqual([
+      expect.objectContaining({ serviceName: 'api', exposureIntent: 'lan', intentStatus: 'set' }),
+      expect.objectContaining({ serviceName: 'worker', exposureIntent: 'lan', intentStatus: 'set' }),
+    ]);
+  });
+
+  it('clears the stack to unclassified when its intent rows are gone', () => {
+    const before = {
+      'exp:1': exposedSummary('exp:1', [
+        ctx({ stackName: 'web', serviceName: 'api', intentStatus: 'set', exposureIntent: 'public' }),
+        ctx({ stackName: 'web', serviceName: 'worker', intentStatus: 'unset' }),
+      ]),
+    };
+
+    const cleared = applySavedIntents(before, 'web', []);
+
+    expect(cleared['exp:1']?.exposure_contexts).toEqual([
+      expect.objectContaining({ serviceName: 'api', intentStatus: 'unset' }),
+      expect.objectContaining({ serviceName: 'worker', intentStatus: 'unset' }),
+    ]);
+    expect(standingIntentEvidence(cleared['exp:1']!)).toBe('Intent: not classified (+1)');
+  });
+
+  it('treats an unknown intent as unset', () => {
+    const before = { 'exp:1': exposedSummary('exp:1', [unsetContext('web', 'api')]) };
+
+    const after = applySavedIntents(before, 'web', [{ service: 'api', intent: 'unknown' }]);
+
+    expect(after['exp:1']?.exposure_contexts?.[0]).toMatchObject({ intentStatus: 'unset' });
+  });
+
+  it('marks a conflicting intent and its aggregate', () => {
+    const before = { 'exp:1': exposedSummary('exp:1', [unsetContext('web', 'api')]) };
+
+    const after = applySavedIntents(before, 'web', [{ service: 'api', intent: 'internal' }]);
+
+    expect(after['exp:1']?.exposure_contexts?.[0]).toMatchObject({
+      intentStatus: 'set',
+      exposureIntent: 'internal',
+      intentConflict: true,
+    });
+    expect(after['exp:1']?.exposure_context_summary?.hasConflict).toBe(true);
+    expect(standingIntentEvidence(after['exp:1']!)).toBe('Intent mismatch: internal');
+  });
+
+  it('leaves stacks the save did not touch alone', () => {
+    const before = { 'exp:1': exposedSummary('exp:1', [unsetContext('db', 'postgres')]) };
+
+    expect(applySavedIntents(before, 'web', [{ service: 'api', intent: 'public' }])).toBe(before);
+  });
+
+  it('keeps a warning a capped list cannot disprove', () => {
+    const before = {
+      'exp:1': exposedSummary('exp:1', [unsetContext('web', 'api')], {
+        exposure_context_count: 3,
+        exposure_contexts_truncated: true,
+        exposure_context_summary: {
+          hasConflict: false,
+          hasUnclassified: true,
+          hasUnavailable: false,
+          allKnownIntentional: false,
+        },
+      }),
+    };
+
+    const after = applySavedIntents(before, 'web', [{ service: 'api', intent: 'public' }]);
+
+    expect(after['exp:1']?.exposure_contexts?.[0]).toMatchObject({ intentStatus: 'set', exposureIntent: 'public' });
+    // Hidden contexts may still be unclassified, so the aggregate stays truthful to them.
+    expect(after['exp:1']?.exposure_context_summary?.hasUnclassified).toBe(true);
+  });
+});
