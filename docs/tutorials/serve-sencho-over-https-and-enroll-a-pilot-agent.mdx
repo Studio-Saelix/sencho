@@ -150,6 +150,8 @@ It does not cover putting a reverse proxy in front of Sencho, which is [Put Senc
       <img src="/images/tutorials/serve-sencho-over-https-and-enroll-a-pilot-agent/enroll-dialog-ca.png" alt="Enroll the pilot agent dialog. Step 1 shows a compose file whose SENCHO_PRIMARY_URL starts with https, with a bind mount of sencho-hub-ca.pem and SENCHO_PILOT_CA_FILE set. Step 1b shows the hub CA certificate with a Copy CA file button. Step 2 shows docker compose up -d. The footer reads Expires 14m from now, with Copy compose file and Done buttons." />
     </Frame>
 
+    The guided **Fleet → Node management → Bootstrap new Linux server** flow defaults the agent directory to `/opt/sencho-agent` and prepares a reviewable plan. This walkthrough stays manual, and the `~/sencho-agent` example below remains valid.
+
     On `edge-02`, create a directory such as `~/sencho-agent` and save two files in it, side by side:
 
     - **Step 1** as `compose.yaml`. **Copy compose file** copies it.

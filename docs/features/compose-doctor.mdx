@@ -209,7 +209,7 @@ Sencho recognizes when the stack it is checking is its own running compose proje
 
 This is the one place Compose Doctor's findings connect to an enforcement that is not advisory. Independent of this report, and independent of whether the finding is acknowledged, Sencho refuses generic **deploy, update, stop, down, and delete** actions on its own compose project, because any of them could recreate or remove the dashboard you are using to manage it. Attempting one of those actions returns an error explaining why; Compose Doctor's finding is the heads-up that surfaces the same fact before you try.
 
-To update Sencho itself, use **Fleet -> Node Update** instead of the stack's own update action. Sencho's own project is refused as described above. Any other stack that holds the Docker socket proxy Sencho is using is protected against operations that would stop or recreate the proxy. Those are refused (see [Updating the proxy](/operations/self-hosting#updating-the-proxy) for the full list), and a deploy that leaves the proxy unchanged goes through. To manage Sencho's own project normally (for example, to deliberately restructure it), move its compose project outside the node's configured Compose directory first.
+To update Sencho itself, use **Fleet -> Node management -> Node updates** instead of the stack's own update action. Sencho's own project is refused as described above. Any other stack that holds the Docker socket proxy Sencho is using is protected against operations that would stop or recreate the proxy. Those are refused (see [Updating the proxy](/operations/self-hosting#updating-the-proxy) for the full list), and a deploy that leaves the proxy unchanged goes through. To manage Sencho's own project normally (for example, to deliberately restructure it), move its compose project outside the node's configured Compose directory first.
 
 ## Networking-relevant findings on the Networking page
 
@@ -330,7 +330,7 @@ There is no tier gate: Compose Doctor is available on all plans.
     The summary card shows the username and relative time: "ran 5 minutes ago by admin". This reflects the most recent run stored for this stack on the currently active node.
   </Accordion>
   <Accordion title="The report warns that this stack is the running Sencho instance">
-    Sencho detected that the stack you are checking is its own compose project. Generic deploy, update, stop, down, and delete actions are refused for this stack no matter what the preflight report says, because any of them could recreate or remove the dashboard you are using right now. Update Sencho from **Fleet -> Node Update** instead. See [Self-management](#self-management).
+    Sencho detected that the stack you are checking is its own compose project. Generic deploy, update, stop, down, and delete actions are refused for this stack no matter what the preflight report says, because any of them could recreate or remove the dashboard you are using right now. Update Sencho from **Fleet -> Node management -> Node updates** instead. See [Self-management](#self-management).
   </Accordion>
   <Accordion title="I dismissed a finding but it still shows on another machine or for a teammate">
     Dismissing the summary card (the **X** button) is stored in your browser's local storage, keyed to the stack and node. It does not sync across devices, browsers, or user accounts, so a dismissal on your machine has no effect on what anyone else sees.
