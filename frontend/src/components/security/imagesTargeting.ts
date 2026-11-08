@@ -62,7 +62,7 @@ const INTENTIONAL = new Set(['public', 'lan', 'reverse-proxy', 'temporary']);
 /** Intents a publicly exposed service contradicts. */
 const CONFLICT = new Set(['internal', 'same-node']);
 
-/** A context carrying the image it belongs to when a targeting snapshot knows it. */
+/** A context carrying the image it belongs to. */
 export type ImageExposureContextRef = ImageExposureContext & { imageRef: string };
 
 /** The image and context a confirmed save came from. A save can name a service
@@ -233,44 +233,43 @@ interface HiddenSaveState {
   unclassified: boolean;
   /** The conflicting intent the save proved, for the row's label. */
   conflictIntent?: ExposureIntent;
-  /** 1 when the saved context no longer counts as exposed, else 0. */
-  removed: number;
+  /** True when the saved context no longer counts as exposed. */
+  settled: boolean;
 }
 
 function hiddenSaveState(
-  summary: ScanSummary,
+  contexts: readonly ImageExposureContext[],
   stackName: string,
   intents: readonly IntentEntry[],
   saved: SavedIntentTarget,
 ): HiddenSaveState | undefined {
   const { context } = saved;
   if (context.stackName !== stackName) return undefined;
-  const visible = summary.exposure_contexts?.some(
-    (row) => row.stackName === stackName && row.serviceName === context.serviceName,
-  );
-  if (visible) return undefined;
+  if (contexts.some((row) => row.stackName === stackName && row.serviceName === context.serviceName)) {
+    return undefined;
+  }
   const intent = effectiveIntentFromSave(context.serviceName, intents);
   if (settledAwayByIntent(context, intent)) {
-    return { conflict: false, unclassified: false, removed: 1 };
+    return { conflict: false, unclassified: false, settled: true };
   }
   if (intent === null || intent === 'unknown') {
-    return { conflict: false, unclassified: true, removed: 0 };
+    return { conflict: false, unclassified: true, settled: false };
   }
   if (CONFLICT.has(intent)) {
-    return { conflict: true, unclassified: false, conflictIntent: intent, removed: 0 };
+    return { conflict: true, unclassified: false, conflictIntent: intent, settled: false };
   }
-  return { conflict: false, unclassified: false, removed: 0 };
+  return { conflict: false, unclassified: false, settled: false };
 }
 
-/** The hidden remainder after a save named one of its contexts. With a known
- *  total of one hidden context, the save settles that whole remainder; with
- *  more, states it does not prove may still sit in another hidden context. */
+/** The hidden remainder after a save named one of its contexts. With exactly
+ *  one hidden context, the save settles that whole remainder; with more, states
+ *  it does not prove may still sit in another hidden context. */
 function hiddenAfterSave(
   hidden: ImageExposureContextHidden,
   state: HiddenSaveState,
-  single: boolean,
+  onlyHidden: boolean,
 ): ImageExposureContextHidden {
-  if (single) {
+  if (onlyHidden) {
     return {
       conflict: state.conflict,
       unclassified: state.unclassified,
@@ -307,21 +306,15 @@ function summaryAfterSave(
       ?? (contexts.length > 0 ? hiddenRemainderEvidence(summary, contexts) : undefined)
     : undefined;
   const { patched, changed } = patchContextsAfterSave(contexts, stackName, intents);
-  // A total at or below the attached length cannot describe a hidden remainder;
-  // there the truncation flag is the only signal, so the remainder is unknown.
-  const hiddenCount = declaredCount !== undefined && declaredCount > contexts.length
-    ? declaredCount - contexts.length
-    : undefined;
+  const onlyHidden = declaredCount === contexts.length + 1;
   const hiddenSave = saved?.imageRef === imageRef && truncated
-    ? hiddenSaveState(summary, stackName, intents, saved)
+    ? hiddenSaveState(contexts, stackName, intents, saved)
     : undefined;
   if (!changed && hiddenSave === undefined) return null;
 
-  const removed = contexts.length - patched.length + (hiddenSave?.removed ?? 0);
-  const remainingHidden = hiddenCount !== undefined
-    ? Math.max(0, hiddenCount - (hiddenSave?.removed ?? 0))
-    : undefined;
-  if (patched.length === 0 && (remainingHidden === 0 || !truncated)) {
+  const onlyHiddenSettled = onlyHidden && hiddenSave?.settled === true;
+  const removed = contexts.length - patched.length + (hiddenSave?.settled === true ? 1 : 0);
+  if (patched.length === 0 && (onlyHiddenSettled || !truncated)) {
     // Every exposed service of this image settled away: the server would no
     // longer report the image as exposed at all.
     return {
@@ -348,9 +341,9 @@ function summaryAfterSave(
     ? undefined
     : hiddenSave === undefined
       ? hidden
-      : hiddenAfterSave(hidden, hiddenSave, hiddenCount === 1);
+      : hiddenAfterSave(hidden, hiddenSave, onlyHidden);
   // A settled last hidden context leaves no remainder to warn about.
-  const keepHidden = nextHidden !== undefined && remainingHidden !== 0;
+  const keepHidden = nextHidden !== undefined && !onlyHiddenSettled;
   return {
     ...summary,
     exposure_contexts: patched,
@@ -362,7 +355,7 @@ function summaryAfterSave(
       : {}),
     ...(keepHidden
       ? { exposure_contexts_truncated: true, exposure_context_hidden: nextHidden }
-      : remainingHidden === 0
+      : onlyHiddenSettled
         ? { exposure_contexts_truncated: false, exposure_context_hidden: undefined }
         : truncated ? { exposure_contexts_truncated: true } : {}),
   };
