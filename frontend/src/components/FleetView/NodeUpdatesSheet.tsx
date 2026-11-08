@@ -276,9 +276,10 @@ export function NodeUpdatesSheet({
             meta={meta}
             primaryAction={isAdmin ? {
                 label: 'Recheck',
-                icon: recheckingUpdates ? Loader2 : RefreshCw,
+                icon: RefreshCw,
                 onClick: () => { void handleRecheck(); },
-                disabled: recheckingUpdates || checkingUpdates,
+                pending: recheckingUpdates,
+                disabled: checkingUpdates,
             } : undefined}
             secondaryActions={secondaryActions}
             footerContext={footerContext}
