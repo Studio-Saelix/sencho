@@ -277,7 +277,8 @@ function summaryAfterSave(
 ): ScanSummary | null {
   const contexts = summary.exposure_contexts;
   const settledBefore = summary.exposure_context_settled ?? [];
-  const savedKey = saved?.imageRef === imageRef ? contextKey(saved.context) : undefined;
+  const savedHere = saved?.imageRef === imageRef ? saved : undefined;
+  const savedKey = savedHere !== undefined ? contextKey(savedHere.context) : undefined;
   const returning = savedKey !== undefined && settledBefore.includes(savedKey);
   if (contexts === undefined || (summary.publicly_exposed !== true && !returning)) return null;
   const declaredCount = summary.exposure_context_count;
@@ -290,33 +291,33 @@ function summaryAfterSave(
       ?? (contexts.length > 0 ? hiddenRemainderEvidence(summary, contexts) : undefined)
     : undefined;
   const { patched, changed, settled } = patchContextsAfterSave(contexts, stackName, intents);
-  const outcome = saved !== undefined && savedKey !== undefined && (truncated || returning)
-    ? hiddenSaveOutcome(contexts, stackName, intents, saved)
+  const outcome = savedHere !== undefined && (truncated || returning)
+    ? hiddenSaveOutcome(contexts, stackName, intents, savedHere)
     : undefined;
   // A context that was already settled away and settles again changes nothing.
   const hiddenSave = returning && outcome?.settled === true ? undefined : outcome;
   if (!changed && hiddenSave === undefined) return null;
 
-  const rejoined = returning && hiddenSave !== undefined && !hiddenSave.settled;
-  const nextContexts = hiddenSave !== undefined && !hiddenSave.settled
-    ? [...patched, hiddenSave.context]
-    : patched;
-  const removed = contexts.length - patched.length + (hiddenSave?.settled === true ? 1 : 0);
+  const hiddenSettled = hiddenSave?.settled === true;
+  const joined = hiddenSave?.settled === false ? hiddenSave.context : undefined;
+  const rejoined = returning && joined !== undefined;
+  const nextContexts = joined !== undefined ? [...patched, joined] : patched;
+  const removed = contexts.length - patched.length + (hiddenSettled ? 1 : 0);
   const nextCount = declaredCount !== undefined
     ? Math.max(0, declaredCount - removed + (rejoined ? 1 : 0))
     : undefined;
   const nextSettled = [...new Set([
     ...settledBefore.filter((key) => !(rejoined && key === savedKey)),
     ...settled,
-    ...(hiddenSave?.settled === true && savedKey !== undefined ? [savedKey] : []),
+    ...(hiddenSettled && savedKey !== undefined ? [savedKey] : []),
   ])];
-  // The count and the contexts that remain listed must both say nothing is
-  // left before the image stops reading as exposed.
   // Without a usable count (absent, or none hidden by it) the remainder cannot
   // be followed, so the cap flag stands.
   const stillTruncated = nextCount !== undefined && wasHiddenCount > 0
     ? nextCount > nextContexts.length
     : truncated;
+  // The count and the contexts that remain listed must both say nothing is
+  // left before the image stops reading as exposed.
   const exposed = nextContexts.length > 0 || (nextCount !== undefined ? nextCount > 0 : stillTruncated);
   if (!exposed) {
     // Every exposed service of this image settled away: the server would no
