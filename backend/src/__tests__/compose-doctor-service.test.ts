@@ -398,8 +398,25 @@ describe('runPreflight', () => {
     fs.mkdirSync(mergeDir, { recursive: true });
     fs.writeFileSync(path.join(mergeDir, 'compose.yaml'), mergeLines.join('\n'));
 
+    // The services map itself is supplied through a chain of merge keys, so its
+    // KEY is visible even though following the values below it hits the cap.
+    const rootMergeStack = 'doctor-root-merge-chain';
+    const rootMergeLines = [
+      'x-1: &a1',
+      '  web:',
+      '    image: nginx:1.27',
+      '    network_mode: none',
+      '    restart: always',
+      '    privileged: true',
+    ];
+    for (let level = 2; level <= 5; level += 1) rootMergeLines.push(`x-${level}: &a${level} {<<: *a${level - 1}}`);
+    rootMergeLines.push('services: *a5', '');
+    const rootMergeDir = path.join(process.env.COMPOSE_DIR as string, rootMergeStack);
+    fs.mkdirSync(rootMergeDir, { recursive: true });
+    fs.writeFileSync(path.join(rootMergeDir, 'compose.yaml'), rootMergeLines.join('\n'));
+
     try {
-      for (const stack of [aliasStack, mergeStack]) {
+      for (const stack of [aliasStack, mergeStack, rootMergeStack]) {
         stubDocker({
           name: stack,
           services: { web: { image: 'nginx:1.27', network_mode: 'none', restart: 'always', privileged: true } },
@@ -409,10 +426,14 @@ describe('runPreflight', () => {
         const report = await doctor().runPreflight(nodeId, stack, 'tester');
         expect(report.renderable).toBe(true);
         expect(report.findings.map(finding => finding.ruleId)).not.toContain('effective-model-expanded');
+        // The rule must have run against a known service set, not been skipped
+        // as "source unreadable": the latter would hide the regression.
+        expect(report.coverage.skipped.some(entry => entry.ruleId === 'effective-model-expanded')).toBe(false);
       }
     } finally {
       fs.rmSync(aliasDir, { recursive: true, force: true });
       fs.rmSync(mergeDir, { recursive: true, force: true });
+      fs.rmSync(rootMergeDir, { recursive: true, force: true });
     }
   });
 

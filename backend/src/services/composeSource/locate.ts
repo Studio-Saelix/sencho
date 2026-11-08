@@ -304,7 +304,6 @@ function locatePort(project: AuthoredProject, hit: RuleHit, model: EffectiveMode
   const scopes = serviceScopes(project, hit.service);
   if (fieldHasTag(scopes, 'ports')) return undefined;
   const count = scopedSequenceCount(scopes, 'ports');
-  const identities = new Set<string>();
   for (let index = 0; index < count; index += 1) {
     for (const scope of scopes) {
       const author = portItemValue(scope.file, scope.declaredService, index);
@@ -317,15 +316,11 @@ function locatePort(project: AuthoredProject, hit: RuleHit, model: EffectiveMode
           && (!broadOnly || normalizedInterface(author.hostIp) === ALL_INTERFACES)
         : specs.some(spec => authoredPortMatches(author, spec, broadOnly));
       if (!matched) continue;
-      // Two different publications (interface or target) on one subject cannot
-      // both be the one the rule reported: refuse rather than pick a layer.
-      identities.add(`${author.hostText}|${author.protocol}|${normalizedInterface(author.hostIp)}|${author.targetStartPort ?? ''}-${author.targetEndPort ?? ''}`);
       const list = byLayer.get(scope.layerIndex) ?? [];
       list.push({ file: scope.file.file, node, layerIndex: scope.layerIndex, writability: scope.file.writability, index });
       byLayer.set(scope.layerIndex, list);
     }
   }
-  if (identities.size > 1) return undefined;
 
   // `ports` appends across Compose layers, so every matching authored item is a
   // live declaration of the publication the hit names. Selecting the latest

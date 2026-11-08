@@ -231,6 +231,41 @@ describe('Compose Doctor authored locations', () => {
     expect(port).toBeUndefined();
   });
 
+  it('refuses a duplicate port supplied through a root-level merge in the override', async () => {
+    writeStack('doctor-port-root-merge', {
+      'compose.yaml': 'services:\n  api:\n    image: nginx:1\n    ports:\n      - "8080:80"\n',
+      'compose.override.yaml': [
+        'x-ovr: &ovr',
+        '  services:',
+        '    api:',
+        '      ports:',
+        '        - "8080:80"',
+        '<<: *ovr',
+        '',
+      ].join('\n'),
+    });
+    const project = await buildAuthoredProject(nodeId, 'doctor-port-root-merge');
+    const port = locateFinding(project, hit('port-exposed-all-interfaces', {
+      service: 'api', sourcePath: 'api', subject: { kind: 'port', key: '8080/tcp' },
+    }));
+    expect(port).toBeUndefined();
+  });
+
+  it('refuses a port location when an earlier COMPOSE_FILE layer cannot be parsed', async () => {
+    writeStack('doctor-port-earlier-unparsed', {
+      '.env': 'COMPOSE_FILE=compose.yaml:broken.yaml:more.yaml\n',
+      'compose.yaml': 'services:\n  api:\n    image: nginx:1\n',
+      'broken.yaml': 'services: [\n',
+      'more.yaml': 'services:\n  api:\n    ports:\n      - "8080:80"\n',
+    });
+    const project = await buildAuthoredProject(nodeId, 'doctor-port-earlier-unparsed');
+    expect(project.files.find(file => file.file === 'broken.yaml')?.state).toBe('parse-failed');
+    const port = locateFinding(project, hit('port-exposed-all-interfaces', {
+      service: 'api', sourcePath: 'api', subject: { kind: 'port', key: '8080/tcp' },
+    }));
+    expect(port).toBeUndefined();
+  });
+
   it('locates the broad publication, not a loopback override on the same host port', async () => {
     writeStack('doctor-port-broad', {
       'compose.yaml': 'services:\n  api:\n    image: nginx:1\n    ports:\n      - "8080:80"\n',
@@ -515,6 +550,31 @@ describe('Compose Doctor authored locations', () => {
       'compose.override.yaml': 'services:\n  api:\n    env_file:\n      - gone.env\n',
     });
     const project = await buildAuthoredProject(nodeId, 'doctor-env-file-duplicate');
+    const missing = locateFinding(project, hit('env-file-missing', {
+      service: 'api', sourcePath: 'gone.env',
+    }));
+    expect(missing).toBeUndefined();
+  });
+
+  it('locates a long-form env-file entry at its path value', async () => {
+    writeStack('doctor-env-file-long', {
+      'compose.yaml': 'services:\n  api:\n    image: nginx:1\n    env_file:\n      - path: gone.env\n',
+    });
+    const project = await buildAuthoredProject(nodeId, 'doctor-env-file-long');
+    const missing = locateFinding(project, hit('env-file-missing', {
+      service: 'api', sourcePath: 'gone.env',
+    }));
+    expect(missing).toMatchObject({
+      file: 'compose.yaml', line: 5, column: 15, path: 'services.api.env_file[0]',
+    });
+  });
+
+  it('refuses an env-file path declared at different indexes in both layers', async () => {
+    writeStack('doctor-env-file-duplicate-index', {
+      'compose.yaml': 'services:\n  api:\n    image: nginx:1\n    env_file:\n      - gone.env\n',
+      'compose.override.yaml': 'services:\n  api:\n    env_file:\n      - b.env\n      - gone.env\n',
+    });
+    const project = await buildAuthoredProject(nodeId, 'doctor-env-file-duplicate-index');
     const missing = locateFinding(project, hit('env-file-missing', {
       service: 'api', sourcePath: 'gone.env',
     }));

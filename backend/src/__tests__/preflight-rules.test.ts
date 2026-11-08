@@ -802,6 +802,11 @@ describe('effective-model-expanded', () => {
     const f = runRules(ctx({ model: m, sourceServiceNames: [], sourceReadable: false }));
     expect(ids(f, 'effective-model-expanded')).toHaveLength(0);
   });
+  it('stays silent when the source was read but its service set is unknown', () => {
+    const m = model([svc({ name: 'web' }), svc({ name: 'sidecar' })]);
+    const f = runRules(ctx({ model: m, sourceServiceNames: [], sourceReadable: true, sourceServicesKnown: false }));
+    expect(ids(f, 'effective-model-expanded')).toHaveLength(0);
+  });
 });
 
 describe('exposure-intent rules', () => {

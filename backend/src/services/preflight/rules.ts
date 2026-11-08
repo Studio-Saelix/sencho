@@ -1002,8 +1002,10 @@ const effectiveModelExpanded: PreflightRule = {
   id: 'effective-model-expanded',
   run(ctx) {
     // Skip when the source could not be read: an empty source-service set then
-    // means "unknown", not "zero services", and would flag every service.
-    if (!ctx.model || !ctx.sourceReadable) return [];
+    // means "unknown", not "zero services", and would flag every service. The
+    // same holds when the file was read but its service set could not be
+    // determined.
+    if (!ctx.model || !ctx.sourceReadable || ctx.sourceServicesKnown === false) return [];
     const source = new Set(ctx.sourceServiceNames);
     const extra = ctx.model.services.map(s => s.name).filter(n => !source.has(n));
     if (extra.length === 0) return [];

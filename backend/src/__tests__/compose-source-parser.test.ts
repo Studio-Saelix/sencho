@@ -99,6 +99,28 @@ describe('parseComposeDocument', () => {
     expect(parsed.serviceNamesKnown).toBe(true);
   });
 
+  it('enumerates services supplied through a root-level alias or merge chain', () => {
+    const lines = [
+      'x-1: &a1',
+      '  web:',
+      '    image: nginx:1.27',
+    ];
+    for (let level = 2; level <= 5; level += 1) lines.push(`x-${level}: &a${level} {<<: *a${level - 1}}`);
+    lines.push('services: *a5', '');
+    const parsed = parse(lines.join('\n'));
+    expect(parsed.state).toBe('parsed');
+    expect(parsed.serviceNames).toEqual(['web']);
+    expect(parsed.serviceNamesKnown).toBe(true);
+
+    const deep = ['x-1: &a1', '  web:', '    image: nginx:1.27'];
+    for (let level = 2; level <= 20; level += 1) deep.push(`x-${level}: &a${level} {<<: *a${level - 1}}`);
+    deep.push('services: *a20', '');
+    const tooDeep = parse(deep.join('\n'));
+    // The services map itself was never reached, so the empty list is unknown.
+    expect(tooDeep.serviceNames).toEqual([]);
+    expect(tooDeep.serviceNamesKnown).toBe(false);
+  });
+
   it('marks an inline label whose value is an alias as unresolved', () => {
     const parsed = parse([
       'x-value: &value override',

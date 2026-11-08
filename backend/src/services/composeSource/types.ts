@@ -98,9 +98,10 @@ export interface AuthoredFileSource {
   state: SourceFileState;
   nodes: ReadonlyMap<string, AuthoredNode>;
   diagnostics: AuthoredDiagnostic[];
-  /** Top-level service keys this file declares, when the reader mapped the
-   *  document. Absent means "unknown" (malformed YAML, size cap), never
-   *  "none": a deep alias or merge chain still leaves this list known. */
+  /** Top-level service keys this file declares, when the walk enumerated the
+   *  `services` map. Absent means "unknown" (malformed YAML, size cap), never
+   *  "none": a deep alias or merge chain in a service value still leaves this
+   *  list known. */
   serviceNames?: string[];
   /** sha256 of the UTF-8 content this build read, when it read the file. A
    *  location persisted from this build carries it so a later read can prove

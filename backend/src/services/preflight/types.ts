@@ -180,6 +180,12 @@ export interface PreflightContext {
   /** Whether the source file could be read; gates source-derived checks so an
    *  unreadable source cannot be mistaken for an empty one. */
   sourceReadable: boolean;
+  /** False when the source was read but its declared service set could not be
+   *  determined (for example a parse the authored model also refused). Gates
+   *  `effective-model-expanded` so "unknown" is never read as "no services".
+   *  Absent means the caller has no separate answer and `sourceReadable`
+   *  already decides. */
+  sourceServicesKnown?: boolean;
   nodePorts: NodePortBinding[];
   existingNetworkNames: Set<string>;
   existingVolumeNames: Set<string>;

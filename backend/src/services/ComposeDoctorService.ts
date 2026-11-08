@@ -230,7 +230,9 @@ export class ComposeDoctorService {
 
     // An unknown source service set must stay unknown: treating it as empty
     // makes every rendered service look like it was pulled in from elsewhere.
-    const ctx = await this.buildContext(nodeId, stackName, sourceServiceNames ?? [], sourceServiceNames !== null);
+    const ctx = await this.buildContext(
+      nodeId, stackName, sourceServiceNames ?? [], source !== null, sourceServiceNames !== null,
+    );
     const { findings: hits, coverage } = runAssuranceRules(ctx);
     const normalized = sortNormalized(hits.map(hit => {
       const rule = getAssuranceRule(hit.ruleId);
@@ -369,7 +371,13 @@ export class ComposeDoctorService {
     return declared.parseError ? null : declared.services.map(service => service.name);
   }
 
-  private async buildContext(nodeId: number, stackName: string, sourceServiceNames: string[], sourceReadable: boolean): Promise<PreflightContext> {
+  private async buildContext(
+    nodeId: number,
+    stackName: string,
+    sourceServiceNames: string[],
+    sourceReadable: boolean,
+    sourceServicesKnown: boolean,
+  ): Promise<PreflightContext> {
     const fsSvc = FileSystemService.getInstance(nodeId);
     const baseDir = fsSvc.getBaseDir();
 
@@ -469,6 +477,7 @@ export class ComposeDoctorService {
       missingEnvFiles,
       sourceServiceNames,
       sourceReadable,
+      sourceServicesKnown,
       nodePorts,
       existingNetworkNames,
       existingVolumeNames,

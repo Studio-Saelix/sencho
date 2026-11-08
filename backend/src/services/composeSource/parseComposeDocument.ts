@@ -127,14 +127,15 @@ export interface ParsedComposeDocument {
   resources: ResourceFileDeclaration[];
   labelFiles: LabelFileDeclaration[];
   inlineLabels: InlineLabelDeclaration[];
-  /** Service keys declared in this file, in declaration order. */
+  /** Service keys enumerated under the top-level `services` map, in walk
+   *  order (a file's own keys before keys it merges in). */
   serviceNames: string[];
   /**
    * Whether `serviceNames` is the complete set this file declares. False when
    * the reader stopped before it understood the document (malformed YAML, the
-   * size cap, a non-map root): an empty list then means "unknown", never
-   * "zero services". A document refused only for a deep alias/merge chain is
-   * still mapped, so its top-level service keys stay known.
+   * size cap, a non-map root, an empty document): an empty list then means
+   * "unknown", never "zero services". A document refused only for a deep
+   * alias/merge chain still enumerates its top-level service keys.
    */
   serviceNamesKnown: boolean;
 }
@@ -189,6 +190,10 @@ interface WalkContext {
   source: string;
   nodeCount: number;
   boundsExceeded: boolean;
+  /** Service keys encountered under the top-level `services` map, in order. */
+  serviceNames: Set<string>;
+  /** The `services` mapping itself was fully walked (keys are complete). */
+  servicesWalked: boolean;
   /** Aliases and resolved nodes on the current expansion path, for cycle detection. */
   aliasTrail: Set<Node>;
   /** Alias/merge traversals performed so far, across every walk of this document. */
@@ -376,22 +381,28 @@ function walkValue(
   }
 }
 
-function mergedPairs(ctx: WalkContext, value: Node | null | undefined, depth: number): Array<{ pair: Pair; via: 'merge' | 'alias' }> {
-  if (!value) return [];
-  if (!chargeAliasWork(ctx)) return [];
+interface FlattenedPairs {
+  pairs: Array<{ pair: Pair; via: 'merge' | 'alias' }>;
+  /** False when a depth, cycle, or work bound stopped the flattening. */
+  complete: boolean;
+}
+
+function mergedPairs(ctx: WalkContext, value: Node | null | undefined, depth: number): FlattenedPairs {
+  if (!value) return { pairs: [], complete: true };
+  if (!chargeAliasWork(ctx)) return { pairs: [], complete: false };
   if (depth >= MAX_ALIAS_DEPTH) {
     reportTooDeep(ctx, value);
-    return [];
+    return { pairs: [], complete: false };
   }
   if (isAlias(value)) {
     if (ctx.aliasTrail.has(value)) {
       reportAliasCycle(ctx, value);
-      return [];
+      return { pairs: [], complete: false };
     }
     const resolved = resolveAlias(ctx, value as Alias);
     if (resolved && ctx.aliasTrail.has(resolved)) {
       reportAliasCycle(ctx, value);
-      return [];
+      return { pairs: [], complete: false };
     }
     ctx.aliasTrail.add(value);
     if (resolved) ctx.aliasTrail.add(resolved);
@@ -410,18 +421,26 @@ function mergedPairs(ctx: WalkContext, value: Node | null | undefined, depth: nu
     // in. Own keys take precedence over its merge sources, and earlier sources
     // over later ones, which is the order `walkMap` relies on.
     const out: Array<{ pair: Pair; via: 'merge' | 'alias' }> = own.map(pair => ({ pair, via: 'merge' as const }));
-    for (const merge of merges) out.push(...mergedPairs(ctx, merge.value as Node, depth + 1));
-    return out;
+    let complete = true;
+    for (const merge of merges) {
+      const flattened = mergedPairs(ctx, merge.value as Node, depth + 1);
+      out.push(...flattened.pairs);
+      complete = complete && flattened.complete;
+    }
+    return { pairs: out, complete };
   }
   if (isSeq(value)) {
     const out: Array<{ pair: Pair; via: 'merge' | 'alias' }> = [];
+    let complete = true;
     for (const item of (value as YAMLSeq).items) {
-      if (!chargeAliasWork(ctx)) break;
-      out.push(...mergedPairs(ctx, item as Node, depth + 1));
+      if (!chargeAliasWork(ctx)) { complete = false; break; }
+      const flattened = mergedPairs(ctx, item as Node, depth + 1);
+      out.push(...flattened.pairs);
+      complete = complete && flattened.complete;
     }
-    return out;
+    return { pairs: out, complete };
   }
-  return [];
+  return { pairs: [], complete: true };
 }
 
 function walkMap(
@@ -438,6 +457,10 @@ function walkMap(
   const emit = (pair: Pair, pairVia: 'own' | 'merge' | 'alias'): void => {
     const keyText = scalarText(pair.key as Node);
     if (keyText === undefined) return;
+    // The service-name set comes from the walk, not from the plain projection:
+    // a `services` map supplied through an alias or a root merge is still
+    // enumerated here, and a deep VALUE never hides its own key.
+    if (path === 'services') ctx.serviceNames.add(keyText);
     const childPath = path ? `${path}.${keyText}` : keyText;
     if (pairVia === 'merge' && ctx.nodes.has(childPath)) return;
     const keyRange = nodeRange(ctx.lineCounter, pair.key as Node);
@@ -445,9 +468,13 @@ function walkMap(
   };
 
   for (const pair of ownPairs) emit(pair, via);
+  let keysComplete = true;
   for (const pair of mergePairs) {
-    for (const merged of mergedPairs(ctx, pair.value as Node, depth)) emit(merged.pair, 'merge');
+    const merged = mergedPairs(ctx, pair.value as Node, depth);
+    if (!merged.complete) keysComplete = false;
+    for (const entry of merged.pairs) emit(entry.pair, 'merge');
   }
+  if (path === 'services') ctx.servicesWalked = keysComplete && !ctx.boundsExceeded;
 }
 
 function addDiagnostic(
@@ -474,7 +501,7 @@ function parseErrorRange(error: { linePos?: Array<{ line: number; col: number }>
 function collectDeclarations(
   ctx: WalkContext,
   root: YAMLMap,
-  result: Pick<ParsedComposeDocument, 'includes' | 'extends' | 'envFiles' | 'resources' | 'labelFiles' | 'inlineLabels' | 'serviceNames'>,
+  result: Pick<ParsedComposeDocument, 'includes' | 'extends' | 'envFiles' | 'resources' | 'labelFiles' | 'inlineLabels'>,
 ): void {
   const readable = new Map<string, unknown>();
 
@@ -510,7 +537,6 @@ function collectDeclarations(
   if (services && typeof services === 'object' && !Array.isArray(services)) {
     for (const [service, value] of Object.entries(services as Record<string, unknown>)) {
       if (!value || typeof value !== 'object' || Array.isArray(value)) continue;
-      result.serviceNames.push(service);
       const svc = value as Record<string, unknown>;
       const ext = svc.extends;
       if (typeof ext === 'string') {
@@ -712,6 +738,8 @@ export function parseComposeDocument(input: ParseComposeDocumentInput): ParsedCo
     source: input.source,
     nodeCount: 0,
     boundsExceeded: false,
+    serviceNames: new Set<string>(),
+    servicesWalked: false,
     aliasTrail: new Set(),
     aliasWork: 0,
     aliasBudgetExceeded: false,
@@ -724,7 +752,11 @@ export function parseComposeDocument(input: ParseComposeDocumentInput): ParsedCo
   // documented paths (`services.api.image`, `networks.edge`, ...).
   walkMap(ctx, doc.contents as YAMLMap, '', 'own', 0);
   collectDeclarations(ctx, doc.contents as YAMLMap, empty);
-  empty.serviceNamesKnown = true;
+  // The walk owns the service-name list: it follows aliases and merge keys and
+  // records each key as it is enumerated, so a chain that is too deep only
+  // stops the values below that key, never the names above it.
+  empty.serviceNames = [...ctx.serviceNames];
+  empty.serviceNamesKnown = ctx.servicesWalked && !ctx.boundsExceeded;
 
   for (const diagnostic of ctx.diagnostics) diagnostic.file = input.file;
   for (const declaration of empty.includes) declaration.range = declaration.range ?? undefined;
