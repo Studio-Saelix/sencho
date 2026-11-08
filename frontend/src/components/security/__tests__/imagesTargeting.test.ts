@@ -8,6 +8,7 @@ import {
   applySavedIntents,
   type ImagesTargetingState,
 } from '../imagesTargeting';
+import type { ServiceTunnelExposure } from '@/types/networking';
 import type { ImageExposureContext, PostureTarget, ScanSummary } from '@/types/security';
 
 function summary(o: Partial<ScanSummary> & { image_ref?: string } = {}): ScanSummary {
@@ -34,6 +35,30 @@ function ctx(partial: Partial<ImageExposureContext> & Pick<ImageExposureContext,
     exposureReason: 'published-port',
     ...partial,
   };
+}
+
+function unsetContext(stackName: string, serviceName: string): ImageExposureContext {
+  return ctx({ stackName, serviceName, intentStatus: 'unset' });
+}
+
+function exposedSummary(
+  imageRef: string,
+  contexts: ImageExposureContext[],
+  extra: Partial<ScanSummary> = {},
+): ScanSummary {
+  return summary({
+    image_ref: imageRef,
+    publicly_exposed: true,
+    exposure_contexts: contexts,
+    exposure_context_count: contexts.length,
+    exposure_context_summary: {
+      hasConflict: false,
+      hasUnclassified: false,
+      hasUnavailable: false,
+      allKnownIntentional: false,
+    },
+    ...extra,
+  });
 }
 
 describe('targetingFromTargets', () => {
@@ -159,6 +184,20 @@ describe('primaryExposureIntentEvidence', () => {
 describe('standingIntentEvidence', () => {
   it('returns null for mixed-version publicly_exposed without contexts', () => {
     expect(standingIntentEvidence(summary({ publicly_exposed: true }))).toBeNull();
+  });
+
+  it('reports a hidden warning when a save settled every displayed context', () => {
+    expect(standingIntentEvidence(summary({
+      publicly_exposed: true,
+      exposure_contexts: [],
+      exposure_context_count: 21,
+      exposure_context_summary: {
+        hasConflict: true,
+        hasUnclassified: true,
+        hasUnavailable: false,
+        allKnownIntentional: false,
+      },
+    }))).toBe('Intent mismatch: internal (+20)');
   });
 
   it('formats standing intent from contexts and summary flags', () => {
@@ -307,30 +346,6 @@ describe('afterIntentSaved', () => {
 });
 
 describe('applySavedIntents', () => {
-  function unsetContext(stackName: string, serviceName: string): ImageExposureContext {
-    return ctx({ stackName, serviceName, intentStatus: 'unset' });
-  }
-
-  function exposedSummary(
-    imageRef: string,
-    contexts: ImageExposureContext[],
-    extra: Partial<ScanSummary> = {},
-  ): ScanSummary {
-    return summary({
-      image_ref: imageRef,
-      publicly_exposed: true,
-      exposure_contexts: contexts,
-      exposure_context_count: contexts.length,
-      exposure_context_summary: {
-        hasConflict: false,
-        hasUnclassified: false,
-        hasUnavailable: false,
-        allKnownIntentional: false,
-      },
-      ...extra,
-    });
-  }
-
   it('adopts a saved service intent and clears the unclassified aggregate', () => {
     const before = {
       'exp:1': exposedSummary('exp:1', [unsetContext('web', 'api')], {
@@ -470,5 +485,359 @@ describe('applySavedIntents', () => {
     expect(after['exp:1']?.exposure_contexts?.[0]).toMatchObject({ intentStatus: 'set', exposureIntent: 'public' });
     // Hidden contexts may still be unclassified, so the aggregate stays truthful to them.
     expect(after['exp:1']?.exposure_context_summary?.hasUnclassified).toBe(true);
+  });
+});
+
+function tunnelContext(
+  provider: ServiceTunnelExposure['provider'],
+  path: ServiceTunnelExposure['path'],
+  serviceName = 'api',
+): ImageExposureContext {
+  return ctx({
+    stackName: 'web',
+    serviceName,
+    exposureReason: 'tunnel',
+    tunnel: {
+      connector: 'edge',
+      provider,
+      scope: provider === 'cloudflared' ? 'public-edge' : 'private-overlay',
+      path,
+    },
+    intentStatus: 'unset',
+  });
+}
+
+function certainTunnelPath(provider: ServiceTunnelExposure['provider'], path: ServiceTunnelExposure['path']): boolean {
+  return path === 'shared-namespace' && (provider === 'tailscale' || provider === 'wireguard');
+}
+
+describe('applySavedIntents tunnel settlement', () => {
+  const PROVIDERS: ServiceTunnelExposure['provider'][] = ['cloudflared', 'tailscale', 'wireguard'];
+  const PATHS: ServiceTunnelExposure['path'][] = ['shared-namespace', 'shared-network', 'host-network'];
+  const INTENTS = ['internal', 'same-node'] as const;
+
+  for (const provider of PROVIDERS) {
+    for (const path of PATHS) {
+      for (const intent of INTENTS) {
+        const certain = certainTunnelPath(provider, path);
+        it(`${certain ? 'keeps' : 'settles'} ${provider} ${path} under ${intent}`, () => {
+          const before = {
+            'exp:1': exposedSummary('exp:1', [tunnelContext(provider, path)], {
+              exposure_context_summary: {
+                hasConflict: false,
+                hasUnclassified: true,
+                hasUnavailable: false,
+                allKnownIntentional: false,
+              },
+            }),
+          };
+
+          const after = applySavedIntents(before, 'web', [{ service: 'api', intent }]);
+          const patched = after['exp:1']!;
+
+          if (certain) {
+            expect(patched.publicly_exposed).toBe(true);
+            expect(patched.exposure_contexts).toHaveLength(1);
+            expect(patched.exposure_contexts?.[0]).toMatchObject({
+              exposureIntent: intent,
+              intentStatus: 'set',
+              intentConflict: true,
+            });
+            expect(standingIntentEvidence(patched)).toBe(`Intent mismatch: ${intent}`);
+          } else {
+            // The server takes an unverified tunnel reach at the operator's word:
+            // the service stops counting as exposed instead of conflicting.
+            expect(patched.publicly_exposed).toBe(false);
+            expect(patched.exposure_contexts).toEqual([]);
+            expect(patched.exposure_context_count).toBe(0);
+            expect(standingIntentEvidence(patched)).toBeNull();
+          }
+        });
+      }
+    }
+  }
+
+  it('settles an unverified tunnel reach that inherits a stack intent', () => {
+    const before = {
+      'exp:1': exposedSummary('exp:1', [
+        tunnelContext('cloudflared', 'shared-network', 'api'),
+        tunnelContext('cloudflared', 'shared-network', 'worker'),
+      ]),
+    };
+
+    const after = applySavedIntents(before, 'web', [{ service: '', intent: 'internal' }]);
+
+    expect(after['exp:1']?.publicly_exposed).toBe(false);
+    expect(after['exp:1']?.exposure_contexts).toEqual([]);
+  });
+
+  it('settles a service that clears its override back to a conflicting stack intent', () => {
+    const before = {
+      'exp:1': exposedSummary('exp:1', [
+        ctx({
+          stackName: 'web',
+          serviceName: 'api',
+          exposureReason: 'tunnel',
+          tunnel: {
+            connector: 'edge',
+            provider: 'cloudflared',
+            scope: 'public-edge',
+            path: 'shared-namespace',
+          },
+          intentStatus: 'set',
+          exposureIntent: 'public',
+        }),
+      ]),
+    };
+
+    // The save response has no service row: the service inherits the stack intent.
+    const after = applySavedIntents(before, 'web', [{ service: '', intent: 'same-node' }]);
+
+    expect(after['exp:1']?.publicly_exposed).toBe(false);
+    expect(after['exp:1']?.exposure_contexts).toEqual([]);
+  });
+
+  it('settles only unverified reaches and keeps a certain tunnel path conflicting', () => {
+    const before = {
+      'exp:1': exposedSummary('exp:1', [
+        tunnelContext('cloudflared', 'shared-network', 'api'),
+        tunnelContext('tailscale', 'shared-namespace', 'worker'),
+      ]),
+    };
+
+    const after = applySavedIntents(before, 'web', [{ service: '', intent: 'internal' }]);
+
+    expect(after['exp:1']?.publicly_exposed).toBe(true);
+    expect(after['exp:1']?.exposure_contexts).toHaveLength(1);
+    expect(after['exp:1']?.exposure_contexts?.[0]).toMatchObject({
+      serviceName: 'worker',
+      exposureIntent: 'internal',
+      intentConflict: true,
+    });
+  });
+
+  it('keeps an explicit service override when the stack intent is restrictive', () => {
+    const before = {
+      'exp:1': exposedSummary('exp:1', [
+        tunnelContext('cloudflared', 'shared-network', 'api'),
+        tunnelContext('cloudflared', 'shared-network', 'worker'),
+      ]),
+    };
+
+    const after = applySavedIntents(before, 'web', [
+      { service: '', intent: 'internal' },
+      { service: 'api', intent: 'public' },
+    ]);
+
+    expect(after['exp:1']?.publicly_exposed).toBe(true);
+    expect(after['exp:1']?.exposure_contexts).toEqual([
+      expect.objectContaining({ serviceName: 'api', exposureIntent: 'public' }),
+    ]);
+  });
+
+  it('keeps an unverified tunnel reach exposed when the save leaves it unclassified', () => {
+    const before = { 'exp:1': exposedSummary('exp:1', [tunnelContext('cloudflared', 'shared-network')]) };
+
+    const after = applySavedIntents(before, 'web', [{ service: 'api', intent: 'unknown' }]);
+
+    expect(after['exp:1']?.publicly_exposed).toBe(true);
+    expect(after['exp:1']?.exposure_contexts?.[0]).toMatchObject({ intentStatus: 'unset' });
+  });
+
+  it('keeps a published port exposed and conflicting with a restrictive intent', () => {
+    for (const intent of INTENTS) {
+      const before = { 'exp:1': exposedSummary('exp:1', [unsetContext('web', 'api')]) };
+
+      const after = applySavedIntents(before, 'web', [{ service: 'api', intent }]);
+
+      expect(after['exp:1']?.publicly_exposed).toBe(true);
+      expect(after['exp:1']?.exposure_contexts?.[0]).toMatchObject({
+        exposureIntent: intent,
+        intentConflict: true,
+      });
+    }
+  });
+
+  it('keeps host-network exposure exposed and conflicting with a restrictive intent', () => {
+    const before = {
+      'exp:1': exposedSummary('exp:1', [
+        ctx({ stackName: 'web', serviceName: 'api', exposureReason: 'host-network', intentStatus: 'unset' }),
+      ]),
+    };
+
+    const after = applySavedIntents(before, 'web', [{ service: 'api', intent: 'internal' }]);
+
+    expect(after['exp:1']?.publicly_exposed).toBe(true);
+    expect(after['exp:1']?.exposure_contexts?.[0]).toMatchObject({ intentConflict: true });
+  });
+
+  it('keeps a capped row exposed when settled contexts leave a hidden remainder', () => {
+    const visible = Array.from({ length: 20 }, (_, index) =>
+      tunnelContext('cloudflared', 'shared-network', `svc${index}`));
+    const before = {
+      'exp:1': exposedSummary('exp:1', visible, {
+        exposure_context_count: 21,
+        exposure_contexts_truncated: true,
+        exposure_context_summary: {
+          hasConflict: false,
+          hasUnclassified: true,
+          hasUnavailable: false,
+          allKnownIntentional: false,
+        },
+      }),
+    };
+
+    const after = applySavedIntents(before, 'web', [{ service: '', intent: 'internal' }]);
+    const patched = after['exp:1']!;
+
+    expect(patched.publicly_exposed).toBe(true);
+    expect(patched.exposure_contexts).toEqual([]);
+    expect(patched.exposure_context_count).toBe(1);
+    expect(patched.exposure_contexts_truncated).toBe(true);
+    expect(standingIntentEvidence(patched)).toBe('Intent: not classified');
+  });
+});
+
+describe('applySavedIntents capped remainder across repeated saves', () => {
+  function capped(
+    contexts: ImageExposureContext[],
+    extra: Partial<ScanSummary>,
+  ): Record<string, ScanSummary> {
+    return { 'exp:1': exposedSummary('exp:1', contexts, extra) };
+  }
+
+  it('keeps a hidden unclassified warning through twenty consecutive saves', () => {
+    const visible = Array.from({ length: 20 }, (_, index) => unsetContext('web', `svc${index}`));
+    let summaries = capped(visible, {
+      exposure_context_count: 21,
+      exposure_contexts_truncated: true,
+      exposure_context_summary: {
+        hasConflict: false,
+        hasUnclassified: true,
+        hasUnavailable: false,
+        allKnownIntentional: false,
+      },
+    });
+
+    for (let index = 0; index < visible.length; index += 1) {
+      summaries = applySavedIntents(summaries, 'web', [{ service: `svc${index}`, intent: 'public' }]);
+    }
+
+    expect(summaries['exp:1']?.exposure_context_summary?.hasUnclassified).toBe(true);
+    expect(standingIntentEvidence(summaries['exp:1']!)).toBe('Intent: not classified (+20)');
+  });
+
+  it('keeps a hidden conflict warning through twenty consecutive saves', () => {
+    const visible = Array.from({ length: 20 }, (_, index) =>
+      ctx({
+        stackName: 'web',
+        serviceName: `svc${index}`,
+        intentStatus: 'set',
+        exposureIntent: 'internal',
+        intentConflict: true,
+      }));
+    let summaries = capped(visible, {
+      exposure_context_count: 21,
+      exposure_contexts_truncated: true,
+      exposure_context_summary: {
+        hasConflict: true,
+        hasUnclassified: false,
+        hasUnavailable: false,
+        allKnownIntentional: false,
+      },
+    });
+
+    for (let index = 0; index < visible.length; index += 1) {
+      summaries = applySavedIntents(summaries, 'web', [{ service: `svc${index}`, intent: 'public' }]);
+    }
+
+    expect(summaries['exp:1']?.exposure_context_summary?.hasConflict).toBe(true);
+    expect(standingIntentEvidence(summaries['exp:1']!)).toBe('Intent mismatch: internal (+20)');
+  });
+
+  it('keeps a hidden warning while saves span two visible stacks', () => {
+    const visible = [
+      ...Array.from({ length: 19 }, (_, index) => unsetContext('web', `svc${index}`)),
+      ctx({
+        stackName: 'db',
+        serviceName: 'postgres',
+        intentStatus: 'set',
+        exposureIntent: 'internal',
+        intentConflict: true,
+      }),
+    ];
+    let summaries = capped(visible, {
+      exposure_context_count: 21,
+      exposure_contexts_truncated: true,
+      exposure_context_summary: {
+        hasConflict: true,
+        hasUnclassified: true,
+        hasUnavailable: false,
+        allKnownIntentional: false,
+      },
+    });
+
+    for (let index = 0; index < 19; index += 1) {
+      summaries = applySavedIntents(summaries, 'web', [{ service: `svc${index}`, intent: 'public' }]);
+    }
+    summaries = applySavedIntents(summaries, 'db', [{ service: 'postgres', intent: 'public' }]);
+
+    // The visible conflict is resolved; the hidden unclassified context is not.
+    expect(summaries['exp:1']?.exposure_context_summary?.hasConflict).toBe(false);
+    expect(summaries['exp:1']?.exposure_context_summary?.hasUnclassified).toBe(true);
+    expect(standingIntentEvidence(summaries['exp:1']!)).toBe('Intent: not classified (+20)');
+  });
+
+  it('treats a count beyond the attached list as truncation without the flag', () => {
+    const before = capped([unsetContext('web', 'api')], {
+      exposure_context_count: 2,
+      exposure_context_summary: {
+        hasConflict: false,
+        hasUnclassified: true,
+        hasUnavailable: false,
+        allKnownIntentional: false,
+      },
+    });
+
+    const after = applySavedIntents(before, 'web', [{ service: 'api', intent: 'public' }]);
+
+    expect(after['exp:1']?.exposure_context_summary?.hasUnclassified).toBe(true);
+  });
+
+  it('treats the truncation flag as truncation without a count', () => {
+    const before = capped([unsetContext('web', 'api')], {
+      exposure_contexts_truncated: true,
+      exposure_context_summary: {
+        hasConflict: false,
+        hasUnclassified: true,
+        hasUnavailable: false,
+        allKnownIntentional: false,
+      },
+    });
+
+    const after = applySavedIntents(before, 'web', [{ service: 'api', intent: 'public' }]);
+
+    expect(after['exp:1']?.exposure_context_summary?.hasUnclassified).toBe(true);
+  });
+
+  it('drops a visible unavailable state once the visible ranks rule out a hidden one', () => {
+    const before = capped([
+      ctx({ stackName: 'web', serviceName: 'api', intentStatus: 'unavailable' }),
+      ctx({ stackName: 'web', serviceName: 'worker', intentStatus: 'set', exposureIntent: 'public' }),
+    ], {
+      exposure_context_count: 3,
+      exposure_contexts_truncated: true,
+      exposure_context_summary: {
+        hasConflict: false,
+        hasUnclassified: false,
+        hasUnavailable: true,
+        allKnownIntentional: true,
+      },
+    });
+
+    const after = applySavedIntents(before, 'web', [{ service: 'api', intent: 'public' }]);
+
+    // The last visible context ranks as set, so no hidden context can be unavailable.
+    expect(after['exp:1']?.exposure_context_summary?.hasUnavailable).toBe(false);
   });
 });

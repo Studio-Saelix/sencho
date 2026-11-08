@@ -8,7 +8,8 @@ import { it, expect, vi, beforeEach } from 'vitest';
 import { render, screen } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { ImagesTab } from '../ImagesTab';
-import type { ScanSummary } from '@/types/security';
+import { applySavedIntents } from '../imagesTargeting';
+import type { ImageExposureContext, ScanSummary } from '@/types/security';
 
 // These cases cover the named Networking navigation, which a session that may not edit the stack keeps.
 vi.mock('@/context/AuthContext', () => ({ useAuth: () => ({ can: () => false }) }));
@@ -524,4 +525,35 @@ it('offers Retry on the error state and calls it', async () => {
   render(<ImagesTab {...base} error onRetry={onRetry} summaries={{}} />);
   await user.click(screen.getByRole('button', { name: 'Retry' }));
   expect(onRetry).toHaveBeenCalledTimes(1);
+});
+
+it('keeps a hidden capped warning on the rendered row after repeated saves', () => {
+  const visible: ImageExposureContext[] = Array.from({ length: 20 }, (_, index) => ({
+    stackName: 'web',
+    serviceName: `svc${index}`,
+    exposureReason: 'published-port',
+    intentStatus: 'unset',
+  }));
+  let summaries = asMap(summary({
+    image_ref: 'exp:1',
+    scan_id: 1,
+    publicly_exposed: true,
+    exposure_contexts: visible,
+    exposure_context_count: 21,
+    exposure_contexts_truncated: true,
+    exposure_context_summary: {
+      hasConflict: false,
+      hasUnclassified: true,
+      hasUnavailable: false,
+      allKnownIntentional: false,
+    },
+  }));
+
+  for (let index = 0; index < visible.length; index += 1) {
+    summaries = applySavedIntents(summaries, 'web', [{ service: `svc${index}`, intent: 'public' }]);
+  }
+
+  render(<ImagesTab {...base} summaries={summaries} />);
+
+  expect(screen.getByText('Intent: not classified (+20)')).toBeInTheDocument();
 });

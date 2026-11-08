@@ -128,7 +128,57 @@ const conflictSummary = summary({
   },
 });
 
-function mockApi(options: { summaries: ScanSummary; failSummariesAfterSave: boolean }) {
+const unverifiedTunnelSummary = summary({
+  publicly_exposed: true,
+  exposure_contexts: [{
+    stackName: 'web',
+    serviceName: 'api',
+    exposureReason: 'tunnel',
+    tunnel: {
+      connector: 'edge',
+      provider: 'cloudflared',
+      scope: 'public-edge',
+      path: 'shared-network',
+    },
+    intentStatus: 'unset',
+  }],
+  exposure_context_count: 1,
+  exposure_context_summary: {
+    hasConflict: false,
+    hasUnclassified: true,
+    hasUnavailable: false,
+    allKnownIntentional: false,
+  },
+});
+
+const certainTunnelSummary = summary({
+  publicly_exposed: true,
+  exposure_contexts: [{
+    stackName: 'web',
+    serviceName: 'api',
+    exposureReason: 'tunnel',
+    tunnel: {
+      connector: 'edge',
+      provider: 'tailscale',
+      scope: 'private-overlay',
+      path: 'shared-namespace',
+    },
+    intentStatus: 'unset',
+  }],
+  exposure_context_count: 1,
+  exposure_context_summary: {
+    hasConflict: false,
+    hasUnclassified: true,
+    hasUnavailable: false,
+    allKnownIntentional: false,
+  },
+});
+
+function mockApi(options: {
+  summaries: ScanSummary;
+  failSummariesAfterSave: boolean;
+  savedIntents?: Array<{ service: string; intent: string }>;
+}) {
   let saved = false;
   apiFetchMock.mockImplementation((url: string, init?: RequestInit) => {
     if (url === '/security/overview') return jsonOk(overview);
@@ -143,7 +193,7 @@ function mockApi(options: { summaries: ScanSummary; failSummariesAfterSave: bool
     if (url === '/fleet/role') return jsonOk({ role: 'control' });
     if (url === '/stacks/web/exposure' && init?.method === 'PUT') {
       saved = true;
-      return jsonOk({ intents: [{ service: 'api', intent: 'public' }] });
+      return jsonOk({ intents: options.savedIntents ?? [{ service: 'api', intent: 'public' }] });
     }
     if (url === '/stacks/web/exposure') return jsonOk({ intents: [] });
     return Promise.resolve({ ok: false, status: 404, json: async () => ({}) } as unknown as Response);
@@ -188,5 +238,44 @@ describe('SecurityView after a save whose summary reread fails', () => {
     expect(screen.queryByText(/Intent mismatch/)).not.toBeInTheDocument();
     expect(screen.queryByText('Exposure conflicts with declared intent')).not.toBeInTheDocument();
     expect(screen.getByRole('button', { name: 'Network exposed: change intent for web/api' })).toBeInTheDocument();
+  });
+
+  it('stops counting an unverified tunnel service instead of inventing a mismatch', async () => {
+    mockApi({
+      summaries: unverifiedTunnelSummary,
+      failSummariesAfterSave: true,
+      savedIntents: [{ service: 'api', intent: 'internal' }],
+    });
+    render(<SecurityView activeTab="images" onTabChange={vi.fn()} />);
+
+    expect(await screen.findByText('Intent: not classified')).toBeInTheDocument();
+
+    await userEvent.click(screen.getByRole('button', { name: /Network exposed: set intent for web\/api/ }));
+    await userEvent.click(await screen.findByRole('button', { name: 'internal' }));
+
+    await waitFor(() => expect(toasts.error).toHaveBeenCalledWith('Could not refresh security data'));
+    // The server takes an unverified tunnel reach at the operator's word, so
+    // the row stops showing exposure evidence and its action.
+    expect(screen.queryByText(/Intent mismatch/)).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /Network exposed/ })).not.toBeInTheDocument();
+    expect(screen.getByText('exp:1')).toBeInTheDocument();
+  });
+
+  it('keeps a certain tunnel reach conflicting after a restrictive save', async () => {
+    mockApi({
+      summaries: certainTunnelSummary,
+      failSummariesAfterSave: true,
+      savedIntents: [{ service: 'api', intent: 'internal' }],
+    });
+    render(<SecurityView activeTab="images" onTabChange={vi.fn()} />);
+
+    expect(await screen.findByText('Intent: not classified')).toBeInTheDocument();
+
+    await userEvent.click(screen.getByRole('button', { name: /Network exposed: set intent for web\/api/ }));
+    await userEvent.click(await screen.findByRole('button', { name: 'internal' }));
+
+    await waitFor(() => expect(toasts.error).toHaveBeenCalledWith('Could not refresh security data'));
+    expect(screen.getByText('Intent mismatch: internal')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /Network exposed: change intent for web\/api/ })).toBeInTheDocument();
   });
 });

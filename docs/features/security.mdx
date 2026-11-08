@@ -141,7 +141,9 @@ or Intent: not classified). Select the **Network exposed** label to set or chang
 intent from a popover without leaving Security; the popover also links to the stack's networking
 for changes that belong in Compose. With several services the label lists them and each row
 carries the same action; where the intent cannot be set from here, the label opens the stack's
-networking instead. Intentional exposure raises the security relevance of vulnerable findings
+networking instead. A confirmed save stays on the row through a failed refresh, and a later
+successful refresh replaces it; a warning about services the row does not list stays visible until
+a refresh resolves it. Intentional exposure raises the security relevance of vulnerable findings
 but does not by itself keep the masthead on Action needed. Open the image, remediate, or triage
 individual findings (Accepted risk and related decisions). There is no image-level "accept residual
 risk" control. Compose Doctor acknowledgements are a separate triage surface and do not clear
