@@ -10,7 +10,7 @@ import { render, screen, fireEvent, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { NetworkExposedControl, ViewNetworkingAction } from '../ExposureNetworking';
 import { SENCHO_OPEN_STACK_EVENT, type SenchoOpenStackDetail } from '@/lib/events';
-import type { ImageExposureContext } from '@/types/security';
+import type { ImageExposureContextRef } from '../imagesTargeting';
 
 const api = vi.hoisted(() => ({ apiFetch: vi.fn() }));
 const auth = vi.hoisted(() => ({ can: vi.fn() }));
@@ -26,21 +26,21 @@ beforeEach(() => {
   auth.can.mockReturnValue(false);
 });
 
-const contexts: ImageExposureContext[] = [
+const contexts: ImageExposureContextRef[] = [
   {
-    stackName: 'web', serviceName: 'app', exposureReason: 'tunnel', intentStatus: 'unset',
+    imageRef: 'exp:1', stackName: 'web', serviceName: 'app', exposureReason: 'tunnel', intentStatus: 'unset',
     tunnel: { connector: 'cloudflared', provider: 'cloudflared', scope: 'public-edge', path: 'shared-network' },
   },
   {
-    stackName: 'vpn', serviceName: 'admin', exposureReason: 'tunnel', intentStatus: 'set', exposureIntent: 'internal', intentConflict: true,
+    imageRef: 'exp:1', stackName: 'vpn', serviceName: 'admin', exposureReason: 'tunnel', intentStatus: 'set', exposureIntent: 'internal', intentConflict: true,
     tunnel: { connector: 'tailscale', provider: 'tailscale', scope: 'private-overlay', path: 'shared-namespace' },
   },
-  { stackName: 'web', serviceName: 'proxy', exposureReason: 'published-port', intentStatus: 'set', exposureIntent: 'public' },
+  { imageRef: 'exp:1', stackName: 'web', serviceName: 'proxy', exposureReason: 'published-port', intentStatus: 'set', exposureIntent: 'public' },
 ];
 
 describe('NetworkExposedControl with tunnel contexts', () => {
   it('lists the tunnel path under each tunnel-exposed service', async () => {
-    render(<NetworkExposedControl contexts={contexts} nodeId={1} onIntentSaved={vi.fn()} />);
+    render(<NetworkExposedControl contexts={contexts} imageRef="exp:1" nodeId={1} onIntentSaved={vi.fn()} />);
     fireEvent.click(screen.getByRole('button', { name: 'View networking contexts' }));
     expect(await screen.findByText('via Cloudflare Tunnel (cloudflared), routing unverified')).toBeInTheDocument();
     expect(screen.getByText('via Tailscale (tailscale)')).toBeInTheDocument();
@@ -51,22 +51,22 @@ describe('NetworkExposedControl with tunnel contexts', () => {
 
 describe('NetworkExposedControl with one context', () => {
   it('marks the badge as a tunnel and names the path in its label', () => {
-    render(<NetworkExposedControl contexts={[contexts[0]!]} nodeId={1} onIntentSaved={vi.fn()} />);
+    render(<NetworkExposedControl contexts={[contexts[0]!]} imageRef="exp:1" nodeId={1} onIntentSaved={vi.fn()} />);
     const button = screen.getByRole('button', { name: 'View networking for web/app, via Cloudflare Tunnel (cloudflared), routing unverified' });
     expect(button).toHaveTextContent('Network exposed · tunnel');
     expect(button).toHaveAttribute('title', 'via Cloudflare Tunnel (cloudflared), routing unverified');
   });
 
   it('keeps the plain badge for a published port', () => {
-    render(<NetworkExposedControl contexts={[contexts[2]!]} nodeId={1} onIntentSaved={vi.fn()} />);
+    render(<NetworkExposedControl contexts={[contexts[2]!]} imageRef="exp:1" nodeId={1} onIntentSaved={vi.fn()} />);
     expect(screen.getByRole('button', { name: 'View networking for web/proxy' })).toHaveTextContent(/^Network exposed$/);
   });
 });
 
 describe('exposure intent in place', () => {
-  const unset: ImageExposureContext = { stackName: 'web', serviceName: 'app', exposureReason: 'published-port', intentStatus: 'unset' };
-  const conflict: ImageExposureContext = {
-    stackName: 'vpn', serviceName: 'admin', exposureReason: 'published-port', intentStatus: 'set', exposureIntent: 'internal', intentConflict: true,
+  const unset: ImageExposureContextRef = { imageRef: 'exp:1', stackName: 'web', serviceName: 'app', exposureReason: 'published-port', intentStatus: 'unset' };
+  const conflict: ImageExposureContextRef = {
+    imageRef: 'exp:1', stackName: 'vpn', serviceName: 'admin', exposureReason: 'published-port', intentStatus: 'set', exposureIntent: 'internal', intentConflict: true,
   };
 
   it('saves the intent from the badge with the second click and reports it', async () => {
@@ -74,7 +74,7 @@ describe('exposure intent in place', () => {
     api.apiFetch.mockResolvedValueOnce(json({ intents: [] }));
     api.apiFetch.mockResolvedValueOnce(json({ intents: [{ service: 'app', intent: 'lan' }] }));
     const onIntentSaved = vi.fn();
-    render(<NetworkExposedControl contexts={[unset]} nodeId={3} onIntentSaved={onIntentSaved} />);
+    render(<NetworkExposedControl contexts={[unset]} imageRef="exp:1" nodeId={3} onIntentSaved={onIntentSaved} />);
 
     await userEvent.click(screen.getByRole('button', { name: 'Network exposed: set intent for web/app' }));
     await userEvent.click(await screen.findByRole('button', { name: 'lan' }));
@@ -104,14 +104,14 @@ describe('exposure intent in place', () => {
 
   it('puts a verb on each row of the list and leaves the name as the navigation', async () => {
     auth.can.mockReturnValue(true);
-    render(<NetworkExposedControl contexts={[unset, conflict]} nodeId={3} onIntentSaved={vi.fn()} />);
+    render(<NetworkExposedControl contexts={[unset, conflict]} imageRef="exp:1" nodeId={3} onIntentSaved={vi.fn()} />);
     await userEvent.click(screen.getByRole('button', { name: 'Network exposed: choose a service' }));
     expect(await screen.findByRole('button', { name: 'Set intent for web/app' })).toBeInTheDocument();
     expect(screen.getByRole('button', { name: 'Change intent for vpn/admin' })).toBeInTheDocument();
   });
 
   it('keeps the navigation when the session cannot edit the stack', () => {
-    render(<NetworkExposedControl contexts={[unset]} nodeId={3} onIntentSaved={vi.fn()} />);
+    render(<NetworkExposedControl contexts={[unset]} imageRef="exp:1" nodeId={3} onIntentSaved={vi.fn()} />);
     expect(screen.getByRole('button', { name: 'View networking for web/app' })).toBeInTheDocument();
     expect(screen.queryByRole('button', { name: /intent/i })).toBeNull();
   });
@@ -124,8 +124,8 @@ describe('exposure intent in place', () => {
 });
 
 describe('multi-context trigger names', () => {
-  const a: ImageExposureContext = { stackName: 'web', serviceName: 'app', exposureReason: 'published-port', intentStatus: 'unset' };
-  const b: ImageExposureContext = { stackName: 'jobs', serviceName: 'worker', exposureReason: 'published-port', intentStatus: 'unset' };
+  const a: ImageExposureContextRef = { imageRef: 'exp:1', stackName: 'web', serviceName: 'app', exposureReason: 'published-port', intentStatus: 'unset' };
+  const b: ImageExposureContextRef = { imageRef: 'exp:1', stackName: 'jobs', serviceName: 'worker', exposureReason: 'published-port', intentStatus: 'unset' };
 
   it('reads as choosing a service on the banner when the rows carry a verb', () => {
     auth.can.mockReturnValue(true);

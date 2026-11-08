@@ -309,8 +309,8 @@ export function SecurityView({ activeTab, onTabChange, headerActions }: Security
   // banner, the mismatch hint, the verb), so the snapshot goes and the rows read
   // the reloaded summaries instead. The listed images stay for the rest of a batch.
   // The confirmed save is adopted into those summaries first, so a save whose
-  // reread fails still shows the saved intent and action instead of the evidence
-  // it replaced.
+  // reread fails still shows the saved intent and action for the contexts the
+  // backend keeps exposed, instead of the evidence it replaced.
   const summariesData = summariesRegion.data;
   const applySummaries = summariesRegion.apply;
   const onIntentSaved = useCallback((stackName: string, intents: IntentEntry[], saved?: SavedIntentTarget) => {

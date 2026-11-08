@@ -89,6 +89,41 @@ describe('onIntentSaved wiring', () => {
     ));
   });
 
+  it('carries the saved context and its tunnel record to the owner', async () => {
+    api.apiFetch.mockResolvedValueOnce(json({ intents: [{ service: 'api', intent: 'lan' }] }));
+    const onIntentSaved = vi.fn();
+    const tunnel: ImageExposureContext = {
+      stackName: 'web',
+      serviceName: 'api',
+      exposureReason: 'tunnel',
+      tunnel: {
+        connector: 'edge',
+        provider: 'cloudflared',
+        scope: 'public-edge',
+        path: 'shared-network',
+      },
+      intentStatus: 'unset',
+    };
+    renderTargeted(tunnel, 'Network exposed images', onIntentSaved);
+
+    await userEvent.click(await screen.findByRole('button', { name: /Network exposed: set intent for web\/api/ }));
+    await pickLan();
+
+    await waitFor(() => expect(onIntentSaved).toHaveBeenCalledWith(
+      'web',
+      [{ service: 'api', intent: 'lan' }],
+      expect.objectContaining({
+        imageRef: 'exp:1',
+        context: expect.objectContaining({
+          stackName: 'web',
+          serviceName: 'api',
+          exposureReason: 'tunnel',
+          tunnel: expect.objectContaining({ provider: 'cloudflared', path: 'shared-network' }),
+        }),
+      }),
+    ));
+  });
+
   it('reports a save made from the conflict banner action', async () => {
     api.apiFetch.mockResolvedValueOnce(json({ intents: [{ service: 'api', intent: 'lan' }] }));
     const onIntentSaved = vi.fn();

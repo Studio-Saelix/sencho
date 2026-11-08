@@ -47,23 +47,20 @@ function OpenNetworkingLink({ nodeId, stackName }: { nodeId: number; stackName: 
   );
 }
 
-function ContextIntentPopover({ ctx, imageRef, nodeId, onIntentSaved, trigger, align }: {
+function ContextIntentPopover({ ctx, nodeId, onIntentSaved, trigger, align }: {
   ctx: ImageExposureContextRef;
-  /** The row's image when the context came from a standing summary. */
-  imageRef?: string;
   nodeId: number;
   onIntentSaved: IntentSavedHandler;
   trigger: ReactElement;
   align?: 'start' | 'end';
 }) {
-  const savedImageRef = ctx.imageRef ?? imageRef;
   return (
     <SetExposureIntentPopover
       stack={ctx.stackName}
       service={ctx.serviceName}
       nodeId={nodeId}
       onSaved={(saved) => onIntentSaved(ctx.stackName, saved, {
-        ...(savedImageRef !== undefined ? { imageRef: savedImageRef } : {}),
+        imageRef: ctx.imageRef,
         context: ctx,
       })}
       trigger={trigger}
@@ -75,13 +72,11 @@ function ContextIntentPopover({ ctx, imageRef, nodeId, onIntentSaved, trigger, a
 
 function NetworkingContextList({
   contexts,
-  imageRef,
   nodeId,
   onIntentSaved,
   showConflictHint = false,
 }: {
   contexts: ImageExposureContextRef[];
-  imageRef?: string;
   nodeId: number;
   onIntentSaved: IntentSavedHandler;
   showConflictHint?: boolean;
@@ -122,7 +117,6 @@ function NetworkingContextList({
             {verb !== null ? (
               <ContextIntentPopover
                 ctx={ctx}
-                {...(imageRef !== undefined ? { imageRef } : {})}
                 nodeId={nodeId}
                 onIntentSaved={onIntentSaved}
                 trigger={(
@@ -155,29 +149,31 @@ export function NetworkExposedControl({
   onIntentSaved,
   className,
 }: {
-  contexts: ImageExposureContextRef[];
+  contexts: ImageExposureContext[];
   /** The row's image, so a save the summary cap hides can still be projected. */
-  imageRef?: string;
+  imageRef: string;
   nodeId?: number;
   /** A confirmed save, with the stack's intents after it, so the exposure conclusions can reflect it before the reread lands. */
   onIntentSaved: IntentSavedHandler;
   className?: string;
 }) {
   const intentVerb = useIntentVerb(nodeId ?? 0);
+  // Every row shares this image, so a save the summary cap hides still names it.
+  const refs = contexts.map((ctx) => ({ ...ctx, imageRef }));
   // With one context there is no list to open, so a tunnel says so on the badge itself.
-  const singleTunnel = contexts.length === 1 ? contexts[0]!.tunnel : undefined;
+  const singleTunnel = refs.length === 1 ? refs[0]!.tunnel : undefined;
   const badge = (
     <span className={cn('font-mono text-[10px] uppercase tracking-[0.14em] text-warning whitespace-nowrap', className)}>
       {singleTunnel ? 'Network exposed · tunnel' : 'Network exposed'}
     </span>
   );
 
-  if (contexts.length === 0 || nodeId === undefined) {
+  if (refs.length === 0 || nodeId === undefined) {
     return badge;
   }
 
-  if (contexts.length === 1) {
-    const only = contexts[0]!;
+  if (refs.length === 1) {
+    const only = refs[0]!;
     const verb = intentVerb(only);
     const tunnelLabel = only.tunnel ? tunnelPathLabel(only.tunnel) : undefined;
     const via = tunnelLabel ? `, ${tunnelLabel}` : '';
@@ -200,7 +196,6 @@ export function NetworkExposedControl({
     return (
       <ContextIntentPopover
         ctx={only}
-        {...(imageRef !== undefined ? { imageRef } : {})}
         nodeId={nodeId}
         onIntentSaved={onIntentSaved}
         align="start"
@@ -210,7 +205,7 @@ export function NetworkExposedControl({
   }
 
   // The list is where the service is chosen when its rows carry a verb, and a plain look at networking when they do not.
-  const choosesService = contexts.some((ctx) => intentVerb(ctx) !== null);
+  const choosesService = refs.some((ctx) => intentVerb(ctx) !== null);
   return (
     <Popover>
       <PopoverTrigger asChild>
@@ -225,8 +220,7 @@ export function NetworkExposedControl({
       </PopoverTrigger>
       <PopoverContent align="start" className="w-72 p-2" onClick={(e) => e.stopPropagation()}>
         <NetworkingContextList
-          contexts={contexts}
-          {...(imageRef !== undefined ? { imageRef } : {})}
+          contexts={refs}
           nodeId={nodeId}
           onIntentSaved={onIntentSaved}
           showConflictHint

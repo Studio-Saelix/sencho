@@ -73,6 +73,23 @@ vi.mock('@/components/security/OverviewTab', () => ({
       >
         go to tunnel images
       </button>
+      <button
+        type="button"
+        onClick={() => onNavigate('images', undefined, {
+          kind: 'public_exposure',
+          label: 'Network exposed images',
+          imageRefs: ['exp:1'],
+          targets: [{
+            imageRef: 'exp:1',
+            stackName: 'web',
+            serviceName: 'hidden',
+            exposureReason: 'published-port',
+            intentStatus: 'unset',
+          }],
+        })}
+      >
+        go to hidden images
+      </button>
     </>
   ),
 }));
@@ -201,6 +218,26 @@ const certainTunnelSummary = summary({
   },
 });
 
+/** Twenty displayed intentional contexts and a twenty-first the cap hides. */
+const hiddenCappedSummary = summary({
+  publicly_exposed: true,
+  exposure_contexts: Array.from({ length: 20 }, (_, index) => ({
+    stackName: 'web',
+    serviceName: `svc${index}`,
+    exposureReason: 'published-port' as const,
+    intentStatus: 'set' as const,
+    exposureIntent: 'public' as const,
+  })),
+  exposure_context_count: 21,
+  exposure_contexts_truncated: true,
+  exposure_context_summary: {
+    hasConflict: false,
+    hasUnclassified: false,
+    hasUnavailable: false,
+    allKnownIntentional: true,
+  },
+});
+
 function mockApi(options: {
   summaries: ScanSummary;
   failSummariesAfterSave: boolean;
@@ -291,6 +328,7 @@ describe('SecurityView after a save whose summary reread fails', () => {
     // The server takes an unverified tunnel reach at the operator's word, so
     // the row stops showing exposure evidence and its action.
     expect(screen.queryByText(/Intent mismatch/)).not.toBeInTheDocument();
+    expect(screen.queryByText('Network exposed')).not.toBeInTheDocument();
     expect(screen.queryByRole('button', { name: /Network exposed/ })).not.toBeInTheDocument();
     expect(screen.getByText('exp:1')).toBeInTheDocument();
   });
@@ -312,6 +350,7 @@ describe('SecurityView after a save whose summary reread fails', () => {
 
     await waitFor(() => expect(toasts.error).toHaveBeenCalledWith('Could not refresh security data'));
     expect(screen.queryByText(/Intent mismatch/)).not.toBeInTheDocument();
+    expect(screen.queryByText('Network exposed')).not.toBeInTheDocument();
     expect(screen.queryByRole('button', { name: /Network exposed/ })).not.toBeInTheDocument();
     expect(screen.getByText('exp:1')).toBeInTheDocument();
   });
@@ -392,5 +431,27 @@ describe('SecurityView after a save whose summary reread fails', () => {
     await waitFor(() => expect(toasts.error).toHaveBeenCalledWith('Could not refresh security data'));
     expect(screen.getByText('Intent mismatch: internal')).toBeInTheDocument();
     expect(screen.getByRole('button', { name: /Network exposed: change intent for web\/api/ })).toBeInTheDocument();
+  });
+
+  it('keeps the conflict a hidden save proved when the reread fails', async () => {
+    mockApi({
+      summaries: hiddenCappedSummary,
+      failSummariesAfterSave: true,
+      savedIntents: [
+        ...Array.from({ length: 20 }, (_, index) => ({ service: `svc${index}`, intent: 'public' })),
+        { service: 'hidden', intent: 'internal' },
+      ],
+    });
+    const { rerender } = render(<SecurityView activeTab="overview" onTabChange={vi.fn()} />);
+
+    await userEvent.click(await screen.findByRole('button', { name: 'go to hidden images' }));
+    rerender(<SecurityView activeTab="images" onTabChange={vi.fn()} />);
+
+    expect(await screen.findByText('Intent: not classified')).toBeInTheDocument();
+    await userEvent.click(screen.getByRole('button', { name: 'Network exposed: set intent for web/hidden' }));
+    await userEvent.click(await screen.findByRole('button', { name: 'internal' }));
+
+    await waitFor(() => expect(toasts.error).toHaveBeenCalledWith('Could not refresh security data'));
+    expect(screen.getByText('Intent mismatch: internal (+20)')).toBeInTheDocument();
   });
 });

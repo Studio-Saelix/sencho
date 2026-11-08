@@ -15,7 +15,7 @@ import { cn } from '@/lib/utils';
 import { useIsMobile } from '@/hooks/use-is-mobile';
 import { ImageScanRow, ImageFilterChips, type ImageFilterChip } from './SecurityMobile';
 import { NetworkExposedControl, ViewNetworkingAction } from './ExposureNetworking';
-import type { ImagesTargetingState, IntentSavedHandler } from './imagesTargeting';
+import type { ImagesTargetingState, ImageExposureContextRef, IntentSavedHandler } from './imagesTargeting';
 import {
   intentionalBannerKind,
   standingExposureContexts,
@@ -143,7 +143,7 @@ function IntentionalExposureBanner({
 }: {
   kind: 'absolute' | 'partial';
   unavailableCount: number;
-  contexts: ImageExposureContext[];
+  contexts: ImageExposureContextRef[];
   nodeId?: number;
   onIntentSaved: IntentSavedHandler;
   onClear?: () => void;

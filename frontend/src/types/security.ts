@@ -1,6 +1,6 @@
 import type { DismissPolicy } from '@/types/findingDismissal';
 import type { SecurityTab } from '@/lib/events';
-import type { ServiceTunnelExposure } from '@/types/networking';
+import type { ExposureIntent, ServiceTunnelExposure } from '@/types/networking';
 
 /** Why a service counts as network exposed. Mirrors the backend `ExposureReason`. */
 export type ExposureReason = 'published-port' | 'host-network' | 'tunnel';
@@ -209,15 +209,19 @@ export interface ImageExposureContextSummary {
 }
 
 /**
- * States the contexts beyond the display cap may still hold. The server sorts
- * before it slices, so this is captured once from the server's slice and kept
- * across in-place saves, which change the visible ranks the cap inference used.
+ * States the contexts beyond the display cap may still hold, or that a save of
+ * a hidden context proved. The server sorts before it slices, so this is
+ * captured once from the server's slice and kept across in-place saves, which
+ * change the visible ranks the cap inference used. A save that names the last
+ * hidden context replaces the may-hold flags with what it proved.
  * Set only by the frontend save projection; server responses never carry it.
  */
 export interface ImageExposureContextHidden {
   conflict: boolean;
   unclassified: boolean;
   unavailable: boolean;
+  /** The conflicting intent a hidden save proved, for the row's label. */
+  conflictIntent?: ExposureIntent;
 }
 
 export interface ScanSummary {
