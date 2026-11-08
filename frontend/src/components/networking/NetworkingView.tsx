@@ -153,7 +153,8 @@ export function NetworkingView({ headerActions }: NetworkingViewProps) {
 
   // The sheet lists this node's findings, so a node change closes it. A failure
   // card replaces the page, and the sheet with it, and Retry can bring the page
-  // back: close it there too, or a stale open flag would pop it back open.
+  // back: close it there too, or a stale open flag would pop it back open. The
+  // lock card has no retry, so only a node change leaves it, and that closes it.
   const sheetNodeRef = useRef(nodeId);
 
   useEffect(() => {

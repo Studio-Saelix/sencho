@@ -112,7 +112,7 @@ describe('NetworkingView dismissed sheet', () => {
     expect(await screen.findByRole('button', { name: '1 dismissed' })).toBeInTheDocument();
   });
 
-  it('closes the sheet when the node turns out not to support Networking', async () => {
+  it('shows the lock card, not the sheet, when the node does not support Networking', async () => {
     let reads = 0;
     apiFetchMock.mockImplementation((path: string, options?: RequestInit) => {
       if (options?.method === 'DELETE' || path !== '/networking/overview') return Promise.resolve(new Response(null, { status: 204 }));
