@@ -387,4 +387,118 @@ describe('authored label contributions', () => {
     expect(list.form).toBe('list');
     expect(list.range.line).toBe(9);
   });
+
+  it('refuses a label-file winner when an interpolated list key could resolve to it', async () => {
+    writeStack('label-dynamic-key', {
+      'compose.yaml': [
+        'services:',
+        '  api:',
+        '    image: nginx:1',
+        '    label_file: app.labels',
+        '    labels:',
+        '      - "${LABEL_KEY}=inline"',
+        '',
+      ].join('\n'),
+      'app.labels': 'owner=file\n',
+    });
+    const project = await buildAuthoredProject(nodeId, 'label-dynamic-key');
+    const labels = project.labels.get('api')!;
+    expect(labels.hasDynamicKeys).toBe(true);
+    expect(labels.winners.owner).toBeUndefined();
+    expect(labels.ambiguity.owner).toBe('interpolated');
+    const result = correlateLabel(project, 'api', 'owner');
+    expect(result.origin).toBeUndefined();
+    expect(result.reason).toBe('interpolated');
+    expect(resolveEditOrigin(project, 'services.api.labels.owner')).toEqual({
+      ok: false, reason: 'interpolated',
+    });
+    // The literal name of the dynamic declaration is not a claimable key.
+    expect(correlateLabel(project, 'api', '${LABEL_KEY}').origin).toBeUndefined();
+  });
+
+  it('keeps a later literal inline label that a dynamic earlier key cannot supersede', async () => {
+    writeStack('label-dynamic-earlier', {
+      'compose.yaml': 'services:\n  api:\n    image: nginx:1\n    label_file: app.labels\n    labels:\n      - "${LABEL_KEY}=inline-base"\n',
+      'compose.override.yaml': 'services:\n  api:\n    labels:\n      - "owner=literal-later"\n',
+      'app.labels': 'owner=file\n',
+    });
+    const project = await buildAuthoredProject(nodeId, 'label-dynamic-earlier');
+    const result = correlateLabel(project, 'api', 'owner');
+    expect(result.origin).toMatchObject({ file: 'compose.override.yaml', range: { line: 4 } });
+    expect(result.reason).toBe('inline-overrides-label-file');
+    expect(resolveEditOrigin(project, 'services.api.labels.owner').ok).toBe(true);
+  });
+
+  it('refuses an inherited literal when the extending layer adds a later dynamic key', async () => {
+    writeStack('label-dynamic-extends-later', {
+      'compose.yaml': 'services:\n  api:\n    extends:\n      file: base.yaml\n      service: api\n    labels:\n      - "${LABEL_KEY}=own-dynamic"\n',
+      'base.yaml': 'services:\n  api:\n    image: nginx:1\n    labels:\n      owner: base-literal\n',
+    });
+    const project = await buildAuthoredProject(nodeId, 'label-dynamic-extends-later');
+    const result = correlateLabel(project, 'api', 'owner');
+    expect(result.origin).toBeUndefined();
+    expect(result.reason).toBe('interpolated');
+  });
+
+  it('keeps an own literal label over a dynamic key in an inherited base', async () => {
+    writeStack('label-dynamic-extends-earlier', {
+      'compose.yaml': 'services:\n  api:\n    extends:\n      file: base.yaml\n      service: api\n    labels:\n      owner: own-literal\n',
+      'base.yaml': 'services:\n  api:\n    image: nginx:1\n    labels:\n      - "${LABEL_KEY}=base-dynamic"\n',
+    });
+    const project = await buildAuthoredProject(nodeId, 'label-dynamic-extends-earlier');
+    const result = correlateLabel(project, 'api', 'owner');
+    expect(result.origin?.file).toBe('compose.yaml');
+    expect(result.reason).toBe('unique');
+  });
+
+  it('treats a map-form key as a literal, because Compose never interpolates mapping keys', async () => {
+    writeStack('label-map-key-literal', {
+      'compose.yaml': [
+        'services:',
+        '  api:',
+        '    image: nginx:1',
+        '    label_file: app.labels',
+        '    labels:',
+        '      "${LABEL_KEY}": inline',
+        '',
+      ].join('\n'),
+      'app.labels': 'owner=file\n',
+    });
+    const project = await buildAuthoredProject(nodeId, 'label-map-key-literal');
+    const labels = project.labels.get('api')!;
+    expect(labels.hasDynamicKeys).toBe(false);
+    expect(labels.winners.owner?.file).toBe('app.labels');
+    expect(correlateLabel(project, 'api', 'owner').origin?.file).toBe('app.labels');
+  });
+
+  it('recognizes a defaulted variable in a list-form label key', async () => {
+    writeStack('label-dynamic-default', {
+      'compose.yaml': 'services:\n  api:\n    image: nginx:1\n    label_file: app.labels\n    labels:\n      - "${LABEL_KEY:-owner}=inline"\n',
+      'app.labels': 'owner=file\n',
+    });
+    const project = await buildAuthoredProject(nodeId, 'label-dynamic-default');
+    expect(project.labels.get('api')!.winners.owner).toBeUndefined();
+    expect(correlateLabel(project, 'api', 'owner').reason).toBe('interpolated');
+  });
+
+  it('refuses a label-file winner when a merged list supplies a dynamic key', async () => {
+    writeStack('label-dynamic-merge', {
+      'compose.yaml': [
+        'x-labels: &labels',
+        '  - "${LABEL_KEY}=inline"',
+        'services:',
+        '  api:',
+        '    image: nginx:1',
+        '    label_file: app.labels',
+        '    labels: *labels',
+        '',
+      ].join('\n'),
+      'app.labels': 'owner=file\n',
+    });
+    const project = await buildAuthoredProject(nodeId, 'label-dynamic-merge');
+    expect(project.labels.get('api')!.hasDynamicKeys).toBe(true);
+    expect(project.labels.get('api')!.winners.owner).toBeUndefined();
+    expect(correlateLabel(project, 'api', 'owner').origin).toBeUndefined();
+    expect(correlateLabel(project, 'api', 'owner').reason).toBe('interpolated');
+  });
 });

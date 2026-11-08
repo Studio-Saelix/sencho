@@ -50,9 +50,21 @@ export interface SourceRange {
 
 export type AuthoredNodeKind = 'mapping' | 'sequence' | 'scalar' | 'alias';
 
+/**
+ * One structural step of an authored path: a mapping key exactly as written, or
+ * a sequence index. Dots and brackets inside a key stay data, so `services.api.image`
+ * (a field of `api`) and `services.api.image` (a service whose name contains a
+ * dot) are different identities.
+ */
+export type AuthoredPathSegment = string | number;
+
 export interface AuthoredNode {
-  /** Dot path, e.g. `services.api.image` or `services.api.ports[0]`. */
+  /** Dot path for display and the edit-origin contract, e.g. `services.api.image`
+   *  or `services.api.ports[0]`. Not an identity: a service name may contain a
+   *  dot, so internal lookup uses `segments`. */
   path: string;
+  /** Collision-free structural identity of this node. */
+  segments: readonly AuthoredPathSegment[];
   kind: AuthoredNodeKind;
   keyRange?: SourceRange;
   valueRange?: SourceRange;
@@ -124,6 +136,9 @@ export interface LabelContribution {
   /** Authority of the file that carries the entry. */
   writability: SourceWritability;
   hasInterpolation: boolean;
+  /** The key itself is built from a variable (list-form labels only): Compose
+   *  may resolve it to any effective key, so it can supersede a literal winner. */
+  keyHasInterpolation?: boolean;
   overridden: boolean;
   via: 'own' | 'extends' | 'merge';
   /** True when the backing label file is used by more than one service. */
@@ -146,6 +161,10 @@ export interface ServiceAuthoredLabels {
   winners: Record<string, LabelContribution>;
   sharedFiles: string[];
   ambiguity: Record<string, LabelAmbiguity>;
+  /** A label key is built from a variable, so some effective key this service
+   *  declares has no known literal name. Consumers must refuse a key that has
+   *  no literal winner for this service. */
+  hasDynamicKeys?: boolean;
   /** Label files this service names that could not be parsed or read. */
   unparsedLabelFiles: string[];
   /** Label declarations this service names that leave the managed boundary. */

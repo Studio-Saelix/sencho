@@ -9,14 +9,37 @@ import type { EditorViewProps } from '../EditorView';
 let lastLanguage: string | undefined;
 let lastValue: string | undefined;
 let lastReadOnly: boolean | undefined;
-vi.mock('@/lib/monacoLoader', () => ({
-  Editor: ({ language, value, options }: { language?: string; value?: string; options?: { readOnly?: boolean } }) => {
+const revealSpy = vi.hoisted(() => ({ revealLocation: vi.fn() }));
+vi.mock('@/lib/monacoLoader', async () => {
+  const React = await import('react');
+  function MockEditor({ language, value, options, onMount }: {
+    language?: string;
+    value?: string;
+    options?: { readOnly?: boolean };
+    onMount?: (editor: unknown) => void;
+  }) {
     lastLanguage = language;
     lastValue = value;
     lastReadOnly = options?.readOnly;
+    React.useEffect(() => {
+      onMount?.({
+        revealRangeInCenter: vi.fn(),
+        setSelection: vi.fn(),
+        focus: vi.fn(),
+        layout: vi.fn(),
+        getModel: () => null,
+      });
+      // The editor instance is registered once per mount, like Monaco.
+      // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, []);
     return <div data-testid="monaco-editor" />;
-  },
-}));
+  }
+  return { Editor: MockEditor };
+});
+vi.mock('@/lib/authoredLocation', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('@/lib/authoredLocation')>();
+  return { ...actual, revealLocation: revealSpy.revealLocation };
+});
 
 // Capture StackLogsSection props for showServiceChips wiring tests.
 let lastShowServiceChips: boolean | undefined;
@@ -465,5 +488,47 @@ describe('EditorView showServiceChips wiring', () => {
       />,
     );
     expect(lastShowServiceChips).toBe(true);
+  });
+});
+
+describe('EditorView authored reveal revision', () => {
+  afterEach(() => revealSpy.revealLocation.mockReset());
+
+  const pending = {
+    target: { surface: 'compose' as const, file: 'compose.yaml' },
+    location: { file: 'compose.yaml', line: 3, column: 5, endLine: 3, endColumn: 12 },
+    revision: 'disk content',
+  };
+
+  it('does not apply a range while the buffer differs from the located revision', () => {
+    const onRevealApplied = vi.fn();
+    const { rerender } = render(
+      <EditorView
+        {...makeProps({
+          editingCompose: true,
+          activeTab: 'compose',
+          content: 'edited content',
+          pendingReveal: pending,
+          onRevealApplied,
+        })}
+      />,
+    );
+    expect(revealSpy.revealLocation).not.toHaveBeenCalled();
+    expect(onRevealApplied).not.toHaveBeenCalled();
+
+    rerender(
+      <EditorView
+        {...makeProps({
+          editingCompose: true,
+          activeTab: 'compose',
+          content: 'disk content',
+          pendingReveal: pending,
+          onRevealApplied,
+        })}
+      />,
+    );
+    expect(revealSpy.revealLocation).toHaveBeenCalledTimes(1);
+    expect(revealSpy.revealLocation.mock.calls[0][1]).toEqual(pending.location);
+    expect(onRevealApplied).toHaveBeenCalledTimes(1);
   });
 });

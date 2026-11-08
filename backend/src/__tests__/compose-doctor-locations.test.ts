@@ -632,4 +632,64 @@ describe('Compose Doctor authored locations', () => {
     expect(JSON.stringify(finding)).not.toContain(canary);
     expect(finding.location?.file).toBeUndefined();
   });
+
+  it('orders an outside layer at its real position in the project chain', async () => {
+    writeStack('doctor-outside-order', {
+      '.env': 'COMPOSE_FILE=compose.yaml:../outside.yaml\n',
+      'compose.yaml': 'services:\n  api:\n    image: nginx:1\n',
+    });
+    const project = await buildAuthoredProject(nodeId, 'doctor-outside-order');
+    const primary = project.files.find(file => file.file === 'compose.yaml')!;
+    const outside = project.files.find(file => file.file === '../outside.yaml')!;
+    // The refused layer follows the declaration it would override; the guards
+    // compare merge order, so the placeholder must not sort before the primary.
+    expect(outside.layerIndex).toBeGreaterThan(primary.layerIndex);
+    expect(project.partialReasons).toContain('outside-boundary');
+  });
+
+  it('refuses specialized locations while a declared outside layer is unknown, in every chain position', async () => {
+    const primary = [
+      'services:',
+      '  api:',
+      '    image: nginx:1',
+      '    ports:',
+      '      - "8080:80"',
+      '    volumes:',
+      '      - ./data:/data',
+      '    environment:',
+      '      API_TOKEN: "abc$def"',
+      '  worker:',
+      '    image: busybox:1',
+      '    environment:',
+      '      - "WORKER_TOKEN=abc$def"',
+      '',
+    ].join('\n');
+    const positions: Array<[string, string, Record<string, string>]> = [
+      ['first', '../outside.yaml:compose.yaml', { 'compose.yaml': primary }],
+      ['middle', 'compose.yaml:../outside.yaml:more.yaml', {
+        'compose.yaml': primary,
+        'more.yaml': 'services:\n  api:\n    image: redis:7\n',
+      }],
+      ['last', 'compose.yaml:../outside.yaml', { 'compose.yaml': primary }],
+    ];
+    for (const [position, chain, files] of positions) {
+      writeStack(`doctor-outside-${position}`, { '.env': `COMPOSE_FILE=${chain}\n`, ...files });
+      const project = await buildAuthoredProject(nodeId, `doctor-outside-${position}`);
+      expect(project.partialReasons).toContain('outside-boundary');
+      const port = locateFinding(project, hit('port-exposed-all-interfaces', {
+        service: 'api', sourcePath: 'api', subject: { kind: 'port', key: '8080/tcp' },
+      }));
+      expect(port).toBeUndefined();
+      for (const ruleId of ['bind-path-missing', 'bind-path-permission'] as const) {
+        const bind = locateFinding(project, hit(ruleId, {
+          service: 'api', sourcePath: './data', subject: { kind: 'bind', key: '/data' },
+        }));
+        expect(bind).toBeUndefined();
+      }
+      const envMap = locateFinding(project, hit('env-literal-dollar', { service: 'api', sourcePath: 'API_TOKEN' }));
+      expect(envMap).toBeUndefined();
+      const envList = locateFinding(project, hit('env-literal-dollar', { service: 'worker', sourcePath: 'WORKER_TOKEN' }));
+      expect(envList).toBeUndefined();
+    }
+  });
 });

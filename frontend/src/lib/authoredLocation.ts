@@ -26,6 +26,12 @@ export interface AuthoredLocationTarget {
 export interface PendingAuthoredReveal {
   target: AuthoredLocationTarget;
   location: AuthoredLocation;
+  /**
+   * The exact file content the range was computed against, for the compose
+   * surface. The editor applies the range only while its displayed buffer still
+   * equals it, so a stale or unsaved buffer never receives fresh coordinates.
+   */
+  revision?: string;
 }
 
 export interface MonacoRangeLike {

@@ -16,7 +16,7 @@ import {
 } from 'yaml';
 
 import type {
-  AuthoredDiagnostic, AuthoredNode, AuthoredDiagnosticCode, ParsedLabelFile,
+  AuthoredDiagnostic, AuthoredNode, AuthoredDiagnosticCode, AuthoredPathSegment, ParsedLabelFile,
   LabelFileEntry, SourceFileKind, SourceFileState, SourceRange, SourceWritability,
 } from './types';
 
@@ -57,6 +57,42 @@ const SCALAR_TEXT = new WeakMap<AuthoredNode, string>();
 
 export function authoredScalarOf(node: AuthoredNode | undefined): string | undefined {
   return node === undefined ? undefined : SCALAR_TEXT.get(node);
+}
+
+/**
+ * Collision-free map key for one structural path. A literal segment escapes
+ * backslash, dot, and brackets, so a key containing them can never be mistaken
+ * for a deeper path or a sequence item. Sequence indexes are the only
+ * unescaped brackets.
+ */
+export function authoredNodeKey(segments: readonly AuthoredPathSegment[]): string {
+  let key = '';
+  for (const segment of segments) {
+    if (typeof segment === 'number') {
+      key += `[${segment}]`;
+      continue;
+    }
+    const escaped = segment
+      .replace(/\\/g, '\\\\')
+      .replace(/\./g, '\\.')
+      .replace(/\[/g, '\\[')
+      .replace(/\]/g, '\\]');
+    key = key === '' ? escaped : `${key}.${escaped}`;
+  }
+  return key;
+}
+
+/** The human dot path quoted by the edit-origin contract; never an identity. */
+export function displayAuthoredPath(segments: readonly AuthoredPathSegment[]): string {
+  let path = '';
+  for (const segment of segments) {
+    if (typeof segment === 'number') {
+      path += `[${segment}]`;
+      continue;
+    }
+    path = path === '' ? segment : `${path}.${segment}`;
+  }
+  return path;
 }
 
 const INTERPOLATION = /(^|[^$])\$(?:\{|[A-Za-z_])/;
@@ -109,6 +145,9 @@ export interface InlineLabelDeclaration {
   range: SourceRange;
   form: 'map' | 'list';
   hasInterpolation: boolean;
+  /** The list-form key text is interpolated, so Compose may resolve it to any
+   *  effective key. A map key is a YAML key and is never interpolated. */
+  keyHasInterpolation?: boolean;
   /** The declaration point is an alias whose value cannot be attributed to this key. */
   unresolved?: boolean;
 }
@@ -278,6 +317,7 @@ function resolveAlias(ctx: WalkContext, alias: Alias): Node | null {
 function recordNode(
   ctx: WalkContext,
   path: string,
+  segments: readonly AuthoredPathSegment[],
   node: Node,
   keyRange: SourceRange | undefined,
   via: 'own' | 'merge' | 'alias',
@@ -300,6 +340,7 @@ function recordNode(
   const customTag = tag === '!reset' || tag === '!override' ? tag : tag ? 'unsupported' : undefined;
   const authored: AuthoredNode = {
     path,
+    segments,
     kind,
     ...(keyRange ? { keyRange } : {}),
     ...(nodeRange(ctx.lineCounter, node) ? { valueRange: nodeRange(ctx.lineCounter, node) } : {}),
@@ -310,10 +351,13 @@ function recordNode(
     ...(customTag ? { customTag } : {}),
   };
   // An own declaration always wins over a merged one for the same path, and
-  // the first merge key wins (YAML merge semantics).
-  const existing = ctx.nodes.get(path);
+  // the first merge key wins (YAML merge semantics). The identity is the
+  // structural segment list, so a service named `api.image` never stands in
+  // for `api`'s `image` field.
+  const identity = authoredNodeKey(segments);
+  const existing = ctx.nodes.get(identity);
   if (existing && (via === 'merge' || (existing.via !== 'merge' && via === 'alias'))) return existing;
-  ctx.nodes.set(path, authored);
+  ctx.nodes.set(identity, authored);
   const text = scalarText(node);
   if (text !== undefined) SCALAR_TEXT.set(authored, text);
   return authored;
@@ -323,6 +367,7 @@ function walkValue(
   ctx: WalkContext,
   node: Node | null | undefined,
   path: string,
+  segments: readonly AuthoredPathSegment[],
   keyRange: SourceRange | undefined,
   via: 'own' | 'merge' | 'alias',
   depth: number,
@@ -335,7 +380,7 @@ function walkValue(
       return;
     }
     if (!chargeAliasWork(ctx)) return;
-    const authored = recordNode(ctx, path, node, keyRange, 'alias', form);
+    const authored = recordNode(ctx, path, segments, node, keyRange, 'alias', form);
     if (authored) SCALAR_TEXT.delete(authored);
     if (depth >= MAX_ALIAS_DEPTH) {
       reportTooDeep(ctx, node);
@@ -349,13 +394,13 @@ function walkValue(
     ctx.aliasTrail.add(node);
     if (resolved) {
       ctx.aliasTrail.add(resolved);
-      walkValue(ctx, resolved, path, keyRange, 'alias', depth + 1, form);
+      walkValue(ctx, resolved, path, segments, keyRange, 'alias', depth + 1, form);
       ctx.aliasTrail.delete(resolved);
     }
     ctx.aliasTrail.delete(node);
     return;
   }
-  const authored = recordNode(ctx, path, node, keyRange, via, form);
+  const authored = recordNode(ctx, path, segments, node, keyRange, via, form);
   if (!authored) return;
   if (isScalar(node)) {
     if (authored.customTag === 'unsupported') {
@@ -369,14 +414,18 @@ function walkValue(
     return;
   }
   if (isMap(node)) {
-    walkMap(ctx, node as YAMLMap, path, via, depth);
+    walkMap(ctx, node as YAMLMap, path, segments, via, depth);
     return;
   }
   if (isSeq(node)) {
     const seq = node as YAMLSeq;
     seq.items.forEach((item, index) => {
       if (!item || typeof item !== 'object') return;
-      walkValue(ctx, item as Node, `${path}[${index}]`, undefined, via, depth, isMap(item) ? 'long' : 'short');
+      const childSegments = [...segments, index];
+      walkValue(
+        ctx, item as Node, displayAuthoredPath(childSegments), childSegments, undefined, via, depth,
+        isMap(item) ? 'long' : 'short',
+      );
     });
   }
 }
@@ -447,6 +496,7 @@ function walkMap(
   ctx: WalkContext,
   map: YAMLMap,
   path: string,
+  segments: readonly AuthoredPathSegment[],
   via: 'own' | 'merge' | 'alias',
   depth: number,
 ): void {
@@ -461,10 +511,14 @@ function walkMap(
     // a `services` map supplied through an alias or a root merge is still
     // enumerated here, and a deep VALUE never hides its own key.
     if (path === 'services') ctx.serviceNames.add(keyText);
-    const childPath = path ? `${path}.${keyText}` : keyText;
-    if (pairVia === 'merge' && ctx.nodes.has(childPath)) return;
+    const childSegments = [...segments, keyText];
+    const childPath = displayAuthoredPath(childSegments);
+    if (pairVia === 'merge' && ctx.nodes.has(authoredNodeKey(childSegments))) return;
     const keyRange = nodeRange(ctx.lineCounter, pair.key as Node);
-    walkValue(ctx, pair.value as Node, childPath, keyRange, pairVia, depth, isMap(pair.value) ? 'long' : undefined);
+    walkValue(
+      ctx, pair.value as Node, childPath, childSegments, keyRange, pairVia, depth,
+      isMap(pair.value) ? 'long' : undefined,
+    );
   };
 
   for (const pair of ownPairs) emit(pair, via);
@@ -503,16 +557,16 @@ function collectDeclarations(
   root: YAMLMap,
   result: Pick<ParsedComposeDocument, 'includes' | 'extends' | 'envFiles' | 'resources' | 'labelFiles' | 'inlineLabels'>,
 ): void {
-  const readable = new Map<string, unknown>();
+  // Declarations are read through the same merge/alias interpretation as the
+  // node walk: a root `<<:` that supplies `include` or `services` contributes
+  // the same declarations Compose would apply. `valueToPlain` reports depth or
+  // budget truncation as a diagnostic, so an unread declaration can never make
+  // the project look complete.
+  const readable = valueToPlain(ctx, root);
+  if (!readable || typeof readable !== 'object' || Array.isArray(readable)) return;
+  const rootMap = readable as Record<string, unknown>;
 
-  for (const pair of root.items) {
-    if (!pair || typeof pair !== 'object' || !('key' in pair)) continue;
-    const key = scalarText(pair.key as Node);
-    if (key === undefined) continue;
-    readable.set(key, valueToPlain(ctx, pair.value as Node));
-  }
-
-  const include = readable.get('include');
+  const include = rootMap.include;
   if (include !== undefined) {
     const items = Array.isArray(include) ? include : [include];
     for (const item of items) {
@@ -533,7 +587,7 @@ function collectDeclarations(
     }
   }
 
-  const services = readable.get('services');
+  const services = rootMap.services;
   if (services && typeof services === 'object' && !Array.isArray(services)) {
     for (const [service, value] of Object.entries(services as Record<string, unknown>)) {
       if (!value || typeof value !== 'object' || Array.isArray(value)) continue;
@@ -594,6 +648,9 @@ function collectDeclarations(
               range: { line: 1, column: 1, endLine: 1, endColumn: 1 },
               form: 'list',
               hasInterpolation: hasInterpolationSyntax(text),
+              // Compose interpolates the whole list item, so a variable in the
+              // key portion can resolve to any effective label key.
+              keyHasInterpolation: hasInterpolationSyntax(key),
             });
           }
         } else {
@@ -613,7 +670,7 @@ function collectDeclarations(
   }
 
   for (const [key, kind] of [['configs', 'config'], ['secrets', 'secret']] as const) {
-    const resources = readable.get(key);
+    const resources = rootMap[key];
     if (!resources || typeof resources !== 'object' || Array.isArray(resources)) continue;
     for (const [resourceKey, def] of Object.entries(resources as Record<string, unknown>)) {
       if (!def || typeof def !== 'object' || Array.isArray(def)) continue;
@@ -626,27 +683,28 @@ function collectDeclarations(
 /**
  * A small plain-value projection used only to enumerate declarations (include
  * paths, env_file entries, label lists, extends). It follows aliases and merge
- * keys under the same cycle/work budget as the node walk, because a declaration
- * behind an alias is still a declaration: dropping it would let an earlier file
- * look decisive. A cycle or an unresolved anchor is a truncating diagnostic;
- * the depth bound only limits how deep a projected VALUE is followed, not the
- * top-level keys a caller enumerates (a deep merge chain still yields its
- * service names).
+ * keys under the same cycle/work/depth budget as the node walk, because a
+ * declaration behind an alias or a merge is still a declaration: dropping it
+ * would let an earlier file look decisive. `mergeDepth` counts only alias and
+ * merge hops, which is exactly what the walk bounds; ordinary nesting does not
+ * consume the bound. A cycle, an unresolved anchor, or a merge deeper than the
+ * supported graph is a truncating diagnostic: the file is not understood and
+ * no origin may be claimed from it.
  */
 function valueToPlain(
   ctx: WalkContext,
   node: Node | null | undefined,
-  depth = 0,
+  mergeDepth = 0,
   trail: Set<Node> = new Set(),
 ): unknown {
   if (!node) return undefined;
-  // Declaration positions are shallow; a deeper plain structure is not needed
-  // for the projection and must not fail the document. Alias traversal below
-  // is still charged to the shared work budget.
-  if (depth > 8) return undefined;
   if (isAlias(node)) {
     if (trail.has(node)) {
       reportAliasCycle(ctx, node);
+      return undefined;
+    }
+    if (mergeDepth >= MAX_ALIAS_DEPTH) {
+      reportTooDeep(ctx, node);
       return undefined;
     }
     if (!chargeAliasWork(ctx)) return undefined;
@@ -658,20 +716,26 @@ function valueToPlain(
     }
     trail.add(node);
     trail.add(resolved);
-    const out = valueToPlain(ctx, resolved, depth + 1, trail);
+    const out = valueToPlain(ctx, resolved, mergeDepth + 1, trail);
     trail.delete(resolved);
     trail.delete(node);
     return out;
   }
   if (isScalar(node)) return (node as Scalar).value;
-  if (isSeq(node)) return (node as YAMLSeq).items.map(item => valueToPlain(ctx, item as Node, depth + 1, trail));
+  if (isSeq(node)) return (node as YAMLSeq).items.map(item => valueToPlain(ctx, item as Node, mergeDepth, trail));
   if (isMap(node)) {
-    const out: Record<string, unknown> = {};
+    // A null prototype keeps a document key such as `__proto__` as data.
+    const out: Record<string, unknown> = Object.create(null) as Record<string, unknown>;
     const pairs = (node as YAMLMap).items
       .filter((pair): pair is Pair => pair !== null && typeof pair === 'object' && 'key' in pair);
     // YAML merge semantics: merged keys first, then the map's own keys win.
     for (const pair of pairs.filter(entry => scalarText(entry.key as Node) === '<<')) {
-      const merged = valueToPlain(ctx, pair.value as Node, depth + 1, trail);
+      if (mergeDepth >= MAX_ALIAS_DEPTH) {
+        reportTooDeep(ctx, pair.value as Node);
+        continue;
+      }
+      if (!chargeAliasWork(ctx)) continue;
+      const merged = valueToPlain(ctx, pair.value as Node, mergeDepth + 1, trail);
       const sources = Array.isArray(merged) ? merged : [merged];
       for (const source of sources) {
         if (!source || typeof source !== 'object' || Array.isArray(source)) continue;
@@ -683,7 +747,7 @@ function valueToPlain(
     }
     for (const pair of pairs.filter(entry => scalarText(entry.key as Node) !== '<<')) {
       const key = scalarText(pair.key as Node);
-      if (key !== undefined) out[key] = valueToPlain(ctx, pair.value as Node, depth + 1, trail);
+      if (key !== undefined) out[key] = valueToPlain(ctx, pair.value as Node, mergeDepth, trail);
     }
     return out;
   }
@@ -750,7 +814,7 @@ export function parseComposeDocument(input: ParseComposeDocumentInput): ParsedCo
 
   // The root itself is not a compose declaration, so its children are the
   // documented paths (`services.api.image`, `networks.edge`, ...).
-  walkMap(ctx, doc.contents as YAMLMap, '', 'own', 0);
+  walkMap(ctx, doc.contents as YAMLMap, '', [], 'own', 0);
   collectDeclarations(ctx, doc.contents as YAMLMap, empty);
   // The walk owns the service-name list: it follows aliases and merge keys and
   // records each key as it is enumerated, so a chain that is too deep only
@@ -766,15 +830,17 @@ export function parseComposeDocument(input: ParseComposeDocumentInput): ParsedCo
   // a direct counterpart. The walker already recorded these paths; ranges stay
   // optional because a dynamic/map declaration may not expose a scalar.
   for (const declaration of empty.labelFiles) {
-    const node = empty.nodes.get(`services.${declaration.service}.label_file`);
+    const node = empty.nodes.get(authoredNodeKey(['services', declaration.service, 'label_file']));
     declaration.range = node?.valueRange;
   }
   for (const declaration of empty.envFiles) {
-    const node = empty.nodes.get(`services.${declaration.service}.env_file`);
+    const node = empty.nodes.get(authoredNodeKey(['services', declaration.service, 'env_file']));
     declaration.range = node?.valueRange;
   }
   for (const declaration of empty.resources) {
-    const node = empty.nodes.get(`${declaration.kind === 'config' ? 'configs' : 'secrets'}.${declaration.key}.file`);
+    const node = empty.nodes.get(authoredNodeKey([
+      declaration.kind === 'config' ? 'configs' : 'secrets', declaration.key, 'file',
+    ]));
     declaration.range = node?.valueRange;
   }
 
@@ -788,11 +854,11 @@ export function parseComposeDocument(input: ParseComposeDocumentInput): ParsedCo
   for (const declaration of empty.inlineLabels) {
     let node: AuthoredNode | undefined;
     if (declaration.form === 'map') {
-      node = empty.nodes.get(`services.${declaration.service}.labels.${declaration.key}`);
+      node = empty.nodes.get(authoredNodeKey(['services', declaration.service, 'labels', declaration.key]));
     } else {
       const next = listIndexByService.get(declaration.service) ?? 0;
       listIndexByService = listIndexByService.set(declaration.service, next + 1);
-      node = empty.nodes.get(`services.${declaration.service}.labels[${next}]`);
+      node = empty.nodes.get(authoredNodeKey(['services', declaration.service, 'labels', next]));
     }
     // The node cap can stop the walk before a declaration. A missing range must
     // never fall back to line 1: the declaration is dropped instead.

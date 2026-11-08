@@ -43,6 +43,8 @@ interface FileViewerProps {
   onDirtyChange?: (dirty: boolean) => void;
   /** A reported authored location to reveal once this file's content is loaded. */
   reveal?: AuthoredLocation | null;
+  /** Bumped when a reveal targets the already-selected path, forcing a reread. */
+  reloadKey?: number;
   onRevealApplied?: () => void;
 }
 
@@ -145,6 +147,7 @@ export function FileViewer({
   onSaved,
   onDirtyChange,
   reveal,
+  reloadKey = 0,
   onRevealApplied,
 }: FileViewerProps) {
   const [content, setContent] = useState('');
@@ -166,6 +169,7 @@ export function FileViewer({
   const [isOversized, setIsOversized] = useState(false);
   const [size, setSize] = useState(0);
   const [loadedVersion, setLoadedVersion] = useState<string | null>(null);
+  const [loadEpoch, setLoadEpoch] = useState(0);
 
   const readOnly = !canEdit;
   const hasChanges = content !== originalContent;
@@ -233,6 +237,8 @@ export function FileViewer({
     setLoadedPath(null);
     setIsBinary(false);
     setIsOversized(false);
+    // A reread must be able to re-apply the same one-shot range.
+    appliedRevealRef.current = null;
 
     readStackFile(stackName, selectedPath, { rootId })
       .then((result) => {
@@ -255,6 +261,7 @@ export function FileViewer({
           setContent(text);
           setOriginalContent(text);
           setLoadedPath(selectedPath);
+          setLoadEpoch((epoch) => epoch + 1);
         }
       })
       .catch((e: unknown) => {
@@ -268,7 +275,7 @@ export function FileViewer({
     return () => {
       cancelled = true;
     };
-  }, [stackName, selectedPath, rootId]);
+  }, [stackName, selectedPath, rootId, reloadKey]);
 
   const handleSave = async () => {
     if (!selectedPath) return;
@@ -318,6 +325,9 @@ export function FileViewer({
 
   const applyReveal = () => {
     const binding = editorBindingRef.current;
+    // An unsaved buffer is not the content the range was computed against;
+    // the explorer's discard confirmation is the only path that replaces it.
+    if (hasChanges) return;
     if (!reveal || !binding || binding.token !== editorToken || loadedPath !== reveal.file) return;
     const key = `${reveal.file}:${reveal.line}:${reveal.column}:${reveal.endLine}:${reveal.endColumn}`;
     if (appliedRevealRef.current === key) return;
@@ -334,9 +344,10 @@ export function FileViewer({
     }
     applyReveal();
     // The editor must be mounted for this exact resource and the requested
-    // file's content must be loaded before a range can be applied.
+    // file's content must be loaded before a range can be applied. `loadEpoch`
+    // covers a reread of the same path, where `loadedPath` may not change.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [reveal, loadedPath, editorToken, editorBindingVersion]);
+  }, [reveal, loadedPath, editorToken, editorBindingVersion, loadEpoch]);
 
   if (!selectedPath) {
     return (

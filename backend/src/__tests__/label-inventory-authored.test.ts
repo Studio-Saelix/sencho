@@ -204,6 +204,20 @@ describe('authored label origins in the stack inventory', () => {
     expect(api.authored?.a?.file).toBeUndefined();
   });
 
+  it('shows an interpolated reason when a list-form key could name the rendered label', async () => {
+    writeStack('label-dynamic-inventory', {
+      'compose.yaml': 'services:\n  api:\n    image: nginx:1\n    label_file: app.labels\n    labels:\n      - "${LABEL_KEY}=inline"\n',
+      'app.labels': 'owner=file\n',
+    });
+    stubRender({ api: { owner: 'inline' } });
+    stubDocker();
+    const inventory = await buildStackLabelInventory(nodeId, 'label-dynamic-inventory');
+    const api = inventory.services.find(service => service.service === 'api')!;
+    expect(api.authored?.owner).toEqual({ ambiguity: 'interpolated' });
+    expect(api.authored?.owner?.file).toBeUndefined();
+    expect(api.authored?.owner?.line).toBeUndefined();
+  });
+
   it('leaves runtime-only labels untouched and adds no authored map when the payload has none', async () => {
     writeStack('label-runtime-only', {
       'compose.yaml': 'services:\n  api:\n    image: nginx:1\n',

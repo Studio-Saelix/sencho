@@ -5,7 +5,7 @@
  * When that cannot be decided, the result is an explicit ambiguous reason and
  * no origin.
  */
-import { authoredScalarOf } from './parseComposeDocument';
+import { authoredNodeKey, authoredScalarOf } from './parseComposeDocument';
 import {
   isActingReason, type AuthoredNode, type AuthoredProject, type CorrelationCandidate,
   type CorrelationOrigin, type CorrelationReason, type CorrelationResult, type LabelContribution,
@@ -94,6 +94,16 @@ export function hasProjectCycle(project: AuthoredProject): boolean {
 }
 
 /**
+ * Structural segments for one field. A service's own field names are plain
+ * Compose keys, but an `environment` key or a label key is data and may itself
+ * contain a dot, so it stays one segment.
+ */
+function fieldSegments(field: string): string[] {
+  if (field.startsWith('environment.')) return ['environment', field.slice('environment.'.length)];
+  return field ? field.split('.') : [];
+}
+
+/**
  * A `!reset`/`!override` on a field or one of its parent mappings
  * (`environment`, `labels`, ...) removes or replaces the declaration, so it is
  * not decisive. Only the winner's own layer or a later one can supersede it.
@@ -105,14 +115,13 @@ function hasTaggedFieldOrAncestorAtOrAfter(
   layerIndex: number,
 ): boolean {
   if (!field) return false;
-  const segments = field.split('.');
+  const segments = fieldSegments(field);
   for (const definition of project.serviceDefinitions.get(service) ?? []) {
     if (definition.layerIndex < layerIndex) continue;
     const file = project.files.find(entry => entry.file === definition.file && entry.state === 'parsed');
     if (!file) continue;
-    let path = `services.${definition.declaredService}`;
-    for (const segment of segments) {
-      path += `.${segment}`;
+    for (let length = 1; length <= segments.length; length += 1) {
+      const path = authoredNodeKey(['services', definition.declaredService, ...segments.slice(0, length)]);
       if (file.nodes.get(path)?.customTag !== undefined) return true;
     }
   }
@@ -153,8 +162,9 @@ export function fieldCandidates(project: AuthoredProject, service: string, field
     // A declared definition this model cannot read would shrink the candidate
     // set silently; refuse the field rather than claim the remainder.
     if (!file) return [];
-    const path = field ? `services.${definition.declaredService}.${field}` : `services.${definition.declaredService}`;
-    const node = file.nodes.get(path);
+    const node = file.nodes.get(authoredNodeKey([
+      'services', definition.declaredService, ...fieldSegments(field),
+    ]));
     if (!node) continue;
     out.push({ file: file.file, node, layerIndex: definition.layerIndex, writability: file.writability });
   }
@@ -413,6 +423,12 @@ export function correlateLabel(project: AuthoredProject, service: string, key: s
       return refusal(project, path, [], 'ambiguous-unparsed-source', 'unparsed-source',
         'A compose layer could not be parsed.');
     }
+    // A list-form key built from a variable could itself be this key. Compose
+    // does not let this model resolve it, so no literal source is decisive.
+    if (labels.hasDynamicKeys === true) {
+      return refusal(project, path, [], 'interpolated', 'interpolated',
+        'A label key is built from a variable, so the effective key cannot be decided.');
+    }
     return baseResult(project, path, [], 'no-authored-source');
   }
 
@@ -489,9 +505,8 @@ export function correlateVariableReference(
     for (const definition of definitions) {
       const file = project.files.find(entry => entry.file === definition.file && entry.state === 'parsed');
       if (!file) return baseResult(project, path, [], 'no-authored-source');
-      const prefix = `services.${definition.declaredService}.`;
       for (const node of file.nodes.values()) {
-        if (!node.path.startsWith(prefix)) continue;
+        if (node.segments[0] !== 'services' || node.segments[1] !== definition.declaredService) continue;
         const text = authoredScalarOf(node);
         if (text === undefined || !pattern.test(text)) continue;
         found.push({ file: file.file, node, layerIndex: definition.layerIndex, writability: file.writability });
@@ -501,7 +516,8 @@ export function correlateVariableReference(
     for (const file of project.files) {
       if (file.state !== 'parsed') continue;
       for (const node of file.nodes.values()) {
-        if (service !== undefined && !node.path.startsWith(`services.${service}.`)) continue;
+        if (service !== undefined
+          && (node.segments[0] !== 'services' || node.segments[1] !== service)) continue;
         const text = authoredScalarOf(node);
         if (text === undefined || !pattern.test(text)) continue;
         found.push({ file: file.file, node, layerIndex: file.layerIndex, writability: file.writability });
@@ -533,21 +549,44 @@ export function correlateVariableReference(
 
 /**
  * Split `services.<name>.<field>` using the project's own service names. A
- * Compose service name may contain dots, so a fixed regex would read
- * `services.my.service.image` as a field of a service called `my`.
+ * Compose service name may contain dots, so the same text can name a field of
+ * `api` or the service `api.image`. An interpretation is viable only when the
+ * project actually authors that node; when both are viable the path cannot say
+ * which structure was meant, so the edit origin is refused.
  */
 function splitAuthoredPath(project: AuthoredProject, path: string): { service: string; field: string } | null {
   const prefix = 'services.';
   if (!path.startsWith(prefix)) return null;
   const rest = path.slice(prefix.length);
-  let service: string | undefined;
+  const candidates: Array<{ service: string; field: string }> = [];
   for (const candidate of project.serviceDefinitions.keys()) {
-    if (rest.startsWith(`${candidate}.`) && (service === undefined || candidate.length > service.length)) {
-      service = candidate;
+    if (rest === candidate) candidates.push({ service: candidate, field: '' });
+    else if (rest.startsWith(`${candidate}.`)) {
+      candidates.push({ service: candidate, field: rest.slice(candidate.length + 1) });
     }
   }
-  if (service === undefined) return null;
-  return { service, field: rest.slice(service.length + 1) };
+  if (candidates.length === 0) return null;
+  const viable = candidates.filter(entry => interpretationIsAuthored(project, entry.service, entry.field));
+  if (viable.length === 1) return viable[0];
+  if (viable.length > 1) return null;
+  // No interpretation names a readable node: keep the historical longest-name
+  // rule so a request for a missing field still reaches a typed refusal.
+  candidates.sort((a, b) => b.service.length - a.service.length);
+  return candidates[0] ?? null;
+}
+
+/** Whether an interpretation could name a node, including an unread file. */
+function interpretationIsAuthored(project: AuthoredProject, service: string, field: string): boolean {
+  const labelPrefix = 'labels.';
+  const segments = field.startsWith(labelPrefix)
+    ? ['labels', field.slice(labelPrefix.length)]
+    : fieldSegments(field);
+  for (const definition of project.serviceDefinitions.get(service) ?? []) {
+    const file = project.files.find(entry => entry.file === definition.file);
+    if (!file || file.state !== 'parsed') return true;
+    if (file.nodes.has(authoredNodeKey(['services', definition.declaredService, ...segments]))) return true;
+  }
+  return false;
 }
 
 /**

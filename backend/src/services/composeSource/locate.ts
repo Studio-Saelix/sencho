@@ -7,7 +7,7 @@ import {
   correlateField, correlateLabel, correlateServiceKey, correlateVariableReference, displayRange,
   hasLaterUnparsedLayer, hasOutsideComposeLayer, hasProjectCycle, hasUnparsedComposeLayer, hasUnresolvedService,
 } from './correlate';
-import { authoredScalarOf } from './parseComposeDocument';
+import { authoredNodeKey, authoredScalarOf } from './parseComposeDocument';
 import { containerPortRange, isDynamicHostPort, isFixedHostPort, splitShortPortSpec } from '../../helpers/composePortSpec';
 import { isActingReason, type AuthoredFileSource, type AuthoredLocation, type AuthoredNode, type AuthoredProject, type CorrelationResult } from './types';
 import type { RuleHit } from '../preflight/types';
@@ -109,7 +109,7 @@ function hasUnresolvedSequenceItem(
   const identityFields = IDENTITY_FIELDS[field] ?? new Set<string>();
   for (const scope of scopes) {
     if (scope.layerIndex < layerIndex) continue;
-    const prefix = `services.${scope.declaredService}.${field}[`;
+    const prefix = `${authoredNodeKey(['services', scope.declaredService, ...field.split('.')])}[`;
     for (const [nodePath, node] of scope.file.nodes) {
       if (!nodePath.startsWith(prefix)) continue;
       const index = /^(\d+)\]/.exec(nodePath.slice(prefix.length));
@@ -130,14 +130,16 @@ function hasUnresolvedSequenceItem(
 
 /** A `!reset`/`!override`/unsupported tag on the field itself makes every item ambiguous. */
 function fieldHasTag(scopes: ServiceScope[], field: string): boolean {
-  return scopes.some(scope => scope.file.nodes.get(`services.${scope.declaredService}.${field}`)?.customTag !== undefined);
+  return scopes.some(scope => scope.file.nodes.get(
+    authoredNodeKey(['services', scope.declaredService, ...field.split('.')]),
+  )?.customTag !== undefined);
 }
 
 /** The largest sequence index any scope declares for one field. */
 function scopedSequenceCount(scopes: ServiceScope[], field: string): number {
   let max = 0;
   for (const scope of scopes) {
-    const prefix = `services.${scope.declaredService}.${field}[`;
+    const prefix = `${authoredNodeKey(['services', scope.declaredService, ...field.split('.')])}[`;
     for (const nodePath of scope.file.nodes.keys()) {
       if (!nodePath.startsWith(prefix) || !nodePath.endsWith(']')) continue;
       const index = Number(nodePath.slice(prefix.length, -1));
@@ -158,7 +160,7 @@ interface AuthoredPortSpec {
 }
 
 function portItemValue(file: AuthoredFileSource, declaredService: string, index: number): AuthoredPortSpec | null {
-  const item = file.nodes.get(`services.${declaredService}.ports[${index}]`);
+  const item = file.nodes.get(authoredNodeKey(['services', declaredService, 'ports', index]));
   // An alias item's own text is not the publication, and this model does not
   // attribute the anchor's value to this item. Never read it as `dynamic`.
   if (!item || item.kind === 'alias') return null;
@@ -176,11 +178,10 @@ function portItemValue(file: AuthoredFileSource, declaredService: string, index:
       ...(target ? { targetStartPort: target.start, targetEndPort: target.end } : {}),
     };
   }
-  const prefix = `services.${declaredService}.ports[${index}]`;
-  const published = authoredScalarOf(file.nodes.get(`${prefix}.published`));
-  const protocol = authoredScalarOf(file.nodes.get(`${prefix}.protocol`)) ?? 'tcp';
-  const hostIp = authoredScalarOf(file.nodes.get(`${prefix}.host_ip`)) ?? '';
-  const target = containerPortRange(authoredScalarOf(file.nodes.get(`${prefix}.target`)));
+  const published = authoredScalarOf(file.nodes.get(authoredNodeKey(['services', declaredService, 'ports', index, 'published'])));
+  const protocol = authoredScalarOf(file.nodes.get(authoredNodeKey(['services', declaredService, 'ports', index, 'protocol']))) ?? 'tcp';
+  const hostIp = authoredScalarOf(file.nodes.get(authoredNodeKey(['services', declaredService, 'ports', index, 'host_ip']))) ?? '';
+  const target = containerPortRange(authoredScalarOf(file.nodes.get(authoredNodeKey(['services', declaredService, 'ports', index, 'target']))));
   const hostText = published === undefined ? 'dynamic' : normalizedHostPart(published);
   return {
     hostText,
@@ -245,7 +246,7 @@ function splitPortSubject(key: string): { hostText: string; protocol: string } {
 
 /** The authored target of one `volumes` sequence item. */
 function volumeItemTarget(file: AuthoredFileSource, declaredService: string, index: number): string | null {
-  const item = file.nodes.get(`services.${declaredService}.volumes[${index}]`);
+  const item = file.nodes.get(authoredNodeKey(['services', declaredService, 'volumes', index]));
   if (item) {
     const text = authoredScalarOf(item);
     if (text !== undefined) {
@@ -256,12 +257,12 @@ function volumeItemTarget(file: AuthoredFileSource, declaredService: string, ind
       return parts[offset + 1] ?? null;
     }
   }
-  return authoredScalarOf(file.nodes.get(`services.${declaredService}.volumes[${index}].target`)) ?? null;
+  return authoredScalarOf(file.nodes.get(authoredNodeKey(['services', declaredService, 'volumes', index, 'target']))) ?? null;
 }
 
 /** The authored source of one `volumes` sequence item, or null when unnamed. */
 function volumeItemSource(file: AuthoredFileSource, declaredService: string, index: number): string | null {
-  const item = file.nodes.get(`services.${declaredService}.volumes[${index}]`);
+  const item = file.nodes.get(authoredNodeKey(['services', declaredService, 'volumes', index]));
   if (item) {
     const text = authoredScalarOf(item);
     if (text !== undefined) {
@@ -271,7 +272,7 @@ function volumeItemSource(file: AuthoredFileSource, declaredService: string, ind
       return parts[offset] ?? null;
     }
   }
-  return authoredScalarOf(file.nodes.get(`services.${declaredService}.volumes[${index}].source`)) ?? null;
+  return authoredScalarOf(file.nodes.get(authoredNodeKey(['services', declaredService, 'volumes', index, 'source']))) ?? null;
 }
 
 /** A location on the latest layer that declares a matching sequence item. */
@@ -297,6 +298,10 @@ function itemLocation(candidates: ItemCandidate[], basePath: string): AuthoredLo
  */
 function locatePort(project: AuthoredProject, hit: RuleHit, model: EffectiveModel | null): AuthoredLocation | undefined {
   if (!hit.service) return undefined;
+  // A declared file outside the boundary has unknown contents and could still
+  // contribute or supersede the publication. Refuse consistently with the
+  // generic field and label correlation, which refuse the whole project.
+  if (hasOutsideComposeLayer(project)) return undefined;
   if (hasUnresolvedService(project, hit.service)) return undefined;
   const broadOnly = hit.ruleId === 'port-exposed-all-interfaces' || hit.ruleId === 'sensitive-service-broad-exposure';
   const subject = hit.subject?.kind === 'port' ? splitPortSubject(hit.subject.key) : undefined;
@@ -323,7 +328,7 @@ function locatePort(project: AuthoredProject, hit: RuleHit, model: EffectiveMode
     for (const scope of scopes) {
       const author = portItemValue(scope.file, scope.declaredService, index);
       if (!author) continue;
-      const node = scope.file.nodes.get(`services.${scope.declaredService}.ports[${index}]`);
+      const node = scope.file.nodes.get(authoredNodeKey(['services', scope.declaredService, 'ports', index]));
       if (!node) continue;
       const matched = subject !== undefined
         ? authoredHostMatchesSubject(author, subject.hostText)
@@ -356,6 +361,7 @@ function locatePort(project: AuthoredProject, hit: RuleHit, model: EffectiveMode
 /** Locate the single `volumes` item a bind hit names, else the sequence key. */
 function locateVolume(project: AuthoredProject, hit: RuleHit): AuthoredLocation | undefined {
   if (!hit.service) return undefined;
+  if (hasOutsideComposeLayer(project)) return undefined;
   if (hasUnresolvedService(project, hit.service)) return undefined;
   if (hit.subject?.kind === 'bind') {
     const target = hit.subject.key;
@@ -366,7 +372,7 @@ function locateVolume(project: AuthoredProject, hit: RuleHit): AuthoredLocation 
     for (let index = 0; index < scopedSequenceCount(scopes, 'volumes'); index += 1) {
       for (const scope of scopes) {
         if (volumeItemTarget(scope.file, scope.declaredService, index) !== target) continue;
-        const node = scope.file.nodes.get(`services.${scope.declaredService}.volumes[${index}]`);
+        const node = scope.file.nodes.get(authoredNodeKey(['services', scope.declaredService, 'volumes', index]));
         if (node) {
           matches.push({
             file: scope.file.file, node, layerIndex: scope.layerIndex, writability: scope.file.writability, index,
@@ -404,6 +410,7 @@ function locateVolume(project: AuthoredProject, hit: RuleHit): AuthoredLocation 
 /** Locate the `env_file` entry naming the missing path, else the field. */
 function locateEnvFile(project: AuthoredProject, hit: RuleHit): AuthoredLocation | undefined {
   if (!hit.service) return undefined;
+  if (hasOutsideComposeLayer(project)) return undefined;
   if (hasUnresolvedService(project, hit.service)) return undefined;
   const path = hit.sourcePath;
   if (path !== undefined) {
@@ -413,9 +420,8 @@ function locateEnvFile(project: AuthoredProject, hit: RuleHit): AuthoredLocation
     const matches: ItemCandidate[] = [];
     for (let index = 0; index < count; index += 1) {
       for (const scope of scopes) {
-        const prefix = `services.${scope.declaredService}.env_file[${index}]`;
-        const shortNode = scope.file.nodes.get(prefix);
-        const longNode = scope.file.nodes.get(`${prefix}.path`);
+        const shortNode = scope.file.nodes.get(authoredNodeKey(['services', scope.declaredService, 'env_file', index]));
+        const longNode = scope.file.nodes.get(authoredNodeKey(['services', scope.declaredService, 'env_file', index, 'path']));
         const text = authoredScalarOf(shortNode) ?? authoredScalarOf(longNode);
         if (text !== undefined && (text === path || text.endsWith(`/${path}`) || path.endsWith(`/${text}`))) {
           const node = longNode ?? shortNode;
@@ -445,14 +451,15 @@ function locateEnvFile(project: AuthoredProject, hit: RuleHit): AuthoredLocation
 
 /** Locate the authored `environment` entry for one key, map or list form. */
 function locateEnvironmentKey(project: AuthoredProject, service: string, key: string): AuthoredLocation | undefined {
+  if (hasOutsideComposeLayer(project)) return undefined;
   if (hasUnresolvedService(project, service)) return undefined;
   const candidates: ItemCandidate[] = [];
   const unresolvedLayers: number[] = [];
   const scopes = serviceScopes(project, service);
   if (fieldHasTag(scopes, 'environment')) return undefined;
   for (const scope of scopes) {
-    const path = `services.${scope.declaredService}.environment`;
-    const mapNode = scope.file.nodes.get(`${path}.${key}`);
+    const pathSegments = ['services', scope.declaredService, 'environment'] as const;
+    const mapNode = scope.file.nodes.get(authoredNodeKey([...pathSegments, key]));
     if (mapNode) {
       // An alias is a reference, not the declaration that holds the value; the
       // anchor cannot be attributed to this key from here.
@@ -463,8 +470,12 @@ function locateEnvironmentKey(project: AuthoredProject, service: string, key: st
       }
       continue;
     }
-    for (const [nodePath, node] of scope.file.nodes) {
-      if (!nodePath.startsWith(`${path}[`) || !nodePath.endsWith(']')) continue;
+    for (const node of scope.file.nodes.values()) {
+      if (node.segments.length !== pathSegments.length + 1
+        || node.segments[0] !== pathSegments[0]
+        || node.segments[1] !== pathSegments[1]
+        || node.segments[2] !== pathSegments[2]
+        || typeof node.segments[3] !== 'number') continue;
       const text = authoredScalarOf(node);
       if (text === undefined) {
         // A list item this reader cannot read could be this key in another
@@ -616,7 +627,7 @@ function correlateTopLevel(project: AuthoredProject, collection: string, key: st
     // An extends base contributes services, never top-level resources, so it
     // is not a declaration of this project's networks or volumes.
     if (file.kind === 'compose-extends') continue;
-    const node = file.nodes.get(path);
+    const node = file.nodes.get(authoredNodeKey([collection, key]));
     if (node) candidates.push({ file: file.file, node, layerIndex: file.layerIndex, writability: file.writability });
   }
   if (hasOutsideComposeLayer(project)) {

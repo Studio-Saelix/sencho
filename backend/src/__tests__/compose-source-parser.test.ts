@@ -4,6 +4,7 @@ import { spawnSync } from 'child_process';
 import {
   parseComposeDocument, parseLabelFile, MAX_COMPOSE_PARSE_BYTES,
 } from '../services/composeSource';
+import { authoredNodeKey } from '../services/composeSource/parseComposeDocument';
 
 const base = {
   file: 'compose.yaml',
@@ -188,6 +189,24 @@ describe('parseComposeDocument', () => {
     expect(parsed.nodes.get('services.api.image')?.via).toBe('merge');
     expect(parsed.nodes.get('services.api.restart')?.via).toBe('own');
     expect(parsed.nodes.get('services.copy.image')?.via).toBe('alias');
+  });
+
+  it('keeps dotted top-level keys distinct from nested identities', () => {
+    const parsed = parse([
+      'networks:',
+      '  edge:',
+      '    driver: bridge',
+      '  edge.x:',
+      '    external: true',
+      'configs:',
+      '  app.conf:',
+      '    file: ./app.conf',
+      '',
+    ].join('\n'));
+    expect(parsed.nodes.get(authoredNodeKey(['networks', 'edge', 'driver']))?.valueRange?.line).toBe(3);
+    expect(parsed.nodes.get(authoredNodeKey(['networks', 'edge.x']))?.keyRange?.line).toBe(4);
+    expect(parsed.nodes.get(authoredNodeKey(['configs', 'app.conf', 'file']))?.valueRange?.line).toBe(8);
+    expect(parsed.resources).toContainEqual({ kind: 'config', key: 'app.conf', file: './app.conf', range: expect.anything() });
   });
 
   it('keeps UTF-16 column parity on a multibyte line', () => {

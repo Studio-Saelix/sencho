@@ -351,6 +351,8 @@ export function EditorView(props: EditorViewProps) {
     } = props;
     const sourceServices = useMemo(() => composeServiceNames(content || ''), [content]);
     const lockedServices = useMemo(() => lockedServiceUrlReasons(serviceUrlEntry), [serviceUrlEntry]);
+    const safeContent = content || '';
+    const safeEnvContent = envContent || '';
     const monacoEditorRef = useRef<import('monaco-editor').editor.IStandaloneCodeEditor | null>(null);
     const canEditCompose = can('stack:edit', 'stack', stackName, activeNode?.id);
     // Pulling stages images for a deploy, so it takes the edit authority for the
@@ -382,15 +384,18 @@ export function EditorView(props: EditorViewProps) {
         };
     }, []);
 
-    // Apply a requested authored location once the compose editor is on screen,
-    // then clear it so a later manual navigation is not overridden.
+    // Apply a requested authored location once the compose editor is on screen
+    // and showing the content revision the range came from, then clear it. A
+    // clean stale buffer is refreshed by the caller before the request is set;
+    // an edited buffer does not match the revision and is never re-selected.
     useEffect(() => {
         if (!pendingReveal || pendingReveal.target.surface !== 'compose' || activeTab !== 'compose' || !editingCompose) return;
+        if (pendingReveal.revision !== undefined && safeContent !== pendingReveal.revision) return;
         const editor = monacoEditorRef.current;
         if (!editor) return;
         revealLocation(editor, pendingReveal.location);
         onRevealApplied?.();
-    }, [pendingReveal, activeTab, editingCompose, onRevealApplied]);
+    }, [pendingReveal, activeTab, editingCompose, onRevealApplied, safeContent]);
 
     // Force Monaco to re-measure its container after the tab switch DOM settles.
     // Monaco's internal child is position:static with an explicit pixel height that
@@ -418,8 +423,6 @@ export function EditorView(props: EditorViewProps) {
     }, [editingCompose, activeTab, canEditCompose]);
 
     const safeContainers = containers || [];
-    const safeContent = content || '';
-    const safeEnvContent = envContent || '';
     const isRunning = safeContainers.some(c => c.State === 'running');
     const canRead = can('stack:read', 'stack', stackName, activeNode?.id);
 
@@ -832,7 +835,8 @@ export function EditorView(props: EditorViewProps) {
                                                     value={activeTab === 'compose' ? safeContent : safeEnvContent}
                                                     onMount={(editor) => {
                                                         monacoEditorRef.current = editor;
-                                                        if (pendingReveal?.target.surface === 'compose') {
+                                                        if (pendingReveal?.target.surface === 'compose'
+                                                            && (pendingReveal.revision === undefined || safeContent === pendingReveal.revision)) {
                                                             revealLocation(editor, pendingReveal.location);
                                                             onRevealApplied?.();
                                                         } else if (editingCompose && activeTab === 'compose' && canEditCompose) {

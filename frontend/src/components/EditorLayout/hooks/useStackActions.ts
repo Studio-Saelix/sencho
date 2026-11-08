@@ -384,6 +384,11 @@ export function useStackActions(options: UseStackActionsOptions) {
   const selectedFileRef = useRef(stackListState.selectedFile);
   const activeNodeIdRef = useRef(activeNode?.id);
   const containersRef = useRef(editorState.containers);
+  // The compose buffer a reveal may target, read after an await.
+  const composeContentRef = useRef(editorState.content);
+  const composeOriginalContentRef = useRef(editorState.originalContent);
+  // A later location click supersedes an earlier one still fetching the file.
+  const authoredLocationRequestRef = useRef(0);
   // Same-owner arbitration: soft refresh, Retry, and detail load can overlap
   // for one stack/node; only the newest generation may apply success or failure.
   const containersFetchGenRef = useRef(0);
@@ -391,6 +396,8 @@ export function useStackActions(options: UseStackActionsOptions) {
     selectedFileRef.current = stackListState.selectedFile;
     activeNodeIdRef.current = activeNode?.id;
     containersRef.current = editorState.containers;
+    composeContentRef.current = editorState.content;
+    composeOriginalContentRef.current = editorState.originalContent;
   });
 
   // Cancel an open Save & Reapply confirmation if the active node or selected
@@ -2264,15 +2271,67 @@ export function useStackActions(options: UseStackActionsOptions) {
   /**
    * Open a reported authored location. One click, one handler: the compose tab
    * when the file is the loaded primary compose file, the Files tab otherwise.
-   * Tab switches preserve both buffers, so no guard is needed for unsaved edits.
+   * A range was computed against one disk revision, so the compose surface
+   * re-reads the file and applies the range only to that revision: a clean
+   * stale buffer is refreshed, while unsaved edits are preserved and the
+   * selection is left alone. The Files surface rereads the same path in
+   * FileViewer, and its existing discard confirmation covers a dirty viewer.
    */
   const openAuthoredLocation = (location: AuthoredLocation) => {
-    if (!stackListState.selectedFile) return;
+    const stackFile = stackListState.selectedFile;
+    if (!stackFile) return;
     const target = planAuthoredLocation(location, editorState.composeFilename);
     if (!target) return;
-    editorState.setEditingCompose(true);
-    editorState.setActiveTab(target.surface === 'compose' ? 'compose' : 'files');
-    editorState.setPendingReveal({ target, location });
+    // Any newer click supersedes a compose file read still in flight, even when
+    // the newer one opens the Files surface.
+    const request = ++authoredLocationRequestRef.current;
+    if (target.surface === 'files') {
+      editorState.setEditingCompose(true);
+      editorState.setActiveTab('files');
+      editorState.setPendingReveal({ target, location });
+      return;
+    }
+
+    const opNodeId = activeNode?.id ?? null;
+    const showCompose = () => {
+      editorState.setEditingCompose(true);
+      editorState.setActiveTab('compose');
+    };
+    const refuseForUnsavedEdits = () => {
+      showCompose();
+      editorState.setPendingReveal(null);
+      toast.info('Save or discard your changes before opening this location.');
+    };
+
+    if (composeContentRef.current !== composeOriginalContentRef.current) {
+      refuseForUnsavedEdits();
+      return;
+    }
+    void (async () => {
+      try {
+        const res = await apiFetch(`/stacks/${stackFile}`, { nodeId: opNodeId });
+        if (!res.ok) throw new Error('compose file unreadable');
+        const text = await res.text();
+        if (request !== authoredLocationRequestRef.current) return;
+        if (selectedFileRef.current !== stackFile || activeNodeIdRef.current !== opNodeId) return;
+        if (composeContentRef.current !== composeOriginalContentRef.current) {
+          refuseForUnsavedEdits();
+          return;
+        }
+        if (composeContentRef.current !== text) {
+          // The buffer is clean but older than disk: refresh it so the range
+          // applies to the content the report just located.
+          editorState.setContent(text);
+          editorState.setOriginalContent(text);
+        }
+        showCompose();
+        editorState.setPendingReveal({ target, location, revision: text });
+      } catch {
+        if (request !== authoredLocationRequestRef.current) return;
+        if (selectedFileRef.current !== stackFile || activeNodeIdRef.current !== opNodeId) return;
+        toast.error('Could not confirm this location is still current.');
+      }
+    })();
   };
 
   const closeComposeEditor = () => {

@@ -184,4 +184,32 @@ describe('FileViewer reveal lifecycle', () => {
     await waitFor(() => expect(onRevealApplied).toHaveBeenCalledTimes(2));
     expect(h.reveals).toHaveLength(2);
   });
+
+  it('rereads an already-loaded path before applying a reveal', async () => {
+    mockReadFile
+      .mockResolvedValueOnce(textResult('stale content'))
+      .mockResolvedValueOnce(textResult('fresh content'));
+    const onRevealApplied = vi.fn();
+
+    const { rerender } = render(
+      <FileViewer {...defaultProps} selectedPath="b.txt" reveal={null} />,
+    );
+    await waitFor(() => expect(mockReadFile).toHaveBeenCalledTimes(1));
+
+    rerender(
+      <FileViewer
+        {...defaultProps}
+        selectedPath="b.txt"
+        reloadKey={1}
+        reveal={revealB}
+        onRevealApplied={onRevealApplied}
+      />,
+    );
+
+    // The viewer must not reuse the buffer loaded before the reveal; it reads
+    // the path again and applies the range only after that read completes.
+    await waitFor(() => expect(mockReadFile).toHaveBeenCalledTimes(2));
+    await waitFor(() => expect(onRevealApplied).toHaveBeenCalledTimes(1));
+    expect(h.editors[h.editors.length - 1].revealRangeInCenter).toHaveBeenCalledWith(expectedRange);
+  });
 });

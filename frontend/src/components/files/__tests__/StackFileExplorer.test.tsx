@@ -31,6 +31,8 @@ const h = vi.hoisted(() => ({
   newFileProps: null as null | { open: boolean; currentDir: string; rootId?: string },
   toastError: vi.fn(),
   toastSuccess: vi.fn(),
+  fileViewerReveal: null as unknown,
+  fileViewerReloadKey: 0,
 }));
 
 vi.mock('@/lib/stackFilesApi', () => ({
@@ -128,18 +130,25 @@ vi.mock('../FileTree', () => ({
   },
 }));
 
-// FileViewer mock exposes a button that flips its dirty signal.
+// FileViewer mock exposes a button that flips its dirty signal and captures
+// the reveal request so navigation tests can assert what the viewer receives.
 vi.mock('../FileViewer', () => ({
-  FileViewer: ({ selectedPath, onDirtyChange }: {
+  FileViewer: ({ selectedPath, onDirtyChange, reveal, reloadKey }: {
     selectedPath: string | null;
     onDirtyChange?: (dirty: boolean) => void;
-  }) => (
-    <div>
-      <div data-testid="viewer-selected">{selectedPath ?? '(none)'}</div>
-      <button onClick={() => onDirtyChange?.(true)}>mark-dirty</button>
-      <button onClick={() => onDirtyChange?.(false)}>mark-clean</button>
-    </div>
-  ),
+    reveal?: unknown;
+    reloadKey?: number;
+  }) => {
+    h.fileViewerReveal = reveal;
+    h.fileViewerReloadKey = reloadKey ?? 0;
+    return (
+      <div>
+        <div data-testid="viewer-selected">{selectedPath ?? '(none)'}</div>
+        <button onClick={() => onDirtyChange?.(true)}>mark-dirty</button>
+        <button onClick={() => onDirtyChange?.(false)}>mark-clean</button>
+      </div>
+    );
+  },
 }));
 
 import { StackFileExplorer } from '../StackFileExplorer';
@@ -498,6 +507,46 @@ describe('StackFileExplorer source navigation and late root discovery', () => {
     await new Promise((resolve) => setTimeout(resolve, 0));
     expect(screen.getByTestId('tree-root').textContent).toBe('my-stack:stack-source');
     expect(screen.getByTestId('viewer-selected').textContent).toBe('a.txt');
+  });
+
+  it('rereads an already-selected path before applying a fresh range', async () => {
+    const samePath: PendingAuthoredReveal = {
+      target: { surface: 'files', file: 'a.txt' },
+      location: { file: 'a.txt', line: 3, column: 2, endLine: 3, endColumn: 9 },
+    };
+    const { rerender } = render(<StackFileExplorer stackName="my-stack" canEdit isDarkMode={false} reveal={null} />);
+    fireEvent.click(screen.getByText('select-a'));
+    await waitFor(() => expect(screen.getByTestId('viewer-selected').textContent).toBe('a.txt'));
+    const before = h.fileViewerReloadKey;
+
+    rerender(<StackFileExplorer stackName="my-stack" canEdit isDarkMode={false} reveal={samePath} />);
+
+    await waitFor(() => expect(h.fileViewerReveal).toEqual(samePath.location));
+    // The viewer gets a new reload epoch even though the selected path did not
+    // change, so a buffer loaded before the edit cannot receive the new range.
+    expect(h.fileViewerReloadKey).toBeGreaterThan(before);
+    expect(screen.queryByText(/discard unsaved changes/i)).not.toBeInTheDocument();
+  });
+
+  it('guards an already-selected path while the viewer is dirty', async () => {
+    const samePath: PendingAuthoredReveal = {
+      target: { surface: 'files', file: 'a.txt' },
+      location: { file: 'a.txt', line: 3, column: 2, endLine: 3, endColumn: 9 },
+    };
+    const { rerender } = render(<StackFileExplorer stackName="my-stack" canEdit isDarkMode={false} reveal={null} />);
+    fireEvent.click(screen.getByText('select-a'));
+    fireEvent.click(screen.getByText('mark-dirty'));
+    const before = h.fileViewerReloadKey;
+
+    rerender(<StackFileExplorer stackName="my-stack" canEdit isDarkMode={false} reveal={samePath} />);
+
+    expect(await screen.findByText(/discard unsaved changes/i)).toBeInTheDocument();
+    expect(h.fileViewerReveal).toBeNull();
+    expect(h.fileViewerReloadKey).toBe(before);
+
+    await userEvent.click(screen.getByRole('button', { name: /discard and open/i }));
+    // Confirmation is the only path that replaces the dirty buffer.
+    expect(h.fileViewerReloadKey).toBeGreaterThan(before);
   });
 });
 

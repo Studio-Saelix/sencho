@@ -575,6 +575,7 @@ function assembleLabels(state: BuildState): Map<string, ServiceAuthoredLabels> {
             layerIndex: definition.layerIndex,
             writability: fileEntry.writability,
             hasInterpolation: entry.hasInterpolation,
+            keyHasInterpolation: false,
             overridden: false,
             via,
           });
@@ -585,6 +586,27 @@ function assembleLabels(state: BuildState): Map<string, ServiceAuthoredLabels> {
         if (declaration.service !== definition.declaredService) continue;
         if (declaration.unresolved) {
           svc.ambiguity[declaration.key] = 'unresolved-alias';
+          // An unresolved list-form item whose key is built from a variable is
+          // still a declaration with an unknown effective key. Keep its place in
+          // the precedence order so a later literal can win and an earlier one
+          // cannot be claimed.
+          if (declaration.keyHasInterpolation === true) {
+            svc.hasDynamicKeys = true;
+            bucket.push({
+              key: declaration.key,
+              source: 'inline',
+              file: definition.file,
+              range: declaration.range,
+              form: declaration.form,
+              fileIndex: 0,
+              layerIndex: definition.layerIndex,
+              writability: loaded.parsed.writability,
+              hasInterpolation: true,
+              keyHasInterpolation: true,
+              overridden: false,
+              via,
+            });
+          }
           continue;
         }
         bucket.push({
@@ -597,6 +619,7 @@ function assembleLabels(state: BuildState): Map<string, ServiceAuthoredLabels> {
           layerIndex: definition.layerIndex,
           writability: loaded.parsed.writability,
           hasInterpolation: declaration.hasInterpolation,
+          keyHasInterpolation: declaration.keyHasInterpolation === true,
           overridden: false,
           via,
         });
@@ -628,8 +651,19 @@ function assembleLabels(state: BuildState): Map<string, ServiceAuthoredLabels> {
       || a.layerIndex - b.layerIndex
       || viaRank(a) - viaRank(b)
       || a.fileIndex - b.fileIndex);
+    // A list-form label key built from a variable can resolve to any effective
+    // key, so it has no literal name and can supersede a literal winner that
+    // sorts before it. It never becomes a winner itself. Compose separates the
+    // list item into an interpolated key and value, so the key is unknown while
+    // the value stays unread; nothing here resolves it.
+    const dynamicKeys = sorted.filter(contribution => contribution.keyHasInterpolation === true);
+    svc.hasDynamicKeys = svc.hasDynamicKeys === true || dynamicKeys.length > 0;
+    const position = new Map<LabelContribution, number>();
+    sorted.forEach((contribution, index) => position.set(contribution, index));
+    const latestDynamic = dynamicKeys.reduce((max, contribution) => Math.max(max, position.get(contribution)!), -1);
     const winnerByKey = new Map<string, LabelContribution>();
     for (const contribution of sorted) {
+      if (contribution.keyHasInterpolation === true) continue;
       const prior = winnerByKey.get(contribution.key);
       if (prior) prior.overridden = true;
       winnerByKey.set(contribution.key, contribution);
@@ -641,6 +675,14 @@ function assembleLabels(state: BuildState): Map<string, ServiceAuthoredLabels> {
       if (prior === 'duplicate-key' && winner.source === 'inline') {
         delete svc.ambiguity[key];
       } else if (prior !== undefined) {
+        continue;
+      }
+      // A dynamic key that sorts after the winner (a later inline declaration,
+      // or any inline declaration against a label file) could resolve to this
+      // key and supersede it. An earlier dynamic key is already overridden by
+      // this literal winner, so that winner stays actionable.
+      if (latestDynamic > position.get(winner)!) {
+        svc.ambiguity[key] = 'interpolated';
         continue;
       }
       if (winner.hasInterpolation) {
@@ -694,7 +736,11 @@ export async function buildAuthoredProject(nodeId: number, stackName: string): P
     if (entry.outsideBoundary) {
       state.files.push({
         file: entry.file, kind: entry.kind, writability: 'outside-boundary',
-        layerIndex: entry.layerIndex, state: 'outside-boundary', nodes: new Map(), diagnostics: [],
+        // Keep project order: a refusal placeholder must sort exactly where its
+        // declared file sits, not at the pre-assigned input index. Parsed and
+        // included files consume the same counter as they load, so an outside
+        // file that appears after a parsed one is still "later" to every guard.
+        layerIndex: state.nextLayer++, state: 'outside-boundary', nodes: new Map(), diagnostics: [],
       });
       addPartial(state, 'outside-boundary');
       continue;

@@ -84,6 +84,8 @@ function makeEditorState(over: Partial<EditorState> = {}): EditorState {
     setEffectiveServices: vi.fn(),
     serviceUpdateInProgress: null,
     setServiceUpdateInProgress: vi.fn(),
+    setPendingReveal: vi.fn(),
+    pendingReveal: null,
   };
   return { ...base, ...over } as unknown as EditorState;
 }
@@ -4513,5 +4515,88 @@ describe('useStackActions.refreshGitSourcePending', () => {
     const { result, editorState } = setup();
     await result.current.refreshGitSourcePending();
     expect(editorState.setGitSourcePendingMap).not.toHaveBeenCalled();
+  });
+});
+
+describe('useStackActions.openAuthoredLocation', () => {
+  const location = { file: 'compose.yaml', line: 3, column: 5, endLine: 3, endColumn: 12 };
+
+  beforeEach(() => {
+    vi.mocked(apiFetch).mockReset();
+    vi.mocked(toast.info).mockReset();
+    vi.mocked(toast.error).mockReset();
+  });
+
+  it('refuses a compose range while the buffer has unsaved edits', () => {
+    const { result, editorState } = setup({
+      editorState: { content: 'edited content', originalContent: 'disk content' },
+    });
+
+    result.current.openAuthoredLocation(location);
+
+    expect(apiFetch).not.toHaveBeenCalled();
+    expect(editorState.setPendingReveal).toHaveBeenCalledWith(null);
+    expect(editorState.setEditingCompose).toHaveBeenCalledWith(true);
+    expect(editorState.setActiveTab).toHaveBeenCalledWith('compose');
+    expect(toast.info).toHaveBeenCalledWith(expect.stringMatching(/save or discard/i));
+  });
+
+  it('refreshes a clean stale buffer and pins the reveal to the revision it read', async () => {
+    vi.mocked(apiFetch).mockResolvedValue(new Response('fresh disk content\n', { status: 200 }));
+    const { result, editorState } = setup({
+      editorState: { content: 'stale content\n', originalContent: 'stale content\n' },
+    });
+
+    await act(async () => {
+      result.current.openAuthoredLocation(location);
+    });
+
+    expect(editorState.setContent).toHaveBeenCalledWith('fresh disk content\n');
+    expect(editorState.setOriginalContent).toHaveBeenCalledWith('fresh disk content\n');
+    expect(editorState.setPendingReveal).toHaveBeenCalledWith({
+      target: { surface: 'compose', file: 'compose.yaml' },
+      location,
+      revision: 'fresh disk content\n',
+    });
+  });
+
+  it('does not apply a range when the stack changes while the file read is in flight', async () => {
+    let resolveRead: ((response: Response) => void) | undefined;
+    vi.mocked(apiFetch).mockImplementation(() => new Promise<Response>((resolve) => { resolveRead = resolve; }));
+    const { result, rerender, stackListState, editorState } = setup({
+      editorState: { content: 'disk content', originalContent: 'disk content' },
+    });
+
+    act(() => {
+      result.current.openAuthoredLocation(location);
+    });
+    (stackListState as unknown as { selectedFile: string | null }).selectedFile = 'other.yml';
+    rerender();
+    await act(async () => {
+      resolveRead?.(new Response('fresh disk content\n', { status: 200 }));
+    });
+
+    expect(editorState.setPendingReveal).not.toHaveBeenCalled();
+  });
+
+  it('leaves edits typed while the file read was in flight untouched', async () => {
+    let resolveRead: ((response: Response) => void) | undefined;
+    vi.mocked(apiFetch).mockImplementation(() => new Promise<Response>((resolve) => { resolveRead = resolve; }));
+    const { result, rerender, editorState } = setup({
+      editorState: { content: 'disk content', originalContent: 'disk content' },
+    });
+
+    act(() => {
+      result.current.openAuthoredLocation(location);
+    });
+    (editorState as unknown as { content: string }).content = 'typed while reading';
+    rerender();
+    await act(async () => {
+      resolveRead?.(new Response('fresh disk content\n', { status: 200 }));
+    });
+
+    expect(editorState.setContent).not.toHaveBeenCalled();
+    expect(editorState.setPendingReveal).toHaveBeenCalledWith(null);
+    expect(toast.info).toHaveBeenCalledWith(expect.stringMatching(/save or discard/i));
   });
 });

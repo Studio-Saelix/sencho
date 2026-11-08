@@ -196,7 +196,13 @@ export function StackFileExplorer({
   // here until the user confirms or cancels in the guard modal.
   const [pendingRootId, setPendingRootId] = useState<string | null>(null);
   const [pendingRevealSelection, setPendingRevealSelection] = useState<PendingAuthoredReveal | null>(null);
+  // A reveal for the already-selected path must reread it: the viewer may hold
+  // content loaded before the file changed. Bumped on every applied reveal.
+  const [viewerReloadKey, setViewerReloadKey] = useState(0);
   const revealConfirmedRef = useRef(false);
+  // The one-shot reveal object already handled, so a state update after
+  // confirmation cannot reopen the same discard dialog.
+  const handledRevealRef = useRef<PendingAuthoredReveal | null>(null);
   // Set once the user or a reported location has chosen a root. A root list
   // that arrives afterwards must not replace that explicit choice.
   const rootChosenRef = useRef(false);
@@ -373,24 +379,30 @@ export function StackFileExplorer({
     const parts = relPath.split('/');
     parts.pop();
     setCurrentDir(parts.join('/'));
+    // Even when the path is already selected, read it again so the range is
+    // applied to the content on disk now, not a buffer loaded earlier.
+    setViewerReloadKey((key) => key + 1);
   }, []);
 
   useEffect(() => {
-    if (!reveal || reveal.target.surface !== 'files') return;
-    if (selectedRootId !== STACK_SOURCE_ROOT_ID && isViewerDirty) {
+    if (!reveal || reveal.target.surface !== 'files') {
+      handledRevealRef.current = null;
+      return;
+    }
+    if (handledRevealRef.current === reveal) return;
+    // A dirty viewer is never replaced or re-selected, whether the reveal names
+    // the open file or another one; the confirmation below discards on purpose.
+    if (isViewerDirty) {
+      handledRevealRef.current = reveal;
       // A one-shot navigation command from the parent, not derived state.
       // eslint-disable-next-line react-hooks/set-state-in-effect
       setPendingRevealSelection(reveal);
       return;
     }
+    handledRevealRef.current = reveal;
     if (selectedRootId !== STACK_SOURCE_ROOT_ID) applyRootSwitch(STACK_SOURCE_ROOT_ID);
-    if (reveal.location.file === selectedPath) return;
-    if (isViewerDirty) {
-      setPendingRevealSelection(reveal);
-      return;
-    }
     applyRevealSelection(reveal);
-  }, [reveal, selectedRootId, selectedPath, isViewerDirty, applyRootSwitch, applyRevealSelection]);
+  }, [reveal, selectedRootId, isViewerDirty, applyRootSwitch, applyRevealSelection]);
 
   const confirmPendingReveal = useCallback(() => {
     if (!pendingRevealSelection) return;
@@ -851,7 +863,10 @@ export function StackFileExplorer({
             rootId={selectedRootId}
             onSaved={refresh}
             onDirtyChange={setIsViewerDirty}
-            reveal={reveal && selectedPath !== null && reveal.location.file === selectedPath ? reveal.location : null}
+            reloadKey={viewerReloadKey}
+            reveal={reveal && selectedPath !== null && reveal.location.file === selectedPath && !isViewerDirty
+              ? reveal.location
+              : null}
             onRevealApplied={onRevealApplied}
           />
         </div>

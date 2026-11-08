@@ -6,7 +6,11 @@ import { setupTestDb, cleanupTestDb } from './helpers/setupTestDb';
 import { DatabaseService } from '../services/DatabaseService';
 import { FileSystemService } from '../services/FileSystemService';
 import { NodeRegistry } from '../services/NodeRegistry';
-import { buildAuthoredProject, correlateField, correlateLabel, resolveEditOrigin } from '../services/composeSource';
+import {
+  buildAuthoredProject, correlateField, correlateLabel, correlateVariableReference, locateFinding,
+  resolveEditOrigin,
+} from '../services/composeSource';
+import type { RuleHit } from '../services/preflight/types';
 
 let tmpDir: string;
 let nodeId: number;
@@ -31,8 +35,11 @@ function writeStack(stack: string, files: Record<string, string>): void {
   }
 }
 
-function withSpec(stack: string, files: string[], contextDir: string | null = null): void {
-  const db = DatabaseService.getInstance();
+function hit(ruleId: RuleHit['ruleId'], overrides: Partial<RuleHit> = {}): RuleHit {
+  return { ruleId, severity: 'warning', title: 't', message: 'm', ...overrides };
+}
+
+function withSpec(stack: string, files: string[], contextDir: string | null = null): void {  const db = DatabaseService.getInstance();
   db.upsertGitSource({
     stack_name: stack,
     repo_url: 'https://example.test/repo.git',
@@ -404,5 +411,228 @@ describe('buildAuthoredProject resolution', () => {
     const project = await buildAuthoredProject(nodeId, 'mesh-stack');
     expect(project.generatedLayers).toContain('mesh-override');
     expect(project.files.some(file => file.file.includes('mesh'))).toBe(false);
+  });
+
+  it('collects every declaration category supplied by a root merge', async () => {
+    writeStack('root-merge-declarations', {
+      'compose.yaml': [
+        'x-extra: &extra',
+        '  include:',
+        '    - child.yaml',
+        '  services:',
+        '    api:',
+        '      extends:',
+        '        file: base.yaml',
+        '        service: base',
+        '      label_file: app.labels',
+        '      env_file: app.env',
+        '      labels:',
+        '        inline: yes',
+        '  configs:',
+        '    cfg:',
+        '      file: ./app.conf',
+        '  secrets:',
+        '    sec:',
+        '      file: ./app.secret',
+        '<<: *extra',
+        '',
+      ].join('\n'),
+      'child.yaml': 'services:\n  worker:\n    image: busybox:1\n',
+      'base.yaml': 'services:\n  base:\n    image: nginx:1\n',
+      'app.labels': 'file=from-file\n',
+      'app.env': 'A=1\n',
+      'app.conf': 'not-read\n',
+      'app.secret': 'not-read-either\n',
+    });
+    const project = await buildAuthoredProject(nodeId, 'root-merge-declarations');
+    expect(project.partial).toBe(false);
+    expect(project.files.map(file => file.file)).toEqual(expect.arrayContaining([
+      'child.yaml', 'base.yaml', 'app.labels', 'app.env', 'app.conf', 'app.secret',
+    ]));
+    expect(correlateField(project, 'api', 'image', 'nginx:1').origin?.file).toBe('base.yaml');
+    expect(correlateLabel(project, 'api', 'file').origin?.file).toBe('app.labels');
+    expect(correlateLabel(project, 'api', 'inline').origin?.file).toBe('compose.yaml');
+    expect(locateFinding(project, hit('image-latest', { service: 'api', sourcePath: 'api' }))).toMatchObject({
+      file: 'base.yaml',
+    });
+    expect(resolveEditOrigin(project, 'services.worker.image')).toMatchObject({
+      ok: true,
+      origin: { file: 'child.yaml' },
+    });
+  });
+
+  it('projects declarations through a supported six-level merge chain', async () => {
+    const chain = [
+      'x-1: &x1',
+      '  extends:',
+      '    file: base.yaml',
+      '    service: base',
+      '  label_file: app.labels',
+      '  env_file: app.env',
+      '  labels:',
+      '    chain: "1"',
+    ];
+    for (let level = 2; level <= 6; level += 1) {
+      chain.push(`x-${level}: &x${level} {<<: *x${level - 1}}`);
+    }
+    chain.push('services:', '  api:', '    <<: *x6', '');
+    writeStack('merge-chain-declarations', {
+      'compose.yaml': chain.join('\n'),
+      'base.yaml': 'services:\n  base:\n    image: nginx:1\n',
+      'app.labels': 'file=from-file\n',
+      'app.env': 'A=1\n',
+    });
+    const project = await buildAuthoredProject(nodeId, 'merge-chain-declarations');
+    expect(project.partial).toBe(false);
+    expect(project.files.some(file => file.file === 'base.yaml')).toBe(true);
+    expect(project.files.some(file => file.file === 'app.labels')).toBe(true);
+    expect(project.files.some(file => file.file === 'app.env')).toBe(true);
+    expect(correlateField(project, 'api', 'image', 'nginx:1').origin?.file).toBe('base.yaml');
+    expect(correlateLabel(project, 'api', 'file').origin?.file).toBe('app.labels');
+    expect(correlateLabel(project, 'api', 'chain').origin?.file).toBe('compose.yaml');
+    expect(locateFinding(project, hit('image-latest', { service: 'api', sourcePath: 'api' }))?.file).toBe('base.yaml');
+  });
+
+  it('refuses a declaration merge chain past the supported depth', async () => {
+    const chain = ['x-1: &x1', '  label_file: app.labels'];
+    for (let level = 2; level <= 20; level += 1) {
+      chain.push(`x-${level}: &x${level} {<<: *x${level - 1}}`);
+    }
+    chain.push('services:', '  api:', '    <<: *x20', '    image: nginx:1', '');
+    writeStack('merge-chain-too-deep', {
+      'compose.yaml': chain.join('\n'),
+      'app.labels': 'a=1\n',
+    });
+    const project = await buildAuthoredProject(nodeId, 'merge-chain-too-deep');
+    expect(project.files.find(file => file.kind === 'compose-primary')?.state).toBe('parse-failed');
+    expect(project.partial).toBe(true);
+    expect(correlateField(project, 'api', 'image', 'nginx:1').origin).toBeUndefined();
+    expect(correlateLabel(project, 'api', 'a').origin).toBeUndefined();
+    expect(locateFinding(project, hit('image-latest', { service: 'api', sourcePath: 'api' }))).toBeUndefined();
+    expect(resolveEditOrigin(project, 'services.api.image')).toEqual({
+      ok: false, reason: 'ambiguous-unparsed-source',
+    });
+  });
+
+  it('projects root-level declarations through a supported merge chain', async () => {
+    const chain = [
+      'x-1: &x1',
+      '  include:',
+      '    - child.yaml',
+      '  configs:',
+      '    cfg:',
+      '      file: ./app.conf',
+      '  secrets:',
+      '    sec:',
+      '      file: ./app.secret',
+    ];
+    for (let level = 2; level <= 6; level += 1) {
+      chain.push(`x-${level}: &x${level} {<<: *x${level - 1}}`);
+    }
+    chain.push('<<: *x6', 'services:', '  api:', '    image: nginx:1', '');
+    writeStack('root-merge-chain', {
+      'compose.yaml': chain.join('\n'),
+      'child.yaml': 'services:\n  worker:\n    image: busybox:1\n',
+      'app.conf': 'not-read\n',
+      'app.secret': 'not-read-either\n',
+    });
+    const project = await buildAuthoredProject(nodeId, 'root-merge-chain');
+    expect(project.partial).toBe(false);
+    expect(project.files.map(file => file.file)).toEqual(expect.arrayContaining([
+      'child.yaml', 'app.conf', 'app.secret',
+    ]));
+    expect(project.files.find(file => file.file === 'app.conf')?.state).toBe('identity-only');
+    expect(project.files.find(file => file.file === 'app.secret')?.state).toBe('identity-only');
+  });
+
+  it('refuses an origin when a root-merged include leaves the stack', async () => {
+    writeStack('root-merge-outside-include', {
+      'compose.yaml': [
+        'x-extra: &extra',
+        '  include:',
+        '    - ../outside.yaml',
+        '<<: *extra',
+        'services:',
+        '  api:',
+        '    image: nginx:1',
+        '',
+      ].join('\n'),
+    });
+    const project = await buildAuthoredProject(nodeId, 'root-merge-outside-include');
+    expect(project.partialReasons).toContain('outside-boundary');
+    expect(project.files.some(file => file.file === '../outside.yaml' && file.state === 'outside-boundary')).toBe(true);
+    expect(resolveEditOrigin(project, 'services.api.image')).toEqual({
+      ok: false, reason: 'ambiguous-unparsed-source',
+    });
+  });
+
+  it('keeps a dotted service name distinct from a field path in both declaration orders', async () => {
+    const fixture = (apiFirst: boolean): string => {
+      const api = [
+        '  api:',
+        '    image: nginx:1',
+        '    labels:',
+        '      team: api-team',
+        '    environment:',
+        '      "A.B": value',
+      ];
+      const sibling = [
+        '  api.image:',
+        '    image: busybox:1',
+        '    labels:',
+        '      team: sibling-team',
+      ];
+      return ['services:', ...(apiFirst ? [...api, ...sibling] : [...sibling, ...api]), ''].join('\n');
+    };
+    for (const [stack, apiFirst] of [['dotted-sibling-first', true], ['dotted-sibling-last', false]] as const) {
+      writeStack(stack, { 'compose.yaml': fixture(apiFirst) });
+      const project = await buildAuthoredProject(nodeId, stack);
+      const apiImageLine = apiFirst ? 3 : 7;
+      const siblingImageLine = apiFirst ? 9 : 3;
+      expect(correlateField(project, 'api', 'image', 'nginx:1').origin).toMatchObject({
+        file: 'compose.yaml', range: { line: apiImageLine },
+      });
+      expect(correlateField(project, 'api.image', 'image', 'busybox:1').origin).toMatchObject({
+        file: 'compose.yaml', range: { line: siblingImageLine },
+      });
+      expect(correlateLabel(project, 'api', 'team').origin?.range.line).toBe(apiFirst ? 5 : 9);
+      expect(correlateLabel(project, 'api.image', 'team').origin?.range.line).toBe(apiFirst ? 11 : 5);
+      const env = locateFinding(project, hit('env-literal-dollar', { service: 'api', sourcePath: 'A.B' }));
+      expect(env?.line).toBe(apiFirst ? 7 : 11);
+      expect(locateFinding(project, hit('image-latest', { service: 'api', sourcePath: 'api' }))?.line)
+        .toBe(apiImageLine);
+      expect(locateFinding(project, hit('image-latest', { service: 'api.image', sourcePath: 'api.image' }))?.line)
+        .toBe(siblingImageLine);
+      // `services.api.image` now names two authored structures, so an edit
+      // origin from that dot path cannot pick one.
+      expect(resolveEditOrigin(project, 'services.api.image')).toEqual({ ok: false, reason: 'no-authored-source' });
+    }
+  });
+
+  it('scopes variable references to the named service when a dotted sibling exists', async () => {
+    writeStack('dotted-variable', {
+      'compose.yaml': [
+        'services:',
+        '  api:',
+        '    image: "${IMG}"',
+        '  api.image:',
+        '    image: "${IMG}"',
+        '',
+      ].join('\n'),
+    });
+    const project = await buildAuthoredProject(nodeId, 'dotted-variable');
+    const reference = correlateVariableReference(project, 'IMG', 'api');
+    expect(reference.origin).toMatchObject({ file: 'compose.yaml', range: { line: 3 } });
+    expect(reference.candidates).toHaveLength(1);
+  });
+
+  it('keeps dotted sibling ownership across project layers', async () => {
+    writeStack('dotted-layered', {
+      'compose.yaml': 'services:\n  api.image:\n    image: busybox:1\n',
+      'compose.override.yaml': 'services:\n  api:\n    image: redis:7\n',
+    });
+    const project = await buildAuthoredProject(nodeId, 'dotted-layered');
+    expect(correlateField(project, 'api', 'image', 'redis:7').origin?.file).toBe('compose.override.yaml');
+    expect(correlateField(project, 'api.image', 'image', 'busybox:1').origin?.file).toBe('compose.yaml');
   });
 });
