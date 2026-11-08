@@ -170,9 +170,13 @@ export const AUDIT_ROUTE_SUMMARIES: Record<string, string> = {
 
   // Fleet secrets
   'POST /secrets': 'Created secret',
-  'PUT /secrets': 'Updated secret',
+  'PATCH /secrets': 'Updated secret',
   'DELETE /secrets': 'Deleted secret',
+  'POST /secrets/*/import-from-stack/preview': 'Previewed secret import',
   'POST /secrets/*/import-from-stack': 'Imported env into secret',
+  'POST /secrets/*/reveal-grant': 'Authorized secret reveal',
+  'POST /secrets/*/reveal': 'Revealed secret value',
+  'POST /secrets/*/replace': 'Replaced secret payload',
   'POST /secrets/*/push/preview': 'Previewed secret push',
   'POST /secrets/*/push': 'Pushed secret',
 

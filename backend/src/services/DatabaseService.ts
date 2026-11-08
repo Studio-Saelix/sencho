@@ -887,6 +887,14 @@ export interface SecretVersionRow {
 
 export type SecretPushStatus = 'ok' | 'failed' | 'skipped';
 
+/** A write was refused because the bundle moved on since the caller read it. */
+export class SecretVersionConflictError extends Error {
+    constructor(public readonly currentVersion: number) {
+        super(`Secret is at version ${currentVersion}`);
+        this.name = 'SecretVersionConflictError';
+    }
+}
+
 export interface SecretPushRow {
     id: number;
     secret_id: number;
@@ -10929,6 +10937,13 @@ stmt.run('gitops_schema_version', '1');
         ).get(secretId) as SecretVersionRow | undefined;
     }
 
+    public getSecretVersion(secretId: number, version: number): SecretVersionRow | undefined {
+        return this.db.prepare(
+            `SELECT id, secret_id, version, encrypted_payload, key_count, created_at, created_by, note
+             FROM secret_versions WHERE secret_id = ? AND version = ?`
+        ).get(secretId, version) as SecretVersionRow | undefined;
+    }
+
     public createSecretWithVersion(input: {
         name: string;
         description: string;
@@ -10959,11 +10974,16 @@ stmt.run('gitops_schema_version', '1');
         keyCount: number;
         createdBy: string;
         note: string;
+        /** When set, the write is refused unless the bundle is still at this version. */
+        expectedVersion?: number;
     }): { version: number } {
         const now = Date.now();
         const txn = this.db.transaction(() => {
             const current = this.db.prepare('SELECT current_version FROM secrets WHERE id = ?').get(input.secretId) as { current_version: number } | undefined;
             if (!current) throw new Error('Secret not found');
+            if (input.expectedVersion !== undefined && current.current_version !== input.expectedVersion) {
+                throw new SecretVersionConflictError(current.current_version);
+            }
             const nextVersion = current.current_version + 1;
             this.db.prepare(
                 'INSERT INTO secret_versions (secret_id, version, encrypted_payload, key_count, created_at, created_by, note) VALUES (?, ?, ?, ?, ?, ?, ?)'
@@ -10974,6 +10994,21 @@ stmt.run('gitops_schema_version', '1');
                 this.db.prepare('UPDATE secrets SET current_version = ?, description = ?, updated_at = ? WHERE id = ?').run(nextVersion, input.description, now, input.secretId);
             }
             return { version: nextVersion };
+        });
+        return txn();
+    }
+
+    /** Update bundle metadata only; a stale version is refused the same way. */
+    public updateSecretDescription(input: { secretId: number; description: string; expectedVersion: number }): { version: number } {
+        const now = Date.now();
+        const txn = this.db.transaction(() => {
+            const current = this.db.prepare('SELECT current_version FROM secrets WHERE id = ?').get(input.secretId) as { current_version: number } | undefined;
+            if (!current) throw new Error('Secret not found');
+            if (current.current_version !== input.expectedVersion) {
+                throw new SecretVersionConflictError(current.current_version);
+            }
+            this.db.prepare('UPDATE secrets SET description = ?, updated_at = ? WHERE id = ?').run(input.description, now, input.secretId);
+            return { version: current.current_version };
         });
         return txn();
     }

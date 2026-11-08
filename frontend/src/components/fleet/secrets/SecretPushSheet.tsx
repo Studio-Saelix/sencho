@@ -12,6 +12,7 @@ import {
     type SecretPushResultEntry,
     type SecretPushStatus,
     type DiffStatus,
+    type PushInput,
     previewPush,
     executePush,
 } from '@/lib/secretsApi';
@@ -24,6 +25,13 @@ interface Props {
 }
 
 type Stage = 'target' | 'preview' | 'results';
+
+/** The inputs, version and per-target digests the preview answered with. */
+interface PreviewState {
+    input: PushInput;
+    version: number;
+    targets: SecretPushPlanEntry[];
+}
 
 const DIFF_STATUS_COLOR: Record<DiffStatus, string> = {
     added: 'text-emerald-500',
@@ -56,10 +64,11 @@ export function SecretPushSheet({ open, onOpenChange, secret }: Props) {
     const [envFilesLoading, setEnvFilesLoading] = useState(false);
     const [previewLoading, setPreviewLoading] = useState(false);
     const [pushLoading, setPushLoading] = useState(false);
-    const [plan, setPlan] = useState<SecretPushPlanEntry[]>([]);
+    const [preview, setPreview] = useState<PreviewState | null>(null);
     const [results, setResults] = useState<SecretPushResultEntry[]>([]);
     const [expanded, setExpanded] = useState<Set<number>>(new Set());
     const inputVersionRef = useRef(0);
+    const plan = preview?.targets ?? [];
 
     useEffect(() => {
         if (!open) return;
@@ -68,7 +77,7 @@ export function SecretPushSheet({ open, onOpenChange, secret }: Props) {
         setStackName('');
         setEnvFiles([]);
         setEnvFile('.env');
-        setPlan([]);
+        setPreview(null);
         setResults([]);
         setExpanded(new Set());
         listDistinctLabels()
@@ -79,7 +88,7 @@ export function SecretPushSheet({ open, onOpenChange, secret }: Props) {
     // Invalidate preview/results computed from the old inputs: clear them and
     // bump a version counter so an in-flight request for the old inputs is dropped.
     useEffect(() => {
-        setPlan([]);
+        setPreview(null);
         setResults([]);
         inputVersionRef.current += 1;
     }, [selectedLabels, labelMode, stackName, envFile]);
@@ -145,17 +154,18 @@ export function SecretPushSheet({ open, onOpenChange, secret }: Props) {
         setPreviewLoading(true);
         const version = inputVersionRef.current;
         try {
-            const result = await previewPush(secret.id, {
+            const input: PushInput = {
                 selector: buildSelector(),
                 stackName: stackName.trim(),
                 envFileBasename: envFile,
-            });
+            };
+            const result = await previewPush(secret.id, input);
             if (inputVersionRef.current !== version) return;
-            if (result.length === 0) {
+            if (result.targets.length === 0) {
                 toast.error('No nodes match this selector');
                 return;
             }
-            setPlan(result);
+            setPreview({ input, version: result.version, targets: result.targets });
             setStage('preview');
         } catch (err) {
             toast.error(err instanceof Error ? err.message : 'Failed to preview push');
@@ -166,12 +176,21 @@ export function SecretPushSheet({ open, onOpenChange, secret }: Props) {
 
     async function handlePush() {
         if (!secret) return;
+        if (!preview) {
+            setStage('target');
+            return;
+        }
         setPushLoading(true);
+        // Send exactly what the preview showed: its inputs, its bundle version,
+        // and every target's digest (null when the preview could not read it).
         try {
             const result = await executePush(secret.id, {
-                selector: buildSelector(),
-                stackName: stackName.trim(),
-                envFileBasename: envFile,
+                ...preview.input,
+                expectedVersion: preview.version,
+                expectedTargets: preview.targets.map((target) => ({
+                    nodeId: target.nodeId,
+                    fingerprint: target.fingerprint,
+                })),
             });
             setResults(result.results);
             setStage('results');
@@ -180,7 +199,21 @@ export function SecretPushSheet({ open, onOpenChange, secret }: Props) {
             if (failCount === 0) toast.success(`Pushed to ${okCount} ${okCount === 1 ? 'node' : 'nodes'}`);
             else toast.error(`${okCount} ok · ${failCount} failed`);
         } catch (err) {
-            toast.error(err instanceof Error ? err.message : 'Failed to push secret');
+            const apiError = err as Error & { status?: number; code?: string };
+            if (apiError.status === 409 && apiError.code === 'PUSH_TARGET_CHANGED') {
+                // The backend names the cause (file changed, node unreadable,
+                // target set moved), so show its message rather than one fixed
+                // sentence that would misreport most of them.
+                toast.error(apiError.message || 'The targets changed since you previewed the push. Preview again before pushing.');
+                setPreview(null);
+                setStage('target');
+            } else if (apiError.status === 409 && apiError.code === 'VERSION_CONFLICT') {
+                toast.error('This bundle changed since you previewed it. Preview again before pushing.');
+                setPreview(null);
+                setStage('target');
+            } else {
+                toast.error(err instanceof Error ? err.message : 'Failed to push secret');
+            }
         } finally {
             setPushLoading(false);
         }
@@ -211,7 +244,7 @@ export function SecretPushSheet({ open, onOpenChange, secret }: Props) {
         if (stage === 'preview') return {
             label: pushLoading ? 'Pushing…' : `Push to ${plan.length} ${plan.length === 1 ? 'node' : 'nodes'}`,
             onClick: handlePush,
-            disabled: pushLoading,
+            disabled: pushLoading || plan.length === 0,
             icon: Send,
         };
         return {
@@ -333,11 +366,13 @@ export function SecretPushSheet({ open, onOpenChange, secret }: Props) {
                             </button>
                             {expanded.has(entry.nodeId) && entry.diff.length > 0 && (
                                 <div className="border-t border-card-border/40 px-3 py-2 space-y-1">
+                                    <p className="text-[10px] uppercase tracking-[0.18em] font-mono text-stat-subtitle">
+                                        Key names and change classes only. Values never enter the preview.
+                                    </p>
                                     {entry.diff.map((d) => (
                                         <div key={d.key} className="flex items-baseline gap-2 font-mono text-xs">
                                             <span className={`w-16 uppercase tracking-[0.18em] text-[10px] ${DIFF_STATUS_COLOR[d.status]}`}>{d.status}</span>
                                             <span className="flex-1 truncate">{d.key}</span>
-                                            {d.status === 'changed' && <span className="text-stat-subtitle">old to new</span>}
                                         </div>
                                     ))}
                                 </div>
