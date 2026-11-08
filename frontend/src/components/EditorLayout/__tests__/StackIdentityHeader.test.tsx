@@ -37,7 +37,7 @@ function renderHeader(over: Partial<ComponentProps<typeof StackIdentityHeader>> 
       stackName="plex"
       activeNode={{ id: 1, name: 'local', type: 'local' } as never}
       safeContainers={CONTAINERS}
-      isRunning
+      runtimeMode="running"
       can={() => true}
       trivy={{ available: false }}
       backupInfo={{ exists: false, timestamp: null }}
@@ -99,7 +99,7 @@ describe('StackIdentityHeader', () => {
   });
 
   it('hides Take down when showTakeDown is false', () => {
-    renderHeader({ showTakeDown: false, isRunning: true });
+    renderHeader({ showTakeDown: false, runtimeMode: 'running' });
 
     expect(screen.queryByTestId('stack-take-down-button')).toBeNull();
   });
@@ -116,7 +116,7 @@ describe('StackIdentityHeader', () => {
 
   it('does not show Take down in the overflow menu when running', async () => {
     const user = userEvent.setup();
-    renderHeader({ showTakeDown: true, isRunning: true, backupInfo: { exists: true, timestamp: Date.now() } });
+    renderHeader({ showTakeDown: true, runtimeMode: 'running', backupInfo: { exists: true, timestamp: Date.now() } });
 
     await user.click(screen.getByRole('button', { name: 'More actions' }));
 
@@ -143,5 +143,108 @@ describe('StackIdentityHeader', () => {
 
     await user.click(screen.getByRole('button', { name: 'More actions' }));
     expect(screen.getByRole('menuitem', { name: 'Scan config' })).toBeInTheDocument();
+  });
+});
+
+describe('StackIdentityHeader on a restart loop', () => {
+  const LOOPING: ContainerInfo[] = [
+    {
+      Id: 'loop1',
+      Names: ['/looper'],
+      State: 'restarting',
+      Status: 'Restarting (1) 5 seconds ago',
+      Image: 'alpine:3.20',
+      ImageID: 'sha256:looping',
+    } as ContainerInfo,
+  ];
+
+  const looping = (over: Partial<ComponentProps<typeof StackIdentityHeader>> = {}) =>
+    renderHeader({ safeContainers: LOOPING, runtimeMode: 'looping', showTakeDown: true, ...over });
+
+  it('makes Stop the primary action and drops Start and Restart', () => {
+    looping();
+
+    expect(screen.getByTestId('stack-stop-button')).toHaveTextContent('Stop');
+    expect(screen.queryByRole('button', { name: 'Start' })).toBeNull();
+    expect(screen.queryByRole('button', { name: 'Restart' })).toBeNull();
+    expect(screen.queryByTestId('stack-deploy-button')).toBeNull();
+  });
+
+  it('still offers Take down and Update', () => {
+    looping();
+
+    expect(screen.getByTestId('stack-take-down-button')).toBeTruthy();
+    expect(screen.getByRole('button', { name: 'Update' })).toBeTruthy();
+  });
+
+  it('shows the restarting pill instead of exited', () => {
+    looping();
+
+    expect(screen.getByText(/^restarting$/i)).toBeTruthy();
+    expect(screen.queryByText(/^exited$/i)).toBeNull();
+  });
+
+  it('calls stopStack from the primary Stop', async () => {
+    const user = userEvent.setup();
+    const stopStack = vi.fn();
+    looping({ stopStack });
+
+    await user.click(screen.getByTestId('stack-stop-button'));
+
+    expect(stopStack).toHaveBeenCalledTimes(1);
+  });
+
+  it('disables Stop on the Sencho stack', () => {
+    looping({ isSelfStack: true });
+
+    expect(screen.getByTestId('stack-stop-button')).toBeDisabled();
+  });
+
+  it('disables Stop while status evidence is not authoritative', () => {
+    looping({ actionsReady: false });
+
+    expect(screen.getByTestId('stack-stop-button')).toBeDisabled();
+  });
+
+  it('shows no lifecycle actions without stack:deploy', () => {
+    looping({ can: (action) => action !== 'stack:deploy' });
+
+    expect(screen.queryByTestId('stack-stop-button')).toBeNull();
+    expect(screen.queryByRole('button', { name: 'Update' })).toBeNull();
+  });
+
+  it('reports a partial loop as running · restarting and keeps the running buttons', () => {
+    const MIXED: ContainerInfo[] = [
+      ...CONTAINERS,
+      {
+        Id: 'loop2',
+        Names: ['/looper'],
+        State: 'restarting',
+        Status: 'Restarting (1) 5 seconds ago',
+        Image: 'alpine:3.20',
+      } as ContainerInfo,
+    ];
+    renderHeader({ safeContainers: MIXED, runtimeMode: 'running', showTakeDown: true });
+
+    expect(screen.getByText(/running · restarting/i)).toBeTruthy();
+    expect(screen.queryByText(/running · healthy/i)).toBeNull();
+    expect(screen.getByRole('button', { name: 'Restart' })).toBeTruthy();
+    expect(screen.getByRole('button', { name: 'Stop' })).toBeTruthy();
+  });
+});
+
+describe('StackIdentityHeader stopped regressions', () => {
+  it('renders Start and Update with no Stop or Take down', () => {
+    renderHeader({
+      safeContainers: [{ Id: 'x', State: 'exited', Status: 'Exited (0)', Names: ['/web'] } as ContainerInfo],
+      runtimeMode: 'stopped',
+      showTakeDown: true,
+    });
+
+    expect(screen.getByRole('button', { name: 'Start' })).toBeTruthy();
+    expect(screen.getByRole('button', { name: 'Update' })).toBeTruthy();
+    expect(screen.queryByRole('button', { name: 'Stop' })).toBeNull();
+    expect(screen.queryByTestId('stack-take-down-button')).toBeNull();
+    expect(screen.getByText(/^exited$/i)).toBeTruthy();
   });
 });

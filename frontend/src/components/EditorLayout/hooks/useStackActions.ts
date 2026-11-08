@@ -466,9 +466,14 @@ export function useStackActions(options: UseStackActionsOptions) {
     const raw = stackListState.stackStatuses[file];
     const status = raw === 'partial' ? 'running' : raw;
     const isSelf = stackListState.stackSelfFlags[file] === true;
+    // A crash loop spends its downtime in Docker's `restarting` state, so the
+    // bulk status reports it as `exited` with zero running containers. Stop is
+    // the only verb that breaks the loop, and Deploy would leave it looping.
+    const restartingCount = stackListState.stackCounts?.[file]?.restarting ?? 0;
+    const looping = restartingCount > 0;
     return {
-      showDeploy: !isSelf && status !== 'running',
-      showStop: !isSelf && status === 'running',
+      showDeploy: !isSelf && status !== 'running' && !looping,
+      showStop: !isSelf && (status === 'running' || looping),
       showRestart: status === 'running',
       showUpdate: !isSelf && status === 'running',
       showTakeDown: !isSelf && (raw === 'running' || raw === 'partial' || raw === 'exited'),

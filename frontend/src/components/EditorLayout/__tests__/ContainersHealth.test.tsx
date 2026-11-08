@@ -454,6 +454,63 @@ describe('declared-service headers (multi-service only)', () => {
     expect(serviceAction).toHaveBeenCalledWith('restart', 'web');
   });
 
+  it('offers Restart and Stop, not Start, for a flattened service that is only restarting', async () => {
+    const user = userEvent.setup();
+    const serviceAction = vi.fn();
+    render(
+      <ContainersHealth
+        safeContainers={[
+          makeContainer({
+            Id: 'loop1',
+            Names: ['/looper'],
+            Service: 'looper',
+            State: 'restarting',
+            Status: 'Restarting (1) 5 seconds ago',
+          }),
+        ]}
+        containerStats={{}}
+        containerStatsError={null}
+        isAdmin
+        activeNode={LOCAL_NODE}
+        openLogViewer={vi.fn()}
+        openBashModal={vi.fn()}
+        serviceAction={serviceAction}
+        effectiveServices={[spec({ name: 'looper' })]}
+      />,
+    );
+
+    await user.click(screen.getByLabelText('Service actions'));
+    expect(screen.queryByRole('menuitem', { name: 'Start service' })).toBeNull();
+    await user.click(await screen.findByRole('menuitem', { name: 'Stop service' }));
+    expect(serviceAction).toHaveBeenCalledWith('stop', 'looper');
+  });
+
+  it('offers Stop on a multi-replica header whose replicas are all restarting', async () => {
+    const user = userEvent.setup();
+    const serviceAction = vi.fn();
+    render(
+      <ContainersHealth
+        safeContainers={[
+          makeContainer({ Id: 'w1', Names: ['/web-1'], Service: 'web', State: 'restarting', Status: 'Restarting (1) 5 seconds ago' }),
+          makeContainer({ Id: 'w2', Names: ['/web-2'], Service: 'web', State: 'restarting', Status: 'Restarting (1) 5 seconds ago' }),
+        ]}
+        containerStats={{}}
+        containerStatsError={null}
+        isAdmin
+        activeNode={LOCAL_NODE}
+        openLogViewer={vi.fn()}
+        openBashModal={vi.fn()}
+        serviceAction={serviceAction}
+        effectiveServices={[spec({ name: 'web', expectedReplicas: 2 })]}
+      />,
+    );
+
+    // The declared-service header owns the menu; nested replica cards hide it.
+    await user.click(screen.getAllByLabelText('Service actions')[0]);
+    expect(screen.getByRole('menuitem', { name: 'Restart service' })).toBeInTheDocument();
+    expect(screen.queryByRole('menuitem', { name: 'Start service' })).toBeNull();
+  });
+
   it('retains multi-replica header Update without leaking onto nested children', () => {
     render(
       <ContainersHealth

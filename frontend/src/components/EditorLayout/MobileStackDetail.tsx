@@ -5,6 +5,7 @@ import ErrorBoundary from '../ErrorBoundary';
 import StackAnatomyPanel from '../StackAnatomyPanel';
 import { MobileComposeEditor } from './MobileComposeEditor';
 import { StackIdentityHeader, ContainersHealth, StackLogsSection } from './editor-view-blocks';
+import { getStackRuntimeMode } from './stackRuntimeMode';
 import { RecoveryPanel } from './RecoveryPanel';
 import { StackOperationBanner } from './StackOperationBanner';
 import { retryHandlerFor } from './recovery-retry';
@@ -103,7 +104,7 @@ export function MobileStackDetail(props: EditorViewProps) {
     const lockedServices = useMemo(() => lockedServiceUrlReasons(serviceUrlEntry), [serviceUrlEntry]);
     const safeContainers = containers || [];
     const isMultiContainerLayout = safeContainers.length > 1 || effectiveServices.length > 1;
-    const isRunning = safeContainers.some(c => c.State === 'running');
+    const runtimeMode = getStackRuntimeMode(safeContainers);
     const canEditStack = can('stack:edit', 'stack', stackName, activeNode?.id);
     // Same paired gate as the desktop item: the route requires stack:edit and
     // stack:deploy, so an edit-only user must not see the affordance at all.
@@ -164,7 +165,7 @@ export function MobileStackDetail(props: EditorViewProps) {
                         stackName={stackName}
                         activeNode={activeNode}
                         safeContainers={safeContainers}
-                        isRunning={isRunning}
+                        runtimeMode={runtimeMode}
                         can={can}
                         trivy={trivy}
                         backupInfo={backupInfo}
