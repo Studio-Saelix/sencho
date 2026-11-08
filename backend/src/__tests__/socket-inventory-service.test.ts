@@ -639,6 +639,66 @@ describe('buildSocketInventory classification', () => {
     expect(udp.containers[0].evidence).not.toContain('docker-api-port-published');
   });
 
+  it('ignores a host binding on a non-Docker port or a non-TCP Docker port number', () => {
+    // A published port is still not a Docker API port unless its number is
+    // 2375/2376, and a host binding does not make a non-TCP transport one.
+    const nonDocker = buildSocketInventory(input({
+      containers: [row({
+        id: 'app-published1',
+        name: 'app-published',
+        mounts: [socketMount(SOCKET, SOCKET, true)],
+        ports: [{ privatePort: 8080, publicPort: 8080, ip: '0.0.0.0', protocol: 'tcp' }],
+      })],
+    }));
+    expect(nonDocker.containers[0].role).toBe('direct-socket-consumer');
+    expect(nonDocker.containers[0].evidence).not.toContain('docker-api-port-exposed');
+    expect(nonDocker.containers[0].evidence).not.toContain('docker-api-port-published');
+
+    const udp = buildSocketInventory(input({
+      containers: [row({
+        id: 'app-udp2',
+        name: 'app-udp-published',
+        mounts: [socketMount(SOCKET, SOCKET, true)],
+        ports: [{ privatePort: 2375, publicPort: 23750, ip: '0.0.0.0', protocol: 'udp' }],
+      })],
+    }));
+    expect(udp.containers[0].role).toBe('direct-socket-consumer');
+    expect(udp.containers[0].evidence).not.toContain('docker-api-port-exposed');
+    expect(udp.containers[0].evidence).not.toContain('docker-api-port-published');
+  });
+
+  it('keeps an unreadable protocol as possible Docker API access', () => {
+    // A protocol the adapter could not read is not proof of a non-TCP
+    // transport, so the port stays a possible Docker API port.
+    const inventory = buildSocketInventory(input({
+      containers: [row({
+        id: 'api-null-protocol1',
+        name: 'api-null-protocol',
+        mounts: [socketMount(SOCKET, SOCKET, true)],
+        ports: [{ privatePort: 2375, publicPort: null, ip: null, protocol: null }],
+      })],
+    }));
+
+    expect(inventory.containers[0].role).toBe('undetermined');
+    expect(inventory.containers[0].evidence).toContain('docker-api-port-exposed');
+    expect(inventory.containers[0].evidence).not.toContain('docker-api-port-published');
+  });
+
+  it('treats a Docker API host port as published even on a non-Docker private port', () => {
+    const inventory = buildSocketInventory(input({
+      containers: [row({
+        id: 'api-host-side1',
+        name: 'api-host-side',
+        mounts: [socketMount(SOCKET, SOCKET, true)],
+        ports: [{ privatePort: 8080, publicPort: 2375, ip: '0.0.0.0', protocol: 'tcp' }],
+      })],
+    }));
+
+    expect(inventory.containers[0].role).toBe('undetermined');
+    expect(inventory.containers[0].evidence).toContain('docker-api-port-published');
+    expect(inventory.containers[0].evidence).not.toContain('docker-api-port-exposed');
+  });
+
   it('keeps the published token when a Docker API port has a host binding', () => {
     const inventory = buildSocketInventory(input({
       containers: [row({

@@ -518,7 +518,7 @@ function isDockerApiPortNumber(port: number | null): boolean {
   return port === 2375 || port === 2376;
 }
 
-/** The Docker API is TCP; an unreadable protocol stays possible, a known other one does not. */
+/** The Docker API is TCP; an unreadable protocol stays possible, any reported other one does not. */
 function isDockerApiTransport(protocol: string | null): boolean {
   return protocol === null || protocol === 'tcp';
 }
@@ -536,11 +536,12 @@ function isDockerApiExposedPortSpec(spec: string): boolean {
 /**
  * Docker API port facts for a row's evidence and classification. The Docker API
  * is TCP, so a known non-TCP transport is ignored. A TCP port number 2375 or
- * 2376 with a readable host binding is published; a private one without a
- * readable binding, or a matching `exposedPorts` entry, is exposed only. The
- * tokens are mutually exclusive: publishing a port also exposes it, so
- * `docker-api-port-published` states the stronger, host-reachable fact and the
- * exposed token is reserved for a row with no published Docker API port at all.
+ * 2376 with a readable host port is published; a private one with no readable
+ * host port, or a matching `exposedPorts` entry, is exposed with no readable
+ * host port. The tokens are mutually exclusive: publishing a port also exposes
+ * it, so `docker-api-port-published` states the stronger, host-reachable fact
+ * and the exposed token is reserved for a row with no published Docker API port
+ * at all.
  */
 function dockerApiPortFacts(row: SocketInventoryContainerRow): {
   any: boolean;
