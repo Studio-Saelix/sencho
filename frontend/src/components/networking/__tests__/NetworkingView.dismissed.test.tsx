@@ -2,7 +2,7 @@
  * The dismissed count on Networking opens one sheet from both tabs that show it.
  */
 import { describe, it, expect, beforeEach, vi } from 'vitest';
-import { render, screen, within } from '@testing-library/react';
+import { render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 
 const apiFetchMock = vi.fn();
@@ -12,8 +12,9 @@ vi.mock('@/lib/api', () => ({
 vi.mock('@/context/AuthContext', () => ({
   useAuth: () => ({ isAdmin: true, can: () => true }),
 }));
+const nodes = vi.hoisted(() => ({ activeId: 1 }));
 vi.mock('@/context/NodeContext', () => ({
-  useNodes: () => ({ activeNode: { id: 1, name: 'local', type: 'local' } }),
+  useNodes: () => ({ activeNode: { id: nodes.activeId, name: 'local', type: 'local' } }),
 }));
 vi.mock('@/hooks/use-is-mobile', () => ({ useIsMobile: () => false }));
 vi.mock('@/hooks/useDeveloperMode', () => ({ useDeveloperMode: () => false }));
@@ -44,7 +45,7 @@ const acknowledged = {
   fingerprint: 'fp1', count: 1, dismissPolicy: 'any', acknowledged: true,
 };
 
-beforeEach(() => { apiFetchMock.mockReset(); });
+beforeEach(() => { apiFetchMock.mockReset(); nodes.activeId = 1; });
 
 describe('NetworkingView dismissed sheet', () => {
   it('opens from the Overview count, crumbed to Overview', async () => {
@@ -74,8 +75,8 @@ describe('NetworkingView dismissed sheet', () => {
   it('restores an acknowledged finding from the sheet and says it is updating while the list is re-read', async () => {
     let finishRead: (response: Response) => void = () => {};
     let reads = 0;
-    apiFetchMock.mockImplementation((_path: string, options?: RequestInit) => {
-      if (options?.method === 'DELETE') return Promise.resolve(new Response(null, { status: 204 }));
+    apiFetchMock.mockImplementation((path: string, options?: RequestInit) => {
+      if (options?.method === 'DELETE' || path !== '/networking/overview') return Promise.resolve(new Response(null, { status: 204 }));
       reads += 1;
       return reads === 1 ? Promise.resolve(overview([acknowledged])) : new Promise<Response>(resolve => { finishRead = resolve; });
     });
@@ -91,22 +92,52 @@ describe('NetworkingView dismissed sheet', () => {
     expect(await screen.findByText('Nothing is dismissed.')).toBeInTheDocument();
   });
 
-  it('does not reopen the sheet by itself after a failed re-read recovers', async () => {
+  it.each([
+    ['an HTTP error', () => Promise.resolve(new Response('{}', { status: 502 })), /retry/i],
+    ['a thrown error', () => Promise.reject(new Error('network down')), /retry/i],
+  ])('does not reopen the sheet by itself after %s on a re-read recovers', async (_label, failure, retry) => {
     let reads = 0;
-    apiFetchMock.mockImplementation((_path: string, options?: RequestInit) => {
-      if (options?.method === 'DELETE') return Promise.resolve(new Response(null, { status: 204 }));
+    apiFetchMock.mockImplementation((path: string, options?: RequestInit) => {
+      if (options?.method === 'DELETE' || path !== '/networking/overview') return Promise.resolve(new Response(null, { status: 204 }));
       reads += 1;
-      if (reads === 2) return Promise.resolve(new Response('{}', { status: 502 }));
-      return Promise.resolve(overview([acknowledged]));
+      return reads === 2 ? failure() : Promise.resolve(overview([acknowledged]));
     });
     const user = userEvent.setup();
     render(<NetworkingView />);
 
     await user.click(await screen.findByRole('button', { name: '1 dismissed' }));
     await user.click(await screen.findByRole('button', { name: 'Restore' }));
-    await user.click(await screen.findByRole('button', { name: /retry/i }));
-    await screen.findByRole('button', { name: '1 dismissed' });
+    await user.click(await screen.findByRole('button', { name: retry }));
+    await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull());
+    expect(await screen.findByRole('button', { name: '1 dismissed' })).toBeInTheDocument();
+  });
+
+  it('closes the sheet when the node turns out not to support Networking', async () => {
+    let reads = 0;
+    apiFetchMock.mockImplementation((path: string, options?: RequestInit) => {
+      if (options?.method === 'DELETE' || path !== '/networking/overview') return Promise.resolve(new Response(null, { status: 204 }));
+      reads += 1;
+      return Promise.resolve(reads === 2 ? new Response('', { status: 404 }) : overview([acknowledged]));
+    });
+    const user = userEvent.setup();
+    render(<NetworkingView />);
+
+    await user.click(await screen.findByRole('button', { name: '1 dismissed' }));
+    await user.click(await screen.findByRole('button', { name: 'Restore' }));
+    await screen.findByText('Networking is not available on this node');
     expect(screen.queryByRole('dialog')).toBeNull();
+  });
+
+  it('closes the sheet when the active node changes', async () => {
+    apiFetchMock.mockImplementation((path: string) => Promise.resolve(path === '/networking/overview' ? overview([acknowledged]) : new Response(null, { status: 204 })));
+    const user = userEvent.setup();
+    const view = render(<NetworkingView />);
+
+    await user.click(await screen.findByRole('button', { name: '1 dismissed' }));
+    expect(screen.getByRole('dialog')).toBeInTheDocument();
+    nodes.activeId = 2;
+    view.rerender(<NetworkingView />);
+    await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull());
   });
 
   it('shows no count when nothing is dismissed', async () => {

@@ -151,7 +151,9 @@ export function NetworkingView({ headerActions }: NetworkingViewProps) {
     }
   }, [confirmDeleteNetwork]);
 
-  // The sheet lists this node's findings, so it never outlives the node it was opened on.
+  // The sheet lists this node's findings, so a node change closes it. A failure
+  // card replaces the page, and the sheet with it, and Retry can bring the page
+  // back: close it there too, or a stale open flag would pop it back open.
   const sheetNodeRef = useRef(nodeId);
 
   useEffect(() => {
@@ -174,7 +176,7 @@ export function NetworkingView({ headerActions }: NetworkingViewProps) {
       try {
         const response = await apiFetch('/networking/overview', { nodeId, signal: controller.signal });
         if (response.status === 404) {
-          if (!stale) { setUnsupported(true); setDismissedOpen(false); }
+          if (!stale) setUnsupported(true);
           return;
         }
         if (!response.ok) {

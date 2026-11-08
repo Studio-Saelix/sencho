@@ -6,7 +6,7 @@ import { cn } from '@/lib/utils';
 export interface DismissedItem {
   id: string | number;
   title: ReactNode;
-  /** Who dismissed it, when, and for how long. */
+  /** Why it is set aside: typically who dismissed it, when, and for how long. */
   meta: string;
   /** Omitted when the account may not restore it. */
   onRestore?: () => void;
@@ -59,7 +59,7 @@ export function DismissedCountButton({ count, onClick, className }: { count: num
 interface DismissedSheetProps {
   open: boolean;
   onOpenChange: (open: boolean) => void;
-  /** The trip to this list: the surface, then the view (for example `['Fleet', 'Readiness']`). */
+  /** The trip to this list: the path to the surface, ending at the view (for example `['Fleet', 'Readiness']`). */
   crumb: string[];
   items: DismissedItem[];
   /** The list is being re-read, so `items` is not yet the whole answer: say so instead of reading as empty. */

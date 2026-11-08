@@ -30,7 +30,7 @@ export function ReadinessSummaryStrip({ data, checking, dismissedCount = 0, onOp
   checking: boolean;
   /** Findings a team dismissal still covers. They stay out of the finding count and are named beside it. */
   dismissedCount?: number;
-  /** Opens the dismissed sheet; the count is the control that reaches it, so it is always wired. */
+  /** Opens the dismissed sheet; the count is the only way into the dismissed sheet. */
   onOpenDismissed: () => void;
 }) {
   const now = useNow(1000);

@@ -41,6 +41,15 @@ describe('DismissedSheet', () => {
     expect(onRestore).toHaveBeenCalledTimes(1);
   });
 
+  it('says it is updating instead of listing or counting while the list is re-read', () => {
+    render(<DismissedSheet open onOpenChange={() => {}} crumb={['Networking', 'Findings']} items={[item({ onRestore: () => {} })]} loading />);
+    expect(screen.getByText('Updating…')).toBeInTheDocument();
+    expect(screen.getByText('Updating the list…')).toBeInTheDocument();
+    expect(screen.queryByText('Port exposure unclear')).toBeNull();
+    expect(screen.queryByRole('button', { name: 'Restore' })).toBeNull();
+    expect(screen.queryByText(/set aside/)).toBeNull();
+  });
+
   it('says so when nothing is dismissed', () => {
     render(<DismissedSheet open onOpenChange={() => {}} crumb={['Security', 'Overview']} items={[]} />);
     expect(screen.getByText('Nothing is dismissed.')).toBeInTheDocument();
