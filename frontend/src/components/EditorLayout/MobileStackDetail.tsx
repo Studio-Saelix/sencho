@@ -257,6 +257,7 @@ export function MobileStackDetail(props: EditorViewProps) {
                                 onInspectImage={onInspectImage}
                                 onOpenServiceMonitor={onOpenServiceMonitor}
                                 serviceAction={serviceAction}
+                                canDeploy={can('stack:deploy', 'stack', stackName, activeNode?.id)}
                                 effectiveServices={effectiveServices}
                                 serviceUpdateStatuses={serviceUpdateStatuses}
                                 serviceUpdateInProgress={serviceUpdateInProgress}

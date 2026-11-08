@@ -114,6 +114,12 @@ interface InternalContainerState extends ContainerLifecycleState {
     /** A recovery helper: its exit is the operation's result, not a crash. */
     helperContainer?: boolean;
     lastCrashAlertAt?: number;
+    /**
+     * Start timestamp of the run whose dispatched crash alert consumed its
+     * stable-run recovery evidence. A duplicate delivery of that same run's
+     * `die` must stay deduped; only a later `start` is a new incident.
+     */
+    lastCrashAlertStartAt?: number;
     lastActivityAt: number;
     healthStatus?: 'healthy' | 'unhealthy' | 'starting';
     unhealthySince?: number;
@@ -651,10 +657,11 @@ export class DockerEventService {
         const state = this.containerState.get(id);
         if (!state) return;
         // Container came back: clear transient flags but keep identity.
-        // `lastCrashAlertAt` deliberately survives: Docker emits `start` on
-        // every restart-policy restart, so clearing it here would let a crash
-        // loop re-alert on every lap. classifyDie is where a crash that
-        // follows a genuinely stable run earns its own alert.
+        // `lastCrashAlertAt` and `lastCrashAlertStartAt` deliberately survive:
+        // Docker emits `start` on every restart-policy restart, so clearing them
+        // here would let a crash loop re-alert on every lap. classifyDie is
+        // where a crash that follows a genuinely stable run earns its own alert,
+        // and where that run's recovery evidence is consumed.
         state.lastKillAt = undefined;
         state.oomPending = undefined;
         state.crashedAt = undefined;
@@ -724,8 +731,18 @@ export class DockerEventService {
         // The stamp survives restarts (see onStart) and only stops suppressing
         // once the container has stayed up long enough to count as recovered, so
         // a loop alerts once per window instead of once per lap.
-        if (this.isWithinAlertDedupWindow(state.lastCrashAlertAt, now, CRASH_DEDUP_MS)
-            && !this.hasStableRunSinceStart(this.lastStartEventAt.get(id) ?? state.lastStartAt, dieAt)) {
+        //
+        // Recovery evidence belongs to one run: once a dispatched alert consumes
+        // it (lastCrashAlertStartAt), a duplicate delivery of the same run's die
+        // must not qualify again. A later start is a distinct incident.
+        // A start that landed after this die (inside the grace window) is the
+        // recovery that followed it, not the run that produced it, so it cannot
+        // be the run this die's alert consumes.
+        const rawStartAt = this.lastStartEventAt.get(id) ?? state.lastStartAt;
+        const startAt = rawStartAt !== undefined && rawStartAt <= dieAt ? rawStartAt : undefined;
+        const stableRun = this.hasStableRunSinceStart(startAt, dieAt)
+            && startAt !== state.lastCrashAlertStartAt;
+        if (this.isWithinAlertDedupWindow(state.lastCrashAlertAt, now, CRASH_DEDUP_MS) && !stableRun) {
             return;
         }
 
@@ -752,6 +769,7 @@ export class DockerEventService {
             exitCode: exitCode ?? 0,
             stackName: state.stackName,
             isSelf: state.isSelf === true,
+            startAt,
         });
     }
 
@@ -762,7 +780,7 @@ export class DockerEventService {
     private async emitClassification(
         classification: Classification,
         state: InternalContainerState | null,
-        info: { name: string; exitCode: number; stackName?: string; isSelf?: boolean },
+        info: { name: string; exitCode: number; stackName?: string; isSelf?: boolean; startAt?: number },
     ): Promise<void> {
         if (this.isStopped()) return;
         // Respect the existing global crash-alerts toggle so users who have
@@ -782,7 +800,12 @@ export class DockerEventService {
 
         // Stamp the dedup clock only after the alert is actually dispatched, so
         // rate-suppressed alerts don't silently lock out the next real crash.
-        if (state) state.lastCrashAlertAt = Date.now();
+        // Record which run's recovery evidence this alert consumed so a
+        // duplicate delivery of the same die stays deduped.
+        if (state) {
+            state.lastCrashAlertAt = Date.now();
+            state.lastCrashAlertStartAt = info.startAt;
+        }
 
         await this.emitError('monitor_alert', message, info.stackName, info.name, info.isSelf === true, state?.serviceName);
     }

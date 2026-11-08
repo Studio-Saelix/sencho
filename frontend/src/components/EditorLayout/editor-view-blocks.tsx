@@ -371,6 +371,13 @@ export interface ContainersHealthProps {
     /** Opens Monitor (Alerts tab); preselects the Compose service in add forms when listed. */
     onOpenServiceMonitor?: (serviceName: string) => void;
     serviceAction: (action: 'start' | 'stop' | 'restart', serviceName: string) => Promise<void>;
+    /**
+     * Stack-and-node-scoped `stack:deploy`, resolved by the caller. Every
+     * service lifecycle affordance (flat card kebab, multi-replica header,
+     * empty-service row) lives behind it so a read-only user never sees an
+     * action the backend would refuse with 403.
+     */
+    canDeploy: boolean;
     // Declared Compose services from the effective model. Multi-service
     // headers (owning Update/Rebuild + badge + Start/Stop/Restart) render only
     // when this has more than one entry; empty/single leaves the flat
@@ -489,6 +496,7 @@ export function ContainersHealth({
     onInspectImage,
     onOpenServiceMonitor,
     serviceAction,
+    canDeploy,
     effectiveServices = [],
     serviceUpdateStatuses = [],
     serviceUpdateInProgress = null,
@@ -643,36 +651,41 @@ export function ContainersHealth({
         );
     };
 
-    const renderServiceLifecycleMenu = (serviceName: string, serviceIsActive: boolean) => (
-        <DropdownMenu>
-            <DropdownMenuTrigger asChild>
-                <Button
-                    size="icon"
-                    variant="ghost"
-                    className="h-7 w-7 rounded-md max-md:h-11 max-md:w-11"
-                    aria-label="Service actions"
-                >
-                    <MoreVertical className="h-3.5 w-3.5" strokeWidth={1.5} />
-                </Button>
-            </DropdownMenuTrigger>
-            <DropdownMenuContent align="end">
-                {serviceIsActive ? (
-                    <>
-                        <DropdownMenuItem onSelect={() => serviceAction('restart', serviceName)}>
-                            Restart service
+    // Read-only users get no lifecycle kebab at all: it holds only Start/Stop/
+    // Restart, and the backend refuses those without `stack:deploy`.
+    const renderServiceLifecycleMenu = (serviceName: string, serviceIsActive: boolean) => {
+        if (!canDeploy) return null;
+        return (
+            <DropdownMenu>
+                <DropdownMenuTrigger asChild>
+                    <Button
+                        size="icon"
+                        variant="ghost"
+                        className="h-7 w-7 rounded-md max-md:h-11 max-md:w-11"
+                        aria-label="Service actions"
+                    >
+                        <MoreVertical className="h-3.5 w-3.5" strokeWidth={1.5} />
+                    </Button>
+                </DropdownMenuTrigger>
+                <DropdownMenuContent align="end">
+                    {serviceIsActive ? (
+                        <>
+                            <DropdownMenuItem onSelect={() => serviceAction('restart', serviceName)}>
+                                Restart service
+                            </DropdownMenuItem>
+                            <DropdownMenuItem onSelect={() => serviceAction('stop', serviceName)}>
+                                Stop service
+                            </DropdownMenuItem>
+                        </>
+                    ) : (
+                        <DropdownMenuItem onSelect={() => serviceAction('start', serviceName)}>
+                            Start service
                         </DropdownMenuItem>
-                        <DropdownMenuItem onSelect={() => serviceAction('stop', serviceName)}>
-                            Stop service
-                        </DropdownMenuItem>
-                    </>
-                ) : (
-                    <DropdownMenuItem onSelect={() => serviceAction('start', serviceName)}>
-                        Start service
-                    </DropdownMenuItem>
-                )}
-            </DropdownMenuContent>
-        </DropdownMenu>
-    );
+                    )}
+                </DropdownMenuContent>
+            </DropdownMenu>
+        );
+    };
 
     const renderContainerCard = (
         container: ContainerInfo,

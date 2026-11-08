@@ -450,6 +450,125 @@ describe('DockerEventService - die classification', () => {
         expect(mockDispatchAlert).toHaveBeenCalledTimes(2);
     });
 
+    it('alerts once when a stable-run crash die is redelivered unchanged', async () => {
+        service = new DockerEventService(1, 'local');
+        await service.start();
+
+        const die = (id: string, atSeconds: number, exitCode = '1') => ({
+            Type: 'container',
+            Action: 'die',
+            Actor: { ID: id, Attributes: { exitCode, name: 'web' } },
+            time: atSeconds,
+        });
+
+        // First crash establishes the loop window.
+        stream.push(die('c-dup', 1_000));
+        await vi.advanceTimersByTimeAsync(600);
+        expect(mockDispatchAlert).toHaveBeenCalledTimes(1);
+
+        // It recovered and ran the full threshold, so this crash is a new
+        // incident and earns an alert.
+        stream.push({ Type: 'container', Action: 'start', Actor: { ID: 'c-dup', Attributes: { name: 'web' } }, time: 1_001 });
+        await vi.advanceTimersByTimeAsync(5 * 60_000);
+        stream.push(die('c-dup', 1_302));
+        await vi.advanceTimersByTimeAsync(600);
+        expect(mockDispatchAlert).toHaveBeenCalledTimes(2);
+
+        // Docker redelivers the identical die event. Same run, same incident:
+        // its recovery evidence was consumed by the dispatched alert.
+        stream.push(die('c-dup', 1_302));
+        await vi.advanceTimersByTimeAsync(600);
+        expect(mockDispatchAlert).toHaveBeenCalledTimes(2);
+
+        // A later distinct start that also runs the threshold is a new incident.
+        stream.push({ Type: 'container', Action: 'start', Actor: { ID: 'c-dup', Attributes: { name: 'web' } }, time: 2_000 });
+        await vi.advanceTimersByTimeAsync(5 * 60_000);
+        stream.push(die('c-dup', 2_302));
+        await vi.advanceTimersByTimeAsync(600);
+        expect(mockDispatchAlert).toHaveBeenCalledTimes(3);
+    });
+
+    it('alerts once when a stable-run OOM die is redelivered unchanged', async () => {
+        service = new DockerEventService(1, 'local');
+        await service.start();
+        mockInspect.mockResolvedValue({ State: { OOMKilled: true, ExitCode: 137 } });
+
+        const oomDie = (atSeconds: number) => ({
+            Type: 'container',
+            Action: 'die',
+            Actor: { ID: 'c-oom-dup', Attributes: { exitCode: '137', name: 'hog' } },
+            time: atSeconds,
+        });
+        const oomAlerts = () => mockDispatchAlert.mock.calls.filter(c =>
+            typeof c[2] === 'string' && c[2].includes('OOM Kill')).length;
+
+        stream.push(oomDie(1_000));
+        await vi.advanceTimersByTimeAsync(600);
+        await Promise.resolve();
+        await Promise.resolve();
+        await Promise.resolve();
+        expect(oomAlerts()).toBe(1);
+
+        stream.push({ Type: 'container', Action: 'start', Actor: { ID: 'c-oom-dup', Attributes: { name: 'hog' } }, time: 1_001 });
+        await vi.advanceTimersByTimeAsync(5 * 60_000);
+        stream.push(oomDie(1_302));
+        await vi.advanceTimersByTimeAsync(600);
+        await Promise.resolve();
+        await Promise.resolve();
+        await Promise.resolve();
+        expect(oomAlerts()).toBe(2);
+
+        stream.push(oomDie(1_302));
+        await vi.advanceTimersByTimeAsync(600);
+        await Promise.resolve();
+        await Promise.resolve();
+        await Promise.resolve();
+        expect(oomAlerts()).toBe(2);
+    });
+
+    it('keeps a stable-run alert eligible when the dispatch was rate-suppressed', async () => {
+        service = new DockerEventService(1, 'local');
+        await service.start();
+
+        const targetAlerts = () => mockDispatchAlert.mock.calls.filter(c =>
+            typeof c[2] === 'string' && c[2].includes('Crash Detected') && c[2].includes('quiet')).length;
+
+        stream.push({ Type: 'container', Action: 'start', Actor: { ID: 'c-suppressed', Attributes: { name: 'quiet' } }, time: 1_000 });
+        await vi.advanceTimersByTimeAsync(5 * 60_000);
+
+        // Exhaust the shared one-minute window with unrelated crashes.
+        for (let i = 0; i < 20; i++) {
+            stream.push({
+                Type: 'container',
+                Action: 'die',
+                Actor: { ID: `noise-${i}`, Attributes: { exitCode: '1', name: `noise-${i}` } },
+            });
+            await vi.advanceTimersByTimeAsync(600);
+        }
+        expect(targetAlerts()).toBe(0);
+        stream.push({
+            Type: 'container',
+            Action: 'die',
+            Actor: { ID: 'c-suppressed', Attributes: { exitCode: '1', name: 'quiet' } },
+            time: 1_302,
+        });
+        await vi.advanceTimersByTimeAsync(600);
+        // Rate-suppressed, so nothing is dispatched or consumed.
+        expect(targetAlerts()).toBe(0);
+
+        // Next window: the same die is still eligible because the suppressed
+        // dispatch did not consume its recovery evidence.
+        await vi.advanceTimersByTimeAsync(61_000);
+        stream.push({
+            Type: 'container',
+            Action: 'die',
+            Actor: { ID: 'c-suppressed', Attributes: { exitCode: '1', name: 'quiet' } },
+            time: 1_302,
+        });
+        await vi.advanceTimersByTimeAsync(600);
+        expect(targetAlerts()).toBe(1);
+    });
+
     it('measures uptime from a restart that lands inside the die grace window', async () => {
         service = new DockerEventService(1, 'local');
         await service.start();
