@@ -1166,11 +1166,17 @@ describe('assertComposeInputsWithinExpansionLimits - review round regressions', 
       await write('sub/a.yaml', 'services:\n  base:\n    extends:\n      file: ~someone/b.yaml\n      service: deeper\n');
       await write('home/someone/b.yaml', nestedAliasBomb(12));
       await expect(assertComposeInputsWithinExpansionLimits({ cwd: dir, invocation: ['compose', 'config'] }))
-        .rejects.toBeInstanceOf(ComposeExpansionRefusal);
+        .rejects.toThrow(/nested YAML aliases/);
     } finally {
       if (previousHome === undefined) delete process.env.HOME;
       else process.env.HOME = previousHome;
     }
+  });
+
+  it('refuses a ~ COMPOSE_ENV_FILES path it cannot resolve the way Compose does', async () => {
+    process.env.COMPOSE_ENV_FILES = '~/vars.env';
+    await expect(assertComposeInputsWithinExpansionLimits({ cwd: dir, invocation: ['compose', 'config'] }))
+      .rejects.toThrow(/cannot resolve the env file path/);
   });
 
   it('refuses a bare-host git include reference', async () => {

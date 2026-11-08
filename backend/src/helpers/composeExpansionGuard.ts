@@ -523,7 +523,9 @@ function resolveDependencyPath(value: string, base: string): string {
 /** Expand a leading `~` the way Compose's extends path expansion does. */
 function expandUserPath(value: string, home: string | undefined): string {
   if (home && value.startsWith('~')) {
-    return path.join(home, value.slice(1).replace(/^[\\/]/, ''));
+    // Compose joins the rest as-is: on Linux a backslash stays a filename
+    // character, so `~\b.yaml` is not the same file as `~/b.yaml`.
+    return path.join(home, value.slice(1));
   }
   return value;
 }
