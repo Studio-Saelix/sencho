@@ -564,6 +564,7 @@ export function ImagesTab({
                       {s.publicly_exposed === true ? (
                         <NetworkExposedControl
                           contexts={contextsForImage(s, targeting)}
+                          imageRef={s.image_ref}
                           nodeId={nodeId}
                           onIntentSaved={onIntentSaved}
                         />

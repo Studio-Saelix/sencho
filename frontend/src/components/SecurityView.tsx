@@ -40,6 +40,7 @@ import {
   applySavedIntents,
   type ImagesTargetingInput,
   type ImagesTargetingState,
+  type SavedIntentTarget,
 } from './security/imagesTargeting';
 import { ImagesTab } from './security/ImagesTab';
 import { FindingsTab } from './security/FindingsTab';
@@ -312,9 +313,9 @@ export function SecurityView({ activeTab, onTabChange, headerActions }: Security
   // it replaced.
   const summariesData = summariesRegion.data;
   const applySummaries = summariesRegion.apply;
-  const onIntentSaved = useCallback((stackName: string, intents: IntentEntry[]) => {
+  const onIntentSaved = useCallback((stackName: string, intents: IntentEntry[], saved?: SavedIntentTarget) => {
     if (summariesData !== null) {
-      const patched = applySavedIntents(summariesData, stackName, intents);
+      const patched = applySavedIntents(summariesData, stackName, intents, saved);
       if (patched !== summariesData) applySummaries(patched);
     }
     setImagesTargeting(afterIntentSaved);

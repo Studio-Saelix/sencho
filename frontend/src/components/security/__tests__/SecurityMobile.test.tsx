@@ -8,7 +8,8 @@ import { render, screen } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { SecurityMobileTabs, ImageScanRow, SecuritySevStrip, type SecurityMobileTab } from '../SecurityMobile';
 import { ImagesTab } from '../ImagesTab';
-import type { ScanSummary, SecurityOverview } from '@/types/security';
+import { applySavedIntents } from '../imagesTargeting';
+import type { ImageExposureContext, ScanSummary, SecurityOverview } from '@/types/security';
 
 // These cases cover the named Networking navigation, which a session that may not edit the stack keeps.
 vi.mock('@/context/AuthContext', () => ({ useAuth: () => ({ can: () => false }) }));
@@ -270,5 +271,88 @@ describe('ImagesTab (mobile)', () => {
     );
     expect(screen.getByText('Network exposed')).toBeInTheDocument();
     expect(screen.queryByText(/Intent:/)).not.toBeInTheDocument();
+  });
+
+  it('stops showing exposure on the phone row when an unverified tunnel save settles it', () => {
+    installMatchMedia(true);
+    const before = asMap(summary({
+      image_ref: 'exp:1',
+      scan_id: 1,
+      publicly_exposed: true,
+      exposure_contexts: [{
+        stackName: 'web',
+        serviceName: 'api',
+        exposureReason: 'tunnel',
+        tunnel: {
+          connector: 'edge',
+          provider: 'cloudflared',
+          scope: 'public-edge',
+          path: 'shared-network',
+        },
+        intentStatus: 'unset',
+      }],
+      exposure_context_count: 1,
+      exposure_context_summary: {
+        hasConflict: false,
+        hasUnclassified: true,
+        hasUnavailable: false,
+        allKnownIntentional: false,
+      },
+    }));
+    const after = applySavedIntents(before, 'web', [{ service: 'api', intent: 'internal' }], {
+      imageRef: 'exp:1',
+      context: {
+        stackName: 'web',
+        serviceName: 'api',
+        exposureReason: 'tunnel',
+        tunnel: {
+          connector: 'edge',
+          provider: 'cloudflared',
+          scope: 'public-edge',
+          path: 'shared-network',
+        },
+        intentStatus: 'unset',
+      },
+    });
+
+    render(<ImagesTab {...base} summaries={after} />);
+
+    expect(screen.getByText('exp:1')).toBeInTheDocument();
+    expect(screen.queryByText('Network exposed')).not.toBeInTheDocument();
+    expect(screen.queryByText(/Intent mismatch/)).not.toBeInTheDocument();
+  });
+
+  it('keeps a hidden capped warning on the phone row after repeated saves', () => {
+    installMatchMedia(true);
+    const visible: ImageExposureContext[] = Array.from({ length: 20 }, (_, index) => ({
+      stackName: 'web',
+      serviceName: `svc${index}`,
+      exposureReason: 'published-port',
+      intentStatus: 'unset',
+    }));
+    let summaries = asMap(summary({
+      image_ref: 'exp:1',
+      scan_id: 1,
+      publicly_exposed: true,
+      exposure_contexts: visible,
+      exposure_context_count: 21,
+      exposure_contexts_truncated: true,
+      exposure_context_summary: {
+        hasConflict: false,
+        hasUnclassified: true,
+        hasUnavailable: false,
+        allKnownIntentional: false,
+      },
+    }));
+
+    const saved: Array<{ service: string; intent: 'public' }> = [];
+    for (let index = 0; index < visible.length; index += 1) {
+      saved.push({ service: `svc${index}`, intent: 'public' });
+      summaries = applySavedIntents(summaries, 'web', saved);
+    }
+
+    render(<ImagesTab {...base} summaries={summaries} />);
+
+    expect(screen.getByText('Intent: not classified (+20)')).toBeInTheDocument();
   });
 });

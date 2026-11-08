@@ -2,7 +2,8 @@
  * A confirmed exposure-intent save is adopted into the Images evidence before
  * the dependent summary reread. When that reread fails, the row must show the
  * saved intent and action instead of presenting the pre-save evidence it
- * replaced as current.
+ * replaced as current. An unverified tunnel reach taken at the operator's word
+ * is the exception: it stops counting as exposed, as it does on the server.
  */
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { render, screen, waitFor } from '@testing-library/react';
@@ -30,24 +31,49 @@ vi.mock('@/hooks/useNodeDismissals', () => ({
 vi.mock('@/hooks/use-is-mobile', () => ({ useIsMobile: () => false }));
 vi.mock('@/components/security/OverviewTab', () => ({
   OverviewTab: ({ onNavigate }: { onNavigate: (tab: string, filter?: undefined, targeting?: unknown) => void }) => (
-    <button
-      type="button"
-      onClick={() => onNavigate('images', undefined, {
-        kind: 'public_exposure',
-        label: 'Exposure conflicts with declared intent',
-        imageRefs: ['exp:1'],
-        targets: [{
-          imageRef: 'exp:1',
-          stackName: 'web',
-          serviceName: 'api',
-          intentStatus: 'set',
-          exposureIntent: 'internal',
-          intentConflict: true,
-        }],
-      })}
-    >
-      go to images
-    </button>
+    <>
+      <button
+        type="button"
+        onClick={() => onNavigate('images', undefined, {
+          kind: 'public_exposure',
+          label: 'Exposure conflicts with declared intent',
+          imageRefs: ['exp:1'],
+          targets: [{
+            imageRef: 'exp:1',
+            stackName: 'web',
+            serviceName: 'api',
+            intentStatus: 'set',
+            exposureIntent: 'internal',
+            intentConflict: true,
+          }],
+        })}
+      >
+        go to images
+      </button>
+      <button
+        type="button"
+        onClick={() => onNavigate('images', undefined, {
+          kind: 'public_exposure',
+          label: 'Network exposed images',
+          imageRefs: ['exp:1'],
+          targets: [{
+            imageRef: 'exp:1',
+            stackName: 'web',
+            serviceName: 'api',
+            exposureReason: 'tunnel',
+            tunnel: {
+              connector: 'edge',
+              provider: 'cloudflared',
+              scope: 'public-edge',
+              path: 'shared-network',
+            },
+            intentStatus: 'unset',
+          }],
+        })}
+      >
+        go to tunnel images
+      </button>
+    </>
   ),
 }));
 vi.mock('@/components/security/FindingsTab', () => ({ FindingsTab: () => null }));
@@ -59,6 +85,7 @@ vi.mock('@/components/settings/SuppressionsPanel', () => ({ SuppressionsPanel: (
 vi.mock('@/components/settings/MisconfigAckPanel', () => ({ MisconfigAckPanel: () => null }));
 
 import { SecurityView } from '../SecurityView';
+import { applySavedIntents } from '../security/imagesTargeting';
 import type { ScanSummary } from '@/types/security';
 
 function jsonOk(body: unknown) {
@@ -178,8 +205,10 @@ function mockApi(options: {
   summaries: ScanSummary;
   failSummariesAfterSave: boolean;
   savedIntents?: Array<{ service: string; intent: string }>;
+  savedIntentsFor?: (putNumber: number) => Array<{ service: string; intent: string }>;
 }) {
   let saved = false;
+  let puts = 0;
   apiFetchMock.mockImplementation((url: string, init?: RequestInit) => {
     if (url === '/security/overview') return jsonOk(overview);
     if (url === '/security/image-summaries') {
@@ -193,7 +222,12 @@ function mockApi(options: {
     if (url === '/fleet/role') return jsonOk({ role: 'control' });
     if (url === '/stacks/web/exposure' && init?.method === 'PUT') {
       saved = true;
-      return jsonOk({ intents: options.savedIntents ?? [{ service: 'api', intent: 'public' }] });
+      puts += 1;
+      return jsonOk({
+        intents: options.savedIntentsFor?.(puts)
+          ?? options.savedIntents
+          ?? [{ service: 'api', intent: 'public' }],
+      });
     }
     if (url === '/stacks/web/exposure') return jsonOk({ intents: [] });
     return Promise.resolve({ ok: false, status: 404, json: async () => ({}) } as unknown as Response);
@@ -259,6 +293,87 @@ describe('SecurityView after a save whose summary reread fails', () => {
     expect(screen.queryByText(/Intent mismatch/)).not.toBeInTheDocument();
     expect(screen.queryByRole('button', { name: /Network exposed/ })).not.toBeInTheDocument();
     expect(screen.getByText('exp:1')).toBeInTheDocument();
+  });
+
+  it('settles an unverified tunnel row reached from targeting', async () => {
+    mockApi({
+      summaries: unverifiedTunnelSummary,
+      failSummariesAfterSave: true,
+      savedIntents: [{ service: 'api', intent: 'internal' }],
+    });
+    const { rerender } = render(<SecurityView activeTab="overview" onTabChange={vi.fn()} />);
+
+    await userEvent.click(await screen.findByRole('button', { name: 'go to tunnel images' }));
+    rerender(<SecurityView activeTab="images" onTabChange={vi.fn()} />);
+
+    expect(await screen.findByText('Intent: not classified')).toBeInTheDocument();
+    await userEvent.click(screen.getByRole('button', { name: /Network exposed: set intent for web\/api/ }));
+    await userEvent.click(await screen.findByRole('button', { name: 'internal' }));
+
+    await waitFor(() => expect(toasts.error).toHaveBeenCalledWith('Could not refresh security data'));
+    expect(screen.queryByText(/Intent mismatch/)).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /Network exposed/ })).not.toBeInTheDocument();
+    expect(screen.getByText('exp:1')).toBeInTheDocument();
+  });
+
+  it('keeps a hidden capped warning across two saves whose rereads fail', async () => {
+    const baseIntents = Array.from({ length: 20 }, (_, index) => ({
+      service: `svc${index}`,
+      intent: 'public',
+    }));
+    const visible = Array.from({ length: 20 }, (_, index) => ({
+      stackName: 'web',
+      serviceName: `svc${index}`,
+      exposureReason: 'published-port' as const,
+      intentStatus: 'unset' as const,
+    }));
+    let projected: Record<string, ScanSummary> = {
+      'exp:1': summary({
+        publicly_exposed: true,
+        exposure_contexts: visible,
+        exposure_context_count: 21,
+        exposure_contexts_truncated: true,
+        exposure_context_summary: {
+          hasConflict: false,
+          hasUnclassified: true,
+          hasUnavailable: false,
+          allKnownIntentional: false,
+        },
+      }),
+    };
+    // The state the row keeps after twenty earlier confirmed saves whose
+    // rereads failed: every displayed context is intentional, the hidden one
+    // may still be unclassified.
+    const earlier: Array<{ service: string; intent: 'public' }> = [];
+    for (let index = 0; index < 20; index += 1) {
+      earlier.push({ service: `svc${index}`, intent: 'public' });
+      projected = applySavedIntents(projected, 'web', earlier);
+    }
+
+    mockApi({
+      summaries: projected['exp:1']!,
+      failSummariesAfterSave: true,
+      savedIntentsFor: (put) => baseIntents.map((entry, index) => {
+        if (index === 0) return { ...entry, intent: 'lan' };
+        if (index === 1 && put >= 2) return { ...entry, intent: 'temporary' };
+        return entry;
+      }),
+    });
+    render(<SecurityView activeTab="images" onTabChange={vi.fn()} />);
+    expect(await screen.findByText('Intent: not classified (+20)')).toBeInTheDocument();
+
+    await userEvent.click(screen.getByRole('button', { name: 'Network exposed: choose a service' }));
+    await userEvent.click(await screen.findByRole('button', { name: 'Change intent for web/svc0' }));
+    await userEvent.click(await screen.findByRole('button', { name: 'lan' }));
+    await waitFor(() => expect(toasts.error).toHaveBeenCalledWith('Could not refresh security data'));
+
+    // The service list stays open through the save and the failed reread.
+    await userEvent.click(await screen.findByRole('button', { name: 'Change intent for web/svc1' }));
+    await userEvent.click(await screen.findByRole('button', { name: 'temporary' }));
+    await waitFor(() => expect(toasts.error).toHaveBeenCalledTimes(2));
+
+    expect(screen.getByText('Intent: not classified (+20)')).toBeInTheDocument();
+    expect(screen.queryByText(/Intent mismatch/)).not.toBeInTheDocument();
   });
 
   it('keeps a certain tunnel reach conflicting after a restrictive save', async () => {

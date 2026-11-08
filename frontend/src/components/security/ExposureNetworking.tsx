@@ -6,7 +6,7 @@ import { cn } from '@/lib/utils';
 import { SENCHO_OPEN_STACK_EVENT, type SenchoOpenStackDetail } from '@/lib/events';
 import { tunnelPathLabel } from '@/lib/tunnelExposure';
 import type { ImageExposureContext } from '@/types/security';
-import type { IntentSavedHandler } from './imagesTargeting';
+import type { ImageExposureContextRef, IntentSavedHandler } from './imagesTargeting';
 
 function openNetworking(nodeId: number | undefined, stackName: string) {
   if (nodeId === undefined) return;
@@ -47,19 +47,25 @@ function OpenNetworkingLink({ nodeId, stackName }: { nodeId: number; stackName: 
   );
 }
 
-function ContextIntentPopover({ ctx, nodeId, onIntentSaved, trigger, align }: {
-  ctx: ImageExposureContext;
+function ContextIntentPopover({ ctx, imageRef, nodeId, onIntentSaved, trigger, align }: {
+  ctx: ImageExposureContextRef;
+  /** The row's image when the context came from a standing summary. */
+  imageRef?: string;
   nodeId: number;
   onIntentSaved: IntentSavedHandler;
   trigger: ReactElement;
   align?: 'start' | 'end';
 }) {
+  const savedImageRef = ctx.imageRef ?? imageRef;
   return (
     <SetExposureIntentPopover
       stack={ctx.stackName}
       service={ctx.serviceName}
       nodeId={nodeId}
-      onSaved={(saved) => onIntentSaved(ctx.stackName, saved)}
+      onSaved={(saved) => onIntentSaved(ctx.stackName, saved, {
+        ...(savedImageRef !== undefined ? { imageRef: savedImageRef } : {}),
+        context: ctx,
+      })}
       trigger={trigger}
       align={align}
       footer={<OpenNetworkingLink nodeId={nodeId} stackName={ctx.stackName} />}
@@ -69,11 +75,13 @@ function ContextIntentPopover({ ctx, nodeId, onIntentSaved, trigger, align }: {
 
 function NetworkingContextList({
   contexts,
+  imageRef,
   nodeId,
   onIntentSaved,
   showConflictHint = false,
 }: {
-  contexts: ImageExposureContext[];
+  contexts: ImageExposureContextRef[];
+  imageRef?: string;
   nodeId: number;
   onIntentSaved: IntentSavedHandler;
   showConflictHint?: boolean;
@@ -114,6 +122,7 @@ function NetworkingContextList({
             {verb !== null ? (
               <ContextIntentPopover
                 ctx={ctx}
+                {...(imageRef !== undefined ? { imageRef } : {})}
                 nodeId={nodeId}
                 onIntentSaved={onIntentSaved}
                 trigger={(
@@ -141,11 +150,14 @@ function NetworkingContextList({
  */
 export function NetworkExposedControl({
   contexts,
+  imageRef,
   nodeId,
   onIntentSaved,
   className,
 }: {
-  contexts: ImageExposureContext[];
+  contexts: ImageExposureContextRef[];
+  /** The row's image, so a save the summary cap hides can still be projected. */
+  imageRef?: string;
   nodeId?: number;
   /** A confirmed save, with the stack's intents after it, so the exposure conclusions can reflect it before the reread lands. */
   onIntentSaved: IntentSavedHandler;
@@ -188,6 +200,7 @@ export function NetworkExposedControl({
     return (
       <ContextIntentPopover
         ctx={only}
+        {...(imageRef !== undefined ? { imageRef } : {})}
         nodeId={nodeId}
         onIntentSaved={onIntentSaved}
         align="start"
@@ -211,7 +224,13 @@ export function NetworkExposedControl({
         </button>
       </PopoverTrigger>
       <PopoverContent align="start" className="w-72 p-2" onClick={(e) => e.stopPropagation()}>
-        <NetworkingContextList contexts={contexts} nodeId={nodeId} onIntentSaved={onIntentSaved} showConflictHint />
+        <NetworkingContextList
+          contexts={contexts}
+          {...(imageRef !== undefined ? { imageRef } : {})}
+          nodeId={nodeId}
+          onIntentSaved={onIntentSaved}
+          showConflictHint
+        />
       </PopoverContent>
     </Popover>
   );
@@ -228,7 +247,7 @@ export function ViewNetworkingAction({
   nodeId,
   onIntentSaved,
 }: {
-  contexts: ImageExposureContext[];
+  contexts: ImageExposureContextRef[];
   nodeId?: number;
   onIntentSaved: IntentSavedHandler;
 }) {

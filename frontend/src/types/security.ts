@@ -243,7 +243,7 @@ export interface ScanSummary {
   exposure_contexts_truncated?: boolean;
   /** Aggregates over the full list before cap; prefer for banner/row conclusions. */
   exposure_context_summary?: ImageExposureContextSummary;
-  /** Unresolved states in the capped remainder, kept by the in-place save projection. */
+  /** States the capped remainder may hold, kept by the in-place save projection. */
   exposure_context_hidden?: ImageExposureContextHidden;
 }
 

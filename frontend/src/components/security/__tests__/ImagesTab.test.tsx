@@ -549,11 +549,38 @@ it('keeps a hidden capped warning on the rendered row after repeated saves', () 
     },
   }));
 
+  const saved: Array<{ service: string; intent: 'public' }> = [];
   for (let index = 0; index < visible.length; index += 1) {
-    summaries = applySavedIntents(summaries, 'web', [{ service: `svc${index}`, intent: 'public' }]);
+    saved.push({ service: `svc${index}`, intent: 'public' });
+    summaries = applySavedIntents(summaries, 'web', saved);
   }
 
   render(<ImagesTab {...base} summaries={summaries} />);
 
   expect(screen.getByText('Intent: not classified (+20)')).toBeInTheDocument();
+});
+
+it('renders a hidden warning when settlement leaves no displayed context', () => {
+  const summaries = asMap(summary({
+    image_ref: 'exp:1',
+    scan_id: 1,
+    publicly_exposed: true,
+    exposure_contexts: [],
+    exposure_context_count: 1,
+    exposure_contexts_truncated: true,
+    exposure_context_summary: {
+      hasConflict: false,
+      hasUnclassified: true,
+      hasUnavailable: false,
+      allKnownIntentional: false,
+    },
+    exposure_context_hidden: { conflict: false, unclassified: true, unavailable: false },
+  }));
+
+  render(<ImagesTab {...base} summaries={summaries} />);
+
+  expect(screen.getByText('Intent: not classified')).toBeInTheDocument();
+  // The row stays exposed but has no displayed context to act on.
+  expect(screen.getByText('Network exposed')).toBeInTheDocument();
+  expect(screen.queryByRole('button', { name: /Network exposed/ })).not.toBeInTheDocument();
 });

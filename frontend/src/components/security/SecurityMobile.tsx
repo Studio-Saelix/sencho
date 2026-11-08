@@ -161,7 +161,12 @@ export function ImageScanRow({
         <span className="mt-px flex flex-wrap items-center gap-x-2 gap-y-0.5 font-mono text-[10px] text-stat-icon">
           <span>scanned {formatTimeAgo(summary.scanned_at)}</span>
           {summary.publicly_exposed === true ? (
-            <NetworkExposedControl contexts={exposureContexts} nodeId={nodeId} onIntentSaved={onIntentSaved} />
+            <NetworkExposedControl
+              contexts={exposureContexts}
+              imageRef={summary.image_ref}
+              nodeId={nodeId}
+              onIntentSaved={onIntentSaved}
+            />
           ) : null}
           {intentEvidence ? <span className="normal-case tracking-normal">{intentEvidence}</span> : null}
         </span>
