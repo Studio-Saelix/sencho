@@ -95,12 +95,24 @@ export function hasProjectCycle(project: AuthoredProject): boolean {
 
 /**
  * Structural segments for one field. A service's own field names are plain
- * Compose keys, but an `environment` key or a label key is data and may itself
- * contain a dot, so it stays one segment.
+ * Compose keys, but an `environment` or label key is data and may itself
+ * contain a dot, so it stays one segment. Sequence fields keep their numeric
+ * indices (`ports[0].published`), matching the walker's identity.
  */
-function fieldSegments(field: string): string[] {
+function fieldSegments(field: string): Array<string | number> {
   if (field.startsWith('environment.')) return ['environment', field.slice('environment.'.length)];
-  return field ? field.split('.') : [];
+  if (field.startsWith('labels.')) return ['labels', field.slice('labels.'.length)];
+  const out: Array<string | number> = [];
+  for (const part of field ? field.split('.') : []) {
+    const match = /^([^[\]]+)((?:\[\d+\])*)$/.exec(part);
+    if (!match) {
+      out.push(part);
+      continue;
+    }
+    out.push(match[1]);
+    for (const index of match[2].matchAll(/\[(\d+)\]/g)) out.push(Number(index[1]));
+  }
+  return out;
 }
 
 /**
@@ -547,14 +559,20 @@ export function correlateVariableReference(
   return baseResult(project, path, [], 'no-authored-source');
 }
 
+type AuthoredPathSplit =
+  | { kind: 'found'; service: string; field: string }
+  | { kind: 'ambiguous-multiple' }
+  | { kind: 'ambiguous-unparsed' };
+
 /**
  * Split `services.<name>.<field>` using the project's own service names. A
  * Compose service name may contain dots, so the same text can name a field of
  * `api` or the service `api.image`. An interpretation is viable only when the
  * project actually authors that node; when both are viable the path cannot say
- * which structure was meant, so the edit origin is refused.
+ * which structure was meant, so the edit origin is refused with the reason that
+ * names the uncertainty.
  */
-function splitAuthoredPath(project: AuthoredProject, path: string): { service: string; field: string } | null {
+function splitAuthoredPath(project: AuthoredProject, path: string): AuthoredPathSplit | null {
   const prefix = 'services.';
   if (!path.startsWith(prefix)) return null;
   const rest = path.slice(prefix.length);
@@ -566,27 +584,38 @@ function splitAuthoredPath(project: AuthoredProject, path: string): { service: s
     }
   }
   if (candidates.length === 0) return null;
-  const viable = candidates.filter(entry => interpretationIsAuthored(project, entry.service, entry.field));
-  if (viable.length === 1) return viable[0];
-  if (viable.length > 1) return null;
+  const viable = candidates.map(entry => ({
+    ...entry,
+    state: interpretationState(project, entry.service, entry.field),
+  })).filter(entry => entry.state !== null);
+  if (viable.length === 1) return { kind: 'found', service: viable[0].service, field: viable[0].field };
+  if (viable.length > 1) {
+    return viable.some(entry => entry.state === 'unread')
+      ? { kind: 'ambiguous-unparsed' }
+      : { kind: 'ambiguous-multiple' };
+  }
   // No interpretation names a readable node: keep the historical longest-name
   // rule so a request for a missing field still reaches a typed refusal.
   candidates.sort((a, b) => b.service.length - a.service.length);
-  return candidates[0] ?? null;
+  return candidates[0] ? { kind: 'found', service: candidates[0].service, field: candidates[0].field } : null;
 }
 
-/** Whether an interpretation could name a node, including an unread file. */
-function interpretationIsAuthored(project: AuthoredProject, service: string, field: string): boolean {
+/** Whether an interpretation names an authored node, or a file we cannot read. */
+function interpretationState(
+  project: AuthoredProject,
+  service: string,
+  field: string,
+): 'authored' | 'unread' | null {
   const labelPrefix = 'labels.';
   const segments = field.startsWith(labelPrefix)
     ? ['labels', field.slice(labelPrefix.length)]
     : fieldSegments(field);
   for (const definition of project.serviceDefinitions.get(service) ?? []) {
     const file = project.files.find(entry => entry.file === definition.file);
-    if (!file || file.state !== 'parsed') return true;
-    if (file.nodes.has(authoredNodeKey(['services', definition.declaredService, ...segments]))) return true;
+    if (!file || file.state !== 'parsed') return 'unread';
+    if (file.nodes.has(authoredNodeKey(['services', definition.declaredService, ...segments]))) return 'authored';
   }
-  return false;
+  return null;
 }
 
 /**
@@ -599,6 +628,8 @@ export function resolveEditOrigin(
 ): { ok: true; origin: CorrelationOrigin } | { ok: false; reason: CorrelationReason } {
   const split = splitAuthoredPath(project, path);
   if (!split) return { ok: false, reason: 'no-authored-source' };
+  if (split.kind === 'ambiguous-multiple') return { ok: false, reason: 'ambiguous-multiple-sources' };
+  if (split.kind === 'ambiguous-unparsed') return { ok: false, reason: 'ambiguous-unparsed-source' };
   const labelPrefix = 'labels.';
   const result = split.field.startsWith(labelPrefix)
     ? correlateLabel(project, split.service, split.field.slice(labelPrefix.length))

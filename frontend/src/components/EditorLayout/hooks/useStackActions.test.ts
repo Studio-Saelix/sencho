@@ -4542,7 +4542,10 @@ describe('useStackActions.openAuthoredLocation', () => {
   });
 
   it('refreshes a clean stale buffer and pins the reveal to the revision it read', async () => {
-    vi.mocked(apiFetch).mockResolvedValue(new Response('fresh disk content\n', { status: 200 }));
+    vi.mocked(apiFetch).mockResolvedValue(new Response('fresh disk content\n', {
+      status: 200,
+      headers: { etag: 'W/"2"', 'x-compose-file': 'compose.yaml' },
+    }));
     const { result, editorState } = setup({
       editorState: { content: 'stale content\n', originalContent: 'stale content\n' },
     });
@@ -4553,6 +4556,8 @@ describe('useStackActions.openAuthoredLocation', () => {
 
     expect(editorState.setContent).toHaveBeenCalledWith('fresh disk content\n');
     expect(editorState.setOriginalContent).toHaveBeenCalledWith('fresh disk content\n');
+    expect(editorState.setComposeEtag).toHaveBeenCalledWith('W/"2"');
+    expect(editorState.setComposeFilename).toHaveBeenCalledWith('compose.yaml');
     expect(editorState.setPendingReveal).toHaveBeenCalledWith({
       target: { surface: 'compose', file: 'compose.yaml' },
       location,
@@ -4576,7 +4581,28 @@ describe('useStackActions.openAuthoredLocation', () => {
       resolveRead?.(new Response('fresh disk content\n', { status: 200 }));
     });
 
-    expect(editorState.setPendingReveal).not.toHaveBeenCalled();
+    expect(editorState.setPendingReveal).not.toHaveBeenCalledWith(expect.objectContaining({
+      target: { surface: 'compose', file: 'compose.yaml' },
+    }));
+    expect(editorState.setPendingReveal).toHaveBeenLastCalledWith(null);
+  });
+
+  it('clears a pending reveal when the stack changes', async () => {
+    vi.mocked(apiFetch).mockResolvedValue(new Response('disk content', { status: 200 }));
+    const { result, rerender, stackListState, editorState } = setup({
+      editorState: { content: 'disk content', originalContent: 'disk content' },
+    });
+
+    await act(async () => {
+      result.current.openAuthoredLocation(location);
+    });
+    expect(editorState.setPendingReveal).toHaveBeenCalledWith(expect.objectContaining({
+      target: { surface: 'compose', file: 'compose.yaml' },
+    }));
+
+    (stackListState as unknown as { selectedFile: string | null }).selectedFile = 'other.yml';
+    rerender();
+    expect(editorState.setPendingReveal).toHaveBeenLastCalledWith(null);
   });
 
   it('leaves edits typed while the file read was in flight untouched', async () => {

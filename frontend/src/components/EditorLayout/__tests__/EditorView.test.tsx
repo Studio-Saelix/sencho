@@ -531,4 +531,35 @@ describe('EditorView authored reveal revision', () => {
     expect(revealSpy.revealLocation.mock.calls[0][1]).toEqual(pending.location);
     expect(onRevealApplied).toHaveBeenCalledTimes(1);
   });
+
+  it('does not apply a compose range to an editor mounted for the env tab', () => {
+    const onRevealApplied = vi.fn();
+    const { rerender } = render(
+      <EditorView
+        {...makeProps({
+          editingCompose: true,
+          activeTab: 'env',
+          content: 'disk content',
+          pendingReveal: pending,
+          onRevealApplied,
+        })}
+      />,
+    );
+    expect(revealSpy.revealLocation).not.toHaveBeenCalled();
+    expect(onRevealApplied).not.toHaveBeenCalled();
+
+    rerender(
+      <EditorView
+        {...makeProps({
+          editingCompose: true,
+          activeTab: 'compose',
+          content: 'disk content',
+          pendingReveal: pending,
+          onRevealApplied,
+        })}
+      />,
+    );
+    expect(revealSpy.revealLocation).toHaveBeenCalledTimes(1);
+    expect(onRevealApplied).toHaveBeenCalledTimes(1);
+  });
 });

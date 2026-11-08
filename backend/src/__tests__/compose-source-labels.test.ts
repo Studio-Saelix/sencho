@@ -501,4 +501,90 @@ describe('authored label contributions', () => {
     expect(correlateLabel(project, 'api', 'owner').origin).toBeUndefined();
     expect(correlateLabel(project, 'api', 'owner').reason).toBe('interpolated');
   });
+
+  it('refuses an earlier literal when a later layer adds a dynamic list key', async () => {
+    writeStack('label-dynamic-later', {
+      'compose.yaml': 'services:\n  api:\n    image: nginx:1\n    label_file: app.labels\n    labels:\n      owner: base-literal\n',
+      'compose.override.yaml': 'services:\n  api:\n    labels:\n      - "${LABEL_KEY}=dynamic-later"\n',
+      'app.labels': 'owner=file\n',
+    });
+    const project = await buildAuthoredProject(nodeId, 'label-dynamic-later');
+    expect(project.labels.get('api')!.winners.owner).toBeUndefined();
+    expect(correlateLabel(project, 'api', 'owner').reason).toBe('interpolated');
+  });
+
+  it('refuses a label-file winner when an unresolved list alias carries a dynamic key', async () => {
+    writeStack('label-dynamic-alias', {
+      'compose.yaml': [
+        'x-label: &label "${LABEL_KEY}=inline"',
+        'services:',
+        '  api:',
+        '    image: nginx:1',
+        '    label_file: app.labels',
+        '    labels:',
+        '      - *label',
+        '',
+      ].join('\n'),
+      'app.labels': 'owner=file\n',
+    });
+    const project = await buildAuthoredProject(nodeId, 'label-dynamic-alias');
+    expect(project.labels.get('api')!.hasDynamicKeys).toBe(true);
+    expect(project.labels.get('api')!.winners.owner).toBeUndefined();
+    expect(correlateLabel(project, 'api', 'owner').reason).toBe('interpolated');
+  });
+
+  it('normalizes an escaped dollar in a list-form label key', async () => {
+    writeStack('label-escaped-dollar', {
+      'compose.yaml': 'services:\n  api:\n    image: nginx:1\n    label_file: app.labels\n    labels:\n      - "$$KEY=inline"\n',
+      'app.labels': '$KEY=file\n',
+    });
+    const project = await buildAuthoredProject(nodeId, 'label-escaped-dollar');
+    const labels = project.labels.get('api')!;
+    expect(labels.hasDynamicKeys).toBe(false);
+    expect(labels.winners.$KEY?.source).toBe('inline');
+    expect(correlateLabel(project, 'api', '$KEY').origin?.file).toBe('compose.yaml');
+    expect(correlateLabel(project, 'api', '$$KEY').origin).toBeUndefined();
+  });
+
+  it('keeps label keys that shadow Object.prototype members', async () => {
+    writeStack('label-prototype-keys', {
+      'compose.yaml': [
+        'services:',
+        '  api:',
+        '    image: nginx:1',
+        '    labels:',
+        '      toString: a',
+        '      constructor: b',
+        '      __proto__: c',
+        '',
+      ].join('\n'),
+    });
+    const project = await buildAuthoredProject(nodeId, 'label-prototype-keys');
+    const labels = project.labels.get('api')!;
+    for (const key of ['toString', 'constructor', '__proto__']) {
+      expect(labels.winners[key]?.file).toBe('compose.yaml');
+      expect(correlateLabel(project, 'api', key).origin?.file).toBe('compose.yaml');
+    }
+  });
+
+  it('lets an inline label written through an anchored map key beat a label file', async () => {
+    writeStack('label-alias-key', {
+      'compose.yaml': [
+        'x-key: &key owner',
+        'services:',
+        '  api:',
+        '    image: nginx:1',
+        '    label_file: app.labels',
+        '    labels:',
+        '      ? *key',
+        '      : inline',
+        '',
+      ].join('\n'),
+      'app.labels': 'owner=file\n',
+    });
+    const project = await buildAuthoredProject(nodeId, 'label-alias-key');
+    const labels = project.labels.get('api')!;
+    expect(labels.winners.owner?.source).toBe('inline');
+    expect(correlateLabel(project, 'api', 'owner').origin?.file).toBe('compose.yaml');
+  });
 });

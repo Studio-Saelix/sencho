@@ -493,6 +493,62 @@ describe('buildAuthoredProject resolution', () => {
     expect(locateFinding(project, hit('image-latest', { service: 'api', sourcePath: 'api' }))?.file).toBe('base.yaml');
   });
 
+  it('projects declarations through an eight-level merge chain the node walk supports', async () => {
+    const chain = [
+      'x-1: &x1',
+      '  extends:',
+      '    file: base.yaml',
+      '    service: base',
+      '  label_file: app.labels',
+      '  env_file: app.env',
+      '  labels:',
+      '    deep: "1"',
+    ];
+    for (let level = 2; level <= 8; level += 1) {
+      chain.push(`x-${level}: &x${level} {<<: *x${level - 1}}`);
+    }
+    chain.push('services:', '  api:', '    <<: *x8', '');
+    writeStack('merge-chain-eight', {
+      'compose.yaml': chain.join('\n'),
+      'base.yaml': 'services:\n  base:\n    image: nginx:1\n',
+      'app.labels': 'file=from-file\n',
+      'app.env': 'A=1\n',
+    });
+    const project = await buildAuthoredProject(nodeId, 'merge-chain-eight');
+    expect(project.partial).toBe(false);
+    expect(correlateField(project, 'api', 'image', 'nginx:1').origin?.file).toBe('base.yaml');
+    expect(correlateLabel(project, 'api', 'file').origin?.file).toBe('app.labels');
+    expect(correlateLabel(project, 'api', 'deep').origin?.file).toBe('compose.yaml');
+  });
+
+  it('projects declarations through an alias to a merge chain', async () => {
+    const chain = [
+      'x-1: &x1',
+      '  api:',
+      '    extends:',
+      '      file: base.yaml',
+      '      service: base',
+      '    label_file: app.labels',
+      '    labels:',
+      '      alias: "1"',
+    ];
+    for (let level = 2; level <= 6; level += 1) {
+      chain.push(`x-${level}: &x${level} {<<: *x${level - 1}}`);
+    }
+    chain.push('services: *x6', '');
+    writeStack('merge-chain-alias', {
+      'compose.yaml': chain.join('\n'),
+      'base.yaml': 'services:\n  base:\n    image: nginx:1\n',
+      'app.labels': 'file=from-file\n',
+    });
+    const project = await buildAuthoredProject(nodeId, 'merge-chain-alias');
+    expect(project.partial).toBe(false);
+    expect(correlateField(project, 'api', 'image', 'nginx:1').origin?.file).toBe('base.yaml');
+    expect(correlateLabel(project, 'api', 'file').origin?.file).toBe('app.labels');
+    expect(correlateLabel(project, 'api', 'alias').origin?.file).toBe('compose.yaml');
+  });
+
+
   it('refuses a declaration merge chain past the supported depth', async () => {
     const chain = ['x-1: &x1', '  label_file: app.labels'];
     for (let level = 2; level <= 20; level += 1) {
@@ -579,15 +635,17 @@ describe('buildAuthoredProject resolution', () => {
       const sibling = [
         '  api.image:',
         '    image: busybox:1',
-        '    labels:',
-        '      team: sibling-team',
+        '  api.labels.team:',
+        '    image: busybox:2',
+        '  api.environment.A.B:',
+        '    image: busybox:3',
       ];
       return ['services:', ...(apiFirst ? [...api, ...sibling] : [...sibling, ...api]), ''].join('\n');
     };
     for (const [stack, apiFirst] of [['dotted-sibling-first', true], ['dotted-sibling-last', false]] as const) {
       writeStack(stack, { 'compose.yaml': fixture(apiFirst) });
       const project = await buildAuthoredProject(nodeId, stack);
-      const apiImageLine = apiFirst ? 3 : 7;
+      const apiImageLine = apiFirst ? 3 : 9;
       const siblingImageLine = apiFirst ? 9 : 3;
       expect(correlateField(project, 'api', 'image', 'nginx:1').origin).toMatchObject({
         file: 'compose.yaml', range: { line: apiImageLine },
@@ -595,18 +653,44 @@ describe('buildAuthoredProject resolution', () => {
       expect(correlateField(project, 'api.image', 'image', 'busybox:1').origin).toMatchObject({
         file: 'compose.yaml', range: { line: siblingImageLine },
       });
-      expect(correlateLabel(project, 'api', 'team').origin?.range.line).toBe(apiFirst ? 5 : 9);
-      expect(correlateLabel(project, 'api.image', 'team').origin?.range.line).toBe(apiFirst ? 11 : 5);
+      expect(correlateField(project, 'api.labels.team', 'image', 'busybox:2')).toMatchObject({
+        origin: { file: 'compose.yaml' },
+      });
+      expect(correlateLabel(project, 'api', 'team').origin?.range.line).toBe(apiFirst ? 5 : 11);
+      expect(correlateLabel(project, 'api.image', 'team').origin).toBeUndefined();
       const env = locateFinding(project, hit('env-literal-dollar', { service: 'api', sourcePath: 'A.B' }));
-      expect(env?.line).toBe(apiFirst ? 7 : 11);
+      expect(env?.line).toBe(apiFirst ? 7 : 13);
       expect(locateFinding(project, hit('image-latest', { service: 'api', sourcePath: 'api' }))?.line)
         .toBe(apiImageLine);
       expect(locateFinding(project, hit('image-latest', { service: 'api.image', sourcePath: 'api.image' }))?.line)
         .toBe(siblingImageLine);
-      // `services.api.image` now names two authored structures, so an edit
-      // origin from that dot path cannot pick one.
-      expect(resolveEditOrigin(project, 'services.api.image')).toEqual({ ok: false, reason: 'no-authored-source' });
+      // Each dot path now names two authored structures, so an edit origin
+      // from it cannot pick one; the refusal names that ambiguity.
+      expect(resolveEditOrigin(project, 'services.api.image')).toEqual({
+        ok: false, reason: 'ambiguous-multiple-sources',
+      });
+      expect(resolveEditOrigin(project, 'services.api.labels.team')).toEqual({
+        ok: false, reason: 'ambiguous-multiple-sources',
+      });
     }
+  });
+
+  it('keeps a dotted sibling distinct from an inherited base field', async () => {
+    writeStack('dotted-inherited', {
+      'compose.yaml': 'services:\n  api:\n    extends:\n      file: base.yaml\n      service: api\n',
+      'base.yaml': [
+        'services:',
+        '  api:',
+        '    image: nginx:1',
+        '  api.image:',
+        '    image: busybox:1',
+        '',
+      ].join('\n'),
+    });
+    const project = await buildAuthoredProject(nodeId, 'dotted-inherited');
+    expect(correlateField(project, 'api', 'image', 'nginx:1').origin).toMatchObject({
+      file: 'base.yaml', range: { line: 3 },
+    });
   });
 
   it('scopes variable references to the named service when a dotted sibling exists', async () => {
@@ -628,11 +712,14 @@ describe('buildAuthoredProject resolution', () => {
 
   it('keeps dotted sibling ownership across project layers', async () => {
     writeStack('dotted-layered', {
-      'compose.yaml': 'services:\n  api.image:\n    image: busybox:1\n',
-      'compose.override.yaml': 'services:\n  api:\n    image: redis:7\n',
+      'compose.yaml': 'services:\n  api:\n    image: nginx:1\n  api.image:\n    image: busybox:1\n',
+      'compose.override.yaml': 'services:\n  api:\n    restart: always\n',
     });
     const project = await buildAuthoredProject(nodeId, 'dotted-layered');
-    expect(correlateField(project, 'api', 'image', 'redis:7').origin?.file).toBe('compose.override.yaml');
+    expect(correlateField(project, 'api', 'image', 'nginx:1').origin).toMatchObject({
+      file: 'compose.yaml', range: { line: 3 },
+    });
     expect(correlateField(project, 'api.image', 'image', 'busybox:1').origin?.file).toBe('compose.yaml');
+    expect(correlateField(project, 'api', 'restart', 'always').origin?.file).toBe('compose.override.yaml');
   });
 });

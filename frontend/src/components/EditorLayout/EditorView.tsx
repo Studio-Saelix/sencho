@@ -836,6 +836,7 @@ export function EditorView(props: EditorViewProps) {
                                                     onMount={(editor) => {
                                                         monacoEditorRef.current = editor;
                                                         if (pendingReveal?.target.surface === 'compose'
+                                                            && activeTab === 'compose'
                                                             && (pendingReveal.revision === undefined || safeContent === pendingReveal.revision)) {
                                                             revealLocation(editor, pendingReveal.location);
                                                             onRevealApplied?.();

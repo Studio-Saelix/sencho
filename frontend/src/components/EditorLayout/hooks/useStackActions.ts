@@ -389,6 +389,9 @@ export function useStackActions(options: UseStackActionsOptions) {
   const composeOriginalContentRef = useRef(editorState.originalContent);
   // A later location click supersedes an earlier one still fetching the file.
   const authoredLocationRequestRef = useRef(0);
+  // A reveal belongs to the stack/node it was requested on; a switch clears it
+  // so a pending range cannot open against the new stack's files.
+  const revealOwnerRef = useRef(`${stackListState.selectedFile ?? ''}\u0000${activeNode?.id ?? ''}`);
   // Same-owner arbitration: soft refresh, Retry, and detail load can overlap
   // for one stack/node; only the newest generation may apply success or failure.
   const containersFetchGenRef = useRef(0);
@@ -398,6 +401,12 @@ export function useStackActions(options: UseStackActionsOptions) {
     containersRef.current = editorState.containers;
     composeContentRef.current = editorState.content;
     composeOriginalContentRef.current = editorState.originalContent;
+    const owner = `${stackListState.selectedFile ?? ''}\u0000${activeNode?.id ?? ''}`;
+    if (revealOwnerRef.current !== owner) {
+      revealOwnerRef.current = owner;
+      authoredLocationRequestRef.current += 1;
+      editorState.setPendingReveal(null);
+    }
   });
 
   // Cancel an open Save & Reapply confirmation if the active node or selected
@@ -2318,6 +2327,12 @@ export function useStackActions(options: UseStackActionsOptions) {
           refuseForUnsavedEdits();
           return;
         }
+        // Adopt the same revision metadata loadFileCore uses, or the next
+        // save would send a stale If-Match and be refused as a concurrent
+        // edit. The file read here is the current disk state even when the
+        // buffer text happens to match it.
+        editorState.setComposeEtag(res.headers.get('etag'));
+        editorState.setComposeFilename(res.headers.get('x-compose-file'));
         if (composeContentRef.current !== text) {
           // The buffer is clean but older than disk: refresh it so the range
           // applies to the content the report just located.
@@ -2329,6 +2344,7 @@ export function useStackActions(options: UseStackActionsOptions) {
       } catch {
         if (request !== authoredLocationRequestRef.current) return;
         if (selectedFileRef.current !== stackFile || activeNodeIdRef.current !== opNodeId) return;
+        editorState.setPendingReveal(null);
         toast.error('Could not confirm this location is still current.');
       }
     })();

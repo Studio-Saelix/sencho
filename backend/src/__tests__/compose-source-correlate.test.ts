@@ -222,7 +222,8 @@ describe('resolveEditOrigin', () => {
     const contribution = {
       key: 'a', source: 'label-file' as const, file: 'app.labels',
       range: { line: 1, column: 1, endLine: 1, endColumn: 4 },
-      fileIndex: 0, layerIndex: 0, writability: 'writable' as const, hasInterpolation: false, overridden: false, via: 'own' as const,
+      fileIndex: 0, layerIndex: 0, writability: 'writable' as const, hasInterpolation: false,
+      keyHasInterpolation: false, overridden: false, via: 'own' as const,
     };
     const labels = new Map([['api', {
       service: 'api',
@@ -232,11 +233,13 @@ describe('resolveEditOrigin', () => {
         a: {
           key: 'a', source: 'label-file' as const, file: 'app.labels',
           range: { line: 1, column: 1, endLine: 1, endColumn: 4 },
-          fileIndex: 0, layerIndex: 0, writability: 'writable' as const, hasInterpolation: false, overridden: false, via: 'own' as const,
+          fileIndex: 0, layerIndex: 0, writability: 'writable' as const, hasInterpolation: false,
+          keyHasInterpolation: false, overridden: false, via: 'own' as const,
         },
       },
       sharedFiles: [],
       ambiguity: {},
+      hasDynamicKeys: false,
       unparsedLabelFiles: [],
       outsideLabelFiles: ['../outside.labels'],
     }]]);
@@ -253,6 +256,7 @@ describe('resolveEditOrigin', () => {
       winners: {},
       sharedFiles: [],
       ambiguity: { a: 'duplicate-key' as const },
+      hasDynamicKeys: false,
       unparsedLabelFiles: [],
       outsideLabelFiles: [],
     }]]);
@@ -260,5 +264,15 @@ describe('resolveEditOrigin', () => {
     const withLabels = { ...base, labels };
     expect(correlateLabel(withLabels, 'api', 'a').reason).toBe('ambiguous-multiple-sources');
     expect(resolveEditOrigin(withLabels, 'services.api.labels.a')).toEqual({ ok: false, reason: 'ambiguous-multiple-sources' });
+  });
+
+  it('resolves a sequence-item path from the displayed authored path', () => {
+    const withPorts = project([{
+      file: 'compose.yaml',
+      source: 'services:\n  api:\n    image: nginx:1\n    ports:\n      - "8080:80"\n',
+    }]);
+    const edit = resolveEditOrigin(withPorts, 'services.api.ports[0]');
+    expect(edit.ok).toBe(true);
+    if (edit.ok) expect(edit.origin.path).toBe('services.api.ports[0]');
   });
 });

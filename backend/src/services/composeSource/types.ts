@@ -52,13 +52,12 @@ export type AuthoredNodeKind = 'mapping' | 'sequence' | 'scalar' | 'alias';
 
 /**
  * One structural step of an authored path: a mapping key exactly as written, or
- * a sequence index. Dots and brackets inside a key stay data, so `services.api.image`
- * (a field of `api`) and `services.api.image` (a service whose name contains a
- * dot) are different identities.
+ * a sequence index. Dots and brackets inside a key stay data, so the segment
+ * list `['services','api','image']` (a field of `api`) and
+ * `['services','api.image']` (a service whose name contains a dot) are
+ * different identities even though their display paths look alike.
  */
-export type AuthoredPathSegment = string | number;
-
-export interface AuthoredNode {
+export type AuthoredPathSegment = string | number;export interface AuthoredNode {
   /** Dot path for display and the edit-origin contract, e.g. `services.api.image`
    *  or `services.api.ports[0]`. Not an identity: a service name may contain a
    *  dot, so internal lookup uses `segments`. */
@@ -108,6 +107,9 @@ export interface AuthoredFileSource {
   /** Merge order, 0 first. */
   layerIndex: number;
   state: SourceFileState;
+  /** Keyed by `authoredNodeKey(node.segments)`; `node.path` is display only and
+   *  is not unique when a key contains a dot. Consumers outside this module
+   *  should use `authoredNodeKey` with the segments they mean. */
   nodes: ReadonlyMap<string, AuthoredNode>;
   diagnostics: AuthoredDiagnostic[];
   /** Top-level service keys this file declares, when the walk enumerated the
@@ -138,7 +140,7 @@ export interface LabelContribution {
   hasInterpolation: boolean;
   /** The key itself is built from a variable (list-form labels only): Compose
    *  may resolve it to any effective key, so it can supersede a literal winner. */
-  keyHasInterpolation?: boolean;
+  keyHasInterpolation: boolean;
   overridden: boolean;
   via: 'own' | 'extends' | 'merge';
   /** True when the backing label file is used by more than one service. */
@@ -164,7 +166,7 @@ export interface ServiceAuthoredLabels {
   /** A label key is built from a variable, so some effective key this service
    *  declares has no known literal name. Consumers must refuse a key that has
    *  no literal winner for this service. */
-  hasDynamicKeys?: boolean;
+  hasDynamicKeys: boolean;
   /** Label files this service names that could not be parsed or read. */
   unparsedLabelFiles: string[];
   /** Label declarations this service names that leave the managed boundary. */

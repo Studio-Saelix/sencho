@@ -17,8 +17,8 @@ import { sha256Hex } from '../../utils/hashing';
 import { parseComposeDocument, parseLabelFile, MAX_COMPOSE_PARSE_BYTES, diagnosticMessage } from './parseComposeDocument';
 import { resolveProjectInputs, stackRelativePath } from './resolveProjectInputs';
 import type {
-  AuthoredDiagnostic, AuthoredFileSource, AuthoredProject, AuthoredServiceDefinition, LabelContribution,
-  ParsedLabelFile, ServiceAuthoredLabels, SourceFileKind, SourceWritability,
+  AuthoredDiagnostic, AuthoredFileSource, AuthoredProject, AuthoredServiceDefinition, LabelAmbiguity,
+  LabelContribution, ParsedLabelFile, ServiceAuthoredLabels, SourceFileKind, SourceWritability,
 } from './types';
 
 const MAX_PROJECT_FILES = 64;
@@ -520,9 +520,10 @@ function assembleLabels(state: BuildState): Map<string, ServiceAuthoredLabels> {
       service,
       contributions: [],
       contributionsByKey: new Map(),
-      winners: {},
+      winners: Object.create(null) as Record<string, LabelContribution>,
       sharedFiles: [],
-      ambiguity: {},
+      ambiguity: Object.create(null) as Record<string, LabelAmbiguity>,
+      hasDynamicKeys: false,
       unparsedLabelFiles: [],
       outsideLabelFiles: [],
     };

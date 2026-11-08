@@ -196,17 +196,63 @@ describe('parseComposeDocument', () => {
       'networks:',
       '  edge:',
       '    driver: bridge',
+      '    x:',
+      '      driver: overlay',
       '  edge.x:',
       '    external: true',
       'configs:',
-      '  app.conf:',
+      '  app:',
       '    file: ./app.conf',
+      '  app.file:',
+      '    file: ./other.conf',
       '',
     ].join('\n'));
     expect(parsed.nodes.get(authoredNodeKey(['networks', 'edge', 'driver']))?.valueRange?.line).toBe(3);
-    expect(parsed.nodes.get(authoredNodeKey(['networks', 'edge.x']))?.keyRange?.line).toBe(4);
-    expect(parsed.nodes.get(authoredNodeKey(['configs', 'app.conf', 'file']))?.valueRange?.line).toBe(8);
-    expect(parsed.resources).toContainEqual({ kind: 'config', key: 'app.conf', file: './app.conf', range: expect.anything() });
+    expect(parsed.nodes.get(authoredNodeKey(['networks', 'edge', 'x']))?.keyRange?.line).toBe(4);
+    expect(parsed.nodes.get(authoredNodeKey(['networks', 'edge.x']))?.keyRange?.line).toBe(6);
+    expect(parsed.nodes.get(authoredNodeKey(['configs', 'app', 'file']))?.valueRange?.line).toBe(10);
+    expect(parsed.nodes.get(authoredNodeKey(['configs', 'app.file']))?.keyRange?.line).toBe(11);
+    expect(parsed.resources).toEqual(expect.arrayContaining([
+      expect.objectContaining({ kind: 'config', key: 'app', file: './app.conf' }),
+      expect.objectContaining({ kind: 'config', key: 'app.file', file: './other.conf' }),
+    ]));
+  });
+
+  it('resolves an anchored scalar used as a mapping key instead of dropping it', () => {
+    const parsed = parse([
+      'x-key: &k owner',
+      'x-env: &e FOO',
+      'services:',
+      '  api:',
+      '    image: nginx:1',
+      '    labels:',
+      '      ? *k',
+      '      : inline',
+      '    environment:',
+      '      ? *e',
+      '      : bar',
+      '',
+    ].join('\n'));
+    expect(parsed.state).toBe('parsed');
+    expect(parsed.inlineLabels).toContainEqual(expect.objectContaining({
+      service: 'api', key: 'owner', form: 'map',
+    }));
+    expect(parsed.nodes.get(authoredNodeKey(['services', 'api', 'environment', 'FOO']))?.valueRange?.line).toBe(11);
+  });
+
+  it('does not treat a nested services map under an empty key as the project map', () => {
+    const parsed = parse([
+      '"":',
+      '  services:',
+      '    ghost:',
+      '      image: nginx:1',
+      'services:',
+      '  api:',
+      '    image: nginx:1',
+      '',
+    ].join('\n'));
+    expect(parsed.serviceNames).toEqual(['api']);
+    expect(authoredNodeKey([''])).not.toBe(authoredNodeKey([]));
   });
 
   it('keeps UTF-16 column parity on a multibyte line', () => {

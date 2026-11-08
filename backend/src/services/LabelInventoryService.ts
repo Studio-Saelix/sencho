@@ -330,7 +330,7 @@ export function authoredOriginsFor(
 ): Record<string, LabelAuthoredOrigin> | undefined {
   if (!project) return undefined;
   const serviceLabels = project.labels.get(service);
-  const out: Record<string, LabelAuthoredOrigin> = {};
+  const out: Record<string, LabelAuthoredOrigin> = Object.create(null) as Record<string, LabelAuthoredOrigin>;
   for (const key of keys) {
     const result = correlateLabel(project, service, key);
     if (serviceLabels && isActingReason(result.reason) && result.origin) {

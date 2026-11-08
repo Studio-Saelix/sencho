@@ -166,7 +166,7 @@ The same controls apply to the `compose.yaml` and `.env` editors.
 
 ## Opening a reported location
 
-Compose Doctor findings and Compose Labels rows can open the exact authored line. A link in the form `compose.override.yaml:14` opens the **Files** tab on that file and selects the range; a link to the primary Compose file opens the **compose.yaml** tab instead. A link never applies a range to a buffer that no longer matches the file the range was located in: a clean primary Compose buffer is re-read and refreshed first, and one with unsaved edits keeps them and opens the tab without moving the selection until you save or discard. If the Files viewer has unsaved changes, its usual discard confirmation appears before the file is re-read and the range applied.
+Compose Doctor findings and Compose Labels rows can open the exact authored line. A link in the form `compose.override.yaml:14` opens the **Files** tab on that file and selects the range; a link to the primary Compose file opens the **compose.yaml** tab instead. A link never applies a range to a buffer that no longer matches the file it was located in: a clean primary Compose buffer is re-read and refreshed first, while one with unsaved edits keeps them and opens the tab without moving the selection. If the Files viewer has unsaved changes, its usual discard confirmation appears before the file is re-read and the range applied. Saving or discarding a dirty buffer does not apply the pending range; click the link again.
 
 ## Diff preview before save
 

@@ -547,6 +547,10 @@ describe('StackFileExplorer source navigation and late root discovery', () => {
     await userEvent.click(screen.getByRole('button', { name: /discard and open/i }));
     // Confirmation is the only path that replaces the dirty buffer.
     expect(h.fileViewerReloadKey).toBeGreaterThan(before);
+
+    // Once the viewer reports the reread as clean, it receives the range.
+    fireEvent.click(screen.getByText('mark-clean'));
+    await waitFor(() => expect(h.fileViewerReveal).toEqual(samePath.location));
   });
 });
 

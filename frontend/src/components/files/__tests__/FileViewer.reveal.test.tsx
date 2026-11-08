@@ -186,9 +186,10 @@ describe('FileViewer reveal lifecycle', () => {
   });
 
   it('rereads an already-loaded path before applying a reveal', async () => {
+    const fresh = deferred<FileContentResult>();
     mockReadFile
       .mockResolvedValueOnce(textResult('stale content'))
-      .mockResolvedValueOnce(textResult('fresh content'));
+      .mockImplementationOnce(() => fresh.promise);
     const onRevealApplied = vi.fn();
 
     const { rerender } = render(
@@ -206,9 +207,13 @@ describe('FileViewer reveal lifecycle', () => {
       />,
     );
 
-    // The viewer must not reuse the buffer loaded before the reveal; it reads
-    // the path again and applies the range only after that read completes.
+    // The viewer must not reuse the buffer loaded before the reveal; it waits
+    // for the reread and applies the range only after that read completes.
     await waitFor(() => expect(mockReadFile).toHaveBeenCalledTimes(2));
+    expect(onRevealApplied).not.toHaveBeenCalled();
+    expect(h.reveals).toHaveLength(0);
+
+    fresh.resolve(textResult('fresh\ncontent with one inserted line\nmore'));
     await waitFor(() => expect(onRevealApplied).toHaveBeenCalledTimes(1));
     expect(h.editors[h.editors.length - 1].revealRangeInCenter).toHaveBeenCalledWith(expectedRange);
   });

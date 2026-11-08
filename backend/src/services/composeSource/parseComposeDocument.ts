@@ -72,11 +72,15 @@ export function authoredNodeKey(segments: readonly AuthoredPathSegment[]): strin
       key += `[${segment}]`;
       continue;
     }
-    const escaped = segment
-      .replace(/\\/g, '\\\\')
-      .replace(/\./g, '\\.')
-      .replace(/\[/g, '\\[')
-      .replace(/\]/g, '\\]');
+    // An empty key still has an identity; `\0` cannot be produced by a
+    // non-empty key because a backslash is escaped below.
+    const escaped = segment === ''
+      ? '\\0'
+      : segment
+        .replace(/\\/g, '\\\\')
+        .replace(/\./g, '\\.')
+        .replace(/\[/g, '\\[')
+        .replace(/\]/g, '\\]');
     key = key === '' ? escaped : `${key}.${escaped}`;
   }
   return key;
@@ -249,7 +253,7 @@ interface WalkContext {
  * the file `parse-failed` even though the YAML library accepted it.
  */
 const TRUNCATING_DIAGNOSTICS: ReadonlySet<AuthoredDiagnosticCode> = new Set<AuthoredDiagnosticCode>([
-  'alias-cycle', 'alias-budget', 'alias-unresolved', 'too-deep', 'bounds-exceeded',
+  'alias-cycle', 'alias-budget', 'alias-unresolved', 'too-deep', 'bounds-exceeded', 'unsupported-syntax',
 ]);
 
 /** Charge one alias/merge traversal. False once the document's shared budget is spent. */
@@ -312,6 +316,35 @@ function resolveAlias(ctx: WalkContext, alias: Alias): Node | null {
     return null;
   }
   return resolved;
+}
+
+/**
+ * The text of a mapping key. Compose accepts an anchored scalar used as a key
+ * (`? *key`), so an alias key must resolve to its scalar text; an alias this
+ * reader cannot turn into a key marks the file unresolved rather than dropping
+ * the declaration silently.
+ */
+function authoredKeyText(ctx: WalkContext, node: Node | null | undefined): string | undefined {
+  if (!node) return undefined;
+  const direct = scalarText(node);
+  if (direct !== undefined) return direct;
+  if (!isAlias(node)) return undefined;
+  if (ctx.aliasTrail.has(node)) {
+    reportAliasCycle(ctx, node);
+    return undefined;
+  }
+  if (!chargeAliasWork(ctx)) return undefined;
+  const resolved = resolveAlias(ctx, node as Alias);
+  if (!resolved) return undefined;
+  const text = scalarText(resolved);
+  if (text !== undefined) return text;
+  ctx.diagnostics.push({
+    file: '',
+    code: 'unsupported-syntax',
+    message: diagnosticMessage('unsupported-syntax'),
+    ...(nodeRange(ctx.lineCounter, node) ? { range: nodeRange(ctx.lineCounter, node) } : {}),
+  });
+  return undefined;
 }
 
 function recordNode(
@@ -505,12 +538,14 @@ function walkMap(
   const ownPairs = own.filter(pair => scalarText(pair.key as Node) !== '<<');
 
   const emit = (pair: Pair, pairVia: 'own' | 'merge' | 'alias'): void => {
-    const keyText = scalarText(pair.key as Node);
+    const keyText = authoredKeyText(ctx, pair.key as Node);
     if (keyText === undefined) return;
     // The service-name set comes from the walk, not from the plain projection:
     // a `services` map supplied through an alias or a root merge is still
-    // enumerated here, and a deep VALUE never hides its own key.
-    if (path === 'services') ctx.serviceNames.add(keyText);
+    // enumerated here, and a deep VALUE never hides its own key. The check is
+    // structural: an empty or dotted top-level key that contains a `services`
+    // map is not the project's own services map.
+    if (segments.length === 1 && segments[0] === 'services') ctx.serviceNames.add(keyText);
     const childSegments = [...segments, keyText];
     const childPath = displayAuthoredPath(childSegments);
     if (pairVia === 'merge' && ctx.nodes.has(authoredNodeKey(childSegments))) return;
@@ -641,16 +676,21 @@ function collectDeclarations(
             // A bare item is a real Compose label with an empty value. It must
             // keep its place in the list: dropping it would shift every later
             // declaration onto the wrong sequence index and line.
-            const key = eq === -1 ? text : text.slice(0, eq);
+            const rawKey = eq === -1 ? text : text.slice(0, eq);
+            // Compose interpolates the whole list item, so `$$` becomes one
+            // literal dollar in the effective key. The key itself is unknown
+            // only when a real variable (not an escaped dollar) is present.
+            const key = rawKey.replace(/\$\$/g, '$');
+            const interpolationProbe = rawKey.replace(/\$\$/g, '');
             result.inlineLabels.push({
               service,
               key,
               range: { line: 1, column: 1, endLine: 1, endColumn: 1 },
               form: 'list',
-              hasInterpolation: hasInterpolationSyntax(text),
+              hasInterpolation: hasInterpolationSyntax(text.replace(/\$\$/g, '')),
               // Compose interpolates the whole list item, so a variable in the
               // key portion can resolve to any effective label key.
-              keyHasInterpolation: hasInterpolationSyntax(key),
+              keyHasInterpolation: hasInterpolationSyntax(interpolationProbe),
             });
           }
         } else {
@@ -746,7 +786,7 @@ function valueToPlain(
       }
     }
     for (const pair of pairs.filter(entry => scalarText(entry.key as Node) !== '<<')) {
-      const key = scalarText(pair.key as Node);
+      const key = authoredKeyText(ctx, pair.key as Node);
       if (key !== undefined) out[key] = valueToPlain(ctx, pair.value as Node, mergeDepth, trail);
     }
     return out;
