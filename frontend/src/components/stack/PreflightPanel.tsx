@@ -341,7 +341,7 @@ export default function PreflightPanel({
       setLoadError(false);
       const current = freshFinding(fresh, finding);
       if (!current?.location) {
-        toast.info('This location is no longer current. Run preflight again to restore it.');
+        toast.info('This location is no longer current. The report was refreshed and no longer shows a link for this finding.');
         return;
       }
       onOpenLocation(current.location);

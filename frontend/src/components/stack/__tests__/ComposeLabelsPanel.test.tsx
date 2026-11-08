@@ -675,9 +675,9 @@ describe('ComposeLabelsPanel io.sencho.* status', () => {
     });
     expect(onOpenLocation).not.toHaveBeenCalled();
     // The panel refreshed its own list before the toast, so the toast states
-    // that fact instead of telling the operator to reopen the panel.
+    // that fact and never asks for a refresh the panel already did.
     expect(toast.info).toHaveBeenCalledWith(
-      'This location is no longer current. The label list was refreshed and no longer shows a link for this label.',
+      'This location is no longer current. The label list was refreshed and no longer shows a link for this label on this service.',
     );
   });
 
@@ -714,6 +714,7 @@ describe('ComposeLabelsPanel io.sencho.* status', () => {
       expect(onOpenLocation).toHaveBeenCalledWith(expect.objectContaining({ file: 'compose.yaml', line: 9 }));
     });
     expect(onOpenLocation).not.toHaveBeenCalledWith(expect.objectContaining({ line: 6 }));
+    expect(toast.info).not.toHaveBeenCalled();
   });
 
   it('ignores a superseded label click response that arrives after a later one', async () => {
@@ -751,6 +752,7 @@ describe('ComposeLabelsPanel io.sencho.* status', () => {
     resolveFirst({ ok: true, json: async () => inventory(3, 6) } as Response);
     await new Promise(resolve => setTimeout(resolve, 0));
     expect(onOpenLocation).toHaveBeenCalledTimes(1);
+    expect(toast.info).not.toHaveBeenCalled();
   });
 
   it('drops a label click response from a stack the panel no longer shows', async () => {
@@ -784,6 +786,7 @@ describe('ComposeLabelsPanel io.sencho.* status', () => {
     await new Promise(resolve => setTimeout(resolve, 0));
     expect(onOpenLocation).not.toHaveBeenCalled();
     expect(screen.queryByTestId('source-location-link')).toBeNull();
+    expect(toast.info).not.toHaveBeenCalled();
   });
 
   it('drops a label click response from a node the panel no longer shows', async () => {
@@ -811,6 +814,7 @@ describe('ComposeLabelsPanel io.sencho.* status', () => {
     resolvePending({ ok: true, json: async () => located } as Response);
     await new Promise(resolve => setTimeout(resolve, 0));
     expect(onOpenLocation).not.toHaveBeenCalled();
+    expect(toast.info).not.toHaveBeenCalled();
   });
 
   it('opens nothing when the panel unmounts before a label read returns', async () => {
@@ -837,6 +841,7 @@ describe('ComposeLabelsPanel io.sencho.* status', () => {
     resolvePending({ ok: true, json: async () => located } as Response);
     await new Promise(resolve => setTimeout(resolve, 0));
     expect(onOpenLocation).not.toHaveBeenCalled();
+    expect(toast.info).not.toHaveBeenCalled();
   });
 
   it('opens nothing when a label location cannot be confirmed', async () => {

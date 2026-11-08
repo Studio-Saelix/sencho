@@ -451,7 +451,9 @@ describe('PreflightPanel', () => {
       expect(screen.queryByRole('button', { name: /^Open / })).toBeNull();
     });
     expect(onOpenLocation).not.toHaveBeenCalled();
-    expect(toast.info).toHaveBeenCalled();
+    expect(toast.info).toHaveBeenCalledWith(
+      'This location is no longer current. The report was refreshed and no longer shows a link for this finding.',
+    );
   });
 
   it('opens the refreshed range when the file moved the finding', async () => {
@@ -481,6 +483,7 @@ describe('PreflightPanel', () => {
       expect(onOpenLocation).toHaveBeenCalledWith(expect.objectContaining({ file: 'compose.override.yaml', line: 17 }));
     });
     expect(onOpenLocation).not.toHaveBeenCalledWith(expect.objectContaining({ line: 14 }));
+    expect(toast.info).not.toHaveBeenCalled();
   });
 
   it('opens the clicked row when two findings share an identity', async () => {
@@ -512,6 +515,7 @@ describe('PreflightPanel', () => {
       expect(onOpenLocation).toHaveBeenCalledWith(expect.objectContaining({ line: 9 }));
     });
     expect(onOpenLocation).not.toHaveBeenCalledWith(expect.objectContaining({ line: 12 }));
+    expect(toast.info).not.toHaveBeenCalled();
   });
 
   it('ignores a superseded click response that arrives after a later one', async () => {
