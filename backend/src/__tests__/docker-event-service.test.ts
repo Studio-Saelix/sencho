@@ -308,6 +308,44 @@ describe('DockerEventService - die classification', () => {
         expect(crashCall).toBeUndefined();
     });
 
+    it('keeps kill evidence when the restart lands inside the die grace window', async () => {
+        service = new DockerEventService(1, 'local');
+        await service.start();
+
+        // An operator restart of a long-running container: kill, die, and the
+        // restart-policy start arrives before the deferred classifier reads the
+        // evidence. It is an intentional restart, not a new crash incident.
+        stream.push({
+            Type: 'container',
+            Action: 'start',
+            Actor: { ID: 'c-kill-race', Attributes: { name: 'svc' } },
+            timeNano: 1_000_000_000_000,
+        });
+        stream.push({
+            Type: 'container',
+            Action: 'kill',
+            Actor: { ID: 'c-kill-race', Attributes: { signal: '15' } },
+            timeNano: 1_320_000_000_000,
+        });
+        stream.push({
+            Type: 'container',
+            Action: 'die',
+            Actor: { ID: 'c-kill-race', Attributes: { exitCode: '143', name: 'svc' } },
+            timeNano: 1_320_050_000_000,
+        });
+        await vi.advanceTimersByTimeAsync(175);
+        stream.push({
+            Type: 'container',
+            Action: 'start',
+            Actor: { ID: 'c-kill-race', Attributes: { name: 'svc' } },
+            timeNano: 1_320_225_000_000,
+        });
+        await vi.advanceTimersByTimeAsync(600);
+
+        expect(mockDispatchAlert).not.toHaveBeenCalled();
+        expect(service.getContainerState('c-kill-race')?.crashedAt).toBeUndefined();
+    });
+
     it('emits OOM alert when oom precedes die', async () => {
         service = new DockerEventService(1, 'local');
         await service.start();

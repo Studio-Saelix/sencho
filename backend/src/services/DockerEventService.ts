@@ -869,8 +869,14 @@ export class DockerEventService {
         // here would let a crash loop re-alert on every lap. classifyDie is
         // where a crash that follows a genuinely stable run earns its own alert,
         // and where that run's recovery evidence is consumed.
-        state.lastKillAt = undefined;
-        state.oomPending = undefined;
+        //
+        // A die still waiting out the grace window owns the kill / OOM evidence
+        // that explains it, and this start may be the restart that followed that
+        // die, so only clear the evidence when nothing is pending.
+        if (!this.pendingDieTimers.has(id)) {
+            state.lastKillAt = undefined;
+            state.oomPending = undefined;
+        }
         state.crashedAt = undefined;
         state.unhealthySince = undefined;
         state.healthStatus = 'starting';
@@ -957,8 +963,9 @@ export class DockerEventService {
         // alert: a run that lasted the recovery threshold opens a new incident,
         // and a loop whose dedup window has elapsed earns its next alert. A start
         // at the same instant is treated as preceding a genuine re-crash, not
-        // superseding it. Only the live state counts here: a start recorded while
-        // this die was the first event for the container cannot supersede it.
+        // superseding it. Only the live state counts here: a start that arrives
+        // before this die's state exists (the die is its first observed event) is
+        // recorded as run evidence only, so it cannot supersede the die.
         const alertWindowExpired = state.lastCrashAlertAt !== undefined
             && !this.isWithinAlertDedupWindow(state.lastCrashAlertAt, now, CRASH_DEDUP_MS);
         if (state.lastStartAt !== undefined && state.lastStartAt > dieAt
