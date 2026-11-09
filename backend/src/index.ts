@@ -56,6 +56,7 @@ import { systemMaintenanceRouter } from './routes/systemMaintenance';
 import { volumesRouter } from './routes/volumes';
 import { templatesRouter } from './routes/templates';
 import { securityRouter } from './routes/security';
+import { socketRouter } from './routes/socket';
 import { dashboardRouter } from './routes/dashboard';
 import { containersRouter, portsRouter } from './routes/containers';
 import { nodesRouter } from './routes/nodes';
@@ -178,6 +179,9 @@ app.use('/api/system', systemMaintenanceRouter);
 app.use('/api/volumes', volumesRouter);
 app.use('/api/templates', templatesRouter);
 app.use('/api/security', securityRouter);
+// Read-only Docker socket access discovery, computed by the node that owns the
+// Docker daemon (ordinary remote-proxy route, never hub-held).
+app.use('/api/socket', socketRouter);
 app.use('/api/containers', containersRouter);
 app.use('/api/ports', portsRouter);
 app.use('/api/dashboard', dashboardRouter);
