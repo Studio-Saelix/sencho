@@ -662,8 +662,17 @@ export class DockerEventService {
         // arrives before classifyDie has created the state, and the crash-loop
         // dedup must still measure uptime from it.
         const startedAt = this.eventTimeMs(event);
-        this.lastStartEventAt.set(id, startedAt);
         const state = this.containerState.get(id);
+        // Starts advance a container's run; they never rewind it. A replayed or
+        // reordered older `start` must not replace the current run's evidence or
+        // clear a crash signal stamped after it, or the older run's `die` could
+        // reopen an incident that was already alerted.
+        const newestStartAt = Math.max(
+            this.lastStartEventAt.get(id) ?? Number.NEGATIVE_INFINITY,
+            state?.lastStartAt ?? Number.NEGATIVE_INFINITY,
+        );
+        if (startedAt <= newestStartAt) return;
+        this.lastStartEventAt.set(id, startedAt);
         if (!state) return;
         // Container came back: clear transient flags but keep identity.
         // `lastCrashAlertAt` and `lastCrashAlertStartAt` deliberately survive:
@@ -737,7 +746,10 @@ export class DockerEventService {
         // is superseded (the container recovered). Do not stamp a crash signal or
         // alert for it; the classification is deferred 500ms, so an immediate
         // restart can race ahead of this handler. A start at the same instant is
-        // treated as preceding a genuine re-crash, not superseding it.
+        // treated as preceding a genuine re-crash, not superseding it. Only the
+        // live state counts here: a start recorded while this die was the first
+        // event for the container is the restart that followed it, and must not
+        // suppress the crash it followed.
         if (state.lastStartAt !== undefined && state.lastStartAt > dieAt) return;
 
         // Stamp the heal signal for Auto-Heal before the alert dedup/toggle gates
@@ -760,10 +772,8 @@ export class DockerEventService {
         // A start that landed after this die (inside the grace window) is the
         // recovery that followed it, not the run that produced it, so it cannot
         // be the run this die's alert consumes.
-        const rawStartAt = this.lastStartEventAt.get(id) ?? state.lastStartAt;
-        const startAt = rawStartAt !== undefined && rawStartAt <= dieAt ? rawStartAt : undefined;
-        const stableRun = this.hasStableRunSinceStart(startAt, dieAt)
-            && startAt !== state.lastCrashAlertStartAt;
+        const startAt = this.runStartForDie(id, state, dieAt);
+        const stableRun = this.isStableRunForAlert(state, startAt, dieAt);
         if (this.isWithinAlertDedupWindow(state.lastCrashAlertAt, now, CRASH_DEDUP_MS) && !stableRun) {
             return;
         }
@@ -786,6 +796,18 @@ export class DockerEventService {
             }
         }
 
+        // The inspect above yields: another lap can pass the dedup gate and
+        // stamp the incident while this one is parked. Revalidate the same gate
+        // against the current state before consuming a token and stamping, so
+        // whichever lap finishes first wins and the other stays deduped.
+        const nowAfterInspect = Date.now();
+        if (
+            this.isWithinAlertDedupWindow(state.lastCrashAlertAt, nowAfterInspect, CRASH_DEDUP_MS)
+            && !this.isStableRunForAlert(state, startAt, dieAt)
+        ) {
+            return;
+        }
+
         await this.emitClassification(classification, state, {
             name: state.name ?? id.slice(0, 12),
             exitCode: exitCode ?? 0,
@@ -793,6 +815,25 @@ export class DockerEventService {
             isSelf: state.isSelf === true,
             startAt,
         });
+    }
+
+    /** Start timestamp of the run that produced this die, if it was observed. */
+    private runStartForDie(id: string, state: InternalContainerState, dieAt: number): number | undefined {
+        const rawStartAt = this.lastStartEventAt.get(id) ?? state.lastStartAt;
+        return rawStartAt !== undefined && rawStartAt <= dieAt ? rawStartAt : undefined;
+    }
+
+    /**
+     * Whether this die's run is a new incident: it ran the full recovery
+     * threshold, and no dispatched alert has consumed that run's evidence yet.
+     */
+    private isStableRunForAlert(
+        state: InternalContainerState,
+        startAt: number | undefined,
+        dieAt: number,
+    ): boolean {
+        return this.hasStableRunSinceStart(startAt, dieAt)
+            && startAt !== state.lastCrashAlertStartAt;
     }
 
     // ========================================================================

@@ -562,7 +562,7 @@ describe('DockerEventService - die classification', () => {
         expect(mockInspect).toHaveBeenCalledTimes(1);
     });
 
-    it('drops a redelivered die that overlaps a different in-flight die', async () => {
+    it('collapses two distinct dies from one run that overlap in flight', async () => {
         service = new DockerEventService(1, 'local');
         await service.start();
 
@@ -594,10 +594,146 @@ describe('DockerEventService - die classification', () => {
         await Promise.resolve();
         await Promise.resolve();
 
+        // Both dies belong to the same run (one start); whichever finishes
+        // first stamps the incident and the other stays deduped.
         const oomAlerts = mockDispatchAlert.mock.calls.filter(c =>
             typeof c[2] === 'string' && c[2].includes('OOM Kill'));
-        expect(oomAlerts).toHaveLength(2);
+        expect(oomAlerts).toHaveLength(1);
         expect(mockInspect).toHaveBeenCalledTimes(2);
+    });
+
+    it('alerts once when a second lap with an ordinary exit overlaps an in-flight OOM inspect', async () => {
+        service = new DockerEventService(1, 'local');
+        await service.start();
+
+        let resolveInspect!: (value: unknown) => void;
+        mockInspect.mockImplementation(() => new Promise(resolve => { resolveInspect = resolve; }));
+
+        const crashAlerts = () => mockDispatchAlert.mock.calls.filter(c =>
+            typeof c[2] === 'string' && (c[2].includes('Crash') || c[2].includes('OOM Kill'))).length;
+
+        stream.push({ Type: 'container', Action: 'start', Actor: { ID: 'c-lap', Attributes: { name: 'web' } }, time: 1_000 });
+        stream.push({
+            Type: 'container',
+            Action: 'die',
+            Actor: { ID: 'c-lap', Attributes: { exitCode: '137', name: 'web' } },
+            time: 1_002,
+        });
+        // The 500 ms grace window elapsed and the first lap is parked on its
+        // OOM inspect, before it can stamp the incident.
+        await vi.advanceTimersByTimeAsync(600);
+
+        // The container restarts and dies again while that inspect is pending,
+        // on the ordinary crash path (no await of its own).
+        stream.push({ Type: 'container', Action: 'start', Actor: { ID: 'c-lap', Attributes: { name: 'web' } }, time: 1_003 });
+        stream.push({
+            Type: 'container',
+            Action: 'die',
+            Actor: { ID: 'c-lap', Attributes: { exitCode: '1', name: 'web' } },
+            time: 1_005,
+        });
+        await vi.advanceTimersByTimeAsync(600);
+        expect(crashAlerts()).toBe(1);
+
+        // The parked lap revalidates against the stamp the second one wrote.
+        resolveInspect({ State: { OOMKilled: true, ExitCode: 137 } });
+        await vi.advanceTimersByTimeAsync(0);
+        await flushMicrotasks();
+        expect(crashAlerts()).toBe(1);
+    });
+
+    it.each([
+        { label: 'the earlier inspect finishes first', finishSecondFirst: false },
+        { label: 'the later inspect finishes first', finishSecondFirst: true },
+    ])('alerts once when a second OOM lap overlaps an in-flight OOM inspect ($label)', async ({ finishSecondFirst }) => {
+        service = new DockerEventService(1, 'local');
+        await service.start();
+
+        const resolvers: Array<(value: unknown) => void> = [];
+        mockInspect.mockImplementation(() => new Promise(resolve => { resolvers.push(resolve); }));
+
+        const oomDie = (atSeconds: number) => ({
+            Type: 'container',
+            Action: 'die',
+            Actor: { ID: 'c-lap-oom', Attributes: { exitCode: '137', name: 'hog' } },
+            time: atSeconds,
+        });
+        const crashAlerts = () => mockDispatchAlert.mock.calls.filter(c =>
+            typeof c[2] === 'string' && (c[2].includes('Crash') || c[2].includes('OOM Kill'))).length;
+
+        stream.push({ Type: 'container', Action: 'start', Actor: { ID: 'c-lap-oom', Attributes: { name: 'hog' } }, time: 1_000 });
+        stream.push(oomDie(1_002));
+        await vi.advanceTimersByTimeAsync(600);
+        stream.push({ Type: 'container', Action: 'start', Actor: { ID: 'c-lap-oom', Attributes: { name: 'hog' } }, time: 1_003 });
+        stream.push(oomDie(1_005));
+        await vi.advanceTimersByTimeAsync(600);
+        expect(resolvers).toHaveLength(2);
+
+        const order = finishSecondFirst ? [resolvers[1], resolvers[0]] : resolvers;
+        for (const resolve of order) {
+            resolve({ State: { OOMKilled: true, ExitCode: 137 } });
+            await vi.advanceTimersByTimeAsync(0);
+            await flushMicrotasks();
+        }
+
+        expect(crashAlerts()).toBe(1);
+    });
+
+    it.each([
+        { label: 'an ordinary exit with second timestamps', exitCode: '1', clock: 'time' },
+        { label: 'an inspected OOM exit with second timestamps', exitCode: '137', clock: 'time' },
+        { label: 'an ordinary exit with nanosecond timestamps', exitCode: '1', clock: 'timeNano' },
+        { label: 'an inspected OOM exit with nanosecond timestamps', exitCode: '137', clock: 'timeNano' },
+    ])('keeps an older incident closed when its start and die are replayed ($label)', async ({ exitCode, clock }) => {
+        service = new DockerEventService(1, 'local');
+        await service.start();
+        mockInspect.mockResolvedValue({ State: { OOMKilled: true, ExitCode: 137 } });
+
+        const stamp = (atSeconds: number) => (clock === 'time'
+            ? { time: atSeconds }
+            : { timeNano: atSeconds * 1_000_000_000 });
+        const start = (atSeconds: number) => ({
+            Type: 'container',
+            Action: 'start',
+            Actor: { ID: 'c-replay', Attributes: { name: 'web' } },
+            ...stamp(atSeconds),
+        });
+        const die = (atSeconds: number) => ({
+            Type: 'container',
+            Action: 'die',
+            Actor: { ID: 'c-replay', Attributes: { exitCode, name: 'web' } },
+            ...stamp(atSeconds),
+        });
+        const crashAlerts = () => mockDispatchAlert.mock.calls.filter(c =>
+            typeof c[2] === 'string' && (c[2].includes('Crash') || c[2].includes('OOM Kill'))).length;
+
+        // Two separate recovered incidents, each after a stable run.
+        stream.push(start(1_000));
+        await vi.advanceTimersByTimeAsync(5 * 60_000);
+        stream.push(die(1_302));
+        await vi.advanceTimersByTimeAsync(600);
+        expect(crashAlerts()).toBe(1);
+
+        stream.push(start(2_000));
+        await vi.advanceTimersByTimeAsync(5 * 60_000);
+        stream.push(die(2_302));
+        await vi.advanceTimersByTimeAsync(600);
+        expect(crashAlerts()).toBe(2);
+        const inspected = mockInspect.mock.calls.length;
+
+        // A delayed redelivery of the older pair must neither reopen that
+        // incident nor rewind the current run's start evidence.
+        stream.push(start(1_000));
+        stream.push(die(1_302));
+        await vi.advanceTimersByTimeAsync(600);
+        await flushMicrotasks();
+
+        expect(crashAlerts()).toBe(2);
+        expect(mockInspect.mock.calls.length).toBe(inspected);
+        const state = (service as unknown as {
+            containerState: Map<string, { lastStartAt?: number }>;
+        }).containerState.get('c-replay');
+        expect(state?.lastStartAt).toBe(2_000_000);
     });
 
     it('keeps a stable-run alert eligible when the dispatch was rate-suppressed', async () => {
