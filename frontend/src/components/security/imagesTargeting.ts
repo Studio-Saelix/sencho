@@ -75,14 +75,13 @@ export interface SavedIntentTarget {
 
 /** A confirmed save hands the owner the stack's intents so the affected rows can
  *  keep showing them until a reread replaces the summaries. A context the server
- *  settles away on that save stops counting as exposed instead. `order` is the
- *  save's start order (see `nextSaveOrder`): a reply that began before one
- *  already adopted for the stack must not undo it. */
+ *  settles away on that save stops counting as exposed instead. Saves to a stack
+ *  are sent one at a time (see `saveExposureIntent`), so each call holds the
+ *  stack as the server left it after that save and after every one before it. */
 export type IntentSavedHandler = (
   stackName: string,
   intents: IntentEntry[],
   saved: SavedIntentTarget,
-  order: number,
 ) => void;
 
 /** The intent a service ends up with after a save: its own row, else the stack row, else unset. */

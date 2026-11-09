@@ -12,18 +12,27 @@ export function asIntents(body: unknown): IntentEntry[] | null {
   return Array.isArray(list) ? (list as IntentEntry[]) : null;
 }
 
-let saveOrder = 0;
+/** The tail of each node and stack's chain of saves, so the next one knows what to wait for. */
+const saveChains = new Map<string, Promise<void>>();
 
 /**
- * A number for the save about to start, larger than every earlier one. Replies
- * can land in any order, so a surface that adopts saves compares it against the
- * newest it already adopted and, for an older one, builds on the newer rows
- * instead of its own. It orders when requests began, which matches the order the
- * server applied them only when they were not reordered in flight.
+ * Runs saves to one stack of one node one after another, in the order they were
+ * asked for. Each save replies with the stack's rows as the server held them when
+ * it applied that save, and a client cannot tell which of two overlapping replies
+ * is newer: the requests can be applied in a different order from the one they
+ * were sent in. Sending the next only once the last has replied makes the
+ * order they were sent the order they were applied, so every reply holds the
+ * rows of the saves before it and a later reply is always the newer one. A save
+ * that fails does not hold up the ones behind it.
  */
-export function nextSaveOrder(): number {
-  saveOrder += 1;
-  return saveOrder;
+function inOrder<T>(key: string, run: () => Promise<T>): Promise<T> {
+  const turn = (saveChains.get(key) ?? Promise.resolve()).then(run);
+  const tail = turn.then(() => undefined, () => undefined);
+  saveChains.set(key, tail);
+  void tail.then(() => {
+    if (saveChains.get(key) === tail) saveChains.delete(key);
+  });
+  return turn;
 }
 
 async function serverError(res: Response, fallback: string): Promise<string> {
@@ -31,8 +40,7 @@ async function serverError(res: Response, fallback: string): Promise<string> {
   return typeof body === 'object' && body !== null && 'error' in body && typeof body.error === 'string' && body.error !== '' ? body.error : fallback;
 }
 
-/** Saves one scope's intent (null clears it). Returns the stack's intents after the save, or null when it failed. */
-export async function saveExposureIntent(
+async function putExposureIntent(
   stackName: string,
   service: string,
   intent: ExposureIntent | null,
@@ -58,6 +66,21 @@ export async function saveExposureIntent(
     toast.error('Failed to save the exposure intent.');
     return null;
   }
+}
+
+/**
+ * Saves one scope's intent (null clears it). Returns the stack's intents after the
+ * save, or null when it failed. Saves to the same stack of the same node are sent
+ * one at a time, in the order they were asked for, whichever surface asks, so a
+ * reply always holds the result of every save made before it.
+ */
+export function saveExposureIntent(
+  stackName: string,
+  service: string,
+  intent: ExposureIntent | null,
+  nodeId?: number,
+): Promise<IntentEntry[] | null> {
+  return inOrder(`${nodeId ?? ''}\0${stackName}`, () => putExposureIntent(stackName, service, intent, nodeId));
 }
 
 /**

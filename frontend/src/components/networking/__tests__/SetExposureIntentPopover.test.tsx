@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { render, screen, waitFor } from '@testing-library/react';
+import { act, render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { SetExposureIntentPopover } from '../SetExposureIntentPopover';
 
@@ -30,7 +30,7 @@ describe('SetExposureIntentPopover', () => {
     await waitFor(() => expect(onSaved).toHaveBeenCalledWith([
       { service: '', intent: 'lan' },
       { service: 'app', intent: 'internal' },
-    ], expect.any(Number)));
+    ]));
     const [path, init] = api.apiFetch.mock.calls[1] as [string, RequestInit & { nodeId?: number }];
     expect(path).toBe('/stacks/web/exposure');
     expect(init.method).toBe('PUT');
@@ -73,7 +73,7 @@ describe('SetExposureIntentPopover', () => {
     expect(screen.getByText('Open stack networking')).toBeInTheDocument();
   });
 
-  it('numbers a save when its request starts, so a reply that lands late still reads as the earlier one', async () => {
+  it('sends a second save of the stack only after the first has been answered', async () => {
     let releaseFirst!: () => void;
     const firstPut = new Promise<Response>((resolve) => {
       releaseFirst = () => resolve(json({ intents: [{ service: 'a', intent: 'lan' }] }));
@@ -81,7 +81,9 @@ describe('SetExposureIntentPopover', () => {
     api.apiFetch.mockImplementation((_path: string, init?: RequestInit) => {
       if (init?.method !== 'PUT') return Promise.resolve(json({ intents: [] }));
       const { service } = JSON.parse(init.body as string) as { service: string };
-      return service === 'a' ? firstPut : Promise.resolve(json({ intents: [{ service: 'b', intent: 'lan' }] }));
+      return service === 'a'
+        ? firstPut
+        : Promise.resolve(json({ intents: [{ service: 'a', intent: 'lan' }, { service: 'b', intent: 'lan' }] }));
     });
     const onSaved = vi.fn();
     render(
@@ -90,17 +92,21 @@ describe('SetExposureIntentPopover', () => {
         <SetExposureIntentPopover stack="web" service="b" nodeId={2} onSaved={onSaved} trigger={<button type="button">second</button>} />
       </>,
     );
+    const putsSent = () => api.apiFetch.mock.calls.filter(([, init]) => (init as RequestInit | undefined)?.method === 'PUT');
 
     await userEvent.click(screen.getByRole('button', { name: 'first' }));
     await userEvent.click(await screen.findByRole('button', { name: 'lan' }));
     await userEvent.keyboard('{Escape}');
     await userEvent.click(screen.getByRole('button', { name: 'second' }));
     await userEvent.click(await screen.findByRole('button', { name: 'lan' }));
-    await waitFor(() => expect(onSaved).toHaveBeenCalledTimes(1));
+    await act(async () => { await new Promise((resolve) => setTimeout(resolve, 30)); });
+    expect(putsSent()).toHaveLength(1);
+    expect(onSaved).not.toHaveBeenCalled();
+
     releaseFirst();
     await waitFor(() => expect(onSaved).toHaveBeenCalledTimes(2));
-
-    const [secondOrder, firstOrder] = onSaved.mock.calls.map((call) => call[1] as number);
-    expect(firstOrder).toBeLessThan(secondOrder!);
+    expect(putsSent()).toHaveLength(2);
+    // Each save is handed over in the order it was made, the later holding both rows.
+    expect(onSaved.mock.calls.map((call) => (call[0] as unknown[]).length)).toEqual([1, 2]);
   });
 });

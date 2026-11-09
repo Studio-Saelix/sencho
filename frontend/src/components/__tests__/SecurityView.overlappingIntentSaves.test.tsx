@@ -1,8 +1,10 @@
 /**
- * Saves that overlap: a reply lands whenever it lands, and must not undo a
- * confirmed save the operator made after it began. Once a save is sent, node 1's
- * summary reread fails, so its rows show only what the saves themselves proved.
- * A reply for a node the operator has since left is not theirs to apply.
+ * Saves that overlap: the server applies a save when the request reaches it, and
+ * its reply carries the stack as it was left then. Saves to one stack are sent
+ * one at a time, so a delayed save is applied before the next is sent and no
+ * reply can hold fewer saves than the one before it. Once a save is sent, node
+ * 1's summary reread fails, so its rows show only what the saves themselves
+ * proved. A reply for a node the operator has since left is not theirs to apply.
  */
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { act, render, screen, waitFor } from '@testing-library/react';
@@ -100,11 +102,11 @@ const rereadsHealed = { value: false };
 interface PendingPut { stack: string; service: string; release: () => void }
 
 /**
- * Summaries per node, and PUTs the test settles by hand. A PUT takes effect on
- * the server when it arrives and its reply carries the stack as it was then, so
- * a held reply is older than a save that arrives after it. Once any PUT has
- * been sent, node 1's summaries reread answers 503, so its rows show only the
- * saves.
+ * Summaries per node, and PUTs the test settles by hand. A held PUT is not
+ * applied by the server until the test releases it, and its reply carries the
+ * stack as it was then. `applied` lists the saves in the order the server took
+ * them. Once any PUT has been sent, node 1's summaries reread answers 503, so
+ * its rows show only the saves.
  */
 function mockApi(
   summariesByNode: Record<number, ScanSummary[]>,
@@ -112,8 +114,10 @@ function mockApi(
   seed: Record<string, Intents> = {},
 ) {
   const puts: PendingPut[] = [];
+  const applied: string[] = [];
+  // Each node keeps its own rows, as the servers do; the seed belongs to node 1.
   const server = new Map<string, Map<string, string>>(
-    Object.entries(seed).map(([stack, rows]) => [stack, new Map(rows.map((row) => [row.service, row.intent]))]),
+    Object.entries(seed).map(([stack, rows]) => [`1\0${stack}`, new Map(rows.map((row) => [row.service, row.intent]))]),
   );
   let saved = false;
   apiFetchMock.mockImplementation((url: string, init?: RequestInit) => {
@@ -131,20 +135,24 @@ function mockApi(
     if (stack !== undefined && init?.method === 'PUT') {
       saved = true;
       const { service, intent } = JSON.parse(init.body as string) as { service: string; intent: string };
-      const rows = server.get(stack) ?? new Map<string, string>();
-      rows.set(service, intent);
-      server.set(stack, rows);
-      const intents: Intents = [...rows].map(([name, value]) => ({ service: name, intent: value }));
-      const reply = { ok: true, status: 200, headers: new Headers(), json: async () => ({ intents }) } as unknown as Response;
-      if (!hold(stack, service)) return Promise.resolve(reply);
+      const rowsKey = `${(init as { nodeId?: number }).nodeId ?? nodeState.id}\0${stack}`;
+      const apply = () => {
+        const rows = server.get(rowsKey) ?? new Map<string, string>();
+        rows.set(service, intent);
+        server.set(rowsKey, rows);
+        applied.push(`${stack}/${service}`);
+        const intents: Intents = [...rows].map(([name, value]) => ({ service: name, intent: value }));
+        return { ok: true, status: 200, headers: new Headers(), json: async () => ({ intents }) } as unknown as Response;
+      };
+      if (!hold(stack, service)) return Promise.resolve(apply());
       return new Promise((resolve) => {
-        puts.push({ stack, service, release: () => resolve(reply) });
+        puts.push({ stack, service, release: () => resolve(apply()) });
       });
     }
     if (stack !== undefined) return jsonOk({ intents: [] });
     return Promise.resolve({ ok: false, status: 404, json: async () => ({}) } as unknown as Response);
   });
-  return puts;
+  return Object.assign(puts, { applied });
 }
 
 beforeEach(() => {
@@ -164,7 +172,7 @@ async function chooseLan(trigger: string) {
 describe.each([['desktop', false], ['phone', true]])('overlapping intent saves on %s', (_name, mobile) => {
   beforeEach(() => { viewport.mobile = mobile; });
 
-  it('keeps a confirmed save on another stack when an earlier save replies after it', async () => {
+  it('does not hold a save to another stack behind one still in flight', async () => {
     const puts = mockApi(
       { 1: [unclassified('app:1', 'web', 'api'), unclassified('app:2', 'other', 'api')] },
       (stack) => stack === 'web',
@@ -190,7 +198,7 @@ describe.each([['desktop', false], ['phone', true]])('overlapping intent saves o
     expect(screen.getByRole('button', { name: 'Network exposed: change intent for web/api' })).toBeInTheDocument();
   });
 
-  it('keeps the later save of a stack when the earlier one replies after it', async () => {
+  it('sends a later save of a stack only after the delayed earlier one is applied', async () => {
     const puts = mockApi(
       { 1: [unclassified('app:1', 'web', 'api'), unclassified('app:2', 'web', 'worker')] },
       (_stack, service) => service === 'api',
@@ -198,20 +206,87 @@ describe.each([['desktop', false], ['phone', true]])('overlapping intent saves o
     render(<SecurityView activeTab="images" onTabChange={vi.fn()} />);
     expect(await screen.findAllByText('Intent: not classified')).toHaveLength(2);
 
+    // The first save is held before the server applies it.
     await chooseLan('Network exposed: set intent for web/api');
     await waitFor(() => expect(puts).toHaveLength(1));
     await userEvent.keyboard('{Escape}');
 
     await chooseLan('Network exposed: set intent for web/worker');
-    // The server applied both saves, so this reply already carries both rows.
-    await waitFor(() => expect(screen.getAllByText('Intent: LAN')).toHaveLength(2));
+    await act(async () => { await new Promise((resolve) => setTimeout(resolve, 50)); });
+    // The worker save waits its turn: it cannot be applied ahead of the api save.
+    const putsSent = () => apiFetchMock.mock.calls.filter(([, init]) => (init as RequestInit | undefined)?.method === 'PUT');
+    expect(putsSent()).toHaveLength(1);
+    expect(puts.applied).toEqual([]);
+    expect(toasts.success).not.toHaveBeenCalled();
 
-    // The earlier reply holds the stack as it was before the worker save.
     puts[0]!.release();
     await waitFor(() => expect(toasts.success).toHaveBeenCalledTimes(2));
+    expect(puts.applied).toEqual(['web/api', 'web/worker']);
 
     await waitFor(() => expect(screen.getAllByText('Intent: LAN')).toHaveLength(2));
     expect(screen.queryByText('Intent: not classified')).not.toBeInTheDocument();
+  });
+
+  it.each([
+    ['public', 'Intent: public'],
+    ['internal', 'Intent mismatch: internal'],
+    ['unknown', 'Intent: not classified'],
+  ])('keeps %s on the delayed save while a later save of the stack waits', async (intent, evidence) => {
+    const puts = mockApi(
+      { 1: [unclassified('app:1', 'web', 'api'), unclassified('app:2', 'web', 'worker')] },
+      (_stack, service) => service === 'api',
+    );
+    render(<SecurityView activeTab="images" onTabChange={vi.fn()} />);
+    expect(await screen.findAllByText('Intent: not classified')).toHaveLength(2);
+
+    await userEvent.click(screen.getByRole('button', { name: 'Network exposed: set intent for web/api' }));
+    await userEvent.click(await screen.findByRole('button', { name: intent }));
+    await waitFor(() => expect(puts).toHaveLength(1));
+    await userEvent.keyboard('{Escape}');
+    await chooseLan('Network exposed: set intent for web/worker');
+
+    puts[0]!.release();
+    await waitFor(() => expect(toasts.success).toHaveBeenCalledTimes(2));
+    expect(puts.applied).toEqual([`web/api`, 'web/worker']);
+
+    // Both rows show their own save, and the reread that would correct them failed.
+    await waitFor(() => expect(screen.getByText('Intent: LAN')).toBeInTheDocument());
+    expect(screen.getAllByText(evidence)).toHaveLength(1);
+  });
+
+  it('sends a later save of a stack even when the earlier one was refused', async () => {
+    const puts = mockApi(
+      { 1: [unclassified('app:1', 'web', 'api'), unclassified('app:2', 'web', 'worker')] },
+      (_stack, service) => service === 'api',
+    );
+    // The api save is held, then refused.
+    const answer = apiFetchMock.getMockImplementation()!;
+    apiFetchMock.mockImplementation((url: string, init?: RequestInit) => {
+      if (init?.method === 'PUT' && JSON.parse(init.body as string).service === 'api') {
+        return new Promise((resolve) => {
+          puts.push({
+            stack: 'web',
+            service: 'api',
+            release: () => resolve({ ok: false, status: 500, headers: new Headers(), json: async () => ({ error: 'boom' }) } as unknown as Response),
+          });
+        });
+      }
+      return answer(url, init);
+    });
+    render(<SecurityView activeTab="images" onTabChange={vi.fn()} />);
+    expect(await screen.findAllByText('Intent: not classified')).toHaveLength(2);
+
+    await chooseLan('Network exposed: set intent for web/api');
+    await waitFor(() => expect(puts).toHaveLength(1));
+    await userEvent.keyboard('{Escape}');
+    await chooseLan('Network exposed: set intent for web/worker');
+
+    puts[0]!.release();
+    await waitFor(() => expect(toasts.error).toHaveBeenCalledWith('boom'));
+    await waitFor(() => expect(toasts.success).toHaveBeenCalledTimes(1));
+    expect(puts.applied).toEqual(['web/worker']);
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Network exposed: change intent for web/worker' })).toBeInTheDocument());
+    expect(screen.getByRole('button', { name: 'Network exposed: set intent for web/api' })).toBeInTheDocument();
   });
 
   it('does not apply a reply to the node the operator moved to', async () => {
@@ -278,7 +353,7 @@ describe.each([['desktop', false], ['phone', true]])('overlapping intent saves o
     expect(screen.getByRole('button', { name: 'Network exposed: set intent for web/worker' })).toBeInTheDocument();
   });
 
-  it('keeps a hidden service saved by a reply that lands after a later save', async () => {
+  it('keeps a hidden service saved while a later save of the stack waits behind it', async () => {
     // Twenty classified services and two the cap hides, reached through targeting.
     const capped: ScanSummary = {
       ...unclassified('exp:1', 'web', 'svc0'),
@@ -315,12 +390,14 @@ describe.each([['desktop', false], ['phone', true]])('overlapping intent saves o
     await openList();
     await userEvent.click(await screen.findByRole('button', { name: 'Set intent for web/hidden2' }));
     await userEvent.click(await screen.findByRole('button', { name: 'lan' }));
-    await waitFor(() => expect(toasts.success).toHaveBeenCalledTimes(1));
+    await act(async () => { await new Promise((resolve) => setTimeout(resolve, 50)); });
+    expect(puts.applied).toEqual([]);
+    expect(toasts.success).not.toHaveBeenCalled();
 
-    // The first reply holds the stack as it was before the second save, and it
-    // alone knows its own hidden service.
+    // The first save is applied, then the second: its reply holds both services.
     puts[0]!.release();
     await waitFor(() => expect(toasts.success).toHaveBeenCalledTimes(2));
+    expect(puts.applied).toEqual(['web/hidden1', 'web/hidden2']);
     await waitFor(() => expect(screen.queryByText(/not classified/)).not.toBeInTheDocument());
 
     await openList();

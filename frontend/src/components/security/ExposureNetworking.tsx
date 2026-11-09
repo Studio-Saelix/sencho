@@ -59,10 +59,10 @@ function ContextIntentPopover({ ctx, nodeId, onIntentSaved, trigger, align }: {
       stack={ctx.stackName}
       service={ctx.serviceName}
       nodeId={nodeId}
-      onSaved={(saved, order) => onIntentSaved(ctx.stackName, saved, {
+      onSaved={(saved) => onIntentSaved(ctx.stackName, saved, {
         imageRef: ctx.imageRef,
         context: ctx,
-      }, order)}
+      })}
       trigger={trigger}
       align={align}
       footer={<OpenNetworkingLink nodeId={nodeId} stackName={ctx.stackName} />}

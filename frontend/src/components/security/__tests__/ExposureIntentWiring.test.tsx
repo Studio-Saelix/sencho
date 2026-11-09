@@ -86,7 +86,6 @@ describe('onIntentSaved wiring', () => {
         imageRef: 'exp:1',
         context: expect.objectContaining({ stackName: 'web', serviceName: 'api' }),
       }),
-      expect.any(Number),
     ));
   });
 
@@ -122,7 +121,6 @@ describe('onIntentSaved wiring', () => {
           tunnel: expect.objectContaining({ provider: 'cloudflared', path: 'shared-network' }),
         }),
       }),
-      expect.any(Number),
     ));
   });
 
@@ -142,7 +140,6 @@ describe('onIntentSaved wiring', () => {
         imageRef: 'exp:1',
         context: expect.objectContaining({ stackName: 'web', serviceName: 'api' }),
       }),
-      expect.any(Number),
     ));
   });
 
@@ -163,7 +160,6 @@ describe('onIntentSaved wiring', () => {
         imageRef: 'exp:1',
         context: expect.objectContaining({ stackName: 'web', serviceName: 'api' }),
       }),
-      expect.any(Number),
     ));
   });
 
@@ -184,7 +180,6 @@ describe('onIntentSaved wiring', () => {
         imageRef: 'exp:1',
         context: expect.objectContaining({ stackName: 'jobs', serviceName: 'worker' }),
       }),
-      expect.any(Number),
     ));
     const [path] = api.apiFetch.mock.calls[1] as [string];
     expect(path).toBe('/stacks/jobs/exposure');
@@ -208,7 +203,6 @@ describe('onIntentSaved wiring', () => {
         imageRef: 'exp:1',
         context: expect.objectContaining({ stackName: 'web', serviceName: 'api' }),
       }),
-      expect.any(Number),
     ));
     expect(onInspect).not.toHaveBeenCalled();
   });

@@ -317,29 +317,18 @@ export function SecurityView({ activeTab, onTabChange, headerActions }: Security
   useEffect(() => {
     activeNodeIdRef.current = activeNodeId;
   }, [activeNodeId]);
-  // The newest save adopted per node and stack: when it began and the stack's
-  // intents it returned. Keyed by node because stack names repeat across nodes.
-  const adoptedSaveRef = useRef(new Map<string, { order: number; intents: IntentEntry[] }>());
   const onIntentSaved = useCallback((
     stackName: string,
     intents: IntentEntry[],
     saved: SavedIntentTarget,
-    order: number,
   ) => {
     // A save confirmed for a node the operator has since left says nothing about
     // the node on screen.
     if (activeNodeIdRef.current !== activeNodeId) return;
-    // A save lands whenever its reply does, possibly after a later save to the
-    // same stack was adopted. Assuming the server applied saves in the order
-    // they began, its rows predate that save and would undo it, so the stack's
-    // newest rows stand and this reply only adds what it alone knows (its own
-    // saved target). The reread that follows reconciles any other order.
-    const key = `${activeNodeId}\0${stackName}`;
-    const newest = adoptedSaveRef.current.get(key);
-    const stale = newest !== undefined && order < newest.order;
-    if (!stale) adoptedSaveRef.current.set(key, { order, intents });
-    const current = stale ? newest.intents : intents;
-    updateSummaries((summaries) => applySavedIntents(summaries, stackName, current, saved));
+    // Saves to a stack reach here in the order the server applied them, each
+    // reply holding every save before it, so the newest reply is the stack's
+    // rows and replaces what an earlier one adopted.
+    updateSummaries((summaries) => applySavedIntents(summaries, stackName, intents, saved));
     setImagesTargeting(afterIntentSaved);
     reloadOverview();
   }, [activeNodeId, updateSummaries, reloadOverview]);
