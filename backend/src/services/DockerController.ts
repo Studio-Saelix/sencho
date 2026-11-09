@@ -171,6 +171,12 @@ export interface BulkStackInfo {
   running?: number;
   /** Total container count for the stack; paired with `running` for the sidebar tooltip. */
   total?: number;
+  /**
+   * Containers in Docker's `restarting` state (set with `running`/`total`).
+   * A restart loop spends its downtime here rather than as `running`, so the
+   * sidebar needs the count to offer Stop on a stack that never settles.
+   */
+  restarting?: number;
   /** True when this stack is the running Sencho instance (compose project matches stack name). */
   isSelf?: boolean;
   /** Unique runtime Docker network names from listContainers NetworkSettings. Omitted when none were observed. */
@@ -2695,13 +2701,13 @@ class DockerController {
     // only used if an inspect fails, since it never moves on restart.
     const runningByStack: Record<string, { ids: string[]; oldestCreated?: number }> = {};
 
-    // Per stack, tally running, genuinely-failed (crashed), and total containers
-    // so the status can distinguish a fully-up stack from one that is partially
-    // degraded (some running, some crashed).
-    const countsByStack: Record<string, { running: number; failed: number; total: number }> = {};
+    // Per stack, tally running, genuinely-failed (crashed), restart-looping,
+    // and total containers so the status can distinguish a fully-up stack from
+    // one that is partially degraded (some running, some crashed).
+    const countsByStack: Record<string, { running: number; failed: number; restarting: number; total: number }> = {};
     const networksByStack: Record<string, Set<string>> = {};
     for (const name of stackNames) {
-      countsByStack[name] = { running: 0, failed: 0, total: 0 };
+      countsByStack[name] = { running: 0, failed: 0, restarting: 0, total: 0 };
     }
 
     for (const container of allContainers as any[]) {
@@ -2744,8 +2750,13 @@ class DockerController {
             if (typeof service === 'string' && service.length > 0) result[stackDir].mainPortService = service;
           }
         }
-      } else if (isContainerFailed(container.State, container.Status)) {
-        counts.failed += 1;
+      } else {
+        if (isContainerFailed(container.State, container.Status)) {
+          counts.failed += 1;
+        }
+        // A restart loop is counted in every state, clean exit or not: the
+        // sidebar offers Stop from this count, and Docker is already retrying.
+        if (container.State === 'restarting') counts.restarting += 1;
       }
     }
 
@@ -2754,13 +2765,14 @@ class DockerController {
     // finished one-shot container (exit 0) stays "running". A stack with no
     // containers keeps its seeded "unknown".
     for (const name of stackNames) {
-      const { running, failed, total } = countsByStack[name];
+      const { running, failed, restarting, total } = countsByStack[name];
       if (total === 0) continue;
       if (running === 0) result[name].status = 'exited';
       else if (failed > 0) result[name].status = 'partial';
       else result[name].status = 'running';
       result[name].running = running;
       result[name].total = total;
+      result[name].restarting = restarting;
       const netNames = networksByStack[name];
       if (netNames && netNames.size > 0) {
         result[name].networks = [...netNames].sort((a, b) => a.localeCompare(b));
@@ -3265,11 +3277,21 @@ class DockerController {
     }
   }
 
+  /**
+   * Run a start or restart unless a staged overwrite has fenced a volume the
+   * container mounts. The fence is checked and the start registered in one
+   * step, so a start cannot slip between the check and a fence being installed
+   * (see `startUnderFence`). Docker is asked only when a fence is live.
+   */
+  private async startUnderFence<T>(containerId: string, start: () => Promise<T>): Promise<T> {
+    const { startContainerUnderFence } = await import('./recovery/restoreFence');
+    return startContainerUnderFence(this.docker, containerId, start);
+  }
+
   // State-safe: silently ignores 304 "already started" errors
   public async startContainer(containerId: string) {
     try {
-      const container = this.docker.getContainer(containerId);
-      await container.start();
+      await this.startUnderFence(containerId, () => this.docker.getContainer(containerId).start());
     } catch (error: any) {
       if (error?.statusCode === 304) {
         // Container already running - not an error
@@ -3329,8 +3351,7 @@ class DockerController {
 
   public async restartContainer(containerId: string, options?: RestartContainerOptions) {
     await this.assertNotDockerEndpointContainer(containerId, 'restart', options);
-    const container = this.docker.getContainer(containerId);
-    await container.restart();
+    await this.startUnderFence(containerId, () => this.docker.getContainer(containerId).restart());
   }
 
   public async getOrphanContainers(knownStackNames: string[]) {

@@ -11,8 +11,9 @@ import { formatTimeAgo } from '@/lib/relativeTime';
 import { useNodes } from '@/context/NodeContext';
 import { useAuth } from '@/context/AuthContext';
 import { Button } from '@/components/ui/button';
+import { IconBusyButton } from '@/components/ui/icon-busy-button';
 import { ConfirmModal } from '@/components/ui/modal';
-import { DismissedSection } from '@/components/ui/dismissed-section';
+import { DismissedCountButton, DismissedSheet } from '@/components/ui/dismissed-sheet';
 import { useFindingDismissal } from '@/hooks/useFindingDismissal';
 import { DRIFT_SEVERITY_SCALE, partitionFindings } from '@/lib/findingDismissals';
 import { describeDismissal } from '@/components/fleet/readiness/describeDismissal';
@@ -59,6 +60,7 @@ interface StackDriftReport {
 const LABEL_CLASS = 'font-mono text-[10px] uppercase tracking-[0.18em] text-stat-subtitle';
 const ACTION_CLASS =
   'inline-flex items-center gap-1 font-mono text-[10px] uppercase tracking-wide text-stat-subtitle hover:text-brand transition-colors disabled:opacity-40';
+const ACTION_BUTTON_CLASS = cn(ACTION_CLASS, 'h-auto rounded-none p-0 font-normal hover:bg-transparent [&_svg]:size-3');
 const CARD_CLASS = 'rounded-lg border px-3 py-2.5';
 
 const STATUS_META: Record<StackDriftStatus, { label: string; icon: LucideIcon; tone: string; line: string }> = {
@@ -292,6 +294,11 @@ export default function DriftPanel({ stackName, onRedeploy, onEditCompose, onOpe
   const { can } = useAuth();
   const now = useNow(30_000);
   const [report, setReport] = useState<StackDriftReport | null>(null);
+  const [dismissedOpen, setDismissedOpen] = useState(false);
+  // The count is the sheet's opener; the status card survives a restore, so it is
+  // where focus lands if restoring the last item removes the count.
+  const dismissedOpenerRef = useRef<HTMLButtonElement>(null);
+  const driftStatusRef = useRef<HTMLDivElement>(null);
   /**
    * The node `report` was read from, so a report can be recognised as belonging
    * to a node the operator has since left.
@@ -330,6 +337,7 @@ export default function DriftPanel({ stackName, onRedeploy, onEditCompose, onOpe
     // below for the same cycle, so the tab reads as checking rather than as wrong.
     liveScope.current = `${nodeId ?? 'none'}:${stackName}`;
     setReport(null);
+    setDismissedOpen(false);
     setReportNodeId(undefined);
     setRedeployTarget(null);
     const run = async () => {
@@ -521,15 +529,15 @@ export default function DriftPanel({ stackName, onRedeploy, onEditCompose, onOpe
     <div data-testid="drift-panel" className="flex-1 min-h-0 overflow-y-auto px-3 py-3 flex flex-col gap-4">
       <div className="flex items-center justify-between gap-2">
         <span className={LABEL_CLASS}>compose vs runtime</span>
-        <button
-          type="button"
+        <IconBusyButton
           data-testid="drift-recheck-btn"
+          variant="ghost"
+          icon={RefreshCw}
+          label="re-check"
+          pending={busy}
           onClick={recheck}
-          disabled={busy}
-          className={ACTION_CLASS}
-        >
-          <RefreshCw className={cn('h-3 w-3', busy && 'animate-spin')} strokeWidth={1.5} /> re-check
-        </button>
+          className={ACTION_BUTTON_CLASS}
+        />
       </div>
 
       {loadError ? (
@@ -549,7 +557,7 @@ export default function DriftPanel({ stackName, onRedeploy, onEditCompose, onOpe
       ) : (
         <>
           {meta && StatusIcon && (
-            <div data-testid="drift-status" data-status={report.status} className={cn(CARD_CLASS, meta.tone)}>
+            <div data-testid="drift-status" data-status={report.status} ref={driftStatusRef} tabIndex={-1} className={cn(CARD_CLASS, meta.tone)}>
               <div className="flex items-center gap-2">
                 <StatusIcon className="h-4 w-4 shrink-0" strokeWidth={1.5} />
                 <span className="font-mono text-[11px] uppercase tracking-wide">{meta.label}</span>
@@ -559,7 +567,10 @@ export default function DriftPanel({ stackName, onRedeploy, onEditCompose, onOpe
                   </span>
                 )}
                 {dismissed.length > 0 && (
-                  <span className="font-mono text-[10px] text-stat-subtitle">· {dismissed.length} dismissed</span>
+                  <span className="font-mono text-[10px] text-stat-subtitle">
+                    {'· '}
+                    <DismissedCountButton ref={dismissedOpenerRef} count={dismissed.length} onClick={() => setDismissedOpen(true)} />
+                  </span>
                 )}
               </div>
               <div className="mt-1 font-mono text-[11px] leading-relaxed text-foreground/80">{meta.line}</div>
@@ -625,7 +636,12 @@ export default function DriftPanel({ stackName, onRedeploy, onEditCompose, onOpe
             </section>
           )}
 
-          <DismissedSection
+          <DismissedSheet
+            open={dismissedOpen}
+            onOpenChange={setDismissedOpen}
+            openerRef={dismissedOpenerRef}
+            fallbackFocusRef={driftStatusRef}
+            crumb={['Stacks', stackName, 'Drift']}
             items={dismissed.map(({ finding, dismissal }) => ({
               id: dismissal.id,
               title: [finding.service, DRIFT_FINDING_LABEL[finding.kind]].filter(part => part !== '').join(' · '),

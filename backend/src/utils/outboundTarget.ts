@@ -67,9 +67,16 @@ function isE2eLoopbackAllowed(address: string): boolean {
     : address === '::1';
 }
 
-function isDisallowedOutboundAddress(address: string): boolean {
+/**
+ * Blocked-address check with the loopback e2e override applied. Exported for
+ * callers that dial a socket themselves (the bootstrap SSH client) instead of
+ * going through the HTTP helpers.
+ */
+export function isDisallowedOutboundTargetAddress(address: string): boolean {
   return isBlockedOutboundAddress(address) && !isE2eLoopbackAllowed(address);
 }
+
+const isDisallowedOutboundAddress = isDisallowedOutboundTargetAddress;
 
 function ipv4FromMappedIpv6(address: string): string | null {
   const mapped = address.match(/^(?:::ffff:|0:0:0:0:0:ffff:)(.+)$/i)?.[1];

@@ -552,47 +552,64 @@ export class SchedulerService {
         if (this.isRemoteNode(task.node_id)) {
             return this.executeRestartRemote(task.node_id, task.target_id, task.target_services);
         }
-        const docker = DockerController.getInstance(task.node_id);
-        const containers = await docker.getContainersByStack(task.target_id);
-        if (!containers || containers.length === 0) {
-            throw new Error(`No containers found for stack "${task.target_id}"`);
-        }
-
-        let filtered = containers;
-        const targetServices: string[] | null = task.target_services
-            ? JSON.parse(task.target_services)
-            : null;
-        if (targetServices) {
-            filtered = targetServices.flatMap(svc => filterContainersByComposeService(containers, svc));
-            if (filtered.length === 0) {
-                throw new Error(`No containers found matching services [${targetServices.join(', ')}] in stack "${task.target_id}"`);
-            }
-        }
-
-        // Refuse the whole batch up front: restarting the siblings of the Docker
-        // endpoint container and then failing on it would leave a half-restart.
-        await docker.assertNoDockerEndpointContainers(filtered.map(c => c.Id), 'restart');
-
-        // This path drives the Engine API itself, so it ends the gates itself. A
-        // restart runs containers one at a time against a 10s Docker timeout, and
-        // a gate poll landing in that window would record the deliberate restart
-        // as a failed update. The remote branch goes through the stack restart
-        // route, which does the same. Scoped to every named service, not just the
-        // first: each one of them has its containers restarted below, so each
-        // one's own gate ends, and each is detached from a sibling's gate rather
-        // than left to fail on the restart the operator scheduled.
-        HealthGateService.getInstance().supersedeForContainerOp(
+        // The local path drives the Engine API itself, so it must take the same
+        // stack lock every other scheduled lifecycle action takes. That is what
+        // makes a staged overwrite's `data_restore` lock refuse the whole restart:
+        // otherwise this path would restart the stack's unfenced siblings and
+        // fail only when it reached the container on the half-swapped volume.
+        const lock = await StackOpLockService.getInstance().runExclusive(
             task.node_id,
             task.target_id,
-            'the stack was restarted during the observation',
-            targetServices ?? undefined,
-        );
+            'restart',
+            'system',
+            async () => {
+                const docker = DockerController.getInstance(task.node_id!);
+                const containers = await docker.getContainersByStack(task.target_id!);
+                if (!containers || containers.length === 0) {
+                    throw new Error(`No containers found for stack "${task.target_id}"`);
+                }
 
-        await Promise.all(filtered.map(c => docker.restartContainer(c.Id, { endpointGuard: 'batch-checked' })));
-        const servicesSuffix = targetServices
-            ? ` (services: ${targetServices.join(', ')})`
-            : '';
-        return `Restarted ${filtered.length} container(s) in stack "${task.target_id}"${servicesSuffix}`;
+                let filtered = containers;
+                const targetServices: string[] | null = task.target_services
+                    ? JSON.parse(task.target_services)
+                    : null;
+                if (targetServices) {
+                    filtered = targetServices.flatMap(svc => filterContainersByComposeService(containers, svc));
+                    if (filtered.length === 0) {
+                        throw new Error(`No containers found matching services [${targetServices.join(', ')}] in stack "${task.target_id}"`);
+                    }
+                }
+
+                // Refuse the whole batch up front: restarting the siblings of the Docker
+                // endpoint container and then failing on it would leave a half-restart.
+                await docker.assertNoDockerEndpointContainers(filtered.map(c => c.Id), 'restart');
+
+                // This path drives the Engine API itself, so it ends the gates itself. A
+                // restart runs containers one at a time against a 10s Docker timeout, and
+                // a gate poll landing in that window would record the deliberate restart
+                // as a failed update. The remote branch goes through the stack restart
+                // route, which does the same. Scoped to every named service, not just the
+                // first: each one of them has its containers restarted below, so each
+                // one's own gate ends, and each is detached from a sibling's gate rather
+                // than left to fail on the restart the operator scheduled.
+                HealthGateService.getInstance().supersedeForContainerOp(
+                    task.node_id!,
+                    task.target_id!,
+                    'the stack was restarted during the observation',
+                    targetServices ?? undefined,
+                );
+
+                await Promise.all(filtered.map(c => docker.restartContainer(c.Id, { endpointGuard: 'batch-checked' })));
+                const servicesSuffix = targetServices
+                    ? ` (services: ${targetServices.join(', ')})`
+                    : '';
+                return `Restarted ${filtered.length} container(s) in stack "${task.target_id}"${servicesSuffix}`;
+            },
+        );
+        // Throw (not return) so the skip records as a failed run instead of a
+        // silent success; the next scheduled tick retries once the lock frees.
+        if (!lock.ran) throw new Error(skipMessage(task.target_id, lock.existing.action));
+        return lock.result;
     }
 
     /**

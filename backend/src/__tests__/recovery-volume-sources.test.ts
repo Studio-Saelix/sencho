@@ -12,6 +12,7 @@ import { describe, it, expect, beforeAll, afterAll, beforeEach, vi } from 'vites
 import fs from 'fs';
 import path from 'path';
 import type Docker from 'dockerode';
+import { errorMessageForLog } from '../utils/safeLog';
 import { setupTestDb, cleanupTestDb } from './helpers/setupTestDb';
 
 const renderResults = new Map<string, { rendered: string | null; stderr: string; timedOut: boolean }>();
@@ -312,5 +313,38 @@ describe('dependents', () => {
     expect(resolution.kind).toBe('resolved');
     if (resolution.kind !== 'resolved') return;
     expect(resolution.dependents).toEqual([{ stackName: 'was-using-it', serviceName: null }]);
+  });
+});
+
+describe('the probe report', () => {
+  const BASE = { dev: 1, ino: 2, uid: 0, gid: 0, mode: 16877, free: 5 };
+
+  it('keeps an unlisted work directory set apart from an empty one', () => {
+    expect(volumeSources.parseProbeReport(JSON.stringify(BASE))).toMatchObject({ workDirs: null });
+    expect(volumeSources.parseProbeReport(JSON.stringify({ ...BASE, work_dirs: [] }))).toMatchObject({ workDirs: [] });
+    expect(volumeSources.parseProbeReport(JSON.stringify({ ...BASE, work_dirs: ['.sencho-restore-a'] })))
+      .toMatchObject({ workDirs: ['.sencho-restore-a'] });
+  });
+
+  it('rejects a work directory list that is not an array of names', () => {
+    expect(volumeSources.parseProbeReport(JSON.stringify({ ...BASE, work_dirs: '.sencho-restore-a' }))).toBeNull();
+    expect(volumeSources.parseProbeReport(JSON.stringify({ ...BASE, work_dirs: [1] }))).toBeNull();
+  });
+
+  it('keeps the probe\'s own refusal as the log cause and the fixed sentence for the API', async () => {
+    const runner = {
+      run: async (spec: { onStdoutLine?: (line: string) => void }) => {
+        spec.onStdoutLine?.(JSON.stringify({ error: 'open /data: permission denied' }));
+        return { exitCode: 1, stderrTail: '', aborted: false, killed: false };
+      },
+    } as unknown as import('../services/recovery/restic/helperRunner').RecoveryHelperRunner;
+    const failure = await volumeSources.probeVolumeReport({
+      runner, operationId: 'o', volumeName: 'd', listWorkDirs: true,
+    }).catch((err: unknown) => err);
+    expect(failure).toMatchObject({
+      errorClass: 'identity_unknown',
+      detail: 'The storage identity could not be established.',
+    });
+    expect(errorMessageForLog(failure)).toContain('open /data: permission denied');
   });
 });

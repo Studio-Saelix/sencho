@@ -43,9 +43,14 @@ vi.mock('@/lib/authoredLocation', async (importOriginal) => {
 
 // Capture StackLogsSection props for showServiceChips wiring tests.
 let lastShowServiceChips: boolean | undefined;
+// Capture the scoped deploy permission handed to the service lifecycle menus.
+let lastContainersHealthCanDeploy: boolean | undefined;
 vi.mock('../editor-view-blocks', () => ({
   StackIdentityHeader: () => <div>identity-header</div>,
-  ContainersHealth: () => <div>health-pane</div>,
+  ContainersHealth: ({ canDeploy }: { canDeploy: boolean }) => {
+    lastContainersHealthCanDeploy = canDeploy;
+    return <div>health-pane</div>;
+  },
   StackLogsSection: ({ showServiceChips }: { showServiceChips: boolean }) => {
     lastShowServiceChips = showServiceChips;
     return <div>logs-pane</div>;
@@ -145,6 +150,23 @@ describe('EditorView Anatomy layout', () => {
     localStorage.setItem('sencho.appearance.anatomyMode', 'resizable');
     render(<EditorView {...makeProps({ editingCompose: true })} />);
     expect(screen.queryByTestId('anatomy-resize-wrapper')).not.toBeInTheDocument();
+  });
+});
+
+describe('EditorView service lifecycle permission', () => {
+  afterEach(() => { lastContainersHealthCanDeploy = undefined; });
+
+  it('passes the stack-and-node-scoped stack:deploy permission to ContainersHealth', () => {
+    const can = vi.fn().mockReturnValue(true);
+    render(<EditorView {...makeProps({ can })} />);
+    expect(can).toHaveBeenCalledWith('stack:deploy', 'stack', 'web', undefined);
+    expect(lastContainersHealthCanDeploy).toBe(true);
+  });
+
+  it('propagates a denied stack:deploy to ContainersHealth', () => {
+    const can = vi.fn().mockReturnValue(false);
+    render(<EditorView {...makeProps({ can })} />);
+    expect(lastContainersHealthCanDeploy).toBe(false);
   });
 });
 

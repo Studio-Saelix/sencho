@@ -12,6 +12,7 @@
 import { describe, it, expect, beforeAll, afterAll, beforeEach, afterEach, vi } from 'vitest';
 import type Docker from 'dockerode';
 import { setupTestDb, cleanupTestDb } from './helpers/setupTestDb';
+import { scriptedHelper } from './__helpers__/overwriteFixture';
 
 let tmpDir: string;
 let runner: typeof import('../services/recovery/operationRunner');
@@ -19,6 +20,8 @@ let operations: typeof import('../services/recovery/operations');
 let repositoryStore: typeof import('../services/recovery/repositories');
 let identityStore: typeof import('../services/recovery/storageIdentity');
 let recoveryDbModule: typeof import('../services/recovery/recoveryDb');
+let pointsModule: typeof import('../services/recovery/recoveryPoints');
+let intentsModule: typeof import('../services/recovery/restoreIntents');
 let DockerController: typeof import('../services/DockerController').default;
 let nodeId: number;
 
@@ -72,6 +75,8 @@ beforeAll(async () => {
   repositoryStore = await import('../services/recovery/repositories');
   identityStore = await import('../services/recovery/storageIdentity');
   recoveryDbModule = await import('../services/recovery/recoveryDb');
+  pointsModule = await import('../services/recovery/recoveryPoints');
+  intentsModule = await import('../services/recovery/restoreIntents');
   DockerController = (await import('../services/DockerController')).default;
   nodeId = (await import('../services/DatabaseService')).DatabaseService.getInstance().getDefaultNode()?.id ?? 1;
   const fs = await import('fs');
@@ -97,7 +102,7 @@ beforeEach(() => {
   (operations.RecoveryOperationStore.getInstance() as unknown as { reconciled: boolean }).reconciled = false;
   const db = recoveryDbModule.recoveryDb();
   for (const table of [
-    'recovery_restore_intents', 'recovery_repository_checks', 'recovery_locks', 'recovery_operations',
+    'recovery_restore_fence_members', 'recovery_restore_intents', 'recovery_repository_checks', 'recovery_locks', 'recovery_operations',
     'recovery_point_verifications', 'recovery_points', 'recovery_repositories',
     'recovery_storage_dependents', 'recovery_storage_identities',
   ]) {
@@ -111,9 +116,10 @@ afterEach(() => {
 });
 
 /** An active repository, a stored volume, and an operation of `kind` a dead process left holding locks. */
-function seedInterrupted(kind: 'create_point' | 'verify_point' | 'restore' | 'repository_init'): {
+function seedInterrupted(kind: 'create_point' | 'verify_point' | 'restore' | 'repository_init', options: { storageLock?: boolean } = {}): {
   repositoryId: string;
   storageKey: string;
+  storageId: string;
   operationId: string;
 } {
   const repository = repositoryStore.RecoveryRepositoryStore.getInstance().register({
@@ -134,12 +140,12 @@ function seedInterrupted(kind: 'create_point' | 'verify_point' | 'restore' | 're
   }).operation;
   store.markRunning(operation.id);
   store.acquireLock('repository', repository.id, operation.id);
-  if (kind === 'create_point') store.acquireLock('storage', storage.storageKey, operation.id);
+  if (kind === 'create_point' || options.storageLock) store.acquireLock('storage', storage.storageKey, operation.id);
   // The process that owned them is gone: the rows carry another epoch.
   const db = recoveryDbModule.recoveryDb();
   db.prepare("UPDATE recovery_operations SET process_epoch = 'dead-epoch' WHERE id = ?").run(operation.id);
   db.prepare("UPDATE recovery_locks SET process_epoch = 'dead-epoch' WHERE owner_operation_id = ?").run(operation.id);
-  return { repositoryId: repository.id, storageKey: storage.storageKey, operationId: operation.id };
+  return { repositoryId: repository.id, storageKey: storage.storageKey, storageId: storage.id, operationId: operation.id };
 }
 
 async function boot(unlockExit: number, remainingHelpers = 0): Promise<{ unlocks: string[] }> {
@@ -180,7 +186,7 @@ describe('boot with an interrupted capture', () => {
     expect(store.get(operationId)).toMatchObject({ state: 'completion_unknown', errorClass: 'interrupted' });
     expect(store.getLock('repository', repositoryId)).toBeNull();
     // The interrupted volume itself still waits for a reviewed release.
-    expect(store.getLock('storage', storageKey)?.staleSince).not.toBeNull();
+    expect(store.getLock('storage', storageKey)).toMatchObject({ staleSince: expect.any(Number) });
 
     const admitted = await captureOtherVolume();
     expect(admitted.replayed).toBe(false);
@@ -193,7 +199,7 @@ describe('boot with an interrupted capture', () => {
     await boot(1);
 
     const store = operations.RecoveryOperationStore.getInstance();
-    expect(store.getLock('repository', repositoryId)?.staleSince).not.toBeNull();
+    expect(store.getLock('repository', repositoryId)).toMatchObject({ staleSince: expect.any(Number) });
     await expect(captureOtherVolume()).rejects.toMatchObject({ errorClass: 'lock_stale' });
   });
 
@@ -201,7 +207,7 @@ describe('boot with an interrupted capture', () => {
     const { repositoryId } = seedInterrupted('create_point');
     await boot(0, 1);
 
-    expect(operations.RecoveryOperationStore.getInstance().getLock('repository', repositoryId)?.staleSince).not.toBeNull();
+    expect(operations.RecoveryOperationStore.getInstance().getLock('repository', repositoryId)).toMatchObject({ staleSince: expect.any(Number) });
     await expect(captureOtherVolume()).rejects.toMatchObject({ errorClass: 'lock_stale' });
   });
 
@@ -224,7 +230,7 @@ describe('boot with an interrupted capture', () => {
     await boot(0);
 
     expect(store.getLock('repository', repositoryId)).toBeNull();
-    expect(store.getLock('repository', other.id)?.staleSince).not.toBeNull();
+    expect(store.getLock('repository', other.id)).toMatchObject({ staleSince: expect.any(Number) });
   });
 
   it('keeps the storage lock of the interrupted volume closed to a new capture', async () => {
@@ -235,6 +241,205 @@ describe('boot with an interrupted capture', () => {
       nodeId, volumeName: 'interrupted_data', actor: 'alice', idempotencyKey: 'same-volume',
       requestDigest: runner.sha256Digest(['create_point', 'interrupted_data']), transport: 'local', authorize: () => true,
     })).rejects.toMatchObject({ errorClass: 'lock_stale' });
+  });
+});
+
+describe('the storage lock of an interrupted overwrite', () => {
+  /** A staged overwrite the dead process left in `phase`, on the operation `seedInterrupted` made. */
+  function seedOverwriteIntent(seeded: ReturnType<typeof seedInterrupted>, phase: 'staging' | 'completion_unknown'): string {
+    const pointStore = pointsModule.RecoveryPointStore.getInstance();
+    const point = pointStore.begin({
+      kind: 'root', storageId: seeded.storageId, expectedGenerationToken: 't1', repositoryId: seeded.repositoryId,
+      trigger: 'manual', actor: 'admin', sourceOperationId: 'op-src', sourceNodeKey: ENGINE_KEY, engineId: 'restic',
+    });
+    pointStore.finalize(point.id, {
+      status: 'succeeded',
+      evidence: {
+        snapshotId: 'snap-1', capture: { fileCount: 1, byteCount: 1, skippedCount: 0 },
+        exclusions: [], consistency: 'crash_consistent_live',
+      },
+    });
+    const intents = intentsModule.RestoreIntentStore.getInstance();
+    const intent = intents.recordOverwrite({
+      operationId: seeded.operationId, pointId: point.id, targetVolume: 'interrupted_data', actor: 'admin',
+      processEpoch: 'dead-epoch', expectedGenerationToken: 't1',
+      stagingVolume: `sencho-recovery-staging-${seeded.operationId}`,
+    });
+    if (phase === 'completion_unknown') intents.advance(intent.id, 'completion_unknown', { outcomeClass: 'identity_unknown' });
+    return intent.id;
+  }
+
+  it('reads failed/interrupted and frees the storage once boot rolled the restore back', async () => {
+    const seeded = seedInterrupted('restore', { storageLock: true });
+    const intentId = seedOverwriteIntent(seeded, 'staging');
+    await boot(0);
+
+    expect(intentsModule.RestoreIntentStore.getInstance().get(intentId)?.phase).toBe('rolled_back');
+    const store = operations.RecoveryOperationStore.getInstance();
+    expect(store.get(seeded.operationId)).toMatchObject({ state: 'failed', errorClass: 'interrupted' });
+    expect(store.getLock('storage', seeded.storageKey)).toBeNull();
+
+    // The volume is usable again: a capture of it is admitted, not refused as stale.
+    runner.RecoveryEngineService.setEngineFactoryForTests(() => ({
+      engineId: 'fake', contractVersion: 1 as const, storageKinds: ['named_volume'] as const,
+      probe: async () => ({ engineId: 'fake', build: 'test', usable: true }),
+      createPoint: async () => ({
+        ok: true as const,
+        evidence: { snapshotId: 'snap', capture: { fileCount: 1, byteCount: 1, skippedCount: 0 }, exclusions: [], consistency: 'crash_consistent_stopped' },
+      }),
+      verifyPoint: async () => ({ ok: true as const, evidence: { result: 'verified' } }),
+      restore: async () => ({ ok: false as const, errorClass: 'internal' }),
+    }) as never);
+    const admitted = await runner.RecoveryEngineService.getInstance(nodeId).admitCreatePoint({
+      nodeId, volumeName: 'interrupted_data', actor: 'alice', idempotencyKey: 'after-boot',
+      requestDigest: runner.sha256Digest(['create_point', 'interrupted_data']), transport: 'local', authorize: () => true,
+    });
+    expect(admitted.replayed).toBe(false);
+  });
+
+  // The operation reads `completion_unknown` from the moment boot parks it until the
+  // reconciler settles it, and the API is already listening. The service has to say it
+  // is still settling for that whole window, and only for it.
+  it('says boot is settling while the operation is parked, and not once boot has ended', async () => {
+    const seeded = seedInterrupted('restore', { storageLock: true });
+    seedOverwriteIntent(seeded, 'staging');
+    vi.spyOn(DockerController.prototype, 'getDocker').mockReturnValue(fakeDocker([OTHER_VOLUME, 'interrupted_data']));
+    const service = runner.RecoveryEngineService.getInstance(nodeId);
+    const store = operations.RecoveryOperationStore.getInstance();
+    // An engine whose boot has not started has nothing to wait for.
+    expect(service.isSettlingAtBoot()).toBe(false);
+    const seen: Array<{ settling: boolean; state: string | undefined }> = [];
+    const observe = () => seen.push({ settling: service.isSettlingAtBoot(), state: store.get(seeded.operationId)?.state });
+    service.setHelperRunnerForTests({
+      run: async (spec: { profile: string; onStdoutLine?: (line: string) => void }) => {
+        observe();
+        if (spec.profile === 'probe') spec.onStdoutLine?.(JSON.stringify({ dev: 1, ino: 2, uid: 0, gid: 0, mode: 16877 }));
+        return { exitCode: 0, stderrTail: '', aborted: false, killed: false };
+      },
+      removeForeignEpochHelpers: async () => { observe(); return 0; },
+      countForeignEpochHelpers: async () => 0,
+    } as never);
+    await service.runBootSequence();
+
+    // Boot parked the operation before it did any helper work, and the service said so.
+    expect(seen.length).toBeGreaterThan(0);
+    expect(seen).toContainEqual({ settling: true, state: 'completion_unknown' });
+    expect(seen.every((entry) => entry.settling)).toBe(true);
+    expect(store.get(seeded.operationId)).toMatchObject({ state: 'failed', errorClass: 'interrupted' });
+    expect(service.isSettlingAtBoot()).toBe(false);
+  });
+
+  it('stops saying boot is settling when boot ended without opening the gate', async () => {
+    const seeded = seedInterrupted('restore', { storageLock: true });
+    seedOverwriteIntent(seeded, 'staging');
+    vi.spyOn(DockerController.prototype, 'getDocker').mockReturnValue(fakeDocker([OTHER_VOLUME, 'interrupted_data']));
+    const service = runner.RecoveryEngineService.getInstance(nodeId);
+    service.setHelperRunnerForTests(helper(0).instance);
+    vi.spyOn(service as unknown as { refreshHealth: () => Promise<void> }, 'refreshHealth').mockRejectedValue(new Error('daemon gone'));
+    vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    await service.runBootSequence();
+    expect(service.isReady()).toBe(false);
+    expect(service.isSettlingAtBoot()).toBe(false);
+  });
+
+  it('keeps completion_unknown and the stale lock for a restore boot could not prove', async () => {
+    const seeded = seedInterrupted('restore', { storageLock: true });
+    const intentId = seedOverwriteIntent(seeded, 'completion_unknown');
+    await boot(0);
+
+    expect(intentsModule.RestoreIntentStore.getInstance().get(intentId)?.phase).toBe('completion_unknown');
+    const store = operations.RecoveryOperationStore.getInstance();
+    expect(store.get(seeded.operationId)).toMatchObject({ state: 'completion_unknown', errorClass: 'interrupted' });
+    expect(store.getLock('storage', seeded.storageKey)).toMatchObject({ staleSince: expect.any(Number) });
+  });
+
+  it('settles the operation and frees the storage when a retry proves the swap committed', async () => {
+    const seeded = seedInterrupted('restore', { storageLock: true });
+    const intentId = seedOverwriteIntent(seeded, 'completion_unknown');
+    await boot(0);
+    const store = operations.RecoveryOperationStore.getInstance();
+    expect(store.getLock('storage', seeded.storageKey)).toMatchObject({ staleSince: expect.any(Number) });
+
+    const service = runner.RecoveryEngineService.getInstance(nodeId);
+    service.setHelperRunnerForTests(scriptedHelper({ swapAnswers: [
+      { action: 'status', exitCode: 0, status: 'swapped' },
+      { action: 'commit', exitCode: 0, status: 'swapped' },
+      { action: 'cleanup', exitCode: 0, status: 'cleaned' },
+    ] }).helper);
+    const resolved = await service.resolveOverwrite({
+      intentId, action: 'retry', actor: 'admin', authorizeStack: () => true, authorizeGlobal: () => true,
+    });
+
+    expect(resolved).toEqual({ outcome: 'committed' });
+    expect(store.get(seeded.operationId)).toMatchObject({ state: 'succeeded', errorClass: null });
+    expect(store.getLock('storage', seeded.storageKey)).toBeNull();
+  });
+
+  it.each([
+    ['restic could not be unlocked', 1, 0],
+    ['a helper of the dead process is still there', 0, 1],
+  ])('settles the operation and frees the storage, but leaves the repository lock stale when %s', async (_label, unlockExit, remaining) => {
+    const seeded = seedInterrupted('restore', { storageLock: true });
+    const intentId = seedOverwriteIntent(seeded, 'staging');
+    await boot(unlockExit, remaining);
+
+    expect(intentsModule.RestoreIntentStore.getInstance().get(intentId)?.phase).toBe('rolled_back');
+    const store = operations.RecoveryOperationStore.getInstance();
+    expect(store.get(seeded.operationId)).toMatchObject({ state: 'failed', errorClass: 'interrupted' });
+    expect(store.getLock('storage', seeded.storageKey)).toBeNull();
+    // A helper that may still write to the repository keeps it closed, whatever the volume proved.
+    expect(store.getLock('repository', seeded.repositoryId)).toMatchObject({ staleSince: expect.any(Number) });
+    await expect(captureOtherVolume()).rejects.toMatchObject({ errorClass: 'lock_stale' });
+  });
+
+  it('settles the operation even when the retry that proves the data cannot release the fence', async () => {
+    const seeded = seedInterrupted('restore', { storageLock: true });
+    const intentId = seedOverwriteIntent(seeded, 'completion_unknown');
+    await boot(0);
+    const store = operations.RecoveryOperationStore.getInstance();
+    expect(store.get(seeded.operationId)?.state).toBe('completion_unknown');
+
+    // The data is committed, but the fence it still holds names a container the
+    // daemon no longer knows, so the release the retry attempts fails and throws.
+    const fenceStore = (await import('../services/recovery/restoreFence')).RestoreFenceStore.getInstance();
+    fenceStore.recordMembers(intentId, [{
+      containerId: 'gone', containerName: 'stack-dir-web-1', stackName: 'stack-dir', projectName: 'stack-dir',
+      restartPolicy: { Name: 'always' }, wasRunning: true,
+    }]);
+    recoveryDbModule.recoveryDb().prepare(
+      "UPDATE recovery_restore_intents SET phase = 'committed', outcome_class = 'fence_unavailable', fence_state = 'held' WHERE id = ?",
+    ).run(intentId);
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const service = runner.RecoveryEngineService.getInstance(nodeId);
+    await expect(service.resolveOverwrite({
+      intentId, action: 'retry', actor: 'admin', authorizeStack: () => true, authorizeGlobal: () => true,
+    })).rejects.toMatchObject({ errorClass: 'fence_unavailable' });
+
+    expect(store.get(seeded.operationId)).toMatchObject({ state: 'partial', errorClass: 'fence_unavailable' });
+    expect(store.getLock('storage', seeded.storageKey)).toBeNull();
+  });
+
+  it('keeps the lock of an interrupted restore that has no overwrite intent, until a reviewed release', async () => {
+    const { storageKey, storageId } = seedInterrupted('restore', { storageLock: true });
+    await boot(0);
+    const store = operations.RecoveryOperationStore.getInstance();
+    expect(store.getLock('storage', storageKey)).toMatchObject({ staleSince: expect.any(Number) });
+
+    const next = store.start({
+      idempotencyKey: 'next-overwrite', kind: 'restore', storageId,
+      actor: 'admin', transport: 'local', requestDigest: 'b'.repeat(64),
+    }).operation;
+    let refusal: unknown;
+    try {
+      store.acquireLock('storage', storageKey, next.id);
+    } catch (err) {
+      refusal = err;
+    }
+    expect(refusal).toMatchObject({ errorClass: 'lock_stale' });
+
+    store.releaseStaleLock('storage', storageKey, 'admin');
+    expect(store.getLock('storage', storageKey)).toBeNull();
+    expect(() => store.acquireLock('storage', storageKey, next.id)).not.toThrow();
   });
 });
 
@@ -262,7 +467,7 @@ describe('which interrupted work releases its repository lock', () => {
   it('keeps an interrupted provisioning locked while a helper of the dead process remains', async () => {
     const { repositoryId } = seedInterrupted('repository_init');
     await boot(0, 1);
-    expect(operations.RecoveryOperationStore.getInstance().getLock('repository', repositoryId)?.staleSince)
-      .not.toBeNull();
+    expect(operations.RecoveryOperationStore.getInstance().getLock('repository', repositoryId))
+      .toMatchObject({ staleSince: expect.any(Number) });
   });
 });

@@ -5,8 +5,10 @@ import {
 import { Tabs, TabsContent, TabsList, TabsTrigger, TabsHighlight, TabsHighlightItem } from '@/components/ui/tabs';
 import { PageMasthead, type MastheadMetadataItem } from '@/components/ui/PageMasthead';
 import { Button } from '@/components/ui/button';
+import { IconBusyButton } from '@/components/ui/icon-busy-button';
 import { Card, CardContent } from '@/components/ui/card';
 import { LockCard } from '@/components/ui/LockCard';
+import { DismissedCountButton, DismissedSheet } from '@/components/ui/dismissed-sheet';
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table';
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip';
 import { apiFetch } from '@/lib/api';
@@ -22,7 +24,8 @@ import { CreateNetworkDialog } from '@/components/resources/CreateNetworkDialog'
 import { ConfirmModal } from '@/components/ui/modal';
 import { NetworkDetailDrawer } from './NetworkDetailDrawer';
 import { NetworkInventoryTable } from './NetworkInventoryTable';
-import { NetworkingDismissedSection, NetworkingFindingsList, type NetworkingDismissedList } from './NetworkingFindingsList';
+import { NetworkingFindingsList, type NetworkingDismissedList } from './NetworkingFindingsList';
+import { networkingDismissedItems } from './networkingDismissedItems';
 import { NetworkingFindingActions, type NetworkingFindingControls } from './NetworkingFindingActions';
 import { NetworkingFindingText } from './NetworkingFindingText';
 import { AcknowledgeInDoctorDialog } from './AcknowledgeInDoctorDialog';
@@ -101,6 +104,13 @@ export function NetworkingView({ headerActions }: NetworkingViewProps) {
   const nodeId = activeNode?.id;
 
   const [tab, setTab] = useState<NetworkingTab>('overview');
+  const [dismissedOpen, setDismissedOpen] = useState(false);
+  // The count that opened the sheet, plus a surviving tab region: closing returns
+  // focus to the exact count, or to the tab panel when restoring the last item
+  // removes that count.
+  const dismissedOpenerRef = useRef<HTMLButtonElement>(null);
+  const overviewFocusRef = useRef<HTMLDivElement>(null);
+  const findingsFocusRef = useRef<HTMLDivElement>(null);
   const [loading, setLoading] = useState(true);
   const [unsupported, setUnsupported] = useState(false);
   const [loadFailure, setLoadFailure] = useState<RemoteReadFailure | null>(null);
@@ -148,9 +158,19 @@ export function NetworkingView({ headerActions }: NetworkingViewProps) {
     }
   }, [confirmDeleteNetwork]);
 
+  // The sheet lists this node's findings, so a node change closes it. A failure
+  // card replaces the page, and the sheet with it, and Retry can bring the page
+  // back: close it there too, or a stale open flag would pop it back open. The
+  // lock card has no retry, so only a node change leaves it, and that closes it.
+  const sheetNodeRef = useRef(nodeId);
+
   useEffect(() => {
     const controller = new AbortController();
     let stale = false;
+    if (sheetNodeRef.current !== nodeId) {
+      sheetNodeRef.current = nodeId;
+      setDismissedOpen(false);
+    }
     setLoading(true);
     setUnsupported(false);
     setLoadFailure(null);
@@ -170,7 +190,10 @@ export function NetworkingView({ headerActions }: NetworkingViewProps) {
         if (!response.ok) {
           // An unreachable or timed-out node is a state, not a thrown error: the
           // page names it and offers a retry instead of drawing zeroed cards.
-          if (!stale) setLoadFailure(classifyRemoteReadFailure(response) ?? 'http');
+          if (!stale) {
+            setLoadFailure(classifyRemoteReadFailure(response) ?? 'http');
+            setDismissedOpen(false);
+          }
           return;
         }
         const body = await response.json() as Partial<NetworkingOverviewEnvelope>;
@@ -197,6 +220,7 @@ export function NetworkingView({ headerActions }: NetworkingViewProps) {
           // before the caller sees the response. Classify it so the page names
           // the cause instead of generic transport copy.
           setLoadFailure(classifyRemoteReadError(error));
+          setDismissedOpen(false);
         }
       } finally {
         if (!stale) setLoading(false);
@@ -464,11 +488,18 @@ export function NetworkingView({ headerActions }: NetworkingViewProps) {
         <CardContent className="p-4">
           <div className="mb-2 flex items-center justify-between">
             <p className="font-mono text-[10px] uppercase tracking-[0.18em] text-stat-subtitle">Operator attention</p>
-            {partition.active.length > 5 && (
-              <button type="button" className="text-xs text-brand hover:underline" onClick={() => setTab('findings')}>
-                View all findings
-              </button>
-            )}
+            <div className="flex items-center gap-3">
+              {!isLegacy && (
+                <span className="font-mono text-[11px] text-stat-subtitle">
+                  <DismissedCountButton ref={dismissedOpenerRef} count={partition.dismissed.length} onClick={() => setDismissedOpen(true)} />
+                </span>
+              )}
+              {partition.active.length > 5 && (
+                <button type="button" className="text-xs text-brand hover:underline" onClick={() => setTab('findings')}>
+                  View all findings
+                </button>
+              )}
+            </div>
           </div>
           {isLegacy ? (
             <p className="text-sm text-stat-value">This node provides a partial networking response. Update it to review enriched findings.</p>
@@ -503,11 +534,6 @@ export function NetworkingView({ headerActions }: NetworkingViewProps) {
                 ))}
               </TableBody>
             </Table>
-          )}
-          {!isLegacy && partition.dismissed.length > 0 && (
-            <div className="mt-3">
-              <NetworkingDismissedSection dismissed={dismissedList} />
-            </div>
           )}
         </CardContent>
       </Card>
@@ -623,16 +649,15 @@ export function NetworkingView({ headerActions }: NetworkingViewProps) {
               <TooltipProvider>
                 <Tooltip>
                   <TooltipTrigger asChild>
-                    <Button
+                    <IconBusyButton
                       variant="outline"
                       size="sm"
+                      icon={RefreshCw}
                       onClick={() => setReloadKey(k => k + 1)}
-                      disabled={loading}
+                      pending={loading}
                       className="h-9 w-9 p-0"
                       aria-label="Refresh"
-                    >
-                      <RefreshCw className={`w-4 h-4 ${loading ? 'animate-spin' : ''}`} />
-                    </Button>
+                    />
                   </TooltipTrigger>
                   <TooltipContent>Refresh</TooltipContent>
                 </Tooltip>
@@ -647,7 +672,7 @@ export function NetworkingView({ headerActions }: NetworkingViewProps) {
           </div>
         )}
 
-        <TabsContent value="overview" className="mt-4">
+        <TabsContent ref={overviewFocusRef} value="overview" className="mt-4">
           {loading ? <p className="text-sm text-muted-foreground">Loading overview…</p> : overviewCards}
           {overview && overview.renderFailedStacks.length > 0 && (
             <p className="mt-3 text-sm text-warning">
@@ -690,16 +715,28 @@ export function NetworkingView({ headerActions }: NetworkingViewProps) {
           )}
         </TabsContent>
 
-        <TabsContent value="findings" className="mt-4">
+        <TabsContent ref={findingsFocusRef} value="findings" className="mt-4">
           <NetworkingFindingsList
             findings={partition.active}
             dismissed={dismissedList}
+            onOpenDismissed={() => setDismissedOpen(true)}
+            dismissedOpenerRef={dismissedOpenerRef}
             loading={loading}
             controls={findingControls}
             disabled={isLegacy}
           />
         </TabsContent>
       </Tabs>
+
+      <DismissedSheet
+        open={dismissedOpen}
+        onOpenChange={setDismissedOpen}
+        openerRef={dismissedOpenerRef}
+        fallbackFocusRef={tab === 'findings' ? findingsFocusRef : overviewFocusRef}
+        crumb={['Networking', tab === 'overview' ? 'Overview' : 'Findings']}
+        items={networkingDismissedItems(dismissedList)}
+        loading={loading}
+      />
 
       <CreateNetworkDialog
         open={showCreateNetwork}

@@ -93,6 +93,8 @@ export interface BulkStatusPayloadEntry {
   mainPortService?: string;
   running?: number;
   total?: number;
+  /** Containers in Docker's `restarting` state; absent on older nodes. */
+  restarting?: number;
   isSelf?: boolean;
 }
 
@@ -112,6 +114,7 @@ export function isValidBulkPayload(
       mainPortService?: unknown;
       running?: unknown;
       total?: unknown;
+      restarting?: unknown;
       isSelf?: unknown;
     };
     return (
@@ -120,6 +123,7 @@ export function isValidBulkPayload(
       (entry.mainPortService === undefined || typeof entry.mainPortService === 'string') &&
       (entry.running === undefined || typeof entry.running === 'number') &&
       (entry.total === undefined || typeof entry.total === 'number') &&
+      (entry.restarting === undefined || typeof entry.restarting === 'number') &&
       (entry.isSelf === undefined || typeof entry.isSelf === 'boolean')
     );
   });
@@ -136,14 +140,14 @@ export function parseBulkStatusPayload(
   ports: Record<string, number | undefined>;
   portServices: Record<string, string | undefined>;
   self: Record<string, boolean>;
-  counts: Record<string, { running: number; total: number } | undefined>;
+  counts: Record<string, { running: number; total: number; restarting?: number } | undefined>;
   coveredFileCount: number;
 } {
   const statuses: Record<string, StackRowStatus> = {};
   const ports: Record<string, number | undefined> = {};
   const portServices: Record<string, string | undefined> = {};
   const self: Record<string, boolean> = {};
-  const counts: Record<string, { running: number; total: number } | undefined> = {};
+  const counts: Record<string, { running: number; total: number; restarting?: number } | undefined> = {};
   let coveredFileCount = 0;
   for (const [key, val] of Object.entries(raw)) {
     statuses[key] = val.status;
@@ -154,7 +158,9 @@ export function parseBulkStatusPayload(
     }
     if (val.isSelf) self[key] = true;
     if (val.running !== undefined && val.total !== undefined) {
-      counts[key] = { running: val.running, total: val.total };
+      counts[key] = val.restarting !== undefined
+        ? { running: val.running, total: val.total, restarting: val.restarting }
+        : { running: val.running, total: val.total };
     }
   }
   for (const file of fileList) {

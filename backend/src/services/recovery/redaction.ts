@@ -1,5 +1,5 @@
 import { redactSensitiveText } from '../../utils/safeLog';
-import type { RecoveryErrorClass } from './types';
+import type { RecoveryErrorClass, RecoveryRefusalReason } from './types';
 
 /**
  * The redaction boundary for recovery.
@@ -33,6 +33,19 @@ const ERROR_DETAIL: Record<RecoveryErrorClass, string> = {
   node_refused: 'The node refused the request.',
   node_error: 'The node, or the recovery helper running on it, failed to complete the request.',
   internal: 'The recovery operation failed.',
+  precondition_failed:
+    'The volume or its dependents changed since this overwrite was confirmed. Ask for a new preview and confirm again.',
+  dependents_changed:
+    'A container or stack started using the volume after this overwrite was admitted, so it was stopped before any live data moved.',
+  fence_unavailable:
+    'The workloads using this volume could not be stopped safely, so nothing was changed.',
+  pre_restore_failed:
+    'The point taken before the overwrite was not complete, so nothing in the volume was changed.',
+  insufficient_space:
+    'There is not enough free space to restore this point next to the existing data.',
+  cleanup_failed:
+    'The restored data is in place, but the temporary restore directory could not be removed. The workloads stay stopped until this is resolved.',
+  not_cancellable: 'This operation can no longer be cancelled.',
 };
 
 export function errorDetailFor(errorClass: RecoveryErrorClass): string {
@@ -46,7 +59,7 @@ export function isRecoveryErrorClass(value: unknown): value is RecoveryErrorClas
 /** What a refusal can say beyond its class: a machine reason and a more specific sentence. */
 export interface RecoveryErrorOptions {
   /** A stable token a client can switch on, such as `repository_not_initialized`. */
-  reason?: string;
+  reason?: RecoveryRefusalReason;
   /** A fixed sentence for this refusal. Never built from engine output. */
   detail?: string;
 }
@@ -54,7 +67,7 @@ export interface RecoveryErrorOptions {
 /** A recovery failure that already carries its sanitized class. */
 export class RecoveryError extends Error {
   readonly errorClass: RecoveryErrorClass;
-  readonly reason: string | undefined;
+  readonly reason: RecoveryRefusalReason | undefined;
   readonly detail: string;
   constructor(errorClass: RecoveryErrorClass, options: RecoveryErrorOptions = {}) {
     const detail = options.detail ?? ERROR_DETAIL[errorClass];

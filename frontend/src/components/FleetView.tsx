@@ -17,6 +17,7 @@ import { useFleetOverview } from './FleetView/hooks/useFleetOverview';
 import { useFleetDossierExport } from './FleetView/hooks/useFleetDossierExport';
 import { useTopologyPreferences } from '@/hooks/useTopologyPreferences';
 import { Button } from '@/components/ui/button';
+import { IconBusyButton } from '@/components/ui/icon-busy-button';
 import { Tabs, TabsContent } from '@/components/ui/tabs';
 import { useAuth } from '@/context/AuthContext';
 import { useNodes } from '@/context/NodeContext';
@@ -36,6 +37,7 @@ import { DependencyMapTab } from './fleet/DependencyMapTab';
 import { useFleetMap } from './fleet/useFleetMap';
 import { ContainerLabelsTab } from './fleet/ContainerLabelsTab';
 import { useNodeActions } from './nodes/useNodeActions';
+import { BootstrapServerDialog } from './nodes/bootstrap/BootstrapServerDialog';
 import type { FleetTab, SecurityTab } from '@/lib/events';
 import type { SectionId } from '@/components/settings/types';
 import type { MuteRuleDraft } from '@/lib/muteRules';
@@ -49,7 +51,7 @@ interface FleetViewProps {
     onOpenNodeNetworking: (nodeId: number) => void;
     /** Switches to a node and opens its Security view (Readiness security findings). */
     onOpenNodeSecurity?: (nodeId: number, tab: SecurityTab | null) => void;
-    /** Opens a Settings section (used to send "Add node" to Settings > Nodes). */
+    /** Opens a Settings section (Readiness findings link to Settings). */
     onOpenSettingsSection?: (section: SectionId) => void;
     onOpenMuteRulesWithPrefill?: (draft: MuteRuleDraft) => void;
     fleetUpdatesIntent?: { tab: 'nodes' | 'changelog' } | null;
@@ -175,9 +177,18 @@ export function FleetView({
 
     const { mastheadStats, lastSyncAt, loading, refreshing } = overview;
 
-    const { openEdit, openDelete, NodeActionModals } = useNodeActions({
+    const { openCreate, openEdit, openDelete, NodeActionModals } = useNodeActions({
         onNodeChange: () => { void overview.fetchOverview(true); },
     });
+    const [bootstrapOpen, setBootstrapOpen] = useState(false);
+    const nodeManagement = useMemo(() => ({
+        canConnectExisting: isAdmin || canManageFleet,
+        canBootstrapServer: isAdmin,
+        checkingUpdates: updateStatus.checkingUpdates,
+        onConnectExisting: openCreate,
+        onBootstrapServer: () => setBootstrapOpen(true),
+        onCheckUpdates: updateStatus.checkUpdates,
+    }), [isAdmin, canManageFleet, updateStatus.checkingUpdates, openCreate, updateStatus.checkUpdates]);
 
     return (
         <div className="h-full overflow-auto p-6">
@@ -202,21 +213,20 @@ export function FleetView({
                         <TooltipProvider>
                             <Tooltip>
                                 <TooltipTrigger asChild>
-                                    <Button
+                                    <IconBusyButton
                                         variant="outline"
                                         size="sm"
+                                        icon={RefreshCw}
                                         onClick={() => {
                                             void overview.fetchOverview(true);
                                             // Overview refreshes skip the fleet-wide readiness fan-out;
                                             // returning to the tab re-checks a stale result instead.
                                             if (activeTab === 'readiness') setReadinessRefreshKey(key => key + 1);
                                         }}
-                                        disabled={refreshing}
+                                        pending={refreshing}
                                         className="h-9 w-9 p-0"
                                         aria-label="Refresh"
-                                    >
-                                        <RefreshCw className={`w-4 h-4 ${refreshing ? 'animate-spin' : ''}`} />
-                                    </Button>
+                                    />
                                 </TooltipTrigger>
                                 <TooltipContent>Refresh</TooltipContent>
                             </Tooltip>
@@ -273,9 +283,7 @@ export function FleetView({
                         onDeleteNode={openDelete}
                         onOpenMuteRulesWithPrefill={onOpenMuteRulesWithPrefill}
                         onOpenNodeDetails={setDetailsNodeId}
-                        onAddNode={isAdmin && onOpenSettingsSection ? () => onOpenSettingsSection('nodes') : undefined}
-                        onCheckUpdates={updateStatus.checkUpdates}
-                        checkingUpdates={updateStatus.checkingUpdates}
+                        nodeManagement={nodeManagement}
                         topologyMode={topology.prefs.mode}
                         onTopologyModeChange={topology.setMode}
                         topologyPositions={topology.prefs.positions}
@@ -401,6 +409,7 @@ export function FleetView({
             />
 
             {NodeActionModals}
+            <BootstrapServerDialog open={bootstrapOpen} onOpenChange={setBootstrapOpen} />
         </div>
     );
 }

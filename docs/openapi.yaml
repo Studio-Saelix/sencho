@@ -1591,7 +1591,7 @@ components:
           description: Fixed, sanitized sentence for this class. Never raw engine output.
         errorClass:
           type: string
-          enum: [invalid_request, permission_denied, capability_unavailable, update_required, schema_unsupported, identity_unknown, lock_held, lock_stale, repository_unavailable, repository_key_unavailable, source_unreadable, integrity_mismatch, attributes_not_restored, interrupted, transport_unreachable, node_refused, node_error, internal]
+          enum: [invalid_request, permission_denied, capability_unavailable, update_required, schema_unsupported, identity_unknown, lock_held, lock_stale, repository_unavailable, repository_key_unavailable, source_unreadable, integrity_mismatch, attributes_not_restored, interrupted, transport_unreachable, node_refused, node_error, internal, precondition_failed, dependents_changed, fence_unavailable, pre_restore_failed, insufficient_space, cleanup_failed, not_cancellable]
         code:
           type: string
           description: The error class upper-cased, for a client to switch on.
@@ -1603,7 +1603,13 @@ components:
             `engine_starting` while the node is still starting, `repository_not_initialized`
             when no repository has been provisioned (both `503 capability_unavailable`),
             `repository_replaced` for a restore of a point in a replaced repository
-            (`503 repository_unavailable`), and `not_cancellable`.
+            (`503 repository_unavailable`). The overwrite routes add
+            `wrong_route` (a `staged_overwrite` or `new_path` mode asked for on the new-volume
+            route), `generation_changed` (the volume's generation moved since the preview),
+            `confirmation_mismatch` (the confirmation token does not match the volume as it is
+            now: it came from another preview, or the containers or the repository changed
+            since the preview), `no_fence` (`release_fence` on a restore that never stopped a workload),
+            and `fence_released` (`release_fence` on a restore whose fence is already released).
 
     RecoveryOperation:
       type: object
@@ -1632,12 +1638,120 @@ components:
             success and is never retried silently.
         errorClass:
           type: ["string", "null"]
-          enum: [invalid_request, permission_denied, capability_unavailable, update_required, schema_unsupported, identity_unknown, lock_held, lock_stale, repository_unavailable, repository_key_unavailable, source_unreadable, integrity_mismatch, attributes_not_restored, interrupted, transport_unreachable, node_refused, node_error, internal, null]
+          enum: [invalid_request, permission_denied, capability_unavailable, update_required, schema_unsupported, identity_unknown, lock_held, lock_stale, repository_unavailable, repository_key_unavailable, source_unreadable, integrity_mismatch, attributes_not_restored, interrupted, transport_unreachable, node_refused, node_error, internal, precondition_failed, dependents_changed, fence_unavailable, pre_restore_failed, insufficient_space, cleanup_failed, not_cancellable, null]
         errorDetail: { type: ["string", "null"] }
         processEpoch: { type: string }
         createdAt: { type: integer }
         updatedAt: { type: integer }
         completedAt: { type: ["integer", "null"] }
+
+    RecoveryOverwritePreview:
+      type: object
+      required: [point, node, target, dependents, inUse, swap, space, preRestorePoint, warnings, confirmation]
+      description: |
+        What restoring a point over its own volume would do. Nothing was written to answer it.
+        `confirmation.token` is bound to the state described here (the point, the volume and its
+        generation, the repository, and each dependent container's id, stack, running state and
+        restart policy), so the overwrite can only run against what
+        the caller saw. It is null when `target.eligible` is false: there is no state an
+        overwrite could be admitted against.
+      properties:
+        point:
+          type: object
+          required: [id, completedAt, consistency, capture, latestVerification, generation, isCurrentGeneration]
+          properties:
+            id: { type: string }
+            completedAt: { type: ["integer", "null"] }
+            consistency: { type: string }
+            capture:
+              type: ["object", "null"]
+              properties:
+                fileCount: { type: integer }
+                byteCount: { type: integer }
+                skippedCount: { type: integer }
+            latestVerification: { type: ["string", "null"] }
+            generation: { type: integer }
+            isCurrentGeneration: { type: boolean }
+        node:
+          type: object
+          description: >-
+            The node the restore targets, as the hub the caller addressed knows it (names
+            are cut to 128 characters). Called directly on a remote instance with no hub in
+            front, or through a hub that predates this field, it names that instance itself.
+          required: [id, name, transport]
+          properties:
+            id: { type: integer }
+            name: { type: string }
+            transport: { type: string }
+        target:
+          type: object
+          required: [volumeName, storageKey, generation, generationToken, eligible, ineligibleReason]
+          properties:
+            volumeName: { type: string }
+            storageKey: { type: string }
+            generation: { type: integer }
+            generationToken: { type: string }
+            eligible: { type: boolean }
+            ineligibleReason: { type: ["string", "null"] }
+        dependents:
+          type: object
+          required: [stacks, containers]
+          description: What the overwrite would stop. Each container is restarted afterwards only if it was running.
+          properties:
+            stacks:
+              type: array
+              items: { type: string }
+            containers:
+              type: array
+              items:
+                type: object
+                required: [id, name, stack, project, running, restartPolicy]
+                properties:
+                  id: { type: string }
+                  name: { type: string }
+                  stack: { type: ["string", "null"] }
+                  project: { type: ["string", "null"] }
+                  running: { type: boolean }
+                  restartPolicy:
+                    type: object
+                    description: The Docker restart policy the fence records and restores.
+        inUse:
+          type: boolean
+          description: Whether any dependent container is running now.
+        swap:
+          type: object
+          required: [method, atomic, supported, reason]
+          properties:
+            method: { type: string, enum: [fenced_rename] }
+            atomic:
+              type: boolean
+              description: Always false. The volume root is briefly neither the old nor the new data, which is why the workloads are stopped.
+            supported: { type: boolean }
+            reason: { type: ["string", "null"] }
+        space:
+          type: object
+          required: [requiredBytes, freeBytes, sufficient]
+          properties:
+            requiredBytes: { type: integer }
+            freeBytes: { type: ["integer", "null"] }
+            sufficient: { type: ["boolean", "null"] }
+        preRestorePoint:
+          type: object
+          description: A stopped, crash-consistent point of the current data is always captured before anything is replaced.
+          properties:
+            required: { type: boolean, enum: [true] }
+            consistency: { type: string, enum: [crash_consistent_stopped] }
+        warnings:
+          type: array
+          items: { type: string }
+        confirmation:
+          type: object
+          required: [token]
+          properties:
+            token:
+              type: ["string", "null"]
+              pattern: '^[0-9a-f]{64}$'
+              description: Null when `target.eligible` is false.
 
     RecoveryProgress:
       type: object
@@ -1894,7 +2008,7 @@ components:
               - $ref: "#/components/schemas/RecoveryError"
               - $ref: "#/components/schemas/Error"
     RecoveryConflict:
-      description: A live lock is held, an interrupted operation left a stale lock, the storage identity is unknown, a check found a mismatch, an operation was interrupted, or a remote node needs an update.
+      description: A live lock is held, an interrupted operation left a stale lock, the storage identity is unknown, a check found a mismatch, an operation was interrupted, an operation cannot be cancelled any more, or a remote node needs an update.
       content:
         application/json:
           schema:
@@ -6125,7 +6239,11 @@ paths:
         only one capture, verification, restore, or repository replacement runs at a time on it. A node with no
         repository answers `503 capability_unavailable` with reason `repository_not_initialized`.
         The capture runs in the background and is followed by a repository-wide metadata
-        check before the operation ends.
+        check before the operation ends. A volume with an overwrite restore that is open
+        (any phase other than `completion_unknown` that has not settled), or whose fence is held or failed to release, answers
+        `409 lock_held`: the restore's hidden working copy may still be inside the volume
+        and a point would include it. A restore parked as `completion_unknown` answers
+        `409 lock_stale` through its storage lock instead.
         Only a Full Admin API token may call it; any other scope is refused with `403 SCOPE_DENIED`.
       parameters:
         - $ref: "#/components/parameters/nodeId"
@@ -6287,7 +6405,11 @@ paths:
                 targetMode:
                   type: string
                   enum: [new_volume, new_path, staged_overwrite]
-                  description: Only `new_volume` is accepted; any other value is refused as an invalid request.
+                  description: |
+                    Only `new_volume` is accepted; any other value is refused as an invalid request.
+                    Both other values are refused with `reason: wrong_route`. For `staged_overwrite`,
+                    restoring over a point's own volume is
+                    `POST /api/recovery/points/{pointId}/overwrite`; `new_path` is not available.
                   default: new_volume
       responses:
         "202":
@@ -6323,6 +6445,264 @@ paths:
         "500":
           $ref: "#/components/responses/RecoveryInternalError"
 
+  /api/recovery/points/{pointId}/overwrite/preview:
+    post:
+      operationId: previewRecoveryOverwrite
+      tags: [Recovery]
+      summary: Preview restoring a point over its own volume
+      description: |
+        Describes what restoring the point over the volume it was captured from would do,
+        without changing anything: the stacks and containers that would stop, whether any is
+        running, the free space, whether the swap is supported on this node, and, when the
+        target is eligible, a `confirmation.token` bound to exactly this state. Send the token to
+        `POST /api/recovery/points/{pointId}/overwrite` to run it. The answer names the
+        dependents, so it needs the same `restore` access on every dependent stack as the
+        overwrite itself, plus the node-wide check when a mounting container belongs to no stack.
+        A restore that did not settle can leave its hidden work directory (`.sencho-restore-<id>`,
+        an intent UUID) in the volume, holding the data it replaced. The next swap refuses a
+        volume that holds one, after the containers have already stopped, so the preview reports
+        the volume as not eligible (`target.eligible: false`, `swap.supported: false`,
+        `confirmation.token: null`) and names the directory in `target.ineligibleReason`; the
+        overwrite is refused with `400 invalid_request` for the same reason. A capture skips that
+        directory, so it is not in any point: copy out what you need, remove it, and preview again.
+        A top-level entry with the prefix but not an intent-id name is a user's own data: it is
+        captured, listed as content, and never treated as a work directory. A volume that does not
+        exist, or that was recreated after the point was captured, is also not eligible: the
+        preview compares the live volume's creation time and root device/inode with the point's
+        generation and does not mount a missing volume by name. Once a new capture records the
+        recreated volume, the point's generation is superseded and the preview refuses it as an
+        unknown storage identity instead. A preview that cannot read the live generation issues no
+        token. The listing reads a volume root an
+        application user owns (mode `0700` or `2750`) as well; when the helper cannot complete
+        the listing at all, the preview adds a warning and the swap's own refusal is the backstop.
+        Only a Full Admin API token may call it; any other scope is refused with `403 SCOPE_DENIED`.
+      parameters:
+        - name: pointId
+          in: path
+          required: true
+          schema:
+            type: string
+        - $ref: "#/components/parameters/nodeId"
+      responses:
+        "200":
+          description: The preview.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RecoveryOverwritePreview"
+        "400":
+          $ref: "#/components/responses/RecoveryBadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/RecoveryForbidden"
+        "409":
+          $ref: "#/components/responses/RecoveryConflict"
+        "503":
+          $ref: "#/components/responses/RecoveryUnavailable"
+        "500":
+          $ref: "#/components/responses/RecoveryInternalError"
+
+  /api/recovery/points/{pointId}/overwrite:
+    post:
+      operationId: overwriteRecoveryPoint
+      tags: [Recovery]
+      summary: Restore a point over its own volume
+      description: |
+        Replaces the contents of the volume the point was captured from. Three things gate it:
+        the `confirmationToken` from the preview, recomputed against the current state; the
+        volume name typed back exactly in `confirmVolumeName`; and `restore` access on every
+        dependent stack (plus the node-wide check for a mounting container no stack owns).
+        A refusal writes nothing, so the same `idempotencyKey` can be sent again after a new
+        preview.
+
+        Sencho restores and verifies the point into a staging volume and removes it, fences and
+        stops every container that mounts the volume, captures a stopped pre-restore point of the
+        current data, swaps the contents, removes the originals, and restarts what was running.
+        A container that appeared or was removed, a fenced container found running again, or a stack
+        that started declaring the volume before the point aborts with `dependents_changed`; a
+        volume generation that moved, a fenced container whose Docker start time cannot be read, or
+        a check that cannot answer ends the operation with `identity_unknown` or its own class. A
+        point read while a container was observed running at either capture check, with a container
+        still present after the read that the fence did not stop (or a fenced one gone), with a
+        fenced container restarted (its Docker start time moved), or without a usable observation
+        (`unknown`) is settled `failed` and the operation fails with `pre_restore_failed`. A stack
+        that starts declaring the volume during the read is caught before the swap. On any refusal
+        here or before the swap the fence is released and the workloads that were running restart,
+        unless the release itself fails: the operation then ends `completion_unknown`, the restore
+        records `fence_unavailable` with its fence still held, and a retry or the next start
+        finishes the release. The operation is asynchronous: read it with `GET /api/recovery/operations/{id}`,
+        whose `result.restore` carries the intent id, phase, fence state and outcome class. A
+        state that cannot be proven ends `completion_unknown` and is settled with
+        `POST /api/recovery/restores/{intentId}/resolve`. When Sencho restarts mid-restore, startup
+        settles the operation with the restore: `failed` with `errorClass: interrupted` after a
+        rollback, `succeeded` after a roll forward, and `partial` while a clean-up or a fence
+        release is owed. Each releases the volume's storage lock; only a restore that could not be
+        proven keeps `completion_unknown` and a stale lock.
+
+        Request errors: `409 precondition_failed` with `reason: generation_changed` or
+        `reason: confirmation_mismatch` (the token is not the one the current state gives; preview again),
+        `409 lock_held` (another restore holds the volume or its fence), and
+        `507 insufficient_space`. Errors found after admission answer `202` and show up on
+        `GET /api/recovery/operations/{id}`, where the operation ends `failed`, `partial` (the
+        data is committed but the originals could not be removed, or the fence could not be
+        released) or `completion_unknown`, with the class in `errorClass`: `pre_restore_failed`
+        (the point was not proven complete, stopped and unchanged while it was read),
+        `fence_unavailable` (a container
+        start was still unanswered, with nothing stopped, or a container could not be fenced and
+        the rollback restarted what had stopped), `dependents_changed` (a container set that
+        changed after admission, including a container that appeared, was removed, or was running
+        again, a stack that started declaring the volume, or a dependent whose Compose model could
+        not be rendered), `cleanup_failed`, and the rest of the class list.
+        A request to the new-volume route naming `staged_overwrite` is refused with
+        `reason: wrong_route`.
+        Only a Full Admin API token may call it; any other scope is refused with `403 SCOPE_DENIED`.
+      parameters:
+        - name: pointId
+          in: path
+          required: true
+          schema:
+            type: string
+        - $ref: "#/components/parameters/nodeId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [confirmationToken, confirmVolumeName, idempotencyKey]
+              properties:
+                confirmationToken:
+                  type: string
+                  pattern: '^[0-9a-f]{64}$'
+                  description: The `confirmation.token` of a preview of this point.
+                confirmVolumeName:
+                  type: string
+                  minLength: 1
+                  maxLength: 255
+                  description: The target volume's name, typed back exactly.
+                idempotencyKey:
+                  type: string
+                  minLength: 1
+                  maxLength: 200
+      responses:
+        "202":
+          description: Overwrite admitted.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [operation, intentId]
+                properties:
+                  operation:
+                    $ref: "#/components/schemas/RecoveryOperation"
+                  intentId:
+                    type: ["string", "null"]
+                    description: The restore intent that owns the volume until it settles.
+        "200":
+          description: Replay of an earlier request with the same idempotency key and confirmation.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [operation, intentId]
+                properties:
+                  operation:
+                    $ref: "#/components/schemas/RecoveryOperation"
+                  intentId:
+                    type: ["string", "null"]
+        "400":
+          $ref: "#/components/responses/RecoveryBadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/RecoveryForbidden"
+        "409":
+          $ref: "#/components/responses/RecoveryConflict"
+        "503":
+          $ref: "#/components/responses/RecoveryUnavailable"
+        "507":
+          description: The target or the helper scratch has no room for the restored data (`insufficient_space`).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RecoveryError"
+        "500":
+          $ref: "#/components/responses/RecoveryInternalError"
+
+  /api/recovery/restores/{intentId}/resolve:
+    post:
+      operationId: resolveRecoveryRestore
+      tags: [Recovery]
+      summary: Resolve a restore that did not settle
+      description: |
+        The operator's answer to an overwrite that did not settle. `retry` runs the
+        reconciliation again and is safe to repeat; it removes a leftover staging volume,
+        finishes a clean-up, and releases a fence that could not be released. When it proves the
+        restore, the restore's operation settles and releases the volume's storage lock, as startup does;
+        so does `release_fence` when the journal proves the swap committed. Once the fence is
+        released, or its release started and did not finish, the workloads may be running, so `retry` then moves no data and applies no
+        metadata: it removes the hidden directory of a swap the journal proves committed,
+        settles a restore that stopped before the swap once its journal is gone, and
+        otherwise answers `unknown`.
+        `release_fence`
+        accepts the volume as it now is: it restores every recorded restart policy and starts
+        nothing. When the journal proves the swap committed, it removes the hidden directory
+        that holds the originals and settles the restore `committed`; if that removal fails,
+        the fence is still released but the restore stays open with `cleanup_failed`. In every
+        other case it leaves the restore `completion_unknown`. A restore that never stopped a
+        workload has no fence to release (`400 invalid_request`, `reason: no_fence`), and one
+        whose fence is already released cannot be accepted again (`reason: fence_released`).
+        `release_fence` on a restore that already settled answers a plain `400 invalid_request`,
+        and a fence that cannot be released answers `503 fence_unavailable` and leaves the
+        restore's phase unchanged. A call made while this process still works on the restore answers
+        `409 lock_held`.
+        Access is held to the stacks the fence stopped, not only the stacks that use the
+        volume now; an id that names nothing is answered like a restore the caller may not touch.
+        Only a Full Admin API token may call it; any other scope is refused with `403 SCOPE_DENIED`.
+      parameters:
+        - name: intentId
+          in: path
+          required: true
+          schema:
+            type: string
+        - $ref: "#/components/parameters/nodeId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [action]
+              properties:
+                action:
+                  type: string
+                  enum: [retry, release_fence]
+      responses:
+        "200":
+          description: The outcome the reconciler reached.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [outcome]
+                properties:
+                  outcome:
+                    type: string
+                    enum: [rolled_back, committed, unknown, fence_released]
+        "400":
+          $ref: "#/components/responses/RecoveryBadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/RecoveryForbidden"
+        "409":
+          $ref: "#/components/responses/RecoveryConflict"
+        "503":
+          $ref: "#/components/responses/RecoveryUnavailable"
+        "500":
+          $ref: "#/components/responses/RecoveryInternalError"
+
   /api/recovery/operations/{id}:
     get:
       operationId: getRecoveryOperation
@@ -6331,9 +6711,19 @@ paths:
       description: |
         Returns the operation with its bounded progress and the evidence it produced.
         `result` depends on the kind: `{point}` for a capture, `{point, verifications}`
-        for a verification, `{intent}` for a restore, and `{repository}` for a repository
-        provisioning. An unknown id answers 403, not 400, to a caller who cannot read every
+        for a verification, `{intent, restore}` for a restore, and `{repository}` for a repository
+        provisioning. `restore` is non-null for a restore over the point's own volume and carries
+        its `intentId`, `phase`, `fenceState`, `preRestorePointId`, `stagedVerified`, the restored
+        file and byte counts, and the `outcomeClass` that says why it is not clean
+        (`cleanup_failed`, `fence_unavailable`, ...). It never carries a host path. An unknown id answers 403, not 400, to a caller who cannot read every
         kind of operation, so the answer does not reveal which ids exist.
+
+        While the node is starting, a restore over its own volume that the previous process left
+        interrupted (`completion_unknown` with `errorClass: interrupted`) is not reported:
+        startup is still proving whether its volume was committed or rolled back, and the ending
+        it holds until then is provisional. The read answers
+        `503 capability_unavailable` with `reason: engine_starting`; read it again, and it shows
+        the ending startup proved, or `completion_unknown` when the volume could not be proven.
       parameters:
         - name: id
           in: path
@@ -6366,6 +6756,8 @@ paths:
           $ref: "#/components/responses/Unauthorized"
         "403":
           $ref: "#/components/responses/RecoveryForbidden"
+        "503":
+          $ref: "#/components/responses/RecoveryUnavailable"
         "500":
           $ref: "#/components/responses/RecoveryInternalError"
 
@@ -6376,11 +6768,15 @@ paths:
       summary: Cancel a running operation
       description: |
         Asks a running operation to stop. A capture settles its point as failed before it
-        settles the operation. A repository provisioning operation is refused as an
-        invalid request (`reason: not_cancellable`), because a half-provisioned repository
-        is settled by the next provisioning attempt. Access is checked first: a caller who
+        settles the operation. A repository provisioning operation is refused with
+        `409 not_cancellable`, because a half-provisioned repository is settled by the next
+        provisioning attempt; so is an overwrite restore whose swap has started, because the
+        originals have begun to move and the only safe endings are roll forward or
+        reconciliation. Access is checked first: a caller who
         may not configure the repository gets 403, and an unknown id answers 403 to a caller
-        who cannot cancel every kind of operation.
+        who cannot cancel every kind of operation. While the node is starting, cancelling an
+        overwrite that the previous process left interrupted answers `503 engine_starting`, as
+        reading it does.
         Only a Full Admin API token may call it; any other scope is refused with `403 SCOPE_DENIED`.
       parameters:
         - name: id
@@ -6406,6 +6802,10 @@ paths:
           $ref: "#/components/responses/Unauthorized"
         "403":
           $ref: "#/components/responses/RecoveryForbidden"
+        "409":
+          $ref: "#/components/responses/RecoveryConflict"
+        "503":
+          $ref: "#/components/responses/RecoveryUnavailable"
         "500":
           $ref: "#/components/responses/RecoveryInternalError"
 
@@ -6422,7 +6822,9 @@ paths:
         and the storage's volume need not exist any more. At startup, once no helper of the
         previous process remains, Sencho releases the repository lock of an interrupted provisioning,
         and, when restic's own locks are cleared, of interrupted captures, checks and restores
-        itself; every storage lock waits for this call.
+        itself; every storage lock waits for this call. While startup is still settling an
+        interrupted overwrite, the call answers `503 engine_starting`: the reconciler releases
+        that lock itself when it has proven the volume.
         Only a Full Admin API token may call it; any other scope is refused with `403 SCOPE_DENIED`.
       parameters:
         - $ref: "#/components/parameters/nodeId"
@@ -6471,5 +6873,7 @@ paths:
           $ref: "#/components/responses/RecoveryForbidden"
         "409":
           $ref: "#/components/responses/RecoveryConflict"
+        "503":
+          $ref: "#/components/responses/RecoveryUnavailable"
         "500":
           $ref: "#/components/responses/RecoveryInternalError"
