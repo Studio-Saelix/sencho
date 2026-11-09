@@ -1,5 +1,7 @@
 import { RefreshCw, Ship } from 'lucide-react';
 import { ConfirmModal } from '@/components/ui/modal';
+import { reapplyUnavailableSentence } from '@/components/FleetView/reapplyUnavailableCopy';
+import type { ReapplyUnavailableReason } from '@/components/FleetView/types';
 
 interface SelfStackProtectedDialogProps {
   open: boolean;
@@ -14,6 +16,12 @@ interface SelfStackProtectedDialogProps {
   /** When true (and the caller cannot reapply), the primary action routes to Fleet node updates. */
   canOpenFleetUpdates: boolean;
   onOpenFleetUpdates?: () => void;
+  /**
+   * Set when the action was refused because Reapply is unavailable on this node:
+   * the node and the bounded reason, so the dialog names both instead of telling
+   * the operator to use an action they do not have.
+   */
+  unavailable?: { nodeName: string | null; reason: ReapplyUnavailableReason | null } | null;
 }
 
 export function SelfStackProtectedDialog({
@@ -22,6 +30,7 @@ export function SelfStackProtectedDialog({
   onReapply,
   canOpenFleetUpdates,
   onOpenFleetUpdates,
+  unavailable,
 }: SelfStackProtectedDialogProps) {
   if (onReapply) {
     return (
@@ -77,11 +86,17 @@ export function SelfStackProtectedDialog({
       }}
     >
       <p className="text-sm text-stat-subtitle">
-        This stack is the running Sencho instance. Destructive lifecycle actions
-        stay protected. Eligible admins can use Save &amp; Reapply in the Compose
-        editor, or Fleet -&gt; Node Updates, to recreate Sencho from its current
-        Compose configuration. To manage it as a normal stack, move Sencho&apos;s
-        compose project outside COMPOSE_DIR.
+        {unavailable ? (
+          reapplyUnavailableSentence(unavailable.reason, unavailable.nodeName)
+        ) : (
+          <>
+            This stack is the running Sencho instance. Destructive lifecycle actions
+            stay protected. Eligible admins can use Save &amp; Reapply in the Compose
+            editor, or Fleet -&gt; Node Updates, to recreate Sencho from its current
+            Compose configuration. To manage it as a normal stack, move Sencho&apos;s
+            compose project outside COMPOSE_DIR.
+          </>
+        )}
       </p>
     </ConfirmModal>
   );

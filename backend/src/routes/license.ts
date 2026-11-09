@@ -7,6 +7,7 @@ import { rejectApiTokenScope } from '../middleware/apiTokenScope';
 import { parseRequestedTargetVersion } from '../utils/targetVersion';
 import type { SelfUpdatePreflight } from '../services/SelfUpdateService';
 import { classifyImageChannel } from '../helpers/imageChannel';
+import { REAPPLY_UNAVAILABLE_CODE } from '../helpers/selfUpdateEligibility';
 import { ImageOperationService } from '../services/ImageOperationService';
 import { imageChannelRouter } from './imageChannel';
 import {
@@ -191,7 +192,12 @@ systemUpdateRouter.post('/reapply-compose', async (req: Request, res: Response):
   if (!requirePermission(req, res, 'system:license')) return;
   const selfUpdate = SelfUpdateService.getInstance();
   if (!selfUpdate.isAvailable()) {
-    res.status(503).json({ error: 'Compose reapply unavailable. Sencho must be deployed via Docker Compose.' });
+    const reason = selfUpdate.getUnavailableCode() ?? 'detecting';
+    res.status(503).json({
+      error: `Compose reapply is unavailable on this node: ${reason}.`,
+      code: REAPPLY_UNAVAILABLE_CODE,
+      reason,
+    });
     return;
   }
   const endpointProvider = parseEndpointProviderChoice(req, res);
