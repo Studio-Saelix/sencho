@@ -5,7 +5,7 @@
  * counts or a finding can point at a declaration it never reported.
  */
 import { describe, expect, it } from 'vitest';
-import { claimsEnumeratedHostPort, claimsEnumeratedHostPortSpan, enumeratedHostPorts } from '../helpers/composePortSpec';
+import { claimsEnumeratedHostPort, enumeratedHostPorts } from '../helpers/composePortSpec';
 
 describe('bounded host-port enumeration', () => {
   it('caps a long range at 256 ports', () => {
@@ -16,8 +16,6 @@ describe('bounded host-port enumeration', () => {
     expect(claimsEnumeratedHostPort({ startPort: 10000, endPort: 20000 }, 10255)).toBe(true);
     expect(claimsEnumeratedHostPort({ startPort: 10000, endPort: 20000 }, 10256)).toBe(false);
     expect(claimsEnumeratedHostPort({ startPort: 10000, endPort: 20000 }, 9999)).toBe(false);
-    expect(claimsEnumeratedHostPortSpan({ startPort: 10000, endPort: 20000 }, 10000, 10255)).toBe(true);
-    expect(claimsEnumeratedHostPortSpan({ startPort: 10000, endPort: 20000 }, 10000, 10256)).toBe(false);
   });
 
   it('enumerates a short range exactly', () => {

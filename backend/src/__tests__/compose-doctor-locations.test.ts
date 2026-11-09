@@ -607,6 +607,73 @@ describe('Compose Doctor authored locations', () => {
     });
   });
 
+  it('locates an expanded authored range beyond the enumeration bound', async () => {
+    writeStack('doctor-port-conflict-expanded-long-range', {
+      'compose.yaml': [
+        'services:',
+        '  s:',
+        '    image: nginx:1.2',
+        '    ports:',
+        '      - "10000-11000:80-1080"',
+        '  t:',
+        '    image: nginx:1.2',
+        '    ports:',
+        '      - "10999:99"',
+        '',
+      ].join('\n'),
+    });
+    const project = await buildAuthoredProject(nodeId, 'doctor-port-conflict-expanded-long-range');
+    // Compose expands the range into one publication per port, so the rule
+    // counts 10999 even though it is beyond the range's first 256 ports.
+    const model = {
+      services: [
+        { name: 's', ports: [{ startPort: 10999, endPort: 10999, hostIp: '', protocol: 'tcp' }] },
+        { name: 't', ports: [{ startPort: 10999, endPort: 10999, hostIp: '', protocol: 'tcp' }] },
+      ],
+    } as unknown as EffectiveModel;
+    expect(locateFinding(project, hit('port-conflict-internal', {
+      subject: { kind: 'port', key: '10999/tcp' },
+    }), model)).toMatchObject({
+      file: 'compose.yaml', line: 5, path: 'services.s.ports[0]',
+    });
+  });
+
+  it('refuses when an expanded range and a fixed declaration both publish the port', async () => {
+    writeStack('doctor-port-conflict-expanded-duplicate', {
+      'compose.yaml': [
+        'services:',
+        '  s:',
+        '    image: nginx:1.2',
+        '    ports:',
+        '      - "10000-11000:80-1080"',
+        '      - "10999:99"',
+        '  t:',
+        '    image: nginx:1.2',
+        '    ports:',
+        '      - "10999:100"',
+        '',
+      ].join('\n'),
+    });
+    const project = await buildAuthoredProject(nodeId, 'doctor-port-conflict-expanded-duplicate');
+    // Both of s's declarations are live publications of 10999, so neither one
+    // can stand in for the service as the conflict's source.
+    const model = {
+      services: [
+        {
+          name: 's',
+          ports: [
+            { startPort: 10999, endPort: 10999, hostIp: '', protocol: 'tcp' },
+            { startPort: 10999, endPort: 10999, hostIp: '', protocol: 'tcp' },
+          ],
+        },
+        { name: 't', ports: [{ startPort: 10999, endPort: 10999, hostIp: '', protocol: 'tcp' }] },
+      ],
+    } as unknown as EffectiveModel;
+    expect(locateFinding(project, hit('port-conflict-internal', {
+      subject: { kind: 'port', key: '10999/tcp' },
+    }), model)).toBeUndefined();
+  });
+
   it('refuses a conflict location when any participating publication is ambiguous', async () => {
     const model = {
       services: [

@@ -8,7 +8,7 @@ import {
   hasLaterUnparsedLayer, hasOutsideComposeLayer, hasProjectCycle, hasUnparsedComposeLayer, hasUnresolvedService,
 } from './correlate';
 import { authoredNodeKey, authoredScalarOf } from './parseComposeDocument';
-import { claimsEnumeratedHostPort, claimsEnumeratedHostPortSpan, containerPortRange, isDynamicHostPort, isFixedHostPort, splitShortPortSpec } from '../../helpers/composePortSpec';
+import { claimsEnumeratedHostPort, containerPortRange, isDynamicHostPort, isFixedHostPort, splitShortPortSpec } from '../../helpers/composePortSpec';
 import { isActingReason, type AuthoredFileSource, type AuthoredLocation, type AuthoredNode, type AuthoredProject, type CorrelationResult } from './types';
 import type { RuleHit } from '../preflight/types';
 import type { EffectiveModel, EffPortSpec } from '../preflight/effectiveModel';
@@ -67,7 +67,9 @@ function sameProtocol(a: string, b: string): boolean {
  * services its finding names.
  */
 function specClaimsConflictPort(spec: EffPortSpec, hostText: string, protocol: string): boolean {
-  if (!sameProtocol(spec.protocol, protocol)) return false;
+  // Both sides are effective-model strings the rule keys verbatim, so a
+  // long-form `protocol: UDP` is a different claim from a short-syntax `/udp`.
+  if (spec.protocol !== protocol) return false;
   const port = Number(hostText);
   return Number.isInteger(port) && hostText !== '' && claimsEnumeratedHostPort(spec, port);
 }
@@ -231,24 +233,29 @@ function subjectMatchesSpec(spec: EffPortSpec, hostText: string, protocol: strin
   return Number.isInteger(port) && port >= spec.startPort && port <= spec.endPort;
 }
 
-function authoredHostMatchesEffective(author: AuthoredPortSpec, spec: EffPortSpec, bounded = false): boolean {
+function authoredHostMatchesEffective(
+  author: AuthoredPortSpec,
+  spec: EffPortSpec,
+  effectivePorts: readonly EffPortSpec[],
+): boolean {
   if (author.dynamic !== (spec.dynamic === true)) return false;
   if (spec.dynamic) {
     if (spec.targetStartPort === undefined || author.targetStartPort === undefined) return true;
     return author.targetStartPort === spec.targetStartPort && author.targetEndPort === spec.targetEndPort;
   }
   if (author.hostText === effectiveHostText(spec)) return true;
-  // Compose expands an authored range into one publication per host port (and
-  // some versions report the range as a single entry), so a range declaration
-  // is the source of every publication inside it. A per-port rule enumerates
-  // only the first 256 ports of that range; a publication beyond it was not
-  // counted and cannot be this finding's source.
   if (!author.hostText.includes('-')) return false;
   const [start, end] = author.hostText.split('-').map(Number);
   if (!Number.isInteger(start) || !Number.isInteger(end)) return false;
-  return bounded
-    ? claimsEnumeratedHostPortSpan({ startPort: start, endPort: end }, spec.startPort, spec.endPort)
-    : spec.startPort >= start && spec.endPort <= end;
+  // Compose normally expands an authored range into one publication per host
+  // port, so the range is the source of every single-port publication inside
+  // it. A renderer that keeps the range collapsed reports one publication with
+  // the exact span; that publication is this declaration's only source, and a
+  // different port inside the span came from another declaration.
+  const collapsed = effectivePorts.find(port => !port.dynamic
+    && port.startPort === start && port.endPort === end);
+  if (collapsed) return collapsed === spec;
+  return spec.startPort === spec.endPort && spec.startPort >= start && spec.startPort <= end;
 }
 
 function authoredHostMatchesSubject(author: AuthoredPortSpec, hostText: string): boolean {
@@ -268,12 +275,12 @@ function authoredPortMatches(
   author: AuthoredPortSpec,
   spec: EffPortSpec,
   broadOnly: boolean,
-  bounded = false,
+  effectivePorts: readonly EffPortSpec[],
 ): boolean {
   if (!sameProtocol(author.protocol, spec.protocol)) return false;
   if (broadOnly && normalizedInterface(author.hostIp) !== ALL_INTERFACES) return false;
   if (!broadOnly && !sameInterface(author.hostIp, spec.hostIp)) return false;
-  return authoredHostMatchesEffective(author, spec, bounded);
+  return authoredHostMatchesEffective(author, spec, effectivePorts);
 }
 
 /** A subject's `host/protocol` split; the host may be a range or `dynamic`. */
@@ -389,12 +396,12 @@ function locatePort(
       const node = scope.file.nodes.get(authoredNodeKey(['services', scope.declaredService, 'ports', index]));
       if (!node) continue;
       const matched = bounded !== undefined
-        ? specs.some(spec => authoredPortMatches(author, spec, broadOnly, true))
+        ? specs.some(spec => authoredPortMatches(author, spec, broadOnly, effective?.ports ?? []))
         : subject !== undefined
           ? authoredHostMatchesSubject(author, subject.hostText)
             && sameProtocol(author.protocol, subject.protocol)
             && (!broadOnly || normalizedInterface(author.hostIp) === ALL_INTERFACES)
-          : specs.some(spec => authoredPortMatches(author, spec, broadOnly));
+          : specs.some(spec => authoredPortMatches(author, spec, broadOnly, effective?.ports ?? []));
       if (!matched) continue;
       const list = byLayer.get(scope.layerIndex) ?? [];
       list.push({ file: scope.file.file, node, layerIndex: scope.layerIndex, writability: scope.file.writability, index });
