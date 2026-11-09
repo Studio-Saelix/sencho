@@ -226,7 +226,7 @@ export interface SocketInventory {
  */
 export interface SocketNodeIdentity {
   id: number;
-  name: string | null;
+  name: string;
   type: Node['type'] | null;
   mode: Node['mode'] | null;
 }
@@ -235,10 +235,16 @@ export interface SocketNodeIdentity {
  * Encode a target identity for the trusted hop header.
  *
  * Base64url keeps the value ASCII however the node is named: a header value
- * cannot carry UTF-8, and a node name is arbitrary Unicode text.
+ * cannot carry UTF-8, and a node name is arbitrary Unicode text. The name is
+ * bounded here as well as on parse, so a very long name cannot push the header
+ * past the receiver's size check and silently fall back to the remote's own
+ * identity.
  */
 export function serializeSocketNodeIdentity(identity: SocketNodeIdentity): string {
-  return Buffer.from(JSON.stringify(identity), 'utf8').toString('base64url');
+  return Buffer.from(
+    JSON.stringify({ ...identity, name: bound(identity.name, 256) }),
+    'utf8',
+  ).toString('base64url');
 }
 
 /**
@@ -328,27 +334,17 @@ function bound(value: string, max: number): string {
 }
 
 /**
- * Extra characters redacted past the response bound so a credential that
- * straddles it is still replaced, not merely cut. Covers the redaction rules'
- * own limits: the longest URL-credential password is 1024 characters, and the
- * replacement text it becomes is shorter than what it replaces.
- */
-const REDACTION_MARGIN = 2048;
-
-/**
- * Bound untrusted metadata before the redaction pass.
+ * Redact untrusted metadata, then bound it for the response.
  *
- * The response never shows more than `max` characters, so redacting a bounded
- * prefix produces the same visible text at a cost independent of the input
- * size. Redacting the whole value first let one 60 kB container label spend
- * seconds in the regexes and block the event loop for every other request on
- * the node; Docker metadata is attacker-controlled through any stack author.
+ * The whole value is redacted, not a prefix: a credential can span an arbitrary
+ * run (a URL password has no length limit), so cutting before redaction can
+ * leave its opening visible in the 256-character window. The redaction rules
+ * are linear in the input, which is what makes a 60 kB container label cost
+ * milliseconds instead of the seconds a backtracking rule used to spend blocking
+ * the node's event loop.
  */
 function safeText(value: string, max: number): string {
-  const prefix = value.length > max + REDACTION_MARGIN
-    ? value.slice(0, max + REDACTION_MARGIN)
-    : value;
-  return bound(redactSensitiveText(prefix), max);
+  return bound(redactSensitiveText(value), max);
 }
 
 function bindsAllInterfaces(ip: string | null): boolean {

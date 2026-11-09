@@ -317,16 +317,20 @@ describe('GET /api/socket/inventory target identity on a machine hop', () => {
     expect(loadSocketInventoryMock).toHaveBeenCalledWith(1, undefined, null);
   });
 
-  it('ignores a malformed identity rather than partly applying it', async () => {
+  it('ignores a malformed identity rather than partly applying it, and says so in the log', async () => {
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const encoded = Buffer.from(
+      JSON.stringify({ id: 12, name: 'sencho-test-02' }),
+      'utf8',
+    ).toString('base64url');
     const res = await request(app)
       .get('/api/socket/inventory')
       .set('Authorization', `Bearer ${machineToken()}`)
-      .set(
-        PROXY_NODE_IDENTITY_HEADER,
-        Buffer.from(JSON.stringify({ id: 12, name: 'sencho-test-02' }), 'utf8').toString('base64url'),
-      );
+      .set(PROXY_NODE_IDENTITY_HEADER, encoded);
     expect(res.status).toBe(200);
     expect(loadSocketInventoryMock).toHaveBeenCalledWith(1, undefined, null);
+    expect(warnSpy.mock.calls.flat().join(' ')).toContain('malformed node identity');
+    expect(warnSpy.mock.calls.flat().join(' ')).toContain(String(encoded.length));
   });
 });
 

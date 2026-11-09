@@ -1542,6 +1542,40 @@ describe('buildSocketInventory classification', () => {
     expect(summary?.value).toContain('[redacted]@registry.example.com');
   });
 
+  it('redacts a URL password longer than the response bound', () => {
+    // Truncating the value before redaction left the opening of a long
+    // credential visible in the 256-character window; redaction must see the
+    // whole value so it finds the closing @.
+    const password = 'p'.repeat(5000);
+    const inventory = buildSocketInventory(input({
+      containers: [proxyRow({
+        labels: {
+          'com.docker.compose.project': 'alpha',
+          'example.summary': `upstream https://operator:${password}@registry.example.com/api`,
+        },
+      })],
+    }));
+    const summary = inventory.containers[0].labels.find(label => label.key === 'example.summary');
+    expect(summary?.value).not.toContain('operator:');
+    expect(summary?.value).not.toContain(password.slice(0, 64));
+    expect(summary?.value).toContain('https://[redacted]@registry.example.com');
+  });
+
+  it('redacts a keyword secret longer than the response bound', () => {
+    const secret = 's'.repeat(5000);
+    const inventory = buildSocketInventory(input({
+      containers: [proxyRow({
+        labels: {
+          'com.docker.compose.project': 'alpha',
+          'example.summary': `config password=${secret} loaded`,
+        },
+      })],
+    }));
+    const summary = inventory.containers[0].labels.find(label => label.key === 'example.summary');
+    expect(summary?.value).not.toContain(secret.slice(0, 64));
+    expect(summary?.value).toContain('password=[redacted]');
+  });
+
   it('bounds oversized labels and status text', () => {
     const inventory = buildSocketInventory(input({
       containers: [proxyRow({
@@ -1579,7 +1613,9 @@ describe('buildSocketInventory classification', () => {
     const inventory = buildSocketInventory(input({
       containers: [proxyRow({ labels: { 'evil.huge': 'A'.repeat(2 * 1024 * 1024) } })],
     }));
-    expect(Date.now() - started).toBeLessThan(1000);
+    // About 200 ms on a developer machine; the old backtracking rule was
+    // quadratic, so this input never finished in practice.
+    expect(Date.now() - started).toBeLessThan(2000);
     expect(inventory.containers[0].labels[0].value.length).toBeLessThanOrEqual(256);
   });
 
@@ -1837,6 +1873,32 @@ describe('loadSocketInventory', () => {
     expect(inventory.status).toBe('partial');
   });
 
+  it('counts assembly, not only the Docker calls, in durationMs', async () => {
+    // A revert to measuring durationMs before buildSocketInventory would hide
+    // the classification and redaction work behind a near-zero number again.
+    const labels: Record<string, string> = {};
+    Object.defineProperty(labels, 'slow.value', {
+      enumerable: true,
+      get() {
+        const until = Date.now() + 30;
+        while (Date.now() < until) {
+          // Deliberate: the read happens while classification walks the labels.
+        }
+        return 'v';
+      },
+    });
+    const inventory = await loadSocketInventory(1, deps({
+      now: () => Date.now(),
+      docker: {
+        listContainersForSocketInventory: vi.fn().mockResolvedValue({
+          rows: [proxyRow({ labels })], listedContainers: 1, truncated: false,
+        }),
+        getDockerSocketPath: vi.fn().mockResolvedValue(null),
+      },
+    }));
+    expect(inventory.durationMs).toBeGreaterThanOrEqual(20);
+  });
+
   it('calls the endpoint provider only for a tcp endpoint', async () => {
     const resolve = vi.fn().mockResolvedValue({ state: 'none', reason: 'unmatched' });
     const original = process.env.DOCKER_HOST;
@@ -2004,10 +2066,16 @@ describe('parseSocketNodeIdentity', () => {
     expect(parseSocketNodeIdentity(raw)).toBeNull();
   });
 
-  it('bounds an oversized name', () => {
-    const identity = parseSocketNodeIdentity(serializeSocketNodeIdentity({
-      id: 2, name: 'n'.repeat(1000), type: 'remote', mode: 'proxy',
-    }));
+  it.each([1_000, 4_000, 20_000])('bounds a %i-character node name in the header itself', (length) => {
+    // The parser rejects an over-long header before it can bound the name; a
+    // long name must therefore be bounded on the way out, not on the way in,
+    // or the remote silently falls back to its own local identity.
+    const encoded = serializeSocketNodeIdentity({
+      id: 2, name: 'n'.repeat(length), type: 'remote', mode: 'proxy',
+    });
+    expect(encoded.length).toBeLessThan(512);
+    const identity = parseSocketNodeIdentity(encoded);
     expect(identity?.name?.length ?? 0).toBeLessThanOrEqual(256);
+    expect(identity?.id).toBe(2);
   });
 });

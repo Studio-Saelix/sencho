@@ -22,7 +22,17 @@ function proxiedNodeIdentity(req: Request): SocketNodeIdentity | null {
   if (!req.machineAuthScope) return null;
   const raw = req.headers[PROXY_NODE_IDENTITY_HEADER];
   if (typeof raw !== 'string') return null;
-  return parseSocketNodeIdentity(raw);
+  const identity = parseSocketNodeIdentity(raw);
+  if (!identity) {
+    // Falling back to the local identity is safe but wrong-scoped; say so
+    // rather than letting a hub bug read as a correct answer. Only the length
+    // is logged, since the value is untrusted.
+    console.warn(
+      '[Socket] Ignoring a malformed node identity header on a machine hop (length %d).',
+      raw.length,
+    );
+  }
+  return identity;
 }
 
 /** Bound on one node's discovery read so a hung Docker socket cannot pin a request. */
