@@ -12,6 +12,13 @@ describe('decodeUtf8PreservingBom', () => {
     expect(decodeUtf8PreservingBom(bytes)).toBe(text);
     expect(sha256Hex(decodeUtf8PreservingBom(bytes))).toBe(sha256Hex(text));
   });
+
+  it('replaces malformed bytes the way the server decoder does', () => {
+    // Node's `Buffer.toString('utf-8')` yields U+FFFD per malformed sequence;
+    // the client must decode the same way or its digest diverges on such files.
+    const malformed = new Uint8Array([0x61, 0xff, 0x62, 0xe2, 0x28, 0xa1]).buffer;
+    expect(decodeUtf8PreservingBom(malformed)).toBe('a\uFFFDb\uFFFD(\uFFFD');
+  });
 });
 
 describe('sha256Hex', () => {

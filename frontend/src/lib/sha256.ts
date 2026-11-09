@@ -26,7 +26,7 @@ function rotr(value: number, bits: number): number {
  * before it hashed the file: malformed sequences become U+FFFD and a leading
  * BOM stays in the text. `Response.text()` runs the Fetch "UTF-8 decode" step,
  * which drops a leading BOM, so hashing its result disagrees with the server
- * for a BOM-prefixed file and the location can never be opened.
+ * for a BOM-prefixed file and the primary compose location can never match.
  */
 export function decodeUtf8PreservingBom(bytes: ArrayBuffer): string {
   return new TextDecoder('utf-8', { ignoreBOM: true }).decode(bytes);

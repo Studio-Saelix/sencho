@@ -4588,16 +4588,21 @@ describe('useStackActions.openAuthoredLocation', () => {
     // The server hashes the decoded file text, which keeps a leading U+FEFF;
     // `Response.text()` drops it, so hashing that would refuse a valid link.
     const bomContent = '\uFEFFservices:\n  web:\n    image: nginx:alpine\n';
+    // The normal load read the file with `res.text()`, so the clean buffer is
+    // the BOM-less text the click must refresh to the revision it verified.
+    const loadedContent = bomContent.slice(1);
     vi.mocked(apiFetch).mockResolvedValue(new Response(bomContent, { status: 200 }));
     const bomLocation = { ...location, fileHash: sha256Hex(bomContent) };
     const { result, editorState } = setup({
-      editorState: { content: bomContent, originalContent: bomContent },
+      editorState: { content: loadedContent, originalContent: loadedContent },
     });
 
     await act(async () => {
       result.current.openAuthoredLocation(bomLocation);
     });
 
+    expect(editorState.setContent).toHaveBeenCalledWith(bomContent);
+    expect(editorState.setOriginalContent).toHaveBeenCalledWith(bomContent);
     expect(editorState.setPendingReveal).toHaveBeenCalledWith({
       target: { surface: 'compose', file: 'compose.yaml' },
       location: bomLocation,
