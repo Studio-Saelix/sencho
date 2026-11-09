@@ -20,6 +20,9 @@ import { REDACTED_SENTINEL } from '../helpers/labelValueRedaction';
 
 const SOCKET = '/var/run/docker.sock';
 
+/** An unpaired high or low surrogate: invalid Unicode that strict JSON clients reject. */
+const LONE_SURROGATE = /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/;
+
 const node: Node = {
   id: 1,
   name: 'local',
@@ -1619,6 +1622,69 @@ describe('buildSocketInventory classification', () => {
     expect(inventory.containers[0].labels[0].value.length).toBeLessThanOrEqual(256);
   });
 
+  it('does not split a surrogate pair at the 256-character label bound', () => {
+    // 200 rocket emoji put the cut (max - 3 = 253 code units) between the high
+    // and low half of the 127th character; a code-unit slice leaves a lone
+    // \ud83d that a strict JSON client cannot decode.
+    const inventory = buildSocketInventory(input({
+      containers: [proxyRow({
+        labels: { 'com.docker.compose.project': 'alpha', 'qa.emoji': '🚀'.repeat(200) },
+      })],
+    }));
+    const label = inventory.containers[0].labels.find(entry => entry.key === 'qa.emoji');
+    expect(label?.value.length).toBeLessThanOrEqual(256);
+    expect(label?.value).toMatch(/\.\.\.$/);
+    expect(LONE_SURROGATE.test(label?.value ?? '')).toBe(false);
+    // Backing off one unit keeps the pair whole rather than replacing half of it.
+    expect(label?.value.slice(0, -3)).toBe('🚀'.repeat(126));
+  });
+
+  it('does not split a surrogate pair at the 128-character Compose bound', () => {
+    const emoji = '🚀'.repeat(200);
+    const inventory = buildSocketInventory(input({
+      containers: [proxyRow({
+        composeProject: emoji,
+        service: emoji,
+        labels: { 'com.docker.compose.project': emoji },
+      })],
+    }));
+    expect(inventory.containers[0].compose?.project?.length).toBeLessThanOrEqual(128);
+    expect(inventory.containers[0].compose?.service?.length).toBeLessThanOrEqual(128);
+    expect(LONE_SURROGATE.test(inventory.containers[0].compose?.project ?? '')).toBe(false);
+    expect(LONE_SURROGATE.test(inventory.containers[0].compose?.service ?? '')).toBe(false);
+  });
+
+  it('does not split a surrogate pair at the mount-path bound', () => {
+    const longSource = `/host/${'🚀'.repeat(300)}`;
+    const inventory = buildSocketInventory(input({
+      self: {
+        state: 'resolved',
+        reason: null,
+        containerId: 'sencho1',
+        containerName: 'sencho',
+        bindMounts: [{ source: longSource, destination: SOCKET }],
+      },
+      containers: [proxyRow({ mounts: [socketMount(longSource, SOCKET, true)] })],
+    }));
+    const mount = inventory.containers[0].socketMounts[0];
+    expect(mount.source?.length ?? 0).toBeLessThanOrEqual(512);
+    expect(LONE_SURROGATE.test(mount.source ?? '')).toBe(false);
+    expect(mount.destination).toBe(SOCKET);
+  });
+
+  it('replaces a lone surrogate that metadata already contained', () => {
+    // JSON permits an escaped unpaired surrogate, so a hostile label can reach
+    // the projection invalid before any cut happens.
+    const inventory = buildSocketInventory(input({
+      containers: [proxyRow({
+        labels: { 'com.docker.compose.project': 'alpha', 'qa.lone': 'before\uD83D' },
+      })],
+    }));
+    const label = inventory.containers[0].labels.find(entry => entry.key === 'qa.lone');
+    expect(LONE_SURROGATE.test(label?.value ?? '')).toBe(false);
+    expect(label?.value).toBe('before\uFFFD');
+  });
+
   it('reports the target identity a hub supplied without relabelling the producing instance', () => {
     const inventory = buildSocketInventory(input({
       nodeIdentity: { id: 12, name: 'sencho-test-02', type: 'remote', mode: 'pilot_agent' },
@@ -2077,5 +2143,27 @@ describe('parseSocketNodeIdentity', () => {
     const identity = parseSocketNodeIdentity(encoded);
     expect(identity?.name?.length ?? 0).toBeLessThanOrEqual(256);
     expect(identity?.id).toBe(2);
+  });
+
+  it('bounds a 1500-emoji name without leaving a lone surrogate', () => {
+    // 1500 rocket emoji is 3000 code units, so the 256 bound lands inside a
+    // pair. The header must keep the name valid Unicode on both sides.
+    const encoded = serializeSocketNodeIdentity({
+      id: 2, name: '🚀'.repeat(1500), type: 'remote', mode: 'proxy',
+    });
+    const identity = parseSocketNodeIdentity(encoded);
+    expect(identity?.name?.length ?? 0).toBeLessThanOrEqual(256);
+    expect(LONE_SURROGATE.test(identity?.name ?? '')).toBe(false);
+    expect(identity?.name.slice(0, -3)).toBe('🚀'.repeat(126));
+  });
+
+  it('replaces a lone surrogate in a hub-supplied name', () => {
+    // JSON permits an escaped unpaired surrogate, so a malicious or buggy hub
+    // can hand the parser invalid Unicode that was never serialized here.
+    const identity = parseSocketNodeIdentity(encode({
+      id: 2, name: 'bad\uD83D', type: 'remote', mode: 'proxy',
+    }));
+    expect(identity?.name).toBe('bad\uFFFD');
+    expect(LONE_SURROGATE.test(identity?.name ?? '')).toBe(false);
   });
 });

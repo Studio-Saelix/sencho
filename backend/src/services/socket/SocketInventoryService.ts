@@ -329,8 +329,36 @@ function defaultDeps(nodeId: number): SocketInventoryDeps {
   };
 }
 
+/**
+ * Replace unpaired UTF-16 surrogates with U+FFFD.
+ *
+ * A lone surrogate cannot be encoded as UTF-8, so a strict client rejects the
+ * whole response (Python's `str.encode` raises, `serde_json` refuses the
+ * escape). Docker metadata is untrusted and JSON permits a `\ud83d` escape with
+ * no partner, so the value may already be invalid before it is bounded.
+ */
+function wellFormed(value: string): string {
+  return value.replace(
+    /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/g,
+    '\uFFFD',
+  );
+}
+
+/**
+ * Bound a value by UTF-16 code units without leaving a lone surrogate.
+ *
+ * The cut runs through `max - 3` (the room kept for the ellipsis) and steps back
+ * one unit when that lands on the high half of a surrogate pair, so a non-BMP
+ * character is either whole or absent. `safeText` and both node-identity bounds
+ * go through here, which keeps every bounded string in the response valid
+ * Unicode.
+ */
 function bound(value: string, max: number): string {
-  return value.length > max ? `${value.slice(0, max - 3)}...` : value;
+  if (value.length <= max) return wellFormed(value);
+  let end = Math.max(0, max - 3);
+  const last = value.charCodeAt(end - 1);
+  if (last >= 0xd800 && last <= 0xdbff) end -= 1;
+  return `${wellFormed(value.slice(0, end))}...`;
 }
 
 /**
