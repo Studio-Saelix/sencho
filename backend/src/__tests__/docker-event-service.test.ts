@@ -199,6 +199,8 @@ describe('DockerEventService - die classification', () => {
         await vi.advanceTimersByTimeAsync(600);
 
         expect(service.getContainerState('c-race')?.crashedAt).toBeUndefined();
+        // A short run that is already back is a recovered blip, not a crash to report.
+        expect(mockDispatchAlert).not.toHaveBeenCalled();
     });
 
     it('keeps stack and container routing for non-self compose crashes', async () => {
@@ -836,6 +838,137 @@ describe('DockerEventService - die classification', () => {
         expect(mockDispatchAlert).toHaveBeenCalledTimes(3);
     });
 
+    it('alerts a stable-run crash when the restart-policy restart beats the classifier', async () => {
+        service = new DockerEventService(1, 'local');
+        await service.start();
+
+        const containerEvent = (action: string, atMs: number, attributes: Record<string, string> = {}) => ({
+            Type: 'container',
+            Action: action,
+            Actor: { ID: 'c-policy', Attributes: { exitCode: '1', name: 'web', ...attributes } },
+            timeNano: atMs * 1_000_000,
+        });
+
+        // First crash establishes the loop's alert window.
+        stream.push(containerEvent('die', 1_000_000));
+        await vi.advanceTimersByTimeAsync(600);
+        expect(mockDispatchAlert).toHaveBeenCalledTimes(1);
+
+        // Docker restarts a policy container about 100 ms after a die, inside
+        // the 500 ms grace window.
+        stream.push(containerEvent('start', 1_000_175));
+        await vi.advanceTimersByTimeAsync(0);
+
+        // It ran 320 s and crashed, and the restart again lands before the
+        // deferred classification: a stable run earns a new incident regardless.
+        await vi.advanceTimersByTimeAsync(320_000);
+        stream.push(containerEvent('die', 1_320_175));
+        await vi.advanceTimersByTimeAsync(175);
+        stream.push(containerEvent('start', 1_320_350));
+        await vi.advanceTimersByTimeAsync(600);
+
+        expect(mockDispatchAlert).toHaveBeenCalledTimes(2);
+    });
+
+    it('keeps the new stable-run incident closed when its die is redelivered after the restart', async () => {
+        service = new DockerEventService(1, 'local');
+        await service.start();
+
+        const containerEvent = (action: string, atMs: number) => ({
+            Type: 'container',
+            Action: action,
+            Actor: { ID: 'c-policy-dup', Attributes: { exitCode: '1', name: 'web' } },
+            timeNano: atMs * 1_000_000,
+        });
+
+        stream.push(containerEvent('die', 1_000_000));
+        await vi.advanceTimersByTimeAsync(600);
+        stream.push(containerEvent('start', 1_000_175));
+        await vi.advanceTimersByTimeAsync(0);
+        await vi.advanceTimersByTimeAsync(320_000);
+        stream.push(containerEvent('die', 1_320_175));
+        await vi.advanceTimersByTimeAsync(175);
+        stream.push(containerEvent('start', 1_320_350));
+        await vi.advanceTimersByTimeAsync(600);
+        expect(mockDispatchAlert).toHaveBeenCalledTimes(2);
+
+        // Docker redelivers the identical die after the restart. The new
+        // incident was already alerted, so its recovery evidence is consumed.
+        stream.push(containerEvent('die', 1_320_175));
+        await vi.advanceTimersByTimeAsync(600);
+        expect(mockDispatchAlert).toHaveBeenCalledTimes(2);
+    });
+
+    it('alerts a stable-run OOM when the restart-policy restart beats the classifier', async () => {
+        service = new DockerEventService(1, 'local');
+        await service.start();
+
+        const containerEvent = (action: string, atMs: number) => ({
+            Type: 'container',
+            Action: action,
+            Actor: { ID: 'c-policy-oom', Attributes: { exitCode: '137', name: 'hog' } },
+            timeNano: atMs * 1_000_000,
+        });
+
+        stream.push(containerEvent('die', 1_000_000));
+        await vi.advanceTimersByTimeAsync(600);
+        expect(mockDispatchAlert).toHaveBeenCalledTimes(1);
+
+        stream.push(containerEvent('start', 1_000_175));
+        await vi.advanceTimersByTimeAsync(0);
+        await vi.advanceTimersByTimeAsync(320_000);
+        stream.push(containerEvent('oom', 1_320_100));
+        stream.push(containerEvent('die', 1_320_175));
+        await vi.advanceTimersByTimeAsync(175);
+        stream.push(containerEvent('start', 1_320_350));
+        await vi.advanceTimersByTimeAsync(600);
+
+        expect(mockDispatchAlert).toHaveBeenCalledTimes(2);
+        expect(mockDispatchAlert).toHaveBeenLastCalledWith(
+            'error',
+            'monitor_alert',
+            expect.stringContaining('OOM Kill'),
+            expect.objectContaining({ containerName: 'hog' }),
+        );
+    });
+
+    it('alerts a loop again after the window when every restart beats the classifier', async () => {
+        service = new DockerEventService(1, 'local');
+        await service.start();
+
+        const containerEvent = (action: string, atMs: number, exitCode = '1') => ({
+            Type: 'container',
+            Action: action,
+            Actor: { ID: 'c-policy-hour', Attributes: { exitCode, name: 'web' } },
+            timeNano: atMs * 1_000_000,
+        });
+
+        // A 20 s lap: longer than Docker's 10 s backoff reset, so the policy
+        // restart is always ~100 ms after the die and lands inside the grace.
+        stream.push(containerEvent('start', 1_000_000, '0'));
+        stream.push(containerEvent('die', 1_020_000));
+        await vi.advanceTimersByTimeAsync(175);
+        stream.push(containerEvent('start', 1_020_175, '0'));
+        await vi.advanceTimersByTimeAsync(600);
+        expect(mockDispatchAlert).toHaveBeenCalledTimes(1);
+
+        // Keep the container tracked through the hour: health events are not
+        // alerts, and prune would otherwise drop the state and the run log.
+        for (let i = 0; i < 13; i++) {
+            await vi.advanceTimersByTimeAsync(5 * 60_000);
+            stream.push(containerEvent('health_status: healthy', 1_020_175, '0'));
+        }
+
+        // The window has elapsed, so the next lap alerts again rather than being
+        // dropped as superseded by its own restart-policy start.
+        stream.push(containerEvent('die', 1_040_175));
+        await vi.advanceTimersByTimeAsync(175);
+        stream.push(containerEvent('start', 1_040_350, '0'));
+        await vi.advanceTimersByTimeAsync(600);
+
+        expect(mockDispatchAlert).toHaveBeenCalledTimes(2);
+    });
+
     it('alerts a looping container once more after the dedup window expires', async () => {
         service = new DockerEventService(1, 'local');
         await service.start();
@@ -1198,6 +1331,43 @@ describe('DockerEventService - crash incident identity', () => {
         await vi.advanceTimersByTimeAsync(2_000);
         for (let i = 0; i < 8; i++) await Promise.resolve();
         expect(crashAlerts()).toBe(2);
+    });
+
+    it('attributes a gap exit to the stable run Docker already restarted', async () => {
+        const baseline = Array.from({ length: 10 }, (_, i) => ({ Id: `m-${i}`, State: 'running' }));
+        mockListContainers.mockResolvedValueOnce(baseline);
+
+        service = new DockerEventService(1, 'local');
+        await service.start();
+
+        // The run lasted past the recovery threshold; the stream dropped before
+        // the die and Docker had already restarted the container on reconnect.
+        stream.push({
+            Type: 'container',
+            Action: 'start',
+            Actor: { ID: 'm-0', Attributes: { name: 'app' } },
+            timeNano: 1_000_000_000_000,
+        });
+        stream.error(new Error('stream dropped'));
+        stream = makeStream();
+        mockGetEvents.mockImplementation(async () => stream);
+        mockListContainers.mockResolvedValueOnce(baseline.map((c, i) => (
+            i === 0 ? { Id: c.Id, State: 'exited' } : c
+        )));
+        mockInspect.mockResolvedValueOnce({
+            Name: '/app',
+            State: {
+                ExitCode: 1,
+                OOMKilled: false,
+                StartedAt: new Date(1_321_000).toISOString(), // the restart
+                FinishedAt: new Date(1_320_000).toISOString(), // the stable run's die
+            },
+            Config: { Labels: { 'com.docker.compose.project': 'stack' } },
+        });
+
+        await vi.advanceTimersByTimeAsync(2_000);
+        for (let i = 0; i < 8; i++) await Promise.resolve();
+        expect(crashAlerts()).toBe(1);
     });
 
     it('clears transient crash state on a genuine restart that shares the coarse timestamp', async () => {

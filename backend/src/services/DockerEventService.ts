@@ -944,15 +944,27 @@ export class DockerEventService {
             return;
         }
 
+        // The run this die ended, and whether it was stable, are fixed from the
+        // event sequence: a start that arrives later only adds the next run.
+        const startAt = run ? run.startAt : this.runStartForDie(id, state, dieAt);
+        const stableRun = run ? run.stable === true : this.hasStableRunSinceStart(startAt, dieAt);
+
         // If the container started again strictly after this die occurred, the die
-        // is superseded (the container recovered). Do not stamp a crash signal or
-        // alert for it; the classification is deferred 500ms, so an immediate
-        // restart can race ahead of this handler. A start at the same instant is
-        // treated as preceding a genuine re-crash, not superseding it. Only the
-        // live state counts here: a start recorded while this die was the first
-        // event for the container is the restart that followed it, and must not
-        // suppress the crash it followed.
-        if (state.lastStartAt !== undefined && state.lastStartAt > dieAt) return;
+        // is normally superseded (the container recovered). The classification is
+        // deferred 500ms, so an immediate restart can race ahead of this handler.
+        // Docker emits that start for every restart-policy restart, though, so a
+        // restart inside the grace window is not a recovery when the die is due an
+        // alert: a run that lasted the recovery threshold opens a new incident,
+        // and a loop whose dedup window has elapsed earns its next alert. A start
+        // at the same instant is treated as preceding a genuine re-crash, not
+        // superseding it. Only the live state counts here: a start recorded while
+        // this die was the first event for the container cannot supersede it.
+        const alertWindowExpired = state.lastCrashAlertAt !== undefined
+            && !this.isWithinAlertDedupWindow(state.lastCrashAlertAt, now, CRASH_DEDUP_MS);
+        if (state.lastStartAt !== undefined && state.lastStartAt > dieAt
+            && !stableRun && !alertWindowExpired) {
+            return;
+        }
 
         // Stamp the heal signal for Auto-Heal before the alert dedup/toggle gates
         // below. This must be independent of whether a crash alert is dispatched,
@@ -965,7 +977,6 @@ export class DockerEventService {
         // to. Dedup is per incident, not per "most recent start": a stable
         // predecessor that completes after its successor stays closed, and a
         // replay of an already-alerted run cannot reopen it.
-        const startAt = run ? run.startAt : this.runStartForDie(id, state, dieAt);
         const incidentKey = run?.incidentKey;
 
         // Dedup early: crashloops repeatedly reach this point with exit 137,
