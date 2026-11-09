@@ -410,7 +410,9 @@ components:
           enum: [duplicate-key, unparsed-source, interpolated, outside-boundary, multiple-sources]
           description: >-
             Present instead of a file and range when no single acting origin exists.
-            `multiple-sources` means more than one declaration carries the effective value.
+            `multiple-sources` means more than one declaration exists and the effective
+            value cannot single one out: two declarations carry it, none carries it, or a
+            later declaration contradicts it.
 
     StackLabelInventory:
       type: object

@@ -1102,7 +1102,12 @@ export function parseLabelFile(file: string, source: string): ParsedLabelFile {
         endLine: index + 1,
         endColumn: Math.max(eq + 2, valueEnd - lineStart + 1),
       },
-      hasInterpolation: hasInterpolationSyntax(rawLine.slice(0, valueStart - lineStart)) || hasInterpolationSyntax(rawValue),
+      // Compose collapses `$$` before interpolation, so `$$${FOO}` still
+      // interpolates. The escaped-dollar form must be detected the same way the
+      // node walk detects it, or a location would be claimed for a value whose
+      // effective text this reader cannot know.
+      hasInterpolation: hasEffectiveInterpolation(rawLine.slice(0, valueStart - lineStart))
+        || hasEffectiveInterpolation(rawValue),
     };
     // The text is kept only for comparison with the effective value, and only
     // when neither the key nor the value needs interpolation. Compose strips

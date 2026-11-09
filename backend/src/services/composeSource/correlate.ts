@@ -704,5 +704,18 @@ export function resolveEditOrigin(
     ? correlateLabel(project, split.service, split.field.slice(labelPrefix.length))
     : correlateField(project, split.service, split.field);
   if (!isActingReason(result.reason) || !result.origin) return { ok: false, reason: result.reason };
+  // This door has no effective value, so it cannot tell two declarations of the
+  // same key apart. An edit provider must not be sent to the one that merely
+  // sorts last: only a key with a single candidate in the winning source tier
+  // is safe to edit.
+  if (split.field.startsWith(labelPrefix)) {
+    const key = split.field.slice(labelPrefix.length);
+    const labels = project.labels.get(split.service);
+    const winner = labels?.winners[key];
+    const tier = winner
+      ? (labels?.contributionsByKey.get(key) ?? []).filter(contribution => contribution.source === winner.source)
+      : [];
+    if (tier.length > 1) return { ok: false, reason: 'ambiguous-multiple-sources' };
+  }
   return { ok: true, origin: result.origin };
 }

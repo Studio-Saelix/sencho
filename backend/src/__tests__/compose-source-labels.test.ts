@@ -651,6 +651,23 @@ describe('value-matched label origins', () => {
     const contradicted = correlateLabel(project, 'web', 'shared', 'first');
     expect(contradicted.origin).toBeUndefined();
     expect(contradicted.ambiguity?.kind).toBe('later-candidate');
+    // The edit-origin door has no effective value to compare against, so it
+    // must refuse a key with more than one candidate in the winning tier.
+    expect(resolveEditOrigin(project, 'services.web.labels.shared'))
+      .toEqual({ ok: false, reason: 'ambiguous-multiple-sources' });
+  });
+
+  it('detects interpolation after an escaped dollar in a label-file value', async () => {
+    writeStack('label-file-escaped-interpolation', {
+      'compose.yaml': 'services:\n  api:\n    image: nginx:1\n    label_file: app.labels\n',
+      'app.labels': 'a=$$${FOO}\n',
+    });
+    const project = await buildAuthoredProject(nodeId, 'label-file-escaped-interpolation');
+    expect(project.labels.get('api')!.ambiguity.a).toBe('interpolated');
+    const result = correlateLabel(project, 'api', 'a');
+    expect(result.origin).toBeUndefined();
+    expect(result.reason).toBe('interpolated');
+    expect(authoredOriginsFor(project, 'api', ['a'])).toEqual({ a: { ambiguity: 'interpolated' } });
   });
 
   it('keeps an inline declaration decisive over a label file with the same value', async () => {
