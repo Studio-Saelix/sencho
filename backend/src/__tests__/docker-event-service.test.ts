@@ -906,6 +906,352 @@ describe('DockerEventService - die classification', () => {
     });
 });
 
+// ── Crash incident ordering, persistence, reconnect, equal timestamps ──
+
+describe('DockerEventService - crash incident identity', () => {
+    const crashAlerts = () => mockDispatchAlert.mock.calls.filter(c =>
+        typeof c[2] === 'string' && (c[2].includes('Crash Detected') || c[2].includes('OOM Kill'))).length;
+
+    it('does not reopen a loop when a stable predecessor completes after its newer short lap', async () => {
+        service = new DockerEventService(1, 'local');
+        await service.start();
+
+        let resolveOldInspect!: (value: unknown) => void;
+        mockInspect.mockImplementation(() => new Promise(resolve => { resolveOldInspect = resolve; }));
+
+        // Stable run 1000 -> die 1302, parked on the OOM inspect.
+        stream.push({ Type: 'container', Action: 'start', Actor: { ID: 'c-pred', Attributes: { name: 'web' } }, time: 1_000 });
+        stream.push({
+            Type: 'container',
+            Action: 'die',
+            Actor: { ID: 'c-pred', Attributes: { exitCode: '137', name: 'web' } },
+            time: 1_302,
+        });
+        await vi.advanceTimersByTimeAsync(600);
+
+        // The next lap is short: it belongs to the same incident and alerts first.
+        stream.push({ Type: 'container', Action: 'start', Actor: { ID: 'c-pred', Attributes: { name: 'web' } }, time: 1_303 });
+        stream.push({
+            Type: 'container',
+            Action: 'die',
+            Actor: { ID: 'c-pred', Attributes: { exitCode: '1', name: 'web' } },
+            time: 1_305,
+        });
+        await vi.advanceTimersByTimeAsync(600);
+        expect(crashAlerts()).toBe(1);
+
+        // Completing the older, now-superseded classification must stay closed.
+        resolveOldInspect({ State: { OOMKilled: false, ExitCode: 137 } });
+        await vi.advanceTimersByTimeAsync(0);
+        await flushMicrotasks();
+        await flushMicrotasks();
+        expect(crashAlerts()).toBe(1);
+    });
+
+    it('keeps a genuinely recovered newer incident when an older stable one finishes late', async () => {
+        service = new DockerEventService(1, 'local');
+        await service.start();
+
+        const resolvers: Array<(value: unknown) => void> = [];
+        mockInspect.mockImplementation(() => new Promise(resolve => { resolvers.push(resolve); }));
+
+        // Incident A: stable run 1000 -> die 1302, inspect parked.
+        stream.push({ Type: 'container', Action: 'start', Actor: { ID: 'c-order', Attributes: { name: 'web' } }, time: 1_000 });
+        stream.push({
+            Type: 'container',
+            Action: 'die',
+            Actor: { ID: 'c-order', Attributes: { exitCode: '137', name: 'web' } },
+            time: 1_302,
+        });
+        await vi.advanceTimersByTimeAsync(600);
+
+        // Incident B: a genuine recovery, stable run 1303 -> die 1604.
+        stream.push({ Type: 'container', Action: 'start', Actor: { ID: 'c-order', Attributes: { name: 'web' } }, time: 1_303 });
+        stream.push({
+            Type: 'container',
+            Action: 'die',
+            Actor: { ID: 'c-order', Attributes: { exitCode: '137', name: 'web' } },
+            time: 1_604,
+        });
+        await vi.advanceTimersByTimeAsync(600);
+        expect(resolvers).toHaveLength(2);
+
+        // The newer incident completes first and alerts.
+        resolvers[1]({ State: { OOMKilled: true, ExitCode: 137 } });
+        await vi.advanceTimersByTimeAsync(0);
+        await flushMicrotasks();
+        await flushMicrotasks();
+        expect(crashAlerts()).toBe(1);
+
+        // The older stable incident still alerts, but must not rewind the
+        // evidence that belongs to the newer one.
+        resolvers[0]({ State: { OOMKilled: true, ExitCode: 137 } });
+        await vi.advanceTimersByTimeAsync(0);
+        await flushMicrotasks();
+        await flushMicrotasks();
+        expect(crashAlerts()).toBe(2);
+
+        // Replaying the newer die must not re-alert after the rewound evidence.
+        mockInspect.mockResolvedValue({ State: { OOMKilled: true, ExitCode: 137 } });
+        stream.push({
+            Type: 'container',
+            Action: 'die',
+            Actor: { ID: 'c-order', Attributes: { exitCode: '137', name: 'web' } },
+            time: 1_604,
+        });
+        await vi.advanceTimersByTimeAsync(600);
+        await vi.advanceTimersByTimeAsync(0);
+        await flushMicrotasks();
+        await flushMicrotasks();
+        expect(crashAlerts()).toBe(2);
+    });
+
+    it.each([
+        { label: 'an ordinary crash', exitCode: '1', oom: false },
+        { label: 'a direct OOM kill', exitCode: '137', oom: true },
+        { label: 'an inspected OOM kill', exitCode: '137', oom: false, inspectOom: true },
+    ])('retries after a failed history write ($label)', async ({ exitCode, oom, inspectOom }) => {
+        service = new DockerEventService(1, 'local');
+        await service.start();
+        if (inspectOom) {
+            mockInspect.mockResolvedValue({ State: { OOMKilled: true, ExitCode: 137 } });
+        }
+        mockDispatchAlert.mockResolvedValueOnce({ persisted: false });
+
+        const die = (id: string, atSeconds: number) => {
+            if (oom) {
+                stream.push({ Type: 'container', Action: 'oom', Actor: { ID: id, Attributes: { name: 'app' } } });
+            }
+            stream.push({
+                Type: 'container',
+                Action: 'die',
+                Actor: { ID: id, Attributes: { exitCode, name: 'app' } },
+                time: atSeconds,
+            });
+        };
+
+        stream.push({ Type: 'container', Action: 'start', Actor: { ID: 'c-persist', Attributes: { name: 'app' } }, time: 1_000 });
+        die('c-persist', 1_002);
+        await vi.advanceTimersByTimeAsync(600);
+        for (let i = 0; i < 6; i++) await Promise.resolve();
+        // The first write failed, so it dispatched but did not consume the loop.
+        expect(crashAlerts()).toBe(1);
+
+        // The next restart-policy lap retries the alert instead of staying muted.
+        stream.push({ Type: 'container', Action: 'start', Actor: { ID: 'c-persist', Attributes: { name: 'app' } }, time: 1_003 });
+        die('c-persist', 1_005);
+        await vi.advanceTimersByTimeAsync(600);
+        for (let i = 0; i < 6; i++) await Promise.resolve();
+        expect(crashAlerts()).toBe(2);
+    });
+
+    it('drops an overlapping crash delivery while a successful write is in flight', async () => {
+        service = new DockerEventService(1, 'local');
+        await service.start();
+
+        let resolveFirst!: (value: unknown) => void;
+        mockDispatchAlert.mockImplementationOnce(() => new Promise(resolve => { resolveFirst = resolve; }));
+
+        stream.push({ Type: 'container', Action: 'start', Actor: { ID: 'c-overlap-write', Attributes: { name: 'app' } }, time: 1_000 });
+        stream.push({
+            Type: 'container',
+            Action: 'die',
+            Actor: { ID: 'c-overlap-write', Attributes: { exitCode: '1', name: 'app' } },
+            time: 1_002,
+        });
+        await vi.advanceTimersByTimeAsync(600);
+
+        stream.push({ Type: 'container', Action: 'start', Actor: { ID: 'c-overlap-write', Attributes: { name: 'app' } }, time: 1_003 });
+        stream.push({
+            Type: 'container',
+            Action: 'die',
+            Actor: { ID: 'c-overlap-write', Attributes: { exitCode: '1', name: 'app' } },
+            time: 1_005,
+        });
+        await vi.advanceTimersByTimeAsync(600);
+        expect(mockDispatchAlert).toHaveBeenCalledTimes(1);
+
+        resolveFirst({ persisted: true });
+        await vi.advanceTimersByTimeAsync(0);
+        await flushMicrotasks();
+        await flushMicrotasks();
+        expect(mockDispatchAlert).toHaveBeenCalledTimes(1);
+    });
+
+    it('reconciles a gap exit against an incident that already alerted', async () => {
+        const baseline = Array.from({ length: 10 }, (_, i) => ({ Id: `g-${i}`, State: 'running' }));
+        mockListContainers.mockResolvedValueOnce(baseline);
+
+        service = new DockerEventService(1, 'local');
+        await service.start();
+
+        // Alert for the escape from a stable run, then the container restarts
+        // and the stream drops before its next die is seen.
+        stream.push({ Type: 'container', Action: 'start', Actor: { ID: 'g-0', Attributes: { name: 'app' } }, time: 1_000 });
+        stream.push({
+            Type: 'container',
+            Action: 'die',
+            Actor: { ID: 'g-0', Attributes: { exitCode: '1', name: 'app' } },
+            time: 1_302,
+        });
+        await vi.advanceTimersByTimeAsync(600);
+        expect(crashAlerts()).toBe(1);
+        stream.push({ Type: 'container', Action: 'start', Actor: { ID: 'g-0', Attributes: { name: 'app' } }, time: 1_303 });
+
+        stream.error(new Error('stream dropped'));
+        stream = makeStream();
+        mockGetEvents.mockImplementation(async () => stream);
+        mockListContainers.mockResolvedValueOnce(baseline.map((c, i) => (
+            i === 0 ? { Id: c.Id, State: 'exited' } : c
+        )));
+        mockInspect.mockResolvedValueOnce({
+            Name: '/app',
+            State: {
+                ExitCode: 1,
+                OOMKilled: false,
+                StartedAt: new Date(1_303_000).toISOString(),
+                FinishedAt: new Date(1_304_000).toISOString(),
+            },
+            Config: { Labels: { 'com.docker.compose.project': 'stack' } },
+        });
+
+        await vi.advanceTimersByTimeAsync(2_000);
+        for (let i = 0; i < 8; i++) await Promise.resolve();
+        expect(crashAlerts()).toBe(1);
+    });
+
+    it('dedupes a die redelivered after a gap alert for the same run', async () => {
+        const baseline = Array.from({ length: 10 }, (_, i) => ({ Id: `h-${i}`, State: 'running' }));
+        mockListContainers.mockResolvedValueOnce(baseline);
+
+        service = new DockerEventService(1, 'local');
+        await service.start();
+
+        stream.error(new Error('stream dropped'));
+        stream = makeStream();
+        mockGetEvents.mockImplementation(async () => stream);
+        mockListContainers.mockResolvedValueOnce(baseline.map((c, i) => (
+            i === 0 ? { Id: c.Id, State: 'exited' } : c
+        )));
+        mockInspect.mockResolvedValueOnce({
+            Name: '/app',
+            State: {
+                ExitCode: 1,
+                OOMKilled: false,
+                StartedAt: new Date(1_303_000).toISOString(),
+                FinishedAt: new Date(1_304_000).toISOString(),
+            },
+            Config: { Labels: { 'com.docker.compose.project': 'stack' } },
+        });
+
+        await vi.advanceTimersByTimeAsync(2_000);
+        for (let i = 0; i < 8; i++) await Promise.resolve();
+        expect(crashAlerts()).toBe(1);
+
+        // The die for that same run is delivered after the gap alert.
+        stream.push({
+            Type: 'container',
+            Action: 'die',
+            Actor: { ID: 'h-0', Attributes: { exitCode: '1', name: 'app' } },
+            time: 1_304,
+        });
+        await vi.advanceTimersByTimeAsync(600);
+        expect(crashAlerts()).toBe(1);
+    });
+
+    it('still alerts a gap exit that ran the full recovery threshold', async () => {
+        const baseline = Array.from({ length: 10 }, (_, i) => ({ Id: `k-${i}`, State: 'running' }));
+        mockListContainers.mockResolvedValueOnce(baseline);
+
+        service = new DockerEventService(1, 'local');
+        await service.start();
+
+        stream.push({ Type: 'container', Action: 'start', Actor: { ID: 'k-0', Attributes: { name: 'app' } }, time: 1_000 });
+        stream.push({
+            Type: 'container',
+            Action: 'die',
+            Actor: { ID: 'k-0', Attributes: { exitCode: '1', name: 'app' } },
+            time: 1_302,
+        });
+        await vi.advanceTimersByTimeAsync(600);
+        expect(crashAlerts()).toBe(1);
+
+        // The container recovered, ran six minutes, then exited during a gap.
+        stream.push({ Type: 'container', Action: 'start', Actor: { ID: 'k-0', Attributes: { name: 'app' } }, time: 1_303 });
+        stream.error(new Error('stream dropped'));
+        stream = makeStream();
+        mockGetEvents.mockImplementation(async () => stream);
+        mockListContainers.mockResolvedValueOnce(baseline.map((c, i) => (
+            i === 0 ? { Id: c.Id, State: 'exited' } : c
+        )));
+        mockInspect.mockResolvedValueOnce({
+            Name: '/app',
+            State: {
+                ExitCode: 1,
+                OOMKilled: false,
+                StartedAt: new Date(1_303_000).toISOString(),
+                FinishedAt: new Date(1_664_000).toISOString(),
+            },
+            Config: { Labels: { 'com.docker.compose.project': 'stack' } },
+        });
+
+        await vi.advanceTimersByTimeAsync(2_000);
+        for (let i = 0; i < 8; i++) await Promise.resolve();
+        expect(crashAlerts()).toBe(2);
+    });
+
+    it('clears transient crash state on a genuine restart that shares the coarse timestamp', async () => {
+        service = new DockerEventService(1, 'local');
+        await service.start();
+
+        stream.push({ Type: 'container', Action: 'start', Actor: { ID: 'c-equal', Attributes: { name: 'web' } }, time: 1_000 });
+        stream.push({
+            Type: 'container',
+            Action: 'die',
+            Actor: { ID: 'c-equal', Attributes: { exitCode: '1', name: 'web' } },
+            time: 1_000,
+        });
+        await vi.advanceTimersByTimeAsync(600);
+        expect(crashAlerts()).toBe(1);
+        expect(service.getContainerState('c-equal')?.crashedAt).toBeTypeOf('number');
+
+        // Same second-resolution timestamp, but the previous run died, so this
+        // is a genuine new run and must clear the crash signal.
+        stream.push({ Type: 'container', Action: 'start', Actor: { ID: 'c-equal', Attributes: { name: 'web' } }, time: 1_000 });
+        await vi.advanceTimersByTimeAsync(0);
+        expect(service.getContainerState('c-equal')?.crashedAt).toBeUndefined();
+    });
+
+    it('does not keep stale kill evidence across an equal-timestamp restart', async () => {
+        service = new DockerEventService(1, 'local');
+        await service.start();
+
+        stream.push({ Type: 'container', Action: 'start', Actor: { ID: 'c-kill-equal', Attributes: { name: 'web' } }, time: 1_000 });
+        stream.push({ Type: 'container', Action: 'kill', Actor: { ID: 'c-kill-equal', Attributes: {} }, time: 1_000 });
+        stream.push({
+            Type: 'container',
+            Action: 'die',
+            Actor: { ID: 'c-kill-equal', Attributes: { exitCode: '1', name: 'web' } },
+            time: 1_000,
+        });
+        await vi.advanceTimersByTimeAsync(600);
+        expect(crashAlerts()).toBe(0);
+
+        // A genuine restart at the same second clears the kill evidence, so the
+        // next node crash is not misclassified as intentional.
+        stream.push({ Type: 'container', Action: 'start', Actor: { ID: 'c-kill-equal', Attributes: { name: 'web' } }, time: 1_000 });
+        await vi.advanceTimersByTimeAsync(0);
+        stream.push({
+            Type: 'container',
+            Action: 'die',
+            Actor: { ID: 'c-kill-equal', Attributes: { exitCode: '1', name: 'web' } },
+            time: 1_002,
+        });
+        await vi.advanceTimersByTimeAsync(600);
+        expect(crashAlerts()).toBe(1);
+    });
+});
+
 // ── Rate limiting ──────────────────────────────────────────────────────
 
 describe('DockerEventService - rate limiting', () => {

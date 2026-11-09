@@ -115,16 +115,54 @@ interface InternalContainerState extends ContainerLifecycleState {
     helperContainer?: boolean;
     lastCrashAlertAt?: number;
     /**
-     * Start timestamp of the run whose dispatched crash alert consumed its
-     * stable-run recovery evidence. A duplicate delivery of that same run's
-     * `die` must stay deduped; only a later `start` is a new incident.
+     * Newest start timestamp whose dispatched crash alert consumed its run's
+     * recovery evidence. Monotonic: an older classification that finishes late
+     * must never rewind it.
      */
     lastCrashAlertStartAt?: number;
+    /**
+     * Incident keys already alerted inside the crash dedup window. An incident
+     * is one crash loop: a stable run starts a new key and the short laps that
+     * follow it inherit that key, so completion order cannot reopen or merge
+     * incidents.
+     */
+    alertedIncidentKeys?: Map<number, number>;
     lastActivityAt: number;
     healthStatus?: 'healthy' | 'unhealthy' | 'starting';
     unhealthySince?: number;
     crashedAt?: number;
     lastStartAt?: number;
+}
+
+/**
+ * One observed run of a container, from `start` until the `die` attributed to
+ * it. Stability is decided from event timestamps when the die arrives, so
+ * incident identity does not depend on when the deferred classifier finishes.
+ */
+interface ContainerRun {
+    seq: number;
+    startAt: number;
+    /** Wall-clock arrival, used for pruning (event times may be historical). */
+    observedAt: number;
+    dieAt?: number;
+    stable?: boolean;
+    incidentKey?: number;
+}
+
+interface CrashAlertInfo {
+    id: string;
+    name: string;
+    exitCode: number;
+    stackName?: string;
+    isSelf?: boolean;
+    startAt?: number;
+    incidentKey?: number;
+}
+
+interface PendingCrashAlert {
+    classification: Classification;
+    state: InternalContainerState;
+    info: CrashAlertInfo;
 }
 
 interface DockerEventPayload {
@@ -143,6 +181,13 @@ type LifecycleStatus = 'disconnected' | 'connecting' | 'connected' | 'stopped';
 /** Rate-limit token bound to the fixed window that issued it. */
 interface RateToken {
     readonly windowStart: number;
+}
+
+/** Parse a Docker inspect timestamp (RFC 3339) to epoch ms, rejecting zero dates. */
+function parseInspectTimestamp(value: string | undefined): number | undefined {
+    if (!value) return undefined;
+    const parsed = Date.parse(value);
+    return Number.isFinite(parsed) && parsed > 0 ? parsed : undefined;
 }
 
 export class DockerEventService {
@@ -180,6 +225,23 @@ export class DockerEventService {
      * another lap. Bounded by pruneStaleState, cleared on destroy.
      */
     private lastStartEventAt = new Map<string, number>();
+
+    /**
+     * Observed runs per container, oldest first. Incident identity comes from
+     * this log rather than from the order classifications finish, so an older
+     * die that resolves after a newer one cannot reopen a closed incident.
+     * Bounded by pruneStaleState, cleared on destroy.
+     */
+    private containerRuns = new Map<string, ContainerRun[]>();
+    private nextRunSeq = 1;
+
+    /**
+     * In-flight crash dispatches keyed by container id. A die that arrives while
+     * its predecessor's history write is pending is deferred, not dispatched,
+     * so an overlapping delivery cannot double-alert or burn two tokens.
+     */
+    private crashAlertInFlight = new Set<string>();
+    private pendingCrashAlerts = new Map<string, PendingCrashAlert>();
 
     /**
      * Shared fixed-window rate limiter for crash and health alerts (per local
@@ -259,6 +321,9 @@ export class DockerEventService {
         this.pendingDieTimers.clear();
         this.detachStream();
         this.containerState.clear();
+        this.containerRuns.clear();
+        this.crashAlertInFlight.clear();
+        this.pendingCrashAlerts.clear();
         this.healthAlertDedupAt.clear();
         this.healthAlertInFlight.clear();
         this.healthAlertPendingRetry.clear();
@@ -437,21 +502,87 @@ export class DockerEventService {
         try {
             const inspect = await this.docker.getContainer(containerId).inspect();
             const classification = classifyGapExit({ State: inspect.State });
-            if (classification === 'clean' || classification === 'intentional') return;
-
-            const name = inspect.Name?.replace(/^\//, '') ?? containerId.slice(0, 12);
+            const state = this.containerState.get(containerId) ?? this.getOrCreateState(containerId);
+            const name = inspect.Name?.replace(/^\//, '') ?? state.name ?? containerId.slice(0, 12);
+            if (!state.name) state.name = name;
             const stackName = inspect.Config?.Labels?.[COMPOSE_PROJECT_LABEL];
+            if (stackName && !state.stackName) state.stackName = stackName;
+            const service = inspect.Config?.Labels?.[COMPOSE_SERVICE_LABEL];
+            if (service && !state.serviceName) state.serviceName = service;
             const exitCode = inspect.State?.ExitCode ?? 0;
-            const isSelf = this.isSelfContainer(containerId, name);
+            if (this.isSelfContainer(containerId, name)) state.isSelf = true;
 
-            // Gap exits have no in-memory state, so there's no dedup to bump.
-            await this.emitClassification(classification, null, { name, exitCode, stackName, isSelf });
+            // A clean stop during a connection gap also ends any crash the last
+            // observed events left behind; the event path clears it on such an exit.
+            if (classification === 'clean' || classification === 'intentional') {
+                state.crashedAt = undefined;
+                return;
+            }
+
+            const dieAt = parseInspectTimestamp(inspect.State?.FinishedAt) ?? Date.now();
+            const startedAt = parseInspectTimestamp(inspect.State?.StartedAt);
+            const run = this.attributeGapRun(containerId, startedAt, dieAt);
+            const startAt = run?.startAt;
+            const incidentKey = run?.incidentKey;
+            const now = Date.now();
+
+            // Same shared crash gate as the live event path: a stream gap must
+            // not repeat an alert already sent for this loop, and an inspected
+            // start that ran long enough still earns a new incident.
+            state.crashedAt = now;
+            if (this.isCrashIncidentSuppressed(state, incidentKey, startAt, dieAt, now)) return;
+
+            await this.emitClassification(classification, state, {
+                id: containerId,
+                name,
+                exitCode,
+                stackName: state.stackName,
+                isSelf: state.isSelf === true,
+                startAt,
+                incidentKey,
+            });
         } catch (err) {
             if (isDebugEnabled()) {
                 console.log(`[DockerEvents:${this.nodeName}:diag] gap inspect failed:`,
                     err instanceof Error ? err.message : err);
             }
         }
+    }
+
+    /** Attribute a reconnect-discovered exit to the run Docker reports it ran. */
+    private attributeGapRun(
+        id: string,
+        startedAt: number | undefined,
+        dieAt: number,
+    ): ContainerRun | undefined {
+        let runs = this.containerRuns.get(id);
+        if (!runs) {
+            runs = [];
+            this.containerRuns.set(id, runs);
+        }
+        // Inspect reports the run Docker actually restarted into during the gap.
+        // Reuse an observed run when it matches; only a clearly later start is a
+        // new run (a second of slack absorbs second-vs-millisecond event times).
+        const last = runs.length > 0 ? runs[runs.length - 1] : undefined;
+        if (startedAt !== undefined && (!last || startedAt > last.startAt + 1_000)) {
+            runs.push({ seq: this.nextRunSeq++, startAt: startedAt, observedAt: Date.now() });
+        }
+        if (runs.length === 0) return undefined;
+        let index = -1;
+        for (let i = runs.length - 1; i >= 0; i--) {
+            if (runs[i].startAt <= dieAt) {
+                index = i;
+                break;
+            }
+        }
+        if (index < 0) return undefined;
+        const run = runs[index];
+        if (run.dieAt === undefined) {
+            run.dieAt = dieAt;
+            run.stable = dieAt - run.startAt >= CRASH_RECOVERY_UPTIME_MS;
+        }
+        this.incidentKeyFor(runs, index);
+        return run;
     }
 
     // ========================================================================
@@ -535,14 +666,54 @@ export class DockerEventService {
         // Capture the die time at arrival, not inside the deferred classifier, so a
         // start that races in during the grace window is correctly seen as later.
         const dieAt = this.eventTimeMs(event);
+        // Attribute the run at arrival: stability and incident identity must be
+        // fixed when the event sequence says they happened, not when a parked
+        // inspect resolves. A late classification then reads the same evidence.
+        const run = this.attributeDieToRun(id, dieAt);
         // Defer classification to absorb out-of-order kill events.
         const existing = this.pendingDieTimers.get(id);
         if (existing) clearTimeout(existing);
         const timer = setTimeout(() => {
             this.pendingDieTimers.delete(id);
-            void this.classifyDie(id, event, dieAt);
+            void this.classifyDie(id, event, dieAt, run);
         }, DIE_GRACE_WINDOW_MS);
         this.pendingDieTimers.set(id, timer);
+    }
+
+    /** Attribute a die to the latest observed run that started at or before it. */
+    private attributeDieToRun(id: string, dieAt: number): ContainerRun | undefined {
+        const runs = this.containerRuns.get(id);
+        if (!runs) return undefined;
+        let index = -1;
+        for (let i = runs.length - 1; i >= 0; i--) {
+            if (runs[i].startAt <= dieAt) {
+                index = i;
+                break;
+            }
+        }
+        if (index < 0) return undefined;
+        const run = runs[index];
+        if (run.dieAt === undefined) {
+            run.dieAt = dieAt;
+            run.stable = dieAt - run.startAt >= CRASH_RECOVERY_UPTIME_MS;
+        }
+        this.incidentKeyFor(runs, index);
+        return run;
+    }
+
+    /**
+     * Incident key for a run: a stable run opens its own incident; a short lap
+     * inherits the incident of the run before it. Memoized per run.
+     */
+    private incidentKeyFor(runs: ContainerRun[], index: number): number {
+        const run = runs[index];
+        if (run.incidentKey !== undefined) return run.incidentKey;
+        if (run.stable || index === 0) {
+            run.incidentKey = run.seq;
+        } else {
+            run.incidentKey = this.incidentKeyFor(runs, index - 1);
+        }
+        return run.incidentKey;
     }
 
     private onOom(id: string): void {
@@ -663,16 +834,34 @@ export class DockerEventService {
         // dedup must still measure uptime from it.
         const startedAt = this.eventTimeMs(event);
         const state = this.containerState.get(id);
+        const runs = this.containerRuns.get(id);
+        const lastRun = runs && runs.length > 0 ? runs[runs.length - 1] : undefined;
         // Starts advance a container's run; they never rewind it. A replayed or
         // reordered older `start` must not replace the current run's evidence or
         // clear a crash signal stamped after it, or the older run's `die` could
         // reopen an incident that was already alerted.
         const newestStartAt = Math.max(
             this.lastStartEventAt.get(id) ?? Number.NEGATIVE_INFINITY,
+            lastRun?.startAt ?? Number.NEGATIVE_INFINITY,
             state?.lastStartAt ?? Number.NEGATIVE_INFINITY,
         );
-        if (startedAt <= newestStartAt) return;
-        this.lastStartEventAt.set(id, startedAt);
+        if (startedAt < newestStartAt) return;
+        if (startedAt === newestStartAt) {
+            // Second-resolution event times make a genuine restart look equal to
+            // the run it replaces. Only a die since that run started proves it is
+            // a new run; without one this is a duplicate delivery of the same start.
+            const restartedAfterDie = lastRun?.dieAt !== undefined && lastRun.dieAt >= lastRun.startAt;
+            if (!restartedAfterDie) return;
+        }
+
+        const previousStart = this.lastStartEventAt.get(id) ?? Number.NEGATIVE_INFINITY;
+        if (startedAt > previousStart) this.lastStartEventAt.set(id, startedAt);
+        if (runs) {
+            runs.push({ seq: this.nextRunSeq++, startAt: startedAt, observedAt: Date.now() });
+        } else {
+            this.containerRuns.set(id, [{ seq: this.nextRunSeq++, startAt: startedAt, observedAt: Date.now() }]);
+        }
+
         if (!state) return;
         // Container came back: clear transient flags but keep identity.
         // `lastCrashAlertAt` and `lastCrashAlertStartAt` deliberately survive:
@@ -696,6 +885,9 @@ export class DockerEventService {
     private onDestroy(id: string): void {
         this.containerState.delete(id);
         this.lastStartEventAt.delete(id);
+        this.containerRuns.delete(id);
+        this.crashAlertInFlight.delete(id);
+        this.pendingCrashAlerts.delete(id);
         const pending = this.pendingDieTimers.get(id);
         if (pending) {
             clearTimeout(pending);
@@ -706,20 +898,30 @@ export class DockerEventService {
         this.healthAlertDedupAt.delete(id);
     }
 
-    private async classifyDie(id: string, event: DockerEventPayload, dieAt: number): Promise<void> {
+    private async classifyDie(
+        id: string,
+        event: DockerEventPayload,
+        dieAt: number,
+        run: ContainerRun | undefined,
+    ): Promise<void> {
         // Drop an identical die that arrives while its own classification is
         // still running; a distinct die (different timestamp) still classifies.
         const key = `${id}:${dieAt}`;
         if (this.inFlightDies.has(key)) return;
         this.inFlightDies.add(key);
         try {
-            await this.classifyDieEvent(id, event, dieAt);
+            await this.classifyDieEvent(id, event, dieAt, run);
         } finally {
             this.inFlightDies.delete(key);
         }
     }
 
-    private async classifyDieEvent(id: string, event: DockerEventPayload, dieAt: number): Promise<void> {
+    private async classifyDieEvent(
+        id: string,
+        event: DockerEventPayload,
+        dieAt: number,
+        run: ContainerRun | undefined,
+    ): Promise<void> {
         const state = this.getOrCreateState(id, event);
         const exitCodeStr = event.Actor?.Attributes?.exitCode;
         const parsedExit = exitCodeStr !== undefined ? parseInt(exitCodeStr, 10) : undefined;
@@ -758,23 +960,18 @@ export class DockerEventService {
         // rate-suppressed. Cleared on the next `start` or a later clean exit.
         state.crashedAt = now;
 
+        // The run and its incident were captured when the die arrived, so a
+        // late-resolving inspect cannot reorder which incident this die belongs
+        // to. Dedup is per incident, not per "most recent start": a stable
+        // predecessor that completes after its successor stays closed, and a
+        // replay of an already-alerted run cannot reopen it.
+        const startAt = run ? run.startAt : this.runStartForDie(id, state, dieAt);
+        const incidentKey = run?.incidentKey;
+
         // Dedup early: crashloops repeatedly reach this point with exit 137,
         // and the OOM fallback below issues a Docker inspect. Skipping the
         // inspect on deduped crashes avoids hammering the daemon.
-        //
-        // The stamp survives restarts (see onStart) and only stops suppressing
-        // once the container has stayed up long enough to count as recovered, so
-        // a loop alerts once per window instead of once per lap.
-        //
-        // Recovery evidence belongs to one run: once a dispatched alert consumes
-        // it (lastCrashAlertStartAt), a duplicate delivery of the same run's die
-        // must not qualify again. A later start is a distinct incident.
-        // A start that landed after this die (inside the grace window) is the
-        // recovery that followed it, not the run that produced it, so it cannot
-        // be the run this die's alert consumes.
-        const startAt = this.runStartForDie(id, state, dieAt);
-        const stableRun = this.isStableRunForAlert(state, startAt, dieAt);
-        if (this.isWithinAlertDedupWindow(state.lastCrashAlertAt, now, CRASH_DEDUP_MS) && !stableRun) {
+        if (this.isCrashIncidentSuppressed(state, incidentKey, startAt, dieAt, now)) {
             return;
         }
 
@@ -800,20 +997,18 @@ export class DockerEventService {
         // stamp the incident while this one is parked. Revalidate the same gate
         // against the current state before consuming a token and stamping, so
         // whichever lap finishes first wins and the other stays deduped.
-        const nowAfterInspect = Date.now();
-        if (
-            this.isWithinAlertDedupWindow(state.lastCrashAlertAt, nowAfterInspect, CRASH_DEDUP_MS)
-            && !this.isStableRunForAlert(state, startAt, dieAt)
-        ) {
+        if (this.isCrashIncidentSuppressed(state, incidentKey, startAt, dieAt, Date.now())) {
             return;
         }
 
         await this.emitClassification(classification, state, {
+            id,
             name: state.name ?? id.slice(0, 12),
             exitCode: exitCode ?? 0,
             stackName: state.stackName,
             isSelf: state.isSelf === true,
             startAt,
+            incidentKey,
         });
     }
 
@@ -824,16 +1019,36 @@ export class DockerEventService {
     }
 
     /**
-     * Whether this die's run is a new incident: it ran the full recovery
-     * threshold, and no dispatched alert has consumed that run's evidence yet.
+     * Whether this die was already reported for its incident.
+     *
+     * A die inside an incident that already alerted stays deduped for the
+     * window. A stable run normally opens a new incident, but the same run's
+     * duplicate delivery must not qualify twice, which the incident-key check
+     * covers. Incident keys are stable regardless of completion order, so an
+     * older classification cannot reopen a loop that a newer one closed.
      */
-    private isStableRunForAlert(
+    private isCrashIncidentSuppressed(
         state: InternalContainerState,
+        incidentKey: number | undefined,
         startAt: number | undefined,
         dieAt: number,
+        now: number,
     ): boolean {
-        return this.hasStableRunSinceStart(startAt, dieAt)
-            && startAt !== state.lastCrashAlertStartAt;
+        const withinWindow = this.isWithinAlertDedupWindow(state.lastCrashAlertAt, now, CRASH_DEDUP_MS);
+        if (!withinWindow) return false;
+
+        const stable = this.hasStableRunSinceStart(startAt, dieAt);
+        if (!stable) return true;
+        if (incidentKey === undefined) {
+            // No observed run to key on; fall back to the consumed start so a
+            // duplicate stable delivery still stays deduped.
+            return startAt !== undefined && startAt === state.lastCrashAlertStartAt;
+        }
+        return this.isWithinAlertDedupWindow(
+            state.alertedIncidentKeys?.get(incidentKey),
+            now,
+            CRASH_DEDUP_MS,
+        );
     }
 
     // ========================================================================
@@ -842,13 +1057,21 @@ export class DockerEventService {
 
     private async emitClassification(
         classification: Classification,
-        state: InternalContainerState | null,
-        info: { name: string; exitCode: number; stackName?: string; isSelf?: boolean; startAt?: number },
+        state: InternalContainerState,
+        info: CrashAlertInfo,
     ): Promise<void> {
         if (this.isStopped()) return;
         // Respect the existing global crash-alerts toggle so users who have
         // disabled these notifications in Settings remain opted out.
         if (!this.isCrashAlertsEnabled()) return;
+
+        // A delivery for this container is already awaiting persistence. Keep
+        // the latest one parked so it can retry if that write fails, instead of
+        // letting both consume tokens and both dispatch.
+        if (this.crashAlertInFlight.has(info.id)) {
+            this.pendingCrashAlerts.set(info.id, { classification, state, info });
+            return;
+        }
 
         const message = classification === 'oom'
             ? `Container OOM Kill: ${info.name} was killed by the OOM killer (out of memory).`
@@ -861,16 +1084,70 @@ export class DockerEventService {
             return;
         }
 
-        // Stamp the dedup clock only after the alert is actually dispatched, so
-        // rate-suppressed alerts don't silently lock out the next real crash.
-        // Record which run's recovery evidence this alert consumed so a
-        // duplicate delivery of the same die stays deduped.
-        if (state) {
-            state.lastCrashAlertAt = Date.now();
-            state.lastCrashAlertStartAt = info.startAt;
+        this.crashAlertInFlight.add(info.id);
+        let shouldRetry = false;
+        try {
+            if (this.isStopped()) {
+                this.refundRateToken(token);
+                this.pendingCrashAlerts.delete(info.id);
+                return;
+            }
+            const result = await this.emitError(
+                'monitor_alert',
+                message,
+                info.stackName,
+                info.name,
+                info.isSelf === true,
+                state.serviceName,
+            );
+            if (result.persisted) {
+                this.stampCrashAlert(state, info);
+                this.pendingCrashAlerts.delete(info.id);
+            } else {
+                // A transient history-write failure must not consume the
+                // incident, or the only alert for the loop is lost until the
+                // window expires. Refund the issuing window's token and let a
+                // later delivery (or a parked overlap) retry.
+                this.refundRateToken(token);
+                shouldRetry = true;
+                console.error(
+                    `[DockerEvents:${this.nodeName}] Crash alert history not persisted for ${info.id}; dedup not advanced`,
+                );
+            }
+        } finally {
+            this.crashAlertInFlight.delete(info.id);
         }
 
-        await this.emitError('monitor_alert', message, info.stackName, info.name, info.isSelf === true, state?.serviceName);
+        if (this.isStopped()) {
+            this.pendingCrashAlerts.delete(info.id);
+            return;
+        }
+
+        // An overlapping delivery was deferred while persistence was pending.
+        // If the first write failed, retry it now so the alert is not lost.
+        if (shouldRetry) {
+            const pending = this.pendingCrashAlerts.get(info.id);
+            if (pending) {
+                this.pendingCrashAlerts.delete(info.id);
+                await this.emitClassification(pending.classification, pending.state, pending.info);
+            }
+        }
+    }
+
+    /** Record a crash alert that reached notification history. */
+    private stampCrashAlert(state: InternalContainerState, info: CrashAlertInfo): void {
+        const now = Date.now();
+        state.lastCrashAlertAt = now;
+        // Monotonic: a late older classification must not rewind the newest
+        // consumed run's evidence, or a replay of the newer run re-alerts.
+        if (info.startAt !== undefined
+            && (state.lastCrashAlertStartAt === undefined || info.startAt > state.lastCrashAlertStartAt)) {
+            state.lastCrashAlertStartAt = info.startAt;
+        }
+        if (info.incidentKey !== undefined) {
+            if (!state.alertedIncidentKeys) state.alertedIncidentKeys = new Map();
+            state.alertedIncidentKeys.set(info.incidentKey, now);
+        }
     }
 
     private isCrashAlertsEnabled(): boolean {
@@ -1055,6 +1332,23 @@ export class DockerEventService {
             const startCutoff = Date.now() - CRASH_DEDUP_MS;
             for (const [id, at] of this.lastStartEventAt) {
                 if (at < startCutoff) this.lastStartEventAt.delete(id);
+            }
+        }
+        // Run history and consumed incident keys prune by wall-clock arrival,
+        // not by event time: supported event timestamps can be second-resolution
+        // or historical, but the dedup window is measured against the clock.
+        const runCutoff = Date.now() - CRASH_DEDUP_MS;
+        if (this.containerRuns.size > 0) {
+            for (const [id, runs] of this.containerRuns) {
+                const kept = runs.filter(run => run.observedAt >= runCutoff);
+                if (kept.length === 0) this.containerRuns.delete(id);
+                else if (kept.length !== runs.length) this.containerRuns.set(id, kept);
+            }
+        }
+        for (const state of this.containerState.values()) {
+            if (!state.alertedIncidentKeys) continue;
+            for (const [key, at] of state.alertedIncidentKeys) {
+                if (at < runCutoff) state.alertedIncidentKeys.delete(key);
             }
         }
     }
