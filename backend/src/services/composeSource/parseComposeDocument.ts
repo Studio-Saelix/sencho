@@ -161,6 +161,10 @@ export interface InlineLabelDeclaration {
   /** The list-form key text is interpolated, so Compose may resolve it to any
    *  effective key. A map key is a YAML key and is never interpolated. */
   keyHasInterpolation: boolean;
+  /** List form only: the item's own index in the authored sequence. Entries a
+   *  consumer does not model (an empty key, a non-string item) still occupy an
+   *  index, so ranges must never be reconstructed from a filtered list. */
+  listIndex?: number;
   /** The declaration point is an alias whose value cannot be attributed to this key. */
   unresolved?: boolean;
 }
@@ -678,14 +682,15 @@ function collectDeclarations(
       const labels = svc.labels;
       if (labels && typeof labels === 'object') {
         if (Array.isArray(labels)) {
-          for (const item of labels) {
+          labels.forEach((item, listIndex) => {
             const text = typeof item === 'string' ? item : undefined;
-            if (text === undefined) continue;
+            // A non-string item is not label syntax Compose accepts; it still
+            // occupies its sequence index, which later declarations keep.
+            if (text === undefined) return;
             const eq = text.indexOf('=');
-            if (eq === 0) continue;
-            // A bare item is a real Compose label with an empty value. It must
-            // keep its place in the list: dropping it would shift every later
-            // declaration onto the wrong sequence index and line.
+            // A bare item is a real Compose label with an empty value, and an
+            // item beginning with `=` is a label with an empty key. Both are
+            // accepted by Compose and keep their place in the list.
             const rawKey = eq === -1 ? text : text.slice(0, eq);
             // Compose interpolates the whole list item, so `$$` becomes one
             // literal dollar in the effective key. The key itself is unknown
@@ -700,8 +705,9 @@ function collectDeclarations(
               // Compose interpolates the whole list item, so a variable in the
               // key portion can resolve to any effective label key.
               keyHasInterpolation: hasEffectiveInterpolation(rawKey),
+              listIndex,
             });
-          }
+          });
         } else {
           for (const [labelKey, labelValue] of Object.entries(labels as Record<string, unknown>)) {
             result.inlineLabels.push({
@@ -895,20 +901,19 @@ export function parseComposeDocument(input: ParseComposeDocumentInput): ParsedCo
   }
 
   // Inline label ranges: map form uses the key/value pair; list form uses the
-  // item itself. The declaration order matches the file's own order because
-  // both the node walk and `valueToPlain` read the map in order. The path is
-  // built from the declaration rather than matched with a dotted regex: a
-  // Compose service or label key may itself contain a dot.
-  let listIndexByService = new Map<string, number>();
+  // item itself. Each declaration carries its own sequence index from the
+  // authored list, so an item this model does not interpret can never shift a
+  // later declaration onto another entry's range.
   const resolvedInline: typeof empty.inlineLabels = [];
   for (const declaration of empty.inlineLabels) {
     let node: AuthoredNode | undefined;
     if (declaration.form === 'map') {
       node = empty.nodes.get(authoredNodeKey(['services', declaration.service, 'labels', declaration.key]));
     } else {
-      const next = listIndexByService.get(declaration.service) ?? 0;
-      listIndexByService = listIndexByService.set(declaration.service, next + 1);
-      node = empty.nodes.get(authoredNodeKey(['services', declaration.service, 'labels', next]));
+      if (declaration.listIndex === undefined) continue;
+      node = empty.nodes.get(authoredNodeKey([
+        'services', declaration.service, 'labels', declaration.listIndex,
+      ]));
     }
     // The node cap can stop the walk before a declaration. A missing range must
     // never fall back to line 1: the declaration is dropped instead.

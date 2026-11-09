@@ -78,11 +78,13 @@ function withFileHash(
 
 /** Project one finding onto the Doctor wire shape, without a decision. The wire
  *  type predates the contract and stays additive: a finding's subject and
- *  identity are backend internals until a normalized wire format exists. */
+ *  identity are backend internals until a normalized wire format exists. An
+ *  authored range travels only with the digest of the content it was computed
+ *  against, so the client can prove the file it opens is that revision. */
 function projectFinding(finding: AssuranceFinding): PreflightFinding {
   const location = finding.location;
   const authored = location?.file !== undefined && location.line !== undefined && location.column !== undefined
-    && location.endLine !== undefined && location.endColumn !== undefined
+    && location.endLine !== undefined && location.endColumn !== undefined && location.fileHash !== undefined
     ? {
       file: location.file,
       ...(location.authoredPath !== undefined || location.path !== undefined
@@ -92,6 +94,7 @@ function projectFinding(finding: AssuranceFinding): PreflightFinding {
       column: location.column,
       endLine: location.endLine,
       endColumn: location.endColumn,
+      fileHash: location.fileHash,
     }
     : undefined;
   return {

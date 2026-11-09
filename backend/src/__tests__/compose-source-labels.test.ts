@@ -609,3 +609,336 @@ describe('authored label contributions', () => {
     expect(correlateLabel(project, 'api', 'owner').origin?.file).toBe('compose.yaml');
   });
 });
+
+describe('empty-key list labels keep every declared range', () => {
+  it('locates an empty-key entry and later labels on their own lines', async () => {
+    writeStack('label-empty-key-list', {
+      'compose.yaml': [
+        'services:',
+        '  api:',
+        '    image: nginx:1',
+        '    labels:',
+        '      - "=empty"',
+        '      - "owner=team"',
+        '      - "=between"',
+        '      - "other=y"',
+        '',
+      ].join('\n'),
+    });
+    const project = await buildAuthoredProject(nodeId, 'label-empty-key-list');
+    const labels = project.labels.get('api')!;
+    // Both empty-key entries are declarations of the empty key; the later one
+    // wins, and each keeps the line it was written on.
+    expect(labels.contributionsByKey.get('')?.map(contribution => contribution.range.line)).toEqual([5, 7]);
+    expect(labels.winners['']?.range.line).toBe(7);
+    expect(correlateLabel(project, 'api', '').origin).toMatchObject({
+      file: 'compose.yaml', range: { line: 7 },
+    });
+    expect(correlateLabel(project, 'api', 'owner').origin).toMatchObject({
+      file: 'compose.yaml', range: { line: 6 },
+    });
+    expect(correlateLabel(project, 'api', 'other').origin).toMatchObject({
+      file: 'compose.yaml', range: { line: 8 },
+    });
+    const origins = authoredOriginsFor(project, 'api', ['', 'owner', 'other']);
+    expect(origins?.['']?.line).toBe(7);
+    expect(origins?.owner?.line).toBe(6);
+    expect(origins?.other?.line).toBe(8);
+    expect(resolveEditOrigin(project, 'services.api.labels.owner')).toMatchObject({
+      ok: true, origin: { file: 'compose.yaml', range: { line: 6 } },
+    });
+  });
+
+  it('keeps later indices when the whole list is supplied through an alias or a merge', async () => {
+    writeStack('label-empty-key-alias', {
+      'compose.yaml': [
+        'x-labels: &labels',
+        '  - "=empty"',
+        '  - "owner=team"',
+        'x-svc: &svc',
+        '  labels: *labels',
+        'services:',
+        '  api:',
+        '    <<: *svc',
+        '    image: nginx:1',
+        '',
+      ].join('\n'),
+    });
+    const project = await buildAuthoredProject(nodeId, 'label-empty-key-alias');
+    expect(correlateLabel(project, 'api', 'owner').origin).toMatchObject({
+      file: 'compose.yaml', range: { line: 3 },
+    });
+    expect(authoredOriginsFor(project, 'api', ['owner'])?.owner?.line).toBe(3);
+  });
+
+  it('keeps later indices when a dynamic empty-key entry sits between them', async () => {
+    writeStack('label-empty-key-dynamic', {
+      'compose.yaml': [
+        'services:',
+        '  api:',
+        '    image: nginx:1',
+        '    labels:',
+        '      - "=empty"',
+        '      - "${LABEL_KEY}=dynamic"',
+        '      - "owner=team"',
+        '',
+      ].join('\n'),
+    });
+    const project = await buildAuthoredProject(nodeId, 'label-empty-key-dynamic');
+    expect(project.labels.get('api')!.hasDynamicKeys).toBe(true);
+    expect(correlateLabel(project, 'api', 'owner').origin).toMatchObject({
+      file: 'compose.yaml', range: { line: 7 },
+    });
+    expect(authoredOriginsFor(project, 'api', ['owner'])?.owner?.line).toBe(7);
+  });
+
+  it('keeps later indices when an individual empty-key item is an alias', async () => {
+    writeStack('label-empty-key-item-alias', {
+      'compose.yaml': [
+        'x-empty: &empty "=empty"',
+        'services:',
+        '  api:',
+        '    image: nginx:1',
+        '    labels:',
+        '      - *empty',
+        '      - "owner=team"',
+        '',
+      ].join('\n'),
+    });
+    const project = await buildAuthoredProject(nodeId, 'label-empty-key-item-alias');
+    // The aliased item cannot be attributed, but it must not shift its sibling.
+    expect(project.labels.get('api')!.ambiguity['']).toBe('unresolved-alias');
+    expect(correlateLabel(project, 'api', 'owner').origin).toMatchObject({
+      file: 'compose.yaml', range: { line: 7 },
+    });
+    expect(resolveEditOrigin(project, 'services.api.labels.owner')).toMatchObject({
+      ok: true, origin: { range: { line: 7 } },
+    });
+  });
+
+  it('keeps later indices across layers and external inheritance', async () => {
+    writeStack('label-empty-key-layers', {
+      'compose.yaml': [
+        'services:',
+        '  api:',
+        '    image: nginx:1',
+        '    labels:',
+        '      - "=empty"',
+        '      - "owner=base"',
+        '',
+      ].join('\n'),
+      'compose.override.yaml': [
+        'services:',
+        '  api:',
+        '    labels:',
+        '      - "=between"',
+        '      - "owner=override"',
+        '',
+      ].join('\n'),
+    });
+    const layered = await buildAuthoredProject(nodeId, 'label-empty-key-layers');
+    expect(correlateLabel(layered, 'api', 'owner').origin).toMatchObject({
+      file: 'compose.override.yaml', range: { line: 5 },
+    });
+
+    writeStack('label-empty-key-extends', {
+      'compose.yaml': [
+        'services:',
+        '  api:',
+        '    extends:',
+        '      file: base.yaml',
+        '      service: api',
+        '    image: nginx:1',
+        '',
+      ].join('\n'),
+      'base.yaml': [
+        'services:',
+        '  api:',
+        '    labels:',
+        '      - "=empty"',
+        '      - "owner=base"',
+        '',
+      ].join('\n'),
+    });
+    const inherited = await buildAuthoredProject(nodeId, 'label-empty-key-extends');
+    expect(correlateLabel(inherited, 'api', 'owner').origin).toMatchObject({
+      file: 'base.yaml', range: { line: 5 },
+    });
+  });
+});
+
+describe('edit-origin disambiguation across label interpretations', () => {
+  const sibling = ['  api.labels.owner:', '    image: busybox:1'];
+
+  function composeWith(api: string[], siblingFirst: boolean): string {
+    const apiLines = ['  api:', ...api];
+    return ['services:', ...(siblingFirst ? [...apiLines, ...sibling] : [...sibling, ...apiLines]), ''].join('\n');
+  }
+
+  it('refuses a label-file origin that collides with a dotted sibling service in both orders', async () => {
+    for (const siblingFirst of [true, false]) {
+      const stack = `label-sibling-file-${siblingFirst ? 'last' : 'first'}`;
+      writeStack(stack, {
+        'compose.yaml': composeWith([
+          '    image: nginx:1',
+          '    label_file: app.labels',
+        ], siblingFirst),
+        'app.labels': 'owner=team\n',
+      });
+      const project = await buildAuthoredProject(nodeId, stack);
+      expect(correlateLabel(project, 'api', 'owner').origin).toMatchObject({ file: 'app.labels' });
+      expect(resolveEditOrigin(project, 'services.api.labels.owner')).toEqual({
+        ok: false, reason: 'ambiguous-multiple-sources',
+      });
+      expect(correlateField(project, 'api.labels.owner', 'image', 'busybox:1').origin).toMatchObject({
+        file: 'compose.yaml',
+      });
+    }
+  });
+
+  it('refuses a list-form label origin that collides with a dotted sibling service', async () => {
+    writeStack('label-sibling-list', {
+      'compose.yaml': composeWith([
+        '    image: nginx:1',
+        '    labels:',
+        '      - "owner=team"',
+      ], true),
+    });
+    const project = await buildAuthoredProject(nodeId, 'label-sibling-list');
+    expect(correlateLabel(project, 'api', 'owner').origin).toMatchObject({ file: 'compose.yaml' });
+    expect(resolveEditOrigin(project, 'services.api.labels.owner')).toEqual({
+      ok: false, reason: 'ambiguous-multiple-sources',
+    });
+  });
+
+  it('refuses a dynamic label key that could name the requested key', async () => {
+    writeStack('label-sibling-dynamic', {
+      'compose.yaml': composeWith([
+        '    image: nginx:1',
+        '    labels:',
+        '      - "${LABEL_KEY:-owner}=team"',
+      ], false),
+    });
+    const project = await buildAuthoredProject(nodeId, 'label-sibling-dynamic');
+    expect(correlateLabel(project, 'api', 'owner').reason).toBe('interpolated');
+    expect(resolveEditOrigin(project, 'services.api.labels.owner')).toEqual({
+      ok: false, reason: 'ambiguous-unparsed-source',
+    });
+  });
+
+  it('refuses a label origin when a label file is unreadable or outside the boundary', async () => {
+    for (const [stack, labelFile, reason] of [
+      ['label-sibling-missing-file', 'missing.labels', 'ambiguous-unparsed-source'],
+      ['label-sibling-outside-file', '../outside.labels', 'ambiguous-unparsed-source'],
+    ] as const) {
+      writeStack(stack, {
+        'compose.yaml': composeWith([
+          '    image: nginx:1',
+          `    label_file: ${labelFile}`,
+        ], true),
+      });
+      const project = await buildAuthoredProject(nodeId, stack);
+      expect(resolveEditOrigin(project, 'services.api.labels.owner')).toEqual({
+        ok: false, reason,
+      });
+    }
+  });
+
+  it('refuses an aliased or merged inline list against a dotted sibling service', async () => {
+    writeStack('label-sibling-alias-list', {
+      'compose.yaml': [
+        'x-labels: &labels',
+        '  - "owner=team"',
+        'services:',
+        '  api:',
+        '    image: nginx:1',
+        '    labels: *labels',
+        ...sibling,
+        '',
+      ].join('\n'),
+    });
+    const aliased = await buildAuthoredProject(nodeId, 'label-sibling-alias-list');
+    expect(correlateLabel(aliased, 'api', 'owner').origin).toMatchObject({ file: 'compose.yaml' });
+    expect(resolveEditOrigin(aliased, 'services.api.labels.owner')).toEqual({
+      ok: false, reason: 'ambiguous-multiple-sources',
+    });
+
+    writeStack('label-sibling-merged-list', {
+      'compose.yaml': [
+        'x-svc: &svc',
+        '  image: nginx:1',
+        '  labels:',
+        '    - "owner=team"',
+        'services:',
+        '  api:',
+        '    <<: *svc',
+        ...sibling,
+        '',
+      ].join('\n'),
+    });
+    const merged = await buildAuthoredProject(nodeId, 'label-sibling-merged-list');
+    expect(correlateLabel(merged, 'api', 'owner').origin).toMatchObject({ file: 'compose.yaml' });
+    expect(resolveEditOrigin(merged, 'services.api.labels.owner')).toEqual({
+      ok: false, reason: 'ambiguous-multiple-sources',
+    });
+  });
+
+  it('refuses a shared label-file origin and an inherited label origin against a sibling', async () => {
+    writeStack('label-sibling-shared', {
+      'compose.yaml': [
+        'services:',
+        '  api:',
+        '    image: nginx:1',
+        '    label_file: app.labels',
+        '  web:',
+        '    image: nginx:1',
+        '    label_file: app.labels',
+        ...sibling,
+        '',
+      ].join('\n'),
+      'app.labels': 'owner=team\n',
+    });
+    const shared = await buildAuthoredProject(nodeId, 'label-sibling-shared');
+    expect(correlateLabel(shared, 'api', 'owner').reason).toBe('shared-input');
+    expect(resolveEditOrigin(shared, 'services.api.labels.owner')).toEqual({
+      ok: false, reason: 'ambiguous-multiple-sources',
+    });
+
+    writeStack('label-sibling-extends', {
+      'compose.yaml': [
+        'services:',
+        '  api:',
+        '    extends:',
+        '      file: base.yaml',
+        '      service: api',
+        '    image: nginx:1',
+        ...sibling,
+        '',
+      ].join('\n'),
+      'base.yaml': 'services:\n  api:\n    labels:\n      owner: base-team\n',
+    });
+    const inherited = await buildAuthoredProject(nodeId, 'label-sibling-extends');
+    expect(correlateLabel(inherited, 'api', 'owner').origin).toMatchObject({ file: 'base.yaml' });
+    expect(resolveEditOrigin(inherited, 'services.api.labels.owner')).toEqual({
+      ok: false, reason: 'ambiguous-multiple-sources',
+    });
+  });
+
+  it('refuses a later-layer label origin against a sibling service in an earlier layer', async () => {
+    writeStack('label-sibling-layer', {
+      'compose.yaml': ['services:', ...sibling, '  api:', '    image: nginx:1', ''].join('\n'),
+      'compose.override.yaml': [
+        'services:',
+        '  api:',
+        '    labels:',
+        '      owner: override-team',
+        '',
+      ].join('\n'),
+    });
+    const project = await buildAuthoredProject(nodeId, 'label-sibling-layer');
+    expect(correlateLabel(project, 'api', 'owner').origin).toMatchObject({ file: 'compose.override.yaml' });
+    expect(resolveEditOrigin(project, 'services.api.labels.owner')).toEqual({
+      ok: false, reason: 'ambiguous-multiple-sources',
+    });
+  });
+});

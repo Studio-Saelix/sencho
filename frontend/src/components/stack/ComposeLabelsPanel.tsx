@@ -53,17 +53,20 @@ const AUTHORED_AMBIGUITY_LABELS: Record<NonNullable<LabelAuthoredOrigin['ambigui
   'outside-boundary': 'outside stack',
 };
 
-/** The actionable range of an authored origin, or null when there is none. */
+/** The actionable range of an authored origin, or null when there is none. A
+ *  range without the revision it was computed against is not actionable. */
 function usableOriginLocation(origin: LabelAuthoredOrigin | undefined): AuthoredLocation | null {
   if (!origin || origin.ambiguity) return null;
   if (origin.file === undefined || origin.line === undefined || origin.column === undefined
-    || origin.endLine === undefined || origin.endColumn === undefined) return null;
+    || origin.endLine === undefined || origin.endColumn === undefined
+    || origin.fileHash === undefined) return null;
   return {
     file: origin.file,
     line: origin.line,
     column: origin.column,
     endLine: origin.endLine,
     endColumn: origin.endColumn,
+    fileHash: origin.fileHash,
   };
 }
 

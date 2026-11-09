@@ -36,6 +36,8 @@ vi.mock('@/context/NodeContext', () => ({
 import { apiFetch } from '@/lib/api';
 import { toast } from '@/components/ui/toast-store';
 
+const FILE_HASH = 'a'.repeat(64);
+
 const mockInventory = {
   stackName: 'demo',
   renderable: true,
@@ -615,8 +617,8 @@ describe('ComposeLabelsPanel io.sencho.* status', () => {
           ],
           replicas: [],
           authored: {
-            'from.file': { source: 'label-file', file: 'app.labels', line: 2, column: 1, endLine: 2, endColumn: 12, shared: true },
-            'inline.key': { source: 'inline', file: 'compose.yaml', line: 6, column: 7, endLine: 6, endColumn: 14, overridden: true },
+            'from.file': { source: 'label-file', file: 'app.labels', fileHash: FILE_HASH, line: 2, column: 1, endLine: 2, endColumn: 12, shared: true },
+            'inline.key': { source: 'inline', file: 'compose.yaml', fileHash: FILE_HASH, line: 6, column: 7, endLine: 6, endColumn: 14, overridden: true },
             'unknown.origin': { source: 'inline', ambiguity: 'unparsed-source' },
           },
         }],
@@ -633,11 +635,11 @@ describe('ComposeLabelsPanel io.sencho.* status', () => {
     const inlineLink = within(card).getByRole('button', { name: 'Open compose.yaml at line 6' });
     fileLink.click();
     await waitFor(() => {
-      expect(onOpenLocation).toHaveBeenCalledWith(expect.objectContaining({ file: 'app.labels', line: 2 }));
+      expect(onOpenLocation).toHaveBeenCalledWith(expect.objectContaining({ file: 'app.labels', fileHash: FILE_HASH, line: 2 }));
     });
     inlineLink.click();
     await waitFor(() => {
-      expect(onOpenLocation).toHaveBeenCalledWith(expect.objectContaining({ file: 'compose.yaml', line: 6 }));
+      expect(onOpenLocation).toHaveBeenCalledWith(expect.objectContaining({ file: 'compose.yaml', fileHash: FILE_HASH, line: 6 }));
     });
     // One link per acting origin: the ambiguous row has a reason word only.
     expect(within(card).getAllByTestId('source-location-link')).toHaveLength(2);
@@ -651,7 +653,7 @@ describe('ComposeLabelsPanel io.sencho.* status', () => {
         declaredLabels: [{ key: 'from.file', value: '1', source: 'compose' as const }],
         replicas: [],
         authored: {
-          'from.file': { source: 'label-file', file: 'app.labels', line: 2, column: 1, endLine: 2, endColumn: 12 },
+          'from.file': { source: 'label-file', file: 'app.labels', fileHash: FILE_HASH, line: 2, column: 1, endLine: 2, endColumn: 12 },
         },
       }],
     };
@@ -689,7 +691,7 @@ describe('ComposeLabelsPanel io.sencho.* status', () => {
         declaredLabels: [{ key: 'inline.key', value: '2', source: 'compose' as const }],
         replicas: [],
         authored: {
-          'inline.key': { source: 'inline', file: 'compose.yaml', line: 6, column: 7, endLine: 6, endColumn: 14 },
+          'inline.key': { source: 'inline', file: 'compose.yaml', fileHash: FILE_HASH, line: 6, column: 7, endLine: 6, endColumn: 14 },
         },
       }],
     };
@@ -700,7 +702,7 @@ describe('ComposeLabelsPanel io.sencho.* status', () => {
         declaredLabels: [{ key: 'inline.key', value: '2', source: 'compose' as const }],
         replicas: [],
         authored: {
-          'inline.key': { source: 'inline', file: 'compose.yaml', line: 9, column: 7, endLine: 9, endColumn: 14 },
+          'inline.key': { source: 'inline', file: 'compose.yaml', fileHash: FILE_HASH, line: 9, column: 7, endLine: 9, endColumn: 14 },
         },
       }],
     };
@@ -711,7 +713,7 @@ describe('ComposeLabelsPanel io.sencho.* status', () => {
     render(<ComposeLabelsPanel stackName="demo" onOpenLocation={onOpenLocation} />);
     fireEvent.click(await screen.findByRole('button', { name: 'Open compose.yaml at line 6' }));
     await waitFor(() => {
-      expect(onOpenLocation).toHaveBeenCalledWith(expect.objectContaining({ file: 'compose.yaml', line: 9 }));
+      expect(onOpenLocation).toHaveBeenCalledWith(expect.objectContaining({ file: 'compose.yaml', fileHash: FILE_HASH, line: 9 }));
     });
     expect(onOpenLocation).not.toHaveBeenCalledWith(expect.objectContaining({ line: 6 }));
     expect(toast.info).not.toHaveBeenCalled();
@@ -728,8 +730,8 @@ describe('ComposeLabelsPanel io.sencho.* status', () => {
         ],
         replicas: [],
         authored: {
-          'from.file': { source: 'label-file', file: 'app.labels', line: labelFileLine, column: 1, endLine: labelFileLine, endColumn: 12 },
-          'inline.key': { source: 'inline', file: 'compose.yaml', line: inlineLine, column: 7, endLine: inlineLine, endColumn: 14 },
+          'from.file': { source: 'label-file', file: 'app.labels', fileHash: FILE_HASH, line: labelFileLine, column: 1, endLine: labelFileLine, endColumn: 12 },
+          'inline.key': { source: 'inline', file: 'compose.yaml', fileHash: FILE_HASH, line: inlineLine, column: 7, endLine: inlineLine, endColumn: 14 },
         },
       }],
     });
@@ -747,7 +749,7 @@ describe('ComposeLabelsPanel io.sencho.* status', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Open compose.yaml at line 6' }));
     resolveSecond({ ok: true, json: async () => inventory(2, 9) } as Response);
     await waitFor(() => {
-      expect(onOpenLocation).toHaveBeenCalledWith(expect.objectContaining({ file: 'compose.yaml', line: 9 }));
+      expect(onOpenLocation).toHaveBeenCalledWith(expect.objectContaining({ file: 'compose.yaml', fileHash: FILE_HASH, line: 9 }));
     });
     resolveFirst({ ok: true, json: async () => inventory(3, 6) } as Response);
     await new Promise(resolve => setTimeout(resolve, 0));
@@ -763,7 +765,7 @@ describe('ComposeLabelsPanel io.sencho.* status', () => {
         declaredLabels: [{ key: 'from.file', value: '1', source: 'compose' as const }],
         replicas: [],
         authored: {
-          'from.file': { source: 'label-file', file: 'app.labels', line: 2, column: 1, endLine: 2, endColumn: 12 },
+          'from.file': { source: 'label-file', file: 'app.labels', fileHash: FILE_HASH, line: 2, column: 1, endLine: 2, endColumn: 12 },
         },
       }],
     };
@@ -797,7 +799,7 @@ describe('ComposeLabelsPanel io.sencho.* status', () => {
         declaredLabels: [{ key: 'from.file', value: '1', source: 'compose' as const }],
         replicas: [],
         authored: {
-          'from.file': { source: 'label-file', file: 'app.labels', line: 2, column: 1, endLine: 2, endColumn: 12 },
+          'from.file': { source: 'label-file', file: 'app.labels', fileHash: FILE_HASH, line: 2, column: 1, endLine: 2, endColumn: 12 },
         },
       }],
     };
@@ -825,7 +827,7 @@ describe('ComposeLabelsPanel io.sencho.* status', () => {
         declaredLabels: [{ key: 'from.file', value: '1', source: 'compose' as const }],
         replicas: [],
         authored: {
-          'from.file': { source: 'label-file', file: 'app.labels', line: 2, column: 1, endLine: 2, endColumn: 12 },
+          'from.file': { source: 'label-file', file: 'app.labels', fileHash: FILE_HASH, line: 2, column: 1, endLine: 2, endColumn: 12 },
         },
       }],
     };
@@ -852,7 +854,7 @@ describe('ComposeLabelsPanel io.sencho.* status', () => {
         declaredLabels: [{ key: 'from.file', value: '1', source: 'compose' as const }],
         replicas: [],
         authored: {
-          'from.file': { source: 'label-file', file: 'app.labels', line: 2, column: 1, endLine: 2, endColumn: 12 },
+          'from.file': { source: 'label-file', file: 'app.labels', fileHash: FILE_HASH, line: 2, column: 1, endLine: 2, endColumn: 12 },
         },
       }],
     };

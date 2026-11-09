@@ -178,6 +178,45 @@ describe('parseComposeDocument', () => {
     expect(parsed.inlineLabels.map(entry => entry.range.line)).toEqual([5, 6, 7]);
   });
 
+  it('keeps accepted empty-key list labels on their own index', () => {
+    const parsed = parse([
+      'services:',
+      '  api:',
+      '    image: nginx',
+      '    labels:',
+      '      - "=empty"',
+      '      - "owner=team"',
+      '      - "=between"',
+      '      - "other=y"',
+      '',
+    ].join('\n'));
+    expect(parsed.state).toBe('parsed');
+    expect(parsed.inlineLabels.map(entry => [entry.key, entry.listIndex, entry.range.line])).toEqual([
+      ['', 0, 5],
+      ['owner', 1, 6],
+      ['', 2, 7],
+      ['other', 3, 8],
+    ]);
+  });
+
+  it('keeps later list indices when the list is supplied through an alias', () => {
+    const parsed = parse([
+      'x-labels: &labels',
+      '  - "=empty"',
+      '  - "owner=team"',
+      'services:',
+      '  api:',
+      '    image: nginx',
+      '    labels: *labels',
+      '',
+    ].join('\n'));
+    expect(parsed.state).toBe('parsed');
+    expect(parsed.inlineLabels.map(entry => [entry.key, entry.listIndex, entry.range.line])).toEqual([
+      ['', 0, 2],
+      ['owner', 1, 3],
+    ]);
+  });
+
   it('records anchors, aliases, and merge keys with their via', () => {
     const parsed = parse([
       'x-base: &base',

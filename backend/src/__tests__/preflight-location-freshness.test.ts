@@ -11,6 +11,7 @@ import path from 'path';
 import { setupTestDb, cleanupTestDb } from './helpers/setupTestDb';
 import { ComposeService } from '../services/ComposeService';
 import DockerController from '../services/DockerController';
+import { sha256Hex } from '../utils/hashing';
 import type { PreflightFinding, PreflightReport } from '../services/preflight/types';
 
 let tmpDir: string;
@@ -89,7 +90,7 @@ afterEach(() => {
 });
 
 describe('stored Doctor location freshness', () => {
-  it('keeps links while the located files are unchanged and never puts the digest on the wire', async () => {
+  it('keeps links while the located files are unchanged and carries the digest with the wire range', async () => {
     writeStack({ 'compose.yaml': PRIMARY, 'compose.override.yaml': OVERRIDE });
     stubDocker();
     const run = await doctor().runPreflight(nodeId, STACK, 'tester');
@@ -103,15 +104,19 @@ describe('stored Doctor location freshness', () => {
     const privileged = locationOf(latest, 'privileged');
     expect(image?.location).toMatchObject({ file: 'compose.override.yaml', line: 3 });
     expect(privileged?.location).toMatchObject({ file: 'compose.yaml', line: 4 });
-    // The freshness digest is storage-only; the wire location shape is unchanged.
-    expect(JSON.stringify(latest)).not.toContain('fileHash');
+    // The digest travels with the range so the client can prove the content it
+    // opens is the revision the range was computed against.
+    expect(image?.location?.fileHash).toBe(sha256Hex(OVERRIDE));
+    expect(privileged?.location?.fileHash).toBe(sha256Hex(PRIMARY));
 
     const row = db().getPreflightFindings(db().getLatestPreflightRun(nodeId, STACK)!.id)
       .find(finding => finding.rule_id === 'image-latest')!;
-    expect(JSON.parse(row.source_location!)).toMatchObject({
+    const stored = JSON.parse(row.source_location!) as { fileHash: string };
+    expect(stored).toMatchObject({
       file: 'compose.override.yaml', line: 3,
       fileHash: expect.stringMatching(/^[0-9a-f]{64}$/),
     });
+    expect(image?.location?.fileHash).toBe(stored.fileHash);
   });
 
   it('drops the link into an edited file and keeps the link into an unchanged one', async () => {

@@ -103,6 +103,10 @@ export interface LabelAuthoredOrigin {
   column?: number;
   endLine?: number;
   endColumn?: number;
+  /** sha256 of the file content the range was computed against. Present only
+   *  for an acting origin; the client refuses to apply a range to any other
+   *  content revision. */
+  fileHash?: string;
   shared?: boolean;
   /** The inline `labels:` map overrides a label-file entry for this key. */
   overridden?: boolean;
@@ -331,11 +335,20 @@ export function authoredOriginsFor(
   if (!project) return undefined;
   const serviceLabels = project.labels.get(service);
   const out: Record<string, LabelAuthoredOrigin> = Object.create(null) as Record<string, LabelAuthoredOrigin>;
+  const contentHashes = new Map(project.files.map(file => [file.file, file.contentHash]));
   for (const key of keys) {
     const result = correlateLabel(project, service, key);
     if (serviceLabels && isActingReason(result.reason) && result.origin) {
       const winner = serviceLabels.winners[key];
       if (!winner) continue;
+      // A range is only actionable together with the content revision it was
+      // computed against. Every parsed file records its digest; a location
+      // without one cannot be verified by the reader and is not offered.
+      const fileHash = contentHashes.get(result.origin.file);
+      if (fileHash === undefined) {
+        out[key] = { source: winner.source, ambiguity: 'unparsed-source' };
+        continue;
+      }
       const overridden = winner.source === 'inline'
         && (serviceLabels.contributionsByKey.get(key)?.some(contribution => contribution.source === 'label-file') ?? false);
       out[key] = {
@@ -345,6 +358,7 @@ export function authoredOriginsFor(
         column: result.origin.range.column,
         endLine: result.origin.range.endLine,
         endColumn: result.origin.range.endColumn,
+        fileHash,
         ...(winner.shared ? { shared: true } : {}),
         ...(overridden ? { overridden: true } : {}),
       };

@@ -46,6 +46,10 @@ export interface PreflightSourceLocation {
   column: number;
   endLine: number;
   endColumn: number;
+  /** sha256 of the file content the range was computed against. A range is
+   *  only shown by a reader that can verify the opened content still hashes to
+   *  it; absent means the location cannot be verified and is not sent. */
+  fileHash?: string;
 }
 
 /** A single deterministic finding. Never carries an environment value. */

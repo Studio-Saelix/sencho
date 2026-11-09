@@ -88,6 +88,8 @@ vi.mock('@/lib/monacoLanguages', () => ({
 }));
 
 import { readStackFile } from '@/lib/stackFilesApi';
+import { sha256Hex } from '@/lib/sha256';
+import { toast } from '@/components/ui/toast-store';
 import { FileViewer } from '../FileViewer';
 
 const mockReadFile = readStackFile as unknown as ReturnType<typeof vi.fn>;
@@ -111,6 +113,7 @@ const revealB: AuthoredLocation = {
   column: 2,
   endLine: 4,
   endColumn: 9,
+  fileHash: sha256Hex('B content'),
 };
 
 const expectedRange = { startLineNumber: 3, startColumn: 2, endLineNumber: 4, endColumn: 9 };
@@ -191,6 +194,8 @@ describe('FileViewer reveal lifecycle', () => {
       .mockResolvedValueOnce(textResult('stale content'))
       .mockImplementationOnce(() => fresh.promise);
     const onRevealApplied = vi.fn();
+    const freshContent = 'fresh\ncontent with one inserted line\nmore';
+    const freshReveal: AuthoredLocation = { ...revealB, fileHash: sha256Hex(freshContent) };
 
     const { rerender } = render(
       <FileViewer {...defaultProps} selectedPath="b.txt" reveal={null} />,
@@ -202,7 +207,7 @@ describe('FileViewer reveal lifecycle', () => {
         {...defaultProps}
         selectedPath="b.txt"
         reloadKey={1}
-        reveal={revealB}
+        reveal={freshReveal}
         onRevealApplied={onRevealApplied}
       />,
     );
@@ -213,8 +218,51 @@ describe('FileViewer reveal lifecycle', () => {
     expect(onRevealApplied).not.toHaveBeenCalled();
     expect(h.reveals).toHaveLength(0);
 
-    fresh.resolve(textResult('fresh\ncontent with one inserted line\nmore'));
+    fresh.resolve(textResult(freshContent));
     await waitFor(() => expect(onRevealApplied).toHaveBeenCalledTimes(1));
     expect(h.editors[h.editors.length - 1].revealRangeInCenter).toHaveBeenCalledWith(expectedRange);
+  });
+
+  it('refuses a range whose file changed after the location was computed', async () => {
+    mockReadFile.mockResolvedValue(textResult('new content with an inserted line\nmore'));
+    const onRevealApplied = vi.fn();
+
+    render(
+      <FileViewer
+        {...defaultProps}
+        selectedPath="b.txt"
+        reveal={revealB}
+        onRevealApplied={onRevealApplied}
+      />,
+    );
+
+    await waitFor(() => expect(onRevealApplied).toHaveBeenCalledTimes(1));
+    // The buffer is newer than the range, so the old coordinates are not applied.
+    expect(h.reveals).toHaveLength(0);
+    expect(toast.info).toHaveBeenCalledWith(expect.stringMatching(/no longer current/i));
+  });
+
+  it('refuses a range that carries no source revision', async () => {
+    mockReadFile.mockResolvedValue(textResult('B content'));
+    const onRevealApplied = vi.fn();
+    const unbound: AuthoredLocation = {
+      file: 'b.txt',
+      line: 3,
+      column: 2,
+      endLine: 4,
+      endColumn: 9,
+    };
+
+    render(
+      <FileViewer
+        {...defaultProps}
+        selectedPath="b.txt"
+        reveal={unbound}
+        onRevealApplied={onRevealApplied}
+      />,
+    );
+
+    await waitFor(() => expect(onRevealApplied).toHaveBeenCalledTimes(1));
+    expect(h.reveals).toHaveLength(0);
   });
 });

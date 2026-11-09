@@ -13,6 +13,10 @@ export interface AuthoredLocation {
   column: number;
   endLine: number;
   endColumn: number;
+  /** sha256 of the file content this range was computed against. Navigation
+   *  refuses a location without it and applies a range only to content that
+   *  hashes to it, so old coordinates never select lines in newer content. */
+  fileHash?: string;
 }
 
 export type AuthoredLocationSurface = 'compose' | 'files';
@@ -51,6 +55,11 @@ function isPositiveInt(value: unknown): value is number {
   return typeof value === 'number' && Number.isInteger(value) && value > 0;
 }
 
+/** A sha256 digest as the backend writes it: 64 lowercase hex characters. */
+export function isFileHash(value: unknown): value is string {
+  return typeof value === 'string' && /^[0-9a-f]{64}$/.test(value);
+}
+
 /** Normalize a stack-relative path, or null when it is absolute or escaping. */
 export function normalizeStackPath(file: string): string | null {
   const normalized = file.replace(/\\/g, '/').replace(/^\.\//, '');
@@ -69,6 +78,7 @@ export function isUsableAuthoredLocation(value: unknown): value is AuthoredLocat
   if (entry.endLine < entry.line) return false;
   if (entry.endLine === entry.line && entry.endColumn < entry.column) return false;
   if (entry.path !== undefined && typeof entry.path !== 'string') return false;
+  if (entry.fileHash !== undefined && !isFileHash(entry.fileHash)) return false;
   return true;
 }
 

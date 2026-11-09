@@ -190,6 +190,7 @@ export function serializeFinding(finding: AssuranceFinding): SerializedAssurance
       ...(location.column !== undefined ? { column: location.column } : {}),
       ...(location.endLine !== undefined ? { endLine: location.endLine } : {}),
       ...(location.endColumn !== undefined ? { endColumn: location.endColumn } : {}),
+      ...(location.fileHash !== undefined ? { fileHash: location.fileHash } : {}),
     }
     : undefined;
   return {

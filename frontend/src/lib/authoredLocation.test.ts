@@ -61,4 +61,10 @@ describe('isUsableAuthoredLocation', () => {
     expect(isUsableAuthoredLocation(location)).toBe(true);
     expect(isUsableAuthoredLocation({ ...location, column: undefined })).toBe(false);
   });
+
+  it('validates a revision digest when one is present', () => {
+    expect(isUsableAuthoredLocation({ ...location, fileHash: 'a'.repeat(64) })).toBe(true);
+    expect(isUsableAuthoredLocation({ ...location, fileHash: 'abc' })).toBe(false);
+    expect(isUsableAuthoredLocation({ ...location, fileHash: 'A'.repeat(64) })).toBe(false);
+  });
 });

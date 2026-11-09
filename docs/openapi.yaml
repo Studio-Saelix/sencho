@@ -394,6 +394,11 @@ components:
         column: { type: integer }
         endLine: { type: integer }
         endColumn: { type: integer }
+        fileHash:
+          type: string
+          description: >-
+            SHA-256 of the file content the range was computed against. Present only for an
+            acting origin; the client applies the range only to content with this digest.
         shared:
           type: boolean
           description: The label file is used by more than one service.

@@ -20,6 +20,7 @@ vi.mock('@/components/ui/toast-store', () => ({
 
 import { apiFetch } from '@/lib/api';
 import type { ServiceUrlEntry } from '@/lib/serviceUrlResolve';
+import { sha256Hex } from '@/lib/sha256';
 import { ENV_READ_FAILED_NOTICE } from '../envNotice';
 import {
   absentRevision,
@@ -4519,7 +4520,10 @@ describe('useStackActions.refreshGitSourcePending', () => {
 });
 
 describe('useStackActions.openAuthoredLocation', () => {
-  const location = { file: 'compose.yaml', line: 3, column: 5, endLine: 3, endColumn: 12 };
+  const location = {
+    file: 'compose.yaml', line: 3, column: 5, endLine: 3, endColumn: 12,
+    fileHash: sha256Hex('disk content'),
+  };
 
   beforeEach(() => {
     vi.mocked(apiFetch).mockReset();
@@ -4551,7 +4555,7 @@ describe('useStackActions.openAuthoredLocation', () => {
     });
 
     await act(async () => {
-      result.current.openAuthoredLocation(location);
+      result.current.openAuthoredLocation({ ...location, fileHash: sha256Hex('fresh disk content\n') });
     });
 
     expect(editorState.setContent).toHaveBeenCalledWith('fresh disk content\n');
@@ -4560,9 +4564,36 @@ describe('useStackActions.openAuthoredLocation', () => {
     expect(editorState.setComposeFilename).toHaveBeenCalledWith('compose.yaml');
     expect(editorState.setPendingReveal).toHaveBeenCalledWith({
       target: { surface: 'compose', file: 'compose.yaml' },
-      location,
+      location: { ...location, fileHash: sha256Hex('fresh disk content\n') },
       revision: 'fresh disk content\n',
     });
+  });
+
+  it('refuses a range when the file changed after the location was computed', async () => {
+    vi.mocked(apiFetch).mockResolvedValue(new Response('new disk content\n', { status: 200 }));
+    const { result, editorState } = setup({
+      editorState: { content: 'disk content', originalContent: 'disk content' },
+    });
+
+    await act(async () => {
+      result.current.openAuthoredLocation(location);
+    });
+
+    expect(editorState.setContent).not.toHaveBeenCalled();
+    expect(editorState.setPendingReveal).toHaveBeenCalledWith(null);
+    expect(toast.info).toHaveBeenCalledWith(expect.stringMatching(/no longer current/i));
+  });
+
+  it('refuses a range that carries no source revision', () => {
+    const { result, editorState } = setup({
+      editorState: { content: 'disk content', originalContent: 'disk content' },
+    });
+
+    result.current.openAuthoredLocation({ file: 'compose.yaml', line: 3, column: 5, endLine: 3, endColumn: 12 });
+
+    expect(apiFetch).not.toHaveBeenCalled();
+    expect(editorState.setPendingReveal).toHaveBeenCalledWith(null);
+    expect(toast.info).toHaveBeenCalledWith(expect.stringMatching(/verified file revision/i));
   });
 
   it('does not apply a range when the stack changes while the file read is in flight', async () => {

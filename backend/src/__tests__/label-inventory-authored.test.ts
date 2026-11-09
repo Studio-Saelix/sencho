@@ -83,6 +83,9 @@ describe('authored label origins in the stack inventory', () => {
     expect(api.authored?.['com.example.file']).toMatchObject({
       source: 'label-file', file: 'app.labels', line: 1, shared: true,
     });
+    // Every acting origin names the content revision it was computed against.
+    expect(api.authored?.['com.example.inline']?.fileHash).toMatch(/^[0-9a-f]{64}$/);
+    expect(api.authored?.['com.example.file']?.fileHash).toMatch(/^[0-9a-f]{64}$/);
     expect(api.authored?.['com.example.file']?.overridden).toBeUndefined();
     const web = inventory.services.find(service => service.service === 'web')!;
     expect(web.authored?.['com.example.file']?.shared).toBe(true);

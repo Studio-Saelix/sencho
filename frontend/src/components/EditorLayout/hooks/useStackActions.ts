@@ -1,5 +1,6 @@
 import { useRef, useCallback, useEffect, useState } from 'react';
-import { planAuthoredLocation, type AuthoredLocation } from '@/lib/authoredLocation';
+import { isFileHash, planAuthoredLocation, type AuthoredLocation } from '@/lib/authoredLocation';
+import { sha256Hex } from '@/lib/sha256';
 import { apiFetch, withDeploySession } from '@/lib/api';
 import {
   dockerEndpointRefusal,
@@ -2280,15 +2281,25 @@ export function useStackActions(options: UseStackActionsOptions) {
   /**
    * Open a reported authored location. One click, one handler: the compose tab
    * when the file is the loaded primary compose file, the Files tab otherwise.
-   * A range belongs to one file revision, so the compose surface re-reads the
-   * file and applies the range only when the buffer equals the content read
-   * here: a clean stale buffer is refreshed, while unsaved edits are preserved
-   * and the selection is left alone. The Files surface rereads the same path in
-   * FileViewer, and its existing discard confirmation covers a dirty viewer.
+   * A range belongs to one file revision: the compose surface re-reads the file
+   * and applies the range only when the bytes hash to the revision the location
+   * was computed against, so a clean stale buffer is refreshed, unsaved edits
+   * are preserved, and a file that changed after the report was read opens
+   * nothing. The Files surface rereads the same path in FileViewer, whose
+   * existing discard confirmation covers a dirty viewer, and which verifies the
+   * same digest before applying the range.
    */
   const openAuthoredLocation = (location: AuthoredLocation) => {
     const stackFile = stackListState.selectedFile;
     if (!stackFile) return;
+    // A location that does not name its source revision cannot be verified, so
+    // it is refused rather than applied to whatever the file holds now.
+    if (!isFileHash(location.fileHash)) {
+      editorState.setPendingReveal(null);
+      toast.info('This location has no verified file revision, so it cannot be opened. Refresh and try the link again.');
+      return;
+    }
+    const expectedHash = location.fileHash;
     const target = planAuthoredLocation(location, editorState.composeFilename);
     if (!target) return;
     // Any newer click supersedes a compose file read still in flight, even when
@@ -2325,6 +2336,13 @@ export function useStackActions(options: UseStackActionsOptions) {
         if (selectedFileRef.current !== stackFile || activeNodeIdRef.current !== opNodeId) return;
         if (composeContentRef.current !== composeOriginalContentRef.current) {
           refuseForUnsavedEdits();
+          return;
+        }
+        if (sha256Hex(text) !== expectedHash) {
+          // The file moved on after the report was read; the range no longer
+          // names the same lines, so open nothing rather than a guessed range.
+          editorState.setPendingReveal(null);
+          toast.info('This location is no longer current. The file changed after it was located; refresh and open its link again.');
           return;
         }
         // Adopt the same revision metadata loadFileCore uses, or the next

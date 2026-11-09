@@ -8,6 +8,7 @@ import { readStackFile, writeStackFile, downloadStackFile, FileConflictError } f
 import { extensionToLanguage } from '@/lib/monacoLanguages';
 import { cn, formatBytes } from '@/lib/utils';
 import { revealLocation, type AuthoredLocation } from '@/lib/authoredLocation';
+import { sha256Hex } from '@/lib/sha256';
 
 const WORD_WRAP_KEY = 'sencho.fileViewer.wordWrap';
 
@@ -153,6 +154,10 @@ export function FileViewer({
   const [content, setContent] = useState('');
   const [originalContent, setOriginalContent] = useState('');
   const [loadedPath, setLoadedPath] = useState<string | null>(null);
+  // SHA-256 of the content currently in the buffer, computed once per read.
+  // A reveal is applied only when it equals the digest the range was computed
+  // against, so coordinates from an older revision never select newer lines.
+  const [loadedHash, setLoadedHash] = useState<string | null>(null);
   // A mounted editor is only valid for the exact resource it was created for.
   // The token changes with the file (and root), so an unmount that races a new
   // load cannot leave a stale editor eligible to receive a reveal.
@@ -225,6 +230,7 @@ export function FileViewer({
     if (!selectedPath) {
       setContent('');
       setOriginalContent('');
+      setLoadedHash(null);
       setIsBinary(false);
       setIsOversized(false);
       setError(null);
@@ -235,6 +241,7 @@ export function FileViewer({
     setLoading(true);
     setError(null);
     setLoadedPath(null);
+    setLoadedHash(null);
     setIsBinary(false);
     setIsOversized(false);
     // A reread must be able to re-apply the same one-shot range.
@@ -260,6 +267,7 @@ export function FileViewer({
           const text = result.content ?? '';
           setContent(text);
           setOriginalContent(text);
+          setLoadedHash(sha256Hex(text));
           setLoadedPath(selectedPath);
           setLoadEpoch((epoch) => epoch + 1);
         }
@@ -329,8 +337,17 @@ export function FileViewer({
     // the explorer's discard confirmation is the only path that replaces it.
     if (hasChanges) return;
     if (!reveal || !binding || binding.token !== editorToken || loadedPath !== reveal.file) return;
-    const key = `${reveal.file}:${reveal.line}:${reveal.column}:${reveal.endLine}:${reveal.endColumn}`;
+    const key = `${reveal.file}:${reveal.fileHash ?? ''}:${reveal.line}:${reveal.column}:${reveal.endLine}:${reveal.endColumn}`;
     if (appliedRevealRef.current === key) return;
+    // The range belongs to one revision. A missing digest cannot be verified,
+    // and a digest that does not match the loaded content means the file moved
+    // on after the range was computed: open nothing rather than a guessed line.
+    if (reveal.fileHash === undefined || loadedHash === null || loadedHash !== reveal.fileHash) {
+      appliedRevealRef.current = key;
+      toast.info('This location is no longer current. The file changed after it was located; refresh and open its link again.');
+      onRevealApplied?.();
+      return;
+    }
     revealLocation(binding.editor, reveal);
     appliedRevealRef.current = key;
     onRevealApplied?.();
@@ -347,7 +364,7 @@ export function FileViewer({
     // file's content must be loaded before a range can be applied. `loadEpoch`
     // covers a reread of the same path, where `loadedPath` may not change.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [reveal, loadedPath, editorToken, editorBindingVersion, loadEpoch]);
+  }, [reveal, loadedPath, loadedHash, editorToken, editorBindingVersion, loadEpoch]);
 
   if (!selectedPath) {
     return (
@@ -402,6 +419,7 @@ export function FileViewer({
           const text = result.content ?? '';
           setContent(text);
           setOriginalContent(text);
+          setLoadedHash(sha256Hex(text));
           setIsBinary(false);
         }
       } catch (e) {

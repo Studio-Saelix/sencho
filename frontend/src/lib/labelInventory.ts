@@ -8,7 +8,7 @@ import {
   type SenchoLabelState,
 } from './senchoLabels';
 import { RETIRED_URL_LABEL } from './serviceUrlLabel';
-import { isUsableAuthoredLocation, normalizeStackPath } from './authoredLocation';
+import { isFileHash, isUsableAuthoredLocation, normalizeStackPath } from './authoredLocation';
 
 export type LabelSource = 'compose' | 'runtime' | 'image' | 'compose-system' | 'unknown';
 
@@ -100,6 +100,9 @@ export interface LabelAuthoredOrigin {
   column?: number;
   endLine?: number;
   endColumn?: number;
+  /** sha256 of the file content the range was computed against. Required for
+   *  an acting origin: navigation never applies a range without it. */
+  fileHash?: string;
   shared?: boolean;
   overridden?: boolean;
   ambiguity?: 'duplicate-key' | 'unparsed-source' | 'interpolated' | 'outside-boundary';
@@ -258,7 +261,9 @@ const AUTHORED_AMBIGUITIES: ReadonlySet<string> = new Set([
  */
 export function readAuthoredOrigins(raw: unknown, declaredKeys: ReadonlySet<string>): Record<string, LabelAuthoredOrigin> | undefined {
   if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return undefined;
-  const out: Record<string, LabelAuthoredOrigin> = {};
+  // A null prototype keeps a document key such as `__proto__` as an own data
+  // entry; assigning it on `{}` would change the prototype instead.
+  const out: Record<string, LabelAuthoredOrigin> = Object.create(null) as Record<string, LabelAuthoredOrigin>;
   for (const [key, value] of Object.entries(raw as Record<string, unknown>)) {
     if (!declaredKeys.has(key) || !value || typeof value !== 'object' || Array.isArray(value)) continue;
     const entry = value as Record<string, unknown>;
@@ -273,8 +278,11 @@ export function readAuthoredOrigins(raw: unknown, declaredKeys: ReadonlySet<stri
       column: entry.column,
       endLine: entry.endLine,
       endColumn: entry.endColumn,
+      fileHash: entry.fileHash,
     };
-    const acting = isUsableAuthoredLocation(candidate) && normalizeStackPath(candidate.file as string) !== null;
+    const acting = isUsableAuthoredLocation(candidate)
+      && normalizeStackPath(candidate.file as string) !== null
+      && isFileHash(candidate.fileHash);
     if (!acting && !ambiguity) continue;
     if (acting && !source) continue;
     out[key] = {
@@ -285,6 +293,7 @@ export function readAuthoredOrigins(raw: unknown, declaredKeys: ReadonlySet<stri
         column: candidate.column as number,
         endLine: candidate.endLine as number,
         endColumn: candidate.endColumn as number,
+        fileHash: candidate.fileHash as string,
       } : {}),
       ...(entry.shared === true ? { shared: true } : {}),
       ...(entry.overridden === true ? { overridden: true } : {}),

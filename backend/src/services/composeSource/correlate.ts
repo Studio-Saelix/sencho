@@ -600,6 +600,35 @@ function splitAuthoredPath(project: AuthoredProject, path: string): AuthoredPath
   return candidates[0] ? { kind: 'found', service: candidates[0].service, field: candidates[0].field } : null;
 }
 
+/**
+ * Whether a label interpretation names an authored declaration, or one this
+ * reader cannot rule out. Label keys can come from an inline map, an inline
+ * list, or a managed label file, and a variable-built key can stand for any
+ * effective key. Consulting the assembled label model is what keeps a display
+ * path such as `services.api.labels.owner` from resolving to a different
+ * service named `api.labels.owner`.
+ */
+function labelInterpretationState(
+  project: AuthoredProject,
+  service: string,
+  key: string,
+): 'authored' | 'unread' | null {
+  const labels = project.labels.get(service);
+  if (!labels) return null;
+  if (labels.ambiguity[key] !== undefined) return 'authored';
+  if (labels.winners[key] !== undefined) return 'authored';
+  if ((labels.contributionsByKey.get(key)?.length ?? 0) > 0) return 'authored';
+  // An `extends` base this reader could not resolve could declare the label.
+  if (hasUnresolvedService(project, service)) return 'unread';
+  // A list-form key built from a variable could resolve to this key, and a
+  // label file this reader could not read (or was not allowed to read) could
+  // declare it. Either way the interpretation is not ruled out.
+  if (labels.hasDynamicKeys) return 'unread';
+  if (labels.unparsedLabelFiles.length > 0 || labels.outsideLabelFiles.length > 0) return 'unread';
+  if (unparsedFiles(project).length > 0) return 'unread';
+  return null;
+}
+
 /** Whether an interpretation names an authored node, or a file we cannot read. */
 function interpretationState(
   project: AuthoredProject,
@@ -607,9 +636,10 @@ function interpretationState(
   field: string,
 ): 'authored' | 'unread' | null {
   const labelPrefix = 'labels.';
-  const segments = field.startsWith(labelPrefix)
-    ? ['labels', field.slice(labelPrefix.length)]
-    : fieldSegments(field);
+  if (field.startsWith(labelPrefix)) {
+    return labelInterpretationState(project, service, field.slice(labelPrefix.length));
+  }
+  const segments = fieldSegments(field);
   for (const definition of project.serviceDefinitions.get(service) ?? []) {
     const file = project.files.find(entry => entry.file === definition.file);
     if (!file || file.state !== 'parsed') return 'unread';
