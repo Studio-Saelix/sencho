@@ -2,9 +2,9 @@ import { describe, expect, it } from 'vitest';
 import { spawnSync } from 'child_process';
 
 import {
-  parseComposeDocument, parseLabelFile, MAX_COMPOSE_PARSE_BYTES,
+  authoredScalarOf, parseComposeDocument, parseLabelFile, MAX_COMPOSE_PARSE_BYTES,
 } from '../services/composeSource';
-import { authoredNodeKey } from '../services/composeSource/parseComposeDocument';
+import { authoredLabelFileValueOf, authoredNodeKey } from '../services/composeSource/parseComposeDocument';
 
 const base = {
   file: 'compose.yaml',
@@ -36,6 +36,36 @@ describe('parseComposeDocument', () => {
     const item = parsed.nodes.get('services.api.ports[0]');
     expect(item?.form).toBe('short');
     expect(item?.valueRange).toEqual({ line: 5, column: 9, endLine: 5, endColumn: 18 });
+  });
+
+  it('reads YAML 1.2 core scalars even under a %YAML 1.1 directive', () => {
+    const source = [
+      'services:',
+      '  web:',
+      '    image: nginx:latest',
+      '    privileged: yes',
+      '    restart: no',
+      '    ports:',
+      '      - 22:22',
+      '',
+    ].join('\n');
+    const scalars = (parsed: ReturnType<typeof parse>) => ({
+      privileged: authoredScalarOf(parsed.nodes.get('services.web.privileged')),
+      restart: authoredScalarOf(parsed.nodes.get('services.web.restart')),
+      port: authoredScalarOf(parsed.nodes.get('services.web.ports[0]')),
+    });
+    const expected = { privileged: 'yes', restart: 'no', port: '22:22' };
+    const without = parse(source);
+    expect(without.state).toBe('parsed');
+    expect(scalars(without)).toEqual(expected);
+    const withDirective = parse(`%YAML 1.1\n---\n${source}`);
+    expect(withDirective.state).toBe('parsed');
+    expect(scalars(withDirective)).toEqual(expected);
+    // Keys are Compose-relevant too: a service or label key named `on`/`yes`
+    // keeps its authored spelling instead of becoming a YAML 1.1 boolean.
+    const keyed = parse('%YAML 1.1\n---\nservices:\n  on:\n    image: nginx:1\n    labels:\n      yes: v\n');
+    expect(keyed.serviceNames).toEqual(['on']);
+    expect(keyed.inlineLabels.map(entry => entry.key)).toEqual(['yes']);
   });
 
   it('marks duplicate keys as parse-failed with the full key range and no nodes', () => {
@@ -473,5 +503,63 @@ describe('parseLabelFile', () => {
   it('flags interpolation syntax without resolving it', () => {
     const parsed = parseLabelFile('app.labels', 'token=${SECRET}\n');
     expect(parsed.entries[0].hasInterpolation).toBe(true);
+  });
+
+  it('reads the value text Compose reads for inline and quoted comments', () => {
+    const parsed = parseLabelFile('app.labels', [
+      'k0=ok',
+      'k5=a b # trailing',
+      'k9=last',
+      'hash=a#b # comment',
+      'quoted="a b" # comment',
+      'single=\'x\'#comment',
+      'spaced=  a b   ',
+      '',
+    ].join('\n'));
+    expect(parsed.diagnostics).toEqual([]);
+    const values = Object.fromEntries(parsed.entries.map(entry => [entry.key, authoredLabelFileValueOf(entry)]));
+    expect(values).toEqual({
+      k0: 'ok',
+      k5: 'a b',
+      k9: 'last',
+      hash: 'a#b',
+      quoted: 'a b',
+      single: 'x',
+      spaced: 'a b',
+    });
+    const k5 = parsed.entries.find(entry => entry.key === 'k5')!;
+    expect(k5.hasInterpolation).toBe(false);
+    // The range covers the value Compose reads, not the comment after it.
+    expect(k5.valueRange).toEqual({ line: 2, column: 4, endLine: 2, endColumn: 7 });
+  });
+
+  it('does not treat interpolation inside a comment as value text', () => {
+    const parsed = parseLabelFile('app.labels', [
+      'a=1 # ${SECRET}',
+      'b=2 ${SECRET}',
+      'c="3 ${SECRET}"',
+      "d='4 ${SECRET}'",
+      '',
+    ].join('\n'));
+    expect(parsed.diagnostics).toEqual([]);
+    expect(parsed.entries[0].hasInterpolation).toBe(false);
+    expect(authoredLabelFileValueOf(parsed.entries[0])).toBe('1');
+    expect(parsed.entries[1].hasInterpolation).toBe(true);
+    expect(authoredLabelFileValueOf(parsed.entries[1])).toBeUndefined();
+    expect(parsed.entries[2].hasInterpolation).toBe(true);
+    // Compose reads a single-quoted value literally, `$` included.
+    expect(parsed.entries[3].hasInterpolation).toBe(false);
+    expect(authoredLabelFileValueOf(parsed.entries[3])).toBe('4 ${SECRET}');
+  });
+
+  it('refuses a value form it cannot reproduce instead of comparing a guess', () => {
+    const parsed = parseLabelFile('app.labels', [
+      'trailing="a" junk',
+      'unterminated="a',
+      'escaped=a\\b',
+      '',
+    ].join('\n'));
+    expect(parsed.entries).toEqual([]);
+    expect(parsed.diagnostics.filter(entry => entry.code === 'unsupported-syntax')).toHaveLength(3);
   });
 });

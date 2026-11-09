@@ -109,6 +109,22 @@ describe('authored label origins in the stack inventory', () => {
     expect(api.authored?.plain).toMatchObject({ source: 'label-file', file: 'lf.env', line: 2 });
   });
 
+  it('locates a label-file entry whose value ends at an inline comment', async () => {
+    writeStack('label-inline-comment', {
+      'compose.yaml': 'services:\n  api:\n    image: nginx:1.25\n    network_mode: none\n    label_file: l.env\n',
+      'l.env': 'k0=ok\nk5=a b # trailing\nk9=last\n',
+    });
+    stubRender({ api: { k0: 'ok', k5: 'a b', k9: 'last' } });
+    stubDocker();
+    const inventory = await buildStackLabelInventory(nodeId, 'label-inline-comment');
+    const api = inventory.services.find(service => service.service === 'api')!;
+    expect(api.authored?.k0).toMatchObject({ source: 'label-file', file: 'l.env', line: 1 });
+    expect(api.authored?.k5).toMatchObject({ source: 'label-file', file: 'l.env', line: 2 });
+    expect(api.authored?.k5?.ambiguity).toBeUndefined();
+    expect(api.authored?.k5?.fileHash).toMatch(/^[0-9a-f]{64}$/);
+    expect(api.authored?.k9).toMatchObject({ source: 'label-file', file: 'l.env', line: 3 });
+  });
+
   it('marks an inline override of a label-file entry without a value', async () => {
     writeStack('label-override', {
       'compose.yaml': 'services:\n  api:\n    image: nginx:1\n    label_file: app.labels\n    labels:\n      a: inline\n',

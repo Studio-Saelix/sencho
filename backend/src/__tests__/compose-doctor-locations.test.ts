@@ -117,6 +117,39 @@ describe('Compose Doctor authored locations', () => {
     }
   });
 
+  it('reads the same authored scalars with and without a %YAML 1.1 directive', async () => {
+    const body = [
+      'services:',
+      '  web:',
+      '    image: nginx:latest',
+      '    network_mode: none',
+      '    privileged: yes',
+      '    restart: no',
+      '    ports:',
+      '      - 22:22',
+      '',
+    ].join('\n');
+    const model = {
+      services: [{
+        name: 'web', image: 'nginx:latest', privileged: true, networkMode: 'none', restart: 'no',
+        ports: [{ startPort: 22, endPort: 22, hostIp: '', protocol: 'tcp' }],
+      }],
+    } as unknown as EffectiveModel;
+    for (const [stack, prefix] of [['doctor-yaml-core', ''], ['doctor-yaml-11-directive', '%YAML 1.1\n---\n']] as const) {
+      writeStack(stack, { 'compose.yaml': prefix + body });
+      const project = await buildAuthoredProject(nodeId, stack);
+      const lineOffset = prefix === '' ? 0 : 2;
+      // `yes` is a string under YAML 1.2 core, so the effective boolean `true`
+      // is never claimed as its origin in either spelling.
+      expect(locateFinding(project, hit('privileged', { service: 'web', sourcePath: 'web' }), model)).toBeUndefined();
+      expect(locateFinding(project, hit('no-restart-policy', { service: 'web', sourcePath: 'web' }), model))
+        .toMatchObject({ file: 'compose.yaml', line: 6 + lineOffset });
+      expect(locateFinding(project, hit('port-exposed-all-interfaces', {
+        service: 'web', sourcePath: 'web', subject: { kind: 'port', key: '22/tcp' },
+      }), model)).toMatchObject({ file: 'compose.yaml', line: 8 + lineOffset });
+    }
+  });
+
   it('locates an explicit restart: "no" but not an absent restart field', async () => {
     writeStack('doctor-restart-explicit', {
       'compose.yaml': 'services:\n  api:\n    image: nginx:1\n    restart: "no"\n',

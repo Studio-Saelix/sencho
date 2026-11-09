@@ -9,6 +9,11 @@
  * nodes: a location must never be claimed from a file Compose itself rejects.
  * Library error text is discarded; only a code-derived message survives, so a
  * library message that quotes a source line cannot leak it.
+ *
+ * Scalars are always read with YAML 1.2 core typing, even when the document
+ * carries a `%YAML 1.1` directive. The directive would otherwise switch the
+ * library's schema and turn `yes`/`no`/`22:22` into other values, changing the
+ * authored text a Compose-relevant field is matched against.
  */
 import {
   isAlias, isMap, isScalar, isSeq, LineCounter, parseDocument,
@@ -928,7 +933,9 @@ export function parseComposeDocument(input: ParseComposeDocumentInput): ParsedCo
   }
 
   const lineCounter = new LineCounter();
-  const doc = parseDocument(input.source, { lineCounter });
+  // `schema` and `resolveKnownTags` are explicit so a `%YAML 1.1` directive
+  // cannot replace the core schema this model reads scalar text with.
+  const doc = parseDocument(input.source, { lineCounter, schema: 'core', resolveKnownTags: true });
   if (doc.errors.length > 0) {
     const keyRanges = doc.errors.some(error => error.code === 'DUPLICATE_KEY')
       ? keyRangesByStart(lineCounter, doc.contents as Node | null)
@@ -1035,10 +1042,12 @@ export function parseComposeDocument(input: ParseComposeDocumentInput): ParsedCo
 /**
  * Env-file-like label file: `key=value` per line, `#` comments and blank lines
  * ignored, split at the first `=`. Compose accepts an `export ` prefix on an
- * env-file line, so it is accepted here and never becomes part of the key. One
- * layer of matching quotes is stripped for value comparison only; this reader
- * never keeps the value. Anything outside that subset is a fixed per-line
- * diagnostic, never a guess.
+ * env-file line, so it is accepted here and never becomes part of the key. The
+ * value text kept for comparison is the one Compose's env-file reader produces:
+ * leading spaces are skipped, a quoted value ends at its closing quote, an
+ * unquoted value ends at the first " #" and loses trailing whitespace. This
+ * reader never keeps the value. Anything outside that subset is a fixed
+ * per-line diagnostic, never a guess.
  */
 export function parseLabelFile(file: string, source: string): ParsedLabelFile {
   const diagnostics: AuthoredDiagnostic[] = [];
@@ -1051,11 +1060,8 @@ export function parseLabelFile(file: string, source: string): ParsedLabelFile {
 
   const seen = new Set<string>();
   const lines = source.split('\n');
-  let offset = 0;
   for (let index = 0; index < lines.length; index += 1) {
     const rawLine = lines[index].replace(/\r$/, '');
-    const lineStart = offset;
-    offset += lines[index].length + 1;
     const trimmed = rawLine.trim();
     if (trimmed === '' || trimmed.startsWith('#')) continue;
 
@@ -1075,15 +1081,19 @@ export function parseLabelFile(file: string, source: string): ParsedLabelFile {
     const key = keyPart.trim();
     const keyLead = keyPart.length - keyPart.trimStart().length;
     const keyStart = prefixLength + keyLead;
-    const rawValue = rawLine.slice(eq + 1);
-    if (key === '' || !isSupportedLabelText(key) || !isSupportedLabelText(rawValue)) {
+    const value = readLabelFileValue(rawLine.slice(eq + 1));
+    if (key === '' || !isSupportedLabelText(key) || value === null) {
       addDiagnostic(diagnostics, file, 'unsupported-syntax', {
         line: index + 1, column: 1, endLine: index + 1, endColumn: Math.max(1, rawLine.length),
       });
       continue;
     }
-    const valueStart = lineStart + eq + 1;
-    const valueEnd = lineStart + rawLine.length;
+    // Compose collapses `$$` before interpolation, so `$$${FOO}` still
+    // interpolates. The escaped-dollar form must be detected the same way the
+    // node walk detects it, or a location would be claimed for a value whose
+    // effective text this reader cannot know. A `$` in a comment is not value
+    // text, so it never makes the entry interpolated.
+    const keyInterpolated = hasEffectiveInterpolation(keyPart);
     if (seen.has(key)) duplicateKeys.add(key);
     seen.add(key);
     const entry: LabelFileEntry = {
@@ -1102,42 +1112,115 @@ export function parseLabelFile(file: string, source: string): ParsedLabelFile {
       },
       valueRange: {
         line: index + 1,
-        column: eq + 2,
+        column: eq + 2 + value.start,
         endLine: index + 1,
-        endColumn: Math.max(eq + 2, valueEnd - lineStart + 1),
+        endColumn: Math.max(eq + 2 + value.start, eq + 2 + value.end),
       },
-      // Compose collapses `$$` before interpolation, so `$$${FOO}` still
-      // interpolates. The escaped-dollar form must be detected the same way the
-      // node walk detects it, or a location would be claimed for a value whose
-      // effective text this reader cannot know.
-      hasInterpolation: hasEffectiveInterpolation(rawLine.slice(0, valueStart - lineStart))
-        || hasEffectiveInterpolation(rawValue),
+      hasInterpolation: keyInterpolated || value.hasInterpolation,
     };
     // The text is kept only for comparison with the effective value, and only
-    // when neither the key nor the value needs interpolation. Compose strips
-    // one layer of matching quotes from an env-file value; do the same here.
-    if (!hasEffectiveInterpolation(rawLine.slice(prefixLength))) {
-      const value = rawValue
-        && (rawValue[0] === '"' || rawValue[0] === "'")
-        && rawValue[rawValue.length - 1] === rawValue[0]
-        ? rawValue.slice(1, -1)
-        : rawValue;
-      LABEL_FILE_VALUE.set(entry, value);
-    }
+    // when neither the key nor the value needs interpolation.
+    if (!keyInterpolated && value.text !== undefined) LABEL_FILE_VALUE.set(entry, value.text);
     entries.push(entry);
   }
   return { file, entries, diagnostics, duplicateKeys };
 }
 
-/**
- * The accepted label-file subset: no unbalanced matching quotes, no escape
- * sequences. A quoted value is read literally, including any `$`, which is why
- * the entry is still flagged for interpolation rather than resolved.
- */
+/** The accepted label-file key subset: no unbalanced matching quotes, no escapes. */
 function isSupportedLabelText(value: string): boolean {
   const first = value[0];
   const last = value[value.length - 1];
   if ((first === '"' || first === "'") && last !== first) return false;
   if (value.includes('\\')) return false;
   return true;
+}
+
+/**
+ * The whitespace Compose skips between `=` and an env-file value. It is Go's
+ * `isSpace`, which excludes the line break that ends an unquoted value.
+ */
+function isEnvValueSpace(char: string): boolean {
+  return char === ' '
+    || char === '\t'
+    || char === '\v'
+    || char === '\f'
+    || char === '\r'
+    || char === '\x85'
+    || char === '\xa0';
+}
+
+/** Go's `unicode.IsSpace`, which Compose trims from the end of an unquoted value. */
+const GO_UNICODE_SPACE = /^\p{White_Space}$/u;
+
+interface LabelFileValue {
+  /** The text Compose reads, or undefined when interpolation leaves no fixed text. */
+  text: string | undefined;
+  hasInterpolation: boolean;
+  /** Offsets within the text after `=` of the authored value token. */
+  start: number;
+  end: number;
+}
+
+/**
+ * Read one label-file value the way Compose's env-file reader does. Leading
+ * spaces are skipped; a quoted value ends at its closing quote, after which
+ * only whitespace or a comment may follow; an unquoted value ends at the first
+ * `" #"` and loses trailing whitespace, while a `#` with no space before it is
+ * value text. A form this reader cannot reproduce exactly returns null, so the
+ * line is reported unsupported instead of being compared against text Compose
+ * never produced.
+ */
+function readLabelFileValue(raw: string): LabelFileValue | null {
+  let start = 0;
+  while (start < raw.length && isEnvValueSpace(raw[start])) start += 1;
+  const quote = raw[start];
+  if (quote === '"' || quote === "'") {
+    let close = -1;
+    let escaped = false;
+    for (let i = start + 1; i < raw.length; i += 1) {
+      const char = raw[i];
+      if (escaped) {
+        escaped = false;
+        continue;
+      }
+      if (char === '\\') {
+        escaped = true;
+        continue;
+      }
+      if (char === quote) {
+        close = i;
+        break;
+      }
+    }
+    if (close === -1) return null;
+    let after = close + 1;
+    while (after < raw.length && isEnvValueSpace(raw[after])) after += 1;
+    // Compose keeps reading the same line after a closing quote; only a comment
+    // may follow, or the line holds statements this reader does not model.
+    if (after < raw.length && raw[after] !== '#') return null;
+    const inner = raw.slice(start + 1, close);
+    // Compose expands escapes inside a double-quoted value and keeps them in a
+    // single-quoted one. Either way this reader cannot reproduce the text, so
+    // the line is refused rather than guessed.
+    if (inner.includes('\\')) return null;
+    const hasInterpolation = quote === '"' && hasEffectiveInterpolation(inner);
+    return {
+      text: hasInterpolation ? undefined : inner,
+      hasInterpolation,
+      start,
+      end: close + 1,
+    };
+  }
+  const commentAt = raw.indexOf(' #', start);
+  let end = commentAt === -1 ? raw.length : commentAt;
+  while (end > start && GO_UNICODE_SPACE.test(raw[end - 1])) end -= 1;
+  const text = raw.slice(start, end);
+  if (text.includes('\\')) return null;
+  const hasInterpolation = hasEffectiveInterpolation(text);
+  return {
+    text: hasInterpolation ? undefined : text,
+    hasInterpolation,
+    start,
+    end,
+  };
 }

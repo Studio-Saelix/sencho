@@ -688,6 +688,25 @@ describe('value-matched label origins', () => {
     expect(result.origin).toMatchObject({ file: 'compose.yaml', range: { line: 6 } });
     expect(result.reason).toBe('inline-overrides-label-file');
   });
+
+  it('locates a label-file entry whose value ends at an inline comment', async () => {
+    writeStack('label-file-inline-comment', {
+      'compose.yaml': 'services:\n  api:\n    image: nginx:1\n    label_file: l.env\n',
+      'l.env': 'k0=ok\nk5=a b # trailing\nk9=last\n',
+    });
+    const project = await buildAuthoredProject(nodeId, 'label-file-inline-comment');
+    expect(correlateLabel(project, 'api', 'k0', 'ok').origin)
+      .toMatchObject({ file: 'l.env', range: { line: 1 } });
+    const k5 = correlateLabel(project, 'api', 'k5', 'a b');
+    expect(k5.origin).toMatchObject({ file: 'l.env', range: { line: 2, column: 1 } });
+    expect(k5.reason).toBe('label-file');
+    expect(k5.ambiguity).toBeUndefined();
+    expect(correlateLabel(project, 'api', 'k9', 'last').origin)
+      .toMatchObject({ file: 'l.env', range: { line: 3 } });
+    expect(resolveEditOrigin(project, 'services.api.labels.k5')).toMatchObject({
+      ok: true, origin: { file: 'l.env', range: { line: 2 } },
+    });
+  });
 });
 
 describe('interpolated label_file paths', () => {
