@@ -500,6 +500,45 @@ describe('Compose Doctor authored locations', () => {
     });
   });
 
+  it('does not treat a long-form protocol casing as the rule subject protocol', async () => {
+    writeStack('doctor-port-conflict-protocol-case', {
+      'compose.yaml': [
+        'services:',
+        '  a:',
+        '    image: nginx:1.2',
+        '    ports:',
+        '      - target: 80',
+        '        published: "8088"',
+        '        protocol: UDP',
+        '  b:',
+        '    image: nginx:1.2',
+        '    ports:',
+        '      - "8088:81/udp"',
+        '  c:',
+        '    image: nginx:1.2',
+        '    ports:',
+        '      - "8088:82/udp"',
+        '',
+      ].join('\n'),
+    });
+    const project = await buildAuthoredProject(nodeId, 'doctor-port-conflict-protocol-case');
+    // Compose preserves a long-form protocol's case while it lowercases short
+    // syntax, and the rule keys claims verbatim. The 8088/udp finding names b
+    // and c only, so a's 8088/UDP declaration must not become the link target.
+    const model = {
+      services: [
+        { name: 'a', ports: [{ startPort: 8088, endPort: 8088, hostIp: '', protocol: 'UDP' }] },
+        { name: 'b', ports: [{ startPort: 8088, endPort: 8088, hostIp: '', protocol: 'udp' }] },
+        { name: 'c', ports: [{ startPort: 8088, endPort: 8088, hostIp: '', protocol: 'udp' }] },
+      ],
+    } as unknown as EffectiveModel;
+    expect(locateFinding(project, hit('port-conflict-internal', {
+      subject: { kind: 'port', key: '8088/udp' },
+    }), model)).toMatchObject({
+      file: 'compose.yaml', line: 11, path: 'services.b.ports[0]',
+    });
+  });
+
   it('ignores an out-of-range declaration when locating a participant', async () => {
     writeStack('doctor-port-conflict-mixed-range', {
       'compose.yaml': [
