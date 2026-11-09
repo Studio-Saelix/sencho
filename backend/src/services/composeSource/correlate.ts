@@ -5,7 +5,7 @@
  * When that cannot be decided, the result is an explicit ambiguous reason and
  * no origin.
  */
-import { authoredNodeKey, authoredScalarOf } from './parseComposeDocument';
+import { authoredLabelContributionValueOf, authoredNodeKey, authoredScalarOf } from './parseComposeDocument';
 import {
   isActingReason, type AuthoredNode, type AuthoredProject, type CorrelationCandidate,
   type CorrelationOrigin, type CorrelationReason, type CorrelationResult, type LabelContribution,
@@ -371,11 +371,6 @@ function matchedOrigin(
   return { ...result, origin: originOf(match) };
 }
 
-/** Correlate the declaration point of a service itself (absence rules). */
-export function correlateServiceKey(project: AuthoredProject, service: string): CorrelationResult {
-  return correlateField(project, service, '');
-}
-
 function labelReason(winner: LabelContribution, contributions: LabelContribution[]): CorrelationReason {
   if (winner.source === 'label-file') {
     return winner.shared ? 'shared-input' : 'label-file';
@@ -385,7 +380,12 @@ function labelReason(winner: LabelContribution, contributions: LabelContribution
 }
 
 /** Correlate one Compose-declared label key on one service. */
-export function correlateLabel(project: AuthoredProject, service: string, key: string): CorrelationResult {
+export function correlateLabel(
+  project: AuthoredProject,
+  service: string,
+  key: string,
+  effectiveValue?: string,
+): CorrelationResult {
   const labels: ServiceAuthoredLabels | undefined = project.labels.get(service);
   const path = `services.${service}.labels.${key}`;
   if (hasOutsideComposeLayer(project)) {
@@ -431,6 +431,10 @@ export function correlateLabel(project: AuthoredProject, service: string, key: s
       return refusal(project, path, [], 'no-authored-source', 'outside-boundary',
         'A label declaration leaves the managed boundary.');
     }
+    if (labels.interpolatedLabelFiles.length > 0) {
+      return refusal(project, path, [], 'interpolated', 'interpolated',
+        'A label file path is built from a variable and cannot be resolved.');
+    }
     if (unparsedFiles(project).length > 0) {
       return refusal(project, path, [], 'ambiguous-unparsed-source', 'unparsed-source',
         'A compose layer could not be parsed.');
@@ -452,9 +456,9 @@ export function correlateLabel(project: AuthoredProject, service: string, key: s
   }
 
   // A label-file winner is never decisive while another label file for the same
-  // service is unreadable or outside the boundary: that file could declare the
-  // key or override it. An inline winner outranks every label file, so only a
-  // later compose layer can supersede it.
+  // service is unreadable, outside the boundary, or interpolated: that file
+  // could declare the key or override it. An inline winner outranks every label
+  // file, so only a later compose layer can supersede it.
   if (winner.source === 'label-file' && labels.unparsedLabelFiles.length > 0) {
     return refusal(project, path, [], 'ambiguous-unparsed-source', 'unparsed-source',
       'Another label file for this service could not be parsed.');
@@ -462,6 +466,10 @@ export function correlateLabel(project: AuthoredProject, service: string, key: s
   if (winner.source === 'label-file' && labels.outsideLabelFiles.length > 0) {
     return refusal(project, path, [], 'no-authored-source', 'outside-boundary',
       'A label declaration leaves the managed boundary.');
+  }
+  if (winner.source === 'label-file' && labels.interpolatedLabelFiles.length > 0) {
+    return refusal(project, path, [], 'interpolated', 'interpolated',
+      'A label file path is built from a variable and could override this key.');
   }
   // Inline labels outrank every label file, so any unparsed compose layer, even
   // an earlier one, could still hold a decisive inline declaration.
@@ -474,6 +482,36 @@ export function correlateLabel(project: AuthoredProject, service: string, key: s
       'A later compose layer could not be parsed.');
   }
   const contributions = labels.contributionsByKey.get(key) ?? [];
+
+  // A field declared in more than one place is located only when exactly one
+  // candidate matches the effective value. Inline declarations outrank every
+  // label file, so the only peers are declarations of the winning source. With
+  // no effective value (an edit-origin request) two declarations that carry the
+  // same text are still indistinguishable.
+  const tier = contributions.filter(contribution => contribution.source === winner.source);
+  const winnerValue = authoredLabelContributionValueOf(winner);
+  if (winnerValue !== undefined) {
+    const target = effectiveValue ?? winnerValue;
+    const matches = tier.filter((contribution) => {
+      const value = authoredLabelContributionValueOf(contribution);
+      return value !== undefined && normalizeForCompare('labels', value) === normalizeForCompare('labels', target);
+    });
+    if (matches.length === 0) {
+      return tier.length === 1
+        ? baseResult(project, path, [], 'no-authored-source')
+        : refusal(project, path, [], 'ambiguous-multiple-sources', 'multiple-candidates',
+          'Several declarations exist and none matches the effective value.');
+    }
+    if (matches.length > 1) {
+      return refusal(project, path, [], 'ambiguous-multiple-sources', 'multiple-matches',
+        'More than one authored declaration matches the effective value.');
+    }
+    if (matches[0] !== winner) {
+      return refusal(project, path, [], 'ambiguous-multiple-sources', 'later-candidate',
+        'A later authored declaration contradicts the effective value.');
+    }
+  }
+
   const origin: CorrelationOrigin = {
     file: winner.file,
     writability: winner.writability,
@@ -624,7 +662,8 @@ function labelInterpretationState(
   // label file this reader could not read (or was not allowed to read) could
   // declare it. Either way the interpretation is not ruled out.
   if (labels.hasDynamicKeys) return 'unread';
-  if (labels.unparsedLabelFiles.length > 0 || labels.outsideLabelFiles.length > 0) return 'unread';
+  if (labels.unparsedLabelFiles.length > 0 || labels.outsideLabelFiles.length > 0
+    || labels.interpolatedLabelFiles.length > 0) return 'unread';
   if (unparsedFiles(project).length > 0) return 'unread';
   return null;
 }

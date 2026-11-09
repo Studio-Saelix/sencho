@@ -407,8 +407,10 @@ components:
           description: An inline labels map overrides a label-file entry for this key.
         ambiguity:
           type: string
-          enum: [duplicate-key, unparsed-source, interpolated, outside-boundary]
-          description: Present instead of a file and range when no single acting origin exists.
+          enum: [duplicate-key, unparsed-source, interpolated, outside-boundary, multiple-sources]
+          description: >-
+            Present instead of a file and range when no single acting origin exists.
+            `multiple-sources` means more than one declaration carries the effective value.
 
     StackLabelInventory:
       type: object

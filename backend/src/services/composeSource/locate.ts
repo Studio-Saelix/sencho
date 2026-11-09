@@ -4,7 +4,7 @@
  * returns a location only for a reason a consumer may act on.
  */
 import {
-  correlateField, correlateLabel, correlateServiceKey, correlateVariableReference, displayRange,
+  correlateField, correlateLabel, correlateVariableReference, displayRange,
   hasLaterUnparsedLayer, hasOutsideComposeLayer, hasProjectCycle, hasUnparsedComposeLayer, hasUnresolvedService,
 } from './correlate';
 import { authoredNodeKey, authoredScalarOf } from './parseComposeDocument';
@@ -493,27 +493,6 @@ function locateEnvironmentKey(project: AuthoredProject, service: string, key: st
   return itemLocation(candidates, `services.${service}.environment.${key}`);
 }
 
-const COMPOSE_KINDS = new Set([
-  'compose-primary', 'compose-additional', 'compose-override', 'compose-include', 'compose-extends',
-]);
-
-function locateParseFailure(project: AuthoredProject): AuthoredLocation | undefined {
-  for (const file of project.files) {
-    if (!COMPOSE_KINDS.has(file.kind)) continue;
-    if (file.state !== 'parse-failed' && file.state !== 'too-large' && file.state !== 'unreadable') continue;
-    const diagnostic = file.diagnostics[0];
-    const range = diagnostic?.range ?? { line: 1, column: 1, endLine: 1, endColumn: 1 };
-    return {
-      file: file.file,
-      line: range.line,
-      column: range.column,
-      endLine: range.endLine,
-      endColumn: range.endColumn,
-    };
-  }
-  return undefined;
-}
-
 function topLevelKey(sourcePath: string | undefined): string | undefined {
   if (!sourcePath) return undefined;
   const match = /^networks\.([^,\s]+)/.exec(sourcePath) ?? /^volumes\.([^,\s]+)/.exec(sourcePath);
@@ -551,7 +530,9 @@ export function locateFinding(
 
   switch (hit.ruleId) {
     case 'render-failed':
-      return locateParseFailure(project);
+      // The origin is a file this reader could not parse. A location there is
+      // never actionable (the wording of the criterion names this case first).
+      return undefined;
     case 'env-unset': {
       const variable = hit.sourcePath;
       if (!variable) return undefined;
@@ -588,10 +569,18 @@ export function locateFinding(
     case 'image-not-digest-pinned':
       if (!hit.service) return undefined;
       return locateEffective(project, hit.service, 'image', model);
-    case 'no-restart-policy':
-    case 'no-healthcheck':
+    case 'no-restart-policy': {
       if (!hit.service) return undefined;
-      return toLocation(correlateServiceKey(project, hit.service));
+      // The rule fires for an absent restart and for an explicit `no`. Only the
+      // latter has an authored field; pointing at the service key would claim a
+      // declaration the operator never wrote.
+      const effective = model?.services.find(entry => entry.name === hit.service);
+      if (effective?.restart !== 'no') return undefined;
+      return locateEffective(project, hit.service, 'restart', model);
+    }
+    case 'no-healthcheck':
+      // The rule fires because no authored healthcheck exists.
+      return undefined;
     case 'healthcheck-disabled':
       if (!hit.service) return undefined;
       return toLocation(correlateField(project, hit.service, 'healthcheck'));

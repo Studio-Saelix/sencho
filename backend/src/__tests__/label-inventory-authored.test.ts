@@ -121,6 +121,36 @@ describe('authored label origins in the stack inventory', () => {
     expect(api.authored?.a).toMatchObject({ source: 'inline', overridden: true });
   });
 
+  it('reports the same label value in two files as ambiguous, in either order', async () => {
+    for (const order of ['compose.yaml:extra.yml', 'extra.yml:compose.yaml'] as const) {
+      const stack = `label-same-value-${order.startsWith('compose') ? 'a' : 'b'}`;
+      writeStack(stack, {
+        'compose.yaml': 'services:\n  web:\n    image: nginx:1\n    labels:\n      shared: same\n',
+        'extra.yml': 'services:\n  web:\n    labels:\n      shared: same\n',
+        '.env': `COMPOSE_FILE=${order}\n`,
+      });
+      stubRender({ web: { shared: 'same' } });
+      stubDocker();
+      const inventory = await buildStackLabelInventory(nodeId, stack);
+      const web = inventory.services.find(service => service.service === 'web')!;
+      expect(web.authored?.shared).toEqual({ source: 'inline', ambiguity: 'multiple-sources' });
+      expect(web.authored?.shared?.file).toBeUndefined();
+    }
+  });
+
+  it('reports an interpolated label_file path as interpolated', async () => {
+    writeStack('label-file-interpolated', {
+      'compose.yaml': 'services:\n  interp:\n    image: nginx:1.25\n    restart: always\n    label_file: ./${LF:-l2}.labels\n',
+      'l2.labels': 'k2=v2\n',
+    });
+    stubRender({ interp: { k2: 'v2' } });
+    stubDocker();
+    const inventory = await buildStackLabelInventory(nodeId, 'label-file-interpolated');
+    const interp = inventory.services.find(service => service.service === 'interp')!;
+    expect(interp.authored?.k2).toEqual({ ambiguity: 'interpolated' });
+    expect(interp.authored?.k2?.file).toBeUndefined();
+  });
+
   it('renders one reason and no link for an unreadable label file', async () => {
     writeStack('label-unreadable', {
       'compose.yaml': 'services:\n  api:\n    image: nginx:1\n    label_file: missing.labels\n',

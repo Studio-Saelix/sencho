@@ -290,7 +290,7 @@ describe('authored label contributions', () => {
     expect(labels.winners.own?.file).toBe('compose.yaml');
   });
 
-  it('refuses an inline label value written through an alias', async () => {
+  it('follows an inline label value written through an alias to its anchor', async () => {
     writeStack('label-value-alias', {
       'compose.yaml': [
         'x-value: &value override',
@@ -306,10 +306,11 @@ describe('authored label contributions', () => {
     });
     const project = await buildAuthoredProject(nodeId, 'label-value-alias');
     const labels = project.labels.get('api')!;
-    expect(labels.ambiguity.a).toBe('unresolved-alias');
-    expect(labels.winners.a).toBeUndefined();
-    expect(correlateLabel(project, 'api', 'a').origin).toBeUndefined();
-    expect(correlateLabel(project, 'api', 'a').reason).toBe('ambiguous-unparsed-source');
+    expect(labels.ambiguity.a).toBeUndefined();
+    expect(labels.winners.a?.source).toBe('inline');
+    const result = correlateLabel(project, 'api', 'a');
+    expect(result.origin).toMatchObject({ file: 'compose.yaml', range: { line: 1 } });
+    expect(result.reason).toBe('inline-overrides-label-file');
   });
 
   it('refuses a label origin when a later layer has a truncated alias graph', async () => {
@@ -610,6 +611,95 @@ describe('authored label contributions', () => {
   });
 });
 
+describe('value-matched label origins', () => {
+  const compose = 'services:\n  web:\n    image: nginx:1\n    labels:\n      shared: same\n';
+  const extra = 'services:\n  web:\n    labels:\n      shared: same\n';
+
+  it('reports the same value declared in two files as ambiguous, in either order', async () => {
+    for (const order of ['compose.yaml:extra.yml', 'extra.yml:compose.yaml'] as const) {
+      const stack = `label-same-value-${order.startsWith('compose') ? 'a' : 'b'}`;
+      writeStack(stack, {
+        'compose.yaml': compose,
+        'extra.yml': extra,
+        '.env': `COMPOSE_FILE=${order}\n`,
+      });
+      const project = await buildAuthoredProject(nodeId, stack);
+      const result = correlateLabel(project, 'web', 'shared', 'same');
+      expect(result.origin).toBeUndefined();
+      expect(result.reason).toBe('ambiguous-multiple-sources');
+      expect(result.ambiguity?.kind).toBe('multiple-matches');
+      // Without an effective value, two declarations carrying the same text are
+      // still indistinguishable, so an edit origin must refuse as well.
+      expect(correlateLabel(project, 'web', 'shared').origin).toBeUndefined();
+      expect(authoredOriginsFor(project, 'web', ['shared'], { shared: 'same' }))
+        .toEqual({ shared: { source: 'inline', ambiguity: 'multiple-sources' } });
+    }
+  });
+
+  it('locates the one declaration whose value is the effective one', async () => {
+    writeStack('label-different-values', {
+      'compose.yaml': 'services:\n  web:\n    image: nginx:1\n    labels:\n      shared: second\n',
+      'extra.yml': 'services:\n  web:\n    labels:\n      shared: first\n',
+      '.env': 'COMPOSE_FILE=extra.yml:compose.yaml\n',
+    });
+    const project = await buildAuthoredProject(nodeId, 'label-different-values');
+    const result = correlateLabel(project, 'web', 'shared', 'second');
+    expect(result.origin).toMatchObject({ file: 'compose.yaml', range: { line: 5 } });
+    expect(result.reason).toBe('unique');
+    // An effective value that contradicts the later declaration is not
+    // locatable at the earlier one: that declaration was overridden.
+    const contradicted = correlateLabel(project, 'web', 'shared', 'first');
+    expect(contradicted.origin).toBeUndefined();
+    expect(contradicted.ambiguity?.kind).toBe('later-candidate');
+  });
+
+  it('keeps an inline declaration decisive over a label file with the same value', async () => {
+    writeStack('label-inline-same-value', {
+      'compose.yaml': 'services:\n  api:\n    image: nginx:1\n    label_file: app.labels\n    labels:\n      a: same\n',
+      'app.labels': 'a=same\n',
+    });
+    const project = await buildAuthoredProject(nodeId, 'label-inline-same-value');
+    const result = correlateLabel(project, 'api', 'a', 'same');
+    expect(result.origin).toMatchObject({ file: 'compose.yaml', range: { line: 6 } });
+    expect(result.reason).toBe('inline-overrides-label-file');
+  });
+});
+
+describe('interpolated label_file paths', () => {
+  it('reports the path as interpolated, never as outside the boundary', async () => {
+    writeStack('label-file-interpolated', {
+      'compose.yaml': [
+        'services:',
+        '  interp:',
+        '    image: nginx:1.25',
+        '    restart: always',
+        '    label_file: ./${LF:-l2}.labels',
+        '    labels:',
+        '      own: inline',
+        '',
+      ].join('\n'),
+      'l2.labels': 'k2=v2\n',
+    });
+    const project = await buildAuthoredProject(nodeId, 'label-file-interpolated');
+    const labels = project.labels.get('interp')!;
+    expect(labels.interpolatedLabelFiles).toEqual(['./${LF:-l2}.labels']);
+    expect(labels.outsideLabelFiles).toEqual([]);
+    expect(project.partialReasons).toContain('interpolated');
+    expect(project.partialReasons).not.toContain('outside-boundary');
+    const result = correlateLabel(project, 'interp', 'k2');
+    expect(result.origin).toBeUndefined();
+    expect(result.reason).toBe('interpolated');
+    expect(result.ambiguity?.kind).toBe('interpolated');
+    expect(resolveEditOrigin(project, 'services.interp.labels.k2'))
+      .toEqual({ ok: false, reason: 'interpolated' });
+    expect(authoredOriginsFor(project, 'interp', ['k2'])).toEqual({ k2: { ambiguity: 'interpolated' } });
+    // An inline declaration outranks every label file, so an unknown path
+    // cannot take away the inline origin.
+    expect(authoredOriginsFor(project, 'interp', ['own'], { own: 'inline' })?.own)
+      .toMatchObject({ source: 'inline', file: 'compose.yaml', line: 7 });
+  });
+});
+
 describe('empty-key list labels keep every declared range', () => {
   it('locates an empty-key entry and later labels on their own lines', async () => {
     writeStack('label-empty-key-list', {
@@ -706,8 +796,11 @@ describe('empty-key list labels keep every declared range', () => {
       ].join('\n'),
     });
     const project = await buildAuthoredProject(nodeId, 'label-empty-key-item-alias');
-    // The aliased item cannot be attributed, but it must not shift its sibling.
-    expect(project.labels.get('api')!.ambiguity['']).toBe('unresolved-alias');
+    // The aliased item resolves to its anchor, and it must not shift its sibling.
+    expect(project.labels.get('api')!.ambiguity['']).toBeUndefined();
+    expect(correlateLabel(project, 'api', '').origin).toMatchObject({
+      file: 'compose.yaml', range: { line: 1 },
+    });
     expect(correlateLabel(project, 'api', 'owner').origin).toMatchObject({
       file: 'compose.yaml', range: { line: 7 },
     });

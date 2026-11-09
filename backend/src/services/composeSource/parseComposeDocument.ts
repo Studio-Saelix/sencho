@@ -16,8 +16,8 @@ import {
 } from 'yaml';
 
 import type {
-  AuthoredDiagnostic, AuthoredNode, AuthoredDiagnosticCode, AuthoredPathSegment, ParsedLabelFile,
-  LabelFileEntry, SourceFileKind, SourceFileState, SourceRange, SourceWritability,
+  AuthoredDiagnostic, AuthoredNode, AuthoredDiagnosticCode, AuthoredPathSegment, LabelContribution,
+  ParsedLabelFile, LabelFileEntry, SourceFileKind, SourceFileState, SourceRange, SourceWritability,
 } from './types';
 
 /** Same cap as every other compose parser in the backend. */
@@ -57,6 +57,31 @@ const SCALAR_TEXT = new WeakMap<AuthoredNode, string>();
 
 export function authoredScalarOf(node: AuthoredNode | undefined): string | undefined {
   return node === undefined ? undefined : SCALAR_TEXT.get(node);
+}
+
+/**
+ * Authored label text, kept out of every public structure for the same reason:
+ * it is compared with the effective value to decide whether two declarations
+ * are distinguishable, and must never reach a response or a log.
+ */
+const INLINE_LABEL_VALUE = new WeakMap<InlineLabelDeclaration, string>();
+const LABEL_FILE_VALUE = new WeakMap<LabelFileEntry, string>();
+const LABEL_CONTRIBUTION_VALUE = new WeakMap<LabelContribution, string>();
+
+export function authoredInlineLabelValueOf(declaration: InlineLabelDeclaration): string | undefined {
+  return INLINE_LABEL_VALUE.get(declaration);
+}
+
+export function authoredLabelFileValueOf(entry: LabelFileEntry): string | undefined {
+  return LABEL_FILE_VALUE.get(entry);
+}
+
+export function setAuthoredLabelContributionValue(contribution: LabelContribution, value: string | undefined): void {
+  if (value !== undefined) LABEL_CONTRIBUTION_VALUE.set(contribution, value);
+}
+
+export function authoredLabelContributionValueOf(contribution: LabelContribution): string | undefined {
+  return LABEL_CONTRIBUTION_VALUE.get(contribution);
 }
 
 /**
@@ -150,6 +175,10 @@ export interface LabelFileDeclaration {
   service: string;
   rawPath: string;
   range?: SourceRange;
+  /** The path is built from a variable, so this reader cannot name the file it
+   *  would read. A consumer must report the input as interpolated, never as
+   *  outside the boundary. */
+  interpolated?: boolean;
 }
 
 export interface InlineLabelDeclaration {
@@ -232,6 +261,17 @@ function asStringList(value: unknown): string[] {
   if (one !== undefined) return [one];
   if (Array.isArray(value)) return value.map(asString).filter((v): v is string => v !== undefined);
   return [];
+}
+
+/**
+ * The authored text of one inline label value. Labels are strings in Compose,
+ * so YAML scalars are compared in their string spelling. A value this reader
+ * would have to interpolate has no fixed text and is not kept.
+ */
+function inlineLabelValueText(value: unknown): string | undefined {
+  if (typeof value === 'string') return hasEffectiveInterpolation(value) ? undefined : value;
+  if (typeof value === 'number' || typeof value === 'boolean') return String(value);
+  return undefined;
 }
 
 function scalarText(node: Node | null | undefined): string | undefined {
@@ -399,10 +439,13 @@ function recordNode(
   // An own declaration always wins over a merged one for the same path, and
   // the first merge key wins (YAML merge semantics). The identity is the
   // structural segment list, so a service named `api.image` never stands in
-  // for `api`'s `image` field.
+  // for `api`'s `image` field. An alias is replaced by the node it resolves to:
+  // the resolved value is the declaration the operator wrote, and its range is
+  // the anchor that holds it. The node keeps `via: 'alias'` so the provenance
+  // stays visible.
   const identity = authoredNodeKey(segments);
   const existing = ctx.nodes.get(identity);
-  if (existing && (via === 'merge' || (existing.via !== 'merge' && via === 'alias'))) return existing;
+  if (existing && via === 'merge') return existing;
   ctx.nodes.set(identity, authored);
   const text = scalarText(node);
   if (text !== undefined) SCALAR_TEXT.set(authored, text);
@@ -601,6 +644,37 @@ function parseErrorRange(error: { linePos?: Array<{ line: number; col: number }>
   return { line: first.line, column: first.col, endLine: last.line, endColumn: last.col };
 }
 
+/**
+ * The full range of every mapping key, by its document offset. A duplicate-key
+ * error points at the start of the second occurrence and reports only its first
+ * character; the same traversal that finds the key's node gives the token range.
+ * Walking once keeps a file full of duplicate keys from being quadratic.
+ */
+function keyRangesByStart(
+  lineCounter: LineCounter,
+  node: Node | null | undefined,
+  out: Map<number, SourceRange> = new Map(),
+): Map<number, SourceRange> {
+  if (!node) return out;
+  if (isMap(node)) {
+    for (const pair of (node as YAMLMap).items) {
+      if (!pair || typeof pair !== 'object' || !('key' in pair)) continue;
+      const key = pair.key as Node | null;
+      if (key?.range?.[0] !== undefined) {
+        const range = nodeRange(lineCounter, key);
+        if (range) out.set(key.range[0], range);
+      }
+      keyRangesByStart(lineCounter, key, out);
+      keyRangesByStart(lineCounter, pair.value as Node | null, out);
+    }
+    return out;
+  }
+  if (isSeq(node)) {
+    for (const item of (node as YAMLSeq).items) keyRangesByStart(lineCounter, item as Node, out);
+  }
+  return out;
+}
+
 function collectDeclarations(
   ctx: WalkContext,
   root: YAMLMap,
@@ -677,7 +751,13 @@ function collectDeclarations(
         }
       }
       for (const rawPath of asStringList(svc.label_file)) {
-        result.labelFiles.push({ service, rawPath });
+        result.labelFiles.push({
+          service,
+          rawPath,
+          // A path built from a variable names no file this reader can read.
+          // It is an interpolation refusal, not an outside-boundary one.
+          ...(hasEffectiveInterpolation(rawPath) ? { interpolated: true } : {}),
+        });
       }
       const labels = svc.labels;
       if (labels && typeof labels === 'object') {
@@ -696,7 +776,7 @@ function collectDeclarations(
             // literal dollar in the effective key. The key itself is unknown
             // only when a real variable (not an escaped dollar) is present.
             const key = rawKey.replace(/\$\$/g, '$');
-            result.inlineLabels.push({
+            const declaration: InlineLabelDeclaration = {
               service,
               key,
               range: { line: 1, column: 1, endLine: 1, endColumn: 1 },
@@ -706,11 +786,15 @@ function collectDeclarations(
               // key portion can resolve to any effective label key.
               keyHasInterpolation: hasEffectiveInterpolation(rawKey),
               listIndex,
-            });
+            };
+            if (!hasEffectiveInterpolation(text)) {
+              INLINE_LABEL_VALUE.set(declaration, eq === -1 ? '' : text.slice(eq + 1));
+            }
+            result.inlineLabels.push(declaration);
           });
         } else {
           for (const [labelKey, labelValue] of Object.entries(labels as Record<string, unknown>)) {
-            result.inlineLabels.push({
+            const declaration: InlineLabelDeclaration = {
               service,
               key: labelKey,
               range: { line: 1, column: 1, endLine: 1, endColumn: 1 },
@@ -718,7 +802,10 @@ function collectDeclarations(
               // A YAML mapping key is never interpolated; only its value is.
               hasInterpolation: typeof labelValue === 'string' && hasEffectiveInterpolation(labelValue),
               keyHasInterpolation: false,
-            });
+            };
+            const value = inlineLabelValueText(labelValue);
+            if (value !== undefined) INLINE_LABEL_VALUE.set(declaration, value);
+            result.inlineLabels.push(declaration);
           }
         }
       }
@@ -837,9 +924,16 @@ export function parseComposeDocument(input: ParseComposeDocumentInput): ParsedCo
   const lineCounter = new LineCounter();
   const doc = parseDocument(input.source, { lineCounter });
   if (doc.errors.length > 0) {
+    const keyRanges = doc.errors.some(error => error.code === 'DUPLICATE_KEY')
+      ? keyRangesByStart(lineCounter, doc.contents as Node | null)
+      : undefined;
     for (const error of doc.errors) {
-      const code: AuthoredDiagnosticCode = error.code === 'DUPLICATE_KEY' ? 'duplicate-key' : 'malformed-yaml';
-      addDiagnostic(empty.diagnostics, input.file, code, parseErrorRange(error));
+      const duplicate = error.code === 'DUPLICATE_KEY';
+      const code: AuthoredDiagnosticCode = duplicate ? 'duplicate-key' : 'malformed-yaml';
+      const range = (duplicate && error.pos
+        ? keyRanges?.get(error.pos[0])
+        : undefined) ?? parseErrorRange(error);
+      addDiagnostic(empty.diagnostics, input.file, code, range);
     }
     return { ...empty, state: 'parse-failed' };
   }
@@ -988,7 +1082,7 @@ export function parseLabelFile(file: string, source: string): ParsedLabelFile {
     const valueEnd = lineStart + rawLine.length;
     if (seen.has(key)) duplicateKeys.add(key);
     seen.add(key);
-    entries.push({
+    const entry: LabelFileEntry = {
       key,
       range: {
         line: index + 1,
@@ -1009,7 +1103,19 @@ export function parseLabelFile(file: string, source: string): ParsedLabelFile {
         endColumn: Math.max(eq + 2, valueEnd - lineStart + 1),
       },
       hasInterpolation: hasInterpolationSyntax(rawLine.slice(0, valueStart - lineStart)) || hasInterpolationSyntax(rawValue),
-    });
+    };
+    // The text is kept only for comparison with the effective value, and only
+    // when neither the key nor the value needs interpolation. Compose strips
+    // one layer of matching quotes from an env-file value; do the same here.
+    if (!hasEffectiveInterpolation(rawLine.slice(prefixLength))) {
+      const value = rawValue
+        && (rawValue[0] === '"' || rawValue[0] === "'")
+        && rawValue[rawValue.length - 1] === rawValue[0]
+        ? rawValue.slice(1, -1)
+        : rawValue;
+      LABEL_FILE_VALUE.set(entry, value);
+    }
+    entries.push(entry);
   }
   return { file, entries, diagnostics, duplicateKeys };
 }

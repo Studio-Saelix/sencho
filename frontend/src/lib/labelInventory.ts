@@ -105,7 +105,7 @@ export interface LabelAuthoredOrigin {
   fileHash?: string;
   shared?: boolean;
   overridden?: boolean;
-  ambiguity?: 'duplicate-key' | 'unparsed-source' | 'interpolated' | 'outside-boundary';
+  ambiguity?: 'duplicate-key' | 'unparsed-source' | 'interpolated' | 'outside-boundary' | 'multiple-sources';
 }
 
 export interface StackServiceLabelRow {
@@ -251,7 +251,7 @@ export function readLabelBehavior(source: LabelSource, key: string, raw: unknown
 }
 
 const AUTHORED_AMBIGUITIES: ReadonlySet<string> = new Set([
-  'duplicate-key', 'unparsed-source', 'interpolated', 'outside-boundary',
+  'duplicate-key', 'unparsed-source', 'interpolated', 'outside-boundary', 'multiple-sources',
 ]);
 
 /**

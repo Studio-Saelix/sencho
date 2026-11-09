@@ -7,5 +7,5 @@ export type { ParsedComposeDocument, ParseComposeDocumentInput } from './parseCo
 export { resolveProjectInputs, stackRelativePath } from './resolveProjectInputs';
 export type { ProjectChainFile, ProjectInputs } from './resolveProjectInputs';
 export { buildAuthoredProject } from './buildAuthoredProject';
-export { correlateField, correlateLabel, correlateServiceKey, correlateVariableReference, resolveEditOrigin, normalizeForCompare } from './correlate';
+export { correlateField, correlateLabel, correlateVariableReference, resolveEditOrigin, normalizeForCompare } from './correlate';
 export { locateFinding } from './locate';

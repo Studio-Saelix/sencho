@@ -38,12 +38,14 @@ describe('parseComposeDocument', () => {
     expect(item?.valueRange).toEqual({ line: 5, column: 9, endLine: 5, endColumn: 18 });
   });
 
-  it('marks duplicate keys as parse-failed with both positions and no nodes', () => {
+  it('marks duplicate keys as parse-failed with the full key range and no nodes', () => {
     const parsed = parse('services:\n  api: {}\n  api: {}\n');
     expect(parsed.state).toBe('parse-failed');
     expect(parsed.nodes.size).toBe(0);
     const duplicate = parsed.diagnostics.find(entry => entry.code === 'duplicate-key');
-    expect(duplicate?.range).toEqual({ line: 3, column: 3, endLine: 3, endColumn: 4 });
+    // The library reports only the first character of the second occurrence.
+    // The diagnostic must span the token the operator has to remove.
+    expect(duplicate?.range).toEqual({ line: 3, column: 3, endLine: 3, endColumn: 6 });
   });
 
   it('treats a file over the 1 MiB cap as too large', () => {
@@ -127,7 +129,7 @@ describe('parseComposeDocument', () => {
     expect(parsed.inlineLabels[0]).toMatchObject({ key: 'token', hasInterpolation: true, form: 'map' });
   });
 
-  it('marks an inline label whose value is an alias as unresolved', () => {
+  it('follows an inline label whose value is an alias to the anchor range', () => {
     const parsed = parse([
       'x-value: &value override',
       'services:',
@@ -139,8 +141,9 @@ describe('parseComposeDocument', () => {
     ].join('\n'));
     expect(parsed.state).toBe('parsed');
     expect(parsed.inlineLabels).toContainEqual(expect.objectContaining({
-      service: 'app', key: 'team', unresolved: true,
+      service: 'app', key: 'team', range: expect.objectContaining({ line: 1 }),
     }));
+    expect(parsed.inlineLabels.find(entry => entry.key === 'team')?.unresolved).toBeUndefined();
   });
 
   it('flattens a merge nested inside an anchored map', () => {

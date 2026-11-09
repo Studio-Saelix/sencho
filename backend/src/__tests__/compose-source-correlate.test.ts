@@ -242,6 +242,7 @@ describe('resolveEditOrigin', () => {
       hasDynamicKeys: false,
       unparsedLabelFiles: [],
       outsideLabelFiles: ['../outside.labels'],
+      interpolatedLabelFiles: [],
     }]]);
     const result = correlateLabel({ ...base, labels }, 'api', 'a');
     expect(result.origin).toBeUndefined();
@@ -259,6 +260,7 @@ describe('resolveEditOrigin', () => {
       hasDynamicKeys: false,
       unparsedLabelFiles: [],
       outsideLabelFiles: [],
+      interpolatedLabelFiles: [],
     }]]);
     const base = project([{ file: 'compose.yaml', source: 'services:\n  api:\n    image: nginx:1\n' }]);
     const withLabels = { ...base, labels };

@@ -262,6 +262,29 @@ describe('withReadBehaviors', () => {
     expect(authored['toString']?.file).toBe('compose.yaml');
   });
 
+  it('keeps a value-tie ambiguity and drops an unknown one', () => {
+    const body = JSON.parse(`{
+      "stackName": "demo",
+      "renderable": true,
+      "generatedAt": 1,
+      "services": [{
+        "service": "web",
+        "declaredLabels": [
+          {"key": "tied", "value": "same", "source": "compose"},
+          {"key": "unknown", "value": "other", "source": "compose"}
+        ],
+        "replicas": [],
+        "authored": {
+          "tied": {"source": "inline", "ambiguity": "multiple-sources"},
+          "unknown": {"ambiguity": "not-a-state"}
+        }
+      }]
+    }`) as StackLabelInventory;
+    const authored = withReadBehaviors(body).services[0].authored!;
+    expect(authored.tied).toEqual({ source: 'inline', ambiguity: 'multiple-sources' });
+    expect(authored.unknown).toBeUndefined();
+  });
+
   it.each([
     ['a null body', null],
     ['a body with no inventory shape', { stackName: 'demo' }],

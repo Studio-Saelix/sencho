@@ -173,6 +173,8 @@ export interface ServiceAuthoredLabels {
   unparsedLabelFiles: string[];
   /** Label declarations this service names that leave the managed boundary. */
   outsideLabelFiles: string[];
+  /** Label paths built from a variable, so this reader cannot name the file. */
+  interpolatedLabelFiles: string[];
 }
 
 export type CorrelationReason =

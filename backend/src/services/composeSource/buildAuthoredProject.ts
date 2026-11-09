@@ -14,7 +14,10 @@ import { getErrorMessage } from '../../utils/errors';
 import { sanitizeForLog } from '../../utils/safeLog';
 import { sha256Hex } from '../../utils/hashing';
 
-import { parseComposeDocument, parseLabelFile, MAX_COMPOSE_PARSE_BYTES, diagnosticMessage } from './parseComposeDocument';
+import {
+  parseComposeDocument, parseLabelFile, MAX_COMPOSE_PARSE_BYTES, diagnosticMessage,
+  authoredInlineLabelValueOf, authoredLabelFileValueOf, setAuthoredLabelContributionValue,
+} from './parseComposeDocument';
 import { resolveProjectInputs, stackRelativePath } from './resolveProjectInputs';
 import type {
   AuthoredDiagnostic, AuthoredFileSource, AuthoredProject, AuthoredServiceDefinition, LabelAmbiguity,
@@ -316,6 +319,12 @@ async function loadDeclarationsFor(
   projectBase: string,
 ): Promise<void> {
   for (const declaration of parsed.labelFiles) {
+    // A path built from a variable names no file this reader may read. It is
+    // reported per service as interpolated, never as outside the boundary.
+    if (declaration.interpolated) {
+      addPartial(state, 'interpolated');
+      continue;
+    }
     const target = resolveAgainst(projectBase, declaration.rawPath);
     if (target === null) {
       addPartial(state, 'outside-boundary');
@@ -526,6 +535,7 @@ function assembleLabels(state: BuildState): Map<string, ServiceAuthoredLabels> {
       hasDynamicKeys: false,
       unparsedLabelFiles: [],
       outsideLabelFiles: [],
+      interpolatedLabelFiles: [],
     };
     labels.set(service, created);
     return created;
@@ -545,6 +555,11 @@ function assembleLabels(state: BuildState): Map<string, ServiceAuthoredLabels> {
       let fileIndex = 0;
       for (const declaration of loaded.parsed.labelFiles) {
         if (declaration.service !== definition.declaredService) continue;
+        if (declaration.interpolated) {
+          svc.interpolatedLabelFiles.push(declaration.rawPath);
+          fileIndex += 1;
+          continue;
+        }
         const target = resolveAgainst(loaded.projectBase, declaration.rawPath);
         if (target === null) {
           svc.outsideLabelFiles.push(declaration.rawPath);
@@ -566,7 +581,7 @@ function assembleLabels(state: BuildState): Map<string, ServiceAuthoredLabels> {
             svc.ambiguity[entry.key] = 'duplicate-key';
             continue;
           }
-          bucket.push({
+          const contribution: LabelContribution = {
             key: entry.key,
             source: 'label-file',
             file: target,
@@ -579,7 +594,9 @@ function assembleLabels(state: BuildState): Map<string, ServiceAuthoredLabels> {
             keyHasInterpolation: false,
             overridden: false,
             via,
-          });
+          };
+          setAuthoredLabelContributionValue(contribution, authoredLabelFileValueOf(entry));
+          bucket.push(contribution);
         }
         fileIndex += 1;
       }
@@ -610,7 +627,7 @@ function assembleLabels(state: BuildState): Map<string, ServiceAuthoredLabels> {
           }
           continue;
         }
-        bucket.push({
+        const contribution: LabelContribution = {
           key: declaration.key,
           source: 'inline',
           file: definition.file,
@@ -623,7 +640,9 @@ function assembleLabels(state: BuildState): Map<string, ServiceAuthoredLabels> {
           keyHasInterpolation: declaration.keyHasInterpolation === true,
           overridden: false,
           via,
-        });
+        };
+        setAuthoredLabelContributionValue(contribution, authoredInlineLabelValueOf(declaration));
+        bucket.push(contribution);
       }
     }
   }

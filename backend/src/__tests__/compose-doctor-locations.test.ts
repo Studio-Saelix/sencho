@@ -73,8 +73,69 @@ describe('Compose Doctor authored locations', () => {
     const absent = locateFinding(project, hit('no-healthcheck', { service: 'api', sourcePath: 'api' }));
     // api is declared in both layers, so the declaration point is ambiguous.
     expect(absent).toBeUndefined();
+    // A missing restart or healthcheck has no authored field to point at, even
+    // when the service itself is declared exactly once.
+    expect(locateFinding(project, hit('no-restart-policy', { service: 'worker', sourcePath: 'worker' }))).toBeUndefined();
+    expect(locateFinding(project, hit('no-healthcheck', { service: 'worker', sourcePath: 'worker' }))).toBeUndefined();
     const network = locateFinding(project, hit('external-network-missing', { sourcePath: 'networks.edge' }));
     expect(network).toMatchObject({ file: 'compose.yaml', line: 12 });
+  });
+
+  it('locates an explicit restart: "no" but not an absent restart field', async () => {
+    writeStack('doctor-restart-explicit', {
+      'compose.yaml': 'services:\n  api:\n    image: nginx:1\n    restart: "no"\n',
+    });
+    const project = await buildAuthoredProject(nodeId, 'doctor-restart-explicit');
+    const explicit = { services: [{ name: 'api', image: 'nginx:1', restart: 'no' }] } as unknown as EffectiveModel;
+    expect(locateFinding(project, hit('no-restart-policy', { service: 'api', sourcePath: 'api' }), explicit))
+      .toMatchObject({ file: 'compose.yaml', line: 4 });
+    const absent = { services: [{ name: 'api', image: 'nginx:1' }] } as unknown as EffectiveModel;
+    expect(locateFinding(project, hit('no-restart-policy', { service: 'api', sourcePath: 'api' }), absent))
+      .toBeUndefined();
+  });
+
+  it('follows a scalar alias to the anchored declaration', async () => {
+    writeStack('doctor-alias-scalars', {
+      'compose.yaml': [
+        'x-img: &img nginx:latest',
+        'x-p: &p true',
+        'services:',
+        '  base:',
+        '    image: nginx:latest',
+        '    restart: always',
+        '  web:',
+        '    image: *img',
+        '    privileged: *p',
+        '    restart: always',
+        '',
+      ].join('\n'),
+    });
+    const project = await buildAuthoredProject(nodeId, 'doctor-alias-scalars');
+    const model = {
+      services: [
+        { name: 'base', image: 'nginx:latest' },
+        { name: 'web', image: 'nginx:latest', privileged: true },
+      ],
+    } as unknown as EffectiveModel;
+    // The value lives at the anchor, so the aliasing service points at the line
+    // that holds it.
+    expect(locateFinding(project, hit('image-latest', { service: 'base', sourcePath: 'base' }), model))
+      .toMatchObject({ file: 'compose.yaml', line: 5 });
+    expect(locateFinding(project, hit('image-latest', { service: 'web', sourcePath: 'web' }), model))
+      .toMatchObject({ file: 'compose.yaml', line: 1 });
+    expect(locateFinding(project, hit('privileged', { service: 'web', sourcePath: 'web' }), model))
+      .toMatchObject({ file: 'compose.yaml', line: 2 });
+  });
+
+  it('refuses an alias whose chain exceeds the follow cap', async () => {
+    const lines = ['x-0: &a0 [true]'];
+    for (let level = 1; level <= 17; level += 1) lines.push(`x-${level}: &a${level} [*a${level - 1}]`);
+    lines.push('services:', '  web:', '    image: nginx:latest', '');
+    writeStack('doctor-alias-too-deep', { 'compose.yaml': lines.join('\n') });
+    const project = await buildAuthoredProject(nodeId, 'doctor-alias-too-deep');
+    expect(project.files.find(file => file.file === 'compose.yaml')?.state).toBe('parse-failed');
+    expect(locateFinding(project, hit('image-latest', { service: 'web', sourcePath: 'web' }),
+      { services: [{ name: 'web', image: 'nginx:latest' }] } as unknown as EffectiveModel)).toBeUndefined();
   });
 
   it('leaves every field unlocated when a later layer cannot be parsed', async () => {
@@ -91,15 +152,16 @@ describe('Compose Doctor authored locations', () => {
     expect(privileged).toBeUndefined();
   });
 
-  it('locates our own parse failure for render-failed', async () => {
+  it('leaves render-failed unlocated even when our own reader rejected a file', async () => {
     writeStack('doctor-render-failed', {
       'compose.yaml': 'services:\n  api:\n    image: nginx:1\n',
       'compose.override.yaml': 'services: [\n',
     });
     const project = await buildAuthoredProject(nodeId, 'doctor-render-failed');
-    expect(locateFinding(project, hit('render-failed', { severity: 'blocker' }))).toMatchObject({
-      file: 'compose.override.yaml', line: 2,
-    });
+    // The origin is a file that could not be parsed, so no range there is
+    // actionable. The per-file diagnostic still carries its own range.
+    expect(locateFinding(project, hit('render-failed', { severity: 'blocker' }))).toBeUndefined();
+    expect(project.files.find(file => file.file === 'compose.override.yaml')?.diagnostics[0]?.code).toBe('malformed-yaml');
   });
 
   it('locates the authored environment key for env-literal-dollar in map and list form', async () => {
@@ -512,7 +574,7 @@ describe('Compose Doctor authored locations', () => {
     expect(broad).toBeUndefined();
   });
 
-  it('never reads an aliased port item as a dynamic publication', async () => {
+  it('follows a port item written through an alias to its anchor', async () => {
     writeStack('doctor-port-alias', {
       'compose.yaml': 'services:\n  api:\n    image: nginx:1\n    ports:\n      - "80"\n',
       'compose.override.yaml': 'x-port: &port "8080:80"\nservices:\n  api:\n    ports:\n      - *port\n',
@@ -530,13 +592,13 @@ describe('Compose Doctor authored locations', () => {
     const dynamic = locateFinding(project, hit('port-exposed-all-interfaces', {
       service: 'api', sourcePath: 'api', subject: { kind: 'port', key: 'dynamic/tcp' },
     }), model);
-    // The alias could still resolve to a dynamic publication, so no link is
-    // defensible; the override's concrete 8080 must never stand in for it.
-    expect(dynamic).toBeUndefined();
+    // The alias resolves to the concrete publication, so the base file's
+    // dynamic item is the only declaration that can cause the dynamic finding.
+    expect(dynamic).toMatchObject({ file: 'compose.yaml', line: 5 });
     const concrete = locateFinding(project, hit('port-exposed-all-interfaces', {
       service: 'api', sourcePath: 'api', subject: { kind: 'port', key: '8080/tcp' },
     }), model);
-    expect(concrete).toBeUndefined();
+    expect(concrete).toMatchObject({ file: 'compose.override.yaml', line: 1 });
   });
 
   it('refuses a location when the field itself carries !override', async () => {

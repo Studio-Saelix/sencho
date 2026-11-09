@@ -110,7 +110,7 @@ export interface LabelAuthoredOrigin {
   shared?: boolean;
   /** The inline `labels:` map overrides a label-file entry for this key. */
   overridden?: boolean;
-  ambiguity?: 'duplicate-key' | 'unparsed-source' | 'interpolated' | 'outside-boundary';
+  ambiguity?: 'duplicate-key' | 'unparsed-source' | 'interpolated' | 'outside-boundary' | 'multiple-sources';
 }
 
 export interface StackServiceLabelRow {
@@ -331,13 +331,16 @@ export function authoredOriginsFor(
   project: AuthoredProject | null,
   service: string,
   keys: string[],
+  values?: Record<string, string>,
 ): Record<string, LabelAuthoredOrigin> | undefined {
   if (!project) return undefined;
   const serviceLabels = project.labels.get(service);
   const out: Record<string, LabelAuthoredOrigin> = Object.create(null) as Record<string, LabelAuthoredOrigin>;
   const contentHashes = new Map(project.files.map(file => [file.file, file.contentHash]));
   for (const key of keys) {
-    const result = correlateLabel(project, service, key);
+    // The rendered value is the only thing that can tell two equally declared
+    // labels apart, so it is passed when the caller has it.
+    const result = correlateLabel(project, service, key, values?.[key]);
     if (serviceLabels && isActingReason(result.reason) && result.origin) {
       const winner = serviceLabels.winners[key];
       if (!winner) continue;
@@ -366,9 +369,16 @@ export function authoredOriginsFor(
     }
     const kind = result.ambiguity?.kind;
     // An aliased declaration is unresolved; the wire reason stays the stable
-    // `unparsed-source` value the client already renders as "unreadable".
-    const wireKind = kind === 'unresolved-alias' ? 'unparsed-source' : kind;
-    if (wireKind === 'duplicate-key' || wireKind === 'unparsed-source' || wireKind === 'interpolated' || wireKind === 'outside-boundary') {
+    // `unparsed-source` value the client already renders as "unreadable". Every
+    // value-matching refusal (two identical declarations, or a later one that
+    // contradicts the effective value) is the same wire state: ambiguous.
+    const wireKind = kind === 'unresolved-alias'
+      ? 'unparsed-source'
+      : kind === 'multiple-matches' || kind === 'multiple-candidates' || kind === 'later-candidate'
+        ? 'multiple-sources'
+        : kind;
+    if (wireKind === 'duplicate-key' || wireKind === 'unparsed-source' || wireKind === 'interpolated'
+      || wireKind === 'outside-boundary' || wireKind === 'multiple-sources') {
       const winner = serviceLabels?.winners[key];
       out[key] = {
         ...(winner ? { source: winner.source } : {}),
@@ -457,7 +467,7 @@ export async function buildStackLabelInventory(
     const declaredLabels = Object.entries(declared)
       .map(([key, value]) => toLabelValue(key, value, 'compose', revealSecrets, declaredLabelBehavior(sencho, service, key)))
       .sort((a, b) => a.key.localeCompare(b.key));
-    const authored = authoredOriginsFor(authoredProject, service, Object.keys(declared));
+    const authored = authoredOriginsFor(authoredProject, service, Object.keys(declared), declared);
 
     const replicas: StackLabelReplica[] = (replicasByService.get(service) ?? []).map((rep) => {
       // A failed inspect has no runtime labels; reconciling against {} would falsely
