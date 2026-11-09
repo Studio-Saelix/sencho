@@ -160,6 +160,21 @@ interface UseStackActionsOptions {
   isAdmin?: boolean;
   /** Authoritative canReapplyCompose === true for the active node. */
   canReapplyCompose?: boolean;
+  /** Why Reapply is unavailable on the active node, from the same read as
+   *  canReapplyCompose. Null/absent when the node is (or may be) eligible. */
+  reapplyUnavailableReason?: import('@/components/FleetView/types').ReapplyUnavailableReason | null;
+  /**
+   * Re-read eligibility for the node that is active at click time. Returns null
+   * when this read no longer owns the decision: the active node changed
+   * mid-read, a newer read superseded it, or no node was active. A null result
+   * cancels the continuation that asked for it.
+   */
+  refreshReapplyEligibility?: () => Promise<{
+    canReapply: boolean;
+    reason: import('@/components/FleetView/types').ReapplyUnavailableReason | null;
+    /** False when the re-read failed; canReapply/reason are then the previous answer. */
+    proven?: boolean;
+  } | null>;
 }
 
 const PRE_DEPLOY_SUMMARY_TIMEOUT_MS = 5000;
@@ -356,6 +371,8 @@ export function useStackActions(options: UseStackActionsOptions) {
     removeNotificationsForStack,
     isAdmin = false,
     canReapplyCompose = false,
+    reapplyUnavailableReason = null,
+    refreshReapplyEligibility,
   } = options;
 
   const pendingStackLoadRef = useRef<string | null>(null);
@@ -515,6 +532,39 @@ export function useStackActions(options: UseStackActionsOptions) {
     if (!hydrationReady()) return false;
     if (opNodeId !== (activeNodeIdRef.current ?? null)) return false;
     return true;
+  };
+
+  /**
+   * Decide at the click whether the active node can reapply Sencho. The cached
+   * answer may be stale in either direction (the node recovered, or lost its
+   * Compose CLI or Docker connection after the editor loaded), so a reapply
+   * confirmation only opens on a fresh read. Returns true when the node is
+   * eligible. Otherwise it returns false: either the read no longer owns the
+   * decision (a node switch or a newer read, nothing is shown), or the node is
+   * ineligible and the protected dialog names it and the reason.
+   */
+  const verifyReapplyEligibility = async (): Promise<boolean> => {
+    const node = activeNode ?? null;
+    if (!isAdmin || !node) return false;
+    const nodeId = node.id;
+    let eligible = canReapplyCompose === true;
+    let reason = reapplyUnavailableReason;
+    if (refreshReapplyEligibility) {
+      const fresh = await refreshReapplyEligibility();
+      // The hook already returns null on a switch; keep the explicit check
+      // so a different implementation cannot retarget the decision or dialog.
+      if ((activeNodeIdRef.current ?? null) !== nodeId) return false;
+      // A null result means a newer read superseded this one (or the node
+      // changed). This request is discarded: continuing with the captured
+      // answer would open a second dialog from this request while the newer
+      // one decides for itself.
+      if (!fresh) return false;
+      eligible = fresh.canReapply;
+      reason = fresh.reason;
+    }
+    if (eligible) return true;
+    overlayState.openSelfStackProtected({ nodeName: node.name, reason: reason ?? null });
+    return false;
   };
 
   const openSelfStackProtectedIfNeeded = (file: string | null | undefined): boolean => {
@@ -1968,11 +2018,13 @@ export function useStackActions(options: UseStackActionsOptions) {
 
     const stackFile = stackListState.selectedFile;
     if (isSelfStackFile(stackFile)) {
-      if (isAdmin && canReapplyCompose && activeNode) {
+      const node = activeNode ?? null;
+      if (isAdmin && node) {
+        if (!(await verifyReapplyEligibility())) return;
         overlayState.setComposeReapplyCapture({
-          nodeId: activeNode.id,
-          nodeType: activeNode.type === 'local' ? 'local' : 'remote',
-          nodeName: activeNode.name,
+          nodeId: node.id,
+          nodeType: node.type === 'local' ? 'local' : 'remote',
+          nodeName: node.name,
           stackFile,
         });
         return;
@@ -3228,6 +3280,7 @@ export function useStackActions(options: UseStackActionsOptions) {
     openInspectImage,
     isSelfStackFile,
     openSelfStackProtectedIfNeeded,
+    verifyReapplyEligibility,
   };
 }
 

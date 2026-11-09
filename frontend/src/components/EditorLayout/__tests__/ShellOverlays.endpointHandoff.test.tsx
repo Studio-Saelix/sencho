@@ -64,11 +64,11 @@ function overlayState(over: Partial<OverlayState> = {}): OverlayState {
   } as unknown as OverlayState;
 }
 
-function renderShell(overlay: OverlayState, options: { reapplySelfTarget?: { nodeId: number; type: 'local' | 'remote'; name: string } | null; isSelfStackSelected?: boolean } = {}) {
+function renderShell(overlay: OverlayState, options: { reapplySelfTarget?: { nodeId: number; type: 'local' | 'remote'; name: string } | null; isSelfStackSelected?: boolean; eligible?: boolean } = {}) {
   return render(
     <ShellOverlays
       overlayState={overlay}
-      stackActions={{} as unknown as StackActionsHook}
+      stackActions={{ verifyReapplyEligibility: vi.fn().mockResolvedValue(options.eligible ?? true) } as unknown as StackActionsHook}
       stackActionMap={{}}
       stackFiles={['sencho.yml']}
       isDarkMode={false}
@@ -99,18 +99,26 @@ function renderShell(overlay: OverlayState, options: { reapplySelfTarget?: { nod
 beforeEach(() => { vi.clearAllMocks(); });
 
 describe('the Docker endpoint refusal confirmation', () => {
-  it('opens the endpoint-only Reapply preview for the refused node and stack', () => {
+  it('opens the endpoint-only Reapply preview for the refused node and stack', async () => {
     const overlay = overlayState();
     renderShell(overlay);
     fireEvent.click(screen.getByRole('button', { name: /Recreate endpoint/i }));
-    expect(overlay.setDockerEndpointProtected).toHaveBeenCalledWith(null);
-    expect(overlay.setComposeReapplyCapture).toHaveBeenCalledWith({
+    await vi.waitFor(() => expect(overlay.setComposeReapplyCapture).toHaveBeenCalledWith({
       nodeId: 1,
       nodeType: 'local',
       nodeName: 'node-1',
       stackFile: 'sencho.yml',
       initialScope: 'only',
-    });
+    }));
+    expect(overlay.setDockerEndpointProtected).toHaveBeenCalledWith(null);
+  });
+
+  it('opens no preview when the node lost eligibility since the refusal', async () => {
+    const overlay = overlayState();
+    renderShell(overlay, { eligible: false });
+    fireEvent.click(screen.getByRole('button', { name: /Recreate endpoint/i }));
+    await vi.waitFor(() => expect(overlay.setDockerEndpointProtected).toHaveBeenCalledWith(null));
+    expect(overlay.setComposeReapplyCapture).not.toHaveBeenCalled();
   });
 
   it('does not offer the replacement after the editor moved to another stack', () => {

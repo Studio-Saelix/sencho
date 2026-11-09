@@ -16,6 +16,10 @@ import {
 import { redactImageReference } from '../../utils/safeLog';
 import { describeComposeVersionSkew } from '../../helpers/composeVersionSkew';
 import { enumeratedHostPorts } from '../../helpers/composePortSpec';
+import {
+  AUTHORED_SOCKET_PROXY_IMAGE_HINTS,
+  socketProxyProviderForImage,
+} from '../../helpers/socketProxyIdentity';
 
 /** Higher number = more severe. Used to derive a run's overall status. */
 export const SEVERITY_RANK: Record<PreflightSeverity, number> = { info: 0, warning: 1, high: 2, blocker: 3 };
@@ -109,17 +113,10 @@ function hasWritableDockerSocket(svc: EffService): boolean {
   return dockerSocketBinds(svc).some(m => !m.readOnly);
 }
 
-const SOCKET_PROXY_IMAGE_HINTS = [
-  'tecnativa/docker-socket-proxy',
-  'lscr.io/linuxserver/socket-proxy',
-  'docker-socket-proxy',
-] as const;
-
 const MUTATING_PROXY_API_FLAGS = new Set(['POST', 'DELETE']);
 
 function hasSocketProxyImage(svc: EffService): boolean {
-  const image = svc.image?.toLowerCase();
-  return image !== undefined && SOCKET_PROXY_IMAGE_HINTS.some(h => image.includes(h));
+  return socketProxyProviderForImage(svc.image, AUTHORED_SOCKET_PROXY_IMAGE_HINTS) !== null;
 }
 
 function hasSocketProxyNameHint(svc: EffService): boolean {
