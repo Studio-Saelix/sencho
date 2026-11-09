@@ -66,7 +66,9 @@ export interface PreflightFinding {
   remediation?: string;
   /** Service the finding is scoped to, when applicable. */
   service?: string;
-  /** Where the operator wrote the declaration, when a single source can be decided. */
+  /** Where the operator wrote the declaration, when one source can be decided.
+   *  A finding that reports a conflict across services carries the first
+   *  conflicting declaration in effective-model order. */
   location?: PreflightSourceLocation;
   /** True when an active acknowledgement covers this finding. */
   acknowledged?: boolean;

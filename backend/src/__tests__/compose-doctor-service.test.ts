@@ -500,6 +500,47 @@ describe('runPreflight', () => {
     expect(ruleIds).not.toContain('node-state-unavailable');
   });
 
+  it('attaches the authored location to a cross-service port conflict', async () => {
+    const stack = 'doctorportconflict';
+    const dir = writeStack(stack, [
+      'services:',
+      '  s:',
+      '    image: nginx:1.27',
+      '    network_mode: none',
+      '    ports:',
+      '      - "8088:80"',
+      '  t:',
+      '    image: nginx:1.27',
+      '    network_mode: none',
+      '    ports:',
+      '      - "8088:81"',
+      '',
+    ].join('\n'));
+    try {
+      stubDocker({
+        name: stack,
+        services: {
+          s: { image: 'nginx:1.27', network_mode: 'none', ports: [{ target: 80, published: '8088', protocol: 'tcp' }] },
+          t: { image: 'nginx:1.27', network_mode: 'none', ports: [{ target: 81, published: '8088', protocol: 'tcp' }] },
+        },
+        networks: {},
+        volumes: {},
+      });
+      const report = await doctor().runPreflight(nodeId, stack, null);
+      const finding = report.findings.find(f => f.ruleId === 'port-conflict-internal');
+      expect(finding).toBeTruthy();
+      // The rule scopes the finding to neither service, so the link is the only
+      // way to reach the declaration it reports.
+      expect(finding!.service).toBeUndefined();
+      expect(finding!.location).toEqual(expect.objectContaining({
+        file: 'compose.yaml', path: 'services.s.ports[0]', line: 6,
+      }));
+      expect(finding!.location?.fileHash).toBeTruthy();
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   it('orders findings by severity, highest first', async () => {
     stubDocker({
       name: STACK,

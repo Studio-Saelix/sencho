@@ -15,6 +15,37 @@ export function fixedPorts<T extends { dynamic?: true }>(ports: readonly T[]): T
   return ports.filter(port => !port.dynamic);
 }
 
+/** Rules enumerate at most this many host ports from one publication, so an
+ *  adversarial `1-65535` range cannot blow up a report. */
+const MAX_ENUMERATED_HOST_PORTS = 256;
+
+/** The last host port a fixed publication contributes to a per-port rule. */
+function lastEnumeratedHostPort(spec: { startPort: number; endPort: number; dynamic?: true }): number {
+  return Math.min(spec.endPort, spec.startPort + MAX_ENUMERATED_HOST_PORTS - 1);
+}
+
+/**
+ * The host ports one publication claims under the shared bounded enumeration,
+ * in ascending order. A per-port rule and the locator that maps its finding back
+ * to an authored declaration must agree on this list: a port the rule did not
+ * enumerate is not one its finding reports.
+ */
+export function enumeratedHostPorts(spec: { startPort: number; endPort: number; dynamic?: true }): number[] {
+  if (spec.dynamic) return [];
+  const end = lastEnumeratedHostPort(spec);
+  const ports: number[] = [];
+  for (let port = spec.startPort; port <= end; port += 1) ports.push(port);
+  return ports;
+}
+
+/** Whether one fixed publication claims this host port under the same enumeration. */
+export function claimsEnumeratedHostPort(
+  spec: { startPort: number; endPort: number; dynamic?: true },
+  port: number,
+): boolean {
+  return !spec.dynamic && port >= spec.startPort && port <= lastEnumeratedHostPort(spec);
+}
+
 export interface ShortPortSpec {
   /** Host interface with any IPv6 brackets removed; '' when none is written. */
   hostIp: string;

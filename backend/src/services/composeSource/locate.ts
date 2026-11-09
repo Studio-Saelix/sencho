@@ -8,7 +8,7 @@ import {
   hasLaterUnparsedLayer, hasOutsideComposeLayer, hasProjectCycle, hasUnparsedComposeLayer, hasUnresolvedService,
 } from './correlate';
 import { authoredNodeKey, authoredScalarOf } from './parseComposeDocument';
-import { containerPortRange, isDynamicHostPort, isFixedHostPort, splitShortPortSpec } from '../../helpers/composePortSpec';
+import { claimsEnumeratedHostPort, containerPortRange, isDynamicHostPort, isFixedHostPort, splitShortPortSpec } from '../../helpers/composePortSpec';
 import { isActingReason, type AuthoredFileSource, type AuthoredLocation, type AuthoredNode, type AuthoredProject, type CorrelationResult } from './types';
 import type { RuleHit } from '../preflight/types';
 import type { EffectiveModel, EffPortSpec } from '../preflight/effectiveModel';
@@ -38,13 +38,30 @@ interface ItemCandidate {
 const ALL_INTERFACES = 'all';
 
 function normalizedInterface(ip: string): string {
-  return ip === '' || ip === '0.0.0.0' || ip === '::' ? ALL_INTERFACES : ip;
+  return ip === '' || ip === '0.0.0.0' || ip === '::' || ip === '[::]' ? ALL_INTERFACES : ip;
 }
 
 function sameInterface(a: string, b: string): boolean {
   const left = normalizedInterface(a);
   const right = normalizedInterface(b);
   return left === right;
+}
+
+/** Whether two host interfaces can bind the same port; mirrors the rule's overlap test. */
+function interfacesOverlap(a: string, b: string): boolean {
+  return normalizedInterface(a) === ALL_INTERFACES || normalizedInterface(b) === ALL_INTERFACES || a === b;
+}
+
+/**
+ * Whether one effective publication claims the subject port the way the conflict
+ * rule enumerates it: a single fixed host port, inside the shared 256-port range
+ * bound. A publication the rule did not count at this port cannot be one of the
+ * services its finding names.
+ */
+function specClaimsConflictPort(spec: EffPortSpec, hostText: string, protocol: string): boolean {
+  if (spec.protocol !== protocol) return false;
+  const port = Number(hostText);
+  return Number.isInteger(port) && hostText !== '' && claimsEnumeratedHostPort(spec, port);
 }
 
 /** An authored host port in the same text form the rule subject uses. */
@@ -358,6 +375,65 @@ function locatePort(project: AuthoredProject, hit: RuleHit, model: EffectiveMode
   return itemLocation(matches, `services.${hit.service}.ports`);
 }
 
+/**
+ * Locate the first participant of a same-stack port conflict. Unlike
+ * `port-conflict-node`, this rule names a port but no service: the finding's
+ * message names every service that claims it. Only the claims that overlap
+ * another service's interface can cause the conflict, so a service that merely
+ * claims the port on an unrelated interface is not a participant, and only the
+ * ports the rule's bounded enumeration reaches count. The link names the first
+ * conflicting publication in effective-model order, but only when every
+ * participant resolves to exactly one authored item. If any participant is
+ * ambiguous then the finding's source as a whole is ambiguous, and a link to
+ * one participant would imply the others had been decided.
+ */
+function locatePortConflictInternal(
+  project: AuthoredProject,
+  hit: RuleHit,
+  model: EffectiveModel | null,
+): AuthoredLocation | undefined {
+  if (hit.subject?.kind !== 'port' || !model) return undefined;
+  const subject = splitPortSubject(hit.subject.key);
+  const claimants = model.services
+    .map(svc => ({
+      service: svc.name,
+      specs: svc.ports.filter(spec => specClaimsConflictPort(spec, subject.hostText, subject.protocol)),
+    }))
+    .filter(claim => claim.specs.length > 0);
+  const participants = claimants
+    .filter((claim, index) => claimants.some((other, otherIndex) =>
+      index !== otherIndex
+      && claim.specs.some(a => other.specs.some(b => interfacesOverlap(a.hostIp, b.hostIp)))))
+    .map(claim => ({ ...hit, service: claim.service }));
+  // The rule only reports a conflict, so a model that names fewer than two
+  // conflicting services does not describe the source of the hit.
+  if (participants.length < 2) return undefined;
+  const locations = participants.map(participant => locatePort(project, participant, model));
+  if (locations.some(location => location === undefined)) return undefined;
+  return locations[0];
+}
+
+/**
+ * Locate one participant of a duplicate `container_name` conflict. The same
+ * multi-participant shape as a same-stack port conflict: the hit names the
+ * duplicated name but no service, so it links to the first service in
+ * effective-model order and refuses when any participant's declaration is
+ * ambiguous.
+ */
+function locateContainerNameConflict(
+  project: AuthoredProject,
+  hit: RuleHit,
+  model: EffectiveModel | null,
+): AuthoredLocation | undefined {
+  if (hit.subject?.kind !== 'container-name' || !model) return undefined;
+  const name = hit.subject.key;
+  const participants = model.services.filter(svc => svc.containerName === name).map(svc => svc.name);
+  if (participants.length < 2) return undefined;
+  const locations = participants.map(service => locateEffective(project, service, 'container_name', model));
+  if (locations.some(location => location === undefined)) return undefined;
+  return locations[0];
+}
+
 /** Locate the single `volumes` item a bind hit names, else the sequence key. */
 function locateVolume(project: AuthoredProject, hit: RuleHit): AuthoredLocation | undefined {
   if (!hit.service) return undefined;
@@ -550,6 +626,10 @@ export function locateFinding(
     case 'port-conflict-node':
     case 'sensitive-service-broad-exposure':
       return locatePort(project, hit, model);
+    case 'port-conflict-internal':
+      return locatePortConflictInternal(project, hit, model);
+    case 'container-name-internal-dup':
+      return locateContainerNameConflict(project, hit, model);
     case 'bind-path-missing':
     case 'bind-path-permission':
     case 'docker-socket-mount':

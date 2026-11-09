@@ -317,6 +317,279 @@ describe('Compose Doctor authored locations', () => {
     expect(conflict).toBeUndefined();
   });
 
+  it('locates the first publication of a conflict between two services', async () => {
+    writeStack('doctor-port-conflict-internal', {
+      'compose.yaml': [
+        'services:',
+        '  s:',
+        '    image: nginx:1.2',
+        '    network_mode: none',
+        '    ports:',
+        '      - "8088:80"',
+        '  t:',
+        '    image: nginx:1.2',
+        '    network_mode: none',
+        '    ports:',
+        '      - "8088:81"',
+        '',
+      ].join('\n'),
+    });
+    const project = await buildAuthoredProject(nodeId, 'doctor-port-conflict-internal');
+    const model = {
+      services: [
+        { name: 's', ports: [{ startPort: 8088, endPort: 8088, hostIp: '', protocol: 'tcp' }] },
+        { name: 't', ports: [{ startPort: 8088, endPort: 8088, hostIp: '', protocol: 'tcp' }] },
+      ],
+    } as unknown as EffectiveModel;
+    const conflict = hit('port-conflict-internal', { subject: { kind: 'port', key: '8088/tcp' } });
+    const location = locateFinding(project, conflict, model);
+    expect(location).toMatchObject({
+      file: 'compose.yaml', line: 6, column: 9, path: 'services.s.ports[0]',
+    });
+    // The rule names no service, so the wire finding must carry the location
+    // without one; the file and range make the link navigable, and the
+    // authored path is what its tooltip shows.
+    const rule = getAssuranceRule('port-conflict-internal')!;
+    const finding = normalizeDoctorHit(nodeId, 'doctor-port-conflict-internal', conflict, rule, location);
+    expect(finding.scope.service).toBeUndefined();
+    expect(finding.location).toEqual(expect.objectContaining({
+      file: 'compose.yaml', authoredPath: 'services.s.ports[0]', line: 6, column: 9,
+    }));
+  });
+
+  it('locates a conflict participant declared in another layer and in long form', async () => {
+    writeStack('doctor-port-conflict-layers', {
+      'compose.yaml': [
+        'services:',
+        '  s:',
+        '    image: nginx:1.2',
+        '    ports:',
+        '      - target: 80',
+        '        published: "8088"',
+        '',
+      ].join('\n'),
+      'compose.override.yaml': [
+        'services:',
+        '  t:',
+        '    image: nginx:1.2',
+        '    ports:',
+        '      - "8088:81"',
+        '',
+      ].join('\n'),
+    });
+    const project = await buildAuthoredProject(nodeId, 'doctor-port-conflict-layers');
+    const model = {
+      services: [
+        { name: 's', ports: [{ startPort: 8088, endPort: 8088, hostIp: '', protocol: 'tcp' }] },
+        { name: 't', ports: [{ startPort: 8088, endPort: 8088, hostIp: '', protocol: 'tcp' }] },
+      ],
+    } as unknown as EffectiveModel;
+    expect(locateFinding(project, hit('port-conflict-internal', {
+      subject: { kind: 'port', key: '8088/tcp' },
+    }), model)).toMatchObject({
+      file: 'compose.yaml', line: 5, path: 'services.s.ports[0]',
+    });
+  });
+
+  it('ignores a claimant whose interface cannot conflict with the conflicting pair', async () => {
+    writeStack('doctor-port-conflict-interfaces', {
+      'compose.yaml': [
+        'services:',
+        '  a:',
+        '    image: nginx:1.2',
+        '    ports:',
+        '      - "10.0.0.9:8088:80"',
+        '  b:',
+        '    image: nginx:1.2',
+        '    ports:',
+        '      - "127.0.0.1:8088:80"',
+        '  c:',
+        '    image: nginx:1.2',
+        '    ports:',
+        '      - "127.0.0.1:8088:81"',
+        '',
+      ].join('\n'),
+      // a's duplicate is ambiguous, but a does not overlap b or c, so it is not
+      // a source of their conflict and must not suppress the link to b.
+      'compose.override.yaml': 'services:\n  a:\n    ports:\n      - "10.0.0.9:8088:80"\n',
+    });
+    const project = await buildAuthoredProject(nodeId, 'doctor-port-conflict-interfaces');
+    const model = {
+      services: [
+        { name: 'a', ports: [{ startPort: 8088, endPort: 8088, hostIp: '10.0.0.9', protocol: 'tcp' }] },
+        { name: 'b', ports: [{ startPort: 8088, endPort: 8088, hostIp: '127.0.0.1', protocol: 'tcp' }] },
+        { name: 'c', ports: [{ startPort: 8088, endPort: 8088, hostIp: '127.0.0.1', protocol: 'tcp' }] },
+      ],
+    } as unknown as EffectiveModel;
+    expect(locateFinding(project, hit('port-conflict-internal', {
+      subject: { kind: 'port', key: '8088/tcp' },
+    }), model)).toMatchObject({
+      file: 'compose.yaml', line: 9, path: 'services.b.ports[0]',
+    });
+    // A model with only one claimant cannot describe a conflict.
+    expect(locateFinding(project, hit('port-conflict-internal', {
+      subject: { kind: 'port', key: '8088/tcp' },
+    }), { services: [model.services[1]] } as unknown as EffectiveModel)).toBeUndefined();
+  });
+
+  it('ignores a claimant whose range the rule does not enumerate at this port', async () => {
+    writeStack('doctor-port-conflict-range-cap', {
+      'compose.yaml': [
+        'services:',
+        '  a:',
+        '    image: nginx:1.2',
+        '    ports:',
+        '      - "10000-20000:80"',
+        '  b:',
+        '    image: nginx:1.2',
+        '    ports:',
+        '      - "15000:80"',
+        '  c:',
+        '    image: nginx:1.2',
+        '    ports:',
+        '      - "15000:81"',
+        '',
+      ].join('\n'),
+    });
+    const project = await buildAuthoredProject(nodeId, 'doctor-port-conflict-range-cap');
+    const model = {
+      services: [
+        { name: 'a', ports: [{ startPort: 10000, endPort: 20000, hostIp: '', protocol: 'tcp' }] },
+        { name: 'b', ports: [{ startPort: 15000, endPort: 15000, hostIp: '', protocol: 'tcp' }] },
+        { name: 'c', ports: [{ startPort: 15000, endPort: 15000, hostIp: '', protocol: 'tcp' }] },
+      ],
+    } as unknown as EffectiveModel;
+    // The rule enumerates at most 256 ports from a's range, so its finding does
+    // not count a at 15000; the link must not point at a declaration the finding
+    // never names.
+    expect(locateFinding(project, hit('port-conflict-internal', {
+      subject: { kind: 'port', key: '15000/tcp' },
+    }), model)).toMatchObject({
+      file: 'compose.yaml', line: 9, path: 'services.b.ports[0]',
+    });
+  });
+
+  it('refuses a conflict location when any participating publication is ambiguous', async () => {
+    const model = {
+      services: [
+        { name: 's', ports: [{ startPort: 8088, endPort: 8088, hostIp: '', protocol: 'tcp' }] },
+        { name: 't', ports: [{ startPort: 8088, endPort: 8088, hostIp: '', protocol: 'tcp' }] },
+      ],
+    } as unknown as EffectiveModel;
+    for (const duplicated of ['s', 't']) {
+      const basePort = duplicated === 's' ? '"8088:80"' : '"8088:81"';
+      writeStack(`doctor-port-conflict-ambiguous-${duplicated}`, {
+        'compose.yaml': [
+          'services:',
+          '  s:',
+          '    image: nginx:1.2',
+          '    ports: ["8088:80"]',
+          '  t:',
+          '    image: nginx:1.2',
+          '    ports: ["8088:81"]',
+          '',
+        ].join('\n'),
+        'compose.override.yaml': [
+          'services:',
+          `  ${duplicated}:`,
+          `    ports: [${basePort}]`,
+          '',
+        ].join('\n'),
+      });
+      const project = await buildAuthoredProject(nodeId, `doctor-port-conflict-ambiguous-${duplicated}`);
+      // One participant is declared identically in two layers. Its own origin is
+      // ambiguous, so the conflict's source as a whole is not decided: the
+      // other participant must not stand in for it.
+      expect(locateFinding(project, hit('port-conflict-internal', {
+        subject: { kind: 'port', key: '8088/tcp' },
+      }), model)).toBeUndefined();
+    }
+  });
+
+  it('refuses a conflict location when a participant could still publish the port through interpolation', async () => {
+    writeStack('doctor-port-conflict-interpolated', {
+      'compose.yaml': [
+        'services:',
+        '  s:',
+        '    image: nginx:1.2',
+        '    ports: ["8088:80"]',
+        '  t:',
+        '    image: nginx:1.2',
+        '    ports: ["8088:81"]',
+        '',
+      ].join('\n'),
+      'compose.override.yaml': [
+        'services:',
+        '  t:',
+        '    ports:',
+        '      - "${ADMIN_PORT}:82"',
+        '',
+      ].join('\n'),
+    });
+    const project = await buildAuthoredProject(nodeId, 'doctor-port-conflict-interpolated');
+    const model = {
+      services: [
+        { name: 's', ports: [{ startPort: 8088, endPort: 8088, hostIp: '', protocol: 'tcp' }] },
+        { name: 't', ports: [{ startPort: 8088, endPort: 8088, hostIp: '', protocol: 'tcp' }] },
+      ],
+    } as unknown as EffectiveModel;
+    expect(locateFinding(project, hit('port-conflict-internal', {
+      subject: { kind: 'port', key: '8088/tcp' },
+    }), model)).toBeUndefined();
+  });
+
+  it('locates a duplicate container_name on the first service in effective-model order', async () => {
+    writeStack('doctor-container-name-conflict', {
+      'compose.yaml': [
+        'services:',
+        '  s:',
+        '    image: nginx:1.2',
+        '    container_name: shared-name',
+        '  t:',
+        '    image: nginx:1.2',
+        '    container_name: shared-name',
+        '',
+      ].join('\n'),
+    });
+    const project = await buildAuthoredProject(nodeId, 'doctor-container-name-conflict');
+    // The model order, not the file order, decides which declaration is first.
+    const model = {
+      services: [
+        { name: 't', containerName: 'shared-name' },
+        { name: 's', containerName: 'shared-name' },
+      ],
+    } as unknown as EffectiveModel;
+    expect(locateFinding(project, hit('container-name-internal-dup', {
+      subject: { kind: 'container-name', key: 'shared-name' },
+    }), model)).toMatchObject({
+      file: 'compose.yaml', line: 7, path: 'services.t.container_name',
+    });
+    // The first participant's copy is ambiguous, so the conflict's source is
+    // not decided and the other copy must not stand in for both.
+    writeStack('doctor-container-name-conflict-ambiguous', {
+      'compose.yaml': [
+        'services:',
+        '  s:',
+        '    image: nginx:1.2',
+        '    container_name: shared-name',
+        '  t:',
+        '    image: nginx:1.2',
+        '    container_name: shared-name',
+        '',
+      ].join('\n'),
+      'compose.override.yaml': [
+        'services:',
+        '  t:',
+        '    container_name: shared-name',
+        '',
+      ].join('\n'),
+    });
+    const ambiguous = await buildAuthoredProject(nodeId, 'doctor-container-name-conflict-ambiguous');
+    expect(locateFinding(ambiguous, hit('container-name-internal-dup', {
+      subject: { kind: 'container-name', key: 'shared-name' },
+    }), model)).toBeUndefined();
+  });
+
   it('refuses the same duplicated port for a subjectless sensitive exposure', async () => {
     writeStack('doctor-sensitive-duplicate', {
       'compose.yaml': 'services:\n  db:\n    image: postgres:16\n    ports:\n      - "5432:5432"\n',
