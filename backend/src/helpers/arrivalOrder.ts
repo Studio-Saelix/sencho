@@ -5,7 +5,10 @@
  * otherwise be overtaken by a later one that validates faster, so the order the
  * requests arrived in stops being the order they are applied in.
  *
- * Work that throws or rejects does not hold up the work behind it. State is
+ * Work that throws or rejects does not hold up the work behind it, but work that
+ * never settles does: the work behind it waits too, until the process restarts.
+ * Bounding the queue instead would let the abandoned work run after the work
+ * behind it, which is the reordering this exists to prevent. State is
  * process-local, like the process that owns the data being written.
  */
 const chains = new Map<string, Promise<void>>();

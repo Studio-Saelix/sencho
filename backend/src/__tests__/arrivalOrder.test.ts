@@ -34,4 +34,19 @@ describe('inArrivalOrder', () => {
     await expect(failed).rejects.toThrow('boom');
     await expect(next).resolves.toBe('ran');
   });
+
+  it('keeps a third piece of work behind a second one that is still running after the first finished', async () => {
+    const second = deferred();
+    const ran: string[] = [];
+    const first = inArrivalOrder('k', async () => { ran.push('first'); });
+    const secondDone = inArrivalOrder('k', async () => { ran.push('second'); await second.promise; });
+    await first;
+    await new Promise((r) => setTimeout(r, 20));
+    const third = inArrivalOrder('k', async () => { ran.push('third'); });
+    await new Promise((r) => setTimeout(r, 20));
+    expect(ran).toEqual(['first', 'second']);
+    second.resolve();
+    await Promise.all([secondDone, third]);
+    expect(ran).toEqual(['first', 'second', 'third']);
+  });
 });

@@ -12,7 +12,7 @@ export function asIntents(body: unknown): IntentEntry[] | null {
   return Array.isArray(list) ? (list as IntentEntry[]) : null;
 }
 
-/** How long a save may wait for its reply before it counts as failed and the saves behind it go ahead. */
+/** How long a save may wait for its reply before it counts as timed out, not confirmed, and the saves behind it go ahead. */
 const SAVE_TIMEOUT_MS = 30_000;
 
 /** The tail of each node and stack's chain of saves, so the next one knows what to wait for. */
@@ -27,10 +27,11 @@ const saveChains = new Map<string, Promise<void>>();
  * order they were sent the order they were applied, so every reply holds the
  * rows of the saves before it and a later reply is always the newer one. A save
  * that fails, or whose reply does not come within `SAVE_TIMEOUT_MS`, does not
- * hold up the ones behind it. Abandoning a save's request does not stop the node
- * working on it, so a timed-out save may still be applied later; the node applies
- * saves to a stack in the order they reach it, so it lands before the saves
- * sent after it and never replaces one that was confirmed.
+ * hold up the ones behind it here. Abandoning a save's request does not stop the
+ * node working on it, so a timed-out save may still be applied later. The node
+ * applies saves to a stack in the order they reach it, so once it has received
+ * the timed-out save it applies it before the saves sent after it, and a later
+ * save waits behind it there if it is stalled.
  */
 function inOrder<T>(key: string, run: () => Promise<T>): Promise<T> {
   const turn = (saveChains.get(key) ?? Promise.resolve()).then(run);
@@ -54,7 +55,7 @@ async function putExposureIntent(
   nodeId?: number,
 ): Promise<IntentEntry[] | null> {
   // A request that never settles would hold every later save to this stack behind it. The abort
-  // only frees this browser: the node may still apply the save, ahead of any save sent after it.
+  // only frees this browser: the node may still apply the save, ahead of any save it receives after it.
   const abort = new AbortController();
   const timer = setTimeout(() => abort.abort(), SAVE_TIMEOUT_MS);
   try {
@@ -86,7 +87,7 @@ async function putExposureIntent(
 
 /**
  * Saves one scope's intent (null clears it). Returns the stack's intents after the
- * save, or null when it failed or its reply could not be read. Saves to the same
+ * save, or null when it failed, timed out or its reply could not be read. Saves to the same
  * stack of the same node (callers pass the node they address) are sent one at a
  * time, in the order they were asked for, whichever surface asks, so a reply
  * holds the result of every save made here before it.

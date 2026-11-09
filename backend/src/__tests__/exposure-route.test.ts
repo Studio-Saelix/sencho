@@ -146,6 +146,7 @@ describe('exposure intent saves that overlap', () => {
     const lateReq = put(stack, late);
     const lateDone = lateReq.then(() => undefined, () => undefined);
     await hold.reachedHold;
+    // The abort rejects the client's promise at once; the node goes on with the save when released.
     lateReq.abort();
     const laterDone = put(stack, later);
     const laterReply = laterDone.then((res) => res);
@@ -193,7 +194,7 @@ describe('exposure intent saves that overlap', () => {
     expect(await intents(STACK)).toEqual([]);
   });
 
-  it('keeps a service inheriting a stack intent when an earlier clear of that service is applied late', async () => {
+  it('keeps a later clear of a service final, so it inherits the stack intent, when an earlier save of that service is applied late', async () => {
     DatabaseService.getInstance().setStackExposureIntent(1, STACK, 'api', 'public', null);
     const reply = await lateThenLater(STACK, { service: 'api', intent: 'lan' }, { service: 'api', intent: null });
     expect(reply.status).toBe(200);
@@ -232,6 +233,7 @@ describe('exposure intent saves that overlap', () => {
     const gone = put(STACK, { service: 'api', intent: 'lan' }).then((res) => res);
     await hold.reachedHold;
     const next = put(STACK, { service: 'api', intent: 'public' }).then((res) => res);
+    await sleep(50);
     hold.release(false);
     expect((await gone).status).toBe(404);
     expect((await next).status).toBe(200);
