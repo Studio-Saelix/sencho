@@ -29,7 +29,7 @@ export interface EffPortSpec {
   /** Docker assigns the host port at start (container-only entry, empty or `0`
    *  host port), so no number is known. The container is still published and
    *  exposure counts it; conflict and documented-port checks skip the unknown
-   *  host number (`fixedPorts` in composePortSpec and `portsOf` in rules).
+   *  host number (`fixedPorts` and `enumeratedHostPorts` in composePortSpec).
    *  Drift matches it to the runtime container port by the target below. */
   dynamic?: true;
   /** Container port range this publication targets, for a `dynamic` entry.

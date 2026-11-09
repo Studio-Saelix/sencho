@@ -346,9 +346,9 @@ describe('Compose Doctor authored locations', () => {
     expect(location).toMatchObject({
       file: 'compose.yaml', line: 6, column: 9, path: 'services.s.ports[0]',
     });
-    // The rule names no service, so the wire finding must carry the location
-    // without one; the file and range make the link navigable, and the
-    // authored path is what its tooltip shows.
+    // The rule sets no single service, so the normalized finding must carry the
+    // location without one; the service layer adds the file hash that makes the
+    // link navigable, and the authored path is what its tooltip shows.
     const rule = getAssuranceRule('port-conflict-internal')!;
     const finding = normalizeDoctorHit(nodeId, 'doctor-port-conflict-internal', conflict, rule, location);
     expect(finding.scope.service).toBeUndefined();
@@ -466,6 +466,144 @@ describe('Compose Doctor authored locations', () => {
       subject: { kind: 'port', key: '15000/tcp' },
     }), model)).toMatchObject({
       file: 'compose.yaml', line: 9, path: 'services.b.ports[0]',
+    });
+  });
+
+  it('matches a short-syntax protocol Compose lowercases', async () => {
+    writeStack('doctor-port-conflict-udp', {
+      'compose.yaml': [
+        'services:',
+        '  s:',
+        '    image: nginx:1.2',
+        '    ports:',
+        '      - "8088:80/UDP"',
+        '  t:',
+        '    image: nginx:1.2',
+        '    ports:',
+        '      - "8088:81/UDP"',
+        '',
+      ].join('\n'),
+    });
+    const project = await buildAuthoredProject(nodeId, 'doctor-port-conflict-udp');
+    const model = {
+      services: [
+        { name: 's', ports: [{ startPort: 8088, endPort: 8088, hostIp: '', protocol: 'udp' }] },
+        { name: 't', ports: [{ startPort: 8088, endPort: 8088, hostIp: '', protocol: 'udp' }] },
+      ],
+    } as unknown as EffectiveModel;
+    // Compose lowercases a short-syntax protocol; the authored text keeps the
+    // spelling the operator used.
+    expect(locateFinding(project, hit('port-conflict-internal', {
+      subject: { kind: 'port', key: '8088/udp' },
+    }), model)).toMatchObject({
+      file: 'compose.yaml', line: 5, path: 'services.s.ports[0]',
+    });
+  });
+
+  it('ignores an out-of-range declaration when locating a participant', async () => {
+    writeStack('doctor-port-conflict-mixed-range', {
+      'compose.yaml': [
+        'services:',
+        '  s:',
+        '    image: nginx:1.2',
+        '    ports:',
+        '      - "8088:80"',
+        '      - "5000-9000:81"',
+        '  t:',
+        '    image: nginx:1.2',
+        '    ports:',
+        '      - "8088:82"',
+        '',
+      ].join('\n'),
+    });
+    const project = await buildAuthoredProject(nodeId, 'doctor-port-conflict-mixed-range');
+    const model = {
+      services: [
+        {
+          name: 's',
+          ports: [
+            { startPort: 8088, endPort: 8088, hostIp: '', protocol: 'tcp' },
+            { startPort: 5000, endPort: 9000, hostIp: '', protocol: 'tcp' },
+          ],
+        },
+        { name: 't', ports: [{ startPort: 8088, endPort: 8088, hostIp: '', protocol: 'tcp' }] },
+      ],
+    } as unknown as EffectiveModel;
+    // The rule enumerates only 5000-5255 from s's range, so only the exact 8088
+    // declaration claims the port it reports.
+    expect(locateFinding(project, hit('port-conflict-internal', {
+      subject: { kind: 'port', key: '8088/tcp' },
+    }), model)).toMatchObject({
+      file: 'compose.yaml', line: 5, path: 'services.s.ports[0]',
+    });
+  });
+
+  it('locates a participant whose second publication of the port does not conflict', async () => {
+    writeStack('doctor-port-conflict-extra-binding', {
+      'compose.yaml': [
+        'services:',
+        '  a:',
+        '    image: nginx:1.2',
+        '    ports:',
+        '      - "10.0.0.9:8088:80"',
+        '      - "127.0.0.1:8088:81"',
+        '  b:',
+        '    image: nginx:1.2',
+        '    ports:',
+        '      - "10.0.0.9:8088:82"',
+        '',
+      ].join('\n'),
+    });
+    const project = await buildAuthoredProject(nodeId, 'doctor-port-conflict-extra-binding');
+    const model = {
+      services: [
+        {
+          name: 'a',
+          ports: [
+            { startPort: 8088, endPort: 8088, hostIp: '10.0.0.9', protocol: 'tcp' },
+            { startPort: 8088, endPort: 8088, hostIp: '127.0.0.1', protocol: 'tcp' },
+          ],
+        },
+        { name: 'b', ports: [{ startPort: 8088, endPort: 8088, hostIp: '10.0.0.9', protocol: 'tcp' }] },
+      ],
+    } as unknown as EffectiveModel;
+    // Only a's 10.0.0.9 publication conflicts with b; its loopback publication
+    // on the same port is not a source of the finding.
+    expect(locateFinding(project, hit('port-conflict-internal', {
+      subject: { kind: 'port', key: '8088/tcp' },
+    }), model)).toMatchObject({
+      file: 'compose.yaml', line: 5, path: 'services.a.ports[0]',
+    });
+  });
+
+  it('locates one port of an authored range that Compose expanded', async () => {
+    writeStack('doctor-port-conflict-expanded-range', {
+      'compose.yaml': [
+        'services:',
+        '  s:',
+        '    image: nginx:1.2',
+        '    ports:',
+        '      - "8000-8010:80-90"',
+        '  t:',
+        '    image: nginx:1.2',
+        '    ports:',
+        '      - "8005:99"',
+        '',
+      ].join('\n'),
+    });
+    const project = await buildAuthoredProject(nodeId, 'doctor-port-conflict-expanded-range');
+    // `docker compose config` reports one publication per host port for a range,
+    // so the model carries only the port this finding is about.
+    const model = {
+      services: [
+        { name: 's', ports: [{ startPort: 8005, endPort: 8005, hostIp: '', protocol: 'tcp' }] },
+        { name: 't', ports: [{ startPort: 8005, endPort: 8005, hostIp: '', protocol: 'tcp' }] },
+      ],
+    } as unknown as EffectiveModel;
+    expect(locateFinding(project, hit('port-conflict-internal', {
+      subject: { kind: 'port', key: '8005/tcp' },
+    }), model)).toMatchObject({
+      file: 'compose.yaml', line: 5, path: 'services.s.ports[0]',
     });
   });
 

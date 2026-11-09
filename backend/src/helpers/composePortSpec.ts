@@ -43,7 +43,16 @@ export function claimsEnumeratedHostPort(
   spec: { startPort: number; endPort: number; dynamic?: true },
   port: number,
 ): boolean {
-  return !spec.dynamic && port >= spec.startPort && port <= lastEnumeratedHostPort(spec);
+  return claimsEnumeratedHostPortSpan(spec, port, port);
+}
+
+/** Whether the bounded enumeration of one publication covers a whole port span. */
+export function claimsEnumeratedHostPortSpan(
+  spec: { startPort: number; endPort: number; dynamic?: true },
+  start: number,
+  end: number,
+): boolean {
+  return !spec.dynamic && start >= spec.startPort && end <= lastEnumeratedHostPort(spec);
 }
 
 export interface ShortPortSpec {

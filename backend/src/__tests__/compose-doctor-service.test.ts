@@ -541,6 +541,41 @@ describe('runPreflight', () => {
     }
   });
 
+  it('attaches the authored location to a duplicate container_name', async () => {
+    const stack = 'doctorcontainerdup';
+    const dir = writeStack(stack, [
+      'services:',
+      '  s:',
+      '    image: nginx:1.27',
+      '    container_name: shared-name',
+      '  t:',
+      '    image: nginx:1.27',
+      '    container_name: shared-name',
+      '',
+    ].join('\n'));
+    try {
+      stubDocker({
+        name: stack,
+        services: {
+          s: { image: 'nginx:1.27', container_name: 'shared-name' },
+          t: { image: 'nginx:1.27', container_name: 'shared-name' },
+        },
+        networks: {},
+        volumes: {},
+      });
+      const report = await doctor().runPreflight(nodeId, stack, null);
+      const finding = report.findings.find(f => f.ruleId === 'container-name-internal-dup');
+      expect(finding).toBeTruthy();
+      expect(finding!.service).toBeUndefined();
+      expect(finding!.location).toEqual(expect.objectContaining({
+        file: 'compose.yaml', path: 'services.s.container_name', line: 4,
+      }));
+      expect(finding!.location?.fileHash).toBeTruthy();
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   it('orders findings by severity, highest first', async () => {
     stubDocker({
       name: STACK,
