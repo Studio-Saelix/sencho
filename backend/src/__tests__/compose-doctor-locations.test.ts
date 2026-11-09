@@ -873,6 +873,215 @@ describe('Compose Doctor authored locations', () => {
     }), model)).toBeUndefined();
   });
 
+  it('links a three-way conflict to the first participant and refuses when any of them is ambiguous', async () => {
+    const claim = { startPort: 8088, endPort: 8088, hostIp: '', protocol: 'tcp' };
+    const model = {
+      services: [
+        { name: 's', ports: [claim] }, { name: 't', ports: [claim] }, { name: 'u', ports: [claim] },
+      ],
+    } as unknown as EffectiveModel;
+    const base = [
+      'services:',
+      '  s:', '    image: nginx:1.2', '    ports: ["8088:80"]',
+      '  t:', '    image: nginx:1.2', '    ports: ["8088:81"]',
+      '  u:', '    image: nginx:1.2', '    ports: ["8088:82"]',
+      '',
+    ].join('\n');
+    writeStack('doctor-port-conflict-three', { 'compose.yaml': base });
+    const clean = await buildAuthoredProject(nodeId, 'doctor-port-conflict-three');
+    expect(locateFinding(clean, hit('port-conflict-internal', {
+      subject: { kind: 'port', key: '8088/tcp' },
+    }), model)).toMatchObject({ path: 'services.s.ports[0]', line: 4 });
+    // The third participant, not the first, is the ambiguous one.
+    writeStack('doctor-port-conflict-three-dup', {
+      'compose.yaml': base,
+      'compose.override.yaml': 'services:\n  u:\n    ports: ["8088:82"]\n',
+    });
+    const ambiguous = await buildAuthoredProject(nodeId, 'doctor-port-conflict-three-dup');
+    expect(locateFinding(ambiguous, hit('port-conflict-internal', {
+      subject: { kind: 'port', key: '8088/tcp' },
+    }), model)).toBeUndefined();
+  });
+
+  it('treats a wildcard interface as overlapping any other and distinct loopbacks as separate', async () => {
+    const pair = (aIp: string, bIp: string, aText: string, bText: string, name: string) => {
+      writeStack(name, {
+        'compose.yaml': [
+          'services:',
+          '  s:', '    image: nginx:1.2', `    ports: ["${aText}"]`,
+          '  t:', '    image: nginx:1.2', `    ports: ["${bText}"]`,
+          '',
+        ].join('\n'),
+      });
+      const model = {
+        services: [
+          { name: 's', ports: [{ startPort: 8088, endPort: 8088, hostIp: aIp, protocol: 'tcp' }] },
+          { name: 't', ports: [{ startPort: 8088, endPort: 8088, hostIp: bIp, protocol: 'tcp' }] },
+        ],
+      } as unknown as EffectiveModel;
+      return { name, model };
+    };
+    const conflict = hit('port-conflict-internal', { subject: { kind: 'port', key: '8088/tcp' } });
+    const wildcard = pair('', '127.0.0.1', '8088:80', '127.0.0.1:8088:81', 'doctor-port-conflict-wildcard');
+    expect(locateFinding(await buildAuthoredProject(nodeId, wildcard.name), conflict, wildcard.model))
+      .toMatchObject({ path: 'services.s.ports[0]' });
+    const spelled = pair('0.0.0.0', '::', '0.0.0.0:8088:80', '[::]:8088:81', 'doctor-port-conflict-all-spellings');
+    expect(locateFinding(await buildAuthoredProject(nodeId, spelled.name), conflict, spelled.model))
+      .toMatchObject({ path: 'services.s.ports[0]' });
+    const loopbacks = pair('127.0.0.1', '::1', '127.0.0.1:8088:80', '[::1]:8088:81', 'doctor-port-conflict-loopbacks');
+    expect(locateFinding(await buildAuthoredProject(nodeId, loopbacks.name), conflict, loopbacks.model)).toBeUndefined();
+  });
+
+  it('refuses a conflict location when a participant sits behind a !override tag or an unreadable layer', async () => {
+    const claim = { startPort: 8088, endPort: 8088, hostIp: '', protocol: 'tcp' };
+    const model = {
+      services: [{ name: 's', ports: [claim] }, { name: 't', ports: [claim] }],
+    } as unknown as EffectiveModel;
+    const conflict = hit('port-conflict-internal', { subject: { kind: 'port', key: '8088/tcp' } });
+    const base = [
+      'services:',
+      '  s:', '    image: nginx:1.2', '    ports: ["8088:80"]',
+      '  t:', '    image: nginx:1.2', '    ports: ["8088:81"]',
+      '',
+    ].join('\n');
+    writeStack('doctor-port-conflict-tag', {
+      'compose.yaml': base,
+      'compose.override.yaml': 'services:\n  t:\n    ports: !override\n      - "8088:81"\n',
+    });
+    expect(locateFinding(await buildAuthoredProject(nodeId, 'doctor-port-conflict-tag'), conflict, model)).toBeUndefined();
+    writeStack('doctor-port-conflict-broken-layer', {
+      '.env': 'COMPOSE_FILE=compose.yaml:broken.yaml\n',
+      'compose.yaml': base,
+      'broken.yaml': 'services: [\n',
+    });
+    expect(locateFinding(await buildAuthoredProject(nodeId, 'doctor-port-conflict-broken-layer'), conflict, model)).toBeUndefined();
+    writeStack('doctor-port-conflict-outside-layer', {
+      '.env': 'COMPOSE_FILE=compose.yaml:../outside.yaml\n',
+      'compose.yaml': base,
+    });
+    expect(locateFinding(await buildAuthoredProject(nodeId, 'doctor-port-conflict-outside-layer'), conflict, model)).toBeUndefined();
+  });
+
+  it('links a participant that is itself a collapsed range spanning the conflict port', async () => {
+    writeStack('doctor-port-conflict-collapsed-participant', {
+      'compose.yaml': [
+        'services:',
+        '  s:', '    image: nginx:1.2', '    ports: ["127.0.0.1:5000-5255:80"]',
+        '  t:', '    image: nginx:1.2', '    ports: ["127.0.0.1:5100:81"]',
+        '',
+      ].join('\n'),
+    });
+    const project = await buildAuthoredProject(nodeId, 'doctor-port-conflict-collapsed-participant');
+    const model = {
+      services: [
+        { name: 's', ports: [{ startPort: 5000, endPort: 5255, hostIp: '127.0.0.1', protocol: 'tcp' }] },
+        { name: 't', ports: [{ startPort: 5100, endPort: 5100, hostIp: '127.0.0.1', protocol: 'tcp' }] },
+      ],
+    } as unknown as EffectiveModel;
+    expect(locateFinding(project, hit('port-conflict-internal', {
+      subject: { kind: 'port', key: '5100/tcp' },
+    }), model)).toMatchObject({ path: 'services.s.ports[0]', line: 4 });
+  });
+
+  it('locates container_name conflicts across three services, an override and an ambiguous participant', async () => {
+    const model = {
+      services: [
+        { name: 's', containerName: 'dup' }, { name: 't', containerName: 'dup' }, { name: 'u', containerName: 'dup' },
+      ],
+    } as unknown as EffectiveModel;
+    const conflict = hit('container-name-internal-dup', { subject: { kind: 'container-name', key: 'dup' } });
+    const base = [
+      'services:',
+      '  s:', '    image: nginx:1.2', '    container_name: dup',
+      '  t:', '    image: nginx:1.2',
+      '  u:', '    image: nginx:1.2', '    container_name: dup',
+      '',
+    ].join('\n');
+    // t's name comes only from the override file, so the located project must
+    // follow it there and still link the first participant.
+    writeStack('doctor-container-name-three', {
+      'compose.yaml': base,
+      'compose.override.yaml': 'services:\n  t:\n    container_name: dup\n',
+    });
+    expect(locateFinding(await buildAuthoredProject(nodeId, 'doctor-container-name-three'), conflict, model))
+      .toMatchObject({ path: 'services.s.container_name', line: 4 });
+    // The third participant declares the name twice: the whole finding is undecided.
+    writeStack('doctor-container-name-three-dup', {
+      'compose.yaml': base,
+      'compose.override.yaml': 'services:\n  t:\n    container_name: dup\n  u:\n    container_name: dup\n',
+    });
+    expect(locateFinding(await buildAuthoredProject(nodeId, 'doctor-container-name-three-dup'), conflict, model)).toBeUndefined();
+    // An interpolated name could resolve to anything.
+    writeStack('doctor-container-name-interpolated', {
+      'compose.yaml': base,
+      'compose.override.yaml': 'services:\n  t:\n    container_name: "${NAME:-dup}"\n',
+    });
+    expect(locateFinding(await buildAuthoredProject(nodeId, 'doctor-container-name-interpolated'), conflict, model)).toBeUndefined();
+    // When the override alone declares the first participant, the link follows it.
+    writeStack('doctor-container-name-override-first', {
+      'compose.yaml': 'services:\n  s:\n    image: nginx:1.2\n  t:\n    image: nginx:1.2\n    container_name: dup\n',
+      'compose.override.yaml': 'services:\n  s:\n    container_name: dup\n',
+    });
+    expect(locateFinding(await buildAuthoredProject(nodeId, 'doctor-container-name-override-first'), conflict, {
+      services: [{ name: 's', containerName: 'dup' }, { name: 't', containerName: 'dup' }],
+    } as unknown as EffectiveModel)).toMatchObject({ file: 'compose.override.yaml', path: 'services.s.container_name', line: 3 });
+  });
+
+  it('names the service the located file declares when the port comes from an extends base', async () => {
+    writeStack('doctor-port-conflict-extends', {
+      'compose.yaml': [
+        'services:',
+        '  s:', '    extends:', '      file: base.yaml', '      service: b',
+        '  t:', '    image: nginx:1.2', '    ports: ["8088:81"]',
+        '',
+      ].join('\n'),
+      'base.yaml': 'services:\n  b:\n    image: nginx:1.2\n    ports: ["8088:80"]\n',
+    });
+    const project = await buildAuthoredProject(nodeId, 'doctor-port-conflict-extends');
+    const claim = { startPort: 8088, endPort: 8088, hostIp: '', protocol: 'tcp' };
+    const model = {
+      services: [{ name: 's', ports: [claim] }, { name: 't', ports: [claim] }],
+    } as unknown as EffectiveModel;
+    expect(locateFinding(project, hit('port-conflict-internal', {
+      subject: { kind: 'port', key: '8088/tcp' },
+    }), model)).toMatchObject({ file: 'base.yaml', path: 'services.b.ports[0]', line: 4 });
+  });
+
+  it('attempts no port location for a model past the publication bound', async () => {
+    writeStack('doctor-port-conflict-bound', {
+      'compose.yaml': [
+        'services:',
+        '  s:', '    image: nginx:1.2', '    ports: ["8088:80"]',
+        '  t:', '    image: nginx:1.2', '    ports: ["8088:81"]',
+        '',
+      ].join('\n'),
+    });
+    const project = await buildAuthoredProject(nodeId, 'doctor-port-conflict-bound');
+    // Compose expands a paired range into one publication per port; the extra
+    // publications stand for a `1-3000:1-3000` range declared elsewhere.
+    const expanded = (count: number) => Array.from({ length: count }, (_, index) => (
+      { startPort: 1 + index, endPort: 1 + index, hostIp: '', protocol: 'tcp' }));
+    const tPort = { startPort: 8088, endPort: 8088, hostIp: '', protocol: 'tcp' };
+    const within = {
+      services: [{ name: 's', ports: [...expanded(100), { ...tPort, startPort: 8088, endPort: 8088 }] }, { name: 't', ports: [tPort] }],
+    } as unknown as EffectiveModel;
+    const beyond = {
+      services: [{ name: 's', ports: [...expanded(3000), { ...tPort }] }, { name: 't', ports: [tPort] }],
+    } as unknown as EffectiveModel;
+    const conflict = hit('port-conflict-internal', { subject: { kind: 'port', key: '8088/tcp' } });
+    const exposed = hit('port-exposed-all-interfaces', {
+      service: 't', sourcePath: 't', subject: { kind: 'port', key: '8088/tcp' },
+    });
+    expect(locateFinding(project, exposed, within)).toMatchObject({ path: 'services.t.ports[0]' });
+    expect(locateFinding(project, conflict, within)).toMatchObject({ path: 'services.s.ports[0]' });
+    const started = Date.now();
+    expect(locateFinding(project, exposed, beyond)).toBeUndefined();
+    expect(locateFinding(project, conflict, beyond)).toBeUndefined();
+    // The bound is what keeps a 65535-port range from taking minutes: it must
+    // return without scanning the model.
+    expect(Date.now() - started).toBeLessThan(500);
+  });
+
   it('refuses the same duplicated port for a subjectless sensitive exposure', async () => {
     writeStack('doctor-sensitive-duplicate', {
       'compose.yaml': 'services:\n  db:\n    image: postgres:16\n    ports:\n      - "5432:5432"\n',

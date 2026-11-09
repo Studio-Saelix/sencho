@@ -28,6 +28,8 @@ function toLocation(result: CorrelationResult): AuthoredLocation | undefined {
 
 interface ItemCandidate {
   file: string;
+  /** Service key inside `file`; differs from the effective service for an `extends` base. */
+  declaredService: string;
   node: AuthoredNode;
   layerIndex: number;
   writability: AuthoredFileSource['writability'];
@@ -36,6 +38,27 @@ interface ItemCandidate {
 }
 
 const ALL_INTERFACES = 'all';
+
+/**
+ * The most effective publications a port location is attempted for. Compose
+ * expands a paired range such as `1-65535:1-65535` into one publication per
+ * port, the rules report one finding per publication, and locating each one
+ * scans the model, so the work grows with the square of the publication count
+ * on the synchronous Doctor path. Past this count the model is too large to
+ * attribute by scanning and no port finding carries a link, the same fail-closed
+ * result as any other bound this reader cannot enumerate.
+ */
+const MAX_LOCATABLE_PUBLICATIONS = 2048;
+
+function exceedsLocatingBound(model: EffectiveModel | null): boolean {
+  if (!model) return false;
+  let total = 0;
+  for (const service of model.services) {
+    total += service.ports.length;
+    if (total > MAX_LOCATABLE_PUBLICATIONS) return true;
+  }
+  return false;
+}
 
 /** Rules whose subject names one enumerated host port, not a whole publication. */
 const PER_PORT_RULES: ReadonlySet<string> = new Set(['port-conflict-node', 'port-conflict-internal']);
@@ -62,9 +85,10 @@ function sameProtocol(a: string, b: string): boolean {
 
 /**
  * Whether one effective publication claims the subject port the way a per-port
- * rule enumerates it: a single fixed host port, inside the shared 256-port range
- * bound. A publication the rule did not count at this port cannot be one of the
- * services its finding names.
+ * rule enumerates it: the publication is fixed and its enumeration, which stops
+ * at the shared 256-port bound, includes the subject port. A publication the
+ * rule did not count at this port cannot be one of the services its finding
+ * names.
  */
 function specClaimsConflictPort(spec: EffPortSpec, hostText: string, protocol: string): boolean {
   // Both sides are effective-model strings the rule keys verbatim, so a
@@ -326,11 +350,16 @@ function volumeItemSource(file: AuthoredFileSource, declaredService: string, ind
   return authoredScalarOf(file.nodes.get(authoredNodeKey(['services', declaredService, 'volumes', index, 'source']))) ?? null;
 }
 
-/** A location on the latest layer that declares a matching sequence item. */
-function itemLocation(candidates: ItemCandidate[], basePath: string): AuthoredLocation | undefined {
+/**
+ * A location on the latest layer that declares a matching sequence item. The
+ * path names the service as the located file declares it, so an `extends` base
+ * shows its own key rather than the extending service's.
+ */
+function itemLocation(candidates: ItemCandidate[], field: string): AuthoredLocation | undefined {
   if (candidates.length === 0) return undefined;
   const winner = candidates.reduce((latest, candidate) => candidate.layerIndex > latest.layerIndex ? candidate : latest);
   const range = displayRange(winner.node);
+  const basePath = `services.${winner.declaredService}.${field}`;
   return {
     file: winner.file,
     path: winner.index !== undefined ? `${basePath}[${winner.index}]` : basePath,
@@ -357,6 +386,7 @@ function locatePort(
   restrictSpecs?: EffPortSpec[],
 ): AuthoredLocation | undefined {
   if (!hit.service) return undefined;
+  if (exceedsLocatingBound(model)) return undefined;
   // A declared file outside the boundary has unknown contents and could still
   // contribute or supersede the publication. Refuse consistently with the
   // generic field and label correlation, which refuse the whole project.
@@ -407,7 +437,7 @@ function locatePort(
           : specs.some(spec => authoredPortMatches(author, spec, broadOnly, effective?.ports ?? []));
       if (!matched) continue;
       const list = byLayer.get(scope.layerIndex) ?? [];
-      list.push({ file: scope.file.file, node, layerIndex: scope.layerIndex, writability: scope.file.writability, index });
+      list.push({ file: scope.file.file, declaredService: scope.declaredService, node, layerIndex: scope.layerIndex, writability: scope.file.writability, index });
       byLayer.set(scope.layerIndex, list);
     }
   }
@@ -425,28 +455,28 @@ function locatePort(
   // An interpolated or aliased item in any layer could resolve to the same
   // publication; the literal item is not provably its only source.
   if (hasUnresolvedSequenceItem(scopes, 'ports', 0, true)) return undefined;
-  return itemLocation(matches, `services.${hit.service}.ports`);
+  return itemLocation(matches, 'ports');
 }
 
 /**
  * Locate the first participant of a same-stack port conflict. Unlike
  * `port-conflict-node`, this rule names a port but no service: the finding's
- * message names every service the rule counted as claiming it at that port.
- * Only the claims that overlap another service's interface can cause the
- * conflict, so a service that merely claims the port on an unrelated interface
- * is not a participant, and only the ports the rule's bounded enumeration
- * reaches count. The link names the first conflicting publication in
- * effective-model order, but only when every participant resolves to exactly
- * one authored item. If any participant is ambiguous then the finding's source
- * as a whole is ambiguous, and a link to one participant would imply the others
- * had been decided.
+ * message names every service the rule counted as claiming it at that port,
+ * including a service whose claim sits on an unrelated interface. The link
+ * considers only the claims that overlap another service's interface, because
+ * only those can cause the conflict, and only the ports the rule's bounded
+ * enumeration reaches count. It names the first participating service in
+ * effective-model order (the rendered configuration's order, not the file's),
+ * but only when every participant resolves to exactly one authored item. If any
+ * participant is ambiguous then the finding's source as a whole is ambiguous,
+ * and a link to one participant would imply the others had been decided.
  */
 function locatePortConflictInternal(
   project: AuthoredProject,
   hit: RuleHit,
   model: EffectiveModel | null,
 ): AuthoredLocation | undefined {
-  if (hit.subject?.kind !== 'port' || !model) return undefined;
+  if (hit.subject?.kind !== 'port' || !model || exceedsLocatingBound(model)) return undefined;
   const subject = splitPortSubject(hit.subject.key);
   const claimants = model.services
     .map(svc => ({
@@ -511,7 +541,8 @@ function locateVolume(project: AuthoredProject, hit: RuleHit): AuthoredLocation 
         const node = scope.file.nodes.get(authoredNodeKey(['services', scope.declaredService, 'volumes', index]));
         if (node) {
           matches.push({
-            file: scope.file.file, node, layerIndex: scope.layerIndex, writability: scope.file.writability, index,
+            file: scope.file.file, declaredService: scope.declaredService, node, layerIndex: scope.layerIndex,
+            writability: scope.file.writability, index,
             source: volumeItemSource(scope.file, scope.declaredService, index),
           });
           matchedIndex = index;
@@ -534,7 +565,7 @@ function locateVolume(project: AuthoredProject, hit: RuleHit): AuthoredLocation 
       if (winner.source !== null && matches.some(match =>
         match.layerIndex < latest && match.source === winner.source)) return undefined;
       if (hasUnresolvedSequenceItem(scopes, 'volumes', latest, true)) return undefined;
-      return itemLocation(matches, `services.${hit.service}.volumes`);
+      return itemLocation(matches, 'volumes');
     }
     // The hit names a bind target no authored declaration matches: refuse to
     // point at the whole volumes field as if it were that mount.
@@ -563,7 +594,7 @@ function locateEnvFile(project: AuthoredProject, hit: RuleHit): AuthoredLocation
           const node = longNode ?? shortNode;
           if (node) {
             matches.push({
-              file: scope.file.file, node, layerIndex: scope.layerIndex,
+              file: scope.file.file, declaredService: scope.declaredService, node, layerIndex: scope.layerIndex,
               writability: scope.file.writability, index,
             });
           }
@@ -577,7 +608,7 @@ function locateEnvFile(project: AuthoredProject, hit: RuleHit): AuthoredLocation
       if (matches.length !== 1) return undefined;
       if (hasUnparsedComposeLayer(project)) return undefined;
       if (hasUnresolvedSequenceItem(scopes, 'env_file', 0, true)) return undefined;
-      return itemLocation(matches, `services.${hit.service}.env_file`);
+      return itemLocation(matches, 'env_file');
     }
     // The hit names a missing env file no authored entry matches.
     return undefined;
@@ -602,7 +633,7 @@ function locateEnvironmentKey(project: AuthoredProject, service: string, key: st
       if (mapNode.kind === 'alias' || mapNode.customTag !== undefined) {
         unresolvedLayers.push(scope.layerIndex);
       } else {
-        candidates.push({ file: scope.file.file, node: mapNode, layerIndex: scope.layerIndex, writability: scope.file.writability });
+        candidates.push({ file: scope.file.file, declaredService: scope.declaredService, node: mapNode, layerIndex: scope.layerIndex, writability: scope.file.writability });
       }
       continue;
     }
@@ -620,13 +651,13 @@ function locateEnvironmentKey(project: AuthoredProject, service: string, key: st
         continue;
       }
       if (!text.startsWith(`${key}=`)) continue;
-      candidates.push({ file: scope.file.file, node, layerIndex: scope.layerIndex, writability: scope.file.writability });
+      candidates.push({ file: scope.file.file, declaredService: scope.declaredService, node, layerIndex: scope.layerIndex, writability: scope.file.writability });
     }
   }
   if (candidates.length !== 1) return undefined;
   if (hasLaterUnparsedLayer(project, candidates[0].layerIndex)) return undefined;
   if (unresolvedLayers.some(layer => layer >= candidates[0].layerIndex)) return undefined;
-  return itemLocation(candidates, `services.${service}.environment.${key}`);
+  return itemLocation(candidates, `environment.${key}`);
 }
 
 function topLevelKey(sourcePath: string | undefined): string | undefined {

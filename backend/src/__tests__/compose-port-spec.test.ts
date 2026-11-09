@@ -18,6 +18,13 @@ describe('bounded host-port enumeration', () => {
     expect(claimsEnumeratedHostPort({ startPort: 10000, endPort: 20000 }, 9999)).toBe(false);
   });
 
+  it('enumerates exactly 256 ports and no more at the boundary', () => {
+    expect(enumeratedHostPorts({ startPort: 1000, endPort: 1255 })).toHaveLength(256);
+    expect(enumeratedHostPorts({ startPort: 1000, endPort: 1256 })).toHaveLength(256);
+    expect(claimsEnumeratedHostPort({ startPort: 1000, endPort: 1255 }, 1255)).toBe(true);
+    expect(claimsEnumeratedHostPort({ startPort: 1000, endPort: 1256 }, 1256)).toBe(false);
+  });
+
   it('enumerates a short range exactly', () => {
     expect(enumeratedHostPorts({ startPort: 8080, endPort: 8082 })).toEqual([8080, 8081, 8082]);
     expect(claimsEnumeratedHostPort({ startPort: 8080, endPort: 8082 }, 8082)).toBe(true);
