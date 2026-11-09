@@ -317,11 +317,7 @@ export function SecurityView({ activeTab, onTabChange, headerActions }: Security
   useEffect(() => {
     activeNodeIdRef.current = activeNodeId;
   }, [activeNodeId]);
-  const onIntentSaved = useCallback((
-    stackName: string,
-    intents: IntentEntry[],
-    saved: SavedIntentTarget,
-  ) => {
+  const onIntentSaved = useCallback((stackName: string, intents: IntentEntry[], saved: SavedIntentTarget) => {
     // A save confirmed for a node the operator has since left says nothing about
     // the node on screen.
     if (activeNodeIdRef.current !== activeNodeId) return;
