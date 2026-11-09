@@ -939,8 +939,14 @@ export class DockerEventService {
             { lastKillAt: state.lastKillAt, oomPending: state.oomPending, helperContainer: state.helperContainer },
         );
 
-        // Die arrived: clear the oom flag regardless (we've now used it).
+        // Die arrived: the kill / OOM evidence has now been read and explains
+        // exactly this die, so consume it here. The next `start` cannot be
+        // trusted to do it: a restart-policy start lands inside the grace window
+        // before this runs and must leave the evidence alone. Leaving
+        // `lastKillAt` behind would classify a later genuine crash inside the
+        // intentional-kill window as an operator stop.
         state.oomPending = undefined;
+        state.lastKillAt = undefined;
         state.lastActivityAt = now;
 
         // A clean or intentional exit clears any prior crash signal, so a stale
@@ -1344,23 +1350,31 @@ export class DockerEventService {
                 if (at < dedupCutoff) this.healthAlertDedupAt.delete(id);
             }
         }
-        // Start evidence only matters while a crash dedup window it could lift
-        // is open, so it expires with that window.
-        if (this.lastStartEventAt.size > 0) {
-            const startCutoff = Date.now() - CRASH_DEDUP_MS;
-            for (const [id, at] of this.lastStartEventAt) {
-                if (at < startCutoff) this.lastStartEventAt.delete(id);
-            }
-        }
         // Run history and consumed incident keys prune by wall-clock arrival,
         // not by event time: supported event timestamps can be second-resolution
-        // or historical, but the dedup window is measured against the clock.
+        // or historical, but the dedup window is measured against the clock. An
+        // open run (no die yet) is kept no matter how old it is: a service can
+        // stay up for days, and that run is the stable predecessor the
+        // five-minute incident rule measures.
         const runCutoff = Date.now() - CRASH_DEDUP_MS;
         if (this.containerRuns.size > 0) {
             for (const [id, runs] of this.containerRuns) {
-                const kept = runs.filter(run => run.observedAt >= runCutoff);
+                const kept = runs.filter(run => run.dieAt === undefined || run.observedAt >= runCutoff);
                 if (kept.length === 0) this.containerRuns.delete(id);
                 else if (kept.length !== runs.length) this.containerRuns.set(id, kept);
+            }
+        }
+        // Start evidence outlives the crash dedup window while its run is still
+        // open. Dropping it after an hour made a crash that follows a long,
+        // healthy run look like an unobserved start, so the restart-policy start
+        // that follows the die was read as a recovery and swallowed the alert.
+        if (this.lastStartEventAt.size > 0) {
+            const startCutoff = Date.now() - CRASH_DEDUP_MS;
+            for (const [id, at] of this.lastStartEventAt) {
+                if (at >= startCutoff) continue;
+                const hasOpenRun = this.containerRuns.get(id)?.some(run => run.dieAt === undefined) === true;
+                if (hasOpenRun) continue;
+                this.lastStartEventAt.delete(id);
             }
         }
         for (const state of this.containerState.values()) {

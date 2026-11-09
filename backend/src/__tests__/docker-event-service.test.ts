@@ -346,6 +346,42 @@ describe('DockerEventService - die classification', () => {
         expect(service.getContainerState('c-kill-race')?.crashedAt).toBeUndefined();
     });
 
+    it('spends kill evidence on its own die so a later crash still alerts', async () => {
+        service = new DockerEventService(1, 'local');
+        await service.start();
+
+        const containerEvent = (action: string, atMs: number, attributes: Record<string, string> = {}) => ({
+            Type: 'container',
+            Action: action,
+            Actor: { ID: 'c-kill-spent', Attributes: { name: 'svc', ...attributes } },
+            timeNano: atMs * 1_000_000,
+        });
+
+        // Operator restart of a long-running container. The restart-policy start
+        // lands inside the grace window, so the kill evidence must survive until
+        // the deferred classifier reads it.
+        stream.push(containerEvent('start', 1_000_000));
+        stream.push(containerEvent('kill', 1_320_000, { signal: '15' }));
+        stream.push(containerEvent('die', 1_320_050, { exitCode: '143' }));
+        await vi.advanceTimersByTimeAsync(175);
+        stream.push(containerEvent('start', 1_320_225));
+        await vi.advanceTimersByTimeAsync(600);
+        expect(mockDispatchAlert).not.toHaveBeenCalled();
+
+        // Ten seconds later the restarted container crashes for real. That kill
+        // belonged to the restart, so this die is a crash, not another stop.
+        stream.push(containerEvent('die', 1_330_000, { exitCode: '1' }));
+        await vi.advanceTimersByTimeAsync(600);
+
+        expect(mockDispatchAlert).toHaveBeenCalledTimes(1);
+        expect(mockDispatchAlert).toHaveBeenCalledWith(
+            'error',
+            'monitor_alert',
+            expect.stringContaining('Crash Detected'),
+            expect.objectContaining({ containerName: 'svc' }),
+        );
+    });
+
     it('emits OOM alert when oom precedes die', async () => {
         service = new DockerEventService(1, 'local');
         await service.start();
@@ -1005,6 +1041,38 @@ describe('DockerEventService - die classification', () => {
         await vi.advanceTimersByTimeAsync(600);
 
         expect(mockDispatchAlert).toHaveBeenCalledTimes(2);
+    });
+
+    it('alerts a stable-run crash after the run outlives the evidence prune window', async () => {
+        service = new DockerEventService(1, 'local');
+        await service.start();
+
+        const t0 = Date.now();
+        const containerEvent = (action: string, atMs: number, exitCode = '1') => ({
+            Type: 'container',
+            Action: action,
+            Actor: { ID: 'c-long-run', Attributes: { exitCode, name: 'web' } },
+            timeNano: atMs * 1_000_000,
+        });
+
+        // A quiet, healthy service with a Docker healthcheck: no alert-worthy
+        // events for 95 minutes, so the 60-minute run-history prune runs, while
+        // the health events keep its tracked state alive.
+        stream.push(containerEvent('start', t0, '0'));
+        for (let i = 0; i < 19; i++) {
+            await vi.advanceTimersByTimeAsync(5 * 60_000);
+            stream.push(containerEvent('health_status: healthy', t0 + (i + 1) * 5 * 60_000, '0'));
+        }
+        await vi.advanceTimersByTimeAsync(0);
+
+        // It crashes and Docker restarts it about 175 ms later, inside the grace
+        // window. The run obviously stayed up past the five-minute threshold.
+        stream.push(containerEvent('die', t0 + 95 * 60_000));
+        await vi.advanceTimersByTimeAsync(175);
+        stream.push(containerEvent('start', t0 + 95 * 60_000 + 175, '0'));
+        await vi.advanceTimersByTimeAsync(600);
+
+        expect(mockDispatchAlert).toHaveBeenCalledTimes(1);
     });
 
     it('alerts a looping container once more after the dedup window expires', async () => {
