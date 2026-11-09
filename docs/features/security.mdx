@@ -142,10 +142,13 @@ intent from a popover without leaving Security; the popover also links to the st
 for changes that belong in Compose. With several services the label lists them and each row
 carries the same action; where the intent cannot be set from here, the label opens the stack's
 networking instead. A confirmed save is reflected on the row even when the follow-up refresh
-fails, and a later successful refresh replaces it. Saves to the same stack are sent one at a time in the order you make them, so a save waits
-for the one before it and each stays reflected however slowly the earlier ones are answered. A service the row's list was too short to show joins
-the list once you save it, with its action. A warning that may involve services the row does not
-list stays visible until a refresh, or until you have saved every one of those services from here.
+fails, and a later successful refresh replaces it. Saves to the same stack are sent one at a time
+in the order you make them, so a save waits for the one before it and each stays reflected
+however slowly the earlier ones are answered; a save with no reply after 30 seconds is reported
+as failed and the next one goes ahead. A service the row's list was too short to show joins the
+list once you save it, with its action. A warning that may involve
+services the row does not list stays visible until a refresh, or until you have saved every one
+of those services from here.
 Intentional exposure raises the security relevance of vulnerable findings
 but does not by itself keep the masthead on Action needed. Open the image, remediate, or triage
 individual findings (Accepted risk and related decisions). There is no image-level "accept residual

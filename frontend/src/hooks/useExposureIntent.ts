@@ -12,6 +12,9 @@ export function asIntents(body: unknown): IntentEntry[] | null {
   return Array.isArray(list) ? (list as IntentEntry[]) : null;
 }
 
+/** How long a save may wait for its reply before it counts as failed and the saves behind it go ahead. */
+const SAVE_TIMEOUT_MS = 30_000;
+
 /** The tail of each node and stack's chain of saves, so the next one knows what to wait for. */
 const saveChains = new Map<string, Promise<void>>();
 
@@ -23,7 +26,8 @@ const saveChains = new Map<string, Promise<void>>();
  * were sent in. Sending the next only once the last has replied makes the
  * order they were sent the order they were applied, so every reply holds the
  * rows of the saves before it and a later reply is always the newer one. A save
- * that fails does not hold up the ones behind it.
+ * that fails, or whose reply does not come within `SAVE_TIMEOUT_MS`, does not
+ * hold up the ones behind it.
  */
 function inOrder<T>(key: string, run: () => Promise<T>): Promise<T> {
   const turn = (saveChains.get(key) ?? Promise.resolve()).then(run);
@@ -46,10 +50,14 @@ async function putExposureIntent(
   intent: ExposureIntent | null,
   nodeId?: number,
 ): Promise<IntentEntry[] | null> {
+  // A request that never settles would hold every later save to this stack behind it.
+  const abort = new AbortController();
+  const timer = setTimeout(() => abort.abort(), SAVE_TIMEOUT_MS);
   try {
     const res = await apiFetch(`/stacks/${encodeURIComponent(stackName)}/exposure`, {
       method: 'PUT',
       nodeId,
+      signal: abort.signal,
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ service, intent }),
     });
@@ -63,16 +71,21 @@ async function putExposureIntent(
     return intents;
   } catch (error) {
     console.error('[ExposureIntent] save failed:', error);
-    toast.error('Failed to save the exposure intent.');
+    toast.error(abort.signal.aborted
+      ? 'Saving the exposure intent timed out. Refresh to confirm.'
+      : 'Failed to save the exposure intent.');
     return null;
+  } finally {
+    clearTimeout(timer);
   }
 }
 
 /**
  * Saves one scope's intent (null clears it). Returns the stack's intents after the
- * save, or null when it failed. Saves to the same stack of the same node are sent
- * one at a time, in the order they were asked for, whichever surface asks, so a
- * reply always holds the result of every save made before it.
+ * save, or null when it failed or its reply could not be read. Saves to the same
+ * stack of the same node (callers pass the node they address) are sent one at a
+ * time, in the order they were asked for, whichever surface asks, so a reply
+ * holds the result of every save made here before it.
  */
 export function saveExposureIntent(
   stackName: string,

@@ -75,9 +75,10 @@ export interface SavedIntentTarget {
 
 /** A confirmed save hands the owner the stack's intents so the affected rows can
  *  keep showing them until a reread replaces the summaries. A context the server
- *  settles away on that save stops counting as exposed instead. Saves to a stack
- *  are sent one at a time (see `saveExposureIntent`), so each call holds the
- *  stack as the server left it after that save and after every one before it. */
+ *  settles away on that save stops counting as exposed instead. Saves made here
+ *  to a stack are sent one at a time (see `saveExposureIntent`), so each call
+ *  holds the stack as the server left it after that save and every earlier one
+ *  made here. */
 export type IntentSavedHandler = (
   stackName: string,
   intents: IntentEntry[],

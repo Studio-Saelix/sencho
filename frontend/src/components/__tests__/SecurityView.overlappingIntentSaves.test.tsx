@@ -105,12 +105,14 @@ interface PendingPut { stack: string; service: string; release: () => void }
  * Summaries per node, and PUTs the test settles by hand. A held PUT is not
  * applied by the server until the test releases it, and its reply carries the
  * stack as it was then. `applied` lists the saves in the order the server took
- * them. Once any PUT has been sent, node 1's summaries reread answers 503, so
+ * them. A PUT held as 'reply' is applied on arrival and only its reply is held,
+ * which is how a reply reaches the client after the reply of a save the server
+ * took later. Once any PUT has been sent, node 1's summaries reread answers 503, so
  * its rows show only the saves.
  */
 function mockApi(
   summariesByNode: Record<number, ScanSummary[]>,
-  hold: (stack: string, service: string) => boolean,
+  hold: (stack: string, service: string) => boolean | 'reply',
   seed: Record<string, Intents> = {},
 ) {
   const puts: PendingPut[] = [];
@@ -144,7 +146,14 @@ function mockApi(
         const intents: Intents = [...rows].map(([name, value]) => ({ service: name, intent: value }));
         return { ok: true, status: 200, headers: new Headers(), json: async () => ({ intents }) } as unknown as Response;
       };
-      if (!hold(stack, service)) return Promise.resolve(apply());
+      const mode = hold(stack, service);
+      if (!mode) return Promise.resolve(apply());
+      if (mode === 'reply') {
+        const response = apply();
+        return new Promise((resolve) => {
+          puts.push({ stack, service, release: () => resolve(response) });
+        });
+      }
       return new Promise((resolve) => {
         puts.push({ stack, service, release: () => resolve(apply()) });
       });
@@ -252,6 +261,36 @@ describe.each([['desktop', false], ['phone', true]])('overlapping intent saves o
     // Both rows show their own save, and the reread that would correct them failed.
     await waitFor(() => expect(screen.getByText('Intent: LAN')).toBeInTheDocument());
     expect(screen.getAllByText(evidence)).toHaveLength(1);
+    // `unknown` leaves the service unset, so only a stated intent turns its action into Change.
+    expect(screen.getByRole('button', {
+      name: `Network exposed: ${intent === 'unknown' ? 'set' : 'change'} intent for web/api`,
+    })).toBeInTheDocument();
+  });
+
+  it('keeps both saves of a stack when the first reply is delivered long after it was applied', async () => {
+    // The server applies the api save on arrival; its reply is the one that lingers.
+    const puts = mockApi(
+      { 1: [unclassified('app:1', 'web', 'api'), unclassified('app:2', 'web', 'worker')] },
+      (_stack, service) => (service === 'api' ? 'reply' : false),
+    );
+    render(<SecurityView activeTab="images" onTabChange={vi.fn()} />);
+    expect(await screen.findAllByText('Intent: not classified')).toHaveLength(2);
+
+    await chooseLan('Network exposed: set intent for web/api');
+    await waitFor(() => expect(puts).toHaveLength(1));
+    await userEvent.keyboard('{Escape}');
+    await chooseLan('Network exposed: set intent for web/worker');
+    await act(async () => { await new Promise((resolve) => setTimeout(resolve, 50)); });
+    // Without the wait, the worker save would be applied and answered first and
+    // the late reply, which predates it, would put the worker row back.
+    expect(puts.applied).toEqual(['web/api']);
+
+    puts[0]!.release();
+    await waitFor(() => expect(toasts.success).toHaveBeenCalledTimes(2));
+    await waitFor(() => expect(screen.getAllByText('Intent: LAN')).toHaveLength(2));
+    expect(screen.queryByText('Intent: not classified')).not.toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Network exposed: change intent for web/worker' })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Network exposed: change intent for web/api' })).toBeInTheDocument();
   });
 
   it('sends a later save of a stack even when the earlier one was refused', async () => {

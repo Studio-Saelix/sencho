@@ -18,7 +18,7 @@ type SetExposureIntentPopoverProps = PopoverTriggerProps & {
   nodeId: number | undefined;
   /** The save was confirmed; the stack's intents after it are handed over so the
    *  surface can keep showing the confirmed result even if its reread fails.
-   *  Saves to a stack arrive here in the order the server applied them. */
+   *  Saves made here to a stack arrive in the order they were made. */
   onSaved: (saved: IntentEntry[]) => void;
   /** A named way out for the work that lives elsewhere, under the picker. */
   footer?: ReactNode;

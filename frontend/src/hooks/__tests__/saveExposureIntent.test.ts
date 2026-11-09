@@ -12,6 +12,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 const apiFetchMock = vi.fn();
 vi.mock('@/lib/api', () => ({ apiFetch: (...args: unknown[]) => apiFetchMock(...args) }));
 vi.mock('@/components/ui/toast-store', () => ({ toast: { error: vi.fn(), success: vi.fn(), info: vi.fn() } }));
+import { toast } from '@/components/ui/toast-store';
 
 import { saveExposureIntent, type IntentEntry } from '../useExposureIntent';
 import { applySavedIntents } from '@/components/security/imagesTargeting';
@@ -37,6 +38,7 @@ beforeEach(() => {
   applied.length = 0;
   serverRows.clear();
   apiFetchMock.mockReset();
+  vi.mocked(toast.error).mockClear();
   apiFetchMock.mockImplementation((url: string, init: { method: string; body: string; nodeId?: number }) => {
     const stack = decodeURIComponent(/^\/stacks\/([^/]+)\/exposure$/.exec(url)![1]!);
     const { service, intent } = JSON.parse(init.body) as { service: string; intent: ExposureIntent | null };
@@ -131,15 +133,41 @@ describe('saveExposureIntent ordering', () => {
     expect(await next).toEqual([{ service: 'worker', intent: 'lan' }]);
   });
 
-  it('forgets a stack once its saves are done', async () => {
-    const first = saveExposureIntent('web', 'api', 'lan', 1);
+  it('sends the next save after one whose request threw', async () => {
+    apiFetchMock.mockImplementationOnce(() => Promise.reject(new Error('network down')));
+    const failed = saveExposureIntent('web', 'api', 'lan', 1);
+    const next = saveExposureIntent('web', 'worker', 'lan', 1);
     await deliverNewestFirst();
-    await first;
-    const again = saveExposureIntent('web', 'api', 'public', 1);
-    await tick();
-    expect(onWire).toHaveLength(1);
-    await deliverNewestFirst();
-    await again;
+    expect(await failed).toBeNull();
+    expect(await next).toEqual([{ service: 'worker', intent: 'lan' }]);
+  });
+
+  it('sends the next save after one that got no reply, and reports the stalled one as timed out', async () => {
+    vi.useFakeTimers();
+    try {
+      let signal: AbortSignal | undefined;
+      apiFetchMock.mockImplementationOnce((_url: string, init: { signal: AbortSignal }) => {
+        signal = init.signal;
+        return new Promise<Response>((_resolve, reject) => {
+          init.signal.addEventListener('abort', () => reject(new DOMException('aborted', 'AbortError')));
+        });
+      });
+      const stalled = saveExposureIntent('web', 'api', 'lan', 1);
+      const next = saveExposureIntent('web', 'worker', 'lan', 1);
+      await vi.advanceTimersByTimeAsync(29_000);
+      expect(onWire).toHaveLength(0);
+      expect(signal?.aborted).toBe(false);
+
+      await vi.advanceTimersByTimeAsync(2_000);
+      expect(await stalled).toBeNull();
+      expect(toast.error).toHaveBeenCalledWith('Saving the exposure intent timed out. Refresh to confirm.');
+      expect(onWire.map((r) => r.service)).toEqual(['worker']);
+      onWire.pop()!.arrive();
+      undelivered.pop()!();
+      expect(await next).toEqual([{ service: 'worker', intent: 'lan' }]);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });
 
@@ -165,7 +193,7 @@ const unverifiedTunnel: ImageExposureContext = {
   intentStatus: 'unset',
 };
 
-describe('rows after overlapping saves whose rereads fail', () => {
+describe('rows after overlapping saves, with no reread to correct them', () => {
   const intents: Array<ExposureIntent | null> = ['public', 'lan', 'reverse-proxy', 'temporary', 'internal', 'same-node', 'unknown', null];
 
   it.each(intents)('shows %s on the saved service and keeps the others', async (intent) => {

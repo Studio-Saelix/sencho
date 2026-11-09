@@ -325,9 +325,9 @@ export function SecurityView({ activeTab, onTabChange, headerActions }: Security
     // A save confirmed for a node the operator has since left says nothing about
     // the node on screen.
     if (activeNodeIdRef.current !== activeNodeId) return;
-    // Saves to a stack reach here in the order the server applied them, each
-    // reply holding every save before it, so the newest reply is the stack's
-    // rows and replaces what an earlier one adopted.
+    // Saves made here to a stack are sent one at a time, so they reach this in
+    // the order they were made, each reply holding every earlier one: the
+    // newest reply is the stack's rows and replaces what an earlier one adopted.
     updateSummaries((summaries) => applySavedIntents(summaries, stackName, intents, saved));
     setImagesTargeting(afterIntentSaved);
     reloadOverview();
