@@ -278,6 +278,26 @@ describe('FileViewer reveal lifecycle', () => {
     expect(h.editors[h.editors.length - 1].revealRangeInCenter).toHaveBeenCalledWith(expectedRange);
   });
 
+  it('hashes a BOM-prefixed file with the BOM, as the server did', async () => {
+    // The Files surface reads the file as JSON, which keeps U+FEFF; the digest
+    // must therefore still match the location the server computed.
+    const bomContent = '\uFEFFB content';
+    mockReadFile.mockResolvedValue(textResult(bomContent));
+    const onRevealApplied = vi.fn();
+
+    render(
+      <FileViewer
+        {...defaultProps}
+        selectedPath="b.txt"
+        reveal={{ ...revealB, fileHash: sha256Hex(bomContent) }}
+        onRevealApplied={onRevealApplied}
+      />,
+    );
+
+    await waitFor(() => expect(onRevealApplied).toHaveBeenCalledTimes(1));
+    expect(h.reveals).toEqual([{ id: h.editors[h.editors.length - 1].id, range: expectedRange }]);
+  });
+
   it('refuses a range that carries no source revision', async () => {
     mockReadFile.mockResolvedValue(textResult('B content'));
     const onRevealApplied = vi.fn();

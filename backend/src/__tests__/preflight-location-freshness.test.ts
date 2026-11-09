@@ -188,4 +188,20 @@ describe('stored Doctor location freshness', () => {
     expect(locationOf(latest, 'image-latest')?.location).toBeUndefined();
     expect(locationOf(latest, 'image-latest')?.sourcePath).toBe('api');
   });
+
+  it('hashes a BOM-prefixed compose file with the BOM, matching the bytes on disk', async () => {
+    // A leading UTF-8 BOM is part of the bytes a client reads back, so the
+    // digest must cover it; the client verifies the same decoded text.
+    const bomPrimary = `\uFEFF${PRIMARY}`;
+    writeStack({ 'compose.yaml': bomPrimary, 'compose.override.yaml': OVERRIDE });
+    stubDocker();
+    await doctor().runPreflight(nodeId, STACK, 'tester');
+
+    const latest = await doctor().getLatest(nodeId, STACK);
+    expect(locationOf(latest, 'privileged')?.location).toMatchObject({
+      file: 'compose.yaml',
+      line: 4,
+      fileHash: sha256Hex(bomPrimary),
+    });
+  });
 });

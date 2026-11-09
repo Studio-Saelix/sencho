@@ -21,6 +21,17 @@ function rotr(value: number, bits: number): number {
   return (value >>> bits) | (value << (32 - bits));
 }
 
+/**
+ * Decode a file response the way the backend's `Buffer.toString('utf-8')` did
+ * before it hashed the file: malformed sequences become U+FFFD and a leading
+ * BOM stays in the text. `Response.text()` runs the Fetch "UTF-8 decode" step,
+ * which drops a leading BOM, so hashing its result disagrees with the server
+ * for a BOM-prefixed file and the location can never be opened.
+ */
+export function decodeUtf8PreservingBom(bytes: ArrayBuffer): string {
+  return new TextDecoder('utf-8', { ignoreBOM: true }).decode(bytes);
+}
+
 export function sha256Hex(text: string): string {
   const bytes = new TextEncoder().encode(text);
   // 0x80 terminator, 8-byte big-endian bit length, padded to a 64-byte block.

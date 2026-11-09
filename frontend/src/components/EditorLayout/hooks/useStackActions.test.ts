@@ -4584,6 +4584,43 @@ describe('useStackActions.openAuthoredLocation', () => {
     expect(toast.info).toHaveBeenCalledWith(expect.stringMatching(/no longer current/i));
   });
 
+  it('opens a range in a BOM-prefixed primary file the server hashed with the BOM', async () => {
+    // The server hashes the decoded file text, which keeps a leading U+FEFF;
+    // `Response.text()` drops it, so hashing that would refuse a valid link.
+    const bomContent = '\uFEFFservices:\n  web:\n    image: nginx:alpine\n';
+    vi.mocked(apiFetch).mockResolvedValue(new Response(bomContent, { status: 200 }));
+    const bomLocation = { ...location, fileHash: sha256Hex(bomContent) };
+    const { result, editorState } = setup({
+      editorState: { content: bomContent, originalContent: bomContent },
+    });
+
+    await act(async () => {
+      result.current.openAuthoredLocation(bomLocation);
+    });
+
+    expect(editorState.setPendingReveal).toHaveBeenCalledWith({
+      target: { surface: 'compose', file: 'compose.yaml' },
+      location: bomLocation,
+      revision: bomContent,
+    });
+    expect(toast.info).not.toHaveBeenCalled();
+  });
+
+  it('still refuses a range when the leading BOM was removed after it was computed', async () => {
+    const bomContent = '\uFEFFservices:\n  web:\n    image: nginx:alpine\n';
+    vi.mocked(apiFetch).mockResolvedValue(new Response(bomContent.slice(1), { status: 200 }));
+    const { result, editorState } = setup({
+      editorState: { content: bomContent.slice(1), originalContent: bomContent.slice(1) },
+    });
+
+    await act(async () => {
+      result.current.openAuthoredLocation({ ...location, fileHash: sha256Hex(bomContent) });
+    });
+
+    expect(editorState.setPendingReveal).toHaveBeenCalledWith(null);
+    expect(toast.info).toHaveBeenCalledWith(expect.stringMatching(/no longer current/i));
+  });
+
   it('refuses a range that carries no source revision', () => {
     const { result, editorState } = setup({
       editorState: { content: 'disk content', originalContent: 'disk content' },

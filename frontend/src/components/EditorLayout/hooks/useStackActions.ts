@@ -1,6 +1,6 @@
 import { useRef, useCallback, useEffect, useState } from 'react';
 import { isFileHash, planAuthoredLocation, type AuthoredLocation } from '@/lib/authoredLocation';
-import { sha256Hex } from '@/lib/sha256';
+import { sha256Hex, decodeUtf8PreservingBom } from '@/lib/sha256';
 import { apiFetch, withDeploySession } from '@/lib/api';
 import {
   dockerEndpointRefusal,
@@ -2331,7 +2331,10 @@ export function useStackActions(options: UseStackActionsOptions) {
       try {
         const res = await apiFetch(`/stacks/${stackFile}`, { nodeId: opNodeId });
         if (!res.ok) throw new Error('compose file unreadable');
-        const text = await res.text();
+        // Read the bytes the server hashed, not `res.text()`: the Fetch text
+        // decoder drops a leading UTF-8 BOM and the server's digest covers it,
+        // so a BOM-prefixed file would never match its own location.
+        const text = decodeUtf8PreservingBom(await res.arrayBuffer());
         if (request !== authoredLocationRequestRef.current) return;
         if (selectedFileRef.current !== stackFile || activeNodeIdRef.current !== opNodeId) return;
         if (composeContentRef.current !== composeOriginalContentRef.current) {

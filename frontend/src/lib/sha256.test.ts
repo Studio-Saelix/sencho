@@ -1,9 +1,18 @@
 import { describe, expect, it } from 'vitest';
 
-import { sha256Hex } from './sha256';
+import { decodeUtf8PreservingBom, sha256Hex } from './sha256';
 
 const EMPTY = 'e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855';
 const ABC = 'ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad';
+
+describe('decodeUtf8PreservingBom', () => {
+  it('keeps a leading BOM that Response.text() would drop', () => {
+    const text = '\uFEFFservices:\n  web:\n    image: nginx:alpine\n';
+    const bytes = new TextEncoder().encode(text).buffer;
+    expect(decodeUtf8PreservingBom(bytes)).toBe(text);
+    expect(sha256Hex(decodeUtf8PreservingBom(bytes))).toBe(sha256Hex(text));
+  });
+});
 
 describe('sha256Hex', () => {
   it('matches the published vectors for empty and short input', () => {
