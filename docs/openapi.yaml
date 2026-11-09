@@ -407,12 +407,14 @@ components:
           description: An inline labels map overrides a label-file entry for this key.
         ambiguity:
           type: string
-          enum: [duplicate-key, unparsed-source, interpolated, outside-boundary, multiple-sources]
+          enum: [duplicate-key, unparsed-source, interpolated, outside-boundary, multiple-sources, compose-tag]
           description: >-
             Present instead of a file and range when no single acting origin exists.
             `multiple-sources` means more than one declaration exists and the effective
             value cannot single one out: two declarations carry it, none carries it, or a
-            later declaration contradicts it.
+            later declaration contradicts it. `compose-tag` means a `!reset` or
+            `!override` marker is on the declaration or a parent mapping, so its authored
+            value is never matched against the effective one.
 
     StackLabelInventory:
       type: object

@@ -52,6 +52,7 @@ const AUTHORED_AMBIGUITY_LABELS: Record<NonNullable<LabelAuthoredOrigin['ambigui
   interpolated: 'interpolated',
   'outside-boundary': 'outside stack',
   'multiple-sources': 'ambiguous',
+  'compose-tag': 'compose tag',
 };
 
 /** The actionable range of an authored origin, or null when there is none. A

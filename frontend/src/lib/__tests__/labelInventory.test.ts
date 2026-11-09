@@ -262,7 +262,7 @@ describe('withReadBehaviors', () => {
     expect(authored['toString']?.file).toBe('compose.yaml');
   });
 
-  it('keeps a value-tie ambiguity and drops an unknown one', () => {
+  it('keeps a value-tie ambiguity, a Compose tag state, and drops an unknown one', () => {
     const body = JSON.parse(`{
       "stackName": "demo",
       "renderable": true,
@@ -271,17 +271,20 @@ describe('withReadBehaviors', () => {
         "service": "web",
         "declaredLabels": [
           {"key": "tied", "value": "same", "source": "compose"},
+          {"key": "tagged", "value": "over", "source": "compose"},
           {"key": "unknown", "value": "other", "source": "compose"}
         ],
         "replicas": [],
         "authored": {
           "tied": {"source": "inline", "ambiguity": "multiple-sources"},
+          "tagged": {"source": "inline", "ambiguity": "compose-tag"},
           "unknown": {"ambiguity": "not-a-state"}
         }
       }]
     }`) as StackLabelInventory;
     const authored = withReadBehaviors(body).services[0].authored!;
     expect(authored.tied).toEqual({ source: 'inline', ambiguity: 'multiple-sources' });
+    expect(authored.tagged).toEqual({ source: 'inline', ambiguity: 'compose-tag' });
     expect(authored.unknown).toBeUndefined();
   });
 

@@ -59,6 +59,27 @@ describe('correlateField', () => {
     expect(result.candidates).toHaveLength(2);
   });
 
+  it('matches a boolean layer by its authored text', () => {
+    // A boolean scalar carries authored text like any other Compose scalar; a
+    // `false` earlier layer must not hide the one matching `true` declaration.
+    const result = correlateField(project([
+      { file: 'compose.yaml', source: 'services:\n  api:\n    privileged: false\n' },
+      { file: 'compose.override.yaml', source: 'services:\n  api:\n    privileged: true\n', kind: 'compose-override' },
+    ]), 'api', 'privileged', 'true');
+    expect(result.reason).toBe('override-winner');
+    expect(result.origin).toMatchObject({ file: 'compose.override.yaml', range: { line: 3 } });
+    expect(result.candidates).toHaveLength(2);
+  });
+
+  it('keeps a boolean declared in two layers ambiguous when both match', () => {
+    const result = correlateField(project([
+      { file: 'compose.yaml', source: 'services:\n  api:\n    privileged: true\n' },
+      { file: 'compose.override.yaml', source: 'services:\n  api:\n    privileged: true\n', kind: 'compose-override' },
+    ]), 'api', 'privileged', 'true');
+    expect(result.reason).toBe('ambiguous-multiple-sources');
+    expect(result.origin).toBeUndefined();
+  });
+
   it('returns ambiguous when more than one layer matches', () => {
     const result = correlateField(project([
       { file: 'compose.yaml', source: 'services:\n  api:\n    image: nginx:1\n' },

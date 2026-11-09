@@ -275,7 +275,13 @@ function inlineLabelValueText(value: unknown): string | undefined {
 }
 
 function scalarText(node: Node | null | undefined): string | undefined {
-  return isScalar(node) ? asString((node as Scalar).value) : undefined;
+  if (!isScalar(node)) return undefined;
+  const value = (node as Scalar).value;
+  // YAML 1.2 booleans are Compose-relevant scalars: `privileged: true` renders as
+  // the effective boolean and its authored text is the only thing that tells two
+  // layers apart. Keys are still stringified by the same rule.
+  if (typeof value === 'boolean') return String(value);
+  return asString(value);
 }
 
 interface WalkContext {

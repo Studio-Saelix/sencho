@@ -138,6 +138,46 @@ describe('authored label origins in the stack inventory', () => {
     }
   });
 
+  it('reports a Compose tag marker instead of dropping the label entry', async () => {
+    const cases: Array<{ stack: string; files: Record<string, string>; render: Record<string, string> }> = [
+      {
+        stack: 'label-override-tag-layered',
+        files: {
+          'compose.yaml': 'services:\n  web:\n    image: nginx:1\n    labels:\n      a: base\n      b: base\n',
+          'extra.yml': 'services:\n  web:\n    labels: !override\n      a: over\n',
+          '.env': 'COMPOSE_FILE=compose.yaml:extra.yml\n',
+        },
+        render: { a: 'over' },
+      },
+      {
+        stack: 'label-override-tag-single',
+        files: {
+          'compose.yaml': 'services:\n  web:\n    image: nginx:1\n    labels: !override\n      a: over\n',
+        },
+        render: { a: 'over' },
+      },
+      {
+        stack: 'label-reset-tag',
+        files: {
+          'compose.yaml': 'services:\n  web:\n    image: nginx:1\n    labels: !reset\n      a: over\n',
+        },
+        render: { a: 'over' },
+      },
+    ];
+    for (const entry of cases) {
+      writeStack(entry.stack, entry.files);
+      stubRender({ web: entry.render });
+      stubDocker();
+      const inventory = await buildStackLabelInventory(nodeId, entry.stack);
+      const web = inventory.services.find(service => service.service === 'web')!;
+      // The marker is detected and surfaced; it is never value-matched, so the
+      // row carries a stated reason and no link.
+      expect(web.authored?.a).toEqual({ source: 'inline', ambiguity: 'compose-tag' });
+      expect(web.authored?.a?.file).toBeUndefined();
+      expect(web.authored?.a?.line).toBeUndefined();
+    }
+  });
+
   it('reports an interpolated label_file path as interpolated', async () => {
     writeStack('label-file-interpolated', {
       'compose.yaml': 'services:\n  interp:\n    image: nginx:1.25\n    restart: always\n    label_file: ./${LF:-l2}.labels\n',

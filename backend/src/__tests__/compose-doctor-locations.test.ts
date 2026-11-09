@@ -81,6 +81,42 @@ describe('Compose Doctor authored locations', () => {
     expect(network).toMatchObject({ file: 'compose.yaml', line: 12 });
   });
 
+  it('locates a boolean override that is the only candidate matching the effective value', async () => {
+    const baseValues: Array<[string, string]> = [['a boolean', 'false'], ['a quoted boolean', "'false'"], ['a Compose-negative word', 'no']];
+    for (const [label, baseValue] of baseValues) {
+      const stack = `doctor-boolean-${label.replace(/\W+/g, '-')}`;
+      writeStack(stack, {
+        '.env': 'COMPOSE_FILE=compose.yaml:extra.yml\n',
+        'compose.yaml': [
+          'services:',
+          '  web:',
+          '    image: nginx:1.25',
+          '    restart: always',
+          '    network_mode: none',
+          `    privileged: ${baseValue}`,
+          '',
+        ].join('\n'),
+        'extra.yml': [
+          'services:',
+          '  web:',
+          '    image: nginx:latest',
+          '    privileged: true',
+          '',
+        ].join('\n'),
+      });
+      const project = await buildAuthoredProject(nodeId, stack);
+      const model = {
+        services: [{ name: 'web', image: 'nginx:latest', privileged: true, networkMode: 'none' }],
+      } as unknown as EffectiveModel;
+      // The override is the one declaration that carries the effective value,
+      // even though the base declared the opposite boolean.
+      expect(locateFinding(project, hit('privileged', { service: 'web', sourcePath: 'web' }), model))
+        .toMatchObject({ file: 'extra.yml', line: 4 });
+      expect(locateFinding(project, hit('image-latest', { service: 'web', sourcePath: 'web' }), model))
+        .toMatchObject({ file: 'extra.yml', line: 3 });
+    }
+  });
+
   it('locates an explicit restart: "no" but not an absent restart field', async () => {
     writeStack('doctor-restart-explicit', {
       'compose.yaml': 'services:\n  api:\n    image: nginx:1\n    restart: "no"\n',

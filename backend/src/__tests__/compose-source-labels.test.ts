@@ -347,14 +347,22 @@ describe('authored label contributions', () => {
     expect(correlateLabel(project, 'api', 'a').reason).toBe('unique');
   });
 
-  it('refuses an inline label under a tagged labels map', async () => {
+  it('refuses an inline label under a tagged labels map with a stated tag reason', async () => {
     writeStack('tagged-labels', {
       'compose.yaml': 'services:\n  api:\n    image: nginx:1\n    labels:\n      old: kept\n',
       'compose.override.yaml': 'services:\n  api:\n    labels: !override\n      new: replaced\n',
     });
     const project = await buildAuthoredProject(nodeId, 'tagged-labels');
     expect(correlateLabel(project, 'api', 'old').origin).toBeUndefined();
+    expect(correlateLabel(project, 'api', 'old').reason).toBe('compose-tag');
     expect(correlateLabel(project, 'api', 'new').origin).toBeUndefined();
+    expect(correlateLabel(project, 'api', 'new').reason).toBe('compose-tag');
+    // The same marker in a single file is detected the same way.
+    writeStack('tagged-labels-single', {
+      'compose.yaml': 'services:\n  api:\n    image: nginx:1\n    labels: !override\n      new: replaced\n',
+    });
+    const single = await buildAuthoredProject(nodeId, 'tagged-labels-single');
+    expect(correlateLabel(single, 'api', 'new').reason).toBe('compose-tag');
   });
 
   it('refuses a nested edit origin under a tagged parent mapping', async () => {

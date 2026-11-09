@@ -614,12 +614,14 @@ describe('ComposeLabelsPanel io.sencho.* status', () => {
             { key: 'from.file', value: '1', source: 'compose' as const },
             { key: 'inline.key', value: '2', source: 'compose' as const },
             { key: 'unknown.origin', value: '3', source: 'compose' as const },
+            { key: 'tagged.origin', value: '4', source: 'compose' as const },
           ],
           replicas: [],
           authored: {
             'from.file': { source: 'label-file', file: 'app.labels', fileHash: FILE_HASH, line: 2, column: 1, endLine: 2, endColumn: 12, shared: true },
             'inline.key': { source: 'inline', file: 'compose.yaml', fileHash: FILE_HASH, line: 6, column: 7, endLine: 6, endColumn: 14, overridden: true },
             'unknown.origin': { source: 'inline', ambiguity: 'unparsed-source' },
+            'tagged.origin': { source: 'inline', ambiguity: 'compose-tag' },
           },
         }],
       }),
@@ -631,6 +633,7 @@ describe('ComposeLabelsPanel io.sencho.* status', () => {
     expect(within(card).getByText('shared')).toBeInTheDocument();
     expect(within(card).getByText('inline overrides label file')).toBeInTheDocument();
     expect(within(card).getByText('unreadable')).toBeInTheDocument();
+    expect(within(card).getByText('compose tag')).toBeInTheDocument();
     const fileLink = within(card).getByRole('button', { name: 'Open app.labels at line 2' });
     const inlineLink = within(card).getByRole('button', { name: 'Open compose.yaml at line 6' });
     fileLink.click();

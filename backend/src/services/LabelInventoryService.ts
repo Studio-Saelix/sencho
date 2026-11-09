@@ -110,7 +110,7 @@ export interface LabelAuthoredOrigin {
   shared?: boolean;
   /** The inline `labels:` map overrides a label-file entry for this key. */
   overridden?: boolean;
-  ambiguity?: 'duplicate-key' | 'unparsed-source' | 'interpolated' | 'outside-boundary' | 'multiple-sources';
+  ambiguity?: 'duplicate-key' | 'unparsed-source' | 'interpolated' | 'outside-boundary' | 'multiple-sources' | 'compose-tag';
 }
 
 export interface StackServiceLabelRow {
@@ -325,13 +325,16 @@ export async function buildNodeLabelInventory(
 // An aliased declaration is unresolved; the wire reason stays the stable
 // `unparsed-source` value the client already renders as "unreadable". Every
 // value-matching refusal (two identical declarations, or a later one that
-// contradicts the effective value) is the same wire state: ambiguous.
+// contradicts the effective value) is the same wire state: ambiguous. A
+// `!reset`/`!override` marker is its own state so the row states why no source
+// was claimed instead of silently showing none.
 const WIRE_AMBIGUITY: ReadonlyMap<string, NonNullable<LabelAuthoredOrigin['ambiguity']>> = new Map([
   ['duplicate-key', 'duplicate-key'],
   ['unparsed-source', 'unparsed-source'],
   ['unresolved-alias', 'unparsed-source'],
   ['interpolated', 'interpolated'],
   ['outside-boundary', 'outside-boundary'],
+  ['compose-tag', 'compose-tag'],
   ['multiple-matches', 'multiple-sources'],
   ['multiple-candidates', 'multiple-sources'],
   ['later-candidate', 'multiple-sources'],
