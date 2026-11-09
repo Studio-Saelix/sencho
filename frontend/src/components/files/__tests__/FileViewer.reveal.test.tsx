@@ -242,6 +242,42 @@ describe('FileViewer reveal lifecycle', () => {
     expect(toast.info).toHaveBeenCalledWith(expect.stringMatching(/no longer current/i));
   });
 
+  it('applies a repeat click after the file is reread at the located revision', async () => {
+    mockReadFile
+      .mockResolvedValueOnce(textResult('changed content with a new line\n'))
+      .mockResolvedValueOnce(textResult('B content'));
+    const onRevealApplied = vi.fn();
+    const { rerender } = render(
+      <FileViewer
+        {...defaultProps}
+        selectedPath="b.txt"
+        reveal={revealB}
+        onRevealApplied={onRevealApplied}
+      />,
+    );
+
+    await waitFor(() => expect(onRevealApplied).toHaveBeenCalledTimes(1));
+    expect(h.reveals).toHaveLength(0);
+    expect(toast.info).toHaveBeenCalledTimes(1);
+
+    // The parent clears the refused request; a new click carries a new reveal
+    // object and rereads the file, which now matches the located revision.
+    rerender(<FileViewer {...defaultProps} selectedPath="b.txt" reveal={null} onRevealApplied={onRevealApplied} />);
+    rerender(
+      <FileViewer
+        {...defaultProps}
+        selectedPath="b.txt"
+        reloadKey={1}
+        reveal={{ ...revealB }}
+        onRevealApplied={onRevealApplied}
+      />,
+    );
+
+    await waitFor(() => expect(onRevealApplied).toHaveBeenCalledTimes(2));
+    expect(h.reveals).toHaveLength(1);
+    expect(h.editors[h.editors.length - 1].revealRangeInCenter).toHaveBeenCalledWith(expectedRange);
+  });
+
   it('refuses a range that carries no source revision', async () => {
     mockReadFile.mockResolvedValue(textResult('B content'));
     const onRevealApplied = vi.fn();

@@ -16,13 +16,15 @@ import { toast } from '@/components/ui/toast-store';
 import { isPreflightNoteFinding } from '@/lib/preflightNotes';
 import PreflightPanel from './PreflightPanel';
 
+const LOCATION_HASH = 'a'.repeat(64);
+
 interface Finding {
   ruleId: string;
   severity: 'blocker' | 'high' | 'warning' | 'info';
   title: string;
   message: string;
   sourcePath?: string;
-  location?: { file: string; path?: string; line: number; column: number; endLine: number; endColumn: number };
+  location?: { file: string; path?: string; fileHash?: string; line: number; column: number; endLine: number; endColumn: number };
   remediation?: string;
   service?: string;
   acknowledged?: boolean;
@@ -411,7 +413,7 @@ describe('PreflightPanel', () => {
       findings: [{
         ruleId: 'image-latest', severity: 'warning', title: 'Image uses a moving tag', message: 'latest tag',
         service: 'web', sourcePath: 'web',
-        location: { file: 'compose.override.yaml', path: 'services.web.image', line: 14, column: 12, endLine: 14, endColumn: 22 },
+        location: { fileHash: LOCATION_HASH, file: 'compose.override.yaml', path: 'services.web.image', line: 14, column: 12, endLine: 14, endColumn: 22 },
       }],
     })));
     render(<PreflightPanel stackName="web" onOpenLocation={onOpenLocation} />);
@@ -425,6 +427,21 @@ describe('PreflightPanel', () => {
     });
   });
 
+  it('shows a location without a verifiable revision as plain text, not a dead control', async () => {
+    const onOpenLocation = vi.fn();
+    vi.mocked(apiFetch).mockResolvedValue(jsonRes(report({
+      status: 'warning', highestSeverity: 'warning',
+      findings: [{
+        ruleId: 'image-latest', severity: 'warning', title: 'Image uses a moving tag', message: 'latest tag',
+        service: 'web', sourcePath: 'web',
+        location: { file: 'compose.override.yaml', line: 14, column: 12, endLine: 14, endColumn: 22 },
+      }],
+    })));
+    render(<PreflightPanel stackName="web" onOpenLocation={onOpenLocation} />);
+    expect(await screen.findByTestId('source-location-text')).toHaveTextContent('compose.override.yaml:14');
+    expect(screen.queryByRole('button', { name: /^Open compose\.override/ })).toBeNull();
+  });
+
   it('re-reads the report before opening a location and opens nothing when the fresh read dropped it', async () => {
     const onOpenLocation = vi.fn();
     const located = report({
@@ -432,7 +449,7 @@ describe('PreflightPanel', () => {
       findings: [{
         ruleId: 'image-latest', severity: 'warning', title: 'Image uses a moving tag', message: 'latest tag',
         service: 'web', sourcePath: 'web',
-        location: { file: 'compose.override.yaml', path: 'services.web.image', line: 14, column: 12, endLine: 14, endColumn: 22 },
+        location: { fileHash: LOCATION_HASH, file: 'compose.override.yaml', path: 'services.web.image', line: 14, column: 12, endLine: 14, endColumn: 22 },
       }],
     });
     const dropped = report({
@@ -463,7 +480,7 @@ describe('PreflightPanel', () => {
       findings: [{
         ruleId: 'image-latest', severity: 'warning', title: 'Image uses a moving tag', message: 'latest tag',
         service: 'web', sourcePath: 'web',
-        location: { file: 'compose.override.yaml', path: 'services.web.image', line: 14, column: 12, endLine: 14, endColumn: 22 },
+        location: { fileHash: LOCATION_HASH, file: 'compose.override.yaml', path: 'services.web.image', line: 14, column: 12, endLine: 14, endColumn: 22 },
       }],
     });
     const after = report({
@@ -471,7 +488,7 @@ describe('PreflightPanel', () => {
       findings: [{
         ruleId: 'image-latest', severity: 'warning', title: 'Image uses a moving tag', message: 'latest tag',
         service: 'web', sourcePath: 'web',
-        location: { file: 'compose.override.yaml', path: 'services.web.image', line: 17, column: 12, endLine: 17, endColumn: 22 },
+        location: { fileHash: LOCATION_HASH, file: 'compose.override.yaml', path: 'services.web.image', line: 17, column: 12, endLine: 17, endColumn: 22 },
       }],
     });
     vi.mocked(apiFetch)
@@ -498,15 +515,15 @@ describe('PreflightPanel', () => {
       .mockResolvedValueOnce(jsonRes(report({
         status: 'high', highestSeverity: 'high',
         findings: [
-          { ...shared, location: { file: 'compose.yaml', line: 4, column: 7, endLine: 4, endColumn: 18 } },
-          { ...shared, location: { file: 'compose.yaml', line: 9, column: 7, endLine: 9, endColumn: 18 } },
+          { ...shared, location: { fileHash: LOCATION_HASH, file: 'compose.yaml', line: 4, column: 7, endLine: 4, endColumn: 18 } },
+          { ...shared, location: { fileHash: LOCATION_HASH, file: 'compose.yaml', line: 9, column: 7, endLine: 9, endColumn: 18 } },
         ],
       })))
       .mockResolvedValueOnce(jsonRes(report({
         status: 'high', highestSeverity: 'high',
         findings: [
-          { ...shared, location: { file: 'compose.yaml', line: 12, column: 7, endLine: 12, endColumn: 18 } },
-          { ...shared, location: { file: 'compose.yaml', line: 9, column: 7, endLine: 9, endColumn: 18 } },
+          { ...shared, location: { fileHash: LOCATION_HASH, file: 'compose.yaml', line: 12, column: 7, endLine: 12, endColumn: 18 } },
+          { ...shared, location: { fileHash: LOCATION_HASH, file: 'compose.yaml', line: 9, column: 7, endLine: 9, endColumn: 18 } },
         ],
       })));
     render(<PreflightPanel stackName="web" onOpenLocation={onOpenLocation} />);
@@ -530,15 +547,15 @@ describe('PreflightPanel', () => {
       .mockResolvedValueOnce(jsonRes(report({
         status: 'high', highestSeverity: 'high',
         findings: [
-          { ...shared, location: { file: 'compose.yaml', line: 4, column: 7, endLine: 4, endColumn: 18 } },
-          { ...shared, location: { file: 'compose.yaml', line: 9, column: 7, endLine: 9, endColumn: 18 } },
+          { ...shared, location: { fileHash: LOCATION_HASH, file: 'compose.yaml', line: 4, column: 7, endLine: 4, endColumn: 18 } },
+          { ...shared, location: { fileHash: LOCATION_HASH, file: 'compose.yaml', line: 9, column: 7, endLine: 9, endColumn: 18 } },
         ],
       })))
       .mockResolvedValueOnce(jsonRes(report({
         status: 'high', highestSeverity: 'high',
         findings: [
-          { ...shared, location: { file: 'compose.yaml', line: 12, column: 7, endLine: 12, endColumn: 18 } },
-          { ...shared, location: { file: 'compose.yaml', line: 15, column: 7, endLine: 15, endColumn: 18 } },
+          { ...shared, location: { fileHash: LOCATION_HASH, file: 'compose.yaml', line: 12, column: 7, endLine: 12, endColumn: 18 } },
+          { ...shared, location: { fileHash: LOCATION_HASH, file: 'compose.yaml', line: 15, column: 7, endLine: 15, endColumn: 18 } },
         ],
       })));
     render(<PreflightPanel stackName="web" onOpenLocation={onOpenLocation} />);
@@ -568,8 +585,8 @@ describe('PreflightPanel', () => {
       .mockResolvedValueOnce(jsonRes(report({
         status: 'high', highestSeverity: 'high',
         findings: [
-          { ...shared, location: { file: 'compose.yaml', line: 4, column: 7, endLine: 4, endColumn: 18 } },
-          { ...shared, location: { file: 'compose.yaml', line: 9, column: 7, endLine: 9, endColumn: 18 } },
+          { ...shared, location: { fileHash: LOCATION_HASH, file: 'compose.yaml', line: 4, column: 7, endLine: 4, endColumn: 18 } },
+          { ...shared, location: { fileHash: LOCATION_HASH, file: 'compose.yaml', line: 9, column: 7, endLine: 9, endColumn: 18 } },
         ],
       })))
       .mockResolvedValueOnce(jsonRes(report({
@@ -601,15 +618,15 @@ describe('PreflightPanel', () => {
       .mockResolvedValueOnce(jsonRes(report({
         status: 'high', highestSeverity: 'high',
         findings: [
-          { ...shared, location: { file: 'compose.yaml', line: 4, column: 7, endLine: 4, endColumn: 18 } },
-          { ...shared, location: { file: 'compose.yaml', line: 9, column: 7, endLine: 9, endColumn: 18 } },
+          { ...shared, location: { fileHash: LOCATION_HASH, file: 'compose.yaml', line: 4, column: 7, endLine: 4, endColumn: 18 } },
+          { ...shared, location: { fileHash: LOCATION_HASH, file: 'compose.yaml', line: 9, column: 7, endLine: 9, endColumn: 18 } },
         ],
       })))
       .mockResolvedValueOnce(jsonRes(report({
         status: 'high', highestSeverity: 'high',
         findings: [
-          { ...shared, acknowledged: true, location: { file: 'compose.yaml', line: 12, column: 7, endLine: 12, endColumn: 18 } },
-          { ...shared, acknowledged: true, location: { file: 'compose.yaml', line: 15, column: 7, endLine: 15, endColumn: 18 } },
+          { ...shared, acknowledged: true, location: { fileHash: LOCATION_HASH, file: 'compose.yaml', line: 12, column: 7, endLine: 12, endColumn: 18 } },
+          { ...shared, acknowledged: true, location: { fileHash: LOCATION_HASH, file: 'compose.yaml', line: 15, column: 7, endLine: 15, endColumn: 18 } },
         ],
       })));
     render(<PreflightPanel stackName="web" onOpenLocation={onOpenLocation} />);
@@ -637,15 +654,15 @@ describe('PreflightPanel', () => {
       .mockResolvedValueOnce(jsonRes(report({
         status: 'high', highestSeverity: 'high',
         findings: [
-          { ...shared, location: { file: 'compose.yaml', line: 4, column: 7, endLine: 4, endColumn: 18 } },
-          { ...shared, location: { file: 'compose.yaml', line: 9, column: 7, endLine: 9, endColumn: 18 } },
+          { ...shared, location: { fileHash: LOCATION_HASH, file: 'compose.yaml', line: 4, column: 7, endLine: 4, endColumn: 18 } },
+          { ...shared, location: { fileHash: LOCATION_HASH, file: 'compose.yaml', line: 9, column: 7, endLine: 9, endColumn: 18 } },
         ],
       })))
       .mockResolvedValueOnce(jsonRes(report({
         status: 'high', highestSeverity: 'high',
         findings: [
-          { ...shared, location: { file: 'compose.yaml', line: 9, column: 7, endLine: 9, endColumn: 18 } },
-          { ...shared, location: { file: 'compose.yaml', line: 9, column: 7, endLine: 9, endColumn: 18 } },
+          { ...shared, location: { fileHash: LOCATION_HASH, file: 'compose.yaml', line: 9, column: 7, endLine: 9, endColumn: 18 } },
+          { ...shared, location: { fileHash: LOCATION_HASH, file: 'compose.yaml', line: 9, column: 7, endLine: 9, endColumn: 18 } },
         ],
       })));
     render(<PreflightPanel stackName="web" onOpenLocation={onOpenLocation} />);
@@ -663,11 +680,11 @@ describe('PreflightPanel', () => {
       findings: [
         {
           ruleId: 'image-latest', severity: 'warning', title: 'First', message: 'first',
-          service: 'web', location: { file: 'compose.yaml', line: 4, column: 7, endLine: 4, endColumn: 18 },
+          service: 'web', location: { fileHash: LOCATION_HASH, file: 'compose.yaml', line: 4, column: 7, endLine: 4, endColumn: 18 },
         },
         {
           ruleId: 'privileged', severity: 'high', title: 'Second', message: 'second',
-          service: 'web', location: { file: 'compose.yaml', line: 9, column: 7, endLine: 9, endColumn: 18 },
+          service: 'web', location: { fileHash: LOCATION_HASH, file: 'compose.yaml', line: 9, column: 7, endLine: 9, endColumn: 18 },
         },
       ],
     });
@@ -676,11 +693,11 @@ describe('PreflightPanel', () => {
       findings: [
         {
           ruleId: 'image-latest', severity: 'warning', title: 'First', message: 'first',
-          service: 'web', location: { file: 'compose.yaml', line: 5, column: 7, endLine: 5, endColumn: 18 },
+          service: 'web', location: { fileHash: LOCATION_HASH, file: 'compose.yaml', line: 5, column: 7, endLine: 5, endColumn: 18 },
         },
         {
           ruleId: 'privileged', severity: 'high', title: 'Second', message: 'second',
-          service: 'web', location: { file: 'compose.yaml', line: 9, column: 7, endLine: 9, endColumn: 18 },
+          service: 'web', location: { fileHash: LOCATION_HASH, file: 'compose.yaml', line: 9, column: 7, endLine: 9, endColumn: 18 },
         },
       ],
     });
@@ -689,11 +706,11 @@ describe('PreflightPanel', () => {
       findings: [
         {
           ruleId: 'image-latest', severity: 'warning', title: 'First', message: 'first',
-          service: 'web', location: { file: 'compose.yaml', line: 4, column: 7, endLine: 4, endColumn: 18 },
+          service: 'web', location: { fileHash: LOCATION_HASH, file: 'compose.yaml', line: 4, column: 7, endLine: 4, endColumn: 18 },
         },
         {
           ruleId: 'privileged', severity: 'high', title: 'Second', message: 'second',
-          service: 'web', location: { file: 'compose.yaml', line: 12, column: 7, endLine: 12, endColumn: 18 },
+          service: 'web', location: { fileHash: LOCATION_HASH, file: 'compose.yaml', line: 12, column: 7, endLine: 12, endColumn: 18 },
         },
       ],
     });
@@ -724,7 +741,7 @@ describe('PreflightPanel', () => {
       status: 'warning', highestSeverity: 'warning',
       findings: [{
         ruleId: 'image-latest', severity: 'warning', title: 'Image uses a moving tag', message: 'latest tag',
-        service: 'web', location: { file: 'compose.override.yaml', line: 14, column: 12, endLine: 14, endColumn: 22 },
+        service: 'web', location: { fileHash: LOCATION_HASH, file: 'compose.override.yaml', line: 14, column: 12, endLine: 14, endColumn: 22 },
       }],
     });
     const api = report({ stack: 'api', status: 'pass' });
@@ -751,7 +768,7 @@ describe('PreflightPanel', () => {
       status: 'warning', highestSeverity: 'warning',
       findings: [{
         ruleId: 'image-latest', severity: 'warning', title: 'Image uses a moving tag', message: 'latest tag',
-        service: 'web', location: { file: 'compose.override.yaml', line: 14, column: 12, endLine: 14, endColumn: 22 },
+        service: 'web', location: { fileHash: LOCATION_HASH, file: 'compose.override.yaml', line: 14, column: 12, endLine: 14, endColumn: 22 },
       }],
     });
     const secondNode = report({ status: 'pass' });
@@ -779,7 +796,7 @@ describe('PreflightPanel', () => {
       status: 'warning', highestSeverity: 'warning',
       findings: [{
         ruleId: 'image-latest', severity: 'warning', title: 'Image uses a moving tag', message: 'latest tag',
-        service: 'web', location: { file: 'compose.override.yaml', line: 14, column: 12, endLine: 14, endColumn: 22 },
+        service: 'web', location: { fileHash: LOCATION_HASH, file: 'compose.override.yaml', line: 14, column: 12, endLine: 14, endColumn: 22 },
       }],
     });
     let resolvePending!: (value: Response) => void;
@@ -804,7 +821,7 @@ describe('PreflightPanel', () => {
         findings: [{
           ruleId: 'image-latest', severity: 'warning', title: 'Image uses a moving tag', message: 'latest tag',
           service: 'web', sourcePath: 'web',
-          location: { file: 'compose.override.yaml', path: 'services.web.image', line: 14, column: 12, endLine: 14, endColumn: 22 },
+          location: { fileHash: LOCATION_HASH, file: 'compose.override.yaml', path: 'services.web.image', line: 14, column: 12, endLine: 14, endColumn: 22 },
         }],
       })))
       .mockResolvedValueOnce(jsonRes(null, false));
@@ -823,7 +840,7 @@ describe('PreflightPanel', () => {
       findings: [{
         ruleId: 'healthcheck-inherited', severity: 'info', title: 'Healthcheck inherited from image',
         message: 'Service "web" does not declare a healthcheck in Compose.', service: 'web',
-        location: { file: 'compose.yaml', line: 6, column: 5, endLine: 6, endColumn: 18 },
+        location: { fileHash: LOCATION_HASH, file: 'compose.yaml', line: 6, column: 5, endLine: 6, endColumn: 18 },
       }],
     });
     const dropped = report({
@@ -863,7 +880,7 @@ describe('PreflightPanel', () => {
       findings: [{
         ruleId: 'image-latest', severity: 'warning', title: 'Image uses a moving tag', message: 'latest tag',
         service: 'web', acknowledged: true, acknowledgementId: 7, acknowledgementReason: 'accepted',
-        location: { file: 'compose.yaml', line: 3, column: 12, endLine: 3, endColumn: 20 },
+        location: { fileHash: LOCATION_HASH, file: 'compose.yaml', line: 3, column: 12, endLine: 3, endColumn: 20 },
       }],
     })));
     render(<PreflightPanel stackName="web" onOpenLocation={vi.fn()} />);

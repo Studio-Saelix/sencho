@@ -14,6 +14,7 @@ const location = {
   column: 3,
   endLine: 14,
   endColumn: 20,
+  fileHash: 'a'.repeat(64),
 };
 
 describe('SourceLocationLink', () => {
@@ -45,6 +46,22 @@ describe('SourceLocationLink', () => {
     expect(screen.queryByRole('button')).toBeNull();
     const text = screen.getByTestId('source-location-text');
     expect(text).toHaveTextContent('compose.override.yaml:14');
+    expect(onOpen).not.toHaveBeenCalled();
+  });
+
+  it('renders plain text when the location has no verifiable content revision', () => {
+    const onOpen = vi.fn();
+    render(<SourceLocationLink location={{ ...location, fileHash: undefined }} onOpen={onOpen} />);
+    expect(screen.queryByRole('button')).toBeNull();
+    expect(screen.getByTestId('source-location-text')).toHaveTextContent('compose.override.yaml:14');
+    expect(onOpen).not.toHaveBeenCalled();
+  });
+
+  it('renders plain text when the range itself is unusable', () => {
+    const onOpen = vi.fn();
+    render(<SourceLocationLink location={{ ...location, endLine: 1 }} onOpen={onOpen} />);
+    expect(screen.queryByRole('button')).toBeNull();
+    expect(screen.getByTestId('source-location-text')).toHaveTextContent('compose.override.yaml:14');
     expect(onOpen).not.toHaveBeenCalled();
   });
 });

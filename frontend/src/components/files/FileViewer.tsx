@@ -167,6 +167,14 @@ export function FileViewer({
   editorTokenRef.current = editorToken;
   const [editorBindingVersion, setEditorBindingVersion] = useState(0);
   const appliedRevealRef = useRef<string | null>(null);
+  // The reveal object whose content mismatch was already reported, so one
+  // pending request does not toast on every render while a fresh click can try
+  // again with the newly read revision.
+  const refusedRevealRef = useRef<AuthoredLocation | null>(null);
+  // True while a read is replacing the buffer. A reveal must wait for that
+  // read: judging the old buffer against the new location would refuse a range
+  // that the read in flight is about to make current.
+  const loadInFlightRef = useRef(false);
   const [loading, setLoading] = useState(false);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -234,10 +242,12 @@ export function FileViewer({
       setIsBinary(false);
       setIsOversized(false);
       setError(null);
+      loadInFlightRef.current = false;
       return;
     }
 
     let cancelled = false;
+    loadInFlightRef.current = true;
     setLoading(true);
     setError(null);
     setLoadedPath(null);
@@ -250,6 +260,7 @@ export function FileViewer({
     readStackFile(stackName, selectedPath, { rootId })
       .then((result) => {
         if (cancelled) return;
+        loadInFlightRef.current = false;
         setSize(result.size);
         setLoadedVersion(result.version ?? fsVersionFromMtime(result.mtimeMs) ?? null);
         // Check oversized BEFORE binary: the backend returns oversized:true
@@ -274,10 +285,15 @@ export function FileViewer({
       })
       .catch((e: unknown) => {
         if (cancelled) return;
+        loadInFlightRef.current = false;
         setError(e instanceof Error ? e.message : 'Failed to load file.');
       })
       .finally(() => {
-        if (!cancelled) setLoading(false);
+        if (cancelled) return;
+        // The buffer now reflects this read; the reveal effect reruns on the
+        // content/hash/epoch updates and may apply the range.
+        loadInFlightRef.current = false;
+        setLoading(false);
       });
 
     return () => {
@@ -337,14 +353,19 @@ export function FileViewer({
     // the explorer's discard confirmation is the only path that replaces it.
     if (hasChanges) return;
     if (!reveal || !binding || binding.token !== editorToken || loadedPath !== reveal.file) return;
+    // A read that is replacing the buffer has not produced a verdict yet: the
+    // reveal effect reruns when it completes.
+    if (loadInFlightRef.current) return;
     const key = `${reveal.file}:${reveal.fileHash ?? ''}:${reveal.line}:${reveal.column}:${reveal.endLine}:${reveal.endColumn}`;
     if (appliedRevealRef.current === key) return;
     // The range belongs to one revision. A missing digest cannot be verified,
     // and a digest that does not match the loaded content means the file moved
     // on after the range was computed: open nothing rather than a guessed line.
     if (reveal.fileHash === undefined || loadedHash === null || loadedHash !== reveal.fileHash) {
-      appliedRevealRef.current = key;
-      toast.info('This location is no longer current. The file changed after it was located; refresh and open its link again.');
+      if (refusedRevealRef.current !== reveal) {
+        refusedRevealRef.current = reveal;
+        toast.info('This location is no longer current. The file changed after it was located; refresh and open its link again.');
+      }
       onRevealApplied?.();
       return;
     }
@@ -357,6 +378,7 @@ export function FileViewer({
     if (!reveal) {
       // A cleared request must not suppress the next click on the same line.
       appliedRevealRef.current = null;
+      refusedRevealRef.current = null;
       return;
     }
     applyReveal();
@@ -398,6 +420,7 @@ export function FileViewer({
   if (isBinary) {
     const handleForceText = async () => {
       const requestedPath = selectedPath;
+      loadInFlightRef.current = true;
       setLoading(true);
       setError(null);
       try {
@@ -406,6 +429,7 @@ export function FileViewer({
         // file while the override request was in flight. Drop the response
         // rather than stomp on the new file's state.
         if (selectedPathRef.current !== requestedPath) return;
+        loadInFlightRef.current = false;
         setSize(result.size);
         setLoadedVersion(result.version ?? fsVersionFromMtime(result.mtimeMs) ?? null);
         if (result.oversized) {
@@ -424,11 +448,15 @@ export function FileViewer({
         }
       } catch (e) {
         if (selectedPathRef.current !== requestedPath) return;
+        loadInFlightRef.current = false;
         const message = e instanceof Error ? e.message : 'Failed to load file as text.';
         setError(message);
         toast.error(message);
       } finally {
-        if (selectedPathRef.current === requestedPath) setLoading(false);
+        if (selectedPathRef.current === requestedPath) {
+          loadInFlightRef.current = false;
+          setLoading(false);
+        }
       }
     };
     return (
