@@ -491,10 +491,10 @@ export function correlateLabel(
   const tier = contributions.filter(contribution => contribution.source === winner.source);
   const winnerValue = authoredLabelContributionValueOf(winner);
   if (winnerValue !== undefined) {
-    const target = effectiveValue ?? winnerValue;
+    const target = normalizeForCompare('labels', effectiveValue ?? winnerValue);
     const matches = tier.filter((contribution) => {
       const value = authoredLabelContributionValueOf(contribution);
-      return value !== undefined && normalizeForCompare('labels', value) === normalizeForCompare('labels', target);
+      return value !== undefined && normalizeForCompare('labels', value) === target;
     });
     if (matches.length === 0) {
       return tier.length === 1
@@ -700,20 +700,20 @@ export function resolveEditOrigin(
   if (split.kind === 'ambiguous-multiple') return { ok: false, reason: 'ambiguous-multiple-sources' };
   if (split.kind === 'ambiguous-unparsed') return { ok: false, reason: 'ambiguous-unparsed-source' };
   const labelPrefix = 'labels.';
-  const result = split.field.startsWith(labelPrefix)
-    ? correlateLabel(project, split.service, split.field.slice(labelPrefix.length))
-    : correlateField(project, split.service, split.field);
+  const labelKey = split.field.startsWith(labelPrefix) ? split.field.slice(labelPrefix.length) : undefined;
+  const result = labelKey === undefined
+    ? correlateField(project, split.service, split.field)
+    : correlateLabel(project, split.service, labelKey);
   if (!isActingReason(result.reason) || !result.origin) return { ok: false, reason: result.reason };
   // This door has no effective value, so it cannot tell two declarations of the
   // same key apart. An edit provider must not be sent to the one that merely
   // sorts last: only a key with a single candidate in the winning source tier
   // is safe to edit.
-  if (split.field.startsWith(labelPrefix)) {
-    const key = split.field.slice(labelPrefix.length);
+  if (labelKey !== undefined) {
     const labels = project.labels.get(split.service);
-    const winner = labels?.winners[key];
+    const winner = labels?.winners[labelKey];
     const tier = winner
-      ? (labels?.contributionsByKey.get(key) ?? []).filter(contribution => contribution.source === winner.source)
+      ? (labels?.contributionsByKey.get(labelKey) ?? []).filter(contribution => contribution.source === winner.source)
       : [];
     if (tier.length > 1) return { ok: false, reason: 'ambiguous-multiple-sources' };
   }

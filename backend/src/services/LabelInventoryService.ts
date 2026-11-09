@@ -322,6 +322,21 @@ export async function buildNodeLabelInventory(
   };
 }
 
+// An aliased declaration is unresolved; the wire reason stays the stable
+// `unparsed-source` value the client already renders as "unreadable". Every
+// value-matching refusal (two identical declarations, or a later one that
+// contradicts the effective value) is the same wire state: ambiguous.
+const WIRE_AMBIGUITY: ReadonlyMap<string, NonNullable<LabelAuthoredOrigin['ambiguity']>> = new Map([
+  ['duplicate-key', 'duplicate-key'],
+  ['unparsed-source', 'unparsed-source'],
+  ['unresolved-alias', 'unparsed-source'],
+  ['interpolated', 'interpolated'],
+  ['outside-boundary', 'outside-boundary'],
+  ['multiple-matches', 'multiple-sources'],
+  ['multiple-candidates', 'multiple-sources'],
+  ['later-candidate', 'multiple-sources'],
+]);
+
 /**
  * The authored origin of each declared key. Exported so the large-input
  * regression test can prove a per-key lookup never scans the flat
@@ -368,17 +383,8 @@ export function authoredOriginsFor(
       continue;
     }
     const kind = result.ambiguity?.kind;
-    // An aliased declaration is unresolved; the wire reason stays the stable
-    // `unparsed-source` value the client already renders as "unreadable". Every
-    // value-matching refusal (two identical declarations, or a later one that
-    // contradicts the effective value) is the same wire state: ambiguous.
-    const wireKind = kind === 'unresolved-alias'
-      ? 'unparsed-source'
-      : kind === 'multiple-matches' || kind === 'multiple-candidates' || kind === 'later-candidate'
-        ? 'multiple-sources'
-        : kind;
-    if (wireKind === 'duplicate-key' || wireKind === 'unparsed-source' || wireKind === 'interpolated'
-      || wireKind === 'outside-boundary' || wireKind === 'multiple-sources') {
+    const wireKind = kind === undefined ? undefined : WIRE_AMBIGUITY.get(kind);
+    if (wireKind) {
       const winner = serviceLabels?.winners[key];
       out[key] = {
         ...(winner ? { source: winner.source } : {}),

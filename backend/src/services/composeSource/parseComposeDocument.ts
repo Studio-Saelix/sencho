@@ -930,9 +930,7 @@ export function parseComposeDocument(input: ParseComposeDocumentInput): ParsedCo
     for (const error of doc.errors) {
       const duplicate = error.code === 'DUPLICATE_KEY';
       const code: AuthoredDiagnosticCode = duplicate ? 'duplicate-key' : 'malformed-yaml';
-      const range = (duplicate && error.pos
-        ? keyRanges?.get(error.pos[0])
-        : undefined) ?? parseErrorRange(error);
+      const range = (duplicate ? keyRanges?.get(error.pos[0]) : undefined) ?? parseErrorRange(error);
       addDiagnostic(empty.diagnostics, input.file, code, range);
     }
     return { ...empty, state: 'parse-failed' };
