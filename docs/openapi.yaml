@@ -441,9 +441,9 @@ components:
           type: object
           required: [id, instanceIdentity]
           description: >-
-            The node this inventory is about, in the numbering of the instance
-            that answered. A proxied read reports the identity the hub selected,
-            so a hub's clients always see that hub's node id and name.
+            The node this inventory is about. A direct read uses the answering
+            instance's numbering; a proxied read reports the identity the hub
+            selected, so a hub's clients always see that hub's node id and name.
           properties:
             id: { type: integer }
             name: { type: string, nullable: true }
