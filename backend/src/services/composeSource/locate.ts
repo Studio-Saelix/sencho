@@ -251,9 +251,12 @@ function authoredHostMatchesEffective(
   // port, so the range is the source of every single-port publication inside
   // it. A renderer that keeps the range collapsed reports one publication with
   // the exact span; that publication is this declaration's only source, and a
-  // different port inside the span came from another declaration.
+  // different port (or interface or protocol) inside the span came from
+  // another declaration.
   const collapsed = effectivePorts.find(port => !port.dynamic
-    && port.startPort === start && port.endPort === end);
+    && port.startPort === start && port.endPort === end
+    && sameInterface(port.hostIp, spec.hostIp)
+    && sameProtocol(port.protocol, spec.protocol));
   if (collapsed) return collapsed === spec;
   return spec.startPort === spec.endPort && spec.startPort >= start && spec.startPort <= end;
 }

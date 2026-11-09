@@ -713,6 +713,45 @@ describe('Compose Doctor authored locations', () => {
     }), model)).toBeUndefined();
   });
 
+  it('locates an expanded range beside a collapsed range on another interface', async () => {
+    writeStack('doctor-port-conflict-mixed-representation', {
+      'compose.yaml': [
+        'services:',
+        '  s:',
+        '    image: nginx:1.2',
+        '    ports:',
+        '      - "127.0.0.1:5000-5255:80"',
+        '      - "10.0.0.9:5000-5255:80-335"',
+        '  t:',
+        '    image: nginx:1.2',
+        '    ports:',
+        '      - "10.0.0.9:5100:99"',
+        '',
+      ].join('\n'),
+    });
+    const project = await buildAuthoredProject(nodeId, 'doctor-port-conflict-mixed-representation');
+    // Compose keeps the loopback host-range-to-one-port form collapsed and
+    // expands the equal-length 10.0.0.9 range. The collapsed publication on a
+    // different interface is not this declaration's source.
+    const model = {
+      services: [
+        {
+          name: 's',
+          ports: [
+            { startPort: 5000, endPort: 5255, hostIp: '127.0.0.1', protocol: 'tcp' },
+            { startPort: 5100, endPort: 5100, hostIp: '10.0.0.9', protocol: 'tcp' },
+          ],
+        },
+        { name: 't', ports: [{ startPort: 5100, endPort: 5100, hostIp: '10.0.0.9', protocol: 'tcp' }] },
+      ],
+    } as unknown as EffectiveModel;
+    expect(locateFinding(project, hit('port-conflict-internal', {
+      subject: { kind: 'port', key: '5100/tcp' },
+    }), model)).toMatchObject({
+      file: 'compose.yaml', line: 6, path: 'services.s.ports[1]',
+    });
+  });
+
   it('refuses a conflict location when any participating publication is ambiguous', async () => {
     const model = {
       services: [
