@@ -27,7 +27,10 @@ const saveChains = new Map<string, Promise<void>>();
  * order they were sent the order they were applied, so every reply holds the
  * rows of the saves before it and a later reply is always the newer one. A save
  * that fails, or whose reply does not come within `SAVE_TIMEOUT_MS`, does not
- * hold up the ones behind it.
+ * hold up the ones behind it. Abandoning a save's request does not stop the node
+ * working on it, so a timed-out save may still be applied later; the node applies
+ * saves to a stack in the order they reach it, so it lands before the saves
+ * sent after it and never replaces one that was confirmed.
  */
 function inOrder<T>(key: string, run: () => Promise<T>): Promise<T> {
   const turn = (saveChains.get(key) ?? Promise.resolve()).then(run);
@@ -50,7 +53,8 @@ async function putExposureIntent(
   intent: ExposureIntent | null,
   nodeId?: number,
 ): Promise<IntentEntry[] | null> {
-  // A request that never settles would hold every later save to this stack behind it.
+  // A request that never settles would hold every later save to this stack behind it. The abort
+  // only frees this browser: the node may still apply the save, ahead of any save sent after it.
   const abort = new AbortController();
   const timer = setTimeout(() => abort.abort(), SAVE_TIMEOUT_MS);
   try {

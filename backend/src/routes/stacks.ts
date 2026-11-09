@@ -96,6 +96,7 @@ import { filterContainersByComposeService } from '../helpers/composeServiceMatch
 import { invalidateNodeCaches } from '../helpers/cacheInvalidation';
 import { invalidateNodeNetworkingAggregate } from '../services/network/networkingAggregateCache';
 import { auditActorUsername } from '../helpers/auditActor';
+import { inArrivalOrder } from '../helpers/arrivalOrder';
 import { invalidateFleetUpdateCache } from '../helpers/fleetUpdateCache';
 import {
   ImageUpdateService,
@@ -2266,30 +2267,38 @@ stacksRouter.get('/:stackName/exposure', async (req: Request, res: Response) => 
   }
 });
 
-stacksRouter.put('/:stackName/exposure', async (req: Request, res: Response) => {
+// Applied in the order saves reach the node, per stack. Validating the stack is
+// asynchronous, so without the queue a save that stalls there (and whose client
+// has since given up on it) would be applied after a later save that already
+// replied, and undo it. A client that abandoned a save cannot know the node has
+// stopped working on it; the order here is what keeps the later save final.
+stacksRouter.put('/:stackName/exposure', (req: Request, res: Response) => {
   const stackName = req.params.stackName as string;
   if (!requirePermission(req, res, 'stack:edit', 'stack', stackName)) return;
-  if (!(await requireStackExists(req.nodeId, stackName, res))) return;
-  const parsed = ExposurePutSchema.safeParse(req.body);
-  if (!parsed.success) {
-    res.status(400).json({ error: 'Invalid exposure intent' });
-    return;
-  }
-  const { service, intent } = parsed.data;
-  try {
-    if (intent === null) {
-      DatabaseService.getInstance().deleteStackExposureIntent(req.nodeId, stackName, service);
-    } else {
-      DatabaseService.getInstance().setStackExposureIntent(req.nodeId, stackName, service, intent, req.user?.username ?? null);
+  const nodeId = req.nodeId;
+  return inArrivalOrder(`${nodeId}\0${stackName}`, async () => {
+    if (!(await requireStackExists(nodeId, stackName, res))) return;
+    const parsed = ExposurePutSchema.safeParse(req.body);
+    if (!parsed.success) {
+      res.status(400).json({ error: 'Invalid exposure intent' });
+      return;
     }
-    // Networking findings depend on intent; drop its memo so the finding is re-checked at once.
-    invalidateNodeNetworkingAggregate(req.nodeId);
-    res.json(exposurePayload(req.nodeId, stackName));
-  } catch (error) {
-    console.error('[Stacks] Failed to save exposure intent for %s:', sanitizeForLog(stackName),
-      sanitizeForLog(getErrorMessage(error, 'unknown')));
-    res.status(500).json({ error: 'Failed to save exposure intent' });
-  }
+    const { service, intent } = parsed.data;
+    try {
+      if (intent === null) {
+        DatabaseService.getInstance().deleteStackExposureIntent(nodeId, stackName, service);
+      } else {
+        DatabaseService.getInstance().setStackExposureIntent(nodeId, stackName, service, intent, req.user?.username ?? null);
+      }
+      // Networking findings depend on intent; drop its memo so the finding is re-checked at once.
+      invalidateNodeNetworkingAggregate(nodeId);
+      res.json(exposurePayload(nodeId, stackName));
+    } catch (error) {
+      console.error('[Stacks] Failed to save exposure intent for %s:', sanitizeForLog(stackName),
+        sanitizeForLog(getErrorMessage(error, 'unknown')));
+      res.status(500).json({ error: 'Failed to save exposure intent' });
+    }
+  });
 });
 
 // Update guard: readiness reports computed on demand from existing stores
