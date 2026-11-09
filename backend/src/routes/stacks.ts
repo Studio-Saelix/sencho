@@ -2267,7 +2267,7 @@ stacksRouter.get('/:stackName/exposure', async (req: Request, res: Response) => 
   }
 });
 
-// Applied in the order saves reach the node, per stack. Validating the stack is
+// Applied in the order saves reach the node that owns the stack, per stack. Validating the stack is
 // asynchronous, so without the queue a save that stalls there (and whose client
 // has since given up on it) would be applied after a later save that already
 // replied, and undo it. A client that abandoned a save cannot know the node has

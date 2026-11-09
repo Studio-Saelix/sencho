@@ -29,7 +29,7 @@ const saveChains = new Map<string, Promise<void>>();
  * that fails, or whose reply does not come within `SAVE_TIMEOUT_MS`, does not
  * hold up the ones behind it here. Abandoning a save's request does not stop the
  * node working on it, so a timed-out save may still be applied later. The node
- * applies saves to a stack in the order they reach it, so once it has received
+ * applies saves to a stack in the order they reach the node that owns it, so once it has received
  * the timed-out save it applies it before the saves sent after it, and a later
  * save waits behind it there if it is stalled.
  */
