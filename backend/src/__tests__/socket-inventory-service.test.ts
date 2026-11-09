@@ -10,6 +10,8 @@ import {
   describeDockerEndpoint,
   loadSocketInventory,
   MAX_INVENTORY_CONTAINERS,
+  parseSocketNodeIdentity,
+  serializeSocketNodeIdentity,
   SocketInventoryUnavailableError,
   type SocketInventoryBuildInput,
   type SocketInventoryDeps,
@@ -1558,6 +1560,43 @@ describe('buildSocketInventory classification', () => {
     }
   });
 
+  it('bounds one 60 kB label in linear time instead of stalling the node', () => {
+    // The QA case: a stack author labels one container with 60,000 'A's and
+    // every inventory call blocked the node's event loop for seconds because
+    // the redaction pass ran over the whole untrusted value.
+    const started = Date.now();
+    const inventory = buildSocketInventory(input({
+      containers: [proxyRow({ labels: { 'evil.big': 'A'.repeat(60_000) } })],
+    }));
+    expect(Date.now() - started).toBeLessThan(1000);
+    const [container] = inventory.containers;
+    const label = container.labels.find(entry => entry.key === 'evil.big');
+    expect(label?.value.length).toBeLessThanOrEqual(256);
+  });
+
+  it('bounds a multi-megabyte label in linear time', () => {
+    const started = Date.now();
+    const inventory = buildSocketInventory(input({
+      containers: [proxyRow({ labels: { 'evil.huge': 'A'.repeat(2 * 1024 * 1024) } })],
+    }));
+    expect(Date.now() - started).toBeLessThan(1000);
+    expect(inventory.containers[0].labels[0].value.length).toBeLessThanOrEqual(256);
+  });
+
+  it('reports the target identity a hub supplied without relabelling the producing instance', () => {
+    const inventory = buildSocketInventory(input({
+      nodeIdentity: { id: 12, name: 'sencho-test-02', type: 'remote', mode: 'pilot_agent' },
+      containers: [],
+    }));
+    expect(inventory.node).toEqual({
+      id: 12,
+      name: 'sencho-test-02',
+      type: 'remote',
+      mode: 'pilot_agent',
+      instanceIdentity: 'instance-fingerprint',
+    });
+  });
+
   it('marks a truncated scan partial and names the bound', () => {
     const inventory = buildSocketInventory(input({
       listedContainers: MAX_INVENTORY_CONTAINERS + 1,
@@ -1929,7 +1968,7 @@ describe('loadSocketInventory', () => {
     }
   });
 
-  it('stamps the producing node identity so a hub cannot relabel it', async () => {
+  it('stamps the producing instance identity so a hub cannot relabel it', async () => {
     const inventory = await loadSocketInventory(1, deps());
     expect(inventory.node).toEqual({
       id: 1,
@@ -1938,5 +1977,37 @@ describe('loadSocketInventory', () => {
       mode: 'proxy',
       instanceIdentity: 'instance-fingerprint',
     });
+  });
+});
+
+describe('parseSocketNodeIdentity', () => {
+  function encode(payload: unknown): string {
+    return Buffer.from(JSON.stringify(payload), 'utf8').toString('base64url');
+  }
+
+  it('accepts the exact identity shape a hub sends, including a Unicode name', () => {
+    expect(parseSocketNodeIdentity(serializeSocketNodeIdentity({
+      id: 12, name: 'sencho-test-02 🚀', type: 'remote', mode: 'pilot_agent',
+    }))).toEqual({ id: 12, name: 'sencho-test-02 🚀', type: 'remote', mode: 'pilot_agent' });
+  });
+
+  it.each([
+    ['not an encoded value', 'not-json'],
+    ['an array', encode([])],
+    ['a missing id', encode({ name: 'n', type: 'remote', mode: 'proxy' })],
+    ['a non-integer id', encode({ id: 1.5, name: 'n', type: 'remote', mode: 'proxy' })],
+    ['a zero id', encode({ id: 0, name: 'n', type: 'remote', mode: 'proxy' })],
+    ['an empty name', encode({ id: 2, name: '', type: 'remote', mode: 'proxy' })],
+    ['an unknown type', encode({ id: 2, name: 'n', type: 'agent', mode: 'proxy' })],
+    ['an unknown mode', encode({ id: 2, name: 'n', type: 'remote', mode: 'relay' })],
+  ])('ignores %s rather than partly applying it', (_shape, raw) => {
+    expect(parseSocketNodeIdentity(raw)).toBeNull();
+  });
+
+  it('bounds an oversized name', () => {
+    const identity = parseSocketNodeIdentity(serializeSocketNodeIdentity({
+      id: 2, name: 'n'.repeat(1000), type: 'remote', mode: 'proxy',
+    }));
+    expect(identity?.name?.length ?? 0).toBeLessThanOrEqual(256);
   });
 });

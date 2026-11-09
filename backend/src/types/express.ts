@@ -58,6 +58,17 @@ declare global {
        * passes for a non-admin user. Resets to undefined after the hop.
        */
       proxyElevatedRole?: 'node-admin';
+      /**
+       * The selected node's identity in this hub's numbering, attached to a
+       * socket-inventory hop so the node that produces the answer reports the
+       * node the caller asked about rather than its own local node.
+       */
+      proxyNodeIdentity?: {
+        id: number;
+        name: string;
+        type: 'local' | 'remote';
+        mode: 'proxy' | 'pilot_agent';
+      };
       /** Verified registry delivery envelope for the current classified operation. */
       registryDeliveryEnvelope?: import('../helpers/registryDeliveryContext').RegistryDeliveryEnvelope;
       /** Abort controller wired for registry delivery disconnect handling. */

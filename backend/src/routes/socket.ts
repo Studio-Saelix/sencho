@@ -2,10 +2,28 @@ import { Router, type Request, type Response } from 'express';
 import { requirePermission } from '../middleware/permissions';
 import {
   loadSocketInventory,
+  parseSocketNodeIdentity,
   SocketInventoryUnavailableError,
+  type SocketNodeIdentity,
 } from '../services/socket/SocketInventoryService';
+import { PROXY_NODE_IDENTITY_HEADER } from '../services/license-headers';
 import { withTimeout, TimeoutError } from '../utils/withTimeout';
 import { errorMessageForLog } from '../utils/safeLog';
+
+/**
+ * The target node identity a hub attached to this proxied read, or null.
+ *
+ * A remote numbers its own nodes from one, so it cannot know the hub's id and
+ * name for the node that was selected. Only a node-to-node hop may state it;
+ * a browser or API client cannot, and a malformed value is ignored rather than
+ * partly applied.
+ */
+function proxiedNodeIdentity(req: Request): SocketNodeIdentity | null {
+  if (!req.machineAuthScope) return null;
+  const raw = req.headers[PROXY_NODE_IDENTITY_HEADER];
+  if (typeof raw !== 'string') return null;
+  return parseSocketNodeIdentity(raw);
+}
 
 /** Bound on one node's discovery read so a hung Docker socket cannot pin a request. */
 export const SOCKET_INVENTORY_TIMEOUT_MS = 15_000;
@@ -15,10 +33,11 @@ export const socketRouter = Router();
 /**
  * Read-only Docker socket access inventory for the request's node.
  *
- * The response is produced by the node that owns the Docker daemon, so the
- * ordinary remote proxy serves a remote node without the hub relabelling it.
- * A Docker read failure answers 503 and a timeout answers 504; an empty 200 is
- * only ever "discovery completed", never "no Docker access".
+ * The response is produced by the node that owns the Docker daemon. That node
+ * numbers its own nodes from one, so a proxied read reports the target identity
+ * the hub attached to the hop while `instanceIdentity` stays the producing
+ * instance's own. A Docker read failure answers 503 and a timeout answers 504;
+ * an empty 200 is only ever "discovery completed", never "no Docker access".
  */
 socketRouter.get('/inventory', async (req: Request, res: Response): Promise<void> => {
   // Authorize the exact target node: a global Deployer with a Node Admin
@@ -27,7 +46,7 @@ socketRouter.get('/inventory', async (req: Request, res: Response): Promise<void
   if (!requirePermission(req, res, 'node:read', 'node', String(req.nodeId))) return;
   try {
     const inventory = await withTimeout(
-      loadSocketInventory(req.nodeId),
+      loadSocketInventory(req.nodeId, undefined, proxiedNodeIdentity(req)),
       SOCKET_INVENTORY_TIMEOUT_MS,
       'socket inventory',
     );

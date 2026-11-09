@@ -192,7 +192,11 @@ export interface SocketInventory {
     name: string | null;
     type: Node['type'] | null;
     mode: Node['mode'] | null;
-    /** Hashed control-instance identity; a hub must not relabel this inventory as another node's. */
+    /**
+     * Hashed identity of the instance that produced this inventory. A hub
+     * reports its own id and name for a proxied read but never rewrites this,
+     * so the evidence always names its producer.
+     */
     instanceIdentity: string | null;
   };
   generatedAt: number;
@@ -210,6 +214,57 @@ export interface SocketInventory {
   endpoint: SocketInventoryEndpoint;
   containers: SocketInventoryContainer[];
   errors: SocketInventoryError[];
+}
+
+/**
+ * The node identity a hub asked this instance to report for a proxied read.
+ *
+ * A remote instance numbers its own nodes from one and has never heard of the
+ * hub's numbering, so a proxied inventory carries the identity the hub
+ * selected. `instanceIdentity` is not part of this: it stays the producing
+ * instance's own fingerprint.
+ */
+export interface SocketNodeIdentity {
+  id: number;
+  name: string | null;
+  type: Node['type'] | null;
+  mode: Node['mode'] | null;
+}
+
+/**
+ * Encode a target identity for the trusted hop header.
+ *
+ * Base64url keeps the value ASCII however the node is named: a header value
+ * cannot carry UTF-8, and a node name is arbitrary Unicode text.
+ */
+export function serializeSocketNodeIdentity(identity: SocketNodeIdentity): string {
+  return Buffer.from(JSON.stringify(identity), 'utf8').toString('base64url');
+}
+
+/**
+ * Parse the hub-supplied target identity header.
+ *
+ * Trusted only under machine auth by the caller. Anything that is not the
+ * exact shape is ignored rather than partially applied, so a malformed value
+ * can never relabel a node while leaving another field from the remote's own
+ * numbering.
+ */
+export function parseSocketNodeIdentity(raw: string): SocketNodeIdentity | null {
+  if (raw.length > 4096) return null;
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(Buffer.from(raw, 'base64url').toString('utf8'));
+  } catch {
+    return null;
+  }
+  if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) return null;
+  const value = parsed as Record<string, unknown>;
+  const { id, name, type, mode } = value;
+  if (typeof id !== 'number' || !Number.isInteger(id) || id < 1) return null;
+  if (typeof name !== 'string' || name.length === 0) return null;
+  if (type !== 'local' && type !== 'remote') return null;
+  if (mode !== 'proxy' && mode !== 'pilot_agent') return null;
+  return { id, name: bound(name, 256), type, mode };
 }
 
 /** A failed socket inventory read. The route maps this to 503, never to an empty 200. */
@@ -231,6 +286,8 @@ interface SocketSelfInfo {
 export interface SocketInventoryBuildInput {
   nodeId: number;
   node: Node | undefined;
+  /** A hub's identity for the node this proxied read was asked about. */
+  nodeIdentity?: SocketNodeIdentity | null;
   instanceIdentity: string;
   listedContainers: number;
   truncated: boolean;
@@ -270,8 +327,28 @@ function bound(value: string, max: number): string {
   return value.length > max ? `${value.slice(0, max - 3)}...` : value;
 }
 
+/**
+ * Extra characters redacted past the response bound so a credential that
+ * straddles it is still replaced, not merely cut. Covers the redaction rules'
+ * own limits: the longest URL-credential password is 1024 characters, and the
+ * replacement text it becomes is shorter than what it replaces.
+ */
+const REDACTION_MARGIN = 2048;
+
+/**
+ * Bound untrusted metadata before the redaction pass.
+ *
+ * The response never shows more than `max` characters, so redacting a bounded
+ * prefix produces the same visible text at a cost independent of the input
+ * size. Redacting the whole value first let one 60 kB container label spend
+ * seconds in the regexes and block the event loop for every other request on
+ * the node; Docker metadata is attacker-controlled through any stack author.
+ */
 function safeText(value: string, max: number): string {
-  return bound(redactSensitiveText(value), max);
+  const prefix = value.length > max + REDACTION_MARGIN
+    ? value.slice(0, max + REDACTION_MARGIN)
+    : value;
+  return bound(redactSensitiveText(prefix), max);
 }
 
 function bindsAllInterfaces(ip: string | null): boolean {
@@ -1198,13 +1275,17 @@ export function buildSocketInventory(input: SocketInventoryBuildInput): SocketIn
     : 'complete';
 
   const node = input.node;
+  // A remote instance numbers its own nodes from one, so a proxied read reports
+  // the identity the hub selected. The producing instance's fingerprint stays
+  // its own either way.
+  const requested = input.nodeIdentity ?? null;
   return {
     schemaVersion: 1,
     node: {
-      id: input.nodeId,
-      name: node?.name ?? null,
-      type: node?.type ?? null,
-      mode: node?.mode ?? null,
+      id: requested ? requested.id : input.nodeId,
+      name: requested ? requested.name : node?.name ?? null,
+      type: requested ? requested.type : node?.type ?? null,
+      mode: requested ? requested.mode : node?.mode ?? null,
       instanceIdentity: input.instanceIdentity ? bound(input.instanceIdentity, 64) : null,
     },
     generatedAt: input.generatedAt,
@@ -1270,10 +1351,15 @@ async function readSelf(
   };
 }
 
-/** Collect one node-scoped snapshot. Throws when the container list itself cannot be read. */
+/**
+ * Collect one node-scoped snapshot. Throws when the container list itself
+ * cannot be read. `nodeIdentity` is set only for a proxied read, where the
+ * hub's numbering is the one the response must speak.
+ */
 export async function loadSocketInventory(
   nodeId: number,
   deps: SocketInventoryDeps = defaultDeps(nodeId),
+  nodeIdentity: SocketNodeIdentity | null = null,
 ): Promise<SocketInventory> {
   const started = deps.now();
   const errors: SocketInventoryError[] = [];
@@ -1323,9 +1409,13 @@ export async function loadSocketInventory(
     endpointProvider = { state: 'none', reason: 'The Docker endpoint is not a tcp address.' };
   }
 
-  return buildSocketInventory({
+  // Assembly (classification, redaction, and projection) is part of the read:
+  // measuring only the Docker calls hid seconds of work behind a short
+  // durationMs.
+  const inventory = buildSocketInventory({
     nodeId,
     node: deps.node(nodeId),
+    nodeIdentity,
     instanceIdentity: deps.instanceIdentity(),
     listedContainers,
     truncated,
@@ -1334,7 +1424,9 @@ export async function loadSocketInventory(
     endpoint,
     endpointProvider,
     generatedAt: deps.now(),
-    durationMs: Math.max(0, deps.now() - started),
+    durationMs: 0,
     errors,
   });
+  inventory.durationMs = Math.max(0, deps.now() - started);
+  return inventory;
 }

@@ -440,6 +440,10 @@ components:
         node:
           type: object
           required: [id, instanceIdentity]
+          description: >-
+            The node this inventory is about, in the numbering of the instance
+            that answered. A proxied read reports the identity the hub selected,
+            so a hub's clients always see that hub's node id and name.
           properties:
             id: { type: integer }
             name: { type: string, nullable: true }
@@ -448,7 +452,7 @@ components:
             instanceIdentity:
               type: string
               nullable: true
-              description: Hashed identity of the instance that produced this inventory. A hub must not relabel it as another node's inventory.
+              description: Hashed identity of the instance that produced this inventory. It is never rewritten, so a client can tell which instance produced the evidence.
         generatedAt: { type: integer, description: Epoch milliseconds when this snapshot was produced. }
         durationMs: { type: integer }
         status:
@@ -2840,8 +2844,10 @@ paths:
         endpoint transport without assuming `/var/run/docker.sock`, and keeps
         proxy candidates and undetermined rows distinct from detected proxies.
 
-        The response is produced by the node that owns the Docker daemon, so a
-        remote node's inventory is never relabelled as the control instance's.
+        The response is produced by the node that owns the Docker daemon. A
+        remote numbers its own nodes from one, so a proxied read reports the
+        selected node's id, name, and mode in the hub's numbering while
+        `node.instanceIdentity` stays the producing instance's fingerprint.
         A Docker read failure is `503` and a timeout is `504`; an empty
         `containers` array means discovery completed and found no matching
         targets, not that the node has no Docker access. Transport failures on

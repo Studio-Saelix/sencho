@@ -7,7 +7,13 @@ import { describe, it, expect, beforeAll, afterAll, beforeEach, afterEach, vi } 
 import request from 'supertest';
 import http from 'http';
 import bcrypt from 'bcrypt';
-import { setupTestDb, cleanupTestDb, loginAsTestAdmin } from './helpers/setupTestDb';
+import jwt from 'jsonwebtoken';
+import { setupTestDb, cleanupTestDb, loginAsTestAdmin, TEST_JWT_SECRET } from './helpers/setupTestDb';
+import { PROXY_NODE_IDENTITY_HEADER } from '../services/license-headers';
+import {
+  parseSocketNodeIdentity,
+  serializeSocketNodeIdentity,
+} from '../services/socket/SocketInventoryService';
 import { requestedTimeoutBudgets, resetRequestedTimeoutBudgets } from './helpers/fastTimeouts';
 
 const { loadSocketInventoryMock } = vi.hoisted(() => ({
@@ -41,6 +47,7 @@ let legacyNodeId: number;
 let unreachableNodeId: number;
 const remoteHops: string[] = [];
 const remoteRoles: Array<{ path: string; role: string | undefined }> = [];
+const remoteIdentities: Array<{ path: string; identity: string | undefined }> = [];
 
 const inventory = {
   schemaVersion: 1,
@@ -100,6 +107,12 @@ beforeAll(async () => {
         ? req.headers['x-sencho-actor-role']
         : undefined,
     });
+    remoteIdentities.push({
+      path,
+      identity: typeof req.headers[PROXY_NODE_IDENTITY_HEADER] === 'string'
+        ? req.headers[PROXY_NODE_IDENTITY_HEADER] as string
+        : undefined,
+    });
     res.setHeader('content-type', 'application/json');
     if (path.endsWith('/api/meta')) {
       res.end(JSON.stringify({
@@ -119,7 +132,13 @@ beforeAll(async () => {
       return;
     }
     if (path.startsWith('/remote/api/socket/inventory')) {
-      res.end(JSON.stringify(remoteInventory));
+      // Stand in for the remote's own route: it reports the target identity its
+      // hub attached while keeping its own producing instance fingerprint.
+      const rawIdentity = req.headers[PROXY_NODE_IDENTITY_HEADER];
+      const identity = typeof rawIdentity === 'string' ? parseSocketNodeIdentity(rawIdentity) : null;
+      res.end(JSON.stringify(identity
+        ? { ...remoteInventory, node: { ...identity, instanceIdentity: 'remote-instance' } }
+        : remoteInventory));
       return;
     }
     res.end(JSON.stringify({ target: true }));
@@ -152,6 +171,7 @@ beforeEach(() => {
   resetRequestedTimeoutBudgets();
   remoteHops.length = 0;
   remoteRoles.length = 0;
+  remoteIdentities.length = 0;
   DatabaseService.getInstance().deleteRoleAssignmentsByUser(scopedDeployerId);
 });
 
@@ -171,7 +191,7 @@ describe('GET /api/socket/inventory', () => {
       .set('Cookie', viewerCookie);
     expect(res.status).toBe(200);
     expect(res.body).toMatchObject({ schemaVersion: 1, status: 'complete' });
-    expect(loadSocketInventoryMock).toHaveBeenCalledWith(1);
+    expect(loadSocketInventoryMock).toHaveBeenCalledWith(1, undefined, null);
   });
 
   it('serves an admin', async () => {
@@ -200,7 +220,7 @@ describe('GET /api/socket/inventory', () => {
       .get('/api/socket/inventory')
       .set('Cookie', scopedDeployerCookie);
     expect(res.status).toBe(200);
-    expect(loadSocketInventoryMock).toHaveBeenCalledWith(1);
+    expect(loadSocketInventoryMock).toHaveBeenCalledWith(1, undefined, null);
   });
 
   it('refuses a global deployer whose node grant is on a different node', async () => {
@@ -268,8 +288,50 @@ describe('GET /api/socket/inventory', () => {
   });
 });
 
+describe('GET /api/socket/inventory target identity on a machine hop', () => {
+  function machineToken(): string {
+    return jwt.sign({ scope: 'node_proxy' }, TEST_JWT_SECRET, { expiresIn: '1m' });
+  }
+
+  it('reports the identity a hub attached under machine auth', async () => {
+    const res = await request(app)
+      .get('/api/socket/inventory')
+      .set('Authorization', `Bearer ${machineToken()}`)
+      .set(PROXY_NODE_IDENTITY_HEADER, serializeSocketNodeIdentity({
+        id: 12, name: 'sencho-test-02', type: 'remote', mode: 'pilot_agent',
+      }));
+    expect(res.status).toBe(200);
+    expect(loadSocketInventoryMock).toHaveBeenCalledWith(1, undefined, {
+      id: 12, name: 'sencho-test-02', type: 'remote', mode: 'pilot_agent',
+    });
+  });
+
+  it('ignores the identity header on a browser session', async () => {
+    const res = await request(app)
+      .get('/api/socket/inventory')
+      .set('Cookie', adminCookie)
+      .set(PROXY_NODE_IDENTITY_HEADER, serializeSocketNodeIdentity({
+        id: 12, name: 'sencho-test-02', type: 'remote', mode: 'pilot_agent',
+      }));
+    expect(res.status).toBe(200);
+    expect(loadSocketInventoryMock).toHaveBeenCalledWith(1, undefined, null);
+  });
+
+  it('ignores a malformed identity rather than partly applying it', async () => {
+    const res = await request(app)
+      .get('/api/socket/inventory')
+      .set('Authorization', `Bearer ${machineToken()}`)
+      .set(
+        PROXY_NODE_IDENTITY_HEADER,
+        Buffer.from(JSON.stringify({ id: 12, name: 'sencho-test-02' }), 'utf8').toString('base64url'),
+      );
+    expect(res.status).toBe(200);
+    expect(loadSocketInventoryMock).toHaveBeenCalledWith(1, undefined, null);
+  });
+});
+
 describe('GET /api/socket/inventory remote transports', () => {
-  it('routes a proxy request to that node and preserves its producer identity and partial state', async () => {
+  it('routes a proxy request to that node and reports the selected node identity with its producer fingerprint', async () => {
     const res = await request(app)
       .get('/api/socket/inventory')
       .set('Cookie', adminCookie)
@@ -277,11 +339,15 @@ describe('GET /api/socket/inventory remote transports', () => {
     expect(res.status).toBe(200);
     expect(res.body).toMatchObject({
       status: 'partial',
-      node: { id: 999, instanceIdentity: 'remote-instance' },
+      node: { id: remoteNodeId, name: 'remote', type: 'remote', mode: 'proxy', instanceIdentity: 'remote-instance' },
       containers: [{ id: 'remote-c1' }],
       errors: [{ stage: 'container-metadata' }],
     });
     expect(remoteHops).toContain('/remote/api/socket/inventory');
+    expect(remoteIdentities).toContainEqual({
+      path: '/remote/api/socket/inventory',
+      identity: serializeSocketNodeIdentity({ id: remoteNodeId, name: 'remote', type: 'remote', mode: 'proxy' }),
+    });
     expect(loadSocketInventoryMock).not.toHaveBeenCalled();
   });
 
@@ -296,12 +362,47 @@ describe('GET /api/socket/inventory remote transports', () => {
     expect(res.status).toBe(200);
     expect(res.body).toMatchObject({
       status: 'partial',
-      node: { id: 999, instanceIdentity: 'remote-instance' },
+      node: {
+        id: pilotNodeId,
+        name: 'pilot',
+        type: 'remote',
+        mode: 'pilot_agent',
+        instanceIdentity: 'remote-instance',
+      },
       containers: [{ id: 'remote-c1' }],
       errors: [{ stage: 'container-metadata' }],
     });
     expect(remoteHops).toContain('/remote/api/socket/inventory');
+    expect(remoteIdentities).toContainEqual({
+      path: '/remote/api/socket/inventory',
+      identity: serializeSocketNodeIdentity({ id: pilotNodeId, name: 'pilot', type: 'remote', mode: 'pilot_agent' }),
+    });
     expect(loadSocketInventoryMock).not.toHaveBeenCalled();
+  });
+
+  it('overwrites a client-supplied target identity with this hub\'s own', async () => {
+    const res = await request(app)
+      .get('/api/socket/inventory')
+      .set('Cookie', adminCookie)
+      .set('x-node-id', String(remoteNodeId))
+      .set(PROXY_NODE_IDENTITY_HEADER, JSON.stringify({ id: 999, name: 'spoofed', type: 'remote', mode: 'proxy' }));
+    expect(res.status).toBe(200);
+    expect(res.body.node).toMatchObject({ id: remoteNodeId, name: 'remote' });
+    expect(remoteIdentities).toContainEqual({
+      path: '/remote/api/socket/inventory',
+      identity: serializeSocketNodeIdentity({ id: remoteNodeId, name: 'remote', type: 'remote', mode: 'proxy' }),
+    });
+  });
+
+  it('never forwards a client-supplied target identity on another proxied route', async () => {
+    const res = await request(app)
+      .get('/api/stacks')
+      .set('Cookie', adminCookie)
+      .set('x-node-id', String(remoteNodeId))
+      .set(PROXY_NODE_IDENTITY_HEADER, JSON.stringify({ id: 999, name: 'spoofed', type: 'remote', mode: 'proxy' }));
+    expect(res.status).toBe(200);
+    expect(remoteIdentities.filter(entry => entry.path.includes('/api/stacks')))
+      .toContainEqual({ path: '/remote/api/stacks', identity: undefined });
   });
 
   it('does not fall back to local discovery when the Pilot tunnel is disconnected', async () => {

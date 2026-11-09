@@ -51,6 +51,18 @@ describe('redactSensitiveText', () => {
     expect(Date.now() - started).toBeLessThan(1000);
   });
 
+  it.each([
+    ['a long run with no dot', 'A'.repeat(60_000)],
+    ['a run just past one JWT segment', 'A'.repeat(60_000) + '.'],
+  ])('stays linear on %s, which is what a 60 kB Docker label looks like', (_shape, input) => {
+    // A container label is attacker-controlled through any stack author; the
+    // greedy JWT first segment used to retry at every offset without a dot,
+    // turning this exact value into seconds of blocked event loop.
+    const started = Date.now();
+    redactSensitiveText(input);
+    expect(Date.now() - started).toBeLessThan(1000);
+  });
+
   it('strips Linux-style homedir usernames while keeping the /home/ prefix', () => {
     const text = redactSensitiveText('compose error reading /home/user-linux/docker/compose.yaml');
 

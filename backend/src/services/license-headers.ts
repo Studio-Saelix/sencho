@@ -28,6 +28,15 @@ export const PROXY_DEPLOY_SOURCE_HEADER = 'x-sencho-deploy-source';
 export const PROXY_DEPLOY_ACTOR_HEADER = 'x-sencho-deploy-actor';
 
 /**
+ * The selected node's identity in the hub's numbering, for a response the
+ * remote produces about itself. A remote numbers its own nodes from one, so
+ * without this its node-scoped answers report the remote's local node. Set
+ * only by the hub on a socket-inventory hop and trusted only under the same
+ * machine auth as the headers below; the gateway strips client values.
+ */
+export const PROXY_NODE_IDENTITY_HEADER = 'x-sencho-node-identity';
+
+/**
  * Bound stack-scoped RBAC evidence for Proxy/Pilot hops. The hub strips any
  * client-supplied values and, when scoped elevation is required, sets the
  * exact stack name plus a comma-separated PermissionAction set conferred by
