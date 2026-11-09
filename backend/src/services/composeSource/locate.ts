@@ -42,14 +42,15 @@ const ALL_INTERFACES = 'all';
 /**
  * The most effective publications a port location is attempted for. Compose
  * expands a paired range such as `1-65535:1-65535` into one publication per
- * port, the rules report one finding per publication, and locating each one
- * scans the model, so the work grows with the square of the publication count
- * on the synchronous Doctor path. Past this count the model is too large to
- * attribute by scanning and no port finding carries a link, the same fail-closed
- * result as any other bound this reader cannot enumerate.
+ * port, and the all-interfaces exposure rule reports one finding for each, so a
+ * run can ask for tens of thousands of locations on the synchronous Doctor path
+ * and each one reads the model. Past this count no port finding carries a link.
+ * The authored file is read once per run (see `memoized`), so the bound only has
+ * to cover the effective model.
  */
 const MAX_LOCATABLE_PUBLICATIONS = 2048;
 
+/** Whether the model holds too many publications for a port finding to be located. */
 function exceedsLocatingBound(model: EffectiveModel | null): boolean {
   if (!model) return false;
   let total = 0;
@@ -108,6 +109,28 @@ function normalizedHostPart(hostPart: string): string {
   return end === undefined ? first : `${first}-${String(parseInt(end, 10))}`;
 }
 
+/**
+ * The scans below walk an authored file's nodes, and one Doctor run asks the
+ * same question once per finding. A project is read once per run and never
+ * changes, so each answer is computed once and reused for every finding: the
+ * work then grows with the size of the file, not with the file times the number
+ * of findings. The cache key is the project (or a scope list taken from it), so
+ * nothing outlives the run that built it.
+ */
+const memos = new WeakMap<object, Map<string, unknown>>();
+
+function memoized<T>(owner: object, key: string, compute: () => T): T {
+  let entries = memos.get(owner);
+  if (!entries) {
+    entries = new Map();
+    memos.set(owner, entries);
+  }
+  if (entries.has(key)) return entries.get(key) as T;
+  const value = compute();
+  entries.set(key, value);
+  return value;
+}
+
 interface ServiceScope {
   file: AuthoredFileSource;
   /** Service key inside `file`; differs for an `extends` base. */
@@ -122,15 +145,17 @@ interface ServiceScope {
  * unrelated file is never included.
  */
 function serviceScopes(project: AuthoredProject, service: string): ServiceScope[] {
-  const scopes: ServiceScope[] = [];
-  for (const definition of project.serviceDefinitions.get(service) ?? []) {
-    const file = project.files.find(entry => entry.file === definition.file && entry.state === 'parsed');
-    // A definition whose file this model cannot read must not be skipped: the
-    // remaining scopes could otherwise look decisive.
-    if (!file) return [];
-    scopes.push({ file, declaredService: definition.declaredService, layerIndex: definition.layerIndex });
-  }
-  return scopes;
+  return memoized(project, `scopes:${service}`, () => {
+    const scopes: ServiceScope[] = [];
+    for (const definition of project.serviceDefinitions.get(service) ?? []) {
+      const file = project.files.find(entry => entry.file === definition.file && entry.state === 'parsed');
+      // A definition whose file this model cannot read must not be skipped: the
+      // remaining scopes could otherwise look decisive.
+      if (!file) return [];
+      scopes.push({ file, declaredService: definition.declaredService, layerIndex: definition.layerIndex });
+    }
+    return scopes;
+  });
 }
 
 /** A sequence item whose identity this reader cannot decide. */
@@ -152,6 +177,16 @@ const IDENTITY_FIELDS: Record<string, ReadonlySet<string>> = {
  * hit: it could still supersede a literal item this reader managed to match.
  */
 function hasUnresolvedSequenceItem(
+  scopes: ServiceScope[],
+  field: string,
+  layerIndex: number,
+  interpolationMatters: boolean,
+): boolean {
+  return memoized(scopes, `unresolved:${field}:${layerIndex}:${interpolationMatters}`,
+    () => scanUnresolvedSequenceItem(scopes, field, layerIndex, interpolationMatters));
+}
+
+function scanUnresolvedSequenceItem(
   scopes: ServiceScope[],
   field: string,
   layerIndex: number,
@@ -188,16 +223,18 @@ function fieldHasTag(scopes: ServiceScope[], field: string): boolean {
 
 /** The largest sequence index any scope declares for one field. */
 function scopedSequenceCount(scopes: ServiceScope[], field: string): number {
-  let max = 0;
-  for (const scope of scopes) {
-    const prefix = `${authoredNodeKey(['services', scope.declaredService, ...field.split('.')])}[`;
-    for (const nodePath of scope.file.nodes.keys()) {
-      if (!nodePath.startsWith(prefix) || !nodePath.endsWith(']')) continue;
-      const index = Number(nodePath.slice(prefix.length, -1));
-      if (Number.isInteger(index)) max = Math.max(max, index + 1);
+  return memoized(scopes, `count:${field}`, () => {
+    let max = 0;
+    for (const scope of scopes) {
+      const prefix = `${authoredNodeKey(['services', scope.declaredService, ...field.split('.')])}[`;
+      for (const nodePath of scope.file.nodes.keys()) {
+        if (!nodePath.startsWith(prefix) || !nodePath.endsWith(']')) continue;
+        const index = Number(nodePath.slice(prefix.length, -1));
+        if (Number.isInteger(index)) max = Math.max(max, index + 1);
+      }
     }
-  }
-  return max;
+    return max;
+  });
 }
 
 /** One authored `ports` item, with the parts that identify a publication. */
@@ -241,6 +278,31 @@ function portItemValue(file: AuthoredFileSource, declaredService: string, index:
     dynamic: hostText === 'dynamic',
     ...(target ? { targetStartPort: target.start, targetEndPort: target.end } : {}),
   };
+}
+
+interface AuthoredPortItem {
+  scope: ServiceScope;
+  index: number;
+  author: AuthoredPortSpec;
+  node: AuthoredNode;
+}
+
+/** Every readable authored `ports` item of one service, in sequence order. */
+function authoredPortItems(scopes: ServiceScope[]): AuthoredPortItem[] {
+  return memoized(scopes, 'items:ports', () => {
+    const items: AuthoredPortItem[] = [];
+    const count = scopedSequenceCount(scopes, 'ports');
+    for (let index = 0; index < count; index += 1) {
+      for (const scope of scopes) {
+        const author = portItemValue(scope.file, scope.declaredService, index);
+        if (!author) continue;
+        const node = scope.file.nodes.get(authoredNodeKey(['services', scope.declaredService, 'ports', index]));
+        if (!node) continue;
+        items.push({ scope, index, author, node });
+      }
+    }
+    return items;
+  });
 }
 
 function effectiveHostText(spec: EffPortSpec): string {
@@ -351,7 +413,8 @@ function volumeItemSource(file: AuthoredFileSource, declaredService: string, ind
 }
 
 /**
- * A location on the latest layer that declares a matching sequence item. The
+ * A location on the latest layer that declares a matching item or map entry.
+ * `field` is the path under the service (`ports`, or `environment.KEY`). The
  * path names the service as the located file declares it, so an `extends` base
  * shows its own key rather than the extending service's.
  */
@@ -421,25 +484,18 @@ function locatePort(
   const byLayer = new Map<number, ItemCandidate[]>();
   const scopes = serviceScopes(project, hit.service);
   if (fieldHasTag(scopes, 'ports')) return undefined;
-  const count = scopedSequenceCount(scopes, 'ports');
-  for (let index = 0; index < count; index += 1) {
-    for (const scope of scopes) {
-      const author = portItemValue(scope.file, scope.declaredService, index);
-      if (!author) continue;
-      const node = scope.file.nodes.get(authoredNodeKey(['services', scope.declaredService, 'ports', index]));
-      if (!node) continue;
-      const matched = bounded !== undefined
-        ? specs.some(spec => authoredPortMatches(author, spec, broadOnly, effective?.ports ?? []))
-        : subject !== undefined
-          ? authoredHostMatchesSubject(author, subject.hostText)
-            && sameProtocol(author.protocol, subject.protocol)
-            && (!broadOnly || normalizedInterface(author.hostIp) === ALL_INTERFACES)
-          : specs.some(spec => authoredPortMatches(author, spec, broadOnly, effective?.ports ?? []));
-      if (!matched) continue;
-      const list = byLayer.get(scope.layerIndex) ?? [];
-      list.push({ file: scope.file.file, declaredService: scope.declaredService, node, layerIndex: scope.layerIndex, writability: scope.file.writability, index });
-      byLayer.set(scope.layerIndex, list);
-    }
+  for (const { scope, index, author, node } of authoredPortItems(scopes)) {
+    const matched = bounded !== undefined
+      ? specs.some(spec => authoredPortMatches(author, spec, broadOnly, effective?.ports ?? []))
+      : subject !== undefined
+        ? authoredHostMatchesSubject(author, subject.hostText)
+          && sameProtocol(author.protocol, subject.protocol)
+          && (!broadOnly || normalizedInterface(author.hostIp) === ALL_INTERFACES)
+        : specs.some(spec => authoredPortMatches(author, spec, broadOnly, effective?.ports ?? []));
+    if (!matched) continue;
+    const list = byLayer.get(scope.layerIndex) ?? [];
+    list.push({ file: scope.file.file, declaredService: scope.declaredService, node, layerIndex: scope.layerIndex, writability: scope.file.writability, index });
+    byLayer.set(scope.layerIndex, list);
   }
 
   // `ports` appends across Compose layers, so every matching authored item is a
@@ -524,6 +580,33 @@ function locateContainerNameConflict(
   return locations[0];
 }
 
+interface AuthoredVolumeItem {
+  scope: ServiceScope;
+  index: number;
+  node: AuthoredNode;
+  source: string | null;
+}
+
+/** Every authored `volumes` item of one service, grouped by its target. */
+function authoredVolumeItems(scopes: ServiceScope[]): Map<string, AuthoredVolumeItem[]> {
+  return memoized(scopes, 'items:volumes', () => {
+    const byTarget = new Map<string, AuthoredVolumeItem[]>();
+    const count = scopedSequenceCount(scopes, 'volumes');
+    for (let index = 0; index < count; index += 1) {
+      for (const scope of scopes) {
+        const target = volumeItemTarget(scope.file, scope.declaredService, index);
+        if (target === null) continue;
+        const node = scope.file.nodes.get(authoredNodeKey(['services', scope.declaredService, 'volumes', index]));
+        if (!node) continue;
+        const list = byTarget.get(target) ?? [];
+        list.push({ scope, index, node, source: volumeItemSource(scope.file, scope.declaredService, index) });
+        byTarget.set(target, list);
+      }
+    }
+    return byTarget;
+  });
+}
+
 /** Locate the single `volumes` item a bind hit names, else the sequence key. */
 function locateVolume(project: AuthoredProject, hit: RuleHit): AuthoredLocation | undefined {
   if (!hit.service) return undefined;
@@ -534,22 +617,14 @@ function locateVolume(project: AuthoredProject, hit: RuleHit): AuthoredLocation 
     const matches: Array<ItemCandidate & { source: string | null }> = [];
     const scopes = serviceScopes(project, hit.service);
     if (fieldHasTag(scopes, 'volumes')) return undefined;
-    let matchedIndex: number | undefined;
-    for (let index = 0; index < scopedSequenceCount(scopes, 'volumes'); index += 1) {
-      for (const scope of scopes) {
-        if (volumeItemTarget(scope.file, scope.declaredService, index) !== target) continue;
-        const node = scope.file.nodes.get(authoredNodeKey(['services', scope.declaredService, 'volumes', index]));
-        if (node) {
-          matches.push({
-            file: scope.file.file, declaredService: scope.declaredService, node, layerIndex: scope.layerIndex,
-            writability: scope.file.writability, index,
-            source: volumeItemSource(scope.file, scope.declaredService, index),
-          });
-          matchedIndex = index;
-        }
-      }
+    for (const item of authoredVolumeItems(scopes).get(target) ?? []) {
+      matches.push({
+        file: item.scope.file.file, declaredService: item.scope.declaredService, node: item.node,
+        layerIndex: item.scope.layerIndex, writability: item.scope.file.writability, index: item.index,
+        source: item.source,
+      });
     }
-    if (matches.length > 0 && matchedIndex !== undefined) {
+    if (matches.length > 0) {
       const latest = Math.max(...matches.map(match => match.layerIndex));
       if (hasLaterUnparsedLayer(project, latest)) return undefined;
       const latestMatches = matches.filter(match => match.layerIndex === latest);
@@ -574,6 +649,31 @@ function locateVolume(project: AuthoredProject, hit: RuleHit): AuthoredLocation 
   return toLocation(correlateField(project, hit.service, 'volumes'));
 }
 
+interface AuthoredEnvFileItem {
+  scope: ServiceScope;
+  index: number;
+  node: AuthoredNode;
+  text: string;
+}
+
+/** Every readable authored `env_file` entry of one service, in sequence order. */
+function authoredEnvFileItems(scopes: ServiceScope[]): AuthoredEnvFileItem[] {
+  return memoized(scopes, 'items:env_file', () => {
+    const items: AuthoredEnvFileItem[] = [];
+    const count = scopedSequenceCount(scopes, 'env_file');
+    for (let index = 0; index < count; index += 1) {
+      for (const scope of scopes) {
+        const shortNode = scope.file.nodes.get(authoredNodeKey(['services', scope.declaredService, 'env_file', index]));
+        const longNode = scope.file.nodes.get(authoredNodeKey(['services', scope.declaredService, 'env_file', index, 'path']));
+        const text = authoredScalarOf(shortNode) ?? authoredScalarOf(longNode);
+        const node = longNode ?? shortNode;
+        if (text !== undefined && node) items.push({ scope, index, node, text });
+      }
+    }
+    return items;
+  });
+}
+
 /** Locate the `env_file` entry naming the missing path, else the field. */
 function locateEnvFile(project: AuthoredProject, hit: RuleHit): AuthoredLocation | undefined {
   if (!hit.service) return undefined;
@@ -583,22 +683,14 @@ function locateEnvFile(project: AuthoredProject, hit: RuleHit): AuthoredLocation
   if (path !== undefined) {
     const scopes = serviceScopes(project, hit.service);
     if (fieldHasTag(scopes, 'env_file')) return undefined;
-    const count = scopedSequenceCount(scopes, 'env_file');
     const matches: ItemCandidate[] = [];
-    for (let index = 0; index < count; index += 1) {
-      for (const scope of scopes) {
-        const shortNode = scope.file.nodes.get(authoredNodeKey(['services', scope.declaredService, 'env_file', index]));
-        const longNode = scope.file.nodes.get(authoredNodeKey(['services', scope.declaredService, 'env_file', index, 'path']));
-        const text = authoredScalarOf(shortNode) ?? authoredScalarOf(longNode);
-        if (text !== undefined && (text === path || text.endsWith(`/${path}`) || path.endsWith(`/${text}`))) {
-          const node = longNode ?? shortNode;
-          if (node) {
-            matches.push({
-              file: scope.file.file, declaredService: scope.declaredService, node, layerIndex: scope.layerIndex,
-              writability: scope.file.writability, index,
-            });
-          }
-        }
+    for (const item of authoredEnvFileItems(scopes)) {
+      const { text } = item;
+      if (text === path || text.endsWith(`/${path}`) || path.endsWith(`/${text}`)) {
+        matches.push({
+          file: item.scope.file.file, declaredService: item.scope.declaredService, node: item.node,
+          layerIndex: item.scope.layerIndex, writability: item.scope.file.writability, index: item.index,
+        });
       }
     }
     if (matches.length > 0) {
@@ -614,6 +706,21 @@ function locateEnvFile(project: AuthoredProject, hit: RuleHit): AuthoredLocation
     return undefined;
   }
   return toLocation(correlateField(project, hit.service, 'env_file'));
+}
+
+/** The list-form `environment` items one scope's file declares for its service. */
+function environmentListItems(scope: ServiceScope): AuthoredNode[] {
+  return memoized(scope, 'items:environment', () => {
+    const items: AuthoredNode[] = [];
+    for (const node of scope.file.nodes.values()) {
+      if (node.segments.length === 4
+        && node.segments[0] === 'services'
+        && node.segments[1] === scope.declaredService
+        && node.segments[2] === 'environment'
+        && typeof node.segments[3] === 'number') items.push(node);
+    }
+    return items;
+  });
 }
 
 /** Locate the authored `environment` entry for one key, map or list form. */
@@ -637,12 +744,7 @@ function locateEnvironmentKey(project: AuthoredProject, service: string, key: st
       }
       continue;
     }
-    for (const node of scope.file.nodes.values()) {
-      if (node.segments.length !== pathSegments.length + 1
-        || node.segments[0] !== pathSegments[0]
-        || node.segments[1] !== pathSegments[1]
-        || node.segments[2] !== pathSegments[2]
-        || typeof node.segments[3] !== 'number') continue;
+    for (const node of environmentListItems(scope)) {
       const text = authoredScalarOf(node);
       if (text === undefined) {
         // A list item this reader cannot read could be this key in another

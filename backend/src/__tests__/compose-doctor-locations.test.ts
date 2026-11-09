@@ -932,7 +932,7 @@ describe('Compose Doctor authored locations', () => {
     expect(locateFinding(await buildAuthoredProject(nodeId, loopbacks.name), conflict, loopbacks.model)).toBeUndefined();
   });
 
-  it('refuses a conflict location when a participant sits behind a !override tag or an unreadable layer', async () => {
+  it('refuses a conflict location when a participant sits behind a !override tag, an unreadable layer or an outside layer', async () => {
     const claim = { startPort: 8088, endPort: 8088, hostIp: '', protocol: 'tcp' };
     const model = {
       services: [{ name: 's', ports: [claim] }, { name: 't', ports: [claim] }],
@@ -1047,6 +1047,34 @@ describe('Compose Doctor authored locations', () => {
     }), model)).toMatchObject({ file: 'base.yaml', path: 'services.b.ports[0]', line: 4 });
   });
 
+  it('names the declared service of an extends base for volume, env_file and environment locations', async () => {
+    writeStack('doctor-extends-fields', {
+      'compose.yaml': 'services:\n  s:\n    extends:\n      file: base.yaml\n      service: b\n',
+      'base.yaml': [
+        'services:',
+        '  b:',
+        '    image: nginx:1.2',
+        '    volumes:',
+        '      - ./data:/data',
+        '    env_file:',
+        '      - ./missing.env',
+        '    environment:',
+        '      - FOO=$$literal',
+        '',
+      ].join('\n'),
+    });
+    const project = await buildAuthoredProject(nodeId, 'doctor-extends-fields');
+    expect(locateFinding(project, hit('bind-path-missing', {
+      service: 's', sourcePath: './data', subject: { kind: 'bind', key: '/data' },
+    }))).toMatchObject({ file: 'base.yaml', path: 'services.b.volumes[0]', line: 5 });
+    expect(locateFinding(project, hit('env-file-missing', {
+      service: 's', sourcePath: './missing.env',
+    }))).toMatchObject({ file: 'base.yaml', path: 'services.b.env_file[0]', line: 7 });
+    expect(locateFinding(project, hit('env-literal-dollar', {
+      service: 's', sourcePath: 'FOO',
+    }))).toMatchObject({ file: 'base.yaml', path: 'services.b.environment.FOO', line: 9 });
+  });
+
   it('attempts no port location for a model past the publication bound', async () => {
     writeStack('doctor-port-conflict-bound', {
       'compose.yaml': [
@@ -1057,29 +1085,87 @@ describe('Compose Doctor authored locations', () => {
       ].join('\n'),
     });
     const project = await buildAuthoredProject(nodeId, 'doctor-port-conflict-bound');
-    // Compose expands a paired range into one publication per port; the extra
-    // publications stand for a `1-3000:1-3000` range declared elsewhere.
-    const expanded = (count: number) => Array.from({ length: count }, (_, index) => (
+    const claim = { startPort: 8088, endPort: 8088, hostIp: '', protocol: 'tcp' };
+    // Compose expands a paired range into one publication per port; the filler
+    // stands for a range declared elsewhere. The count is the total across services.
+    const filler = (count: number) => Array.from({ length: count }, (_, index) => (
       { startPort: 1 + index, endPort: 1 + index, hostIp: '', protocol: 'tcp' }));
-    const tPort = { startPort: 8088, endPort: 8088, hostIp: '', protocol: 'tcp' };
-    const within = {
-      services: [{ name: 's', ports: [...expanded(100), { ...tPort, startPort: 8088, endPort: 8088 }] }, { name: 't', ports: [tPort] }],
-    } as unknown as EffectiveModel;
-    const beyond = {
-      services: [{ name: 's', ports: [...expanded(3000), { ...tPort }] }, { name: 't', ports: [tPort] }],
-    } as unknown as EffectiveModel;
+    const modelWith = (total: number) => ({
+      // s carries the conflicting claim, t the rest of the total (one more than
+      // the claim itself), so the sum is split across both services.
+      services: [
+        { name: 's', ports: [claim, ...filler(Math.floor((total - 2) / 2))] },
+        { name: 't', ports: [claim, ...filler(Math.ceil((total - 2) / 2))] },
+      ],
+    }) as unknown as EffectiveModel;
     const conflict = hit('port-conflict-internal', { subject: { kind: 'port', key: '8088/tcp' } });
     const exposed = hit('port-exposed-all-interfaces', {
       service: 't', sourcePath: 't', subject: { kind: 'port', key: '8088/tcp' },
     });
-    expect(locateFinding(project, exposed, within)).toMatchObject({ path: 'services.t.ports[0]' });
-    expect(locateFinding(project, conflict, within)).toMatchObject({ path: 'services.s.ports[0]' });
+    // Exactly 2048 publications still locate; 2049 do not.
+    expect(locateFinding(project, exposed, modelWith(2048))).toMatchObject({ path: 'services.t.ports[0]' });
+    expect(locateFinding(project, conflict, modelWith(2048))).toMatchObject({ path: 'services.s.ports[0]' });
+    expect(locateFinding(project, exposed, modelWith(2049))).toBeUndefined();
+    expect(locateFinding(project, conflict, modelWith(2049))).toBeUndefined();
+    // Every rule that reaches the port locator is held to the same bound.
+    for (const ruleId of ['port-conflict-node', 'sensitive-service-broad-exposure'] as const) {
+      const nodeHit = hit(ruleId, {
+        service: 't', sourcePath: 't', subject: { kind: 'port', key: '8088/tcp' },
+      });
+      expect(locateFinding(project, nodeHit, modelWith(2048))).toBeDefined();
+      expect(locateFinding(project, nodeHit, modelWith(2049))).toBeUndefined();
+    }
+  });
+
+  it('locates every finding of a large authored file in time that does not grow with findings times lines', async () => {
+    // A range plus thousands of repeated lines under the publication bound: the
+    // authored scans must run once per file, not once per finding.
+    const copies = Array.from({ length: 12000 }, () => '      - "1:1"');
+    writeStack('doctor-large-ports', {
+      'compose.yaml': ['services:', '  s:', '    image: nginx:1.2', '    ports:', '      - "1-1500:1-1500"', ...copies, ''].join('\n'),
+    });
+    const project = await buildAuthoredProject(nodeId, 'doctor-large-ports');
+    const model = {
+      services: [{
+        name: 's',
+        ports: Array.from({ length: 1500 }, (_, index) => (
+          { startPort: 1 + index, endPort: 1 + index, hostIp: '', protocol: 'tcp' })),
+      }],
+    } as unknown as EffectiveModel;
     const started = Date.now();
-    expect(locateFinding(project, exposed, beyond)).toBeUndefined();
-    expect(locateFinding(project, conflict, beyond)).toBeUndefined();
-    // The bound is what keeps a 65535-port range from taking minutes: it must
-    // return without scanning the model.
-    expect(Date.now() - started).toBeLessThan(500);
+    let located = 0;
+    for (let port = 1; port <= 1500; port += 1) {
+      const found = locateFinding(project, hit('port-exposed-all-interfaces', {
+        service: 's', sourcePath: 's', subject: { kind: 'port', key: `${port}/tcp` },
+      }), model);
+      if (found) located += 1;
+    }
+    // Port 1 is declared by every repeated line and stays unlocated; the rest
+    // come from the one range item.
+    expect(located).toBe(1499);
+    // Scanning the file per finding took close to a minute here; the generous
+    // limit only catches that regression, not ordinary runner variance.
+    expect(Date.now() - started).toBeLessThan(15000);
+  });
+
+  it('locates every bind finding of a large volumes list without rescanning the file per finding', async () => {
+    const binds = Array.from({ length: 1000 }, (_, index) => `      - ./m${index}:/d${index}`);
+    writeStack('doctor-large-volumes', {
+      'compose.yaml': ['services:', '  s:', '    image: nginx:1.2', '    volumes:', ...binds, ''].join('\n'),
+    });
+    const project = await buildAuthoredProject(nodeId, 'doctor-large-volumes');
+    const started = Date.now();
+    let located = 0;
+    for (let index = 0; index < 1000; index += 1) {
+      const found = locateFinding(project, hit('bind-path-missing', {
+        service: 's', sourcePath: `./m${index}`, subject: { kind: 'bind', key: `/d${index}` },
+      }));
+      if (found?.path === `services.s.volumes[${index}]`) located += 1;
+    }
+    expect(located).toBe(1000);
+    // One finding per bind used to cost a full pass over the file each time, a
+    // minute for this list. The generous limit catches that, not runner noise.
+    expect(Date.now() - started).toBeLessThan(15000);
   });
 
   it('refuses the same duplicated port for a subjectless sensitive exposure', async () => {

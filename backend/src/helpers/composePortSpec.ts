@@ -18,7 +18,8 @@ export function fixedPorts<T extends { dynamic?: true }>(ports: readonly T[]): T
 /** Rules enumerate at most this many host ports from one publication, so a
  *  collapsed host range such as `1-65535:80` cannot blow up a report. A paired
  *  range (`1-65535:1-65535`) reaches the rules already expanded by Compose into
- *  one publication per port; the locator bounds that case on its own. */
+ *  one publication per port, so the report is not bounded there; the locator
+ *  bounds only its own location work. */
 const MAX_ENUMERATED_HOST_PORTS = 256;
 
 /** The last host port a fixed publication contributes to a per-port rule. */
