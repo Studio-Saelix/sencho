@@ -93,6 +93,7 @@ function makeStackListState(over: Partial<StackListState> = {}): StackListState 
     selectedFile: 'web.yml',
     files: ['web.yml'],
     stackStatuses: { 'web.yml': 'running' },
+    stackCounts: {},
     stackPorts: {},
     stackPortServices: {},
     stackSelfFlags: {},
@@ -2902,6 +2903,38 @@ describe('useStackActions.getStackMenuVisibility', () => {
     const { result } = setup({ stackList: { stackStatuses: { 'web.yml': 'exited' } as never } });
     expect(result.current.getStackMenuVisibility('web.yml')).toEqual({
       showDeploy: true, showStop: false, showRestart: false, showUpdate: false, showTakeDown: true,
+    });
+  });
+
+  it('offers Stop but not Deploy for an exited stack whose containers are restart-looping', () => {
+    const { result } = setup({
+      stackList: {
+        stackStatuses: { 'web.yml': 'exited' } as never,
+        stackCounts: { 'web.yml': { running: 0, total: 1, restarting: 1 } } as never,
+      },
+    });
+    expect(result.current.getStackMenuVisibility('web.yml')).toEqual({
+      showDeploy: false, showStop: true, showRestart: false, showUpdate: false, showTakeDown: true,
+    });
+  });
+
+  it('keeps the exited-stack flags when the node does not report a restarting count', () => {
+    const { result } = setup({ stackList: { stackStatuses: { 'web.yml': 'exited' } as never } });
+    expect(result.current.getStackMenuVisibility('web.yml')).toEqual({
+      showDeploy: true, showStop: false, showRestart: false, showUpdate: false, showTakeDown: true,
+    });
+  });
+
+  it('keeps Stop hidden for a restarting self stack', () => {
+    const { result } = setup({
+      stackList: {
+        stackStatuses: { 'sencho.yml': 'exited' } as never,
+        stackSelfFlags: { 'sencho.yml': true },
+        stackCounts: { 'sencho.yml': { running: 0, total: 1, restarting: 1 } } as never,
+      },
+    });
+    expect(result.current.getStackMenuVisibility('sencho.yml')).toEqual({
+      showDeploy: false, showStop: false, showRestart: false, showUpdate: false, showTakeDown: false,
     });
   });
 

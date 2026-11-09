@@ -43,6 +43,7 @@ import { useAnatomyLayout } from '@/hooks/use-anatomy-layout';
 import { ScrollArea } from '../ui/scroll-area';
 import { AnatomyResizePane } from '@/components/stack/AnatomyResizePane';
 import { StackIdentityHeader, ContainersHealth, StackLogsSection } from './editor-view-blocks';
+import { getStackRuntimeMode } from './stackRuntimeMode';
 import { MobileStackDetail } from './MobileStackDetail';
 import { ENV_READ_FAILED_NOTICE } from './envNotice';
 import { RecoveryChip } from './RecoveryChip';
@@ -401,7 +402,7 @@ export function EditorView(props: EditorViewProps) {
     const safeContainers = containers || [];
     const safeContent = content || '';
     const safeEnvContent = envContent || '';
-    const isRunning = safeContainers.some(c => c.State === 'running');
+    const runtimeMode = getStackRuntimeMode(safeContainers);
     const canRead = can('stack:read', 'stack', stackName, activeNode?.id);
 
     useEffect(() => {
@@ -508,7 +509,7 @@ export function EditorView(props: EditorViewProps) {
                                         stackName={stackName}
                                         activeNode={activeNode}
                                         safeContainers={safeContainers}
-                                        isRunning={isRunning}
+                                        runtimeMode={runtimeMode}
                                         can={can}
                                         trivy={trivy}
                                         backupInfo={backupInfo}
@@ -571,6 +572,7 @@ export function EditorView(props: EditorViewProps) {
                                     onInspectImage={onInspectImage}
                                     onOpenServiceMonitor={onOpenServiceMonitor}
                                     serviceAction={serviceAction}
+                                    canDeploy={can('stack:deploy', 'stack', stackName, activeNode?.id)}
                                     effectiveServices={effectiveServices}
                                     serviceUpdateStatuses={serviceUpdateStatuses}
                                     serviceUpdateInProgress={serviceUpdateInProgress}
@@ -606,6 +608,7 @@ export function EditorView(props: EditorViewProps) {
                                 onInspectImage={onInspectImage}
                                 onOpenServiceMonitor={onOpenServiceMonitor}
                                 serviceAction={serviceAction}
+                                canDeploy={can('stack:deploy', 'stack', stackName, activeNode?.id)}
                                 effectiveServices={effectiveServices}
                                 serviceUpdateStatuses={serviceUpdateStatuses}
                                 serviceUpdateInProgress={serviceUpdateInProgress}

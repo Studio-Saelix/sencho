@@ -54,6 +54,7 @@ import type { EffectiveServiceSpec } from '@/types/effectiveServices';
 import type { StackServiceUpdateStatus } from '@/types/imageUpdates';
 import { isConfirmedServiceUpdate } from '@/types/imageUpdates';
 import { serviceUpdateButtonState } from './serviceUpdatePolicy';
+import { isServiceStoppable, type StackRuntimeMode } from './stackRuntimeMode';
 
 const extractUptime = (status: string | undefined): string | null => {
     if (!status) return null;
@@ -76,15 +77,35 @@ type StackPill = {
     pulse: boolean;
 };
 
-const getStackStatePill = (containers: ContainerInfo[]): StackPill | null => {
+const getStackStatePill = (
+    containers: ContainerInfo[],
+    runtimeMode: StackRuntimeMode,
+): StackPill | null => {
     if (!containers || containers.length === 0) return null;
-    const running = containers.some(c => c.State === 'running');
-    if (!running) {
+    // A restart loop is the louder fact: it outranks the health suffixes and is
+    // never reported as plain running, because Start/Restart cannot break it.
+    if (runtimeMode === 'looping') {
+        return {
+            label: 'restarting',
+            dotClass: 'bg-destructive',
+            className: 'border-destructive/40 bg-destructive/10 text-destructive',
+            pulse: true,
+        };
+    }
+    if (runtimeMode === 'stopped') {
         return {
             label: 'exited',
             dotClass: 'bg-destructive',
             className: 'border-destructive/40 bg-destructive/10 text-destructive',
             pulse: false,
+        };
+    }
+    if (containers.some(c => c.State === 'restarting')) {
+        return {
+            label: 'running · restarting',
+            dotClass: 'bg-warning',
+            className: 'border-warning/40 bg-warning/10 text-warning',
+            pulse: true,
         };
     }
     const anyUnhealthy = containers.some(c => c.healthStatus === 'unhealthy');
@@ -126,7 +147,8 @@ export interface StackIdentityHeaderProps {
     stackName: string;
     activeNode: Node | null;
     safeContainers: ContainerInfo[];
-    isRunning: boolean;
+    /** How the stack is spending its runtime; drives the button set and pill. */
+    runtimeMode: StackRuntimeMode;
     can: ReturnType<typeof useAuth>['can'];
     trivy: { available: boolean };
     backupInfo: { exists: boolean; timestamp: number | null };
@@ -157,7 +179,7 @@ export function StackIdentityHeader({
     stackName,
     activeNode,
     safeContainers,
-    isRunning,
+    runtimeMode,
     can,
     trivy,
     backupInfo,
@@ -191,7 +213,7 @@ export function StackIdentityHeader({
                 <div className="flex items-center gap-3 flex-wrap">
                     <CardTitle className="font-heading text-3xl leading-none tracking-tight">{stackName}</CardTitle>
                     {(() => {
-                        const pill = getStackStatePill(safeContainers);
+                        const pill = getStackStatePill(safeContainers, runtimeMode);
                         if (!pill) return null;
                         return (
                             <span className={`inline-flex items-center gap-1.5 rounded-full border px-2 py-0.5 ${pill.className}`}>
@@ -221,7 +243,15 @@ export function StackIdentityHeader({
                     <div className="flex items-center gap-2 flex-wrap">
                         {canDeploy && (
                             <>
-                                {isRunning ? (
+                                {runtimeMode === 'looping' ? (
+                                    // Primary verb in a crash loop: Stop cancels the
+                                    // pending restart policy restart. Start and Restart
+                                    // would only race the loop, so neither is offered.
+                                    <Button type="button" size="sm" data-testid="stack-stop-button" className="rounded-lg max-md:h-11 bg-brand text-brand-foreground hover:bg-brand/90" onClick={stopStack} disabled={actionsDisabled}>
+                                        <Square className="w-4 h-4 mr-2" strokeWidth={1.5} />
+                                        {loadingAction === 'stop' ? 'Stopping...' : 'Stop'}
+                                    </Button>
+                                ) : runtimeMode === 'running' ? (
                                     <Button type="button" size="sm" data-testid="stack-deploy-button" className="rounded-lg max-md:h-11 bg-brand text-brand-foreground hover:bg-brand/90" onClick={restartStack} disabled={loadingAction !== null || !actionsReady}>
                                         <RotateCw className="w-4 h-4 mr-2" strokeWidth={1.5} />
                                         {loadingAction === 'restart' ? 'Restarting...' : 'Restart'}
@@ -232,13 +262,13 @@ export function StackIdentityHeader({
                                         {loadingAction === 'deploy' ? 'Starting...' : 'Start'}
                                     </Button>
                                 )}
-                                {isRunning && (
+                                {runtimeMode === 'running' && (
                                     <Button type="button" size="sm" variant="outline" className="rounded-lg max-md:h-11" onClick={stopStack} disabled={actionsDisabled}>
                                         <Square className="w-4 h-4 mr-2" strokeWidth={1.5} />
                                         {loadingAction === 'stop' ? 'Stopping...' : 'Stop'}
                                     </Button>
                                 )}
-                                {isRunning && showTakeDown && (
+                                {runtimeMode !== 'stopped' && showTakeDown && (
                                     <Button
                                         type="button"
                                         size="sm"
@@ -341,6 +371,13 @@ export interface ContainersHealthProps {
     /** Opens Monitor (Alerts tab); preselects the Compose service in add forms when listed. */
     onOpenServiceMonitor?: (serviceName: string) => void;
     serviceAction: (action: 'start' | 'stop' | 'restart', serviceName: string) => Promise<void>;
+    /**
+     * Stack-and-node-scoped `stack:deploy`, resolved by the caller. Every
+     * service lifecycle affordance (flat card kebab, multi-replica header,
+     * empty-service row) lives behind it so a read-only user never sees an
+     * action the backend would refuse with 403.
+     */
+    canDeploy: boolean;
     // Declared Compose services from the effective model. Multi-service
     // headers (owning Update/Rebuild + badge + Start/Stop/Restart) render only
     // when this has more than one entry; empty/single leaves the flat
@@ -459,6 +496,7 @@ export function ContainersHealth({
     onInspectImage,
     onOpenServiceMonitor,
     serviceAction,
+    canDeploy,
     effectiveServices = [],
     serviceUpdateStatuses = [],
     serviceUpdateInProgress = null,
@@ -613,36 +651,41 @@ export function ContainersHealth({
         );
     };
 
-    const renderServiceLifecycleMenu = (serviceName: string, isServiceActive: boolean) => (
-        <DropdownMenu>
-            <DropdownMenuTrigger asChild>
-                <Button
-                    size="icon"
-                    variant="ghost"
-                    className="h-7 w-7 rounded-md max-md:h-11 max-md:w-11"
-                    aria-label="Service actions"
-                >
-                    <MoreVertical className="h-3.5 w-3.5" strokeWidth={1.5} />
-                </Button>
-            </DropdownMenuTrigger>
-            <DropdownMenuContent align="end">
-                {isServiceActive ? (
-                    <>
-                        <DropdownMenuItem onSelect={() => serviceAction('restart', serviceName)}>
-                            Restart service
+    // Read-only users get no lifecycle kebab at all: it holds only Start/Stop/
+    // Restart, and the backend refuses those without `stack:deploy`.
+    const renderServiceLifecycleMenu = (serviceName: string, serviceIsActive: boolean) => {
+        if (!canDeploy) return null;
+        return (
+            <DropdownMenu>
+                <DropdownMenuTrigger asChild>
+                    <Button
+                        size="icon"
+                        variant="ghost"
+                        className="h-7 w-7 rounded-md max-md:h-11 max-md:w-11"
+                        aria-label="Service actions"
+                    >
+                        <MoreVertical className="h-3.5 w-3.5" strokeWidth={1.5} />
+                    </Button>
+                </DropdownMenuTrigger>
+                <DropdownMenuContent align="end">
+                    {serviceIsActive ? (
+                        <>
+                            <DropdownMenuItem onSelect={() => serviceAction('restart', serviceName)}>
+                                Restart service
+                            </DropdownMenuItem>
+                            <DropdownMenuItem onSelect={() => serviceAction('stop', serviceName)}>
+                                Stop service
+                            </DropdownMenuItem>
+                        </>
+                    ) : (
+                        <DropdownMenuItem onSelect={() => serviceAction('start', serviceName)}>
+                            Start service
                         </DropdownMenuItem>
-                        <DropdownMenuItem onSelect={() => serviceAction('stop', serviceName)}>
-                            Stop service
-                        </DropdownMenuItem>
-                    </>
-                ) : (
-                    <DropdownMenuItem onSelect={() => serviceAction('start', serviceName)}>
-                        Start service
-                    </DropdownMenuItem>
-                )}
-            </DropdownMenuContent>
-        </DropdownMenu>
-    );
+                    )}
+                </DropdownMenuContent>
+            </DropdownMenu>
+        );
+    };
 
     const renderContainerCard = (
         container: ContainerInfo,
@@ -813,7 +856,7 @@ export function ContainersHealth({
                                         {!hideServiceMenu && container.Service && (
                                             renderServiceLifecycleMenu(
                                                 container.Service,
-                                                isActive,
+                                                isServiceStoppable([container]),
                                             )
                                         )}
                                     </div>
@@ -920,7 +963,10 @@ export function ContainersHealth({
                         // Stack-level Update in the identity header remains the
                         // always-on full-stack pull path.
                         const showUpdateAction = hasUpdate || spec.hasBuild;
-                        const isServiceActive = group.some(c => c.State === 'running' || c.State === 'paused');
+                        // A restarting container is already under Docker's control,
+                        // so the menu offers Restart/Stop rather than a Start that
+                        // only races the restart policy.
+                        const serviceIsActive = isServiceStoppable(group);
                         const runningCount = group.filter(c => c.State === 'running').length;
                         const replicaWord = spec.expectedReplicas === 1 ? 'replica' : 'replicas';
                         const replicaCopy = mode === 'rebuild'
@@ -970,7 +1016,7 @@ export function ContainersHealth({
                                     </div>
                                     <div className="flex shrink-0 items-center gap-1">
                                         {renderServiceUpdateButton(updateAffordance)}
-                                        {renderServiceLifecycleMenu(spec.name, false)}
+                                        {renderServiceLifecycleMenu(spec.name, isServiceStoppable(group))}
                                     </div>
                                 </div>
                             );
@@ -1002,7 +1048,7 @@ export function ContainersHealth({
                                     </div>
                                     <div className="flex shrink-0 items-center gap-1">
                                         {renderServiceUpdateButton(updateAffordance)}
-                                        {renderServiceLifecycleMenu(spec.name, isServiceActive)}
+                                        {renderServiceLifecycleMenu(spec.name, serviceIsActive)}
                                     </div>
                                 </div>
                                 <div className="ml-2 flex flex-col gap-2 border-l border-hairline pl-3">

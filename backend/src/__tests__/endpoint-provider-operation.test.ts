@@ -29,11 +29,21 @@ beforeAll(async () => {
 });
 
 afterEach(async () => {
-  vi.restoreAllMocks();
+  // A test that deliberately leaves a provider operation pending (the helper
+  // has not answered yet) leaves its watcher running in the background. Let it
+  // settle before mocks are removed and its directory is deleted: a persist
+  // racing the recursive removal surfaces as ENOTEMPTY and fails the test it
+  // followed.
   const service = ImageOperationService.getInstance() as unknown as {
     endpointProviderPending: boolean;
     endpointProviderTimings: Record<string, number>;
+    isEndpointProviderPending(): boolean;
   };
+  const settleBy = Date.now() + 2_000;
+  while (service.isEndpointProviderPending() && Date.now() < settleBy) {
+    await new Promise(resolve => setTimeout(resolve, 10));
+  }
+  vi.restoreAllMocks();
   service.endpointProviderPending = false;
   service.endpointProviderTimings = {
     pollMs: 2_000,
@@ -47,7 +57,9 @@ afterEach(async () => {
   SelfUpdateService.getInstance().clearLastError();
   for (const [nodeId] of [...FleetUpdateTrackerService.getInstance().entries()]) FleetUpdateTrackerService.getInstance().delete(nodeId);
   await fs.rm(path.join(tmpDir, 'image-operation-current.json'), { force: true });
-  await fs.rm(path.join(tmpDir, 'image-operations'), { recursive: true, force: true });
+  // maxRetries covers a writer that started just before the watcher settled:
+  // Node retries ENOTEMPTY with a linear backoff.
+  await fs.rm(path.join(tmpDir, 'image-operations'), { recursive: true, force: true, maxRetries: 10, retryDelay: 20 });
   await fs.rm(path.join(tmpDir, 'endpoint-provider'), { recursive: true, force: true });
 });
 
