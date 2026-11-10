@@ -77,7 +77,7 @@ const WRITE_SCRIPT = [
   // link goes first; the rename is for what cannot be linked (a directory) and
   // counts only when the moved-aside name is gone afterwards.
   'restore() {',
-  '  if ln -T -- "$old" "./$n" 2>/dev/null; then rm -f "$old"; return 0; fi',
+  '  if [ "$old" -ef "./$n" ] || ln -T -- "$old" "./$n" 2>/dev/null; then rm -f "$old"; return 0; fi',
   '  mv -nT -- "$old" "./$n" 2>/dev/null && [ ! -e "$old" ] && [ ! -L "$old" ]',
   '}',
   // However the script ends, the temporary file (which holds the enrollment
@@ -209,13 +209,13 @@ const DIRECTORY_SCRIPT = [
   `      die ${WRITE_EXIT.notCreated} "could not create: $p"`,
   '    fi',
   `    enter "./$c" || die ${WRITE_EXIT.notDirectory} "changed while it was set up: $p"`,
-  // A directory this script made is owned by the user it runs as; one that is
-  // not was put there by someone else, and is left alone.
-  '    if [ "$created" = 1 ]; then',
-  `      [ -O . ] || die ${WRITE_EXIT.unfinished} "changed while it was set up: $p"`,
+  // A directory this script works in is owned by the user it runs as. One that
+  // is not was put there by someone else, even if it appeared as a parent in the
+  // meantime, and nothing is made inside it. Only a directory it made itself
+  // gets the parent mode.
+  `    [ -O . ] || die ${WRITE_EXIT.unfinished} "changed while it was set up: $p"`,
   // Parents get the usual 0755 (install -d did the same); the mode and owner below are for the directory itself.
-  `      if [ -n "$rest" ]; then chmod 0755 . || die ${WRITE_EXIT.unfinished} "could not set the mode of a parent of $p"; fi`,
-  '    fi',
+  `    if [ "$created" = 1 ] && [ -n "$rest" ]; then chmod 0755 . || die ${WRITE_EXIT.unfinished} "could not set the mode of a parent of $p"; fi`,
   '  done',
   'fi',
   `chown "$o:$g" . || die ${WRITE_EXIT.unfinished} "could not set the owner of $p"`,

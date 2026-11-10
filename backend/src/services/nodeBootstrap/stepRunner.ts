@@ -483,7 +483,7 @@ async function runCommandStep(step: BootstrapPlanStep, ctx: StepContext): Promis
       throw new StepFailure('recovery', 'FILE_CONFLICT', `${step.target.path} appeared on the host after the plan was approved. It was left as it is.`, detail, { changedNothing: true });
     }
     if (result.exitCode === WRITE_EXIT.notDirectory) {
-      throw new StepFailure('failed', 'DIRECTORY_CHANGED', `The nearest existing parent of ${step.target.path} is not a directory, or was swapped while it was being entered. Nothing was created.`, detail, { changedNothing: true });
+      throw new StepFailure('failed', 'DIRECTORY_CHANGED', `A parent of ${step.target.path} (the nearest one that exists, or one that appeared while the directory was made) is not a directory, or was swapped while it was being entered. Nothing was created.`, detail, { changedNothing: true });
     }
     if (result.exitCode === WRITE_EXIT.notCreated) {
       throw new StepFailure('failed', 'STEP_FAILED', `"${step.title}" failed (exit ${result.exitCode}); nothing was created.`, detail, { changedNothing: true });

@@ -657,6 +657,17 @@ describe('B1: a stop in the middle of a replacement never loses or strands the c
     expect(fs.readdirSync(root).filter((entry) => !entry.startsWith('signal-'))).toEqual(['compose.yaml']);
   });
 
+  it('leaves no extra link to the original when the stop lands right after it was put back', () => {
+    fs.writeFileSync(path.join(root, 'compose.yaml'), previous, { mode: 0o600 });
+    // The write was told to replace a different file, so the original is moved aside, found not to match, and put back.
+    const command = writeFileCommand(path.join(root, 'compose.yaml'), { ...file, sha256: sha256('new compose') }, { sudo: false, replaces: sha256('something else') });
+    const env = signalingShim(root, 'ln', '*.old.*');
+    const result = runShell(command, 'new compose', env);
+    expect(result.status).not.toBe(0);
+    expect(fs.readFileSync(path.join(root, 'compose.yaml'), 'utf8')).toBe(previous);
+    expect(fs.readdirSync(root).filter((entry) => !entry.startsWith('signal-'))).toEqual(['compose.yaml']);
+  });
+
   it('leaves only the new file when the stop lands right after it was published', () => {
     fs.writeFileSync(path.join(root, 'compose.yaml'), previous, { mode: 0o600 });
     const env = signalingShim(root, 'ln', '*.old.*) ;; *./compose.yaml');
