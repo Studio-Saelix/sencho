@@ -6785,11 +6785,24 @@ stmt.run('gitops_schema_version', '1');
         ).get(targetKey, fingerprint ?? '') as NodeBootstrapOperation | undefined;
     }
 
-    /** Every operation that still holds its server, newest first. Never capped: it is the recovery path. */
-    public listActiveNodeBootstrapOperations(): NodeBootstrapOperation[] {
+    /**
+     * One page of the operations that still hold their server, newest first,
+     * after the row named by `after` (a keyset on creation time and id, so a
+     * row that changes state or is released while an operator pages through
+     * never shifts the rows still to come). Every hold is reachable by paging;
+     * none is skipped.
+     */
+    public listActiveNodeBootstrapOperations(limit: number, after: { createdAt: number; id: string } | null = null): NodeBootstrapOperation[] {
+        if (after === null) {
+            return this.db.prepare(
+                'SELECT * FROM node_bootstrap_operations WHERE active = 1 ORDER BY created_at DESC, id DESC LIMIT ?'
+            ).all(limit) as NodeBootstrapOperation[];
+        }
         return this.db.prepare(
-            'SELECT * FROM node_bootstrap_operations WHERE active = 1 ORDER BY created_at DESC'
-        ).all() as NodeBootstrapOperation[];
+            `SELECT * FROM node_bootstrap_operations
+             WHERE active = 1 AND (created_at < ? OR (created_at = ? AND id < ?))
+             ORDER BY created_at DESC, id DESC LIMIT ?`
+        ).all(after.createdAt, after.createdAt, after.id, limit) as NodeBootstrapOperation[];
     }
 
     /** The latest operations that no longer hold their server. */

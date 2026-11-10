@@ -224,6 +224,9 @@ function DialogBody({ wizard, run }: { wizard: UseNodeBootstrap; run: UseBootstr
           <BootstrapOperationsList
             operations={run.operations}
             loadFailed={run.listFailed}
+            hasMore={run.hasMoreOperations}
+            loadingMore={run.loadingMoreOperations}
+            onLoadMore={() => { void run.loadMore(); }}
             disabled={busy !== null || run.busy !== null}
             onFollow={(operation) => { void follow(operation.id); }}
             onRetry={(operation) => wizard.startRetry(operation)}

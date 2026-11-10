@@ -59,8 +59,32 @@ import type { BootstrapPlan, BootstrapPreflightResult } from './types';
 export const APPROVAL_TTL_MS = 10 * 60_000;
 export const MAX_PENDING_APPROVALS = 32;
 export const ENROLL_WAIT_MS = 5 * 60_000;
-/** Finished runs listed after the ones still holding a server; holds are never cut by this. */
+/** Finished runs listed with the first page of holds. */
 export const OPERATION_HISTORY_LIMIT = 20;
+/** Runs that still hold a server returned per page; the rest are reached with the cursor the page returns. */
+export const OPERATION_HOLD_PAGE = 20;
+
+export interface OperationPage {
+  operations: OperationView[];
+  /** Opaque; pass it back to read the next page of holds. Null when this page ends the holds. */
+  nextCursor: string | null;
+}
+
+function encodeCursor(op: NodeBootstrapOperation): string {
+  return Buffer.from(JSON.stringify([op.created_at, op.id])).toString('base64url');
+}
+
+function decodeCursor(cursor: string): { createdAt: number; id: string } {
+  try {
+    const parsed: unknown = JSON.parse(Buffer.from(cursor, 'base64url').toString('utf8'));
+    if (Array.isArray(parsed) && parsed.length === 2 && Number.isSafeInteger(parsed[0]) && typeof parsed[1] === 'string' && parsed[1].length > 0 && parsed[1].length <= 64) {
+      return { createdAt: parsed[0], id: parsed[1] };
+    }
+  } catch {
+    // Falls through to the refusal below.
+  }
+  throw new BootstrapError(400, 'INVALID_CURSOR', 'That page of bootstrap runs is not valid. Reload the list.');
+}
 
 const RUNNING_STATES: readonly NodeBootstrapOperationState[] = ['rechecking', 'running', 'enrolling'];
 const RETRYABLE_STATES: readonly NodeBootstrapOperationState[] = [
@@ -451,15 +475,22 @@ export class NodeBootstrapOperationService {
   }
 
   /**
-   * Every run that still holds its server, then the latest finished ones. The
-   * holds are the recovery path, so none is ever left out; only the finished
-   * history is capped.
+   * The runs that still hold their server, a page at a time (newest first),
+   * and with the first page the latest finished ones. A hold is the way back
+   * to a run that needs recovery, so every one is reachable: each page names
+   * where the next begins, and a page costs a bounded read, reconcile and
+   * response however many holds have piled up. The cursor is a position, not
+   * an offset, so a run that settles or is released while an operator pages
+   * never makes another one slip past.
    */
-  public list(): OperationView[] {
-    const holds = this.deps.db.listActiveNodeBootstrapOperations();
-    const history = this.deps.db.listFinishedNodeBootstrapOperations(OPERATION_HISTORY_LIMIT);
+  public list(cursor: string | null = null): OperationPage {
+    const after = cursor === null ? null : decodeCursor(cursor);
+    const rows = this.deps.db.listActiveNodeBootstrapOperations(OPERATION_HOLD_PAGE + 1, after);
+    const holds = rows.slice(0, OPERATION_HOLD_PAGE);
+    const nextCursor = rows.length > OPERATION_HOLD_PAGE ? encodeCursor(holds[holds.length - 1]) : null;
+    const history = after === null ? this.deps.db.listFinishedNodeBootstrapOperations(OPERATION_HISTORY_LIMIT) : [];
     // A read can settle a row (a Pilot that connected, a run with no process behind it), so rows are viewed after reconciling.
-    return [...holds, ...history].map((op) => this.view(this.reconcile(op)));
+    return { operations: [...holds, ...history].map((op) => this.view(this.reconcile(op))), nextCursor };
   }
 
   public get(id: string): OperationDetail {

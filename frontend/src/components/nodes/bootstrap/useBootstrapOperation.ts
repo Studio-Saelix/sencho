@@ -43,6 +43,11 @@ export function useBootstrapOperation({ open, api }: UseBootstrapOperationOption
   const [operation, setOperation] = useState<BootstrapOperationDetail | null>(null);
   const [operations, setOperations] = useState<BootstrapOperation[]>([]);
   const [listFailed, setListFailed] = useState(false);
+  // Where the next page of held runs begins; null when the loaded rows end the holds.
+  const [nextCursor, setNextCursor] = useState<string | null>(null);
+  const [loadingMore, setLoadingMore] = useState(false);
+  // Bumped by every read of the first page, so a later page that was still on its way is dropped, not stitched onto a newer list.
+  const listGeneration = useRef(0);
   // Consecutive failed progress reads for the shown run; reset by any answer.
   const [pollFailures, setPollFailures] = useState(0);
   const [busy, setBusy] = useState<OperationBusy>(null);
@@ -57,8 +62,11 @@ export function useBootstrapOperation({ open, api }: UseBootstrapOperationOption
   }, []);
 
   const refreshList = useCallback(async (signal?: AbortSignal) => {
+    listGeneration.current += 1;
     try {
-      setOperations(await client.list(signal));
+      const page = await client.list(signal);
+      setOperations(page.operations);
+      setNextCursor(page.nextCursor);
       setListFailed(false);
     } catch (error: unknown) {
       if (error instanceof DOMException && error.name === 'AbortError') return;
@@ -75,9 +83,11 @@ export function useBootstrapOperation({ open, api }: UseBootstrapOperationOption
   useEffect(() => {
     if (!open) return;
     const controller = new AbortController();
+    listGeneration.current += 1;
     client.list(controller.signal)
-      .then((rows) => {
-        setOperations(rows);
+      .then((page) => {
+        setOperations(page.operations);
+        setNextCursor(page.nextCursor);
         setListFailed(false);
       })
       .catch((error: unknown) => {
@@ -88,6 +98,29 @@ export function useBootstrapOperation({ open, api }: UseBootstrapOperationOption
     return () => controller.abort();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open]);
+
+  /** Read the next page of held runs and add it below the ones shown. */
+  const loadMore = useCallback(async () => {
+    if (nextCursor === null || loadingMore) return;
+    const generation = listGeneration.current;
+    setLoadingMore(true);
+    try {
+      const page = await client.list(undefined, nextCursor);
+      if (generation !== listGeneration.current) return;
+      setOperations((shown) => {
+        const known = new Set(shown.map((operation) => operation.id));
+        return [...shown, ...page.operations.filter((operation) => !known.has(operation.id))];
+      });
+      setNextCursor(page.nextCursor);
+    } catch (error: unknown) {
+      if (generation !== listGeneration.current) return;
+      // The cursor is kept, so the same button tries the same page again.
+      toast.error(error instanceof Error ? error.message : 'More bootstrap runs could not be loaded.');
+    } finally {
+      setLoadingMore(false);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [nextCursor, loadingMore]);
 
   const openOperation = useCallback(async (id: string): Promise<BootstrapOperationDetail | null> => {
     setBusy('open');
@@ -173,6 +206,9 @@ export function useBootstrapOperation({ open, api }: UseBootstrapOperationOption
     operation,
     operations,
     listFailed,
+    hasMoreOperations: nextCursor !== null,
+    loadingMoreOperations: loadingMore,
+    loadMore,
     /** Progress has not refreshed for three reads in a row, or the run can no longer be read. */
     progressStale: pollStopped || pollFailures >= 3,
     busy,

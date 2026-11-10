@@ -174,9 +174,17 @@ export async function fetchBootstrapOperation(id: string, signal?: AbortSignal):
   return await res.json() as BootstrapOperationDetail;
 }
 
-export async function listBootstrapOperations(signal?: AbortSignal): Promise<BootstrapOperation[]> {
-  const res = await apiFetch('/nodes/bootstrap/operations', { localOnly: true, signal });
+/** One page of runs: those that still hold a server, and with the first page the latest finished ones. */
+export interface BootstrapOperationPage {
+  operations: BootstrapOperation[];
+  /** Pass it back to read the next page of held runs; null when there are no more. */
+  nextCursor: string | null;
+}
+
+export async function listBootstrapOperations(signal?: AbortSignal, cursor?: string | null): Promise<BootstrapOperationPage> {
+  const query = cursor ? `?cursor=${encodeURIComponent(cursor)}` : '';
+  const res = await apiFetch(`/nodes/bootstrap/operations${query}`, { localOnly: true, signal });
   if (!res.ok) throw await toError(res);
-  const body = await res.json() as { operations?: BootstrapOperation[] };
-  return body.operations ?? [];
+  const body = await res.json() as { operations?: BootstrapOperation[]; nextCursor?: string | null };
+  return { operations: body.operations ?? [], nextCursor: body.nextCursor ?? null };
 }

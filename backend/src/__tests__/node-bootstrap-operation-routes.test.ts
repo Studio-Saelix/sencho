@@ -109,7 +109,7 @@ describe('bootstrap operation routes: refusals', () => {
     expect(Array.isArray(res.body.operations)).toBe(true);
   });
 
-  it('answers with every held operation, past twenty, and without plan bodies', async () => {
+  it('pages through every held operation, past twenty, without plan bodies', async () => {
     const db = DatabaseService.getInstance();
     const now = Date.now();
     const ids = Array.from({ length: 23 }, (_, index) => {
@@ -123,16 +123,32 @@ describe('bootstrap operation routes: refusals', () => {
       });
       return id;
     });
-    const res = await request(app).get('/api/nodes/bootstrap/operations').set('Authorization', adminAuth);
-    expect(res.status).toBe(200);
-    const listed = (res.body.operations as Array<{ id: string; actions: { release: boolean } }>);
+    type Page = { operations: Array<{ id: string; active: boolean; actions: { release: boolean } }>; nextCursor: string | null };
+    const first = await request(app).get('/api/nodes/bootstrap/operations').set('Authorization', adminAuth);
+    expect(first.status).toBe(200);
+    const firstPage = first.body as Page;
+    expect(firstPage.operations.filter((entry) => entry.active)).toHaveLength(20);
+    expect(typeof firstPage.nextCursor).toBe('string');
+    const second = await request(app).get('/api/nodes/bootstrap/operations').query({ cursor: firstPage.nextCursor }).set('Authorization', adminAuth);
+    expect(second.status).toBe(200);
+    const secondPage = second.body as Page;
+    expect(secondPage.nextCursor).toBeNull();
+    const listed = [...firstPage.operations, ...secondPage.operations];
     for (const id of ids) expect(listed.find((entry) => entry.id === id)?.actions.release).toBe(true);
-    expect(JSON.stringify(res.body)).not.toContain('plan body');
+    expect(JSON.stringify([first.body, second.body])).not.toContain('plan body');
     // Any held run opens with its recovery controls.
     const opened = await request(app).get(`/api/nodes/bootstrap/operations/${ids[0]}`).set('Authorization', adminAuth);
     expect(opened.status).toBe(200);
     expect(opened.body.actions).toMatchObject({ release: true });
     for (const id of ids) db.transitionNodeBootstrapOperation(id, ['partial'], { active: 0 }, Date.now());
+  });
+
+  it('refuses a page cursor that is not one the list returned', async () => {
+    for (const cursor of ['garbage', 'e30', 'x'.repeat(300)]) {
+      const res = await request(app).get('/api/nodes/bootstrap/operations').query({ cursor }).set('Authorization', adminAuth);
+      expect(res.status).toBe(400);
+      expect(res.body.code).toBe('INVALID_CURSOR');
+    }
   });
 
   it('refuses a retry preflight for an operation that does not exist before any SSH work', async () => {

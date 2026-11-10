@@ -4,7 +4,8 @@ import fs from 'fs';
 import os from 'os';
 import path from 'path';
 import { execFileSync, spawn, spawnSync } from 'child_process';
-import { READ_EXIT, WRITE_EXIT, createDirectoryCommand, writeFileCommand } from '../services/nodeBootstrap/executionCommands';
+import { READ_EXIT, WRITE_EXIT } from '../services/nodeBootstrap/executionCommands';
+import { approvedPath, directoryCommand, writeCommand } from './__helpers__/bootstrapCommands';
 import { StepFailure, TOKEN_PLACEHOLDER, runPlanStep, type StepContext } from '../services/nodeBootstrap/stepRunner';
 import { buildPilotEnrollmentCompose } from '../helpers/pilotEnrollmentCompose';
 import { DOCKER_KEY_ASC } from './__helpers__/dockerRepoFixtures';
@@ -106,7 +107,7 @@ describe('B1: file publication refuses at the moment of the write', () => {
   it('does not overwrite a file created after the absence check', async () => {
     const target = path.join(root, 'compose.yaml');
     const result = await runRaced(
-      writeFileCommand(target, { ...file, sha256: sha256('ours') }, { sudo: false, replaces: null }),
+      writeCommand(target, { ...file, sha256: sha256('ours') }, { sudo: false, replaces: null }),
       'ours',
       hasTemp(root, 'compose.yaml'),
       () => fs.writeFileSync(target, 'theirs', { mode: 0o644 }),
@@ -122,7 +123,7 @@ describe('B1: file publication refuses at the moment of the write', () => {
     const elsewhere = path.join(root, 'elsewhere');
     fs.writeFileSync(elsewhere, 'untouched', { mode: 0o644 });
     const result = await runRaced(
-      writeFileCommand(target, { ...file, sha256: sha256('ours') }, { sudo: false, replaces: null }),
+      writeCommand(target, { ...file, sha256: sha256('ours') }, { sudo: false, replaces: null }),
       'ours',
       hasTemp(root, 'compose.yaml'),
       () => fs.symlinkSync(elsewhere, target),
@@ -137,7 +138,7 @@ describe('B1: file publication refuses at the moment of the write', () => {
   it('does not replace a directory created at the name after the check', async () => {
     const target = path.join(root, 'compose.yaml');
     const result = await runRaced(
-      writeFileCommand(target, { ...file, sha256: sha256('ours') }, { sudo: false, replaces: null }),
+      writeCommand(target, { ...file, sha256: sha256('ours') }, { sudo: false, replaces: null }),
       'ours',
       hasTemp(root, 'compose.yaml'),
       () => fs.mkdirSync(target),
@@ -155,7 +156,7 @@ describe('B1: file publication refuses at the moment of the write', () => {
       fs.writeFileSync(target, inspected, { mode: 0o644 });
       return target;
     }
-    const command = (target: string) => writeFileCommand(target, { ...file, sha256: sha256('new compose') }, { sudo: false, replaces: sha256(inspected) });
+    const command = (target: string) => writeCommand(target, { ...file, sha256: sha256('new compose') }, { sudo: false, replaces: sha256(inspected) });
 
     it('replaces it when it is still that file', async () => {
       const target = arrange();
@@ -218,7 +219,7 @@ describe('B1: file publication refuses at the moment of the write', () => {
       fs.mkdirSync(real, { mode: 0o755 });
       const link = path.join(root, 'link');
       fs.symlinkSync(real, link);
-      const result = runShell(writeFileCommand(path.join(link, 'compose.yaml'), { ...file, sha256: sha256('ours') }, { sudo: false, replaces: null }), 'ours');
+      const result = runShell(writeCommand(path.join(link, 'compose.yaml'), { ...file, sha256: sha256('ours') }, { sudo: false, replaces: null }), 'ours');
       expect(result.status).toBe(WRITE_EXIT.notDirectory);
       expect(fs.readdirSync(real)).toEqual([]);
     });
@@ -229,7 +230,7 @@ describe('B1: file publication refuses at the moment of the write', () => {
       fs.mkdirSync(dir, { mode: 0o755 });
       fs.mkdirSync(decoy, { mode: 0o755 });
       const result = await runRaced(
-        writeFileCommand(path.join(dir, 'compose.yaml'), { ...file, sha256: sha256('ours') }, { sudo: false, replaces: null }),
+        writeCommand(path.join(dir, 'compose.yaml'), { ...file, sha256: sha256('ours') }, { sudo: false, replaces: null }),
         'ours',
         hasTemp(dir, 'compose.yaml'),
         () => {
@@ -250,7 +251,7 @@ describe('B1: file publication refuses at the moment of the write', () => {
       fs.mkdirSync(dir, { recursive: true, mode: 0o755 });
       fs.mkdirSync(path.join(decoyParent, 'agent'), { recursive: true, mode: 0o755 });
       const result = await runRaced(
-        writeFileCommand(path.join(dir, 'compose.yaml'), { ...file, sha256: sha256('ours') }, { sudo: false, replaces: null }),
+        writeCommand(path.join(dir, 'compose.yaml'), { ...file, sha256: sha256('ours') }, { sudo: false, replaces: null }),
         'ours',
         hasTemp(dir, 'compose.yaml'),
         () => {
@@ -270,7 +271,7 @@ describe('B1: directory creation never changes a directory it did not create', (
 
   it('creates a missing directory with the planned mode', () => {
     const target = path.join(root, 'agent');
-    expect(runShell(createDirectoryCommand(target, dirSpec, { sudo: false, allowExisting: false })).status).toBe(0);
+    expect(runShell(directoryCommand(target, dirSpec, { sudo: false, allowExisting: false })).status).toBe(0);
     expect(modeOf(target)).toBe('700');
   });
 
@@ -281,7 +282,7 @@ describe('B1: directory creation never changes a directory it did not create', (
     const link = path.join(root, 'agent');
     fs.symlinkSync(unrelated, link);
     for (const allowExisting of [false, true]) {
-      expect(runShell(createDirectoryCommand(link, dirSpec, { sudo: false, allowExisting })).status).toBe(WRITE_EXIT.exists);
+      expect(runShell(directoryCommand(link, dirSpec, { sudo: false, allowExisting })).status).toBe(WRITE_EXIT.exists);
       expect(modeOf(unrelated)).toBe('755');
       expect(fs.lstatSync(link).isSymbolicLink()).toBe(true);
     }
@@ -291,7 +292,7 @@ describe('B1: directory creation never changes a directory it did not create', (
     const made = path.join(root, 'agent');
     fs.mkdirSync(made);
     fs.chmodSync(made, 0o755);
-    expect(runShell(createDirectoryCommand(made, dirSpec, { sudo: false, allowExisting: false })).status).toBe(WRITE_EXIT.exists);
+    expect(runShell(directoryCommand(made, dirSpec, { sudo: false, allowExisting: false })).status).toBe(WRITE_EXIT.exists);
     expect(modeOf(made)).toBe('755');
   });
 
@@ -299,13 +300,13 @@ describe('B1: directory creation never changes a directory it did not create', (
     const keyrings = path.join(root, 'keyrings');
     fs.mkdirSync(keyrings);
     fs.chmodSync(keyrings, 0o700);
-    expect(runShell(createDirectoryCommand(keyrings, { mode: '0755', owner, group }, { sudo: false, allowExisting: true })).status).toBe(0);
+    expect(runShell(directoryCommand(keyrings, { mode: '0755', owner, group }, { sudo: false, allowExisting: true })).status).toBe(0);
     expect(modeOf(keyrings)).toBe('755');
   });
 
   it('treats an injection-shaped path as data', () => {
     const hostile = path.join(root, "it's $(touch pwned) `id`;");
-    expect(runShell(createDirectoryCommand(hostile, dirSpec, { sudo: false, allowExisting: false })).status).toBe(0);
+    expect(runShell(directoryCommand(hostile, dirSpec, { sudo: false, allowExisting: false })).status).toBe(0);
     expect(fs.readdirSync(root).some((name) => name.startsWith('pwned'))).toBe(false);
   });
 });
@@ -441,7 +442,7 @@ describe('B1: a directory step refuses what appeared after the plan was approved
       rationale: 'test',
       effect: 'directory-create',
       privilege: 'user',
-      command: createDirectoryCommand(dest, { mode: '0700', owner, group }, { sudo: false, allowExisting }),
+      command: directoryCommand(dest, { mode: '0700', owner, group }, { sudo: false, allowExisting }),
       target: { path: dest, mode: '0700', owner, group, preserveExisting: allowExisting },
       disruptive: false,
       reversible: 'yes',
@@ -561,7 +562,7 @@ describe('B1: the directory is pinned between its inspection and its entry', () 
     fs.mkdirSync(dir, { mode: 0o755 });
     fs.mkdirSync(decoy, { mode: 0o755 });
     const shim = shimDir(root, `mv "${dir}" "${dir}.moved" && ln -s "${decoy}" "${dir}"`);
-    const result = runShell(writeFileCommand(path.join(dir, 'compose.yaml'), { ...file, sha256: sha256('ours') }, { sudo: false, replaces: null }), 'ours', shim.env);
+    const result = runShell(writeCommand(path.join(dir, 'compose.yaml'), { ...file, sha256: sha256('ours') }, { sudo: false, replaces: null }), 'ours', shim.env);
     expect(result.status).toBe(WRITE_EXIT.notDirectory);
     expect(fs.readdirSync(decoy)).toEqual([]);
     expect(fs.readdirSync(`${dir}.moved`)).toEqual([]);
@@ -573,7 +574,7 @@ describe('B1: the directory is pinned between its inspection and its entry', () 
     fs.mkdirSync(path.join(parent, 'agent'), { recursive: true });
     fs.mkdirSync(path.join(decoyParent, 'agent'), { recursive: true });
     const shim = shimDir(root, `mv "${parent}" "${parent}.moved" && ln -s "${decoyParent}" "${parent}"`);
-    const result = runShell(writeFileCommand(path.join(parent, 'agent', 'compose.yaml'), { ...file, sha256: sha256('ours') }, { sudo: false, replaces: null }), 'ours', shim.env);
+    const result = runShell(writeCommand(path.join(parent, 'agent', 'compose.yaml'), { ...file, sha256: sha256('ours') }, { sudo: false, replaces: null }), 'ours', shim.env);
     expect(result.status).toBe(WRITE_EXIT.notDirectory);
     expect(fs.readdirSync(path.join(decoyParent, 'agent'))).toEqual([]);
   });
@@ -584,7 +585,7 @@ describe('B1: the directory is pinned between its inspection and its entry', () 
     fs.mkdirSync(parent, { mode: 0o755 });
     fs.mkdirSync(decoy, { mode: 0o755 });
     const shim = shimDir(root, `mv "${parent}" "${parent}.moved" && ln -s "${decoy}" "${parent}"`);
-    const result = runShell(createDirectoryCommand(path.join(parent, 'agent'), { mode: '0700', owner, group }, { sudo: false, allowExisting: false }), '', shim.env);
+    const result = runShell(directoryCommand(path.join(parent, 'agent'), { mode: '0700', owner, group }, { sudo: false, allowExisting: false }), '', shim.env);
     expect(result.status).toBe(WRITE_EXIT.notDirectory);
     expect(fs.readdirSync(decoy)).toEqual([]);
     expect(modeOf(decoy)).toBe('755');
@@ -592,7 +593,7 @@ describe('B1: the directory is pinned between its inspection and its entry', () 
 
   it('removes its temporary file when the session ends on a closed pipe (the token must not stay behind)', async () => {
     const target = path.join(root, 'compose.yaml');
-    const child = spawn('sh', ['-c', `LC_ALL=C ${writeFileCommand(target, { ...file, sha256: sha256('the full content') }, { sudo: false, replaces: null })}`]);
+    const child = spawn('sh', ['-c', `LC_ALL=C ${writeCommand(target, { ...file, sha256: sha256('the full content') }, { sudo: false, replaces: null })}`]);
     const closed = new Promise<number | null>((resolve) => child.on('close', (code) => resolve(code)));
     const deadline = Date.now() + 10_000;
     while (!hasTemp(root, 'compose.yaml')()) {
@@ -610,7 +611,7 @@ describe('B1: the directory is pinned between its inspection and its entry', () 
     const target = path.join(root, 'compose.yaml');
     fs.writeFileSync(target, 'old compose with a spent token', { mode: 0o600 });
     const shim = shimDir(root, ':');
-    const child = spawn('sh', ['-c', `LC_ALL=C ${writeFileCommand(target, { ...file, sha256: sha256('new compose') }, { sudo: false, replaces: sha256('old compose with a spent token') })}`], { env: { ...process.env, ...shim.env }, detached: true });
+    const child = spawn('sh', ['-c', `LC_ALL=C ${writeCommand(target, { ...file, sha256: sha256('new compose') }, { sudo: false, replaces: sha256('old compose with a spent token') })}`], { env: { ...process.env, ...shim.env }, detached: true });
     const closed = new Promise<number | null>((resolve) => child.on('close', (code) => resolve(code)));
     child.stdin.end('new compose');
     const deadline = Date.now() + 10_000;
@@ -646,7 +647,7 @@ function signalingShim(base: string, command: string, when: string): { PATH: str
 
 describe('B1: a stop in the middle of a replacement never loses or strands the compose file', () => {
   const previous = 'old compose with a spent token';
-  const replacement = () => writeFileCommand(path.join(root, 'compose.yaml'), { ...file, sha256: sha256('new compose') }, { sudo: false, replaces: sha256(previous) });
+  const replacement = () => writeCommand(path.join(root, 'compose.yaml'), { ...file, sha256: sha256('new compose') }, { sudo: false, replaces: sha256(previous) });
 
   it('puts the previous file back when the stop lands right after it was moved aside', () => {
     fs.writeFileSync(path.join(root, 'compose.yaml'), previous, { mode: 0o600 });
@@ -660,7 +661,7 @@ describe('B1: a stop in the middle of a replacement never loses or strands the c
   it('leaves no extra link to the original when the stop lands right after it was put back', () => {
     fs.writeFileSync(path.join(root, 'compose.yaml'), previous, { mode: 0o600 });
     // The write was told to replace a different file, so the original is moved aside, found not to match, and put back.
-    const command = writeFileCommand(path.join(root, 'compose.yaml'), { ...file, sha256: sha256('new compose') }, { sudo: false, replaces: sha256('something else') });
+    const command = writeCommand(path.join(root, 'compose.yaml'), { ...file, sha256: sha256('new compose') }, { sudo: false, replaces: sha256('something else') });
     const env = signalingShim(root, 'ln', '*.old.*');
     const result = runShell(command, 'new compose', env);
     expect(result.status).not.toBe(0);
@@ -683,11 +684,11 @@ describe('B1: directory creation makes missing parents the way install -d did', 
 
   it('creates every missing parent with 0755 and gives only the directory itself the planned mode', () => {
     const target = path.join(root, 'opt', 'docker', 'sencho');
-    expect(runShell(createDirectoryCommand(target, { mode: '0755', owner, group }, { sudo: false, allowExisting: false })).status).toBe(0);
+    expect(runShell(directoryCommand(target, { mode: '0755', owner, group }, { sudo: false, allowExisting: false })).status).toBe(0);
     expect(modeOf(path.join(root, 'opt'))).toBe('755');
     expect(modeOf(path.join(root, 'opt', 'docker'))).toBe('755');
     const agent = path.join(root, 'srv', 'a', 'agent');
-    expect(runShell(createDirectoryCommand(agent, dirSpec, { sudo: false, allowExisting: false })).status).toBe(0);
+    expect(runShell(directoryCommand(agent, dirSpec, { sudo: false, allowExisting: false })).status).toBe(0);
     expect(modeOf(path.join(root, 'srv', 'a'))).toBe('755');
     expect(modeOf(agent)).toBe('700');
   });
@@ -697,7 +698,7 @@ describe('B1: directory creation makes missing parents the way install -d did', 
     fs.mkdirSync(real, { mode: 0o755 });
     const link = path.join(root, 'link');
     fs.symlinkSync(real, link);
-    expect(runShell(createDirectoryCommand(path.join(link, 'docker', 'sencho'), { mode: '0755', owner, group }, { sudo: false, allowExisting: false })).status).toBe(0);
+    expect(runShell(directoryCommand(path.join(link, 'docker', 'sencho'), { mode: '0755', owner, group }, { sudo: false, allowExisting: false })).status).toBe(0);
     expect(fs.statSync(path.join(real, 'docker', 'sencho')).isDirectory()).toBe(true);
     expect(fs.lstatSync(link).isSymbolicLink()).toBe(true);
   });
@@ -709,7 +710,7 @@ describe('B1: directory creation makes missing parents the way install -d did', 
     const realMkdir = execFileSync('sh', ['-c', 'command -v mkdir'], { encoding: 'utf8' }).trim();
     fs.writeFileSync(path.join(shimBase, 'mkdir'), ['#!/bin/sh', 'case "$2" in ./mid) "' + realMkdir + '" -m 0700 ./mid; exit 1 ;; esac', `exec "${realMkdir}" "$@"`].join('\n'), { mode: 0o755 });
     const target = path.join(root, 'mid', 'agent');
-    const result = runShell(createDirectoryCommand(target, dirSpec, { sudo: false, allowExisting: false }), '', { PATH: `${shimBase}:${process.env.PATH ?? ''}` });
+    const result = runShell(directoryCommand(target, dirSpec, { sudo: false, allowExisting: false }), '', { PATH: `${shimBase}:${process.env.PATH ?? ''}` });
     expect(result.status).toBe(0);
     expect(modeOf(path.join(root, 'mid'))).toBe('700');
     expect(modeOf(target)).toBe('700');
@@ -718,14 +719,14 @@ describe('B1: directory creation makes missing parents the way install -d did', 
   it('refuses when the nearest existing ancestor is a file, and when the path is not absolute', () => {
     const blocker = path.join(root, 'blocker');
     fs.writeFileSync(blocker, 'x');
-    expect(runShell(createDirectoryCommand(path.join(blocker, 'agent'), dirSpec, { sudo: false, allowExisting: false })).status).toBe(WRITE_EXIT.notDirectory);
-    expect(runShell(createDirectoryCommand('relative/agent', dirSpec, { sudo: false, allowExisting: false })).status).toBe(WRITE_EXIT.notDirectory);
+    expect(runShell(directoryCommand(path.join(blocker, 'agent'), dirSpec, { sudo: false, allowExisting: false })).status).toBe(WRITE_EXIT.notDirectory);
+    expect(runShell(directoryCommand('relative/agent', dirSpec, { sudo: false, allowExisting: false })).status).toBe(WRITE_EXIT.notDirectory);
   });
 
   it.skipIf(IS_ROOT)('says nothing was created when mkdir fails for a reason other than the name existing', () => {
     const locked = path.join(root, 'locked');
     fs.mkdirSync(locked, { mode: 0o555 });
-    const result = runShell(createDirectoryCommand(path.join(locked, 'agent'), dirSpec, { sudo: false, allowExisting: false }));
+    const result = runShell(directoryCommand(path.join(locked, 'agent'), dirSpec, { sudo: false, allowExisting: false }));
     expect(result.status).toBe(WRITE_EXIT.notCreated);
     expect(result.stderr).toContain('could not create');
     fs.chmodSync(locked, 0o755);
@@ -733,7 +734,7 @@ describe('B1: directory creation makes missing parents the way install -d did', 
 
   it.skipIf(IS_ROOT)('says a directory was created but not finished when its owner cannot be set', () => {
     const target = path.join(root, 'srv', 'agent');
-    const result = runShell(createDirectoryCommand(target, { mode: '0700', owner, group: 'root' }, { sudo: false, allowExisting: false }));
+    const result = runShell(directoryCommand(target, { mode: '0700', owner, group: 'root' }, { sudo: false, allowExisting: false }));
     expect(result.status).toBe(WRITE_EXIT.unfinished);
     expect(fs.existsSync(target)).toBe(true);
   });
@@ -761,7 +762,7 @@ describe('B1: the step names what a script refused', () => {
       rationale: 'test',
       effect: 'directory-create',
       privilege: 'user',
-      command: createDirectoryCommand(dest, { mode: '0755', owner, group }, { sudo: false, allowExisting: false }),
+      command: directoryCommand(dest, { mode: '0755', owner, group }, { sudo: false, allowExisting: false }),
       target: { path: dest, mode: '0755', owner, group, preserveExisting: false },
       disruptive: false,
       reversible: 'yes',
@@ -862,5 +863,306 @@ describe('B2: a failed key download records none of the key either', () => {
     const failure = await failureOf(() => runPlanStep(keyStep(path.join(root, 'docker.asc')), context(localSession({ truncatedDownload: true })), PLAN));
     expect(failure.code).toBe('KEY_NOT_VERIFIED');
     expect(fs.readdirSync(root)).toEqual([]);
+  });
+});
+
+/** The names every shared writer caller publishes: the marker, the compose file, the CA, the apt source and the Docker key. */
+const WRITER_NAMES: Array<[string, string, string]> = [
+  ['the bootstrap marker', 'sencho-bootstrap.json', '0600'],
+  ['the compose file', 'compose.yaml', '0600'],
+  ['the hub CA', 'sencho-hub-ca.pem', '0644'],
+  ['the apt source', 'docker.list', '0644'],
+  ['the Docker key', 'docker.asc', '0644'],
+];
+
+describe('B1: execution is bound to the directory the plan approved', () => {
+  /** root/srv/agent approved as it is, then root/srv replaced by a link to root/decoy/agent's parent before the script starts. */
+  function arrangeSwappedAncestor(): { dir: string; decoyDir: string; approved: string } {
+    const parent = path.join(root, 'srv');
+    const dir = path.join(parent, 'agent');
+    const decoyParent = path.join(root, 'decoy');
+    fs.mkdirSync(dir, { recursive: true, mode: 0o755 });
+    fs.mkdirSync(path.join(decoyParent, 'agent'), { recursive: true, mode: 0o755 });
+    return {
+      dir,
+      decoyDir: path.join(decoyParent, 'agent'),
+      approved: approvedPath(dir),
+    };
+  }
+  const swapAncestor = () => {
+    const parent = path.join(root, 'srv');
+    fs.renameSync(parent, `${parent}.moved`);
+    fs.symlinkSync(path.join(root, 'decoy'), parent);
+  };
+
+  it.each(WRITER_NAMES)('refuses to write %s through an ancestor replaced by a link before the script started', (_label, name, mode) => {
+    const { dir, decoyDir, approved } = arrangeSwappedAncestor();
+    const command = writeCommand(path.join(dir, name), { mode, owner, group, sha256: sha256('ours') }, { sudo: false, replaces: null, directory: approved });
+    swapAncestor();
+    const result = runShell(command, 'ours');
+    expect(result.status).toBe(WRITE_EXIT.notDirectory);
+    expect(fs.readdirSync(decoyDir)).toEqual([]);
+    expect(modeOf(decoyDir)).toBe('755');
+    expect(fs.readdirSync(path.join(`${path.join(root, 'srv')}.moved`, 'agent'))).toEqual([]);
+  });
+
+  it('refuses a replacement through the swapped ancestor as well, and keeps what the link leads to', () => {
+    const { dir, decoyDir, approved } = arrangeSwappedAncestor();
+    fs.writeFileSync(path.join(dir, 'compose.yaml'), 'old', { mode: 0o600 });
+    fs.writeFileSync(path.join(decoyDir, 'compose.yaml'), 'old', { mode: 0o644 });
+    const command = writeCommand(path.join(dir, 'compose.yaml'), { ...file, sha256: sha256('new') }, { sudo: false, replaces: sha256('old'), directory: approved });
+    swapAncestor();
+    expect(runShell(command, 'new').status).toBe(WRITE_EXIT.notDirectory);
+    expect(fs.readFileSync(path.join(decoyDir, 'compose.yaml'), 'utf8')).toBe('old');
+    expect(modeOf(path.join(decoyDir, 'compose.yaml'))).toBe('644');
+  });
+
+  it('refuses a system directory that is reached through a link (the apt directories must be what they say)', () => {
+    const real = path.join(root, 'real');
+    fs.mkdirSync(path.join(real, 'keyrings'), { recursive: true, mode: 0o755 });
+    fs.symlinkSync(real, path.join(root, 'etc'));
+    const keyrings = path.join(root, 'etc', 'keyrings');
+    const result = runShell(writeCommand(path.join(keyrings, 'docker.asc'), { ...file, sha256: sha256('ours') }, { sudo: false, replaces: null, directory: keyrings }), 'ours');
+    expect(result.status).toBe(WRITE_EXIT.notDirectory);
+    expect(fs.readdirSync(path.join(real, 'keyrings'))).toEqual([]);
+    // The same directory, reached the way it is approved, is written.
+    const direct = path.join(real, 'keyrings');
+    expect(runShell(writeCommand(path.join(direct, 'docker.asc'), { ...file, sha256: sha256('ours') }, { sudo: false, replaces: null, directory: direct }), 'ours').status).toBe(0);
+  });
+
+  it('refuses, through a step, a file written into an agent directory whose ancestor was replaced after the preflight', async () => {
+    const { dir, decoyDir, approved } = arrangeSwappedAncestor();
+    const plan = { paths: { composeDir: { input: '/opt/docker/sencho', realPath: '/opt/docker/sencho' }, agentDir: { input: dir, realPath: approved } } } as unknown as BootstrapPlan;
+    const step = composeStep(path.join(dir, 'compose.yaml'));
+    const racing = localSession({ beforeWrite: swapAncestor });
+    const failure = await failureOf(() => runPlanStep(step, { ...context(racing, [NEW_TOKEN]), composeWithToken: () => composeWith(NEW_TOKEN) }, plan));
+    expect(failure).toMatchObject({ kind: 'failed', code: 'DIRECTORY_CHANGED', changedNothing: true });
+    expect(fs.readdirSync(decoyDir)).toEqual([]);
+  });
+
+  it('writes the file when the agent directory is reached through a link the plan disclosed', async () => {
+    const real = path.join(root, 'data', 'agent');
+    fs.mkdirSync(real, { recursive: true, mode: 0o755 });
+    const link = path.join(root, 'link');
+    fs.symlinkSync(path.join(root, 'data'), link);
+    const dir = path.join(link, 'agent');
+    const plan = { paths: { composeDir: { input: '/opt/docker/sencho', realPath: '/opt/docker/sencho' }, agentDir: { input: dir, realPath: approvedPath(dir) } } } as unknown as BootstrapPlan;
+    expect(approvedPath(dir)).toBe(fs.realpathSync(real));
+    const outcome = await runPlanStep(composeStep(path.join(dir, 'compose.yaml')), { ...context(localSession(), [NEW_TOKEN]), composeWithToken: () => composeWith(NEW_TOKEN) }, plan);
+    expect(outcome.status).toBe('done');
+    expect(fs.existsSync(path.join(real, 'compose.yaml'))).toBe(true);
+  });
+
+  it('refuses, through the key step, a keyring directory that became a link after the plan was approved', async () => {
+    const keyrings = path.join(root, 'keyrings');
+    const decoy = path.join(root, 'decoy');
+    fs.mkdirSync(keyrings, { mode: 0o755 });
+    fs.mkdirSync(decoy, { mode: 0o755 });
+    const racing = localSession({
+      beforeWrite: () => {
+        fs.renameSync(keyrings, `${keyrings}.moved`);
+        fs.symlinkSync(decoy, keyrings);
+      },
+    });
+    const failure = await failureOf(() => runPlanStep(keyStep(path.join(keyrings, 'docker.asc')), context(racing), PLAN));
+    expect(failure).toMatchObject({ code: 'DIRECTORY_CHANGED', changedNothing: true });
+    expect(fs.readdirSync(decoy)).toEqual([]);
+  });
+
+  describe('directories', () => {
+    const dirSpec = { mode: '0700', owner, group };
+
+    it('creates nothing below an ancestor replaced by a link before the script started', () => {
+      const parent = path.join(root, 'srv');
+      const decoy = path.join(root, 'decoy');
+      fs.mkdirSync(parent, { mode: 0o755 });
+      fs.mkdirSync(decoy, { mode: 0o755 });
+      const command = directoryCommand(path.join(parent, 'a', 'agent'), dirSpec, { sudo: false, allowExisting: false });
+      fs.renameSync(parent, `${parent}.moved`);
+      fs.symlinkSync(decoy, parent);
+      const result = runShell(command);
+      expect(result.status).toBe(WRITE_EXIT.notDirectory);
+      expect(fs.readdirSync(decoy)).toEqual([]);
+      expect(modeOf(decoy)).toBe('755');
+    });
+
+    it('changes nothing in an existing directory (the apt keyrings) replaced by a link before the script started', () => {
+      const keyrings = path.join(root, 'keyrings');
+      const decoy = path.join(root, 'decoy');
+      fs.mkdirSync(keyrings, { mode: 0o700 });
+      fs.mkdirSync(decoy, { mode: 0o700 });
+      const command = directoryCommand(keyrings, { mode: '0755', owner, group }, { sudo: false, allowExisting: true });
+      fs.renameSync(keyrings, `${keyrings}.moved`);
+      fs.symlinkSync(decoy, keyrings);
+      expect(runShell(command).status).toBe(WRITE_EXIT.exists);
+      expect(modeOf(decoy)).toBe('700');
+      // A real directory put at the name instead is another directory than the approved one only by its path, so it is the one entered; a different location is what is refused.
+      fs.unlinkSync(keyrings);
+      fs.mkdirSync(keyrings, { mode: 0o700 });
+      const moved = directoryCommand(keyrings, { mode: '0755', owner, group }, { sudo: false, allowExisting: true, approved: path.join(root, 'elsewhere') });
+      expect(runShell(moved).status).toBe(WRITE_EXIT.notDirectory);
+      expect(modeOf(keyrings)).toBe('700');
+    });
+
+    it('refuses when the approved path is not where the directory would be made', () => {
+      const parent = path.join(root, 'srv');
+      fs.mkdirSync(parent, { mode: 0o755 });
+      const command = directoryCommand(path.join(parent, 'agent'), dirSpec, { sudo: false, allowExisting: false, approved: path.join(root, 'elsewhere', 'agent') });
+      expect(runShell(command).status).toBe(WRITE_EXIT.notDirectory);
+      expect(fs.readdirSync(parent)).toEqual([]);
+    });
+
+    it('creates the directory under a link the plan disclosed, at the path it approved', () => {
+      const real = path.join(root, 'real');
+      fs.mkdirSync(real, { mode: 0o755 });
+      fs.symlinkSync(real, path.join(root, 'link'));
+      const target = path.join(root, 'link', 'a', 'agent');
+      const command = directoryCommand(target, dirSpec, { sudo: false, allowExisting: false });
+      expect(runShell(command).status).toBe(0);
+      expect(modeOf(path.join(real, 'a', 'agent'))).toBe('700');
+    });
+
+    /** A `mkdir` that makes the directory, then puts `unrelated` at its name, the way another process could between the two calls. */
+    function swapAfterMkdir(name: string, unrelated: string): { PATH: string } {
+      const dir = path.join(root, 'shim-swap');
+      fs.mkdirSync(dir);
+      const real = execFileSync('sh', ['-c', 'command -v mkdir'], { encoding: 'utf8' }).trim();
+      fs.writeFileSync(path.join(dir, 'mkdir'), [
+        '#!/bin/sh',
+        `"${real}" "$@"; rc=$?`,
+        `case "$2" in ./${name}) rmdir ./${name} && mv "${unrelated}" ./${name} ;; esac`,
+        'exit $rc',
+      ].join('\n'), { mode: 0o755 });
+      return { PATH: `${dir}:${process.env.PATH ?? ''}` };
+    }
+
+    it('leaves an unrelated directory put at the new name right after mkdir exactly as it was', () => {
+      const parent = path.join(root, 'srv');
+      fs.mkdirSync(parent, { mode: 0o755 });
+      const unrelated = path.join(root, 'unrelated');
+      fs.mkdirSync(unrelated, { mode: 0o755 });
+      fs.writeFileSync(path.join(unrelated, 'keep'), 'operator data', { mode: 0o644 });
+      const command = directoryCommand(path.join(parent, 'agent'), dirSpec, { sudo: false, allowExisting: false });
+      const result = runShell(command, '', swapAfterMkdir('agent', unrelated));
+      expect(result.status).toBe(WRITE_EXIT.unfinished);
+      expect(modeOf(path.join(parent, 'agent'))).toBe('755');
+      expect(fs.readFileSync(path.join(parent, 'agent', 'keep'), 'utf8')).toBe('operator data');
+    });
+
+    it('leaves an empty unrelated directory with another mode alone as well', () => {
+      const parent = path.join(root, 'srv');
+      fs.mkdirSync(parent, { mode: 0o755 });
+      const unrelated = path.join(root, 'unrelated');
+      fs.mkdirSync(unrelated);
+      fs.chmodSync(unrelated, 0o755);
+      const command = directoryCommand(path.join(parent, 'agent'), dirSpec, { sudo: false, allowExisting: false });
+      expect(runShell(command, '', swapAfterMkdir('agent', unrelated)).status).toBe(WRITE_EXIT.unfinished);
+      expect(modeOf(path.join(parent, 'agent'))).toBe('755');
+    });
+
+    it('does not make anything inside a parent it made when another directory took its place', () => {
+      const base = path.join(root, 'srv');
+      fs.mkdirSync(base, { mode: 0o755 });
+      const unrelated = path.join(root, 'unrelated');
+      fs.mkdirSync(path.join(unrelated, 'inner'), { recursive: true, mode: 0o755 });
+      const command = directoryCommand(path.join(base, 'mid', 'agent'), dirSpec, { sudo: false, allowExisting: false });
+      expect(runShell(command, '', swapAfterMkdir('mid', unrelated)).status).toBe(WRITE_EXIT.unfinished);
+      expect(fs.readdirSync(path.join(base, 'mid'))).toEqual(['inner']);
+      expect(fs.readdirSync(path.join(base, 'mid', 'inner'))).toEqual([]);
+      expect(modeOf(path.join(base, 'mid'))).toBe('755');
+    });
+
+    it('still finishes a directory it made itself', () => {
+      const target = path.join(root, 'srv', 'agent');
+      expect(runShell(directoryCommand(target, dirSpec, { sudo: false, allowExisting: false })).status).toBe(0);
+      expect(modeOf(target)).toBe('700');
+    });
+  });
+});
+
+/**
+ * A `mv` that does its move and then, when the move put something aside (the
+ * `-fT` one; the script's own restore uses `-nT` and is left alone), puts
+ * something else at the original name and stops the shell that called it, as a
+ * dropped session does: the stop lands after the rename and before the script
+ * has recorded what it moved.
+ */
+function stopAfterRename(base: string, name: string, conflict: 'file' | 'symlink' | 'directory', signal = 'TERM'): { PATH: string } {
+  const dir = path.join(base, `stop-${conflict}-${signal}`);
+  fs.mkdirSync(dir);
+  const real = execFileSync('sh', ['-c', 'command -v mv'], { encoding: 'utf8' }).trim();
+  const create = {
+    file: `printf theirs > ./${name}`,
+    symlink: `ln -s /nonexistent-target ./${name}`,
+    directory: `mkdir ./${name} && printf theirs > ./${name}/inside`,
+  }[conflict];
+  fs.writeFileSync(path.join(dir, 'mv'), [
+    '#!/bin/sh',
+    `"${real}" "$@"; rc=$?`,
+    `case "$*" in -fT*.old.*) ${create}; kill -${signal} $PPID ;; esac`,
+    'exit $rc',
+  ].join('\n'), { mode: 0o755 });
+  return { PATH: `${dir}:${process.env.PATH ?? ''}` };
+}
+
+describe('B3: a stop right after the rename never deletes what was moved aside', () => {
+  const edit = 'operator edit made after the file was read';
+  const cases = WRITER_NAMES
+    .filter(([, name]) => name === 'compose.yaml' || name === 'docker.asc')
+    .flatMap(([label, name, mode]) => (['file', 'symlink', 'directory'] as const).map((conflict) => [label, name, conflict, mode] as const));
+
+  it.each(cases)('keeps the edit made to %s (%s) when a %s appears at its name', (_label, name, conflict, mode) => {
+    const target = path.join(root, name);
+    fs.writeFileSync(target, edit, { mode: 0o640 });
+    const env = stopAfterRename(root, name, conflict);
+    // The run inspected an earlier version, so the edit is not the file it may replace.
+    const command = writeCommand(target, { mode, owner, group, sha256: sha256('new') }, { sudo: false, replaces: sha256('what was read') });
+    const result = runShell(command, 'new', env);
+    expect(result.status).not.toBe(0);
+    const kept = fs.readdirSync(root).filter((entry) => entry.startsWith(`.${name}.old.`));
+    expect(kept).toHaveLength(1);
+    expect(fs.readFileSync(path.join(root, kept[0]), 'utf8')).toBe(edit);
+    expect(modeOf(path.join(root, kept[0]))).toBe('640');
+    expect(result.stderr).toContain(`kept as ${root}/${kept[0]}`);
+    // What appeared at the name is left as it is, and the temporary file with the new content is gone.
+    if (conflict === 'file') expect(fs.readFileSync(target, 'utf8')).toBe('theirs');
+    if (conflict === 'symlink') expect(fs.readlinkSync(target)).toBe('/nonexistent-target');
+    if (conflict === 'directory') expect(fs.readFileSync(path.join(target, 'inside'), 'utf8')).toBe('theirs');
+    expect(fs.readdirSync(root).filter((entry) => !entry.startsWith('stop-') && entry !== name && entry !== kept[0])).toEqual([]);
+  });
+
+  it.each(['HUP', 'INT', 'TERM'])('keeps it on SIG%s too', (signal) => {
+    const target = path.join(root, 'compose.yaml');
+    fs.writeFileSync(target, edit, { mode: 0o640 });
+    const env = stopAfterRename(root, 'compose.yaml', 'file', signal);
+    const result = runShell(writeCommand(target, { ...file, sha256: sha256('new') }, { sudo: false, replaces: sha256('what was read') }), 'new', env);
+    expect(result.status).not.toBe(0);
+    const kept = fs.readdirSync(root).filter((entry) => entry.startsWith('.compose.yaml.old.'));
+    expect(kept.map((entry) => fs.readFileSync(path.join(root, entry), 'utf8'))).toEqual([edit]);
+  });
+
+  it('puts the original back when nothing took its name, and keeps no stray copy', () => {
+    const target = path.join(root, 'compose.yaml');
+    fs.writeFileSync(target, edit, { mode: 0o640 });
+    const dir = path.join(root, 'stop-only');
+    fs.mkdirSync(dir);
+    const real = execFileSync('sh', ['-c', 'command -v mv'], { encoding: 'utf8' }).trim();
+    fs.writeFileSync(path.join(dir, 'mv'), ['#!/bin/sh', `"${real}" "$@"; rc=$?`, 'case "$*" in -fT*.old.*) kill -TERM $PPID ;; esac', 'exit $rc'].join('\n'), { mode: 0o755 });
+    const result = runShell(writeCommand(target, { ...file, sha256: sha256('new') }, { sudo: false, replaces: sha256('what was read') }), 'new', { PATH: `${dir}:${process.env.PATH ?? ''}` });
+    expect(result.status).not.toBe(0);
+    expect(fs.readFileSync(target, 'utf8')).toBe(edit);
+    expect(fs.readdirSync(root).filter((entry) => entry !== 'stop-only')).toEqual(['compose.yaml']);
+  });
+
+  it('keeps the file it was told to replace, under its slot name, when a stop and a new file at the name meet', () => {
+    const target = path.join(root, 'compose.yaml');
+    const previous = 'old compose with a spent token';
+    fs.writeFileSync(target, previous, { mode: 0o600 });
+    const env = stopAfterRename(root, 'compose.yaml', 'file');
+    const result = runShell(writeCommand(target, { ...file, sha256: sha256('new') }, { sudo: false, replaces: sha256(previous) }), 'new', env);
+    expect(result.status).not.toBe(0);
+    expect(fs.readFileSync(target, 'utf8')).toBe('theirs');
+    const kept = fs.readdirSync(root).filter((entry) => entry.startsWith('.compose.yaml.old.'));
+    expect(kept.map((entry) => fs.readFileSync(path.join(root, entry), 'utf8'))).toEqual([previous]);
   });
 });

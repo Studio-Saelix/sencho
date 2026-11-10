@@ -35,11 +35,13 @@ export const WRITE_EXIT = {
 } as const;
 
 /**
- * Enter a directory without trusting its name twice. The name is inspected
- * without following a final symlink (it must be a directory), the shell
- * changes into it, and the directory it is in must be the one inspected: a name
- * swapped for a symlink or another directory in between refuses here, before
- * anything is changed. Every later operation uses names relative to the
+ * Enter a directory without trusting its name twice, and only if it is the
+ * directory that was approved. The name is inspected without following a final
+ * symlink (it must be a directory), the shell changes into it, the directory it
+ * is in must be the one inspected, and its physical path (`pwd -P`) must be the
+ * one the plan approved ($2): a name or an ancestor swapped for a symlink or
+ * another directory, before this script started or in between, refuses here,
+ * before anything is changed. Every later operation uses names relative to the
  * directory the shell holds, so a swap after this point cannot redirect it.
  */
 const ENTER_DIRECTORY = [
@@ -47,7 +49,8 @@ const ENTER_DIRECTORY = [
   '  before=$(stat -c "%F:%d:%i" -- "$1" 2>/dev/null) || before=',
   '  case $before in directory:*) ;; *) return 1 ;; esac',
   '  cd -P -- "$1" 2>/dev/null || return 1',
-  '  [ "$(stat -c "%F:%d:%i" -- . 2>/dev/null)" = "$before" ]',
+  '  [ "$(stat -c "%F:%d:%i" -- . 2>/dev/null)" = "$before" ] || return 1',
+  '  [ "$(pwd -P)" = "$2" ]',
   '}',
 ].join('\n');
 
@@ -57,22 +60,23 @@ const ENTER_VIA_LINKS = [
   '  before=$(stat -L -c "%F:%d:%i" -- "$1" 2>/dev/null) || before=',
   '  case $before in directory:*) ;; *) return 1 ;; esac',
   '  cd -P -- "$1" 2>/dev/null || return 1',
-  '  [ "$(stat -c "%F:%d:%i" -- . 2>/dev/null)" = "$before" ]',
+  '  [ "$(stat -c "%F:%d:%i" -- . 2>/dev/null)" = "$before" ] || return 1',
+  '  [ "$(pwd -P)" = "$2" ]',
   '}',
 ].join('\n');
 
 const WRITE_SCRIPT = [
   'set -eu',
   'umask 077',
-  'd=$1; n=$2; m=$3; o=$4; g=$5; ph=$6; h=$7',
+  'd=$1; n=$2; m=$3; o=$4; g=$5; ph=$6; h=$7; e=$8',
   ENTER_DIRECTORY,
-  `enter "$d" || { echo "not a directory, or it changed: $d" >&2; exit ${WRITE_EXIT.notDirectory}; }`,
+  `enter "$d" "$e" || { echo "not the approved directory, or it changed: $d" >&2; exit ${WRITE_EXIT.notDirectory}; }`,
   // A name that already holds something is refused here without waiting for the
   // content to arrive; the publication below is what makes the refusal hold.
   `if [ -z "$ph" ] && { [ -e "./$n" ] || [ -L "./$n" ]; }; then echo "already exists: $d/$n" >&2; exit ${WRITE_EXIT.exists}; fi`,
   `if [ -L "./$n" ] || { [ -e "./$n" ] && [ ! -f "./$n" ]; }; then echo "not a regular file: $d/$n" >&2; exit ${WRITE_EXIT.notRegular}; fi`,
   't=$(mktemp "./.$n.XXXXXX")',
-  'slot=; old=; moving=0; published=0',
+  'slot=; slot_id=; old=; moving=0; published=0',
   // Put a file that was moved aside back, when the name is still free. The hard
   // link goes first; the rename is for what cannot be linked (a directory) and
   // counts only when the moved-aside name is gone afterwards.
@@ -83,16 +87,19 @@ const WRITE_SCRIPT = [
   // However the script ends, the temporary file (which holds the enrollment
   // token) goes, and a file moved aside for a replacement goes back, unless the
   // new file was already published (the name and the temporary file are the same
-  // file), when the old one just goes. A signal that
-  // lands while the file is being moved aside is told apart by the name: when it
-  // is gone, the move happened and the slot holds the original.
+  // file), when the old one just goes. Whether a signal landed before or after
+  // the move is told by the slot, never by the name: the slot is still the empty
+  // file made for it until the rename lands, and holds the original afterwards,
+  // whatever has appeared at the name since. Anything moved aside that was not
+  // validated is never removed: when it cannot go back, it stays under its slot
+  // name and the script says so.
   'cleanup() {',
   '  if [ -e "$t" ] && [ "./$n" -ef "$t" ]; then published=1; fi',
   '  rm -f "$t"',
-  '  if [ "$moving" = 1 ] && [ -n "$slot" ] && [ ! -e "./$n" ] && [ ! -L "./$n" ]; then old=$slot; slot=; fi',
+  '  if [ "$moving" = 1 ] && [ -n "$slot" ] && { [ -e "$slot" ] || [ -L "$slot" ]; } && [ "$(stat -c "%d:%i" -- "$slot" 2>/dev/null)" != "$slot_id" ]; then old=$slot; slot=; fi',
   '  if [ -n "$slot" ]; then rm -f "$slot"; fi',
   '  if [ -n "$old" ]; then',
-  '    if [ "$published" = 1 ]; then rm -f "$old"; else restore || :; fi',
+  '    if [ "$published" = 1 ]; then rm -f "$old"; elif ! restore; then echo "the file that was there is kept as $d/${old#./}" >&2; fi',
   '  fi',
   '}',
   'trap cleanup EXIT',
@@ -110,6 +117,7 @@ const WRITE_SCRIPT = [
   // else is put back and the write refuses, so no other file is ever replaced.
   'if [ -n "$ph" ]; then',
   '  slot=$(mktemp "./.$n.old.XXXXXX")',
+  '  slot_id=$(stat -c "%d:%i" -- "$slot")',
   '  moving=1',
   '  if mv -fT -- "./$n" "$slot" 2>/dev/null; then old=$slot; slot=; fi',
   '  moving=0',
@@ -128,6 +136,8 @@ const WRITE_SCRIPT = [
   'fi',
   // A hard link publishes only when the name is free, atomically; unlike a
   // rename it cannot replace a file another process created after the check.
+  // The file moved aside is the one that was inspected and matched, so it is
+  // what the replacement was approved to remove.
   'if ! ln -T -- "$t" "./$n" 2>/dev/null; then',
   '  if [ -e "./$n" ] || [ -L "./$n" ]; then',
   '    rm -f "$old"; old=',
@@ -149,12 +159,14 @@ const WRITE_SCRIPT = [
  * when the name is still free (or kept under a `.old` name the error gives)
  * and the write is refused. The directory is entered once and every name is
  * relative to it, so a symlink swapped in for the directory or one of its
- * ancestors after the check is refused instead of followed.
+ * ancestors after the check is refused instead of followed. `directory` is the
+ * physical path of the file's directory that the plan approved (see
+ * `approvedDirectory`): the directory the shell enters must be exactly that one.
  */
 export function writeFileCommand(
   filePath: string,
   file: { mode: string; owner: string; group: string; sha256: string },
-  options: { sudo: boolean; replaces: string | null },
+  options: { sudo: boolean; replaces: string | null; directory: string },
 ): string {
   const args = [
     path.posix.dirname(filePath),
@@ -164,6 +176,7 @@ export function writeFileCommand(
     file.group,
     options.replaces ?? '',
     file.sha256,
+    options.directory,
   ].map(shellQuote).join(' ');
   return withSudo(`sh -c ${shellQuote(WRITE_SCRIPT)} sencho-write ${args}`, options.sudo);
 }
@@ -171,11 +184,16 @@ export function writeFileCommand(
 const DIRECTORY_SCRIPT = [
   'set -eu',
   'umask 077',
-  'p=$1; m=$2; o=$3; g=$4; keep=$5',
+  'p=$1; m=$2; o=$3; g=$4; keep=$5; e=$6',
   ENTER_DIRECTORY,
   ENTER_VIA_LINKS,
   `case $p in /*) ;; *) echo "not an absolute path: $p" >&2; exit ${WRITE_EXIT.notDirectory} ;; esac`,
   'made=0',
+  // What mkdir leaves under umask 077 (the setgid bit comes from a parent that has it).
+  'fresh() {',
+  '  [ -O . ] && [ -z "$(ls -A)" ] || return 1',
+  '  case $(stat -c "%a" -- .) in 700|2700) ;; *) return 1 ;; esac',
+  '}',
   // Once something was created, a refusal is an unfinished change, not a clean one.
   'die() { code=$1; shift; echo "$*" >&2; if [ "$made" = 1 ]; then code=' + WRITE_EXIT.unfinished + '; fi; exit "$code"; }',
   // The deepest ancestor that exists; the names below it are created one at a time.
@@ -188,9 +206,13 @@ const DIRECTORY_SCRIPT = [
   'if [ -z "$below" ]; then',
   // The name exists already: only a real directory may be adjusted, and only when allowed.
   `  if [ "$keep" != 1 ] || [ -L "$p" ] || [ ! -d "$p" ]; then die ${WRITE_EXIT.exists} "already exists: $p"; fi`,
-  `  enter "$p" || die ${WRITE_EXIT.notDirectory} "not a directory, or it changed: $p"`,
+  `  enter "$p" "$e" || die ${WRITE_EXIT.notDirectory} "not the approved directory, or it changed: $p"`,
   'else',
-  `  enter_via "$anc" || die ${WRITE_EXIT.notDirectory} "not a directory, or it changed: $anc"`,
+  // The approved path is the physical path of the whole directory; what exists
+  // now is its front part, and the rest is what is made below it.
+  `  case $e in *"$below") want=\${e%"$below"} ;; *) die ${WRITE_EXIT.notDirectory} "not the approved directory: $p" ;; esac`,
+  '  [ -n "$want" ] || want=/',
+  `  enter_via "$anc" "$want" || die ${WRITE_EXIT.notDirectory} "not the approved directory, or it changed: $anc"`,
   '  rest=${below#/}',
   '  while [ -n "$rest" ]; do',
   '    c=${rest%%/*}',
@@ -208,7 +230,14 @@ const DIRECTORY_SCRIPT = [
   '    else',
   `      die ${WRITE_EXIT.notCreated} "could not create: $p"`,
   '    fi',
-  `    enter "./$c" || die ${WRITE_EXIT.notDirectory} "changed while it was set up: $p"`,
+  '    want=${want%/}/$c',
+  `    enter "./$c" "$want" || die ${WRITE_EXIT.notDirectory} "changed while it was set up: $p"`,
+  // The name was free when mkdir ran, but what the shell entered is only the
+  // directory mkdir made if nothing else was put at the name in between. A
+  // directory made here is empty, owned by this user and has exactly the
+  // mode mkdir gave it; anything else was put there by someone else and is
+  // not touched.
+  `    if [ "$created" = 1 ]; then fresh || die ${WRITE_EXIT.unfinished} "changed while it was set up: $p"; fi`,
   // A directory this script works in is owned by the user it runs as. One that
   // is not was put there by someone else, even if it appeared as a parent in the
   // meantime, and nothing is made inside it. Only a directory it made itself
@@ -230,13 +259,18 @@ const DIRECTORY_SCRIPT = [
  * owner to that directory itself, never through a symlink. The nearest existing
  * ancestor may itself be a symlink, which the plan discloses; it is entered
  * once and the new directories are made inside the directory it led to.
+ * `approved` is the physical path the plan approved for `dirPath`: every
+ * directory the script enters must be on the way to exactly that path, so an
+ * ancestor swapped before the script started is refused. A directory it makes
+ * is changed only when it is empty and still has the mode and owner it was
+ * made with.
  */
 export function createDirectoryCommand(
   dirPath: string,
   dir: { mode: string; owner: string; group: string },
-  options: { sudo: boolean; allowExisting: boolean },
+  options: { sudo: boolean; allowExisting: boolean; approved: string },
 ): string {
-  const args = [dirPath, dir.mode, dir.owner, dir.group, options.allowExisting ? '1' : '0'].map(shellQuote).join(' ');
+  const args = [dirPath, dir.mode, dir.owner, dir.group, options.allowExisting ? '1' : '0', options.approved].map(shellQuote).join(' ');
   return withSudo(`sh -c ${shellQuote(DIRECTORY_SCRIPT)} sencho-mkdir ${args}`, options.sudo);
 }
 

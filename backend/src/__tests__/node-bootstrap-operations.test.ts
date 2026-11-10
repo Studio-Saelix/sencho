@@ -156,7 +156,7 @@ class FakeHost {
   private answer(command: string, options: ExecOptions): ExecResult {
     const ok = (stdout = ''): ExecResult => ({ exitCode: 0, stdout, stderr: '', truncated: false, timedOut: false, error: null });
     const exit = (code: number, stderr = ''): ExecResult => ({ exitCode: code, stdout: '', stderr, truncated: false, timedOut: false, error: null });
-    const write = /sencho-write '([^']*)' '([^']*)' '([^']*)' '([^']*)' '([^']*)' '([0-9a-f]*)' '([0-9a-f]{64})'$/.exec(command);
+    const write = /sencho-write '([^']*)' '([^']*)' '([^']*)' '([^']*)' '([^']*)' '([0-9a-f]*)' '([0-9a-f]{64})' '([^']*)'$/.exec(command);
     if (write) {
       const [, dir, name, mode, owner, group, replaces, sha256] = write;
       const target = `${dir}/${name}`;
@@ -181,7 +181,7 @@ class FakeHost {
       if (dir) return ok(`${Number.parseInt(dir.mode, 8).toString(8)} ${dir.owner} ${dir.group} directory`);
       return exit(1, 'No such file or directory');
     }
-    const makeDir = /sencho-mkdir '([^']*)' '([^']*)' '([^']*)' '([^']*)' '([01])'$/.exec(command);
+    const makeDir = /sencho-mkdir '([^']*)' '([^']*)' '([^']*)' '([^']*)' '([01])' '([^']*)'$/.exec(command);
     if (makeDir) {
       const [, dir, mode, owner, group, allowExisting] = makeDir;
       if (this.dirs.has(dir) && allowExisting !== '1') return exit(17, `already exists: ${dir}`);
@@ -232,7 +232,7 @@ let db: DatabaseService;
 
 /** Every row, held ones first, as the tests need to find a run by its host. */
 function allOperations() {
-  return [...db.listActiveNodeBootstrapOperations(), ...db.listFinishedNodeBootstrapOperations(500)];
+  return [...db.listActiveNodeBootstrapOperations(10_000), ...db.listFinishedNodeBootstrapOperations(500)];
 }
 
 beforeAll(async () => {
@@ -1018,7 +1018,7 @@ describe('bootstrap operations: failure paths found in review', () => {
     const { request } = approve(h);
     const op = h.service.start(request, context());
     await h.service.settled();
-    const row = h.service.list().find((entry) => entry.id === op.id);
+    const row = h.service.list().operations.find((entry) => entry.id === op.id);
     expect(row).toBeDefined();
     expect(row).not.toHaveProperty('plan');
     expect(row).not.toHaveProperty('events');
@@ -1511,7 +1511,7 @@ describe('bootstrap operations: S1 a failed setup does not strand the operation'
     expect(() => h.service.assertTargetIdle(request.host, request.port as number)).not.toThrow();
     const row = rowFor(request.host);
     expect(row).toMatchObject({ state: 'blocked', active: 0 });
-    const listed = h.service.list().find((entry) => entry.id === row?.id);
+    const listed = h.service.list().operations.find((entry) => entry.id === row?.id);
     expect(listed).toMatchObject({ state: 'blocked', active: false });
   });
 
@@ -1575,12 +1575,15 @@ describe('bootstrap operations: a stranded row is settled by the action that mee
 });
 
 describe('bootstrap operations: S2 every held run stays discoverable', () => {
+  /** `index` orders the rows (a higher one is newer); the name is unique across the tests, since released rows keep their ids. */
+  let heldSerial = 0;
   function insertHeld(index: number, state: 'partial' | 'blocked' = 'partial') {
     const now = Date.now() + index;
-    const id = `00000000-0000-4000-8000-${String(1000 + index).padStart(12, '0')}`;
+    heldSerial += 1;
+    const id = `00000000-0000-4000-8000-${String(1000 + heldSerial).padStart(12, '0')}`;
     db.insertNodeBootstrapOperation({
-      id, target_key: `held-${index}.example.com:22`, host: `held-${index}.example.com`, port: 22, username: 'ubuntu', address: '192.168.1.80',
-      target_name: `held-${index}`, host_key_fingerprint: `SHA256:held-${index}`, compose_dir: '/opt/docker/sencho', agent_dir: '/opt/sencho-agent',
+      id, target_key: `held-${heldSerial}.example.com:22`, host: `held-${heldSerial}.example.com`, port: 22, username: 'ubuntu', address: '192.168.1.80',
+      target_name: `held-${heldSerial}`, host_key_fingerprint: `SHA256:held-${heldSerial}`, compose_dir: '/opt/docker/sencho', agent_dir: '/opt/sencho-agent',
       plan_json: '{}', plan_digest: 'd', approved_by: TEST_USERNAME, approved_at: now, attempt: 1, state, stage: null, step: null, node_id: null,
       changes_made: 1, agent_started: 0, active: 1, cancel_requested: 0, error_code: null, error_message: null, enrollment_expires_at: null,
       created_at: now, updated_at: now, finished_at: now,
@@ -1588,17 +1591,89 @@ describe('bootstrap operations: S2 every held run stays discoverable', () => {
     return id;
   }
 
-  it('lists all twenty-five held runs, the oldest included, and opens each one with its recovery actions', () => {
+  /** Every hold the pages return, following the cursor to the end. */
+  function traverse(h: ReturnType<typeof harness>, between: (page: number, cursor: string | null) => void = () => undefined): { ids: string[]; pages: number[] } {
+    const ids: string[] = [];
+    const pages: number[] = [];
+    let cursor: string | null = null;
+    for (let page = 0; page < 50; page += 1) {
+      const result = h.service.list(cursor);
+      const holds = result.operations.filter((entry) => entry.active).map((entry) => entry.id);
+      ids.push(...holds);
+      pages.push(holds.length);
+      cursor = result.nextCursor;
+      if (cursor === null) return { ids, pages };
+      between(page, cursor);
+    }
+    throw new Error('the pages never ended');
+  }
+
+  it('pages through twenty-five held runs, the oldest included, and opens each one with its recovery actions', () => {
     const h = harness();
     const ids = Array.from({ length: 25 }, (_, index) => insertHeld(index));
-    const listed = h.service.list();
-    const heldIds = listed.filter((entry) => entry.active).map((entry) => entry.id);
-    for (const id of ids) expect(heldIds).toContain(id);
+    const first = h.service.list();
+    // One page is bounded, and says where the rest begins.
+    expect(first.operations.filter((entry) => entry.active)).toHaveLength(20);
+    expect(first.nextCursor).not.toBeNull();
+    const { ids: seen, pages } = traverse(h);
+    expect(pages).toEqual([20, 5]);
+    expect([...seen].sort()).toEqual([...ids].sort());
+    expect(new Set(seen).size).toBe(seen.length);
+    // The newest holds come first, so the oldest is on the last page and still opens.
+    expect(seen[seen.length - 1]).toBe(ids[0]);
     expect(h.service.get(ids[0])).toMatchObject({ active: true, actions: { release: true } });
     for (const id of ids) h.service.release(id, AUDIT);
   });
 
-  it('caps only the finished history and keeps holds out of that cap', () => {
+  it('does only a bounded read and reconcile per page however many holds have piled up', () => {
+    const h = harness();
+    const ids = Array.from({ length: 45 }, (_, index) => insertHeld(index));
+    const reads = vi.spyOn(db, 'listActiveNodeBootstrapOperations');
+    const { pages } = traverse(h);
+    expect(pages).toEqual([20, 20, 5]);
+    for (const [limit] of reads.mock.calls) expect(limit).toBeLessThanOrEqual(21);
+    reads.mockRestore();
+    for (const id of ids) h.service.release(id, AUDIT);
+  });
+
+  it('keeps every hold reachable when runs settle, are released or start while the pages are read', () => {
+    const h = harness();
+    const ids = Array.from({ length: 50 }, (_, index) => insertHeld(index));
+    // ids[49] is the newest. Page one holds ids[49..30]; the cursor sits on ids[30].
+    const lateId = { value: '' };
+    const { ids: seen } = traverse(h, (page) => {
+      if (page !== 0) return;
+      // The run the cursor stands on is released, one not yet read settles, and a new one starts.
+      h.service.release(ids[30], AUDIT);
+      h.service.release(ids[10], AUDIT);
+      lateId.value = insertHeld(100);
+    });
+    // Nothing still held was skipped, and nothing was returned twice.
+    const stillHeld = ids.filter((id) => id !== ids[30] && id !== ids[10]);
+    for (const id of stillHeld) expect(seen).toContain(id);
+    expect(seen).not.toContain(ids[10]);
+    expect(new Set(seen).size).toBe(seen.length);
+    // The run that started meanwhile is newer than the cursor: the next read of the first page shows it.
+    expect(seen).not.toContain(lateId.value);
+    expect(h.service.list().operations.filter((entry) => entry.active).map((entry) => entry.id)).toContain(lateId.value);
+    for (const id of [...stillHeld, lateId.value]) h.service.release(id, AUDIT);
+  });
+
+  it('puts the finished history on the first page only and refuses a cursor that is not one of its own', () => {
+    const h = harness();
+    const ids = Array.from({ length: 22 }, (_, index) => insertHeld(200 + index));
+    h.service.release(insertHeld(300, 'blocked'), AUDIT);
+    const first = h.service.list();
+    expect(first.operations.some((entry) => !entry.active)).toBe(true);
+    const second = h.service.list(first.nextCursor);
+    expect(second.operations.every((entry) => entry.active)).toBe(true);
+    for (const cursor of ['', 'not-a-cursor', Buffer.from('{"a":1}').toString('base64url'), Buffer.from(JSON.stringify(['x', 'y'])).toString('base64url')]) {
+      expect(() => h.service.list(cursor)).toThrow(expect.objectContaining({ status: 400, code: 'INVALID_CURSOR' }));
+    }
+    for (const id of ids) h.service.release(id, AUDIT);
+  });
+
+  it('caps the finished history, and the holds are paged on their own', () => {
     const h = harness();
     const held = insertHeld(40);
     const finished = Array.from({ length: 23 }, (_, index) => {
@@ -1606,7 +1681,7 @@ describe('bootstrap operations: S2 every held run stays discoverable', () => {
       h.service.release(id, AUDIT);
       return id;
     });
-    const listed = h.service.list();
+    const listed = h.service.list().operations;
     expect(listed.filter((entry) => !entry.active)).toHaveLength(20);
     expect(listed.map((entry) => entry.id)).toContain(held);
     // The newest finished runs are the ones kept.

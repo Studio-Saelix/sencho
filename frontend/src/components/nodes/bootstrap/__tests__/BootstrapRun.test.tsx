@@ -170,7 +170,7 @@ beforeEach(() => {
   vi.mocked(fetchBootstrapCapabilities).mockResolvedValue(FALLBACK_CAPABILITIES);
   vi.mocked(checkBootstrapHostKey).mockResolvedValue(KEY);
   vi.mocked(runBootstrapPreflight).mockResolvedValue(preflightResult(PLAN));
-  vi.mocked(listBootstrapOperations).mockResolvedValue([]);
+  vi.mocked(listBootstrapOperations).mockResolvedValue({ operations: [], nextCursor: null });
   vi.mocked(startBootstrapOperation).mockResolvedValue(operation({ state: 'rechecking', stage: null, step: null }));
   vi.mocked(retryBootstrapOperation).mockResolvedValue(operation({ state: 'rechecking', stage: null, step: null, attempt: 2 }));
   vi.mocked(fetchBootstrapOperation).mockResolvedValue(operation());
@@ -254,7 +254,7 @@ describe('approving a plan', () => {
 
 describe('coming back to a run', () => {
   it('lists runs on open, follows one, and offers the verbs the hub allows', async () => {
-    vi.mocked(listBootstrapOperations).mockResolvedValue([STOPPED]);
+    vi.mocked(listBootstrapOperations).mockResolvedValue({ operations: [STOPPED], nextCursor: null });
     vi.mocked(fetchBootstrapOperation).mockResolvedValue(STOPPED);
     const user = userEvent.setup();
     render(<BootstrapServerDialog open onOpenChange={() => {}} />);
@@ -275,7 +275,7 @@ describe('coming back to a run', () => {
   });
 
   it('retries with the server and directories filled in and the key entered again', async () => {
-    vi.mocked(listBootstrapOperations).mockResolvedValue([STOPPED]);
+    vi.mocked(listBootstrapOperations).mockResolvedValue({ operations: [STOPPED], nextCursor: null });
     const user = userEvent.setup();
     render(<BootstrapServerDialog open onOpenChange={() => {}} />);
     await user.click(within(await screen.findByTestId(`bootstrap-run-${STOPPED.id}`)).getByRole('button', { name: 'Retry' }));
@@ -413,5 +413,87 @@ describe('polling after the session ends', () => {
     expect(fetchBootstrapOperation).toHaveBeenCalledTimes(1);
     expect(result.current.progressStale).toBe(true);
     expect(result.current.operation?.state).toBe('running');
+  });
+});
+
+describe('held runs arrive a page at a time', () => {
+  const held = (index: number) => operation({
+    id: `held-${index}`,
+    targetName: `server-${index}`,
+    state: 'partial',
+    actions: { cancel: false, retry: true, release: true },
+    finishedAt: Date.now(),
+  });
+  const firstPage = Array.from({ length: 20 }, (_, index) => held(24 - index));
+  const secondPage = Array.from({ length: 5 }, (_, index) => held(4 - index));
+
+  it('shows a bounded first page, then reaches the oldest hold and opens it', async () => {
+    vi.mocked(listBootstrapOperations)
+      .mockResolvedValueOnce({ operations: firstPage, nextCursor: 'cursor-1' })
+      .mockResolvedValueOnce({ operations: secondPage, nextCursor: null });
+    vi.mocked(fetchBootstrapOperation).mockResolvedValue(held(0));
+    const user = userEvent.setup();
+    render(<BootstrapServerDialog open onOpenChange={() => {}} />);
+    await screen.findByTestId('bootstrap-run-held-24');
+    expect(screen.getAllByTestId(/^bootstrap-run-held-/)).toHaveLength(20);
+    expect(screen.queryByTestId('bootstrap-run-held-0')).not.toBeInTheDocument();
+
+    await user.click(screen.getByTestId('bootstrap-runs-more'));
+    const oldest = await screen.findByTestId('bootstrap-run-held-0');
+    expect(screen.getAllByTestId(/^bootstrap-run-held-/)).toHaveLength(25);
+    expect(vi.mocked(listBootstrapOperations).mock.calls[1][1]).toBe('cursor-1');
+    // The last page ends the button.
+    expect(screen.queryByTestId('bootstrap-runs-more')).not.toBeInTheDocument();
+
+    await user.click(within(oldest).getByRole('button', { name: 'View' }));
+    expect(fetchBootstrapOperation).toHaveBeenCalledWith('held-0');
+  });
+
+  it('keeps its place when a page fails, and tries the same page again', async () => {
+    vi.mocked(listBootstrapOperations)
+      .mockResolvedValueOnce({ operations: firstPage, nextCursor: 'cursor-1' })
+      .mockRejectedValueOnce(new Error('offline'))
+      .mockResolvedValueOnce({ operations: secondPage, nextCursor: null });
+    const user = userEvent.setup();
+    render(<BootstrapServerDialog open onOpenChange={() => {}} />);
+    await screen.findByTestId('bootstrap-run-held-24');
+    await user.click(screen.getByTestId('bootstrap-runs-more'));
+    await waitFor(() => expect(listBootstrapOperations).toHaveBeenCalledTimes(2));
+    expect(screen.getAllByTestId(/^bootstrap-run-held-/)).toHaveLength(20);
+    await user.click(await screen.findByTestId('bootstrap-runs-more'));
+    await screen.findByTestId('bootstrap-run-held-0');
+    expect(vi.mocked(listBootstrapOperations).mock.calls[2][1]).toBe('cursor-1');
+  });
+
+  it('adds a run once when a page repeats one already shown', async () => {
+    vi.mocked(listBootstrapOperations)
+      .mockResolvedValueOnce({ operations: firstPage, nextCursor: 'cursor-1' })
+      .mockResolvedValueOnce({ operations: [firstPage[19], ...secondPage], nextCursor: null });
+    const user = userEvent.setup();
+    render(<BootstrapServerDialog open onOpenChange={() => {}} />);
+    await screen.findByTestId('bootstrap-run-held-24');
+    await user.click(screen.getByTestId('bootstrap-runs-more'));
+    await screen.findByTestId('bootstrap-run-held-0');
+    expect(screen.getAllByTestId(/^bootstrap-run-held-/)).toHaveLength(25);
+  });
+
+  it('drops a page that was still on its way when the list was read again', async () => {
+    let finishLate: (page: { operations: BootstrapOperationDetail[]; nextCursor: string | null }) => void = () => undefined;
+    vi.mocked(listBootstrapOperations)
+      .mockResolvedValueOnce({ operations: firstPage, nextCursor: 'cursor-1' })
+      .mockReturnValueOnce(new Promise((resolve) => { finishLate = resolve; }))
+      .mockResolvedValueOnce({ operations: [held(30)], nextCursor: null });
+    const { result } = renderHook(() => useBootstrapOperation({ open: true }));
+    await waitFor(() => expect(result.current.operations).toHaveLength(20));
+    let more: Promise<void> = Promise.resolve();
+    act(() => { more = result.current.loadMore(); });
+    await act(async () => { await result.current.refreshList(); });
+    expect(result.current.operations.map((entry) => entry.id)).toEqual(['held-30']);
+    await act(async () => {
+      finishLate({ operations: secondPage, nextCursor: null });
+      await more;
+    });
+    expect(result.current.operations.map((entry) => entry.id)).toEqual(['held-30']);
+    expect(result.current.hasMoreOperations).toBe(false);
   });
 });

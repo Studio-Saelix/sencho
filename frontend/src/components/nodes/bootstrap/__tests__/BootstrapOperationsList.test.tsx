@@ -36,12 +36,18 @@ function operation(index: number, overrides: Partial<BootstrapOperation> = {}): 
   };
 }
 
-function renderList(operations: BootstrapOperation[], handlers: { onFollow?: (op: BootstrapOperation) => void } = {}) {
+function renderList(
+  operations: BootstrapOperation[],
+  handlers: { onFollow?: (op: BootstrapOperation) => void; hasMore?: boolean; loadingMore?: boolean; onLoadMore?: () => void } = {},
+) {
   render(
     <BootstrapOperationsList
       operations={operations}
       loadFailed={false}
       disabled={false}
+      hasMore={handlers.hasMore}
+      loadingMore={handlers.loadingMore}
+      onLoadMore={handlers.onLoadMore}
       onFollow={handlers.onFollow ?? vi.fn()}
       onRetry={vi.fn()}
     />,
@@ -49,7 +55,7 @@ function renderList(operations: BootstrapOperation[], handlers: { onFollow?: (op
 }
 
 describe('BootstrapOperationsList', () => {
-  it('lists every run that holds a server, however many there are, and opens the oldest', async () => {
+  it('lists the held runs it was given and opens the oldest of them', async () => {
     const holds = Array.from({ length: 25 }, (_, index) => operation(index));
     const onFollow = vi.fn();
     renderList(holds, { onFollow });
@@ -60,7 +66,24 @@ describe('BootstrapOperationsList', () => {
     expect(within(oldest).getByRole('button', { name: 'Retry' })).toBeInTheDocument();
   });
 
-  it('cuts only finished runs, keeping all holds before the latest three finished ones', () => {
+  it('offers the next page of held runs for as long as the hub has one, and says it is loading', async () => {
+    const onLoadMore = vi.fn();
+    renderList([operation(1)], { hasMore: true, onLoadMore });
+    await userEvent.click(screen.getByTestId('bootstrap-runs-more'));
+    expect(onLoadMore).toHaveBeenCalledTimes(1);
+  });
+
+  it('shows no more-button when the hub has no further page, and disables it while one loads', () => {
+    renderList([operation(1)], { hasMore: false, onLoadMore: vi.fn() });
+    expect(screen.queryByTestId('bootstrap-runs-more')).not.toBeInTheDocument();
+  });
+
+  it('disables the more-button while the next page loads', () => {
+    renderList([operation(1)], { hasMore: true, loadingMore: true, onLoadMore: vi.fn() });
+    expect(screen.getByTestId('bootstrap-runs-more')).toBeDisabled();
+  });
+
+  it('cuts only finished runs, keeping the held ones before the latest three finished ones', () => {
     const holds = Array.from({ length: 22 }, (_, index) => operation(index));
     const finished = Array.from({ length: 6 }, (_, index) => operation(100 + index, { active: false, state: 'enrolled', actions: { cancel: false, retry: false, release: false } }));
     renderList([...holds, ...finished]);

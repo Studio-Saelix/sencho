@@ -263,6 +263,21 @@ function sha256Of(content: string | Buffer): string {
 }
 
 /**
+ * The physical path the plan approved for a directory a step writes into: the
+ * resolved path the preflight recorded for the Compose or Agent directory, and
+ * the literal path for a system directory (the apt keyring and source
+ * directories), which must not be reached through a link. The write script
+ * refuses any other directory, so what was approved is what is changed.
+ */
+export function approvedDirectory(plan: BootstrapPlan, directory: string): string {
+  const clean = (value: string) => (value.length > 1 ? value.replace(/\/+$/, '') : value);
+  for (const known of [plan.paths.agentDir, plan.paths.composeDir]) {
+    if (clean(known.input) === clean(directory)) return known.realPath ?? known.input;
+  }
+  return directory;
+}
+
+/**
  * Put `desired` at `filePath` through the write script and check the result.
  * `replaces` is the sha256 of the file the run inspected and means to replace;
  * without it the name must be free when the file is published. A refusal means
@@ -270,6 +285,7 @@ function sha256Of(content: string | Buffer): string {
  */
 async function publishFile(
   ctx: StepContext,
+  plan: BootstrapPlan,
   step: BootstrapPlanStep,
   file: { path: string; mode: string },
   facts: { owner: string; group: string },
@@ -277,7 +293,8 @@ async function publishFile(
   replaces: string | null,
 ): Promise<StepOutcome> {
   const sudo = step.privilege === 'sudo';
-  const command = writeFileCommand(file.path, { mode: file.mode, owner: facts.owner, group: facts.group, sha256: sha256Of(desired) }, { sudo, replaces });
+  const directory = approvedDirectory(plan, path.posix.dirname(file.path));
+  const command = writeFileCommand(file.path, { mode: file.mode, owner: facts.owner, group: facts.group, sha256: sha256Of(desired) }, { sudo, replaces, directory });
   const result = await ctx.session.run(command, { timeoutMs: step.timeoutMs, stdin: desired });
   const failure = transportFailure(result, step.title, step.timeoutMs, ctx.secrets);
   if (failure) throw failure;
@@ -285,7 +302,7 @@ async function publishFile(
     throw new StepFailure('failed', 'WRITE_INCOMPLETE', `${file.path} did not arrive in full, so it was not put in place. The connection may have dropped.`, commandDetail(result, ctx.secrets), { changedNothing: true });
   }
   if (result.exitCode === WRITE_EXIT.notDirectory) {
-    throw new StepFailure('failed', 'DIRECTORY_CHANGED', `The directory for ${file.path} is not a directory any more, or was swapped while it was being entered. Nothing was written.`, commandDetail(result, ctx.secrets), { changedNothing: true });
+    throw new StepFailure('failed', 'DIRECTORY_CHANGED', `The directory for ${file.path} is not the directory the plan approved (it is not a directory any more, or it, or one of its parents, was replaced or redirected). Nothing was written.`, commandDetail(result, ctx.secrets), { changedNothing: true });
   }
   if (result.exitCode === WRITE_EXIT.exists || result.exitCode === WRITE_EXIT.notRegular) {
     // A replacement moves the inspected file aside first, so only a plain write is known to have changed nothing.
@@ -323,7 +340,7 @@ async function runFileStep(step: BootstrapPlanStep, ctx: StepContext, plan: Boot
       replaces = sha256Of(existing.bytes);
     }
   }
-  return publishFile(ctx, step, file, { owner: target.owner, group: target.group }, desired, replaces);
+  return publishFile(ctx, plan, step, file, { owner: target.owner, group: target.group }, desired, replaces);
 }
 
 /**
@@ -333,7 +350,7 @@ async function runFileStep(step: BootstrapPlanStep, ctx: StepContext, plan: Boot
  * existing key is replaced only when it is itself Docker's key and still the
  * file that was read.
  */
-async function runKeyStep(step: BootstrapPlanStep, ctx: StepContext): Promise<StepOutcome> {
+async function runKeyStep(step: BootstrapPlanStep, ctx: StepContext, plan: BootstrapPlan): Promise<StepOutcome> {
   const target = step.target;
   if (!step.command || !target?.owner || !target.group || !target.mode) {
     throw new StepFailure('failed', 'PLAN_INVALID', `The plan step "${step.title}" has no key destination. Nothing was run.`);
@@ -366,7 +383,7 @@ async function runKeyStep(step: BootstrapPlanStep, ctx: StepContext): Promise<St
     }
     replaces = sha256Of(existing.bytes);
   }
-  return publishFile(ctx, step, { path: keyPath, mode: target.mode }, { owner: target.owner, group: target.group }, downloaded.toString('utf8'), replaces);
+  return publishFile(ctx, plan, step, { path: keyPath, mode: target.mode }, { owner: target.owner, group: target.group }, downloaded.toString('utf8'), replaces);
 }
 
 /** The package names, and pinned versions, an `apt-get install` command names. */
@@ -483,13 +500,13 @@ async function runCommandStep(step: BootstrapPlanStep, ctx: StepContext): Promis
       throw new StepFailure('recovery', 'FILE_CONFLICT', `${step.target.path} appeared on the host after the plan was approved. It was left as it is.`, detail, { changedNothing: true });
     }
     if (result.exitCode === WRITE_EXIT.notDirectory) {
-      throw new StepFailure('failed', 'DIRECTORY_CHANGED', `A parent of ${step.target.path} (the nearest one that exists, or one that appeared while the directory was made) is not a directory, or was swapped while it was being entered. Nothing was created.`, detail, { changedNothing: true });
+      throw new StepFailure('failed', 'DIRECTORY_CHANGED', `${step.target.path} is not where the plan approved it: a parent (the nearest one that exists, or one that appeared while the directory was made) is not a directory, or it, or one above it, was replaced or redirected. Nothing was created.`, detail, { changedNothing: true });
     }
     if (result.exitCode === WRITE_EXIT.notCreated) {
       throw new StepFailure('failed', 'STEP_FAILED', `"${step.title}" failed (exit ${result.exitCode}); nothing was created.`, detail, { changedNothing: true });
     }
     if (result.exitCode === WRITE_EXIT.unfinished) {
-      throw new StepFailure('recovery', 'DIRECTORY_NOT_FINISHED', `Setting up ${step.target.path} could not be finished: a directory on the way to it was created or adjusted, and its owner or mode could not be set, or it was swapped while it was set up. Look at it on the host before retrying.`, detail);
+      throw new StepFailure('recovery', 'DIRECTORY_NOT_FINISHED', `Setting up ${step.target.path} could not be finished: a directory on the way to it was created or adjusted, and its owner or mode could not be set, or what was found where it was made was not the directory just made. Look at it on the host before retrying.`, detail);
     }
   }
   if (result.exitCode !== 0) {
@@ -505,7 +522,7 @@ async function runCommandStep(step: BootstrapPlanStep, ctx: StepContext): Promis
 
 export async function runPlanStep(step: BootstrapPlanStep, ctx: StepContext, plan: BootstrapPlan): Promise<StepOutcome> {
   if (step.file) return runFileStep(step, ctx, plan);
-  return step.id === KEY_STEP_ID ? runKeyStep(step, ctx) : runCommandStep(step, ctx);
+  return step.id === KEY_STEP_ID ? runKeyStep(step, ctx, plan) : runCommandStep(step, ctx);
 }
 
 /** The start step's privilege decides how Docker is reached after installation. */

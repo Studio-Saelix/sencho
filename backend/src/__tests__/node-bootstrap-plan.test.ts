@@ -58,8 +58,9 @@ describe('bootstrap plan builder', () => {
     expect(step.privilege).toBe('user');
     expect(step.target).toMatchObject({ path: '/opt/docker/sencho', mode: '0755', owner: 'ubuntu', group: 'ubuntu' });
     // The directory is created, never entered by name twice: a name that exists is refused, and a symlink is never followed.
-    expect(step.command).toBe(createDirectoryCommand('/opt/docker/sencho', { mode: '0755', owner: 'ubuntu', group: 'ubuntu' }, { sudo: false, allowExisting: false }));
-    expect(step.command).toMatch(/sencho-mkdir '\/opt\/docker\/sencho' '0755' 'ubuntu' 'ubuntu' '0'$/);
+    expect(step.command).toBe(createDirectoryCommand('/opt/docker/sencho', { mode: '0755', owner: 'ubuntu', group: 'ubuntu' }, { sudo: false, allowExisting: false, approved: '/opt/docker/sencho' }));
+    // ... and only the directory the preflight resolved: a path that leads elsewhere by then is refused.
+    expect(step.command).toMatch(/sencho-mkdir '\/opt\/docker\/sencho' '0755' 'ubuntu' 'ubuntu' '0' '\/opt\/docker\/sencho'$/);
     expect(step.command).not.toContain('install -d');
   });
 
@@ -71,7 +72,7 @@ describe('bootstrap plan builder', () => {
       repo: { probeComplete: true, dockerSourceConfigured: false, keyringPresent: false, sourceVerified: false, keyringVerified: false, candidateSourceVerified: null, problem: null },
     });
     const steps = allSteps(planFor(facts));
-    const flag = (id: string) => /' '([01])'$/.exec(steps.find((entry) => entry.id === id)?.command ?? '')?.[1];
+    const flag = (id: string) => /' '([01])' '[^']*'$/.exec(steps.find((entry) => entry.id === id)?.command ?? '')?.[1];
     expect(flag('docker-keyring-dir')).toBe('1');
     expect(flag('create-compose-dir')).toBe('0');
     expect(flag('create-agent-dir')).toBe('0');

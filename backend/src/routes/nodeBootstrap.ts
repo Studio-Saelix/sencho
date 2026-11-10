@@ -220,10 +220,18 @@ nodeBootstrapRouter.post('/operations', bootstrapOperationLimiter, (req: Request
   }
 });
 
+/** A page of runs that still hold a server; `cursor` is what the previous page returned. */
+const listQuerySchema = z.object({ cursor: z.string().min(1).max(200).optional() });
+
 nodeBootstrapRouter.get('/operations', (req: Request, res: Response) => {
   if (!guard(req, res)) return;
+  const query = listQuerySchema.safeParse(req.query);
+  if (!query.success) {
+    res.status(400).json({ error: 'That page of bootstrap runs is not valid. Reload the list.', code: 'INVALID_CURSOR' });
+    return;
+  }
   try {
-    res.json({ operations: NodeBootstrapOperationService.getInstance().list() });
+    res.json(NodeBootstrapOperationService.getInstance().list(query.data.cursor ?? null));
   } catch (error: unknown) {
     sendError(res, error, 'operation');
   }
