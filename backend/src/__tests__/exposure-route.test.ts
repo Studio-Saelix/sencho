@@ -15,6 +15,7 @@ import { DatabaseService } from '../services/DatabaseService';
 import { generateApiToken } from '../utils/apiTokenFormat';
 import { FileSystemService } from '../services/FileSystemService';
 import { EXPOSURE_INTENTS, type ExposureIntent } from '../services/network/types';
+import { MAX_PENDING_PER_KEY } from '../helpers/arrivalOrder';
 
 let tmpDir: string;
 let app: import('express').Express;
@@ -282,5 +283,73 @@ describe('exposure intent saves that overlap', () => {
     expect((await gone).status).toBe(404);
     expect((await next).status).toBe(200);
     expect(await intents(STACK)).toEqual([expect.objectContaining({ service: 'api', intent: 'public' })]);
+  });
+
+  describe('when a save never finishes', () => {
+    /** Holds the first save of `stack` in validation, then sends saves behind it until the stack holds as many as it admits. */
+    async function fillStack(stack: string) {
+      const hold = holdValidationOf(stack);
+      const admitted = [put(stack, { service: 'api', intent: 'lan' }).then((res) => res)];
+      await hold.reachedHold;
+      for (let i = 1; i < MAX_PENDING_PER_KEY; i += 1) {
+        admitted.push(put(stack, { service: 'worker', intent: EXPOSURE_INTENTS[i % EXPOSURE_INTENTS.length] }).then((res) => res));
+      }
+      await sleep(150);
+      return { hold, admitted };
+    }
+
+    it('answers a save with 429 at once once the stack holds as many as it admits, and never applies it', async () => {
+      const { hold, admitted } = await fillStack(STACK);
+      const refused = await put(STACK, { service: 'refused', intent: 'public' });
+      expect(refused.status).toBe(429);
+      expect(refused.body.code).toBe('exposure_save_queue_full');
+      hold.release();
+      const replies = await Promise.all(admitted);
+      expect(replies.map((reply) => reply.status)).toEqual(admitted.map(() => 200));
+      expect((await intents(STACK)).map((row) => row.service)).not.toContain('refused');
+    });
+
+    it.each([
+      ['a clear', { service: 'api', intent: null }],
+      ['a stack-wide save', { intent: 'public' }],
+      ['an invalid body', { service: 'api', intent: 'bogus' }],
+    ])('answers %s with 429 too, and applies none of it', async (_name, body) => {
+      const { hold, admitted } = await fillStack(STACK);
+      expect((await put(STACK, body)).status).toBe(429);
+      hold.release();
+      await Promise.all(admitted);
+      const rows = await intents(STACK);
+      expect(rows.find((row) => row.service === 'api')).toEqual(expect.objectContaining({ intent: 'lan' }));
+      expect(rows.find((row) => row.service === '')).toBeUndefined();
+    });
+
+    it('applies the saves it admitted in their order, so the last admitted one is final, and then accepts saves again', async () => {
+      const { hold, admitted } = await fillStack(STACK);
+      expect((await put(STACK, { service: 'worker', intent: 'internal' })).status).toBe(429);
+      hold.release();
+      await Promise.all(admitted);
+      const lastAdmitted = EXPOSURE_INTENTS[(MAX_PENDING_PER_KEY - 1) % EXPOSURE_INTENTS.length];
+      expect((await intents(STACK)).find((row) => row.service === 'worker')).toEqual(expect.objectContaining({ intent: lastAdmitted }));
+      const after = await put(STACK, { service: 'worker', intent: 'internal' });
+      expect(after.status).toBe(200);
+      expect(after.body.intents).toContainEqual(expect.objectContaining({ service: 'worker', intent: 'internal' }));
+    });
+
+    it('does not make another stack wait or refuse while this one is full', async () => {
+      const { hold, admitted } = await fillStack(STACK);
+      expect((await put(STACK, { service: 'api', intent: 'public' })).status).toBe(429);
+      expect((await put(OTHER, { service: 'api', intent: 'public' })).status).toBe(200);
+      hold.release();
+      await Promise.all(admitted);
+    });
+
+    it('still refuses a session that may not edit with 403, not 429, while the stack is full', async () => {
+      const { hold, admitted } = await fillStack(STACK);
+      const denied = await request(app).put(`/api/stacks/${STACK}/exposure`)
+        .set('Authorization', `Bearer ${readOnlyToken}`).send({ service: 'api', intent: 'public' });
+      expect(denied.status).toBe(403);
+      hold.release();
+      await Promise.all(admitted);
+    });
   });
 });

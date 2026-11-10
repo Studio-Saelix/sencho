@@ -96,7 +96,7 @@ import { filterContainersByComposeService } from '../helpers/composeServiceMatch
 import { invalidateNodeCaches } from '../helpers/cacheInvalidation';
 import { invalidateNodeNetworkingAggregate } from '../services/network/networkingAggregateCache';
 import { auditActorUsername } from '../helpers/auditActor';
-import { inArrivalOrder } from '../helpers/arrivalOrder';
+import { inArrivalOrder, ArrivalQueueFullError } from '../helpers/arrivalOrder';
 import { invalidateFleetUpdateCache } from '../helpers/fleetUpdateCache';
 import {
   ImageUpdateService,
@@ -2271,11 +2271,27 @@ stacksRouter.get('/:stackName/exposure', async (req: Request, res: Response) => 
 // Validating the stack is asynchronous, so without the queue a save that stalls there
 // (and whose client has since given up on it) would be applied after a later save that
 // already replied, and undo it. A client that abandoned a save cannot know the node has
-// stopped working on it; the order here is what keeps the later save final.
-stacksRouter.put('/:stackName/exposure', (req: Request, res: Response) => {
+// stopped working on it; the order here is what keeps the later save final. The queue
+// admits a bounded number of saves that have not finished, so a stack whose validation
+// never returns answers further saves with 429 instead of holding every one of them.
+// Saves already admitted keep their order.
+stacksRouter.put('/:stackName/exposure', async (req: Request, res: Response) => {
   const stackName = req.params.stackName as string;
   if (!requirePermission(req, res, 'stack:edit', 'stack', stackName)) return;
   const nodeId = req.nodeId;
+  try {
+    await saveInArrivalOrder(req, res, nodeId, stackName);
+  } catch (error) {
+    if (!(error instanceof ArrivalQueueFullError)) throw error;
+    console.error('[Stacks] Exposure save refused, too many saves waiting on %s:', sanitizeForLog(stackName));
+    res.status(429).json({
+      error: 'Too many exposure saves are waiting on this stack. Wait for them to finish, then try again.',
+      code: 'exposure_save_queue_full',
+    });
+  }
+});
+
+function saveInArrivalOrder(req: Request, res: Response, nodeId: number, stackName: string): Promise<void> {
   return inArrivalOrder(`${nodeId}\0${stackName}`, async () => {
     if (!(await requireStackExists(nodeId, stackName, res))) return;
     const parsed = ExposurePutSchema.safeParse(req.body);
@@ -2299,7 +2315,7 @@ stacksRouter.put('/:stackName/exposure', (req: Request, res: Response) => {
       res.status(500).json({ error: 'Failed to save exposure intent' });
     }
   });
-});
+}
 
 // Update guard: readiness reports computed on demand from existing stores
 // (preflight runs, drift findings, backup slot, update preview, live Docker

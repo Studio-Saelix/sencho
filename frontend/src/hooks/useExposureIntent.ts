@@ -31,7 +31,9 @@ const saveChains = new Map<string, Promise<void>>();
  * node working on it, so a timed-out save may still be applied later. A node on
  * this version applies saves to a stack in the order they reach it, so a save it
  * has received is applied before the saves sent after it, and a later save waits
- * behind it there if it is stalled.
+ * behind it there if it is stalled. Past a bounded number of saves waiting on one
+ * stack the node refuses the next with 429 instead of holding it, which is reported
+ * as a save that was not applied.
  */
 function inOrder<T>(key: string, run: () => Promise<T>): Promise<T> {
   const turn = (saveChains.get(key) ?? Promise.resolve()).then(run);

@@ -133,6 +133,18 @@ describe('saveExposureIntent ordering', () => {
     expect(await next).toEqual([{ service: 'worker', intent: 'lan' }]);
   });
 
+  it('reports the node\'s own message when it refuses a save because too many are waiting, and still sends the next', async () => {
+    const message = 'Too many exposure saves are waiting on this stack. Wait for them to finish, then try again.';
+    apiFetchMock.mockImplementationOnce(() => Promise.resolve(reply(429, { error: message, code: 'exposure_save_queue_full' })));
+    const full = saveExposureIntent('web', 'api', 'lan', 1);
+    const next = saveExposureIntent('web', 'worker', 'lan', 1);
+    await deliverNewestFirst();
+    expect(await full).toBeNull();
+    expect(toast.error).toHaveBeenCalledWith(message);
+    expect(await next).toEqual([{ service: 'worker', intent: 'lan' }]);
+    expect(applied).toEqual(['1/web/worker=lan']);
+  });
+
   it('sends the next save after one whose request threw', async () => {
     apiFetchMock.mockImplementationOnce(() => Promise.reject(new Error('network down')));
     const failed = saveExposureIntent('web', 'api', 'lan', 1);
