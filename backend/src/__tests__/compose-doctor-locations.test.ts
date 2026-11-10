@@ -1220,6 +1220,25 @@ describe('Compose Doctor authored locations', () => {
     expect(Date.now() - started).toBeLessThan(5000);
   });
 
+  it('matches a publication again when another model reuses it beside different publications', async () => {
+    writeStack('doctor-port-shared-spec', {
+      'compose.yaml': 'services:\n  d:\n    image: nginx:1.2\n    network_mode: none\n    ports:\n      - "5000-5001:5000-5001"\n',
+    });
+    const project = await buildAuthoredProject(nodeId, 'doctor-port-shared-spec');
+    const range = { startPort: 5000, endPort: 5001, hostIp: '', protocol: 'tcp' };
+    const single = { startPort: 5000, endPort: 5000, hostIp: '', protocol: 'tcp' };
+    const nodeHit = hit('port-conflict-node', {
+      service: 'd', sourcePath: 'd', subject: { kind: 'port', key: '5000/tcp' },
+    });
+    // With the collapsed range present, the range is the source of itself and
+    // the single publication is not; without it the range expands to the single.
+    const withRange = { services: [{ name: 'd', ports: [range, single] }] } as unknown as EffectiveModel;
+    const expanded = { services: [{ name: 'd', ports: [single] }] } as unknown as EffectiveModel;
+    expect(locateFinding(project, nodeHit, withRange)).toMatchObject({ path: 'services.d.ports[0]' });
+    expect(locateFinding(project, nodeHit, expanded)).toMatchObject({ path: 'services.d.ports[0]' });
+    expect(locateFinding(project, nodeHit, withRange)).toMatchObject({ path: 'services.d.ports[0]' });
+  });
+
   it('locates every port-conflict-node finding of a service at the publication bound, one range each', async () => {
     // 2,048 ranges of 31 ports, the most the locator attempts. The node binds
     // the first port of each, so each range yields one finding.

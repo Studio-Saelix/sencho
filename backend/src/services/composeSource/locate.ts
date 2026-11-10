@@ -46,8 +46,9 @@ const ALL_INTERFACES = 'all';
  * run can ask for tens of thousands of locations on the synchronous Doctor path
  * and each one reads the model. Past this count no port finding carries a link.
  * The authored file, the claims of each port and the authored items behind each
- * publication are read once per run (see `memoized`), so a finding costs a
- * lookup and the bound only has to cover the effective model.
+ * publication are read once per run (see `memoized`), so a repeated finding
+ * costs a lookup. The first finding for each publication still reads the
+ * authored items, so the bound caps that work at the square of the count.
  */
 const MAX_LOCATABLE_PUBLICATIONS = 2048;
 
@@ -377,9 +378,9 @@ function authoredPortMatches(
  * The authored `ports` items that produced one effective publication, stopping
  * at the second: two sources make the origin ambiguous whatever else matches.
  * One publication is asked about once per finding that counts it, and each
- * answer reads every authored item, so the answer is kept per publication.
- * A publication belongs to one service's effective ports, which is what its
- * answer depends on besides the authored scopes it is cached under.
+ * answer reads the authored items until it finds a second, so the answer is
+ * kept per publication, together with the effective ports it was matched
+ * against and under the authored scopes it was read from.
  */
 function itemsProducing(
   scopes: ServiceScope[],
@@ -387,9 +388,12 @@ function itemsProducing(
   broadOnly: boolean,
   effectivePorts: readonly EffPortSpec[],
 ): AuthoredPortItem[] {
-  const bySpec = memoized(scopes, `spec-items:${broadOnly}`, () => new Map<EffPortSpec, AuthoredPortItem[]>());
+  const bySpec = memoized(scopes, `spec-items:${broadOnly}`,
+    () => new Map<EffPortSpec, { ports: readonly EffPortSpec[]; items: AuthoredPortItem[] }>());
   const known = bySpec.get(spec);
-  if (known) return known;
+  // The answer also depends on the effective ports it was matched against, so a
+  // publication reused by another model's ports is matched again.
+  if (known && known.ports === effectivePorts) return known.items;
   const found: AuthoredPortItem[] = [];
   const specText = effectiveHostText(spec);
   for (const item of authoredPortItems(scopes)) {
@@ -397,7 +401,7 @@ function itemsProducing(
     found.push(item);
     if (found.length > 1) break;
   }
-  bySpec.set(spec, found);
+  bySpec.set(spec, { ports: effectivePorts, items: found });
   return found;
 }
 
