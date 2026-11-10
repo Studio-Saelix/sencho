@@ -3,85 +3,121 @@
  *
  * Run:  node --test scripts/check-bundle-size.test.mjs
  *
- * The CLI cases build a small fake dist directory, so they exercise the same
- * path CI runs without needing a real Vite build.
+ * The CLI cases build a small fake dist directory shaped like Vite's output
+ * (crossorigin attributes, a modulepreloaded vendor chunk, fonts next to the
+ * chunks), so they exercise the same path CI runs without a real build.
  */
 
 import { spawnSync } from 'node:child_process'
-import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from 'node:fs'
+import { randomBytes } from 'node:crypto'
+import { mkdtempSync, mkdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { after, describe, it } from 'node:test'
 import assert from 'node:assert/strict'
 
-import { chunkName, compare, groupOf, initialAssets, measure } from './check-bundle-size.mjs'
+import {
+  chunkName, compare, formatTable, groupOf, initialAssets, measure, parseArgs, parseBudget,
+} from './check-bundle-size.mjs'
 
-const SCRIPT = resolve(dirname(fileURLToPath(import.meta.url)), 'check-bundle-size.mjs')
+const SCRIPTS_DIR = dirname(fileURLToPath(import.meta.url))
+const SCRIPT = resolve(SCRIPTS_DIR, 'check-bundle-size.mjs')
 const NAMED = ['monaco', 'xterm']
 
 const INDEX_HTML = `<!doctype html>
+<link rel="icon" type="image/svg+xml" href="/sencho-logo-dark.svg" />
 <script src="/theme-init.js"></script>
-<script type="module" src="/assets/index-Ab12Cd34.js"></script>
-<link rel="modulepreload" href="/assets/monaco-Zz-9yY_8.js">
-<link rel="stylesheet" href="/assets/index-Ef56Gh78.css">
-<link rel="icon" href="/sencho-logo-dark.svg">`
+<script type="module" crossorigin src="/assets/index-Ab12Cd34.js"></script>
+<link rel="modulepreload" crossorigin href="/assets/rolldown-runtime-Kk00Ll11.js">
+<link rel="modulepreload" crossorigin href="/assets/monaco-Zz-9yY_8.js">
+<link rel="prefetch" href="/assets/SettingsView-Uu55Ii66.js">
+<link rel="stylesheet" crossorigin href="/assets/index-Ef56Gh78.css">`
 
 const tempDirs = []
 after(() => {
   for (const dir of tempDirs) rmSync(dir, { recursive: true, force: true })
 })
 
-/** A fake dist with a 64 KB incompressible entry chunk unless `entryBytes` says otherwise. */
-function fakeDist(entryBytes = 64 * 1024) {
+function tempDir() {
   const dir = mkdtempSync(join(tmpdir(), 'bundle-size-'))
   tempDirs.push(dir)
-  mkdirSync(join(dir, 'assets'))
-  writeFileSync(join(dir, 'index.html'), INDEX_HTML)
-  // Random bytes do not compress, so the gzipped size tracks the raw size.
-  const random = (n) => Buffer.from(Array.from({ length: n }, () => Math.floor(Math.random() * 256)))
-  writeFileSync(join(dir, 'assets', 'index-Ab12Cd34.js'), random(entryBytes))
-  writeFileSync(join(dir, 'assets', 'index-Ef56Gh78.css'), 'body{}')
-  writeFileSync(join(dir, 'assets', 'monaco-Zz-9yY_8.js'), 'm')
-  writeFileSync(join(dir, 'assets', 'xterm-Qq11Ww22.js'), 'x')
-  writeFileSync(join(dir, 'assets', 'ts.worker-Rr33Tt44.js'), 'w')
-  writeFileSync(join(dir, 'assets', 'SettingsView-Uu55Ii66.js'), 's')
-  writeFileSync(join(dir, 'assets', 'ibm-plex-sans-latin-400-normal-CDDApCn2.woff2'), 'font')
   return dir
 }
 
-function writeBudget(dir, gzipKb) {
+/**
+ * A fake dist. The entry chunk is `entryBytes` of random data, which does not
+ * compress, so its gzipped size tracks its raw size.
+ */
+function fakeDist({ entryBytes = 64 * 1024, indexHtml = INDEX_HTML, extra = {} } = {}) {
+  const dir = tempDir()
+  mkdirSync(join(dir, 'assets'))
+  writeFileSync(join(dir, 'index.html'), indexHtml)
+  const files = {
+    'index-Ab12Cd34.js': randomBytes(entryBytes),
+    'index-Ef56Gh78.css': 'body{}',
+    'rolldown-runtime-Kk00Ll11.js': 'r',
+    'monaco-Zz-9yY_8.js': 'm',
+    'xterm-Qq11Ww22.js': 'x',
+    'xterm-Oo77Pp88.css': '.x{}',
+    'ts.worker-Rr33Tt44.js': 'w',
+    'SettingsView-Uu55Ii66.js': 's',
+    'ibm-plex-sans-latin-400-normal-CDDApCn2.woff2': 'font',
+    ...extra,
+  }
+  for (const [name, content] of Object.entries(files)) writeFileSync(join(dir, 'assets', name), content)
+  return dir
+}
+
+const GENEROUS = {
+  'entry-js': 100, 'preload-js': 1, 'first-load-js': 100, 'initial-css': 1, 'lazy-js': 1, 'lazy-css': 1,
+  workers: 1, monaco: 1, xterm: 1, 'total-js': 100,
+}
+
+function writeBudget(dir, gzipKb, namedChunks = NAMED) {
   const path = join(dir, 'budget.json')
-  writeFileSync(path, JSON.stringify({ namedChunks: NAMED, gzipKb }))
+  writeFileSync(path, JSON.stringify({ namedChunks, gzipKb }))
   return path
 }
 
-function run(dist, budget) {
-  return spawnSync(process.execPath, [SCRIPT, '--dist', dist, '--budget', budget], {
+function run(args, env = {}) {
+  return spawnSync(process.execPath, [SCRIPT, ...args], {
     encoding: 'utf8',
-    env: { ...process.env, GITHUB_STEP_SUMMARY: '' },
+    env: { ...process.env, GITHUB_STEP_SUMMARY: '', ...env },
   })
 }
 
 describe('chunkName', () => {
-  it('strips the content hash, including hashes that contain a dash', () => {
+  it('strips the content hash, including hashes that contain a dash or underscore', () => {
     assert.equal(chunkName('index-Bh-4uhRG.js'), 'index')
+    assert.equal(chunkName('dist-53YMm-pa.js'), 'dist')
     assert.equal(chunkName('ts.worker-DGGa2mF8.js'), 'ts.worker')
     assert.equal(chunkName('table-2-AbCdEf_1.css'), 'table-2')
   })
 
-  it('returns null for assets that are not JS or CSS chunks', () => {
-    assert.equal(chunkName('ibm-plex-sans-latin-400-normal-CDDApCn2.woff2'), null)
+  it('returns null for a name without a hash', () => {
+    assert.equal(chunkName('sw.js'), null)
     assert.equal(chunkName('index.html'), null)
   })
 })
 
 describe('initialAssets', () => {
-  it('collects every asset index.html loads or preloads, and nothing outside assets/', () => {
-    assert.deepEqual(
-      [...initialAssets(INDEX_HTML)].sort(),
-      [['index-Ab12Cd34.js', 'src'], ['index-Ef56Gh78.css', 'href'], ['monaco-Zz-9yY_8.js', 'href']],
-    )
+  it('reads the entry script, modulepreloads, and stylesheets, and skips prefetch and non-asset URLs', () => {
+    assert.deepEqual([...initialAssets(INDEX_HTML)].sort(), [
+      ['index-Ab12Cd34.js', 'entry'],
+      ['index-Ef56Gh78.css', 'css'],
+      ['monaco-Zz-9yY_8.js', 'preload'],
+      ['rolldown-runtime-Kk00Ll11.js', 'preload'],
+    ])
+  })
+
+  it('accepts single quotes, unquoted values, a relative base, and any attribute order', () => {
+    const html = `<script src='./assets/index-Ab12Cd34.js' type=module></script>
+      <link href=assets/monaco-Zz-9yY_8.js rel=modulepreload>`
+    assert.deepEqual([...initialAssets(html)].sort(), [
+      ['index-Ab12Cd34.js', 'entry'],
+      ['monaco-Zz-9yY_8.js', 'preload'],
+    ])
   })
 })
 
@@ -90,66 +126,138 @@ describe('groupOf', () => {
 
   it('splits first-visit assets into the entry script, its preloads, and stylesheets', () => {
     assert.equal(groupOf('index-Ab12Cd34.js', initial, NAMED), 'entry-js')
+    assert.equal(groupOf('rolldown-runtime-Kk00Ll11.js', initial, NAMED), 'preload-js')
     assert.equal(groupOf('index-Ef56Gh78.css', initial, NAMED), 'initial-css')
   })
 
-  it('puts a preloaded named chunk in preload-js, not in its own group', () => {
-    assert.equal(groupOf('monaco-Zz-9yY_8.js', initial, NAMED), 'preload-js')
+  it('keeps a named vendor chunk in its own group even when it is preloaded', () => {
+    assert.equal(groupOf('monaco-Zz-9yY_8.js', initial, NAMED), 'monaco')
+    assert.equal(groupOf('xterm-Qq11Ww22.js', initial, NAMED), 'xterm')
   })
 
-  it('separates named vendor chunks, workers, and other lazy chunks', () => {
-    assert.equal(groupOf('xterm-Qq11Ww22.js', initial, NAMED), 'xterm')
+  it('separates workers from other lazy chunks', () => {
     assert.equal(groupOf('ts.worker-Rr33Tt44.js', initial, NAMED), 'workers')
     assert.equal(groupOf('SettingsView-Uu55Ii66.js', initial, NAMED), 'lazy-js')
     assert.equal(groupOf('xterm-Oo77Pp88.css', initial, NAMED), 'lazy-css')
   })
 })
 
-describe('measure and compare', () => {
-  it('measures gzipped bytes per group and totals the JavaScript', () => {
+describe('measure', () => {
+  it('counts each chunk once per group, and preloaded named chunks toward first load', () => {
     const groups = measure(fakeDist(), NAMED)
-    assert.ok(groups['entry-js'] > 64 * 1024, 'random entry chunk does not compress')
+    const gz = (s) => groups[s] ?? 0
+    assert.ok(gz('entry-js') > 64 * 1024, 'random entry chunk does not compress')
+    assert.equal(gz('first-load-js'), gz('entry-js') + gz('preload-js') + gz('monaco'))
     assert.equal(
-      groups['total-js'],
-      groups['entry-js'] + groups['preload-js'] + groups.xterm + groups.workers + groups['lazy-js'],
+      gz('total-js'),
+      gz('entry-js') + gz('preload-js') + gz('monaco') + gz('xterm') + gz('workers') + gz('lazy-js'),
     )
-    assert.equal(groups.monaco, undefined, 'preloaded monaco is counted as a preload')
+    assert.ok(gz('lazy-css') > 0 && gz('initial-css') > 0)
   })
 
-  it('flags a group over budget and a measured group with no budget', () => {
-    const rows = compare({ 'entry-js': 3 * 1024, xterm: 1024 }, { 'entry-js': 2, monaco: 5 })
-    assert.deepEqual(
-      rows.map((r) => [r.group, r.status]),
-      [['entry-js', 'over'], ['monaco', 'ok'], ['xterm', 'no budget']],
-    )
+  it('throws when index.html has no entry script under assets/', () => {
+    const dist = fakeDist({ indexHtml: '<html><body>nothing here</body></html>' })
+    assert.throws(() => measure(dist, NAMED), /has no module script under assets/)
+  })
+
+  it('throws on a JS or CSS asset whose name has no recognisable hash', () => {
+    const dist = fakeDist({ extra: { 'sw.js': 'self' } })
+    assert.throws(() => measure(dist, NAMED), /Unrecognised asset name "sw.js"/)
+  })
+})
+
+describe('compare', () => {
+  it('flags over budget, no budget, and a budgeted group that measured nothing; the exact budget passes', () => {
+    const rows = compare({ 'entry-js': 3 * 1024, 'lazy-js': 2 * 1024, xterm: 1024 }, { 'entry-js': 2, 'lazy-js': 2, monaco: 5 })
+    assert.deepEqual(rows.map((r) => [r.group, r.status]), [
+      ['entry-js', 'over'], ['lazy-js', 'ok'], ['monaco', 'empty'], ['xterm', 'no budget'],
+    ])
+  })
+
+  it('formats one table row per group', () => {
+    const table = formatTable([{ group: 'entry-js', kb: 1.25, budget: 2, status: 'ok' }])
+    assert.match(table, /^\| Group \| Gzipped KB \| Budget KB \| Status \|/)
+    assert.match(table, /\| entry-js \| 1\.3 \| 2 \| ok \|$/)
+  })
+})
+
+describe('parseBudget and parseArgs', () => {
+  it('rejects a budget that is not a positive number, and a missing namedChunks', () => {
+    assert.throws(() => parseBudget('{"namedChunks":[],"gzipKb":{"entry-js":"625kb"}}', 'b.json'), /"entry-js" must be a positive number/)
+    assert.throws(() => parseBudget('{"gzipKb":{}}', 'b.json'), /namedChunks must be an array/)
+  })
+
+  it('accepts the committed budget file', () => {
+    const path = resolve(SCRIPTS_DIR, '../frontend/bundle-budget.json')
+    const budget = parseBudget(readFileSync(path, 'utf8'), path)
+    for (const name of budget.namedChunks) assert.ok(budget.gzipKb[name], `${name} has a budget`)
+  })
+
+  it('rejects unknown flags and flags without a value', () => {
+    assert.throws(() => parseArgs(['--dst', 'x']), /Unknown argument "--dst"/)
+    assert.throws(() => parseArgs(['--dist=x']), /Unknown argument "--dist=x"/)
+    assert.throws(() => parseArgs(['--dist']), /--dist needs a value/)
+    assert.throws(() => parseArgs(['--dist', '--budget', 'b']), /--dist needs a value/)
+    assert.deepEqual(parseArgs(['--budget', 'b.json']), { dist: 'frontend/dist', budget: 'b.json' })
   })
 })
 
 describe('CLI', () => {
-  const generous = {
-    'entry-js': 100, 'preload-js': 1, 'initial-css': 1, 'lazy-js': 1, 'lazy-css': 1,
-    workers: 1, monaco: 1, xterm: 1, 'total-js': 100,
-  }
-
-  it('passes when every group is within budget', () => {
+  it('passes when every group is within budget and writes the job summary', () => {
     const dist = fakeDist()
-    const result = run(dist, writeBudget(dist, generous))
+    const summary = join(dist, 'summary.md')
+    const result = run(['--dist', dist, '--budget', writeBudget(dist, GENEROUS)], { GITHUB_STEP_SUMMARY: summary })
     assert.equal(result.status, 0, result.stderr)
     assert.match(result.stdout, /\| entry-js \| \d+\.\d \| 100 \| ok \|/)
+    assert.match(readFileSync(summary, 'utf8'), /### Frontend bundle size[\s\S]*\| entry-js \|/)
   })
 
-  it('fails and names the chunk, its size, and its budget when a heavy import lands in the entry chunk', () => {
-    const dist = fakeDist(200 * 1024)
-    const result = run(dist, writeBudget(dist, generous))
+  it('fails, names the group, its size and its budget, and still prints the table when a heavy import lands in the entry chunk', () => {
+    const dist = fakeDist({ entryBytes: 200 * 1024 })
+    const result = run(['--dist', dist, '--budget', writeBudget(dist, GENEROUS)])
     assert.equal(result.status, 1)
     assert.match(result.stderr, /Bundle group "entry-js" is \d+\.\d KB gzipped, over its 100 KB budget/)
+    assert.match(result.stdout, /\| entry-js \| \d+\.\d \| 100 \| over \|/)
   })
 
   it('fails when a group has no budget', () => {
     const dist = fakeDist()
-    const { workers, ...withoutWorkers } = generous
-    const result = run(dist, writeBudget(dist, withoutWorkers))
+    const { workers: _omitted, ...withoutWorkers } = GENEROUS
+    const result = run(['--dist', dist, '--budget', writeBudget(dist, withoutWorkers)])
     assert.equal(result.status, 1)
     assert.match(result.stderr, /Bundle group "workers" has no budget/)
+  })
+
+  it('fails when a named chunk no longer exists in the build', () => {
+    const dist = fakeDist()
+    const result = run(['--dist', dist, '--budget', writeBudget(dist, { ...GENEROUS, charts: 5 }, [...NAMED, 'charts'])])
+    assert.equal(result.status, 1)
+    assert.match(result.stderr, /Bundle group "charts" measured 0 bytes/)
+  })
+
+  it('fails with a message, not a pass, when the dist or index.html cannot be read', () => {
+    const dir = tempDir()
+    const result = run(['--dist', join(dir, 'missing'), '--budget', writeBudget(dir, GENEROUS)])
+    assert.equal(result.status, 1)
+    assert.match(result.stderr, /^Bundle size check failed: /)
+  })
+
+  it('still reports the result when the job summary cannot be written', () => {
+    const dist = fakeDist({ entryBytes: 200 * 1024 })
+    const result = run(['--dist', dist, '--budget', writeBudget(dist, GENEROUS)], { GITHUB_STEP_SUMMARY: join(dist, 'no', 'such', 'file') })
+    assert.equal(result.status, 1)
+    assert.match(result.stderr, /Bundle group "entry-js" is .* over its 100 KB budget/)
+    assert.match(result.stderr, /Could not write the job summary/)
+  })
+
+  it('runs the check when invoked through a symlinked directory', () => {
+    const link = join(tempDir(), 'scripts')
+    symlinkSync(SCRIPTS_DIR, link)
+    const dir = tempDir()
+    const result = spawnSync(process.execPath, [join(link, 'check-bundle-size.mjs'), '--dist', join(dir, 'missing')], {
+      encoding: 'utf8',
+      env: { ...process.env, GITHUB_STEP_SUMMARY: '' },
+    })
+    assert.equal(result.status, 1, 'a symlinked invocation must not import-and-exit 0')
   })
 })
