@@ -789,6 +789,18 @@ describe('bootstrap operations: failure paths found in review', () => {
     expect(h.host.commands.some((entry) => /apt-get (-o \S+ )?install /.test(entry.command))).toBe(false);
   });
 
+  it('installs nothing when a mirror also serves the candidate apt would install', async () => {
+    const h = harness();
+    // apt could fetch the candidate from either archive, so the official one beside it is not enough.
+    h.host.policy = officialPolicy().split('noble/stable amd64 Packages').join('noble/stable amd64 Packages\n        500 https://mirror.example.com/docker noble/stable amd64 Packages');
+    const { request } = approve(h);
+    const op = h.service.start(request, context());
+    await h.service.settled();
+    expect(h.service.get(op.id).error).toMatchObject({ code: 'CANDIDATE_NOT_VERIFIED' });
+    expect(h.host.commands.some((entry) => /apt-get (-o \S+ )?install /.test(entry.command))).toBe(false);
+    h.service.release(op.id, AUDIT);
+  });
+
   it('installs nothing when a package candidate does not come from the official repository', async () => {
     const h = harness();
     h.host.policy = officialPolicy('noble', 'https://mirror.example.com/docker');

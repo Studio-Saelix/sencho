@@ -328,8 +328,8 @@ async function hostCodename(ctx: StepContext): Promise<string> {
 
 /**
  * Before installing, ask apt where each package would come from: every one
- * must have a candidate served by the official Docker repository from the host
- * release's stable channel, and a pinned version must be the candidate.
+ * must have a candidate served only by the official Docker repository from the
+ * host release's stable channel, and a pinned version must be the candidate.
  * Nothing is installed when one is not.
  */
 async function verifyDockerCandidates(ctx: StepContext, step: BootstrapPlanStep): Promise<void> {
@@ -346,7 +346,9 @@ async function verifyDockerCandidates(ctx: StepContext, step: BootstrapPlanStep)
   const problems: string[] = [];
   for (const spec of installSpecs(step.command ?? '')) {
     const pkg = packages.find((entry) => entry.name === spec.name);
-    const official = pkg?.candidateSources?.some((source) => source.uri === OFFICIAL_DOCKER_URI && source.official !== false) ?? false;
+    // apt may fetch the candidate from any archive that serves it, so every one must be the official repository.
+    const sources = pkg?.candidateSources ?? [];
+    const official = sources.length > 0 && sources.every((source) => source.uri === OFFICIAL_DOCKER_URI && source.official === true);
     if (!pkg?.candidateVersion || !official) problems.push(`${spec.name} has no candidate from the official Docker repository`);
     else if (spec.version !== null && pkg.candidateVersion !== spec.version) problems.push(`${spec.name} would install ${pkg.candidateVersion}, not ${spec.version}`);
   }
