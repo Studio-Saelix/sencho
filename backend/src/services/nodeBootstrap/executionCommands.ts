@@ -72,7 +72,7 @@ const WRITE_SCRIPT = [
   `if [ -z "$ph" ] && { [ -e "./$n" ] || [ -L "./$n" ]; }; then echo "already exists: $d/$n" >&2; exit ${WRITE_EXIT.exists}; fi`,
   `if [ -L "./$n" ] || { [ -e "./$n" ] && [ ! -f "./$n" ]; }; then echo "not a regular file: $d/$n" >&2; exit ${WRITE_EXIT.notRegular}; fi`,
   't=$(mktemp "./.$n.XXXXXX")',
-  'slot=; old=',
+  'slot=; old=; moving=0; published=0',
   // Put a file that was moved aside back, when the name is still free. The hard
   // link goes first; the rename is for what cannot be linked (a directory) and
   // counts only when the moved-aside name is gone afterwards.
@@ -81,11 +81,19 @@ const WRITE_SCRIPT = [
   '  mv -nT -- "$old" "./$n" 2>/dev/null && [ ! -e "$old" ] && [ ! -L "$old" ]',
   '}',
   // However the script ends, the temporary file (which holds the enrollment
-  // token) goes, and a file moved aside for a replacement goes back.
+  // token) goes, and a file moved aside for a replacement goes back, unless the
+  // new file was already published (the name and the temporary file are the same
+  // file), when the old one just goes. A signal that
+  // lands while the file is being moved aside is told apart by the name: when it
+  // is gone, the move happened and the slot holds the original.
   'cleanup() {',
+  '  if [ -e "$t" ] && [ "./$n" -ef "$t" ]; then published=1; fi',
   '  rm -f "$t"',
+  '  if [ "$moving" = 1 ] && [ -n "$slot" ] && [ ! -e "./$n" ] && [ ! -L "./$n" ]; then old=$slot; slot=; fi',
   '  if [ -n "$slot" ]; then rm -f "$slot"; fi',
-  '  if [ -n "$old" ]; then restore || :; fi',
+  '  if [ -n "$old" ]; then',
+  '    if [ "$published" = 1 ]; then rm -f "$old"; else restore || :; fi',
+  '  fi',
   '}',
   'trap cleanup EXIT',
   // A dropped session ends the shell through a signal (or a write to a closed
@@ -102,7 +110,10 @@ const WRITE_SCRIPT = [
   // else is put back and the write refuses, so no other file is ever replaced.
   'if [ -n "$ph" ]; then',
   '  slot=$(mktemp "./.$n.old.XXXXXX")',
-  '  if mv -fT -- "./$n" "$slot" 2>/dev/null; then old=$slot; slot=; else rm -f "$slot"; slot=; fi',
+  '  moving=1',
+  '  if mv -fT -- "./$n" "$slot" 2>/dev/null; then old=$slot; slot=; fi',
+  '  moving=0',
+  '  if [ -n "$slot" ]; then rm -f "$slot"; slot=; fi',
   '  if [ -n "$old" ]; then',
   '    if [ -L "$old" ] || [ ! -f "$old" ] || [ "$(sha256sum "$old" | cut -d\' \' -f1)" != "$ph" ]; then',
   '      if restore; then',
@@ -124,6 +135,7 @@ const WRITE_SCRIPT = [
   '  fi',
   `  echo "could not publish: $d/$n" >&2; exit ${WRITE_EXIT.notPublished}`,
   'fi',
+  'published=1',
   'if [ -n "$old" ]; then rm -f "$old"; old=; fi',
 ].join('\n');
 
@@ -185,9 +197,10 @@ const DIRECTORY_SCRIPT = [
   '    case $rest in */*) rest=${rest#*/} ;; *) rest= ;; esac',
   // mkdir never follows or replaces an existing name, a symlink included, so a
   // name taken since the plan was approved is refused, not changed. A parent
-  // that appeared meanwhile as a real directory is simply entered.
+  // that appeared meanwhile as a real directory is simply entered, and left as it is.
+  '    created=0',
   '    if mkdir -- "./$c" 2>/dev/null; then',
-  '      made=1',
+  '      made=1; created=1',
   '    elif [ -n "$rest" ] && [ ! -L "./$c" ] && [ -d "./$c" ]; then',
   '      :',
   '    elif [ -e "./$c" ] || [ -L "./$c" ]; then',
@@ -195,11 +208,14 @@ const DIRECTORY_SCRIPT = [
   '    else',
   `      die ${WRITE_EXIT.notCreated} "could not create: $p"`,
   '    fi',
+  `    enter "./$c" || die ${WRITE_EXIT.notDirectory} "changed while it was set up: $p"`,
   // A directory this script made is owned by the user it runs as; one that is
   // not was put there by someone else, and is left alone.
-  `    enter "./$c" && [ -O . ] || die ${WRITE_EXIT.unfinished} "changed while it was set up: $p"`,
+  '    if [ "$created" = 1 ]; then',
+  `      [ -O . ] || die ${WRITE_EXIT.unfinished} "changed while it was set up: $p"`,
   // Parents get the usual 0755 (install -d did the same); the mode and owner below are for the directory itself.
-  `    if [ -n "$rest" ]; then chmod 0755 . || die ${WRITE_EXIT.unfinished} "could not set the mode of a parent of $p"; fi`,
+  `      if [ -n "$rest" ]; then chmod 0755 . || die ${WRITE_EXIT.unfinished} "could not set the mode of a parent of $p"; fi`,
+  '    fi',
   '  done',
   'fi',
   `chown "$o:$g" . || die ${WRITE_EXIT.unfinished} "could not set the owner of $p"`,

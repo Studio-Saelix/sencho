@@ -489,7 +489,7 @@ async function runCommandStep(step: BootstrapPlanStep, ctx: StepContext): Promis
       throw new StepFailure('failed', 'STEP_FAILED', `"${step.title}" failed (exit ${result.exitCode}); nothing was created.`, detail, { changedNothing: true });
     }
     if (result.exitCode === WRITE_EXIT.unfinished) {
-      throw new StepFailure('recovery', 'DIRECTORY_NOT_FINISHED', `${step.target.path} was created but could not be finished (its owner or mode, or it was swapped while it was set up). Look at it on the host before retrying.`, detail);
+      throw new StepFailure('recovery', 'DIRECTORY_NOT_FINISHED', `Setting up ${step.target.path} could not be finished: a directory on the way to it was created or adjusted, and its owner or mode could not be set, or it was swapped while it was set up. Look at it on the host before retrying.`, detail);
     }
   }
   if (result.exitCode !== 0) {

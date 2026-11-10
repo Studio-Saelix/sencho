@@ -630,6 +630,43 @@ describe('B1: the directory is pinned between its inspection and its entry', () 
   });
 });
 
+/** A shim that runs the real command and then stops the shell that called it, as sudo does when a session ends. */
+function signalingShim(base: string, command: string, when: string): { PATH: string } {
+  const dir = path.join(base, `signal-${command}`);
+  fs.mkdirSync(dir);
+  const real = execFileSync('sh', ['-c', `command -v ${command}`], { encoding: 'utf8' }).trim();
+  fs.writeFileSync(path.join(dir, command), [
+    '#!/bin/sh',
+    `"${real}" "$@"; rc=$?`,
+    `case "$*" in ${when}) kill -TERM $PPID ;; esac`,
+    'exit $rc',
+  ].join('\n'), { mode: 0o755 });
+  return { PATH: `${dir}:${process.env.PATH ?? ''}` };
+}
+
+describe('B1: a stop in the middle of a replacement never loses or strands the compose file', () => {
+  const previous = 'old compose with a spent token';
+  const replacement = () => writeFileCommand(path.join(root, 'compose.yaml'), { ...file, sha256: sha256('new compose') }, { sudo: false, replaces: sha256(previous) });
+
+  it('puts the previous file back when the stop lands right after it was moved aside', () => {
+    fs.writeFileSync(path.join(root, 'compose.yaml'), previous, { mode: 0o600 });
+    const env = signalingShim(root, 'mv', '*.old.*');
+    const result = runShell(replacement(), 'new compose', env);
+    expect(result.status).not.toBe(0);
+    expect(fs.readFileSync(path.join(root, 'compose.yaml'), 'utf8')).toBe(previous);
+    expect(fs.readdirSync(root).filter((entry) => !entry.startsWith('signal-'))).toEqual(['compose.yaml']);
+  });
+
+  it('leaves only the new file when the stop lands right after it was published', () => {
+    fs.writeFileSync(path.join(root, 'compose.yaml'), previous, { mode: 0o600 });
+    const env = signalingShim(root, 'ln', '*.old.*) ;; *./compose.yaml');
+    const result = runShell(replacement(), 'new compose', env);
+    expect(result.status).not.toBe(0);
+    expect(fs.readFileSync(path.join(root, 'compose.yaml'), 'utf8')).toBe('new compose');
+    expect(fs.readdirSync(root).filter((entry) => !entry.startsWith('signal-'))).toEqual(['compose.yaml']);
+  });
+});
+
 describe('B1: directory creation makes missing parents the way install -d did', () => {
   const dirSpec = { mode: '0700', owner, group };
 
@@ -652,6 +689,19 @@ describe('B1: directory creation makes missing parents the way install -d did', 
     expect(runShell(createDirectoryCommand(path.join(link, 'docker', 'sencho'), { mode: '0755', owner, group }, { sudo: false, allowExisting: false })).status).toBe(0);
     expect(fs.statSync(path.join(real, 'docker', 'sencho')).isDirectory()).toBe(true);
     expect(fs.lstatSync(link).isSymbolicLink()).toBe(true);
+  });
+
+  it('enters a parent that appeared as a real directory meanwhile and leaves its mode alone', () => {
+    // A mkdir that finds the name taken by a directory made in the meantime.
+    const shimBase = path.join(root, 'shim-mkdir');
+    fs.mkdirSync(shimBase);
+    const realMkdir = execFileSync('sh', ['-c', 'command -v mkdir'], { encoding: 'utf8' }).trim();
+    fs.writeFileSync(path.join(shimBase, 'mkdir'), ['#!/bin/sh', 'case "$2" in ./mid) "' + realMkdir + '" -m 0700 ./mid; exit 1 ;; esac', `exec "${realMkdir}" "$@"`].join('\n'), { mode: 0o755 });
+    const target = path.join(root, 'mid', 'agent');
+    const result = runShell(createDirectoryCommand(target, dirSpec, { sudo: false, allowExisting: false }), '', { PATH: `${shimBase}:${process.env.PATH ?? ''}` });
+    expect(result.status).toBe(0);
+    expect(modeOf(path.join(root, 'mid'))).toBe('700');
+    expect(modeOf(target)).toBe('700');
   });
 
   it('refuses when the nearest existing ancestor is a file, and when the path is not absolute', () => {
