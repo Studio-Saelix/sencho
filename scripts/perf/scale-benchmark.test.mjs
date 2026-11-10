@@ -10,12 +10,15 @@
  * Docker and a built backend, and runs in the scale-benchmark workflow.
  */
 
-import { describe, it } from 'node:test'
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
+import { after, describe, it } from 'node:test'
 import assert from 'node:assert/strict'
 
 import {
   assertAllMisses, assertMeasuredWork, assertSameScale, compare, failures, formatTable, lanAddress, limitsFrom,
-  parseArgs, parseBaseline, percentile, statusOutcomes, summarize,
+  parseArgs, parseBaseline, percentile, prepareWorkDir, statusOutcomes, summarize,
 } from './scale-benchmark.mjs'
 
 const LIMITS = { ratio: 1.5, floorMs: 25 }
@@ -228,5 +231,28 @@ describe('lanAddress', () => {
 
   it('fails clearly when there is no usable address', () => {
     assert.throws(() => lanAddress({ lo: [{ family: 'IPv4', internal: true, address: '127.0.0.1' }] }), /No non-loopback IPv4/)
+  })
+})
+
+describe('prepareWorkDir', () => {
+  const root = mkdtempSync(join(tmpdir(), 'scale-workdir-'))
+  after(() => rmSync(root, { recursive: true, force: true }))
+
+  it('creates a new directory and accepts an empty one', () => {
+    assert.equal(prepareWorkDir(join(root, 'new')), join(root, 'new'))
+    mkdirSync(join(root, 'empty'))
+    assert.equal(prepareWorkDir(join(root, 'empty')), join(root, 'empty'))
+  })
+
+  it('refuses a directory with leftovers from an earlier run', () => {
+    mkdirSync(join(root, 'used'))
+    writeFileSync(join(root, 'used', 'backend.log'), 'old')
+    assert.throws(() => prepareWorkDir(join(root, 'used')), /is not empty; use a new or empty directory/)
+  })
+
+  it('makes a temporary directory when none is given', () => {
+    const dir = prepareWorkDir(null)
+    assert.match(dir, /sencho-scale-/)
+    rmSync(dir, { recursive: true, force: true })
   })
 })

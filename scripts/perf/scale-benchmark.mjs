@@ -20,8 +20,8 @@
  * proves it measured real work: before and after timing, every node in the
  * fleet overview must be online and list every seeded stack, and the stack
  * statuses must show every seeded stack running. Each miss sample's cache
- * outcome is read from the backend's own debug timing log and must be a
- * computation, not a cache hit.
+ * outcome is read from the backend's own debug timing log and must be
+ * computed or inflight, never a hit or a stale fallback.
  *
  * With `--baseline`, the run fails when a series' median is over `--ratio`
  * times the baseline median and also more than `--floor-ms` slower (so CI
@@ -104,7 +104,7 @@ export function parseArgs(args) {
   return options
 }
 
-/** A baseline file's contents, or an error naming what is wrong with it. */
+/** A baseline file's contents, or an error naming what is wrong with it (and `path`, when it is not JSON). */
 export function parseBaseline(text, path = 'baseline') {
   let baseline
   try {
@@ -132,7 +132,7 @@ export function limitsFrom(options) {
   return { ratio: options.ratio, floorMs: options['floor-ms'] }
 }
 
-/** Throws unless there is one logged outcome per sample and each is a computation. */
+/** Throws unless there is one logged outcome per sample and each is computed or inflight. */
 export function assertAllMisses(outcomes, count) {
   if (outcomes.length !== count || !outcomes.every((o) => MISS_OUTCOMES.has(o))) {
     throw new Error(`statuses-miss samples were not all cache misses (logged outcomes: ${outcomes.join(', ') || 'none'})`)
@@ -474,10 +474,13 @@ async function sampleMisses(cookie, count, logPath) {
   try {
     logStart = statSync(logPath).size
     summary = await sampleSeries('/api/stacks/statuses', cookie, count, STATUS_CACHE_EXPIRY_MS)
-  } finally {
-    // Never let turning debug back off hide the sampling error.
-    await setDeveloperMode(cookie, false).catch((error) => console.error(`Could not turn developer mode off: ${error.message}`))
+  } catch (error) {
+    // Report the sampling error, not a failure to turn debug back off.
+    await setDeveloperMode(cookie, false).catch((offError) => console.error(`Could not turn developer mode off: ${offError.message}`))
+    throw error
   }
+  // Later series must not run with debug logging on, so this failure fails the run.
+  await setDeveloperMode(cookie, false)
   assertAllMisses(statusOutcomes(readFileSync(logPath).subarray(logStart).toString('utf8')), count)
   return summary
 }
@@ -539,9 +542,10 @@ function makeCleanup(state, options) {
 
 /**
  * Ctrl-C or a cancelled job still stops the backend and removes the stacks.
- * `state.aborted` stops the main flow from starting anything new meanwhile;
- * a `docker compose up` already running can still finish after the sweep,
- * and the next run's opening sweep removes it.
+ * `state.aborted` keeps the backend from being started when the signal
+ * arrives during the deploy, and keeps an interrupted run from reporting
+ * results. A `docker compose up` already running can still finish after the
+ * sweep; the next run's opening sweep removes it.
  */
 function cleanUpOnSignal(cleanup, state) {
   const onSignal = (signal) => {
@@ -558,7 +562,7 @@ function cleanUpOnSignal(cleanup, state) {
 }
 
 /** A scratch directory that is new or empty, so leftovers cannot skew the run. */
-function prepareWorkDir(workDir) {
+export function prepareWorkDir(workDir) {
   if (workDir === null) return mkdtempSync(join(tmpdir(), 'sencho-scale-'))
   mkdirSync(workDir, { recursive: true })
   if (readdirSync(workDir).length > 0) throw new Error(`--work-dir ${workDir} is not empty; use a new or empty directory`)
@@ -610,6 +614,7 @@ async function benchmark(options) {
   } finally {
     detachSignals()
   }
+  checkAborted() // A run interrupted during the final cleanup reports no results.
   return results
 }
 
