@@ -5,6 +5,7 @@ import type {
   IntegrityVerification,
   PointReadEligibility,
   PointReadEvidence,
+  ReadablePoint,
   RecoveryPoint,
   StorageIdentity,
 } from './types';
@@ -47,16 +48,22 @@ const CONTROL_CHARACTERS = /[\u0000-\u001f\u007f-\u009f]/;
  * traversal is never "resolved" into something harmless-looking.
  */
 export function parsePointPath(raw: unknown): string {
-  if (typeof raw !== 'string') throw new RecoveryError('invalid_request');
-  if (raw === '/') return raw;
-  const bytes = Buffer.byteLength(raw);
-  if (bytes === 0 || bytes > MAX_PATH_BYTES) throw new RecoveryError('invalid_request');
-  if (!raw.startsWith('/') || CONTROL_CHARACTERS.test(raw)) throw new RecoveryError('invalid_request');
-  for (const segment of raw.slice(1).split('/')) {
-    if (segment === '' || segment === '.' || segment === '..') throw new RecoveryError('invalid_request');
-    if (Buffer.byteLength(segment) > MAX_SEGMENT_BYTES) throw new RecoveryError('invalid_request');
-  }
+  if (!isPointPath(raw)) throw new RecoveryError('invalid_request');
   return raw;
+}
+
+/** The same grammar as `parsePointPath`, as a test: true when a request could name `raw`. */
+export function isPointPath(raw: unknown): raw is string {
+  if (typeof raw !== 'string') return false;
+  if (raw === '/') return true;
+  const bytes = Buffer.byteLength(raw);
+  if (bytes === 0 || bytes > MAX_PATH_BYTES) return false;
+  if (!raw.startsWith('/') || CONTROL_CHARACTERS.test(raw)) return false;
+  for (const segment of raw.slice(1).split('/')) {
+    if (segment === '' || segment === '.' || segment === '..') return false;
+    if (Buffer.byteLength(segment) > MAX_SEGMENT_BYTES) return false;
+  }
+  return true;
 }
 
 /** A page offset: a non-negative integer written in plain digits. */
@@ -90,16 +97,16 @@ export function pointReadEligibility(
   if (!repository.active || repository.id !== point.repositoryId) {
     return { readable: false, reason: 'repository_replaced' };
   }
-  return { readable: true };
+  return { readable: true, point };
 }
 
 // --- Read slots -------------------------------------------------------------
 
 /**
  * Point reads in flight, by repository. A read holds no restic lock (`--no-lock`),
- * so a prune or a forget cannot see it; this count is what repository
- * maintenance waits on or refuses against instead. The node-wide total is the
- * concurrency bound.
+ * so a prune or a forget could not see it; `activeReadCount` is the count a
+ * repository maintenance path must consult to wait for or refuse in-flight
+ * reads. Nothing calls it yet: today only the node-wide total gates admission.
  */
 const activeReads = new Map<string, number>();
 let totalActiveReads = 0;
@@ -144,7 +151,7 @@ export function resetPointReadSlotsForTests(): void {
  * incomplete. A check that errored proves nothing and reads as unverified.
  */
 export function describePointReadEvidence(
-  point: Extract<RecoveryPoint, { status: 'succeeded' | 'partial' }>,
+  point: ReadablePoint,
   storage: StorageIdentity,
   verifications: readonly IntegrityVerification[],
 ): PointReadEvidence {

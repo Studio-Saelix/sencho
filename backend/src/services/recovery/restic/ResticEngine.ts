@@ -23,7 +23,7 @@ import {
   classifyContentRun,
   contentSnapshotPath,
   parentPointPath,
-  parseContentNodeLine,
+  parseContentLine,
 } from './resticContents';
 import type {
   BackupEngine,
@@ -316,9 +316,10 @@ export class ResticEngine implements BackupEngine, PointContentReader {
     let self: PointEntry | null = null;
     let seen = 0;
     let hasMore = false;
-    // Set when the run stops itself: the page is full, or the record is all a
-    // file, a link or a record-only read needs.
+    // Set when the run stops itself: the page is full, the record is all a
+    // file, a link or a record-only read needs, or a line could not be trusted.
     let stopped = false;
+    let malformed = false;
     const stop = (): void => {
       stopped = true;
       controller.abort();
@@ -340,8 +341,14 @@ export class ResticEngine implements BackupEngine, PointContentReader {
         timeoutMs: CONTENT_LISTING_TIMEOUT_MS,
         onStdoutLine: (line) => {
           if (stopped) return;
-          const entry = parseContentNodeLine(line);
-          if (!entry) return;
+          const parsed = parseContentLine(line);
+          if (parsed.kind === 'skip') return;
+          if (parsed.kind === 'malformed') {
+            malformed = true;
+            stop();
+            return;
+          }
+          const entry = parsed.entry;
           if (entry.path === request.path) {
             self = entry;
             if (entry.type !== 'directory' || page.pageSize === 0) stop();
@@ -364,6 +371,12 @@ export class ResticEngine implements BackupEngine, PointContentReader {
 
     const failure = this.contentFailure('list', request, result, ctx.signal, stopped && !ctx.signal.aborted);
     if (failure) return failure;
+    if (malformed) {
+      // restic printed a record this build cannot read. A page that skipped it
+      // would shift every offset after it, so the read fails instead.
+      console.warn('[Recovery] Listing of snapshot %s returned a record this build cannot read', sanitizeForLog(request.snapshotId));
+      return { ok: false, errorClass: 'node_error' };
+    }
     if (!self) return { ok: true, evidence: { found: false } };
     return {
       ok: true,

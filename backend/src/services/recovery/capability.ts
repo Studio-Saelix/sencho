@@ -135,8 +135,8 @@ const RESTORE_MODES: readonly RestoreMode[] = ['new_volume', 'staged_overwrite']
  * as `['new_volume']`, which is what a node that never heard of the field can
  * do. A list that names anything else is refused rather than narrowed silently,
  * because a hub that guessed would send a destructive request to a node that
- * cannot carry it out. `pointReads` is read as `[]` when it is missing (see
- * `parsePointReads`).
+ * cannot carry it out. `pointReads` is read as `[]` when it is missing, and a
+ * value that is not a list is refused the same way (see `parsePointReads`).
  */
 export function parseRecoveryNodeDescriptor(data: unknown): RecoveryNodeDescriptor | null {
   if (!data || typeof data !== 'object' || Array.isArray(data)) return null;
@@ -150,19 +150,22 @@ export function parseRecoveryNodeDescriptor(data: unknown): RecoveryNodeDescript
   if (!reported) return null;
   const modes = parseRestoreModes(restoreModes);
   if (modes === null) return null;
-  return { contractVersion, volumeProtection: reported, restoreModes: modes, pointReads: parsePointReads(pointReads) };
+  const reads = parsePointReads(pointReads);
+  if (reads === null) return null;
+  return { contractVersion, volumeProtection: reported, restoreModes: modes, pointReads: reads };
 }
 
 const POINT_READS: readonly PointReadKind[] = ['list', 'download'];
 
 /**
- * The point reads a descriptor names. A missing or malformed list reads as `[]`,
- * and a name this build does not know is dropped: unlike a restore mode, a read
- * changes nothing, so a hub that cannot use a newer node's read simply does not
- * offer it, and the rest of the descriptor stays valid.
+ * The point reads a descriptor names, or null when the field is not a list. A
+ * missing field reads as `[]`: the node predates point reads. A name this build
+ * does not know is dropped: unlike a restore mode, a read changes nothing, so a
+ * hub that cannot use a newer node's read simply does not offer it.
  */
-function parsePointReads(value: unknown): PointReadKind[] {
-  if (!Array.isArray(value)) return [];
+function parsePointReads(value: unknown): PointReadKind[] | null {
+  if (value === undefined) return [];
+  if (!Array.isArray(value)) return null;
   const reads: PointReadKind[] = [];
   for (const item of value) {
     const known = POINT_READS.find((read) => read === item);

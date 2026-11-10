@@ -13,8 +13,14 @@ import {
   contentSnapshotPath,
   formatEntryMode,
   parentPointPath,
-  parseContentNodeLine,
+  parseContentLine,
 } from '../services/recovery/restic/resticContents';
+
+/** The entry a line maps to, or null for a skipped or malformed line. */
+function parseContentNodeLine(line: string) {
+  const parsed = parseContentLine(line);
+  return parsed.kind === 'entry' ? parsed.entry : null;
+}
 
 const SNAPSHOT_HEADER = '{"time":"2026-11-07T18:58:56.320279769Z","tree":"b85fbc3f","paths":["/data"],"hostname":"sencho","program_version":"restic 0.19.1","summary":{"backup_start":"2026-11-07T18:58:56.320279769Z","backup_end":"2026-11-07T18:58:57.07714048Z","files_new":3},"id":"06b26c23","short_id":"06b26c23","message_type":"snapshot","struct_type":"snapshot"}';
 const DIR = '{"name":"etc","type":"dir","path":"/data/etc","uid":0,"gid":0,"mode":2147484141,"permissions":"drwxr-xr-x","mtime":"2026-11-07T18:58:44.058753409Z","atime":"2026-11-07T18:58:44.058753409Z","ctime":"2026-11-07T18:58:44.058753409Z","inode":6074664,"message_type":"node","struct_type":"node"}';
@@ -49,6 +55,27 @@ describe('formatEntryMode', () => {
     expect(formatEntryMode(undefined)).toBeNull();
     expect(formatEntryMode(-1)).toBeNull();
     expect(formatEntryMode(1.5)).toBeNull();
+  });
+});
+
+describe('parseContentLine', () => {
+  it('skips what is not a record and refuses a record it cannot trust', () => {
+    expect(parseContentLine(SNAPSHOT_HEADER)).toEqual({ kind: 'skip' });
+    expect(parseContentLine('applying 3 changes')).toEqual({ kind: 'skip' });
+    expect(parseContentLine('{"message_type":"status","percent_done":0.5}')).toEqual({ kind: 'skip' });
+    // A truncated record, a record outside the root, and one whose name disagrees.
+    expect(parseContentLine('{"name":"x","type":"file","path":"/data/x"')).toEqual({ kind: 'malformed' });
+    expect(parseContentLine('{"name":"passwd","type":"file","path":"/etc/passwd","message_type":"node"}')).toEqual({ kind: 'malformed' });
+    expect(parseContentLine('{"name":"other","type":"file","path":"/data/x","message_type":"node"}')).toEqual({ kind: 'malformed' });
+    expect(parseContentLine(`{"pad":"${'a'.repeat(MAX_CONTENT_LINE_BYTES)}","message_type":"node"}`)).toEqual({ kind: 'malformed' });
+  });
+
+  it('lists a name a request cannot spell, but never as downloadable', () => {
+    const tab = JSON.stringify({ name: 'tab\there', type: 'file', path: '/data/tab\there', size: 3, message_type: 'node' });
+    expect(parseContentNodeLine(tab)).toMatchObject({ name: 'tab\there', type: 'file', size: 3, downloadable: false });
+    const long = 'a'.repeat(256);
+    const longLine = JSON.stringify({ name: long, type: 'file', path: `/data/${long}`, size: 3, message_type: 'node' });
+    expect(parseContentNodeLine(longLine)).toMatchObject({ downloadable: false });
   });
 });
 

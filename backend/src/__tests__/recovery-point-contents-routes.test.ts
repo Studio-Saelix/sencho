@@ -615,7 +615,7 @@ describe('GET /api/recovery/points/:pointId/download', () => {
     service().markReadyForTests();
     const { setDownloadIdleMsForTests } = await import('../routes/recovery');
     setDownloadIdleMsForTests(50);
-    const stall = stallingDump(1024);
+    const stall = stallingDump(FILE_BODY.length - 1);
     contentEngine({ dumpFile: stall.dumpFile });
     const outcome = await request(app).get(download(pointId, '/notes.md')).set('Cookie', viewerCookie)
       .then(() => 'completed', (err: Error) => err.message);
@@ -675,6 +675,102 @@ describe('what a read leaves behind', () => {
     expect(DatabaseService.getInstance().getDb().prepare('SELECT COUNT(*) AS n FROM audit_log').get()).toEqual(auditBefore);
     expect(slots.activeReadCount(repositoryId)).toBe(0);
   });
+});
+
+describe('read slots on every ending', () => {
+  const activeRepository = () => repositories.RecoveryRepositoryStore.getInstance().getActive()?.id ?? '';
+
+  it('frees the slot after a HEAD, a failure before the first byte and a failure after it', async () => {
+    const pointId = seedPoint();
+    await stubDocker();
+    service().markReadyForTests();
+    contentEngine();
+    await request(app).head(download(pointId, '/notes.md')).set('Cookie', viewerCookie).expect(200);
+    expect(slots.activeReadCount(activeRepository())).toBe(0);
+
+    contentEngine({ dumpFile: async () => ({ ok: false, errorClass: 'integrity_mismatch' }) });
+    await request(app).get(download(pointId, '/notes.md')).set('Cookie', viewerCookie).expect(409);
+    expect(slots.activeReadCount(activeRepository())).toBe(0);
+
+    contentEngine({
+      dumpFile: async (sink) => {
+        sink(Buffer.from('sec'), NO_CONTROL);
+        return { ok: false, errorClass: 'integrity_mismatch' };
+      },
+    });
+    await request(app).get(download(pointId, '/notes.md')).set('Cookie', viewerCookie).then(() => undefined, () => undefined);
+    await vi.waitFor(() => expect(slots.activeReadCount(activeRepository())).toBe(0));
+
+    contentEngine({ dumpFile: async () => { throw new Error('daemon refused'); } });
+    await request(app).get(download(pointId, '/notes.md')).set('Cookie', viewerCookie).expect(500);
+    expect(slots.activeReadCount(activeRepository())).toBe(0);
+  });
+
+  it('frees the slot after an idle stop', async () => {
+    const pointId = seedPoint();
+    await stubDocker();
+    service().markReadyForTests();
+    const { setDownloadIdleMsForTests } = await import('../routes/recovery');
+    setDownloadIdleMsForTests(50);
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    const stall = stallingDump(FILE_BODY.length - 1);
+    contentEngine({ dumpFile: stall.dumpFile });
+    await request(app).get(download(pointId, '/notes.md')).set('Cookie', viewerCookie).then(() => undefined, () => undefined);
+    expect(await abortedWithin(stall.seen)).toBe('aborted');
+    await vi.waitFor(() => expect(slots.activeReadCount(activeRepository())).toBe(0));
+    // The node ending a read is logged, with no path and no bytes.
+    expect(warn.mock.calls.map((c) => c.join(' ')).join('\n')).toMatch(/idle bound/);
+  });
+
+  it('pauses the dump while the client stops reading and resumes it on drain', async () => {
+    const pointId = seedPoint();
+    await stubDocker();
+    service().markReadyForTests();
+    const chunk = Buffer.alloc(64 * 1024, 0x61);
+    const total = 256;
+    let pauses = 0;
+    let resumes = 0;
+    contentEngine({
+      dumpFile: async (sink) => {
+        let paused = false;
+        let wake: () => void = () => undefined;
+        const control = {
+          pause: () => { if (!paused) { paused = true; pauses += 1; } },
+          resume: () => { if (paused) { paused = false; resumes += 1; wake(); } },
+        };
+        for (let i = 0; i < total; i += 1) {
+          sink(chunk, control);
+          if (paused) await new Promise<void>((resolve) => { wake = resolve; });
+        }
+        return { ok: true, evidence: { bytes: total * chunk.length } };
+      },
+    });
+    // The record says the file is this long, so Content-Length matches.
+    TREE['/big.bin'] = { self: entry('/big.bin', 'file', total * chunk.length), children: [] };
+    const server = http.createServer(app);
+    await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+    const port = (server.address() as import('net').AddressInfo).port;
+    try {
+      const received = await new Promise<number>((resolve, reject) => {
+        const req = http.get({ host: '127.0.0.1', port, path: download(pointId, '/big.bin'), headers: { Cookie: viewerCookie } }, (res) => {
+          let bytes = 0;
+          res.pause();
+          setTimeout(() => {
+            res.on('data', (c: Buffer) => { bytes += c.length; });
+            res.on('end', () => resolve(bytes));
+            res.resume();
+          }, 300);
+        });
+        req.on('error', reject);
+      });
+      expect(received).toBe(total * chunk.length);
+    } finally {
+      delete TREE['/big.bin'];
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+    }
+    expect(pauses).toBeGreaterThan(0);
+    expect(resumes).toBe(pauses);
+  }, 20_000);
 });
 
 describe('a point\'s contents over the node proxy and the Pilot tunnel', () => {

@@ -58,11 +58,13 @@ import {
   pointReadEligibility,
   skippedInDirectory,
 } from './pointContents';
-import type { PointContentReadTarget } from './authorization';
+import { pointContentReadTargetFor, type PointContentReadTarget } from './authorization';
 import type {
   BackupEngine,
   ContentChunkSink,
   ContentDump,
+  ContentReadContext,
+  ContentReadRequest,
   EngineExecutionContext,
   EngineResult,
   IntegrityMethod,
@@ -70,8 +72,8 @@ import type {
   PointContentReader,
   PointEntry,
   PointListing,
+  ReadablePoint,
   RecoveryErrorClass,
-  RecoveryPoint,
   RecoveryOperation,
   RecoveryProgress,
   RepositoryDescriptor,
@@ -158,11 +160,11 @@ export interface PointReadInput {
 
 /** One opened read: the proven point and the engine that reads it, holding a slot. */
 interface OpenedPointRead {
-  point: Extract<RecoveryPoint, { status: 'succeeded' | 'partial' }>;
+  point: ReadablePoint;
   storage: StorageIdentity;
   reader: PointContentReader;
-  request: { snapshotId: string; repositoryId: string; path: string };
-  ctx: { operationId: string; signal: AbortSignal };
+  request: ContentReadRequest;
+  ctx: ContentReadContext;
   release: () => void;
 }
 
@@ -963,7 +965,7 @@ export class RecoveryEngineService {
    *
    * A read writes no operation row and takes no lock: a snapshot is immutable,
    * so two reads cannot disagree, and a read never holds up a capture. It does
-   * take one of the node's read slots, so repository maintenance can see it.
+   * take one of the node's read slots, counted per repository.
    */
   async browsePoint(input: PointReadInput & { offset: number }): Promise<PointListing> {
     const opened = await this.openPointRead(input);
@@ -1034,7 +1036,7 @@ export class RecoveryEngineService {
       throw new RecoveryError('invalid_request', { detail: 'No recovery point on this node has that id.' });
     }
     const storage = StorageIdentityStore.getInstance().getById(point.storageId);
-    if (!input.authorize(storage ? await this.pointContentReadTarget(storage) : null)) {
+    if (!input.authorize(await this.pointContentReadTarget(storage))) {
       throw new RecoveryError('permission_denied');
     }
     this.requireReady();
@@ -1053,10 +1055,7 @@ export class RecoveryEngineService {
       }
       throw new RecoveryError('invalid_request', { reason: eligibility.reason });
     }
-    // Eligibility proved the status; this narrows the type to match.
-    if (point.status !== 'succeeded' && point.status !== 'partial') {
-      throw new RecoveryError('invalid_request', { reason: 'point_not_readable' });
-    }
+    const readable = eligibility.point;
     const repository = this.repositories.get(point.repositoryId);
     if (!repository) throw new RecoveryError('repository_unavailable');
 
@@ -1074,10 +1073,10 @@ export class RecoveryEngineService {
         });
       }
       return {
-        point,
+        point: readable,
         storage,
         reader: engine as BackupEngine & PointContentReader,
-        request: { snapshotId: point.snapshotId, repositoryId: repository.id, path: input.path },
+        request: { snapshotId: readable.snapshotId, repositoryId: repository.id, path: input.path },
         ctx: { operationId, signal: input.signal },
         release,
       };
@@ -1087,15 +1086,10 @@ export class RecoveryEngineService {
     }
   }
 
-  /** The dependents a content read is decided on, resolved now with a render. */
-  private async pointContentReadTarget(storage: StorageIdentity): Promise<PointContentReadTarget> {
-    const resolution = await this.resolveStorageDependents(storage);
-    return {
-      storageKey: storage.storageKey,
-      resolved: resolution.kind === 'resolved',
-      dependents: resolution.dependents,
-      current: resolution.current,
-    };
+  /** What a content read is decided on, from the dependents resolved now with a render. */
+  private async pointContentReadTarget(storage: StorageIdentity | null): Promise<PointContentReadTarget> {
+    if (!storage) return { kind: 'detached' };
+    return pointContentReadTargetFor(storage.storageKey, await this.resolveStorageDependents(storage));
   }
 
   /** The deps every overwrite entry point needs, so the three cannot drift. */

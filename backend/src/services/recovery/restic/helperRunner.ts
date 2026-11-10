@@ -1,5 +1,6 @@
 import type Docker from 'dockerode';
 import { Writable } from 'stream';
+import { StringDecoder } from 'string_decoder';
 import { errorMessageForLog, sanitizeForLog } from '../../../utils/safeLog';
 import type { ContentChunkSink, RecoveryErrorClass } from '../types';
 import { RecoveryError } from '../redaction';
@@ -150,9 +151,10 @@ export const HELPER_PROFILES: Readonly<Record<HelperProfile, HelperProfileSpec>>
   // repository is mounted, read-only; no application volume is attached, because
   // the bytes come out of the repository, so no capability is needed. The output
   // is the data itself, which is why the run streams it instead of collecting it.
-  // The profile sets no deadline. A listing run passes its own 10-minute bound
-  // (it loads the index before the first entry); a dump runs as long as the file
-  // does and ends on the caller's cancellation or when restic exits.
+  // The profile sets no deadline. A listing run passes its own
+  // (`CONTENT_LISTING_TIMEOUT_MS`, because it loads the index before the first
+  // entry); a dump runs as long as the file does and ends on the caller's
+  // cancellation, the download route's idle stop, or when restic exits.
   read: {
     user: '0:0',
     capAdd: [],
@@ -282,6 +284,12 @@ export const HELPER_STDERR_TAIL_BYTES = 8 * 1024;
 export const HELPER_ABORT_GRACE_MS = 10_000;
 /** How long the attach stream may take to flush after the process exits. */
 export const HELPER_STREAM_FLUSH_MS = 1_000;
+/**
+ * How long a stream the sink paused may take to deliver its tail after the
+ * process exits. A slow client needs more than the flush window, but a socket
+ * that never closes must still let the run settle.
+ */
+export const HELPER_PAUSED_TAIL_MS = 30_000;
 
 /** A timer that keeps the event loop free to exit. */
 function delay(ms: number): Promise<void> {
@@ -417,11 +425,14 @@ export interface HelperRunnerDeps {
 class LineSplitter {
   private buffer = '';
   private discarding = false;
+  // A demuxed frame can end inside a multi-byte character; decoding each chunk on
+  // its own would turn both halves into U+FFFD and corrupt the line.
+  private readonly decoder = new StringDecoder('utf8');
 
   constructor(private readonly onLine: (line: string) => void) {}
 
   write(chunk: Buffer): void {
-    this.buffer += chunk.toString('utf8');
+    this.buffer += this.decoder.write(chunk);
     let index = this.buffer.indexOf('\n');
     while (index !== -1) {
       const line = this.buffer.slice(0, index);
@@ -438,6 +449,7 @@ class LineSplitter {
   }
 
   end(): void {
+    this.buffer += this.decoder.end();
     if (this.buffer.length > 0 && !this.discarding) this.onLine(this.buffer);
     this.buffer = '';
     this.discarding = false;
@@ -493,12 +505,16 @@ export class RecoveryHelperRunner {
 
     let attachStream: NodeJS.ReadableStream | null = null;
     let pausedBySink = false;
+    let exited = false;
     // The chunk sink's backpressure control. Pausing the attach stream stops the
     // demuxer's data events, so a slow destination leaves at most one socket
-    // chunk buffered rather than a whole file.
+    // chunk buffered rather than a whole file. Once the run is aborted or the
+    // process has exited, a pause is ignored: what is left on the socket is
+    // bounded, and a sink that pauses a stream nobody will resume again would
+    // keep the stream from ending and the run from settling.
     const sinkControl = {
       pause: (): void => {
-        if (pausedBySink) return;
+        if (pausedBySink || aborted || exited) return;
         pausedBySink = true;
         attachStream?.pause();
       },
@@ -512,6 +528,11 @@ export class RecoveryHelperRunner {
     const onAbort = (): void => {
       if (aborted) return;
       aborted = true;
+      // A stream the sink paused would hold the tail on the socket; let it drain.
+      if (pausedBySink) {
+        pausedBySink = false;
+        attachStream?.resume();
+      }
       void kill('SIGINT');
       graceTimer = setTimeout(() => {
         killed = true;
@@ -577,15 +598,17 @@ export class RecoveryHelperRunner {
       // see EOF, or `cat config` waits forever for more input.
       stream.end();
       const exitInfo = await container.wait();
-      if (pausedBySink) {
+      exited = true;
+      if (pausedBySink && !aborted) {
         // The sink paused the stream for backpressure (a slow client), so the
         // process may be gone while its last bytes are still on the socket.
         // Resume, and wait for the stream itself rather than the 1 s flush
-        // window: the process cannot hold the operation open any more, and
-        // stopping early would lose the tail of a file the client asked for.
+        // window, which would lose the tail of a file the client asked for. The
+        // wait is still bounded: a socket that never closes ends the run, and
+        // the byte count then reports the short body.
         pausedBySink = false;
         stream.resume();
-        await ended;
+        await Promise.race([ended, delay(HELPER_PAUSED_TAIL_MS)]);
       } else {
         // The exit code is the run's result. The stream only carries output that
         // is still being flushed, so a stream that never closes cannot hold the

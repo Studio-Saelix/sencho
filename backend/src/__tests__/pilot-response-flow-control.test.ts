@@ -175,6 +175,32 @@ describe('PilotTunnelBridge response flow control', () => {
         expect(result.body).toBe('partial');
     }, 10_000);
 
+    it('sends no resume when the client drains after the stream ended', async () => {
+        const { socket, streamId } = await openRawRequest('/api/stacks/x/files/download');
+        socket.pause();
+        agentSends({ t: 'http_res', s: streamId, status: 200, headers: { 'content-type': 'application/octet-stream' } });
+        const chunk = Buffer.alloc(256 * 1024, 0x63);
+        const sawPause = () => jsonFramesSent(mockWs).some((f) => f.t === 'http_res_pause' && f.s === streamId);
+        for (let i = 0; i < 200 && !sawPause(); i++) {
+            agentSendsBody(streamId, chunk);
+            await sleep(5);
+        }
+        expect(sawPause()).toBe(true);
+        // The agent ends the stream while the hub may still wait for drain. A
+        // resume the kernel's own drain caused before this point is legal; none
+        // may follow the end.
+        const resumes = () => jsonFramesSent(mockWs).filter((f) => f.t === 'http_res_resume' && f.s === streamId).length;
+        const pauses = () => jsonFramesSent(mockWs).filter((f) => f.t === 'http_res_pause' && f.s === streamId).length;
+        const waitingForDrain = pauses() > resumes();
+        const before = resumes();
+        agentSends({ t: 'http_res_end', s: streamId });
+        socket.resume();
+        await sleep(200);
+        expect(resumes()).toBe(before);
+        expect(waitingForDrain || before > 0).toBe(true);
+        socket.destroy();
+    }, 15_000);
+
     it('ignores unknown JSON frame types without closing the tunnel', () => {
         const closed = new Promise<boolean>((resolve) => {
             bridge.once('closed', () => resolve(true));
@@ -184,6 +210,39 @@ describe('PilotTunnelBridge response flow control', () => {
         expect(mockWs.readyState).toBe(WebSocket.OPEN);
         return expect(closed).resolves.toBe(false);
     });
+});
+
+describe('PilotTunnelBridge teardown after headers', () => {
+    it('aborts the client response when the tunnel closes mid-body', async () => {
+        const ws = makeMockTunnelWs();
+        const own = new PilotTunnelBridge(2, ws as unknown as WebSocket);
+        await own.start();
+        const url = new URL(own.getLoopbackUrl());
+        const reqFrames = () => jsonFramesSent(ws).filter((f) => f.t === 'http_req');
+        const outcome = new Promise<{ aborted: boolean; ended: boolean; body: string }>((resolve) => {
+            const req = http.request({ host: url.hostname, port: Number(url.port), method: 'GET', path: '/api/stacks/x/files/download' }, (res) => {
+                let body = '';
+                let aborted = false;
+                res.on('data', (c: Buffer) => { body += c.toString(); });
+                res.on('aborted', () => { aborted = true; });
+                res.on('error', () => { aborted = true; });
+                res.on('end', () => resolve({ aborted, ended: true, body }));
+                res.on('close', () => resolve({ aborted: aborted || !res.complete, ended: false, body }));
+            });
+            req.on('error', () => resolve({ aborted: true, ended: false, body: '' }));
+            req.end();
+        });
+        await waitFor(() => reqFrames().length > 0);
+        const s = reqFrames()[0].s;
+        ws.emit('message', encodeJsonFrame({ t: 'http_res', s, status: 200, headers: { 'content-type': 'application/octet-stream' } }), false);
+        ws.emit('message', encodeBinaryFrame(BinaryFrameType.HttpResBody, s, Buffer.from('partial')), true);
+        await sleep(30);
+        ws.close();
+        const result = await outcome;
+        expect(result.aborted).toBe(true);
+        expect(result.ended).toBe(false);
+        own.close();
+    }, 10_000);
 });
 
 describe('PilotAgent response flow control', () => {
@@ -303,6 +362,35 @@ describe('PilotAgent response flow control', () => {
         internals().cleanupAfterDisconnect();
         expect(internals().responseDrainTimer).toBeUndefined();
         expect(internals().httpStreams.size).toBe(0);
+    }, 10_000);
+
+    it('holds a hub pause that arrived before the response did', async () => {
+        agent = new PilotAgent({
+            primaryUrl: 'http://primary.invalid',
+            loopbackPort: upstreamPort,
+            initialToken: 'test-token',
+            enrollToken: null,
+            enrolling: false,
+        });
+        mockWs = makeMockTunnelWs();
+        internals().ws = mockWs;
+        internals().handleJsonFrame({ t: 'http_req', s: 12, method: 'GET', path: '/download', headers: {} });
+        internals().handleJsonFrame({ t: 'http_res_pause', s: 12 });
+        internals().handleJsonFrame({ t: 'http_req_end', s: 12 });
+        await waitFor(() => internals().httpStreams.get(12)?.res !== undefined);
+        await sleep(100);
+        expect(bodyFramesSent(mockWs, 12)).toBeLessThanOrEqual(1);
+        expect(internals().httpStreams.get(12)?.res?.isPaused()).toBe(true);
+        internals().handleJsonFrame({ t: 'http_res_resume', s: 12 });
+        await expectFlowing(12);
+    }, 10_000);
+
+    it('ignores pause and resume frames for a stream it does not hold', async () => {
+        await startStream(13);
+        expect(() => internals().handleJsonFrame({ t: 'http_res_pause', s: 999 })).not.toThrow();
+        expect(() => internals().handleJsonFrame({ t: 'http_res_resume', s: 998 })).not.toThrow();
+        expect(internals().httpStreams.has(999)).toBe(false);
+        await expectFlowing(13);
     }, 10_000);
 
     it('ignores unknown JSON frame types', async () => {

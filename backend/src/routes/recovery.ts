@@ -10,6 +10,7 @@ import {
   RECOVERY_FAILURE_DOMAIN,
   SAME_FAILURE_DOMAIN_WARNING,
   sha256Digest,
+  type PointContentDownload,
 } from '../services/recovery/operationRunner';
 import {
   authorizeNodeWide,
@@ -664,7 +665,9 @@ export function setDownloadIdleMsForTests(ms: number | null): void {
  */
 function contentDisposition(name: string): string {
   const safe = name.replace(/[^\x20-\x7e]/g, '_').replace(/[\\"]/g, '');
-  return `attachment; filename="${safe}"; filename*=UTF-8''${encodeURIComponent(name)}`;
+  // `encodeURIComponent` leaves `'()*` alone; RFC 5987 does not allow them.
+  const encoded = encodeURIComponent(name).replace(/['()*]/g, (c) => `%${c.charCodeAt(0).toString(16).toUpperCase()}`);
+  return `attachment; filename="${safe}"; filename*=UTF-8''${encoded}`;
 }
 
 /** The read input both routes give the engine, with the content-read rule. */
@@ -740,13 +743,15 @@ recoveryRouter.get('/points/:pointId/download', handle(async (req, res) => {
   const watchIdle = (): void => {
     stopIdleWatch();
     idleTimer = setTimeout(() => {
+      console.warn('[Recovery] Download from point %s stopped: no byte moved within the idle bound', sanitizeForLog(paramOf(req, 'pointId')));
       abandon();
       if (!res.destroyed && !res.writableEnded) res.destroy();
     }, downloadIdleMsOverride ?? POINT_DOWNLOAD_IDLE_MS);
     idleTimer.unref?.();
   };
-  const download = await engineService(req).prepareDownload(pointReadInput(req, path, controller.signal));
+  let download: PointContentDownload | null = null;
   try {
+    download = await engineService(req).prepareDownload(pointReadInput(req, path, controller.signal));
     const fileHeaders: Record<string, string> = {
       'Content-Type': 'application/octet-stream',
       'Content-Length': String(download.entry.size),
@@ -767,10 +772,10 @@ recoveryRouter.get('/points/:pointId/download', handle(async (req, res) => {
 
     watchIdle();
     const result = await download.stream((chunk, control) => {
-      if (abandoned || res.writableEnded || res.destroyed) {
-        control.pause();
-        return;
-      }
+      // Nobody reads this response any more. The chunk is dropped rather than
+      // the stream paused: a pause nobody resumes would keep the helper's
+      // stream from ending, and the run, its container and its slot with it.
+      if (abandoned || res.writableEnded || res.destroyed) return;
       commitHeaders();
       watchIdle();
       if (!res.write(chunk)) {
@@ -793,7 +798,7 @@ recoveryRouter.get('/points/:pointId/download', handle(async (req, res) => {
     res.end();
   } finally {
     stopIdleWatch();
-    download.release();
+    download?.release();
     detach();
   }
 }));

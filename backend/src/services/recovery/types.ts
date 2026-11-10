@@ -613,8 +613,14 @@ export interface PointEntry {
  * storage is refused before this is consulted.
  */
 export type PointReadEligibility =
-  | { readable: true }
-  | { readable: false; reason: 'point_not_readable' | 'repository_replaced' | 'unsupported_entry_type' };
+  | { readable: true; point: ReadablePoint }
+  | {
+    readable: false;
+    reason: Extract<RecoveryRefusalReason, 'point_not_readable' | 'repository_replaced' | 'unsupported_entry_type'>;
+  };
+
+/** A finished point that recorded a snapshot: the only kind a read can open. */
+export type ReadablePoint = Extract<RecoveryPoint, { status: 'succeeded' | 'partial' }>;
 
 /** The point's own evidence beside a listing. */
 export interface PointReadEvidence {

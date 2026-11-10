@@ -346,6 +346,87 @@ describe('the helper runner under a streamed body', () => {
     expect(fake.removed).toEqual(['helper']);
   });
 
+  it('settles an aborted run whose sink pauses on every chunk and never resumes', async () => {
+    const controller = new AbortController();
+    const fake = streamingDocker((attach) => {
+      attach.write(Buffer.from('a'));
+      // The client went away while the stream was paused for backpressure; the
+      // route's sink keeps refusing chunks and nothing will ever resume it.
+      controller.abort();
+      attach.write(Buffer.from('b'));
+      attach.write(Buffer.from('c'));
+      attach.end();
+    });
+    const received: string[] = [];
+    const run = realRunner(fake.docker).run({
+      profile: 'read',
+      operationId: 'op-abort-paused',
+      cmd: ['/restic', 'version'],
+      mounts: { repository: REPOSITORY.locator },
+      signal: controller.signal,
+      onStdoutChunk: (chunk, control: ContentChunkControl) => {
+        received.push(chunk.toString());
+        control.pause();
+      },
+    });
+    const outcome = await Promise.race([
+      run.then((result) => ({ settled: true as const, result })),
+      new Promise<{ settled: false }>((resolve) => setTimeout(() => resolve({ settled: false }), 3_000)),
+    ]);
+    expect(outcome.settled).toBe(true);
+    if (outcome.settled) expect(outcome.result.aborted).toBe(true);
+    expect(fake.removed).toEqual(['helper']);
+  }, 10_000);
+
+  it('settles a run whose sink pauses again on the tail after the process exited', async () => {
+    const fake = streamingDocker((attach) => {
+      attach.write(Buffer.from('a'));
+      attach.write(Buffer.from('b'));
+      attach.write(Buffer.from('c'));
+      attach.end();
+    });
+    const received: string[] = [];
+    const run = realRunner(fake.docker).run({
+      profile: 'read',
+      operationId: 'op-exit-paused',
+      cmd: ['/restic', 'version'],
+      mounts: { repository: REPOSITORY.locator },
+      onStdoutChunk: (chunk, control: ContentChunkControl) => {
+        received.push(chunk.toString());
+        control.pause();
+      },
+    });
+    const outcome = await Promise.race([
+      run.then(() => 'settled'),
+      new Promise<string>((resolve) => setTimeout(() => resolve('hung'), 3_000)),
+    ]);
+    expect(outcome).toBe('settled');
+    // Every byte of the tail reached the sink, so the byte count stays honest.
+    expect(received.join('')).toBe('abc');
+    expect(fake.removed).toEqual(['helper']);
+  }, 10_000);
+
+  it('keeps a multi-byte character whole when a frame boundary splits it', async () => {
+    const line = Buffer.from(`${JSON.stringify({ name: '\u65e5\u672c\u8a9e', path: '/data/\u65e5\u672c\u8a9e' })}\n`);
+    const cut = line.indexOf(Buffer.from('\u672c')) + 1;
+    const fake = streamingDocker((attach) => {
+      attach.write(line.subarray(0, cut));
+      attach.write(line.subarray(cut));
+      attach.end();
+    });
+    const lines: string[] = [];
+    await realRunner(fake.docker).run({
+      profile: 'read',
+      operationId: 'op-utf8',
+      cmd: ['/restic', 'version'],
+      mounts: { repository: REPOSITORY.locator },
+      onStdoutLine: (text) => lines.push(text),
+    });
+    expect(lines).toHaveLength(1);
+    expect(JSON.parse(lines[0])).toEqual({ name: '\u65e5\u672c\u8a9e', path: '/data/\u65e5\u672c\u8a9e' });
+    expect(lines[0]).not.toContain('\ufffd');
+  });
+
   it('kills a helper whose abort arrived before the container started', async () => {
     const controller = new AbortController();
     controller.abort();

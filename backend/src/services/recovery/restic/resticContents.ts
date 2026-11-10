@@ -1,4 +1,5 @@
 import { HELPER_SOURCE_MOUNT } from './helperRunner';
+import { isPointPath } from '../pointContents';
 import type { PointEntry, RecoveryErrorClass } from '../types';
 
 /**
@@ -69,34 +70,44 @@ function mtimeOrNull(value: unknown): string | null {
 }
 
 /**
- * One `restic ls --json` line as an entry, or null when the line is not a node
- * record (the snapshot header, a progress line, anything malformed or too long).
+ * One `restic ls --json` line, read three ways:
  *
- * The mount prefix is checked before it is stripped: a record naming anything
- * outside the captured root is dropped rather than shown as if it were part of
- * the point. Well-formed output cannot name one, which is why this is a guard
- * and not a translation.
+ * - `entry`: a node record, mapped to an entry;
+ * - `skip`: a line that is not a node record (the snapshot header, a progress
+ *   line, anything that is not a JSON object);
+ * - `malformed`: a line that claims to be a record but cannot be trusted: a
+ *   JSON object that does not parse (a truncated line among them), a line over
+ *   the length cap, or a node record whose path leaves the captured root or
+ *   whose name is not its path's last segment.
+ *
+ * A malformed line is never dropped quietly, because a listing that silently
+ * lost an entry would shift every offset after it and still read as complete.
  */
-export function parseContentNodeLine(line: string): PointEntry | null {
-  if (Buffer.byteLength(line) > MAX_CONTENT_LINE_BYTES) return null;
+export type ContentLine =
+  | { kind: 'entry'; entry: PointEntry }
+  | { kind: 'skip' }
+  | { kind: 'malformed' };
+
+export function parseContentLine(line: string): ContentLine {
   const trimmed = line.trim();
-  if (!trimmed.startsWith('{')) return null;
+  if (!trimmed.startsWith('{')) return { kind: 'skip' };
+  if (Buffer.byteLength(line) > MAX_CONTENT_LINE_BYTES) return { kind: 'malformed' };
   let parsed: unknown;
   try {
     parsed = JSON.parse(trimmed);
   } catch {
-    return null;
+    return { kind: 'malformed' };
   }
-  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return null;
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return { kind: 'malformed' };
   const record = parsed as Record<string, unknown>;
   // `ls --json` marks both fields; requiring one keeps a status line from being
   // read as an entry if restic ever stops writing one of them.
   const marker = record.message_type ?? record.struct_type;
-  if (marker !== 'node') return null;
+  if (marker !== 'node') return { kind: 'skip' };
 
   const name = typeof record.name === 'string' ? record.name : '';
   const recordPath = typeof record.path === 'string' ? record.path : null;
-  if (!name || recordPath === null) return null;
+  if (!name || recordPath === null) return { kind: 'malformed' };
 
   let pointPath: string;
   if (recordPath === HELPER_SOURCE_MOUNT) {
@@ -104,29 +115,34 @@ export function parseContentNodeLine(line: string): PointEntry | null {
   } else if (recordPath.startsWith(`${HELPER_SOURCE_MOUNT}/`)) {
     pointPath = recordPath.slice(HELPER_SOURCE_MOUNT.length);
   } else {
-    return null;
+    return { kind: 'malformed' };
   }
   const segments = pointPath.split('/').slice(1);
-  if (pointPath !== '/' && segments.some((s) => s === '' || s === '.' || s === '..')) return null;
+  if (pointPath !== '/' && segments.some((s) => s === '' || s === '.' || s === '..')) return { kind: 'malformed' };
 
   // The name is the last segment of the recorded path. A record that disagrees
-  // is dropped rather than trusted, because the name is what a download puts in
-  // its Content-Disposition header. The point root is the one exception: its
-  // record is named after the mount, and no listing shows it as an entry.
-  if (pointPath !== '/' && segments[segments.length - 1] !== name) return null;
+  // is not trusted, because the name is what a download puts in its
+  // Content-Disposition header. The point root is the one exception: its record
+  // is named after the mount, and no listing shows it as an entry.
+  if (pointPath !== '/' && segments[segments.length - 1] !== name) return { kind: 'malformed' };
 
   const type = entryType(record.type);
   const size = type === 'file' ? nonNegativeInteger(record.size) : null;
   return {
-    name,
-    path: pointPath,
-    type,
-    size,
-    mode: formatEntryMode(record.mode),
-    mtime: mtimeOrNull(record.mtime),
-    uid: nonNegativeInteger(record.uid),
-    gid: nonNegativeInteger(record.gid),
-    downloadable: type === 'file' && size !== null,
+    kind: 'entry',
+    entry: {
+      name,
+      path: pointPath,
+      type,
+      size,
+      mode: formatEntryMode(record.mode),
+      mtime: mtimeOrNull(record.mtime),
+      uid: nonNegativeInteger(record.uid),
+      gid: nonNegativeInteger(record.gid),
+      // A name a request cannot spell (a control character, a segment over 255
+      // bytes) is listed, but no download could name it.
+      downloadable: type === 'file' && size !== null && isPointPath(pointPath),
+    },
   };
 }
 

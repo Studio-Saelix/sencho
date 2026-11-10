@@ -189,7 +189,9 @@ describe('resolveRemoteVolumeProtection', () => {
       capability.resolveRemoteRecoveryRead({ kind: 'ok', data: { ...descriptor('available', 'engine_registered'), pointReads } });
     expect(read(['list', 'download']).pointReads).toEqual(['list', 'download']);
     expect(read(['list', 'archive', 'list']).pointReads).toEqual(['list']);
-    expect(read('list').pointReads).toEqual([]);
+    // A value that is not a list is not a descriptor this build reads.
+    expect(read('list')).toMatchObject({ status: { state: 'unknown', reason: 'descriptor_invalid' }, pointReads: null });
+    expect(read(null)).toMatchObject({ status: { state: 'unknown', reason: 'descriptor_invalid' } });
     // A read changes nothing, so an unknown name never invalidates the descriptor.
     expect(read(['archive']).status.state).toBe('available');
     expect(capability.resolveRemoteRecoveryRead({ kind: 'transport', detail: 'down' }).pointReads).toBeNull();

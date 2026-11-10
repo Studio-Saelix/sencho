@@ -8,7 +8,8 @@ import type { StorageDependent } from './types';
  * Recovery authorization, on the canonical RBAC engine.
  *
  *   read      view coverage and history                  stack:read on every dependent stack
- *   content   browse or download a point's contents      stack:read on every dependent stack,
+ *   content   browse or download a point's contents      stack:read on every dependent stack
+ *                                                        (node-wide when a model will not render),
  *                                                        system:settings when no stack depends on it now
  *   protect   create a root or path point                stack:edit on every dependent stack
  *   restore   restore or undo                            stack:edit on every dependent stack
@@ -99,35 +100,55 @@ export function authorizeStorageAccess(
 }
 
 /**
- * The dependents a content read is decided on: every recorded and current one,
- * and the ones found now on their own. `resolved` is false when a stack's model
- * could not be rendered, so the full set is unknown. Null means the point's
- * storage record is missing.
+ * What a content read is decided on, from the dependents resolved for the
+ * request:
+ *
+ * - `attached`: a stack depends on the storage now, and every model rendered;
+ *   `dependents` is every recorded and current dependent.
+ * - `unrenderable`: a stack depends on it now, but a model could not be
+ *   rendered, so the full set is unknown.
+ * - `detached`: no stack depends on it now (a deleted stack's recorded rows do
+ *   not count), its dependents could not be proven, or its record is missing.
  */
-export type PointContentReadTarget = {
-  storageKey: string;
-  resolved: boolean;
-  dependents: readonly StorageDependent[];
-  current: readonly StorageDependent[];
-} | null;
+export type PointContentReadTarget =
+  | { kind: 'attached'; storageKey: string; dependents: readonly StorageDependent[] }
+  | { kind: 'unrenderable' }
+  | { kind: 'detached' };
+
+/**
+ * The target for a resolved storage. No current dependent makes it detached
+ * whatever the recorded rows say; only then does an unrenderable model matter.
+ */
+export function pointContentReadTargetFor(
+  storageKey: string,
+  resolution: { kind: 'resolved' | 'unrenderable'; dependents: readonly StorageDependent[]; current: readonly StorageDependent[] },
+): PointContentReadTarget {
+  if (resolution.current.length === 0) return { kind: 'detached' };
+  if (resolution.kind === 'unrenderable') return { kind: 'unrenderable' };
+  return { kind: 'attached', storageKey, dependents: resolution.dependents };
+}
 
 /**
  * Whether the caller may read a point's contents.
  *
- * A storage with a current dependent is read under the ordinary rule:
- * `stack:read` on every recorded and current dependent, or node-wide when a
- * model could not be rendered. A storage no stack depends on now (the volume of
- * a deleted stack, one no stack ever owned, or one whose dependents cannot be
- * proven) is detached, and its files are readable only with `system:settings`.
- * Node-wide `stack:read` does not count, and neither does `stack:read` on a name
- * a deleted stack left in the recorded rows: an empty dependent set must never
- * be the reason a read is allowed. The dedicated recovery-administration
- * permission replaces the floor here, and both read routes follow.
+ * Attached storage is read under the ordinary rule: `stack:read` on every
+ * recorded and current dependent. Unrenderable storage falls back to node-wide
+ * `stack:read`. Detached storage is readable only with `system:settings`
+ * globally: node-wide `stack:read` does not count, a node role never satisfies
+ * it, and neither does `stack:read` on a name a deleted stack left in the
+ * recorded rows, so an empty dependent set is never the reason a read is
+ * allowed. If a dedicated recovery-administration action is added, it replaces
+ * `system:settings` here and both read routes follow.
  */
 export function authorizePointContentRead(req: Request, target: PointContentReadTarget): boolean {
-  if (target === null || target.current.length === 0) return authorizeNodeWide(req, 'configure');
-  if (!target.resolved) return authorizeNodeWide(req, 'read');
-  return authorizeStorageAccess(req, 'read', { storageKey: target.storageKey, liveDependents: target.dependents }).allowed;
+  switch (target.kind) {
+    case 'detached':
+      return authorizeNodeWide(req, 'configure');
+    case 'unrenderable':
+      return authorizeNodeWide(req, 'read');
+    case 'attached':
+      return authorizeStorageAccess(req, 'read', { storageKey: target.storageKey, liveDependents: target.dependents }).allowed;
+  }
 }
 
 /**

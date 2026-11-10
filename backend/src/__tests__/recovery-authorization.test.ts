@@ -269,7 +269,11 @@ describe('authorizePointContentRead', () => {
     options: { resolved?: boolean; current?: Array<{ stackName: string; serviceName: string | null }> } = {},
   ) => {
     const current = options.current ?? [];
-    return { storageKey, resolved: options.resolved ?? true, dependents: current, current };
+    return auth.pointContentReadTargetFor(storageKey, {
+      kind: options.resolved === false ? 'unrenderable' : 'resolved',
+      dependents: current,
+      current,
+    });
   };
   const read = (request: Request, t: Parameters<typeof auth.authorizePointContentRead>[1]) =>
     auth.authorizePointContentRead(request, t);
@@ -331,9 +335,18 @@ describe('authorizePointContentRead', () => {
     expect(read(req({ role: 'admin', userId: 995 }), unproven)).toBe(true);
   });
 
+  it('classifies storage by what depends on it now, never by its recorded rows', () => {
+    const recorded = [{ stackName: 'photos', serviceName: 'app' }];
+    expect(auth.pointContentReadTargetFor(soloKey, { kind: 'resolved', dependents: recorded, current: [] })).toEqual({ kind: 'detached' });
+    expect(auth.pointContentReadTargetFor(soloKey, { kind: 'unrenderable', dependents: recorded, current: [] })).toEqual({ kind: 'detached' });
+    expect(auth.pointContentReadTargetFor(soloKey, { kind: 'unrenderable', dependents: recorded, current: recorded })).toEqual({ kind: 'unrenderable' });
+    expect(auth.pointContentReadTargetFor(soloKey, { kind: 'resolved', dependents: recorded, current: recorded }))
+      .toEqual({ kind: 'attached', storageKey: soloKey, dependents: recorded });
+  });
+
   it('holds a point with no storage record to system:settings', () => {
-    expect(read(req({ role: 'viewer', userId: 996 }), null)).toBe(false);
-    expect(read(req({ role: 'admin', userId: 995 }), null)).toBe(true);
+    expect(read(req({ role: 'viewer', userId: 996 }), { kind: 'detached' })).toBe(false);
+    expect(read(req({ role: 'admin', userId: 995 }), { kind: 'detached' })).toBe(true);
   });
 
   for (const machine of ['node_proxy', 'pilot_tunnel'] as const) {

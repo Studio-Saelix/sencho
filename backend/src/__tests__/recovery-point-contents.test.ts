@@ -119,8 +119,9 @@ describe('parsePageOffset', () => {
 
 describe('pointReadEligibility', () => {
   it('reads a finished root point of a named volume in the active repository', () => {
-    expect(pointReadEligibility(finished('succeeded'), STORAGE, ACTIVE)).toEqual({ readable: true });
-    expect(pointReadEligibility(finished('partial', 1), STORAGE, ACTIVE)).toEqual({ readable: true });
+    const succeeded = finished('succeeded');
+    expect(pointReadEligibility(succeeded, STORAGE, ACTIVE)).toEqual({ readable: true, point: succeeded });
+    expect(pointReadEligibility(finished('partial', 1), STORAGE, ACTIVE)).toMatchObject({ readable: true });
   });
 
   it('answers point_not_readable for a point that holds no snapshot', () => {

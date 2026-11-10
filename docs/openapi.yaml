@@ -6332,7 +6332,8 @@ paths:
         It creates no operation, takes no lock and writes no audit entry.
 
         It needs `stack:read` on every stack that uses the volume, recorded or found
-        now. A point whose volume no stack uses now is readable only with
+        now, or `stack:read` across the node when a Compose model does not render.
+        A point whose volume no stack uses now is readable only with
         `system:settings`. A denial names no stack.
       parameters:
         - name: pointId
@@ -6390,7 +6391,7 @@ paths:
         error; a failure after it, or a body whose length differs from
         `Content-Length`, closes the connection instead of completing it. A client
         that disconnects stops the read, and a body that delivers nothing for five
-        minutes is stopped. A `HEAD` answers the headers and reads no data. A
+        minutes is stopped. A `HEAD` answers the headers and reads no file bytes. A
         directory, symlink or special file answers `unsupported_entry_type`.
         Authorization is the same as for browsing.
       parameters:

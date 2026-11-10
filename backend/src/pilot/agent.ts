@@ -570,7 +570,11 @@ export class PilotAgent {
             headers: this.buildLoopbackHeaders(frame.headers),
         }, (res) => {
             const entry = this.httpStreams.get(frame.s);
-            if (entry) entry.res = res;
+            if (entry) {
+                entry.res = res;
+                // A pause that arrived before the response did still holds.
+                this.applyResponseFlow(entry);
+            }
             const outHeaders: Record<string, string> = {};
             for (const [k, v] of Object.entries(res.headers)) {
                 if (typeof v === 'string') outHeaders[k] = v;

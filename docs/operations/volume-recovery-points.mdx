@@ -182,7 +182,7 @@ You can open a saved point before you restore it. List what it holds, one direct
 Each entry carries its name, path, type, size, permission bits, owner and modification time, so you can confirm a point holds the data you expect. The answer also carries the point's own facts: its status, the consistency label the capture observed, the capture counts, whether it is complete, its latest integrity check, and what the capture skipped inside the directory you are looking at. A `partial` point can be browsed, because it holds the bytes it captured, and it is never reported complete. Browsing never changes a point's integrity state: run a [verification](#verify-a-point) for that.
 
 - **Permission:** reading a point needs `stack:read` on every stack that uses the volume, the stacks recorded when it was last observed and the stacks using it now. The check runs again on every request, so a volume that gained a stack since you last looked is checked against the new set.
-- **A point no stack uses any more is readable by an administrator only.** That covers the volume of a stack you deleted, a volume no stack ever declared, and a volume whose stacks cannot be worked out because a compose file does not render.
+- **A point no stack uses any more is readable by an administrator only.** That covers the volume of a stack you deleted and a volume no stack ever declared. When a compose file on the node does not render, the volume's full set of stacks is unknown: a volume a container or its own Compose label still ties to a stack needs `stack:read` across the node, and one with no such tie needs an administrator.
 - **Symlinks are listed, never followed.** restic records a link's target as the text it had, so a captured absolute link still names a host path that is not part of the point. A link has no file body to download.
 - **Directories and special files are listed, not downloadable.** A device, socket or FIFO has no file body. Downloading a whole directory is not offered.
 - **Downloads stream.** The bytes travel from the node at the pace of the client, so memory stays flat however large the file is. If the client disconnects, the read on the node stops. A transfer that moves no byte for five minutes is stopped as well.
@@ -194,10 +194,10 @@ A point that has not finished, that failed, or that was interrupted holds nothin
 
 - A directory is listed 500 entries per page, in the order restic records them (sorted by name). `nextOffset` names the next page, and an offset always names the same entry, because a point never changes.
 - A node runs at most 4 reads at once. Another read answers `503 capability_unavailable` with `reason: "read_capacity"` and a `Retry-After` header.
-- Finding a directory's entries is bounded at 2 minutes. A download stops after 5 minutes without a byte delivered.
+- Finding a directory's entries is bounded at 2 minutes on the node. On a remote node the control instance's 30-second wait for a slow read applies first. A download stops after 5 minutes without a byte delivered.
 - Downloads have no ranges and cannot be resumed (`Accept-Ranges: none`).
 - Each read opens the repository and loads its index first, so on a very large repository the first entry or byte can take tens of seconds.
-- A file name that is not valid UTF-8 is listed, but downloading it by that name may answer `path_not_found`.
+- A file name that is not valid UTF-8 is listed, but downloading it by that name may answer `path_not_found`. A name holding a control character, or a path segment longer than 255 bytes, is listed with `downloadable: false`, and a directory with such a name cannot be opened.
 
 ## Restore to a new volume
 
@@ -645,7 +645,7 @@ curl "https://your-sencho-instance:1852/api/recovery/points/5b1c8b7e-2f60-4a63-8
 
 `path` is absolute within the point, and `/` is its root, which is also what the listing reads when `path` is absent. It is 1 to 4096 bytes, each segment is 1 to 255 bytes, and a `.`, `..` or empty segment (a trailing slash included) is refused rather than resolved, as is a control character or a repeated parameter. `type` is `file`, `directory`, `symlink` or `other`; `mode` holds the permission bits as four octal digits; `downloadable` is true only for a regular file. `skipped` lists what the capture left out directly inside this directory, each with its reason. `integrity.state` is `verified`, `unverified` or `mismatch`, from the point's latest check.
 
-A download needs `path` and answers the body with `Content-Length`, `Content-Disposition: attachment`, `X-Content-Type-Options: nosniff`, `Cache-Control: no-store` and `Accept-Ranges: none`. A `HEAD` answers the same headers and reads no data. The headers are sent with the first byte, so a failure before it is answered as a JSON error.
+A download needs `path` and answers the body with `Content-Length`, `Content-Disposition: attachment`, `X-Content-Type-Options: nosniff`, `Cache-Control: no-store` and `Accept-Ranges: none`. A `HEAD` answers the same headers and reads no file bytes. The headers are sent with the first byte, so a failure before it is answered as a JSON error.
 
 | Condition | Answer |
 | --- | --- |
@@ -653,7 +653,7 @@ A download needs `path` and answers the body with `Content-Length`, `Content-Dis
 | The point holds no snapshot | `400 invalid_request`, `reason: "point_not_readable"` |
 | The path is not in the point | `400 invalid_request`, `reason: "path_not_found"` |
 | A browse of something that is not a directory | `400 invalid_request`, `reason: "not_a_directory"` |
-| A download of a directory, symlink or special file | `400 invalid_request`, `reason: "unsupported_entry_type"` |
+| A download of a directory, symlink or special file, or any read of a point kind that has no read | `400 invalid_request`, `reason: "unsupported_entry_type"` |
 | A point id this node does not hold | `400 invalid_request` for an administrator, `403 permission_denied` for anyone else |
 | No access to every stack using the volume, or a point no stack uses without administrator access | `403 permission_denied`, naming no stack |
 | The node is starting | `503 capability_unavailable`, `reason: "engine_starting"` |
@@ -661,6 +661,7 @@ A download needs `path` and answers the body with `Content-Length`, `Content-Dis
 | The point's repository was replaced | `503 repository_unavailable`, `reason: "repository_replaced"` |
 | The repository or its key cannot be opened | `503 repository_unavailable` or `repository_key_unavailable` |
 | A missing or damaged chunk | `409 integrity_mismatch` before the first byte; a closed connection after it |
+| The node read a listing record it cannot trust | `503 node_error` (the node's log names the snapshot) |
 | A remote node that predates these routes | `409 update_required`, from the control instance |
 | A remote node that cannot be reached | `503 transport_unreachable`, or a closed connection mid-download |
 
