@@ -203,6 +203,10 @@ describe('execute (the process that spawns the helper)', () => {
       },
     }));
     expect(service.isEndpointProviderPending()).toBe(true);
+    // End the watcher this execution started, so it cannot release the claim
+    // or set the tracker during a later test.
+    await writeOutcome(operation.operationId, { ok: false, phase: 'provider', error: 'probe: stopped by the test' });
+    await waitForSettled(service, 'failed', 2_000);
   });
 
   it('fails with the staging refusal and clears pending when nothing was stopped', async () => {
