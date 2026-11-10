@@ -216,7 +216,7 @@ jobs:
         run: npm run build
 
       # Fails when a gzipped bundle group outgrows frontend/bundle-budget.json
-      # or has no budget there.
+      # or has no budget there, and when it cannot read the build.
       - name: Bundle size budget
         run: node scripts/check-bundle-size.mjs
 

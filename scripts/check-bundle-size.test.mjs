@@ -9,7 +9,7 @@
  */
 
 import { spawnSync } from 'node:child_process'
-import { randomBytes } from 'node:crypto'
+import { createHash } from 'node:crypto'
 import { mkdtempSync, mkdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
@@ -46,15 +46,26 @@ function tempDir() {
 }
 
 /**
- * A fake dist. The entry chunk is `entryBytes` of random data, which does not
- * compress, so its gzipped size tracks its raw size.
+ * `n` bytes from a SHA-256 chain: incompressible like random data, so the
+ * gzipped size tracks the raw size, but the same on every run.
  */
+function incompressible(n) {
+  const blocks = []
+  let block = createHash('sha256').update('bundle-size').digest()
+  for (let size = 0; size < n; size += block.length) {
+    blocks.push(block)
+    block = createHash('sha256').update(block).digest()
+  }
+  return Buffer.concat(blocks).subarray(0, n)
+}
+
+/** A fake dist whose entry chunk is `entryBytes` of incompressible data. */
 function fakeDist({ entryBytes = 64 * 1024, indexHtml = INDEX_HTML, extra = {} } = {}) {
   const dir = tempDir()
   mkdirSync(join(dir, 'assets'))
   writeFileSync(join(dir, 'index.html'), indexHtml)
   const files = {
-    'index-Ab12Cd34.js': randomBytes(entryBytes),
+    'index-Ab12Cd34.js': incompressible(entryBytes),
     'index-Ef56Gh78.css': 'body{}',
     'rolldown-runtime-Kk00Ll11.js': 'r',
     'monaco-Zz-9yY_8.js': 'm',
@@ -146,7 +157,7 @@ describe('measure', () => {
   it('counts each chunk once per group, and preloaded named chunks toward first load', () => {
     const groups = measure(fakeDist(), NAMED)
     const gz = (s) => groups[s] ?? 0
-    assert.ok(gz('entry-js') > 64 * 1024, 'random entry chunk does not compress')
+    assert.ok(gz('entry-js') > 64 * 1024, 'incompressible entry chunk does not shrink')
     assert.equal(gz('first-load-js'), gz('entry-js') + gz('preload-js') + gz('monaco'))
     assert.equal(
       gz('total-js'),
@@ -182,9 +193,22 @@ describe('compare', () => {
 })
 
 describe('parseBudget and parseArgs', () => {
-  it('rejects a budget that is not a positive number, and a missing namedChunks', () => {
-    assert.throws(() => parseBudget('{"namedChunks":[],"gzipKb":{"entry-js":"625kb"}}', 'b.json'), /"entry-js" must be a positive number/)
+  it('rejects a budget that is not a positive number', () => {
+    for (const kb of ['"625kb"', '0', '-1', 'null']) {
+      assert.throws(
+        () => parseBudget(`{"namedChunks":[],"gzipKb":{"entry-js":${kb}}}`, 'b.json'),
+        /"entry-js" must be a positive number/,
+        `budget ${kb}`,
+      )
+    }
+  })
+
+  it('rejects a malformed namedChunks or gzipKb, and a named chunk that shadows a group', () => {
     assert.throws(() => parseBudget('{"gzipKb":{}}', 'b.json'), /namedChunks must be an array/)
+    assert.throws(() => parseBudget('{"namedChunks":[1],"gzipKb":{}}', 'b.json'), /namedChunks must be an array/)
+    assert.throws(() => parseBudget('{"namedChunks":[]}', 'b.json'), /gzipKb must be an object/)
+    assert.throws(() => parseBudget('{"namedChunks":[],"gzipKb":[]}', 'b.json'), /gzipKb must be an object/)
+    assert.throws(() => parseBudget('{"namedChunks":["total-js"],"gzipKb":{}}', 'b.json'), /"total-js" is a group name/)
   })
 
   it('accepts the committed budget file', () => {
@@ -235,7 +259,7 @@ describe('CLI', () => {
     assert.match(result.stderr, /Bundle group "charts" measured 0 bytes/)
   })
 
-  it('fails with a message, not a pass, when the dist or index.html cannot be read', () => {
+  it('fails with a message, not a pass, when the dist cannot be read', () => {
     const dir = tempDir()
     const result = run(['--dist', join(dir, 'missing'), '--budget', writeBudget(dir, GENEROUS)])
     assert.equal(result.status, 1)
@@ -253,11 +277,25 @@ describe('CLI', () => {
   it('runs the check when invoked through a symlinked directory', () => {
     const link = join(tempDir(), 'scripts')
     symlinkSync(SCRIPTS_DIR, link)
-    const dir = tempDir()
-    const result = spawnSync(process.execPath, [join(link, 'check-bundle-size.mjs'), '--dist', join(dir, 'missing')], {
+    const viaLink = (dist, budget) => spawnSync(
+      process.execPath,
+      [join(link, 'check-bundle-size.mjs'), '--dist', dist, '--budget', budget],
+      { encoding: 'utf8', env: { ...process.env, GITHUB_STEP_SUMMARY: '' } },
+    )
+    const ok = fakeDist()
+    const passed = viaLink(ok, writeBudget(ok, GENEROUS))
+    assert.equal(passed.status, 0, passed.stderr)
+    assert.match(passed.stdout, /\| entry-js \|/, 'the check ran and printed its table')
+    const heavy = fakeDist({ entryBytes: 200 * 1024 })
+    assert.equal(viaLink(heavy, writeBudget(heavy, GENEROUS)).status, 1, 'a symlinked invocation must not import-and-exit 0')
+  })
+
+  it('does not run the check when imported from stdin', () => {
+    const result = spawnSync(process.execPath, ['--input-type=module', '-'], {
+      input: `await import(${JSON.stringify(SCRIPT)}); console.log('imported')`,
       encoding: 'utf8',
-      env: { ...process.env, GITHUB_STEP_SUMMARY: '' },
     })
-    assert.equal(result.status, 1, 'a symlinked invocation must not import-and-exit 0')
+    assert.equal(result.status, 0, result.stderr)
+    assert.equal(result.stdout.trim(), 'imported')
   })
 })

@@ -11,9 +11,10 @@
  *
  * Groups:
  *   entry-js       the module script dist/index.html runs
- *   preload-js     other chunks dist/index.html modulepreloads
+ *   preload-js     preloaded chunks outside a named group
  *   initial-css    stylesheets dist/index.html links
- *   <name>         a named vendor chunk from vite.config.ts `manualChunks`,
+ *   <name>         a chunk listed in the budget's `namedChunks`, which
+ *                  mirrors vite.config.ts `manualChunks`; measured by name
  *                  whether or not index.html preloads it
  *   first-load-js  entry plus every preloaded chunk, named ones included:
  *                  the JavaScript a first visit downloads
@@ -43,6 +44,9 @@ import { fileURLToPath } from 'node:url'
 // includes `-` and `_`.
 const HASHED = /^(.+)-[A-Za-z0-9_-]{8}\.(js|css)$/
 const CODE_ASSET = /\.(js|mjs|css)$/
+const RESERVED_GROUPS = [
+  'entry-js', 'preload-js', 'first-load-js', 'initial-css', 'workers', 'lazy-js', 'lazy-css', 'total-js',
+]
 
 /** The chunk name without its content hash, or null when the name has no hash. */
 export function chunkName(file) {
@@ -61,7 +65,7 @@ function assetFile(url) {
 }
 
 /**
- * How dist/index.html loads each asset: `entry` for the module script,
+ * How dist/index.html loads each asset: `entry` for a script under assets/,
  * `preload` for a modulepreload link, `css` for a stylesheet link. Prefetch
  * and icon links are not part of the first load and are left out.
  */
@@ -83,7 +87,7 @@ export function initialAssets(indexHtml) {
 
 /** The budget group a built JS or CSS chunk belongs to. */
 export function groupOf(file, initial, namedChunks) {
-  const name = chunkName(file)
+  const name = chunkName(file) ?? ''
   const ext = file.endsWith('.css') ? 'css' : 'js'
   const how = initial.get(file)
   if (how === 'css') return 'initial-css'
@@ -153,6 +157,8 @@ export function parseBudget(text, path) {
   if (!Array.isArray(named) || !named.every((n) => typeof n === 'string')) {
     throw new Error(`${path}: namedChunks must be an array of chunk names`)
   }
+  const reserved = named.find((n) => RESERVED_GROUPS.includes(n))
+  if (reserved) throw new Error(`${path}: "${reserved}" is a group name and cannot be a named chunk`)
   const gzipKb = budget.gzipKb
   if (gzipKb === null || typeof gzipKb !== 'object' || Array.isArray(gzipKb)) {
     throw new Error(`${path}: gzipKb must be an object of group to KB`)
@@ -207,8 +213,17 @@ function main(args) {
 }
 
 // realpath on both sides, so a symlinked checkout still runs the check
-// instead of importing it as a module and exiting 0.
-if (process.argv[1] && realpathSync(process.argv[1]) === realpathSync(fileURLToPath(import.meta.url))) {
+// instead of importing it as a module and exiting 0. An argv[1] that is not a
+// file (`node -`, a REPL) means this was imported, not run.
+function isMain() {
+  try {
+    return realpathSync(process.argv[1]) === realpathSync(fileURLToPath(import.meta.url))
+  } catch {
+    return false
+  }
+}
+
+if (process.argv[1] && isMain()) {
   try {
     process.exitCode = main(process.argv.slice(2))
   } catch (error) {

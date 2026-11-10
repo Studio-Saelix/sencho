@@ -1,5 +1,5 @@
 {
-  "_note": "Gzipped KB per bundle group, checked in CI by scripts/check-bundle-size.mjs (its header lists the groups). Each value is the size measured on main plus about 10% headroom. Raise a value only in the pull request that needs it, and say why in its description; lower it after a size win.",
+  "_note": "Gzipped KB per bundle group, checked in CI by scripts/check-bundle-size.mjs (its header lists the groups). Each value is the size measured on main plus about 10% headroom, with a round floor for small groups. Raise a value only in the pull request that needs it, and say why in its description; lower it after a size win.",
   "namedChunks": ["monaco", "xterm", "charts", "flow", "motion"],
   "gzipKb": {
     "entry-js": 625,
