@@ -1,5 +1,5 @@
 import { describe, it, expect, vi } from 'vitest';
-import { inArrivalOrder, ArrivalQueueFullError, MAX_PENDING_PER_KEY } from '../helpers/arrivalOrder';
+import { inArrivalOrder, pendingCount, ArrivalQueueFullError, MAX_PENDING_PER_KEY } from '../helpers/arrivalOrder';
 
 const deferred = () => {
   let resolve!: () => void;
@@ -58,7 +58,7 @@ describe('inArrivalOrder', () => {
     await held;
   });
 
-  it('holds later work behind work that never settles, so work admitted before it cannot be overtaken', async () => {
+  it('holds later work behind work that never settles, so later work cannot run ahead of it', async () => {
     const ran: string[] = [];
     void inArrivalOrder('wedged', () => new Promise<void>(() => {}));
     const later = inArrivalOrder('wedged', async () => { ran.push('later'); });
@@ -68,7 +68,7 @@ describe('inArrivalOrder', () => {
   });
 
   describe('when work is not finishing', () => {
-    /** Holds one piece of work on `key`, then admits work up to its limit behind it; returns what ran, in order, and everything admitted. */
+    /** Holds one piece of work on `key`, then admits work up to its limit behind it; records what ran, in order, into `ran` and returns everything admitted. */
     function fillKey(key: string, hold: ReturnType<typeof deferred>, ran: string[]) {
       const admitted = [inArrivalOrder(key, async () => { await hold.promise; ran.push(`${key}#0`); })];
       for (let i = 1; i < MAX_PENDING_PER_KEY; i += 1) {
@@ -89,6 +89,16 @@ describe('inArrivalOrder', () => {
       await Promise.all(admitted);
       expect(refusedRan).toBe(false);
       expect(ran).toEqual(Array.from({ length: MAX_PENDING_PER_KEY }, (_, i) => `k#${i}`));
+    });
+
+    it('counts the work admitted to a key that has not settled, and not the work it refused', async () => {
+      const hold = deferred();
+      const admitted = fillKey('counted', hold, []);
+      await expect(inArrivalOrder('counted', async () => undefined)).rejects.toBeInstanceOf(ArrivalQueueFullError);
+      expect(pendingCount('counted')).toBe(MAX_PENDING_PER_KEY);
+      hold.resolve();
+      await Promise.all(admitted);
+      expect(pendingCount('counted')).toBe(0);
     });
 
     it('keeps admitted work in its order while it refuses more, then admits again once it has finished', async () => {

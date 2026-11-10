@@ -2272,9 +2272,9 @@ stacksRouter.get('/:stackName/exposure', async (req: Request, res: Response) => 
 // (and whose client has since given up on it) would be applied after a later save that
 // already replied, and undo it. A client that abandoned a save cannot know the node has
 // stopped working on it; the order here is what keeps the later save final. The queue
-// admits a bounded number of saves that have not finished, so a stack whose validation
-// never returns answers further saves with 429 instead of holding every one of them.
-// Saves already admitted keep their order.
+// admits a bounded number of saves that have not finished, per stack and across the node,
+// so saves that never finish answer further saves with 429 instead of holding every one
+// of them. Saves already admitted keep their order.
 stacksRouter.put('/:stackName/exposure', async (req: Request, res: Response) => {
   const stackName = req.params.stackName as string;
   if (!requirePermission(req, res, 'stack:edit', 'stack', stackName)) return;
@@ -2283,9 +2283,9 @@ stacksRouter.put('/:stackName/exposure', async (req: Request, res: Response) => 
     await saveInArrivalOrder(req, res, nodeId, stackName);
   } catch (error) {
     if (!(error instanceof ArrivalQueueFullError)) throw error;
-    console.error('[Stacks] Exposure save refused, too many saves waiting on %s:', sanitizeForLog(stackName));
+    console.error('[Stacks] Exposure save for %s refused, too many saves are waiting:', sanitizeForLog(stackName));
     res.status(429).json({
-      error: 'Too many exposure saves are waiting on this stack. Wait for them to finish, then try again.',
+      error: 'Too many exposure saves are waiting on this node, so this one was not applied. Try again shortly; if it keeps happening, the node is not finishing earlier saves and may need a restart.',
       code: 'exposure_save_queue_full',
     });
   }

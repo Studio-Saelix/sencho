@@ -148,10 +148,11 @@ however slowly the earlier ones are answered. A save with no reply after 30 seco
 as timed out and the next one goes ahead; the node may still apply the timed-out save. A node on
 this version applies saves to a stack in the order they reach it, so a save it received first is
 applied first and the later save stays final. A later save waits behind a stalled one on the
-node and may time out too. When 16 saves to one stack are waiting on a node, it refuses the next
-with a message that too many are waiting, and does not apply it; the saves it already holds keep
-their order, and it accepts saves again as they finish. A node running an older version does not order saves this way, so
-update it before relying on this. Refresh to see what the node holds. A service the row's list
+node and may time out too. When 16 saves to one stack, or 256 across the node's stacks, are
+waiting or being applied, the node refuses the next with a message that too many are waiting and
+does not apply it. The saves it already holds keep their order, and it accepts saves again as they
+finish; if one never finishes, the node may need a restart. A node running an older version does
+not order saves this way, so update it before relying on this. Refresh to see what the node holds. A service the row's list
 was too short to show joins the list once you save it, with its action. A warning that may involve
 services the row does not list stays visible until a refresh, or until you have saved every one
 of those services from here.

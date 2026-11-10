@@ -15,7 +15,7 @@ import { DatabaseService } from '../services/DatabaseService';
 import { generateApiToken } from '../utils/apiTokenFormat';
 import { FileSystemService } from '../services/FileSystemService';
 import { EXPOSURE_INTENTS, type ExposureIntent } from '../services/network/types';
-import { MAX_PENDING_PER_KEY } from '../helpers/arrivalOrder';
+import { MAX_PENDING_PER_KEY, pendingCount } from '../helpers/arrivalOrder';
 
 let tmpDir: string;
 let app: import('express').Express;
@@ -286,15 +286,33 @@ describe('exposure intent saves that overlap', () => {
   });
 
   describe('when a save never finishes', () => {
-    /** Holds the first save of `stack` in validation, then sends saves behind it until the stack holds as many as it admits. */
+    /** Holds on to every stack filled by a test, so a test that fails before it lets go does not leave saves stuck for the ones after it. */
+    const filled: Array<{ release: () => void; admitted: Promise<unknown>[] }> = [];
+    afterEach(async () => {
+      for (const { release, admitted } of filled.splice(0)) {
+        release();
+        await Promise.all(admitted);
+      }
+    });
+
+    /**
+     * Holds the first save of `stack` in validation, then sends saves behind it one at a time,
+     * each only once the node has admitted the one before, until the stack holds as many as it admits.
+     */
     async function fillStack(stack: string) {
+      const key = `1\0${stack}`;
       const hold = holdValidationOf(stack);
       const admitted = [put(stack, { service: 'api', intent: 'lan' }).then((res) => res)];
       await hold.reachedHold;
       for (let i = 1; i < MAX_PENDING_PER_KEY; i += 1) {
         admitted.push(put(stack, { service: 'worker', intent: EXPOSURE_INTENTS[i % EXPOSURE_INTENTS.length] }).then((res) => res));
+        const deadline = Date.now() + 5000;
+        while (pendingCount(key) < i + 1) {
+          if (Date.now() > deadline) throw new Error(`the node did not admit save ${i + 1}`);
+          await sleep(5);
+        }
       }
-      await sleep(150);
+      filled.push({ release: () => hold.release(), admitted });
       return { hold, admitted };
     }
 

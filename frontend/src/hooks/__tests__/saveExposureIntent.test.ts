@@ -134,7 +134,7 @@ describe('saveExposureIntent ordering', () => {
   });
 
   it('reports the node\'s own message when it refuses a save because too many are waiting, and still sends the next', async () => {
-    const message = 'Too many exposure saves are waiting on this stack. Wait for them to finish, then try again.';
+    const message = 'Too many exposure saves are waiting on this node, so this one was not applied. Try again shortly.';
     apiFetchMock.mockImplementationOnce(() => Promise.resolve(reply(429, { error: message, code: 'exposure_save_queue_full' })));
     const full = saveExposureIntent('web', 'api', 'lan', 1);
     const next = saveExposureIntent('web', 'worker', 'lan', 1);

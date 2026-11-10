@@ -1,4 +1,4 @@
-/** Most pieces of work that may wait on, or run for, one key. A client sends one at a time, so a key near this has work that is not finishing. */
+/** Most pieces of work that may wait on, or run for, one key. A client sends one save at a time and gives up on one after 30 seconds, so a key near this has work that is not finishing. */
 export const MAX_PENDING_PER_KEY = 16;
 /** Most pieces of work that may wait on, or run for, all keys together, so many stalled keys cannot add up to an unbounded backlog. */
 export const MAX_PENDING_TOTAL = 256;
@@ -57,4 +57,9 @@ export function inArrivalOrder<T>(key: string, work: () => Promise<T>): Promise<
     if (lane.pending === 0) lanes.delete(key);
   });
   return turn;
+}
+
+/** How many pieces of work admitted to `key` have not settled yet. */
+export function pendingCount(key: string): number {
+  return lanes.get(key)?.pending ?? 0;
 }
