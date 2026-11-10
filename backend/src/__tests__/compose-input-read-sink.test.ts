@@ -4,10 +4,11 @@
  * path, not how a caller mocks it.
  */
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
+import { execFile } from 'child_process';
 import { promises as fsPromises } from 'fs';
 import os from 'os';
 import path from 'path';
-import { readComposeInputWithinCap } from '../helpers/composeInputReadSink';
+import { readComposeInputWithinCap, resolvePhysicalDirectory } from '../helpers/composeInputReadSink';
 
 let dir: string;
 
@@ -90,9 +91,10 @@ describe('readComposeInputWithinCap', () => {
     const file = path.join(dir, 'compose.yaml');
     await fsPromises.writeFile(file, Buffer.concat([
       Buffer.from([0xff, 0xfe]),
-      Buffer.from('x'.repeat(32), 'utf16le'),
+      Buffer.from('x'.repeat(10), 'utf16le'),
     ]));
 
+    // 10 characters but 22 bytes: a cap applied to the decoded text would pass.
     await expect(readComposeInputWithinCap(file, 16)).resolves.toEqual({
       content: null,
       tooLarge: true,
@@ -127,7 +129,32 @@ describe('readComposeInputWithinCap', () => {
 
   it('marks a directory as a non-regular input', async () => {
     await expect(readComposeInputWithinCap(dir, 1024))
-      .resolves.toEqual({ content: null, tooLarge: false, nonRegular: true });
+      .resolves.toEqual({ content: null, tooLarge: false, nonRegular: 'directory' });
+  });
+
+  it('reports /dev/null as the null device and /dev/zero as unbounded', async () => {
+    await expect(readComposeInputWithinCap('/dev/null', 1024))
+      .resolves.toEqual({ content: null, tooLarge: false, nonRegular: 'null-device' });
+    await expect(readComposeInputWithinCap('/dev/zero', 1024))
+      .resolves.toEqual({ content: null, tooLarge: false, nonRegular: 'unbounded' });
+  });
+
+  it('reports a FIFO as unbounded without blocking', async () => {
+    const fifo = path.join(dir, 'pipe');
+    await new Promise<void>((resolve, reject) => {
+      execFile('mkfifo', [fifo], (err) => (err ? reject(err) : resolve()));
+    });
+    await expect(readComposeInputWithinCap(fifo, 1024))
+      .resolves.toEqual({ content: null, tooLarge: false, nonRegular: 'unbounded' });
+  });
+
+  it('resolves a symlinked directory to its physical path and leaves a missing one alone', async () => {
+    const real = path.join(dir, 'real');
+    await fsPromises.mkdir(real);
+    const link = path.join(dir, 'link');
+    await fsPromises.symlink(real, link);
+    expect(await resolvePhysicalDirectory(link)).toBe(await fsPromises.realpath(real));
+    expect(await resolvePhysicalDirectory(path.join(dir, 'missing'))).toBe(path.join(dir, 'missing'));
   });
 
   it('skips a broken symlink', async () => {

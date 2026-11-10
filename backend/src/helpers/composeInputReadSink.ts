@@ -6,34 +6,38 @@
  * the operating system's temporary directory, and Git source validation does run
  * the guard over a throwaway directory. Nothing here creates or modifies a file:
  * the open is `O_RDONLY` with no create flag, the path is one the Compose
- * invocation selects or its include/extends graph declares, the descriptor is
- * checked with `fstat`
+ * invocation selects or its include/extends graph declares (or an env file that
+ * selects or interpolates them), the descriptor is checked with `fstat`
  * before the bounded read, and `O_NONBLOCK` keeps a FIFO from wedging it. The
  * module is listed under `paths-ignore` in the CodeQL config with the same
  * reasoning.
  *
  * An input that is missing or cannot be read as one is reported as skipped:
  * Compose reads the same file next and reports the real error. A path that
- * exists but is not a regular file is marked `nonRegular`, so an env-file caller
- * can treat `/dev/null` as the empty file Compose reads instead of treating it
- * as missing. Any other read failure is rethrown, so a file this guard could not
- * inspect is never handed to Compose unmeasured.
+ * exists but is not a regular file is marked `nonRegular` with its kind: a
+ * directory is Compose's error to report, `/dev/null` is the empty file Compose
+ * reads, and anything else (another device, a FIFO) is `unbounded` because
+ * Compose reads it with no cap, so the caller must refuse it. Any other read
+ * failure is rethrown, so a file this guard could not inspect is never handed
+ * to Compose unmeasured.
  *
  * Compose's YAML parser accepts UTF-8 and BOM-marked UTF-16LE/UTF-16BE, so the
  * bytes are decoded the same way. Decoding everything as UTF-8 would measure a
  * string the CLI never parses, and a UTF-16 alias bomb would pass the guard.
  * The decoder is shared with env-file reads; Compose's dotenv reader rejects a
  * UTF-16 env file, so decoding one only makes the guard over-read it and can
- * refuse a file Compose would reject, never the reverse.
+ * refuse a file Compose would reject, never the reverse. The file is read
+ * whole and decoded once.
  */
 import { promises as fsPromises, constants as fsConstants } from 'fs';
+import type { Stats } from 'fs';
 
 /**
  * Decode one Compose YAML input from its bytes. A leading byte-order mark
  * selects UTF-16LE/BE, which is the encoding Go's YAML parser accepts; without
  * one the file is UTF-8 (a UTF-8 BOM is dropped before parsing). An odd byte at
  * the end of a UTF-16 file is not text Compose can parse either, so it is
- * dropped rather than combined with the next read.
+ * dropped.
  */
 export function decodeComposeInput(bytes: Buffer): string {
   if (bytes.length >= 2) {
@@ -65,11 +69,24 @@ export interface ComposeInputRead {
   /** True when the file is larger than the cap and the caller must refuse it. */
   tooLarge: boolean;
   /**
-   * True when the path exists but is not a regular file. Compose reads such a
-   * path itself (a character device like `/dev/null` is empty, a FIFO can
-   * block), so an env-file caller must not treat it as a missing file.
+   * Set when the path exists but is not a regular file. `directory` and
+   * `null-device` hold no data Compose could expand (it reports the first and
+   * reads the second as empty). `unbounded` is any other device or a FIFO:
+   * Compose reads it to its end, so the guard cannot measure it and the caller
+   * must refuse it.
    */
-  nonRegular?: true;
+  nonRegular?: NonRegularKind;
+}
+
+export type NonRegularKind = 'directory' | 'null-device' | 'unbounded';
+
+async function classifyNonRegular(stat: Stats): Promise<NonRegularKind> {
+  if (stat.isDirectory()) return 'directory';
+  if (stat.isCharacterDevice()) {
+    const nullDevice = await fsPromises.stat('/dev/null').catch(() => undefined);
+    if (nullDevice && nullDevice.isCharacterDevice() && nullDevice.rdev === stat.rdev) return 'null-device';
+  }
+  return 'unbounded';
 }
 
 /**
@@ -84,9 +101,9 @@ function isSkippableReadError(err: unknown): boolean {
 }
 
 /**
- * Read at most `maxBytes` from a regular file. Non-regular files (a directory,
- * FIFO, device, or broken link) and the ordinary unreadable-file errors are
- * skipped; any other failure is rethrown. A file that grows after the `fstat`
+ * Read at most `maxBytes` from a regular file. A non-regular file is reported
+ * with its kind and the ordinary unreadable-file errors (including a broken
+ * link) are skipped; any other failure is rethrown. A file that grows after the `fstat`
  * cannot be read past the cap: the read loop stops one byte past it and reports
  * `tooLarge`.
  */
@@ -103,7 +120,7 @@ export async function readComposeInputWithinCap(
   }
   try {
     const stat = await handle.stat();
-    if (!stat.isFile()) return { content: null, tooLarge: false, nonRegular: true };
+    if (!stat.isFile()) return { content: null, tooLarge: false, nonRegular: await classifyNonRegular(stat) };
     if (stat.size > maxBytes) return { content: null, tooLarge: true };
 
     const chunks: Buffer[] = [];
@@ -125,5 +142,18 @@ export async function readComposeInputWithinCap(
     throw err;
   } finally {
     await handle.close().catch(() => undefined);
+  }
+}
+
+/**
+ * The physical path of a directory, so relative paths and `..` resolve the way
+ * they do for a process running there. A directory that cannot be resolved is
+ * returned unchanged: Compose reports it.
+ */
+export async function resolvePhysicalDirectory(directory: string): Promise<string> {
+  try {
+    return await fsPromises.realpath(directory);
+  } catch {
+    return directory;
   }
 }

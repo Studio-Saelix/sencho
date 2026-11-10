@@ -4,6 +4,7 @@
  * mocks it.
  */
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { execFile } from 'child_process';
 import { promises as fsPromises } from 'fs';
 import os from 'os';
 import path from 'path';
@@ -120,9 +121,35 @@ describe('assertComposeSourceWithinExpansionLimits', () => {
       .not.toThrow();
   });
 
-  it('leaves a syntax error for Compose even when the same document also holds a bomb', () => {
+  it('refuses a document the parser rejects when it also holds aliases Compose might still expand', () => {
     const source = `${nestedAliasBomb(12)}  broken: [\n`;
-    expect(() => assertComposeSourceWithinExpansionLimits(source, 'compose.yaml')).not.toThrow();
+    expect(() => assertComposeSourceWithinExpansionLimits(source, 'compose.yaml'))
+      .toThrow(/YAML that Sencho's parser rejects/);
+  });
+
+  it('refuses the over-budget chain beside YAML Compose accepts but the parser rejects', () => {
+    // Compose's parser takes each of these; the `yaml` package reports an error.
+    for (const accepted of ['x-q: "v"#c\n', `x-${'k'.repeat(1100)}: 1\n`, 'x-tf: [\n\ta]\n']) {
+      expect(() => assertComposeSourceWithinExpansionLimits(`${nestedAliasBomb(5)}${accepted}`, 'compose.yaml'))
+        .toThrow(ComposeExpansionRefusal);
+    }
+  });
+
+  it('refuses a rejected document that declares an include', () => {
+    expect(() => assertComposeSourceWithinExpansionLimits('include:\n  - big.yaml\nx-q: "v"#c\n', 'compose.yaml'))
+      .toThrow(ComposeExpansionRefusal);
+  });
+
+  it('still measures a document whose only errors are an unresolved alias or a repeated key', () => {
+    expect(() => assertComposeSourceWithinExpansionLimits(`${nestedAliasBomb(12)}  web: *missing\n`, 'compose.yaml'))
+      .toThrow(/nested YAML aliases/);
+    expect(() => assertComposeSourceWithinExpansionLimits(`${nestedAliasBomb(12)}services:\n  web: {}\n`, 'compose.yaml'))
+      .toThrow(/nested YAML aliases/);
+  });
+
+  it('leaves a syntax error with no aliases or includes for Compose to report', () => {
+    expect(() => assertComposeSourceWithinExpansionLimits('services:\n  web:\n    image: nginx\n  bad: [\n', 'compose.yaml'))
+      .not.toThrow();
   });
 
   it('accepts an empty document', () => {
@@ -229,7 +256,7 @@ describe('assertComposeInputsWithinExpansionLimits', () => {
   it('refuses a source larger than the read cap', async () => {
     await write('compose.yaml', `# ${'x'.repeat(MAX_COMPOSE_INPUT_BYTES)}\n`);
     await expect(assertComposeInputsWithinExpansionLimits({ cwd: dir, invocation: ['compose', 'config'] }))
-      .rejects.toThrow(/larger than 16 MiB/);
+      .rejects.toThrow(/larger than 1 MiB/);
   });
 });
 
@@ -797,7 +824,7 @@ describe('assertComposeInputsWithinExpansionLimits - include and extends depende
     await write('compose.yaml', 'include:\n  - huge.yaml\nservices:\n  web:\n    image: nginx:alpine\n');
     await write('huge.yaml', `# ${'x'.repeat(MAX_COMPOSE_INPUT_BYTES)}\n`);
     await expect(assertComposeInputsWithinExpansionLimits({ cwd: dir, invocation: ['compose', 'config'] }))
-      .rejects.toThrow(/larger than 16 MiB/);
+      .rejects.toThrow(/larger than 1 MiB/);
   });
 
   it('refuses a remote include it cannot inspect, without echoing the URL', async () => {
@@ -984,9 +1011,9 @@ describe('assertComposeInputsWithinExpansionLimits - encodings', () => {
   });
 
   it('keeps the byte cap for a UTF-16 file', async () => {
-    await write('compose.yaml', encodeUtf16(`# ${'x'.repeat(MAX_COMPOSE_INPUT_BYTES)}`, 'le'));
+    await write('compose.yaml', encodeUtf16(`# ${'x'.repeat(MAX_COMPOSE_INPUT_BYTES / 2 + 100)}`, 'le'));
     await expect(assertComposeInputsWithinExpansionLimits({ cwd: dir, invocation: ['compose', 'config'] }))
-      .rejects.toThrow(/larger than 16 MiB/);
+      .rejects.toThrow(/larger than 1 MiB/);
   });
 });
 
@@ -1278,5 +1305,318 @@ describe('assertComposeInputsWithinExpansionLimits - review round regressions', 
     await write('bomb.yaml', nestedAliasBomb(12));
     await expect(assertComposeInputsWithinExpansionLimits({ cwd: dir, invocation: ['compose', 'config'] }))
       .rejects.toBeInstanceOf(ComposeExpansionRefusal);
+  });
+});
+
+describe('assertComposeInputsWithinExpansionLimits - review round 3 regressions', () => {
+  const run = (cwd = dir, invocation: string[] = ['compose', 'config'], env?: (name: string) => string | undefined) =>
+    assertComposeInputsWithinExpansionLimits({ cwd, invocation, env });
+
+  describe('YAML the parser rejects but Compose accepts', () => {
+    it('refuses a bomb file with an unspaced comment after a quoted value', async () => {
+      await write('compose.yaml', `${nestedAliasBomb(5)}x-q: "v"#c\n`);
+      await expect(run()).rejects.toThrow(/YAML that Sencho's parser rejects/);
+    });
+
+    it('refuses the same file when it is only a dependency', async () => {
+      await write('compose.yaml', 'include:\n  - dep.yaml\nservices:\n  web:\n    image: nginx\n');
+      await write('dep.yaml', `${nestedAliasBomb(5)}x-tf: [\n\ta]\n`);
+      await expect(run()).rejects.toBeInstanceOf(ComposeExpansionRefusal);
+    });
+
+    it('refuses an include that sits in a document the parser rejects', async () => {
+      await write('compose.yaml', 'include:\n  - dep.yaml\nx-q: "v"#c\n');
+      await write('dep.yaml', nestedAliasBomb(5));
+      await expect(run()).rejects.toBeInstanceOf(ComposeExpansionRefusal);
+    });
+
+    it('leaves a broken file with no aliases or includes to Compose', async () => {
+      await write('compose.yaml', 'services:\n  web: [1\n');
+      await expect(run()).resolves.toBeUndefined();
+    });
+
+    it('leaves a bomb after an earlier unparsable document to Compose', async () => {
+      await write('compose.yaml', `services:\n  web: [1\n---\n${nestedAliasBomb(12)}`);
+      await expect(run()).resolves.toBeUndefined();
+    });
+  });
+
+  describe('inputs that are not regular files', () => {
+    const makeFifo = async (name: string) => {
+      const target = path.join(dir, name);
+      await new Promise<void>((resolve, reject) => {
+        execFile('mkfifo', [target], (err) => (err ? reject(err) : resolve()));
+      });
+      return target;
+    };
+
+    it('refuses an include of /dev/zero', async () => {
+      await write('compose.yaml', 'include:\n  - /dev/zero\n');
+      await expect(run()).rejects.toThrow(/not a regular file/);
+    });
+
+    it('refuses an extends of /dev/zero', async () => {
+      await write('compose.yaml', 'services:\n  web:\n    extends:\n      file: /dev/zero\n      service: base\n');
+      await expect(run()).rejects.toThrow(/not a regular file/);
+    });
+
+    it('refuses an include that is a FIFO', async () => {
+      await makeFifo('pipe.yaml');
+      await write('compose.yaml', 'include:\n  - pipe.yaml\n');
+      await expect(run()).rejects.toThrow(/not a regular file/);
+    });
+
+    it('refuses a -f file that links to /dev/zero', async () => {
+      await fsPromises.symlink('/dev/zero', path.join(dir, 'zero.yaml'));
+      await expect(run(dir, ['compose', '-f', 'zero.yaml', 'config'])).rejects.toThrow(/not a regular file/);
+    });
+
+    it('refuses a discovered compose.yaml that links to /dev/zero beside a benign compose.yml', async () => {
+      await fsPromises.symlink('/dev/zero', path.join(dir, 'compose.yaml'));
+      await write('compose.yml', SAFE_COMPOSE);
+      await expect(run()).rejects.toThrow(/not a regular file/);
+    });
+
+    it('refuses a discovered override that links to /dev/zero', async () => {
+      await write('compose.yaml', SAFE_COMPOSE);
+      await fsPromises.symlink('/dev/zero', path.join(dir, 'compose.override.yml'));
+      await expect(run()).rejects.toThrow(/not a regular file/);
+    });
+
+    it('refuses an include env_file of /dev/zero', async () => {
+      await write('compose.yaml', 'include:\n  - path: dep.yaml\n    env_file: /dev/zero\n');
+      await write('dep.yaml', SAFE_COMPOSE);
+      await expect(run()).rejects.toThrow(/not a regular file/);
+    });
+
+    it('refuses a project .env that links to /dev/zero', async () => {
+      await write('compose.yaml', SAFE_COMPOSE);
+      await fsPromises.symlink('/dev/zero', path.join(dir, '.env'));
+      await expect(run()).rejects.toThrow(/not a regular file/);
+    });
+
+    it('still reads /dev/null as an empty env file and measures the compose file', async () => {
+      await write('compose.yaml', nestedAliasBomb(12));
+      await expect(run(dir, ['compose', '--env-file', '/dev/null', 'config'])).rejects.toThrow(/nested YAML aliases/);
+    });
+
+    it('treats a directory named like a compose file as the pick, as Compose does', async () => {
+      await fsPromises.mkdir(path.join(dir, 'compose.yaml'));
+      await write('compose.yml', nestedAliasBomb(12));
+      await expect(run()).resolves.toBeUndefined();
+    });
+  });
+
+  describe('extends copies and repeated dependencies', () => {
+    it('refuses services that each extend one under-budget service of the same file', async () => {
+      const chain = ['x0: &a0 [lol, lol, lol, lol, lol, lol, lol, lol, lol]'];
+      for (let level = 1; level <= 4; level += 1) {
+        chain.push(`x${level}: &a${level} [${Array.from({ length: 9 }, () => `*a${level - 1}`).join(', ')}]`);
+      }
+      const extenders = Array.from({ length: 30 }, (_, i) => `  s${i}:\n    extends: y`).join('\n');
+      await write('compose.yaml', `${chain.join('\n')}\nservices:\n  y:\n    image: nginx\n    x-big: *a4\n${extenders}\n`);
+      await expect(run()).rejects.toThrow(/in total/);
+    });
+
+    it('refuses the same fan-out through extends: { service: ... }', async () => {
+      const chain = ['x0: &a0 [lol, lol, lol, lol, lol, lol, lol, lol, lol]'];
+      for (let level = 1; level <= 4; level += 1) {
+        chain.push(`x${level}: &a${level} [${Array.from({ length: 9 }, () => `*a${level - 1}`).join(', ')}]`);
+      }
+      const extenders = Array.from({ length: 30 }, (_, i) => `  s${i}:\n    extends:\n      service: y`).join('\n');
+      await write('compose.yaml', `${chain.join('\n')}\nservices:\n  y:\n    image: nginx\n    x-big: *a4\n${extenders}\n`);
+      await expect(run()).rejects.toThrow(/in total/);
+    });
+
+    it('refuses an extends carried in through a merge key', async () => {
+      const chain = ['x0: &a0 [lol, lol, lol, lol, lol, lol, lol, lol, lol]'];
+      for (let level = 1; level <= 4; level += 1) {
+        chain.push(`x${level}: &a${level} [${Array.from({ length: 9 }, () => `*a${level - 1}`).join(', ')}]`);
+      }
+      const extenders = Array.from({ length: 30 }, (_, i) => `  s${i}:\n    <<: *ext`).join('\n');
+      await write('compose.yaml', `${chain.join('\n')}\nx-ext: &ext\n  extends: y\nservices:\n  y:\n    image: nginx\n    x-big: *a4\n${extenders}\n`);
+      await expect(run()).rejects.toThrow(/in total/);
+    });
+
+    it('refuses services that extend a chain through another file and charge its whole subtree', async () => {
+      await write('big.yaml', `${nestedAliasBomb(4)}`);
+      await write('mid.yaml', 'services:\n  m:\n    extends:\n      file: big.yaml\n      service: y\n');
+      const extenders = Array.from({ length: 30 }, (_, i) => `  s${i}:\n    extends:\n      file: mid.yaml\n      service: m`).join('\n');
+      await write('compose.yaml', `services:\n${extenders}\n`);
+      await expect(run()).rejects.toThrow(/in total/);
+    });
+
+    it('charges the descendants of a file that one file includes many times', async () => {
+      await write('big.yaml', nestedAliasBomb(4));
+      await write('mid.yaml', 'include:\n  - big.yaml\n');
+      await write('compose.yaml', `include:\n${Array.from({ length: 30 }, () => '  - mid.yaml').join('\n')}\n`);
+      await expect(run()).rejects.toThrow(/in total/);
+    });
+
+    it('refuses a fan-out that doubles at every level of tiny files', async () => {
+      for (let level = 0; level < 25; level += 1) {
+        await write(`f${level}.yaml`, `include:\n  - f${level + 1}.yaml\n  - f${level + 1}.yaml\n`);
+      }
+      await write('f25.yaml', '');
+      await write('compose.yaml', 'include:\n  - f0.yaml\n');
+      await expect(run()).rejects.toThrow(/in total/);
+    });
+
+    it('refuses more include references than the bound', async () => {
+      await write('leaf.yaml', SAFE_COMPOSE);
+      await write('compose.yaml', `include:\n${Array.from({ length: 5000 }, () => '  - leaf.yaml').join('\n')}\n`);
+      await expect(run()).rejects.toThrow(/include and extends references/);
+    });
+
+    it('refuses an extends chain deeper than the bound inside one file', async () => {
+      const services = Array.from({ length: 40 }, (_, i) =>
+        (i === 0 ? '  s0:\n    image: nginx' : `  s${i}:\n    extends: s${i - 1}`)).join('\n');
+      await write('compose.yaml', `services:\n${services}\n`);
+      await expect(run()).rejects.toThrow(/extends chain deeper/);
+    });
+
+    it('accepts an ordinary stack where a few services extend a shared base', async () => {
+      const services = Array.from({ length: 12 }, (_, i) => `  s${i}:\n    extends: base\n    image: nginx`).join('\n');
+      await write('compose.yaml', `services:\n  base:\n    image: alpine\n    environment:\n      A: b\n${services}\n`);
+      await expect(run()).resolves.toBeUndefined();
+    });
+
+    it('accepts a same-file extends cycle or a missing parent, which Compose reports itself', async () => {
+      await write('compose.yaml', 'services:\n  a:\n    extends: b\n  b:\n    extends: a\n  c:\n    extends: nope\n');
+      await expect(run()).resolves.toBeUndefined();
+    });
+
+    it('accepts an include cycle, which Compose reports itself', async () => {
+      await write('compose.yaml', 'include:\n  - a.yaml\n');
+      await write('a.yaml', 'include:\n  - compose.yaml\n');
+      await expect(run()).resolves.toBeUndefined();
+    });
+
+    it('accepts an extends cycle across files, which Compose reports itself', async () => {
+      await write('compose.yaml', 'services:\n  web:\n    extends:\n      file: a.yaml\n      service: x\n');
+      await write('a.yaml', 'services:\n  x:\n    extends:\n      file: compose.yaml\n      service: web\n');
+      await expect(run()).resolves.toBeUndefined();
+    });
+  });
+
+  describe('cost of the guard itself', () => {
+    it('measures a file with tens of thousands of aliases in linear time', async () => {
+      const aliases = Array.from({ length: 60_000 }, () => '  - *a').join('\n');
+      await write('compose.yaml', `x-a: &a [1, 2]\nx-list:\n${aliases}\nservices:\n  web:\n    image: nginx\n`);
+      const started = Date.now();
+      await expect(run()).resolves.toBeUndefined();
+      expect(Date.now() - started).toBeLessThan(5_000);
+    });
+
+    it('reads a large env file once for many includes', async () => {
+      await write('leaf.yaml', SAFE_COMPOSE);
+      await write('.env', `${Array.from({ length: 5_000 }, (_, i) => `K${i}=value${i}`).join('\n')}\n`);
+      await write('compose.yaml', `include:\n${Array.from({ length: 1500 }, () => '  - leaf.yaml').join('\n')}\n`);
+      const started = Date.now();
+      await expect(run()).resolves.toBeUndefined();
+      expect(Date.now() - started).toBeLessThan(8_000);
+    });
+  });
+
+  describe('a symlinked working directory', () => {
+    it('resolves relative dependencies from the physical directory, as Compose does', async () => {
+      await write('real/stack/compose.yaml', 'include:\n  - ../common.yaml\n');
+      await write('real/common.yaml', nestedAliasBomb(12));
+      await write('link-parent/common.yaml', SAFE_COMPOSE);
+      await fsPromises.symlink(path.join(dir, 'real', 'stack'), path.join(dir, 'link-parent', 'stack'));
+      await expect(run(path.join(dir, 'link-parent', 'stack'))).rejects.toThrow(/nested YAML aliases/);
+    });
+
+    it('does not refuse a benign stack because of a bomb beside the link', async () => {
+      await write('real/stack/compose.yaml', 'include:\n  - ../common.yaml\n');
+      await write('real/common.yaml', SAFE_COMPOSE);
+      await write('link-parent/common.yaml', nestedAliasBomb(12));
+      await fsPromises.symlink(path.join(dir, 'real', 'stack'), path.join(dir, 'link-parent', 'stack'));
+      await expect(run(path.join(dir, 'link-parent', 'stack'))).resolves.toBeUndefined();
+    });
+  });
+
+  describe('anchors and merge keys', () => {
+    it('counts only the last definition of a reused anchor name before an alias', async () => {
+      // The first &a is a bomb that the alias no longer names.
+      const source = [
+        'x0: &b0 [lol, lol, lol, lol, lol, lol, lol, lol, lol]',
+        ...Array.from({ length: 12 }, (_, i) => `x${i + 1}: &b${i + 1} [${Array.from({ length: 9 }, () => `*b${i}`).join(', ')}]`),
+      ];
+      // Bomb defined under the name a, then redefined as a scalar before use.
+      const bomb = source.join('\n').replace(/&b/g, '&a').replace(/\*b/g, '*a');
+      await write('compose.yaml', `${bomb}\nx-small: &a small\nx-use: [*a, *a, *a]\nservices:\n  web:\n    image: nginx\n`);
+      // x12 itself is still a bomb, so the file is refused; the redefinition does not hide it.
+      await expect(run()).rejects.toThrow(/nested YAML aliases/);
+    });
+
+    it('does not count an anchor name redefined before a reused alias against the earlier bomb', async () => {
+      await write('compose.yaml', [
+        'x-big: &a [lol, lol, lol, lol, lol, lol, lol, lol, lol]',
+        'x-small: &a small',
+        `x-use: [${Array.from({ length: 20 }, () => '*a').join(', ')}]`,
+        'services:',
+        '  web:',
+        '    image: nginx',
+      ].join('\n'));
+      await expect(run()).resolves.toBeUndefined();
+    });
+
+    it('refuses a bomb built from merge keys', async () => {
+      const lines = ['x0: &m0 {a: 1, b: 2, c: 3}'];
+      for (let level = 1; level <= 6; level += 1) {
+        const merged = Array.from({ length: 9 }, () => `*m${level - 1}`).join(', ');
+        lines.push(`x${level}: &m${level} {<<: [${merged}], k${level}: 1}`);
+      }
+      await write('compose.yaml', `${lines.join('\n')}\nservices:\n  web:\n    image: nginx\n`);
+      await expect(run()).rejects.toThrow(/nested YAML aliases/);
+    });
+
+    it('refuses a bomb whose aliases are mapping keys', async () => {
+      const lines = ['x0: &k0 [lol, lol, lol, lol, lol, lol, lol, lol, lol]'];
+      for (let level = 1; level <= 6; level += 1) {
+        lines.push(`x${level}: &k${level} {${Array.from({ length: 9 }, () => `*k${level - 1} : *k${level - 1}`).join(', ')}}`);
+      }
+      await write('compose.yaml', `${lines.join('\n')}\nservices:\n  web:\n    image: nginx\n`);
+      await expect(run()).rejects.toThrow(/nested YAML aliases/);
+    });
+  });
+
+  describe('env files', () => {
+    it('refuses an env file over the byte cap', async () => {
+      await write('compose.yaml', SAFE_COMPOSE);
+      await write('big.env', `K=${'x'.repeat(MAX_COMPOSE_INPUT_BYTES)}\n`);
+      await expect(run(dir, ['compose', '--env-file', 'big.env', 'config'])).rejects.toThrow(/Env file "big.env" is larger than 1 MiB/);
+    });
+
+    it('refuses an included project .env over the byte cap', async () => {
+      await write('compose.yaml', 'include:\n  - sub/dep.yaml\n');
+      await write('sub/dep.yaml', SAFE_COMPOSE);
+      await write('sub/.env', `K=${'x'.repeat(MAX_COMPOSE_INPUT_BYTES)}\n`);
+      await expect(run()).rejects.toThrow(/Env file ".*\.env" is larger than 1 MiB/);
+    });
+
+    it('treats a COMPOSE_ENV_FILES entry that does not exist as a Compose failure', async () => {
+      await write('compose.yaml', nestedAliasBomb(12));
+      await expect(run(dir, ['compose', 'config'], (name) => (name === 'COMPOSE_ENV_FILES' ? 'missing.env' : undefined)))
+        .resolves.toBeUndefined();
+    });
+
+    it('refuses a remote include project_directory', async () => {
+      await write('compose.yaml', 'include:\n  - path: dep.yaml\n    project_directory: https://example.com/repo.git\n');
+      await write('dep.yaml', SAFE_COMPOSE);
+      await expect(run()).rejects.toThrow(/remote include reference/);
+    });
+
+    it('treats a COMPOSE_FILE of only separators as nothing to measure', async () => {
+      await write('compose.yaml', nestedAliasBomb(12));
+      await expect(run(dir, ['compose', 'config'], (name) => (name === 'COMPOSE_FILE' ? ':::' : undefined)))
+        .resolves.toBeUndefined();
+    });
+
+    it('treats an include path that fails interpolation as unresolved', async () => {
+      await write('compose.yaml', 'include:\n  - ${REQUIRED:?must be set}/dep.yaml\n');
+      await expect(run()).resolves.toBeUndefined();
+    });
   });
 });
