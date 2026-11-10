@@ -144,11 +144,17 @@ describe('bootstrap operation routes: refusals', () => {
   });
 
   it('refuses a page cursor that is not one the list returned', async () => {
-    for (const cursor of ['garbage', 'e30', 'x'.repeat(300)]) {
+    for (const cursor of ['garbage', 'e30', 'x'.repeat(300), '']) {
       const res = await request(app).get('/api/nodes/bootstrap/operations').query({ cursor }).set('Authorization', adminAuth);
       expect(res.status).toBe(400);
       expect(res.body.code).toBe('INVALID_CURSOR');
     }
+  });
+
+  it('refuses a repeated cursor parameter instead of picking one', async () => {
+    const res = await request(app).get('/api/nodes/bootstrap/operations?cursor=a&cursor=b').set('Authorization', adminAuth);
+    expect(res.status).toBe(400);
+    expect(res.body.code).toBe('INVALID_CURSOR');
   });
 
   it('refuses a retry preflight for an operation that does not exist before any SSH work', async () => {

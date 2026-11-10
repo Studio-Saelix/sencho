@@ -38,7 +38,7 @@ export const WRITE_EXIT = {
  * Enter a directory without trusting its name twice, and only if it is the
  * directory that was approved. The name is inspected without following a final
  * symlink (it must be a directory), the shell changes into it, the directory it
- * is in must be the one inspected, and its physical path (`pwd -P`) must be the
+ * is in must be the one inspected (same device and inode), and its physical path (`pwd -P`) must be the
  * one the plan approved ($2): a name or an ancestor swapped for a symlink or
  * another directory, before this script started or in between, refuses here,
  * before anything is changed. Every later operation uses names relative to the
@@ -92,8 +92,11 @@ const WRITE_SCRIPT = [
   // file made for it until the rename lands, and holds the original afterwards,
   // whatever has appeared at the name since. Anything moved aside that was not
   // validated is never removed: when it cannot go back, it stays under its slot
-  // name and the script says so.
+  // name, and the script says so on standard error (which only reaches the
+  // caller while the session lives). A second signal must not cut the cleanup
+  // short, so signals are ignored while it runs.
   'cleanup() {',
+  "  trap '' HUP INT TERM PIPE",
   '  if [ -e "$t" ] && [ "./$n" -ef "$t" ]; then published=1; fi',
   '  rm -f "$t"',
   '  if [ "$moving" = 1 ] && [ -n "$slot" ] && { [ -e "$slot" ] || [ -L "$slot" ]; } && [ "$(stat -c "%d:%i" -- "$slot" 2>/dev/null)" != "$slot_id" ]; then old=$slot; slot=; fi',
@@ -189,10 +192,15 @@ const DIRECTORY_SCRIPT = [
   ENTER_VIA_LINKS,
   `case $p in /*) ;; *) echo "not an absolute path: $p" >&2; exit ${WRITE_EXIT.notDirectory} ;; esac`,
   'made=0',
-  // What mkdir leaves under umask 077 (the setgid bit comes from a parent that has it).
+  // A directory this script just made is empty, owned by this user and has the
+  // mode mkdir gives under umask 077 (the setgid bit comes from a parent that has
+  // it). A parent with an ACL is the exception: its default entries replace the
+  // umask, so the mode says nothing there and emptiness and ownership decide.
   'fresh() {',
   '  [ -O . ] && [ -z "$(ls -A)" ] || return 1',
-  '  case $(stat -c "%a" -- .) in 700|2700) ;; *) return 1 ;; esac',
+  '  case $(stat -c "%a" -- .) in 700|2700) return 0 ;; esac',
+  '  case $(ls -ld -- .. | cut -c11) in +) return 0 ;; esac',
+  '  return 1',
   '}',
   // Once something was created, a refusal is an unfinished change, not a clean one.
   'die() { code=$1; shift; echo "$*" >&2; if [ "$made" = 1 ]; then code=' + WRITE_EXIT.unfinished + '; fi; exit "$code"; }',
@@ -234,9 +242,10 @@ const DIRECTORY_SCRIPT = [
   `    enter "./$c" "$want" || die ${WRITE_EXIT.notDirectory} "changed while it was set up: $p"`,
   // The name was free when mkdir ran, but what the shell entered is only the
   // directory mkdir made if nothing else was put at the name in between. A
-  // directory made here is empty, owned by this user and has exactly the
-  // mode mkdir gave it; anything else was put there by someone else and is
-  // not touched.
+  // directory that is not empty, not owned by this user or not in the mode
+  // mkdir gives was put there by someone else and is not touched (an empty
+  // directory of this user's own with that mode cannot be told from the one
+  // just made, and is harmless to adjust).
   `    if [ "$created" = 1 ]; then fresh || die ${WRITE_EXIT.unfinished} "changed while it was set up: $p"; fi`,
   // A directory this script works in is owned by the user it runs as. One that
   // is not was put there by someone else, even if it appeared as a parent in the
@@ -253,17 +262,18 @@ const DIRECTORY_SCRIPT = [
 
 /**
  * Create the directory `dirPath` and any missing parents (as `install -d`
- * did) with the mode and owner, changing only directories it created. A name
- * that exists is refused, a symlink never followed; `allowExisting` accepts an
- * existing real directory (the apt keyring directory) and applies the mode and
- * owner to that directory itself, never through a symlink. The nearest existing
+ * did) with the mode and owner, changing only directories it created (and the
+ * one existing directory `allowExisting` accepts). A name that exists is
+ * refused, a symlink never followed; `allowExisting` accepts an existing real
+ * directory (the apt keyring directory) and applies the mode and owner to that
+ * directory itself, never through a symlink. The nearest existing
  * ancestor may itself be a symlink, which the plan discloses; it is entered
  * once and the new directories are made inside the directory it led to.
  * `approved` is the physical path the plan approved for `dirPath`: every
  * directory the script enters must be on the way to exactly that path, so an
  * ancestor swapped before the script started is refused. A directory it makes
- * is changed only when it is empty and still has the mode and owner it was
- * made with.
+ * is changed only while it is empty, owned by this user and in the mode mkdir
+ * gives (any mode under a parent with an ACL).
  */
 export function createDirectoryCommand(
   dirPath: string,

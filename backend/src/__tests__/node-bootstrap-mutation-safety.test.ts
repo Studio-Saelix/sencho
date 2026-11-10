@@ -6,7 +6,7 @@ import path from 'path';
 import { execFileSync, spawn, spawnSync } from 'child_process';
 import { READ_EXIT, WRITE_EXIT } from '../services/nodeBootstrap/executionCommands';
 import { approvedPath, directoryCommand, writeCommand } from './__helpers__/bootstrapCommands';
-import { StepFailure, TOKEN_PLACEHOLDER, runPlanStep, type StepContext } from '../services/nodeBootstrap/stepRunner';
+import { StepFailure, TOKEN_PLACEHOLDER, approvedDirectory, runPlanStep, type StepContext } from '../services/nodeBootstrap/stepRunner';
 import { buildPilotEnrollmentCompose } from '../helpers/pilotEnrollmentCompose';
 import { DOCKER_KEY_ASC } from './__helpers__/dockerRepoFixtures';
 import type { ExecOptions, ExecResult, ExecSession } from '../services/nodeBootstrap/sshExecClient';
@@ -996,7 +996,7 @@ describe('B1: execution is bound to the directory the plan approved', () => {
       fs.symlinkSync(decoy, keyrings);
       expect(runShell(command).status).toBe(WRITE_EXIT.exists);
       expect(modeOf(decoy)).toBe('700');
-      // A real directory put at the name instead is another directory than the approved one only by its path, so it is the one entered; a different location is what is refused.
+      // A real directory put back at the name is accepted only when it resolves to the approved path; with another approved path it is refused.
       fs.unlinkSync(keyrings);
       fs.mkdirSync(keyrings, { mode: 0o700 });
       const moved = directoryCommand(keyrings, { mode: '0755', owner, group }, { sudo: false, allowExisting: true, approved: path.join(root, 'elsewhere') });
@@ -1070,6 +1070,70 @@ describe('B1: execution is bound to the directory the plan approved', () => {
       expect(fs.readdirSync(path.join(base, 'mid'))).toEqual(['inner']);
       expect(fs.readdirSync(path.join(base, 'mid', 'inner'))).toEqual([]);
       expect(modeOf(path.join(base, 'mid'))).toBe('755');
+    });
+
+    it('leaves a non-empty directory with the mode mkdir gives alone, so emptiness is checked on its own', () => {
+      const parent = path.join(root, 'srv');
+      fs.mkdirSync(parent, { mode: 0o755 });
+      const unrelated = path.join(root, 'unrelated');
+      fs.mkdirSync(unrelated);
+      fs.chmodSync(unrelated, 0o700);
+      fs.writeFileSync(path.join(unrelated, 'keep'), 'operator data');
+      const result = runShell(directoryCommand(path.join(parent, 'agent'), dirSpec, { sudo: false, allowExisting: false }), '', swapAfterMkdir('agent', unrelated));
+      expect(result.status).toBe(WRITE_EXIT.unfinished);
+      expect(modeOf(path.join(parent, 'agent'))).toBe('700');
+      expect(fs.readFileSync(path.join(parent, 'agent', 'keep'), 'utf8')).toBe('operator data');
+    });
+
+    it('refuses a symlink put at the new name right after mkdir, and leaves what it points to alone', () => {
+      const parent = path.join(root, 'srv');
+      fs.mkdirSync(parent, { mode: 0o755 });
+      const unrelated = path.join(root, 'unrelated');
+      fs.mkdirSync(unrelated, { mode: 0o755 });
+      const shimDir = path.join(root, 'shim-link');
+      fs.mkdirSync(shimDir);
+      const realMkdir = execFileSync('sh', ['-c', 'command -v mkdir'], { encoding: 'utf8' }).trim();
+      fs.writeFileSync(path.join(shimDir, 'mkdir'), ['#!/bin/sh', `"${realMkdir}" "$@"; rc=$?`, `case "$2" in ./agent) rmdir ./agent && ln -s "${unrelated}" ./agent ;; esac`, 'exit $rc'].join('\n'), { mode: 0o755 });
+      const result = runShell(directoryCommand(path.join(parent, 'agent'), dirSpec, { sudo: false, allowExisting: false }), '', { PATH: `${shimDir}:${process.env.PATH ?? ''}` });
+      expect(result.status).toBe(WRITE_EXIT.unfinished);
+      expect(modeOf(unrelated)).toBe('755');
+    });
+
+    it('creates a directory under a setgid parent, which hands its bit on', () => {
+      const parent = path.join(root, 'srv');
+      fs.mkdirSync(parent, { mode: 0o755 });
+      fs.chmodSync(parent, 0o2755);
+      const target = path.join(parent, 'agent');
+      expect(runShell(directoryCommand(target, dirSpec, { sudo: false, allowExisting: false })).status).toBe(0);
+      expect(fs.statSync(target).isDirectory()).toBe(true);
+      expect(modeOf(target)).toBe('700');
+    });
+
+    /** What a default ACL on the parent does: mkdir ignores the umask, and ls marks the parent with a plus. */
+    function aclParent(withMark: boolean): { PATH: string } {
+      const dir = path.join(root, `shim-acl-${withMark ? 'marked' : 'plain'}`);
+      fs.mkdirSync(dir);
+      const realMkdir = execFileSync('sh', ['-c', 'command -v mkdir'], { encoding: 'utf8' }).trim();
+      const realLs = execFileSync('sh', ['-c', 'command -v ls'], { encoding: 'utf8' }).trim();
+      fs.writeFileSync(path.join(dir, 'mkdir'), ['#!/bin/sh', `"${realMkdir}" "$@"; rc=$?`, 'case "$2" in ./agent) chmod 0755 ./agent ;; esac', 'exit $rc'].join('\n'), { mode: 0o755 });
+      fs.writeFileSync(path.join(dir, 'ls'), ['#!/bin/sh', withMark ? 'case "$*" in "-ld -- ..") echo "drwxr-xr-x+ 3 u g 4096 Jan 1 00:00 .." ; exit 0 ;; esac' : ':', `exec "${realLs}" "$@"`].join('\n'), { mode: 0o755 });
+      return { PATH: `${dir}:${process.env.PATH ?? ''}` };
+    }
+
+    it('finishes a directory it made under a parent with an ACL, where mkdir does not give 0700', () => {
+      const parent = path.join(root, 'srv');
+      fs.mkdirSync(parent, { mode: 0o755 });
+      const target = path.join(parent, 'agent');
+      expect(runShell(directoryCommand(target, dirSpec, { sudo: false, allowExisting: false }), '', aclParent(true)).status).toBe(0);
+      expect(modeOf(target)).toBe('700');
+    });
+
+    it('still refuses an unexpected mode when the parent has no ACL', () => {
+      const parent = path.join(root, 'srv');
+      fs.mkdirSync(parent, { mode: 0o755 });
+      const target = path.join(parent, 'agent');
+      expect(runShell(directoryCommand(target, dirSpec, { sudo: false, allowExisting: false }), '', aclParent(false)).status).toBe(WRITE_EXIT.unfinished);
+      expect(modeOf(target)).toBe('755');
     });
 
     it('still finishes a directory it made itself', () => {
@@ -1164,5 +1228,64 @@ describe('B3: a stop right after the rename never deletes what was moved aside',
     expect(fs.readFileSync(target, 'utf8')).toBe('theirs');
     const kept = fs.readdirSync(root).filter((entry) => entry.startsWith('.compose.yaml.old.'));
     expect(kept.map((entry) => fs.readFileSync(path.join(root, entry), 'utf8'))).toEqual([previous]);
+  });
+});
+
+describe('B1: approvedDirectory names the directory each file is written into', () => {
+  const plan = {
+    paths: {
+      composeDir: { input: '/opt/docker/sencho', realPath: '/mnt/vol/sencho' },
+      agentDir: { input: '/opt/sencho-agent', realPath: '/data/agent' },
+    },
+  } as unknown as BootstrapPlan;
+
+  it('gives the resolved path of the Agent and Compose directories, with or without a trailing slash', () => {
+    expect(approvedDirectory(plan, '/opt/sencho-agent')).toBe('/data/agent');
+    expect(approvedDirectory(plan, '/opt/sencho-agent/')).toBe('/data/agent');
+    expect(approvedDirectory(plan, '/opt/docker/sencho')).toBe('/mnt/vol/sencho');
+  });
+
+  it('gives the literal path of any other directory (the apt directories must not be links)', () => {
+    expect(approvedDirectory(plan, '/etc/apt/keyrings')).toBe('/etc/apt/keyrings');
+    expect(approvedDirectory(plan, '/etc/apt/sources.list.d')).toBe('/etc/apt/sources.list.d');
+    expect(approvedDirectory(plan, '/')).toBe('/');
+  });
+
+  it('falls back to the input when the preflight recorded no resolved path', () => {
+    const unresolved = { paths: { composeDir: { input: '/opt/docker/sencho', realPath: null }, agentDir: { input: '/opt/sencho-agent', realPath: null } } } as unknown as BootstrapPlan;
+    expect(approvedDirectory(unresolved, '/opt/sencho-agent')).toBe('/opt/sencho-agent');
+  });
+});
+
+describe('B3: a stop before the rename, and a second stop during the cleanup', () => {
+  const edit = 'operator edit made after the file was read';
+
+  it('leaves the original at its name, and no slot, when the stop lands before the rename ran', () => {
+    const target = path.join(root, 'compose.yaml');
+    fs.writeFileSync(target, edit, { mode: 0o640 });
+    const dir = path.join(root, 'stop-before');
+    fs.mkdirSync(dir);
+    // The shim stops the shell and exits without moving anything.
+    fs.writeFileSync(path.join(dir, 'mv'), ['#!/bin/sh', 'case "$*" in -fT*.old.*) kill -TERM $PPID; exit 1 ;; esac', `exec "${execFileSync('sh', ['-c', 'command -v mv'], { encoding: 'utf8' }).trim()}" "$@"`].join('\n'), { mode: 0o755 });
+    const result = runShell(writeCommand(target, { ...file, sha256: sha256('new') }, { sudo: false, replaces: sha256('what was read') }), 'new', { PATH: `${dir}:${process.env.PATH ?? ''}` });
+    expect(result.status).not.toBe(0);
+    expect(fs.readFileSync(target, 'utf8')).toBe(edit);
+    expect(modeOf(target)).toBe('640');
+    expect(fs.readdirSync(root).filter((entry) => entry !== 'stop-before')).toEqual(['compose.yaml']);
+  });
+
+  it('finishes putting the original back when a second stop lands while it is being put back', () => {
+    const target = path.join(root, 'compose.yaml');
+    fs.writeFileSync(target, edit, { mode: 0o640 });
+    // No entry takes the name: the first stop alone is undone, and a second one lands during that.
+    const stopOnly = path.join(root, 'stop-only');
+    fs.mkdirSync(stopOnly);
+    const realMv = execFileSync('sh', ['-c', 'command -v mv'], { encoding: 'utf8' }).trim();
+    fs.writeFileSync(path.join(stopOnly, 'mv'), ['#!/bin/sh', `"${realMv}" "$@"; rc=$?`, 'case "$*" in -fT*.old.*) kill -TERM $PPID ;; esac', 'exit $rc'].join('\n'), { mode: 0o755 });
+    const second = signalingShim(root, 'ln', '*.old.*');
+    const result = runShell(writeCommand(target, { ...file, sha256: sha256('new') }, { sudo: false, replaces: sha256('what was read') }), 'new', { PATH: `${stopOnly}:${second.PATH}` });
+    expect(result.status).not.toBe(0);
+    expect(fs.readFileSync(target, 'utf8')).toBe(edit);
+    expect(fs.readdirSync(root).filter((entry) => !entry.startsWith('stop-') && !entry.startsWith('signal-'))).toEqual(['compose.yaml']);
   });
 });

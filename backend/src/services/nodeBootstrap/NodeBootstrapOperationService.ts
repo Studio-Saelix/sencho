@@ -427,7 +427,7 @@ export class NodeBootstrapOperationService {
       error_message: null,
       finished_at: null,
       active: 1,
-    }, now);
+    }, now, { stillActive: true });
     if (!moved) {
       throw new BootstrapError(409, 'OPERATION_NOT_RETRYABLE', 'This bootstrap changed state. Refresh it and try again.');
     }

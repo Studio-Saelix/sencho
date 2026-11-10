@@ -1582,8 +1582,8 @@ describe('bootstrap operations: S2 every held run stays discoverable', () => {
 
   /** `index` orders the rows (a higher one is newer); the name is unique across the tests, since released rows keep their ids. */
   let heldSerial = 0;
-  function insertHeld(index: number, state: 'partial' | 'blocked' = 'partial') {
-    const now = Date.now() + index;
+  function insertHeld(index: number, state: 'partial' | 'blocked' = 'partial', at?: number) {
+    const now = at ?? Date.now() + index;
     heldSerial += 1;
     const id = `00000000-0000-4000-8000-${String(1000 + heldSerial).padStart(12, '0')}`;
     db.insertNodeBootstrapOperation({
@@ -1664,6 +1664,37 @@ describe('bootstrap operations: S2 every held run stays discoverable', () => {
     for (const id of [...stillHeld, lateId.value]) h.service.release(id, AUDIT);
   });
 
+  it('keeps every hold that was created in the same millisecond reachable across a page boundary', () => {
+    const h = harness();
+    const at = Date.now() + 5_000;
+    const ids = Array.from({ length: 25 }, (_, index) => insertHeld(index, 'partial', at));
+    const { ids: seen, pages } = traverse(h);
+    expect(pages).toEqual([20, 5]);
+    expect([...seen].sort()).toEqual([...ids].sort());
+    expect(new Set(seen).size).toBe(25);
+    for (const id of ids) h.service.release(id, AUDIT);
+  });
+
+  it('reads each page of holds from an index in the order it returns them, so the cost follows the page', () => {
+    const raw = (db as unknown as { db: { prepare: (sql: string) => { all: (...args: unknown[]) => Array<{ detail: string }> } } }).db;
+    const plan = (sql: string, ...args: unknown[]) => raw.prepare(`EXPLAIN QUERY PLAN ${sql}`).all(...args).map((row) => row.detail).join(' | ');
+    const first = plan('SELECT * FROM node_bootstrap_operations WHERE active = 1 ORDER BY created_at DESC, id DESC LIMIT ?', 21);
+    const later = plan(`SELECT * FROM node_bootstrap_operations WHERE active = 1 AND (created_at < ? OR (created_at = ? AND id < ?)) ORDER BY created_at DESC, id DESC LIMIT ?`, 1, 1, 'x', 21);
+    for (const detail of [first, later]) {
+      expect(detail).toContain('idx_node_bootstrap_ops_active_page');
+      expect(detail).not.toContain('TEMP B-TREE');
+    }
+  });
+
+  it('does not bring a released run back when a retry races the release', () => {
+    const held = insertHeld(0);
+    db.transitionNodeBootstrapOperation(held, ['partial'], { active: 0 }, Date.now());
+    const states = ['blocked', 'failed', 'partial', 'cancelled', 'outcome_unknown', 'recovery_required'] as const;
+    // The retry's compare-and-set arrives after the release: it must lose, not make the row hold its server again.
+    expect(db.transitionNodeBootstrapOperation(held, states, { state: 'rechecking', active: 1 }, Date.now(), { stillActive: true })).toBe(false);
+    expect(db.getNodeBootstrapOperation(held)).toMatchObject({ state: 'partial', active: 0 });
+  });
+
   it('puts the finished history on the first page only and refuses a cursor that is not one of its own', () => {
     const h = harness();
     const ids = Array.from({ length: 22 }, (_, index) => insertHeld(200 + index));
@@ -1680,9 +1711,11 @@ describe('bootstrap operations: S2 every held run stays discoverable', () => {
 
   it('caps the finished history, and the holds are paged on their own', () => {
     const h = harness();
-    const held = insertHeld(40);
+    // Newer than anything an earlier test left behind, so the newest finished runs are this test's own.
+    const base = Date.now() + 1_000_000;
+    const held = insertHeld(40, 'partial', base + 40);
     const finished = Array.from({ length: 23 }, (_, index) => {
-      const id = insertHeld(50 + index, 'blocked');
+      const id = insertHeld(50 + index, 'blocked', base + 50 + index);
       h.service.release(id, AUDIT);
       return id;
     });

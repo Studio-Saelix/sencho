@@ -95,7 +95,7 @@ export function BootstrapOperationsList({
       )}
       {finished.length > recent.length && (
         <p className="font-mono text-[10px] uppercase tracking-[0.18em] text-stat-subtitle" data-testid="bootstrap-runs-older-hidden">
-          Showing the latest {RECENT_STOPPED} finished runs. Runs that still hold a server are all reachable.
+          Showing the latest {RECENT_STOPPED} finished runs. A run that still holds a server is never left out of the pages.
         </p>
       )}
     </section>

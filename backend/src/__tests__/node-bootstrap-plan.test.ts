@@ -64,6 +64,22 @@ describe('bootstrap plan builder', () => {
     expect(step.command).not.toContain('install -d');
   });
 
+  it('approves the resolved path of a directory that is reached through a link, not the path it was typed as', () => {
+    const facts = makeFacts({
+      composeDir: { input: '/opt/docker/sencho', exists: false, isDirectory: false, realPath: '/mnt/volume/sencho', parentWritableByUser: true },
+      agentDir: { input: '/opt/sencho-agent', exists: false, isDirectory: false, realPath: '/data/agent', parentWritableByUser: true },
+      docker: { cliInstalled: false, serverVersion: null, composeVersion: null, serviceActive: false, serviceEnabled: false, socketAccess: 'none' },
+      repo: { probeComplete: true, dockerSourceConfigured: false, keyringPresent: false, sourceVerified: false, keyringVerified: false, candidateSourceVerified: null, problem: null },
+    });
+    const steps = allSteps(planFor(facts));
+    const compose = steps.find((entry) => entry.id === 'create-compose-dir');
+    const agent = steps.find((entry) => entry.id === 'create-agent-dir');
+    expect(compose?.command).toMatch(/sencho-mkdir '\/opt\/docker\/sencho' '0755' 'ubuntu' 'ubuntu' '0' '\/mnt\/volume\/sencho'$/);
+    expect(agent?.command).toMatch(/sencho-mkdir '\/opt\/sencho-agent' '0700' 'ubuntu' 'ubuntu' '0' '\/data\/agent'$/);
+    // The keyring directory is approved by its literal path.
+    expect(steps.find((entry) => entry.id === 'docker-keyring-dir')?.command).toMatch(/sencho-mkdir '\/etc\/apt\/keyrings' '0755' 'root' 'root' '1' '\/etc\/apt\/keyrings'$/);
+  });
+
   it('lets only the apt keyring directory exist already: the Compose and Agent directories must be new', () => {
     const facts = makeFacts({
       composeDir: { exists: false, isDirectory: false, realPath: '/opt/docker/sencho', parentWritableByUser: true },

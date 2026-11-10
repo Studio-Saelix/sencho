@@ -46,7 +46,8 @@ export function useBootstrapOperation({ open, api }: UseBootstrapOperationOption
   // Where the next page of held runs begins; null when the loaded rows end the holds.
   const [nextCursor, setNextCursor] = useState<string | null>(null);
   const [loadingMore, setLoadingMore] = useState(false);
-  // Bumped by every read of the first page, so a later page that was still on its way is dropped, not stitched onto a newer list.
+  // Bumped when a read of the first page starts and again when its answer is applied, so a later page that
+  // was asked for with the old cursor, before or while that read ran, is dropped instead of stitched onto the new list.
   const listGeneration = useRef(0);
   // Consecutive failed progress reads for the shown run; reset by any answer.
   const [pollFailures, setPollFailures] = useState(0);
@@ -65,6 +66,7 @@ export function useBootstrapOperation({ open, api }: UseBootstrapOperationOption
     listGeneration.current += 1;
     try {
       const page = await client.list(signal);
+      listGeneration.current += 1;
       setOperations(page.operations);
       setNextCursor(page.nextCursor);
       setListFailed(false);
@@ -86,6 +88,7 @@ export function useBootstrapOperation({ open, api }: UseBootstrapOperationOption
     listGeneration.current += 1;
     client.list(controller.signal)
       .then((page) => {
+        listGeneration.current += 1;
         setOperations(page.operations);
         setNextCursor(page.nextCursor);
         setListFailed(false);

@@ -302,7 +302,7 @@ async function publishFile(
     throw new StepFailure('failed', 'WRITE_INCOMPLETE', `${file.path} did not arrive in full, so it was not put in place. The connection may have dropped.`, commandDetail(result, ctx.secrets), { changedNothing: true });
   }
   if (result.exitCode === WRITE_EXIT.notDirectory) {
-    throw new StepFailure('failed', 'DIRECTORY_CHANGED', `The directory for ${file.path} is not the directory the plan approved (it is not a directory any more, or it, or one of its parents, was replaced or redirected). Nothing was written.`, commandDetail(result, ctx.secrets), { changedNothing: true });
+    throw new StepFailure('failed', 'DIRECTORY_CHANGED', `The directory for ${file.path} is not the directory the plan approved (it is not a directory any more, or it, or one of its parents, was replaced or redirected; an apt directory that is itself reached through a link on this host ends here too). Nothing was written.`, commandDetail(result, ctx.secrets), { changedNothing: true });
   }
   if (result.exitCode === WRITE_EXIT.exists || result.exitCode === WRITE_EXIT.notRegular) {
     // A replacement moves the inspected file aside first, so only a plain write is known to have changed nothing.
@@ -506,7 +506,7 @@ async function runCommandStep(step: BootstrapPlanStep, ctx: StepContext): Promis
       throw new StepFailure('failed', 'STEP_FAILED', `"${step.title}" failed (exit ${result.exitCode}); nothing was created.`, detail, { changedNothing: true });
     }
     if (result.exitCode === WRITE_EXIT.unfinished) {
-      throw new StepFailure('recovery', 'DIRECTORY_NOT_FINISHED', `Setting up ${step.target.path} could not be finished: a directory on the way to it was created or adjusted, and its owner or mode could not be set, or what was found where it was made was not the directory just made. Look at it on the host before retrying.`, detail);
+      throw new StepFailure('recovery', 'DIRECTORY_NOT_FINISHED', `Setting up ${step.target.path} could not be finished: a directory on the way to it was created or adjusted and its owner or mode could not be set, what was found where it was made was not the directory just made, or a directory on the way is not owned by this user. Look at it on the host before retrying.`, detail);
     }
   }
   if (result.exitCode !== 0) {

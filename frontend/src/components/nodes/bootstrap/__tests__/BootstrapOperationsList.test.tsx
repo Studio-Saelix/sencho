@@ -73,7 +73,7 @@ describe('BootstrapOperationsList', () => {
     expect(onLoadMore).toHaveBeenCalledTimes(1);
   });
 
-  it('shows no more-button when the hub has no further page, and disables it while one loads', () => {
+  it('shows no more-button when the hub has no further page', () => {
     renderList([operation(1)], { hasMore: false, onLoadMore: vi.fn() });
     expect(screen.queryByTestId('bootstrap-runs-more')).not.toBeInTheDocument();
   });

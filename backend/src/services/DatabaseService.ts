@@ -1784,6 +1784,9 @@ export class DatabaseService {
         ON node_bootstrap_operations(target_key) WHERE active = 1;
       CREATE UNIQUE INDEX IF NOT EXISTS idx_node_bootstrap_ops_active_key
         ON node_bootstrap_operations(host_key_fingerprint) WHERE active = 1;
+      -- A page of held runs reads in the order it is returned, so its cost follows the page, not the number of holds.
+      CREATE INDEX IF NOT EXISTS idx_node_bootstrap_ops_active_page
+        ON node_bootstrap_operations(created_at DESC, id DESC) WHERE active = 1;
 
       CREATE TABLE IF NOT EXISTS node_bootstrap_events (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -6836,11 +6839,13 @@ stmt.run('gitops_schema_version', '1');
         from: readonly NodeBootstrapOperationState[],
         updates: NodeBootstrapOperationTransition,
         now: number,
+        options: { stillActive?: boolean } = {},
     ): boolean {
         const { assignments, values } = bootstrapAssignments(updates);
         assignments.push('updated_at = ?');
+        // `stillActive` keeps a release that lands first from being undone: the row is only moved while it still holds its server.
         const result = this.db.prepare(
-            `UPDATE node_bootstrap_operations SET ${assignments.join(', ')} WHERE id = ? AND state IN (${from.map(() => '?').join(', ')})`
+            `UPDATE node_bootstrap_operations SET ${assignments.join(', ')} WHERE id = ? AND state IN (${from.map(() => '?').join(', ')})${options.stillActive ? ' AND active = 1' : ''}`
         ).run(...values, now, id, ...from);
         return result.changes === 1;
     }

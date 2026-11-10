@@ -496,4 +496,33 @@ describe('held runs arrive a page at a time', () => {
     expect(result.current.operations.map((entry) => entry.id)).toEqual(['held-30']);
     expect(result.current.hasMoreOperations).toBe(false);
   });
+  it('drops a page asked for while the first page was being read again', async () => {
+    type Page = { operations: BootstrapOperationDetail[]; nextCursor: string | null };
+    let finishRefresh: (page: Page) => void = () => undefined;
+    let finishMore: (page: Page) => void = () => undefined;
+    vi.mocked(listBootstrapOperations)
+      .mockResolvedValueOnce({ operations: firstPage, nextCursor: 'cursor-1' })
+      .mockReturnValueOnce(new Promise((resolve) => { finishRefresh = resolve; }))
+      .mockReturnValueOnce(new Promise((resolve) => { finishMore = resolve; }));
+    const { result } = renderHook(() => useBootstrapOperation({ open: true }));
+    await waitFor(() => expect(result.current.operations).toHaveLength(20));
+    let refresh: Promise<void> = Promise.resolve();
+    act(() => { refresh = result.current.refreshList(); });
+    // The next page is asked for with the old cursor while the refresh is still on its way.
+    let more: Promise<void> = Promise.resolve();
+    act(() => { more = result.current.loadMore(); });
+    // The refresh answers first, then the page that was read with the old cursor.
+    await act(async () => {
+      finishRefresh({ operations: [held(30), ...firstPage.slice(0, 19)], nextCursor: 'cursor-2' });
+      await refresh;
+    });
+    await act(async () => {
+      finishMore({ operations: secondPage, nextCursor: null });
+      await more;
+    });
+    // The refreshed first page stands with its own cursor; the page read with the old one was not stitched on.
+    expect(result.current.operations).toHaveLength(20);
+    expect(result.current.operations.map((entry) => entry.id)).not.toContain('held-0');
+    expect(result.current.hasMoreOperations).toBe(true);
+  });
 });
