@@ -276,7 +276,7 @@ export async function startServer(server: Server): Promise<void> {
   try {
     NodeBootstrapOperationService.getInstance().recoverOnStartup();
   } catch (err) {
-    console.error('[Startup] Node bootstrap operation recovery failed:', getErrorMessage(err, 'unknown error'));
+    console.error('[Startup] Node bootstrap operation recovery failed:', sanitizeForLog(getErrorMessage(err, 'unknown error')));
   }
 
   runRecoveryReconcile();

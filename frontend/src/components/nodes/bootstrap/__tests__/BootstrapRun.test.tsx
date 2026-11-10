@@ -399,3 +399,19 @@ describe('run controls and degraded reads', () => {
     expect(() => operationStages(unknown)).not.toThrow();
   });
 });
+
+describe('polling after the session ends', () => {
+  it('stops polling on a 401 and keeps the last state with the stale notice', async () => {
+    vi.useFakeTimers();
+    const { BootstrapApiError } = await import('../bootstrapApi');
+    vi.mocked(fetchBootstrapOperation).mockRejectedValue(new BootstrapApiError('Unauthorized', 'HTTP_401', null));
+    const { result } = renderHook(() => useBootstrapOperation({ open: true }));
+    act(() => result.current.show(operation()));
+    for (let tick = 0; tick < 4; tick += 1) {
+      await act(async () => { await vi.advanceTimersByTimeAsync(OPERATION_POLL_MS); });
+    }
+    expect(fetchBootstrapOperation).toHaveBeenCalledTimes(1);
+    expect(result.current.progressStale).toBe(true);
+    expect(result.current.operation?.state).toBe('running');
+  });
+});

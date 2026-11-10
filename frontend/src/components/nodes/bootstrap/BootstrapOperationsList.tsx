@@ -29,18 +29,18 @@ export function BootstrapOperationsList({
   const active = operations.filter((operation) => operation.active);
   const recent = operations.filter((operation) => !operation.active).slice(0, RECENT_STOPPED);
   const rows = [...active, ...recent];
-  if (loadFailed) {
-    return (
-      <p className="font-mono text-[10px] uppercase tracking-[0.18em] text-stat-subtitle" data-testid="bootstrap-runs-unavailable">
-        Earlier bootstrap runs could not be loaded.
-      </p>
-    );
-  }
-  if (rows.length === 0) return null;
+  // A failed refresh keeps the rows already loaded and says the list may be stale.
+  const unavailable = loadFailed ? (
+    <p className="font-mono text-[10px] uppercase tracking-[0.18em] text-stat-subtitle" data-testid="bootstrap-runs-unavailable">
+      {rows.length > 0 ? 'Bootstrap runs could not be refreshed.' : 'Earlier bootstrap runs could not be loaded.'}
+    </p>
+  ) : null;
+  if (rows.length === 0) return unavailable;
 
   return (
     <section className="space-y-2" aria-label="Bootstrap runs">
       <h4 className="font-mono text-[10px] uppercase tracking-[0.18em] text-stat-subtitle">Bootstrap runs</h4>
+      {unavailable}
       <ul className="rounded-lg border border-muted bg-card/40 px-3 py-1">
         {rows.map((operation) => {
           const state = operationStateWord(operation);

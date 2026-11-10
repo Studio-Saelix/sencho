@@ -38,14 +38,15 @@ const KEY_READ_BYTES = 12_288;
 
 const COMPOSE_FILE_NAMES = `\\( -name 'compose.yaml' -o -name 'compose.yml' -o -name 'docker-compose.yaml' -o -name 'docker-compose.yml' \\)`;
 
+/** The candidate query for every Docker package, shared by the preflight and the run's pre-install check. */
+export const APT_POLICY_COMMAND = 'apt-cache policy docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin 2>/dev/null';
+
 /**
  * Every Docker command runs against the host's own unix socket. The operator's
  * shell environment and ~/.docker/config.json can select a different, remote
  * context; an explicit default context plus DOCKER_HOST makes the inspected
  * daemon and the planned start command the same local daemon.
  */
-/** The candidate query for every Docker package, shared by the preflight and the run's pre-install check. */
-export const APT_POLICY_COMMAND = 'apt-cache policy docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin 2>/dev/null';
 export const DOCKER_LOCAL_ENDPOINT = 'unix:///var/run/docker.sock';
 export const DOCKER_LOCAL_UNSET_ARGS = '-u DOCKER_HOST -u DOCKER_CONTEXT -u DOCKER_CONFIG';
 export const DOCKER_LOCAL_ASSIGNMENTS = `DOCKER_CONTEXT=default DOCKER_HOST=${DOCKER_LOCAL_ENDPOINT}`;

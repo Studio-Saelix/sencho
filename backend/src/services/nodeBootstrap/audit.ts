@@ -39,6 +39,6 @@ export function recordBootstrapAudit(
       summary,
     });
   } catch (error: unknown) {
-    console.warn('[Bootstrap] Audit log write failed:', error instanceof Error ? error.message : 'unknown');
+    console.warn(`[Bootstrap] Audit log write failed for ${sanitizeForLog(action)}:`, sanitizeForLog(error instanceof Error ? error.message : 'unknown'));
   }
 }

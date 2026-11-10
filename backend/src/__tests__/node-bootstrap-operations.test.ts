@@ -96,6 +96,7 @@ class FakeHost {
   public opened = 0;
   public openedWith: Array<{ session: { host: string; address: string; port: number; username: string }; expectedFingerprint: string }> = [];
   public policy = officialPolicy();
+  public codename = 'noble';
   /** When set, opening the session waits on this (a slow connect), honouring the abort signal. */
   public openGate: Promise<void> | null = null;
 
@@ -171,6 +172,7 @@ class FakeHost {
       return ok();
     }
     if (command === APT_POLICY_COMMAND) return ok(this.policy);
+    if (command.includes('/etc/os-release')) return ok(`${this.codename}\n`);
     if (command.includes("docker version --format '{{.Server.Version}}'")) return ok('27.3.1\n');
     if (command.includes('docker compose version --short')) return ok('2.29.7\n');
     if (command.includes('systemctl is-active docker; systemctl is-enabled docker')) return ok('active\nenabled\n');
@@ -256,6 +258,7 @@ function harness(options: { facts?: BootstrapFacts; enrollWaitMs?: number; conne
       return { token: `eyJhbGciOiJIUzI1NiJ9.enroll-${nodeId}-${minted.length}.signature-material`, expiresAt: Date.now() + (options.tokenTtlMs ?? 15 * 60_000) };
     },
     enrollWaitMs: options.enrollWaitMs ?? 2_000,
+    aptLockRetry: { intervalMs: 5, totalMs: 1_000 },
   });
   if (options.connectOnStart !== false) {
     host.override = (command) => {
@@ -745,7 +748,7 @@ describe('bootstrap operations: failure paths found in review', () => {
     h.service.release(op.id, AUDIT);
   });
 
-  it('reports a file that did not arrive in full as an unknown outcome and never puts it in place', async () => {
+  it('refuses a file that did not arrive in full and never puts it in place', async () => {
     const h = harness({ facts: makeFacts() });
     const { request } = approve(h);
     h.host.override = (command) => (command.includes("'compose.yaml'") && command.includes('sencho-write')
@@ -753,7 +756,8 @@ describe('bootstrap operations: failure paths found in review', () => {
       : undefined);
     const op = h.service.start(request, context());
     await h.service.settled();
-    expect(h.service.get(op.id)).toMatchObject({ state: 'outcome_unknown', error: { code: 'WRITE_INCOMPLETE' }, active: true });
+    // Earlier steps had already changed the server, so the run stops partway and keeps it.
+    expect(h.service.get(op.id)).toMatchObject({ state: 'partial', error: { code: 'WRITE_INCOMPLETE' }, active: true });
     expect(h.host.files.has('/opt/sencho-agent/compose.yaml')).toBe(false);
     h.service.release(op.id, AUDIT);
     const nodeId = h.service.get(op.id).nodeId;
@@ -1039,5 +1043,265 @@ describe('bootstrap recheck: the address pin', () => {
       pinnedAddress: '192.168.1.76',
     })).rejects.toMatchObject({ code: 'TARGET_CHANGED' });
     expect(runCommands).not.toHaveBeenCalled();
+  });
+});
+
+describe('bootstrap operations: round two review cases', () => {
+  const okResult = (stdout = '') => ({ exitCode: 0, stdout, stderr: '', truncated: false, timedOut: false, error: null });
+
+  it('reads a policy far longer than the command output tail and installs from it', async () => {
+    const h = harness();
+    // Real hosts list every version the repository serves: about 32 KB for the five packages.
+    const versions = Array.from({ length: 400 }, (_, index) => `     1.0.${index}-1 500\n        500 https://download.docker.com/linux/ubuntu noble/stable amd64 Packages`).join('\n');
+    h.host.policy = officialPolicy().split('\n  Version table:\n').join(`\n  Version table:\n${versions}\n`);
+    expect(h.host.policy.length).toBeGreaterThan(16 * 1024);
+    const { request } = approve(h);
+    const op = h.service.start(request, context());
+    await h.service.settled();
+    expect(h.service.get(op.id).state).toBe('enrolled');
+    db.deleteNode(h.service.get(op.id).nodeId as number);
+  });
+
+  it.each([
+    ['the archives serve another release', (h: Harness) => { h.host.codename = 'jammy'; }, /no candidate from the official Docker repository/],
+    ['apt cannot answer', (h: Harness) => {
+      h.host.override = (command) => (command === APT_POLICY_COMMAND ? { exitCode: 100, stdout: '', stderr: 'E: broken sources', truncated: false, timedOut: false, error: null } : undefined);
+    }, /apt could not report/],
+    ['the host release cannot be read', (h: Harness) => {
+      h.host.override = (command) => (command.includes('/etc/os-release') ? { exitCode: 1, stdout: '', stderr: 'No such file', truncated: false, timedOut: false, error: null } : undefined);
+    }, /host release could not be read/],
+  ])('installs nothing when %s', async (_label, arrange, message) => {
+    const h = harness();
+    arrange(h);
+    const { request } = approve(h);
+    const op = h.service.start(request, context());
+    await h.service.settled();
+    const detail = h.service.get(op.id);
+    expect(detail).toMatchObject({ state: 'partial', error: { code: 'CANDIDATE_NOT_VERIFIED' } });
+    expect(detail.error?.message).toMatch(message);
+    expect(h.host.commands.some((entry) => /apt-get (-o \S+ )?install /.test(entry.command))).toBe(false);
+    h.service.release(op.id, AUDIT);
+  });
+
+  it('installs nothing when a pinned version is no longer the candidate', async () => {
+    const pinned = freshFacts({
+      repo: { dockerSourceConfigured: true, keyringPresent: true, sourceVerified: true, keyringVerified: true, candidateSourceVerified: true, sourceLocations: 'default' },
+      packages: ['docker-ce', 'docker-ce-cli', 'containerd.io', 'docker-buildx-plugin', 'docker-compose-plugin'].map((name) => ({
+        name: name as 'docker-ce', installedVersion: null, candidateVersion: '0.9.0-1',
+        candidateSources: [{ uri: 'https://download.docker.com/linux/ubuntu' as const, official: true }],
+      })),
+    });
+    const h = harness({ facts: pinned });
+    const { request, plan } = approve(h);
+    expect(plan.stages.flatMap((stage) => stage.steps).find((step) => step.id === 'install-docker-packages')?.command).toContain('docker-ce=0.9.0-1');
+    const op = h.service.start(request, context());
+    await h.service.settled();
+    expect(h.service.get(op.id).error?.message).toMatch(/docker-ce would install 1\.0\.0-1, not 0\.9\.0-1/);
+    if (h.service.get(op.id).active) h.service.release(op.id, AUDIT);
+  });
+
+  it('retries the metadata refresh while another apt job holds the lists lock, within a bound', async () => {
+    const locked = { exitCode: 100, stdout: '', stderr: 'E: Could not get lock /var/lib/apt/lists/lock. It is held by process 812 (apt-get)', truncated: false, timedOut: false, error: null };
+    const waits = harness();
+    let held = 2;
+    const connect = waits.host.override;
+    waits.host.override = (command, options) => (/apt-get (-o \S+ )?update/.test(command) && held-- > 0 ? locked : connect?.(command, options));
+    const first = approve(waits);
+    const op = waits.service.start(first.request, context());
+    await waits.service.settled();
+    expect(waits.service.get(op.id).error).toBeNull();
+    expect(waits.service.get(op.id).state).toBe('enrolled');
+    expect(waits.host.commands.filter((entry) => /apt-get (-o \S+ )?update/.test(entry.command))).toHaveLength(3);
+    db.deleteNode(waits.service.get(op.id).nodeId as number);
+
+    const never = harness();
+    never.host.override = (command) => (/apt-get (-o \S+ )?update/.test(command) ? locked : undefined);
+    const second = approve(never);
+    const op2 = never.service.start(second.request, context());
+    await never.service.settled();
+    expect(never.service.get(op2.id)).toMatchObject({ state: 'partial', error: { code: 'STEP_FAILED' } });
+    const attempts = never.host.commands.filter((entry) => /apt-get (-o \S+ )?update/.test(entry.command)).length;
+    // Retried, then given up once the bound ran out instead of waiting forever.
+    expect(attempts).toBeGreaterThan(2);
+    expect(attempts).toBeLessThanOrEqual(1_000 / 5 + 1);
+    never.service.release(op2.id, AUDIT);
+  });
+
+  it('keeps a step failure that lands after a cancel request instead of calling it cancelled', async () => {
+    const h = harness({ facts: makeFacts() });
+    let release: () => void = () => undefined;
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    h.host.override = (command) => (command.includes('up -d')
+      ? gate.then(() => ({ exitCode: null, stdout: '', stderr: '', truncated: false, timedOut: false, error: 'CONNECTION_LOST' as const }))
+      : undefined);
+    const { request } = approve(h);
+    const op = h.service.start(request, context());
+    await vi.waitFor(() => expect(h.host.commands.some((entry) => entry.command.includes('up -d'))).toBe(true), { timeout: 10_000 });
+    h.service.cancel(op.id, AUDIT);
+    release();
+    await h.service.settled();
+    expect(h.service.get(op.id)).toMatchObject({ state: 'outcome_unknown', error: { code: 'SSH_CONNECTION_LOST' }, active: true });
+    h.service.release(op.id, AUDIT);
+    const nodeId = h.service.get(op.id).nodeId;
+    if (nodeId) db.deleteNode(nodeId);
+  });
+
+  it('audits how each attempt ended', async () => {
+    const h = harness({ facts: makeFacts(), connectOnStart: false, enrollWaitMs: 20 });
+    const { request } = approve(h);
+    const op = h.service.start(request, context());
+    await h.service.settled();
+    const rows = db.getAuditLogs({ limit: 500, search: op.id }).entries.map((row) => ({ summary: row.summary, status: row.status_code }));
+    expect(rows).toEqual(expect.arrayContaining([
+      expect.objectContaining({ summary: expect.stringMatching(/^bootstrap\.execute\.approved: operation=/), status: 200 }),
+      expect.objectContaining({ summary: expect.stringMatching(/^bootstrap\.execute\.finished: .*state=partial .*code=ENROLLMENT_NOT_CONNECTED/), status: 500 }),
+    ]));
+    h.service.release(op.id, AUDIT);
+    db.deleteNode(h.service.get(op.id).nodeId as number);
+  });
+
+  it('checks the compose file before registering a node or minting anything', async () => {
+    const h = harness({ facts: makeFacts() });
+    const tampered = (plan: BootstrapPlan): BootstrapPlan => ({
+      ...plan,
+      stages: plan.stages.map((stage) => ({
+        ...stage,
+        steps: stage.steps.map((step) => (step.id === 'agent-compose-file' && step.file
+          ? { ...step, file: { ...step.file, content: `${step.file.content}# changed\n` } }
+          : step)),
+      })),
+    });
+    h.preflight.mockImplementation(async (_input: unknown, ctx: { planNow?: number }) => resultFor(tampered(planFrom(h.facts.current, ctx.planNow ?? NOW, h.name)), h.facts.current));
+    const plan = tampered(planFrom(h.facts.current, Date.now(), h.name));
+    h.service.rememberPlan(resultFor(plan, h.facts.current), TEST_USERNAME, null);
+    const nodes = db.getNodes().length;
+    const op = h.service.start({
+      host: plan.target.host, port: plan.target.port, username: plan.target.username, privateKey: PRIVATE_KEY, passphrase: null,
+      expectedFingerprint: plan.hostKeyFingerprint, targetName: plan.targetName, composeDir: plan.paths.composeDir.input,
+      agentDir: plan.paths.agentDir.input, planDigest: plan.digest,
+    }, context());
+    await h.service.settled();
+    const detail = h.service.get(op.id);
+    expect(detail.error?.code).toBe('PLAN_INVALID');
+    expect(detail.nodeId).toBeNull();
+    expect(h.minted).toEqual([]);
+    expect(db.getNodes()).toHaveLength(nodes);
+    if (detail.active) h.service.release(op.id, AUDIT);
+  });
+
+  it('holds the target once a node is registered, even when the compose write then fails cleanly', async () => {
+    // A leftover marker means nothing before the compose file changes the host.
+    const h = harness({
+      facts: makeFacts({
+        agentDir: {
+          exists: true, isDirectory: true, realPath: '/opt/sencho-agent', writableByUser: true, readableByUser: true,
+          entries: ['sencho-bootstrap.json'], hasMarker: true, markerProject: 'sencho-agent',
+          markerComposeDir: '/opt/docker/sencho', markerAgentDir: '/opt/sencho-agent',
+        },
+      }),
+    });
+    h.host.dirs.set('/opt/sencho-agent', { mode: '0700', owner: 'ubuntu', group: 'ubuntu' });
+    h.host.files.set('/opt/sencho-agent/sencho-bootstrap.json', {
+      content: JSON.stringify({ project: 'sencho-agent', composeDir: '/opt/docker/sencho', agentDir: '/opt/sencho-agent' }),
+      mode: '0600', owner: 'ubuntu', group: 'ubuntu',
+    });
+    h.host.override = (command) => (command.includes("'compose.yaml'") && command.includes('sencho-write')
+      ? { exitCode: 1, stdout: '', stderr: 'mktemp: failed', truncated: false, timedOut: false, error: null }
+      : undefined);
+    const { request } = approve(h);
+    const op = h.service.start(request, context());
+    await h.service.settled();
+    const detail = h.service.get(op.id);
+    expect(detail.nodeId).not.toBeNull();
+    expect(detail).toMatchObject({ state: 'partial', active: true, actions: { retry: true } });
+    h.service.release(op.id, AUDIT);
+    db.deleteNode(detail.nodeId as number);
+  });
+
+  it('consumes a retry approval only once and clears the previous enrollment expiry', async () => {
+    const h = harness({ connectOnStart: false, enrollWaitMs: 20 });
+    const first = approve(h);
+    const op = h.service.start(first.request, context());
+    await h.service.settled();
+    expect(h.service.get(op.id).enrollmentExpiresAt).not.toBeNull();
+    let release: () => void = () => undefined;
+    h.host.openGate = new Promise<void>((resolve) => { release = resolve; });
+    const again = approve(h, op.id);
+    const retried = h.service.retry(op.id, again.request, context());
+    expect(retried.enrollmentExpiresAt).toBeNull();
+    h.service.cancel(op.id, AUDIT);
+    release();
+    await h.service.settled();
+    expect(() => h.service.retry(op.id, again.request, context())).toThrow(/no longer current/);
+    if (h.service.get(op.id).active) h.service.release(op.id, AUDIT);
+    db.deleteNode(h.service.get(op.id).nodeId as number);
+  });
+
+  it('refuses to release a run in progress or one already released', async () => {
+    const h = harness({ connectOnStart: false, enrollWaitMs: 60_000 });
+    const { request } = approve(h);
+    const op = h.service.start(request, context());
+    expect(() => h.service.release(op.id, AUDIT)).toThrow(/Only a stopped bootstrap/);
+    await vi.waitFor(() => expect(h.service.get(op.id).state).toBe('enrolling'), { timeout: 10_000 });
+    h.service.cancel(op.id, AUDIT);
+    await h.service.settled();
+    expect(h.service.get(op.id).active).toBe(true);
+    h.service.release(op.id, AUDIT);
+    expect(() => h.service.release(op.id, AUDIT)).toThrow(/Only a stopped bootstrap/);
+    db.deleteNode(h.service.get(op.id).nodeId as number);
+  });
+
+  it('refuses an update naming a column outside the operation table', () => {
+    expect(() => db.updateNodeBootstrapOperation('x', { ['state; DROP TABLE nodes' as 'stage']: 'x' }, Date.now())).toThrow(/Unknown bootstrap operation column/);
+  });
+
+  it('recovers every interrupted row even when one cannot be written', () => {
+    const h = harness();
+    const now = Date.now();
+    const base = {
+      port: 22, username: 'ubuntu', address: '192.168.1.62', compose_dir: '/opt/docker/sencho', agent_dir: '/opt/sencho-agent',
+      plan_json: '{}', plan_digest: 'd', approved_by: TEST_USERNAME, approved_at: now, stage: null, step: null, node_id: null,
+      agent_started: 0 as const, active: 1 as const, cancel_requested: 0 as const, error_code: null, error_message: null,
+      enrollment_expires_at: null, created_at: now, updated_at: now, finished_at: null, attempt: 1, state: 'running' as const, changes_made: 1 as const,
+    };
+    db.insertNodeBootstrapOperation({ ...base, id: '00000000-0000-4000-8000-000000000021', target_key: 'a.example.com:22', host: 'a.example.com', target_name: 'a', host_key_fingerprint: 'SHA256:a' });
+    db.insertNodeBootstrapOperation({ ...base, id: '00000000-0000-4000-8000-000000000022', target_key: 'b.example.com:22', host: 'b.example.com', target_name: 'b', host_key_fingerprint: 'SHA256:b' });
+    const real = db.transitionNodeBootstrapOperation.bind(db);
+    const spy = vi.spyOn(db, 'transitionNodeBootstrapOperation').mockImplementationOnce(() => { throw new Error('SQLITE_BUSY'); }).mockImplementation(real);
+    h.service.recoverOnStartup();
+    spy.mockRestore();
+    const states = ['00000000-0000-4000-8000-000000000021', '00000000-0000-4000-8000-000000000022'].map((id) => db.getNodeBootstrapOperation(id)?.state);
+    expect(states.filter((state) => state === 'outcome_unknown')).toHaveLength(1);
+    expect(states.filter((state) => state === 'running')).toHaveLength(1);
+    // The row that could not be written is recovered on the next start.
+    h.service.recoverOnStartup();
+    expect(states.length).toBe(2);
+    for (const id of ['00000000-0000-4000-8000-000000000021', '00000000-0000-4000-8000-000000000022']) {
+      expect(db.getNodeBootstrapOperation(id)?.state).toBe('outcome_unknown');
+      h.service.release(id, AUDIT);
+    }
+  });
+
+  it('marks a run whose own error path failed as stopped on an internal error, not as a restart', async () => {
+    const h = harness({ facts: makeFacts() });
+    h.host.override = (command) => (command.includes('install -d -m 0700')
+      ? { exitCode: 1, stdout: '', stderr: 'denied', truncated: false, timedOut: false, error: null }
+      : undefined);
+    // The run's own finish (a compare-and-set out of the running states) fails once.
+    const real = db.transitionNodeBootstrapOperation.bind(db);
+    let failed = false;
+    const spy = vi.spyOn(db, 'transitionNodeBootstrapOperation').mockImplementation((id, from, updates, now) => {
+      if (!failed && from.length === 3 && updates.state === 'failed') {
+        failed = true;
+        throw new Error('SQLITE_BUSY');
+      }
+      return real(id, from, updates, now);
+    });
+    const { request } = approve(h);
+    const op = h.service.start(request, context());
+    await h.service.settled();
+    spy.mockRestore();
+    expect(db.getNodeBootstrapOperation(op.id)).toMatchObject({ error_code: 'RUN_ABORTED', error_message: expect.stringMatching(/internal error/) });
+    if (db.getNodeBootstrapOperation(op.id)?.active === 1) h.service.release(op.id, AUDIT);
   });
 });

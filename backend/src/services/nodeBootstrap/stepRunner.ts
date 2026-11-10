@@ -18,7 +18,7 @@ import {
   writeFileCommand,
 } from './executionCommands';
 import { scrubSecrets } from './sshProbeClient';
-import { EXEC_READ_MAX_BYTES, type ExecResult, type ExecSession } from './sshExecClient';
+import { EXEC_READ_MAX_BYTES, type ExecOptions, type ExecResult, type ExecSession } from './sshExecClient';
 import type { BootstrapPlan, BootstrapPlanStep, BootstrapStageId } from './types';
 
 /**
@@ -52,13 +52,22 @@ export class StepFailure extends Error {
   public readonly kind: StepFailureKind;
   public readonly code: string;
   public readonly detail: string | null;
+  /** The step refused before its command or write ran, so it changed nothing on the host. */
+  public readonly changedNothing: boolean;
 
-  public constructor(kind: StepFailureKind, code: string, message: string, detail: string | null = null) {
+  public constructor(
+    kind: StepFailureKind,
+    code: string,
+    message: string,
+    detail: string | null = null,
+    options: { changedNothing?: boolean } = {},
+  ) {
     super(message);
     this.name = 'StepFailure';
     this.kind = kind;
     this.code = code;
     this.detail = detail;
+    this.changedNothing = options.changedNothing ?? false;
   }
 }
 
@@ -67,8 +76,13 @@ export interface StepOutcome {
   message: string;
 }
 
+/** How long a package metadata refresh is retried while another apt job holds its lock. */
+export const APT_LOCK_RETRY = { intervalMs: 10_000, totalMs: 300_000 };
+
 export interface StepContext {
   session: ExecSession;
+  /** Overrides APT_LOCK_RETRY (tests shorten it). */
+  aptLockRetry?: { intervalMs: number; totalMs: number };
   /** Every secret the run holds, scrubbed from anything recorded. */
   secrets: string[];
   /** The Pilot compose file with the real token; called only for the compose step. */
@@ -121,8 +135,14 @@ function transportFailure(result: ExecResult, what: string, timeoutMs: number, s
   return null;
 }
 
-async function runChecked(ctx: StepContext, command: string, what: string, timeoutMs = VERIFY_TIMEOUT_MS): Promise<ExecResult> {
-  const result = await ctx.session.run(command, { timeoutMs });
+async function runChecked(
+  ctx: StepContext,
+  command: string,
+  what: string,
+  options: { timeoutMs?: number; keep?: ExecOptions['keep'] } = {},
+): Promise<ExecResult> {
+  const timeoutMs = options.timeoutMs ?? VERIFY_TIMEOUT_MS;
+  const result = await ctx.session.run(command, { timeoutMs, keep: options.keep });
   const failure = transportFailure(result, what, timeoutMs, ctx.secrets);
   if (failure) throw failure;
   return result;
@@ -256,7 +276,7 @@ async function runFileStep(step: BootstrapPlanStep, ctx: StepContext, plan: Boot
   const failure = transportFailure(result, step.title, step.timeoutMs, ctx.secrets);
   if (failure) throw failure;
   if (result.exitCode === WRITE_EXIT.incomplete) {
-    throw new StepFailure('unknown', 'WRITE_INCOMPLETE', `${file.path} did not arrive in full, so it was not put in place. The connection may have dropped.`, commandDetail(result, ctx.secrets));
+    throw new StepFailure('failed', 'WRITE_INCOMPLETE', `${file.path} did not arrive in full, so it was not put in place. The connection may have dropped.`, commandDetail(result, ctx.secrets), { changedNothing: true });
   }
   if (result.exitCode === WRITE_EXIT.exists || result.exitCode === WRITE_EXIT.notRegular) {
     throw new StepFailure('recovery', 'FILE_CONFLICT', `${file.path} appeared on the host after the plan was approved. It was left as it is.`, commandDetail(result, ctx.secrets));
@@ -293,10 +313,16 @@ function installSpecs(command: string): Array<{ name: string; version: string | 
   });
 }
 
-/** The Ubuntu suite the plan's own Docker source names, when it writes one. */
-function planCodename(plan: BootstrapPlan): string {
-  const source = plan.stages.flatMap((stage) => stage.steps).find((step) => step.id === 'docker-sources')?.file?.content ?? '';
-  return /\/linux\/ubuntu (\S+) stable/.exec(source)?.[1] ?? '';
+/** The host release's codename, read fresh, so the check holds archives to this release. */
+const OS_CODENAME_COMMAND = `sh -c '. /etc/os-release && printf "%s\\n" "$VERSION_CODENAME"'`;
+
+async function hostCodename(ctx: StepContext): Promise<string> {
+  const result = await runChecked(ctx, OS_CODENAME_COMMAND, 'read the host release');
+  const codename = result.stdout.trim();
+  if (result.exitCode !== 0 || !/^[a-z]+$/.test(codename)) {
+    throw new StepFailure('failed', 'CANDIDATE_NOT_VERIFIED', 'The host release could not be read, so nothing was installed.', commandDetail(result, ctx.secrets), { changedNothing: true });
+  }
+  return codename;
 }
 
 /**
@@ -305,12 +331,17 @@ function planCodename(plan: BootstrapPlan): string {
  * host release, when the plan wrote the source), and a pinned version must be
  * the candidate. Nothing is installed when one is not.
  */
-async function verifyDockerCandidates(ctx: StepContext, step: BootstrapPlanStep, plan: BootstrapPlan): Promise<void> {
-  const result = await runChecked(ctx, APT_POLICY_COMMAND, 'check the Docker package sources');
+async function verifyDockerCandidates(ctx: StepContext, step: BootstrapPlanStep): Promise<void> {
+  const codename = await hostCodename(ctx);
+  // apt lists every version the repository serves, well past the tail kept for
+  // command output, so the policy is read from the start like a file.
+  const result = await runChecked(ctx, APT_POLICY_COMMAND, 'check the Docker package sources', {
+    keep: { mode: 'head', maxBytes: EXEC_READ_MAX_BYTES },
+  });
   if (result.exitCode !== 0 || result.truncated) {
-    throw new StepFailure('failed', 'CANDIDATE_NOT_VERIFIED', 'apt could not report where the Docker packages come from, so nothing was installed.', commandDetail(result, ctx.secrets));
+    throw new StepFailure('failed', 'CANDIDATE_NOT_VERIFIED', 'apt could not report where the Docker packages come from, so nothing was installed.', commandDetail(result, ctx.secrets), { changedNothing: true });
   }
-  const packages = parseAptPolicy(result.stdout, planCodename(plan));
+  const packages = parseAptPolicy(result.stdout, codename);
   const problems: string[] = [];
   for (const spec of installSpecs(step.command ?? '')) {
     const pkg = packages.find((entry) => entry.name === spec.name);
@@ -319,16 +350,36 @@ async function verifyDockerCandidates(ctx: StepContext, step: BootstrapPlanStep,
     else if (spec.version !== null && pkg.candidateVersion !== spec.version) problems.push(`${spec.name} would install ${pkg.candidateVersion}, not ${spec.version}`);
   }
   if (problems.length > 0) {
-    throw new StepFailure('failed', 'CANDIDATE_NOT_VERIFIED', `Nothing was installed: ${problems.join('; ')}.`);
+    throw new StepFailure('failed', 'CANDIDATE_NOT_VERIFIED', `Nothing was installed: ${problems.join('; ')}.`, null, { changedNothing: true });
   }
 }
 
-async function runCommandStep(step: BootstrapPlanStep, ctx: StepContext, plan: BootstrapPlan): Promise<StepOutcome> {
+const APT_LISTS_LOCK = /Could not get lock \/var\/lib\/apt\/lists\/lock/;
+
+/**
+ * Run a package metadata refresh, retrying while another apt job (a freshly
+ * booted host's daily refresh) holds the lists lock. apt has no wait option for
+ * that lock, so the same command is run again, within a fixed total.
+ */
+async function runMetadataRefresh(step: BootstrapPlanStep, ctx: StepContext): Promise<ExecResult> {
+  const retry = ctx.aptLockRetry ?? APT_LOCK_RETRY;
+  const deadline = Date.now() + retry.totalMs;
+  for (;;) {
+    const result = await ctx.session.run(step.command ?? '', { timeoutMs: step.timeoutMs });
+    const locked = result.exitCode !== 0 && result.exitCode !== null && APT_LISTS_LOCK.test(result.stderr);
+    if (!locked || Date.now() + retry.intervalMs > deadline) return result;
+    await new Promise((resolve) => setTimeout(resolve, retry.intervalMs));
+  }
+}
+
+async function runCommandStep(step: BootstrapPlanStep, ctx: StepContext): Promise<StepOutcome> {
   if (!step.command) {
     throw new StepFailure('failed', 'PLAN_INVALID', `The plan step "${step.title}" has no command. Nothing was run.`);
   }
-  if (step.effect === 'package-install') await verifyDockerCandidates(ctx, step, plan);
-  const result = await ctx.session.run(step.command, { timeoutMs: step.timeoutMs });
+  if (step.effect === 'package-install') await verifyDockerCandidates(ctx, step);
+  const result = step.effect === 'package-metadata'
+    ? await runMetadataRefresh(step, ctx)
+    : await ctx.session.run(step.command, { timeoutMs: step.timeoutMs });
   const failure = transportFailure(result, step.title, step.timeoutMs, ctx.secrets);
   if (failure) throw failure;
   if (result.exitCode !== 0) {
@@ -344,7 +395,7 @@ async function runCommandStep(step: BootstrapPlanStep, ctx: StepContext, plan: B
 }
 
 export async function runPlanStep(step: BootstrapPlanStep, ctx: StepContext, plan: BootstrapPlan): Promise<StepOutcome> {
-  return step.file ? runFileStep(step, ctx, plan) : runCommandStep(step, ctx, plan);
+  return step.file ? runFileStep(step, ctx, plan) : runCommandStep(step, ctx);
 }
 
 /** The start step's privilege decides how Docker is reached after installation. */

@@ -138,7 +138,12 @@ interface OperationDeps {
   mintToken: (nodeId: number) => { token: string; expiresAt: number };
   registerNode: (name: string, composeDir: string) => number;
   enrollWaitMs: number;
+  /** How long the package metadata refresh is retried while another apt job holds its lock. */
+  aptLockRetry?: { intervalMs: number; totalMs: number };
 }
+
+/** Who records rows nobody requested: restart recovery and late reconciliation. */
+const SYSTEM_AUDIT: BootstrapAuditContext = { username: 'system', ip: 'local', method: 'RECOVERY', path: 'node_bootstrap_operations' };
 
 function defaultRegisterNode(name: string, composeDir: string): number {
   const id = DatabaseService.getInstance().addNode({
@@ -463,25 +468,27 @@ export class NodeBootstrapOperationService {
     }
   }
 
-  private recordInterrupted(op: NodeBootstrapOperation): void {
+  private recordInterrupted(op: NodeBootstrapOperation, cause: 'restart' | 'aborted' = 'restart'): void {
     const now = this.deps.now();
     const state: NodeBootstrapOperationState = op.state === 'rechecking' ? 'blocked' : 'outcome_unknown';
+    const what = cause === 'restart' ? 'The hub restarted' : 'The run stopped on an internal error';
     const message = op.state === 'rechecking'
-      ? 'The hub restarted before this attempt changed anything.'
+      ? `${what} before this attempt changed anything.`
       : op.state === 'enrolling'
-        ? 'The hub restarted while it waited for the Pilot to connect. Every step had run; the Pilot can still connect on its own.'
-        : 'The hub restarted during this attempt. Steps already run stay on the host, and the step in progress may or may not have completed.';
+        ? `${what} while it waited for the Pilot to connect. Every step had run; the Pilot can still connect on its own.`
+        : `${what} during this attempt. Steps already run stay on the host, and the step in progress may or may not have completed.`;
     const moved = this.deps.db.transitionNodeBootstrapOperation(op.id, [op.state], {
       state,
       active: holdsLock(state, op.changes_made === 1) ? 1 : 0,
       cancel_requested: 0,
-      error_code: 'HUB_RESTARTED',
+      error_code: cause === 'restart' ? 'HUB_RESTARTED' : 'RUN_ABORTED',
       error_message: message,
       finished_at: now,
     }, now);
     if (!moved) return;
     this.event(op, state === 'blocked' ? 'info' : 'unknown', message);
-    console.warn(`[Bootstrap] Operation ${op.id} for ${sanitizeForLog(op.host)} was interrupted by a restart (${state}).`);
+    this.audit(SYSTEM_AUDIT, 'bootstrap.execute.finished', op, { state, code: cause === 'restart' ? 'HUB_RESTARTED' : 'RUN_ABORTED', attempt: op.attempt, nodeId: op.node_id }, 500);
+    console.warn(`[Bootstrap] Operation ${op.id} for ${sanitizeForLog(op.host)} was interrupted (${cause}, ${state}).`);
   }
 
   // --- run ------------------------------------------------------------------
@@ -495,7 +502,7 @@ export class NodeBootstrapOperationService {
         console.error(`[Bootstrap] Operation ${id} ended unexpectedly:`, sanitizeForLog(getErrorMessage(error, 'unknown')));
         try {
           const op = this.deps.db.getNodeBootstrapOperation(id);
-          if (op && RUNNING_STATES.includes(op.state)) this.recordInterrupted(op);
+          if (op && RUNNING_STATES.includes(op.state)) this.recordInterrupted(op, 'aborted');
         } catch (fallbackError: unknown) {
           console.error(`[Bootstrap] Operation ${id} could not be marked interrupted:`, sanitizeForLog(getErrorMessage(fallbackError, 'unknown')));
         }
@@ -528,6 +535,7 @@ export class NodeBootstrapOperationService {
       const ctx: StepContext = {
         session,
         secrets,
+        aptLockRetry: this.deps.aptLockRetry,
         composeWithToken: () => {
           if (composeWithToken === null) throw new StepFailure('failed', 'PLAN_INVALID', 'The enrollment was not prepared before the compose file step.');
           return composeWithToken;
@@ -554,7 +562,9 @@ export class NodeBootstrapOperationService {
           } catch (error: unknown) {
             // A step whose outcome is unknown, or that may have done part of
             // its work before failing, counts as a change; a clean refusal does not.
-            const mayHaveChanged = !(error instanceof StepFailure) || error.kind !== 'failed' || PARTIAL_EFFECTS.has(step.effect);
+            const refusedCleanly = error instanceof StepFailure && error.changedNothing;
+            const mayHaveChanged = !refusedCleanly
+              && (!(error instanceof StepFailure) || error.kind !== 'failed' || PARTIAL_EFFECTS.has(step.effect));
             if (mayHaveChanged) this.deps.db.updateNodeBootstrapOperation(id, { changes_made: 1 }, this.deps.now());
             throw error;
           }
@@ -643,13 +653,14 @@ export class NodeBootstrapOperationService {
     // Checked before anything is registered or minted, so a mismatch leaves no live credential behind.
     const reviewed = plan.stages.flatMap((stage) => stage.steps).find((step) => step.id === COMPOSE_STEP_ID)?.file?.content;
     if (composeFor(TOKEN_PLACEHOLDER) !== reviewed) {
-      throw new StepFailure('failed', 'PLAN_INVALID', 'The Pilot compose file no longer matches the reviewed plan, so nothing was written.');
+      throw new StepFailure('failed', 'PLAN_INVALID', 'The Pilot compose file no longer matches the reviewed plan, so nothing was written.', null, { changedNothing: true });
     }
     const op = this.requireOperation(id);
     const existing = op.node_id !== null ? this.deps.db.getNode(op.node_id) : undefined;
     let nodeId: number;
     // The node an earlier attempt registered is reused by id, even if it was
-    // renamed since, so the host never gets a second identity.
+    // renamed since, so a rename does not create a second node. A node that was
+    // deleted meanwhile is registered again below.
     if (existing && existing.type === 'remote' && existing.mode === 'pilot_agent') {
       nodeId = existing.id;
       // As the manual regenerate route does: an open tunnel would outlive the new credential.
@@ -659,7 +670,9 @@ export class NodeBootstrapOperationService {
         throw new StepFailure('failed', 'NODE_NAME_TAKEN', `A node named ${op.target_name} was added while this bootstrap ran. Docker work already done stays on the host.`);
       }
       nodeId = this.deps.registerNode(op.target_name, plan.paths.composeDir.input);
-      this.deps.db.updateNodeBootstrapOperation(id, { node_id: nodeId }, this.deps.now());
+      // A registered node is a change: the run keeps its target, so a retry
+      // reuses this node instead of meeting it as a name already taken.
+      this.deps.db.updateNodeBootstrapOperation(id, { node_id: nodeId, changes_made: 1 }, this.deps.now());
       this.audit(context.audit, 'bootstrap.node.created', op, { nodeId });
     }
     const { token, expiresAt } = this.deps.mintToken(nodeId);
@@ -714,9 +727,12 @@ export class NodeBootstrapOperationService {
   private finishWithError(id: string, error: unknown, signal: AbortSignal, context: RunContext): void {
     const op = this.requireOperation(id);
     const changesMade = op.changes_made === 1;
-    // A cancel can surface as a transport error (the connect was aborted), so
-    // the request decides, not the error's type.
-    if (error instanceof RunCancelled || signal.aborted || op.cancel_requested === 1) {
+    // A cancel ends the run as cancelled when it is what stopped the run: the
+    // run saw it at a step boundary, or it aborted the connect or the recheck.
+    // A step failure keeps its own outcome, so an unknown or broken step is
+    // never relabelled as a clean cancel.
+    const abortedTransport = signal.aborted && (error instanceof SshTransportError || error instanceof BootstrapError);
+    if (error instanceof RunCancelled || abortedTransport) {
       this.finish(id, 'cancelled', { code: 'CANCELLED', message: changesMade
         ? 'Cancelled. Steps that already ran stay on the host; nothing was undone.'
         : 'Cancelled before anything was changed.' }, context);
@@ -770,7 +786,7 @@ export class NodeBootstrapOperationService {
       code: error?.code ?? null,
       attempt: op.attempt,
       nodeId: op.node_id,
-    }, state === 'enrolled' ? 200 : 500);
+    }, state === 'enrolled' || state === 'cancelled' || state === 'blocked' ? 200 : 500);
     console.log(`[Bootstrap] Operation ${id} for ${sanitizeForLog(op.host)} ended: ${state}${error ? ` (${error.code})` : ''}`);
   }
 
@@ -799,6 +815,7 @@ export class NodeBootstrapOperationService {
       return this.requireOperation(op.id);
     }
     this.event(op, 'done', 'The Pilot connected after the run stopped. The node is enrolled; its readiness has not been verified yet.', 'enroll', null);
+    this.audit(SYSTEM_AUDIT, 'bootstrap.execute.finished', op, { state: 'enrolled', code: null, attempt: op.attempt, nodeId: op.node_id });
     return this.requireOperation(op.id);
   }
 

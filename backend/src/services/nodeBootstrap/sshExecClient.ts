@@ -21,8 +21,9 @@ import {
  * differs in what execution needs: one connection runs the steps in order,
  * each command has its own deadline, standard input can carry file content (so
  * a credential never appears in a process argument), and output is capped:
- * the tail for a command, the head for a file read. A dropped connection or an expired deadline is reported as
- * such, because the remote outcome of that command is then unknown.
+ * the tail for a command, the head for a file read. A dropped connection or
+ * an expired deadline is reported as such, because the remote outcome of that
+ * command is then unknown.
  */
 
 export const EXEC_OUTPUT_TAIL_BYTES = 16 * 1024;

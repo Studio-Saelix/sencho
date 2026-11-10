@@ -269,7 +269,7 @@ nodeBootstrapRouter.post('/operations/:id/retry', bootstrapOperationLimiter, (re
   }
 });
 
-nodeBootstrapRouter.post('/operations/:id/cancel', bootstrapOperationLimiter, (req: Request, res: Response) => {
+nodeBootstrapRouter.post('/operations/:id/cancel', (req: Request, res: Response) => {
   if (!guard(req, res)) return;
   const id = operationId(req, res);
   if (!id) return;
@@ -280,7 +280,7 @@ nodeBootstrapRouter.post('/operations/:id/cancel', bootstrapOperationLimiter, (r
   }
 });
 
-nodeBootstrapRouter.post('/operations/:id/release', bootstrapOperationLimiter, (req: Request, res: Response) => {
+nodeBootstrapRouter.post('/operations/:id/release', (req: Request, res: Response) => {
   if (!guard(req, res)) return;
   const id = operationId(req, res);
   if (!id) return;

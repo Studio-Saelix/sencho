@@ -42,7 +42,9 @@ export const BOOTSTRAP_PLAN_VERSION = 1 as const;
 const MARKER_MODE = '0600';
 /**
  * A freshly booted Ubuntu host often runs its own apt jobs for a few minutes;
- * apt waits for their lock instead of failing at once.
+ * the install waits up to five minutes for the dpkg lock instead of failing at
+ * once. (The metadata refresh takes a different lock, which apt cannot wait
+ * for, so the run retries that step instead.)
  */
 const APT_LOCK_WAIT = '-o DPkg::Lock::Timeout=300';
 const COMPOSE_FILE_MODE = '0600';
@@ -113,7 +115,7 @@ function aptUpdateStep(sudo: boolean): BootstrapPlanStep {
     rationale: 'The Docker repository must be indexed before its packages can be resolved.',
     effect: 'package-metadata',
     privilege: sudo ? 'sudo' : 'user',
-    command: sudoCommand(`apt-get ${APT_LOCK_WAIT} update`, sudo),
+    command: sudoCommand('apt-get update', sudo),
     disruptive: false,
     reversible: 'yes',
     pointOfNoReturn: false,
