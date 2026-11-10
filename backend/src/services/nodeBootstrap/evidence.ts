@@ -645,8 +645,46 @@ function persistenceCheck(facts: BootstrapFacts): BootstrapCheck {
   };
 }
 
-function agentConflictCheck(facts: BootstrapFacts): BootstrapCheck {
+/**
+ * What an operation being retried already put on this host. Its own Pilot
+ * container and data volume are reconciled by the retry rather than blocking
+ * it; nothing that does not carry its marker counts.
+ */
+export interface BootstrapOwnership {
+  /** The node record the operation created, holding the node name. */
+  nodeNameOwned: boolean;
+  /** The operation reached its start step, so its Pilot container may exist. */
+  agentStarted: boolean;
+}
+
+function markerIsOurs(facts: BootstrapFacts): boolean {
+  const dir = facts.paths.agentDir;
+  return dir.hasMarker
+    && dir.markerProject === PILOT_PROJECT_NAME
+    && dir.markerComposeDir === facts.paths.composeDir.input
+    && dir.markerAgentDir === dir.input;
+}
+
+/** Every Pilot container on the host runs from the chosen directory, which carries this workflow's marker. */
+function ownedAgentPresent(facts: BootstrapFacts, owned: BootstrapOwnership | null): boolean {
+  if (!owned?.agentStarted || !markerIsOurs(facts)) return false;
+  if (facts.docker.cliProbeUnknown || !facts.containers.complete) return false;
+  const dirs = new Set([facts.paths.agentDir.input, facts.paths.agentDir.realPath].filter((dir): dir is string => Boolean(dir)));
+  return facts.agent.projectContainers.length > 0
+    && facts.agent.projectContainers.every((row) => row.workingDir !== null && dirs.has(row.workingDir));
+}
+
+function agentConflictCheck(facts: BootstrapFacts, owned: BootstrapOwnership | null): BootstrapCheck {
   const base = { id: 'agent_conflict' as const, category: 'conflicts' as const, label: 'Existing Pilot agent' };
+  if (ownedAgentPresent(facts, owned)) {
+    return {
+      ...base,
+      status: 'warn',
+      summary: `The ${PILOT_PROJECT_NAME} container from this operation's earlier attempt is present.`,
+      observed: facts.agent.projectContainers.map((row) => `${row.name} (${row.status})`).join(', '),
+      remediation: 'The retry rewrites its compose file with a new enrollment and recreates this container. Its data volume is kept.',
+    };
+  }
   if (facts.agent.projectContainers.length > 0) {
     return {
       ...base,
@@ -702,12 +740,23 @@ function agentConflictCheck(facts: BootstrapFacts): BootstrapCheck {
     };
   }
   if (facts.agent.dataVolumeExists === true) {
+    // A stored tunnel credential outranks the enrollment token when the agent
+    // starts, so an unknown volume could connect this host as another node.
+    if (owned?.agentStarted && markerIsOurs(facts)) {
+      return {
+        ...base,
+        status: 'warn',
+        summary: `The ${PILOT_PROJECT_NAME} data volume from this operation's earlier attempt already exists.`,
+        observed: facts.agent.dataVolumeNames.join(', ') || 'sencho-agent-data',
+        remediation: 'The retry keeps the volume, so the Pilot keeps the identity it enrolled with on this node.',
+      };
+    }
     return {
       ...base,
-      status: 'warn',
-      summary: `The ${PILOT_PROJECT_NAME} data volume already exists without a running project.`,
+      status: 'blocked',
+      summary: `The ${PILOT_PROJECT_NAME} data volume already exists without a running project, and it can hold another Pilot's identity.`,
       observed: facts.agent.dataVolumeNames.join(', ') || 'sencho-agent-data',
-      remediation: 'The volume can carry a previous Pilot identity. Execution must verify the stored identity or require an explicit replace before reusing it.',
+      remediation: 'Confirm on the host that the volume holds no Pilot you still need and remove it deliberately, or enroll this host manually. Nothing is replaced automatically.',
     };
   }
   if (facts.agent.dataVolumeExists === null) {
@@ -727,7 +776,13 @@ function agentConflictCheck(facts: BootstrapFacts): BootstrapCheck {
   };
 }
 
-export function buildBootstrapEvidence(input: { facts: BootstrapFacts; nodeNameTaken: boolean; targetName: string }): EvidenceResult {
+export function buildBootstrapEvidence(input: {
+  facts: BootstrapFacts;
+  nodeNameTaken: boolean;
+  targetName: string;
+  /** Set when the preflight is the recheck or retry of an existing operation. */
+  owned?: BootstrapOwnership | null;
+}): EvidenceResult {
   const { facts } = input;
   const checks: BootstrapCheck[] = [];
 
@@ -1119,7 +1174,7 @@ export function buildBootstrapEvidence(input: { facts: BootstrapFacts; nodeNameT
     remediation: 'Choose two directories that are neither equal nor nested, for example /opt/docker/sencho and /opt/sencho-agent.',
   });
 
-  checks.push(agentConflictCheck(facts));
+  checks.push(agentConflictCheck(facts, input.owned ?? null));
 
   const workloadsCheck = { id: 'existing_workloads', category: 'conflicts', label: 'Existing workloads' } as const;
   checks.push(facts.docker.cliProbeUnknown ? {
@@ -1146,7 +1201,11 @@ export function buildBootstrapEvidence(input: { facts: BootstrapFacts; nodeNameT
   });
 
   const nodeNameCheck = { id: 'node_name', category: 'network', label: 'Node name' } as const;
-  checks.push(input.nodeNameTaken ? {
+  checks.push(input.nodeNameTaken && input.owned?.nodeNameOwned ? {
+    ...nodeNameCheck,
+    status: 'pass',
+    summary: `The node ${input.targetName} was created by this bootstrap operation and is reused.`,
+  } : input.nodeNameTaken ? {
     ...nodeNameCheck,
     status: 'blocked',
     summary: `A node named ${input.targetName} already exists in this console.`,

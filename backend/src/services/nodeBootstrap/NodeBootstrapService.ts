@@ -1,6 +1,6 @@
-import { loadNativeTlsMaterial } from '../../helpers/nativeTls';
-import { sanitizeForLog } from '../../utils/safeLog';
+import { pilotHubCaPem } from '../../helpers/pilotEnrollment';
 import { DatabaseService, type NodeBootstrapTrust } from '../DatabaseService';
+import { recordBootstrapAudit, type BootstrapAuditContext } from './audit';
 import { buildBootstrapEvidence } from './evidence';
 import {
   DEFAULT_AGENT_DIR,
@@ -63,6 +63,7 @@ export type BootstrapErrorCode =
   | 'HOST_KEY_MISMATCH'
   | 'HOST_KEY_UNTRUSTED'
   | 'BOOTSTRAP_IN_PROGRESS'
+  | 'TARGET_CHANGED'
   | 'PREFLIGHT_FAILED';
 
 export class BootstrapError extends Error {
@@ -106,12 +107,7 @@ export interface BootstrapPreflightRequest {
   agentDir?: string;
 }
 
-interface AuditContext {
-  username: string;
-  ip: string;
-  method: string;
-  path: string;
-}
+type AuditContext = BootstrapAuditContext;
 
 /** `hubHost` is the host clients reach the hub on; a target resolving to it is refused as the hub itself. */
 type AddressResolver = (host: string, hubHost?: string | null) => Promise<string[]>;
@@ -145,7 +141,7 @@ const DEFAULT_DEPS: Omit<BootstrapDeps, 'db'> = {
   transport: sshProbeClient,
   now: () => Date.now(),
   resolveAddresses: (hostname, hubHost) => resolveTargetAddresses(hostname, undefined, hubHost),
-  caPem: () => (loadNativeTlsMaterial()?.caPem ?? null),
+  caPem: () => pilotHubCaPem() ?? null,
   requestBudgetMs: SSH_TOTAL_TIMEOUT_MS,
 };
 
@@ -319,7 +315,20 @@ export class NodeBootstrapService {
   /** Run the read-only inspection and, when unblocked, build the plan. */
   public async preflight(
     input: BootstrapPreflightRequest,
-    context: { hubUrl: string; audit: AuditContext; signal?: AbortSignal },
+    context: {
+      hubUrl: string;
+      audit: AuditContext;
+      signal?: AbortSignal;
+      /**
+       * Rebuild the plan as of this time. Execution passes the approved plan's
+       * generation time, so the same facts reproduce the approved digest.
+       */
+      planNow?: number;
+      /** Dial only this address, which must still be one the host resolves to. */
+      pinnedAddress?: string;
+      /** The operation this preflight rechecks or retries, if any. */
+      ownership?: { nodeId: number | null; agentStarted: boolean } | null;
+    },
   ): Promise<BootstrapPreflightResult> {
     const targetInput = this.validateTargetInput(input);
     const paths = validateInstallPaths(
@@ -351,7 +360,13 @@ export class NodeBootstrapService {
       pin = this.deps.db.getNodeBootstrapTrust(targetInput.host, targetInput.port);
       this.assertPinnedTrust(targetInput, pin, expectedFingerprint, replacement, context.audit);
 
-      const addresses = await this.resolveOrThrow(targetInput.host, deadline, context.signal, hubHostOf(context.hubUrl));
+      const resolved = await this.resolveOrThrow(targetInput.host, deadline, context.signal, hubHostOf(context.hubUrl));
+      const addresses = context.pinnedAddress
+        ? resolved.filter((address) => address === context.pinnedAddress)
+        : resolved;
+      if (addresses.length === 0) {
+        throw new BootstrapError(409, 'TARGET_CHANGED', 'The host no longer resolves to the address the plan was approved for. Run the preflight again.');
+      }
       dialed = addresses[0];
       let lastError: unknown = null;
       for (const address of addresses) {
@@ -447,8 +462,16 @@ export class NodeBootstrapService {
       now,
     });
 
-    const nodeNameTaken = this.deps.db.getNodes().some((node) => node.name === targetInput.targetName);
-    const evidence = buildBootstrapEvidence({ facts, nodeNameTaken, targetName: targetInput.targetName });
+    const namedNode = this.deps.db.getNodes().find((node) => node.name === targetInput.targetName);
+    const ownership = context.ownership ?? null;
+    const evidence = buildBootstrapEvidence({
+      facts,
+      nodeNameTaken: namedNode !== undefined,
+      targetName: targetInput.targetName,
+      owned: ownership
+        ? { nodeNameOwned: namedNode !== undefined && namedNode.id === ownership.nodeId, agentStarted: ownership.agentStarted }
+        : null,
+    });
     const blocked = evidence.blockers > 0 || evidence.planSuppressed;
     const plan = blocked
       ? null
@@ -457,7 +480,7 @@ export class NodeBootstrapService {
         targetName: targetInput.targetName,
         hubUrl: context.hubUrl,
         caPem: this.deps.caPem(),
-        now,
+        now: context.planNow ?? now,
       });
 
     this.recordAudit(context.audit, 'bootstrap.preflight', {
@@ -710,23 +733,6 @@ export class NodeBootstrapService {
   }
 
   private recordAudit(context: AuditContext, action: string, facts: Record<string, unknown>, statusCode = 200): void {
-    const summary = `${action}: ${Object.entries(facts)
-      .filter(([, value]) => value !== null && value !== undefined)
-      .map(([key, value]) => `${key}=${sanitizeForLog(String(value))}`)
-      .join(' ')}`;
-    try {
-      this.deps.db.insertAuditLog({
-        timestamp: this.deps.now(),
-        username: context.username,
-        method: context.method,
-        path: context.path,
-        status_code: statusCode,
-        node_id: null,
-        ip_address: context.ip,
-        summary,
-      });
-    } catch (error: unknown) {
-      console.warn('[Bootstrap] Audit log write failed:', error instanceof Error ? error.message : 'unknown');
-    }
+    recordBootstrapAudit(this.deps.db, this.deps.now(), context, action, facts, statusCode);
   }
 }
