@@ -6,8 +6,9 @@ vi.mock('@/lib/api', () => ({ apiFetch: vi.fn() }));
 import { apiFetch } from '@/lib/api';
 import { toast } from '@/components/ui/toast-store';
 
+const authState = vi.hoisted(() => ({ isAdmin: true }));
 vi.mock('@/context/AuthContext', () => ({
-  useAuth: () => ({ user: { role: 'admin' }, isAdmin: true }),
+  useAuth: () => ({ user: { role: authState.isAdmin ? 'admin' : 'viewer' }, isAdmin: authState.isAdmin }),
 }));
 vi.mock('@/context/LicenseContext', () => ({
   useLicense: () => ({ isPaid: true }),
@@ -511,5 +512,45 @@ describe('FleetSnapshots list provenance and warning completeness', () => {
     await waitFor(() => expect(
       screen.getByTitle('Imported from an archive rather than captured on this instance'),
     ).toBeInTheDocument());
+  });
+});
+
+describe('FleetSnapshots action row', () => {
+  beforeEach(() => {
+    mockedFetch.mockReset();
+    mockedFetch.mockImplementation(async (path: string) => {
+      if (path === '/fleet/snapshots') {
+        return {
+          ok: true,
+          json: async () => ({
+            snapshots: [{
+              id: 1, description: 'one', created_by: 'admin', node_count: 1, stack_count: 1,
+              skipped_nodes: '[]', skipped_stacks: '[]', created_at: Date.now(), has_documentation: 0,
+            }],
+            total: 1,
+          }),
+        } as Response;
+      }
+      return { ok: true, json: async () => ({}) } as Response;
+    });
+  });
+
+  it('offers Create Snapshot to admins and swaps it for the form when opened', async () => {
+    authState.isAdmin = true;
+    render(<FleetSnapshots />);
+    fireEvent.click(await screen.findByRole('button', { name: /Create Snapshot/ }));
+    expect(screen.getByPlaceholderText('Snapshot description (optional)')).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /Create Snapshot/ })).not.toBeInTheDocument();
+  });
+
+  it('renders no Create Snapshot button for a non-admin', async () => {
+    authState.isAdmin = false;
+    try {
+      render(<FleetSnapshots />);
+      await screen.findByText('one');
+      expect(screen.queryByRole('button', { name: /Create Snapshot/ })).not.toBeInTheDocument();
+    } finally {
+      authState.isAdmin = true;
+    }
   });
 });

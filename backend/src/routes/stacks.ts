@@ -1932,7 +1932,7 @@ stacksRouter.get('/:stackName/preflight', async (req: Request, res: Response) =>
   if (!requirePermission(req, res, 'stack:read', 'stack', stackName)) return;
   if (!(await requireStackExists(req.nodeId, stackName, res))) return;
   try {
-    res.json(ComposeDoctorService.getInstance().getLatest(req.nodeId, stackName));
+    res.json(await ComposeDoctorService.getInstance().getLatest(req.nodeId, stackName));
   } catch (error) {
     console.error('[Stacks] Failed to load preflight for %s:', sanitizeForLog(stackName),
       sanitizeForLog(inspect(error, { depth: 4 })));

@@ -40,7 +40,7 @@ export interface StackListProps {
   searchQuery: string;
   stackLabelMap: Record<string, Label[]>;
   stackStatuses: Record<string, StackRowStatus | undefined>;
-  stackCounts: Record<string, { running: number; total: number } | undefined>;
+  stackCounts: Record<string, { running: number; total: number; restarting?: number } | undefined>;
   stackUpdates: Record<string, StackUpdateInfo>;
   gitSourcePendingMap: GitSourcePendingMap;
   pinnedFiles: string[];

@@ -20,8 +20,11 @@ import type {
 import type { AssuranceCoverage } from './assurance/types';
 import { runAssuranceRules, parseCoverage, unrecordedCoverage } from './assurance/coverage';
 import {
-  findFingerprintCollisions, normalizeDoctorHit, normalizeStoredFinding, withDecision, type AssuranceFinding,
+  findFingerprintCollisions, normalizeDoctorHit, normalizeStoredFinding, serializeSourceLocation,
+  withDecision, type AssuranceFinding,
 } from './assurance/finding';
+import { buildAuthoredProject, locateFinding, type AuthoredLocation, type AuthoredProject } from './composeSource';
+import { dropStaleStoredLocations } from './assurance/locationFreshness';
 import { assuranceRuleOrder, getAssuranceRule } from './assurance/ruleRegistry';
 import { collectServiceHealthcheckEvidence } from './healthcheck/collectServiceHealthcheckEvidence';
 import {
@@ -59,16 +62,48 @@ function sortNormalized(findings: AssuranceFinding[]): AssuranceFinding[] {
   return [...findings].sort(compareFindings);
 }
 
+/** Attach the digest of the file a location points into, so a later read can
+ *  prove the range still applies to the content it was computed against. A
+ *  location whose file has no digest (unreadable, too large, or not read at
+ *  all) is not actionable: a fallback line 1 would be a wrong line, so it is
+ *  dropped here as well as on a later read. */
+function withFileHash(
+  project: AuthoredProject | null,
+  location: AuthoredLocation | undefined,
+): AuthoredLocation | undefined {
+  if (!location || !project) return undefined;
+  const fileHash = project.files.find(file => file.file === location.file)?.contentHash;
+  return fileHash === undefined ? undefined : { ...location, fileHash };
+}
+
 /** Project one finding onto the Doctor wire shape, without a decision. The wire
  *  type predates the contract and stays additive: a finding's subject and
- *  identity are backend internals until a normalized wire format exists. */
+ *  identity are backend internals until a normalized wire format exists. An
+ *  authored range travels only with the digest of the content it was computed
+ *  against, so the client can prove the file it opens is that revision. */
 function projectFinding(finding: AssuranceFinding): PreflightFinding {
+  const location = finding.location;
+  const authored = location?.file !== undefined && location.line !== undefined && location.column !== undefined
+    && location.endLine !== undefined && location.endColumn !== undefined && location.fileHash !== undefined
+    ? {
+      file: location.file,
+      ...(location.authoredPath !== undefined || location.path !== undefined
+        ? { path: location.authoredPath ?? location.path }
+        : {}),
+      line: location.line,
+      column: location.column,
+      endLine: location.endLine,
+      endColumn: location.endColumn,
+      fileHash: location.fileHash,
+    }
+    : undefined;
   return {
     ruleId: finding.ruleId,
     severity: finding.severity,
     title: finding.title,
     message: finding.message,
     ...(finding.location?.path !== undefined ? { sourcePath: finding.location.path } : {}),
+    ...(authored ? { location: authored } : {}),
     ...(finding.remediation !== undefined ? { remediation: finding.remediation } : {}),
     ...(finding.scope.service !== undefined ? { service: finding.scope.service } : {}),
   };
@@ -187,21 +222,25 @@ export class ComposeDoctorService {
       console.warn('[ComposeDoctor] Source unreadable for %s; source-derived checks skipped:',
         sanitizeForLog(stackName), sanitizeForLog(getErrorMessage(err, 'unknown')));
     }
-    const sourceReadable = source !== null;
     // renderedHash is the parsed-SOURCE-model hash (the same `rendered_hash`
     // meaning the drift ledger uses), deliberately not a hash of docker's
     // rendered output, which inlines resolved env values and must never be hashed.
     const hashes = source !== null
       ? computeStackHashes(source)
       : { sourceHash: null as string | null, renderedHash: null as string | null };
-    const sourceServiceNames = source !== null ? parseComposeDependencies(source).services.map(s => s.name) : [];
+    const authored = await this.loadAuthoredProject(nodeId, stackName);
+    const sourceServiceNames = source !== null ? this.sourceServiceNames(source, authored) : null;
 
-    const ctx = await this.buildContext(nodeId, stackName, sourceServiceNames, sourceReadable);
+    // An unknown source service set must stay unknown: treating it as empty
+    // makes every rendered service look like it was pulled in from elsewhere.
+    const ctx = await this.buildContext(
+      nodeId, stackName, sourceServiceNames ?? [], source !== null, sourceServiceNames !== null,
+    );
     const { findings: hits, coverage } = runAssuranceRules(ctx);
     const normalized = sortNormalized(hits.map(hit => {
       const rule = getAssuranceRule(hit.ruleId);
       if (!rule) throw new Error(`Compose Doctor rule "${hit.ruleId}" is missing from the assurance registry`);
-      return normalizeDoctorHit(nodeId, stackName, hit, rule);
+      return normalizeDoctorHit(nodeId, stackName, hit, rule, withFileHash(authored, locateFinding(authored, hit, ctx.model)));
     }));
     const collisions = findFingerprintCollisions(normalized);
     if (collisions.length > 0) {
@@ -245,18 +284,22 @@ export class ComposeDoctorService {
    * rather than a parallel model. A fresh `runPreflight` decides its findings the
    * same way (`decideFindings`).
    */
-  getLatestAssurance(nodeId: number, stackName: string): {
+  async getLatestAssurance(nodeId: number, stackName: string): Promise<{
     run: PreflightRunRow | null;
     findings: AssuranceFinding[];
     coverage: AssuranceCoverage;
-  } {
+  }> {
     const run = DatabaseService.getInstance().getLatestPreflightRun(nodeId, stackName);
     if (!run) return { run: null, findings: [], coverage: unrecordedCoverage() };
     const { acks, ackCtx } = loadAcknowledgementInputs(nodeId, stackName, run.rendered_hash, run.service_images);
+    // A range is only actionable while the file it names still has the content
+    // the run hashed; an edited file drops the link until its content matches
+    // the run again.
+    const stored = await dropStaleStoredLocations(nodeId, stackName, this.readNormalized(nodeId, stackName, run.id));
     return {
       run,
       // One clock reading for the whole read.
-      findings: decideFindings(this.readNormalized(nodeId, stackName, run.id), ackCtx, acks, Date.now()),
+      findings: decideFindings(stored, ackCtx, acks, Date.now()),
       coverage: parseCoverage(run.coverage),
     };
   }
@@ -270,8 +313,8 @@ export class ComposeDoctorService {
   }
 
   /** Read the last stored run for a stack, mapped to the report shape. */
-  getLatest(nodeId: number, stackName: string): PreflightReport {
-    const { run, findings: decided, coverage } = this.getLatestAssurance(nodeId, stackName);
+  async getLatest(nodeId: number, stackName: string): Promise<PreflightReport> {
+    const { run, findings: decided, coverage } = await this.getLatestAssurance(nodeId, stackName);
     if (!run) {
       return {
         stack: stackName, ranAt: null, ranBy: null, renderable: true, renderError: null,
@@ -300,7 +343,45 @@ export class ComposeDoctorService {
     };
   }
 
-  private async buildContext(nodeId: number, stackName: string, sourceServiceNames: string[], sourceReadable: boolean): Promise<PreflightContext> {
+  /**
+   * The authored source model, built fail-soft: a model failure leaves every
+   * finding unlocated (today's behaviour) and never fails the run. The warning
+   * names the stack and a sanitized message, never file content.
+   */
+  private async loadAuthoredProject(nodeId: number, stackName: string): Promise<AuthoredProject | null> {
+    try {
+      return await buildAuthoredProject(nodeId, stackName);
+    } catch (error) {
+      console.warn('[ComposeDoctor] Authored source model unavailable for %s:',
+        sanitizeForLog(stackName), sanitizeForLog(getErrorMessage(error, 'unknown')));
+      return null;
+    }
+  }
+
+  /**
+   * The services the primary authored file declares, or null when that cannot
+   * be known. The YAML library's alias-expansion budget makes the light
+   * `parseComposeDependencies` parser report a whole file as unparseable, and
+   * an empty list would read as "zero services" to `effective-model-expanded`.
+   * The authored parser follows aliases and merge keys under its own depth cap
+   * and still knows the top-level keys when it refuses the rest, so it answers
+   * first; the light parser is only a fallback for a model this run could not
+   * build.
+   */
+  private sourceServiceNames(source: string, authored: AuthoredProject | null): string[] | null {
+    const primary = authored?.files.find(file => file.kind === 'compose-primary');
+    if (primary?.serviceNames !== undefined) return primary.serviceNames;
+    const declared = parseComposeDependencies(source);
+    return declared.parseError ? null : declared.services.map(service => service.name);
+  }
+
+  private async buildContext(
+    nodeId: number,
+    stackName: string,
+    sourceServiceNames: string[],
+    sourceReadable: boolean,
+    sourceServicesKnown: boolean,
+  ): Promise<PreflightContext> {
     const fsSvc = FileSystemService.getInstance(nodeId);
     const baseDir = fsSvc.getBaseDir();
 
@@ -401,6 +482,7 @@ export class ComposeDoctorService {
       missingEnvFiles,
       sourceServiceNames,
       sourceReadable,
+      sourceServicesKnown,
       nodePorts,
       existingNetworkNames,
       existingVolumeNames,
@@ -582,6 +664,7 @@ export class ComposeDoctorService {
           title: finding.title,
           message: finding.message,
           source_path: finding.location?.path ?? null,
+          source_location: serializeSourceLocation(finding.location),
           remediation: finding.remediation ?? null,
           service: finding.scope.service ?? null,
           rule_version: finding.ruleVersion,

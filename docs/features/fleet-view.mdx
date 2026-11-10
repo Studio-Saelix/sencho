@@ -10,7 +10,7 @@ The **Fleet** tab is the single page you open when you want to see the whole est
 </Note>
 
 <Frame>
-  <img src="/images/fleet-view/fleet-overview.png" alt="Fleet page showing the masthead with the editorial 'The fleet' word, a meta line reading '4 nodes · 4 online · last sync 5s', and CPU / MEM / CONTAINERS stat tiles next to a 0-alert counter. Below, the toolbar (collapsed search icon, sort, filters, Grid/Topology toggle, Node Update, Manage nodes) sits above a grid of four node cards: a pinned Local card with a cyan ★ Local rail and a version chip, followed by Opsix, Pitt-Moba, and SLX-Mars, each carrying a Proxy or Pilot marker in the corner." />
+  <img src="/images/fleet-view/fleet-overview.png" alt="Fleet page showing the masthead with the editorial 'The fleet' word, a meta line reading '4 nodes · 4 online · last sync 5s', and CPU / MEM / CONTAINERS stat tiles next to a 0-alert counter. Below, the toolbar (collapsed search icon, sort, filters, Grid/Topology toggle, Node management) sits above a grid of four node cards: a pinned Local card with a cyan ★ Local rail and a version chip, followed by Opsix, Pitt-Moba, and SLX-Mars, each carrying a Proxy or Pilot marker in the corner." />
 </Frame>
 
 ## Page layout
@@ -60,7 +60,7 @@ Two buttons sit next to the tab strip in the top-right corner. They are visible 
 | **Refresh** | Forces an immediate re-fetch of fleet data. The icon spins while the refresh is in flight; the button is disabled until it completes. |
 | **Export Dossier** | Admin-only. Walks every node and stack and downloads a `homelab-dossier.zip` Markdown archive of the whole fleet. See [Fleet Dossier](/features/fleet-dossier). |
 
-The **Node Update** and **Manage nodes** buttons live in the Overview tab's own toolbar rather than this shared row; see [Toolbar](#toolbar) below.
+The **Node management** menu lives in the Overview tab's own toolbar rather than this shared row; see [Toolbar](#toolbar) below.
 
 ## The Overview tab
 
@@ -68,7 +68,11 @@ Overview is the default tab and is where most operators spend their time. It off
 
 ### Toolbar
 
-In **Grid** mode the toolbar exposes search, sort, filters, and the view toggle. In **Topology** mode only the view toggle remains (the grid-only controls collapse). **Node Update** and **Manage nodes** sit at the end of the row in both modes.
+In **Grid** mode the toolbar exposes search, sort, filters, and the view toggle. In **Topology** mode only the view toggle remains (the grid-only controls collapse). The **Node management** menu sits at the end of the row in both modes.
+
+<Frame>
+  <img src="/images/fleet-view/fleet-node-management-menu.png" alt="The Node management menu open from the Fleet Overview toolbar, with an Onboarding section holding Connect existing node and Bootstrap new Linux server, a separator, and a Maintenance section holding Node updates." />
+</Frame>
 
 | Control | Behaviour |
 |---------|-----------|
@@ -77,8 +81,9 @@ In **Grid** mode the toolbar exposes search, sort, filters, and the view toggle.
 | **Direction toggle** | Arrow button next to the sort combobox. The icon rotates 180° and the title flips between *Switch to ascending* / *Switch to descending* to confirm the current direction. |
 | **Filters** | Popover with five sections: **Status** (All / Online / Offline), **Type** (All / Local / Remote), **Severity** (Critical Only toggle), **Networking** (All / Exposed / Unknown / Drift, matching the Networking section of each node's details sheet; Unknown means a stack that publishes something without a classified exposure intent, so its stack Networking tab still shows what Sencho detected under **auto (detected)**; Unknown also includes a stack whose effective Compose inputs could not be read, which a node on an older version does not report; profiles are not applied, so a profile-gated service or connector counts as present), and **Tags** (multi-select of fleet label palette, only visible if labels exist). The button shows a count badge for active filters; a **Clear all filters** action appears at the bottom of the popover when at least one filter is set. All filter and sort selections persist in the browser. |
 | **Grid / Topology** | Segmented control, with a Grid icon and a Topology icon. The control resets to Grid when the page is reloaded. |
-| **Node Update** | Opens the [Node Updates sheet](#node-updates) and immediately re-checks every node's version, same as **Recheck** inside the sheet. |
-| **Manage nodes** | Admin-only. Navigates to **Settings → Infrastructure → Nodes**, where you register, edit, or remove nodes. |
+| **Connect existing node** | Opens the Add node form in place, for a host that already runs Sencho or a Pilot agent. Visible with node management permission. |
+| **Bootstrap new Linux server** | Opens the read-only [bootstrap preflight](/features/node-bootstrap). Admin only. |
+| **Node updates** | Opens the [Node Updates sheet](#node-updates) and immediately re-checks every node's version, same as **Recheck** inside the sheet. |
 
 ### Grid view
 
@@ -234,7 +239,7 @@ When a node cannot be reached, its finding says so once, on Connectivity, instea
 
 A finding you have seen and decided to live with does not have to stay in the worklist. **Dismiss** on its row moves it out of the list in one click and shows an **Undo** for a few seconds. By default a dismissal holds until the finding changes: if the stack goes from one service down to two, the condition gets worse, or its underlying facts change, the finding comes back on its own. The chevron beside **Dismiss** offers **Dismiss for 7 days** and **Dismiss permanently**. A permanent dismissal still comes back if the finding gets worse.
 
-A dismissal applies to everyone on this hub, and the audit log records who made it. Dismissed findings are never hidden outright: the summary counts them (`2 dismissed`), and the **dismissed** row under the table lists each one with who dismissed it, when, and for how long. **Restore** puts a finding back in the list. A dismissal clears itself once the condition it covered has gone and a complete check confirms it, so the same problem returning later is shown again.
+A dismissal applies to everyone on this hub, and the audit log records who made it. Dismissed findings are never hidden outright: the summary counts them (`2 dismissed`), and selecting that count opens a sheet that lists each one with who dismissed it, when, and for how long. **Restore** in the sheet puts a finding back in the list. A dismissal clears itself once the condition it covered has gone and a complete check confirms it, so the same problem returning later is shown again.
 
 Some findings cannot be dismissed. A finding that restates the Security posture is resolved on the Security page, so it has no **Dismiss**. A finding about evidence that could not be read, such as a node that did not answer, can be dismissed for a time but not permanently, because a permanent dismissal would hide the absence of evidence. Dismissing changes nothing about the matrix: its cells keep counting every finding, and the fleet's state and the node counts above stay what the evidence says.
 
@@ -295,7 +300,7 @@ Remote nodes stay on the 5 second transport budget. The hub builds its own graph
 
 ## Node Updates
 
-Click **Node Update** in the Overview tab's toolbar to open the **Node Updates** sheet. From here you can read every node's current Sencho version, see which nodes have an update available, and trigger updates one node at a time or across the whole fleet. The sheet has two tabs: **Nodes** (the node table and summary) and **Changelog** (release notes for the available Sencho version, fetched from the GitHub Releases page).
+Open **Node management** in the Overview tab's toolbar and choose **Node updates** to open the **Node Updates** sheet. From here you can read every node's current Sencho version, see which nodes have an update available, and trigger updates one node at a time or across the whole fleet. The sheet has two tabs: **Nodes** (the node table and summary) and **Changelog** (release notes for the available Sencho version, fetched from the GitHub Releases page).
 
 <Frame>
   <img src="/images/fleet-view/fleet-node-updates.png" alt="Node updates sheet titled 'Node updates · 4 nodes · 0 updates available'. A Recheck button sits in the header. Below it, four summary cards read '4 Up to date', '0 Available', '0 Updating', '0 Failed'. A 'Filter nodes…' search box sits above the node table, which has columns Node / Type / Current / Latest / Status; all four rows (Local, Opsix, Pitt-Moba, SLX-Mars) show a green 'Up to date' badge at v0.95.0. The footer reads 'LATEST VERSION v0.95.0'." />

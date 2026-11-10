@@ -2706,6 +2706,50 @@ describe('DockerController - getBulkStackStatuses partial status', () => {
     expect(result['empty-stack'].running).toBeUndefined();
     expect(result['empty-stack'].total).toBeUndefined();
   });
+
+  it('counts a stack that is only restart-looping as exited with restarting 1', async () => {
+    mockDocker.listContainers.mockResolvedValue([
+      container('loop-1', 'loop-stack', 'restarting', 'Restarting (1) 5 seconds ago'),
+    ]);
+
+    const result = await DockerController.getInstance(1).getBulkStackStatuses(['loop-stack']);
+    expect(result['loop-stack'].status).toBe('exited');
+    expect(result['loop-stack'].running).toBe(0);
+    expect(result['loop-stack'].restarting).toBe(1);
+  });
+
+  it('counts a restarting sibling beside a running container', async () => {
+    stubInspect();
+    mockDocker.listContainers.mockResolvedValue([
+      container('mix-run', 'mix-stack', 'running', 'Up 2 hours'),
+      container('mix-loop', 'mix-stack', 'restarting', 'Restarting (1) 5 seconds ago'),
+    ]);
+
+    const result = await DockerController.getInstance(1).getBulkStackStatuses(['mix-stack']);
+    expect(result['mix-stack'].status).toBe('partial');
+    expect(result['mix-stack'].restarting).toBe(1);
+  });
+
+  it('counts a restart loop that keeps exiting cleanly', async () => {
+    mockDocker.listContainers.mockResolvedValue([
+      container('zero-loop', 'zero-stack', 'restarting', 'Restarting (0) 2 seconds ago'),
+    ]);
+
+    const result = await DockerController.getInstance(1).getBulkStackStatuses(['zero-stack']);
+    // A clean exit is not a crash, so the stack status stays exited either way,
+    // but the loop itself must still be visible to the sidebar.
+    expect(result['zero-stack'].restarting).toBe(1);
+  });
+
+  it('reports restarting 0 when nothing is looping', async () => {
+    stubInspect();
+    mockDocker.listContainers.mockResolvedValue([
+      container('nr-run', 'nr-stack', 'running', 'Up 2 hours'),
+    ]);
+
+    const result = await DockerController.getInstance(1).getBulkStackStatuses(['nr-stack']);
+    expect(result['nr-stack'].restarting).toBe(0);
+  });
 });
 
 describe('DockerController - getBulkStackStatuses networks', () => {

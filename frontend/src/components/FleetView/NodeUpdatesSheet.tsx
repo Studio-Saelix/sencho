@@ -16,6 +16,7 @@ import { toast } from '@/components/ui/toast-store';
 import { formatVersion, isValidVersion } from '@/lib/version';
 import { UpdateStatusBadge } from './UpdateStatusBadge';
 import { PinnedUpdateBadge } from './PinnedUpdateBadge';
+import { reapplyUnavailableSentence } from './reapplyUnavailableCopy';
 import type { NodeUpdateStatus } from './types';
 
 interface NodeUpdatesSheetProps {
@@ -276,9 +277,10 @@ export function NodeUpdatesSheet({
             meta={meta}
             primaryAction={isAdmin ? {
                 label: 'Recheck',
-                icon: recheckingUpdates ? Loader2 : RefreshCw,
+                icon: RefreshCw,
                 onClick: () => { void handleRecheck(); },
-                disabled: recheckingUpdates || checkingUpdates,
+                pending: recheckingUpdates,
+                disabled: checkingUpdates,
             } : undefined}
             secondaryActions={secondaryActions}
             footerContext={footerContext}
@@ -508,9 +510,7 @@ export function NodeUpdatesSheet({
                                         {isAdmin && !s.updateStatus && s.canReapplyCompose === false && (
                                             <span
                                                 className="text-[10px] text-muted-foreground/70 min-w-[4rem] max-w-[9rem] flex-1 basis-0 text-right leading-tight"
-                                                title={s.type === 'local'
-                                                    ? 'This node is not Compose-managed, so configuration reapply is unavailable.'
-                                                    : 'This node does not advertise Compose self-management, or is unreachable.'}
+                                                title={reapplyUnavailableSentence(s.reapplyUnavailableReason ?? null, s.name)}
                                             >
                                                 Reapply unavailable
                                             </span>

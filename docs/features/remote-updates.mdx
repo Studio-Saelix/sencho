@@ -27,7 +27,9 @@ Nodes deployed with `docker run`, with hand-rolled systemd units, or with orches
 
 ## Anatomy at a glance
 
-Open the **Fleet** tab and click **Node Update** in the Overview toolbar to open the **Node updates** sheet. The sheet lists every registered node with its current and latest Sencho version, the cluster-wide summary, and the action buttons, split across two tabs: **Nodes** (the table and summary) and **Changelog** (release notes for the latest published version, pulled from GitHub Releases).
+Open the **Fleet** tab, choose **Node management** in the Overview toolbar, and select **Node updates** to open the **Node updates** sheet.
+
+A Pilot agent installed under `/opt/sencho-agent` (the default the bootstrap preflight previews) can use any other dedicated directory. Either way, self-update locates the agent's compose file from the container's Compose labels rather than a fixed path, so a custom install directory does not disable updates. The sheet lists every registered node with its current and latest Sencho version, the cluster-wide summary, and the action buttons, split across two tabs: **Nodes** (the table and summary) and **Changelog** (release notes for the latest published version, pulled from GitHub Releases).
 
 <Frame>
   <img src="/images/fleet-view/fleet-node-updates.png" alt="Node updates sheet titled 'Node updates · 4 nodes · 0 updates available'. A Recheck button sits under the header, above Nodes and Changelog tabs. Four summary cards read '4 Up to date', '0 Available', '0 Updating', '0 Failed'. A 'Filter nodes…' search box sits above a table with columns Node / Type / Current / Latest / Status; all four rows (Local, Opsix, Pitt-Moba, SLX-Mars) show a green 'Up to date' badge at v0.95.0. The footer reads 'LATEST VERSION v0.95.0'." />
@@ -69,6 +71,8 @@ Confirming a local reapply opens a dialog that states the node will recreate fro
 Eligible admins can also run the same procedure from the Compose editor: on Sencho's own stack the primary save action becomes **Save & Reapply**, which saves the file first, then opens the same confirmation and fleet reapply path. On Sencho's own stack the stack-level **Start**, **Stop**, **Take down**, **Update**, **Rollback**, and **Delete** controls are disabled, and **Stop service** on one of its services opens a **Reapply Sencho** confirmation instead; confirming it runs the same reapply.
 
 Update and Reapply recreate only the Sencho service (`docker compose up -d --no-deps --force-recreate`). Other services in Sencho's Compose project, including the ones it lists in `depends_on`, keep running as they are.
+
+Reapply needs a node to know its own Compose project, which Sencho works out when the node starts. A node cannot reapply while it is not running in a container, when its own container cannot be identified, when its Docker endpoint is not answering, when the container has no Compose labels, when the Docker Compose CLI is missing from the image, or when its image name cannot be read. The editor and the Node updates sheet name the node and the specific reason instead of leaving Reapply grayed out with no explanation. When the cause is temporary, such as a socket proxy that was not answering yet, the node retries on its own and Reapply becomes available without a restart; the next Save & Reapply or Save & Deploy in an open editor re-checks eligibility before it decides, so an editor that was open before a node lost eligibility names the reason too.
 
 ## Recreating the Docker endpoint
 

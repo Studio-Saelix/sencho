@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import {
   Check, TriangleAlert, ShieldAlert, Info, RefreshCw, Stethoscope, X,
   ChevronDown, ChevronRight, type LucideIcon,
@@ -11,11 +11,14 @@ import { formatTimeAgo } from '@/lib/relativeTime';
 import { useNodes } from '@/context/NodeContext';
 import { preflightFingerprint, useStackDismiss } from '@/hooks/useStackDismiss';
 import { Button } from '@/components/ui/button';
+import { IconBusyButton } from '@/components/ui/icon-busy-button';
 import { Label } from '@/components/ui/label';
 import { Combobox, type ComboboxOption } from '@/components/ui/combobox';
 import { Modal, ModalHeader, ModalBody, ModalFooter, ConfirmModal } from '@/components/ui/modal';
 import { isPreflightNoteFinding } from '@/lib/preflightNotes';
 import { coverageGapLine, type AssuranceCoverage } from '@/lib/coverageGaps';
+import { SourceLocationLink } from '@/components/ui/source-location-link';
+import type { AuthoredLocation } from '@/lib/authoredLocation';
 
 type PreflightSeverity = 'blocker' | 'high' | 'warning' | 'info';
 type PreflightStatus = 'never-run' | 'pass' | 'unrenderable' | PreflightSeverity;
@@ -27,6 +30,8 @@ interface PreflightFinding {
   title: string;
   message: string;
   sourcePath?: string;
+  /** Authored file and range, when one source could be decided. */
+  location?: AuthoredLocation;
   remediation?: string;
   service?: string;
   acknowledged?: boolean;
@@ -51,10 +56,48 @@ interface PreflightReport {
   coverage?: AssuranceCoverage;
 }
 
+/** A finding's stable identity across two reads: a read can only drop or move
+ *  its location, while a new run can replace the finding altogether. */
+function sameFinding(a: PreflightFinding, b: PreflightFinding): boolean {
+  return a.ruleId === b.ruleId
+    && (a.service ?? null) === (b.service ?? null)
+    && (a.sourcePath ?? null) === (b.sourcePath ?? null)
+    && a.message === b.message;
+}
+
+function sameRange(a: AuthoredLocation | undefined, b: AuthoredLocation | undefined): boolean {
+  if (!a || !b) return a === b;
+  return a.file === b.file && a.line === b.line && a.column === b.column
+    && a.endLine === b.endLine && a.endColumn === b.endColumn;
+}
+
+/** The finding a click belongs to in a fresh report. When several stored
+ *  findings render the same identity (for example one bind source mounted at
+ *  two targets), the clicked range is the only discriminator: a candidate
+ *  anchored at the clicked range opens that range, even when several rows
+ *  share it. With no anchor the click cannot choose, so the caller says
+ *  whether the refreshed report still has a link to choose from. */
+type FreshFinding =
+  | { kind: 'found'; finding: PreflightFinding }
+  | { kind: 'missing' }
+  | { kind: 'ambiguous'; hasLink: boolean };
+
+function freshFinding(report: PreflightReport, finding: PreflightFinding): FreshFinding {
+  const candidates = report.findings.filter(candidate => sameFinding(candidate, finding));
+  if (candidates.length === 0) return { kind: 'missing' };
+  if (candidates.length === 1) return { kind: 'found', finding: candidates[0] };
+  // Every anchored candidate has the clicked range, so opening any of them
+  // lands on the same place; only a range that anchors none is ambiguous.
+  const anchored = candidates.filter(candidate => sameRange(candidate.location, finding.location));
+  if (anchored.length > 0) return { kind: 'found', finding: anchored[0] };
+  return { kind: 'ambiguous', hasLink: candidates.some(candidate => candidate.location !== undefined && !candidate.acknowledged) };
+}
+
 const LABEL_CLASS = 'font-mono text-[10px] uppercase tracking-[0.18em] text-stat-subtitle';
 const MODAL_FIELD_LABEL = LABEL_CLASS;
 const ACTION_CLASS =
   'inline-flex items-center gap-1 font-mono text-[10px] uppercase tracking-wide text-stat-subtitle hover:text-brand transition-colors disabled:opacity-40';
+const ACTION_BUTTON_CLASS = cn(ACTION_CLASS, 'h-auto rounded-none p-0 font-normal hover:bg-transparent [&_svg]:size-3');
 const CARD_CLASS = 'rounded-lg border px-3 py-2.5';
 
 const SEVERITY_META: Record<PreflightSeverity, { label: string; icon: LucideIcon; tone: string }> = {
@@ -149,10 +192,12 @@ function FindingRow({
   finding,
   canEdit,
   onAcknowledge,
+  onOpenLocation,
 }: {
   finding: PreflightFinding;
   canEdit: boolean;
   onAcknowledge?: (finding: PreflightFinding) => void;
+  onOpenLocation?: (finding: PreflightFinding) => void;
 }) {
   return (
     <div className="border-t border-muted py-2 first:border-t-0">
@@ -180,9 +225,13 @@ function FindingRow({
           <span className="font-mono text-[10px] uppercase tracking-wide">fix</span> · {finding.remediation}
         </div>
       )}
-      {finding.sourcePath && (
+      {finding.location && onOpenLocation ? (
+        <div className="mt-0.5">
+          <SourceLocationLink location={finding.location} onOpen={() => onOpenLocation(finding)} />
+        </div>
+      ) : finding.sourcePath ? (
         <div className="mt-0.5 font-mono text-[10px] text-stat-subtitle">{finding.sourcePath}</div>
-      )}
+      ) : null}
     </div>
   );
 }
@@ -230,7 +279,15 @@ function AcknowledgedRow({
   );
 }
 
-export default function PreflightPanel({ stackName, canEdit = false }: { stackName: string; canEdit?: boolean }) {
+export default function PreflightPanel({
+  stackName,
+  canEdit = false,
+  onOpenLocation,
+}: {
+  stackName: string;
+  canEdit?: boolean;
+  onOpenLocation?: (location: AuthoredLocation) => void;
+}) {
   const { activeNode } = useNodes();
   const nodeId = activeNode?.id;
   const [report, setReport] = useState<PreflightReport | null>(null);
@@ -246,18 +303,70 @@ export default function PreflightPanel({ stackName, canEdit = false }: { stackNa
   const [clearTarget, setClearTarget] = useState<PreflightFinding | null>(null);
   const [clearing, setClearing] = useState(false);
   const [ackSectionOpen, setAckSectionOpen] = useState(false);
+  const locationRequest = useRef(0);
+  // The click-time read belongs to the stack and node it was opened on. A
+  // pending response must not land in the panel after the operator moves on.
+  const locationScope = useRef({ stackName, nodeId });
+  useLayoutEffect(() => {
+    locationScope.current = { stackName, nodeId };
+  }, [stackName, nodeId]);
+  const mounted = useRef(true);
+  useEffect(() => {
+    mounted.current = true;
+    return () => { mounted.current = false; };
+  }, []);
+
+  const loadReport = async (): Promise<PreflightReport> => {
+    const res = await apiFetch(`/stacks/${stackName}/preflight`);
+    if (!res.ok) throw new Error('Failed to load the preflight report.');
+    return (await res.json()) as PreflightReport;
+  };
 
   const refreshReport = async () => {
     try {
-      const res = await apiFetch(`/stacks/${stackName}/preflight`);
-      if (!res.ok) {
-        toast.error('Failed to refresh the preflight report.');
-        return;
-      }
-      setReport((await res.json()) as PreflightReport);
+      setReport(await loadReport());
       setLoadError(false);
     } catch {
       toast.error('Failed to refresh the preflight report.');
+    }
+  };
+
+  /**
+   * A rendered link is a fact about the report as it was read, not about the
+   * file now. Re-read the report on the way to the editor so the click opens
+   * the range the current file actually has; when the fresh read can no longer
+   * locate the finding, open nothing rather than a stale line. A later click
+   * supersedes an earlier one still in flight, so an out-of-order response
+   * cannot reopen the range the operator moved away from.
+   */
+  const openFindingLocation = async (finding: PreflightFinding) => {
+    if (!onOpenLocation) return;
+    const request = ++locationRequest.current;
+    const scope = { stackName, nodeId };
+    try {
+      const fresh = await loadReport();
+      if (request !== locationRequest.current
+        || !mounted.current
+        || locationScope.current.stackName !== scope.stackName
+        || locationScope.current.nodeId !== scope.nodeId) return;
+      setReport(fresh);
+      setLoadError(false);
+      const current = freshFinding(fresh, finding);
+      if (current.kind === 'ambiguous') {
+        // Several findings share the identity and the clicked range picks none
+        // of them; name a visible link only when the refreshed report has one.
+        toast.info(current.hasLink
+          ? 'The report now has more than one matching finding. Choose the link from the current report.'
+          : 'The report was refreshed; several findings match and none shows a link.');
+        return;
+      }
+      if (current.kind === 'missing' || !current.finding.location) {
+        toast.info('This location is no longer current. The report was refreshed and no longer shows a link for this finding.');
+        return;
+      }
+      onOpenLocation(current.finding.location);
+    } catch {
+      toast.error('Could not confirm this location is still current.');
     }
   };
 
@@ -392,15 +501,15 @@ export default function PreflightPanel({ stackName, canEdit = false }: { stackNa
     <div data-testid="preflight-panel" className="flex-1 min-h-0 overflow-y-auto px-3 py-3 flex flex-col gap-4">
       <div className="flex items-center justify-between gap-2">
         <span className={LABEL_CLASS}>compose doctor</span>
-        <button
-          type="button"
+        <IconBusyButton
           data-testid="preflight-run-btn"
+          variant="ghost"
+          icon={RefreshCw}
+          label="run preflight"
+          pending={busy}
           onClick={runPreflight}
-          disabled={busy}
-          className={ACTION_CLASS}
-        >
-          <RefreshCw className={cn('h-3 w-3', running && 'animate-spin')} strokeWidth={1.5} /> run preflight
-        </button>
+          className={ACTION_BUTTON_CLASS}
+        />
       </div>
 
       {loadError ? (
@@ -470,6 +579,7 @@ export default function PreflightPanel({ stackName, canEdit = false }: { stackNa
                     key={`note-${f.ruleId}-${f.service ?? ''}-${i}`}
                     finding={f}
                     canEdit={false}
+                    onOpenLocation={(target) => { void openFindingLocation(target); }}
                   />
                 ))}
               </div>
@@ -489,6 +599,7 @@ export default function PreflightPanel({ stackName, canEdit = false }: { stackNa
                       finding={f}
                       canEdit={canEdit}
                       onAcknowledge={openAckDialog}
+                      onOpenLocation={(target) => { void openFindingLocation(target); }}
                     />
                   ))}
                 </div>

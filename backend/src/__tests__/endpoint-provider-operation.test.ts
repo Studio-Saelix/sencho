@@ -4,6 +4,7 @@
  * a provider-phase failure, and the new process answers the helper (ack) and
  * marks success only on the helper's positive verdict.
  */
+import fsSync from 'fs';
 import fs from 'fs/promises';
 import path from 'path';
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
@@ -28,11 +29,21 @@ beforeAll(async () => {
 });
 
 afterEach(async () => {
-  vi.restoreAllMocks();
+  // A test that deliberately leaves a provider operation pending (the helper
+  // has not answered yet) leaves its watcher running in the background. Let it
+  // settle before mocks are removed and its directory is deleted: a persist
+  // racing the recursive removal surfaces as ENOTEMPTY and fails the test it
+  // followed.
   const service = ImageOperationService.getInstance() as unknown as {
     endpointProviderPending: boolean;
     endpointProviderTimings: Record<string, number>;
+    isEndpointProviderPending(): boolean;
   };
+  const settleBy = Date.now() + 2_000;
+  while (service.isEndpointProviderPending() && Date.now() < settleBy) {
+    await new Promise(resolve => setTimeout(resolve, 10));
+  }
+  vi.restoreAllMocks();
   service.endpointProviderPending = false;
   service.endpointProviderTimings = {
     pollMs: 2_000,
@@ -46,7 +57,9 @@ afterEach(async () => {
   SelfUpdateService.getInstance().clearLastError();
   for (const [nodeId] of [...FleetUpdateTrackerService.getInstance().entries()]) FleetUpdateTrackerService.getInstance().delete(nodeId);
   await fs.rm(path.join(tmpDir, 'image-operation-current.json'), { force: true });
-  await fs.rm(path.join(tmpDir, 'image-operations'), { recursive: true, force: true });
+  // maxRetries covers a writer that started just before the watcher settled:
+  // Node retries ENOTEMPTY with a linear backoff.
+  await fs.rm(path.join(tmpDir, 'image-operations'), { recursive: true, force: true, maxRetries: 10, retryDelay: 20 });
   await fs.rm(path.join(tmpDir, 'endpoint-provider'), { recursive: true, force: true });
 });
 
@@ -74,6 +87,19 @@ function handoff(operationId: string, file: 'ack' | 'outcome' | 'plan') {
 async function writeOutcome(operationId: string, outcome: Record<string, unknown>) {
   await fs.mkdir(path.dirname(handoff(operationId, 'outcome')), { recursive: true });
   await fs.writeFile(handoff(operationId, 'outcome'), JSON.stringify({ operationId, ...outcome }));
+}
+
+/**
+ * Publishes a verdict from inside a helper-list probe. The real helper renames
+ * its outcome into place before its container exits, so a probe that answers
+ * "the helper is gone" must already have the verdict on disk. Writing it
+ * synchronously keeps the list call's bounded timeout from abandoning a
+ * still-pending write and leaving a "gone without a verdict" answer behind.
+ */
+function writeOutcomeFromProbe(operationId: string, outcome: Record<string, unknown>) {
+  const file = handoff(operationId, 'outcome');
+  fsSync.mkdirSync(path.dirname(file), { recursive: true });
+  fsSync.writeFileSync(file, JSON.stringify({ operationId, ...outcome }));
 }
 
 /** A Docker that answers through the new provider, with the provider running and the given health. */
@@ -240,6 +266,40 @@ describe('execute (the process that spawns the helper)', () => {
     expect(service.isEndpointProviderPending()).toBe(false);
   });
 
+  it.each([
+    ['a failure', { ok: false, phase: 'provider', error: 'container is unhealthy', rollback: { restored: true, error: null } }, 'failed'],
+    ['a success', { ok: true }, 'succeeded'],
+  ])('releases the claim before %s is readable as the operation state', async (_label, outcome, state) => {
+    const selfUpdate = mockAvailableProvider();
+    const service = fastTimings();
+    mockDocker();
+    await service.claimComposeReapply({ replace: true });
+    const operationId = (await service.getCurrentOperation())!.operationId;
+    vi.spyOn(selfUpdate, 'triggerComposeReapply').mockImplementation(async () => {
+      await writeOutcome(operationId, outcome);
+    });
+    // Hold the slow disk step long enough that the first poll which sees the
+    // terminal state is still inside the window a rename-then-chmod ordering
+    // leaves open.
+    const realChmod = fs.chmod.bind(fs);
+    vi.spyOn(fs, 'chmod').mockImplementation(async (...args: Parameters<typeof fs.chmod>) => {
+      await new Promise(resolve => setTimeout(resolve, 300));
+      return realChmod(...args);
+    });
+    await service.executeClaimedComposeReapply();
+    // Assert on the first poll that sees the terminal state. A retrying waitFor
+    // would step over the window and pass on a rename-then-chmod ordering.
+    let pendingWhenFirstReadable: boolean | undefined;
+    await vi.waitFor(async () => {
+      if ((await service.getCurrentOperation())?.state !== state) {
+        throw new Error('the operation has not reached its terminal state yet');
+      }
+      pendingWhenFirstReadable ??= service.isEndpointProviderPending();
+      expect(pendingWhenFirstReadable).toBe(false);
+    }, { interval: 5, timeout: 5_000 });
+    await expect(service.claimComposeReapply({ replace: true, only: true })).resolves.toEqual({ ok: true });
+  });
+
   it('consumes a restored verdict published just as the helper exits on the shared watch path', async () => {
     const selfUpdate = mockAvailableProvider();
     vi.spyOn(selfUpdate, 'triggerComposeReapply').mockResolvedValue(undefined);
@@ -250,7 +310,7 @@ describe('execute (the process that spawns the helper)', () => {
       onHelperList: async () => {
         if (published) return;
         published = true;
-        await writeOutcome(operationId, {
+        writeOutcomeFromProbe(operationId, {
           ok: false,
           phase: 'verify',
           error: 'the new proxy is unhealthy',
@@ -288,7 +348,7 @@ describe('execute (the process that spawns the helper)', () => {
       dockerOptions.helperRunning = false;
       if (published) return;
       published = true;
-      await writeOutcome(operationId, {
+      writeOutcomeFromProbe(operationId, {
         ok: false,
         phase: 'verify',
         error: 'the new proxy is unhealthy',
@@ -326,7 +386,7 @@ describe('execute (the process that spawns the helper)', () => {
       dockerOptions.helperRunning = false;
       if (published) return;
       published = true;
-      await writeOutcome(operationId, {
+      writeOutcomeFromProbe(operationId, {
         ok: false,
         phase: 'verify',
         error: 'the new proxy is unhealthy',
@@ -515,7 +575,7 @@ describe('execute (the process that spawns the helper)', () => {
       onHelperList: async () => {
         if (published) return;
         published = true;
-        await writeOutcome(operationId, {
+        writeOutcomeFromProbe(operationId, {
           ok: false,
           phase: 'provider',
           error: 'the new proxy did not start',
@@ -553,7 +613,7 @@ describe('execute (the process that spawns the helper)', () => {
         dockerOptions.helperRunning = false;
         if (published) return;
         published = true;
-        await writeOutcome(operationId, {
+        writeOutcomeFromProbe(operationId, {
           ok: false,
           phase: 'verify',
           error: 'the new proxy is unhealthy',
@@ -718,7 +778,7 @@ describe('provider-only reapply (Sencho stays running)', () => {
         // The helper restored the previous container and renamed its verdict
         // into place, but the poll read the file just before that rename and
         // then saw the helper gone.
-        await writeOutcome(operationId, {
+        writeOutcomeFromProbe(operationId, {
           ok: false,
           phase: 'verify',
           error: 'the new proxy is unhealthy',
@@ -1207,7 +1267,7 @@ describe('reconcileOnStartup (the new process)', () => {
       onHelperList: async () => {
         if (published) return;
         published = true;
-        await writeOutcome(operationId, {
+        writeOutcomeFromProbe(operationId, {
           ok: false,
           phase: 'verify',
           error: 'the new proxy is unhealthy',

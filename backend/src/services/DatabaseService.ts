@@ -472,6 +472,8 @@ export interface PreflightFindingRow {
     title: string;
     message: string;
     source_path: string | null;
+    /** JSON {file,line,column,endLine,endColumn} of the authored source, when known. */
+    source_location?: string | null;
     remediation: string | null;
     service: string | null;
     created_at: number;
@@ -556,6 +558,17 @@ export interface PilotEnrollment {
     token_hash: string;
     expires_at: number;
     used_at: number | null;
+}
+
+/** Trust-on-first-use pin for a bootstrap SSH host key, keyed by host and port. */
+export interface NodeBootstrapTrust {
+    host: string;
+    port: number;
+    fingerprint: string;
+    algorithm: string;
+    approved_by: string | null;
+    approved_at: number;
+    last_seen_at: number;
 }
 
 export interface Label {
@@ -875,6 +888,14 @@ export interface SecretVersionRow {
 }
 
 export type SecretPushStatus = 'ok' | 'failed' | 'skipped';
+
+/** A write was refused because the bundle moved on since the caller read it. */
+export class SecretVersionConflictError extends Error {
+    constructor(public readonly currentVersion: number) {
+        super(`Secret is at version ${currentVersion}`);
+        this.name = 'SecretVersionConflictError';
+    }
+}
 
 export interface SecretPushRow {
     id: number;
@@ -1428,6 +1449,7 @@ export class DatabaseService {
         this.migrateStackAlertServiceScope();
         this.migrateGitOpsSourcePolicy();
         this.migrateRecoverySchema();
+        this.migrateNodeBootstrapTrustHostCase();
 
         // Reset the cache once at end of constructor in case any migration
         // populated it via getGlobalSettings() and a subsequent migration
@@ -1615,6 +1637,17 @@ export class DatabaseService {
         expires_at INTEGER NOT NULL,
         used_at INTEGER,
         FOREIGN KEY (node_id) REFERENCES nodes(id) ON DELETE CASCADE
+      );
+
+      CREATE TABLE IF NOT EXISTS node_bootstrap_trust (
+        host TEXT NOT NULL,
+        port INTEGER NOT NULL,
+        fingerprint TEXT NOT NULL,
+        algorithm TEXT NOT NULL,
+        approved_by TEXT,
+        approved_at INTEGER NOT NULL,
+        last_seen_at INTEGER NOT NULL,
+        PRIMARY KEY (host, port)
       );
 
       CREATE TABLE IF NOT EXISTS system_state (
@@ -2102,6 +2135,7 @@ export class DatabaseService {
         title TEXT NOT NULL,
         message TEXT NOT NULL,
         source_path TEXT,
+        source_location TEXT,
         remediation TEXT,
         service TEXT,
         created_at INTEGER NOT NULL
@@ -2513,6 +2547,7 @@ export class DatabaseService {
         maybeAddCol('preflight_findings', 'rule_version', 'INTEGER');
         maybeAddCol('preflight_findings', 'subject_kind', 'TEXT');
         maybeAddCol('preflight_findings', 'subject_key', 'TEXT');
+        maybeAddCol('preflight_findings', 'source_location', 'TEXT');
 
         // Scheduled operations migrations
         maybeAddCol('scheduled_task_runs', 'triggered_by', "TEXT NOT NULL DEFAULT 'scheduler'");
@@ -5051,12 +5086,13 @@ stmt.run('gitops_schema_version', '1');
             );
             const insert = this.db.prepare(
                 `INSERT INTO preflight_findings
-                    (id, run_id, rule_id, severity, title, message, source_path, remediation, service, created_at, rule_version, subject_kind, subject_key)
-                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+                    (id, run_id, rule_id, severity, title, message, source_path, source_location, remediation, service, created_at, rule_version, subject_kind, subject_key)
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
             );
             for (const f of findings) {
                 insert.run(
-                    f.id, f.run_id, f.rule_id, f.severity, f.title, f.message, f.source_path, f.remediation, f.service, f.created_at,
+                    f.id, f.run_id, f.rule_id, f.severity, f.title, f.message, f.source_path, f.source_location ?? null,
+                    f.remediation, f.service, f.created_at,
                     f.rule_version ?? null, f.subject_kind ?? null, f.subject_key ?? null,
                 );
             }
@@ -6459,6 +6495,95 @@ stmt.run('gitops_schema_version', '1');
             this.db.prepare('UPDATE pilot_enrollments SET used_at = ? WHERE node_id = ?').run(now, row.node_id);
             return { ...row, used_at: now };
         })();
+    }
+
+    // --- Node bootstrap trust pins ---
+
+    // The host column holds the lower-case spelling: DNS names are
+    // case-insensitive, so one server must never hold two pins. The accessors
+    // fold their input so a caller cannot reach a case variant of a pin.
+
+    public getNodeBootstrapTrust(host: string, port: number): NodeBootstrapTrust | undefined {
+        return this.db.prepare(
+            'SELECT host, port, fingerprint, algorithm, approved_by, approved_at, last_seen_at FROM node_bootstrap_trust WHERE host = ? AND port = ?'
+        ).get(host.toLowerCase(), port) as NodeBootstrapTrust | undefined;
+    }
+
+    /**
+     * Fold pins stored under a mixed-case host into the lower-case row. Spellings
+     * that hold the same key merge into the oldest approval. Spellings that hold
+     * different keys cannot be ranked: the later pin never went through a
+     * changed-key confirmation, and a replacement resets the approval time, so
+     * neither "oldest" nor "newest" is known to be the key the operator last
+     * chose. Neither is trusted: the host is dropped, and the next preflight
+     * asks for a fresh trust decision. Every dropped key is logged and audited
+     * with who approved it and when; the audit row is written in the same
+     * transaction as the drop, so neither can be lost without the other.
+     * Idempotent.
+     */
+    private migrateNodeBootstrapTrustHostCase(): void {
+        const rows = this.db.prepare(
+            `SELECT host, port, fingerprint, algorithm, approved_by, approved_at, last_seen_at FROM node_bootstrap_trust
+             ORDER BY approved_at ASC, (host = lower(host)) DESC, last_seen_at DESC, host`
+        ).all() as NodeBootstrapTrust[];
+        if (!rows.some((row) => row.host !== row.host.toLowerCase())) return;
+        const remove = this.db.prepare('DELETE FROM node_bootstrap_trust WHERE host = ? AND port = ?');
+        const insert = this.db.prepare(
+            `INSERT INTO node_bootstrap_trust (host, port, fingerprint, algorithm, approved_by, approved_at, last_seen_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?)`
+        );
+        const audit = this.db.prepare(
+            `INSERT INTO audit_log (timestamp, username, method, path, status_code, node_id, ip_address, summary)
+             VALUES (?, 'system', 'MIGRATION', 'node_bootstrap_trust', 409, NULL, 'local', ?)`
+        );
+        const conflicts: Array<{ key: string; dropped: string }> = [];
+        this.db.transaction(() => {
+            const groups = new Map<string, NodeBootstrapTrust[]>();
+            for (const row of rows) {
+                const key = `${row.host.toLowerCase()}:${row.port}`;
+                const group = groups.get(key);
+                if (group) group.push(row);
+                else groups.set(key, [row]);
+            }
+            for (const row of rows) remove.run(row.host, row.port);
+            for (const [key, group] of groups) {
+                if (new Set(group.map((row) => row.fingerprint)).size > 1) {
+                    const dropped = group
+                        .map((row) => `${sanitizeForLog(row.fingerprint)} (approved by ${sanitizeForLog(row.approved_by)} at ${Number.isFinite(new Date(row.approved_at).getTime()) ? new Date(row.approved_at).toISOString() : row.approved_at})`)
+                        .join(', ');
+                    audit.run(Date.now(), `bootstrap.trust.conflict: host=${sanitizeForLog(key)} dropped=${dropped}`);
+                    conflicts.push({ key, dropped });
+                    continue;
+                }
+                const oldest = group[0];
+                const lastSeen = Math.max(...group.map((row) => row.last_seen_at));
+                insert.run(oldest.host.toLowerCase(), oldest.port, oldest.fingerprint, oldest.algorithm, oldest.approved_by, oldest.approved_at, lastSeen);
+            }
+        })();
+        for (const conflict of conflicts) {
+            console.warn(`[Bootstrap] Conflicting host key pins for ${sanitizeForLog(conflict.key)}: dropped ${conflict.dropped}. The next preflight asks for a fresh trust decision.`);
+        }
+    }
+
+    public upsertNodeBootstrapTrust(record: NodeBootstrapTrust): void {
+        this.db.prepare(
+            `INSERT INTO node_bootstrap_trust (host, port, fingerprint, algorithm, approved_by, approved_at, last_seen_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?)
+             ON CONFLICT(host, port) DO UPDATE SET
+                fingerprint = excluded.fingerprint,
+                algorithm = excluded.algorithm,
+                approved_by = excluded.approved_by,
+                approved_at = excluded.approved_at,
+                last_seen_at = excluded.last_seen_at`
+        ).run(
+            record.host.toLowerCase(),
+            record.port,
+            record.fingerprint,
+            record.algorithm,
+            record.approved_by,
+            record.approved_at,
+            record.last_seen_at,
+        );
     }
 
     public deletePilotEnrollment(nodeId: number): void {
@@ -10817,6 +10942,13 @@ stmt.run('gitops_schema_version', '1');
         ).get(secretId) as SecretVersionRow | undefined;
     }
 
+    public getSecretVersion(secretId: number, version: number): SecretVersionRow | undefined {
+        return this.db.prepare(
+            `SELECT id, secret_id, version, encrypted_payload, key_count, created_at, created_by, note
+             FROM secret_versions WHERE secret_id = ? AND version = ?`
+        ).get(secretId, version) as SecretVersionRow | undefined;
+    }
+
     public createSecretWithVersion(input: {
         name: string;
         description: string;
@@ -10847,11 +10979,16 @@ stmt.run('gitops_schema_version', '1');
         keyCount: number;
         createdBy: string;
         note: string;
+        /** When set, the write is refused unless the bundle is still at this version. */
+        expectedVersion?: number;
     }): { version: number } {
         const now = Date.now();
         const txn = this.db.transaction(() => {
             const current = this.db.prepare('SELECT current_version FROM secrets WHERE id = ?').get(input.secretId) as { current_version: number } | undefined;
             if (!current) throw new Error('Secret not found');
+            if (input.expectedVersion !== undefined && current.current_version !== input.expectedVersion) {
+                throw new SecretVersionConflictError(current.current_version);
+            }
             const nextVersion = current.current_version + 1;
             this.db.prepare(
                 'INSERT INTO secret_versions (secret_id, version, encrypted_payload, key_count, created_at, created_by, note) VALUES (?, ?, ?, ?, ?, ?, ?)'
@@ -10862,6 +10999,21 @@ stmt.run('gitops_schema_version', '1');
                 this.db.prepare('UPDATE secrets SET current_version = ?, description = ?, updated_at = ? WHERE id = ?').run(nextVersion, input.description, now, input.secretId);
             }
             return { version: nextVersion };
+        });
+        return txn();
+    }
+
+    /** Update bundle metadata only; a stale version is refused the same way. */
+    public updateSecretDescription(input: { secretId: number; description: string; expectedVersion: number }): { version: number } {
+        const now = Date.now();
+        const txn = this.db.transaction(() => {
+            const current = this.db.prepare('SELECT current_version FROM secrets WHERE id = ?').get(input.secretId) as { current_version: number } | undefined;
+            if (!current) throw new Error('Secret not found');
+            if (current.current_version !== input.expectedVersion) {
+                throw new SecretVersionConflictError(current.current_version);
+            }
+            this.db.prepare('UPDATE secrets SET description = ?, updated_at = ? WHERE id = ?').run(input.description, now, input.secretId);
+            return { version: current.current_version };
         });
         return txn();
     }

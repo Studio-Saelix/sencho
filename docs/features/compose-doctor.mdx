@@ -209,7 +209,7 @@ Sencho recognizes when the stack it is checking is its own running compose proje
 
 This is the one place Compose Doctor's findings connect to an enforcement that is not advisory. Independent of this report, and independent of whether the finding is acknowledged, Sencho refuses generic **deploy, update, stop, down, and delete** actions on its own compose project, because any of them could recreate or remove the dashboard you are using to manage it. Attempting one of those actions returns an error explaining why; Compose Doctor's finding is the heads-up that surfaces the same fact before you try.
 
-To update Sencho itself, use **Fleet -> Node Update** instead of the stack's own update action. Sencho's own project is refused as described above. Any other stack that holds the Docker socket proxy Sencho is using is protected against operations that would stop or recreate the proxy. Those are refused (see [Updating the proxy](/operations/self-hosting#updating-the-proxy) for the full list), and a deploy that leaves the proxy unchanged goes through. To manage Sencho's own project normally (for example, to deliberately restructure it), move its compose project outside the node's configured Compose directory first.
+To update Sencho itself, use **Fleet -> Node management -> Node updates** instead of the stack's own update action. Sencho's own project is refused as described above. Any other stack that holds the Docker socket proxy Sencho is using is protected against operations that would stop or recreate the proxy. Those are refused (see [Updating the proxy](/operations/self-hosting#updating-the-proxy) for the full list), and a deploy that leaves the proxy unchanged goes through. To manage Sencho's own project normally (for example, to deliberately restructure it), move its compose project outside the node's configured Compose directory first.
 
 ## Networking-relevant findings on the Networking page
 
@@ -257,6 +257,23 @@ Other signals (current container health, the pending image change, the rollback 
 
 Preflight runs against the **active node**, so selecting a remote node checks the stack against that machine's live Docker state. On mobile, the same report appears under the **Compose** section of the stack detail view.
 
+## Opening a finding's source
+
+A finding that points at a field you authored shows a small `file:line` link under the message. Clicking it opens the exact range in the stack editor:
+
+- A declaration in the primary Compose file opens the **compose.yaml** tab with the range selected.
+- A declaration in an override, an included file, or a `label_file` opens the **Files** tab on that file and selects the range.
+
+For a finding about one field, the location is shown only when Sencho can decide a single authored source. A value produced by more than one layer that cannot be told apart by the effective value, a value that contains interpolation, a `!reset` or `!override` marker, a Sencho-generated Mesh override, a file that cannot be parsed, or a declaration the reader could not fully enumerate because an alias or merge chain exceeded its bounds shows no link. A layer that could still declare the field blocks the link even when another file matches: for a scalar only a later layer can supersede an earlier literal, while a mapping or sequence merges across layers so an earlier unparsed layer can still contribute. A declaration that reaches the project through a root merge or a supported merge chain is read like any other declaration, so its file can still be the link target. An `extends` base that cannot be resolved blocks every link for that service. That is deliberate: a wrong line is worse than no line.
+
+A stored link is dropped as soon as the file it points into changes: the finding stays, but its `file:line` link disappears until that file's content matches the run again. Clicking a link re-reads the report first, so a change to the located file while the tab is open cannot send the click to a stale line. The range is bound to the file content it was computed from, and the editor opens it only after verifying the content it reads still hashes to that revision; if the file changes between the two reads, nothing is selected and Sencho says the location is no longer current. A clean compose buffer that no longer matches disk is refreshed first, while a buffer with unsaved edits keeps them and the selection is left alone. A change to a different layer that supersedes the field is not readable from that file's bytes; re-running preflight is what updates the finding itself. When the fresh report cannot link the clicked finding, the click says so instead of opening a guessed line. When several findings share the clicked identity and the range picks none of them, it asks you to choose from the current report when at least one still shows a link; otherwise it says that none does.
+
+A declaration inherited through `extends` links to the file that actually writes it, not to the extending service.
+
+A finding that reports a conflict between services, such as two services publishing the same host port or setting the same `container_name` (a Compose version that refuses duplicate names fails to render, and the render error is reported instead), links to the first participating service in the rendered configuration's order, which is not necessarily the order in the file. The finding's text can name a service whose claim sits on an unrelated interface; that claim does not take part in the conflict and does not affect the link. The link is shown only when every participating declaration resolves to a single authored item; if any of them is ambiguous, the finding shows no link. The exclusions for a single field apply here too: interpolation, a `!reset` or `!override` marker, a file that cannot be parsed, or a layer outside the managed boundary leaves the finding without a link. A stack whose rendered configuration holds more than 2,048 port publications across its services (Compose renders a paired range such as `1-3000:1-3000` as one publication per port) is too large to attribute, so none of its port findings shows a link.
+
+Hovering a link shows the authored path, such as `services.api.image`. On a phone the location appears as plain text, because the phone detail has no full editor or Files tab.
+
 ## Acknowledging findings
 
 When a finding is valid in general but intentional for your stack, you can acknowledge it so it no longer counts toward the active warning total, the Doctor tab badge, or the update readiness check.
@@ -288,6 +305,8 @@ The **Doctor** tab only appears when the active node reports the `compose-doctor
 There is no tier gate: Compose Doctor is available on all plans.
 
 ## Limitations
+
+- A finding has no source link when the authored files cannot be read, when a layer that could declare the field cannot be parsed or lies outside the stack directory, when an `extends` base cannot be resolved, or when several layers declare the field and the effective value does not identify one of them. The finding itself is still reported.
 
 - **Advisory only, with one exception.** Compose Doctor's report never blocks a deploy or changes any stack configuration; act on findings or ignore them. The one exception is the self-management guard: Sencho refuses generic deploy, update, stop, down, and delete actions on its own compose project regardless of whether that finding is acknowledged. See [Self-management](#self-management).
 - **Dismissing the summary is local to your browser.** The **X** on the summary card and the Doctor tab dot share a per-stack, per-node dismissal stored in your browser's local storage. It is not synced across devices or between teammates, so a dismissal you make is invisible to anyone else looking at the same stack.
@@ -343,7 +362,7 @@ There is no tier gate: Compose Doctor is available on all plans.
     The summary card shows the username and relative time: "ran 5 minutes ago by admin". This reflects the most recent run stored for this stack on the currently active node.
   </Accordion>
   <Accordion title="The report warns that this stack is the running Sencho instance">
-    Sencho detected that the stack you are checking is its own compose project. Generic deploy, update, stop, down, and delete actions are refused for this stack no matter what the preflight report says, because any of them could recreate or remove the dashboard you are using right now. Update Sencho from **Fleet -> Node Update** instead. See [Self-management](#self-management).
+    Sencho detected that the stack you are checking is its own compose project. Generic deploy, update, stop, down, and delete actions are refused for this stack no matter what the preflight report says, because any of them could recreate or remove the dashboard you are using right now. Update Sencho from **Fleet -> Node management -> Node updates** instead. See [Self-management](#self-management).
   </Accordion>
   <Accordion title="I dismissed a finding but it still shows on another machine or for a teammate">
     Dismissing the summary card (the **X** button) is stored in your browser's local storage, keyed to the stack and node. It does not sync across devices, browsers, or user accounts, so a dismissal on your machine has no effect on what anyone else sees.

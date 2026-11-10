@@ -581,3 +581,135 @@ describe('SelfIdentityService identity state', () => {
   });
 });
 
+describe('SelfIdentityService failure log redaction', () => {
+  const CREDENTIAL = 'hunter2';
+  const secretError = () => new Error(`inspect failed for tcp://operator:${CREDENTIAL}@proxy:2375/containers`);
+
+  function expectSecretAbsent(warnSpy: ReturnType<typeof vi.spyOn>, reason?: string | null): void {
+    const logged = warnSpy.mock.calls.flat().join(' ');
+    expect(logged).not.toContain(CREDENTIAL);
+    expect(logged).toContain('[redacted]');
+    if (reason !== undefined && reason !== null) expect(reason).not.toContain(CREDENTIAL);
+  }
+
+  it('redacts an initialization failure', async () => {
+    const svc = SelfIdentityService.getInstance();
+    vi.spyOn(svc as unknown as { resolveSelfInspect: () => Promise<unknown> }, 'resolveSelfInspect')
+      .mockRejectedValue(secretError());
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+
+    await svc.initialize();
+
+    expect(svc.getState()).toBe('unresolved');
+    expectSecretAbsent(warnSpy, svc.getUnresolvedReason());
+  });
+
+  it('redacts a HOSTNAME probe failure', async () => {
+    process.env.HOSTNAME = 'sencho-1';
+    mockContainer.inspect.mockRejectedValue(secretError());
+    vi.spyOn(SelfIdentityService, 'readContainerIdFromCgroup').mockResolvedValue(null);
+    vi.spyOn(SelfIdentityService, 'readContainerIdFromMountinfo').mockResolvedValue(null);
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+
+    const svc = SelfIdentityService.getInstance();
+    await svc.initialize();
+
+    expect(svc.getState()).toBe('unresolved');
+    expect(svc.getUnresolvedReason()).toContain('HOSTNAME inspect failed');
+    expectSecretAbsent(warnSpy, svc.getUnresolvedReason());
+  });
+
+  it('redacts a cgroup-derived id probe failure', async () => {
+    process.env.HOSTNAME = 'custom-hostname';
+    mockContainer.inspect
+      .mockRejectedValueOnce(Object.assign(new Error('no such container'), { statusCode: 404 }))
+      .mockRejectedValueOnce(secretError());
+    vi.spyOn(SelfIdentityService, 'readContainerIdFromCgroup').mockResolvedValue(FULL_CONTAINER_ID);
+    vi.spyOn(SelfIdentityService, 'readContainerIdFromMountinfo').mockResolvedValue(null);
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+
+    const svc = SelfIdentityService.getInstance();
+    await svc.initialize();
+
+    expect(svc.getState()).toBe('unresolved');
+    expect(svc.getUnresolvedReason()).toContain('cgroup inspect failed');
+    expectSecretAbsent(warnSpy, svc.getUnresolvedReason());
+  });
+
+  it('redacts a cgroup read failure', async () => {
+    process.env.HOSTNAME = 'custom-hostname';
+    mockContainer.inspect.mockRejectedValue(Object.assign(new Error('no such container'), { statusCode: 404 }));
+    vi.spyOn(SelfIdentityService, 'readContainerIdFromCgroup')
+      .mockRejectedValue(new Error(`open /run/secrets/config: token=${CREDENTIAL}`));
+    vi.spyOn(SelfIdentityService, 'readContainerIdFromMountinfo').mockResolvedValue(null);
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+
+    const svc = SelfIdentityService.getInstance();
+    await svc.initialize();
+
+    expect(svc.getState()).toBe('unresolved');
+    expect(svc.getUnresolvedReason()).toContain('cgroup read failed');
+    expectSecretAbsent(warnSpy, svc.getUnresolvedReason());
+  });
+
+  it('redacts a mountinfo read failure', async () => {
+    process.env.HOSTNAME = 'custom-hostname';
+    mockContainer.inspect.mockRejectedValue(Object.assign(new Error('no such container'), { statusCode: 404 }));
+    vi.spyOn(SelfIdentityService, 'readContainerIdFromCgroup').mockResolvedValue(null);
+    vi.spyOn(SelfIdentityService, 'readContainerIdFromMountinfo')
+      .mockRejectedValue(new Error(`mountinfo unreadable: password=${CREDENTIAL}`));
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+
+    const svc = SelfIdentityService.getInstance();
+    await svc.initialize();
+
+    expect(svc.getState()).toBe('unresolved');
+    expect(svc.getUnresolvedReason()).toContain('mountinfo read failed');
+    expectSecretAbsent(warnSpy, svc.getUnresolvedReason());
+  });
+
+  it('redacts a mount reinspection failure on an already resolved identity', async () => {
+    process.env.HOSTNAME = 'sencho-1';
+    mockContainer.inspect.mockResolvedValueOnce({
+      Id: FULL_CONTAINER_ID,
+      Name: '/sencho',
+      Image: 'sha256:' + FULL_IMAGE_ID_HEX,
+      Config: { Labels: {} },
+      NetworkSettings: { Networks: {} },
+      Mounts: [{ Type: 'bind', Source: '/var/run/docker.sock', Destination: '/var/run/docker.sock' }],
+    });
+    const svc = SelfIdentityService.getInstance();
+    await svc.initialize();
+    expect(svc.getState()).toBe('resolved');
+
+    mockContainer.inspect.mockRejectedValue(secretError());
+    vi.spyOn(SelfIdentityService, 'readContainerIdFromCgroup').mockResolvedValue(null);
+    vi.spyOn(SelfIdentityService, 'readContainerIdFromMountinfo').mockResolvedValue(null);
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+
+    await expect(svc.getBindMounts()).rejects.toThrow('cannot read mounts');
+    expectSecretAbsent(warnSpy);
+  });
+
+  it('redacts a detached build-revision enrichment failure', async () => {
+    process.env.HOSTNAME = 'sencho-1';
+    mockContainer.inspect.mockResolvedValue({
+      Id: FULL_CONTAINER_ID,
+      Name: '/sencho',
+      Image: 'sha256:' + FULL_IMAGE_ID_HEX,
+      Config: { Image: 'registry.example.com/sencho:1', Labels: {} },
+      NetworkSettings: { Networks: {} },
+      Mounts: [],
+    });
+    const svc = SelfIdentityService.getInstance();
+    vi.spyOn(svc as unknown as { resolveDigestRevision: () => Promise<string | null> }, 'resolveDigestRevision')
+      .mockRejectedValue(secretError());
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+
+    await svc.initialize();
+    await svc.whenRevisionResolved();
+
+    expectSecretAbsent(warnSpy);
+  });
+});
+

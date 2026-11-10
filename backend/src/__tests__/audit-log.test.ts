@@ -143,6 +143,19 @@ describe('getAuditSummary()', () => {
     expect(getAuditSummary('POST', '/users/42/mfa/reset')).not.toBe('Created user: 42');
   });
 
+  it('labels node bootstrap requests as bootstrap actions, never as a node being added', () => {
+    expect(getAuditSummary('POST', '/nodes/bootstrap/host-key', 200)).toBe('Checked bootstrap host key');
+    expect(getAuditSummary('POST', '/nodes/bootstrap/preflight', 200)).toBe('Ran bootstrap preflight');
+    // The generic node-creation entry still applies to the node itself.
+    expect(getAuditSummary('POST', '/nodes', 200)).toBe('Added node');
+    expect(getAuditSummary('POST', '/nodes/bootstrap/preflight')).not.toMatch(/^Added node/);
+  });
+
+  it.each([400, 403, 409, 422, 429, 500])('does not claim a bootstrap action when the request failed with %i', (status) => {
+    expect(getAuditSummary('POST', '/nodes/bootstrap/host-key', status)).toBe(`Bootstrap host key check failed (${status})`);
+    expect(getAuditSummary('POST', '/nodes/bootstrap/preflight', status)).toBe(`Bootstrap preflight failed (${status})`);
+  });
+
   it('does not claim prune success on 409/400 responses', () => {
     expect(getAuditSummary('POST', '/system/prune/system', 409)).toBe('Prune blocked: plan stale');
     expect(getAuditSummary('POST', '/system/prune/system', 400)).toBe('Prune request rejected');

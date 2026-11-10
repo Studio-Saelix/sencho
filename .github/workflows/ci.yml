@@ -215,6 +215,11 @@ jobs:
         working-directory: ./frontend
         run: npm run build
 
+      # Fails when a gzipped bundle group outgrows frontend/bundle-budget.json
+      # or has no budget there, and when it cannot read the build.
+      - name: Bundle size budget
+        run: node scripts/check-bundle-size.mjs
+
       - name: Unit Tests (Vitest)
         working-directory: ./frontend
         run: npm test
@@ -447,6 +452,9 @@ jobs:
           node --check scripts/release-highlights.mjs
           node --check scripts/audit-with-vex.mjs
           node --check scripts/check-pr-title.mjs
+          node --check scripts/check-bundle-size.mjs
+          node --check scripts/perf/scale-benchmark.mjs
+          node --check scripts/perf/idle-footprint.mjs
           node --check scripts/check-version-transition.mjs
 
       - name: Unit tests
@@ -456,5 +464,8 @@ jobs:
           node --test scripts/release-highlights.test.mjs
           node --test scripts/audit-with-vex.test.mjs
           node --test scripts/check-pr-title.test.mjs
+          node --test scripts/check-bundle-size.test.mjs
+          node --test scripts/perf/scale-benchmark.test.mjs
+          node --test scripts/perf/idle-footprint.test.mjs
           node --test scripts/check-workflow-expressions.test.mjs
           node --test scripts/check-version-transition.test.mjs

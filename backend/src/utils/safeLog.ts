@@ -21,7 +21,12 @@ export function redactSensitiveText(value: unknown): string {
   return s
     .replace(/Bearer\s+[A-Za-z0-9\-._~+/=]+/gi, 'Bearer [redacted]')
     .replace(/Basic\s+[A-Za-z0-9+/=]+/gi, 'Basic [redacted]')
-    .replace(/[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}/g, '[redacted-jwt]')
+    // The lookbehind is what keeps this linear. Without it the greedy first
+    // segment is retried from every offset of a long run that holds no dot, so
+    // a 60 kB label value costs seconds and blocks the event loop; Docker
+    // metadata is untrusted and unbounded. It only forbids a match that starts
+    // inside a base64url run, which is not where a JWT begins.
+    .replace(/(?<![A-Za-z0-9_-])[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}/g, '[redacted-jwt]')
     // Any URL scheme, since a credential rides in postgres://, redis://, and
     // amqp:// strings as readily as in http(s) ones. The user may be empty
     // (redis://:pw@host), and the password runs to the last `@` of the authority,
