@@ -696,9 +696,10 @@ describe('bootstrap operations: enrollment and retry', () => {
     const nodesBefore = db.getNodes().length;
     const retried = h.service.retry(op.id, second.request, context());
     expect(retried).toMatchObject({ state: 'rechecking', attempt: 2 });
-    await vi.waitFor(() => expect(h.service.get(op.id).state).toBe('enrolling'));
-    h.tunnels.connect(nodeId);
+    // The Pilot connects after the retry's enrollment wait ended, as in the first attempt: the stopped run is reconciled when it is read.
     await h.service.settled();
+    expect(h.service.get(op.id)).toMatchObject({ state: 'partial', attempt: 2, error: { code: 'ENROLLMENT_NOT_CONNECTED' } });
+    h.tunnels.connect(nodeId);
 
     const done = h.service.get(op.id);
     expect(done).toMatchObject({ state: 'enrolled', nodeId, attempt: 2, active: false });
