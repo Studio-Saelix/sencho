@@ -52,12 +52,11 @@ jobs:
       - name: Run benchmark
         env:
           WORK_DIR: ${{ runner.temp }}/scale-benchmark
-        run: |
-          args=(--out scale-benchmark-results.json --work-dir "$WORK_DIR")
-          if [ -f scripts/perf/scale-benchmark-baseline.json ]; then
-            args+=(--baseline scripts/perf/scale-benchmark-baseline.json)
-          fi
-          node scripts/perf/scale-benchmark.mjs "${args[@]}"
+        run: >-
+          node scripts/perf/scale-benchmark.mjs
+          --baseline scripts/perf/scale-benchmark-baseline.json
+          --out scale-benchmark-results.json
+          --work-dir "$WORK_DIR"
 
       - name: Upload results
         if: always()

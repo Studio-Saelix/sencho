@@ -10,9 +10,10 @@
  * Docker and a built backend, and runs in the scale-benchmark workflow.
  */
 
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { dirname, join } from 'node:path'
+import { fileURLToPath } from 'node:url'
 import { after, describe, it } from 'node:test'
 import assert from 'node:assert/strict'
 
@@ -254,5 +255,21 @@ describe('prepareWorkDir', () => {
     const dir = prepareWorkDir(null)
     assert.match(dir, /sencho-scale-/)
     rmSync(dir, { recursive: true, force: true })
+  })
+})
+
+describe('committed baseline', () => {
+  const path = join(dirname(fileURLToPath(import.meta.url)), 'scale-benchmark-baseline.json')
+  const baseline = parseBaseline(readFileSync(path, 'utf8'), path)
+
+  it('is valid, at the default scale, and taken on the CI runner the workflow uses', () => {
+    const defaults = parseArgs([])
+    assert.doesNotThrow(() => assertSameScale(baseline, defaults))
+    assert.equal(baseline.meta.runner, 'github-actions')
+  })
+
+  it('has every series the benchmark measures, so none can go missing unnoticed', () => {
+    const measured = ['stacks', 'statuses-miss', 'statuses-hit', 'fleet-overview']
+    assert.deepEqual(Object.keys(baseline.series).sort(), [...measured].sort())
   })
 })
