@@ -1487,9 +1487,9 @@ describe('bootstrap operations: S1 a failed setup does not strand the operation'
     expect(stranded).toMatchObject({ state: 'blocked', active: true, changesMade: true, attempt: 2, nodeId, actions: { retry: true, release: true, cancel: false } });
     const third = approve(h, op.id);
     h.service.retry(op.id, third.request, context());
-    await vi.waitFor(() => expect(h.service.get(op.id).state).toBe('enrolling'));
-    h.tunnels.connect(nodeId);
     await h.service.settled();
+    expect(h.service.get(op.id)).toMatchObject({ state: 'partial', nodeId, attempt: 3, error: { code: 'ENROLLMENT_NOT_CONNECTED' } });
+    h.tunnels.connect(nodeId);
     expect(h.service.get(op.id)).toMatchObject({ state: 'enrolled', active: false, nodeId, attempt: 3 });
     db.deleteNode(nodeId);
   });
@@ -1564,10 +1564,11 @@ describe('bootstrap operations: a stranded row is settled by the action that mee
     });
     const second = approve(h, op.id);
     expect(() => h.service.retry(op.id, second.request, context())).not.toThrow();
-    await vi.waitFor(() => expect(h.service.get(op.id).state).toBe('enrolling'));
-    h.tunnels.connect(nodeId);
+    // The retry ran to the end of its enrollment wait (the Pilot never connects here), so it was not stranded.
     await h.service.settled();
-    expect(h.service.get(op.id)).toMatchObject({ state: 'enrolled', nodeId, attempt: 3 });
+    expect(h.service.get(op.id)).toMatchObject({ state: 'partial', nodeId, attempt: 3, error: { code: 'ENROLLMENT_NOT_CONNECTED' } });
+    h.tunnels.connect(nodeId);
+    expect(h.service.get(op.id)).toMatchObject({ state: 'enrolled', nodeId });
     db.deleteNode(nodeId);
   });
 });
