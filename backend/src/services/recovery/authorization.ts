@@ -7,7 +7,9 @@ import type { StorageDependent } from './types';
 /**
  * Recovery authorization, on the canonical RBAC engine.
  *
- *   read      view coverage, history, browse, download   stack:read on every dependent stack
+ *   read      view coverage and history                  stack:read on every dependent stack
+ *   content   browse or download a point's contents      stack:read on every dependent stack,
+ *                                                        system:settings when no stack depends on it now
  *   protect   create a root or path point                stack:edit on every dependent stack
  *   restore   restore or undo                            stack:edit on every dependent stack
  *   configure repositories, keys, blocking policy        system:settings
@@ -94,6 +96,38 @@ export function authorizeStorageAccess(
   }
   const deniedStacks = checkedStacks.filter((stack) => !checkPermission(req, action, 'stack', stack));
   return { allowed: deniedStacks.length === 0, action, checkedStacks, deniedStacks };
+}
+
+/**
+ * The dependents a content read is decided on: every recorded and current one,
+ * and the ones found now on their own. `resolved` is false when a stack's model
+ * could not be rendered, so the full set is unknown. Null means the point's
+ * storage record is missing.
+ */
+export type PointContentReadTarget = {
+  storageKey: string;
+  resolved: boolean;
+  dependents: readonly StorageDependent[];
+  current: readonly StorageDependent[];
+} | null;
+
+/**
+ * Whether the caller may read a point's contents.
+ *
+ * A storage with a current dependent is read under the ordinary rule:
+ * `stack:read` on every recorded and current dependent, or node-wide when a
+ * model could not be rendered. A storage no stack depends on now (the volume of
+ * a deleted stack, one no stack ever owned, or one whose dependents cannot be
+ * proven) is detached, and its files are readable only with `system:settings`.
+ * Node-wide `stack:read` does not count, and neither does `stack:read` on a name
+ * a deleted stack left in the recorded rows: an empty dependent set must never
+ * be the reason a read is allowed. The dedicated recovery-administration
+ * permission replaces the floor here, and both read routes follow.
+ */
+export function authorizePointContentRead(req: Request, target: PointContentReadTarget): boolean {
+  if (target === null || target.current.length === 0) return authorizeNodeWide(req, 'configure');
+  if (!target.resolved) return authorizeNodeWide(req, 'read');
+  return authorizeStorageAccess(req, 'read', { storageKey: target.storageKey, liveDependents: target.dependents }).allowed;
 }
 
 /**

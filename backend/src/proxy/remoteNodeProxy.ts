@@ -86,7 +86,7 @@ import {
 } from '../helpers/registryDeliveryBodyLimits';
 import { classifyRegistryDeliveryOp } from '../helpers/registryOpClassifier';
 import { preflightRecoveryRequest } from '../services/recovery/remoteSupport';
-import type { RestoreMode } from '../services/recovery/types';
+import type { PointReadKind, RestoreMode } from '../services/recovery/types';
 import { augmentRemoteProxyWithRegistryDelivery, evaluateRegistryDeliveryProxyGate } from '../helpers/registryDeliveryProxy';
 
 /**
@@ -808,7 +808,11 @@ export function createRemoteProxyMiddleware(): RequestHandler {
       // described one way and refused another. A node with the engine passes
       // through and answers for itself, including `503` while boot is running.
       if (isRecoveryProxyPath(req.path) && !isRecoveryDescriptorPath(req.path)) {
-        const preflight = await preflightRecoveryRequest(req.nodeId, requiredRestoreModeFor(req.method, req.path));
+        const preflight = await preflightRecoveryRequest(
+          req.nodeId,
+          requiredRestoreModeFor(req.method, req.path),
+          requiredPointReadFor(req.method, req.path),
+        );
         if (!preflight.ok) {
           res.status(preflight.httpStatus).json({
             error: preflight.message,
@@ -1394,6 +1398,20 @@ export function requiredRestoreModeFor(method: string, path: string): RestoreMod
   return /^\/recovery\/(?:points\/[^/]+\/overwrite(?:\/preview)?|restores\/[^/]+\/resolve)\/?(?:\?|$)/i.test(path)
     ? 'staged_overwrite'
     : undefined;
+}
+
+/**
+ * The point read a recovery request needs the node to serve, or undefined for
+ * any other route. Browse and download are GETs (a HEAD runs the same handler),
+ * and a node that never advertised them has no route to answer with, so the hub
+ * refuses with `update_required` before the hop.
+ */
+export function requiredPointReadFor(method: string, path: string): PointReadKind | undefined {
+  const verb = method.toUpperCase();
+  if (verb !== 'GET' && verb !== 'HEAD') return undefined;
+  const match = /^\/recovery\/points\/[^/]+\/(browse|download)\/?(?:\?|$)/i.exec(path);
+  if (!match) return undefined;
+  return match[1].toLowerCase() === 'browse' ? 'list' : 'download';
 }
 
 /** A recovery URL with its `/api` prefix still on, as the proxy's error hook sees it. */

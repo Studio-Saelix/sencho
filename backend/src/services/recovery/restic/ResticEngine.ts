@@ -21,9 +21,8 @@ import { RECOVERY_CONTRACT_VERSION } from '../types';
 import { RECOVERY_WORK_DIR_GLOB } from '../restoreIntents';
 import {
   classifyContentRun,
-  contentListingFor,
   contentSnapshotPath,
-  MAX_CONTENT_ENTRIES,
+  parentPointPath,
   parseContentNodeLine,
 } from './resticContents';
 import type {
@@ -39,8 +38,8 @@ import type {
   IntegrityMethod,
   PointCaptureEvidence,
   PointContentReader,
-  RecoveryContentEntry,
-  RecoveryContents,
+  PointDirectoryRead,
+  PointEntry,
   RecoveryPoint,
   RestoreEvidence,
   RestoreIntent,
@@ -66,10 +65,10 @@ export const RESTIC_ENGINE_ID = 'restic';
 /**
  * How long one listing may take. A directory read loads the repository index
  * before the first entry, and a repository on a stalled mount would otherwise
- * hold a helper and a response forever. A file body has no deadline: it moves at
- * the client's pace and ends when the client leaves.
+ * hold a helper and a response forever. A file body has no total deadline: it
+ * moves at the client's pace, and the download route stops one that stops moving.
  */
-const CONTENT_LISTING_TIMEOUT_MS = 10 * 60 * 1000;
+export const CONTENT_LISTING_TIMEOUT_MS = 120 * 1000;
 
 export class ResticEngine implements BackupEngine, PointContentReader {
   readonly engineId = RESTIC_ENGINE_ID;
@@ -293,31 +292,37 @@ export class ResticEngine implements BackupEngine, PointContentReader {
   // --- Point contents -------------------------------------------------------
 
   /**
-   * One read of a saved point: a directory's entries, or one entry's metadata.
+   * One directory read of a saved point: the path's own record and one page of
+   * its immediate children.
    *
    * `restic ls --json` walks to the requested path and prints the path's own
-   * node followed by its immediate children, so the read is bounded by the
-   * directory rather than by the whole tree. A directory past the entry cap
-   * stops the run by aborting it: the listing is truncated on purpose, and the
-   * SIGINT it causes says nothing about the repository.
+   * node followed by its immediate children in tree order (sorted by name), so
+   * an offset names the same entry on every read of an immutable snapshot. The
+   * run skips the first `offset` children without keeping them and stops itself
+   * once it has seen one entry past the page, which is how it knows there is a
+   * next page. That stop is a SIGINT the classifier reads as success.
    */
-  async listContents(
+  async readDirectory(
     request: ContentReadRequest,
+    page: { offset: number; pageSize: number },
     ctx: ContentReadContext,
-  ): Promise<EngineResult<RecoveryContents>> {
+  ): Promise<EngineResult<PointDirectoryRead>> {
     const repository = this.deps.repositoryFor(request.repositoryId);
     if (!repository) return { ok: false, errorClass: 'repository_unavailable' };
     if (!request.snapshotId) return { ok: false, errorClass: 'invalid_request' };
-    let snapshotPath: string;
-    try {
-      snapshotPath = contentSnapshotPath(request.path);
-    } catch {
-      return { ok: false, errorClass: 'invalid_request' };
-    }
+    const snapshotPath = contentSnapshotPath(request.path);
 
-    const entries: RecoveryContentEntry[] = [];
-    let self: RecoveryContentEntry | null = null;
-    let truncated = false;
+    const entries: PointEntry[] = [];
+    let self: PointEntry | null = null;
+    let seen = 0;
+    let hasMore = false;
+    // Set when the run stops itself: the page is full, or the record is all a
+    // file, a link or a record-only read needs.
+    let stopped = false;
+    const stop = (): void => {
+      stopped = true;
+      controller.abort();
+    };
     const controller = new AbortController();
     const onExternalAbort = (): void => controller.abort();
     if (ctx.signal.aborted) controller.abort();
@@ -334,15 +339,20 @@ export class ResticEngine implements BackupEngine, PointContentReader {
         signal: controller.signal,
         timeoutMs: CONTENT_LISTING_TIMEOUT_MS,
         onStdoutLine: (line) => {
+          if (stopped) return;
           const entry = parseContentNodeLine(line);
           if (!entry) return;
           if (entry.path === request.path) {
             self = entry;
+            if (entry.type !== 'directory' || page.pageSize === 0) stop();
             return;
           }
-          if (entries.length >= MAX_CONTENT_ENTRIES) {
-            truncated = true;
-            controller.abort();
+          if (parentPointPath(entry.path) !== request.path) return;
+          seen += 1;
+          if (seen <= page.offset) return;
+          if (entries.length >= page.pageSize) {
+            hasMore = true;
+            stop();
             return;
           }
           entries.push(entry);
@@ -352,11 +362,18 @@ export class ResticEngine implements BackupEngine, PointContentReader {
       ctx.signal.removeEventListener('abort', onExternalAbort);
     }
 
-    const failure = this.contentFailure('list', request, result, ctx.signal, truncated);
+    const failure = this.contentFailure('list', request, result, ctx.signal, stopped && !ctx.signal.aborted);
     if (failure) return failure;
-    const contents = contentListingFor({ path: request.path, self, entries, truncated });
-    if (!contents) return { ok: false, errorClass: 'not_found' };
-    return { ok: true, evidence: contents };
+    if (!self) return { ok: true, evidence: { found: false } };
+    return {
+      ok: true,
+      evidence: {
+        found: true,
+        self,
+        entries,
+        nextOffset: hasMore ? page.offset + page.pageSize : null,
+      },
+    };
   }
 
   /**
@@ -376,12 +393,7 @@ export class ResticEngine implements BackupEngine, PointContentReader {
     const repository = this.deps.repositoryFor(request.repositoryId);
     if (!repository) return { ok: false, errorClass: 'repository_unavailable' };
     if (!request.snapshotId) return { ok: false, errorClass: 'invalid_request' };
-    let snapshotPath: string;
-    try {
-      snapshotPath = contentSnapshotPath(request.path);
-    } catch {
-      return { ok: false, errorClass: 'invalid_request' };
-    }
+    const snapshotPath = contentSnapshotPath(request.path);
 
     let bytes = 0;
     const result = await this.deps.runner.run({
@@ -424,14 +436,14 @@ export class ResticEngine implements BackupEngine, PointContentReader {
     request: ContentReadRequest,
     result: HelperRunResult,
     signal: AbortSignal,
-    truncated: boolean,
+    stoppedEarly: boolean,
   ): EngineResult<never> | null {
     const outcome = classifyContentRun({
       exitCode: result.exitCode,
       aborted: result.aborted,
       killed: result.killed,
       externalAborted: signal.aborted,
-      truncated,
+      stoppedEarly,
     });
     if (outcome.status === 'ok') return null;
     if (outcome.status === 'cancelled') return { ok: false, errorClass: 'interrupted' };

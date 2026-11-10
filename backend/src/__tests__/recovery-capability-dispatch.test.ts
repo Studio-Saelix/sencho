@@ -68,9 +68,10 @@ const descriptor = (state = 'unavailable', reason = 'engine_not_installed', cont
   contractVersion,
   volumeProtection: { capability: 'volume-protection-v1', version, state, reason },
   restoreModes: ['new_volume', 'staged_overwrite'] as string[],
+  pointReads: ['list', 'download'] as string[],
 });
 
-/** The same answer from a node that predates the restore-mode field. */
+/** The same answer from a node that predates the restore-mode and point-read fields. */
 const legacyDescriptor = (state = 'available', reason = 'engine_registered') => ({
   contractVersion: 1,
   volumeProtection: { capability: 'volume-protection-v1', version: 1, state, reason },
@@ -175,7 +176,23 @@ describe('resolveRemoteVolumeProtection', () => {
   it('reads a descriptor without restore modes as new_volume only', async () => {
     const capability = await import('../services/recovery/capability');
     expect(capability.resolveRemoteRecoveryRead({ kind: 'ok', data: legacyDescriptor() }))
-      .toEqual({ status: { capability: 'volume-protection-v1', version: 1, state: 'available', reason: 'engine_registered' }, restoreModes: ['new_volume'] });
+      .toEqual({
+        status: { capability: 'volume-protection-v1', version: 1, state: 'available', reason: 'engine_registered' },
+        restoreModes: ['new_volume'],
+        pointReads: [],
+      });
+  });
+
+  it('reads the point reads a node advertises, dropping names this build does not know', async () => {
+    const capability = await import('../services/recovery/capability');
+    const read = (pointReads: unknown) =>
+      capability.resolveRemoteRecoveryRead({ kind: 'ok', data: { ...descriptor('available', 'engine_registered'), pointReads } });
+    expect(read(['list', 'download']).pointReads).toEqual(['list', 'download']);
+    expect(read(['list', 'archive', 'list']).pointReads).toEqual(['list']);
+    expect(read('list').pointReads).toEqual([]);
+    // A read changes nothing, so an unknown name never invalidates the descriptor.
+    expect(read(['archive']).status.state).toBe('available');
+    expect(capability.resolveRemoteRecoveryRead({ kind: 'transport', detail: 'down' }).pointReads).toBeNull();
   });
 
   it('reads the modes a node advertises, and none when the status is not its own answer', async () => {
@@ -493,6 +510,18 @@ describe('the hub preflight and a node without the overwrite surface', () => {
         });
       }
 
+      for (const path of ['/api/recovery/points/pt-1/browse?path=/', '/api/recovery/points/pt-1/download?path=/a.txt']) {
+        it(`refuses GET ${path} when the node never advertised point reads, before forwarding it`, async () => {
+          mockRead.mockImplementation(echoing(legacyDescriptor()) as never);
+          await giveTunnel(getId());
+          const res = await request(app).get(path).set('Authorization', authHeader).set('x-node-id', String(getId()));
+          expect(res.status).toBe(409);
+          expect(res.body).toMatchObject({ code: 'UPDATE_REQUIRED', errorClass: 'update_required' });
+          expect(res.body.error).toMatch(/browse or download/);
+          expect(mockRead.mock.calls.map(([args]) => args.path)).toEqual(['/api/recovery/node']);
+        });
+      }
+
       for (const path of otherPosts) {
         it(`does not refuse POST ${path} as an update-required request for a node without the overwrite`, async () => {
           mockRead.mockImplementation(echoing(legacyDescriptor()) as never);
@@ -548,6 +577,42 @@ describe('the hub preflight and a node without the overwrite surface', () => {
     vi.spyOn(original, 'readNodeProxyJson').mockImplementation(echoing(legacyDescriptor()) as never);
     support.resetRemoteRecoverySupportCacheForTests();
     expect(await support.preflightRecoveryRequest(1)).toMatchObject({ ok: true });
+  });
+});
+
+describe('the hub preflight and a node without point reads', () => {
+  it('advertises both point reads, so the field is not dead code', async () => {
+    const res = await request(app).get('/api/recovery/node').set('Authorization', authHeader);
+    expect(res.body.pointReads).toEqual(['list', 'download']);
+  });
+
+  it('answers 409 UPDATE_REQUIRED for a browse or a download on a node that never advertised it', async () => {
+    const support = await import('../services/recovery/remoteSupport');
+    const original = await import('../helpers/nodeProxyJson');
+    vi.spyOn(original, 'readNodeProxyJson').mockImplementation(echoing(legacyDescriptor()) as never);
+    for (const read of ['list', 'download'] as const) {
+      support.resetRemoteRecoverySupportCacheForTests();
+      expect(await support.preflightRecoveryRequest(1, undefined, read), read).toMatchObject({
+        ok: false, httpStatus: 409, code: 'UPDATE_REQUIRED', errorClass: 'update_required',
+      });
+    }
+    // The same node still takes every other recovery request.
+    support.resetRemoteRecoverySupportCacheForTests();
+    expect(await support.preflightRecoveryRequest(1)).toMatchObject({ ok: true });
+  });
+
+  it('lets a browse through to a node that advertises it, and answers an unreachable one as such', async () => {
+    const support = await import('../services/recovery/remoteSupport');
+    const original = await import('../helpers/nodeProxyJson');
+    const spy = vi.spyOn(original, 'readNodeProxyJson').mockImplementation(echoing(descriptor('available', 'engine_registered')) as never);
+    support.resetRemoteRecoverySupportCacheForTests();
+    expect(await support.preflightRecoveryRequest(1, undefined, 'download')).toMatchObject({ ok: true });
+    spy.mockReset();
+    vi.spyOn(original, 'readNodeProxyJson').mockImplementation(async () => ({ kind: 'transport', detail: 'no route' }));
+    support.resetRemoteRecoverySupportCacheForTests();
+    expect(await support.preflightRecoveryRequest(1, undefined, 'list')).toMatchObject({
+      ok: false, httpStatus: 503, errorClass: 'transport_unreachable',
+    });
   });
 });
 

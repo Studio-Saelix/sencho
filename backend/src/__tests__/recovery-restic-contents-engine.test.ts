@@ -2,8 +2,8 @@
  * The restic adapter's read half, with the helper stubbed.
  *
  * The route suite proves the HTTP contract; this one proves the engine wiring
- * that the routes depend on: the argv and profile a read uses, the entry cap and
- * the abort it causes, the exit-code map, the short-body guard, and the two
+ * that the routes depend on: the argv and profile a read uses, paging and the
+ * early stop it causes, the exit-code map, the short-body guard, and the two
  * runner behaviours a streamed body needs (backpressure really pauses the
  * helper, and an abort that lands before the container starts still stops it).
  */
@@ -15,7 +15,6 @@ import {
   RecoveryHelperRunner,
   type HelperRunSpec,
 } from '../services/recovery/restic/helperRunner';
-import { MAX_CONTENT_ENTRIES } from '../services/recovery/restic/resticContents';
 import type { ContentChunkControl } from '../services/recovery/types';
 
 const IMAGE = 'ghcr.io/studio-saelix/sencho-recovery-helper@sha256:' + 'a'.repeat(64);
@@ -74,24 +73,28 @@ afterEach(() => {
   vi.restoreAllMocks();
 });
 
-describe('ResticEngine.listContents', () => {
+describe('ResticEngine.readDirectory', () => {
+  const FIRST_PAGE = { offset: 0, pageSize: 500 };
+
   it('lists one directory through the read profile and the repository alone', async () => {
     const { calls, runner } = runnerReturning((spec) => {
       spec.onStdoutLine?.('{"message_type":"snapshot","struct_type":"snapshot","id":"' + SNAPSHOT + '"}');
       spec.onStdoutLine?.(nodeLine({ name: 'etc', type: 'dir', path: '/data/etc' }));
       spec.onStdoutLine?.(nodeLine({ name: 'a.txt', type: 'file', path: '/data/etc/a.txt', size: 12 }));
       spec.onStdoutLine?.(nodeLine({ name: 'link', type: 'symlink', path: '/data/etc/link' }));
+      // A grandchild is not part of this directory's page, whatever restic prints.
+      spec.onStdoutLine?.(nodeLine({ name: 'deep', type: 'file', path: '/data/etc/sub/deep', size: 1 }));
       return { exitCode: 0 };
     });
 
-    const result = await engineWith(runner).listContents(READ('etc'), readContext());
+    const result = await engineWith(runner).readDirectory(READ('/etc'), FIRST_PAGE, readContext());
     expect(result.ok).toBe(true);
-    if (!result.ok) return;
-    expect(result.evidence).toMatchObject({ path: 'etc', kind: 'directory', truncated: false });
-    expect(result.evidence.entry).toMatchObject({ name: 'etc', type: 'directory' });
+    if (!result.ok || !result.evidence.found) throw new Error('expected a listing');
+    expect(result.evidence.self).toMatchObject({ name: 'etc', path: '/etc', type: 'directory' });
     expect(result.evidence.entries.map((entry) => entry.name)).toEqual(['a.txt', 'link']);
-    expect(result.evidence.entries[0]).toMatchObject({ path: 'etc/a.txt', size: 12 });
-    expect(result.evidence.entries[1]).toMatchObject({ type: 'symlink', size: null });
+    expect(result.evidence.entries[0]).toMatchObject({ path: '/etc/a.txt', size: 12, downloadable: true });
+    expect(result.evidence.entries[1]).toMatchObject({ type: 'symlink', size: null, downloadable: false });
+    expect(result.evidence.nextOffset).toBeNull();
 
     const spec = calls[0];
     expect(spec.profile).toBe('read');
@@ -102,36 +105,78 @@ describe('ResticEngine.listContents', () => {
     expect(spec.mounts).toEqual({ repository: REPOSITORY.locator });
     expect(spec.stdinSecret).toBe('repository-password');
     // A listing has a deadline; a file body does not.
-    expect(spec.timeoutMs).toBe(10 * 60 * 1000);
+    expect(spec.timeoutMs).toBe(120 * 1000);
   });
 
-  it('stops at the entry cap, aborts the run and reports the listing as truncated', async () => {
-    const total = MAX_CONTENT_ENTRIES + 5;
+  it('maps the point root onto the mount, so no argument can read as a flag', async () => {
+    const { calls, runner } = runnerReturning(() => ({ exitCode: 0 }));
+    await engineWith(runner).readDirectory(READ('/'), FIRST_PAGE, readContext());
+    await engineWith(runner).readDirectory(READ('/-rf'), FIRST_PAGE, readContext());
+    // `ls <snapshot> <path>`: the path argument always starts with the mount.
+    expect(calls[0].cmd.slice(4, 7)).toEqual(['ls', SNAPSHOT, '/data']);
+    expect(calls[1].cmd.slice(4, 7)).toEqual(['ls', SNAPSHOT, '/data/-rf']);
+  });
+
+  it('skips to the offset, holds one page, and stops itself on the entry past it', async () => {
+    let printed = 0;
     const { calls, runner } = runnerReturning((spec) => {
       spec.onStdoutLine?.(nodeLine({ name: 'big', type: 'dir', path: '/data/big' }));
-      for (let index = 0; index < total; index += 1) {
-        spec.onStdoutLine?.(nodeLine({ name: `f${index}`, type: 'file', path: `/data/big/f${index}`, size: 1 }));
+      for (let index = 0; index < 1_200; index += 1) {
+        if (spec.signal?.aborted) break;
+        printed += 1;
+        const name = `f${String(index).padStart(4, '0')}`;
+        spec.onStdoutLine?.(nodeLine({ name, type: 'file', path: `/data/big/${name}`, size: 1 }));
       }
       // The engine aborted the run on purpose, so the helper exits through a
       // signal; the read is still a success.
       return { exitCode: 130, aborted: true };
     });
 
-    const result = await engineWith(runner).listContents(READ('big'), readContext());
-    expect(result.ok).toBe(true);
-    if (!result.ok) return;
-    expect(result.evidence.truncated).toBe(true);
-    expect(result.evidence.entries).toHaveLength(MAX_CONTENT_ENTRIES);
+    const result = await engineWith(runner).readDirectory(READ('/big'), { offset: 500, pageSize: 500 }, readContext());
+    if (!result.ok || !result.evidence.found) throw new Error('expected a listing');
+    expect(result.evidence.entries).toHaveLength(500);
+    expect(result.evidence.entries[0].name).toBe('f0500');
+    expect(result.evidence.entries[499].name).toBe('f0999');
+    expect(result.evidence.nextOffset).toBe(1_000);
+    expect(calls[0].signal?.aborted).toBe(true);
+    expect(printed).toBe(1_001);
+  });
+
+  it('answers the last page with no next offset', async () => {
+    const { runner } = runnerReturning((spec) => {
+      spec.onStdoutLine?.(nodeLine({ name: 'big', type: 'dir', path: '/data/big' }));
+      for (let index = 0; index < 1_200; index += 1) {
+        spec.onStdoutLine?.(nodeLine({ name: `f${index}`, type: 'file', path: `/data/big/f${index}`, size: 1 }));
+      }
+      return { exitCode: 0 };
+    });
+    const result = await engineWith(runner).readDirectory(READ('/big'), { offset: 1_000, pageSize: 500 }, readContext());
+    if (!result.ok || !result.evidence.found) throw new Error('expected a listing');
+    expect(result.evidence.entries).toHaveLength(200);
+    expect(result.evidence.nextOffset).toBeNull();
+  });
+
+  it('reads one record alone and stops, for a download lookup', async () => {
+    const { calls, runner } = runnerReturning((spec) => {
+      spec.onStdoutLine?.(nodeLine({ name: 'etc', type: 'dir', path: '/data/etc' }));
+      spec.onStdoutLine?.(nodeLine({ name: 'a.txt', type: 'file', path: '/data/etc/a.txt', size: 12 }));
+      return { exitCode: 130, aborted: true };
+    });
+    const result = await engineWith(runner).readDirectory(READ('/etc'), { offset: 0, pageSize: 0 }, readContext());
+    expect(result).toEqual({
+      ok: true,
+      evidence: { found: true, self: expect.objectContaining({ type: 'directory' }), entries: [], nextOffset: null },
+    });
     expect(calls[0].signal?.aborted).toBe(true);
   });
 
-  it('answers not_found when the path is not in the snapshot', async () => {
+  it('answers found: false when the path is not in the snapshot', async () => {
     const { runner } = runnerReturning((spec) => {
       spec.onStdoutLine?.('{"message_type":"snapshot","struct_type":"snapshot"}');
       return { exitCode: 0 };
     });
-    expect(await engineWith(runner).listContents(READ('nope'), readContext()))
-      .toEqual({ ok: false, errorClass: 'not_found' });
+    expect(await engineWith(runner).readDirectory(READ('/nope'), FIRST_PAGE, readContext()))
+      .toEqual({ ok: true, evidence: { found: false } });
   });
 
   it('maps restic exit codes and logs the cause once', async () => {
@@ -144,7 +189,7 @@ describe('ResticEngine.listContents', () => {
     ];
     for (const [exitCode, errorClass] of cases) {
       const { runner } = runnerReturning(() => ({ exitCode, stderrTail: 'Fatal: something specific' }));
-      expect(await engineWith(runner).listContents(READ(''), readContext())).toEqual({ ok: false, errorClass });
+      expect(await engineWith(runner).readDirectory(READ('/'), FIRST_PAGE, readContext())).toEqual({ ok: false, errorClass });
     }
     expect(warn).toHaveBeenCalledTimes(cases.length);
     // The log line is the only place restic's own message survives.
@@ -157,14 +202,18 @@ describe('ResticEngine.listContents', () => {
       exitCode: 1,
       stderrTail: 'Fatal: open /repo: permission denied (password repository-password)',
     }));
-    await engineWith(runner).listContents(READ(''), readContext());
+    await engineWith(runner).readDirectory(READ('/'), FIRST_PAGE, readContext());
     const printed = warn.mock.calls.map((call) => call.join(' ')).join('\n');
     expect(printed).not.toContain('repository-password');
   });
 
   it('reads a cancelled run as interrupted, not as a failure', async () => {
-    const { runner } = runnerReturning(() => ({ exitCode: 130, aborted: true }));
-    expect(await engineWith(runner).listContents(READ(''), readContext()))
+    const caller = new AbortController();
+    const { runner } = runnerReturning(() => {
+      caller.abort();
+      return { exitCode: 130, aborted: true };
+    });
+    expect(await engineWith(runner).readDirectory(READ('/'), FIRST_PAGE, readContext(caller.signal)))
       .toEqual({ ok: false, errorClass: 'interrupted' });
   });
 });
@@ -178,7 +227,7 @@ describe('ResticEngine.dumpFile', () => {
     });
 
     const result = await engineWith(runner).dumpFile(
-      READ('a.txt'),
+      READ('/a.txt'),
       5,
       (chunk) => { chunks.push(chunk); },
       readContext(),
@@ -200,7 +249,7 @@ describe('ResticEngine.dumpFile', () => {
       spec.onStdoutChunk?.(Buffer.from('alp'), { pause: () => undefined, resume: () => undefined });
       return { exitCode: 0, stderrTail: 'Load(<data/ab>): does not exist' };
     });
-    expect(await engineWith(runner).dumpFile(READ('a.txt'), 5, () => undefined, readContext()))
+    expect(await engineWith(runner).dumpFile(READ('/a.txt'), 5, () => undefined, readContext()))
       .toEqual({ ok: false, errorClass: 'integrity_mismatch' });
     expect(warn.mock.calls[0].join(' ')).toContain('does not exist');
   });

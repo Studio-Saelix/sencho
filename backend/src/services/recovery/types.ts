@@ -198,11 +198,7 @@ export type RecoveryErrorClass =
   /** The data was committed but the work directory could not be removed. */
   | 'cleanup_failed'
   /** The operation has passed its commit point and cannot be rolled back. */
-  | 'not_cancellable'
-  /** A point id, or a path inside a point, names nothing. */
-  | 'not_found'
-  /** A file in a point is larger than the download bound this build serves. */
-  | 'payload_too_large';
+  | 'not_cancellable';
 
 /**
  * Every `reason` token a recovery refusal can carry beside its class. A
@@ -219,14 +215,16 @@ export const RECOVERY_REFUSAL_REASONS = [
   'confirmation_mismatch',
   'no_fence',
   'fence_released',
-  /** The point has no snapshot to read: it is still capturing, failed, or was interrupted. */
-  'no_snapshot',
-  /** The requested entry is a directory or a special file, never a file body. */
-  'not_a_file',
-  /** The requested entry is a symlink. A point is browsed, never followed. */
-  'symlink_not_followed',
-  /** A regular file whose record carries no size cannot be streamed with a bound. */
-  'size_unknown',
+  /** The point holds no snapshot to read: it is still capturing, failed, or was interrupted. */
+  'point_not_readable',
+  /** The requested path is not in the point. */
+  'path_not_found',
+  /** A browse named something that is not a directory. */
+  'not_a_directory',
+  /** The entry (a directory, symlink or special file) or the point kind has no read of that shape. */
+  'unsupported_entry_type',
+  /** The node is already running as many point reads as it allows at once. */
+  'read_capacity',
 ] as const;
 export type RecoveryRefusalReason = (typeof RECOVERY_REFUSAL_REASONS)[number];
 
@@ -368,7 +366,16 @@ export interface RecoveryNodeDescriptor {
    * widens what the hub will send it.
    */
   restoreModes: RestoreMode[];
+  /**
+   * The point reads this node serves. A node that predates the field is read as
+   * `[]`, so the hub refuses a browse or a download with `update_required`
+   * instead of sending it to a node that has no such route.
+   */
+  pointReads: PointReadKind[];
 }
+
+/** A read of a saved point's contents: one directory page, or one file body. */
+export type PointReadKind = 'list' | 'download';
 
 // --- Operations and locks ---------------------------------------------------
 
@@ -581,54 +588,74 @@ export interface BackupEngine {
 // --- Point contents (read-only browse and download) -------------------------
 
 /**
- * One entry inside a saved point, as restic records it. `path` is relative to
- * the point root, so it never names the helper's mount (`/data`) and never
- * starts with a slash. The point root itself is not listed as an entry: restic
- * records it with the mount's own name, which is not part of the point, so a
- * read of the root answers its children with no entry of their own.
+ * One entry inside a saved point. `path` is absolute within the point root
+ * (`/` is the root) and never names the helper's mount (`/data`).
  */
-export interface RecoveryContentEntry {
-  path: string;
+export interface PointEntry {
   name: string;
+  path: string;
   type: 'file' | 'directory' | 'symlink' | 'other';
-  /** Bytes for a regular file; null for every other type. */
+  /** Bytes for a regular file; null for every other type and for a file record with no size. */
   size: number | null;
-  /** The permission string restic reports, such as `-rw-r--r--`. */
-  permissions: string | null;
-  mode: number | null;
+  /** Permission bits as four octal digits, such as `0644`, or null when the record has none. */
+  mode: string | null;
+  /** Modification time as restic recorded it (RFC 3339), or null when it is missing or invalid. */
+  mtime: string | null;
   uid: number | null;
   gid: number | null;
-  /** Milliseconds since the epoch, or null when the record carries no valid time. */
-  mtime: number | null;
+  /** Only a regular file with a known size has a body a download can serve. */
+  downloadable: boolean;
 }
 
 /**
- * A regular file with its size, the only entry a download serves. The read path
- * proves both facts before it hands one back, so a caller never re-derives them.
+ * Whether a point can be read at all, decided from stored records alone. It
+ * starts no helper and authorizes nothing: a caller that may not read the
+ * storage is refused before this is consulted.
  */
-export type RecoveryFileEntry = RecoveryContentEntry & { type: 'file'; size: number };
+export type PointReadEligibility =
+  | { readable: true }
+  | { readable: false; reason: 'point_not_readable' | 'repository_replaced' | 'unsupported_entry_type' };
 
-export type RecoveryContentKind = 'directory' | 'file' | 'other';
+/** The point's own evidence beside a listing. */
+export interface PointReadEvidence {
+  id: string;
+  status: 'succeeded' | 'partial';
+  snapshotId: string;
+  storage: { id: string; locator: string; generation: number; state: StorageIdentity['state'] };
+  consistency: ConsistencyClass;
+  capture: CaptureSummary;
+  /** The capture left nothing out but policy exclusions. Never true for a partial point. */
+  complete: boolean;
+  /** The latest integrity check, by the rule coverage uses. A read never changes it. */
+  integrity: {
+    state: 'verified' | 'unverified' | 'mismatch';
+    method: IntegrityMethod | null;
+    verifiedAt: number | null;
+  };
+  completedAt: number;
+}
 
-/**
- * One read of a point: what the requested path is, its metadata, and (for a
- * directory) the entries it holds. `truncated` means more entries exist than
- * this read lists; the ones past the cap are not returned by this read.
- */
-export interface RecoveryContents {
-  /** Root-relative path this read answered: '' is the point root. */
+/** One page of one directory of a point, with the point's evidence. */
+export interface PointListing {
+  point: PointReadEvidence;
   path: string;
-  kind: RecoveryContentKind;
-  entry: RecoveryContentEntry | null;
-  entries: RecoveryContentEntry[];
-  truncated: boolean;
+  entries: PointEntry[];
+  /** What the capture left out directly inside this directory. */
+  skipped: Array<{ name: string; reason: ExclusionReason }>;
+  offset: number;
+  nextOffset: number | null;
+  limits: { pageSize: number; concurrentReads: number };
 }
 
-/** What a content read needs from the engine. Paths are already canonical. */
+/** One directory read from the engine: the path's own record and one page of its children. */
+export type PointDirectoryRead =
+  | { found: false }
+  | { found: true; self: PointEntry; entries: PointEntry[]; nextOffset: number | null };
+
+/** What a content read needs from the engine. `path` is already validated and absolute. */
 export interface ContentReadRequest {
   snapshotId: string;
   repositoryId: string;
-  /** Root-relative path: '' is the point root. */
   path: string;
 }
 
@@ -660,15 +687,22 @@ export interface ContentDump {
  * The read half of the engine contract: what a saved point holds, without
  * restoring it. Kept apart from `BackupEngine` because a read needs no lock,
  * writes no operation and returns bytes to a caller rather than evidence to a
- * store. A node's engine may implement it; a caller that needs it refuses
- * `capability_unavailable` when the registered engine does not.
+ * store. A caller refuses `capability_unavailable` when the registered engine
+ * does not implement it.
  */
 export interface PointContentReader {
-  /** One directory's entries, or one entry's metadata. */
-  listContents(request: ContentReadRequest, ctx: ContentReadContext): Promise<EngineResult<RecoveryContents>>;
   /**
-   * Stream one regular file's bytes. `expectedBytes` is what the metadata read
-   * reported, so the caller can refuse a short or overlong body.
+   * The path's own record and one page of its immediate children, in the
+   * snapshot's tree order. `pageSize` 0 reads the record alone.
+   */
+  readDirectory(
+    request: ContentReadRequest,
+    page: { offset: number; pageSize: number },
+    ctx: ContentReadContext,
+  ): Promise<EngineResult<PointDirectoryRead>>;
+  /**
+   * Stream one regular file's bytes. `expectedBytes` is what the record
+   * reported, so a short or overlong body is a failure, never a success.
    */
   dumpFile(
     request: ContentReadRequest,

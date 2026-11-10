@@ -38,6 +38,19 @@ const PING_INTERVAL_MS = 30_000;
 /** Deliberate floor for enroll exp checks; gross host skew surfaces via the degraded operator log. */
 const ENROLL_EXP_SKEW_MS = 60_000;
 const TOKEN_PATH = path.join(process.env.DATA_DIR || '/app/data', 'pilot.jwt');
+/**
+ * Tunnel send-buffer level above which the agent stops reading a loopback
+ * HTTP response. Lower than the hub's mesh mark because a single download
+ * can otherwise fill the buffer far faster than the tunnel drains it, and
+ * every buffered byte also delays control frames for other streams.
+ */
+const RESPONSE_SEND_BUFFER_HIGH_WATER_MARK = 1024 * 1024;
+/**
+ * Poll cadence while a response is paused on the send buffer. The `ws`
+ * client has no usable 'drain' event, so the agent samples
+ * `bufferedAmount`; the timer only runs while some response is paused.
+ */
+const RESPONSE_DRAIN_CHECK_INTERVAL_MS = 100;
 
 interface UpgradeRejectInfo {
     status: number;
@@ -105,6 +118,19 @@ export function startPilotAgent(loopbackPort: number): void {
     agent.start();
 }
 
+/**
+ * One proxied loopback HTTP request. The response is read only while
+ * neither cause holds: the hub asked for a pause (its client is slow) or the
+ * tunnel send buffer is above its mark.
+ */
+interface HttpStreamEntry {
+    req: http.ClientRequest;
+    cancelled?: boolean;
+    res?: http.IncomingMessage;
+    hubPaused: boolean;
+    sendBufferPaused: boolean;
+}
+
 interface AgentOptions {
     primaryUrl: string;
     loopbackPort: number;
@@ -132,7 +158,8 @@ export class PilotAgent {
     private ws: WebSocket | null = null;
     private stopHeartbeat?: () => void;
     private reconnectTimer?: NodeJS.Timeout;
-    private readonly httpStreams = new Map<number, { req: http.ClientRequest; cancelled?: boolean }>();
+    private readonly httpStreams = new Map<number, HttpStreamEntry>();
+    private responseDrainTimer?: NodeJS.Timeout;
     private readonly wsStreams = new Map<number, WebSocket>();
     /** Per-connection mesh frame handler. Created on `connect()`, cleaned up on disconnect. */
     private switchboard: TcpStreamSwitchboard | null = null;
@@ -367,6 +394,7 @@ export class PilotAgent {
             try { entry.req.destroy(); } catch { /* ignore */ }
         }
         this.httpStreams.clear();
+        this.stopResponseDrainTimer();
         for (const [, ws] of this.wsStreams) {
             try { ws.close(1006, 'tunnel closed'); } catch { /* ignore */ }
         }
@@ -484,6 +512,8 @@ export class PilotAgent {
             case 'http_req': this.onHttpReq(frame); break;
             case 'http_req_end': this.onHttpReqEnd(frame.s); break;
             case 'http_cancel': this.onHttpCancel(frame.s); break;
+            case 'http_res_pause': this.setHubPaused(frame.s, true); break;
+            case 'http_res_resume': this.setHubPaused(frame.s, false); break;
             case 'ws_open': this.onWsOpen(frame); break;
             case 'ws_msg_text': this.onWsMsgText(frame.s, frame.data); break;
             case 'ws_close': this.onWsClose(frame.s, frame.code, frame.reason); break;
@@ -539,6 +569,8 @@ export class PilotAgent {
             path: frame.path,
             headers: this.buildLoopbackHeaders(frame.headers),
         }, (res) => {
+            const entry = this.httpStreams.get(frame.s);
+            if (entry) entry.res = res;
             const outHeaders: Record<string, string> = {};
             for (const [k, v] of Object.entries(res.headers)) {
                 if (typeof v === 'string') outHeaders[k] = v;
@@ -557,6 +589,7 @@ export class PilotAgent {
             res.on('data', (chunk: Buffer) => {
                 try { ws.send(encodeBinaryFrame(BinaryFrameType.HttpResBody, frame.s, chunk), { binary: true }); } catch { /* ignore */ }
                 this.refreshIdleTimer(frame.s);
+                if (ws.bufferedAmount > RESPONSE_SEND_BUFFER_HIGH_WATER_MARK) this.pauseForSendBuffer(frame.s);
             });
             res.on('end', () => {
                 try { ws.send(encodeJsonFrame({ t: 'http_res_end', s: frame.s })); } catch { /* ignore */ }
@@ -583,7 +616,7 @@ export class PilotAgent {
             this.clearIdleTimer(frame.s);
         });
 
-        this.httpStreams.set(frame.s, { req });
+        this.httpStreams.set(frame.s, { req, hubPaused: false, sendBufferPaused: false });
         this.refreshIdleTimer(frame.s);
     }
 
@@ -601,6 +634,54 @@ export class PilotAgent {
         try { entry.req.destroy(); } catch { /* ignore */ }
         this.httpStreams.delete(streamId);
         this.clearIdleTimer(streamId);
+    }
+
+    // --- HTTP response flow control ---
+
+    private applyResponseFlow(entry: HttpStreamEntry): void {
+        if (!entry.res) return;
+        if (entry.hubPaused || entry.sendBufferPaused) entry.res.pause();
+        else entry.res.resume();
+    }
+
+    private setHubPaused(streamId: number, paused: boolean): void {
+        const entry = this.httpStreams.get(streamId);
+        if (!entry || entry.cancelled) return;
+        entry.hubPaused = paused;
+        this.applyResponseFlow(entry);
+    }
+
+    private pauseForSendBuffer(streamId: number): void {
+        const entry = this.httpStreams.get(streamId);
+        if (!entry || entry.sendBufferPaused) return;
+        entry.sendBufferPaused = true;
+        this.applyResponseFlow(entry);
+        if (!this.responseDrainTimer) {
+            this.responseDrainTimer = setInterval(() => this.checkResponseDrain(), RESPONSE_DRAIN_CHECK_INTERVAL_MS);
+        }
+    }
+
+    private checkResponseDrain(): void {
+        const waiting = [...this.httpStreams.values()].filter((entry) => entry.sendBufferPaused);
+        // Streams that ended or errored while paused leave the map, so an
+        // empty list means nothing is left to wake.
+        if (waiting.length === 0 || !this.ws) {
+            this.stopResponseDrainTimer();
+            return;
+        }
+        if (this.ws.bufferedAmount > RESPONSE_SEND_BUFFER_HIGH_WATER_MARK) return;
+        for (const entry of waiting) {
+            entry.sendBufferPaused = false;
+            this.applyResponseFlow(entry);
+        }
+        this.stopResponseDrainTimer();
+    }
+
+    private stopResponseDrainTimer(): void {
+        if (this.responseDrainTimer) {
+            clearInterval(this.responseDrainTimer);
+            this.responseDrainTimer = undefined;
+        }
     }
 
     // --- WebSocket dispatch (tunnel -> loopback) ---

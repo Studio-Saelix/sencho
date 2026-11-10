@@ -87,8 +87,8 @@ export function latestVerificationFor(
 /**
  * A point that counted everything it recorded and left nothing out but policy
  * exclusions. Verification is a separate fact: this predicate says the capture
- * itself is complete, and a surface that also needs a verified check combines it
- * with `latestVerificationFor(...).result === 'verified'` (see `pointEvidence.ts`).
+ * itself is complete, and a surface reports `latestVerificationFor` beside it
+ * rather than folding the two together (see `pointContents.ts`).
  */
 export const isCompletePoint = (p: RecoveryPoint): boolean =>
   p.status === 'succeeded' && p.capture.skippedCount === 0

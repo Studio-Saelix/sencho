@@ -1,22 +1,19 @@
 /**
- * Reading a saved point's contents: the path grammar, restic's node records, the
- * listing shape and the exit-code map.
+ * Reading a saved point's contents: restic's node records, the snapshot path a
+ * point path maps to, and the exit-code map.
  *
  * The sample lines are what `restic ls --json` printed for a real repository
  * (0.19.1, the pinned helper build), so the parser is tested against the shape
  * the helper produces rather than against a guess.
  */
 import { describe, it, expect } from 'vitest';
-import type { RecoveryContentEntry } from '../services/recovery/types';
 import {
-  MAX_CONTENT_ENTRIES,
-  MAX_CONTENT_PATH_LENGTH,
-  canonicalizeContentPath,
+  MAX_CONTENT_LINE_BYTES,
   classifyContentRun,
-  contentListingFor,
   contentSnapshotPath,
+  formatEntryMode,
+  parentPointPath,
   parseContentNodeLine,
-  sortContentEntries,
 } from '../services/recovery/restic/resticContents';
 
 const SNAPSHOT_HEADER = '{"time":"2026-11-07T18:58:56.320279769Z","tree":"b85fbc3f","paths":["/data"],"hostname":"sencho","program_version":"restic 0.19.1","summary":{"backup_start":"2026-11-07T18:58:56.320279769Z","backup_end":"2026-11-07T18:58:57.07714048Z","files_new":3},"id":"06b26c23","short_id":"06b26c23","message_type":"snapshot","struct_type":"snapshot"}';
@@ -25,69 +22,53 @@ const FILE = '{"name":"config.txt","type":"file","path":"/data/etc/app/config.tx
 const SYMLINK = '{"name":"escape-link","type":"symlink","path":"/data/escape-link","uid":0,"gid":0,"mode":134218239,"permissions":"Lrwxrwxrwx","mtime":"2026-11-07T18:58:44.060020974Z","message_type":"node","struct_type":"node"}';
 const FIFO = '{"name":"a-fifo","type":"fifo","path":"/data/a-fifo","uid":0,"gid":0,"mode":33554852,"permissions":"prw-r--r--","mtime":"2026-11-07T18:58:44.061020946Z","message_type":"node","struct_type":"node"}';
 
-describe('canonicalizeContentPath', () => {
-  it('reads empty and slash as the point root', () => {
-    expect(canonicalizeContentPath('')).toBe('');
-    expect(canonicalizeContentPath('/')).toBe('');
-    expect(canonicalizeContentPath('//')).toBe('');
+describe('contentSnapshotPath', () => {
+  it('maps a point path onto the captured mount, so an argument always starts with a slash', () => {
+    expect(contentSnapshotPath('/')).toBe('/data');
+    expect(contentSnapshotPath('/etc/app')).toBe('/data/etc/app');
+    expect(contentSnapshotPath('/-rf')).toBe('/data/-rf');
   });
 
-  it('reads a leading slash as the point root, not the host root', () => {
-    expect(canonicalizeContentPath('/etc/app')).toBe('etc/app');
-    expect(canonicalizeContentPath('etc/app')).toBe('etc/app');
-    expect(canonicalizeContentPath('etc//app/')).toBe('etc/app');
-    expect(canonicalizeContentPath('./etc')).toBe('etc');
-  });
-
-  it('keeps a name that only looks special', () => {
-    expect(canonicalizeContentPath('..hidden')).toBe('..hidden');
-    expect(canonicalizeContentPath('my file.txt')).toBe('my file.txt');
-  });
-
-  it('refuses traversal instead of resolving it', () => {
-    expect(() => canonicalizeContentPath('..')).toThrow();
-    expect(() => canonicalizeContentPath('../etc/passwd')).toThrow();
-    expect(() => canonicalizeContentPath('etc/../../etc/passwd')).toThrow();
-    expect(() => canonicalizeContentPath('/../etc')).toThrow();
-  });
-
-  it('refuses a NUL and an absurdly long path', () => {
-    expect(() => canonicalizeContentPath('a\0b')).toThrow();
-    expect(() => canonicalizeContentPath('a'.repeat(MAX_CONTENT_PATH_LENGTH + 1))).toThrow();
-  });
-
-  it('refuses anything that is not a string', () => {
-    expect(() => canonicalizeContentPath(undefined)).toThrow();
-    expect(() => canonicalizeContentPath(['a'])).toThrow();
+  it('names the parent of a point path, with the root its own parent', () => {
+    expect(parentPointPath('/')).toBe('/');
+    expect(parentPointPath('/etc')).toBe('/');
+    expect(parentPointPath('/etc/app/config.txt')).toBe('/etc/app');
   });
 });
 
-describe('contentSnapshotPath', () => {
-  it('maps a root-relative path onto the captured mount', () => {
-    expect(contentSnapshotPath('')).toBe('/data');
-    expect(contentSnapshotPath('etc/app')).toBe('/data/etc/app');
-    expect(contentSnapshotPath('/etc/app')).toBe('/data/etc/app');
+describe('formatEntryMode', () => {
+  it('prints Go file modes as POSIX octal, special bits moved back into place', () => {
+    expect(formatEntryMode(2147484141)).toBe('0755');
+    expect(formatEntryMode(416)).toBe('0640');
+    expect(formatEntryMode((1 << 23) | 0o755)).toBe('4755');
+    expect(formatEntryMode((1 << 22) | 0o750)).toBe('2750');
+    expect(formatEntryMode(2 ** 31 + (1 << 20) + 0o777)).toBe('1777');
   });
 
-  it('refuses a path that would leave the mount', () => {
-    expect(() => contentSnapshotPath('../etc')).toThrow();
+  it('answers null for a missing or invalid mode', () => {
+    expect(formatEntryMode(undefined)).toBeNull();
+    expect(formatEntryMode(-1)).toBeNull();
+    expect(formatEntryMode(1.5)).toBeNull();
   });
 });
 
 describe('parseContentNodeLine', () => {
   it('reads a directory, a file, a symlink and a special file', () => {
-    expect(parseContentNodeLine(DIR)).toMatchObject({
-      path: 'etc', name: 'etc', type: 'directory', size: null, permissions: 'drwxr-xr-x', uid: 0, gid: 0,
+    expect(parseContentNodeLine(DIR)).toEqual({
+      name: 'etc', path: '/etc', type: 'directory', size: null, mode: '0755',
+      mtime: '2026-11-07T18:58:44.058753409Z', uid: 0, gid: 0, downloadable: false,
     });
-    expect(parseContentNodeLine(FILE)).toMatchObject({
-      path: 'etc/app/config.txt', name: 'config.txt', type: 'file', size: 12, mode: 416, uid: 1000, gid: 1000,
+    expect(parseContentNodeLine(FILE)).toEqual({
+      name: 'config.txt', path: '/etc/app/config.txt', type: 'file', size: 12, mode: '0640',
+      mtime: '2026-11-07T18:58:44.060020974Z', uid: 1000, gid: 1000, downloadable: true,
     });
-    expect(parseContentNodeLine(SYMLINK)).toMatchObject({ path: 'escape-link', type: 'symlink', size: null });
-    expect(parseContentNodeLine(FIFO)).toMatchObject({ path: 'a-fifo', type: 'other', size: null });
+    expect(parseContentNodeLine(SYMLINK)).toMatchObject({ path: '/escape-link', type: 'symlink', size: null, downloadable: false });
+    expect(parseContentNodeLine(FIFO)).toMatchObject({ path: '/a-fifo', type: 'other', size: null, downloadable: false });
   });
 
-  it('carries the modification time as milliseconds', () => {
-    expect(parseContentNodeLine(FILE)?.mtime).toBe(Date.parse('2026-11-07T18:58:44.060020974Z'));
+  it('reads the point root\'s own record as /', () => {
+    const root = '{"name":"data","type":"dir","path":"/data","mode":2147484141,"message_type":"node"}';
+    expect(parseContentNodeLine(root)).toMatchObject({ path: '/', type: 'directory' });
   });
 
   it('ignores the snapshot header and anything that is not a node record', () => {
@@ -96,6 +77,12 @@ describe('parseContentNodeLine', () => {
     expect(parseContentNodeLine('applying 3 changes')).toBeNull();
     expect(parseContentNodeLine('{"message_type":"status","percent_done":0.5}')).toBeNull();
     expect(parseContentNodeLine('not json at all')).toBeNull();
+    expect(parseContentNodeLine('{"name":"x","type":"file","path":"/data/x"')).toBeNull();
+  });
+
+  it('drops a line over the length cap whole instead of parsing part of it', () => {
+    const padded = `{"name":"x","type":"file","path":"/data/x","size":1,"pad":"${'a'.repeat(MAX_CONTENT_LINE_BYTES)}","message_type":"node"}`;
+    expect(parseContentNodeLine(padded)).toBeNull();
   });
 
   it('drops a record whose name is not its path\'s last segment', () => {
@@ -106,7 +93,7 @@ describe('parseContentNodeLine', () => {
   it('refuses a negative or fractional size and fractional ids', () => {
     const negative = '{"name":"x","type":"file","path":"/data/x","size":-1,"message_type":"node"}';
     const fractional = '{"name":"x","type":"file","path":"/data/x","size":1.5,"message_type":"node"}';
-    expect(parseContentNodeLine(negative)?.size).toBeNull();
+    expect(parseContentNodeLine(negative)).toMatchObject({ size: null, downloadable: false });
     expect(parseContentNodeLine(fractional)?.size).toBeNull();
     const badUid = '{"name":"x","type":"file","path":"/data/x","size":1,"uid":1.5,"message_type":"node"}';
     expect(parseContentNodeLine(badUid)?.uid).toBeNull();
@@ -117,94 +104,35 @@ describe('parseContentNodeLine', () => {
     expect(parseContentNodeLine(outside)).toBeNull();
     const traversal = '{"name":"passwd","type":"file","path":"/data/../etc/passwd","size":1,"message_type":"node"}';
     expect(parseContentNodeLine(traversal)).toBeNull();
+    const sibling = '{"name":"x","type":"file","path":"/database/x","size":1,"message_type":"node"}';
+    expect(parseContentNodeLine(sibling)).toBeNull();
   });
 
   it('accepts the deprecated struct_type marker when message_type is absent', () => {
     const legacy = '{"name":"x","type":"file","path":"/data/x","size":1,"struct_type":"node"}';
-    expect(parseContentNodeLine(legacy)).toMatchObject({ path: 'x', size: 1 });
+    expect(parseContentNodeLine(legacy)).toMatchObject({ path: '/x', size: 1 });
   });
 
-  it('reports a file with no size record as an unknown size, never as empty', () => {
+  it('reports a file with no size record as an unknown size that cannot be downloaded', () => {
     const noSize = '{"name":"x","type":"file","path":"/data/x","message_type":"node"}';
-    expect(parseContentNodeLine(noSize)?.size).toBeNull();
-  });
-});
-
-describe('sortContentEntries', () => {
-  it('puts directories first, then names, so two reads agree', () => {
-    const entries: RecoveryContentEntry[] = [
-      { path: 'b.txt', name: 'b.txt', type: 'file', size: 0, permissions: null, mode: null, uid: null, gid: null, mtime: null },
-      { path: 'z', name: 'z', type: 'directory', size: null, permissions: null, mode: null, uid: null, gid: null, mtime: null },
-      { path: 'a.txt', name: 'a.txt', type: 'file', size: 0, permissions: null, mode: null, uid: null, gid: null, mtime: null },
-      { path: 'a', name: 'a', type: 'directory', size: null, permissions: null, mode: null, uid: null, gid: null, mtime: null },
-    ];
-    expect(sortContentEntries(entries).map((e) => e.name)).toEqual(['a', 'z', 'a.txt', 'b.txt']);
-  });
-});
-
-describe('contentListingFor', () => {
-  const dir = parseContentNodeLine(DIR)!;
-  const file = parseContentNodeLine(FILE)!;
-
-  it('answers a directory with its sorted entries', () => {
-    const contents = contentListingFor({
-      path: 'etc',
-      self: dir,
-      entries: [file],
-      truncated: false,
-    });
-    expect(contents).toMatchObject({ path: 'etc', kind: 'directory', truncated: false });
-    expect(contents?.entry?.path).toBe('etc');
-    expect(contents?.entries.map((e) => e.path)).toEqual(['etc/app/config.txt']);
+    expect(parseContentNodeLine(noSize)).toMatchObject({ size: null, downloadable: false });
   });
 
-  it('answers a file with its metadata and no entries', () => {
-    const contents = contentListingFor({ path: 'etc/app/config.txt', self: file, entries: [], truncated: false });
-    expect(contents).toMatchObject({ kind: 'file', entries: [], truncated: false });
-  });
-
-  it('answers a symlink as neither a file nor a directory', () => {
-    const contents = contentListingFor({
-      path: 'escape-link', self: parseContentNodeLine(SYMLINK)!, entries: [], truncated: false,
-    });
-    expect(contents?.kind).toBe('other');
-  });
-
-  it('answers null when the path is not in the snapshot', () => {
-    expect(contentListingFor({ path: 'nope', self: null, entries: [], truncated: false })).toBeNull();
-  });
-
-  it('never names the point root as an entry, because restic names it after the mount', () => {
-    const root = parseContentNodeLine(
-      '{"name":"data","type":"dir","path":"/data","uid":0,"gid":0,"permissions":"drwxr-xr-x","message_type":"node"}',
-    )!;
-    const contents = contentListingFor({ path: '', self: root, entries: [dir, file], truncated: false });
-    expect(contents).toMatchObject({ path: '', kind: 'directory', entry: null });
-    expect(contents?.entries.map((e) => e.path)).toEqual(['etc', 'etc/app/config.txt']);
-    expect(JSON.stringify(contents)).not.toContain('"name":"data"');
-  });
-
-  it('never reports truncation for a file', () => {
-    const contents = contentListingFor({ path: 'etc/app/config.txt', self: file, entries: [], truncated: true });
-    expect(contents?.truncated).toBe(false);
-  });
-
-  it('can report the entry cap of a directory', () => {
-    expect(MAX_CONTENT_ENTRIES).toBeGreaterThan(0);
-    const contents = contentListingFor({ path: 'etc', self: dir, entries: [], truncated: true });
-    expect(contents?.truncated).toBe(true);
+  it('drops an invalid modification time rather than passing it on', () => {
+    const badTime = '{"name":"x","type":"file","path":"/data/x","size":1,"mtime":"yesterday","message_type":"node"}';
+    expect(parseContentNodeLine(badTime)?.mtime).toBeNull();
   });
 });
 
 describe('classifyContentRun', () => {
-  const base = { exitCode: 0, aborted: false, killed: false, externalAborted: false, truncated: false };
+  const base = { exitCode: 0, aborted: false, killed: false, externalAborted: false, stoppedEarly: false };
 
   it('reads a clean exit as success', () => {
     expect(classifyContentRun(base)).toEqual({ status: 'ok' });
   });
 
-  it('reads a truncated listing as success, whatever the helper exit says', () => {
-    expect(classifyContentRun({ ...base, exitCode: 130, aborted: true, killed: true, truncated: true }))
+  it('reads a listing that stopped itself as success, whatever the helper exit says', () => {
+    expect(classifyContentRun({ ...base, exitCode: 130, aborted: true, killed: true, stoppedEarly: true }))
       .toEqual({ status: 'ok' });
   });
 
@@ -215,7 +143,7 @@ describe('classifyContentRun', () => {
   });
 
   it('reads a kill with no caller abort behind it as the run\'s own deadline', () => {
-    // The 10-minute listing bound SIGKILLs the helper without aborting anyone's
+    // The 120-second listing bound SIGKILLs the helper without aborting anyone's
     // signal; that is the node failing to answer, not the client leaving.
     expect(classifyContentRun({ ...base, exitCode: null, killed: true }))
       .toEqual({ status: 'failed', errorClass: 'node_error' });

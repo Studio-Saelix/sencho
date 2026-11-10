@@ -13,9 +13,11 @@ import {
 } from '../services/recovery/operationRunner';
 import {
   authorizeNodeWide,
+  authorizePointContentRead,
   authorizeStorageAccess,
   mayLearnIdIsUnknown,
   RECOVERY_ACCESS_ACTION,
+  type PointContentReadTarget,
   type RecoveryAccess,
 } from '../services/recovery/authorization';
 import { RECOVERY_RESERVED_PREFIX } from '../services/recovery/reservedNames';
@@ -47,9 +49,11 @@ import {
 } from '../services/recovery/redaction';
 import { ROOT_COVERAGE_FRESHNESS_MS } from '../services/recovery/types';
 import {
-  MAX_CONTENT_DOWNLOAD_BYTES,
-  MAX_CONTENT_DOWNLOAD_IDLE_MS,
-} from '../services/recovery/restic/resticContents';
+  POINT_DOWNLOAD_IDLE_MS,
+  POINT_READ_RETRY_AFTER_S,
+  parsePageOffset,
+  parsePointPath,
+} from '../services/recovery/pointContents';
 import type {
   RecoveryErrorClass,
   RecoveryOperation,
@@ -106,8 +110,6 @@ export const ERROR_STATUS: Readonly<Record<RecoveryErrorClass, number>> = {
   insufficient_space: 507,
   cleanup_failed: 500,
   not_cancellable: 409,
-  not_found: 404,
-  payload_too_large: 413,
 };
 
 /** The machine code a client switches on, one per class. */
@@ -170,6 +172,10 @@ function sendThrown(req: Request, res: Response, err: unknown): void {
   }
   const extra: Record<string, unknown> = {};
   if (err instanceof RecoveryError && err.reason !== undefined) extra.reason = err.reason;
+  // A read refused for capacity frees up within seconds, and says when to ask again.
+  if (err instanceof RecoveryError && err.reason === 'read_capacity') {
+    res.setHeader('Retry-After', String(POINT_READ_RETRY_AFTER_S));
+  }
   sendRecoveryError(res, errorClass, extra, err instanceof RecoveryError ? err.detail : undefined);
 }
 
@@ -642,20 +648,8 @@ recoveryRouter.post('/points/:pointId/restore', handle(async (req, res) => {
 // --- Browsing a saved point -------------------------------------------------
 
 /**
- * The `path` query parameter: absent or empty is the point root, a repeated
- * parameter is refused, and anything else is canonicalized by the service (a
- * leading slash means the point root, `..` is refused).
- */
-function contentPathOf(req: Request): string {
-  const raw: unknown = req.query.path;
-  if (raw === undefined) return '';
-  if (typeof raw !== 'string') throw new RecoveryError('invalid_request');
-  return raw;
-}
-
-/**
  * Test seam: how long a download body may stall before it is stopped. Production
- * never sets this; the fixed bound is the one the API answers with in `limits`.
+ * never sets this; the fixed bound is the documented one.
  */
 let downloadIdleMsOverride: number | null = null;
 export function setDownloadIdleMsForTests(ms: number | null): void {
@@ -673,32 +667,47 @@ function contentDisposition(name: string): string {
   return `attachment; filename="${safe}"; filename*=UTF-8''${encodeURIComponent(name)}`;
 }
 
-/**
- * One directory of a saved point, or one entry's metadata.
- *
- * Read-only and node-local: the node that owns the storage answers, so a hub
- * proxying the request authorizes nothing itself. `?path=` is relative to the
- * point root. The answer carries the point's own evidence beside the entries, so
- * a point that skipped data, or whose check did not verify, is never shown as a
- * complete copy.
- */
-recoveryRouter.get('/points/:pointId/contents', handle(async (req, res) => {
+/** The read input both routes give the engine, with the content-read rule. */
+function pointReadInput(req: Request, path: string, signal: AbortSignal) {
+  return {
+    pointId: paramOf(req, 'pointId'),
+    path,
+    authorize: (target: PointContentReadTarget) => authorizePointContentRead(req, target),
+    // An unknown id could have needed either access: the stack read of a live
+    // volume or the floor of a detached one.
+    mayLearnIdIsUnknown: () => mayLearnIdIsUnknown(req, 'read', 'configure'),
+    signal,
+  };
+}
+
+/** An abort controller tied to the client: closing the response stops the read. */
+function abortOnClose(res: Response): { controller: AbortController; detach: () => void } {
   const controller = new AbortController();
   const onClose = (): void => {
-    if (res.writableFinished) return;
-    controller.abort();
+    if (!res.writableFinished) controller.abort();
   };
   res.once('close', onClose);
+  return { controller, detach: () => res.off('close', onClose) };
+}
+
+/**
+ * One page of one directory of a saved point.
+ *
+ * Read-only and node-local: the node that owns the storage answers, so a hub
+ * proxying the request authorizes nothing itself. `?path=` is absolute within
+ * the point (`/` is the root) and `?offset=` pages through a large directory.
+ * The answer carries the point's own evidence beside the entries, so a point
+ * that skipped data, or whose check did not verify, is never shown as a clean
+ * copy.
+ */
+recoveryRouter.get('/points/:pointId/browse', handle(async (req, res) => {
+  const path = parsePointPath(req.query.path ?? '/');
+  const offset = parsePageOffset(req.query.offset);
+  const { controller, detach } = abortOnClose(res);
   try {
-    const result = await engineService(req).readPointContents({
-      pointId: paramOf(req, 'pointId'),
-      path: contentPathOf(req),
-      authorize: authorizeWith(req, 'read'),
-      signal: controller.signal,
-    });
-    res.json(result);
+    res.json(await engineService(req).browsePoint({ ...pointReadInput(req, path, controller.signal), offset }));
   } finally {
-    res.off('close', onClose);
+    detach();
   }
 }));
 
@@ -707,31 +716,22 @@ recoveryRouter.get('/points/:pointId/contents', handle(async (req, res) => {
  *
  * The bytes stream from the helper through this node to the caller, at the
  * caller's pace: memory stays flat however large the file is. A symlink, a
- * directory and a special file are refused before any byte moves, as is a file
- * past the download bound. A client that disconnects cancels the helper. A run
- * that ends after the headers, for any other reason, breaks the connection so a
- * partial body is never read as a whole one.
+ * directory and a special file are refused before any byte moves. Headers are
+ * sent with the first byte, so a dump that fails before it answers its own JSON
+ * error. A client that disconnects cancels the helper, and a body that stops
+ * moving for the idle bound is stopped. A run that ends after the headers for
+ * any other reason breaks the connection, so a partial body is never read as a
+ * whole one.
  */
-recoveryRouter.get('/points/:pointId/contents/download', handle(async (req, res) => {
-  // A download names one file. No path means the root, which is a directory,
-  // so the request is refused here rather than after a helper run.
-  const path = contentPathOf(req);
-  if (path === '') throw new RecoveryError('invalid_request', { reason: 'not_a_file' });
-
-  const controller = new AbortController();
+recoveryRouter.get('/points/:pointId/download', handle(async (req, res) => {
+  if (req.query.path === undefined) throw new RecoveryError('invalid_request');
+  const path = parsePointPath(req.query.path);
+  const { controller, detach } = abortOnClose(res);
   let abandoned = false;
   const abandon = (): void => {
     abandoned = true;
     controller.abort();
   };
-  const onClose = (): void => {
-    if (res.writableFinished) return;
-    abandon();
-  };
-  res.once('close', onClose);
-  // Idle bound: a repository that stops producing bytes, and a client that stays
-  // connected without reading, both leave the transfer motionless. Either ends
-  // the read after the bound instead of holding a helper and a socket forever.
   let idleTimer: NodeJS.Timeout | undefined;
   const stopIdleWatch = (): void => {
     if (idleTimer) clearTimeout(idleTimer);
@@ -742,82 +742,59 @@ recoveryRouter.get('/points/:pointId/contents/download', handle(async (req, res)
     idleTimer = setTimeout(() => {
       abandon();
       if (!res.destroyed && !res.writableEnded) res.destroy();
-    }, downloadIdleMsOverride ?? MAX_CONTENT_DOWNLOAD_IDLE_MS);
+    }, downloadIdleMsOverride ?? POINT_DOWNLOAD_IDLE_MS);
     idleTimer.unref?.();
   };
+  const download = await engineService(req).prepareDownload(pointReadInput(req, path, controller.signal));
   try {
-    const download = await engineService(req).prepareContentDownload({
-      pointId: paramOf(req, 'pointId'),
-      path,
-      authorize: authorizeWith(req, 'read'),
-      signal: controller.signal,
-    });
-    const size = download.entry.size;
-    if (size > MAX_CONTENT_DOWNLOAD_BYTES) {
-      sendRecoveryError(res, 'payload_too_large', { size, maxBytes: MAX_CONTENT_DOWNLOAD_BYTES });
-      return;
-    }
-    res.setHeader('Content-Type', 'application/octet-stream');
-    res.setHeader('Content-Length', String(size));
-    res.setHeader('Content-Disposition', contentDisposition(download.entry.name));
-    res.setHeader('Cache-Control', 'no-store');
-    res.setHeader('X-Content-Type-Options', 'nosniff');
-    // A HEAD answers the same metadata and reads nothing: Node discards a body
+    const fileHeaders: Record<string, string> = {
+      'Content-Type': 'application/octet-stream',
+      'Content-Length': String(download.entry.size),
+      'Content-Disposition': contentDisposition(download.entry.name),
+      'Cache-Control': 'no-store',
+      'X-Content-Type-Options': 'nosniff',
+      'Accept-Ranges': 'none',
+    };
+    // A HEAD answers the same headers and reads nothing: Node discards a body
     // for HEAD, so running the dump would read the whole file for no output.
     if (req.method === 'HEAD') {
-      res.end();
+      res.set(fileHeaders).end();
       return;
     }
+    const commitHeaders = (): void => {
+      if (!res.headersSent) res.set(fileHeaders);
+    };
 
-    let wroteAny = false;
     watchIdle();
-    try {
-      const result = await download.stream((chunk, control) => {
-        if (abandoned || res.writableEnded || res.destroyed) {
-          control.pause();
-          return;
-        }
-        wroteAny = true;
-        watchIdle();
-        if (!res.write(chunk)) {
-          control.pause();
-          res.once('drain', () => {
-            if (abandoned) return;
-            watchIdle();
-            control.resume();
-          });
-        }
-      });
-      if (abandoned) return;
-      if (!result.ok) {
-        if (!wroteAny && !res.headersSent) {
-          // Nothing of the body was written, so the failure can be answered as
-          // itself (409 integrity_mismatch, 503 repository_unavailable) instead of
-          // as a reset connection. The catch below drops the file headers.
-          throw new RecoveryError(result.errorClass);
-        }
-        // Part of the body is already on the wire: a JSON error cannot replace it,
-        // and ending normally would present a short file as a complete one.
-        res.destroy();
+    const result = await download.stream((chunk, control) => {
+      if (abandoned || res.writableEnded || res.destroyed) {
+        control.pause();
         return;
       }
-      res.end();
-    } catch (err) {
-      // The dump failed before its first byte. The file headers set above would
-      // turn the JSON error into an empty attachment, so they are removed and the
-      // handler's own error answer takes over.
-      if (!wroteAny && !res.headersSent) {
-        res.removeHeader('Content-Disposition');
-        res.removeHeader('Content-Length');
-        res.removeHeader('Content-Type');
-        res.removeHeader('Cache-Control');
-        res.removeHeader('X-Content-Type-Options');
+      commitHeaders();
+      watchIdle();
+      if (!res.write(chunk)) {
+        control.pause();
+        res.once('drain', () => {
+          if (abandoned) return;
+          watchIdle();
+          control.resume();
+        });
       }
-      throw err;
+    });
+    if (abandoned) return;
+    if (!result.ok) {
+      // Nothing of the body was written, so the failure is answered as itself
+      // (409 integrity_mismatch, 503 repository_unavailable). Once a byte is on
+      // the wire, the handler breaks the connection instead.
+      throw new RecoveryError(result.errorClass);
     }
+    commitHeaders();
+    res.end();
   } finally {
     stopIdleWatch();
-    res.off('close', onClose);
+    download.release();
+    detach();
   }
 }));
 
