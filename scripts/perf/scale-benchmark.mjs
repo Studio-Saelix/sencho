@@ -71,7 +71,6 @@ const STATUS_CACHE_EXPIRY_MS = 16_000
 // Cache outcomes (CacheFetchOutcome in backend/src/services/CacheService.ts)
 // that mean the request waited on a real computation.
 const MISS_OUTCOMES = new Set(['computed', 'inflight'])
-export const SERIES = ['stacks', 'statuses-miss', 'statuses-hit', 'fleet-overview']
 const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '../..')
 
 const DEFAULTS = {
