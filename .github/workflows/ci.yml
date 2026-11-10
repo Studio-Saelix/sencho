@@ -59,7 +59,9 @@ jobs:
   backend:
     name: Backend unit tests (Build, Test, Lint)
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    # This job has reached 9m47s on recent pull request branches, and a 10
+    # minute ceiling killed one at 10m12s while lint was still running.
+    timeout-minutes: 15
     needs: changes
     # Runs unless detection positively found no code: a failed detection job
     # runs every gate instead of skipping them.
