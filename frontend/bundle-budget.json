@@ -1,0 +1,18 @@
+{
+  "_note": "Gzipped KB per bundle group, checked in CI by scripts/check-bundle-size.mjs. Each value is the measured size plus about 10% headroom. Raise a value only in the pull request that needs it, and say why in its description.",
+  "namedChunks": ["monaco", "xterm", "charts", "flow", "motion"],
+  "gzipKb": {
+    "entry-js": 625,
+    "preload-js": 1545,
+    "initial-css": 75,
+    "lazy-js": 290,
+    "lazy-css": 10,
+    "workers": 2320,
+    "monaco": 1220,
+    "xterm": 105,
+    "charts": 125,
+    "flow": 75,
+    "motion": 47,
+    "total-js": 4880
+  }
+}
