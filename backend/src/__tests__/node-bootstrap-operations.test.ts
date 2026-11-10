@@ -1106,7 +1106,6 @@ describe('bootstrap operations: round two review cases', () => {
     repo: { dockerSourceConfigured: true, keyringPresent: true, sourceVerified: true, keyringVerified: true, candidateSourceVerified: true, sourceLocations: 'default' },
   });
 
-
   it('reads a policy far longer than the command output tail and installs from it', async () => {
     const h = harness();
     // Real hosts list every version the repository serves: about 32 KB for the five packages.
@@ -1230,6 +1229,7 @@ describe('bootstrap operations: round two review cases', () => {
     await h.service.settled();
     expect(Date.now() - cancelledAt).toBeLessThan(5_000);
     expect(h.service.get(op.id)).toMatchObject({ state: 'cancelled', changesMade: false, active: false });
+    expect(h.service.get(op.id).events.some((event) => /holds the package lists/.test(event.message))).toBe(false);
     expect(h.host.commands.filter((entry) => /apt-get (-o \S+ )?update/.test(entry.command))).toHaveLength(1);
   });
 

@@ -242,6 +242,12 @@ export class NodeBootstrapOperationService {
     this.approvals.set(result.plan.digest, { plan: result.plan, actor, storedAt: now, operationId });
   }
 
+  private assertRetryable(op: NodeBootstrapOperation): void {
+    if (!op.active || !RETRYABLE_STATES.includes(op.state) || this.runs.has(op.id)) {
+      throw new BootstrapError(409, 'OPERATION_NOT_RETRYABLE', 'This bootstrap cannot be retried in its current state.');
+    }
+  }
+
   /**
    * What a retry preflight may treat as this operation's own: its node and,
    * once it reached the start step, its Pilot. Only a stopped operation that
@@ -249,9 +255,7 @@ export class NodeBootstrapOperationService {
    */
   public retryOwnership(id: string, host: string, port: number): { nodeId: number | null; agentStarted: boolean } {
     const op = this.reconcile(this.requireOperation(id));
-    if (!op.active || !RETRYABLE_STATES.includes(op.state) || this.runs.has(id)) {
-      throw new BootstrapError(409, 'OPERATION_NOT_RETRYABLE', 'This bootstrap cannot be retried in its current state.');
-    }
+    this.assertRetryable(op);
     if (op.target_key !== `${host.toLowerCase()}:${port}`) {
       throw new BootstrapError(409, 'OPERATION_NOT_RETRYABLE', 'A retry must inspect the same server as the bootstrap it retries.');
     }
@@ -371,9 +375,7 @@ export class NodeBootstrapOperationService {
     if (this.reconcile(op).state === 'enrolled') {
       throw new BootstrapError(409, 'OPERATION_NOT_RETRYABLE', 'The Pilot for this bootstrap has connected. There is nothing to retry.');
     }
-    if (!op.active || !RETRYABLE_STATES.includes(op.state) || this.runs.has(id)) {
-      throw new BootstrapError(409, 'OPERATION_NOT_RETRYABLE', 'This bootstrap cannot be retried in its current state.');
-    }
+    this.assertRetryable(op);
     const plan = this.peekApproval(request, context.audit.username, id);
     if (plan.hostKeyFingerprint !== op.host_key_fingerprint || `${plan.target.host}:${plan.target.port}` !== op.target_key
       || plan.targetName !== op.target_name || plan.paths.composeDir.input !== op.compose_dir || plan.paths.agentDir.input !== op.agent_dir) {
@@ -576,13 +578,10 @@ export class NodeBootstrapOperationService {
           if (outcome.status === 'done') this.deps.db.updateNodeBootstrapOperation(id, { changes_made: 1 }, this.deps.now());
           this.event(op, outcome.status, outcome.message, stage.id, step.id);
         }
-        const verified = stage.id === dockerVerifyStage
-          ? [...(stage.id === 'docker_service' ? [await verifyDockerService(ctx, plan)] : []), await verifyDockerReady(ctx, plan)]
-          : stage.id === 'docker_service'
-            ? [await verifyDockerService(ctx, plan)]
-            : stage.id === 'agent_start'
-              ? [await verifyAgentContainer(ctx, plan)]
-              : [];
+        const verified: string[] = [];
+        if (stage.id === 'docker_service') verified.push(await verifyDockerService(ctx, plan));
+        if (stage.id === dockerVerifyStage) verified.push(await verifyDockerReady(ctx, plan));
+        if (stage.id === 'agent_start') verified.push(await verifyAgentContainer(ctx, plan));
         for (const message of verified) this.event(this.requireOperation(id), 'done', message, stage.id, null);
       }
       session.close();

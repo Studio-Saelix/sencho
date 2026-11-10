@@ -158,12 +158,9 @@ interface RemoteFile {
 }
 
 async function readRemoteFile(ctx: StepContext, filePath: string, sudo: boolean): Promise<RemoteFile> {
-  const result = await ctx.session.run(readFileCommand(filePath, sudo), {
-    timeoutMs: VERIFY_TIMEOUT_MS,
+  const result = await runChecked(ctx, readFileCommand(filePath, sudo), `read ${filePath}`, {
     keep: { mode: 'head', maxBytes: EXEC_READ_MAX_BYTES },
   });
-  const failure = transportFailure(result, `read ${filePath}`, VERIFY_TIMEOUT_MS, ctx.secrets);
-  if (failure) throw failure;
   if (result.exitCode === READ_EXIT.missing) return { exists: false, bytes: null };
   if (result.exitCode === READ_EXIT.notRegular) {
     throw new StepFailure('recovery', 'UNEXPECTED_ENTRY', `${filePath} exists but is not a regular file. Nothing was written to it.`);
