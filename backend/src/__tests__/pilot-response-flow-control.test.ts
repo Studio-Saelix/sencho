@@ -175,7 +175,9 @@ describe('PilotTunnelBridge response flow control', () => {
         expect(result.body).toBe('partial');
     }, 10_000);
 
-    it('sends no resume when the client drains after the stream ended', async () => {
+    // Node emits no drain on an ended response, so this pins the observable
+    // contract; it does not reach the bridge's stream-identity guard.
+    it('sends no resume after the stream ended', async () => {
         const { socket, streamId } = await openRawRequest('/api/stacks/x/files/download');
         socket.pause();
         agentSends({ t: 'http_res', s: streamId, status: 200, headers: { 'content-type': 'application/octet-stream' } });

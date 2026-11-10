@@ -58,6 +58,8 @@ describe('recovery helper profiles', () => {
       expect(hostConfig.Privileged, profile).toBe(false);
       expect(hostConfig.SecurityOpt, profile).toEqual(['no-new-privileges:true']);
       expect(hostConfig.CapDrop, profile).toEqual(['ALL']);
+      // A logging driver would keep a copy of the output (the file itself, for a read).
+      expect(hostConfig.LogConfig, profile).toEqual({ Type: 'none', Config: {} });
       expect(hostConfig.PidsLimit, profile).toBe(256);
       // Only a capture stages restic's temporary packs, so only it gets the larger
       // scratch and the memory a tmpfs is charged to.

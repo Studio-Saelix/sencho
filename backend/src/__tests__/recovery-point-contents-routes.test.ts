@@ -722,6 +722,35 @@ describe('read slots on every ending', () => {
     expect(warn.mock.calls.map((c) => c.join(' ')).join('\n')).toMatch(/idle bound/);
   });
 
+  it('drops chunks once the response is gone instead of pausing a stream nobody will resume', async () => {
+    const pointId = seedPoint();
+    await stubDocker();
+    service().markReadyForTests();
+    const { setDownloadIdleMsForTests } = await import('../routes/recovery');
+    setDownloadIdleMsForTests(50);
+    vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    let pausesAfterAbort = 0;
+    let finished: () => void = () => undefined;
+    const done = new Promise<void>((resolve) => { finished = resolve; });
+    contentEngine({
+      dumpFile: async (sink, ctx) => {
+        const control = {
+          pause: () => { if (ctx.signal.aborted) pausesAfterAbort += 1; },
+          resume: () => undefined,
+        };
+        sink(Buffer.from('se'), control);
+        await new Promise<void>((resolve) => ctx.signal.addEventListener('abort', () => resolve(), { once: true }));
+        // The helper's tail still arrives after the idle stop.
+        for (let i = 0; i < 5; i += 1) sink(Buffer.alloc(64 * 1024, 0x61), control);
+        finished();
+        return { ok: false, errorClass: 'interrupted' };
+      },
+    });
+    await request(app).get(download(pointId, '/notes.md')).set('Cookie', viewerCookie).then(() => undefined, () => undefined);
+    await done;
+    expect(pausesAfterAbort).toBe(0);
+  });
+
   it('pauses the dump while the client stops reading and resumes it on drain', async () => {
     const pointId = seedPoint();
     await stubDocker();

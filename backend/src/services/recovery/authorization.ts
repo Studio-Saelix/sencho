@@ -111,7 +111,7 @@ export function authorizeStorageAccess(
  *   not count), its dependents could not be proven, or its record is missing.
  */
 export type PointContentReadTarget =
-  | { kind: 'attached'; storageKey: string; dependents: readonly StorageDependent[] }
+  | { kind: 'attached'; storageKey: string; dependents: readonly [StorageDependent, ...StorageDependent[]] }
   | { kind: 'unrenderable' }
   | { kind: 'detached' };
 
@@ -125,7 +125,11 @@ export function pointContentReadTargetFor(
 ): PointContentReadTarget {
   if (resolution.current.length === 0) return { kind: 'detached' };
   if (resolution.kind === 'unrenderable') return { kind: 'unrenderable' };
-  return { kind: 'attached', storageKey, dependents: resolution.dependents };
+  // `current` is a subset of `dependents`, so the list is never empty here; the
+  // type says so, which keeps an empty set from ever reaching the stack check.
+  const [first, ...rest] = resolution.dependents;
+  if (!first) return { kind: 'detached' };
+  return { kind: 'attached', storageKey, dependents: [first, ...rest] };
 }
 
 /**

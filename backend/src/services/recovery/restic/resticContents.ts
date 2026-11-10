@@ -69,25 +69,27 @@ function mtimeOrNull(value: unknown): string | null {
   return Number.isFinite(Date.parse(value)) ? value : null;
 }
 
-/**
- * One `restic ls --json` line, read three ways:
- *
- * - `entry`: a node record, mapped to an entry;
- * - `skip`: a line that is not a node record (the snapshot header, a progress
- *   line, anything that is not a JSON object);
- * - `malformed`: a line that claims to be a record but cannot be trusted: a
- *   JSON object that does not parse (a truncated line among them), a line over
- *   the length cap, or a node record whose path leaves the captured root or
- *   whose name is not its path's last segment.
- *
- * A malformed line is never dropped quietly, because a listing that silently
- * lost an entry would shift every offset after it and still read as complete.
- */
+/** One `restic ls --json` line: an entry, a line to skip, or a record that cannot be trusted. */
 export type ContentLine =
   | { kind: 'entry'; entry: PointEntry }
   | { kind: 'skip' }
   | { kind: 'malformed' };
 
+/**
+ * Read one `restic ls --json` line:
+ *
+ * - `entry`: a node record, mapped to an entry;
+ * - `skip`: a line that is not a JSON object (a progress line), or a JSON object
+ *   that is not a node record (the snapshot header);
+ * - `malformed`: a line that claims to be a record but cannot be trusted: a
+ *   JSON object that does not parse (a truncated line among them), a line over
+ *   the length cap, a node record with no name or path, a path that leaves the
+ *   captured root or holds an empty, `.` or `..` segment, or a name that is not
+ *   its path's last segment.
+ *
+ * A malformed line is never dropped quietly, because a listing that silently
+ * lost an entry would shift every offset after it and still read as complete.
+ */
 export function parseContentLine(line: string): ContentLine {
   const trimmed = line.trim();
   if (!trimmed.startsWith('{')) return { kind: 'skip' };
@@ -140,8 +142,10 @@ export function parseContentLine(line: string): ContentLine {
       uid: nonNegativeInteger(record.uid),
       gid: nonNegativeInteger(record.gid),
       // A name a request cannot spell (a control character, a segment over 255
-      // bytes) is listed, but no download could name it.
-      downloadable: type === 'file' && size !== null && isPointPath(pointPath),
+      // bytes, a path over 4096 bytes) is listed, but no download could name it.
+      // Neither can one restic recorded with U+FFFD in place of bytes that were
+      // not UTF-8: the name it prints is not the name it stores.
+      downloadable: type === 'file' && size !== null && isPointPath(pointPath) && !pointPath.includes('\ufffd'),
     },
   };
 }

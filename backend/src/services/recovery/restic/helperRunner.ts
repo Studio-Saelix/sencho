@@ -366,6 +366,12 @@ export function buildHelperContainerConfig(input: HelperContainerInput): {
     Memory: spec.memoryBytes,
     Tmpfs: { ...spec.tmpfs },
     Mounts: mounts,
+    // Output reaches Sencho over the attach stream only. A logging driver would
+    // copy it too, and for the read profile the output is the file itself: the
+    // default json-file driver would write every downloaded byte to the Docker
+    // root, and journald or a remote driver would keep it after the container is
+    // removed. Nothing reads helper logs, so no driver runs.
+    LogConfig: { Type: 'none', Config: {} },
   };
   if (spec.capAdd.length > 0) hostConfig.CapAdd = [...spec.capAdd];
 

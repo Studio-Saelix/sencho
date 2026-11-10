@@ -12,6 +12,7 @@ import { PassThrough } from 'stream';
 import type Docker from 'dockerode';
 import { ResticEngine } from '../services/recovery/restic/ResticEngine';
 import {
+  HELPER_PAUSED_TAIL_MS,
   RecoveryHelperRunner,
   type HelperRunSpec,
 } from '../services/recovery/restic/helperRunner';
@@ -177,6 +178,22 @@ describe('ResticEngine.readDirectory', () => {
     });
     expect(await engineWith(runner).readDirectory(READ('/nope'), FIRST_PAGE, readContext()))
       .toEqual({ ok: true, evidence: { found: false } });
+  });
+
+  it('fails a listing whose output holds a record it cannot trust, instead of shortening the page', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    const { calls, runner } = runnerReturning((spec) => {
+      spec.onStdoutLine?.(nodeLine({ name: 'etc', type: 'dir', path: '/data/etc' }));
+      spec.onStdoutLine?.(nodeLine({ name: 'a.txt', type: 'file', path: '/data/etc/a.txt', size: 1 }));
+      // A record the line cap cut short.
+      spec.onStdoutLine?.('{"name":"b.txt","type":"file","path":"/data/etc/b');
+      spec.onStdoutLine?.(nodeLine({ name: 'c.txt', type: 'file', path: '/data/etc/c.txt', size: 1 }));
+      return { exitCode: 130, aborted: true };
+    });
+    expect(await engineWith(runner).readDirectory(READ('/etc'), FIRST_PAGE, readContext()))
+      .toEqual({ ok: false, errorClass: 'node_error' });
+    expect(calls[0].signal?.aborted).toBe(true);
+    expect(warn.mock.calls.map((c) => c.join(' ')).join('\n')).toMatch(/cannot read/);
   });
 
   it('maps restic exit codes and logs the cause once', async () => {
@@ -405,6 +422,54 @@ describe('the helper runner under a streamed body', () => {
     expect(received.join('')).toBe('abc');
     expect(fake.removed).toEqual(['helper']);
   }, 10_000);
+
+  it('resumes a paused stream as soon as the run is aborted, so the helper can drain and exit', async () => {
+    const controller = new AbortController();
+    let flowingAfterAbort: boolean | null = null;
+    const fake = streamingDocker((attach) => {
+      attach.write(Buffer.from('a'));
+      controller.abort();
+      // Read before the process exits: a stream left paused here would block the
+      // helper's writes until SIGKILL instead of letting SIGINT end it.
+      flowingAfterAbort = !attach.isPaused();
+      attach.end();
+    });
+    await realRunner(fake.docker).run({
+      profile: 'read',
+      operationId: 'op-abort-resume',
+      cmd: ['/restic', 'version'],
+      mounts: { repository: REPOSITORY.locator },
+      signal: controller.signal,
+      onStdoutChunk: (_chunk, control: ContentChunkControl) => control.pause(),
+    });
+    expect(flowingAfterAbort).toBe(true);
+  });
+
+  it('bounds the wait for a paused tail whose socket never closes', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    try {
+      const fake = streamingDocker((attach) => {
+        attach.write(Buffer.from('a'));
+        // The process exits, but the attach socket never ends.
+      });
+      let settled = false;
+      const run = realRunner(fake.docker).run({
+        profile: 'read',
+        operationId: 'op-tail-bound',
+        cmd: ['/restic', 'version'],
+        mounts: { repository: REPOSITORY.locator },
+        onStdoutChunk: (_chunk, control: ContentChunkControl) => control.pause(),
+      }).then((result) => { settled = true; return result; });
+      await vi.advanceTimersByTimeAsync(HELPER_PAUSED_TAIL_MS - 1_000);
+      expect(settled).toBe(false);
+      await vi.advanceTimersByTimeAsync(2_000);
+      const result = await run;
+      expect(result.exitCode).toBe(0);
+      expect(fake.removed).toEqual(['helper']);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
 
   it('keeps a multi-byte character whole when a frame boundary splits it', async () => {
     const line = Buffer.from(`${JSON.stringify({ name: '\u65e5\u672c\u8a9e', path: '/data/\u65e5\u672c\u8a9e' })}\n`);

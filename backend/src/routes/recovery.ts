@@ -771,6 +771,7 @@ recoveryRouter.get('/points/:pointId/download', handle(async (req, res) => {
     };
 
     watchIdle();
+    let waitingForDrain = false;
     const result = await download.stream((chunk, control) => {
       // Nobody reads this response any more. The chunk is dropped rather than
       // the stream paused: a pause nobody resumes would keep the helper's
@@ -778,9 +779,13 @@ recoveryRouter.get('/points/:pointId/download', handle(async (req, res) => {
       if (abandoned || res.writableEnded || res.destroyed) return;
       commitHeaders();
       watchIdle();
-      if (!res.write(chunk)) {
+      // One drain listener at a time: after the helper exits the runner ignores
+      // pauses, so the tail can meet a full buffer several times in a row.
+      if (!res.write(chunk) && !waitingForDrain) {
+        waitingForDrain = true;
         control.pause();
         res.once('drain', () => {
+          waitingForDrain = false;
           if (abandoned) return;
           watchIdle();
           control.resume();
