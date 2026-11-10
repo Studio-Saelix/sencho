@@ -10,18 +10,27 @@
  *
  * This module measures the files the invocation will hand to the CLI: the
  * `-f` files or, when none are named, the files Compose selects from
- * `COMPOSE_FILE` or its own discovery. It then follows the whole YAML
- * dependency graph Compose loads from them (`include:` and `extends.file`),
- * resolving paths in the same project directory Compose uses. It counts the
- * nodes each document expands to using the `yaml` package's AST. That package
- * keeps alias targets as shared references instead of copying them, so the
- * count is linear in the file and an over-budget expansion is refused before
- * it is materialized. A file over the budget is refused with a clear message
- * and the CLI is never started.
+ * `COMPOSE_FILE` (process environment, an env file, or the project `.env`) or
+ * its own discovery. It then follows the YAML dependency graph Compose loads
+ * from them (`include:` and `extends.file`), resolving paths in the same
+ * project directory Compose uses. It counts the nodes each document expands to
+ * using the `yaml` package's AST. That package keeps alias targets as shared
+ * references instead of copying them, so the count is linear in the file and an
+ * over-budget expansion is refused before it is materialized. Compose loads a
+ * file again for every include or extends that names it and copies an extended
+ * service into each service that extends it, so those repeats count too. A
+ * file over the budget is refused with a clear message and the CLI is never
+ * started.
  *
- * The guard also refuses an input over the byte cap, a remote input, and a
- * dependency graph it cannot bound. A syntax error or a missing compose file is
- * left for Compose to report, so an ordinary broken stack still fails as it did.
+ * The guard also refuses what it cannot bound: an input over the byte cap, a
+ * remote input, a device or pipe, an include/extends graph past its limits, a
+ * relative path inside an included project, an env file it cannot read, and a
+ * document its parser rejects that uses aliases, include, or extends. A syntax
+ * error elsewhere, an unresolved alias, or a missing compose file is left for
+ * Compose to report, so an ordinary broken stack still fails as it did.
+ *
+ * Not covered: Sencho's own deployment project (self-update and the endpoint
+ * provider helper). Those render operator-owned files, not a managed stack's.
  */
 import { createHash } from 'crypto';
 import path from 'path';
@@ -280,7 +289,9 @@ function usesUnmeasurableConstructs(text: string): boolean {
   const hasAnchor = /(?:^|[\s,[{:-])&[^\s,[\]{}]/m.test(text);
   const hasAlias = /(?:^|[\s,[{:-])\*[^\s,[\]{}]/m.test(text);
   if (hasAnchor && hasAlias) return true;
-  return /(?:^|[\s,{"'])(?:include|extends)["']?\s*:/m.test(text);
+  // The words themselves, quoted or not, and the two ways to hide them: a
+  // backslash escape inside a double-quoted key, and an explicit `? ` key.
+  return /\b(?:include|extends)\b/.test(text) || text.includes('\\') || /^\s*\?\s/m.test(text);
 }
 
 /**
@@ -293,7 +304,9 @@ function usesUnmeasurableConstructs(text: string): boolean {
  * not read. When the `yaml` package rejects a document that uses aliases,
  * include, or extends, the guard cannot tell what Compose's parser would make
  * of it, so it refuses instead of passing it; a rejected document with none of
- * those is left to Compose to report.
+ * those is left to Compose to report. The text checked runs from the rejected
+ * document to the end of the stream: if Compose's parser accepts the document,
+ * it goes on to read what follows.
  */
 function measureDocumentStream(source: string, label: string): MeasuredDocument[] {
   const documents = parseAllDocuments(source, { prettyErrors: false, merge: true });
@@ -302,9 +315,7 @@ function measureDocumentStream(source: string, label: string): MeasuredDocument[
   for (const doc of documents) {
     const hasErrors = doc.errors.length > 0;
     if (hasErrors && !doc.errors.every((error) => COMPLETE_STRUCTURE_ERROR_CODES.has(error.code))) {
-      const start = doc.range?.[0] ?? 0;
-      const end = doc.range?.[2] ?? source.length;
-      if (usesUnmeasurableConstructs(source.slice(start, end))) throw unparsableRefusal(label);
+      if (usesUnmeasurableConstructs(source.slice(doc.range?.[0] ?? 0))) throw unparsableRefusal(label);
       break;
     }
     if (doc.contents) {
@@ -539,10 +550,9 @@ async function loadSelectionEnv(
 
 /**
  * True when a value names a remote Compose input: a URL with a scheme, an
- * SCP-like git ref, or a bare host ref (`github.com/org/repo`). Compose's git
- * loader accepts all three for `include`, `extends.file`, `-f`, and
- * `COMPOSE_FILE`; none can be read locally, so their expansion cannot be
- * bounded.
+ * SCP-like git ref, or a `github.com/` ref. Compose's git loader accepts all
+ * three for `include`, `extends.file`, `-f`, and `COMPOSE_FILE`; none can be
+ * read locally, so their expansion cannot be bounded.
  */
 function isRemoteComposeRef(value: string): boolean {
   if (/^[a-zA-Z][a-zA-Z0-9+.-]*:\/\//.test(value)) return true;
@@ -905,6 +915,9 @@ async function assertInputClosure(args: {
   };
 
   const subtotals = new Map<string, number>();
+  // A file's own nodes, known before its dependencies are walked: a cycle
+  // back to a file in progress charges these, not nothing.
+  const ownNodes = new Map<string, number>();
   const active = new Set<string>();
   let references = 0;
 
@@ -918,8 +931,9 @@ async function assertInputClosure(args: {
     const contextKey = inputContextKey(filePath, input.projectBase, input.env, input.viaExtends);
     const known = subtotals.get(contextKey);
     if (known !== undefined) return known;
-    // Compose rejects an include or extends cycle itself.
-    if (active.has(contextKey)) return 0;
+    // Compose rejects an include or extends cycle itself, but only once it
+    // reaches the back edge, so the file the edge points at is charged again.
+    if (active.has(contextKey)) return ownNodes.get(contextKey) ?? 1;
     if (subtotals.size + active.size >= MAX_COMPOSE_DEPENDENCY_FILES) {
       throw dependencyBoundRefusal(label, `more than ${MAX_COMPOSE_DEPENDENCY_FILES} resolved compose inputs`);
     }
@@ -951,6 +965,7 @@ async function assertInputClosure(args: {
       // Every load is at least one node, so a graph of empty files that fans
       // out at each level cannot walk past the budget for free.
       subtotal = Math.max(subtotal, 1);
+      ownNodes.set(contextKey, subtotal);
       const add = (amount: number): void => {
         subtotal = saturateAt(subtotal, amount, MAX_TOTAL_EXPANDED_NODES);
         if (subtotal > MAX_TOTAL_EXPANDED_NODES) throw totalRefusalForFile(label);
@@ -1147,9 +1162,9 @@ export async function assertComposeInputsWithinExpansionLimits(opts: {
   cwd: string;
   invocation: readonly string[];
   /**
-   * Values layered above this process's environment, matching a child spawned
-   * with `{ ...process.env, ...overrides }`. A name the override leaves unset
-   * comes from `process.env`, exactly as it does for the child.
+   * The child's whole environment, for a caller that builds it (a name it
+   * leaves unset is unset for the child, whatever this process holds). Omit it
+   * when the child inherits this process's environment unchanged.
    */
   env?: ComposeEnvLookup;
 }): Promise<void> {
@@ -1157,7 +1172,7 @@ export async function assertComposeInputsWithinExpansionLimits(opts: {
   // resolves `..` (and every relative path) from the real location.
   const cwd = await resolvePhysicalDirectory(path.resolve(opts.cwd));
   const invocation = opts.invocation;
-  const processEnv: ComposeEnvLookup = (name) => opts.env?.(name) ?? process.env[name];
+  const processEnv: ComposeEnvLookup = opts.env ?? ((name) => process.env[name]);
 
   const explicitFileValues = composeFileArgsFromInvocation(invocation);
   for (const file of explicitFileValues) {

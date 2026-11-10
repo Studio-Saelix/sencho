@@ -3046,6 +3046,9 @@ describe('DockerController - missing stack directory', () => {
       invocation: ['-f', 'compose.yaml', '--env-file', '.env'],
     });
     expect(mockExecFileAsync).not.toHaveBeenCalled();
+    // The empty result is not silent: the refusal reaches the log.
+    const logged = errSpy.mock.calls.map((call) => call.map(String).join(' ')).join('\n');
+    expect(logged).toContain('Compose file "compose.yaml" was refused.');
     errSpy.mockRestore();
   });
 });

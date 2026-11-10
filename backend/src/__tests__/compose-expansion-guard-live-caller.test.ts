@@ -41,6 +41,7 @@ vi.mock('../services/DatabaseService', () => ({
 }));
 
 import { ComposeService } from '../services/ComposeService';
+import type { RollbackInvocationRecord } from '../types/rollbackGeneration';
 
 function nestedAliasBomb(levels: number): string {
   const lines = ['x0: &a0 [lol, lol, lol, lol, lol, lol, lol, lol, lol]'];
@@ -194,5 +195,77 @@ describe('ComposeService live caller uses the real guard', () => {
     await expect(ComposeService.getInstance(1).renderComposeYaml('stack'))
       .rejects.toThrow(/nested YAML aliases/);
     expect(mockSpawn).not.toHaveBeenCalled();
+  });
+});
+
+describe('ComposeService mutating invocations use the real guard', () => {
+  it('refuses a discovered bomb on the authored lifecycle invocation without spawning Compose', async () => {
+    await writeStackFile('compose.yaml', nestedAliasBomb(12));
+
+    await expect(ComposeService.getInstance(1).validateExactComposeInvocation('stack'))
+      .rejects.toThrow(/nested YAML aliases/);
+    expect(mockSpawn).not.toHaveBeenCalled();
+  });
+
+  it('refuses a bomb selected by the project .env on the lifecycle invocation', async () => {
+    await writeStackFile('compose.yaml', SAFE_COMPOSE);
+    await writeStackFile('selected.yaml', nestedAliasBomb(12));
+    await writeStackFile('.env', 'COMPOSE_FILE=selected.yaml\n');
+
+    await expect(ComposeService.getInstance(1).validateExactComposeInvocation('stack'))
+      .rejects.toThrow(/nested YAML aliases/);
+    expect(mockSpawn).not.toHaveBeenCalled();
+  });
+
+  it('refuses an extends dependency bomb on the lifecycle invocation', async () => {
+    await writeStackFile('compose.yaml', 'services:\n  web:\n    extends:\n      file: base.yaml\n      service: base\n');
+    await writeStackFile('base.yaml', nestedAliasBomb(12));
+
+    await expect(ComposeService.getInstance(1).validateExactComposeInvocation('stack'))
+      .rejects.toThrow(/nested YAML aliases/);
+    expect(mockSpawn).not.toHaveBeenCalled();
+  });
+
+  it('refuses a device include on the lifecycle invocation', async () => {
+    await writeStackFile('compose.yaml', 'include:\n  - /dev/zero\n');
+
+    await expect(ComposeService.getInstance(1).validateExactComposeInvocation('stack'))
+      .rejects.toThrow(/not a regular file/);
+    expect(mockSpawn).not.toHaveBeenCalled();
+  });
+
+  it('refuses a bomb named by a captured recovery invocation without spawning Compose', async () => {
+    await writeStackFile('selected.yaml', nestedAliasBomb(12));
+    const invocation = {
+      composeArgsPrefix: ['-f', 'selected.yaml'],
+      projectDirectory: null,
+      projectName: 'stack',
+      explicitComposeFiles: ['selected.yaml'],
+      composeLayers: ['selected.yaml'],
+    } as unknown as RollbackInvocationRecord;
+
+    await expect(ComposeService.getInstance(1).buildComposeArgsWithRecoveryOverride(
+      'stack',
+      ['up', '-d'],
+      null,
+      invocation,
+    )).rejects.toThrow(/nested YAML aliases/);
+    expect(mockSpawn).not.toHaveBeenCalled();
+  });
+
+  it('refuses a discovered bomb on a recovery invocation with no captured prefix', async () => {
+    await writeStackFile('compose.yaml', nestedAliasBomb(12));
+
+    await expect(ComposeService.getInstance(1).buildComposeArgsWithRecoveryOverride('stack', ['up', '-d'], null, null))
+      .rejects.toThrow(/nested YAML aliases/);
+    expect(mockSpawn).not.toHaveBeenCalled();
+  });
+
+  it('builds a recovery invocation for an ordinary stack', async () => {
+    await writeStackFile('compose.yaml', SAFE_COMPOSE);
+
+    const args = await ComposeService.getInstance(1).buildComposeArgsWithRecoveryOverride('stack', ['up', '-d'], null, null);
+
+    expect(args).toContain('up');
   });
 });

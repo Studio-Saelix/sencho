@@ -2482,6 +2482,10 @@ describe('ComposeService - alias-expansion guard on mutating invocations', () =>
       null,
       invocation,
     )).rejects.toThrow('nested YAML aliases');
+    // The captured prefix, not the authored one, is what the guard measures.
+    expect(mockAssertComposeInputs).toHaveBeenCalledWith(expect.objectContaining({
+      invocation: expect.arrayContaining(['compose', '-p', 'my-stack', 'up', '-d']),
+    }));
     expect(mockSpawn).not.toHaveBeenCalled();
   });
 });

@@ -2902,7 +2902,7 @@ class DockerController {
     const envFileArgs = await authoredComposeEnvFileArgs(stackName, this.nodeId);
     // `compose ps` composes the project too, so the same expansion bound
     // applies before the CLI reads the files, including a COMPOSE_FILE
-    // selection and a project directory the env decides.
+    // selection from the environment or an env file.
     await assertComposeInputsWithinExpansionLimits({
       cwd: stackDir,
       invocation: [...filePrefix, ...envFileArgs],

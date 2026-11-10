@@ -601,8 +601,8 @@ export class ComposeService {
     args.push(...action);
     // Every command built here runs Compose, which expands YAML aliases with
     // no bound. The check is last, after every layer is appended, so it sees
-    // exactly the files, env selection, and project directory the CLI is about
-    // to read.
+    // the files, env selection, and project directory in the argv the CLI is
+    // about to read.
     await assertComposeInputsWithinExpansionLimits({
       cwd: stackDirOverride ?? path.join(this.baseDir, stackName),
       invocation: args,

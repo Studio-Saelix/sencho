@@ -190,10 +190,16 @@ describe('assertComposeSourceWithinExpansionLimits', () => {
       .toThrow(ComposeExpansionRefusal);
   });
 
-  it('leaves a bomb after an earlier syntax error to Compose', () => {
-    // Compose stops at the first document it cannot parse, so the later
-    // document is never expanded and the guard does not need to refuse it.
+  it('refuses a bomb after an earlier syntax error, since Compose may accept the earlier document', () => {
+    // Compose's parser accepts some documents this one rejects, and would go on
+    // to expand the later one, so the guard does not assume the stream stops.
     const source = `services: [\n---\n${nestedAliasBomb(12)}`;
+    expect(() => assertComposeSourceWithinExpansionLimits(source, 'stream.yaml'))
+      .toThrow(ComposeExpansionRefusal);
+  });
+
+  it('leaves a syntax error followed only by plain documents to Compose', () => {
+    const source = 'services: [\n---\nservices:\n  web:\n    image: nginx\n';
     expect(() => assertComposeSourceWithinExpansionLimits(source, 'stream.yaml')).not.toThrow();
   });
 });
@@ -552,18 +558,19 @@ describe('assertComposeInputsWithinExpansionLimits - COMPOSE_FILE selection', ()
     })).rejects.toBeInstanceOf(ComposeExpansionRefusal);
   });
 
-  it('layers a child environment override above the process environment', async () => {
+  it('takes the child environment as the whole environment, so a name it lacks is unset', async () => {
     await write('selected.yaml', nestedAliasBomb(12));
     await write('compose.yaml', SAFE_COMPOSE);
     process.env.COMPOSE_FILE = 'selected.yaml';
+    // The child has no COMPOSE_FILE, so Compose loads the safe discovered file.
     await expect(assertComposeInputsWithinExpansionLimits({
       cwd: dir,
       invocation: ['compose', 'config'],
       env: (name) => (name === 'SOMETHING_ELSE' ? 'x' : undefined),
-    })).rejects.toBeInstanceOf(ComposeExpansionRefusal);
+    })).resolves.toBeUndefined();
   });
 
-  it('lets a child environment override win over the process environment', async () => {
+  it('lets the child environment win over a different process environment', async () => {
     await write('safe.yaml', SAFE_COMPOSE);
     await write('selected.yaml', nestedAliasBomb(12));
     process.env.COMPOSE_FILE = 'safe.yaml';
@@ -1185,7 +1192,7 @@ describe('assertComposeInputsWithinExpansionLimits - review round regressions', 
     })).rejects.toThrow(/cannot resolve the env file path/);
   });
 
-  it('expands a ~user extends path from the child HOME', async () => {
+  it('joins a ~someone extends path under the child HOME, as Compose does', async () => {
     const previousHome = process.env.HOME;
     process.env.HOME = path.join(dir, 'home');
     try {
@@ -1335,8 +1342,20 @@ describe('assertComposeInputsWithinExpansionLimits - review round 3 regressions'
       await expect(run()).resolves.toBeUndefined();
     });
 
-    it('leaves a bomb after an earlier unparsable document to Compose', async () => {
+    it('refuses a bomb after an earlier unparsable document, since Compose may parse the first one', async () => {
       await write('compose.yaml', `services:\n  web: [1\n---\n${nestedAliasBomb(12)}`);
+      await expect(run()).rejects.toThrow(/YAML that Sencho's parser rejects/);
+    });
+
+    it('refuses a rejected document that hides include behind a quoted escape', async () => {
+      await write('compose.yaml', 'x-q: "v"#c\n"inc\\x6cude":\n  - dep.yaml\n');
+      await write('dep.yaml', nestedAliasBomb(5));
+      await expect(run()).rejects.toBeInstanceOf(ComposeExpansionRefusal);
+    });
+
+    it('still measures a self-referencing extends once, as Compose reports the cycle', async () => {
+      await write('compose.yaml', 'services:\n  web:\n    extends:\n      file: a.yaml\n      service: x\n');
+      await write('a.yaml', 'services:\n  x:\n    extends:\n      file: compose.yaml\n      service: web\n');
       await expect(run()).resolves.toBeUndefined();
     });
   });

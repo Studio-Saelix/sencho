@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import fs from 'fs';
 import path from 'path';
 import {
@@ -37,6 +37,17 @@ function nestedAliasBomb(levels: number): string {
 function encodeUtf16Le(text: string): Buffer {
   return Buffer.concat([Buffer.from([0xff, 0xfe]), Buffer.from(text, 'utf16le')]);
 }
+
+// Directories the alias-guard tests create, removed after each test.
+const guardTestDirs: string[] = [];
+function guardTestDir(label: string): string {
+  const dir = path.join(process.env.TMPDIR || '/tmp', `sencho-refdisc-${label}-${Date.now()}-${guardTestDirs.length}`);
+  guardTestDirs.push(dir);
+  return dir;
+}
+afterEach(() => {
+  for (const dir of guardTestDirs.splice(0)) fs.rmSync(dir, { recursive: true, force: true });
+});
 
 describe('registryReferenceDiscovery', () => {
   beforeEach(() => {
@@ -829,7 +840,7 @@ describe('registryReferenceDiscovery', () => {
   });
 
   it('resolves an include path from the process environment the render child inherits', async () => {
-    const dir = path.join(process.env.TMPDIR || '/tmp', `sencho-refdisc-procenv-${Date.now()}`);
+    const dir = guardTestDir('procenv');
     fs.mkdirSync(path.join(dir, 'deps'), { recursive: true });
     fs.writeFileSync(
       path.join(dir, 'compose.yaml'),
@@ -850,7 +861,7 @@ describe('registryReferenceDiscovery', () => {
   });
 
   it('resolves an include path with the docker-control variables the render child pins', async () => {
-    const dir = path.join(process.env.TMPDIR || '/tmp', `sencho-refdisc-pinned-${Date.now()}`);
+    const dir = guardTestDir('pinned');
     fs.mkdirSync(path.join(dir, 'safe'), { recursive: true });
     fs.writeFileSync(
       path.join(dir, 'compose.yaml'),
@@ -875,7 +886,7 @@ describe('registryReferenceDiscovery', () => {
   });
 
   it('does not render Compose when an extends dependency is over the alias budget', async () => {
-    const dir = path.join(process.env.TMPDIR || '/tmp', `sencho-refdisc-dep-${Date.now()}`);
+    const dir = guardTestDir('dep');
     fs.mkdirSync(path.join(dir, 'sub'), { recursive: true });
     fs.writeFileSync(
       path.join(dir, 'compose.yaml'),
@@ -892,7 +903,7 @@ describe('registryReferenceDiscovery', () => {
   });
 
   it('does not render Compose when the selected file is a UTF-16 alias bomb', async () => {
-    const dir = path.join(process.env.TMPDIR || '/tmp', `sencho-refdisc-utf16-${Date.now()}`);
+    const dir = guardTestDir('utf16');
     fs.mkdirSync(dir, { recursive: true });
     fs.writeFileSync(path.join(dir, 'compose.yaml'), encodeUtf16Le(nestedAliasBomb(12)));
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
@@ -905,7 +916,7 @@ describe('registryReferenceDiscovery', () => {
   });
 
   it('does not render Compose when a later document of the stream is an alias bomb', async () => {
-    const dir = path.join(process.env.TMPDIR || '/tmp', `sencho-refdisc-stream-${Date.now()}`);
+    const dir = guardTestDir('stream');
     fs.mkdirSync(dir, { recursive: true });
     fs.writeFileSync(
       path.join(dir, 'compose.yaml'),
@@ -921,7 +932,7 @@ describe('registryReferenceDiscovery', () => {
   });
 
   it('renders a safe multi-document stream', async () => {
-    const dir = path.join(process.env.TMPDIR || '/tmp', `sencho-refdisc-safestream-${Date.now()}`);
+    const dir = guardTestDir('safestream');
     fs.mkdirSync(dir, { recursive: true });
     fs.writeFileSync(
       path.join(dir, 'compose.yaml'),
