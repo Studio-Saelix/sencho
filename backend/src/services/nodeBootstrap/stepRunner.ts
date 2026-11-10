@@ -262,6 +262,10 @@ function sha256Of(content: string | Buffer): string {
   return crypto.createHash('sha256').update(content).digest('hex');
 }
 
+function withoutTrailingSlashes(value: string): string {
+  return value.length > 1 ? value.replace(/\/+$/, '') : value;
+}
+
 /**
  * The physical path the plan approved for a directory a step writes into: the
  * resolved path the preflight recorded for the Compose or Agent directory, and
@@ -270,9 +274,8 @@ function sha256Of(content: string | Buffer): string {
  * refuses any other directory, so what was approved is what is changed.
  */
 export function approvedDirectory(plan: BootstrapPlan, directory: string): string {
-  const clean = (value: string) => (value.length > 1 ? value.replace(/\/+$/, '') : value);
   for (const known of [plan.paths.agentDir, plan.paths.composeDir]) {
-    if (clean(known.input) === clean(directory)) return known.realPath ?? known.input;
+    if (withoutTrailingSlashes(known.input) === withoutTrailingSlashes(directory)) return known.realPath ?? known.input;
   }
   return directory;
 }

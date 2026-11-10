@@ -85,19 +85,7 @@ export function useBootstrapOperation({ open, api }: UseBootstrapOperationOption
   useEffect(() => {
     if (!open) return;
     const controller = new AbortController();
-    listGeneration.current += 1;
-    client.list(controller.signal)
-      .then((page) => {
-        listGeneration.current += 1;
-        setOperations(page.operations);
-        setNextCursor(page.nextCursor);
-        setListFailed(false);
-      })
-      .catch((error: unknown) => {
-        if (error instanceof DOMException && error.name === 'AbortError') return;
-        console.warn('Bootstrap operations could not be listed:', error);
-        setListFailed(true);
-      });
+    void refreshList(controller.signal);
     return () => controller.abort();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open]);
