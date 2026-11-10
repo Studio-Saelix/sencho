@@ -4,7 +4,11 @@ import { cn } from '@/lib/utils';
 import { isOperationRunning, operationStateWord } from './operationStatus';
 import type { BootstrapOperation } from './types';
 
-/** How many of the latest stopped runs are listed after the ones still holding a server. */
+/**
+ * How many of the latest stopped runs are listed after the ones still holding a
+ * server. Only finished runs are cut: every hold is listed, however many there
+ * are, because a hold is the way back to a run that needs recovery.
+ */
 const RECENT_STOPPED = 3;
 
 /**
@@ -41,7 +45,7 @@ export function BootstrapOperationsList({
     <section className="space-y-2" aria-label="Bootstrap runs">
       <h4 className="font-mono text-[10px] uppercase tracking-[0.18em] text-stat-subtitle">Bootstrap runs</h4>
       {unavailable}
-      <ul className="rounded-lg border border-muted bg-card/40 px-3 py-1">
+      <ul className="max-h-72 overflow-y-auto rounded-lg border border-muted bg-card/40 px-3 py-1" data-testid="bootstrap-runs-list">
         {rows.map((operation) => {
           const state = operationStateWord(operation);
           const running = isOperationRunning(operation);

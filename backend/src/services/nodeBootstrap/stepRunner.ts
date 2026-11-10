@@ -35,6 +35,7 @@ import type { BootstrapPlan, BootstrapPlanStep, BootstrapStageId } from './types
  */
 
 export const COMPOSE_STEP_ID = 'agent-compose-file';
+export const KEY_STEP_ID = 'docker-key';
 export const TOKEN_PLACEHOLDER = '{{SENCHO_ENROLL_TOKEN}}';
 const VERIFY_TIMEOUT_MS = 30_000;
 const DETAIL_MAX_CHARS = 4_000;
@@ -112,9 +113,15 @@ function lastLines(text: string, cut: boolean): string {
   return tail;
 }
 
-/** The recorded detail for a command: its output tail, with every secret removed before anything is cut. */
-export function commandDetail(result: ExecResult, secrets: string[]): string | null {
-  const parts = [result.stderr, result.stdout]
+/**
+ * The recorded detail for a command: its output tail, with every secret removed
+ * before anything is cut. A command whose standard output is file content (a
+ * file read, a key download) passes `stdout: false`: content can carry a
+ * credential in a form the scrub cannot recognize (base64, or one an earlier
+ * attempt minted), so only its standard error is ever recorded.
+ */
+export function commandDetail(result: ExecResult, secrets: string[], options: { stdout?: boolean } = {}): string | null {
+  const parts = [result.stderr, options.stdout === false ? '' : result.stdout]
     .map((text) => lastLines(scrubSecrets(text, secrets), result.truncated))
     .filter(Boolean);
   if (parts.length === 0) return null;
@@ -126,15 +133,15 @@ function seconds(ms: number): string {
 }
 
 /** Map a transport outcome that is not a normal exit to the failure it means. */
-function transportFailure(result: ExecResult, what: string, timeoutMs: number, secrets: string[]): StepFailure | null {
+function transportFailure(result: ExecResult, what: string, timeoutMs: number, secrets: string[], options: { stdout?: boolean } = {}): StepFailure | null {
   if (result.error === 'CONNECTION_LOST') {
-    return new StepFailure('unknown', 'SSH_CONNECTION_LOST', `The SSH connection dropped during "${what}". Whether it took effect is not known.`, commandDetail(result, secrets));
+    return new StepFailure('unknown', 'SSH_CONNECTION_LOST', `The SSH connection dropped during "${what}". Whether it took effect is not known.`, commandDetail(result, secrets, options));
   }
   if (result.timedOut) {
-    return new StepFailure('unknown', 'STEP_TIMEOUT', `"${what}" did not finish within ${seconds(timeoutMs)}. It may still be running on the host.`, commandDetail(result, secrets));
+    return new StepFailure('unknown', 'STEP_TIMEOUT', `"${what}" did not finish within ${seconds(timeoutMs)}. It may still be running on the host.`, commandDetail(result, secrets, options));
   }
   if (result.error === 'COMMAND_ERROR') {
-    return new StepFailure('unknown', 'COMMAND_ERROR', `The SSH channel for "${what}" failed before it reported an exit status.`, commandDetail(result, secrets));
+    return new StepFailure('unknown', 'COMMAND_ERROR', `The SSH channel for "${what}" failed before it reported an exit status.`, commandDetail(result, secrets, options));
   }
   return null;
 }
@@ -143,11 +150,11 @@ async function runChecked(
   ctx: StepContext,
   command: string,
   what: string,
-  options: { timeoutMs?: number; keep?: ExecOptions['keep'] } = {},
+  options: { timeoutMs?: number; keep?: ExecOptions['keep']; stdout?: boolean } = {},
 ): Promise<ExecResult> {
   const timeoutMs = options.timeoutMs ?? VERIFY_TIMEOUT_MS;
   const result = await ctx.session.run(command, { timeoutMs, keep: options.keep });
-  const failure = transportFailure(result, what, timeoutMs, ctx.secrets);
+  const failure = transportFailure(result, what, timeoutMs, ctx.secrets, { stdout: options.stdout });
   if (failure) throw failure;
   return result;
 }
@@ -158,15 +165,17 @@ interface RemoteFile {
 }
 
 async function readRemoteFile(ctx: StepContext, filePath: string, sudo: boolean): Promise<RemoteFile> {
+  // The output is the file's content: no failure detail may carry it.
   const result = await runChecked(ctx, readFileCommand(filePath, sudo), `read ${filePath}`, {
     keep: { mode: 'head', maxBytes: EXEC_READ_MAX_BYTES },
+    stdout: false,
   });
   if (result.exitCode === READ_EXIT.missing) return { exists: false, bytes: null };
   if (result.exitCode === READ_EXIT.notRegular) {
     throw new StepFailure('recovery', 'UNEXPECTED_ENTRY', `${filePath} exists but is not a regular file. Nothing was written to it.`);
   }
   if (result.exitCode !== 0) {
-    throw new StepFailure('failed', 'READ_FAILED', `${filePath} could not be read back.`, commandDetail(result, ctx.secrets));
+    throw new StepFailure('failed', 'READ_FAILED', `${filePath} could not be read back.`, commandDetail(result, ctx.secrets, { stdout: false }));
   }
   if (result.truncated) {
     throw new StepFailure('recovery', 'UNEXPECTED_ENTRY', `${filePath} is larger than any file this plan writes. Nothing was written to it.`);
@@ -249,6 +258,48 @@ function reconcileExisting(step: BootstrapPlanStep, existing: Buffer, desired: s
   );
 }
 
+function sha256Of(content: string | Buffer): string {
+  return crypto.createHash('sha256').update(content).digest('hex');
+}
+
+/**
+ * Put `desired` at `filePath` through the write script and check the result.
+ * `replaces` is the sha256 of the file the run inspected and means to replace;
+ * without it the name must be free when the file is published. A refusal means
+ * the host changed after the plan was approved or after this run looked.
+ */
+async function publishFile(
+  ctx: StepContext,
+  step: BootstrapPlanStep,
+  file: { path: string; mode: string },
+  facts: { owner: string; group: string },
+  desired: string,
+  replaces: string | null,
+): Promise<StepOutcome> {
+  const sudo = step.privilege === 'sudo';
+  const command = writeFileCommand(file.path, { mode: file.mode, owner: facts.owner, group: facts.group, sha256: sha256Of(desired) }, { sudo, replaces });
+  const result = await ctx.session.run(command, { timeoutMs: step.timeoutMs, stdin: desired });
+  const failure = transportFailure(result, step.title, step.timeoutMs, ctx.secrets);
+  if (failure) throw failure;
+  if (result.exitCode === WRITE_EXIT.incomplete) {
+    throw new StepFailure('failed', 'WRITE_INCOMPLETE', `${file.path} did not arrive in full, so it was not put in place. The connection may have dropped.`, commandDetail(result, ctx.secrets), { changedNothing: true });
+  }
+  if (result.exitCode === WRITE_EXIT.notDirectory) {
+    throw new StepFailure('failed', 'DIRECTORY_CHANGED', `The directory for ${file.path} is not a directory any more, or was swapped while it was being entered. Nothing was written.`, commandDetail(result, ctx.secrets), { changedNothing: true });
+  }
+  if (result.exitCode === WRITE_EXIT.exists || result.exitCode === WRITE_EXIT.notRegular) {
+    // A replacement moves the inspected file aside first, so only a plain write is known to have changed nothing.
+    throw new StepFailure('recovery', 'FILE_CONFLICT', `${file.path} appeared or changed on the host after the plan was approved. It was left as it is.`, commandDetail(result, ctx.secrets), { changedNothing: replaces === null });
+  }
+  if (result.exitCode !== 0) {
+    throw new StepFailure('failed', 'STEP_FAILED', `"${step.title}" failed (exit ${result.exitCode}).`, commandDetail(result, ctx.secrets));
+  }
+  expectStat(file.path, await statRemote(ctx, file.path, sudo), {
+    mode: file.mode, owner: facts.owner, group: facts.group, type: 'regular file',
+  });
+  return { status: 'done', message: replaces === null ? `Wrote ${file.path}.` : `Replaced ${file.path} with a new enrollment.` };
+}
+
 async function runFileStep(step: BootstrapPlanStep, ctx: StepContext, plan: BootstrapPlan): Promise<StepOutcome> {
   const file = step.file;
   const target = step.target;
@@ -257,7 +308,7 @@ async function runFileStep(step: BootstrapPlanStep, ctx: StepContext, plan: Boot
   }
   const sudo = step.privilege === 'sudo';
   const desired = step.id === COMPOSE_STEP_ID ? ctx.composeWithToken() : file.content;
-  let noClobber = true;
+  let replaces: string | null = null;
   if (target.preserveExisting) {
     const existing = await readRemoteFile(ctx, file.path, sudo);
     if (existing.exists && existing.bytes) {
@@ -268,40 +319,54 @@ async function runFileStep(step: BootstrapPlanStep, ctx: StepContext, plan: Boot
         });
         return { status: 'skipped', message: `${file.path} is already in place and was kept.` };
       }
-      noClobber = false;
+      // The write replaces exactly the file that was read, and refuses anything else.
+      replaces = sha256Of(existing.bytes);
     }
   }
-  const sha256 = crypto.createHash('sha256').update(desired).digest('hex');
-  const command = writeFileCommand(file.path, { mode: file.mode, owner: target.owner, group: target.group, sha256 }, { sudo, noClobber });
-  const result = await ctx.session.run(command, { timeoutMs: step.timeoutMs, stdin: desired });
-  const failure = transportFailure(result, step.title, step.timeoutMs, ctx.secrets);
-  if (failure) throw failure;
-  if (result.exitCode === WRITE_EXIT.incomplete) {
-    throw new StepFailure('failed', 'WRITE_INCOMPLETE', `${file.path} did not arrive in full, so it was not put in place. The connection may have dropped.`, commandDetail(result, ctx.secrets), { changedNothing: true });
-  }
-  if (result.exitCode === WRITE_EXIT.exists || result.exitCode === WRITE_EXIT.notRegular) {
-    throw new StepFailure('recovery', 'FILE_CONFLICT', `${file.path} appeared on the host after the plan was approved. It was left as it is.`, commandDetail(result, ctx.secrets));
-  }
-  if (result.exitCode !== 0) {
-    throw new StepFailure('failed', 'STEP_FAILED', `"${step.title}" failed (exit ${result.exitCode}).`, commandDetail(result, ctx.secrets));
-  }
-  expectStat(file.path, await statRemote(ctx, file.path, sudo), {
-    mode: file.mode, owner: target.owner, group: target.group, type: 'regular file',
-  });
-  return { status: 'done', message: noClobber ? `Wrote ${file.path}.` : `Replaced ${file.path} with a new enrollment.` };
+  return publishFile(ctx, step, file, { owner: target.owner, group: target.group }, desired, replaces);
 }
 
-async function verifyDockerKey(ctx: StepContext, step: BootstrapPlanStep): Promise<void> {
-  const keyPath = step.target?.path;
-  if (!keyPath) return;
-  const read = await readRemoteFile(ctx, keyPath, step.privilege === 'sudo');
-  if (!read.exists || !isDockerReleaseKeyFile(keyPath, read.bytes)) {
+/**
+ * Download Docker's release key to standard output and put it in place with the
+ * file writer, once it is known to be that key. Nothing is written through a
+ * path before then, so a symlink at the destination is never followed, and an
+ * existing key is replaced only when it is itself Docker's key and still the
+ * file that was read.
+ */
+async function runKeyStep(step: BootstrapPlanStep, ctx: StepContext): Promise<StepOutcome> {
+  const target = step.target;
+  if (!step.command || !target?.owner || !target.group || !target.mode) {
+    throw new StepFailure('failed', 'PLAN_INVALID', `The plan step "${step.title}" has no key destination. Nothing was run.`);
+  }
+  const keyPath = target.path;
+  const sudo = step.privilege === 'sudo';
+  const fetched = await runChecked(ctx, step.command, step.title, {
+    timeoutMs: step.timeoutMs,
+    keep: { mode: 'head', maxBytes: EXEC_READ_MAX_BYTES },
+    stdout: false,
+  });
+  if (fetched.exitCode !== 0) {
+    throw new StepFailure('failed', 'STEP_FAILED', `"${step.title}" failed (exit ${fetched.exitCode}).`, commandDetail(fetched, ctx.secrets, { stdout: false }), { changedNothing: true });
+  }
+  const downloaded = Buffer.from(fetched.stdout, 'utf8');
+  if (fetched.truncated || !isDockerReleaseKeyFile(keyPath, downloaded)) {
     throw new StepFailure(
       'failed',
       'KEY_NOT_VERIFIED',
-      `The key downloaded to ${keyPath} is not Docker's release key, so the Docker repository was not added.`,
+      `The key downloaded for ${keyPath} is not Docker's release key, so the Docker repository was not added.`,
+      null,
+      { changedNothing: true },
     );
   }
+  let replaces: string | null = null;
+  const existing = await readRemoteFile(ctx, keyPath, sudo);
+  if (existing.exists && existing.bytes) {
+    if (!isDockerReleaseKeyFile(keyPath, existing.bytes)) {
+      throw new StepFailure('recovery', 'FILE_CONFLICT', `${keyPath} already exists and is not Docker's release key. It was left as it is.`, null, { changedNothing: true });
+    }
+    replaces = sha256Of(existing.bytes);
+  }
+  return publishFile(ctx, step, { path: keyPath, mode: target.mode }, { owner: target.owner, group: target.group }, downloaded.toString('utf8'), replaces);
 }
 
 /** The package names, and pinned versions, an `apt-get install` command names. */
@@ -411,10 +476,18 @@ async function runCommandStep(step: BootstrapPlanStep, ctx: StepContext): Promis
     : await ctx.session.run(step.command, { timeoutMs: step.timeoutMs });
   const failure = transportFailure(result, step.title, step.timeoutMs, ctx.secrets);
   if (failure) throw failure;
+  if (step.effect === 'directory-create' && step.target) {
+    // The directory script refuses without changing anything: the name is taken, or its parent is not what was inspected.
+    if (result.exitCode === WRITE_EXIT.exists) {
+      throw new StepFailure('recovery', 'FILE_CONFLICT', `${step.target.path} appeared on the host after the plan was approved. It was left as it is.`, commandDetail(result, ctx.secrets), { changedNothing: true });
+    }
+    if (result.exitCode === WRITE_EXIT.notDirectory) {
+      throw new StepFailure('failed', 'DIRECTORY_CHANGED', `The parent of ${step.target.path} is not a directory any more, or was swapped while it was being entered. Nothing was created.`, commandDetail(result, ctx.secrets), { changedNothing: true });
+    }
+  }
   if (result.exitCode !== 0) {
     throw new StepFailure('failed', 'STEP_FAILED', `"${step.title}" failed (exit ${result.exitCode}).`, commandDetail(result, ctx.secrets));
   }
-  if (step.id === 'docker-key') await verifyDockerKey(ctx, step);
   if (step.effect === 'directory-create' && step.target) {
     expectStat(step.target.path, await statRemote(ctx, step.target.path, step.privilege === 'sudo'), {
       mode: step.target.mode, owner: step.target.owner, group: step.target.group, type: 'directory',
@@ -424,7 +497,8 @@ async function runCommandStep(step: BootstrapPlanStep, ctx: StepContext): Promis
 }
 
 export async function runPlanStep(step: BootstrapPlanStep, ctx: StepContext, plan: BootstrapPlan): Promise<StepOutcome> {
-  return step.file ? runFileStep(step, ctx, plan) : runCommandStep(step, ctx);
+  if (step.file) return runFileStep(step, ctx, plan);
+  return step.id === KEY_STEP_ID ? runKeyStep(step, ctx) : runCommandStep(step, ctx);
 }
 
 /** The start step's privilege decides how Docker is reached after installation. */

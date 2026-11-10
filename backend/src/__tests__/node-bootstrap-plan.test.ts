@@ -2,6 +2,7 @@ import { describe, it, expect } from 'vitest';
 import { execFileSync } from 'child_process';
 import { parse as parseYaml } from 'yaml';
 import { buildBootstrapPlan, canonicalJson, formatPlanText, planDigest } from '../services/nodeBootstrap/planBuilder';
+import { createDirectoryCommand } from '../services/nodeBootstrap/executionCommands';
 import { makeAgentDir, makeComposeDir, makeFacts } from './__helpers__/bootstrapFacts';
 import type { BootstrapFacts, BootstrapPlan, BootstrapPlanStep } from '../services/nodeBootstrap/types';
 
@@ -56,7 +57,10 @@ describe('bootstrap plan builder', () => {
     expect(step.effect).toBe('directory-create');
     expect(step.privilege).toBe('user');
     expect(step.target).toMatchObject({ path: '/opt/docker/sencho', mode: '0755', owner: 'ubuntu', group: 'ubuntu' });
-    expect(step.command).toBe("install -d -m 0755 -o 'ubuntu' -g 'ubuntu' -- '/opt/docker/sencho'");
+    // The directory is created, never entered by name twice: a name that exists is refused, and a symlink is never followed.
+    expect(step.command).toBe(createDirectoryCommand('/opt/docker/sencho', { mode: '0755', owner: 'ubuntu', group: 'ubuntu' }, { sudo: false, allowExisting: false }));
+    expect(step.command).toMatch(/sencho-mkdir '\/opt\/docker\/sencho' '0755' 'ubuntu' 'ubuntu' '0'$/);
+    expect(step.command).not.toContain('install -d');
   });
 
   it('uses sudo when the parent is not writable by the SSH user', () => {
@@ -66,7 +70,7 @@ describe('bootstrap plan builder', () => {
     });
     const step = allSteps(planFor(facts)).find((entry) => entry.id === 'create-compose-dir');
     expect(step?.privilege).toBe('sudo');
-    expect(step?.command).toContain('sudo -n install -d');
+    expect(step?.command).toMatch(/^sudo -n sh -c [\s\S]* sencho-mkdir '/);
   });
 
   it('creates the agent directory with 0700 and writes the three files under it', () => {

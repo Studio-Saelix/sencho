@@ -6785,9 +6785,17 @@ stmt.run('gitops_schema_version', '1');
         ).get(targetKey, fingerprint ?? '') as NodeBootstrapOperation | undefined;
     }
 
-    public listNodeBootstrapOperations(limit: number): NodeBootstrapOperation[] {
+    /** Every operation that still holds its server, newest first. Never capped: it is the recovery path. */
+    public listActiveNodeBootstrapOperations(): NodeBootstrapOperation[] {
         return this.db.prepare(
-            'SELECT * FROM node_bootstrap_operations ORDER BY active DESC, created_at DESC LIMIT ?'
+            'SELECT * FROM node_bootstrap_operations WHERE active = 1 ORDER BY created_at DESC'
+        ).all() as NodeBootstrapOperation[];
+    }
+
+    /** The latest operations that no longer hold their server. */
+    public listFinishedNodeBootstrapOperations(limit: number): NodeBootstrapOperation[] {
+        return this.db.prepare(
+            'SELECT * FROM node_bootstrap_operations WHERE active = 0 ORDER BY created_at DESC LIMIT ?'
         ).all(limit) as NodeBootstrapOperation[];
     }
 

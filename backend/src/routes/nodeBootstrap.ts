@@ -223,7 +223,7 @@ nodeBootstrapRouter.post('/operations', bootstrapOperationLimiter, (req: Request
 nodeBootstrapRouter.get('/operations', (req: Request, res: Response) => {
   if (!guard(req, res)) return;
   try {
-    res.json({ operations: NodeBootstrapOperationService.getInstance().list() });
+    res.json(NodeBootstrapOperationService.getInstance().list());
   } catch (error: unknown) {
     sendError(res, error, 'operation');
   }

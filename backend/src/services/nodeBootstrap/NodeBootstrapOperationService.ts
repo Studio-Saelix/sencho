@@ -59,7 +59,8 @@ import type { BootstrapPlan, BootstrapPreflightResult } from './types';
 export const APPROVAL_TTL_MS = 10 * 60_000;
 export const MAX_PENDING_APPROVALS = 32;
 export const ENROLL_WAIT_MS = 5 * 60_000;
-export const OPERATION_LIST_LIMIT = 20;
+/** Finished runs listed after the ones still holding a server; holds are never cut by this. */
+export const OPERATION_HISTORY_LIMIT = 20;
 
 const RUNNING_STATES: readonly NodeBootstrapOperationState[] = ['rechecking', 'running', 'enrolling'];
 const RETRYABLE_STATES: readonly NodeBootstrapOperationState[] = [
@@ -265,8 +266,11 @@ export class NodeBootstrapOperationService {
   /** Refuse a new preflight while a run holds the same target. */
   public assertTargetIdle(host: string, port: number, exceptOperationId: string | null = null): void {
     const targetKey = `${host.toLowerCase()}:${port}`;
+    // A row with no run behind it is settled first, so it cannot block its own server.
     const busy = this.deps.db.listNodeBootstrapOperationsInStates(RUNNING_STATES)
-      .find((op) => op.target_key === targetKey && op.id !== exceptOperationId);
+      .filter((op) => op.target_key === targetKey && op.id !== exceptOperationId)
+      .map((op) => this.reconcile(op))
+      .find((op) => RUNNING_STATES.includes(op.state));
     if (busy) {
       throw new BootstrapError(409, 'BOOTSTRAP_IN_PROGRESS', 'A bootstrap is running on this host. Open it to follow its progress.', {
         details: { operationId: busy.id },
@@ -364,9 +368,10 @@ export class NodeBootstrapOperationService {
       throw error;
     }
     this.consumeApproval(plan.digest);
-    this.audit(context.audit, 'bootstrap.execute.approved', op, { digest: plan.digest });
-    this.event(op, 'info', `Approved by ${actor}. Plan sha256:${plan.digest}.`);
-    this.launch(op.id, request, plan, context);
+    this.beginRun(op, request, plan, context, () => {
+      this.audit(context.audit, 'bootstrap.execute.approved', op, { digest: plan.digest });
+      this.event(op, 'info', `Approved by ${actor}. Plan sha256:${plan.digest}.`);
+    });
     return this.detail(op.id);
   }
 
@@ -402,10 +407,17 @@ export class NodeBootstrapOperationService {
       throw new BootstrapError(409, 'OPERATION_NOT_RETRYABLE', 'This bootstrap changed state. Refresh it and try again.');
     }
     this.consumeApproval(plan.digest);
-    const updated = this.requireOperation(id);
-    this.audit(context.audit, 'bootstrap.execute.retry', updated, { digest: plan.digest, attempt: updated.attempt });
-    this.event(updated, 'info', `Retry approved by ${context.audit.username}. Plan sha256:${plan.digest}.`);
-    this.launch(id, request, plan, context);
+    let updated: NodeBootstrapOperation;
+    try {
+      updated = this.requireOperation(id);
+    } catch (error: unknown) {
+      this.stopStrandedSetup(id, error);
+      throw error;
+    }
+    this.beginRun(updated, request, plan, context, () => {
+      this.audit(context.audit, 'bootstrap.execute.retry', updated, { digest: plan.digest, attempt: updated.attempt });
+      this.event(updated, 'info', `Retry approved by ${context.audit.username}. Plan sha256:${plan.digest}.`);
+    });
     return this.detail(id);
   }
 
@@ -437,8 +449,19 @@ export class NodeBootstrapOperationService {
     return this.detail(id);
   }
 
-  public list(): OperationView[] {
-    return this.deps.db.listNodeBootstrapOperations(OPERATION_LIST_LIMIT).map((op) => this.view(this.reconcile(op)));
+  /**
+   * Every run that still holds its server, then the latest finished ones. The
+   * holds are the recovery path, so none is ever left out; only the finished
+   * history is capped, and `historyTruncated` says when older ones exist.
+   */
+  public list(): { operations: OperationView[]; historyTruncated: boolean } {
+    const holds = this.deps.db.listActiveNodeBootstrapOperations();
+    const history = this.deps.db.listFinishedNodeBootstrapOperations(OPERATION_HISTORY_LIMIT + 1);
+    return {
+      // A read can settle a row (a Pilot that connected, a run with no process behind it), so rows are viewed after reconciling.
+      operations: [...holds, ...history.slice(0, OPERATION_HISTORY_LIMIT)].map((op) => this.view(this.reconcile(op))),
+      historyTruncated: history.length > OPERATION_HISTORY_LIMIT,
+    };
   }
 
   public get(id: string): OperationDetail {
@@ -493,6 +516,39 @@ export class NodeBootstrapOperationService {
   }
 
   // --- run ------------------------------------------------------------------
+
+  /**
+   * The operation row is already `rechecking` here, and only a live run can
+   * end that state. If recording the approval fails, no run exists to do it, so
+   * the row is stopped (earlier attempts' changes keep the hold) before the
+   * error goes back to the operator, who can retry or release it.
+   */
+  private beginRun(
+    op: NodeBootstrapOperation,
+    request: ExecuteRequest,
+    plan: BootstrapPlan,
+    context: RunContext,
+    record: () => void,
+  ): void {
+    try {
+      record();
+    } catch (error: unknown) {
+      this.stopStrandedSetup(op.id, error);
+      throw error;
+    }
+    this.launch(op.id, request, plan, context);
+  }
+
+  private stopStrandedSetup(id: string, cause: unknown): void {
+    console.error(`[Bootstrap] Operation ${id} could not be set up:`, sanitizeForLog(getErrorMessage(cause, 'unknown')));
+    try {
+      const op = this.deps.db.getNodeBootstrapOperation(id);
+      if (op && RUNNING_STATES.includes(op.state) && !this.runs.has(id)) this.recordInterrupted(op, 'aborted');
+    } catch (error: unknown) {
+      // The database is still failing; a later read settles the row (see `reconcile`).
+      console.error(`[Bootstrap] Operation ${id} could not be marked interrupted:`, sanitizeForLog(getErrorMessage(error, 'unknown')));
+    }
+  }
 
   private launch(id: string, request: ExecuteRequest, plan: BootstrapPlan, context: RunContext): void {
     const abort = new AbortController();
@@ -807,6 +863,18 @@ export class NodeBootstrapOperationService {
    * was interrupted. Checked when the operation is read, so no timer polls.
    */
   private reconcile(op: NodeBootstrapOperation): NodeBootstrapOperation {
+    // A run lives only in this process. A row that says it is running with no run
+    // behind it was stranded (its setup failed to write, and so did the cleanup),
+    // so it is stopped now instead of holding its server with every action refused.
+    if (RUNNING_STATES.includes(op.state) && !this.runs.has(op.id)) {
+      try {
+        this.recordInterrupted(op, 'aborted');
+        return this.requireOperation(op.id);
+      } catch (error: unknown) {
+        console.error(`[Bootstrap] Operation ${op.id} could not be marked interrupted:`, sanitizeForLog(getErrorMessage(error, 'unknown')));
+        return op;
+      }
+    }
     if (!RECONCILABLE_STATES.includes(op.state) || op.node_id === null || op.agent_started !== 1 || this.runs.has(op.id)) return op;
     const node = this.deps.db.getNode(op.node_id);
     const connected = this.deps.tunnels.hasActiveTunnel(op.node_id)

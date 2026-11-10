@@ -118,6 +118,9 @@ class FakeHost {
 
   public constructor() {
     // Directories every supported Ubuntu host already has, plus the existing stacks root the facts describe.
+    this.dirs.set('/etc/apt', { mode: '0755', owner: 'root', group: 'root' });
+    this.dirs.set('/opt', { mode: '0755', owner: 'root', group: 'root' });
+    this.dirs.set('/opt/docker', { mode: '0755', owner: 'root', group: 'root' });
     this.dirs.set('/etc/apt/sources.list.d', { mode: '0755', owner: 'root', group: 'root' });
     this.dirs.set('/opt/docker/sencho', { mode: '0755', owner: 'ubuntu', group: 'ubuntu' });
   }
@@ -154,12 +157,14 @@ class FakeHost {
   private answer(command: string, options: ExecOptions): ExecResult {
     const ok = (stdout = ''): ExecResult => ({ exitCode: 0, stdout, stderr: '', truncated: false, timedOut: false, error: null });
     const exit = (code: number, stderr = ''): ExecResult => ({ exitCode: code, stdout: '', stderr, truncated: false, timedOut: false, error: null });
-    const write = /sencho-write '([^']*)' '([^']*)' '([^']*)' '([^']*)' '([^']*)' '([01])' '([0-9a-f]{64})'$/.exec(command);
+    const write = /sencho-write '([^']*)' '([^']*)' '([^']*)' '([^']*)' '([^']*)' '([0-9a-f]*)' '([0-9a-f]{64})'$/.exec(command);
     if (write) {
-      const [, dir, name, mode, owner, group, noClobber, sha256] = write;
+      const [, dir, name, mode, owner, group, replaces, sha256] = write;
       const target = `${dir}/${name}`;
       if (!this.dirs.has(dir)) return exit(20, `not a directory: ${dir}`);
-      if (noClobber === '1' && this.files.has(target)) return exit(17, `already exists: ${target}`);
+      const present = this.files.get(target);
+      if (replaces === '' && present) return exit(17, `already exists: ${target}`);
+      if (replaces !== '' && present && crypto.createHash('sha256').update(present.content).digest('hex') !== replaces) return exit(17, `changed since it was inspected: ${target}`);
       if (crypto.createHash('sha256').update(options.stdin ?? '').digest('hex') !== sha256) return exit(22, `content incomplete: ${target}`);
       this.files.set(target, { content: options.stdin ?? '', mode, owner, group });
       return ok();
@@ -177,15 +182,15 @@ class FakeHost {
       if (dir) return ok(`${Number.parseInt(dir.mode, 8).toString(8)} ${dir.owner} ${dir.group} directory`);
       return exit(1, 'No such file or directory');
     }
-    const installDir = /install -d -m (\d+) -o '([^']*)' -g '([^']*)' -- '([^']*)'$/.exec(command);
-    if (installDir) {
-      this.dirs.set(installDir[4], { mode: installDir[1], owner: installDir[2], group: installDir[3] });
+    const makeDir = /sencho-mkdir '([^']*)' '([^']*)' '([^']*)' '([^']*)' '([01])'$/.exec(command);
+    if (makeDir) {
+      const [, dir, mode, owner, group, allowExisting] = makeDir;
+      if (!this.dirs.has(dir.slice(0, dir.lastIndexOf('/')) || '/')) return exit(20, `not a directory: ${dir}`);
+      if (this.dirs.has(dir) && allowExisting !== '1') return exit(17, `already exists: ${dir}`);
+      this.dirs.set(dir, { mode, owner, group });
       return ok();
     }
-    if (command.includes('curl -fsSL https://download.docker.com/linux/ubuntu/gpg -o /etc/apt/keyrings/docker.asc')) {
-      this.files.set('/etc/apt/keyrings/docker.asc', { content: DOCKER_KEY_ASC, mode: '0644', owner: 'root', group: 'root' });
-      return ok();
-    }
+    if (/(^| )curl -fsSL https:\/\/download.docker.com\/linux\/ubuntu\/gpg$/.test(command)) return ok(DOCKER_KEY_ASC);
     if (command === APT_POLICY_COMMAND) return ok(this.policy);
     if (command.includes('/etc/os-release')) return ok(`${this.codename}\n`);
     if (command.includes("docker version --format '{{.Server.Version}}'")) return ok('27.3.1\n');
@@ -222,6 +227,11 @@ class FakeTunnels extends EventEmitter {
 
 let tmpDir: string;
 let db: DatabaseService;
+
+/** Every row, held ones first, as the tests need to find a run by its host. */
+function allOperations() {
+  return [...db.listActiveNodeBootstrapOperations(), ...db.listFinishedNodeBootstrapOperations(500)];
+}
 
 beforeAll(async () => {
   tmpDir = await setupTestDb();
@@ -278,7 +288,7 @@ function harness(options: { facts?: BootstrapFacts; enrollWaitMs?: number; conne
   if (options.connectOnStart !== false) {
     host.override = (command) => {
       if (command.includes('up -d')) {
-        const op = db.listNodeBootstrapOperations(50).find((row) => row.host === hostname);
+        const op = allOperations().find((row) => row.host === hostname);
         if (op?.node_id) setTimeout(() => tunnels.connect(op.node_id as number), 5);
       }
       return undefined;
@@ -325,7 +335,7 @@ describe('bootstrap operations: approval', () => {
     const op = h.service.start(request, context());
     await h.service.settled();
     expect(() => h.service.start(request, context())).toThrow(/no longer current/);
-    expect(db.listNodeBootstrapOperations(50).filter((row) => row.id === op.id)).toHaveLength(1);
+    expect(allOperations().filter((row) => row.id === op.id)).toHaveLength(1);
   });
 
   it('binds the approval to the operator, the target, the directories and the host key', () => {
@@ -553,14 +563,15 @@ describe('bootstrap operations: stopping honestly', () => {
     const { request } = approve(h);
     h.host.override = (command) => {
       if (command.includes('curl -fsSL')) {
-        h.host.files.set('/etc/apt/keyrings/docker.asc', { content: '-----BEGIN PGP PUBLIC KEY BLOCK-----\n\nnot-docker\n-----END PGP PUBLIC KEY BLOCK-----\n', mode: '0644', owner: 'root', group: 'root' });
-        return { exitCode: 0, stdout: '', stderr: '', truncated: false, timedOut: false, error: null };
+        return { exitCode: 0, stdout: '-----BEGIN PGP PUBLIC KEY BLOCK-----\n\nnot-docker\n-----END PGP PUBLIC KEY BLOCK-----\n', stderr: '', truncated: false, timedOut: false, error: null };
       }
       return undefined;
     };
     const op = h.service.start(request, context());
     await h.service.settled();
     expect(h.service.get(op.id)).toMatchObject({ state: 'partial', error: { code: 'KEY_NOT_VERIFIED' } });
+    // The key is checked before anything is written for it, so neither the key nor the source exists.
+    expect(h.host.files.has('/etc/apt/keyrings/docker.asc')).toBe(false);
     expect(h.host.files.has('/etc/apt/sources.list.d/docker.list')).toBe(false);
     h.service.release(op.id, AUDIT);
   });
@@ -742,7 +753,7 @@ describe('bootstrap operations: failure paths found in review', () => {
   it('records a first step that fails cleanly as failed and releases the target', async () => {
     const h = harness({ facts: makeFacts() });
     const { request } = approve(h);
-    h.host.override = (command) => (command.includes('install -d -m 0700')
+    h.host.override = (command) => (command.includes("sencho-mkdir '/opt/sencho-agent'")
       ? { exitCode: 1, stdout: '', stderr: 'install: cannot create directory', truncated: false, timedOut: false, error: null }
       : undefined);
     const op = h.service.start(request, context());
@@ -897,7 +908,7 @@ describe('bootstrap operations: failure paths found in review', () => {
     const up = harness({ connectOnStart: false, enrollWaitMs: 60_000 });
     up.host.override = (command) => {
       if (command.includes('up -d')) {
-        const row = db.listNodeBootstrapOperations(50).find((entry) => entry.host === up.facts.current.target.host);
+        const row = allOperations().find((entry) => entry.host === up.facts.current.target.host);
         if (row?.node_id) up.tunnels.active.add(row.node_id);
       }
       return undefined;
@@ -1004,7 +1015,7 @@ describe('bootstrap operations: failure paths found in review', () => {
     const { request } = approve(h);
     const op = h.service.start(request, context());
     await h.service.settled();
-    const row = h.service.list().find((entry) => entry.id === op.id);
+    const row = h.service.list().operations.find((entry) => entry.id === op.id);
     expect(row).toBeDefined();
     expect(row).not.toHaveProperty('plan');
     expect(row).not.toHaveProperty('events');
@@ -1402,7 +1413,7 @@ describe('bootstrap operations: round two review cases', () => {
 
   it('marks a run whose own error path failed as stopped on an internal error, not as a restart', async () => {
     const h = harness({ facts: makeFacts() });
-    h.host.override = (command) => (command.includes('install -d -m 0700')
+    h.host.override = (command) => (command.includes("sencho-mkdir '/opt/sencho-agent'")
       ? { exitCode: 1, stdout: '', stderr: 'denied', truncated: false, timedOut: false, error: null }
       : undefined);
     // The run's own finish (a compare-and-set out of the running states) fails once.
@@ -1421,5 +1432,188 @@ describe('bootstrap operations: round two review cases', () => {
     spy.mockRestore();
     expect(db.getNodeBootstrapOperation(op.id)).toMatchObject({ error_code: 'RUN_ABORTED', error_message: expect.stringMatching(/internal error/) });
     if (db.getNodeBootstrapOperation(op.id)?.active === 1) h.service.release(op.id, AUDIT);
+  });
+});
+
+describe('bootstrap operations: S1 a failed setup does not strand the operation', () => {
+  const disk = () => new Error('SQLITE_FULL: database or disk is full');
+
+  function rowFor(host: string) {
+    return allOperations().find((row) => row.host === host);
+  }
+
+  it('stops a start whose first event cannot be written, and lets the server be started again', async () => {
+    const h = harness();
+    const { request } = approve(h);
+    const spy = vi.spyOn(db, 'appendNodeBootstrapEvent').mockImplementationOnce(() => { throw disk(); });
+    expect(() => h.service.start(request, context())).toThrow(/SQLITE_FULL/);
+    spy.mockRestore();
+    const row = rowFor(request.host);
+    expect(row).toMatchObject({ state: 'blocked', active: 0, changes_made: 0, error_code: 'RUN_ABORTED' });
+    expect(h.host.commands).toEqual([]);
+    // The database is writable again: nothing needs a restart, and the server is free to start.
+    const again = approve(h);
+    const op = h.service.start(again.request, context());
+    await h.service.settled();
+    expect(h.service.get(op.id).state).toBe('enrolled');
+    db.deleteNode(h.service.get(op.id).nodeId as number);
+  });
+
+  it('keeps an earlier attempt\'s changes and hold when a retry cannot record its first event, and the retry works afterwards', async () => {
+    const h = harness({ connectOnStart: false, enrollWaitMs: 20 });
+    const first = approve(h);
+    const op = h.service.start(first.request, context());
+    await h.service.settled();
+    const stopped = h.service.get(op.id);
+    expect(stopped).toMatchObject({ state: 'partial', active: true, changesMade: true });
+    const nodeId = stopped.nodeId as number;
+    h.facts.current = makeFacts({
+      target: h.facts.current.target,
+      hostKey: h.facts.current.hostKey,
+      agentDir: {
+        exists: true, isDirectory: true, realPath: '/opt/sencho-agent', writableByUser: true, readableByUser: true,
+        entries: ['compose.yaml', 'sencho-bootstrap.json'], hasMarker: true, hasComposeFile: true,
+        markerProject: 'sencho-agent', markerComposeDir: '/opt/docker/sencho', markerAgentDir: '/opt/sencho-agent',
+      },
+    });
+    const second = approve(h, op.id);
+    const spy = vi.spyOn(db, 'appendNodeBootstrapEvent').mockImplementationOnce(() => { throw disk(); });
+    expect(() => h.service.retry(op.id, second.request, context())).toThrow(/SQLITE_FULL/);
+    spy.mockRestore();
+
+    const stranded = h.service.get(op.id);
+    expect(stranded).toMatchObject({ state: 'blocked', active: true, changesMade: true, attempt: 2, nodeId, actions: { retry: true, release: true, cancel: false } });
+    const third = approve(h, op.id);
+    h.service.retry(op.id, third.request, context());
+    await vi.waitFor(() => expect(h.service.get(op.id).state).toBe('enrolling'));
+    h.tunnels.connect(nodeId);
+    await h.service.settled();
+    expect(h.service.get(op.id)).toMatchObject({ state: 'enrolled', active: false, nodeId, attempt: 3 });
+    db.deleteNode(nodeId);
+  });
+
+  it('settles a row nothing could write back, on the next read, so no action stays refused', async () => {
+    const h = harness();
+    const { request } = approve(h);
+    const real = db.transitionNodeBootstrapOperation.bind(db);
+    const events = vi.spyOn(db, 'appendNodeBootstrapEvent').mockImplementationOnce(() => { throw disk(); });
+    // The database refuses the cleanup too.
+    const transitions = vi.spyOn(db, 'transitionNodeBootstrapOperation').mockImplementationOnce(() => { throw disk(); }).mockImplementation(real);
+    expect(() => h.service.start(request, context())).toThrow(/SQLITE_FULL/);
+    events.mockRestore();
+    transitions.mockRestore();
+    expect(rowFor(request.host)).toMatchObject({ state: 'rechecking', active: 1 });
+
+    // A new preflight for the server is not refused as busy, and the list and the row settle it.
+    expect(() => h.service.assertTargetIdle(request.host, request.port as number)).not.toThrow();
+    const row = rowFor(request.host);
+    expect(row).toMatchObject({ state: 'blocked', active: 0 });
+    const listed = h.service.list().operations.find((entry) => entry.id === row?.id);
+    expect(listed).toMatchObject({ state: 'blocked', active: false });
+  });
+
+  it('settles a stranded row that holds earlier changes into one that can be retried or released', () => {
+    const h = harness();
+    const now = Date.now();
+    db.insertNodeBootstrapOperation({
+      id: '00000000-0000-4000-8000-0000000000a1', target_key: 'stranded.example.com:22', host: 'stranded.example.com', port: 22, username: 'ubuntu',
+      address: '192.168.1.70', target_name: 'stranded', host_key_fingerprint: 'SHA256:stranded', compose_dir: '/opt/docker/sencho', agent_dir: '/opt/sencho-agent',
+      plan_json: '{}', plan_digest: 'd', approved_by: TEST_USERNAME, approved_at: now, attempt: 2, state: 'rechecking', stage: null, step: null, node_id: null,
+      changes_made: 1, agent_started: 0, active: 1, cancel_requested: 0, error_code: null, error_message: null, enrollment_expires_at: null,
+      created_at: now, updated_at: now, finished_at: null,
+    });
+    const view = h.service.get('00000000-0000-4000-8000-0000000000a1');
+    expect(view).toMatchObject({ state: 'blocked', active: true, changesMade: true, actions: { retry: true, release: true } });
+    h.service.release(view.id, AUDIT);
+  });
+});
+
+describe('bootstrap operations: S2 every held run stays discoverable', () => {
+  function insertHeld(index: number, state: 'partial' | 'blocked' = 'partial') {
+    const now = Date.now() + index;
+    const id = `00000000-0000-4000-8000-${String(1000 + index).padStart(12, '0')}`;
+    db.insertNodeBootstrapOperation({
+      id, target_key: `held-${index}.example.com:22`, host: `held-${index}.example.com`, port: 22, username: 'ubuntu', address: '192.168.1.80',
+      target_name: `held-${index}`, host_key_fingerprint: `SHA256:held-${index}`, compose_dir: '/opt/docker/sencho', agent_dir: '/opt/sencho-agent',
+      plan_json: '{}', plan_digest: 'd', approved_by: TEST_USERNAME, approved_at: now, attempt: 1, state, stage: null, step: null, node_id: null,
+      changes_made: 1, agent_started: 0, active: 1, cancel_requested: 0, error_code: null, error_message: null, enrollment_expires_at: null,
+      created_at: now, updated_at: now, finished_at: now,
+    });
+    return id;
+  }
+
+  it('lists all twenty-five held runs, the oldest included, and opens each one with its recovery actions', () => {
+    const h = harness();
+    const ids = Array.from({ length: 25 }, (_, index) => insertHeld(index));
+    const listed = h.service.list();
+    const heldIds = listed.operations.filter((entry) => entry.active).map((entry) => entry.id);
+    for (const id of ids) expect(heldIds).toContain(id);
+    expect(h.service.get(ids[0])).toMatchObject({ active: true, actions: { release: true } });
+    for (const id of ids) h.service.release(id, AUDIT);
+  });
+
+  it('caps only the finished history, says so, and keeps holds out of that cap', () => {
+    const h = harness();
+    const held = insertHeld(40);
+    const finished = Array.from({ length: 23 }, (_, index) => {
+      const id = insertHeld(50 + index, 'blocked');
+      h.service.release(id, AUDIT);
+      return id;
+    });
+    const listed = h.service.list();
+    expect(listed.historyTruncated).toBe(true);
+    expect(listed.operations.filter((entry) => !entry.active)).toHaveLength(20);
+    expect(listed.operations.map((entry) => entry.id)).toContain(held);
+    // The newest finished runs are the ones kept.
+    expect(listed.operations.map((entry) => entry.id)).toContain(finished[22]);
+    expect(listed.operations.map((entry) => entry.id)).not.toContain(finished[0]);
+    h.service.release(held, AUDIT);
+  });
+});
+
+describe('bootstrap operations: B2 a failed read of the previous compose file records nothing of it', () => {
+  it.each([
+    ['the connection drops', { exitCode: null, error: 'CONNECTION_LOST' as const }],
+    ['the read times out', { exitCode: null, timedOut: true }],
+    ['the channel fails', { exitCode: null, error: 'COMMAND_ERROR' as const }],
+    ['the read exits non-zero', { exitCode: 5 }],
+  ])('keeps both credentials out of every event, response and audit row when %s', async (_label, failure) => {
+    const h = harness({ connectOnStart: false, enrollWaitMs: 20 });
+    const first = approve(h);
+    const op = h.service.start(first.request, context());
+    await h.service.settled();
+    const nodeId = h.service.get(op.id).nodeId as number;
+    const previousCompose = h.host.files.get('/opt/sencho-agent/compose.yaml')?.content ?? '';
+    const previousToken = /SENCHO_ENROLL_TOKEN: "([^"]+)"/.exec(previousCompose)?.[1] ?? '';
+    expect(previousToken).toMatch(/^eyJ/);
+
+    h.facts.current = makeFacts({
+      target: h.facts.current.target,
+      hostKey: h.facts.current.hostKey,
+      agentDir: {
+        exists: true, isDirectory: true, realPath: '/opt/sencho-agent', writableByUser: true, readableByUser: true,
+        entries: ['compose.yaml', 'sencho-bootstrap.json'], hasMarker: true, hasComposeFile: true,
+        markerProject: 'sencho-agent', markerComposeDir: '/opt/docker/sencho', markerAgentDir: '/opt/sencho-agent',
+      },
+    });
+    // The host sends the old file's content, then the read ends the way the case says.
+    h.host.override = (command) => (command.includes("sencho-read '/opt/sencho-agent/compose.yaml'")
+      ? { stdout: Buffer.from(previousCompose).toString('base64'), stderr: '', truncated: false, timedOut: false, error: null, ...failure }
+      : undefined);
+    const second = approve(h, op.id);
+    h.service.retry(op.id, second.request, context());
+    await h.service.settled();
+
+    const detail = h.service.get(op.id);
+    expect(detail.state).not.toBe('enrolled');
+    const everything = JSON.stringify([detail, db.listNodeBootstrapEvents(op.id), auditText()]);
+    const encodedOld = Buffer.from(previousCompose).toString('base64');
+    const newToken = /enroll-\d+-\d+/.exec(everything)?.[0] ?? null;
+    expect(everything).not.toContain(previousToken);
+    expect(everything).not.toContain(encodedOld.slice(0, 60));
+    expect(everything).not.toContain(Buffer.from(previousToken).toString('base64'));
+    expect(newToken).toBeNull();
+    if (h.service.get(op.id).active) h.service.release(op.id, AUDIT);
+    db.deleteNode(nodeId);
   });
 });

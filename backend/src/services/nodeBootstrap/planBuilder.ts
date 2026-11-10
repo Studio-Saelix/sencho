@@ -9,6 +9,7 @@ import {
   unsupportedComposeAddition,
 } from './evidence';
 import { DOCKER_LOCAL_ASSIGNMENTS, DOCKER_LOCAL_UNSET_ARGS, debianArchitecture } from './probes';
+import { createDirectoryCommand } from './executionCommands';
 import {
   BOOTSTRAP_MARKER_FILENAME,
   BOOTSTRAP_MARKER_SCHEMA_VERSION,
@@ -81,10 +82,6 @@ function sudoCommand(command: string, sudo: boolean): string {
   return sudo ? `sudo -n ${command}` : command;
 }
 
-function installDirCommand(path: string, mode: string, owner: string, group: string, sudo: boolean): string {
-  return sudoCommand(`install -d -m ${mode} -o ${shellQuote(owner)} -g ${shellQuote(group)} -- ${shellQuote(path)}`, sudo);
-}
-
 function startCommand(agentDir: string, sudo: boolean): string {
   const compose = `${agentDir}/compose.yaml`;
   // Pin both the Docker endpoint and the Compose project: a configured remote
@@ -136,7 +133,7 @@ function repoSteps(facts: BootstrapFacts, sudo: boolean): BootstrapPlanStep[] {
       rationale: 'The Docker repository key must be readable by apt from a stable location.',
       effect: 'directory-create',
       privilege: sudo ? 'sudo' : 'user',
-      command: installDirCommand('/etc/apt/keyrings', '0755', 'root', 'root', sudo),
+      command: createDirectoryCommand('/etc/apt/keyrings', { mode: '0755', owner: 'root', group: 'root' }, { sudo, allowExisting: true }),
       target: { path: '/etc/apt/keyrings', mode: '0755', owner: 'root', group: 'root', preserveExisting: true },
       disruptive: false,
       reversible: 'yes',
@@ -146,27 +143,15 @@ function repoSteps(facts: BootstrapFacts, sudo: boolean): BootstrapPlanStep[] {
     {
       id: 'docker-key',
       title: 'Fetch the Docker repository key',
-      rationale: 'apt verifies the Docker package signatures with this key.',
+      rationale: 'apt verifies the Docker package signatures with this key. The download is checked as Docker\'s release key before it is put in place, with the mode and owner below.',
       effect: 'file-write',
       privilege: sudo ? 'sudo' : 'user',
-      command: sudoCommand('curl -fsSL https://download.docker.com/linux/ubuntu/gpg -o /etc/apt/keyrings/docker.asc', sudo),
+      command: sudoCommand('curl -fsSL https://download.docker.com/linux/ubuntu/gpg', sudo),
       target: { path: '/etc/apt/keyrings/docker.asc', mode: CA_FILE_MODE, owner: 'root', group: 'root', preserveExisting: false },
       disruptive: false,
       reversible: 'yes',
       pointOfNoReturn: false,
       timeoutMs: 30_000,
-    },
-    {
-      id: 'docker-key-mode',
-      title: 'Make the Docker key world-readable',
-      rationale: 'apt reads the key as a non-root user.',
-      effect: 'file-write',
-      privilege: sudo ? 'sudo' : 'user',
-      command: sudoCommand('chmod 0644 /etc/apt/keyrings/docker.asc', sudo),
-      disruptive: false,
-      reversible: 'yes',
-      pointOfNoReturn: false,
-      timeoutMs: 10_000,
     },
     {
       id: 'docker-sources',
@@ -445,7 +430,7 @@ export function buildBootstrapPlan(input: PlanBuildInput): BootstrapPlan {
         rationale: 'Sencho manages the Compose project folders in this directory.',
         effect: 'directory-create',
         privilege: composeDir.parentWritableByUser ? 'user' : 'sudo',
-        command: installDirCommand(composeDir.input, '0755', owner, group, !composeDir.parentWritableByUser && !root),
+        command: createDirectoryCommand(composeDir.input, { mode: '0755', owner, group }, { sudo: !composeDir.parentWritableByUser && !root, allowExisting: false }),
         target: { path: composeDir.input, mode: '0755', owner, group, preserveExisting: false },
         disruptive: false,
         reversible: 'yes',
@@ -474,7 +459,7 @@ export function buildBootstrapPlan(input: PlanBuildInput): BootstrapPlan {
         rationale: 'The agent keeps its compose file and hub CA in a dedicated directory.',
         effect: 'directory-create',
         privilege: agentDir.parentWritableByUser ? 'user' : 'sudo',
-        command: installDirCommand(agentDir.input, '0700', owner, group, !agentDir.parentWritableByUser && !root),
+        command: createDirectoryCommand(agentDir.input, { mode: '0700', owner, group }, { sudo: !agentDir.parentWritableByUser && !root, allowExisting: false }),
         target: { path: agentDir.input, mode: '0700', owner, group, preserveExisting: false },
         disruptive: false,
         reversible: 'yes',
