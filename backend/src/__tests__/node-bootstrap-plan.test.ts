@@ -113,7 +113,9 @@ describe('bootstrap plan builder', () => {
       'docker_repository', 'docker_packages', 'docker_service',
     ]));
     const install = allSteps(bare).find((entry) => entry.id === 'install-docker-packages');
-    expect(install?.command).toContain('apt-get install -y --no-install-recommends');
+    expect(install?.command).toContain('apt-get -o DPkg::Lock::Timeout=300 install -y --no-install-recommends');
+    // apt waits for a lock held by the host's own apt jobs instead of failing at once.
+    expect(allSteps(bare).find((entry) => entry.id === 'apt-update')?.command).toBe('sudo -n apt-get -o DPkg::Lock::Timeout=300 update');
     expect(install?.command).toContain('docker-ce');
     expect(bare.notices.join(' ')).toContain('resolved from the official repository when the plan runs');
     const service = allSteps(bare).find((entry) => entry.id === 'enable-start-docker');

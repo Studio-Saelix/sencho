@@ -1,7 +1,7 @@
 import { Router, type Request, type Response } from 'express';
 import { z } from 'zod';
 import { requireAdmin, requireUserSession } from '../middleware/tierGates';
-import { bootstrapLimiter } from '../middleware/rateLimiters';
+import { bootstrapLimiter, bootstrapOperationLimiter } from '../middleware/rateLimiters';
 import { auditActorUsername } from '../helpers/auditActor';
 import { resolvePrimaryUrl } from '../helpers/primaryUrl';
 import { sanitizeForLog } from '../utils/safeLog';
@@ -178,7 +178,7 @@ nodeBootstrapRouter.post('/preflight', bootstrapLimiter, async (req: Request, re
     const { operationId, ...input } = parsed.data;
     const target = validateTarget({ host: input.host, port: input.port, username: input.username, targetName: input.targetName });
     operations.assertTargetIdle(target.host, target.port);
-    const ownership = operationId ? operations.retryOwnership(operationId) : null;
+    const ownership = operationId ? operations.retryOwnership(operationId, target.host, target.port) : null;
     const audit = auditContext(req);
     const result = await NodeBootstrapService.getInstance().preflight(input, {
       hubUrl: resolvePrimaryUrl(req),
@@ -201,7 +201,7 @@ nodeBootstrapRouter.post('/preflight', bootstrapLimiter, async (req: Request, re
  * operation is recorded; the run continues on the hub whether or not the
  * browser stays open.
  */
-nodeBootstrapRouter.post('/operations', bootstrapLimiter, (req: Request, res: Response) => {
+nodeBootstrapRouter.post('/operations', bootstrapOperationLimiter, (req: Request, res: Response) => {
   if (!guard(req, res)) return;
   const parsed = executeSchema.safeParse(req.body);
   if (!parsed.success) {
@@ -249,7 +249,7 @@ nodeBootstrapRouter.get('/operations/:id', (req: Request, res: Response) => {
   }
 });
 
-nodeBootstrapRouter.post('/operations/:id/retry', bootstrapLimiter, (req: Request, res: Response) => {
+nodeBootstrapRouter.post('/operations/:id/retry', bootstrapOperationLimiter, (req: Request, res: Response) => {
   if (!guard(req, res)) return;
   const id = operationId(req, res);
   if (!id) return;
@@ -269,7 +269,7 @@ nodeBootstrapRouter.post('/operations/:id/retry', bootstrapLimiter, (req: Reques
   }
 });
 
-nodeBootstrapRouter.post('/operations/:id/cancel', (req: Request, res: Response) => {
+nodeBootstrapRouter.post('/operations/:id/cancel', bootstrapOperationLimiter, (req: Request, res: Response) => {
   if (!guard(req, res)) return;
   const id = operationId(req, res);
   if (!id) return;
@@ -280,7 +280,7 @@ nodeBootstrapRouter.post('/operations/:id/cancel', (req: Request, res: Response)
   }
 });
 
-nodeBootstrapRouter.post('/operations/:id/release', (req: Request, res: Response) => {
+nodeBootstrapRouter.post('/operations/:id/release', bootstrapOperationLimiter, (req: Request, res: Response) => {
   if (!guard(req, res)) return;
   const id = operationId(req, res);
   if (!id) return;

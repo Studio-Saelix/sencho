@@ -1,5 +1,7 @@
+import crypto from 'crypto';
 import path from 'path';
 import { isDockerReleaseKeyFile } from './openpgpKey';
+import { APT_POLICY_COMMAND, OFFICIAL_DOCKER_URI, parseAptPolicy } from './probes';
 import {
   BOOTSTRAP_MARKER_FILENAME,
   PILOT_PROJECT_NAME,
@@ -26,9 +28,10 @@ import type { BootstrapPlan, BootstrapPlanStep, BootstrapStageId } from './types
  * A command step runs the plan's exact command. A file step writes the plan's
  * exact content through the fixed write script; the only substitution is the
  * enrollment token, which replaces its placeholder in the Pilot compose file.
- * Every step is followed by a read-only check, and the outcome is one of:
- * done, skipped (already in place), or a `StepFailure` that says whether the
- * host state is known.
+ * Steps with a checkable effect (a key, a directory, a file) are followed by a
+ * read-only check, the package install is preceded by a check of where each
+ * package would come from, and the outcome is one of: done, skipped (already
+ * in place), or a `StepFailure` that says whether the host state is known.
  */
 
 export const COMPOSE_STEP_ID = 'agent-compose-file';
@@ -74,8 +77,9 @@ export interface StepContext {
 
 /**
  * The last whole lines of `text` within the limit. A cut tail starts at a
- * line boundary, so it never begins with a fragment of a secret the scrub
- * could not recognize; every secret this run holds is a single line.
+ * line boundary, so it never begins with a fragment of a one-line secret (the
+ * enrollment token, the passphrase) that the scrub could not recognize. The
+ * private key spans lines but is never sent to the host.
  */
 function lastLines(text: string, cut: boolean): string {
   let tail = text.trim();
@@ -208,8 +212,8 @@ function markerMatches(bytes: Buffer, plan: BootstrapPlan): boolean {
  */
 function reconcileExisting(step: BootstrapPlanStep, existing: Buffer, desired: string, plan: BootstrapPlan): 'keep' | 'replace' {
   const text = existing.toString('utf8');
-  // The compose file is always rewritten: the token it carries is spent or
-  // expired, so keeping it would start an agent that cannot enroll.
+  // This workflow's own compose file is always rewritten, never kept: the
+  // token it carries is spent or expired. Any other compose file is a conflict.
   if (step.id === COMPOSE_STEP_ID) {
     if (maskComposeToken(text) === step.file?.content) return 'replace';
   } else {
@@ -246,10 +250,14 @@ async function runFileStep(step: BootstrapPlanStep, ctx: StepContext, plan: Boot
       noClobber = false;
     }
   }
-  const command = writeFileCommand(file.path, { mode: file.mode, owner: target.owner, group: target.group }, { sudo, noClobber });
+  const sha256 = crypto.createHash('sha256').update(desired).digest('hex');
+  const command = writeFileCommand(file.path, { mode: file.mode, owner: target.owner, group: target.group, sha256 }, { sudo, noClobber });
   const result = await ctx.session.run(command, { timeoutMs: step.timeoutMs, stdin: desired });
   const failure = transportFailure(result, step.title, step.timeoutMs, ctx.secrets);
   if (failure) throw failure;
+  if (result.exitCode === WRITE_EXIT.incomplete) {
+    throw new StepFailure('unknown', 'WRITE_INCOMPLETE', `${file.path} did not arrive in full, so it was not put in place. The connection may have dropped.`, commandDetail(result, ctx.secrets));
+  }
   if (result.exitCode === WRITE_EXIT.exists || result.exitCode === WRITE_EXIT.notRegular) {
     throw new StepFailure('recovery', 'FILE_CONFLICT', `${file.path} appeared on the host after the plan was approved. It was left as it is.`, commandDetail(result, ctx.secrets));
   }
@@ -275,10 +283,51 @@ async function verifyDockerKey(ctx: StepContext, step: BootstrapPlanStep): Promi
   }
 }
 
-async function runCommandStep(step: BootstrapPlanStep, ctx: StepContext): Promise<StepOutcome> {
+/** The package names, and pinned versions, an `apt-get install` command names. */
+function installSpecs(command: string): Array<{ name: string; version: string | null }> {
+  const words = command.split(/\s+/);
+  const start = words.indexOf('--no-install-recommends');
+  return words.slice(start + 1).filter(Boolean).map((word) => {
+    const [name, version] = word.split('=');
+    return { name, version: version ?? null };
+  });
+}
+
+/** The Ubuntu suite the plan's own Docker source names, when it writes one. */
+function planCodename(plan: BootstrapPlan): string {
+  const source = plan.stages.flatMap((stage) => stage.steps).find((step) => step.id === 'docker-sources')?.file?.content ?? '';
+  return /\/linux\/ubuntu (\S+) stable/.exec(source)?.[1] ?? '';
+}
+
+/**
+ * Before installing, ask apt where each package would come from: every one
+ * must have a candidate served by the official Docker repository (for the
+ * host release, when the plan wrote the source), and a pinned version must be
+ * the candidate. Nothing is installed when one is not.
+ */
+async function verifyDockerCandidates(ctx: StepContext, step: BootstrapPlanStep, plan: BootstrapPlan): Promise<void> {
+  const result = await runChecked(ctx, APT_POLICY_COMMAND, 'check the Docker package sources');
+  if (result.exitCode !== 0 || result.truncated) {
+    throw new StepFailure('failed', 'CANDIDATE_NOT_VERIFIED', 'apt could not report where the Docker packages come from, so nothing was installed.', commandDetail(result, ctx.secrets));
+  }
+  const packages = parseAptPolicy(result.stdout, planCodename(plan));
+  const problems: string[] = [];
+  for (const spec of installSpecs(step.command ?? '')) {
+    const pkg = packages.find((entry) => entry.name === spec.name);
+    const official = pkg?.candidateSources?.some((source) => source.uri === OFFICIAL_DOCKER_URI && source.official !== false) ?? false;
+    if (!pkg?.candidateVersion || !official) problems.push(`${spec.name} has no candidate from the official Docker repository`);
+    else if (spec.version !== null && pkg.candidateVersion !== spec.version) problems.push(`${spec.name} would install ${pkg.candidateVersion}, not ${spec.version}`);
+  }
+  if (problems.length > 0) {
+    throw new StepFailure('failed', 'CANDIDATE_NOT_VERIFIED', `Nothing was installed: ${problems.join('; ')}.`);
+  }
+}
+
+async function runCommandStep(step: BootstrapPlanStep, ctx: StepContext, plan: BootstrapPlan): Promise<StepOutcome> {
   if (!step.command) {
     throw new StepFailure('failed', 'PLAN_INVALID', `The plan step "${step.title}" has no command. Nothing was run.`);
   }
+  if (step.effect === 'package-install') await verifyDockerCandidates(ctx, step, plan);
   const result = await ctx.session.run(step.command, { timeoutMs: step.timeoutMs });
   const failure = transportFailure(result, step.title, step.timeoutMs, ctx.secrets);
   if (failure) throw failure;
@@ -295,7 +344,7 @@ async function runCommandStep(step: BootstrapPlanStep, ctx: StepContext): Promis
 }
 
 export async function runPlanStep(step: BootstrapPlanStep, ctx: StepContext, plan: BootstrapPlan): Promise<StepOutcome> {
-  return step.file ? runFileStep(step, ctx, plan) : runCommandStep(step, ctx);
+  return step.file ? runFileStep(step, ctx, plan) : runCommandStep(step, ctx, plan);
 }
 
 /** The start step's privilege decides how Docker is reached after installation. */

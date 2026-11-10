@@ -593,10 +593,13 @@ export interface NodeBootstrapOperation {
     stage: string | null;
     step: string | null;
     node_id: number | null;
-    changes_made: number;
-    agent_started: number;
-    active: number;
-    cancel_requested: number;
+    /** 1 once a step may have changed the host; never reset. */
+    changes_made: 0 | 1;
+    /** 1 once the start step began, so the Pilot container may exist. */
+    agent_started: 0 | 1;
+    /** 1 while the operation holds its target (the per-target lock). */
+    active: 0 | 1;
+    cancel_requested: 0 | 1;
     error_code: string | null;
     error_message: string | null;
     enrollment_expires_at: number | null;
@@ -619,11 +622,41 @@ export interface NodeBootstrapEvent {
     detail: string | null;
 }
 
-/** Fields an operation update may change; the identity and approval columns are fixed at insert. */
-export type NodeBootstrapOperationUpdate = Partial<Pick<NodeBootstrapOperation,
-    'state' | 'stage' | 'step' | 'node_id' | 'changes_made' | 'agent_started' | 'active' | 'cancel_requested'
-    | 'error_code' | 'error_message' | 'enrollment_expires_at' | 'finished_at' | 'attempt' | 'plan_json'
+/**
+ * Progress a running operation records about itself. Lifecycle, lock and
+ * approval columns are not here: they change only through
+ * `transitionNodeBootstrapOperation`, a compare-and-set on the state.
+ */
+export type NodeBootstrapOperationProgress = Partial<Pick<NodeBootstrapOperation,
+    'stage' | 'step' | 'node_id' | 'changes_made' | 'agent_started' | 'cancel_requested' | 'enrollment_expires_at'>>;
+
+/** What a state transition may also write. The identity columns (target, host, key, directories) never change after insert. */
+export type NodeBootstrapOperationTransition = NodeBootstrapOperationProgress & Partial<Pick<NodeBootstrapOperation,
+    'state' | 'active' | 'error_code' | 'error_message' | 'finished_at' | 'attempt' | 'plan_json'
     | 'plan_digest' | 'approved_by' | 'approved_at'>>;
+
+const BOOTSTRAP_OPERATION_COLUMNS: ReadonlyArray<keyof NodeBootstrapOperation> = [
+    'id', 'target_key', 'host', 'port', 'username', 'address', 'target_name', 'host_key_fingerprint',
+    'compose_dir', 'agent_dir', 'plan_json', 'plan_digest', 'approved_by', 'approved_at', 'attempt', 'state',
+    'stage', 'step', 'node_id', 'changes_made', 'agent_started', 'active', 'cancel_requested', 'error_code',
+    'error_message', 'enrollment_expires_at', 'created_at', 'updated_at', 'finished_at',
+];
+const BOOTSTRAP_OPERATION_COLUMN_SET: ReadonlySet<string> = new Set(BOOTSTRAP_OPERATION_COLUMNS);
+
+/** `column = ?` assignments for the keys of `updates`, each checked against the fixed column list. */
+function bootstrapAssignments(updates: NodeBootstrapOperationTransition): { assignments: string[]; values: Array<string | number | null> } {
+    const assignments: string[] = [];
+    const values: Array<string | number | null> = [];
+    for (const [key, value] of Object.entries(updates)) {
+        if (value === undefined) continue;
+        if (!BOOTSTRAP_OPERATION_COLUMN_SET.has(key) || key === 'id') {
+            throw new Error(`Unknown bootstrap operation column: ${key}`);
+        }
+        assignments.push(`${key} = ?`);
+        values.push(value as string | number | null);
+    }
+    return { assignments, values };
+}
 
 /** Trust-on-first-use pin for a bootstrap SSH host key, keyed by host and port. */
 export interface NodeBootstrapTrust {
@@ -6715,7 +6748,7 @@ stmt.run('gitops_schema_version', '1');
      * target or host key; the partial unique indexes make the check atomic.
      */
     public insertNodeBootstrapOperation(op: NodeBootstrapOperation): void {
-        const columns = Object.keys(op) as Array<keyof NodeBootstrapOperation>;
+        const columns = BOOTSTRAP_OPERATION_COLUMNS;
         const insert = this.db.prepare(
             `INSERT INTO node_bootstrap_operations (${columns.join(', ')}) VALUES (${columns.map(() => '?').join(', ')})`
         );
@@ -6765,13 +6798,12 @@ stmt.run('gitops_schema_version', '1');
         ).all(...states) as NodeBootstrapOperation[];
     }
 
-    public updateNodeBootstrapOperation(id: string, updates: NodeBootstrapOperationUpdate, now: number): void {
-        const entries = Object.entries(updates).filter(([, value]) => value !== undefined);
-        const assignments = entries.map(([key]) => `${key} = ?`);
+    public updateNodeBootstrapOperation(id: string, updates: NodeBootstrapOperationProgress, now: number): void {
+        const { assignments, values } = bootstrapAssignments(updates);
         assignments.push('updated_at = ?');
         this.db.prepare(
             `UPDATE node_bootstrap_operations SET ${assignments.join(', ')} WHERE id = ?`
-        ).run(...entries.map(([, value]) => value as string | number | null), now, id);
+        ).run(...values, now, id);
     }
 
     /**
@@ -6781,15 +6813,14 @@ stmt.run('gitops_schema_version', '1');
     public transitionNodeBootstrapOperation(
         id: string,
         from: readonly NodeBootstrapOperationState[],
-        updates: NodeBootstrapOperationUpdate,
+        updates: NodeBootstrapOperationTransition,
         now: number,
     ): boolean {
-        const entries = Object.entries(updates).filter(([, value]) => value !== undefined);
-        const assignments = entries.map(([key]) => `${key} = ?`);
+        const { assignments, values } = bootstrapAssignments(updates);
         assignments.push('updated_at = ?');
         const result = this.db.prepare(
             `UPDATE node_bootstrap_operations SET ${assignments.join(', ')} WHERE id = ? AND state IN (${from.map(() => '?').join(', ')})`
-        ).run(...entries.map(([, value]) => value as string | number | null), now, id, ...from);
+        ).run(...values, now, id, ...from);
         return result.changes === 1;
     }
 

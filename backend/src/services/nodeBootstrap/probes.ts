@@ -44,6 +44,8 @@ const COMPOSE_FILE_NAMES = `\\( -name 'compose.yaml' -o -name 'compose.yml' -o -
  * context; an explicit default context plus DOCKER_HOST makes the inspected
  * daemon and the planned start command the same local daemon.
  */
+/** The candidate query for every Docker package, shared by the preflight and the run's pre-install check. */
+export const APT_POLICY_COMMAND = 'apt-cache policy docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin 2>/dev/null';
 export const DOCKER_LOCAL_ENDPOINT = 'unix:///var/run/docker.sock';
 export const DOCKER_LOCAL_UNSET_ARGS = '-u DOCKER_HOST -u DOCKER_CONTEXT -u DOCKER_CONFIG';
 export const DOCKER_LOCAL_ASSIGNMENTS = `DOCKER_CONTEXT=default DOCKER_HOST=${DOCKER_LOCAL_ENDPOINT}`;
@@ -344,7 +346,7 @@ export function buildProbeCatalog(input: ProbeCatalogInput): ProbeDefinition[] {
     { id: 'docker_repo', command: `sh -c ${shellQuote(DOCKER_REPO_SCRIPT)}` },
     {
       id: 'apt_policy',
-      command: `apt-cache policy docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin 2>/dev/null`,
+      command: APT_POLICY_COMMAND,
     },
     { id: 'containers', command: `${DOCKER_LOCAL_COMMAND} ${DOCKER_PS_ARGS}` },
     { id: 'containers_sudo', command: `${DOCKER_LOCAL_SUDO_COMMAND} ${DOCKER_PS_ARGS}` },
@@ -533,7 +535,7 @@ export function parseSourceLocations(text: string): RepositoryObservation['sourc
   return main === DEFAULT_SOURCE_LIST && parts === DEFAULT_SOURCE_PARTS ? 'default' : 'custom';
 }
 
-const OFFICIAL_DOCKER_URI = 'https://download.docker.com/linux/ubuntu';
+export const OFFICIAL_DOCKER_URI = 'https://download.docker.com/linux/ubuntu';
 const DOCKER_HOST = 'download.docker.com';
 
 /** apt options that switch off or weaken signature checking for a source. */

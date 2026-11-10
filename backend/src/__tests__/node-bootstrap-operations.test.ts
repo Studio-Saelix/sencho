@@ -8,11 +8,27 @@ import {
   type ExecuteRequest,
 } from '../services/nodeBootstrap/NodeBootstrapOperationService';
 import { buildBootstrapPlan } from '../services/nodeBootstrap/planBuilder';
+import { SshTransportError } from '../services/nodeBootstrap/sshProbeClient';
+import { NodeBootstrapService as RealPreflightService } from '../services/nodeBootstrap/NodeBootstrapService';
 import type { BootstrapExecTransport, ExecOptions, ExecResult, ExecSession } from '../services/nodeBootstrap/sshExecClient';
 import type { BootstrapFacts, BootstrapPlan, BootstrapPreflightResult } from '../services/nodeBootstrap/types';
 import type { NodeBootstrapService } from '../services/nodeBootstrap/NodeBootstrapService';
 import { makeFacts } from './__helpers__/bootstrapFacts';
+import crypto from 'crypto';
 import { DOCKER_KEY_ASC } from './__helpers__/dockerRepoFixtures';
+import { APT_POLICY_COMMAND } from '../services/nodeBootstrap/probes';
+
+/** apt-cache policy output naming the official repository as each package's source. */
+function officialPolicy(codename = 'noble', origin = 'https://download.docker.com/linux/ubuntu'): string {
+  return ['docker-ce', 'docker-ce-cli', 'containerd.io', 'docker-buildx-plugin', 'docker-compose-plugin'].map((name) => [
+    `${name}:`,
+    '  Installed: (none)',
+    '  Candidate: 1.0.0-1',
+    '  Version table:',
+    '     1.0.0-1 500',
+    `        500 ${origin} ${codename}/stable amd64 Packages`,
+  ].join('\n')).join('\n');
+}
 
 /**
  * The operation lifecycle against a scripted host: approval, the recheck that
@@ -42,9 +58,11 @@ function freshFacts(overrides: Parameters<typeof makeFacts>[0] = {}): BootstrapF
   });
 }
 
-function planFrom(facts: BootstrapFacts, now = NOW, targetName = 'media-server'): BootstrapPlan {
-  return buildBootstrapPlan({ facts, targetName, hubUrl: HUB_URL, caPem: null, now });
+function planFrom(facts: BootstrapFacts, now = NOW, targetName = 'media-server', caPem: string | null = null): BootstrapPlan {
+  return buildBootstrapPlan({ facts, targetName, hubUrl: HUB_URL, caPem, now });
 }
+
+const HUB_CA = '-----BEGIN CERTIFICATE-----\nMIIBhub-ca-for-tests\n-----END CERTIFICATE-----\n';
 
 function resultFor(plan: BootstrapPlan | null, facts: BootstrapFacts, blocked = false): BootstrapPreflightResult {
   return {
@@ -76,6 +94,10 @@ class FakeHost {
   public override: ((command: string, options: ExecOptions) => ExecResult | Promise<ExecResult> | undefined) | null = null;
   public agentRunning = true;
   public opened = 0;
+  public openedWith: Array<{ session: { host: string; address: string; port: number; username: string }; expectedFingerprint: string }> = [];
+  public policy = officialPolicy();
+  /** When set, opening the session waits on this (a slow connect), honouring the abort signal. */
+  public openGate: Promise<void> | null = null;
 
   public constructor() {
     // Directories every supported Ubuntu host already has, plus the existing stacks root the facts describe.
@@ -85,9 +107,20 @@ class FakeHost {
 
   public transport(): BootstrapExecTransport {
     return {
-      open: async () => {
+      open: async (session, options) => {
         this.opened += 1;
-        const session: ExecSession = {
+        this.openedWith.push({
+          session: { host: session.host, address: session.address, port: session.port, username: session.username },
+          expectedFingerprint: options.expectedFingerprint,
+        });
+        if (this.openGate) {
+          const gate = this.openGate;
+          await new Promise<void>((resolve, reject) => {
+            options.signal?.addEventListener('abort', () => reject(new SshTransportError('SSH_UNREACHABLE', 'The request was cancelled.')), { once: true });
+            void gate.then(resolve);
+          });
+        }
+        const exec: ExecSession = {
           closed: false,
           run: async (command, options) => {
             this.commands.push({ command, stdin: options.stdin });
@@ -97,7 +130,7 @@ class FakeHost {
           },
           close: () => undefined,
         };
-        return session;
+        return exec;
       },
     };
   }
@@ -105,12 +138,13 @@ class FakeHost {
   private answer(command: string, options: ExecOptions): ExecResult {
     const ok = (stdout = ''): ExecResult => ({ exitCode: 0, stdout, stderr: '', truncated: false, timedOut: false, error: null });
     const exit = (code: number, stderr = ''): ExecResult => ({ exitCode: code, stdout: '', stderr, truncated: false, timedOut: false, error: null });
-    const write = /sencho-write '([^']*)' '([^']*)' '([^']*)' '([^']*)' '([^']*)' '([01])'$/.exec(command);
+    const write = /sencho-write '([^']*)' '([^']*)' '([^']*)' '([^']*)' '([^']*)' '([01])' '([0-9a-f]{64})'$/.exec(command);
     if (write) {
-      const [, dir, name, mode, owner, group, noClobber] = write;
+      const [, dir, name, mode, owner, group, noClobber, sha256] = write;
       const target = `${dir}/${name}`;
       if (!this.dirs.has(dir)) return exit(20, `not a directory: ${dir}`);
       if (noClobber === '1' && this.files.has(target)) return exit(17, `already exists: ${target}`);
+      if (crypto.createHash('sha256').update(options.stdin ?? '').digest('hex') !== sha256) return exit(22, `content incomplete: ${target}`);
       this.files.set(target, { content: options.stdin ?? '', mode, owner, group });
       return ok();
     }
@@ -136,6 +170,7 @@ class FakeHost {
       this.files.set('/etc/apt/keyrings/docker.asc', { content: DOCKER_KEY_ASC, mode: '0644', owner: 'root', group: 'root' });
       return ok();
     }
+    if (command === APT_POLICY_COMMAND) return ok(this.policy);
     if (command.includes("docker version --format '{{.Server.Version}}'")) return ok('27.3.1\n');
     if (command.includes('docker compose version --short')) return ok('2.29.7\n');
     if (command.includes('systemctl is-active docker; systemctl is-enabled docker')) return ok('active\nenabled\n');
@@ -186,11 +221,12 @@ interface Harness {
   facts: { current: BootstrapFacts };
   minted: number[];
   name: string;
+  caPem: string | null;
 }
 
 let hostCounter = 0;
 
-function harness(options: { facts?: BootstrapFacts; enrollWaitMs?: number; connectOnStart?: boolean } = {}): Harness {
+function harness(options: { facts?: BootstrapFacts; enrollWaitMs?: number; connectOnStart?: boolean; caPem?: string | null; tokenTtlMs?: number } = {}): Harness {
   hostCounter += 1;
   const hostname = `server-${hostCounter}.example.com`;
   const base = options.facts ?? freshFacts();
@@ -206,7 +242,7 @@ function harness(options: { facts?: BootstrapFacts; enrollWaitMs?: number; conne
   const minted: number[] = [];
   const name = `node-${hostCounter}`;
   const preflight = vi.fn(async (_input: unknown, ctx: { planNow?: number; ownership?: unknown }) => {
-    const plan = planFrom(facts.current, ctx.planNow ?? NOW, name);
+    const plan = planFrom(facts.current, ctx.planNow ?? NOW, name, options.caPem ?? null);
     return resultFor(plan, facts.current);
   });
   const service = new NodeBootstrapOperationService({
@@ -217,7 +253,7 @@ function harness(options: { facts?: BootstrapFacts; enrollWaitMs?: number; conne
     now: () => Date.now(),
     mintToken: (nodeId) => {
       minted.push(nodeId);
-      return { token: `eyJhbGciOiJIUzI1NiJ9.enroll-${nodeId}-${minted.length}.signature-material`, expiresAt: Date.now() + 15 * 60_000 };
+      return { token: `eyJhbGciOiJIUzI1NiJ9.enroll-${nodeId}-${minted.length}.signature-material`, expiresAt: Date.now() + (options.tokenTtlMs ?? 15 * 60_000) };
     },
     enrollWaitMs: options.enrollWaitMs ?? 2_000,
   });
@@ -230,11 +266,11 @@ function harness(options: { facts?: BootstrapFacts; enrollWaitMs?: number; conne
       return undefined;
     };
   }
-  return { service, host, tunnels, preflight, facts, minted, name };
+  return { service, host, tunnels, preflight, facts, minted, name, caPem: options.caPem ?? null };
 }
 
 function approve(h: Harness, operationId: string | null = null, actor = TEST_USERNAME): { request: ExecuteRequest; plan: BootstrapPlan } {
-  const plan = planFrom(h.facts.current, Date.now(), h.name);
+  const plan = planFrom(h.facts.current, Date.now(), h.name, h.caPem);
   h.service.rememberPlan(resultFor(plan, h.facts.current), actor, operationId);
   const request: ExecuteRequest = {
     host: plan.target.host,
@@ -307,6 +343,17 @@ describe('bootstrap operations: a clean run', () => {
     expect(op.state).toBe('enrolled');
     expect(op.active).toBe(false);
     expect(op.nodeId).not.toBeNull();
+
+    // The session dials the approved address and accepts only the approved host key.
+    expect(h.host.openedWith).toEqual([{
+      session: { host: plan.target.host, address: plan.target.address, port: plan.target.port, username: plan.target.username },
+      expectedFingerprint: plan.hostKeyFingerprint,
+    }]);
+    // Before installing, apt was asked where every package comes from.
+    const policyAt = h.host.commands.findIndex((entry) => entry.command === APT_POLICY_COMMAND);
+    const installAt = h.host.commands.findIndex((entry) => /apt-get (-o \S+ )?install /.test(entry.command));
+    expect(policyAt).toBeGreaterThan(-1);
+    expect(policyAt).toBeLessThan(installAt);
 
     // The service check runs with the service step's privilege: without D-Bus only root reaches systemd.
     expect(h.host.commands.map((entry) => entry.command)).toContain("sudo -n sh -c 'systemctl is-active docker; systemctl is-enabled docker'");
@@ -442,7 +489,7 @@ describe('bootstrap operations: stopping honestly', () => {
   it('records a failed package step as partial, keeps the target and mints nothing', async () => {
     const h = harness();
     const { request } = approve(h);
-    h.host.override = (command) => (command.includes('apt-get install')
+    h.host.override = (command) => (/apt-get (-o \S+ )?install /.test(command)
       ? { exitCode: 100, stdout: 'Reading package lists...', stderr: 'E: Could not get lock /var/lib/dpkg/lock-frontend', truncated: false, timedOut: false, error: null }
       : undefined);
     const op = h.service.start(request, context());
@@ -462,7 +509,7 @@ describe('bootstrap operations: stopping honestly', () => {
   it('reports a dropped connection as an unknown outcome', async () => {
     const h = harness();
     const { request } = approve(h);
-    h.host.override = (command) => (command.includes('apt-get install')
+    h.host.override = (command) => (/apt-get (-o \S+ )?install /.test(command)
       ? { exitCode: null, stdout: '', stderr: '', truncated: false, timedOut: false, error: 'CONNECTION_LOST' }
       : undefined);
     const op = h.service.start(request, context());
@@ -544,11 +591,11 @@ describe('bootstrap operations: stopping honestly', () => {
     const { request } = approve(h);
     let release: () => void = () => undefined;
     const gate = new Promise<void>((resolve) => { release = resolve; });
-    h.host.override = (command) => (command.includes('apt-get update')
+    h.host.override = (command) => (/apt-get (-o \S+ )?update/.test(command)
       ? gate.then(() => ({ exitCode: 0, stdout: '', stderr: '', truncated: false, timedOut: false, error: null }))
       : undefined);
     const op = h.service.start(request, context());
-    await vi.waitFor(() => expect(h.host.commands.some((entry) => entry.command.includes('apt-get update'))).toBe(true));
+    await vi.waitFor(() => expect(h.host.commands.some((entry) => /apt-get (-o \S+ )?update/.test(entry.command))).toBe(true), { timeout: 10_000 });
     const cancelling = h.service.cancel(op.id, AUDIT);
     expect(cancelling.cancelRequested).toBe(true);
     release();
@@ -557,7 +604,7 @@ describe('bootstrap operations: stopping honestly', () => {
     expect(detail.state).toBe('cancelled');
     expect(detail.error?.message).toMatch(/nothing was undone/);
     expect(detail.active).toBe(true);
-    expect(h.host.commands.some((entry) => entry.command.includes('apt-get install'))).toBe(false);
+    expect(h.host.commands.some((entry) => /apt-get (-o \S+ )?install /.test(entry.command))).toBe(false);
     h.service.release(op.id, AUDIT);
   });
 
@@ -567,11 +614,11 @@ describe('bootstrap operations: stopping honestly', () => {
     const base = {
       target_key: 'restart.example.com:22', host: 'restart.example.com', port: 22, username: 'ubuntu', address: '192.168.1.60',
       target_name: 'restart', compose_dir: '/opt/docker/sencho', agent_dir: '/opt/sencho-agent', plan_json: '{}', plan_digest: 'd',
-      approved_by: TEST_USERNAME, approved_at: now, attempt: 1, stage: null, step: null, node_id: null, agent_started: 0, active: 1,
-      cancel_requested: 0, error_code: null, error_message: null, enrollment_expires_at: null, created_at: now, updated_at: now, finished_at: null,
+      approved_by: TEST_USERNAME, approved_at: now, attempt: 1, stage: null, step: null, node_id: null, agent_started: 0 as const, active: 1 as const,
+      cancel_requested: 0 as const, error_code: null, error_message: null, enrollment_expires_at: null, created_at: now, updated_at: now, finished_at: null,
     };
-    db.insertNodeBootstrapOperation({ ...base, id: '00000000-0000-4000-8000-000000000001', state: 'running', changes_made: 1, host_key_fingerprint: 'SHA256:restart-a' });
-    db.insertNodeBootstrapOperation({ ...base, id: '00000000-0000-4000-8000-000000000002', state: 'rechecking', changes_made: 0, target_key: 'restart-b.example.com:22', host: 'restart-b.example.com', host_key_fingerprint: 'SHA256:restart-b' });
+    db.insertNodeBootstrapOperation({ ...base, id: '00000000-0000-4000-8000-000000000001', state: 'running', changes_made: 1 as const, host_key_fingerprint: 'SHA256:restart-a' });
+    db.insertNodeBootstrapOperation({ ...base, id: '00000000-0000-4000-8000-000000000002', state: 'rechecking', changes_made: 0 as const, target_key: 'restart-b.example.com:22', host: 'restart-b.example.com', host_key_fingerprint: 'SHA256:restart-b' });
     h.service.recoverOnStartup();
     expect(db.getNodeBootstrapOperation('00000000-0000-4000-8000-000000000001')).toMatchObject({ state: 'outcome_unknown', active: 1, error_code: 'HUB_RESTARTED' });
     expect(db.getNodeBootstrapOperation('00000000-0000-4000-8000-000000000002')).toMatchObject({ state: 'blocked', active: 0, error_code: 'HUB_RESTARTED' });
@@ -612,7 +659,7 @@ describe('bootstrap operations: enrollment and retry', () => {
         markerProject: 'sencho-agent', markerComposeDir: '/opt/docker/sencho', markerAgentDir: '/opt/sencho-agent',
       },
     });
-    expect(h.service.retryOwnership(op.id)).toEqual({ nodeId, agentStarted: true });
+    expect(h.service.retryOwnership(op.id, h.facts.current.target.host, 22)).toEqual({ nodeId, agentStarted: true });
     const second = approve(h, op.id);
     expect(() => h.service.start(second.request, context())).toThrow(/different bootstrap/);
     const nodesBefore = db.getNodes().length;
@@ -635,7 +682,7 @@ describe('bootstrap operations: enrollment and retry', () => {
     const h = harness();
     const { request } = approve(h);
     const op = h.service.start(request, context());
-    expect(() => h.service.retryOwnership(op.id)).toThrow(/cannot be retried/);
+    expect(() => h.service.retryOwnership(op.id, request.host, 22)).toThrow(/cannot be retried/);
     await h.service.settled();
     expect(h.service.get(op.id).state).toBe('enrolled');
     const again = approve(h, op.id);
@@ -670,5 +717,327 @@ describe('stablePlanDigest', () => {
     expect(b.evidenceDigest).not.toBe(a.evidenceDigest);
     expect(stablePlanDigest(b)).toBe(stablePlanDigest(a));
     expect(stablePlanDigest(planFrom(facts, NOW + 1))).not.toBe(stablePlanDigest(a));
+  });
+});
+
+describe('bootstrap operations: failure paths found in review', () => {
+  it('records a first step that fails cleanly as failed and releases the target', async () => {
+    const h = harness({ facts: makeFacts() });
+    const { request } = approve(h);
+    h.host.override = (command) => (command.includes('install -d -m 0700')
+      ? { exitCode: 1, stdout: '', stderr: 'install: cannot create directory', truncated: false, timedOut: false, error: null }
+      : undefined);
+    const op = h.service.start(request, context());
+    await h.service.settled();
+    expect(h.service.get(op.id)).toMatchObject({ state: 'failed', changesMade: false, active: false, error: { code: 'STEP_FAILED' } });
+  });
+
+  it('installs nothing when a package candidate does not come from the official repository', async () => {
+    const h = harness();
+    h.host.policy = officialPolicy('noble', 'https://mirror.example.com/docker');
+    const { request } = approve(h);
+    const op = h.service.start(request, context());
+    await h.service.settled();
+    const detail = h.service.get(op.id);
+    expect(detail).toMatchObject({ state: 'partial', error: { code: 'CANDIDATE_NOT_VERIFIED' } });
+    expect(detail.error?.message).toMatch(/docker-ce has no candidate from the official Docker repository/);
+    expect(h.host.commands.some((entry) => /apt-get (-o \S+ )?install /.test(entry.command))).toBe(false);
+    h.service.release(op.id, AUDIT);
+  });
+
+  it('reports a file that did not arrive in full as an unknown outcome and never puts it in place', async () => {
+    const h = harness({ facts: makeFacts() });
+    const { request } = approve(h);
+    h.host.override = (command) => (command.includes("'compose.yaml'") && command.includes('sencho-write')
+      ? { exitCode: 22, stdout: '', stderr: 'content incomplete', truncated: false, timedOut: false, error: null }
+      : undefined);
+    const op = h.service.start(request, context());
+    await h.service.settled();
+    expect(h.service.get(op.id)).toMatchObject({ state: 'outcome_unknown', error: { code: 'WRITE_INCOMPLETE' }, active: true });
+    expect(h.host.files.has('/opt/sencho-agent/compose.yaml')).toBe(false);
+    h.service.release(op.id, AUDIT);
+    const nodeId = h.service.get(op.id).nodeId;
+    if (nodeId) db.deleteNode(nodeId);
+  });
+
+  it('writes the hub CA with its planned mode and mounts it in the compose file', async () => {
+    const h = harness({ facts: makeFacts(), caPem: HUB_CA });
+    const { request, plan } = approve(h);
+    expect(plan.stages.flatMap((stage) => stage.steps).some((step) => step.id === 'agent-hub-ca')).toBe(true);
+    const op = h.service.start(request, context());
+    await h.service.settled();
+    expect(h.service.get(op.id).state).toBe('enrolled');
+    expect(h.host.files.get('/opt/sencho-agent/sencho-hub-ca.pem')).toMatchObject({ content: HUB_CA, mode: '0644' });
+    expect(h.host.files.get('/opt/sencho-agent/compose.yaml')?.content).toContain('SENCHO_PILOT_CA_FILE');
+    db.deleteNode(h.service.get(op.id).nodeId as number);
+  });
+
+  it.each([
+    ['the agent container is not running', 'AGENT_NOT_RUNNING', (h: Harness) => { h.host.agentRunning = false; }],
+    ['Compose does not answer', 'COMPOSE_NOT_READY', (h: Harness) => {
+      h.host.override = (command) => (command.includes('docker compose version --short')
+        ? { exitCode: 1, stdout: '', stderr: "docker: 'compose' is not a docker command.", truncated: false, timedOut: false, error: null }
+        : undefined);
+    }],
+    ['a created directory has the wrong mode', 'VERIFY_FAILED', (h: Harness) => {
+      h.host.override = (command) => (command.includes("stat -c '%a %U %G %F' -- '/opt/sencho-agent'")
+        ? { exitCode: 0, stdout: '777 ubuntu ubuntu directory\n', stderr: '', truncated: false, timedOut: false, error: null }
+        : undefined);
+    }],
+  ])('requires recovery when %s after its step', async (_label, code, arrange) => {
+    const h = harness({ connectOnStart: false, enrollWaitMs: 20 });
+    arrange(h);
+    const { request } = approve(h);
+    const op = h.service.start(request, context());
+    await h.service.settled();
+    expect(h.service.get(op.id)).toMatchObject({ state: 'recovery_required', error: { code }, active: true });
+    h.service.release(op.id, AUDIT);
+    const nodeId = h.service.get(op.id).nodeId;
+    if (nodeId) db.deleteNode(nodeId);
+  });
+
+  it('cancels a run that is still connecting as cancelled, not as a connection failure', async () => {
+    const h = harness();
+    let open: () => void = () => undefined;
+    h.host.openGate = new Promise<void>((resolve) => { open = resolve; });
+    const { request } = approve(h);
+    const op = h.service.start(request, context());
+    await vi.waitFor(() => expect(h.host.opened).toBe(1), { timeout: 10_000 });
+    h.service.cancel(op.id, AUDIT);
+    await h.service.settled();
+    open();
+    expect(h.service.get(op.id)).toMatchObject({ state: 'cancelled', changesMade: false, active: false, cancelRequested: false });
+  });
+
+  it('cancels while waiting for the Pilot, keeps the target, and reconciles once the Pilot connects', async () => {
+    const h = harness({ connectOnStart: false, enrollWaitMs: 60_000 });
+    const { request } = approve(h);
+    const op = h.service.start(request, context());
+    await vi.waitFor(() => expect(h.service.get(op.id).state).toBe('enrolling'), { timeout: 10_000 });
+    h.service.cancel(op.id, AUDIT);
+    await h.service.settled();
+    const cancelled = h.service.get(op.id);
+    expect(cancelled).toMatchObject({ state: 'cancelled', active: true, cancelRequested: false });
+    h.tunnels.connect(cancelled.nodeId as number);
+    expect(h.service.get(op.id)).toMatchObject({ state: 'enrolled', active: false });
+    db.deleteNode(cancelled.nodeId as number);
+  });
+
+  it('takes a tunnel that is already up, and ignores a tunnel for another node', async () => {
+    const up = harness({ connectOnStart: false, enrollWaitMs: 60_000 });
+    up.host.override = (command) => {
+      if (command.includes('up -d')) {
+        const row = db.listNodeBootstrapOperations(50).find((entry) => entry.host === up.facts.current.target.host);
+        if (row?.node_id) up.tunnels.active.add(row.node_id);
+      }
+      return undefined;
+    };
+    const first = approve(up);
+    const op = up.service.start(first.request, context());
+    await up.service.settled();
+    expect(up.service.get(op.id).state).toBe('enrolled');
+    db.deleteNode(up.service.get(op.id).nodeId as number);
+
+    const other = harness({ connectOnStart: false, enrollWaitMs: 50 });
+    other.host.override = (command) => {
+      if (command.includes('up -d')) setTimeout(() => other.tunnels.emit('tunnel-up', 987_654), 5);
+      return undefined;
+    };
+    const second = approve(other);
+    const op2 = other.service.start(second.request, context());
+    await other.service.settled();
+    expect(other.service.get(op2.id)).toMatchObject({ state: 'partial', error: { code: 'ENROLLMENT_NOT_CONNECTED' } });
+    expect(other.tunnels.listenerCount('tunnel-up')).toBe(0);
+    other.service.release(op2.id, AUDIT);
+    db.deleteNode(other.service.get(op2.id).nodeId as number);
+  });
+
+  it('stops waiting when the enrollment expires before the wait does', async () => {
+    const h = harness({ connectOnStart: false, enrollWaitMs: 60_000, tokenTtlMs: 40 });
+    const { request } = approve(h);
+    const started = Date.now();
+    const op = h.service.start(request, context());
+    await h.service.settled();
+    expect(Date.now() - started).toBeLessThan(10_000);
+    expect(h.service.get(op.id)).toMatchObject({ state: 'partial', error: { code: 'ENROLLMENT_NOT_CONNECTED' } });
+    h.service.release(op.id, AUDIT);
+    db.deleteNode(h.service.get(op.id).nodeId as number);
+  });
+
+  it('refuses a preflight on a target while its run is in progress', async () => {
+    const h = harness({ connectOnStart: false, enrollWaitMs: 60_000 });
+    const { request } = approve(h);
+    const op = h.service.start(request, context());
+    expect(() => h.service.assertTargetIdle(request.host, 22)).toThrow(/A bootstrap is running on this host/);
+    expect(() => h.service.assertTargetIdle(request.host.toUpperCase(), 22)).toThrow(/A bootstrap is running/);
+    expect(() => h.service.assertTargetIdle('elsewhere.example.com', 22)).not.toThrow();
+    h.service.cancel(op.id, AUDIT);
+    await h.service.settled();
+    expect(() => h.service.assertTargetIdle(request.host, 22)).not.toThrow();
+    const nodeId = h.service.get(op.id).nodeId;
+    if (h.service.get(op.id).active) h.service.release(op.id, AUDIT);
+    if (nodeId) db.deleteNode(nodeId);
+  });
+
+  it('keeps the approval usable when the target is held, so release then approve works', async () => {
+    const h = harness({ connectOnStart: false, enrollWaitMs: 20 });
+    const first = approve(h);
+    const op = h.service.start(first.request, context());
+    await h.service.settled();
+    const second = approve(h);
+    expect(() => h.service.start(second.request, context())).toThrow(/Another bootstrap holds this server/);
+    h.service.release(op.id, AUDIT);
+    db.deleteNode(h.service.get(op.id).nodeId as number);
+    const next = h.service.start(second.request, context());
+    await h.service.settled();
+    expect(h.service.get(next.id).attempt).toBe(1);
+    h.service.release(next.id, AUDIT);
+    const nodeId = h.service.get(next.id).nodeId;
+    if (nodeId) db.deleteNode(nodeId);
+  });
+
+  it('records interrupted enrolling and retried runs with what is actually known', () => {
+    const h = harness();
+    const now = Date.now();
+    const base = {
+      port: 22, username: 'ubuntu', address: '192.168.1.61', compose_dir: '/opt/docker/sencho', agent_dir: '/opt/sencho-agent',
+      plan_json: '{}', plan_digest: 'd', approved_by: TEST_USERNAME, approved_at: now, stage: null, step: null, node_id: null,
+      agent_started: 1 as const, active: 1 as const, cancel_requested: 0 as const, error_code: null, error_message: null,
+      enrollment_expires_at: null, created_at: now, updated_at: now, finished_at: null,
+    };
+    db.insertNodeBootstrapOperation({ ...base, id: '00000000-0000-4000-8000-000000000011', target_key: 'enrolling.example.com:22', host: 'enrolling.example.com', target_name: 'enrolling', host_key_fingerprint: 'SHA256:enrolling', attempt: 1, state: 'enrolling', changes_made: 1 });
+    db.insertNodeBootstrapOperation({ ...base, id: '00000000-0000-4000-8000-000000000012', target_key: 'retried.example.com:22', host: 'retried.example.com', target_name: 'retried', host_key_fingerprint: 'SHA256:retried', attempt: 2, state: 'rechecking', changes_made: 1 });
+    h.service.recoverOnStartup();
+    expect(db.getNodeBootstrapOperation('00000000-0000-4000-8000-000000000011')).toMatchObject({ state: 'outcome_unknown', active: 1, error_message: expect.stringMatching(/Every step had run/) });
+    // A retry that was still rechecking changed nothing this attempt, but earlier attempts did: the target stays held.
+    expect(db.getNodeBootstrapOperation('00000000-0000-4000-8000-000000000012')).toMatchObject({ state: 'blocked', active: 1 });
+    h.service.release('00000000-0000-4000-8000-000000000011', AUDIT);
+    h.service.release('00000000-0000-4000-8000-000000000012', AUDIT);
+  });
+
+  it('keeps state and the target lock across a new service instance on the same database', async () => {
+    const h = harness({ connectOnStart: false, enrollWaitMs: 20 });
+    const { request } = approve(h);
+    const op = h.service.start(request, context());
+    await h.service.settled();
+    const restarted = new NodeBootstrapOperationService({ db, preflight: { preflight: h.preflight } as unknown as Pick<NodeBootstrapService, 'preflight'>, exec: h.host.transport(), tunnels: h.tunnels });
+    expect(restarted.get(op.id)).toMatchObject({ state: 'partial', approvedBy: TEST_USERNAME, hostKeyFingerprint: h.facts.current.hostKey.fingerprint, active: true });
+    const again = approve(h);
+    restarted.rememberPlan(resultFor(again.plan, h.facts.current), TEST_USERNAME, null);
+    expect(() => restarted.start(again.request, context())).toThrow(/Another bootstrap holds this server/);
+    h.service.release(op.id, AUDIT);
+    db.deleteNode(h.service.get(op.id).nodeId as number);
+  });
+
+  it('lists operations without plan bodies, keys or tokens', async () => {
+    const h = harness();
+    const { request } = approve(h);
+    const op = h.service.start(request, context());
+    await h.service.settled();
+    const row = h.service.list().find((entry) => entry.id === op.id);
+    expect(row).toBeDefined();
+    expect(row).not.toHaveProperty('plan');
+    expect(row).not.toHaveProperty('events');
+    expect(JSON.stringify(row)).not.toMatch(/private-key-material|enroll-\d+-\d+/);
+    db.deleteNode(h.service.get(op.id).nodeId as number);
+  });
+
+  it("ties a retry preflight to the operation's own target", async () => {
+    const h = harness({ connectOnStart: false, enrollWaitMs: 20 });
+    const { request } = approve(h);
+    const op = h.service.start(request, context());
+    await h.service.settled();
+    expect(() => h.service.retryOwnership(op.id, 'other.example.com', 22)).toThrow(/same server/);
+    expect(() => h.service.retryOwnership(op.id, request.host, 2222)).toThrow(/same server/);
+    expect(h.service.retryOwnership(op.id, request.host.toUpperCase(), 22)).toMatchObject({ agentStarted: true });
+    h.service.release(op.id, AUDIT);
+    db.deleteNode(h.service.get(op.id).nodeId as number);
+  });
+});
+
+describe('bootstrap operations: the node a retry enrolls', () => {
+  async function stoppedAtEnrollment(h: Harness) {
+    const { request } = approve(h);
+    const op = h.service.start(request, context());
+    await h.service.settled();
+    const stopped = h.service.get(op.id);
+    expect(stopped.state).toBe('partial');
+    h.facts.current = makeFacts({
+      target: h.facts.current.target,
+      hostKey: h.facts.current.hostKey,
+      agentDir: {
+        exists: true, isDirectory: true, realPath: '/opt/sencho-agent', writableByUser: true, readableByUser: true,
+        entries: ['compose.yaml', 'sencho-bootstrap.json'], hasMarker: true, hasComposeFile: true,
+        markerProject: 'sencho-agent', markerComposeDir: '/opt/docker/sencho', markerAgentDir: '/opt/sencho-agent',
+      },
+    });
+    return stopped;
+  }
+
+  async function retryToEnd(h: Harness, id: string) {
+    const again = approve(h, id);
+    h.service.retry(id, again.request, context());
+    await h.service.settled();
+    return h.service.get(id);
+  }
+
+  it('reuses the node by id even after it was renamed', async () => {
+    const h = harness({ connectOnStart: false, enrollWaitMs: 20 });
+    const stopped = await stoppedAtEnrollment(h);
+    db.updateNode(stopped.nodeId as number, { name: `${h.name}-renamed` });
+    const nodes = db.getNodes().length;
+    const after = await retryToEnd(h, stopped.id);
+    expect(after.nodeId).toBe(stopped.nodeId);
+    expect(db.getNodes()).toHaveLength(nodes);
+    h.service.release(stopped.id, AUDIT);
+    db.deleteNode(stopped.nodeId as number);
+  });
+
+  it('registers a new node when the earlier one was deleted', async () => {
+    const h = harness({ connectOnStart: false, enrollWaitMs: 20 });
+    const stopped = await stoppedAtEnrollment(h);
+    db.deleteNode(stopped.nodeId as number);
+    const after = await retryToEnd(h, stopped.id);
+    expect(after.nodeId).not.toBeNull();
+    expect(after.nodeId).not.toBe(stopped.nodeId);
+    expect(db.getNode(after.nodeId as number)?.name).toBe(h.name);
+    h.service.release(stopped.id, AUDIT);
+    db.deleteNode(after.nodeId as number);
+  });
+
+  it('refuses to register a second node under a name another node took meanwhile', async () => {
+    const h = harness({ connectOnStart: false, enrollWaitMs: 20 });
+    const stopped = await stoppedAtEnrollment(h);
+    db.deleteNode(stopped.nodeId as number);
+    const squatter = db.addNode({ name: h.name, type: 'remote', compose_dir: '/opt/docker/sencho', is_default: false, api_url: 'http://192.168.1.99:1852', api_token: 't', mode: 'proxy' });
+    const after = await retryToEnd(h, stopped.id);
+    expect(after).toMatchObject({ error: { code: 'NODE_NAME_TAKEN' } });
+    expect(db.getNodes().filter((node) => node.name === h.name)).toHaveLength(1);
+    h.service.release(stopped.id, AUDIT);
+    db.deleteNode(squatter);
+  });
+});
+
+describe('bootstrap recheck: the address pin', () => {
+  it('refuses before any SSH work when the host no longer resolves to the approved address', async () => {
+    const runCommands = vi.fn();
+    const service = new RealPreflightService({
+      db,
+      transport: { captureHostKey: vi.fn(), runCommands },
+      resolveAddresses: async () => ['192.168.1.77'],
+      caPem: () => null,
+    });
+    await expect(service.preflight({
+      host: 'pinned.example.com',
+      username: 'ubuntu',
+      privateKey: PRIVATE_KEY,
+      expectedFingerprint: 'SHA256:pinned',
+      targetName: 'pinned',
+    }, {
+      hubUrl: HUB_URL,
+      audit: AUDIT,
+      pinnedAddress: '192.168.1.76',
+    })).rejects.toMatchObject({ code: 'TARGET_CHANGED' });
+    expect(runCommands).not.toHaveBeenCalled();
   });
 });

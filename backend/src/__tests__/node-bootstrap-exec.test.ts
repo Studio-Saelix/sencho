@@ -11,6 +11,10 @@ import { READ_EXIT, WRITE_EXIT, readFileCommand, writeFileCommand } from '../ser
 import { commandDetail, maskComposeToken, TOKEN_PLACEHOLDER } from '../services/nodeBootstrap/stepRunner';
 import { buildPilotEnrollmentCompose } from '../helpers/pilotEnrollmentCompose';
 
+function sha256(content: string): string {
+  return crypto.createHash('sha256').update(content).digest('hex');
+}
+
 /**
  * The execution transport against an in-process SSH server, and the fixed
  * write and read scripts against a real POSIX shell and filesystem.
@@ -173,7 +177,7 @@ describe('bootstrap write and read scripts on a real shell', () => {
 
   it('writes standard input atomically with the planned mode and leaves no temporary file', () => {
     const target = path.join(dir, 'compose.yaml');
-    const result = runShell(writeFileCommand(target, file, { sudo: false, noClobber: true }), 'name: sencho-agent\n');
+    const result = runShell(writeFileCommand(target, { ...file, sha256: sha256('name: sencho-agent\n') }, { sudo: false, noClobber: true }), 'name: sencho-agent\n');
     expect(result.status).toBe(0);
     expect(fs.readFileSync(target, 'utf8')).toBe('name: sencho-agent\n');
     expect((fs.statSync(target).mode & 0o777).toString(8)).toBe('600');
@@ -183,26 +187,34 @@ describe('bootstrap write and read scripts on a real shell', () => {
   it('refuses to clobber, to write through a symlink, or into a missing directory', () => {
     const target = path.join(dir, 'compose.yaml');
     fs.writeFileSync(target, 'theirs');
-    expect(runShell(writeFileCommand(target, file, { sudo: false, noClobber: true }), 'ours').status).toBe(WRITE_EXIT.exists);
+    expect(runShell(writeFileCommand(target, { ...file, sha256: sha256('ours') }, { sudo: false, noClobber: true }), 'ours').status).toBe(WRITE_EXIT.exists);
     expect(fs.readFileSync(target, 'utf8')).toBe('theirs');
 
     const elsewhere = path.join(dir, 'elsewhere');
     fs.writeFileSync(elsewhere, 'untouched');
     const link = path.join(dir, 'linked.yaml');
     fs.symlinkSync(elsewhere, link);
-    expect(runShell(writeFileCommand(link, file, { sudo: false, noClobber: false }), 'ours').status).toBe(WRITE_EXIT.notRegular);
+    expect(runShell(writeFileCommand(link, { ...file, sha256: sha256('ours') }, { sudo: false, noClobber: false }), 'ours').status).toBe(WRITE_EXIT.notRegular);
     expect(fs.readFileSync(elsewhere, 'utf8')).toBe('untouched');
 
     fs.mkdirSync(path.join(dir, 'a-directory'));
-    expect(runShell(writeFileCommand(path.join(dir, 'a-directory'), file, { sudo: false, noClobber: false }), 'ours').status).toBe(WRITE_EXIT.notRegular);
-    expect(runShell(writeFileCommand(path.join(dir, 'missing', 'x'), file, { sudo: false, noClobber: true }), 'ours').status).toBe(WRITE_EXIT.notDirectory);
+    expect(runShell(writeFileCommand(path.join(dir, 'a-directory'), { ...file, sha256: sha256('ours') }, { sudo: false, noClobber: false }), 'ours').status).toBe(WRITE_EXIT.notRegular);
+    expect(runShell(writeFileCommand(path.join(dir, 'missing', 'x'), { ...file, sha256: sha256('ours') }, { sudo: false, noClobber: true }), 'ours').status).toBe(WRITE_EXIT.notDirectory);
     expect(fs.readdirSync(dir).sort()).toEqual(['a-directory', 'compose.yaml', 'elsewhere', 'linked.yaml']);
+  });
+
+  it('refuses to put a file in place when standard input ended early', () => {
+    const target = path.join(dir, 'compose.yaml');
+    const full = 'name: sencho-agent\nservices: {}\n';
+    const result = runShell(writeFileCommand(target, { ...file, sha256: sha256(full) }, { sudo: false, noClobber: true }), full.slice(0, 10));
+    expect(result.status).toBe(WRITE_EXIT.incomplete);
+    expect(fs.readdirSync(dir)).toEqual([]);
   });
 
   it('replaces an existing file in place when clobbering is allowed', () => {
     const target = path.join(dir, 'compose.yaml');
     fs.writeFileSync(target, 'old', { mode: 0o644 });
-    expect(runShell(writeFileCommand(target, file, { sudo: false, noClobber: false }), 'new').status).toBe(0);
+    expect(runShell(writeFileCommand(target, { ...file, sha256: sha256('new') }, { sudo: false, noClobber: false }), 'new').status).toBe(0);
     expect(fs.readFileSync(target, 'utf8')).toBe('new');
     expect((fs.statSync(target).mode & 0o777).toString(8)).toBe('600');
   });
@@ -212,7 +224,7 @@ describe('bootstrap write and read scripts on a real shell', () => {
     fs.mkdirSync(hostile);
     const target = path.join(hostile, 'compose.yaml');
     const content = "$(touch pwned-content)\n`touch pwned-tick`\n'; touch pwned-quote; '\n";
-    const result = runShell(writeFileCommand(target, file, { sudo: false, noClobber: true }), content);
+    const result = runShell(writeFileCommand(target, { ...file, sha256: sha256(content) }, { sudo: false, noClobber: true }), content);
     expect(result.status).toBe(0);
     expect(fs.readFileSync(target, 'utf8')).toBe(content);
     const read = runShell(readFileCommand(target, false));
@@ -235,7 +247,7 @@ describe('bootstrap write and read scripts on a real shell', () => {
   });
 
   it('prefixes sudo -n only when the step needs it', () => {
-    expect(writeFileCommand('/etc/apt/sources.list.d/docker.list', { mode: '0644', owner: 'root', group: 'root' }, { sudo: true, noClobber: true })).toMatch(/^sudo -n sh -c /);
+    expect(writeFileCommand('/etc/apt/sources.list.d/docker.list', { mode: '0644', owner: 'root', group: 'root', sha256: sha256('x') }, { sudo: true, noClobber: true })).toMatch(/^sudo -n sh -c /);
     expect(readFileCommand('/opt/sencho-agent/compose.yaml', false)).toMatch(/^sh -c /);
   });
 });

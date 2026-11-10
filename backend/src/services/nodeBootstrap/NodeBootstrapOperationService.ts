@@ -2,12 +2,14 @@ import crypto from 'crypto';
 import { buildPilotEnrollmentCompose } from '../../helpers/pilotEnrollmentCompose';
 import { mintPilotEnrollmentToken } from '../../helpers/pilotEnrollment';
 import { PilotCloseCode } from '../../pilot/protocol';
+import { getErrorMessage } from '../../utils/errors';
 import { sanitizeForLog } from '../../utils/safeLog';
 import {
   DatabaseService,
   type NodeBootstrapEventStatus,
   type NodeBootstrapOperation,
   type NodeBootstrapOperationState,
+  type NodeBootstrapOperationTransition,
 } from '../DatabaseService';
 import { NodeRegistry } from '../NodeRegistry';
 import { PilotTunnelManager } from '../PilotTunnelManager';
@@ -177,6 +179,14 @@ function holdsLock(state: NodeBootstrapOperationState, changesMade: boolean): bo
 
 class RunCancelled extends Error {}
 
+/** Effects a step can leave behind partly even when it exits with an error. */
+const PARTIAL_EFFECTS: ReadonlySet<string> = new Set(['package-install', 'service-change', 'container-start']);
+
+interface RunContext {
+  hubUrl: string;
+  audit: BootstrapAuditContext;
+}
+
 export class NodeBootstrapOperationService {
   private static instance: NodeBootstrapOperationService | null = null;
   private readonly deps: OperationDeps;
@@ -233,10 +243,13 @@ export class NodeBootstrapOperationService {
    * once it reached the start step, its Pilot. Only a stopped operation that
    * still holds its target can be retried.
    */
-  public retryOwnership(id: string): { nodeId: number | null; agentStarted: boolean } {
+  public retryOwnership(id: string, host: string, port: number): { nodeId: number | null; agentStarted: boolean } {
     const op = this.reconcile(this.requireOperation(id));
     if (!op.active || !RETRYABLE_STATES.includes(op.state) || this.runs.has(id)) {
       throw new BootstrapError(409, 'OPERATION_NOT_RETRYABLE', 'This bootstrap cannot be retried in its current state.');
+    }
+    if (op.target_key !== `${host.toLowerCase()}:${port}`) {
+      throw new BootstrapError(409, 'OPERATION_NOT_RETRYABLE', 'A retry must inspect the same server as the bootstrap it retries.');
     }
     return { nodeId: op.node_id, agentStarted: op.agent_started === 1 };
   }
@@ -254,11 +267,13 @@ export class NodeBootstrapOperationService {
   }
 
   /**
-   * Take a pending approval for this request. The approval is single use and
-   * bound to the operator who saw the plan, the target, both directories and
-   * the host key; any difference refuses before an operation exists.
+   * Check a pending approval against this request. The approval is bound to
+   * the operator who saw the plan, the target, both directories and the host
+   * key; any difference refuses before an operation exists. It is consumed
+   * only once the operation holds its target (`consumeApproval`), so a refusal
+   * on the lock leaves it usable.
    */
-  private takeApproval(request: ExecuteRequest, actor: string, operationId: string | null): BootstrapPlan {
+  private peekApproval(request: ExecuteRequest, actor: string, operationId: string | null): BootstrapPlan {
     const pending = this.approvals.get(request.planDigest);
     const now = this.deps.now();
     if (!pending || now - pending.storedAt > APPROVAL_TTL_MS) {
@@ -284,15 +299,19 @@ export class NodeBootstrapOperationService {
     if (!matches) {
       throw new BootstrapError(409, 'PLAN_NOT_CURRENT', 'The request does not match the reviewed plan. Run the preflight again.');
     }
-    this.approvals.delete(request.planDigest);
     return plan;
+  }
+
+  /** An approval runs once: a second request with the same digest is refused. */
+  private consumeApproval(digest: string): void {
+    this.approvals.delete(digest);
   }
 
   // --- lifecycle ------------------------------------------------------------
 
-  public start(request: ExecuteRequest, context: { hubUrl: string; audit: BootstrapAuditContext }): OperationDetail {
+  public start(request: ExecuteRequest, context: RunContext): OperationDetail {
     const actor = context.audit.username;
-    const plan = this.takeApproval(request, actor, null);
+    const plan = this.peekApproval(request, actor, null);
     const now = this.deps.now();
     const op: NodeBootstrapOperation = {
       id: crypto.randomUUID(),
@@ -336,13 +355,14 @@ export class NodeBootstrapOperationService {
       }
       throw error;
     }
+    this.consumeApproval(plan.digest);
     this.audit(context.audit, 'bootstrap.execute.approved', op, { digest: plan.digest });
     this.event(op, 'info', `Approved by ${actor}. Plan sha256:${plan.digest}.`);
     this.launch(op.id, request, plan, context);
     return this.detail(op.id);
   }
 
-  public retry(id: string, request: ExecuteRequest, context: { hubUrl: string; audit: BootstrapAuditContext }): OperationDetail {
+  public retry(id: string, request: ExecuteRequest, context: RunContext): OperationDetail {
     const op = this.requireOperation(id);
     if (this.reconcile(op).state === 'enrolled') {
       throw new BootstrapError(409, 'OPERATION_NOT_RETRYABLE', 'The Pilot for this bootstrap has connected. There is nothing to retry.');
@@ -350,7 +370,7 @@ export class NodeBootstrapOperationService {
     if (!op.active || !RETRYABLE_STATES.includes(op.state) || this.runs.has(id)) {
       throw new BootstrapError(409, 'OPERATION_NOT_RETRYABLE', 'This bootstrap cannot be retried in its current state.');
     }
-    const plan = this.takeApproval(request, context.audit.username, id);
+    const plan = this.peekApproval(request, context.audit.username, id);
     if (plan.hostKeyFingerprint !== op.host_key_fingerprint || `${plan.target.host}:${plan.target.port}` !== op.target_key
       || plan.targetName !== op.target_name || plan.paths.composeDir.input !== op.compose_dir || plan.paths.agentDir.input !== op.agent_dir) {
       throw new BootstrapError(409, 'PLAN_NOT_CURRENT', 'A retry must target the same server, host key, node name and directories.');
@@ -366,6 +386,7 @@ export class NodeBootstrapOperationService {
       stage: null,
       step: null,
       cancel_requested: 0,
+      enrollment_expires_at: null,
       error_code: null,
       error_message: null,
       finished_at: null,
@@ -374,6 +395,7 @@ export class NodeBootstrapOperationService {
     if (!moved) {
       throw new BootstrapError(409, 'OPERATION_NOT_RETRYABLE', 'This bootstrap changed state. Refresh it and try again.');
     }
+    this.consumeApproval(plan.digest);
     const updated = this.requireOperation(id);
     this.audit(context.audit, 'bootstrap.execute.retry', updated, { digest: plan.digest, attempt: updated.attempt });
     this.event(updated, 'info', `Retry approved by ${context.audit.username}. Plan sha256:${plan.digest}.`);
@@ -401,7 +423,9 @@ export class NodeBootstrapOperationService {
       throw new BootstrapError(409, 'OPERATION_NOT_RELEASABLE', 'Only a stopped bootstrap that still holds its server can be released.');
     }
     const now = this.deps.now();
-    this.deps.db.updateNodeBootstrapOperation(id, { active: 0, finished_at: op.finished_at ?? now }, now);
+    if (!this.deps.db.transitionNodeBootstrapOperation(id, [op.state], { active: 0, finished_at: op.finished_at ?? now }, now)) {
+      throw new BootstrapError(409, 'OPERATION_NOT_RELEASABLE', 'This bootstrap changed state. Refresh it and try again.');
+    }
     this.audit(audit, 'bootstrap.execute.release', op, {});
     this.event(op, 'info', `Released by ${audit.username}. Nothing on the host was changed or removed${op.node_id !== null ? ', and the node record stays in Fleet' : ''}.`);
     return this.detail(id);
@@ -422,32 +446,59 @@ export class NodeBootstrapOperationService {
    * outcome is unknown until the host is inspected again.
    */
   public recoverOnStartup(): void {
-    const now = this.deps.now();
     for (const op of this.deps.db.listNodeBootstrapOperationsInStates(RUNNING_STATES)) {
-      const state: NodeBootstrapOperationState = op.state === 'rechecking' ? 'blocked' : 'outcome_unknown';
-      const changesMade = op.changes_made === 1;
-      this.deps.db.updateNodeBootstrapOperation(op.id, {
-        state,
-        active: holdsLock(state, changesMade) ? 1 : 0,
-        error_code: 'HUB_RESTARTED',
-        error_message: state === 'blocked'
-          ? 'The hub restarted before this attempt changed anything.'
-          : 'The hub restarted during this attempt. Steps already run stay on the host, and the step in progress may or may not have completed.',
-        finished_at: now,
-      }, now);
-      this.event(op, state === 'blocked' ? 'info' : 'unknown', 'The hub restarted while this bootstrap was running.');
-      console.warn(`[Bootstrap] Operation ${op.id} for ${sanitizeForLog(op.host)} was interrupted by a restart (${state}).`);
+      // One row that cannot be written must not leave the others looking live.
+      try {
+        this.recordInterrupted(op);
+      } catch (error: unknown) {
+        console.error(`[Bootstrap] Operation ${op.id} could not be marked interrupted:`, sanitizeForLog(getErrorMessage(error, 'unknown')));
+      }
     }
-    for (const op of this.deps.db.listNodeBootstrapOperationsInStates(RECONCILABLE_STATES)) this.reconcile(op);
+    for (const op of this.deps.db.listNodeBootstrapOperationsInStates(RECONCILABLE_STATES)) {
+      try {
+        this.reconcile(op);
+      } catch (error: unknown) {
+        console.error(`[Bootstrap] Operation ${op.id} could not be reconciled:`, sanitizeForLog(getErrorMessage(error, 'unknown')));
+      }
+    }
+  }
+
+  private recordInterrupted(op: NodeBootstrapOperation): void {
+    const now = this.deps.now();
+    const state: NodeBootstrapOperationState = op.state === 'rechecking' ? 'blocked' : 'outcome_unknown';
+    const message = op.state === 'rechecking'
+      ? 'The hub restarted before this attempt changed anything.'
+      : op.state === 'enrolling'
+        ? 'The hub restarted while it waited for the Pilot to connect. Every step had run; the Pilot can still connect on its own.'
+        : 'The hub restarted during this attempt. Steps already run stay on the host, and the step in progress may or may not have completed.';
+    const moved = this.deps.db.transitionNodeBootstrapOperation(op.id, [op.state], {
+      state,
+      active: holdsLock(state, op.changes_made === 1) ? 1 : 0,
+      cancel_requested: 0,
+      error_code: 'HUB_RESTARTED',
+      error_message: message,
+      finished_at: now,
+    }, now);
+    if (!moved) return;
+    this.event(op, state === 'blocked' ? 'info' : 'unknown', message);
+    console.warn(`[Bootstrap] Operation ${op.id} for ${sanitizeForLog(op.host)} was interrupted by a restart (${state}).`);
   }
 
   // --- run ------------------------------------------------------------------
 
-  private launch(id: string, request: ExecuteRequest, plan: BootstrapPlan, context: { hubUrl: string; audit: BootstrapAuditContext }): void {
+  private launch(id: string, request: ExecuteRequest, plan: BootstrapPlan, context: RunContext): void {
     const abort = new AbortController();
     const done = this.execute(id, request, plan, context, abort.signal)
       .catch((error: unknown) => {
-        console.error(`[Bootstrap] Operation ${id} ended unexpectedly:`, error instanceof Error ? error.message : 'unknown');
+        // The run's own error path failed (a database write, most likely).
+        // Leave the row stopped rather than looking live with no run behind it.
+        console.error(`[Bootstrap] Operation ${id} ended unexpectedly:`, sanitizeForLog(getErrorMessage(error, 'unknown')));
+        try {
+          const op = this.deps.db.getNodeBootstrapOperation(id);
+          if (op && RUNNING_STATES.includes(op.state)) this.recordInterrupted(op);
+        } catch (fallbackError: unknown) {
+          console.error(`[Bootstrap] Operation ${id} could not be marked interrupted:`, sanitizeForLog(getErrorMessage(fallbackError, 'unknown')));
+        }
       })
       .finally(() => {
         this.runs.delete(id);
@@ -459,7 +510,7 @@ export class NodeBootstrapOperationService {
     id: string,
     request: ExecuteRequest,
     plan: BootstrapPlan,
-    context: { hubUrl: string; audit: BootstrapAuditContext },
+    context: RunContext,
     signal: AbortSignal,
   ): Promise<void> {
     const secrets = [request.privateKey, request.passphrase ?? null].filter((value): value is string => Boolean(value));
@@ -488,18 +539,26 @@ export class NodeBootstrapOperationService {
           if (signal.aborted || this.requireOperation(id).cancel_requested === 1) throw new RunCancelled();
           this.deps.db.updateNodeBootstrapOperation(id, { stage: stage.id, step: step.id }, this.deps.now());
           if (step.id === COMPOSE_STEP_ID) {
-            const enrollment = this.prepareEnrollment(id, plan, context.audit);
+            const enrollment = this.prepareEnrollment(id, plan, context);
             composeWithToken = enrollment.compose;
             secrets.push(enrollment.token);
           }
           op = this.requireOperation(id);
-          // Recorded before the step runs: from here on, the host may hold it.
-          this.deps.db.updateNodeBootstrapOperation(id, {
-            changes_made: 1,
-            ...(step.effect === 'container-start' ? { agent_started: 1 } : {}),
-          }, this.deps.now());
+          // The start step is recorded before it runs: from then on the Pilot
+          // container may exist, which a retry has to recognize as its own.
+          if (step.effect === 'container-start') this.deps.db.updateNodeBootstrapOperation(id, { agent_started: 1 }, this.deps.now());
           this.event(op, 'started', step.title, stage.id, step.id);
-          const outcome = await runPlanStep(step, ctx, plan);
+          let outcome: Awaited<ReturnType<typeof runPlanStep>>;
+          try {
+            outcome = await runPlanStep(step, ctx, plan);
+          } catch (error: unknown) {
+            // A step whose outcome is unknown, or that may have done part of
+            // its work before failing, counts as a change; a clean refusal does not.
+            const mayHaveChanged = !(error instanceof StepFailure) || error.kind !== 'failed' || PARTIAL_EFFECTS.has(step.effect);
+            if (mayHaveChanged) this.deps.db.updateNodeBootstrapOperation(id, { changes_made: 1 }, this.deps.now());
+            throw error;
+          }
+          if (outcome.status === 'done') this.deps.db.updateNodeBootstrapOperation(id, { changes_made: 1 }, this.deps.now());
           this.event(op, outcome.status, outcome.message, stage.id, step.id);
         }
         const verified = stage.id === dockerVerifyStage
@@ -513,9 +572,9 @@ export class NodeBootstrapOperationService {
       }
       session.close();
       session = null;
-      await this.awaitEnrollment(id, signal);
+      await this.awaitEnrollment(id, signal, context);
     } catch (error: unknown) {
-      this.finishWithError(id, error);
+      this.finishWithError(id, error, signal, context);
     } finally {
       session?.close();
       secrets.length = 0;
@@ -527,7 +586,7 @@ export class NodeBootstrapOperationService {
     id: string,
     request: ExecuteRequest,
     plan: BootstrapPlan,
-    context: { hubUrl: string; audit: BootstrapAuditContext },
+    context: RunContext,
     signal: AbortSignal,
   ): Promise<void> {
     const op = this.requireOperation(id);
@@ -573,11 +632,25 @@ export class NodeBootstrapOperationService {
    * long package steps are behind it, so the 15-minute window is spent on the
    * agent's start and first connection.
    */
-  private prepareEnrollment(id: string, plan: BootstrapPlan, audit: BootstrapAuditContext): { token: string; compose: string } {
+  private prepareEnrollment(id: string, plan: BootstrapPlan, context: RunContext): { token: string; compose: string } {
+    const caPem = plan.stages.flatMap((stage) => stage.steps).find((step) => step.id === 'agent-hub-ca')?.file?.content;
+    const composeFor = (token: string) => buildPilotEnrollmentCompose({
+      primaryUrl: plan.hubUrl,
+      token,
+      composeDir: plan.paths.composeDir.input,
+      caPem,
+    });
+    // Checked before anything is registered or minted, so a mismatch leaves no live credential behind.
+    const reviewed = plan.stages.flatMap((stage) => stage.steps).find((step) => step.id === COMPOSE_STEP_ID)?.file?.content;
+    if (composeFor(TOKEN_PLACEHOLDER) !== reviewed) {
+      throw new StepFailure('failed', 'PLAN_INVALID', 'The Pilot compose file no longer matches the reviewed plan, so nothing was written.');
+    }
     const op = this.requireOperation(id);
     const existing = op.node_id !== null ? this.deps.db.getNode(op.node_id) : undefined;
     let nodeId: number;
-    if (existing && existing.type === 'remote' && existing.mode === 'pilot_agent' && existing.name === op.target_name) {
+    // The node an earlier attempt registered is reused by id, even if it was
+    // renamed since, so the host never gets a second identity.
+    if (existing && existing.type === 'remote' && existing.mode === 'pilot_agent') {
       nodeId = existing.id;
       // As the manual regenerate route does: an open tunnel would outlive the new credential.
       this.deps.tunnels.closeTunnel(nodeId, PilotCloseCode.EnrollmentRegenerated, 'enrollment regenerated');
@@ -587,26 +660,15 @@ export class NodeBootstrapOperationService {
       }
       nodeId = this.deps.registerNode(op.target_name, plan.paths.composeDir.input);
       this.deps.db.updateNodeBootstrapOperation(id, { node_id: nodeId }, this.deps.now());
-      this.audit(audit, 'bootstrap.node.created', op, { nodeId });
+      this.audit(context.audit, 'bootstrap.node.created', op, { nodeId });
     }
     const { token, expiresAt } = this.deps.mintToken(nodeId);
-    const caStep = plan.stages.flatMap((stage) => stage.steps).find((step) => step.id === 'agent-hub-ca');
-    const compose = buildPilotEnrollmentCompose({
-      primaryUrl: plan.hubUrl,
-      token,
-      composeDir: plan.paths.composeDir.input,
-      caPem: caStep?.file?.content,
-    });
-    const reviewed = plan.stages.flatMap((stage) => stage.steps).find((step) => step.id === COMPOSE_STEP_ID)?.file?.content;
-    if (compose.split(token).join(TOKEN_PLACEHOLDER) !== reviewed) {
-      throw new StepFailure('failed', 'PLAN_INVALID', 'The Pilot compose file no longer matches the reviewed plan, so it was not written.');
-    }
     this.deps.db.updateNodeBootstrapOperation(id, { enrollment_expires_at: expiresAt }, this.deps.now());
     this.event(this.requireOperation(id), 'info', `Enrollment minted for node ${nodeId}; it expires at ${new Date(expiresAt).toISOString()}.`, 'agent_project', COMPOSE_STEP_ID);
-    return { token, compose };
+    return { token, compose: composeFor(token) };
   }
 
-  private async awaitEnrollment(id: string, signal: AbortSignal): Promise<void> {
+  private async awaitEnrollment(id: string, signal: AbortSignal, context: RunContext): Promise<void> {
     const op = this.transition(id, ['running'], { state: 'enrolling', stage: 'enroll', step: null });
     const nodeId = op.node_id;
     if (nodeId === null) throw new StepFailure('recovery', 'NODE_MISSING', 'The Pilot started, but no node was registered for it.');
@@ -644,18 +706,20 @@ export class NodeBootstrapOperationService {
         'The Pilot started but did not connect before the wait ended. Check that the host can reach the hub URL, then retry; a retry mints a new enrollment.',
       );
     }
-    this.finish(id, 'enrolled', null, 'The Pilot connected. The node is enrolled; its readiness has not been verified yet.');
+    this.finish(id, 'enrolled', null, context, 'The Pilot connected. The node is enrolled; its readiness has not been verified yet.');
   }
 
   // --- state ----------------------------------------------------------------
 
-  private finishWithError(id: string, error: unknown): void {
+  private finishWithError(id: string, error: unknown, signal: AbortSignal, context: RunContext): void {
     const op = this.requireOperation(id);
     const changesMade = op.changes_made === 1;
-    if (error instanceof RunCancelled) {
+    // A cancel can surface as a transport error (the connect was aborted), so
+    // the request decides, not the error's type.
+    if (error instanceof RunCancelled || signal.aborted || op.cancel_requested === 1) {
       this.finish(id, 'cancelled', { code: 'CANCELLED', message: changesMade
         ? 'Cancelled. Steps that already ran stay on the host; nothing was undone.'
-        : 'Cancelled before anything was changed.' });
+        : 'Cancelled before anything was changed.' }, context);
       return;
     }
     // Until the run leaves `rechecking`, this attempt has changed nothing on the
@@ -663,43 +727,54 @@ export class NodeBootstrapOperationService {
     const beforeMutation = op.state === 'rechecking';
     if (error instanceof StepFailure) {
       const state = beforeMutation ? 'blocked' : finalStateFor(error.kind, changesMade);
-      this.finish(id, state, { code: error.code, message: error.message }, null, error.detail);
+      this.finish(id, state, { code: error.code, message: error.message }, context, null, error.detail);
       return;
     }
     if (error instanceof SshTransportError || error instanceof BootstrapError) {
       const state: NodeBootstrapOperationState = beforeMutation ? 'blocked' : 'outcome_unknown';
-      this.finish(id, state, { code: error.code, message: error.message });
+      this.finish(id, state, { code: error.code, message: error.message }, context);
       return;
     }
-    const message = error instanceof Error ? error.message : 'unknown error';
-    console.error(`[Bootstrap] Operation ${id} failed:`, sanitizeForLog(message));
+    console.error(`[Bootstrap] Operation ${id} failed:`, sanitizeForLog(getErrorMessage(error, 'unknown error')));
     const state: NodeBootstrapOperationState = beforeMutation ? 'blocked' : 'recovery_required';
-    this.finish(id, state, { code: 'INTERNAL_ERROR', message: 'The bootstrap stopped on an unexpected error. Check the hub logs.' });
+    this.finish(id, state, { code: 'INTERNAL_ERROR', message: 'The bootstrap stopped on an unexpected error. Check the hub logs.' }, context);
   }
 
   private finish(
     id: string,
     state: NodeBootstrapOperationState,
     error: { code: string; message: string } | null,
+    context: RunContext,
     note: string | null = null,
     detail: string | null = null,
   ): void {
     const op = this.requireOperation(id);
     const now = this.deps.now();
     const changesMade = op.changes_made === 1;
-    this.deps.db.updateNodeBootstrapOperation(id, {
+    const moved = this.deps.db.transitionNodeBootstrapOperation(id, RUNNING_STATES, {
       state,
       active: holdsLock(state, changesMade) ? 1 : 0,
+      cancel_requested: 0,
       error_code: error?.code ?? null,
       error_message: error?.message ?? null,
       finished_at: now,
     }, now);
+    if (!moved) {
+      console.warn(`[Bootstrap] Operation ${id} was no longer running when it ended (${state}); its record was left as it is.`);
+      return;
+    }
     const status: NodeBootstrapEventStatus = state === 'enrolled' ? 'done' : state === 'outcome_unknown' ? 'unknown' : state === 'cancelled' || state === 'blocked' ? 'info' : 'failed';
     this.event(op, status, note ?? error?.message ?? state, op.stage, op.step, detail);
+    this.audit(context.audit, 'bootstrap.execute.finished', op, {
+      state,
+      code: error?.code ?? null,
+      attempt: op.attempt,
+      nodeId: op.node_id,
+    }, state === 'enrolled' ? 200 : 500);
     console.log(`[Bootstrap] Operation ${id} for ${sanitizeForLog(op.host)} ended: ${state}${error ? ` (${error.code})` : ''}`);
   }
 
-  private transition(id: string, from: readonly NodeBootstrapOperationState[], updates: Parameters<DatabaseService['updateNodeBootstrapOperation']>[1]): NodeBootstrapOperation {
+  private transition(id: string, from: readonly NodeBootstrapOperationState[], updates: NodeBootstrapOperationTransition): NodeBootstrapOperation {
     if (!this.deps.db.transitionNodeBootstrapOperation(id, from, updates, this.deps.now())) {
       throw new StepFailure('unknown', 'STATE_CONFLICT', 'The operation changed state while it was running.');
     }
@@ -753,7 +828,7 @@ export class NodeBootstrapOperationService {
     });
   }
 
-  private audit(context: BootstrapAuditContext, action: string, op: NodeBootstrapOperation, facts: Record<string, unknown>): void {
+  private audit(context: BootstrapAuditContext, action: string, op: NodeBootstrapOperation, facts: Record<string, unknown>, statusCode = 200): void {
     recordBootstrapAudit(this.deps.db, this.deps.now(), context, action, {
       operation: op.id,
       target: op.target_name,
@@ -761,7 +836,7 @@ export class NodeBootstrapOperationService {
       port: op.port,
       fingerprint: op.host_key_fingerprint,
       ...facts,
-    });
+    }, statusCode);
   }
 
   private view(op: NodeBootstrapOperation): OperationView {

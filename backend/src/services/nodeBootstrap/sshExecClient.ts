@@ -20,8 +20,8 @@ import {
  * host key that must equal the approved fingerprint before authentication. It
  * differs in what execution needs: one connection runs the steps in order,
  * each command has its own deadline, standard input can carry file content (so
- * a credential never appears in a process argument), and only the tail of the
- * output is kept. A dropped connection or an expired deadline is reported as
+ * a credential never appears in a process argument), and output is capped:
+ * the tail for a command, the head for a file read. A dropped connection or an expired deadline is reported as
  * such, because the remote outcome of that command is then unknown.
  */
 
@@ -36,7 +36,7 @@ export interface ExecResult {
   /** More output arrived than was kept. */
   truncated: boolean;
   timedOut: boolean;
-  /** `CONNECTION_LOST` or `COMMAND_ERROR`; null for a normal exit. */
+  /** `CONNECTION_LOST` or `COMMAND_ERROR`; null for a normal exit and for a timeout (see `timedOut`). */
   error: 'CONNECTION_LOST' | 'COMMAND_ERROR' | null;
 }
 

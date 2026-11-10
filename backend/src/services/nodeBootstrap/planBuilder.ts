@@ -40,6 +40,11 @@ import type {
 export const BOOTSTRAP_PLAN_VERSION = 1 as const;
 
 const MARKER_MODE = '0600';
+/**
+ * A freshly booted Ubuntu host often runs its own apt jobs for a few minutes;
+ * apt waits for their lock instead of failing at once.
+ */
+const APT_LOCK_WAIT = '-o DPkg::Lock::Timeout=300';
 const COMPOSE_FILE_MODE = '0600';
 const CA_FILE_MODE = '0644';
 
@@ -98,7 +103,7 @@ function packageInstallCommand(packages: DockerPackage[], resolved: boolean): st
   const specs = packages.map((pkg) => (
     resolved && pkg.candidateVersion ? `${pkg.name}=${pkg.candidateVersion}` : pkg.name
   ));
-  return `apt-get install -y --no-install-recommends ${specs.join(' ')}`;
+  return `apt-get ${APT_LOCK_WAIT} install -y --no-install-recommends ${specs.join(' ')}`;
 }
 
 function aptUpdateStep(sudo: boolean): BootstrapPlanStep {
@@ -108,7 +113,7 @@ function aptUpdateStep(sudo: boolean): BootstrapPlanStep {
     rationale: 'The Docker repository must be indexed before its packages can be resolved.',
     effect: 'package-metadata',
     privilege: sudo ? 'sudo' : 'user',
-    command: sudoCommand('apt-get update', sudo),
+    command: sudoCommand(`apt-get ${APT_LOCK_WAIT} update`, sudo),
     disruptive: false,
     reversible: 'yes',
     pointOfNoReturn: false,
@@ -359,7 +364,7 @@ export function buildBootstrapPlan(input: PlanBuildInput): BootstrapPlan {
     }
     const versionsKnown = packagesToInstall.every((pkg) => pkg.candidateVersion !== null);
     if (!versionsKnown) {
-      notices.push('Package versions are not available from the local apt index yet, so they are resolved from the official repository when the plan runs. Execution re-checks the resolved versions before installation.');
+      notices.push("Package versions are not available from the local apt index yet, so they are resolved from the official repository when the plan runs. Before installing, the run checks that every package's candidate comes from the official Docker repository, and installs nothing if one does not.");
     }
     stages.push({
       id: 'docker_packages',
@@ -511,7 +516,7 @@ export function buildBootstrapPlan(input: PlanBuildInput): BootstrapPlan {
     const volumeNames = facts.agent.dataVolumeNames.length > 0
       ? facts.agent.dataVolumeNames.join(', ')
       : PILOT_DATA_VOLUME;
-    notices.push(`The ${volumeNames} volume already exists. Execution verifies the stored Pilot identity before reusing it.`);
+    notices.push(`The ${volumeNames} volume already exists and is kept. Only a volume this bootstrap's own earlier attempt created gets this far; any other blocks the preflight.`);
   }
   if (previousAttempt) {
     notices.push('A previous bootstrap attempt was found in the agent directory. Execution reconciles it against this plan and never overwrites a file whose content differs.');
@@ -556,11 +561,11 @@ export function buildBootstrapPlan(input: PlanBuildInput): BootstrapPlan {
     ],
     versions,
     redactions: [
-      { placeholder: '{{SENCHO_ENROLL_TOKEN}}', purpose: 'Minted when the run reaches the Pilot files, after the Docker steps. Valid once, for 15 minutes, and never written to the plan.' },
+      { placeholder: '{{SENCHO_ENROLL_TOKEN}}', purpose: 'Minted when the run reaches the compose file, after the Docker steps. Valid once, for 15 minutes, and never written to the plan.' },
       { placeholder: '{{SSH_PRIVATE_KEY}}', purpose: 'Used for the preflight and, when you approve, for the run. Held in memory only, never stored, logged or returned.' },
     ],
     verification: [
-      { id: 'project-exists', title: `The ${PILOT_PROJECT_NAME} project exists`, expected: 'docker compose ls lists the project', slice: 'S2' },
+      { id: 'project-exists', title: `The ${PILOT_PROJECT_NAME} project exists`, expected: `docker inspect shows the ${PILOT_CONTAINER_NAME} container in the ${PILOT_PROJECT_NAME} project`, slice: 'S2' },
       { id: 'container-running', title: `The ${PILOT_CONTAINER_NAME} container is running`, expected: 'docker inspect reports running', slice: 'S2' },
       { id: 'labels-point-at-dir', title: 'Compose labels point at the chosen agent directory', expected: `${agentDir.input} in com.docker.compose.project.working_dir`, slice: 'S2' },
       { id: 'compose-mount', title: 'The Compose directory is mounted at the same path', expected: `bind source and target both equal ${composeDir.input}`, slice: 'S3' },

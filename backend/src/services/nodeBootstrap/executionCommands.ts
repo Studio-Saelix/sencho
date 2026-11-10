@@ -5,10 +5,11 @@ import { PILOT_CONTAINER_NAME, shellQuote } from './pathPolicy';
 /**
  * The fixed commands execution adds around the plan's own steps: writing a
  * planned file, reading one back, and the read-only checks that establish what
- * a step actually did. Each is a constant script; every value it takes (paths,
- * modes, owners) is passed as a quoted positional argument, never spliced into
- * the script, and file content travels on standard input so it never appears
- * in a process argument.
+ * a step actually did. The write and read scripts are constants that take
+ * every value (paths, modes, owners, the content hash) as a quoted positional
+ * argument; the other checks are constants with at most one `shellQuote`d path.
+ * File content travels on standard input, so it never appears in a process
+ * argument.
  */
 
 function withSudo(command: string, sudo: boolean): string {
@@ -20,18 +21,22 @@ export const WRITE_EXIT = {
   notDirectory: 20,
   exists: 17,
   notRegular: 21,
+  incomplete: 22,
 } as const;
 
 const WRITE_SCRIPT = [
   'set -eu',
   'umask 077',
-  'd=$1; n=$2; m=$3; o=$4; g=$5; nc=$6',
+  'd=$1; n=$2; m=$3; o=$4; g=$5; nc=$6; h=$7',
   `if [ ! -d "$d" ] || [ -L "$d" ]; then echo "not a directory: $d" >&2; exit ${WRITE_EXIT.notDirectory}; fi`,
   `if [ "$nc" = 1 ] && { [ -e "$d/$n" ] || [ -L "$d/$n" ]; }; then echo "already exists: $d/$n" >&2; exit ${WRITE_EXIT.exists}; fi`,
   `if [ -L "$d/$n" ] || { [ -e "$d/$n" ] && [ ! -f "$d/$n" ]; }; then echo "not a regular file: $d/$n" >&2; exit ${WRITE_EXIT.notRegular}; fi`,
   't=$(mktemp "$d/.$n.XXXXXX")',
   'trap \'rm -f "$t"\' EXIT',
   'cat > "$t"',
+  // Standard input ends early when the session drops; the hash keeps a short
+  // file from being renamed into place.
+  `if [ "$(sha256sum "$t" | cut -d' ' -f1)" != "$h" ]; then echo "content incomplete: $d/$n" >&2; exit ${WRITE_EXIT.incomplete}; fi`,
   'chown "$o:$g" "$t"',
   'chmod "$m" "$t"',
   'mv -fT "$t" "$d/$n"',
@@ -40,13 +45,13 @@ const WRITE_SCRIPT = [
 
 /**
  * Write standard input to `filePath` atomically: a temporary file in the same
- * directory gets the mode and owner first and is then renamed over the target.
- * With `noClobber` an existing entry fails the write instead of being replaced;
- * a symlink or non-regular entry is never written through.
+ * directory must hash to `sha256`, then gets the mode and owner and is renamed
+ * over the target. With `noClobber` an existing entry fails the write instead
+ * of being replaced; a symlink or non-regular entry is never written through.
  */
 export function writeFileCommand(
   filePath: string,
-  file: { mode: string; owner: string; group: string },
+  file: { mode: string; owner: string; group: string; sha256: string },
   options: { sudo: boolean; noClobber: boolean },
 ): string {
   const args = [
@@ -56,6 +61,7 @@ export function writeFileCommand(
     file.owner,
     file.group,
     options.noClobber ? '1' : '0',
+    file.sha256,
   ].map(shellQuote).join(' ');
   return withSudo(`sh -c ${shellQuote(WRITE_SCRIPT)} sencho-write ${args}`, options.sudo);
 }
