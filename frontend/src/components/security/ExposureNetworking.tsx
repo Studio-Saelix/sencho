@@ -15,7 +15,7 @@ function openNetworking(nodeId: number | undefined, stackName: string) {
   }));
 }
 
-/** The badge is the one-click trigger, so on a phone it takes the 44 px touch target; desktop keeps the inline text. */
+/** The badge is the one-click trigger, so below the md breakpoint it takes the 44 px touch target (inline-flex, or an inline button ignores the height); from md up it stays plain inline text. */
 const BADGE_TRIGGER_CLASS = 'hover:underline max-md:inline-flex max-md:min-h-11 max-md:items-center';
 
 function networkingActionLabel(ctx: ImageExposureContext): string {

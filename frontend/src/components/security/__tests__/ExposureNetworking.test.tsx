@@ -162,9 +162,11 @@ describe('phone touch targets', () => {
     expect(screen.getByRole('button', { name: label }).className).toMatch(PHONE);
   });
 
-  it('keeps the desktop classes on the badge', () => {
+  it('keeps the height and the flex layout phone-only on the badge', () => {
     render(<NetworkExposedControl contexts={[a]} imageRef="exp:1" nodeId={3} onIntentSaved={vi.fn()} />);
-    expect(screen.getByRole('button', { name: 'View networking for web/app' })).toHaveClass('hover:underline');
+    const badge = screen.getByRole('button', { name: 'View networking for web/app' });
+    expect(badge).toHaveClass('hover:underline', 'max-md:inline-flex', 'max-md:items-center');
+    expect(badge.className).not.toMatch(/(^|\s)(min-h-11|inline-flex)/);
   });
 
   it('gives the popover footer link and the list-row navigation the phone height', async () => {
