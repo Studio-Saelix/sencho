@@ -158,7 +158,7 @@ export function logInternalFailure(method: string, path: string, err: unknown): 
   console.error('Recovery: %s %s failed:', sanitizeForLog(method), sanitizeForLog(path), errorMessageForLog(err));
 }
 
-/** Run a handler and turn every thrown recovery error into its documented answer. */
+/** Answer a thrown recovery error with its documented status and body. */
 function sendThrown(req: Request, res: Response, err: unknown): void {
   const errorClass = classifyRecoveryError(err);
   if (errorClass === 'internal') {
@@ -180,6 +180,7 @@ function sendThrown(req: Request, res: Response, err: unknown): void {
   sendRecoveryError(res, errorClass, extra, err instanceof RecoveryError ? err.detail : undefined);
 }
 
+/** Run a handler and turn every thrown recovery error into its documented answer. */
 function handle(fn: (req: Request, res: Response) => Promise<void> | void) {
   return async (req: Request, res: Response): Promise<void> => {
     try {
