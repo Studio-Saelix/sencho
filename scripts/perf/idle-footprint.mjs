@@ -20,17 +20,18 @@
  *   memory   median container memory (docker stats MemUsage) more than 20% higher
  *   requests /api requests per minute from the tab more than 50% higher
  * Mean CPU more than 50% and more than 1 point higher is reported as `higher`
- * but does not fail the run: on a shared bench it moved from 1.6% to 4.9%
- * between two runs of the same image.
+ * but does not fail the run: on a shared host CPU varies more between runs of
+ * the same image than memory or request rate do.
  *
  * A run that cannot vouch for its numbers fails and records nothing: the
  * instance at `--url` must be the one in `--container` (started within 30 s
- * of it and, when the container publishes ports, publishing the URL's port),
+ * of it and, when the container publishes ports, publishing the URL's port;
+ * point `--url` at the published port, not at a reverse proxy in front),
  * neither the container nor the Sencho process may restart during the run,
  * the tab must make /api requests with no 401 or 403 and no more than 10%
  * failures, and every docker stats sample must be readable.
  *
- * The account must be a local admin without MFA. Credentials come from
+ * The account must be a local user without MFA that can open the Dashboard. Credentials come from
  * SENCHO_USERNAME and SENCHO_PASSWORD and are never written to the record;
  * export them from a secrets source rather than typing them on the command
  * line, where they would land in shell history.
@@ -55,8 +56,8 @@ const DEFAULTS = {
 const NUMERIC = new Set(['minutes', 'settle-seconds', 'sample-seconds'])
 const CONTAINER_NAME = /^[A-Za-z0-9][A-Za-z0-9_.-]*$/
 const COMMAND_TIMEOUT_MS = 60_000
-// The meta start time and the container start time are taken by different
-// clocks a moment apart; anything closer than this is the same start.
+// The Sencho process starts shortly after its container; a start gap within
+// this is the same instance.
 const START_TOLERANCE_MS = 30_000
 export const MIN_SAMPLES = 5
 export const MAX_FAILED_SHARE = 0.1
@@ -196,6 +197,11 @@ export function previousRecord(history, label, baselineLabel = null) {
   return null
 }
 
+/** Throws before a run is spent when `--baseline-label` names a record the history lacks. */
+export function assertBaselineExists(history, baselineLabel) {
+  if (baselineLabel) previousRecord(history, null, baselineLabel)
+}
+
 const usable = (n) => typeof n === 'number' && Number.isFinite(n) && n > 0
 
 /**
@@ -224,7 +230,10 @@ export function exitCode(rows) {
 
 export function formatTable(rows, previousLabel) {
   const lines = [`| Metric | Now | ${previousLabel ?? 'Previous'} | Status |`, '|---|---:|---:|---|']
-  for (const r of rows) lines.push(`| ${r.metric} | ${r.now} | ${r.before ?? '-'} | ${r.status} |`)
+  for (const r of rows) {
+    const status = r.status === 'higher' ? 'higher (not gated)' : r.status
+    lines.push(`| ${r.metric} | ${r.now} | ${r.before ?? '-'} | ${status} |`)
+  }
   return lines.join('\n')
 }
 
@@ -251,8 +260,12 @@ async function containerState(options) {
   const format = '{{json .Config.Image}} {{json .Image}} {{json .State.StartedAt}} {{json .RestartCount}} {{json .NetworkSettings.Ports}}'
   const { stdout } = await docker(options, ['inspect', '--format', format, options.container])
   const [image, imageId, startedAt, restartCount, ports] = stdout.trim().split(' ').map((v) => JSON.parse(v))
-  const hostPorts = Object.values(ports ?? {}).flat().filter(Boolean).map((p) => Number(p.HostPort))
-  return { image, imageId, startedAt, restartCount, hostPorts }
+  return { image, imageId, startedAt, restartCount, hostPorts: hostPortsOf(ports) }
+}
+
+/** Host ports from `NetworkSettings.Ports`; exposed but unpublished ports map to null and are skipped. */
+export function hostPortsOf(ports) {
+  return Object.values(ports ?? {}).flat().filter(Boolean).map((p) => Number(p.HostPort))
 }
 
 async function instanceMeta(url) {
@@ -276,7 +289,7 @@ export function assertSameInstance(meta, state, url) {
   const { port, protocol } = new URL(url)
   const urlPort = Number(port || (protocol === 'https:' ? 443 : 80))
   if (state.hostPorts.length > 0 && !state.hostPorts.includes(urlPort)) {
-    throw new Error(`The container publishes ports ${state.hostPorts.join(', ')}, not ${urlPort} from --url; --container or --ssh names a different instance`)
+    throw new Error(`The container publishes ports ${state.hostPorts.join(', ')}, not ${urlPort} from --url; point --url at a published port, or --container or --ssh names a different instance`)
   }
 }
 
@@ -302,7 +315,7 @@ async function openDashboard(url, watch) {
   }
 }
 
-/** Counts the tab's API and WebSocket traffic while `active` is true. */
+/** Counts API requests and WebSocket frames while `active`, and the outcomes of those requests. */
 function watchTraffic(page) {
   const traffic = {
     active: false, total: 0, failed: 0, authFailures: 0, websocketOpens: 0, websocketFrames: 0, counts: new Map(),
@@ -403,8 +416,7 @@ async function main(args) {
   const options = parseArgs(args)
   const history = readHistory(options.history)
   if (history.length === 0) console.error(`Starting a new history at ${options.history}`)
-  // Fail before the measurement, not after it, when the named baseline is not there.
-  if (options['baseline-label']) previousRecord(history, null, options['baseline-label'])
+  assertBaselineExists(history, options['baseline-label'])
   const record = await measure(options)
   const previous = previousRecord(history, record.label, options['baseline-label'])
   const rows = compare(record, previous)
@@ -427,8 +439,8 @@ async function main(args) {
   console.log(`\nWebSocket: ${record.websocketOpens} opened, ${record.websocketFramesPerMinute} frames per minute. Failed /api requests: ${record.failedRequests}.`)
   console.log(`Busiest paths: ${record.topPaths.join(', ')}`)
   for (const r of rows.filter((row) => row.status === 'grew' || row.status === 'higher')) {
-    const note = r.status === 'higher' ? ' (reported, not gated: rerun to tell a trend from bench noise)' : ''
-    console.error(`${r.metric} grew from ${r.before} to ${r.now} since ${previous.label}${note}.`)
+    const verb = r.status === 'grew' ? 'grew' : 'is higher (not gated; rerun to tell a trend from noise)'
+    console.error(`${r.metric} ${verb}: ${r.before} to ${r.now} since ${previous.label}.`)
   }
   return exitCode(rows)
 }

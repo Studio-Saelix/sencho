@@ -14,8 +14,8 @@ import { describe, it } from 'node:test'
 import assert from 'node:assert/strict'
 
 import {
-  MIN_SAMPLES, apiPath, assertSameInstance, buildRecord, compare, exitCode, formatTable, parseArgs, parseDockerStats,
-  parseSize, previousRecord, shellQuote, summarizeSamples, topPaths,
+  MIN_SAMPLES, apiPath, assertBaselineExists, assertSameInstance, buildRecord, compare, exitCode, formatTable, hostPortsOf,
+  parseArgs, parseDockerStats, parseSize, previousRecord, shellQuote, summarizeSamples, topPaths,
 } from './idle-footprint.mjs'
 
 describe('parseSize and parseDockerStats', () => {
@@ -121,10 +121,21 @@ describe('assertSameInstance', () => {
     assert.throws(() => assertSameInstance({}, state('2026-11-09T10:00:00Z'), url), /different instance/)
   })
 
-  it('rejects a container that does not publish the URL port', () => {
-    const sameStart = { startedAt: '2026-11-09T10:00:01Z' }
-    assert.throws(() => assertSameInstance(sameStart, state('2026-11-09T10:00:00Z', [1853]), url), /publishes ports 1853, not 1852/)
-    assert.throws(() => assertSameInstance(sameStart, state('2026-11-09T10:00:00Z', [8080]), 'https://h'), /not 443/)
+  it('rejects a container that does not publish the URL port, including the scheme defaults', () => {
+    const closeStart = { startedAt: '2026-11-09T10:00:01Z' }
+    assert.throws(() => assertSameInstance(closeStart, state('2026-11-09T10:00:00Z', [1853]), url), /publishes ports 1853, not 1852/)
+    assert.throws(() => assertSameInstance(closeStart, state('2026-11-09T10:00:00Z', [8080]), 'https://h'), /not 443/)
+    assert.throws(() => assertSameInstance(closeStart, state('2026-11-09T10:00:00Z', [8080]), 'http://h'), /not 80/)
+    assert.doesNotThrow(() => assertSameInstance(closeStart, state('2026-11-09T10:00:00Z', [80]), 'http://h'))
+  })
+})
+
+describe('hostPortsOf', () => {
+  it('lists published host ports and skips exposed-only ports and host networking', () => {
+    const ports = { '1852/tcp': [{ HostIp: '0.0.0.0', HostPort: '1852' }, { HostIp: '::', HostPort: '1852' }], '9000/tcp': null }
+    assert.deepEqual(hostPortsOf(ports), [1852, 1852])
+    assert.deepEqual(hostPortsOf({}), [])
+    assert.deepEqual(hostPortsOf(null), [])
   })
 })
 
@@ -138,6 +149,12 @@ describe('previousRecord', () => {
   it('uses the named baseline label when given, and fails when it is not in the history', () => {
     assert.equal(previousRecord(history, '0.98.3', '0.98.1').label, '0.98.1')
     assert.throws(() => previousRecord(history, '0.98.3', '0.97.0'), /No record labelled "0.97.0"/)
+  })
+
+  it('checks a named baseline exists before any measurement', () => {
+    assert.doesNotThrow(() => assertBaselineExists(history, null))
+    assert.doesNotThrow(() => assertBaselineExists(history, '0.98.1'))
+    assert.throws(() => assertBaselineExists(history, '0.97.0'), /No record labelled "0.97.0"/)
   })
 
   it('returns null when only the current label has been measured', () => {
@@ -201,6 +218,7 @@ describe('compare and exitCode', () => {
     assert.match(table, /^\| Metric \| Now \| 0\.98\.2 \| Status \|/)
     assert.match(table, /\| memory median MiB \| 241 \| 200 \| grew \|/)
     assert.match(table, /\| requests per minute \| 10 \| 10 \| ok \|/)
+    assert.match(formatTable(compare({ ...base, cpuMeanPct: 9 }, previous)), /\| cpu mean % \| 9 \| 2 \| higher \(not gated\) \|/)
     const noBaseline = formatTable(compare(base, null))
     assert.match(noBaseline, /^\| Metric \| Now \| Previous \| Status \|/)
     assert.match(noBaseline, /\| memory median MiB \| 200 \| - \| no baseline \|/)
