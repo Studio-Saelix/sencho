@@ -138,3 +138,42 @@ describe('multi-context trigger names', () => {
     expect(screen.getByRole('button', { name: 'View networking' })).toBeInTheDocument();
   });
 });
+
+describe('phone touch targets', () => {
+  const PHONE = /max-md:min-h-11/;
+  const a: ImageExposureContextRef = { imageRef: 'exp:1', stackName: 'web', serviceName: 'app', exposureReason: 'published-port', intentStatus: 'unset' };
+  const b: ImageExposureContextRef = { imageRef: 'exp:1', stackName: 'jobs', serviceName: 'worker', exposureReason: 'published-port', intentStatus: 'unset' };
+
+  it.each([
+    ['a single context that sets its intent in place', true],
+    ['a single context that only names the networking', false],
+  ])('gives the badge of %s the phone height', (_name, canEdit) => {
+    auth.can.mockReturnValue(canEdit);
+    render(<NetworkExposedControl contexts={[a]} imageRef="exp:1" nodeId={3} onIntentSaved={vi.fn()} />);
+    expect(screen.getByRole('button', { name: /^(Network exposed: set intent|View networking) for web\/app$/ }).className).toMatch(PHONE);
+  });
+
+  it.each([
+    ['the rows carry a verb', true, 'Network exposed: choose a service'],
+    ['no row can set an intent', false, 'View networking contexts'],
+  ])('gives the multi-context badge the phone height when %s', (_name, canEdit, label) => {
+    auth.can.mockReturnValue(canEdit);
+    render(<NetworkExposedControl contexts={[a, b]} imageRef="exp:1" nodeId={3} onIntentSaved={vi.fn()} />);
+    expect(screen.getByRole('button', { name: label }).className).toMatch(PHONE);
+  });
+
+  it('keeps the desktop classes on the badge', () => {
+    render(<NetworkExposedControl contexts={[a]} imageRef="exp:1" nodeId={3} onIntentSaved={vi.fn()} />);
+    expect(screen.getByRole('button', { name: 'View networking for web/app' })).toHaveClass('hover:underline');
+  });
+
+  it('gives the popover footer link and the list-row navigation the phone height', async () => {
+    auth.can.mockReturnValue(true);
+    render(<NetworkExposedControl contexts={[a, b]} imageRef="exp:1" nodeId={3} onIntentSaved={vi.fn()} />);
+    await userEvent.click(screen.getByRole('button', { name: 'Network exposed: choose a service' }));
+    const rowNav = (await screen.findAllByTitle('Open stack networking'))[0]!;
+    expect(rowNav.className).toMatch(PHONE);
+    await userEvent.click(await screen.findByRole('button', { name: 'Set intent for web/app' }));
+    expect((await screen.findByRole('button', { name: 'Open stack networking' })).className).toMatch(PHONE);
+  });
+});

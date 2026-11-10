@@ -15,6 +15,9 @@ function openNetworking(nodeId: number | undefined, stackName: string) {
   }));
 }
 
+/** The badge is the one-click trigger, so on a phone it takes the 44 px touch target; desktop keeps the inline text. */
+const BADGE_TRIGGER_CLASS = 'hover:underline max-md:inline-flex max-md:min-h-11 max-md:items-center';
+
 function networkingActionLabel(ctx: ImageExposureContext): string {
   return ctx.intentConflict ? 'Review networking' : 'View networking';
 }
@@ -39,7 +42,7 @@ function OpenNetworkingLink({ nodeId, stackName }: { nodeId: number; stackName: 
   return (
     <button
       type="button"
-      className="text-xs font-medium text-brand hover:underline"
+      className="text-xs font-medium text-brand hover:underline max-md:min-h-11"
       onClick={() => openNetworking(nodeId, stackName)}
     >
       Open stack networking
@@ -93,7 +96,7 @@ function NetworkingContextList({
           >
             <button
               type="button"
-              className="flex min-w-0 flex-1 items-start justify-between gap-2 text-left"
+              className="flex min-w-0 flex-1 items-start justify-between gap-2 text-left max-md:min-h-11"
               title="Open stack networking"
               onClick={() => openNetworking(nodeId, ctx.stackName)}
             >
@@ -181,7 +184,7 @@ export function NetworkExposedControl({
     const badgeButton = (
       <button
         type="button"
-        className="hover:underline"
+        className={BADGE_TRIGGER_CLASS}
         title={tunnelLabel}
         onClick={(e) => {
           e.stopPropagation();
@@ -211,7 +214,7 @@ export function NetworkExposedControl({
       <PopoverTrigger asChild>
         <button
           type="button"
-          className="hover:underline"
+          className={BADGE_TRIGGER_CLASS}
           onClick={(e) => e.stopPropagation()}
           aria-label={choosesService ? 'Network exposed: choose a service' : 'View networking contexts'}
         >
