@@ -47,6 +47,7 @@ Commands, UI paths, or both. CI passing is not a substitute for this.
 
 - [ ] CLA check must pass ([CLA.md](https://github.com/studio-saelix/sencho/blob/main/CLA.md); you will be prompted on your first PR)
 - [ ] Tests added or updated, or this change does not need them
+- [ ] Any new polling, per-item or per-node requests, unbounded storage, or heavy dependency is called out in the summary with its interval or limit, or this change adds none
 - [ ] Docs updated if user-facing behavior, labels, or defaults changed
 - [ ] Lint and typecheck pass locally (`npm run lint` and `npx tsc --noEmit` in `backend/` and/or `frontend/` as applicable)
 - [ ] Commit messages and the PR title follow [Conventional Commits](https://www.conventionalcommits.org/) (the CHANGELOG line comes from the subject; do not edit `CHANGELOG.md`)
