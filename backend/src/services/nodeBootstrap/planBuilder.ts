@@ -556,8 +556,8 @@ export function buildBootstrapPlan(input: PlanBuildInput): BootstrapPlan {
     ],
     versions,
     redactions: [
-      { placeholder: '{{SENCHO_ENROLL_TOKEN}}', purpose: 'Minted when execution starts, valid for 15 minutes and never written to the plan.' },
-      { placeholder: '{{SSH_PRIVATE_KEY}}', purpose: 'Used only for this preflight and never stored, logged or returned.' },
+      { placeholder: '{{SENCHO_ENROLL_TOKEN}}', purpose: 'Minted when the run reaches the Pilot files, after the Docker steps. Valid once, for 15 minutes, and never written to the plan.' },
+      { placeholder: '{{SSH_PRIVATE_KEY}}', purpose: 'Used for the preflight and, when you approve, for the run. Held in memory only, never stored, logged or returned.' },
     ],
     verification: [
       { id: 'project-exists', title: `The ${PILOT_PROJECT_NAME} project exists`, expected: 'docker compose ls lists the project', slice: 'S2' },

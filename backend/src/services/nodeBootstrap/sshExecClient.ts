@@ -128,10 +128,11 @@ class Ssh2ExecSession implements ExecSession {
       let settled = false;
       let timedOut = false;
       let channel: ClientChannel | null = null;
+      let timer: NodeJS.Timeout | null = null;
       const settle = (exitCode: number | null, error: ExecResult['error']) => {
         if (settled) return;
         settled = true;
-        clearTimeout(timer);
+        if (timer) clearTimeout(timer);
         this.pending.delete(onLost);
         resolve({
           exitCode,
@@ -150,7 +151,7 @@ class Ssh2ExecSession implements ExecSession {
       this.pending.add(onLost);
       // The deadline starts before the exec request, so a peer that never
       // acknowledges it cannot hold the step open.
-      const timer = setTimeout(() => {
+      timer = setTimeout(() => {
         timedOut = true;
         try {
           channel?.destroy();

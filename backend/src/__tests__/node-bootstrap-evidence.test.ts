@@ -207,9 +207,64 @@ describe('bootstrap evidence: conflicts and network', () => {
     }), 'agent_conflict').status).toBe('blocked');
   });
 
-  it('warns about a data volume without a project and reports unknown when unreadable', () => {
-    expect(check(makeFacts({ agent: { dataVolumeExists: true } }), 'agent_conflict').status).toBe('warn');
+  it('blocks a data volume without a project, since it can hold another Pilot identity, and reports unknown when unreadable', () => {
+    const volume = check(makeFacts({ agent: { dataVolumeExists: true } }), 'agent_conflict');
+    expect(volume.status).toBe('blocked');
+    expect(volume.summary).toMatch(/another Pilot's identity/);
     expect(check(makeFacts({ agent: { dataVolumeExists: null } }), 'agent_conflict').status).toBe('unknown');
+  });
+
+  describe('a retry of an operation that reached its start step', () => {
+    const ownMarker = {
+      exists: true,
+      isDirectory: true,
+      entries: ['compose.yaml', 'sencho-bootstrap.json'],
+      hasMarker: true,
+      hasComposeFile: true,
+      markerProject: 'sencho-agent',
+      markerComposeDir: '/opt/docker/sencho',
+      markerAgentDir: '/opt/sencho-agent',
+    };
+    const ownContainer = [{ name: 'sencho-agent', workingDir: '/opt/sencho-agent', configFiles: null, image: 'saelix/sencho:latest', status: 'Up' }];
+    const owned = { nodeNameOwned: true, agentStarted: true };
+    const ownedCheck = (facts: BootstrapFacts, ownership = owned) => buildBootstrapEvidence({
+      facts, nodeNameTaken: true, targetName: 'media-server', owned: ownership,
+    });
+
+    it('reconciles its own Pilot container and volume instead of blocking', () => {
+      const facts = makeFacts({ agent: { projectContainers: ownContainer, dataVolumeExists: true }, agentDir: ownMarker });
+      const result = ownedCheck(facts);
+      expect(result.checks.find((entry) => entry.id === 'agent_conflict')?.status).toBe('warn');
+      expect(result.checks.find((entry) => entry.id === 'node_name')?.status).toBe('pass');
+      const volumeOnly = ownedCheck(makeFacts({ agent: { dataVolumeExists: true }, agentDir: ownMarker }));
+      expect(volumeOnly.checks.find((entry) => entry.id === 'agent_conflict')?.status).toBe('warn');
+    });
+
+    it('still blocks a container running from another directory, a foreign marker, or an unstarted operation', () => {
+      const elsewhere = makeFacts({
+        agent: { projectContainers: [{ ...ownContainer[0], workingDir: '/srv/other' }] },
+        agentDir: ownMarker,
+      });
+      expect(ownedCheck(elsewhere).checks.find((entry) => entry.id === 'agent_conflict')?.status).toBe('blocked');
+      const foreignMarker = makeFacts({ agent: { projectContainers: ownContainer }, agentDir: { ...ownMarker, markerComposeDir: '/srv/stacks' } });
+      expect(ownedCheck(foreignMarker).checks.find((entry) => entry.id === 'agent_conflict')?.status).toBe('blocked');
+      const unstarted = makeFacts({ agent: { projectContainers: ownContainer, dataVolumeExists: true }, agentDir: ownMarker });
+      expect(ownedCheck(unstarted, { nodeNameOwned: true, agentStarted: false }).checks.find((entry) => entry.id === 'agent_conflict')?.status).toBe('blocked');
+    });
+
+    it('does not trust an incomplete container inventory', () => {
+      const facts = makeFacts({
+        agent: { projectContainers: ownContainer },
+        agentDir: ownMarker,
+        containers: { complete: false, error: 'truncated' },
+      });
+      expect(ownedCheck(facts).checks.find((entry) => entry.id === 'agent_conflict')?.status).toBe('blocked');
+    });
+
+    it('keeps a name taken by another node blocked', () => {
+      const result = ownedCheck(makeFacts(), { nodeNameOwned: false, agentStarted: false });
+      expect(result.checks.find((entry) => entry.id === 'node_name')?.status).toBe('blocked');
+    });
   });
 
   it('blocks a non-root user without sudo when any planned stage needs it', () => {
@@ -383,7 +438,7 @@ describe('bootstrap evidence: working Docker and repository provenance', () => {
       agent: { dataVolumeExists: true, dataVolumeNames: ['sencho-agent_sencho-agent-data'] },
     }));
     const row = result.checks.find((entry) => entry.id === 'agent_conflict');
-    expect(row?.status).toBe('warn');
+    expect(row?.status).toBe('blocked');
     expect(row?.observed).toBe('sencho-agent_sencho-agent-data');
   });
 });
