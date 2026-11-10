@@ -107,10 +107,10 @@ describe('exposure intent routes', () => {
 });
 
 /**
- * A save whose client gave up on it (the browser times out after 30 seconds and
- * sends the next) is still being worked on by the node. The node applies saves
- * to one stack in the order they arrived, so that save cannot land after a later
- * one that already replied and undo it.
+ * A save whose client gave up on it (the browser times out and sends the next)
+ * is still being worked on by the node. The node applies saves to one stack in
+ * the order they arrived, so that save cannot land after a later one that
+ * already replied and undo it.
  */
 describe('exposure intent saves that overlap', () => {
   const OTHER = 'exproute-other';
@@ -226,6 +226,50 @@ describe('exposure intent saves that overlap', () => {
     expect(other.status).toBe(200);
     hold.release();
     expect((await held).status).toBe(200);
+  });
+
+  it('applies the next save after one refused for an invalid body', async () => {
+    const hold = holdValidationOf(STACK);
+    const invalid = put(STACK, { service: 'api', intent: 'bogus' }).then((res) => res);
+    await hold.reachedHold;
+    const next = put(STACK, { service: 'api', intent: 'public' }).then((res) => res);
+    await sleep(50);
+    hold.release();
+    expect((await invalid).status).toBe(400);
+    expect((await next).status).toBe(200);
+    expect(await intents(STACK)).toEqual([expect.objectContaining({ service: 'api', intent: 'public' })]);
+  });
+
+  it('refuses a session that may not edit at once, without waiting behind a held save', async () => {
+    const hold = holdValidationOf(STACK);
+    const held = put(STACK, { service: 'api', intent: 'lan' }).then((res) => res);
+    await hold.reachedHold;
+    const denied = await request(app).put(`/api/stacks/${STACK}/exposure`)
+      .set('Authorization', `Bearer ${readOnlyToken}`).send({ service: 'api', intent: 'public' });
+    expect(denied.status).toBe(403);
+    hold.release();
+    expect((await held).status).toBe(200);
+    expect(await intents(STACK)).toEqual([expect.objectContaining({ service: 'api', intent: 'lan' })]);
+  });
+
+  it('records each queued save under the user who made it', async () => {
+    const db = DatabaseService.getInstance();
+    const other = 'exproute-second-user';
+    db.addUser({ username: other, password_hash: 'unused', role: 'admin' });
+    const otherHeader = `Bearer ${jwt.sign({ username: other }, TEST_JWT_SECRET, { expiresIn: '5m' })}`;
+    const hold = holdValidationOf(STACK);
+    const first = put(STACK, { service: 'api', intent: 'lan' }).then((res) => res);
+    await hold.reachedHold;
+    const second = request(app).put(`/api/stacks/${STACK}/exposure`).set('Authorization', otherHeader)
+      .send({ service: 'worker', intent: 'public' }).then((res) => res);
+    await sleep(50);
+    hold.release();
+    await Promise.all([first, second]);
+    const rows = await intents(STACK);
+    expect(rows).toEqual([
+      expect.objectContaining({ service: 'api', intent: 'lan', updatedBy: TEST_USERNAME }),
+      expect.objectContaining({ service: 'worker', intent: 'public', updatedBy: other }),
+    ]);
   });
 
   it('applies the next save after one that found the stack gone', async () => {

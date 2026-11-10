@@ -145,10 +145,11 @@ networking instead. A confirmed save is reflected on the row even when the follo
 fails, and a later successful refresh replaces it. Saves to the same stack are sent one at a time
 in the order you make them, so a save waits for the one before it and each stays reflected
 however slowly the earlier ones are answered. A save with no reply after 30 seconds is reported
-as timed out and the next one goes ahead; the node may still apply the timed-out save. It applies
-the saves to a stack in the order they reach the node that owns it, so a save it received before
-a later one lands first and never replaces the later one, and a later save waits behind a stalled
-one on the node and may time out too. Refresh to see what the node holds. A service the row's list
+as timed out and the next one goes ahead; the node may still apply the timed-out save. A node on
+this version applies saves to a stack in the order they reach it, so a save it received first is
+applied first and the later save stays final. A later save waits behind a stalled one on the
+node and may time out too. A node running an older version does not order saves this way, so
+update it before relying on this. Refresh to see what the node holds. A service the row's list
 was too short to show joins the list once you save it, with its action. A warning that may involve
 services the row does not list stays visible until a refresh, or until you have saved every one
 of those services from here.

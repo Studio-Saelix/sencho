@@ -1,3 +1,6 @@
+/** The tail of each key's chain of work, so the next piece of work knows what to wait for. State is process-local, like the process that owns the data being written. */
+const chains = new Map<string, Promise<void>>();
+
 /**
  * Runs the work for one key one after another, in the order `inArrivalOrder` was
  * called, however long an earlier one takes. The call must come before the
@@ -8,11 +11,8 @@
  * Work that throws or rejects does not hold up the work behind it, but work that
  * never settles does: the work behind it waits too, until the process restarts.
  * Bounding the queue instead would let the abandoned work run after the work
- * behind it, which is the reordering this exists to prevent. State is
- * process-local, like the process that owns the data being written.
+ * behind it, which is the reordering this exists to prevent.
  */
-const chains = new Map<string, Promise<void>>();
-
 export function inArrivalOrder<T>(key: string, work: () => Promise<T>): Promise<T> {
   const turn = (chains.get(key) ?? Promise.resolve()).then(work);
   const tail = turn.then(() => undefined, () => undefined);

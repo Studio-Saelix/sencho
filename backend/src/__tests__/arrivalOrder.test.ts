@@ -49,4 +49,21 @@ describe('inArrivalOrder', () => {
     await Promise.all([secondDone, third]);
     expect(ran).toEqual(['first', 'second', 'third']);
   });
+
+  it('keeps the same stack name on another node independent, as the route keys it', async () => {
+    const slow = deferred();
+    const held = inArrivalOrder('1\0web', () => slow.promise);
+    await expect(inArrivalOrder('2\0web', async () => 'done')).resolves.toBe('done');
+    slow.resolve();
+    await held;
+  });
+
+  it('holds later work behind work that never settles, so abandoned work cannot run after it', async () => {
+    const ran: string[] = [];
+    void inArrivalOrder('wedged', () => new Promise<void>(() => {}));
+    const later = inArrivalOrder('wedged', async () => { ran.push('later'); });
+    await new Promise((r) => setTimeout(r, 30));
+    expect(ran).toEqual([]);
+    void later;
+  });
 });

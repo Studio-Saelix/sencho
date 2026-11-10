@@ -12,7 +12,7 @@ export function asIntents(body: unknown): IntentEntry[] | null {
   return Array.isArray(list) ? (list as IntentEntry[]) : null;
 }
 
-/** How long a save may wait for its reply before it counts as timed out, not confirmed, and the saves behind it go ahead. */
+/** How long a save may wait for its reply before it counts as timed out (not confirmed) and the saves behind it go ahead. */
 const SAVE_TIMEOUT_MS = 30_000;
 
 /** The tail of each node and stack's chain of saves, so the next one knows what to wait for. */
@@ -28,10 +28,10 @@ const saveChains = new Map<string, Promise<void>>();
  * rows of the saves before it and a later reply is always the newer one. A save
  * that fails, or whose reply does not come within `SAVE_TIMEOUT_MS`, does not
  * hold up the ones behind it here. Abandoning a save's request does not stop the
- * node working on it, so a timed-out save may still be applied later. The node
- * applies saves to a stack in the order they reach the node that owns it, so once it has received
- * the timed-out save it applies it before the saves sent after it, and a later
- * save waits behind it there if it is stalled.
+ * node working on it, so a timed-out save may still be applied later. A node on
+ * this version applies saves to a stack in the order they reach it, so a save it
+ * has received is applied before the saves sent after it, and a later save waits
+ * behind it there if it is stalled.
  */
 function inOrder<T>(key: string, run: () => Promise<T>): Promise<T> {
   const turn = (saveChains.get(key) ?? Promise.resolve()).then(run);
