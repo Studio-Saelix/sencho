@@ -447,6 +447,7 @@ jobs:
           node --check scripts/release-highlights.mjs
           node --check scripts/audit-with-vex.mjs
           node --check scripts/check-pr-title.mjs
+          node --check scripts/perf/idle-footprint.mjs
           node --check scripts/check-version-transition.mjs
 
       - name: Unit tests
@@ -456,5 +457,6 @@ jobs:
           node --test scripts/release-highlights.test.mjs
           node --test scripts/audit-with-vex.test.mjs
           node --test scripts/check-pr-title.test.mjs
+          node --test scripts/perf/idle-footprint.test.mjs
           node --test scripts/check-workflow-expressions.test.mjs
           node --test scripts/check-version-transition.test.mjs
