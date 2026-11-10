@@ -155,7 +155,65 @@ export interface BootstrapHostKeyResult {
   pinnedFingerprint: string | null;
 }
 
-export type BootstrapStep = 'target' | 'preflight' | 'plan';
+export type BootstrapStep = 'target' | 'preflight' | 'plan' | 'run';
+
+/** Lifecycle of an approved run, as the hub records it. */
+export type BootstrapOperationState =
+  | 'rechecking'
+  | 'running'
+  | 'enrolling'
+  | 'enrolled'
+  | 'blocked'
+  | 'failed'
+  | 'partial'
+  | 'cancelled'
+  | 'outcome_unknown'
+  | 'recovery_required';
+
+export interface BootstrapOperationEvent {
+  at: number;
+  attempt: number;
+  stage: string | null;
+  step: string | null;
+  status: 'started' | 'done' | 'skipped' | 'failed' | 'unknown' | 'info';
+  message: string;
+  detail: string | null;
+}
+
+export interface BootstrapOperation {
+  id: string;
+  targetName: string;
+  host: string;
+  port: number;
+  username: string;
+  address: string;
+  hostKeyFingerprint: string;
+  composeDir: string;
+  agentDir: string;
+  planDigest: string;
+  approvedBy: string;
+  approvedAt: number;
+  attempt: number;
+  state: BootstrapOperationState;
+  stage: string | null;
+  step: string | null;
+  nodeId: number | null;
+  changesMade: boolean;
+  active: boolean;
+  cancelRequested: boolean;
+  error: { code: string; message: string } | null;
+  enrollmentExpiresAt: number | null;
+  createdAt: number;
+  updatedAt: number;
+  finishedAt: number | null;
+  /** The verbs the hub offers for this operation right now. */
+  actions: { cancel: boolean; retry: boolean; release: boolean };
+}
+
+export interface BootstrapOperationDetail extends BootstrapOperation {
+  plan: BootstrapPlan;
+  events: BootstrapOperationEvent[];
+}
 
 /** What an edit made stale; it picks the wording of the banner that explains it. */
 export type BootstrapInvalidation = 'name' | 'paths' | 'key' | 'target';

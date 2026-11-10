@@ -1,12 +1,16 @@
-import { useEffect, useRef } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { AlertTriangle } from 'lucide-react';
-import { Modal, ModalBody, ModalFooter, ModalHeader } from '@/components/ui/modal';
+import { ConfirmModal, Modal, ModalBody, ModalFooter, ModalHeader } from '@/components/ui/modal';
 import { Button } from '@/components/ui/button';
 import { BusyButton } from '@/components/ui/busy-button';
 import { cn } from '@/lib/utils';
 import { BootstrapTargetStep } from './BootstrapTargetStep';
 import { BootstrapPreflightStep } from './BootstrapPreflightStep';
 import { BootstrapPlanStep } from './BootstrapPlanStep';
+import { BootstrapRunStep } from './BootstrapRunStep';
+import { BootstrapOperationsList } from './BootstrapOperationsList';
+import { isOperationRunning } from './operationStatus';
+import { useBootstrapOperation, type UseBootstrapOperation } from './useBootstrapOperation';
 import { FirstTrustPrompt } from './FirstTrustPrompt';
 import { HostKeyCompare } from './HostKeyCompare';
 import { INVALIDATION_MESSAGE } from './invalidation';
@@ -17,16 +21,17 @@ const STEPS: Array<{ id: BootstrapStep; label: string }> = [
   { id: 'target', label: 'Server' },
   { id: 'preflight', label: 'Preflight' },
   { id: 'plan', label: 'Plan' },
+  { id: 'run', label: 'Run' },
 ];
 
 function StepRail({ step, reachablePlan }: { step: BootstrapStep; reachablePlan: boolean }) {
   const activeIndex = STEPS.findIndex((entry) => entry.id === step);
   return (
-    <div className="grid grid-cols-3 border-b border-card-border/60" role="list" aria-label="Bootstrap steps">
+    <div className="grid grid-cols-4 border-b border-card-border/60" role="list" aria-label="Bootstrap steps">
       {STEPS.map((entry, index) => {
         const isActive = index === activeIndex;
         const isComplete = index < activeIndex;
-        const unreachable = entry.id === 'plan' && !reachablePlan;
+        const unreachable = (entry.id === 'plan' && !reachablePlan && step !== 'run') || (entry.id === 'run' && step !== 'run');
         return (
           <div
             key={entry.id}
@@ -53,7 +58,17 @@ function StepRail({ step, reachablePlan }: { step: BootstrapStep; reachablePlan:
   );
 }
 
-function FooterActions({ wizard, onClose }: { wizard: UseNodeBootstrap; onClose: () => void }) {
+function FooterActions({
+  wizard,
+  run,
+  onClose,
+  onApprove,
+}: {
+  wizard: UseNodeBootstrap;
+  run: UseBootstrapOperation;
+  onClose: () => void;
+  onApprove: () => void;
+}) {
   const { step, busy, hostKey, trusted, replacing, result, resultIsCurrent, runPreflight, checkHostKey, back } = wizard;
   const checkingKey = busy === 'host-key';
   const running = busy === 'preflight';
@@ -97,21 +112,101 @@ function FooterActions({ wizard, onClose }: { wizard: UseNodeBootstrap; onClose:
     );
   }
 
+  if (step === 'run') {
+    const operation = run.operation;
+    const running = operation !== null && isOperationRunning(operation);
+    return (
+      <ModalFooter
+        primary={<Button size="sm" onClick={onClose}>{running ? 'Close' : 'Done'}</Button>}
+        hint={running
+          ? 'The run continues on the hub after you close this window.'
+          : operation?.state === 'enrolled'
+            ? 'Readiness for deployments is not verified by this run.'
+            : undefined}
+      />
+    );
+  }
+
   return (
     <ModalFooter
       secondary={<Button variant="outline" size="sm" onClick={back}>Back to inspection</Button>}
-      primary={<Button size="sm" onClick={onClose}>{planShown ? 'Done' : 'Close'}</Button>}
-      hint="No changes have been made on this server."
+      primary={planShown ? (
+        <Button size="sm" onClick={onApprove} disabled={busy !== null}>
+          {wizard.retryOf ? 'Approve and retry' : 'Approve and run'}
+        </Button>
+      ) : (
+        <Button size="sm" onClick={onClose}>Close</Button>
+      )}
+      hint="Nothing has changed on this server yet."
     />
   );
 }
 
-function DialogBody({ wizard }: { wizard: UseNodeBootstrap }) {
+function ApproveConfirm({
+  wizard,
+  open,
+  onOpenChange,
+  onApproved,
+}: {
+  wizard: UseNodeBootstrap;
+  open: boolean;
+  onOpenChange: (open: boolean) => void;
+  onApproved: (operation: Awaited<ReturnType<UseNodeBootstrap['approve']>>) => void;
+}) {
+  const plan = wizard.result?.plan;
+  if (!plan) return null;
+  const stepCount = plan.stages.reduce((total, stage) => total + stage.steps.length, 0);
+  return (
+    <ConfirmModal
+      open={open}
+      onOpenChange={onOpenChange}
+      size="md"
+      kicker={`BOOTSTRAP · ${plan.targetName}`}
+      title={wizard.retryOf ? 'Retry with this plan?' : 'Run this plan?'}
+      hint={`CHANGES ${plan.target.host}`}
+      confirmLabel={wizard.retryOf ? 'Approve and retry' : 'Approve and run'}
+      busyConfirmLabel="Starting"
+      confirming={wizard.busy === 'approve'}
+      onConfirm={async () => {
+        const operation = await wizard.approve();
+        onOpenChange(false);
+        if (operation) onApproved(operation);
+      }}
+    >
+      <div className="space-y-3 text-sm text-muted-foreground">
+        <p>
+          Sencho connects to {plan.target.username}@{plan.target.host} and runs the {stepCount} steps of this plan,
+          then waits for the Pilot to enroll. It inspects the server again first and stops without changing anything
+          if the server no longer matches the plan.
+        </p>
+        <ol className="list-decimal space-y-0.5 pl-5 text-xs">
+          {plan.stages.map((stage) => <li key={stage.id}>{stage.title}</li>)}
+        </ol>
+        <p className="break-all font-mono text-[10px] text-stat-subtitle">Plan sha256:{plan.digest}</p>
+      </div>
+    </ConfirmModal>
+  );
+}
+
+function DialogBody({ wizard, run }: { wizard: UseNodeBootstrap; run: UseBootstrapOperation }) {
   const { step, result, resultIsCurrent, invalidated, error, hostKey, trusted, setTrusted, replacing, setReplacing, supersededFingerprint, runPreflight, busy } = wizard;
+
+  const follow = async (id: string) => {
+    if (await run.openOperation(id)) wizard.setStep('run');
+  };
 
   return (
     <ModalBody className="max-h-[65vh] overflow-y-auto">
       <div className="space-y-4">
+        {wizard.retryOf && step !== 'run' && (
+          <div className="rounded-lg border border-muted bg-card/40 px-3 py-2" data-testid="bootstrap-retry-banner">
+            <p className="text-xs text-muted-foreground">
+              Retrying {wizard.retryOf.targetName} on {wizard.retryOf.host}. Enter the SSH key again: the hub never stored it.
+              The preflight then shows a new plan to approve.
+            </p>
+          </div>
+        )}
+
         {invalidated && (
           <div className="rounded-lg border border-warning/30 bg-warning/5 px-3 py-2">
             <p className="text-xs text-warning">
@@ -129,7 +224,26 @@ function DialogBody({ wizard }: { wizard: UseNodeBootstrap }) {
           </div>
         )}
 
+        {step === 'target' && !wizard.retryOf && (
+          <BootstrapOperationsList
+            operations={run.operations}
+            disabled={busy !== null || run.busy !== null}
+            onFollow={(operation) => { void follow(operation.id); }}
+            onRetry={(operation) => wizard.startRetry(operation)}
+          />
+        )}
+
         {step === 'target' && <BootstrapTargetStep wizard={wizard} />}
+
+        {step === 'run' && run.operation && (
+          <BootstrapRunStep
+            operation={run.operation}
+            busy={run.busy}
+            onCancel={() => { void run.cancel(); }}
+            onRetry={() => { if (run.operation) wizard.startRetry(run.operation); }}
+            onRelease={run.release}
+          />
+        )}
 
         {step === 'preflight' && result && resultIsCurrent && (
           <BootstrapPreflightStep
@@ -207,6 +321,8 @@ function DialogBody({ wizard }: { wizard: UseNodeBootstrap }) {
 
 export function BootstrapServerDialog({ open, onOpenChange }: { open: boolean; onOpenChange: (open: boolean) => void }) {
   const wizard = useNodeBootstrap({ open });
+  const run = useBootstrapOperation({ open });
+  const [confirmOpen, setConfirmOpen] = useState(false);
   const reachablePlan = wizard.result?.plan != null && wizard.resultIsCurrent;
   // The dialog is opened from a menu item, which unmounts when the menu closes.
   // Radix would try to restore focus to that gone item, so hand focus back to
@@ -228,18 +344,29 @@ export function BootstrapServerDialog({ open, onOpenChange }: { open: boolean; o
   const close = () => {
     onOpenChange(false);
     wizard.reset();
+    run.show(null);
   };
 
   return (
-    <Modal open={open} onOpenChange={(next) => { if (!next) { onOpenChange(false); wizard.reset(); } else { onOpenChange(true); } }} size="xl" mobileFullScreen>
+    <Modal open={open} onOpenChange={(next) => { if (!next) close(); else onOpenChange(true); }} size="xl" mobileFullScreen>
       <ModalHeader
         kicker="NODES · BOOTSTRAP"
         title="Bootstrap a new Linux server"
-        description="Inspect a host over SSH and prepare a plan. Nothing is changed on the server."
+        description="Inspect a host over SSH, review the plan, then approve it to prepare Docker and enroll a Pilot."
       />
       <StepRail step={wizard.step} reachablePlan={reachablePlan} />
-      <DialogBody wizard={wizard} />
-      <FooterActions wizard={wizard} onClose={close} />
+      <DialogBody wizard={wizard} run={run} />
+      <FooterActions wizard={wizard} run={run} onClose={close} onApprove={() => setConfirmOpen(true)} />
+      <ApproveConfirm
+        wizard={wizard}
+        open={confirmOpen}
+        onOpenChange={setConfirmOpen}
+        onApproved={(operation) => {
+          if (!operation) return;
+          run.show(operation);
+          void run.refreshList();
+        }}
+      />
     </Modal>
   );
 }
