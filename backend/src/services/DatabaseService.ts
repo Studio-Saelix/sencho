@@ -472,6 +472,8 @@ export interface PreflightFindingRow {
     title: string;
     message: string;
     source_path: string | null;
+    /** JSON {file,line,column,endLine,endColumn} of the authored source, when known. */
+    source_location?: string | null;
     remediation: string | null;
     service: string | null;
     created_at: number;
@@ -2133,6 +2135,7 @@ export class DatabaseService {
         title TEXT NOT NULL,
         message TEXT NOT NULL,
         source_path TEXT,
+        source_location TEXT,
         remediation TEXT,
         service TEXT,
         created_at INTEGER NOT NULL
@@ -2544,6 +2547,7 @@ export class DatabaseService {
         maybeAddCol('preflight_findings', 'rule_version', 'INTEGER');
         maybeAddCol('preflight_findings', 'subject_kind', 'TEXT');
         maybeAddCol('preflight_findings', 'subject_key', 'TEXT');
+        maybeAddCol('preflight_findings', 'source_location', 'TEXT');
 
         // Scheduled operations migrations
         maybeAddCol('scheduled_task_runs', 'triggered_by', "TEXT NOT NULL DEFAULT 'scheduler'");
@@ -5082,12 +5086,13 @@ stmt.run('gitops_schema_version', '1');
             );
             const insert = this.db.prepare(
                 `INSERT INTO preflight_findings
-                    (id, run_id, rule_id, severity, title, message, source_path, remediation, service, created_at, rule_version, subject_kind, subject_key)
-                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+                    (id, run_id, rule_id, severity, title, message, source_path, source_location, remediation, service, created_at, rule_version, subject_kind, subject_key)
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
             );
             for (const f of findings) {
                 insert.run(
-                    f.id, f.run_id, f.rule_id, f.severity, f.title, f.message, f.source_path, f.remediation, f.service, f.created_at,
+                    f.id, f.run_id, f.rule_id, f.severity, f.title, f.message, f.source_path, f.source_location ?? null,
+                    f.remediation, f.service, f.created_at,
                     f.rule_version ?? null, f.subject_kind ?? null, f.subject_key ?? null,
                 );
             }

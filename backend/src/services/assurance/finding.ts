@@ -41,11 +41,18 @@ export interface AssuranceSubject {
 
 export interface AssuranceLocation {
   file?: string;
+  /** Logical path used for identity and the existing `sourcePath` wire field. */
   path?: string;
+  /** Authored dot path (for example `services.api.image`), when the locator knows it. */
+  authoredPath?: string;
   line?: number;
   column?: number;
   endLine?: number;
   endColumn?: number;
+  /** sha256 of the file content the range was computed against. A stored
+   *  location without it, or whose file no longer hashes to it, is not shown:
+   *  a wrong line is worse than no line. */
+  fileHash?: string;
 }
 
 export interface AssuranceEvidenceRef {
@@ -183,6 +190,7 @@ export function serializeFinding(finding: AssuranceFinding): SerializedAssurance
       ...(location.column !== undefined ? { column: location.column } : {}),
       ...(location.endLine !== undefined ? { endLine: location.endLine } : {}),
       ...(location.endColumn !== undefined ? { endColumn: location.endColumn } : {}),
+      ...(location.fileHash !== undefined ? { fileHash: location.fileHash } : {}),
     }
     : undefined;
   return {
@@ -259,6 +267,9 @@ export function normalizeDoctorHit(
   stackName: string,
   hit: RuleHit,
   rule: AssuranceRule,
+  authoredLocation?: {
+    file: string; path?: string; line: number; column: number; endLine: number; endColumn: number; fileHash?: string;
+  },
 ): AssuranceFinding {
   const scope: AssuranceScope = {
     nodeId,
@@ -268,6 +279,18 @@ export function normalizeDoctorHit(
   const sourcePath = hit.sourcePath === undefined ? undefined : redactSensitiveText(hit.sourcePath);
   const hitSubject = subjectForHit(rule, stackName, { ...hit, sourcePath });
   const subject: AssuranceSubject = { kind: hitSubject.kind, key: redactSensitiveText(hitSubject.key) };
+  const location: AssuranceLocation | undefined = authoredLocation
+    ? {
+      ...(sourcePath !== undefined ? { path: sourcePath } : {}),
+      ...(authoredLocation.path !== undefined ? { authoredPath: redactSensitiveText(authoredLocation.path) } : {}),
+      file: redactSensitiveText(authoredLocation.file),
+      line: authoredLocation.line,
+      column: authoredLocation.column,
+      endLine: authoredLocation.endLine,
+      endColumn: authoredLocation.endColumn,
+      ...(authoredLocation.fileHash !== undefined ? { fileHash: authoredLocation.fileHash } : {}),
+    }
+    : sourcePath !== undefined ? { path: sourcePath } : undefined;
   return {
     ruleId: rule.id,
     ruleVersion: rule.version,
@@ -281,7 +304,7 @@ export function normalizeDoctorHit(
       subjectKey: findingSubjectKey(scope, subject),
       basis: 'structured',
     },
-    ...(sourcePath !== undefined ? { location: { path: sourcePath } } : {}),
+    ...(location ? { location } : {}),
     evidence: rule.evidenceLayers.map(layer => ({ layer, provider: 'compose-doctor' as const })),
     title: redactSensitiveText(hit.title),
     message: redactSensitiveText(hit.message),
@@ -293,6 +316,79 @@ export function normalizeDoctorHit(
 
 function storedEvidenceLayers(rule: AssuranceRule | undefined): readonly EvidenceLayer[] {
   return rule?.evidenceLayers ?? ['authored'];
+}
+
+function isPositiveInt(value: unknown): value is number {
+  return typeof value === 'number' && Number.isInteger(value) && value > 0;
+}
+
+/** A sha256 digest as the hasher writes it: 64 lowercase hex characters. */
+export function isFileHash(value: unknown): value is string {
+  return typeof value === 'string' && /^[0-9a-f]{64}$/.test(value);
+}
+
+function isRelativeStackPath(file: string): boolean {
+  if (file.length === 0 || file.includes('\0') || file.includes('\\')) return false;
+  if (file.startsWith('/') || /^[A-Za-z]:/.test(file)) return false;
+  return !file.split('/').includes('..');
+}
+
+/**
+ * Read the persisted authored location through an explicit allowlist. A stored
+ * row is untrusted input: an absolute or escaping path, a non-positive line, or
+ * a reversed range is dropped whole, never repaired into a partial location.
+ */
+export function parseStoredSourceLocation(raw: string | null | undefined): AssuranceLocation | undefined {
+  if (raw === null || raw === undefined || raw === '') return undefined;
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    return undefined;
+  }
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return undefined;
+  const value = parsed as Record<string, unknown>;
+  if (typeof value.file !== 'string' || !isRelativeStackPath(value.file)) return undefined;
+  if (!isPositiveInt(value.line) || !isPositiveInt(value.column)
+    || !isPositiveInt(value.endLine) || !isPositiveInt(value.endColumn)) return undefined;
+  if (value.endLine < value.line) return undefined;
+  if (value.endLine === value.line && value.endColumn < value.column) return undefined;
+  const authoredPath = typeof value.authoredPath === 'string'
+    && value.authoredPath.length <= 200
+    && !value.authoredPath.includes('\0')
+    ? value.authoredPath
+    : undefined;
+  const fileHash = isFileHash(value.fileHash) ? value.fileHash : undefined;
+  return {
+    file: value.file,
+    ...(authoredPath !== undefined ? { authoredPath } : {}),
+    line: value.line,
+    column: value.column,
+    endLine: value.endLine,
+    endColumn: value.endColumn,
+    ...(fileHash !== undefined ? { fileHash } : {}),
+  };
+}
+
+/** Serialize only the authored file and range; the logical path already has a column. */
+export function serializeSourceLocation(location: AssuranceLocation | undefined): string | null {
+  if (!location || location.file === undefined || location.line === undefined || location.column === undefined
+    || location.endLine === undefined || location.endColumn === undefined) return null;
+  if (!isRelativeStackPath(location.file)) return null;
+  const authoredPath = location.authoredPath !== undefined
+    && location.authoredPath.length <= 200
+    && !location.authoredPath.includes('\0')
+    ? location.authoredPath
+    : undefined;
+  return JSON.stringify({
+    file: location.file,
+    ...(authoredPath !== undefined ? { authoredPath } : {}),
+    line: location.line,
+    column: location.column,
+    endLine: location.endLine,
+    endColumn: location.endColumn,
+    ...(isFileHash(location.fileHash) ? { fileHash: location.fileHash } : {}),
+  });
 }
 
 /** Attach the read-time acknowledgement decision to a normalized finding. The
@@ -362,6 +458,13 @@ export function normalizeStoredFinding(row: PreflightFindingRow, nodeId: number,
     ...(service !== undefined ? { service } : {}),
   };
   const structured = row.rule_version !== null && row.subject_kind !== null && row.subject_key !== null;
+  const storedLocation = parseStoredSourceLocation(row.source_location);
+  const location = sourcePath !== undefined || storedLocation !== undefined
+    ? {
+      ...(sourcePath !== undefined ? { path: sourcePath } : {}),
+      ...(storedLocation ?? {}),
+    }
+    : undefined;
   return {
     // Kept verbatim: a row stored before this contract can carry an id the
     // registry no longer knows. `ruleVersion: null` and `basis: 'legacy'` mark it.
@@ -377,7 +480,7 @@ export function normalizeStoredFinding(row: PreflightFindingRow, nodeId: number,
       subjectKey: findingSubjectKey(scope, subject),
       basis: structured ? 'structured' : 'legacy',
     },
-    ...(sourcePath !== undefined ? { location: { path: sourcePath } } : {}),
+    ...(location ? { location } : {}),
     evidence: storedEvidenceLayers(rule).map(layer => ({ layer, provider: 'compose-doctor' as const })),
     title: redactSensitiveText(row.title),
     message: redactSensitiveText(redactQuotedImage(row.rule_id, row.message)),

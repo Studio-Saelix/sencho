@@ -65,19 +65,19 @@ afterEach(() => {
 });
 
 describe('applyDoctorNetworkingFindings', () => {
-  it('never calls runPreflight; reads only getLatest', () => {
+  it('never calls runPreflight; reads only getLatest', async () => {
     const getLatest = vi.spyOn(ComposeDoctorService, 'getInstance').mockReturnValue({
       getLatest: vi.fn().mockReturnValue(stubReport({ stack: 'stack1', findings: [] })),
     } as unknown as ComposeDoctorService);
 
-    applyDoctorNetworkingFindings([], { nodeId: 1, stackNames: ['stack1'], stackFacts: [stubFacts()], snapshot: null });
+    await applyDoctorNetworkingFindings([], { nodeId: 1, stackNames: ['stack1'], stackFacts: [stubFacts()], snapshot: null });
 
     expect(getLatest).toHaveBeenCalled();
     const instance = getLatest.mock.results[0].value as { getLatest: unknown; runPreflight?: unknown };
     expect(instance.runPreflight).toBeUndefined();
   });
 
-  it('merges a Doctor host-mode finding into the matching live card instead of duplicating it', () => {
+  it('merges a Doctor host-mode finding into the matching live card instead of duplicating it', async () => {
     vi.spyOn(ComposeDoctorService, 'getInstance').mockReturnValue({
       getLatest: vi.fn().mockReturnValue(stubReport({
         stack: 'stack1',
@@ -89,7 +89,7 @@ describe('applyDoctorNetworkingFindings', () => {
     } as unknown as ComposeDoctorService);
 
     const live = [liveHostFinding('stack1', 'web')];
-    const result = applyDoctorNetworkingFindings(live, {
+    const result = await applyDoctorNetworkingFindings(live, {
       nodeId: 1, stackNames: ['stack1'], stackFacts: [stubFacts()], snapshot: null,
     });
 
@@ -101,7 +101,7 @@ describe('applyDoctorNetworkingFindings', () => {
     expect(result[0].recommendedActions.some((a) => a.kind === 'open-stack-doctor')).toBe(true);
   });
 
-  it('surfaces a Doctor-only rule (no live counterpart) as a standalone finding', () => {
+  it('surfaces a Doctor-only rule (no live counterpart) as a standalone finding', async () => {
     vi.spyOn(ComposeDoctorService, 'getInstance').mockReturnValue({
       getLatest: vi.fn().mockReturnValue(stubReport({
         stack: 'stack1',
@@ -112,7 +112,7 @@ describe('applyDoctorNetworkingFindings', () => {
       })),
     } as unknown as ComposeDoctorService);
 
-    const result = applyDoctorNetworkingFindings([], {
+    const result = await applyDoctorNetworkingFindings([], {
       nodeId: 1, stackNames: ['stack1'],
       stackFacts: [stubFacts({ services: [{ name: 'db', networks: [], publishedPorts: [], extraHosts: [] }] })],
       snapshot: null,
@@ -125,7 +125,7 @@ describe('applyDoctorNetworkingFindings', () => {
     expect(result[0].recommendedActions.some((a) => a.kind === 'open-stack-networking')).toBe(true);
   });
 
-  it('collapses two occurrences on the SAME service into one merged card (one-to-many)', () => {
+  it('collapses two occurrences on the SAME service into one merged card (one-to-many)', async () => {
     vi.spyOn(ComposeDoctorService, 'getInstance').mockReturnValue({
       getLatest: vi.fn().mockReturnValue(stubReport({
         stack: 'stack1',
@@ -136,7 +136,7 @@ describe('applyDoctorNetworkingFindings', () => {
       })),
     } as unknown as ComposeDoctorService);
 
-    const result = applyDoctorNetworkingFindings([], {
+    const result = await applyDoctorNetworkingFindings([], {
       nodeId: 1, stackNames: ['stack1'], stackFacts: [stubFacts()], snapshot: null,
     });
 
@@ -146,7 +146,7 @@ describe('applyDoctorNetworkingFindings', () => {
     expect(result[0].severity).toBe('critical');
   });
 
-  it('gives distinct services distinct cards, never collapsing them together', () => {
+  it('gives distinct services distinct cards, never collapsing them together', async () => {
     vi.spyOn(ComposeDoctorService, 'getInstance').mockReturnValue({
       getLatest: vi.fn().mockReturnValue(stubReport({
         stack: 'stack1',
@@ -157,7 +157,7 @@ describe('applyDoctorNetworkingFindings', () => {
       })),
     } as unknown as ComposeDoctorService);
 
-    const result = applyDoctorNetworkingFindings([], {
+    const result = await applyDoctorNetworkingFindings([], {
       nodeId: 1, stackNames: ['stack1'],
       stackFacts: [stubFacts({ services: [
         { name: 'web', networks: [], publishedPorts: [], extraHosts: [] },
@@ -170,7 +170,7 @@ describe('applyDoctorNetworkingFindings', () => {
     expect(new Set(result.map((f) => f.id)).size).toBe(2);
   });
 
-  it('keeps two service-less port conflicts as two cards with different ids', () => {
+  it('keeps two service-less port conflicts as two cards with different ids', async () => {
     vi.spyOn(ComposeDoctorService, 'getInstance').mockReturnValue({
       getLatest: vi.fn().mockReturnValue(stubReport({
         stack: 'stack1',
@@ -180,7 +180,7 @@ describe('applyDoctorNetworkingFindings', () => {
         ],
       })),
     } as unknown as ComposeDoctorService);
-    const result = applyDoctorNetworkingFindings([], { nodeId: 1, stackNames: ['stack1'], stackFacts: [stubFacts()], snapshot: null });
+    const result = await applyDoctorNetworkingFindings([], { nodeId: 1, stackNames: ['stack1'], stackFacts: [stubFacts()], snapshot: null });
     expect(result).toHaveLength(2);
     expect(new Set(result.map((f) => f.id)).size).toBe(2);
   });
@@ -195,51 +195,51 @@ describe('applyDoctorNetworkingFindings', () => {
     const run = (live: NetworkingFinding[] = []) =>
       applyDoctorNetworkingFindings(live, { nodeId: 1, stackNames: ['stack1'], stackFacts: [dbFacts()], snapshot: null });
 
-    it('keeps an acknowledged Doctor-only finding, marked acknowledged, so it can be listed as dismissed', () => {
+    it('keeps an acknowledged Doctor-only finding, marked acknowledged, so it can be listed as dismissed', async () => {
       reportWith([{
         ruleId: 'sensitive-service-broad-exposure', severity: 'high', title: 't', message: 'm',
         service: 'db', acknowledged: true, acknowledgementId: 7, acknowledgementReason: 'fronted by a proxy',
       }]);
-      const [card] = run();
+      const [card] = await run();
       expect(card.acknowledged).toBe(true);
       expect(card.sources).toEqual(['doctor']);
       expect(card.dismissPolicy).toBe('none');
       expect(card.doctorFindings[0].acknowledgement).toEqual({ id: 7, reason: 'fronted by a proxy' });
     });
 
-    it('stays an active card while any occurrence is still open, and follows the open one', () => {
+    it('stays an active card while any occurrence is still open, and follows the open one', async () => {
       reportWith([
         { ruleId: 'sensitive-service-broad-exposure', severity: 'blocker', title: 'old', message: 'm', service: 'db', acknowledged: true, acknowledgementId: 7 },
         { ruleId: 'sensitive-service-broad-exposure', severity: 'warning', title: 'open', message: 'm', service: 'db' },
       ]);
-      const [card] = run();
+      const [card] = await run();
       expect(card.acknowledged).toBeUndefined();
       expect(card.title).toBe('open');
       expect(card.severity).toBe('medium');
     });
 
-    it('does not decorate a live card with an acknowledged occurrence', () => {
+    it('does not decorate a live card with an acknowledged occurrence', async () => {
       reportWith([{
         ruleId: 'network-mode-host', severity: 'high', title: 't', message: 'm', service: 'web',
         sourcePath: 'services.web.network_mode', acknowledged: true, acknowledgementId: 3,
       }]);
-      const result = applyDoctorNetworkingFindings([liveHostFinding('stack1', 'web')], {
+      const result = await applyDoctorNetworkingFindings([liveHostFinding('stack1', 'web')], {
         nodeId: 1, stackNames: ['stack1'], stackFacts: [stubFacts()], snapshot: null,
       });
       expect(result).toHaveLength(1);
       expect(result[0].doctorFindings).toEqual([]);
     });
 
-    it('gives the card the same id whether or not it is acknowledged', () => {
+    it('gives the card the same id whether or not it is acknowledged', async () => {
       reportWith([{ ruleId: 'sensitive-service-broad-exposure', severity: 'high', title: 't', message: 'm', service: 'db' }]);
-      const open = run()[0];
+      const open = (await run())[0];
       reportWith([{ ruleId: 'sensitive-service-broad-exposure', severity: 'high', title: 't', message: 'reworded', service: 'db', acknowledged: true, acknowledgementId: 1 }]);
-      const acked = run()[0];
+      const acked = (await run())[0];
       expect(acked.id).toBe(open.id);
       expect(acked.id).toBe('sensitive-service-broad-exposure|stack1|db||sensitive-service-broad-exposure');
     });
 
-    it('keeps an internal loopback publication a Doctor-only high card, open or acknowledged', () => {
+    it('keeps an internal loopback publication a Doctor-only high card, open or acknowledged', async () => {
       // The live engine deliberately leaves this to Doctor, so the card never
       // gains a live source, and an acknowledgement lists it as dismissed.
       for (const acknowledged of [false, true]) {
@@ -251,7 +251,7 @@ describe('applyDoctorNetworkingFindings', () => {
           service: 'db',
           ...(acknowledged ? { acknowledged: true, acknowledgementId: 4 } : {}),
         }]);
-        const [card] = run();
+        const [card] = await run();
         expect(card.sources).toEqual(['doctor']);
         expect(card.severity).toBe('high');
         expect(card.dismissPolicy).toBe('none');
@@ -260,7 +260,7 @@ describe('applyDoctorNetworkingFindings', () => {
     });
   });
 
-  it('discards a stale finding when the referenced service no longer exists', () => {
+  it('discards a stale finding when the referenced service no longer exists', async () => {
     vi.spyOn(ComposeDoctorService, 'getInstance').mockReturnValue({
       getLatest: vi.fn().mockReturnValue(stubReport({
         stack: 'stack1',
@@ -270,13 +270,13 @@ describe('applyDoctorNetworkingFindings', () => {
       })),
     } as unknown as ComposeDoctorService);
 
-    const result = applyDoctorNetworkingFindings([], {
+    const result = await applyDoctorNetworkingFindings([], {
       nodeId: 1, stackNames: ['stack1'], stackFacts: [stubFacts()], snapshot: null,
     });
     expect(result).toHaveLength(0);
   });
 
-  it('is fail-soft: a getLatest() failure for one stack does not throw and other stacks still contribute', () => {
+  it('is fail-soft: a getLatest() failure for one stack does not throw and other stacks still contribute', async () => {
     vi.spyOn(ComposeDoctorService, 'getInstance').mockReturnValue({
       getLatest: vi.fn().mockImplementation((_nodeId: number, stack: string) => {
         if (stack === 'broken') throw new Error('db unavailable');
@@ -287,23 +287,23 @@ describe('applyDoctorNetworkingFindings', () => {
       }),
     } as unknown as ComposeDoctorService);
 
-    expect(() => applyDoctorNetworkingFindings([], {
+    await expect(applyDoctorNetworkingFindings([], {
       nodeId: 1, stackNames: ['broken', 'stack1'], stackFacts: [stubFacts({ stack: 'stack1' })], snapshot: null,
-    })).not.toThrow();
+    })).resolves.toBeDefined();
 
-    const result = applyDoctorNetworkingFindings([], {
+    const result = await applyDoctorNetworkingFindings([], {
       nodeId: 1, stackNames: ['broken', 'stack1'], stackFacts: [stubFacts({ stack: 'stack1' })], snapshot: null,
     });
     expect(result).toHaveLength(1);
     expect(result[0].stack).toBe('stack1');
   });
 
-  it('never-run stacks are absent (no "never ran" nagging finding)', () => {
+  it('never-run stacks are absent (no "never ran" nagging finding)', async () => {
     vi.spyOn(ComposeDoctorService, 'getInstance').mockReturnValue({
       getLatest: vi.fn().mockReturnValue(stubReport({ stack: 'stack1', status: 'never-run', findings: [] })),
     } as unknown as ComposeDoctorService);
 
-    const result = applyDoctorNetworkingFindings([], {
+    const result = await applyDoctorNetworkingFindings([], {
       nodeId: 1, stackNames: ['stack1'], stackFacts: [stubFacts()], snapshot: null,
     });
     expect(result).toHaveLength(0);

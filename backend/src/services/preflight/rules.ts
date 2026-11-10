@@ -15,6 +15,7 @@ import {
 } from '../network/tunnelDetection';
 import { redactImageReference } from '../../utils/safeLog';
 import { describeComposeVersionSkew } from '../../helpers/composeVersionSkew';
+import { enumeratedHostPorts } from '../../helpers/composePortSpec';
 import {
   AUTHORED_SOCKET_PROXY_IMAGE_HINTS,
   socketProxyProviderForImage,
@@ -48,23 +49,12 @@ export interface PreflightRule {
 
 // ----- shared helpers -------------------------------------------------------
 
-const MAX_RANGE = 256; // cap range expansion so an adversarial 1-65535 spec can't blow up
-
 function isAllInterfaces(ip: string): boolean {
   return ip === '' || ip === '0.0.0.0' || ip === '::' || ip === '[::]';
 }
 
 function interfaceOverlap(a: string, b: string): boolean {
   return isAllInterfaces(a) || isAllInterfaces(b) || a === b;
-}
-
-/** Every host port a spec claims; none for a dynamic one, whose number Docker picks at start. */
-function portsOf(spec: EffPortSpec): number[] {
-  if (spec.dynamic) return [];
-  const end = Math.min(spec.endPort, spec.startPort + MAX_RANGE - 1);
-  const out: number[] = [];
-  for (let p = spec.startPort; p <= end; p++) out.push(p);
-  return out;
 }
 
 function specLabel(spec: EffPortSpec): string {
@@ -260,7 +250,7 @@ const portConflictNode: PreflightRule = {
     const findings: RuleHit[] = [];
     for (const svc of ctx.model.services) {
       for (const spec of svc.ports) {
-        for (const port of portsOf(spec)) {
+        for (const port of enumeratedHostPorts(spec)) {
           const clash = (byPort.get(port) ?? []).find(b =>
             b.protocol === spec.protocol && interfaceOverlap(spec.hostIp, b.ip) && b.stack !== ctx.stackName);
           if (!clash) continue;
@@ -290,7 +280,7 @@ const portConflictInternal: PreflightRule = {
     const claims = new Map<string, { service: string; hostIp: string }[]>();
     for (const svc of ctx.model.services) {
       for (const spec of svc.ports) {
-        for (const port of portsOf(spec)) {
+        for (const port of enumeratedHostPorts(spec)) {
           const key = `${port}/${spec.protocol}`;
           const list = claims.get(key);
           if (list) list.push({ service: svc.name, hostIp: spec.hostIp });
@@ -999,8 +989,10 @@ const effectiveModelExpanded: PreflightRule = {
   id: 'effective-model-expanded',
   run(ctx) {
     // Skip when the source could not be read: an empty source-service set then
-    // means "unknown", not "zero services", and would flag every service.
-    if (!ctx.model || !ctx.sourceReadable) return [];
+    // means "unknown", not "zero services", and would flag every service. The
+    // same holds when the file was read but its service set could not be
+    // determined.
+    if (!ctx.model || !ctx.sourceReadable || ctx.sourceServicesKnown === false) return [];
     const source = new Set(ctx.sourceServiceNames);
     const extra = ctx.model.services.map(s => s.name).filter(n => !source.has(n));
     if (extra.length === 0) return [];
@@ -1182,7 +1174,7 @@ const exposurePortVsDossier: PreflightRule = {
     if (!ctx.model || !ctx.hasAccessUrls) return [];
     const findings: RuleHit[] = [];
     for (const svc of ctx.model.services) {
-      const undocumented = [...new Set(svc.ports.flatMap(portsOf).filter(p => !ctx.accessUrlPorts.has(p)))];
+      const undocumented = [...new Set(svc.ports.flatMap(enumeratedHostPorts).filter(p => !ctx.accessUrlPorts.has(p)))];
       if (undocumented.length === 0) continue;
       findings.push({
         ruleId: 'exposure-port-vs-dossier',

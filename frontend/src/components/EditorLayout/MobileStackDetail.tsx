@@ -96,6 +96,7 @@ export function MobileStackDetail(props: EditorViewProps) {
         panelStartedAt,
         stackMuteActions,
         openComposeEditor,
+        openAuthoredLocation,
     } = props;
 
     const [segment, setSegment] = useState<Segment>('logs');
@@ -295,6 +296,7 @@ export function MobileStackDetail(props: EditorViewProps) {
                                 serviceUrlEntry={serviceUrlEntry}
                                 gitSourcePending={gitSourcePendingMap[stackName] ?? null}
                                 onEditCompose={openComposeEditor}
+                                onOpenLocation={openAuthoredLocation}
                                 onOpenGitSource={() => setGitSourceOpen(true)}
                                 onApplyUpdate={() => { void updateStack(); }}
                                 onRedeploy={() => deployStack()}

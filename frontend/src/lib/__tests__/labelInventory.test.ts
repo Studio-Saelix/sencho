@@ -88,6 +88,8 @@ describe('readLabelBehavior', () => {
   });
 });
 
+const HASH = 'a'.repeat(64);
+
 describe('withReadBehaviors', () => {
   const inventory = (overrides: Record<string, unknown> = {}) => ({
     stackName: 'demo',
@@ -110,6 +112,180 @@ describe('withReadBehaviors', () => {
     expect(read.stackName).toBe('demo');
     expect(read.services[0].declaredLabels[0]).toMatchObject({ key: 'io.sencho.url', behavior: { state: 'active' } });
     expect(read.services[0].replicas[0].runtimeLabels[0]).toMatchObject({ behavior: { state: 'inert' } });
+  });
+
+  it('drops an all-invalid authored map instead of carrying it through the service spread', () => {
+    const body = {
+      stackName: 'demo',
+      renderable: true,
+      generatedAt: 1,
+      services: [{
+        service: 'web',
+        declaredLabels: [{ key: 'a', value: '1', source: 'compose' }],
+        replicas: [],
+        authored: {
+          a: { source: 'inline', file: '../../escape', line: -1, column: 1, endLine: 1, endColumn: 2 },
+        },
+      }],
+    } as unknown as StackLabelInventory;
+    const read = withReadBehaviors(body);
+    expect('authored' in read.services[0]).toBe(false);
+    expect(read.services[0].authored).toBeUndefined();
+  });
+
+  it('keeps only the valid entries of a partially invalid authored map', () => {
+    const body = {
+      stackName: 'demo',
+      renderable: true,
+      generatedAt: 1,
+      services: [{
+        service: 'web',
+        declaredLabels: [
+          { key: 'a', value: '1', source: 'compose' },
+          { key: 'b', value: '2', source: 'compose' },
+        ],
+        replicas: [],
+        authored: {
+          a: { source: 'inline', file: 'compose.yaml', fileHash: HASH, line: 4, column: 7, endLine: 4, endColumn: 12 },
+          b: { source: 'inline', file: '../escape', line: 1, column: 1, endLine: 1, endColumn: 2 },
+        },
+      }],
+    } as unknown as StackLabelInventory;
+    const read = withReadBehaviors(body);
+    expect(Object.keys(read.services[0].authored ?? {})).toEqual(['a']);
+  });
+
+  it('drops an acting origin that carries no content revision', () => {
+    const body = {
+      stackName: 'demo',
+      renderable: true,
+      generatedAt: 1,
+      services: [{
+        service: 'web',
+        declaredLabels: [{ key: 'a', value: '1', source: 'compose' }],
+        replicas: [],
+        authored: {
+          a: { source: 'inline', file: 'compose.yaml', line: 4, column: 7, endLine: 4, endColumn: 12 },
+        },
+      }],
+    } as unknown as StackLabelInventory;
+    expect(withReadBehaviors(body).services[0].authored).toBeUndefined();
+  });
+
+  it('keeps every accepted key as own data, including __proto__', () => {
+    const body = JSON.parse(`{
+      "stackName": "demo",
+      "renderable": true,
+      "generatedAt": 1,
+      "services": [{
+        "service": "web",
+        "declaredLabels": [
+          {"key": "__proto__", "value": "1", "source": "compose"},
+          {"key": "ordinary", "value": "2", "source": "compose"}
+        ],
+        "replicas": [],
+        "authored": {
+          "__proto__": {"source": "inline", "file": "compose.yaml", "fileHash": "${HASH}", "line": 4, "column": 7, "endLine": 4, "endColumn": 12},
+          "ordinary": {"source": "label-file", "file": "app.labels", "fileHash": "${HASH}", "line": 2, "column": 1, "endLine": 2, "endColumn": 8}
+        }
+      }]
+    }`) as StackLabelInventory;
+    const authored = withReadBehaviors(body).services[0].authored!;
+    expect(Object.prototype.hasOwnProperty.call(authored, '__proto__')).toBe(true);
+    expect(authored['__proto__']).toMatchObject({ source: 'inline', file: 'compose.yaml', line: 4 });
+    expect(authored.ordinary).toMatchObject({ source: 'label-file', file: 'app.labels' });
+    // The accumulator is data, not a prototype carrier.
+    expect(Object.getPrototypeOf(authored)).toBeNull();
+    expect(({} as Record<string, unknown>).source).toBeUndefined();
+  });
+
+  it('keeps a sole __proto__ acting origin as own data', () => {
+    const body = JSON.parse(`{
+      "stackName": "demo",
+      "renderable": true,
+      "generatedAt": 1,
+      "services": [{
+        "service": "web",
+        "declaredLabels": [{"key": "__proto__", "value": "1", "source": "compose"}],
+        "replicas": [],
+        "authored": {
+          "__proto__": {"source": "inline", "file": "compose.yaml", "fileHash": "${HASH}", "line": 4, "column": 7, "endLine": 4, "endColumn": 12}
+        }
+      }]
+    }`) as StackLabelInventory;
+    const authored = withReadBehaviors(body).services[0].authored!;
+    expect(Object.prototype.hasOwnProperty.call(authored, '__proto__')).toBe(true);
+    expect(authored['__proto__']).toMatchObject({ source: 'inline', file: 'compose.yaml', line: 4, fileHash: HASH });
+    expect(Object.getPrototypeOf(authored)).toBeNull();
+  });
+
+  it('keeps a sole __proto__ ambiguity entry as own data', () => {
+    const body = JSON.parse(`{
+      "stackName": "demo",
+      "renderable": true,
+      "generatedAt": 1,
+      "services": [{
+        "service": "web",
+        "declaredLabels": [{"key": "__proto__", "value": "1", "source": "compose"}],
+        "replicas": [],
+        "authored": {"__proto__": {"source": "inline", "ambiguity": "interpolated"}}
+      }]
+    }`) as StackLabelInventory;
+    const authored = withReadBehaviors(body).services[0].authored!;
+    expect(Object.prototype.hasOwnProperty.call(authored, '__proto__')).toBe(true);
+    expect(authored['__proto__']?.ambiguity).toBe('interpolated');
+  });
+
+  it('keeps constructor and toString entries alongside a prototype-named key', () => {
+    const body = JSON.parse(`{
+      "stackName": "demo",
+      "renderable": true,
+      "generatedAt": 1,
+      "services": [{
+        "service": "web",
+        "declaredLabels": [
+          {"key": "__proto__", "value": "1", "source": "compose"},
+          {"key": "constructor", "value": "2", "source": "compose"},
+          {"key": "toString", "value": "3", "source": "compose"}
+        ],
+        "replicas": [],
+        "authored": {
+          "__proto__": {"source": "inline", "ambiguity": "interpolated"},
+          "constructor": {"source": "inline", "ambiguity": "unparsed-source"},
+          "toString": {"source": "inline", "file": "compose.yaml", "fileHash": "${HASH}", "line": 3, "column": 1, "endLine": 3, "endColumn": 4}
+        }
+      }]
+    }`) as StackLabelInventory;
+    const authored = withReadBehaviors(body).services[0].authored!;
+    expect(authored['__proto__']?.ambiguity).toBe('interpolated');
+    expect(authored['constructor']?.ambiguity).toBe('unparsed-source');
+    expect(authored['toString']?.file).toBe('compose.yaml');
+  });
+
+  it('keeps a value-tie ambiguity, a Compose tag state, and drops an unknown one', () => {
+    const body = JSON.parse(`{
+      "stackName": "demo",
+      "renderable": true,
+      "generatedAt": 1,
+      "services": [{
+        "service": "web",
+        "declaredLabels": [
+          {"key": "tied", "value": "same", "source": "compose"},
+          {"key": "tagged", "value": "over", "source": "compose"},
+          {"key": "unknown", "value": "other", "source": "compose"}
+        ],
+        "replicas": [],
+        "authored": {
+          "tied": {"source": "inline", "ambiguity": "multiple-sources"},
+          "tagged": {"source": "inline", "ambiguity": "compose-tag"},
+          "unknown": {"ambiguity": "not-a-state"}
+        }
+      }]
+    }`) as StackLabelInventory;
+    const authored = withReadBehaviors(body).services[0].authored!;
+    expect(authored.tied).toEqual({ source: 'inline', ambiguity: 'multiple-sources' });
+    expect(authored.tagged).toEqual({ source: 'inline', ambiguity: 'compose-tag' });
+    expect(authored.unknown).toBeUndefined();
   });
 
   it.each([

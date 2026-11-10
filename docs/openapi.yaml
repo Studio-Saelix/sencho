@@ -375,6 +375,48 @@ components:
         replicas:
           type: array
           items: { $ref: "#/components/schemas/StackLabelReplica" }
+        authored:
+          type: object
+          description: >-
+            Authored origin by label key, for labels declared in Compose. Absent on nodes
+            that predate the source model. Never carries a label value.
+          additionalProperties: { $ref: "#/components/schemas/LabelAuthoredOrigin" }
+
+    LabelAuthoredOrigin:
+      type: object
+      properties:
+        source:
+          type: string
+          enum: [inline, label-file]
+          description: Omitted when only an ambiguity is known.
+        file:
+          type: string
+          description: Stack-relative path of the declaring file. Present only for an acting origin.
+        line: { type: integer }
+        column: { type: integer }
+        endLine: { type: integer }
+        endColumn: { type: integer }
+        fileHash:
+          type: string
+          description: >-
+            SHA-256 of the file content the range was computed against. Present only for an
+            acting origin; the client applies the range only to content with this digest.
+        shared:
+          type: boolean
+          description: The label file is used by more than one service.
+        overridden:
+          type: boolean
+          description: An inline labels map overrides a label-file entry for this key.
+        ambiguity:
+          type: string
+          enum: [duplicate-key, unparsed-source, interpolated, outside-boundary, multiple-sources, compose-tag]
+          description: >-
+            Present instead of a file and range when no single acting origin exists.
+            `multiple-sources` means more than one declaration exists and the effective
+            value cannot single one out: two declarations carry it, none carries it, or a
+            later declaration contradicts it. `compose-tag` means a `!reset` or
+            `!override` marker is on the declaration or a parent mapping, so its authored
+            value is never matched against the effective one.
 
     StackLabelInventory:
       type: object

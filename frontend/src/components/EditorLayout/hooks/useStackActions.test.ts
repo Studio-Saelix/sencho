@@ -21,6 +21,7 @@ vi.mock('@/components/ui/toast-store', () => ({
 
 import { apiFetch } from '@/lib/api';
 import type { ServiceUrlEntry } from '@/lib/serviceUrlResolve';
+import { sha256Hex } from '@/lib/sha256';
 import { ENV_READ_FAILED_NOTICE } from '../envNotice';
 import {
   absentRevision,
@@ -85,6 +86,8 @@ function makeEditorState(over: Partial<EditorState> = {}): EditorState {
     setEffectiveServices: vi.fn(),
     serviceUpdateInProgress: null,
     setServiceUpdateInProgress: vi.fn(),
+    setPendingReveal: vi.fn(),
+    pendingReveal: null,
   };
   return { ...base, ...over } as unknown as EditorState;
 }
@@ -4908,5 +4911,218 @@ describe('useStackActions.refreshGitSourcePending', () => {
     const { result, editorState } = setup();
     await result.current.refreshGitSourcePending();
     expect(editorState.setGitSourcePendingMap).not.toHaveBeenCalled();
+  });
+});
+
+describe('useStackActions.openAuthoredLocation', () => {
+  const location = {
+    file: 'compose.yaml', line: 3, column: 5, endLine: 3, endColumn: 12,
+    fileHash: sha256Hex('disk content'),
+  };
+
+  beforeEach(() => {
+    vi.mocked(apiFetch).mockReset();
+    vi.mocked(toast.info).mockReset();
+    vi.mocked(toast.error).mockReset();
+  });
+
+  it('refuses a compose range while the buffer has unsaved edits', () => {
+    const { result, editorState } = setup({
+      editorState: { content: 'edited content', originalContent: 'disk content' },
+    });
+
+    result.current.openAuthoredLocation(location);
+
+    expect(apiFetch).not.toHaveBeenCalled();
+    expect(editorState.setPendingReveal).toHaveBeenCalledWith(null);
+    expect(editorState.setEditingCompose).toHaveBeenCalledWith(true);
+    expect(editorState.setActiveTab).toHaveBeenCalledWith('compose');
+    expect(toast.info).toHaveBeenCalledWith(expect.stringMatching(/save or discard/i));
+  });
+
+  it('refreshes a clean stale buffer and pins the reveal to the revision it read', async () => {
+    vi.mocked(apiFetch).mockResolvedValue(new Response('fresh disk content\n', {
+      status: 200,
+      headers: { etag: 'W/"2"', 'x-compose-file': 'compose.yaml' },
+    }));
+    const { result, editorState } = setup({
+      editorState: { content: 'stale content\n', originalContent: 'stale content\n' },
+    });
+
+    await act(async () => {
+      result.current.openAuthoredLocation({ ...location, fileHash: sha256Hex('fresh disk content\n') });
+    });
+
+    expect(editorState.setContent).toHaveBeenCalledWith('fresh disk content\n');
+    expect(editorState.setOriginalContent).toHaveBeenCalledWith('fresh disk content\n');
+    expect(editorState.setComposeEtag).toHaveBeenCalledWith('W/"2"');
+    expect(editorState.setComposeFilename).toHaveBeenCalledWith('compose.yaml');
+    expect(editorState.setPendingReveal).toHaveBeenCalledWith({
+      target: { surface: 'compose', file: 'compose.yaml' },
+      location: { ...location, fileHash: sha256Hex('fresh disk content\n') },
+      revision: 'fresh disk content\n',
+    });
+  });
+
+  it('refuses a range when the file changed after the location was computed', async () => {
+    vi.mocked(apiFetch).mockResolvedValue(new Response('new disk content\n', { status: 200 }));
+    const { result, editorState } = setup({
+      editorState: { content: 'disk content', originalContent: 'disk content' },
+    });
+
+    await act(async () => {
+      result.current.openAuthoredLocation(location);
+    });
+
+    expect(editorState.setContent).not.toHaveBeenCalled();
+    expect(editorState.setPendingReveal).toHaveBeenCalledWith(null);
+    expect(toast.info).toHaveBeenCalledWith(expect.stringMatching(/no longer current/i));
+  });
+
+  it('opens a range in a BOM-prefixed primary file the server hashed with the BOM', async () => {
+    // The server hashes the decoded file text, which keeps a leading U+FEFF;
+    // `Response.text()` drops it, so hashing that would refuse a valid link.
+    const bomContent = '\uFEFFservices:\n  web:\n    image: nginx:alpine\n';
+    // The normal load read the file with `res.text()`, so the clean buffer is
+    // the BOM-less text the click must refresh to the revision it verified.
+    const loadedContent = bomContent.slice(1);
+    vi.mocked(apiFetch).mockResolvedValue(new Response(bomContent, { status: 200 }));
+    const bomLocation = { ...location, fileHash: sha256Hex(bomContent) };
+    const { result, editorState } = setup({
+      editorState: { content: loadedContent, originalContent: loadedContent },
+    });
+
+    await act(async () => {
+      result.current.openAuthoredLocation(bomLocation);
+    });
+
+    expect(editorState.setContent).toHaveBeenCalledWith(bomContent);
+    expect(editorState.setOriginalContent).toHaveBeenCalledWith(bomContent);
+    expect(editorState.setPendingReveal).toHaveBeenCalledWith({
+      target: { surface: 'compose', file: 'compose.yaml' },
+      location: bomLocation,
+      revision: bomContent,
+    });
+    expect(toast.info).not.toHaveBeenCalled();
+  });
+
+  it('still refuses a range when the leading BOM was removed after it was computed', async () => {
+    const bomContent = '\uFEFFservices:\n  web:\n    image: nginx:alpine\n';
+    vi.mocked(apiFetch).mockResolvedValue(new Response(bomContent.slice(1), { status: 200 }));
+    const { result, editorState } = setup({
+      editorState: { content: bomContent.slice(1), originalContent: bomContent.slice(1) },
+    });
+
+    await act(async () => {
+      result.current.openAuthoredLocation({ ...location, fileHash: sha256Hex(bomContent) });
+    });
+
+    expect(editorState.setPendingReveal).toHaveBeenCalledWith(null);
+    expect(toast.info).toHaveBeenCalledWith(expect.stringMatching(/no longer current/i));
+  });
+
+  it('refuses a range that carries no source revision', () => {
+    const { result, editorState } = setup({
+      editorState: { content: 'disk content', originalContent: 'disk content' },
+    });
+
+    result.current.openAuthoredLocation({ file: 'compose.yaml', line: 3, column: 5, endLine: 3, endColumn: 12 });
+
+    expect(apiFetch).not.toHaveBeenCalled();
+    expect(editorState.setPendingReveal).toHaveBeenCalledWith(null);
+    expect(toast.info).toHaveBeenCalledWith(expect.stringMatching(/verified file revision/i));
+  });
+
+  it('does not apply a range when the stack changes while the file read is in flight', async () => {
+    let resolveRead: ((response: Response) => void) | undefined;
+    vi.mocked(apiFetch).mockImplementation(() => new Promise<Response>((resolve) => { resolveRead = resolve; }));
+    const { result, rerender, stackListState, editorState } = setup({
+      editorState: { content: 'disk content', originalContent: 'disk content' },
+    });
+
+    act(() => {
+      result.current.openAuthoredLocation(location);
+    });
+    (stackListState as unknown as { selectedFile: string | null }).selectedFile = 'other.yml';
+    rerender();
+    await act(async () => {
+      resolveRead?.(new Response('fresh disk content\n', { status: 200 }));
+    });
+
+    expect(editorState.setPendingReveal).not.toHaveBeenCalledWith(expect.objectContaining({
+      target: { surface: 'compose', file: 'compose.yaml' },
+    }));
+    expect(editorState.setPendingReveal).toHaveBeenLastCalledWith(null);
+  });
+
+  it('clears a pending reveal when the node changes', async () => {
+    vi.mocked(apiFetch).mockResolvedValue(new Response('disk content', { status: 200 }));
+    const { result, rerender, activeNodeHolder, editorState } = setup({
+      editorState: { content: 'disk content', originalContent: 'disk content' },
+    });
+
+    await act(async () => {
+      result.current.openAuthoredLocation(location);
+    });
+    expect(editorState.setPendingReveal).toHaveBeenCalledWith(expect.objectContaining({
+      target: { surface: 'compose', file: 'compose.yaml' },
+    }));
+
+    activeNodeHolder.current = { id: 2, name: 'Remote', type: 'remote' } as Parameters<typeof useStackActions>[0]['activeNode'];
+    rerender();
+    expect(editorState.setPendingReveal).toHaveBeenLastCalledWith(null);
+  });
+
+  it('clears a pending reveal when the compose read fails', async () => {
+    vi.mocked(apiFetch).mockRejectedValue(new Error('unreachable'));
+    const { result, editorState } = setup({
+      editorState: { content: 'disk content', originalContent: 'disk content' },
+    });
+
+    await act(async () => {
+      result.current.openAuthoredLocation(location);
+    });
+
+    expect(editorState.setPendingReveal).toHaveBeenCalledWith(null);
+    expect(toast.error).toHaveBeenCalledWith(expect.stringMatching(/could not confirm/i));
+  });
+
+  it('clears a pending reveal when the stack changes', async () => {
+    vi.mocked(apiFetch).mockResolvedValue(new Response('disk content', { status: 200 }));
+    const { result, rerender, stackListState, editorState } = setup({
+      editorState: { content: 'disk content', originalContent: 'disk content' },
+    });
+
+    await act(async () => {
+      result.current.openAuthoredLocation(location);
+    });
+    expect(editorState.setPendingReveal).toHaveBeenCalledWith(expect.objectContaining({
+      target: { surface: 'compose', file: 'compose.yaml' },
+    }));
+
+    (stackListState as unknown as { selectedFile: string | null }).selectedFile = 'other.yml';
+    rerender();
+    expect(editorState.setPendingReveal).toHaveBeenLastCalledWith(null);
+  });
+
+  it('leaves edits typed while the file read was in flight untouched', async () => {
+    let resolveRead: ((response: Response) => void) | undefined;
+    vi.mocked(apiFetch).mockImplementation(() => new Promise<Response>((resolve) => { resolveRead = resolve; }));
+    const { result, rerender, editorState } = setup({
+      editorState: { content: 'disk content', originalContent: 'disk content' },
+    });
+
+    act(() => {
+      result.current.openAuthoredLocation(location);
+    });
+    (editorState as unknown as { content: string }).content = 'typed while reading';
+    rerender();
+    await act(async () => {
+      resolveRead?.(new Response('fresh disk content\n', { status: 200 }));
+    });
+
+    expect(editorState.setContent).not.toHaveBeenCalled();
+    expect(editorState.setPendingReveal).toHaveBeenCalledWith(null);
+    expect(toast.info).toHaveBeenCalledWith(expect.stringMatching(/save or discard/i));
   });
 });
