@@ -23,11 +23,16 @@
  * started.
  *
  * The guard also refuses what it cannot bound: an input over the byte cap, a
- * remote input, a device or pipe, an include/extends graph past its limits, a
- * relative path inside an included project, an env file it cannot read, and a
- * document its parser rejects that uses aliases, include, or extends. A syntax
- * error elsewhere, an unresolved alias, or a missing compose file is left for
- * Compose to report, so an ordinary broken stack still fails as it did.
+ * remote input or standard input, a device or pipe (a service's `env_file` and
+ * `label_file` included, which are read under the same cap), an include/extends
+ * graph past its limits, a relative path inside an included or extended file,
+ * an env file it cannot parse or whose interpolation passes its bounds, a key
+ * or path that spans U+2028 or U+2029 (Compose keeps those characters, its
+ * parser here folds them), and a document its parser rejects that holds both an
+ * anchor and an alias, an `include`, an `extends`, a backslash, or an explicit
+ * `? ` key. A syntax error elsewhere, an unresolved alias (Compose stops there,
+ * so nothing after it loads), or a missing compose file is left for Compose to
+ * report, so an ordinary broken stack still fails as it did.
  *
  * Not covered: Sencho's own deployment project (self-update and the endpoint
  * provider helper). Those render operator-owned files, not a managed stack's.
@@ -39,12 +44,14 @@ import type { Document, Node, YAMLMap } from 'yaml';
 import {
   ComposeEnvFileError,
   ComposeEnvFiles,
+  ComposeEnvLimitError,
+  type ComposeEnvLimits,
   DEFAULT_PATH_SEPARATOR,
   expandComposeEnvTemplate,
   type ComposeEnvLookup,
 } from '../utils/composeDotenv';
 import { COMPOSE_OVERRIDE_FILENAMES, COMPOSE_ROOT_FILENAMES } from '../utils/composeFilenames';
-import { inspectComposeInput, readComposeInputWithinCap, resolvePhysicalDirectory } from './composeInputReadSink';
+import { readComposeInputWithinCap, resolvePhysicalDirectory } from './composeInputReadSink';
 
 /**
  * Expanded-node budget per file. A compose file that reuses an anchor across a
@@ -73,22 +80,37 @@ export const MAX_COMPOSE_INPUT_BYTES = 1024 * 1024;
 /**
  * Bounds on the include/extends graph. An ordinary project is far below both;
  * a graph beyond them cannot be established safely, so it is refused rather
- * than walked without a limit.
+ * than walked without a limit. The file bound counts a file once for each
+ * environment and project directory it is reached under, and it also bounds the
+ * distinct env files read.
  */
 export const MAX_COMPOSE_DEPENDENCY_DEPTH = 32;
 export const MAX_COMPOSE_DEPENDENCY_FILES = 512;
 /**
- * Include, extends, and env-file mentions walked per invocation, repeats
- * included. A mention costs a map lookup at least, and an env file costs a
- * parse, so the count is bounded rather than left to the file's size.
+ * Include, extends, env_file, and label_file mentions walked per invocation,
+ * repeats included. A mention costs a map lookup at least, and an env file
+ * costs a read, so the count is bounded rather than left to the file's size.
  */
 export const MAX_COMPOSE_DEPENDENCY_REFERENCES = 4096;
-/** Distinct include environments built per invocation. */
-export const MAX_COMPOSE_ENV_CONTEXTS = 512;
-/** Compose text parsed per invocation, repeats under another context included. */
+/**
+ * Compose text parsed or read per invocation (counted in characters, so
+ * non-ASCII text counts less than its bytes), repeats under another context
+ * included, and every service env_file and label_file read.
+ */
 export const MAX_COMPOSE_PARSED_BYTES = 8 * 1024 * 1024;
-/** Env-file text parsed to build those environments, across the invocation. */
+/** Env-file text read to build those environments, across the invocation (characters). */
 export const MAX_COMPOSE_ENV_PARSE_BYTES = 8 * 1024 * 1024;
+/**
+ * Bounds on interpolating an untrusted `.env`: one value as written, the text
+ * one statement copies out of the variables it names, and everything copied or
+ * stored across the invocation. A real `.env` stays within kilobytes.
+ */
+export const MAX_COMPOSE_ENV_RAW_VALUE = 64 * 1024;
+export const MAX_COMPOSE_ENV_STATEMENT_READS = 1024 * 1024;
+export const MAX_COMPOSE_ENV_COPIED = 32 * 1024 * 1024;
+/** Longest include/extends/env_file path as written, and as expanded. */
+export const MAX_COMPOSE_PATH_TEMPLATE = 4096;
+export const MAX_COMPOSE_PATH_EXPANSION = 64 * 1024;
 
 const DISCOVERED_COMPOSE_NAMES = COMPOSE_ROOT_FILENAMES;
 const DISCOVERED_OVERRIDE_NAMES = COMPOSE_OVERRIDE_FILENAMES;
@@ -145,6 +167,24 @@ function envFileRefusal(label: string): ComposeExpansionRefusal {
   );
 }
 
+function scalarSeparatorRefusal(label: string): ComposeExpansionRefusal {
+  return unresolvedIncludePathRefusal(
+    label,
+    'has a key or path that contains the Unicode line separator U+2028 or U+2029, which Sencho and Docker Compose read differently.',
+  );
+}
+
+function envFileTooLargeRefusal(label: string): ComposeExpansionRefusal {
+  return new ComposeExpansionRefusal(
+    `The env file "${label}" has a value that is too long, or interpolates into more text than Sencho will build, so it could not determine which compose files the run would load. ` +
+    'Shorten the value or remove the nested references, then try again.',
+  );
+}
+
+function pathTooLargeRefusal(label: string): ComposeExpansionRefusal {
+  return unresolvedIncludePathRefusal(label, 'names a path that is too long or interpolates into too much text.');
+}
+
 function envFileHomeRefusal(label: string): ComposeExpansionRefusal {
   return new ComposeExpansionRefusal(
     `Sencho cannot resolve the env file path "${label}" the way Docker Compose does, so it could not determine which compose files the run would load. ` +
@@ -183,8 +223,22 @@ function remoteInputRefusal(): ComposeExpansionRefusal {
   );
 }
 
+function stdinInputRefusal(): ComposeExpansionRefusal {
+  return new ComposeExpansionRefusal(
+    'A compose input for this run is standard input, which Sencho cannot read before Docker Compose does. ' +
+    'Write the file to disk and pass its path, then try again.',
+  );
+}
+
 function dependencyBoundRefusal(label: string, bound: string): ComposeExpansionRefusal {
   return dependencyRefusal(label, `crosses ${bound}.`);
+}
+
+function envBoundRefusal(label: string, bound: string): ComposeExpansionRefusal {
+  return new ComposeExpansionRefusal(
+    `The env file "${label}" takes the env files this run reads past ${bound}. ` +
+    'Sencho reads them all to work out which compose files the run loads, and refused to run a project whose env files it cannot bound.',
+  );
 }
 
 function saturateAt(total: number, amount: number, limit: number): number {
@@ -280,11 +334,12 @@ interface MeasuredDocument {
 
 /**
  * Parse errors that leave the document's structure complete: an alias with no
- * anchor and a repeated key both leave every node in place, so the document can
- * still be measured. Every other error means the `yaml` package stopped
- * building the tree, and what it dropped is unknown.
+ * anchor leaves every node in place, so the document can still be measured
+ * (repeated keys are not an error here, see `uniqueKeys` below). Every other
+ * error means the `yaml` package stopped building the tree, and what it
+ * dropped is unknown.
  */
-const COMPLETE_STRUCTURE_ERROR_CODES = new Set(['BAD_ALIAS', 'DUPLICATE_KEY']);
+const COMPLETE_STRUCTURE_ERROR_CODES = new Set(['BAD_ALIAS']);
 
 /**
  * True when a document the parser rejected could still hold what the guard
@@ -297,6 +352,8 @@ const COMPLETE_STRUCTURE_ERROR_CODES = new Set(['BAD_ALIAS', 'DUPLICATE_KEY']);
  * `include` and `extends` count wherever they appear, and so does a backslash
  * (an escape in a quoted key can spell them) or an explicit `? ` key, because
  * the text of a rejected document cannot be trusted to show a key as written.
+ * Each test is a single line-bounded or linear scan: this runs on text the
+ * parser rejected, which can be a megabyte of blank lines.
  */
 function usesUnmeasurableConstructs(text: string): boolean {
   const hasAnchor = /(?:^|[\s,[{:-])&[^\s,[\]{}]/m.test(text);
@@ -304,7 +361,9 @@ function usesUnmeasurableConstructs(text: string): boolean {
   if (hasAnchor && hasAlias) return true;
   // The words themselves, quoted or not, and the two ways to hide them: a
   // backslash escape inside a double-quoted key, and an explicit `? ` key.
-  return /\b(?:include|extends)\b/.test(text) || text.includes('\\') || /^\s*\?\s/m.test(text);
+  // Indentation before `?` is spaces, so the pattern never crosses a line: a
+  // `\s*` here would rescan every blank line that follows, which is quadratic.
+  return /\b(?:include|extends)\b/.test(text) || text.includes('\\') || /^ *\?\s/m.test(text);
 }
 
 /**
@@ -315,10 +374,14 @@ function usesUnmeasurableConstructs(text: string): boolean {
  * Compose expands a valid document as it reaches it, so documents before the
  * first one the `yaml` package rejects are measured. What follows a rejected
  * document is not measured, because this parser stops there. When the rejected
- * document or anything after it uses aliases, include, or extends, the guard
- * cannot tell what Compose's parser would make of it (it may accept the
- * document and go on to read what follows), so it refuses instead of passing
- * it; a stream with none of those is left to Compose to report.
+ * document or anything after it holds both an anchor and an alias, an
+ * `include`, an `extends`, a backslash, or an explicit `? ` key (see
+ * `usesUnmeasurableConstructs`), the guard cannot tell what Compose's parser
+ * would make of it (it may accept the document and go on to read what
+ * follows), so it refuses instead of passing it; a stream with none of those is
+ * left to Compose to report. A document whose only error is an alias naming no
+ * anchor is measured, and ends the stream: Compose fails at that alias, so
+ * nothing after it is loaded.
  */
 function measureDocumentStream(rawSource: string, label: string): MeasuredDocument[] {
   // Compose's YAML parser reads a lone CR, U+0085, U+2028, and U+2029 as line
@@ -326,7 +389,13 @@ function measureDocumentStream(rawSource: string, label: string): MeasuredDocume
   // an include that follows one (CRLF is one break either way). Unique keys are
   // not checked: that check is quadratic in the keys of one map, and a repeated
   // key is Compose's error to report.
-  const source = rawSource.replace(/\r\n?|[\u0085\u2028\u2029]/g, '\n');
+  const crlfFolded = rawSource.replace(/\r\n/g, '\n');
+  // Compose keeps U+2028 and U+2029 as characters inside a scalar, where this
+  // normalization turns them into a break that folds to a space; the offsets are
+  // kept so a key or path that spans one is refused instead of misread.
+  const separators: number[] = [];
+  for (const match of crlfFolded.matchAll(/[\u2028\u2029]/g)) separators.push(match.index ?? 0);
+  const source = crlfFolded.replace(/[\r\u0085\u2028\u2029]/g, '\n');
   const documents = parseAllDocuments(source, { prettyErrors: false, merge: true, uniqueKeys: false });
   const measured: MeasuredDocument[] = [];
   let expanded = 0;
@@ -338,6 +407,7 @@ function measureDocumentStream(rawSource: string, label: string): MeasuredDocume
     }
     if (doc.contents) {
       const targets = resolveAliasTargets(doc);
+      if (separators.length > 0) scalarSeparators.set(targets, separators);
       const sizes = new Map<object, number>();
       expanded = saturateAdd(expanded, countExpandedNodes(doc.contents, targets, sizes, new Set()));
       if (expanded > MAX_EXPANDED_NODES) throw refusalForFile(label);
@@ -349,9 +419,9 @@ function measureDocumentStream(rawSource: string, label: string): MeasuredDocume
 }
 
 /**
- * Throw when one compose source expands past the budget. The source is a
- * string the caller already decoded, so this checks the stream only; the
- * dependency graph needs files on disk and is checked by
+ * Throw when one compose source is over the byte cap or expands past the
+ * budget. The source is a string the caller already decoded, so this checks the
+ * stream only; the dependency graph needs files on disk and is checked by
  * `assertComposeInputsWithinExpansionLimits`.
  */
 export function assertComposeSourceWithinExpansionLimits(source: string, label: string): void {
@@ -427,6 +497,8 @@ interface GuardEnvContext {
    * value.
    */
   parent?: GuardEnvContext;
+  /** Text every env reader and path template of this invocation may still copy. */
+  copyBudget: { remaining: number };
 }
 
 interface EnvFileText {
@@ -455,12 +527,21 @@ function lookupEnv(context: GuardEnvContext): ComposeEnvLookup {
  */
 function withAdditionalEnvFiles(context: GuardEnvContext, contents: readonly EnvFileText[]): GuardEnvContext {
   if (contents.length === 0) return context;
-  const reader = new ComposeEnvFiles(lookupEnv(context));
+  const limits: ComposeEnvLimits = {
+    maxRawValue: MAX_COMPOSE_ENV_RAW_VALUE,
+    maxStatementReads: MAX_COMPOSE_ENV_STATEMENT_READS,
+    shared: context.copyBudget,
+  };
+  const reader = new ComposeEnvFiles(lookupEnv(context), limits);
   for (const entry of contents) {
     try {
       reader.read(entry.text);
     } catch (err) {
+      // A syntax Compose rejects, a value past the interpolation bounds, and a
+      // template nested past the stack all leave the compose inputs
+      // undetermined; none is a pass.
       if (err instanceof ComposeEnvFileError) throw envFileRefusal(entry.label);
+      if (err instanceof ComposeEnvLimitError || err instanceof RangeError) throw envFileTooLargeRefusal(entry.label);
       throw err;
     }
   }
@@ -468,6 +549,7 @@ function withAdditionalEnvFiles(context: GuardEnvContext, contents: readonly Env
     processEnv: context.processEnv,
     values: new Map(),
     parent: context,
+    copyBudget: context.copyBudget,
   };
   const inherited = lookupEnv(context);
   for (const name of reader.assignedNames()) {
@@ -533,6 +615,7 @@ async function loadSelectionEnv(
   envFileArgs: readonly string[],
   processEnv: ComposeEnvLookup,
 ): Promise<LoadedSelectionEnv | null> {
+  const copyBudget = { remaining: MAX_COMPOSE_ENV_COPIED };
   const sources: Array<{ path: string; label: string; required: boolean }> = [];
   let explicitSources = false;
   if (envFileArgs.length > 0) {
@@ -559,7 +642,7 @@ async function loadSelectionEnv(
         if (disabled === null) return null;
         if (disabled) {
           return {
-            context: { processEnv, values: new Map() },
+            context: { processEnv, values: new Map(), copyBudget },
             explicitSources: false,
             disabled: true,
           };
@@ -578,7 +661,7 @@ async function loadSelectionEnv(
     }
     contents.push(entry);
   }
-  const base: GuardEnvContext = { processEnv, values: new Map() };
+  const base: GuardEnvContext = { processEnv, values: new Map(), copyBudget };
   return { context: withAdditionalEnvFiles(base, contents), explicitSources, disabled: false };
 }
 
@@ -633,12 +716,29 @@ function resolveExtendsPath(
   return resolveDependencyPath(value, base);
 }
 
-/** Interpolate one path declaration; null means Compose fails on it too. */
-function interpolatePath(raw: string, context: GuardEnvContext): string | null {
+/**
+ * Interpolate one path declaration; null means Compose fails on it too. The
+ * template and what it copies out of variables are bounded, because the nested
+ * `${A:-${A:-...}}` form costs quadratic time and a variable repeated many times
+ * copies its whole value each time.
+ */
+function interpolatePath(raw: string, context: GuardEnvContext, label: string): string | null {
+  if (raw.length > MAX_COMPOSE_PATH_TEMPLATE) throw pathTooLargeRefusal(label);
+  const lookup = lookupEnv(context);
+  let copied = 0;
   try {
-    return expandComposeEnvTemplate(raw, lookupEnv(context));
+    return expandComposeEnvTemplate(raw, (name) => {
+      const value = lookup(name);
+      if (value !== undefined) {
+        copied += value.length;
+        context.copyBudget.remaining -= value.length;
+        if (copied > MAX_COMPOSE_PATH_EXPANSION || context.copyBudget.remaining < 0) throw new ComposeEnvLimitError('a path expands past the limit');
+      }
+      return value;
+    });
   } catch (err) {
     if (err instanceof ComposeEnvFileError) return null;
+    if (err instanceof ComposeEnvLimitError || err instanceof RangeError) throw pathTooLargeRefusal(label);
     throw err;
   }
 }
@@ -690,11 +790,43 @@ function deref(node: unknown, targets: Map<Node, Node>): unknown {
   return isAlias(current) ? undefined : current;
 }
 
+/**
+ * Offsets of the U+2028 and U+2029 characters the stream held, per document
+ * (keyed by its alias-target map). Compose keeps them inside a scalar, but the
+ * parse treated them as line breaks, so a scalar spanning one was not read as
+ * Compose reads it.
+ */
+const scalarSeparators = new WeakMap<Map<Node, Node>, number[]>();
+
+/** Raised when a key or path spans a character the parse read differently from Compose. */
+class MisreadScalarError extends Error {}
+
+function spansSeparator(offsets: readonly number[], start: number, end: number): boolean {
+  let low = 0;
+  let high = offsets.length;
+  while (low < high) {
+    const mid = (low + high) >> 1;
+    if (offsets[mid] < start) low = mid + 1;
+    else high = mid;
+  }
+  return low < offsets.length && offsets[low] < end;
+}
+
+/**
+ * The text of a scalar key or path, as Compose reads it. A `!!binary` scalar
+ * is decoded: Compose's decoder turns it into the string it encodes, so an
+ * `include`, a path, or a key spelled that way names what it decodes to.
+ */
 function textOf(node: unknown, targets: Map<Node, Node>): string | undefined {
   const resolved = deref(node, targets);
   if (!isScalar(resolved)) return undefined;
+  const separators = scalarSeparators.get(targets);
+  if (separators !== undefined && resolved.range && spansSeparator(separators, resolved.range[0], resolved.range[1])) {
+    throw new MisreadScalarError();
+  }
   if (typeof resolved.value === 'string') return resolved.value;
   if (typeof resolved.value === 'number') return String(resolved.value);
+  if (resolved.value instanceof Uint8Array) return Buffer.from(resolved.value).toString('utf8');
   return undefined;
 }
 
@@ -970,13 +1102,24 @@ async function assertInputClosure(args: {
   // Env files and the contexts they build are shared by every include that
   // names them, so a project with many includes reads and parses each once.
   const envEntries = new Map<string, Promise<EnvFileText | null>>();
+  let envReadBytes = 0;
   const readEnvEntry = (filePath: string): Promise<EnvFileText | null> => {
     let entry = envEntries.get(filePath);
     if (entry === undefined) {
       if (envEntries.size >= MAX_COMPOSE_DEPENDENCY_FILES) {
-        throw dependencyBoundRefusal(inputLabel(args.cwd, filePath), `more than ${MAX_COMPOSE_DEPENDENCY_FILES} env files`);
+        throw envBoundRefusal(inputLabel(args.cwd, filePath), `${MAX_COMPOSE_DEPENDENCY_FILES} files`);
       }
-      entry = readEnvFileEntry(filePath, inputLabel(args.cwd, filePath));
+      const label = inputLabel(args.cwd, filePath);
+      // Counted as each file arrives, so the entries held never pass the bound.
+      entry = readEnvFileEntry(filePath, label).then((read) => {
+        if (read !== null) {
+          envReadBytes += read.text.length;
+          if (envReadBytes > MAX_COMPOSE_ENV_PARSE_BYTES) {
+            throw envBoundRefusal(label, `${MAX_COMPOSE_ENV_PARSE_BYTES / (1024 * 1024)} MiB in total`);
+          }
+        }
+        return read;
+      });
       envEntries.set(filePath, entry);
     }
     return entry;
@@ -989,14 +1132,11 @@ async function assertInputClosure(args: {
     let child = childEnvs.get(key);
     if (child === undefined) {
       const label = entries[0].entry.label;
-      if (childEnvs.size >= MAX_COMPOSE_ENV_CONTEXTS) {
-        throw dependencyBoundRefusal(label, `more than ${MAX_COMPOSE_ENV_CONTEXTS} distinct include environments`);
-      }
       for (const item of entries) {
         envParseBytes += item.entry.text.length;
       }
       if (envParseBytes > MAX_COMPOSE_ENV_PARSE_BYTES) {
-        throw dependencyBoundRefusal(label, `env files totalling more than ${MAX_COMPOSE_ENV_PARSE_BYTES / (1024 * 1024)} MiB`);
+        throw envBoundRefusal(label, `${MAX_COMPOSE_ENV_PARSE_BYTES / (1024 * 1024)} MiB in total`);
       }
       child = withAdditionalEnvFiles(parent, entries.map((item) => item.entry));
       childEnvs.set(key, child);
@@ -1012,6 +1152,12 @@ async function assertInputClosure(args: {
   let references = 0;
   let measuredNodes = 0;
   let parsedBytes = 0;
+  const countParsedBytes = (length: number, label: string): void => {
+    parsedBytes += length;
+    if (parsedBytes > MAX_COMPOSE_PARSED_BYTES) {
+      throw dependencyBoundRefusal(label, `more than ${MAX_COMPOSE_PARSED_BYTES / (1024 * 1024)} MiB of compose text in total`);
+    }
+  };
   const countReference = (label: string): void => {
     references += 1;
     if (references > MAX_COMPOSE_DEPENDENCY_REFERENCES) {
@@ -1050,10 +1196,7 @@ async function assertInputClosure(args: {
       content = read.content;
     }
 
-    parsedBytes += content.length;
-    if (parsedBytes > MAX_COMPOSE_PARSED_BYTES) {
-      throw dependencyBoundRefusal(label, `more than ${MAX_COMPOSE_PARSED_BYTES / (1024 * 1024)} MiB of compose text in total`);
-    }
+    countParsedBytes(content.length, label);
     active.add(contextKey);
     try {
       // The parsed documents are dropped before the walk descends: a chain of
@@ -1066,7 +1209,17 @@ async function assertInputClosure(args: {
         }
         // Every load is at least one node, so a graph of empty files that fans
         // out at each level cannot walk past the budget for free.
-        return { own: Math.max(nodes, 1), extracted: measured.map(extractDependencies) };
+        return {
+          own: Math.max(nodes, 1),
+          extracted: measured.map((item) => {
+            try {
+              return extractDependencies(item);
+            } catch (err) {
+              if (err instanceof MisreadScalarError) throw scalarSeparatorRefusal(label);
+              throw err;
+            }
+          }),
+        };
       })();
       let subtotal = own;
       ownNodes.set(contextKey, own);
@@ -1104,7 +1257,7 @@ async function assertInputClosure(args: {
     if (group.kind === 'readFiles') {
       for (const raw of group.paths) {
         countReference(label);
-        const target = interpolatePath(raw, input.env);
+        const target = interpolatePath(raw, input.env, label);
         if (target === null || target === '') continue;
         // Compose expands a leading `~` in these paths and reads a relative one
         // from the project directory, so both spellings are checked.
@@ -1112,7 +1265,15 @@ async function assertInputClosure(args: {
         const home = input.env.processEnv('HOME');
         if (home && target.startsWith('~')) candidates.add(path.resolve(expandUserPath(target, home)));
         for (const resolved of candidates) {
-          if ((await inspectComposeInput(resolved)) === 'unbounded') throw unboundedInputRefusal(inputLabel(args.cwd, resolved));
+          // Compose reads the whole file, so it is read here under the same
+          // cap as every other input: a device or pipe is refused unopened, a
+          // file over the cap is refused, and a `/proc` entry that reports no
+          // size but never ends stops at the cap.
+          const fileLabel = inputLabel(args.cwd, resolved);
+          const read = await readComposeInputWithinCap(resolved, MAX_COMPOSE_INPUT_BYTES);
+          if (read.tooLarge) throw sizeRefusalForInput(fileLabel, 'Env file');
+          if (read.nonRegular === 'unbounded') throw unboundedInputRefusal(fileLabel);
+          if (read.content !== null) countParsedBytes(read.content.length, fileLabel);
         }
       }
       return [];
@@ -1120,7 +1281,7 @@ async function assertInputClosure(args: {
     if (group.kind === 'extends') {
       const children: PendingInput[] = [];
       for (const raw of group.paths) {
-        const target = interpolatePath(raw, input.env);
+        const target = interpolatePath(raw, input.env, label);
         if (target === null) continue;
         if (isRemoteComposeRef(target)) throw remoteDependencyRefusal(label, 'extends');
         const resolved = resolveExtendsPath(target, input.projectBase, input.viaExtends, input.env.processEnv('HOME'));
@@ -1137,7 +1298,7 @@ async function assertInputClosure(args: {
 
     const targets: string[] = [];
     for (const raw of group.paths) {
-      const target = interpolatePath(raw, input.env);
+      const target = interpolatePath(raw, input.env, label);
       if (target === null) continue;
       if (isRemoteComposeRef(target)) throw remoteDependencyRefusal(label, 'include');
       targets.push(resolveDependencyPath(target, input.projectBase));
@@ -1146,7 +1307,7 @@ async function assertInputClosure(args: {
 
     let childBase: string;
     if (group.projectDirectory !== null) {
-      const rawDirectory = interpolatePath(group.projectDirectory, input.env);
+      const rawDirectory = interpolatePath(group.projectDirectory, input.env, label);
       if (rawDirectory === null) return [];
       if (rawDirectory === '') {
         // An interpolated empty value is absent to Compose, the same as an
@@ -1159,7 +1320,7 @@ async function assertInputClosure(args: {
         // chain, which can differ from the absolute project base here.
         // Refuse rather than measure a different file than Compose loads.
         if (input.depth > 0 && !path.isAbsolute(rawDirectory)) {
-          throw unresolvedIncludePathRefusal(label, 'has a relative project_directory inside an included project.');
+          throw unresolvedIncludePathRefusal(label, 'has a relative project_directory inside an included or extended file.');
         }
         childBase = resolveDependencyPath(rawDirectory, input.projectBase);
       }
@@ -1172,10 +1333,10 @@ async function assertInputClosure(args: {
       const seenEnvFiles = new Set<string>();
       for (const raw of group.envFiles) {
         countReference(label);
-        const target = interpolatePath(raw, input.env);
+        const target = interpolatePath(raw, input.env, label);
         if (target === null) continue;
         if (input.depth > 0 && !path.isAbsolute(target)) {
-          throw unresolvedIncludePathRefusal(label, 'has a relative env_file inside an included project.');
+          throw unresolvedIncludePathRefusal(label, 'has a relative env_file inside an included or extended file.');
         }
         const resolved = resolveDependencyPath(target, input.projectBase);
         // Compose reads a path listed twice twice and the later assignment
@@ -1277,11 +1438,12 @@ function sameFileExtendsCharge(
  * `COMPOSE_DISABLE_ENV_FILE` variables in `env`, which is the environment the
  * child receives.
  *
- * A missing compose input is left for Compose to report, so an ordinary broken
- * stack fails exactly as it did. `/dev/null` given as an env file is read as
- * empty, the way Compose reads it. A dependency or selected input the guard
- * cannot read (a remote Git or OCI reference, a device or pipe, or a graph past
- * the traversal bounds) is refused, because Compose would read it unmeasured.
+ * A missing or unreadable (permission denied) compose input is left for Compose
+ * to report, so an ordinary broken stack fails exactly as it did. `/dev/null`
+ * given as an env file is read as empty, the way Compose reads it. A dependency
+ * or selected input the guard cannot bound (a remote Git or OCI reference,
+ * standard input, a device or pipe, or a graph past the traversal bounds) is
+ * refused, because Compose would read it unmeasured.
  *
  * The measurement is taken immediately before the caller spawns Compose, but a
  * file rewritten in the gap between the two is not re-checked. A writer who can
@@ -1307,6 +1469,7 @@ export async function assertComposeInputsWithinExpansionLimits(opts: {
   const explicitFileValues = composeFileArgsFromInvocation(invocation);
   for (const file of explicitFileValues) {
     if (isRemoteComposeRef(file)) throw remoteInputRefusal();
+    if (file === '-') throw stdinInputRefusal();
   }
   const explicitFiles = explicitFileValues.map((file) => path.resolve(cwd, file));
   const envFileArgs = flagValues(invocation, '--env-file', '--env-file');
@@ -1351,7 +1514,7 @@ export async function assertComposeInputsWithinExpansionLimits(opts: {
         for (const [name, value] of selection.context.values) {
           if (name.startsWith('COMPOSE_')) kept.set(name, value);
         }
-        rootEnv = { processEnv, values: kept };
+        rootEnv = { processEnv, values: kept, copyBudget: selection.context.copyBudget };
         skipProjectEnv = true;
       }
     }
@@ -1371,6 +1534,7 @@ export async function assertComposeInputsWithinExpansionLimits(opts: {
       if (entries.length === 0) return;
       for (const entry of entries) {
         if (isRemoteComposeRef(entry)) throw remoteInputRefusal();
+        if (entry === '-') throw stdinInputRefusal();
       }
       // COMPOSE_FILE entries resolve against the working directory, not the
       // project directory (the project directory is derived from them).

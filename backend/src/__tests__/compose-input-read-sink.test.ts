@@ -5,10 +5,11 @@
  */
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { execFile } from 'child_process';
-import { promises as fsPromises } from 'fs';
+import { existsSync, promises as fsPromises } from 'fs';
+import net from 'net';
 import os from 'os';
 import path from 'path';
-import { inspectComposeInput, readComposeInputWithinCap, resolvePhysicalDirectory } from '../helpers/composeInputReadSink';
+import { readComposeInputWithinCap, resolvePhysicalDirectory } from '../helpers/composeInputReadSink';
 
 let dir: string;
 
@@ -112,6 +113,7 @@ describe('readComposeInputWithinCap', () => {
   });
 
   it('reports a file that grows past the cap after the stat', async () => {
+    await fsPromises.writeFile(path.join(dir, 'compose.yaml'), 'x');
     const handle = fakeHandle({
       stat: vi.fn().mockResolvedValue({ isFile: () => true, size: 0 }),
       read: vi.fn().mockResolvedValue({ bytesRead: 17 }),
@@ -164,14 +166,45 @@ describe('readComposeInputWithinCap', () => {
       .resolves.toEqual({ content: null, tooLarge: false });
   });
 
-  it('inspects a path without reading it', async () => {
-    const file = path.join(dir, 'a.yaml');
-    await fsPromises.writeFile(file, 'x');
-    await expect(inspectComposeInput(file)).resolves.toBe('regular');
-    await expect(inspectComposeInput(path.join(dir, 'missing'))).resolves.toBe('missing');
-    await expect(inspectComposeInput(dir)).resolves.toBe('directory');
-    await expect(inspectComposeInput('/dev/null')).resolves.toBe('null-device');
-    await expect(inspectComposeInput('/dev/zero')).resolves.toBe('unbounded');
+  it('classifies a device or pipe without opening it', async () => {
+    const fifo = path.join(dir, 'pipe');
+    await new Promise<void>((resolve, reject) => {
+      execFile('mkfifo', [fifo], (err) => (err ? reject(err) : resolve()));
+    });
+    const openSpy = vi.spyOn(fsPromises, 'open');
+    try {
+      await expect(readComposeInputWithinCap('/dev/zero', 1024)).resolves.toEqual({ content: null, tooLarge: false, nonRegular: 'unbounded' });
+      await expect(readComposeInputWithinCap(fifo, 1024)).resolves.toEqual({ content: null, tooLarge: false, nonRegular: 'unbounded' });
+      await expect(readComposeInputWithinCap('/dev/null', 1024)).resolves.toEqual({ content: null, tooLarge: false, nonRegular: 'null-device' });
+      await expect(readComposeInputWithinCap(dir, 1024)).resolves.toEqual({ content: null, tooLarge: false, nonRegular: 'directory' });
+      expect(openSpy).not.toHaveBeenCalled();
+    } finally {
+      openSpy.mockRestore();
+    }
+  });
+
+  it.runIf(process.platform === 'linux' && existsSync('/proc/self/pagemap'))(
+    'stops a /proc file that reports no size but never ends at the cap',
+    async () => {
+      // `pagemap` reports size 0 and yields about 256 GiB; a read whose length is
+      // not a multiple of 8 fails with EINVAL, so the loop reads whole chunks.
+      await expect(readComposeInputWithinCap('/proc/self/pagemap', 1024 * 1024))
+        .resolves.toEqual({ content: null, tooLarge: true });
+    },
+  );
+
+  it('skips a unix socket, which Compose cannot open either', async () => {
+    const socketPath = path.join(dir, 's.sock');
+    const server = net.createServer();
+    await new Promise<void>((resolve, reject) => {
+      server.once('error', reject);
+      server.listen(socketPath, resolve);
+    });
+    try {
+      await expect(readComposeInputWithinCap(socketPath, 1024)).resolves.toEqual({ content: null, tooLarge: false });
+    } finally {
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+    }
   });
 
   it('skips a broken symlink', async () => {
@@ -183,6 +216,7 @@ describe('readComposeInputWithinCap', () => {
   });
 
   it('skips an input it is not allowed to read', async () => {
+    await fsPromises.writeFile(path.join(dir, 'compose.yaml'), 'x');
     vi.spyOn(fsPromises, 'open').mockRejectedValueOnce(codedError('EACCES'));
 
     await expect(readComposeInputWithinCap(path.join(dir, 'compose.yaml'), 1024))
@@ -190,6 +224,7 @@ describe('readComposeInputWithinCap', () => {
   });
 
   it('rethrows an unexpected open failure rather than handing the file to Compose unmeasured', async () => {
+    await fsPromises.writeFile(path.join(dir, 'compose.yaml'), 'x');
     vi.spyOn(fsPromises, 'open').mockRejectedValueOnce(codedError('EIO', 'input/output error'));
 
     await expect(readComposeInputWithinCap(path.join(dir, 'compose.yaml'), 1024))
@@ -197,6 +232,7 @@ describe('readComposeInputWithinCap', () => {
   });
 
   it('rethrows an unexpected read failure and closes the descriptor', async () => {
+    await fsPromises.writeFile(path.join(dir, 'compose.yaml'), 'x');
     const handle = fakeHandle({
       stat: vi.fn().mockResolvedValue({ isFile: () => true, size: 10 }),
       read: vi.fn().mockRejectedValue(codedError('EIO', 'input/output error')),
@@ -209,6 +245,7 @@ describe('readComposeInputWithinCap', () => {
   });
 
   it('keeps the content when only the descriptor close fails', async () => {
+    await fsPromises.writeFile(path.join(dir, 'compose.yaml'), 'x');
     const handle = fakeHandle({
       close: vi.fn().mockRejectedValue(codedError('EBADF')),
     });

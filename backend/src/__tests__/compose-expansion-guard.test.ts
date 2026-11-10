@@ -5,7 +5,7 @@
  */
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { execFile } from 'child_process';
-import { promises as fsPromises } from 'fs';
+import { existsSync, promises as fsPromises } from 'fs';
 import os from 'os';
 import path from 'path';
 import {
@@ -140,7 +140,7 @@ describe('assertComposeSourceWithinExpansionLimits', () => {
       .toThrow(ComposeExpansionRefusal);
   });
 
-  it('still measures a document whose only errors are an unresolved alias or a repeated key', () => {
+  it('still measures a document whose only error is an unresolved alias, or that repeats a key', () => {
     expect(() => assertComposeSourceWithinExpansionLimits(`${nestedAliasBomb(12)}  web: *missing\n`, 'compose.yaml'))
       .toThrow(/nested YAML aliases/);
     expect(() => assertComposeSourceWithinExpansionLimits(`${nestedAliasBomb(12)}services:\n  web: {}\n`, 'compose.yaml'))
@@ -1167,14 +1167,14 @@ describe('assertComposeInputsWithinExpansionLimits - selection, dependency, and 
     await write('sub/main.yaml', 'include:\n  - path: sub2/main2.yaml\n    project_directory: ../deep2\nservices:\n  level1:\n    image: nginx:alpine\n');
     await write('deep2/nested/dep.yaml', nestedAliasBomb(12));
     await expect(assertComposeInputsWithinExpansionLimits({ cwd: dir, invocation: ['compose', 'config'] }))
-      .rejects.toThrow(/relative project_directory inside an included project/);
+      .rejects.toThrow(/relative project_directory inside an included or extended file/);
   });
 
   it('refuses a relative env_file inside an included project', async () => {
     await write('compose.yaml', 'include:\n  - path: sub/main.yaml\n    project_directory: deep\nservices:\n  web:\n    image: nginx:alpine\n');
     await write('sub/main.yaml', 'include:\n  - path: sub2/main2.yaml\n    env_file: vars.env\nservices:\n  level1:\n    image: nginx:alpine\n');
     await expect(assertComposeInputsWithinExpansionLimits({ cwd: dir, invocation: ['compose', 'config'] }))
-      .rejects.toThrow(/relative env_file inside an included project/);
+      .rejects.toThrow(/relative env_file inside an included or extended file/);
   });
 
   it('accepts a first-level relative project_directory with a safe nested include', async () => {
@@ -1646,7 +1646,7 @@ describe('assertComposeInputsWithinExpansionLimits - parser gaps, devices, exten
   });
 
   describe('line breaks, key checks, and env-file budgets', () => {
-    it('reads U+0085, U+2028, and U+2029 as line breaks, as Compose does', async () => {
+    it('refuses a flow sequence that U+0085, U+2028, or U+2029 splits, as unmeasurable', async () => {
       for (const breakChar of ['\u0085', '\u2028', '\u2029']) {
         const lines = ['x-l0: &l0 [a, a, a, a, a, a, a, a, a]'];
         for (let level = 1; level <= 6; level += 1) {
@@ -1656,6 +1656,13 @@ describe('assertComposeInputsWithinExpansionLimits - parser gaps, devices, exten
         // Compose accepts the break inside the flow sequence. Here it becomes a
         // newline the parser rejects, and the file is refused as unmeasurable.
         await expect(run()).rejects.toBeInstanceOf(ComposeExpansionRefusal);
+      }
+    });
+
+    it('measures an alias bomb that follows U+0085, U+2028, or U+2029 in a comment', async () => {
+      for (const breakChar of ['\u0085', '\u2028', '\u2029']) {
+        await write('compose.yaml', `x-pad: 1 # note${breakChar}${nestedAliasBomb(12)}`);
+        await expect(run()).rejects.toThrow(/nested YAML aliases/);
       }
     });
 
@@ -1715,7 +1722,7 @@ describe('assertComposeInputsWithinExpansionLimits - parser gaps, devices, exten
         envFiles.push(`      - e${i}.env`);
       }
       await write('compose.yaml', `include:\n  - path: leaf.yaml\n    env_file:\n${envFiles.join('\n')}\n`);
-      await expect(run()).rejects.toThrow(/more than 512 env files/);
+      await expect(run()).rejects.toThrow(/past 512 files/);
     });
 
     it('refuses the same large file parsed under many project directories', async () => {
@@ -1743,16 +1750,20 @@ describe('assertComposeInputsWithinExpansionLimits - parser gaps, devices, exten
     });
 
     it('checks a ~ service env_file against HOME', async () => {
+      // HOME is a different directory from the stack, so `~/pipe.env` names a
+      // file only the HOME expansion can reach (the literal `./~/pipe.env` does not exist).
+      await fsPromises.mkdir(path.join(dir, 'home'));
       await new Promise<void>((resolve, reject) => {
-        execFile('mkfifo', [path.join(dir, 'fifo2')], (err) => (err ? reject(err) : resolve()));
+        execFile('mkfifo', [path.join(dir, 'home', 'pipe.env')], (err) => (err ? reject(err) : resolve()));
       });
-      await write('compose.yaml', 'services:\n  web:\n    image: nginx\n    env_file: ~/fifo2\n');
-      await expect(run(dir, ['compose', 'config'], (name) => (name === 'HOME' ? dir : undefined)))
-        .rejects.toThrow(/not a regular file/);
-      // Enough `..` segments to reach the filesystem root from any scratch depth.
-      await write('compose.yaml', `services:\n  web:\n    image: nginx\n    env_file: ~/${'../'.repeat(40)}dev/zero\n`);
-      await expect(run(dir, ['compose', 'config'], (name) => (name === 'HOME' ? dir : undefined)))
-        .rejects.toThrow(/not a regular file/);
+      await fsPromises.symlink('/dev/zero', path.join(dir, 'home', 'zero.env'));
+      const home = (name: string): string | undefined => (name === 'HOME' ? path.join(dir, 'home') : undefined);
+      for (const target of ['~/pipe.env', '~/zero.env']) {
+        await write('compose.yaml', `services:\n  web:\n    image: nginx\n    env_file: ${target}\n`);
+        await expect(run(dir, ['compose', 'config'], home)).rejects.toThrow(/not a regular file/);
+        // With no HOME the path stays literal and nothing there exists.
+        await expect(run(dir, ['compose', 'config'], () => undefined)).resolves.toBeUndefined();
+      }
     });
 
     it('names an input outside the stack by its own path', async () => {
@@ -1764,11 +1775,13 @@ describe('assertComposeInputsWithinExpansionLimits - parser gaps, devices, exten
       await write('leaf.yaml', SAFE_COMPOSE);
       const entries: string[] = [];
       for (let i = 0; i < 10; i += 1) {
-        await write(`e${i}.env`, `K${i}=${'x'.repeat(900_000)}\n`);
+        // Each value stays under the single-value bound; the file totals ~900 KB.
+        const values = Array.from({ length: 18 }, (_, k) => `K${k}=${'x'.repeat(50_000)}`);
+        await write(`e${i}.env`, `${values.join('\n')}\n`);
         entries.push(`  - path: leaf.yaml\n    env_file: e${i}.env`);
       }
       await write('compose.yaml', `include:\n${entries.join('\n')}\n`);
-      await expect(run()).rejects.toThrow(/env files totalling more than 8 MiB/);
+      await expect(run()).rejects.toThrow(/past 8 MiB in total/);
     });
 
     it('refuses an unbounded service env_file or label_file', async () => {
@@ -1808,6 +1821,196 @@ describe('assertComposeInputsWithinExpansionLimits - parser gaps, devices, exten
       }
       await write('compose.yaml', 'include:\n  - f0.yaml\n');
       await expect(run()).rejects.toThrow(/in total/);
+    });
+  });
+});
+
+describe('assertComposeInputsWithinExpansionLimits - scalar text, interpolation bounds, and layered environments', () => {
+  const run = (cwd = dir, invocation: string[] = ['compose', 'config'], env?: (name: string) => string | undefined) =>
+    assertComposeInputsWithinExpansionLimits({ cwd, invocation, env });
+  const b64 = (text: string): string => Buffer.from(text, 'utf8').toString('base64');
+
+  describe('a !!binary scalar names what it decodes to, as Compose reads it', () => {
+    beforeEach(async () => {
+      await write('dep.yaml', nestedAliasBomb(12));
+    });
+
+    it('follows an include path written as !!binary', async () => {
+      await write('compose.yaml', `include:\n  - !!binary ${b64('dep.yaml')}\n`);
+      await expect(run()).rejects.toThrow(/nested YAML aliases/);
+      await write('compose.yaml', `include:\n  - path: !!binary ${b64('dep.yaml')}\n`);
+      await expect(run()).rejects.toThrow(/nested YAML aliases/);
+    });
+
+    it('follows an extends.file written as !!binary', async () => {
+      await write('compose.yaml', `services:\n  web:\n    extends:\n      file: !!binary ${b64('dep.yaml')}\n      service: web\n`);
+      await expect(run()).rejects.toThrow(/nested YAML aliases/);
+    });
+
+    it('reads a !!binary key as the name it decodes to', async () => {
+      await write('compose.yaml', `!!binary ${b64('include')}: [dep.yaml]\n`);
+      await expect(run()).rejects.toThrow(/nested YAML aliases/);
+      await write('compose.yaml', `!!binary ${b64('services')}:\n  web:\n    image: nginx\n    extends:\n      file: dep.yaml\n      service: web\n`);
+      await expect(run()).rejects.toThrow(/nested YAML aliases/);
+    });
+
+    it('refuses a service env_file written as !!binary that names a device', async () => {
+      await write('compose.yaml', `services:\n  web:\n    image: nginx\n    env_file: !!binary ${b64('/dev/zero')}\n`);
+      await expect(run()).rejects.toThrow(/not a regular file/);
+    });
+
+    it('accepts a !!binary path to a safe file', async () => {
+      await write('dep.yaml', SAFE_COMPOSE.replace('web', 'other'));
+      await write('compose.yaml', `include:\n  - !!binary ${b64('dep.yaml')}\n`);
+      await expect(run()).resolves.toBeUndefined();
+    });
+  });
+
+  describe('U+2028 and U+2029 inside a key or path', () => {
+    it('refuses an include path that holds one, because Compose keeps it and the parse folds it', async () => {
+      for (const separator of [' ', ' ']) {
+        // Compose loads `x<sep>y.yaml`; folded to a space the guard would look for `x y.yaml`.
+        await write(`x${separator}y.yaml`, nestedAliasBomb(12));
+        await write('compose.yaml', `include:\n  - "x${separator}    y.yaml"\n`);
+        await expect(run()).rejects.toThrow(/U\+2028 or U\+2029/);
+      }
+    });
+
+    it('still accepts the characters in a value the guard never reads as text', async () => {
+      await write('compose.yaml', 'services:\n  web:\n    image: nginx\n    labels:\n      note: "a b c"\n# trailing comment\n');
+      await expect(run()).resolves.toBeUndefined();
+    });
+  });
+
+  describe('service env_file and label_file are read under the cap', () => {
+    it.runIf(process.platform === 'linux' && existsSync('/proc/self/pagemap'))(
+      'refuses a /proc file that reports no size but never ends',
+      async () => {
+        for (const field of ['env_file', 'label_file']) {
+          await write('compose.yaml', `services:\n  web:\n    image: nginx\n    ${field}: /proc/self/pagemap\n`);
+          await expect(run()).rejects.toThrow(/larger than 1 MiB/);
+        }
+      },
+    );
+
+    it('refuses an ordinary env_file over the cap and counts its text toward the run', async () => {
+      await write('big.env', `A=${'x'.repeat(MAX_COMPOSE_INPUT_BYTES)}\n`);
+      await write('compose.yaml', 'services:\n  web:\n    image: nginx\n    env_file: big.env\n');
+      await expect(run()).rejects.toThrow(/larger than 1 MiB/);
+      for (let i = 0; i < 10; i += 1) await write(`m${i}.env`, `A=${'x'.repeat(900_000)}\n`);
+      const files = Array.from({ length: 10 }, (_, i) => `      - m${i}.env`).join('\n');
+      await write('compose.yaml', `services:\n  web:\n    image: nginx\n    env_file:\n${files}\n`);
+      await expect(run()).rejects.toThrow(/MiB of compose text in total/);
+    });
+  });
+
+  describe('the guard bounds its own work', () => {
+    it('does not rescan blank lines after a rejected document (quadratic regular expression)', async () => {
+      const source = `services: [@bad\n${'\n'.repeat(400_000)}`;
+      const started = Date.now();
+      assertComposeSourceWithinExpansionLimits(source, 'compose.yaml');
+      await write('compose.yaml', source);
+      await run();
+      expect(Date.now() - started).toBeLessThan(3_000);
+    });
+
+    it('refuses a .env whose interpolation doubles into gigabytes, quickly and without building it', async () => {
+      const lines = ['A0=seed-value'];
+      for (let i = 1; i <= 24; i += 1) lines.push(`A${i}="\${A${i - 1}}\${A${i - 1}}"`);
+      for (let i = 0; i < 2_000; i += 1) lines.push(`B${i}="\${A24}"`);
+      await write('.env', `${lines.join('\n')}\n`);
+      await write('compose.yaml', SAFE_COMPOSE);
+      const started = Date.now();
+      await expect(run()).rejects.toThrow(/too long, or interpolates into more text/);
+      expect(Date.now() - started).toBeLessThan(5_000);
+    });
+
+    it('refuses an include env_file value longer than the bound', async () => {
+      await write('big.env', `V=${'x'.repeat(100_000)}\n`);
+      await write('leaf.yaml', SAFE_COMPOSE);
+      await write('compose.yaml', 'include:\n  - path: leaf.yaml\n    env_file: big.env\n');
+      await expect(run()).rejects.toThrow(/too long, or interpolates into more text/);
+    });
+
+    it('refuses a path template nested deeper than the bound, quickly', async () => {
+      await write('.env', 'A=\n');
+      await write('compose.yaml', `include:\n  - '${'${A:-'.repeat(500)}x${'}'.repeat(500)}'\n`);
+      const started = Date.now();
+      await expect(run()).resolves.toBeUndefined();
+      await write('compose.yaml', `include:\n  - '${'${A:-'.repeat(40_000)}'\n`);
+      await expect(run()).rejects.toThrow(/too long or interpolates into too much text/);
+      expect(Date.now() - started).toBeLessThan(5_000);
+    });
+
+    it('refuses a path that repeats a large variable past the expansion bound', async () => {
+      await write('.env', `BIG=${'x'.repeat(30_000)}\n`);
+      await write('compose.yaml', `include:\n  - '${'${BIG}'.repeat(600)}'\n`);
+      await expect(run()).rejects.toThrow(/too long or interpolates into too much text/);
+    });
+
+    it('still accepts an ordinary interpolated .env and path', async () => {
+      await write('.env', 'DIR=sub\nNAME=${DIR}/dep\nEXT="yaml"\n');
+      await write('sub/dep.yaml', SAFE_COMPOSE);
+      await write('compose.yaml', 'include:\n  - ${NAME}.${EXT}\n');
+      await expect(run()).resolves.toBeUndefined();
+    });
+  });
+
+  describe('env-file reads stop at the byte bound', () => {
+    it('stops reading once the env files read pass 8 MiB, instead of reading every listed file', async () => {
+      const values = Array.from({ length: 18 }, (_, k) => `K${k}=${'x'.repeat(50_000)}`);
+      await write('real.env', `${values.join('\n')}\n`);
+      const links: string[] = [];
+      for (let i = 0; i < 60; i += 1) {
+        await fsPromises.symlink(path.join(dir, 'real.env'), path.join(dir, `link${i}.env`));
+        links.push(`      - link${i}.env`);
+      }
+      await write('leaf.yaml', SAFE_COMPOSE);
+      await write('compose.yaml', `include:\n  - path: leaf.yaml\n    env_file:\n${links.join('\n')}\n`);
+      const openSpy = vi.spyOn(fsPromises, 'open');
+      try {
+        await expect(run()).rejects.toThrow(/past 8 MiB in total/);
+        const envOpens = openSpy.mock.calls.filter(([target]) => /link\d+\.env$/.test(String(target))).length;
+        // 900 KB each: the ninth read passes 8 MiB, so the other files stay unread.
+        expect(envOpens).toBeLessThanOrEqual(12);
+      } finally {
+        openSpy.mockRestore();
+      }
+    });
+  });
+
+  describe('standard input', () => {
+    it('refuses -f - and a COMPOSE_FILE entry of -, which the guard cannot read', async () => {
+      await write('compose.yaml', SAFE_COMPOSE);
+      await expect(run(dir, ['compose', '-f', '-', 'config'])).rejects.toThrow(/standard input/);
+      await expect(run(dir, ['compose', 'config'], (name) => (name === 'COMPOSE_FILE' ? '-' : undefined)))
+        .rejects.toThrow(/standard input/);
+    });
+  });
+
+  describe('layered include environments', () => {
+    it('keeps an inherited name over an include env_file assignment, as Compose does', async () => {
+      await write('.env', 'FOO=fromroot\n');
+      await write('e.env', 'FOO=frominc\n');
+      await write('fromroot.yaml', nestedAliasBomb(12));
+      await write('frominc.yaml', SAFE_COMPOSE);
+      await write('compose.yaml', 'include:\n  - path: mid.yaml\n    env_file: e.env\n');
+      await write('mid.yaml', 'include:\n  - ${FOO}.yaml\n');
+      await expect(run()).rejects.toThrow(/nested YAML aliases/);
+    });
+
+    it('measures a shared file again when only an ancestor layer differs', async () => {
+      // `leaf.yaml` is reached through `mid.yaml` under two outer layers with the
+      // same inner `b.env`; the include it declares names a file chosen by the outer one.
+      await write('a1.env', 'DEP=safe.yaml\n');
+      await write('a2.env', 'DEP=bomb.yaml\n');
+      await write('b.env', 'X=1\n');
+      await write('safe.yaml', SAFE_COMPOSE);
+      await write('bomb.yaml', nestedAliasBomb(12));
+      await write('compose.yaml', 'include:\n  - path: mid.yaml\n    env_file: a1.env\n  - path: mid.yaml\n    env_file: a2.env\n');
+      await write('mid.yaml', 'include:\n  - path: leaf.yaml\n    env_file: /ABS/b.env\n'.replace('/ABS', dir));
+      await write('leaf.yaml', 'include:\n  - ${DEP}\n');
+      await expect(run()).rejects.toThrow(/nested YAML aliases/);
     });
   });
 });

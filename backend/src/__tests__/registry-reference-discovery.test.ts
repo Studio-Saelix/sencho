@@ -1,5 +1,6 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import fs from 'fs';
+import os from 'os';
 import path from 'path';
 import {
   discoverRegistryReferences,
@@ -41,7 +42,7 @@ function encodeUtf16Le(text: string): Buffer {
 // Directories the alias-guard tests create, removed after each test.
 const guardTestDirs: string[] = [];
 function guardTestDir(label: string): string {
-  const dir = path.join(process.env.TMPDIR || '/tmp', `sencho-refdisc-${label}-${Date.now()}-${guardTestDirs.length}`);
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), `sencho-refdisc-${label}-`));
   guardTestDirs.push(dir);
   return dir;
 }

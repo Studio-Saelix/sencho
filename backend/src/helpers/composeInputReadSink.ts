@@ -7,10 +7,12 @@
  * the guard over a throwaway directory. Nothing here creates or modifies a file:
  * the open is `O_RDONLY` with no create flag, the path is one the Compose
  * invocation selects or its include/extends graph declares (or an env file that
- * selects or interpolates them), the descriptor is checked with `fstat`
- * before the bounded read, and `O_NONBLOCK` keeps a FIFO from wedging it. The
- * module is listed under `paths-ignore` in the CodeQL config with the same
- * reasoning.
+ * selects or interpolates them), the path is `stat`ed before it is opened so a
+ * device or pipe is never opened, the descriptor is checked with `fstat` before
+ * the bounded read (the file may have been swapped in between), and
+ * `O_NONBLOCK` keeps a FIFO from wedging it. The module is listed under
+ * `paths-ignore` in the CodeQL config with the same reasoning, which also
+ * covers `resolvePhysicalDirectory` below.
  *
  * An input that is missing or cannot be read as one is reported as skipped:
  * Compose reads the same file next and reports the real error. A path that
@@ -106,15 +108,31 @@ function isSkippableReadError(err: unknown): boolean {
 
 /**
  * Read at most `maxBytes` from a regular file. A non-regular file is reported
- * with its kind and the ordinary unreadable-file errors (including a broken
- * link) are skipped; any other failure is rethrown. A file that grows after the `fstat`
- * cannot be read past the cap: the read loop stops one byte past it and reports
- * `tooLarge`.
+ * with its kind, without being opened, and the ordinary unreadable-file errors
+ * (including a broken link) are skipped; any other failure is rethrown. A file
+ * that reports a small size but yields more (a `/proc` entry, or one that grows
+ * after the `fstat`) cannot be read past the cap: the read loop stops once it
+ * holds more than `maxBytes` and reports `tooLarge`.
  */
 export async function readComposeInputWithinCap(
   filePath: string,
   maxBytes: number,
 ): Promise<ComposeInputRead> {
+  // `stat` before `open`: opening a device can act on it (a watchdog starts, a
+  // tape rewinds), so a path that is not a regular file is classified without
+  // being opened.
+  let before: Stats;
+  try {
+    before = await fsPromises.stat(filePath);
+  } catch (err) {
+    if (isSkippableReadError(err)) return { content: null, tooLarge: false };
+    throw err;
+  }
+  // A socket cannot be opened (ENXIO), so Compose fails on it without reading
+  // anything, the same outcome as the open errors skipped below.
+  if (before.isSocket()) return { content: null, tooLarge: false };
+  if (!before.isFile()) return { content: null, tooLarge: false, nonRegular: await classifyNonRegular(before) };
+
   let handle: Awaited<ReturnType<typeof fsPromises.open>>;
   try {
     handle = await fsPromises.open(filePath, fsConstants.O_RDONLY | fsConstants.O_NONBLOCK);
@@ -123,6 +141,8 @@ export async function readComposeInputWithinCap(
     throw err;
   }
   try {
+    // The path can change between the `stat` and the `open`; the descriptor is
+    // the file that will be read.
     const stat = await handle.stat();
     if (!stat.isFile()) return { content: null, tooLarge: false, nonRegular: await classifyNonRegular(stat) };
     if (stat.size > maxBytes) return { content: null, tooLarge: true };
@@ -130,7 +150,10 @@ export async function readComposeInputWithinCap(
     const chunks: Buffer[] = [];
     let total = 0;
     while (total <= maxBytes) {
-      const chunk = Buffer.allocUnsafe(Math.min(64 * 1024, maxBytes + 1 - total));
+      // Whole chunks only: a `/proc` file such as `pagemap` rejects a read
+      // whose length is not a multiple of its record size, and the overshoot
+      // past the cap is dropped below.
+      const chunk = Buffer.allocUnsafe(64 * 1024);
       const { bytesRead } = await handle.read(chunk, 0, chunk.length, null);
       if (bytesRead === 0) break;
       chunks.push(chunk.subarray(0, bytesRead));
@@ -160,22 +183,4 @@ export async function resolvePhysicalDirectory(directory: string): Promise<strin
   } catch {
     return directory;
   }
-}
-
-/**
- * What a path is, without reading it: `missing`, `regular`, or the kind of
- * non-regular file. A caller that only has to know whether Compose could read
- * it without limit asks this instead of reading up to the cap.
- */
-export async function inspectComposeInput(filePath: string): Promise<'missing' | 'regular' | NonRegularKind> {
-  // `stat`, not `open`: opening a device can act on it (a watchdog starts, a
-  // tape rewinds), and Compose never opens a path the guard refuses.
-  let stat: Stats;
-  try {
-    stat = await fsPromises.stat(filePath);
-  } catch (err) {
-    if (isSkippableReadError(err)) return 'missing';
-    throw err;
-  }
-  return stat.isFile() ? 'regular' : await classifyNonRegular(stat);
 }

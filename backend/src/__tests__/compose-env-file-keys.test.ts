@@ -5,7 +5,7 @@
  * file is read literally.
  */
 import { describe, expect, it } from 'vitest';
-import { ComposeEnvFileError, ComposeEnvFiles } from '../utils/composeDotenv';
+import { ComposeEnvFileError, ComposeEnvFiles, ComposeEnvLimitError, type ComposeEnvLimits } from '../utils/composeDotenv';
 
 const none = () => undefined;
 
@@ -121,5 +121,50 @@ describe('service env_file assigned names', () => {
         expect(() => new ComposeEnvFiles(none).read(bad, { raw: true }), bad).toThrow(ComposeEnvFileError);
       }
     });
+  });
+});
+
+describe('ComposeEnvFiles limits', () => {
+  const limits = (overrides: Partial<ComposeEnvLimits> = {}): ComposeEnvLimits => ({
+    maxRawValue: 100,
+    maxStatementReads: 50,
+    shared: { remaining: 1_000 },
+    ...overrides,
+  });
+  const reader = (l?: ComposeEnvLimits) => new ComposeEnvFiles(() => undefined, l);
+
+  it('reads the same values with or without limits when nothing passes a bound', () => {
+    const text = 'A=one\nB="${A}-two"\nC=${B}-three # note\n';
+    const bounded = reader(limits());
+    bounded.read(text);
+    const free = reader();
+    free.read(text);
+    expect(bounded.assigned('C')).toBe(free.assigned('C'));
+    expect(bounded.assigned('C')).toBe('one-two-three');
+  });
+
+  it('refuses a value longer than the raw bound, quoted or not', () => {
+    expect(() => reader(limits()).read(`A=${'x'.repeat(101)}\n`)).toThrow(ComposeEnvLimitError);
+    expect(() => reader(limits()).read(`A="${'x'.repeat(101)}"\n`)).toThrow(ComposeEnvLimitError);
+    expect(() => reader(limits()).read(`A='${'x'.repeat(101)}'\n`)).toThrow(ComposeEnvLimitError);
+  });
+
+  it('refuses a statement that copies more than the per-statement bound out of variables', () => {
+    const env = reader(limits());
+    env.read(`A=${'x'.repeat(40)}\n`);
+    expect(() => env.read('B="${A}${A}"\n')).toThrow(ComposeEnvLimitError);
+  });
+
+  it('refuses text copied past the shared budget, across readers that share it', () => {
+    const shared = { remaining: 100 };
+    reader(limits({ shared })).read(`A=${'x'.repeat(60)}\n`);
+    expect(shared.remaining).toBe(40);
+    expect(() => reader(limits({ shared })).read(`B=${'y'.repeat(60)}\n`)).toThrow(ComposeEnvLimitError);
+  });
+
+  it('is not a syntax error, so a caller cannot read it as a file Compose rejects too', () => {
+    const error = (() => { try { reader(limits()).read(`A=${'x'.repeat(101)}\n`); } catch (err) { return err; } return null; })();
+    expect(error).toBeInstanceOf(ComposeEnvLimitError);
+    expect(error).not.toBeInstanceOf(ComposeEnvFileError);
   });
 });

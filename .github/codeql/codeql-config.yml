@@ -15,12 +15,13 @@ data_extensions:
 # metadata rather than file location.
 paths-ignore:
   - e2e/**
-  # Compose input read: a read-only, non-blocking descriptor with an fstat and a
-  # hard byte cap, on a compose input the invocation selected (an `-f` file, a
-  # `COMPOSE_FILE` entry, or a discovered name), one its `include`/`extends`
-  # graph declares, or an env file that selects or interpolates them. Compose
-  # reads those same paths, including a dependency
-  # outside the stack directory. Nothing is created or modified, but
+  # Compose input read: a stat, then a read-only, non-blocking descriptor with
+  # an fstat and a hard byte cap, on a compose input the invocation selected (an
+  # `-f` file, a `COMPOSE_FILE` entry, or a discovered name), one its
+  # `include`/`extends` graph declares, a service's `env_file` or `label_file`,
+  # or an env file that selects or interpolates them. Compose reads those same
+  # paths, including a dependency outside the stack directory. The module also
+  # resolves a directory's physical path. Nothing is created or modified, but
   # js/insecure-temporary-file flags every fs.open whose path can reach the OS
   # temp directory, and Git source validation runs the guard over a throwaway
   # directory. The module is a filesystem sink by design; excluding it keeps the

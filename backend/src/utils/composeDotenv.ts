@@ -39,6 +39,31 @@ export class ComposeEnvFileError extends Error {
 /** Compose's chain separator when COMPOSE_PATH_SEPARATOR is unset or empty. */
 export const DEFAULT_PATH_SEPARATOR = ':';
 
+/**
+ * Bounds for a caller that reads env files it does not trust. Interpolation
+ * copies the value of every variable a line names, so a few kilobytes of
+ * `${A}${A}` over a value that doubles on each line can build gigabytes.
+ */
+export interface ComposeEnvLimits {
+  /** Longest value, before interpolation, in UTF-16 code units. */
+  maxRawValue: number;
+  /** Code units one statement may copy out of the variables it names. */
+  maxStatementReads: number;
+  /**
+   * Code units every statement may copy and store, counted across every reader
+   * that shares this object, so many small readers cannot add up to a large one.
+   */
+  shared: { remaining: number };
+}
+
+/** Raised when env-file text passes a {@link ComposeEnvLimits} bound. */
+export class ComposeEnvLimitError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'ComposeEnvLimitError';
+  }
+}
+
 /** The byte-order mark Compose drops from the start of an env file's bytes. */
 const UTF8_BOM = '\uFEFF';
 
@@ -307,6 +332,7 @@ function parseEnvFileText(
   content: string,
   lookup: ComposeEnvLookup,
   assign: (name: string, value: string) => void,
+  maxRawValue = Infinity,
 ): void {
   let cursor = 0;
   for (;;) {
@@ -373,6 +399,7 @@ function parseEnvFileText(
     const quote = content[cursor];
     if (quote === DOUBLE_QUOTE || quote === SINGLE_QUOTE) {
       const { raw, next } = readQuotedValue(content, cursor, quote);
+      if (raw.length > maxRawValue) throw new ComposeEnvLimitError('a value is longer than the limit');
       const value = quote === DOUBLE_QUOTE
         ? expandComposeEnvTemplate(expandComposeEnvEscapes(raw), lookup)
         : raw;
@@ -390,6 +417,7 @@ function parseEnvFileText(
     const rawValue = trimRightUnicodeSpace(
       commentAt === -1 ? content.slice(cursor, end) : content.slice(cursor, cursor + commentAt),
     );
+    if (rawValue.length > maxRawValue) throw new ComposeEnvLimitError('a value is longer than the limit');
     assign(key, expandComposeEnvTemplate(rawValue, lookup));
     cursor = lineEnd === -1 ? content.length : lineEnd + 1;
   }
@@ -438,7 +466,10 @@ function readQuotedValue(text: string, openIndex: number, quote: string): { raw:
 export class ComposeEnvFiles {
   private readonly values = new Map<string, string>();
 
-  constructor(private readonly processEnv: ComposeEnvLookup) {}
+  constructor(
+    private readonly processEnv: ComposeEnvLookup,
+    private readonly limits?: ComposeEnvLimits,
+  ) {}
 
   lookup(name: string): string | undefined {
     const fromProcess = this.processEnv(name);
@@ -473,9 +504,38 @@ export class ComposeEnvFiles {
     // starts with. Only the first character is considered, so a BOM elsewhere
     // stays the character Compose rejects in a name.
     const text = content.startsWith(UTF8_BOM) ? content.slice(1) : content;
-    parseEnvFileText(text, (name) => this.lookup(name), (name, value) => {
-      this.values.set(name, value);
-    });
+    const limits = this.limits;
+    if (limits === undefined) {
+      parseEnvFileText(text, (name) => this.lookup(name), (name, value) => {
+        this.values.set(name, value);
+      });
+      return;
+    }
+    // A statement's reads are what its interpolation copies out of variables;
+    // the shared total also counts what it stores.
+    let statementReads = 0;
+    const spend = (amount: number): void => {
+      limits.shared.remaining -= amount;
+      if (limits.shared.remaining < 0) throw new ComposeEnvLimitError('the env files copy more text than the limit');
+    };
+    parseEnvFileText(
+      text,
+      (name) => {
+        const value = this.lookup(name);
+        if (value !== undefined) {
+          statementReads += value.length;
+          if (statementReads > limits.maxStatementReads) throw new ComposeEnvLimitError('a value expands past the limit');
+          spend(value.length);
+        }
+        return value;
+      },
+      (name, value) => {
+        statementReads = 0;
+        spend(value.length);
+        this.values.set(name, value);
+      },
+      limits.maxRawValue,
+    );
   }
 
   private readRaw(content: string): void {
