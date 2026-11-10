@@ -102,6 +102,9 @@ const SKIPPABLE_READ_ERRORS = new Set([
   'ENAMETOOLONG', 'ENXIO', 'ERR_INVALID_ARG_VALUE',
 ]);
 
+/** Paths that name a process's own descriptors or memory rather than a file. */
+const PROCESS_DESCRIPTOR_PATH = /^\/(?:dev\/(?:stdin|stdout|stderr|fd\/)|proc\/(?:self|thread-self|\d+)\/(?:fd\/|mem$|task\/\d+\/(?:fd\/|mem$)))/;
+
 function isSkippableReadError(err: unknown): boolean {
   return SKIPPABLE_READ_ERRORS.has((err as NodeJS.ErrnoException).code ?? '');
 }
@@ -118,6 +121,11 @@ export async function readComposeInputWithinCap(
   filePath: string,
   maxBytes: number,
 ): Promise<ComposeInputRead> {
+  // The guard's own descriptors are not Compose's: `/dev/stdin` or
+  // `/proc/self/fd/0` named in a compose input is whatever the Compose child
+  // has there (often a pipe), not what this process has, and `/proc/*/mem`
+  // fails every read. Refuse them by name.
+  if (PROCESS_DESCRIPTOR_PATH.test(filePath)) return { content: null, tooLarge: false, nonRegular: 'unbounded' };
   // `stat` before `open`: opening a device can act on it (a watchdog starts, a
   // tape rewinds), so a path that is not a regular file is classified without
   // being opened.

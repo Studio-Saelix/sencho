@@ -49,11 +49,29 @@ export interface ComposeEnvLimits {
   maxRawValue: number;
   /** Code units one statement may copy out of the variables it names. */
   maxStatementReads: number;
+  /** Deepest `${` nesting a value may have; deeper costs quadratic time. */
+  maxTemplateDepth: number;
   /**
    * Code units every statement may copy and store, counted across every reader
    * that shares this object, so many small readers cannot add up to a large one.
    */
   shared: { remaining: number };
+}
+
+/** The deepest `${ ... }` nesting in `text`, counting every `${` against its closing brace. */
+export function templateNestingDepth(text: string): number {
+  let depth = 0;
+  let deepest = 0;
+  for (let i = 0; i < text.length; i += 1) {
+    if (text[i] === '$' && text[i + 1] === '{') {
+      depth += 1;
+      if (depth > deepest) deepest = depth;
+      i += 1;
+    } else if (text[i] === '}' && depth > 0) {
+      depth -= 1;
+    }
+  }
+  return deepest;
 }
 
 /** Raised when env-file text passes a {@link ComposeEnvLimits} bound. */
@@ -332,8 +350,15 @@ function parseEnvFileText(
   content: string,
   lookup: ComposeEnvLookup,
   assign: (name: string, value: string) => void,
-  maxRawValue = Infinity,
+  limits?: Pick<ComposeEnvLimits, 'maxRawValue' | 'maxTemplateDepth'>,
 ): void {
+  const maxRawValue = limits?.maxRawValue ?? Infinity;
+  const maxDepth = limits?.maxTemplateDepth ?? Infinity;
+  const checkRaw = (raw: string): void => {
+    if (raw.length > maxRawValue || (maxDepth !== Infinity && templateNestingDepth(raw) > maxDepth)) {
+      throw new ComposeEnvLimitError('a value is longer or nested deeper than the limit');
+    }
+  };
   let cursor = 0;
   for (;;) {
     cursor = skipToStatement(content, cursor);
@@ -399,7 +424,7 @@ function parseEnvFileText(
     const quote = content[cursor];
     if (quote === DOUBLE_QUOTE || quote === SINGLE_QUOTE) {
       const { raw, next } = readQuotedValue(content, cursor, quote);
-      if (raw.length > maxRawValue) throw new ComposeEnvLimitError('a value is longer than the limit');
+      checkRaw(raw);
       const value = quote === DOUBLE_QUOTE
         ? expandComposeEnvTemplate(expandComposeEnvEscapes(raw), lookup)
         : raw;
@@ -417,7 +442,7 @@ function parseEnvFileText(
     const rawValue = trimRightUnicodeSpace(
       commentAt === -1 ? content.slice(cursor, end) : content.slice(cursor, cursor + commentAt),
     );
-    if (rawValue.length > maxRawValue) throw new ComposeEnvLimitError('a value is longer than the limit');
+    checkRaw(rawValue);
     assign(key, expandComposeEnvTemplate(rawValue, lookup));
     cursor = lineEnd === -1 ? content.length : lineEnd + 1;
   }
@@ -534,7 +559,7 @@ export class ComposeEnvFiles {
         spend(value.length);
         this.values.set(name, value);
       },
-      limits.maxRawValue,
+      limits,
     );
   }
 

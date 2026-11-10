@@ -1815,7 +1815,7 @@ describe('assertComposeInputsWithinExpansionLimits - parser gaps, devices, exten
     });
 
     it('refuses before parsing further files once the distinct files pass the run budget', async () => {
-      const body = `x: [${'a,'.repeat(130_000)}a]\n`;
+      const body = `x: [${'a,'.repeat(140_000)}a]\n`;
       for (let level = 0; level < 10; level += 1) {
         await write(`f${level}.yaml`, `${body}${level < 9 ? `include:\n  - f${level + 1}.yaml\n` : ''}`);
       }
@@ -1868,7 +1868,7 @@ describe('assertComposeInputsWithinExpansionLimits - scalar text, interpolation 
 
   describe('U+2028 and U+2029 inside a key or path', () => {
     it('refuses an include path that holds one, because Compose keeps it and the parse folds it', async () => {
-      for (const separator of [' ', ' ']) {
+      for (const separator of ['\u2028', '\u2029']) {
         // Compose loads `x<sep>y.yaml`; folded to a space the guard would look for `x y.yaml`.
         await write(`x${separator}y.yaml`, nestedAliasBomb(12));
         await write('compose.yaml', `include:\n  - "x${separator}    y.yaml"\n`);
@@ -1876,9 +1876,16 @@ describe('assertComposeInputsWithinExpansionLimits - scalar text, interpolation 
       }
     });
 
-    it('still accepts the characters in a value the guard never reads as text', async () => {
-      await write('compose.yaml', 'services:\n  web:\n    image: nginx\n    labels:\n      note: "a b c"\n# trailing comment\n');
+    it('still accepts the characters in a comment, or in a value the parse reads cleanly', async () => {
+      await write('compose.yaml', 'services:\n  web:\n    image: nginx\n    labels:\n      note: "a\u2028          b\u2029          c"\n# trailing\u2028# comment\n');
       await expect(run()).resolves.toBeUndefined();
+    });
+
+    it('refuses a document the folded break makes unparsable, rather than guess what Compose reads', async () => {
+      // Compose keeps the character in the value; folded, it ends the line and
+      // the continuation has no indentation, so the parse rejects the document.
+      await write('compose.yaml', 'services:\n  web:\n    image: nginx\n    labels:\n      note: "a\u2028b"\n');
+      await expect(run()).rejects.toThrow(/Unicode line separator/);
     });
   });
 
@@ -1897,10 +1904,11 @@ describe('assertComposeInputsWithinExpansionLimits - scalar text, interpolation 
       await write('big.env', `A=${'x'.repeat(MAX_COMPOSE_INPUT_BYTES)}\n`);
       await write('compose.yaml', 'services:\n  web:\n    image: nginx\n    env_file: big.env\n');
       await expect(run()).rejects.toThrow(/larger than 1 MiB/);
-      for (let i = 0; i < 10; i += 1) await write(`m${i}.env`, `A=${'x'.repeat(900_000)}\n`);
+      const nineValues = Array.from({ length: 9 }, (_, k) => `A${k}=${'x'.repeat(100_000)}`).join('\n');
+      for (let i = 0; i < 10; i += 1) await write(`m${i}.env`, `${nineValues}\n`);
       const files = Array.from({ length: 10 }, (_, i) => `      - m${i}.env`).join('\n');
       await write('compose.yaml', `services:\n  web:\n    image: nginx\n    env_file:\n${files}\n`);
-      await expect(run()).rejects.toThrow(/MiB of compose text in total/);
+      await expect(run()).rejects.toThrow(/MiB of compose and env text in total/);
     });
   });
 
@@ -1926,15 +1934,15 @@ describe('assertComposeInputsWithinExpansionLimits - scalar text, interpolation 
     });
 
     it('refuses an include env_file value longer than the bound', async () => {
-      await write('big.env', `V=${'x'.repeat(100_000)}\n`);
+      await write('big.env', `V=${'x'.repeat(140_000)}\n`);
       await write('leaf.yaml', SAFE_COMPOSE);
       await write('compose.yaml', 'include:\n  - path: leaf.yaml\n    env_file: big.env\n');
       await expect(run()).rejects.toThrow(/too long, or interpolates into more text/);
     });
 
-    it('refuses a path template nested deeper than the bound, quickly', async () => {
+    it('refuses an over-long path template, quickly, and accepts a nested one within the bound', async () => {
       await write('.env', 'A=\n');
-      await write('compose.yaml', `include:\n  - '${'${A:-'.repeat(500)}x${'}'.repeat(500)}'\n`);
+      await write('compose.yaml', `include:\n  - '${'${A:-'.repeat(50)}x${'}'.repeat(50)}'\n`);
       const started = Date.now();
       await expect(run()).resolves.toBeUndefined();
       await write('compose.yaml', `include:\n  - '${'${A:-'.repeat(40_000)}'\n`);
@@ -1953,6 +1961,132 @@ describe('assertComposeInputsWithinExpansionLimits - scalar text, interpolation 
       await write('sub/dep.yaml', SAFE_COMPOSE);
       await write('compose.yaml', 'include:\n  - ${NAME}.${EXT}\n');
       await expect(run()).resolves.toBeUndefined();
+    });
+  });
+
+  describe('YAML spellings Compose reads as ordinary structure', () => {
+    beforeEach(async () => {
+      await write('dep.yaml', nestedAliasBomb(12));
+    });
+
+    it('follows an include list tagged !!pairs or !!omap, which the parser hands over as bare pairs', async () => {
+      await write('compose.yaml', 'include: !!pairs\n  - path: dep.yaml\n');
+      await expect(run()).rejects.toThrow(/nested YAML aliases/);
+      await write('compose.yaml', 'include: !!omap\n  - path: dep.yaml\n');
+      await expect(run()).rejects.toThrow(/nested YAML aliases/);
+      await write('compose.yaml', 'include: !!pairs [ {path: dep.yaml} ]\n');
+      await expect(run()).rejects.toThrow(/nested YAML aliases/);
+    });
+
+    it('reads a service env_file listed as !!pairs', async () => {
+      await write('compose.yaml', 'services:\n  web:\n    image: nginx\n    env_file: !!pairs\n      - path: /dev/zero\n');
+      await expect(run()).rejects.toThrow(/not a regular file/);
+    });
+
+    it('treats a quoted << tagged !!merge as a merge key', async () => {
+      await write('compose.yaml', "!!merge '<<': {include: [dep.yaml]}\nservices:\n  web:\n    image: nginx\n");
+      await expect(run()).rejects.toThrow(/nested YAML aliases/);
+      await write('base.yaml', nestedAliasBomb(12));
+      await write('compose.yaml', "services:\n  web:\n    image: nginx\n    !!merge '<<': {extends: {file: base.yaml, service: web}}\n");
+      await expect(run()).rejects.toThrow(/nested YAML aliases/);
+    });
+
+    it('does not read a quoted << with no tag as a merge key', async () => {
+      await write('compose.yaml', "x-a: {include: [dep.yaml]}\nservices:\n  web:\n    image: nginx\n    '<<': {extends: {file: dep.yaml, service: web}}\n");
+      await expect(run()).resolves.toBeUndefined();
+    });
+
+    it('refuses a rejected document that holds a U+2028 or a tag spelling, since either can hide an include', async () => {
+      await write('compose.yaml', 'x-note: "p\u2028q"\n!!binary aW5jbHVkZQ==: [dep.yaml]\n');
+      await expect(run()).rejects.toThrow(/parser rejects/);
+      await write('compose.yaml', 'x-note: "p\u2028q"\nservices:\n  web:\n    image: nginx\n    env_file: "e\u2028f.env"\n');
+      await expect(run()).rejects.toThrow(/parser rejects/);
+      await write('compose.yaml', '!!binary aW5jbHVkZQ==: [dep.yaml]\nbad: [unclosed\n');
+      await expect(run()).rejects.toThrow(/parser rejects/);
+    });
+
+    it('still leaves a plain syntax error with none of those for Compose to report', async () => {
+      await write('compose.yaml', 'services:\n  web:\n    image: [unclosed\n');
+      await expect(run()).resolves.toBeUndefined();
+    });
+
+    it('refuses a !!binary path that is not valid UTF-8, which Compose keeps as raw bytes', async () => {
+      await write('compose.yaml', `include:\n  - !!binary ${Buffer.from([0x64, 0xff, 0x2e, 0x79, 0x61, 0x6d, 0x6c]).toString('base64')}\n`);
+      await expect(run()).rejects.toThrow(/not UTF-8/);
+    });
+  });
+
+  describe('large scalars count by their text, not as one node', () => {
+    it('refuses one large anchored string aliased many times', async () => {
+      const big = 'x'.repeat(100_000);
+      const refs = Array.from({ length: 4_000 }, () => '*b').join(', ');
+      await write('compose.yaml', `x-big: &b "${big}"\nx-use: [${refs}]\nservices:\n  web:\n    image: nginx\n`);
+      await expect(run()).rejects.toThrow(/expands to more than 250,000 nodes/);
+    });
+
+    it('accepts a large scalar used a few times, and ordinary short strings used often', async () => {
+      const big = 'x'.repeat(100_000);
+      await write('compose.yaml', `x-big: &b "${big}"\nx-use: [*b, *b, *b]\nservices:\n  web:\n    image: nginx\n`);
+      await expect(run()).resolves.toBeUndefined();
+    });
+  });
+
+  describe('a service env_file is interpolated, so it is bounded like a project .env', () => {
+    const doubling = (levels: number): string => {
+      const lines = ['A0=seed'];
+      for (let i = 1; i <= levels; i += 1) lines.push(`A${i}="\${A${i - 1}}\${A${i - 1}}"`);
+      return `${lines.join('\n')}\n`;
+    };
+
+    it('refuses a doubling env_file and label_file, but reads a format: raw one literally', async () => {
+      await write('bomb.env', doubling(24));
+      await write('compose.yaml', 'services:\n  web:\n    image: nginx\n    env_file: bomb.env\n');
+      await expect(run()).rejects.toThrow(/too long, or interpolates into more text/);
+      await write('compose.yaml', 'services:\n  web:\n    image: nginx\n    label_file: bomb.env\n');
+      await expect(run()).rejects.toThrow(/too long, or interpolates into more text/);
+      await write('compose.yaml', 'services:\n  web:\n    image: nginx\n    env_file:\n      - path: bomb.env\n        format: raw\n');
+      await expect(run()).resolves.toBeUndefined();
+    });
+
+    it('leaves a syntax error in an env_file for Compose and accepts ordinary interpolation', async () => {
+      await write('bad.env', 'A B=1\n');
+      await write('ok.env', 'NAME=${HOME_DIR:-/srv}/app\nOTHER="${NAME}-x"\n');
+      await write('compose.yaml', 'services:\n  web:\n    image: nginx\n    env_file: [bad.env, ok.env]\n');
+      await expect(run()).resolves.toBeUndefined();
+    });
+
+    it('reads a file that many services share once', async () => {
+      await write('shared.env', `A=${'x'.repeat(112_000)}\n`);
+      const services = Array.from({ length: 120 }, (_, i) => `  s${i}:\n    image: nginx\n    env_file: shared.env`).join('\n');
+      await write('compose.yaml', `services:\n${services}\n`);
+      const openSpy = vi.spyOn(fsPromises, 'open');
+      try {
+        await expect(run()).resolves.toBeUndefined();
+        expect(openSpy.mock.calls.filter(([target]) => /shared\.env$/.test(String(target))).length).toBe(1);
+      } finally {
+        openSpy.mockRestore();
+      }
+    });
+  });
+
+  describe('template nesting and process descriptors', () => {
+    it('refuses a path or env value nested past the depth bound, and accepts ordinary nesting', async () => {
+      await write('.env', 'A=\n');
+      await write('compose.yaml', `include:\n  - '${'${A:-'.repeat(100)}x${'}'.repeat(100)}'\n`);
+      await expect(run()).rejects.toThrow(/too long or interpolates into too much text/);
+      await write('compose.yaml', 'services:\n  web:\n    image: nginx\n');
+      await write('.env', `B=${'${A:-'.repeat(100)}x${'}'.repeat(100)}\n`);
+      await expect(run()).rejects.toThrow(/too long, or interpolates into more text/);
+      await write('.env', 'A=\nB=${A:-${A:-${A:-x}}}\n');
+      await expect(run()).resolves.toBeUndefined();
+    });
+
+    it('refuses a compose input named by one of the process descriptors, which are not the child\'s', async () => {
+      await write('compose.yaml', SAFE_COMPOSE);
+      await expect(run(dir, ['compose', '-f', '/dev/stdin', 'config'])).rejects.toThrow(/not a regular file/);
+      await expect(run(dir, ['compose', '--env-file', '/proc/self/fd/0', 'config'])).rejects.toThrow(/not a regular file/);
+      await write('compose.yaml', 'services:\n  web:\n    image: nginx\n    env_file: /proc/self/mem\n');
+      await expect(run()).rejects.toThrow(/not a regular file/);
     });
   });
 

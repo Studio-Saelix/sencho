@@ -5,7 +5,7 @@
  * file is read literally.
  */
 import { describe, expect, it } from 'vitest';
-import { ComposeEnvFileError, ComposeEnvFiles, ComposeEnvLimitError, type ComposeEnvLimits } from '../utils/composeDotenv';
+import { ComposeEnvFileError, ComposeEnvFiles, ComposeEnvLimitError, templateNestingDepth, type ComposeEnvLimits } from '../utils/composeDotenv';
 
 const none = () => undefined;
 
@@ -128,6 +128,7 @@ describe('ComposeEnvFiles limits', () => {
   const limits = (overrides: Partial<ComposeEnvLimits> = {}): ComposeEnvLimits => ({
     maxRawValue: 100,
     maxStatementReads: 50,
+    maxTemplateDepth: 5,
     shared: { remaining: 1_000 },
     ...overrides,
   });
@@ -160,6 +161,14 @@ describe('ComposeEnvFiles limits', () => {
     reader(limits({ shared })).read(`A=${'x'.repeat(60)}\n`);
     expect(shared.remaining).toBe(40);
     expect(() => reader(limits({ shared })).read(`B=${'y'.repeat(60)}\n`)).toThrow(ComposeEnvLimitError);
+  });
+
+  it('refuses a value nested deeper than the template bound, and counts nesting by braces', () => {
+    expect(templateNestingDepth('a${B:-${C:-${D}}}e')).toBe(3);
+    expect(templateNestingDepth('${A}${B}${C}')).toBe(1);
+    expect(templateNestingDepth('plain $A and $$ {not}')).toBe(0);
+    expect(() => reader(limits()).read('A=${B:-${C:-${D:-${E:-${F:-${G}}}}}}\n')).toThrow(ComposeEnvLimitError);
+    expect(() => reader(limits()).read('A=${B:-${C:-${D}}}\n')).not.toThrow();
   });
 
   it('is not a syntax error, so a caller cannot read it as a file Compose rejects too', () => {
