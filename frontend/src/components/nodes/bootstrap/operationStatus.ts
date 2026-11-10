@@ -74,6 +74,12 @@ const STOPPED: Record<Exclude<BootstrapOperationState, 'rechecking' | 'running' 
   recovery_required: { tone: 'destructive', title: 'Needs recovery', word: 'needs recovery' },
 };
 
+/** The wording for a stopped state, with a neutral fallback for a state this build does not know. */
+function stoppedState(state: BootstrapOperationState): { tone: StatusTone; title: string; word: string } {
+  return (STOPPED as Partial<Record<BootstrapOperationState, { tone: StatusTone; title: string; word: string }>>)[state]
+    ?? { tone: 'neutral', title: 'Stopped', word: 'stopped' };
+}
+
 export function operationAnswer(op: BootstrapOperationDetail): Omit<StatusPathAnswer, 'action'> {
   if (op.state === 'rechecking') {
     return { tone: 'brand', title: 'Re-checking', status: op.state, line: 'Re-checking the host against the approved plan. Nothing has been changed yet.' };
@@ -96,7 +102,7 @@ export function operationAnswer(op: BootstrapOperationDetail): Omit<StatusPathAn
       line: op.cancelRequested ? 'Stopping the wait for the Pilot.' : 'The Pilot is running. Waiting for it to connect with its enrollment.',
     };
   }
-  const stopped = STOPPED[op.state];
+  const stopped = stoppedState(op.state);
   if (op.state === 'enrolled') {
     return {
       tone: stopped.tone,
@@ -120,7 +126,7 @@ export function operationStages(op: BootstrapOperationDetail): StatusPathStage[]
   const phases = phasesIn(op);
   const reached = phases.indexOf(currentPhase(op));
   const running = isOperationRunning(op);
-  const stopped = running ? null : STOPPED[op.state as keyof typeof STOPPED];
+  const stopped = running ? null : stoppedState(op.state);
   return phases.map((phase, index): StatusPathStage => {
     const base = { id: phase, label: PHASE_LABEL[phase], 'data-testid': `bootstrap-phase-${phase}` };
     if (op.state === 'enrolled') return { ...base, tone: 'success', word: phase === 'enroll' ? 'connected' : 'done', status: 'done' };
@@ -138,6 +144,6 @@ export function operationStateWord(op: Pick<BootstrapOperation, 'state'>): { ton
   if (op.state === 'rechecking') return { tone: 'brand', word: 'Re-checking' };
   if (op.state === 'running') return { tone: 'brand', word: 'Running' };
   if (op.state === 'enrolling') return { tone: 'brand', word: 'Enrolling' };
-  const stopped = STOPPED[op.state];
+  const stopped = stoppedState(op.state);
   return { tone: stopped.tone, word: stopped.title };
 }

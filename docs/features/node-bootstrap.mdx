@@ -105,7 +105,7 @@ When there are no blockers and every fact the plan depends on was established, S
 - File writes for `compose.yaml` (`0600`), the bootstrap marker (`0600`) and, when the hub uses native TLS, `sencho-hub-ca.pem` (`0644`), all under the chosen Agent directory.
 - The Docker repository, package and service steps, or an explicit no-change row when they already apply.
 - The exact `docker compose` start command, with the project name pinned to `sencho-agent`, an explicit project directory and file, and the environment variables that could otherwise change which project runs cleared.
-- An **Expected after execution** section. The items marked S2 are checked by the run itself; the rest describe a readiness check that a run does not perform.
+- An **Expected after execution** section. Items marked **run** are checked by the run itself; items marked **readiness** describe a readiness check that a run does not perform.
 - A SHA-256 digest over the plan, and a digest over the evidence it was built from.
 
 <Frame>
@@ -126,14 +126,16 @@ Select **Approve and run**. A confirmation names the server, lists the stages an
 The run then goes through these phases, shown as one row under its status:
 
 1. **Recheck.** Sencho connects to the address the plan was built for, checks the pinned host key, runs the read-only preflight again and rebuilds the plan from what it finds. If the server no longer passes the preflight, or the rebuilt plan differs from the one you approved in any way (a new stack folder, a Docker change, a different address), the run stops as **Blocked** and nothing is changed. Run the preflight again and review the new plan.
-2. **Docker.** The repository, package and service steps, when the plan has them. The downloaded repository key is read back and must be Docker's release key before the repository is added. After the last Docker step, the Docker service must be active and enabled, and the daemon and the Compose plugin must answer on the local socket.
-3. **Pilot files.** The Agent directory, the bootstrap marker, the compose file and, when the hub uses native TLS, the hub CA. Each file is written to a temporary file in the same directory, given its mode and owner, then renamed into place, and its mode and owner are checked afterwards. The file content travels over the SSH session's input, never in a command line.
+2. **Docker.** The repository, package and service steps, when the plan has them. The downloaded repository key is read back and must be Docker's release key before the repository is added. apt waits up to five minutes for a lock held by the server's own apt jobs, which often run on a freshly booted server. Before installing, apt is asked where each package would come from: every package must come from the official Docker repository, or nothing is installed. After the last Docker step, the Docker service must be active and enabled, and the daemon and the Compose plugin must answer on the local socket.
+3. **Pilot files.** The Compose stacks directory when it does not exist yet, the Agent directory, the bootstrap marker, the compose file and, when the hub uses native TLS, the hub CA. Each file is written to a temporary file in the same directory and must match the planned content by SHA-256 before it gets its mode and owner and is renamed into place; a file that did not arrive in full is never put in place. Its mode and owner are checked afterwards. The file content travels over the SSH session's input, never in a command line.
 4. **Start.** The pinned `docker compose up -d` command. Afterwards the `sencho-agent` container must be running, as the `sencho-agent` project, from the Agent directory.
 5. **Enroll.** Sencho waits up to five minutes for the Pilot to connect with its enrollment.
 
 **Every command comes from the plan.** The run executes the plan's commands exactly as the plan shows them, plus fixed read-only checks and the fixed file-write script around them. Nothing you typed is placed into a command except through the validated values the plan already shows.
 
 **Enrollment is minted late.** The node record is created and its one-use, 15-minute enrollment token is minted only when the run reaches the compose file, after every Docker step. The token reaches the server inside the compose file and is never logged, shown, or recorded in the run's activity. The node appears in Fleet from that point.
+
+Approving, retrying, cancelling and releasing a run are recorded in the audit log, refused requests included, and so is how each attempt ended.
 
 **Activity** under the status lists what was approved (digest, administrator, time, attempt), the server, the host key, the node, and every recorded step with its outcome. A failed step keeps the last lines of its output, with any secret removed.
 
@@ -143,18 +145,18 @@ The run then goes through these phases, shown as one row under its status:
 | --- | --- | --- |
 | Re-checking, Running, Enrolling | The run is in progress. | **Cancel run** stops it after the current step. |
 | Enrolled | The Pilot connected. The node is enrolled; its readiness for deployments is not verified. | Nothing further in this workflow. |
-| Blocked | The run stopped before changing anything in this attempt (the server changed, the recheck could not reach it, or the hub restarted first). | Run the preflight again and approve the new plan. |
-| Failed | A step failed before any step could have changed the server. | Fix the cause and start again. |
-| Stopped partway | A step failed after earlier steps ran, or the Pilot started but did not connect in time. | **Retry**, or **Release server**. |
+| Blocked | The run stopped before changing anything in this attempt (the server changed, the recheck could not reach it, or the hub restarted first). | Run the preflight again and approve the new plan. If an earlier attempt of the same run had already changed the server, the run still holds it: use **Retry**. |
+| Failed | A step refused or exited with an error before any step had changed the server (for example the first step, or a package check before anything was installed). The server is released. | Fix the cause and start again. |
+| Stopped partway | A step failed after earlier steps changed the server, a package, service or start step failed partway through, or the Pilot started but did not connect in time. | **Retry**, or **Release server**. |
 | Outcome unknown | The SSH connection dropped or a step outlived its time limit, so whether it took effect is not known. | **Retry**: the recheck reads the server's actual state first. |
 | Needs recovery | A step's result did not hold, or a file the plan writes already exists with content this workflow did not write. | Look at the server, then **Retry** or **Release server**. |
-| Cancelled | You cancelled the run. | **Retry**, or **Release server** if steps had run. |
+| Cancelled | You cancelled the run. | When steps had run, **Retry** or **Release server**. When nothing had run, the server is released. |
 
 Nothing is ever rolled back. Packages, files and services that a step created stay on the server after a failure or a cancellation, and the status says so. A run never deletes an existing container, volume or stack.
 
 ### One run per server
 
-While a run holds a server, no other run can start on it, matched by host and port and by host key, so the same server reached under another name is still one server. A run that finished without changing anything releases the server at once, and so does an enrolled run. Any other stopped run keeps holding it, so that a second attempt cannot register a second node for the same server, until you retry it or release it. A preflight for a server whose run is in progress is refused.
+While a run holds a server, no other run can start on it, matched by host and port and by host key, so the same server reached under another name is still one server. Servers cloned from one image that kept its SSH host keys share a host key, so they count as one server here too: give each clone its own host keys (`ssh-keygen -A` after removing the copied ones) before bootstrapping them at the same time. A run that finished without changing anything releases the server at once, and so does an enrolled run. Any other stopped run keeps holding it, so that a second attempt cannot register a second node for the same server, until you retry it or release it. A preflight for a server whose run is in progress is refused.
 
 ### Retry
 
@@ -164,7 +166,7 @@ While a run holds a server, no other run can start on it, matched by host and po
 2. Check the host key and run the preflight. The preflight recognizes what this run already put on the server: its node, and, once the run had reached its start step, its own Pilot container and data volume. Anything else is judged as for a new server.
 3. Review the new plan and select **Approve and retry**.
 
-A retry reuses the node the run registered, so the server never gets a second identity. It mints a new enrollment, rewrites the compose file the run wrote (only when it differs from the reviewed one by the token alone), keeps the run's own bootstrap marker, and starts the Pilot again with its data volume kept.
+A retry reuses the node the run registered, by its identity rather than its name, so a node renamed in Fleet in the meantime is still the one enrolled. If that node was deleted, the retry registers a new one under the run's node name. It mints a new enrollment, rewrites the compose file the run wrote (only when it differs from the reviewed one by the token alone), keeps the run's own bootstrap marker, and starts the Pilot again with its data volume kept.
 
 ### Release server
 
@@ -261,6 +263,9 @@ The Agent installation directory has no settings field. It is chosen only here.
 | `ENROLLMENT_NOT_CONNECTED` | The Pilot started but did not connect within the wait. Check that the server reaches the hub URL, then retry; a retry mints a new enrollment. |
 | `STEP_FAILED` | A plan step exited with an error. **Activity** shows the step and the last lines of its output. |
 | `HUB_RESTARTED` | Sencho restarted during the run. Retry it. |
+| `CANDIDATE_NOT_VERIFIED` | apt would install a Docker package from somewhere other than the official repository (a mirror or a pinned source), so nothing was installed. Check `apt-cache policy docker-ce` on the server, then retry. |
+| `WRITE_INCOMPLETE` | A file did not arrive in full, usually because the connection dropped, so it was not put in place. Retry. |
+| `dpkg was interrupted` in a step's output | A package step was cut off earlier. Run `sudo dpkg --configure -a` on the server, then retry. |
 
 ## Related
 

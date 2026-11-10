@@ -48,6 +48,7 @@ import { RegistryDeliveryService } from '../services/RegistryDeliveryService';
 import { RegistryDeliveryReconciler } from '../services/RegistryDeliveryReconciler';
 import { LOW_MEMORY_FLOOR_BYTES } from '../utils/spawnErrors';
 import { NodeBootstrapOperationService } from '../services/nodeBootstrap/NodeBootstrapOperationService';
+import { getErrorMessage } from '../utils/errors';
 
 function isPilotMode(): boolean {
   return process.env.SENCHO_MODE === 'pilot';
@@ -275,7 +276,7 @@ export async function startServer(server: Server): Promise<void> {
   try {
     NodeBootstrapOperationService.getInstance().recoverOnStartup();
   } catch (err) {
-    console.error('[Startup] Node bootstrap operation recovery failed:', (err as Error).message);
+    console.error('[Startup] Node bootstrap operation recovery failed:', getErrorMessage(err, 'unknown error'));
   }
 
   runRecoveryReconcile();

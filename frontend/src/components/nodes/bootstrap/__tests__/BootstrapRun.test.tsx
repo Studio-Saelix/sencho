@@ -337,3 +337,65 @@ describe('progress polling', () => {
     expect(fetchBootstrapOperation).toHaveBeenCalledTimes(3);
   });
 });
+
+describe('run controls and degraded reads', () => {
+  it('cancels a running operation from its Answer', async () => {
+    const user = await reachPlan();
+    vi.mocked(startBootstrapOperation).mockResolvedValueOnce(operation());
+    await user.click(screen.getByRole('button', { name: 'Approve and run' }));
+    await user.click(within(await screen.findByRole('alertdialog')).getByRole('button', { name: 'Approve and run' }));
+    const answer = await screen.findByTestId('bootstrap-run-answer');
+    await user.click(within(answer).getByRole('button', { name: 'Cancel run' }));
+    await waitFor(() => expect(cancelBootstrapOperation).toHaveBeenCalledWith(operation().id));
+    expect(await screen.findByTestId('bootstrap-run-answer')).toHaveTextContent('The run stops after this step.');
+  });
+
+  it('approves once even when the button is pressed twice', async () => {
+    let resolve: (value: BootstrapOperationDetail) => void = () => undefined;
+    vi.mocked(startBootstrapOperation).mockImplementationOnce(() => new Promise((done) => { resolve = done; }));
+    const user = await reachPlan();
+    await user.click(screen.getByRole('button', { name: 'Approve and run' }));
+    const confirm = await screen.findByRole('alertdialog');
+    const button = within(confirm).getByRole('button', { name: 'Approve and run' });
+    await user.click(button);
+    await user.click(button);
+    resolve(operation({ state: 'rechecking', stage: null, step: null }));
+    await screen.findByTestId('bootstrap-run-answer');
+    expect(startBootstrapOperation).toHaveBeenCalledTimes(1);
+  });
+
+  it('says when earlier runs could not be loaded', async () => {
+    vi.mocked(listBootstrapOperations).mockRejectedValueOnce(new Error('offline'));
+    render(<BootstrapServerDialog open onOpenChange={() => {}} />);
+    expect(await screen.findByTestId('bootstrap-runs-unavailable')).toHaveTextContent('Earlier bootstrap runs could not be loaded.');
+  });
+
+  it('marks progress stale after three failed reads and stops polling a run that is gone', async () => {
+    vi.useFakeTimers();
+    const { BootstrapApiError } = await import('../bootstrapApi');
+    vi.mocked(fetchBootstrapOperation).mockRejectedValue(new Error('hub unreachable'));
+    const { result } = renderHook(() => useBootstrapOperation({ open: true }));
+    act(() => result.current.show(operation()));
+    for (let tick = 0; tick < 3; tick += 1) {
+      await act(async () => { await vi.advanceTimersByTimeAsync(OPERATION_POLL_MS); });
+    }
+    expect(result.current.progressStale).toBe(true);
+    expect(result.current.operation?.state).toBe('running');
+
+    vi.mocked(fetchBootstrapOperation).mockReset();
+    vi.mocked(fetchBootstrapOperation).mockRejectedValue(new BootstrapApiError('Bootstrap operation not found.', 'OPERATION_NOT_FOUND', null));
+    act(() => result.current.show(operation({ id: '22222222-2222-4222-8222-222222222222' })));
+    await act(async () => { await vi.advanceTimersByTimeAsync(OPERATION_POLL_MS); });
+    for (let tick = 0; tick < 3; tick += 1) {
+      await act(async () => { await vi.advanceTimersByTimeAsync(OPERATION_POLL_MS); });
+    }
+    expect(fetchBootstrapOperation).toHaveBeenCalledTimes(1);
+    expect(result.current.progressStale).toBe(true);
+  });
+
+  it('shows a state this build does not know as stopped instead of failing', () => {
+    const unknown = operation({ state: 'paused' as BootstrapOperationDetail['state'], actions: { cancel: false, retry: false, release: false } });
+    expect(operationAnswer(unknown)).toMatchObject({ tone: 'neutral', title: 'Stopped' });
+    expect(() => operationStages(unknown)).not.toThrow();
+  });
+});

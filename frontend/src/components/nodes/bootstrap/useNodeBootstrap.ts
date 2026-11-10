@@ -120,6 +120,8 @@ export function useNodeBootstrap({ open, api }: UseNodeBootstrapOptions) {
   const resultRef = useRef<BootstrapPreflightResult | null>(null);
   const hostKeyRef = useRef<BootstrapHostKeyResult | null>(null);
   const stepRef = useRef<BootstrapStep>('target');
+  // The approval in flight, read synchronously so a double click cannot send two.
+  const busyRef = useRef<BusyKind>(null);
 
   useEffect(() => {
     resultRef.current = result;
@@ -465,7 +467,9 @@ export function useNodeBootstrap({ open, api }: UseNodeBootstrapOptions) {
   /** Approve the shown plan: start a run, or retry the operation this wizard prepared. */
   const approve = useCallback(async (): Promise<BootstrapOperationDetail | null> => {
     const plan = resultIsCurrent ? result?.plan : null;
-    if (!plan || !hostKey) return null;
+    // One approval at a time: a second click while the first is in flight would be refused as already used.
+    if (!plan || !hostKey || busyRef.current === 'approve') return null;
+    busyRef.current = 'approve';
     setBusy('approve');
     setError(null);
     const input = {
@@ -491,6 +495,7 @@ export function useNodeBootstrap({ open, api }: UseNodeBootstrapOptions) {
       setError(caught instanceof Error ? caught.message : 'The plan could not be started.');
       return null;
     } finally {
+      busyRef.current = null;
       setBusy(null);
     }
   }, [client, form, hostKey, result, resultIsCurrent, retryOf]);

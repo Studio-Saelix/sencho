@@ -4,7 +4,7 @@ import { cn } from '@/lib/utils';
 import { isOperationRunning, operationStateWord } from './operationStatus';
 import type { BootstrapOperation } from './types';
 
-/** Stopped runs older than the active ones are listed only this many at a time. */
+/** How many of the latest stopped runs are listed after the ones still holding a server. */
 const RECENT_STOPPED = 3;
 
 /**
@@ -14,11 +14,14 @@ const RECENT_STOPPED = 3;
  */
 export function BootstrapOperationsList({
   operations,
+  loadFailed,
   disabled,
   onFollow,
   onRetry,
 }: {
   operations: BootstrapOperation[];
+  /** The list could not be loaded, so a run holding a server may be missing from it. */
+  loadFailed: boolean;
   disabled: boolean;
   onFollow: (operation: BootstrapOperation) => void;
   onRetry: (operation: BootstrapOperation) => void;
@@ -26,6 +29,13 @@ export function BootstrapOperationsList({
   const active = operations.filter((operation) => operation.active);
   const recent = operations.filter((operation) => !operation.active).slice(0, RECENT_STOPPED);
   const rows = [...active, ...recent];
+  if (loadFailed) {
+    return (
+      <p className="font-mono text-[10px] uppercase tracking-[0.18em] text-stat-subtitle" data-testid="bootstrap-runs-unavailable">
+        Earlier bootstrap runs could not be loaded.
+      </p>
+    );
+  }
   if (rows.length === 0) return null;
 
   return (

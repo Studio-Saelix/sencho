@@ -223,6 +223,7 @@ function DialogBody({ wizard, run }: { wizard: UseNodeBootstrap; run: UseBootstr
         {step === 'target' && !wizard.retryOf && (
           <BootstrapOperationsList
             operations={run.operations}
+            loadFailed={run.listFailed}
             disabled={busy !== null || run.busy !== null}
             onFollow={(operation) => { void follow(operation.id); }}
             onRetry={(operation) => wizard.startRetry(operation)}
@@ -230,6 +231,12 @@ function DialogBody({ wizard, run }: { wizard: UseNodeBootstrap; run: UseBootstr
         )}
 
         {step === 'target' && <BootstrapTargetStep wizard={wizard} />}
+
+        {step === 'run' && run.operation && run.progressStale && isOperationRunning(run.operation) && (
+          <p className="font-mono text-[10px] uppercase tracking-[0.18em] text-warning" data-testid="bootstrap-progress-stale">
+            Progress could not be refreshed. The run continues on the hub; reopen it to check again.
+          </p>
+        )}
 
         {step === 'run' && run.operation && (
           <BootstrapRunStep

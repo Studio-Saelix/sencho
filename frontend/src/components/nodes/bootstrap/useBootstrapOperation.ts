@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { toast } from '@/components/ui/toast-store';
 import {
+  BootstrapApiError,
   cancelBootstrapOperation,
   fetchBootstrapOperation,
   listBootstrapOperations,
@@ -41,6 +42,9 @@ export function useBootstrapOperation({ open, api }: UseBootstrapOperationOption
   };
   const [operation, setOperation] = useState<BootstrapOperationDetail | null>(null);
   const [operations, setOperations] = useState<BootstrapOperation[]>([]);
+  const [listFailed, setListFailed] = useState(false);
+  // Consecutive failed progress reads for the shown run; reset by any answer.
+  const [pollFailures, setPollFailures] = useState(0);
   const [busy, setBusy] = useState<OperationBusy>(null);
   // The shown operation's id, so a reply for one the operator has moved away
   // from is dropped instead of replacing the current view.
@@ -49,15 +53,18 @@ export function useBootstrapOperation({ open, api }: UseBootstrapOperationOption
   const show = useCallback((detail: BootstrapOperationDetail | null) => {
     shownRef.current = detail?.id ?? null;
     setOperation(detail);
+    setPollFailures(0);
   }, []);
 
   const refreshList = useCallback(async (signal?: AbortSignal) => {
     try {
       setOperations(await client.list(signal));
+      setListFailed(false);
     } catch (error: unknown) {
       if (error instanceof DOMException && error.name === 'AbortError') return;
-      // The list is a convenience; the wizard stays usable without it.
+      // The wizard stays usable without the list; the dialog says it is missing.
       console.warn('Bootstrap operations could not be listed:', error);
+      setListFailed(true);
     }
     // client.* is stable module API unless a test injects it.
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -69,10 +76,14 @@ export function useBootstrapOperation({ open, api }: UseBootstrapOperationOption
     if (!open) return;
     const controller = new AbortController();
     client.list(controller.signal)
-      .then(setOperations)
+      .then((rows) => {
+        setOperations(rows);
+        setListFailed(false);
+      })
       .catch((error: unknown) => {
         if (error instanceof DOMException && error.name === 'AbortError') return;
         console.warn('Bootstrap operations could not be listed:', error);
+        setListFailed(true);
       });
     return () => controller.abort();
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -95,11 +106,13 @@ export function useBootstrapOperation({ open, api }: UseBootstrapOperationOption
 
   const running = operation !== null && isOperationRunning(operation);
   const operationId = operation?.id ?? null;
+  // A run that no longer exists (or a session that ended) will not come back on the next tick.
+  const [pollStopped, setPollStopped] = useState(false);
   // Bumped after every poll, answered or not, so a long step that changes
   // nothing on the hub still gets the next tick.
   const [pollTick, setPollTick] = useState(0);
   useEffect(() => {
-    if (!open || !running || !operationId) return;
+    if (!open || !running || !operationId || pollStopped) return;
     const controller = new AbortController();
     const timer = window.setTimeout(() => {
       // A hidden tab does not poll; the next visible tick picks the run up.
@@ -110,11 +123,16 @@ export function useBootstrapOperation({ open, api }: UseBootstrapOperationOption
       void client.get(operationId, controller.signal)
         .then((detail) => {
           if (shownRef.current === detail.id) setOperation(detail);
+          setPollFailures(0);
         })
         .catch((error: unknown) => {
           if (error instanceof DOMException && error.name === 'AbortError') return;
-          // A failed poll keeps the last state on screen; the next tick tries again.
+          // A failed poll keeps the last state on screen and counts toward the
+          // notice; a run that is gone, or a session that ended, stops the polling.
           console.warn('Bootstrap progress could not be refreshed:', error);
+          setPollFailures((count) => count + 1);
+          const status = error instanceof BootstrapApiError ? error.code : '';
+          if (status === 'OPERATION_NOT_FOUND' || status === 'HTTP_404' || status === 'HTTP_401') setPollStopped(true);
         })
         .finally(() => {
           if (!controller.signal.aborted) setPollTick((tick) => tick + 1);
@@ -126,7 +144,14 @@ export function useBootstrapOperation({ open, api }: UseBootstrapOperationOption
     };
     // client.* is stable module API unless a test injects it.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [open, running, operationId, pollTick]);
+  }, [open, running, operationId, pollTick, pollStopped]);
+
+  // A newly shown operation polls again.
+  const [pollFor, setPollFor] = useState<string | null>(null);
+  if (pollFor !== operationId) {
+    setPollFor(operationId);
+    setPollStopped(false);
+  }
 
   const act = useCallback(async (kind: 'cancel' | 'release') => {
     if (!operationId) return;
@@ -147,6 +172,9 @@ export function useBootstrapOperation({ open, api }: UseBootstrapOperationOption
   return {
     operation,
     operations,
+    listFailed,
+    /** Progress has not refreshed for three reads in a row, or the run can no longer be read. */
+    progressStale: pollStopped || pollFailures >= 3,
     busy,
     show,
     openOperation,
