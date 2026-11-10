@@ -31,8 +31,8 @@
  * the tab must make /api requests with no 401 or 403 and no more than 10%
  * failures, and every docker stats sample must be readable.
  *
- * The account must be a local user without MFA that can open the Dashboard. Credentials come from
- * SENCHO_USERNAME and SENCHO_PASSWORD and are never written to the record;
+ * The account must be a local user without MFA that can open the Dashboard.
+ * Credentials come from SENCHO_USERNAME and SENCHO_PASSWORD and are never written to the record;
  * export them from a secrets source rather than typing them on the command
  * line, where they would land in shell history.
  *
@@ -71,7 +71,7 @@ export function parseArgs(args) {
     if (!key || !(key in DEFAULTS)) throw new Error(`Unknown argument "${args[i]}"`)
     if (value === undefined || value === '' || value.startsWith('--')) throw new Error(`${args[i]} needs a value`)
     if (NUMERIC.has(key)) {
-      const n = value.trim() === '' ? NaN : Number(value)
+      const n = Number(value)
       if (!Number.isFinite(n) || n <= 0) throw new Error(`${args[i]} must be a positive number`)
       options[key] = n
     } else {
