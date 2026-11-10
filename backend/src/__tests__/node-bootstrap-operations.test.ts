@@ -1575,6 +1575,11 @@ describe('bootstrap operations: a stranded row is settled by the action that mee
 });
 
 describe('bootstrap operations: S2 every held run stays discoverable', () => {
+  // The page counts below need a list that holds only what each test inserts, whatever an earlier test left held.
+  beforeEach(() => {
+    for (const row of db.listActiveNodeBootstrapOperations(10_000)) db.transitionNodeBootstrapOperation(row.id, [row.state], { active: 0 }, Date.now());
+  });
+
   /** `index` orders the rows (a higher one is newer); the name is unique across the tests, since released rows keep their ids. */
   let heldSerial = 0;
   function insertHeld(index: number, state: 'partial' | 'blocked' = 'partial') {
