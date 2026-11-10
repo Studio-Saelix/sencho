@@ -63,6 +63,20 @@ describe('bootstrap plan builder', () => {
     expect(step.command).not.toContain('install -d');
   });
 
+  it('lets only the apt keyring directory exist already: the Compose and Agent directories must be new', () => {
+    const facts = makeFacts({
+      composeDir: { exists: false, isDirectory: false, realPath: '/opt/docker/sencho', parentWritableByUser: true },
+      agentDir: { exists: false, isDirectory: false, parentWritableByUser: true },
+      docker: { cliInstalled: false, serverVersion: null, composeVersion: null, serviceActive: false, serviceEnabled: false, socketAccess: 'none' },
+      repo: { probeComplete: true, dockerSourceConfigured: false, keyringPresent: false, sourceVerified: false, keyringVerified: false, candidateSourceVerified: null, problem: null },
+    });
+    const steps = allSteps(planFor(facts));
+    const flag = (id: string) => /' '([01])'$/.exec(steps.find((entry) => entry.id === id)?.command ?? '')?.[1];
+    expect(flag('docker-keyring-dir')).toBe('1');
+    expect(flag('create-compose-dir')).toBe('0');
+    expect(flag('create-agent-dir')).toBe('0');
+  });
+
   it('uses sudo when the parent is not writable by the SSH user', () => {
     const facts = makeFacts({
       user: { name: 'ubuntu', uid: 1000, group: 'ubuntu', isRoot: false, sudoNonInteractive: true },

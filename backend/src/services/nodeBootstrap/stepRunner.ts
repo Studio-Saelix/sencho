@@ -477,12 +477,19 @@ async function runCommandStep(step: BootstrapPlanStep, ctx: StepContext): Promis
   const failure = transportFailure(result, step.title, step.timeoutMs, ctx.secrets);
   if (failure) throw failure;
   if (step.effect === 'directory-create' && step.target) {
-    // The directory script refuses without changing anything: the name is taken, or its parent is not what was inspected.
+    // The directory script says whether it created anything before it refused.
+    const detail = commandDetail(result, ctx.secrets);
     if (result.exitCode === WRITE_EXIT.exists) {
-      throw new StepFailure('recovery', 'FILE_CONFLICT', `${step.target.path} appeared on the host after the plan was approved. It was left as it is.`, commandDetail(result, ctx.secrets), { changedNothing: true });
+      throw new StepFailure('recovery', 'FILE_CONFLICT', `${step.target.path} appeared on the host after the plan was approved. It was left as it is.`, detail, { changedNothing: true });
     }
     if (result.exitCode === WRITE_EXIT.notDirectory) {
-      throw new StepFailure('failed', 'DIRECTORY_CHANGED', `The parent of ${step.target.path} is not a directory any more, or was swapped while it was being entered. Nothing was created.`, commandDetail(result, ctx.secrets), { changedNothing: true });
+      throw new StepFailure('failed', 'DIRECTORY_CHANGED', `The nearest existing parent of ${step.target.path} is not a directory, or was swapped while it was being entered. Nothing was created.`, detail, { changedNothing: true });
+    }
+    if (result.exitCode === WRITE_EXIT.notCreated) {
+      throw new StepFailure('failed', 'STEP_FAILED', `"${step.title}" failed (exit ${result.exitCode}); nothing was created.`, detail, { changedNothing: true });
+    }
+    if (result.exitCode === WRITE_EXIT.unfinished) {
+      throw new StepFailure('recovery', 'DIRECTORY_NOT_FINISHED', `${step.target.path} was created but could not be finished (its owner or mode, or it was swapped while it was set up). Look at it on the host before retrying.`, detail);
     }
   }
   if (result.exitCode !== 0) {

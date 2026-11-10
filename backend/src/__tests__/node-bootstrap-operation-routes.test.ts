@@ -109,6 +109,32 @@ describe('bootstrap operation routes: refusals', () => {
     expect(Array.isArray(res.body.operations)).toBe(true);
   });
 
+  it('answers with every held operation, past twenty, and without plan bodies', async () => {
+    const db = DatabaseService.getInstance();
+    const now = Date.now();
+    const ids = Array.from({ length: 23 }, (_, index) => {
+      const id = `00000000-0000-4000-8000-${String(2000 + index).padStart(12, '0')}`;
+      db.insertNodeBootstrapOperation({
+        id, target_key: `route-held-${index}.example.com:22`, host: `route-held-${index}.example.com`, port: 22, username: 'ubuntu', address: '192.168.1.90',
+        target_name: `route-held-${index}`, host_key_fingerprint: `SHA256:route-held-${index}`, compose_dir: '/opt/docker/sencho', agent_dir: '/opt/sencho-agent',
+        plan_json: '{"secret":"plan body"}', plan_digest: 'd', approved_by: 'admin', approved_at: now, attempt: 1, state: 'partial', stage: null, step: null,
+        node_id: null, changes_made: 1, agent_started: 0, active: 1, cancel_requested: 0, error_code: null, error_message: null, enrollment_expires_at: null,
+        created_at: now + index, updated_at: now + index, finished_at: now + index,
+      });
+      return id;
+    });
+    const res = await request(app).get('/api/nodes/bootstrap/operations').set('Authorization', adminAuth);
+    expect(res.status).toBe(200);
+    const listed = (res.body.operations as Array<{ id: string; actions: { release: boolean } }>);
+    for (const id of ids) expect(listed.find((entry) => entry.id === id)?.actions.release).toBe(true);
+    expect(JSON.stringify(res.body)).not.toContain('plan body');
+    // Any held run opens with its recovery controls.
+    const opened = await request(app).get(`/api/nodes/bootstrap/operations/${ids[0]}`).set('Authorization', adminAuth);
+    expect(opened.status).toBe(200);
+    expect(opened.body.actions).toMatchObject({ release: true });
+    for (const id of ids) db.transitionNodeBootstrapOperation(id, ['partial'], { active: 0 }, Date.now());
+  });
+
   it('refuses a retry preflight for an operation that does not exist before any SSH work', async () => {
     const { planDigest: _digest, ...preflight } = BODY;
     const res = await request(app).post('/api/nodes/bootstrap/preflight').set('Authorization', adminAuth).send({ ...preflight, operationId: ID });

@@ -31,7 +31,8 @@ export function BootstrapOperationsList({
   onRetry: (operation: BootstrapOperation) => void;
 }) {
   const active = operations.filter((operation) => operation.active);
-  const recent = operations.filter((operation) => !operation.active).slice(0, RECENT_STOPPED);
+  const finished = operations.filter((operation) => !operation.active);
+  const recent = finished.slice(0, RECENT_STOPPED);
   const rows = [...active, ...recent];
   // A failed refresh keeps the rows already loaded and says the list may be stale.
   const unavailable = loadFailed ? (
@@ -79,6 +80,11 @@ export function BootstrapOperationsList({
           );
         })}
       </ul>
+      {finished.length > recent.length && (
+        <p className="font-mono text-[10px] uppercase tracking-[0.18em] text-stat-subtitle" data-testid="bootstrap-runs-older-hidden">
+          Showing the latest {RECENT_STOPPED} finished runs. Runs that still hold a server are all listed.
+        </p>
+      )}
     </section>
   );
 }

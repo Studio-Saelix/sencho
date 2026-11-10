@@ -376,8 +376,9 @@ export class NodeBootstrapOperationService {
   }
 
   public retry(id: string, request: ExecuteRequest, context: RunContext): OperationDetail {
-    const op = this.requireOperation(id);
-    if (this.reconcile(op).state === 'enrolled') {
+    // The reconciled row decides: a stranded row is settled by this very read, so its first retry is not refused.
+    const op = this.reconcile(this.requireOperation(id));
+    if (op.state === 'enrolled') {
       throw new BootstrapError(409, 'OPERATION_NOT_RETRYABLE', 'The Pilot for this bootstrap has connected. There is nothing to retry.');
     }
     this.assertRetryable(op);
@@ -436,7 +437,7 @@ export class NodeBootstrapOperationService {
 
   /** Release the target lock without touching the host. The record and its node stay. */
   public release(id: string, audit: BootstrapAuditContext): OperationDetail {
-    const op = this.requireOperation(id);
+    const op = this.reconcile(this.requireOperation(id));
     if (!op.active || RUNNING_STATES.includes(op.state) || this.runs.has(id)) {
       throw new BootstrapError(409, 'OPERATION_NOT_RELEASABLE', 'Only a stopped bootstrap that still holds its server can be released.');
     }
@@ -452,16 +453,13 @@ export class NodeBootstrapOperationService {
   /**
    * Every run that still holds its server, then the latest finished ones. The
    * holds are the recovery path, so none is ever left out; only the finished
-   * history is capped, and `historyTruncated` says when older ones exist.
+   * history is capped.
    */
-  public list(): { operations: OperationView[]; historyTruncated: boolean } {
+  public list(): OperationView[] {
     const holds = this.deps.db.listActiveNodeBootstrapOperations();
-    const history = this.deps.db.listFinishedNodeBootstrapOperations(OPERATION_HISTORY_LIMIT + 1);
-    return {
-      // A read can settle a row (a Pilot that connected, a run with no process behind it), so rows are viewed after reconciling.
-      operations: [...holds, ...history.slice(0, OPERATION_HISTORY_LIMIT)].map((op) => this.view(this.reconcile(op))),
-      historyTruncated: history.length > OPERATION_HISTORY_LIMIT,
-    };
+    const history = this.deps.db.listFinishedNodeBootstrapOperations(OPERATION_HISTORY_LIMIT);
+    // A read can settle a row (a Pilot that connected, a run with no process behind it), so rows are viewed after reconciling.
+    return [...holds, ...history].map((op) => this.view(this.reconcile(op)));
   }
 
   public get(id: string): OperationDetail {

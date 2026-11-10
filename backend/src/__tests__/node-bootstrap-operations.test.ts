@@ -120,7 +120,6 @@ class FakeHost {
     // Directories every supported Ubuntu host already has, plus the existing stacks root the facts describe.
     this.dirs.set('/etc/apt', { mode: '0755', owner: 'root', group: 'root' });
     this.dirs.set('/opt', { mode: '0755', owner: 'root', group: 'root' });
-    this.dirs.set('/opt/docker', { mode: '0755', owner: 'root', group: 'root' });
     this.dirs.set('/etc/apt/sources.list.d', { mode: '0755', owner: 'root', group: 'root' });
     this.dirs.set('/opt/docker/sencho', { mode: '0755', owner: 'ubuntu', group: 'ubuntu' });
   }
@@ -185,8 +184,11 @@ class FakeHost {
     const makeDir = /sencho-mkdir '([^']*)' '([^']*)' '([^']*)' '([^']*)' '([01])'$/.exec(command);
     if (makeDir) {
       const [, dir, mode, owner, group, allowExisting] = makeDir;
-      if (!this.dirs.has(dir.slice(0, dir.lastIndexOf('/')) || '/')) return exit(20, `not a directory: ${dir}`);
       if (this.dirs.has(dir) && allowExisting !== '1') return exit(17, `already exists: ${dir}`);
+      // Missing parents are created like install -d did, owned by whoever creates them.
+      for (let parent = dir.slice(0, dir.lastIndexOf('/')); parent && !this.dirs.has(parent); parent = parent.slice(0, parent.lastIndexOf('/'))) {
+        this.dirs.set(parent, { mode: '0755', owner: 'root', group: 'root' });
+      }
       this.dirs.set(dir, { mode, owner, group });
       return ok();
     }
@@ -1015,7 +1017,7 @@ describe('bootstrap operations: failure paths found in review', () => {
     const { request } = approve(h);
     const op = h.service.start(request, context());
     await h.service.settled();
-    const row = h.service.list().operations.find((entry) => entry.id === op.id);
+    const row = h.service.list().find((entry) => entry.id === op.id);
     expect(row).toBeDefined();
     expect(row).not.toHaveProperty('plan');
     expect(row).not.toHaveProperty('events');
@@ -1508,7 +1510,7 @@ describe('bootstrap operations: S1 a failed setup does not strand the operation'
     expect(() => h.service.assertTargetIdle(request.host, request.port as number)).not.toThrow();
     const row = rowFor(request.host);
     expect(row).toMatchObject({ state: 'blocked', active: 0 });
-    const listed = h.service.list().operations.find((entry) => entry.id === row?.id);
+    const listed = h.service.list().find((entry) => entry.id === row?.id);
     expect(listed).toMatchObject({ state: 'blocked', active: false });
   });
 
@@ -1525,6 +1527,48 @@ describe('bootstrap operations: S1 a failed setup does not strand the operation'
     const view = h.service.get('00000000-0000-4000-8000-0000000000a1');
     expect(view).toMatchObject({ state: 'blocked', active: true, changesMade: true, actions: { retry: true, release: true } });
     h.service.release(view.id, AUDIT);
+  });
+});
+
+describe('bootstrap operations: a stranded row is settled by the action that meets it', () => {
+  it('releases a stranded row that holds earlier changes on the first request', () => {
+    const h = harness();
+    const now = Date.now();
+    const id = '00000000-0000-4000-8000-0000000000b1';
+    db.insertNodeBootstrapOperation({
+      id, target_key: 'stranded-release.example.com:22', host: 'stranded-release.example.com', port: 22, username: 'ubuntu',
+      address: '192.168.1.71', target_name: 'stranded-release', host_key_fingerprint: 'SHA256:stranded-release', compose_dir: '/opt/docker/sencho', agent_dir: '/opt/sencho-agent',
+      plan_json: '{}', plan_digest: 'd', approved_by: TEST_USERNAME, approved_at: now, attempt: 2, state: 'rechecking', stage: null, step: null, node_id: null,
+      changes_made: 1, agent_started: 0, active: 1, cancel_requested: 0, error_code: null, error_message: null, enrollment_expires_at: null,
+      created_at: now, updated_at: now, finished_at: null,
+    });
+    expect(h.service.release(id, AUDIT)).toMatchObject({ active: false });
+  });
+
+  it('retries a stranded row on the first request, keeping its node', async () => {
+    const h = harness({ connectOnStart: false, enrollWaitMs: 20 });
+    const first = approve(h);
+    const op = h.service.start(first.request, context());
+    await h.service.settled();
+    const nodeId = h.service.get(op.id).nodeId as number;
+    // The state a failed retry setup leaves behind when the database also refused the cleanup.
+    expect(db.transitionNodeBootstrapOperation(op.id, ['partial'], { state: 'rechecking', attempt: 2 }, Date.now())).toBe(true);
+    h.facts.current = makeFacts({
+      target: h.facts.current.target,
+      hostKey: h.facts.current.hostKey,
+      agentDir: {
+        exists: true, isDirectory: true, realPath: '/opt/sencho-agent', writableByUser: true, readableByUser: true,
+        entries: ['compose.yaml', 'sencho-bootstrap.json'], hasMarker: true, hasComposeFile: true,
+        markerProject: 'sencho-agent', markerComposeDir: '/opt/docker/sencho', markerAgentDir: '/opt/sencho-agent',
+      },
+    });
+    const second = approve(h, op.id);
+    expect(() => h.service.retry(op.id, second.request, context())).not.toThrow();
+    await vi.waitFor(() => expect(h.service.get(op.id).state).toBe('enrolling'));
+    h.tunnels.connect(nodeId);
+    await h.service.settled();
+    expect(h.service.get(op.id)).toMatchObject({ state: 'enrolled', nodeId, attempt: 3 });
+    db.deleteNode(nodeId);
   });
 });
 
@@ -1546,13 +1590,13 @@ describe('bootstrap operations: S2 every held run stays discoverable', () => {
     const h = harness();
     const ids = Array.from({ length: 25 }, (_, index) => insertHeld(index));
     const listed = h.service.list();
-    const heldIds = listed.operations.filter((entry) => entry.active).map((entry) => entry.id);
+    const heldIds = listed.filter((entry) => entry.active).map((entry) => entry.id);
     for (const id of ids) expect(heldIds).toContain(id);
     expect(h.service.get(ids[0])).toMatchObject({ active: true, actions: { release: true } });
     for (const id of ids) h.service.release(id, AUDIT);
   });
 
-  it('caps only the finished history, says so, and keeps holds out of that cap', () => {
+  it('caps only the finished history and keeps holds out of that cap', () => {
     const h = harness();
     const held = insertHeld(40);
     const finished = Array.from({ length: 23 }, (_, index) => {
@@ -1561,12 +1605,11 @@ describe('bootstrap operations: S2 every held run stays discoverable', () => {
       return id;
     });
     const listed = h.service.list();
-    expect(listed.historyTruncated).toBe(true);
-    expect(listed.operations.filter((entry) => !entry.active)).toHaveLength(20);
-    expect(listed.operations.map((entry) => entry.id)).toContain(held);
+    expect(listed.filter((entry) => !entry.active)).toHaveLength(20);
+    expect(listed.map((entry) => entry.id)).toContain(held);
     // The newest finished runs are the ones kept.
-    expect(listed.operations.map((entry) => entry.id)).toContain(finished[22]);
-    expect(listed.operations.map((entry) => entry.id)).not.toContain(finished[0]);
+    expect(listed.map((entry) => entry.id)).toContain(finished[22]);
+    expect(listed.map((entry) => entry.id)).not.toContain(finished[0]);
     h.service.release(held, AUDIT);
   });
 });

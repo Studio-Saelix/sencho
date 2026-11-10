@@ -66,5 +66,12 @@ describe('BootstrapOperationsList', () => {
     renderList([...holds, ...finished]);
     for (const hold of holds) expect(screen.getByTestId(`bootstrap-run-${hold.id}`)).toBeInTheDocument();
     expect(screen.getAllByTestId(/^bootstrap-run-op-1\d\d$/)).toHaveLength(3);
+    // The cut is said out loud, so an older finished run is not mistaken for a missing one.
+    expect(screen.getByTestId('bootstrap-runs-older-hidden')).toHaveTextContent(/latest 3 finished runs/);
+  });
+
+  it('says nothing about hidden runs when every finished run is listed', () => {
+    renderList([operation(1), operation(100, { active: false, state: 'enrolled', actions: { cancel: false, retry: false, release: false } })]);
+    expect(screen.queryByTestId('bootstrap-runs-older-hidden')).not.toBeInTheDocument();
   });
 });

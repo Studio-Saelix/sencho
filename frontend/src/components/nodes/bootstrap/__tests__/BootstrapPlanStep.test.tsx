@@ -59,7 +59,7 @@ const plan: BootstrapPlan = {
         rationale: 'The agent keeps its compose file in a dedicated directory.',
         effect: 'directory-create',
         privilege: 'user',
-        command: "install -d -m 0700 -o 'ubuntu' -g 'ubuntu' -- '/srv/sencho-agent'",
+        command: "sh -c 'set -eu ...' sencho-mkdir '/srv/sencho-agent' '0700' 'ubuntu' 'ubuntu' '0'",
         target: { path: '/srv/sencho-agent', mode: '0700', owner: 'ubuntu', group: 'ubuntu', preserveExisting: false },
         disruptive: false,
         reversible: 'yes',
@@ -131,7 +131,7 @@ describe('BootstrapPlanStep', () => {
       '2. Agent files',
       '3. Start the Pilot agent',
     ]);
-    expect(screen.getByText(/install -d -m 0700/)).toBeInTheDocument();
+    expect(screen.getByText(/sencho-mkdir '\/srv\/sencho-agent' '0700'/)).toBeInTheDocument();
     expect(screen.getByText(/mode 0700/)).toBeInTheDocument();
     expect(screen.getByText('user · mode 0700 · ubuntu:ubuntu')).toBeInTheDocument();
     expect(screen.getByText(/The Docker service is active and enabled at boot/)).toBeInTheDocument();

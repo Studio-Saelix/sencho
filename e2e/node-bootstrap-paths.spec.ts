@@ -96,7 +96,7 @@ function planFor(composeDir: string, agentDir: string) {
           rationale: 'The agent keeps its compose file in a dedicated directory.',
           effect: 'directory-create',
           privilege: 'user',
-          command: `install -d -m 0700 -o 'ubuntu' -g 'ubuntu' -- '${agentDir}'`,
+          command: `sh -c 'set -eu ...' sencho-mkdir '${agentDir}' '0700' 'ubuntu' 'ubuntu' '0'`,
           target: { path: agentDir, mode: '0700', owner: 'ubuntu', group: 'ubuntu', preserveExisting: false },
           disruptive: false,
           reversible: 'yes',
@@ -257,7 +257,7 @@ test.describe('Node bootstrap wizard', () => {
     await expect(page.getByText('Not changed')).toBeVisible();
     await expect(page.getByText('/srv/sencho-stacks').first()).toBeVisible();
     await expect(page.getByText('/srv/sencho-agent').first()).toBeVisible();
-    await expect(page.getByText(/install -d -m 0700/)).toBeVisible();
+    await expect(page.getByText(/sencho-mkdir .* '0700'/)).toBeVisible();
     await expect(page.getByText(/--project-name sencho-agent/)).toBeVisible();
     await expect(page.getByText('No changes have been made on this server.').first()).toBeVisible();
     const firstDigest = await page.locator('code', { hasText: /^sha256:/ }).innerText();
