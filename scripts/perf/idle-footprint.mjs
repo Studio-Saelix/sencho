@@ -7,9 +7,9 @@
  * Every poller, cache, and background service adds a little idle cost, and on
  * a small self-hosted box those add up without any single change looking
  * expensive. This probe opens the Dashboard in headless Chromium, lets it
- * settle, then for `--minutes` counts the `/api` requests and WebSocket
- * frames the tab produces and samples the Sencho container with `docker
- * stats`, over ssh when `--ssh` names the host.
+ * settle, then for `--minutes` counts the `/api` requests the tab makes and
+ * the WebSocket frames it receives, and samples the Sencho container with
+ * `docker stats`, over ssh when `--ssh` names the host.
  *
  * Each run appends one record to `--history`, keyed by `--label` (default:
  * the version the instance reports). Set `--label` to the release under audit:
@@ -19,14 +19,18 @@
  * threshold:
  *   memory   median container memory (docker stats MemUsage) more than 20% higher
  *   requests /api requests per minute from the tab more than 50% higher
- *   cpu      mean CPU more than 50% higher and more than 1 point higher
+ * Mean CPU more than 50% and more than 1 point higher is reported as `higher`
+ * but does not fail the run: on a shared bench it moved from 1.6% to 4.9%
+ * between two runs of the same image.
  *
  * A run that cannot vouch for its numbers fails and records nothing: the
- * instance at `--url` must be the one in `--container` (same start time), the
- * container must not restart during the run, the tab must make /api requests
- * with no 401 or 403, and every docker stats sample must be readable.
+ * instance at `--url` must be the one in `--container` (started within 30 s
+ * of it and, when the container publishes ports, publishing the URL's port),
+ * neither the container nor the Sencho process may restart during the run,
+ * the tab must make /api requests with no 401 or 403 and no more than 10%
+ * failures, and every docker stats sample must be readable.
  *
- * The account must be a local user without MFA. Credentials come from
+ * The account must be a local admin without MFA. Credentials come from
  * SENCHO_USERNAME and SENCHO_PASSWORD and are never written to the record;
  * export them from a secrets source rather than typing them on the command
  * line, where they would land in shell history.
@@ -38,7 +42,7 @@
  */
 
 import { execFile } from 'node:child_process'
-import { existsSync, readFileSync, realpathSync, renameSync, writeFileSync } from 'node:fs'
+import { existsSync, readFileSync, realpathSync, renameSync, rmSync, writeFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import { promisify } from 'node:util'
 
@@ -53,8 +57,9 @@ const CONTAINER_NAME = /^[A-Za-z0-9][A-Za-z0-9_.-]*$/
 const COMMAND_TIMEOUT_MS = 60_000
 // The meta start time and the container start time are taken by different
 // clocks a moment apart; anything closer than this is the same start.
-const START_TOLERANCE_MS = 120_000
+const START_TOLERANCE_MS = 30_000
 export const MIN_SAMPLES = 5
+export const MAX_FAILED_SHARE = 0.1
 export const THRESHOLDS = { memoryRatio: 1.2, requestsRatio: 1.5, cpuRatio: 1.5, cpuFloorPoints: 1 }
 
 export function parseArgs(args) {
@@ -63,7 +68,7 @@ export function parseArgs(args) {
     const key = args[i].startsWith('--') ? args[i].slice(2) : null
     const value = args[i + 1]
     if (!key || !(key in DEFAULTS)) throw new Error(`Unknown argument "${args[i]}"`)
-    if (value === undefined || value.startsWith('--')) throw new Error(`${args[i]} needs a value`)
+    if (value === undefined || value === '' || value.startsWith('--')) throw new Error(`${args[i]} needs a value`)
     if (NUMERIC.has(key)) {
       const n = value.trim() === '' ? NaN : Number(value)
       if (!Number.isFinite(n) || n <= 0) throw new Error(`${args[i]} must be a positive number`)
@@ -76,6 +81,10 @@ export function parseArgs(args) {
   if (!options.history) throw new Error('--history is required')
   if (!CONTAINER_NAME.test(options.container)) throw new Error(`--container "${options.container}" is not a container name`)
   if (options.ssh?.startsWith('-')) throw new Error('--ssh must be a host, not an option')
+  const expectedSamples = Math.ceil((options.minutes * 60) / options['sample-seconds'])
+  if (expectedSamples < MIN_SAMPLES) {
+    throw new Error(`--minutes ${options.minutes} at --sample-seconds ${options['sample-seconds']} gives ${expectedSamples} samples; need at least ${MIN_SAMPLES}`)
+  }
   return options
 }
 
@@ -90,9 +99,11 @@ export function parseSize(text) {
 
 /**
  * Memory in MiB and CPU percent from one `docker stats --format '{{json .}}'`
- * line. A stopped container reports zero memory and `--` CPU; both throw.
+ * line. A stopped container reports zero memory or a non-numeric CPU; either
+ * throws, as does an empty line.
  */
 export function parseDockerStats(line) {
+  if (!line.trim()) throw new Error('docker stats printed nothing; is the container name right?')
   const stats = JSON.parse(line)
   const memMiB = parseSize(stats.MemUsage.split('/')[0]) / 1024 ** 2
   const cpuPct = Number(String(stats.CPUPerc).replace('%', ''))
@@ -150,6 +161,9 @@ export function buildRecord({ label, version, image, imageId, url, host, elapsed
   if (samples.length < MIN_SAMPLES) throw new Error(`Only ${samples.length} docker stats samples; need at least ${MIN_SAMPLES}`)
   if (traffic.authFailures > 0) throw new Error(`${traffic.authFailures} /api responses were 401 or 403; the tab lost its session`)
   if (traffic.total === 0) throw new Error('The tab made no /api requests; it is not showing the Dashboard')
+  if (traffic.failed > traffic.total * MAX_FAILED_SHARE) {
+    throw new Error(`${traffic.failed} of ${traffic.total} /api requests failed; the request rate does not describe a healthy idle tab`)
+  }
   return {
     label: label ?? version,
     version,
@@ -170,7 +184,8 @@ export function buildRecord({ label, version, image, imageId, url, host, elapsed
 
 /**
  * The record to compare against: the latest with `baselineLabel` when given,
- * otherwise the latest with a label other than `label`. Null when there is none.
+ * otherwise the latest with a label other than `label`. Null when there is
+ * none; throws when `baselineLabel` is given and no record has it.
  */
 export function previousRecord(history, label, baselineLabel = null) {
   for (let i = history.length - 1; i >= 0; i--) {
@@ -184,24 +199,25 @@ export function previousRecord(history, label, baselineLabel = null) {
 const usable = (n) => typeof n === 'number' && Number.isFinite(n) && n > 0
 
 /**
- * One row per metric: `grew` when it crossed its threshold against
- * `previous`, `ok` otherwise, and `no baseline` when there is no previous
- * value to compare (no previous record, or a missing or zero value).
+ * One row per metric: past its threshold against `previous` it is `grew`
+ * (memory, requests; fails the run) or `higher` (CPU; reported only), `ok`
+ * otherwise, and `no baseline` when there is no previous value to compare
+ * (no previous record, or a missing or zero value).
  */
 export function compare(current, previous, limits = THRESHOLDS) {
-  const row = (metric, key, grew) => {
+  const row = (metric, key, crossed, label = 'grew') => {
     const before = previous?.[key]
     if (!usable(before)) return { metric, now: current[key], before: null, status: 'no baseline' }
-    return { metric, now: current[key], before, status: grew(current[key], before) ? 'grew' : 'ok' }
+    return { metric, now: current[key], before, status: crossed(current[key], before) ? label : 'ok' }
   }
   return [
     row('memory median MiB', 'memMedianMiB', (now, before) => now > before * limits.memoryRatio),
     row('requests per minute', 'requestsPerMinute', (now, before) => now > before * limits.requestsRatio),
-    row('cpu mean %', 'cpuMeanPct', (now, before) => now > before * limits.cpuRatio && now - before > limits.cpuFloorPoints),
+    row('cpu mean %', 'cpuMeanPct', (now, before) => now > before * limits.cpuRatio && now - before > limits.cpuFloorPoints, 'higher'),
   ]
 }
 
-/** 1 when any metric grew past its threshold, else 0. */
+/** 1 when a gated metric (memory or requests) grew past its threshold, else 0. */
 export function exitCode(rows) {
   return rows.some((r) => r.status === 'grew') ? 1 : 0
 }
@@ -229,12 +245,14 @@ async function dockerStats(options) {
   return parseDockerStats(stdout.trim().split('\n')[0])
 }
 
-/** Image, image id, start time, and restart count, to pin what is measured. */
+/** Image, image id, start time, restart count, and published host ports, to pin what is measured. */
 async function containerState(options) {
-  const format = '{{json .Config.Image}} {{json .Image}} {{json .State.StartedAt}} {{json .RestartCount}}'
+  // Each value is compact JSON with no spaces (image refs, ids, timestamps, numbers, port maps).
+  const format = '{{json .Config.Image}} {{json .Image}} {{json .State.StartedAt}} {{json .RestartCount}} {{json .NetworkSettings.Ports}}'
   const { stdout } = await docker(options, ['inspect', '--format', format, options.container])
-  const [image, imageId, startedAt, restartCount] = stdout.trim().split(' ').map((v) => JSON.parse(v))
-  return { image, imageId, startedAt, restartCount }
+  const [image, imageId, startedAt, restartCount, ports] = stdout.trim().split(' ').map((v) => JSON.parse(v))
+  const hostPorts = Object.values(ports ?? {}).flat().filter(Boolean).map((p) => Number(p.HostPort))
+  return { image, imageId, startedAt, restartCount, hostPorts }
 }
 
 async function instanceMeta(url) {
@@ -245,11 +263,20 @@ async function instanceMeta(url) {
   return meta
 }
 
-/** Throws unless the instance at the URL started when the container did. */
-export function assertSameInstance(meta, state) {
+/**
+ * Throws unless the instance at the URL is the container: it started within
+ * moments of it and, when the container publishes ports, one of them is the
+ * URL's port. A container on the host network publishes none.
+ */
+export function assertSameInstance(meta, state, url) {
   const gap = Math.abs(new Date(meta.startedAt).getTime() - new Date(state.startedAt).getTime())
   if (!(gap <= START_TOLERANCE_MS)) {
     throw new Error(`The instance at --url started at ${meta.startedAt}, the container at ${state.startedAt}; --container or --ssh names a different instance`)
+  }
+  const { port, protocol } = new URL(url)
+  const urlPort = Number(port || (protocol === 'https:' ? 443 : 80))
+  if (state.hostPorts.length > 0 && !state.hostPorts.includes(urlPort)) {
+    throw new Error(`The container publishes ports ${state.hostPorts.join(', ')}, not ${urlPort} from --url; --container or --ssh names a different instance`)
   }
 }
 
@@ -280,19 +307,23 @@ function watchTraffic(page) {
   const traffic = {
     active: false, total: 0, failed: 0, authFailures: 0, websocketOpens: 0, websocketFrames: 0, counts: new Map(),
   }
+  // Outcomes are counted only for requests counted in `total`, so a request
+  // sent while settling cannot add a failure without adding a request.
+  const counted = new WeakSet()
   page.on('request', (req) => {
     const path = traffic.active ? apiPath(req.url()) : null
     if (path === null) return
+    counted.add(req)
     traffic.total++
     traffic.counts.set(path, (traffic.counts.get(path) ?? 0) + 1)
   })
   page.on('response', (res) => {
-    if (!traffic.active || apiPath(res.url()) === null) return
+    if (!counted.has(res.request())) return
     if (res.status() === 401 || res.status() === 403) traffic.authFailures++
     else if (res.status() >= 400) traffic.failed++
   })
   page.on('requestfailed', (req) => {
-    if (traffic.active && apiPath(req.url()) !== null) traffic.failed++
+    if (counted.has(req)) traffic.failed++
   })
   page.on('websocket', (ws) => {
     if (traffic.active) traffic.websocketOpens++
@@ -308,7 +339,7 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
 async function measure(options) {
   const meta = await instanceMeta(options.url)
   const before = await containerState(options)
-  assertSameInstance(meta, before)
+  assertSameInstance(meta, before, options.url)
   await dockerStats(options) // Fails early on a stopped container.
   const { browser, watched: traffic } = await openDashboard(options.url, watchTraffic)
   try {
@@ -329,6 +360,9 @@ async function measure(options) {
     if (after.startedAt !== before.startedAt || after.restartCount !== before.restartCount) {
       throw new Error('The container restarted during the run')
     }
+    if ((await instanceMeta(options.url)).startedAt !== meta.startedAt) {
+      throw new Error('Sencho restarted inside the container during the run')
+    }
     return buildRecord({
       label: options.label, version: meta.version, image: before.image, imageId: before.imageId,
       url: new URL(options.url).origin, host: options.ssh ?? 'local', elapsedMs, samples, traffic,
@@ -346,7 +380,9 @@ function readHistory(path) {
   } catch (error) {
     throw new Error(`${path} is not valid JSON: ${error.message}`)
   }
-  if (!Array.isArray(history)) throw new Error(`${path} must hold a JSON array of records`)
+  if (!Array.isArray(history) || !history.every((r) => typeof r?.label === 'string')) {
+    throw new Error(`${path} must hold a JSON array of records, each with a label`)
+  }
   return history
 }
 
@@ -354,14 +390,21 @@ function readHistory(path) {
 function appendRecord(path, record) {
   const history = readHistory(path)
   const temp = `${path}.${process.pid}.tmp`
-  writeFileSync(temp, `${JSON.stringify([...history, record], null, 2)}\n`)
-  renameSync(temp, path)
+  try {
+    writeFileSync(temp, `${JSON.stringify([...history, record], null, 2)}\n`)
+    renameSync(temp, path)
+  } catch (error) {
+    rmSync(temp, { force: true })
+    throw error
+  }
 }
 
 async function main(args) {
   const options = parseArgs(args)
   const history = readHistory(options.history)
   if (history.length === 0) console.error(`Starting a new history at ${options.history}`)
+  // Fail before the measurement, not after it, when the named baseline is not there.
+  if (options['baseline-label']) previousRecord(history, null, options['baseline-label'])
   const record = await measure(options)
   const previous = previousRecord(history, record.label, options['baseline-label'])
   const rows = compare(record, previous)
@@ -370,6 +413,9 @@ async function main(args) {
   console.log(`Idle footprint of ${record.label} (${record.image}) over ${record.minutes} min (${record.samples} samples)\n`)
   if (previous) {
     console.log(`Compared with ${previous.label} (${previous.image}) measured ${previous.date}`)
+    if (previous.imageId === record.imageId) {
+      console.log('The previous record measured the same image; the comparison says nothing about this release.')
+    }
     if (previous.host !== record.host || previous.url !== record.url) {
       console.log(`The previous record was taken on ${previous.host} (${previous.url}); this comparison is indicative only.`)
     }
@@ -380,8 +426,9 @@ async function main(args) {
   console.log(formatTable(rows, previous?.label))
   console.log(`\nWebSocket: ${record.websocketOpens} opened, ${record.websocketFramesPerMinute} frames per minute. Failed /api requests: ${record.failedRequests}.`)
   console.log(`Busiest paths: ${record.topPaths.join(', ')}`)
-  for (const r of rows.filter((row) => row.status === 'grew')) {
-    console.error(`${r.metric} grew from ${r.before} to ${r.now} since ${previous.label}.`)
+  for (const r of rows.filter((row) => row.status === 'grew' || row.status === 'higher')) {
+    const note = r.status === 'higher' ? ' (reported, not gated: rerun to tell a trend from bench noise)' : ''
+    console.error(`${r.metric} grew from ${r.before} to ${r.now} since ${previous.label}${note}.`)
   }
   return exitCode(rows)
 }

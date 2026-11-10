@@ -38,6 +38,14 @@ describe('parseSize and parseDockerStats', () => {
     assert.equal(stats.cpuPct, 2.45)
   })
 
+  it('accepts an idle container at 0% CPU', () => {
+    assert.equal(parseDockerStats(JSON.stringify({ MemUsage: '90MiB / 1GiB', CPUPerc: '0.00%' })).cpuPct, 0)
+  })
+
+  it('names the container when docker stats prints nothing', () => {
+    assert.throws(() => parseDockerStats(''), /printed nothing; is the container name right/)
+  })
+
   it('rejects the zero memory and dashes of a stopped container', () => {
     assert.throws(() => parseDockerStats(JSON.stringify({ MemUsage: '0B / 0B', CPUPerc: '0.00%' })), /is the container running/)
     assert.throws(() => parseDockerStats(JSON.stringify({ MemUsage: '100MiB / 1GiB', CPUPerc: '--' })), /is the container running/)
@@ -81,6 +89,8 @@ describe('buildRecord', () => {
   it('defaults the label to the reported version and rates traffic over the measured time', () => {
     const record = buildRecord(input)
     assert.equal(record.label, '0.98.2')
+    assert.deepEqual([record.url, record.host, record.topPaths], ['http://h:1852', 'ops@h', ['/api/stats: 60']])
+    assert.ok(!Number.isNaN(Date.parse(record.date)))
     assert.equal(record.minutes, 2)
     assert.equal(record.requestsPerMinute, 30)
     assert.equal(record.websocketFramesPerMinute, 15)
@@ -88,18 +98,33 @@ describe('buildRecord', () => {
     assert.equal(buildRecord({ ...input, label: '0.99.0' }).label, '0.99.0')
   })
 
-  it('refuses a run with too few samples, a lost session, or no API traffic', () => {
+  it('refuses a run with too few samples, a lost session, no API traffic, or too many failures', () => {
     assert.throws(() => buildRecord({ ...input, samples: samples.slice(1) }), /need at least 5/)
-    assert.throws(() => buildRecord({ ...input, traffic: { ...traffic, authFailures: 3 } }), /3 \/api responses were 401 or 403/)
+    assert.throws(() => buildRecord({ ...input, traffic: { ...traffic, authFailures: 1 } }), /1 \/api responses were 401 or 403/)
     assert.throws(() => buildRecord({ ...input, traffic: { ...traffic, total: 0 } }), /not showing the Dashboard/)
+    assert.throws(() => buildRecord({ ...input, traffic: { ...traffic, failed: 7 } }), /7 of 60 \/api requests failed/)
+    assert.doesNotThrow(() => buildRecord({ ...input, traffic: { ...traffic, failed: 6 } }))
   })
 })
 
 describe('assertSameInstance', () => {
-  it('accepts start times a moment apart and rejects a different instance', () => {
-    assert.doesNotThrow(() => assertSameInstance({ startedAt: '2026-11-09T10:00:01Z' }, { startedAt: '2026-11-09T10:00:00.5Z' }))
-    assert.throws(() => assertSameInstance({ startedAt: '2026-11-09T10:00:00Z' }, { startedAt: '2026-11-08T09:00:00Z' }), /different instance/)
-    assert.throws(() => assertSameInstance({}, { startedAt: '2026-11-08T09:00:00Z' }), /different instance/)
+  const state = (startedAt, hostPorts = [1852]) => ({ startedAt, hostPorts })
+  const url = 'http://h:1852'
+
+  it('accepts the process starting a moment after its container, as epoch ms or ISO', () => {
+    assert.doesNotThrow(() => assertSameInstance({ startedAt: Date.parse('2026-11-09T10:00:02Z') }, state('2026-11-09T10:00:00.5Z'), url))
+    assert.doesNotThrow(() => assertSameInstance({ startedAt: '2026-11-09T10:00:01Z' }, state('2026-11-09T10:00:00Z', []), url))
+  })
+
+  it('rejects a start time from another instance, or none at all', () => {
+    assert.throws(() => assertSameInstance({ startedAt: '2026-11-09T10:01:00Z' }, state('2026-11-09T10:00:00Z'), url), /different instance/)
+    assert.throws(() => assertSameInstance({}, state('2026-11-09T10:00:00Z'), url), /different instance/)
+  })
+
+  it('rejects a container that does not publish the URL port', () => {
+    const sameStart = { startedAt: '2026-11-09T10:00:01Z' }
+    assert.throws(() => assertSameInstance(sameStart, state('2026-11-09T10:00:00Z', [1853]), url), /publishes ports 1853, not 1852/)
+    assert.throws(() => assertSameInstance(sameStart, state('2026-11-09T10:00:00Z', [8080]), 'https://h'), /not 443/)
   })
 })
 
@@ -133,8 +158,10 @@ describe('compare and exitCode', () => {
     assert.deepEqual(at({ ...base, requestsPerMinute: 15 }), ['ok', 'ok', 'ok'])
   })
 
-  it('flags CPU only when it is over both 50% and 1 point', () => {
-    assert.equal(at({ ...base, cpuMeanPct: 3.1 })[2], 'grew')
+  it('reports CPU as higher only when it is over both 50% and 1 point', () => {
+    assert.equal(at({ ...base, cpuMeanPct: 3.1 })[2], 'higher')
+    // Exactly 50% higher and well over 1 point: not more than 50%.
+    assert.equal(at({ ...base, cpuMeanPct: 30 }, { ...previous, cpuMeanPct: 20 })[2], 'ok')
     // Over 1 point but not over 50%: a busy host moving from 20% to 25%.
     assert.equal(at({ ...base, cpuMeanPct: 25 }, { ...previous, cpuMeanPct: 20 })[2], 'ok')
     // Over 50% but not over 1 point: 0.2% to 0.9%.
@@ -146,15 +173,25 @@ describe('compare and exitCode', () => {
   it('reports no baseline for a missing previous record, a missing field, or a zero value', () => {
     assert.deepEqual(at({ memMedianMiB: 999, requestsPerMinute: 99, cpuMeanPct: 99 }, null), ['no baseline', 'no baseline', 'no baseline'])
     assert.deepEqual(at(base, { memMedianMiB: 200, requestsPerMinute: 0 }), ['ok', 'no baseline', 'no baseline'])
+    assert.deepEqual(at(base, { memMedianMiB: '200', requestsPerMinute: NaN, cpuMeanPct: null }), ['no baseline', 'no baseline', 'no baseline'])
   })
 
-  it('applies limits passed in', () => {
-    const rows = compare({ ...base, memMedianMiB: 230 }, previous, { memoryRatio: 1.1, requestsRatio: 1.5, cpuRatio: 1.5, cpuFloorPoints: 1 })
-    assert.equal(rows[0].status, 'grew')
+  it('applies every limit passed in', () => {
+    const defaults = { memoryRatio: 1.2, requestsRatio: 1.5, cpuRatio: 1.5, cpuFloorPoints: 1 }
+    const before = { ...previous, cpuMeanPct: 4 }
+    const grown = { memMedianMiB: 230, requestsPerMinute: 13, cpuMeanPct: 5.5 }
+    assert.deepEqual(compare(grown, before, defaults).map((r) => r.status), ['ok', 'ok', 'ok'])
+    const strict = (override) => compare(grown, before, { ...defaults, ...override }).map((r) => r.status)
+    assert.deepEqual(strict({ memoryRatio: 1.1 }), ['grew', 'ok', 'ok'])
+    assert.deepEqual(strict({ requestsRatio: 1.2 }), ['ok', 'grew', 'ok'])
+    assert.deepEqual(strict({ cpuRatio: 1.2 }), ['ok', 'ok', 'higher'])
+    assert.deepEqual(strict({ cpuRatio: 1.2, cpuFloorPoints: 2 }), ['ok', 'ok', 'ok'])
   })
 
-  it('exits 1 only when a metric grew', () => {
+  it('exits 1 only when memory or requests grew, not for higher CPU', () => {
     assert.equal(exitCode(compare({ ...base, memMedianMiB: 241 }, previous)), 1)
+    assert.equal(exitCode(compare({ ...base, requestsPerMinute: 16 }, previous)), 1)
+    assert.equal(exitCode(compare({ ...base, cpuMeanPct: 9 }, previous)), 0)
     assert.equal(exitCode(compare(base, previous)), 0)
     assert.equal(exitCode(compare(base, null)), 0)
   })
@@ -163,7 +200,10 @@ describe('compare and exitCode', () => {
     const table = formatTable(compare({ ...base, memMedianMiB: 241 }, previous), '0.98.2')
     assert.match(table, /^\| Metric \| Now \| 0\.98\.2 \| Status \|/)
     assert.match(table, /\| memory median MiB \| 241 \| 200 \| grew \|/)
-    assert.match(formatTable(compare(base, null)), /\| memory median MiB \| 200 \| - \| no baseline \|/)
+    assert.match(table, /\| requests per minute \| 10 \| 10 \| ok \|/)
+    const noBaseline = formatTable(compare(base, null))
+    assert.match(noBaseline, /^\| Metric \| Now \| Previous \| Status \|/)
+    assert.match(noBaseline, /\| memory median MiB \| 200 \| - \| no baseline \|/)
   })
 })
 
@@ -176,8 +216,8 @@ describe('shellQuote', () => {
 
 describe('parseArgs', () => {
   it('requires the url and history file and keeps defaults for the rest', () => {
-    const options = parseArgs(['--url', 'http://h:1852', '--history', 'h.json', '--minutes', '2'])
-    assert.equal(options.minutes, 2)
+    const options = parseArgs(['--url', 'http://h:1852', '--history', 'h.json', '--minutes', '3'])
+    assert.equal(options.minutes, 3)
     assert.equal(options.container, 'sencho')
     assert.equal(options.ssh, null)
     assert.equal(options.label, null)
@@ -193,6 +233,18 @@ describe('parseArgs', () => {
     assert.throws(() => parseArgs(['--url', '--history', 'x']), /--url needs a value/)
     assert.throws(() => parseArgs([...required, '--minutes', '0']), /positive number/)
     assert.throws(() => parseArgs([...required, '--minutes', 'abc']), /positive number/)
+    assert.throws(() => parseArgs([...required, '--minutes', '']), /--minutes needs a value/)
+    for (const flag of ['--minutes', '--settle-seconds', '--sample-seconds']) {
+      assert.throws(() => parseArgs([...required, flag, 'Infinity']), /positive number/, flag)
+      assert.throws(() => parseArgs([...required, flag, '-1']), /positive number/, flag)
+    }
+    assert.throws(() => parseArgs([...required, '--ssh', '']), /--ssh needs a value/)
+  })
+
+  it('rejects a window too short for the minimum number of samples', () => {
+    const required = ['--url', 'u', '--history', 'h']
+    assert.throws(() => parseArgs([...required, '--minutes', '1']), /gives 2 samples; need at least 5/)
+    assert.doesNotThrow(() => parseArgs([...required, '--minutes', '1', '--sample-seconds', '12']))
   })
 
   it('rejects a container name or ssh target that would be read as an option', () => {
