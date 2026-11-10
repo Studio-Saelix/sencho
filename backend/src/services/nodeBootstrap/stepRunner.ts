@@ -360,7 +360,7 @@ async function verifyDockerCandidates(ctx: StepContext, step: BootstrapPlanStep)
 
 const APT_LISTS_LOCK = /Could not get lock \/var\/lib\/apt\/lists\/lock/;
 
-/** A cancel stopped the run: seen at a step boundary, or while a step waited between attempts. */
+/** A cancel ended the run, noticed between phases or while a step waited between attempts. */
 export class RunCancelled extends Error {}
 
 function waitOrCancel(ms: number, signal: AbortSignal): Promise<void> {
@@ -394,7 +394,7 @@ async function runMetadataRefresh(step: BootstrapPlanStep, ctx: StepContext): Pr
     const result = await ctx.session.run(step.command ?? '', { timeoutMs: step.timeoutMs });
     const locked = result.exitCode !== 0 && result.exitCode !== null && APT_LISTS_LOCK.test(result.stderr);
     if (!locked || Date.now() + retry.intervalMs > deadline) return result;
-    if (!waiting) {
+    if (!waiting && !ctx.signal.aborted) {
       waiting = true;
       ctx.note(`Another apt job holds the package lists. Retrying every ${Math.round(retry.intervalMs / 1000)}s for up to ${Math.round(retry.totalMs / 60_000)} minutes; a cancel stops the wait.`);
     }

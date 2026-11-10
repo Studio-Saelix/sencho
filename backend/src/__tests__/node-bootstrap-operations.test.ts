@@ -18,6 +18,7 @@ import { makeFacts } from './__helpers__/bootstrapFacts';
 import crypto from 'crypto';
 import { DOCKER_KEY_ASC } from './__helpers__/dockerRepoFixtures';
 import { APT_POLICY_COMMAND } from '../services/nodeBootstrap/probes';
+import { runPlanStep, type StepContext } from '../services/nodeBootstrap/stepRunner';
 
 /** apt-cache policy output naming the official repository as each package's source. */
 function officialPolicy(codename = 'noble', origin = 'https://download.docker.com/linux/ubuntu'): string {
@@ -87,7 +88,6 @@ function resultFor(plan: BootstrapPlan | null, facts: BootstrapFacts, blocked = 
 
 interface HostFile { content: string; mode: string; owner: string; group: string }
 
-/** A scripted host: a file and directory model plus fixed answers for the checks. */
 /** The output limits the real session applies: the tail by default, the head when asked. */
 function capOutput(result: ExecResult, options: ExecOptions): ExecResult {
   const keep = options.keep ?? { mode: 'tail' as const, maxBytes: EXEC_OUTPUT_TAIL_BYTES };
@@ -102,6 +102,7 @@ function capOutput(result: ExecResult, options: ExecOptions): ExecResult {
   return { ...result, stdout: stdout.text, stderr: stderr.text, truncated: result.truncated || stdout.cut || stderr.cut };
 }
 
+/** A scripted host: a file and directory model plus fixed answers for the checks. */
 class FakeHost {
   public readonly files = new Map<string, HostFile>();
   public readonly dirs = new Map<string, { mode: string; owner: string; group: string }>();
@@ -749,7 +750,7 @@ describe('bootstrap operations: failure paths found in review', () => {
     expect(h.service.get(op.id)).toMatchObject({ state: 'failed', changesMade: false, active: false, error: { code: 'STEP_FAILED' } });
   });
 
-  it('records a clean refusal on the first change as failed and releases the target', async () => {
+  it('records a failed write on the first change as failed and releases the target', async () => {
     // Docker works and the agent directory exists, so writing the marker file is the first change.
     const h = harness({ facts: makeFacts({ agentDir: {
       exists: true, isDirectory: true, owner: 'ubuntu', group: 'ubuntu', mode: '0700',
@@ -769,6 +770,23 @@ describe('bootstrap operations: failure paths found in review', () => {
     const next = h.service.start(again.request, context());
     await h.service.settled();
     expect(h.service.get(next.id).state).toBe('failed');
+  });
+
+  it('marks a refused candidate check as changing nothing, so it never counts as a change by itself', async () => {
+    // At the service level an install always follows a metadata refresh that already counts as a
+    // change, so the flag is pinned on the step itself.
+    const h = harness();
+    h.host.policy = officialPolicy('noble', 'https://mirror.example.com/docker');
+    const { request, plan } = approve(h);
+    const install = plan.stages.flatMap((stage) => stage.steps).find((step) => step.effect === 'package-install');
+    if (!install) throw new Error('The plan has no install step.');
+    const session = await h.host.transport().open({ ...request, address: '192.0.2.10', port: 22 }, { expectedFingerprint: 'unused' });
+    const ctx: StepContext = {
+      session, secrets: [], signal: new AbortController().signal, note: () => undefined,
+      composeWithToken: () => { throw new Error('not used'); },
+    };
+    await expect(runPlanStep(install, ctx, plan)).rejects.toMatchObject({ code: 'CANDIDATE_NOT_VERIFIED', changedNothing: true });
+    expect(h.host.commands.some((entry) => /apt-get (-o \S+ )?install /.test(entry.command))).toBe(false);
   });
 
   it('installs nothing when a package candidate does not come from the official repository', async () => {
@@ -1083,6 +1101,11 @@ describe('bootstrap recheck: the address pin', () => {
 });
 
 describe('bootstrap operations: round two review cases', () => {
+  /** A host whose official Docker source is configured and verified, with Docker not yet installed. */
+  const repoReadyFacts = () => freshFacts({
+    repo: { dockerSourceConfigured: true, keyringPresent: true, sourceVerified: true, keyringVerified: true, candidateSourceVerified: true, sourceLocations: 'default' },
+  });
+
 
   it('reads a policy far longer than the command output tail and installs from it', async () => {
     const h = harness();
@@ -1147,6 +1170,8 @@ describe('bootstrap operations: round two review cases', () => {
     expect(waits.service.get(op.id).error).toBeNull();
     expect(waits.service.get(op.id).state).toBe('enrolled');
     expect(waits.host.commands.filter((entry) => /apt-get (-o \S+ )?update/.test(entry.command))).toHaveLength(3);
+    // The wait is noted once, not once per retry.
+    expect(waits.service.get(op.id).events.filter((event) => /holds the package lists/.test(event.message))).toHaveLength(1);
     db.deleteNode(waits.service.get(op.id).nodeId as number);
 
     const never = harness();
@@ -1164,9 +1189,11 @@ describe('bootstrap operations: round two review cases', () => {
 
   it('stops waiting for the lists lock when the operator cancels, and says it is waiting', async () => {
     const locked = { exitCode: 100, stdout: '', stderr: 'E: Could not get lock /var/lib/apt/lists/lock. It is held by process 812 (apt-get)', truncated: false, timedOut: false, error: null };
-    const h = harness({ aptLockRetry: { intervalMs: 60_000, totalMs: 300_000 } });
+    const h = harness({ facts: repoReadyFacts(), aptLockRetry: { intervalMs: 60_000, totalMs: 300_000 } });
     h.host.override = (command) => (/apt-get (-o \S+ )?update/.test(command) ? locked : undefined);
-    const { request } = approve(h);
+    const { request, plan } = approve(h);
+    // The Docker source is already in place, so the refresh is the run's first step.
+    expect(plan.stages[0]?.steps[0]?.id).toBe('apt-update');
     const op = h.service.start(request, context());
     await vi.waitFor(() => expect(h.service.get(op.id).events.some((event) => /holds the package lists/.test(event.message))).toBe(true), { timeout: 10_000 });
     const cancelledAt = Date.now();
@@ -1174,9 +1201,36 @@ describe('bootstrap operations: round two review cases', () => {
     await h.service.settled();
     // The wait is a minute long; the cancel ends it at once.
     expect(Date.now() - cancelledAt).toBeLessThan(5_000);
-    expect(h.service.get(op.id)).toMatchObject({ state: 'cancelled', error: { code: 'CANCELLED' } });
+    // The refused refresh changed nothing, so the cancel leaves the server free.
+    expect(h.service.get(op.id)).toMatchObject({
+      state: 'cancelled', changesMade: false, active: false,
+      error: { code: 'CANCELLED', message: 'Cancelled before anything was changed.' },
+    });
     expect(h.host.commands.filter((entry) => /apt-get (-o \S+ )?update/.test(entry.command))).toHaveLength(1);
-    if (h.service.get(op.id).active) h.service.release(op.id, AUDIT);
+  });
+
+  it('does not start the lists-lock wait when the cancel lands while the refresh runs', async () => {
+    const locked = { exitCode: 100, stdout: '', stderr: 'E: Could not get lock /var/lib/apt/lists/lock. It is held by process 812 (apt-get)', truncated: false, timedOut: false, error: null };
+    const h = harness({ facts: repoReadyFacts(), aptLockRetry: { intervalMs: 60_000, totalMs: 300_000 } });
+    let answer: () => void = () => undefined;
+    let running = false;
+    h.host.override = (command) => {
+      if (!/apt-get (-o \S+ )?update/.test(command)) return undefined;
+      running = true;
+      return new Promise((resolve) => { answer = () => resolve(locked); });
+    };
+    const { request, plan } = approve(h);
+    // The Docker source is already in place, so the refresh is the run's first step.
+    expect(plan.stages[0]?.steps[0]?.id).toBe('apt-update');
+    const op = h.service.start(request, context());
+    await vi.waitFor(() => expect(running).toBe(true), { timeout: 10_000 });
+    const cancelledAt = Date.now();
+    h.service.cancel(op.id, AUDIT);
+    answer();
+    await h.service.settled();
+    expect(Date.now() - cancelledAt).toBeLessThan(5_000);
+    expect(h.service.get(op.id)).toMatchObject({ state: 'cancelled', changesMade: false, active: false });
+    expect(h.host.commands.filter((entry) => /apt-get (-o \S+ )?update/.test(entry.command))).toHaveLength(1);
   });
 
   it('keeps a step failure that lands after a cancel request instead of calling it cancelled', async () => {

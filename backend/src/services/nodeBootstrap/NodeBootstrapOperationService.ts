@@ -416,7 +416,7 @@ export class NodeBootstrapOperationService {
     this.deps.db.updateNodeBootstrapOperation(id, { cancel_requested: 1 }, this.deps.now());
     run.abort.abort();
     this.audit(audit, 'bootstrap.execute.cancel', op, {});
-    this.event(op, 'info', `Cancellation requested by ${audit.username}. The current step finishes first; nothing it changed is undone.`);
+    this.event(op, 'info', `Cancellation requested by ${audit.username}. The current command finishes first, a wait for another apt job ends at once, and nothing already changed is undone.`);
     return this.detail(id);
   }
 
