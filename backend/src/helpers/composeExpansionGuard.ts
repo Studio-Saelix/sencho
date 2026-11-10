@@ -47,7 +47,7 @@
 import { createHash } from 'crypto';
 import path from 'path';
 import { isAlias, isCollection, isMap, isPair, isScalar, isSeq, parseAllDocuments, visit } from 'yaml';
-import type { Document, Node, YAMLMap } from 'yaml';
+import type { Document, Node, Scalar, YAMLMap } from 'yaml';
 import {
   ComposeEnvFileError,
   ComposeEnvFiles,
@@ -127,6 +127,8 @@ export const MAX_COMPOSE_ENV_RAW_VALUE = 128 * 1024;
 export const MAX_COMPOSE_TEMPLATE_DEPTH = 64;
 export const MAX_COMPOSE_ENV_STATEMENT_READS = 1024 * 1024;
 export const MAX_COMPOSE_ENV_COPIED = 32 * 1024 * 1024;
+/** Service env_file and label_file text parsed per invocation, every mention counted. */
+export const MAX_COMPOSE_SERVICE_ENV_PARSE_CHARS = 64 * 1024 * 1024;
 /** Longest include/extends/env_file path as written, and as expanded. */
 export const MAX_COMPOSE_PATH_TEMPLATE = 1024;
 export const MAX_COMPOSE_PATH_EXPANSION = 64 * 1024;
@@ -195,7 +197,7 @@ function scalarSeparatorRefusal(label: string): ComposeExpansionRefusal {
 
 function envFileTooLargeRefusal(label: string): ComposeExpansionRefusal {
   return new ComposeExpansionRefusal(
-    `The env file "${label}" has a value that is too long, or interpolates into more text than Sencho will build, so it could not determine which compose files the run would load. ` +
+    `The env file "${label}" has a value that is too long, or interpolates into more text than Sencho will build, so Sencho could not bound what Docker Compose would build from it. ` +
     'Shorten the value or remove the nested references, then try again.',
   );
 }
@@ -256,7 +258,7 @@ function dependencyBoundRefusal(label: string, bound: string): ComposeExpansionR
 function envBoundRefusal(label: string, bound: string): ComposeExpansionRefusal {
   return new ComposeExpansionRefusal(
     `The env file "${label}" takes the env files this run reads past ${bound}. ` +
-    'Sencho reads them all to work out which compose files the run loads, and refused to run a project whose env files it cannot bound.',
+    'Sencho reads them to bound what Docker Compose would build from them, and refused to run a project whose env files it cannot bound.',
   );
 }
 
@@ -291,6 +293,19 @@ function resolveAliasTargets(doc: Document): Map<Node, Node> {
     },
   });
   return targets;
+}
+
+/**
+ * The text a scalar holds, as Compose keeps it. A `!!binary` value is its
+ * decoded bytes, and a numeral the parser reads as a number (a very long digit
+ * string) stays text to Compose, so the source span stands in for both.
+ */
+function scalarTextLength(scalar: Scalar): number {
+  const value: unknown = scalar.value;
+  const span = scalar.range ? scalar.range[1] - scalar.range[0] : 0;
+  if (typeof value === 'string') return Math.max(value.length, span);
+  if (value instanceof Uint8Array) return Math.max(value.byteLength, span);
+  return span;
 }
 
 /**
@@ -333,10 +348,10 @@ function countExpandedNodes(
         if (total > MAX_EXPANDED_NODES) break;
       }
     }
-    else if (isScalar(item) && typeof item.value === 'string') {
-      total = saturateAdd(1, Math.floor(item.value.length / EXPANDED_SCALAR_CHARS_PER_NODE));
+    else if (isScalar(item)) {
+      total = saturateAdd(1, Math.floor(scalarTextLength(item) / EXPANDED_SCALAR_CHARS_PER_NODE));
     }
-    // Any other scalar, or a node shape this walk does not model, is one node.
+    // A node shape this walk does not model is one node.
   } finally {
     active.delete(item);
   }
@@ -592,28 +607,6 @@ function withAdditionalEnvFiles(context: GuardEnvContext, contents: readonly Env
   return child;
 }
 
-/**
- * Read a service's env or label file through the bounded env reader. Compose
- * interpolates its values against the project environment, so the same
- * doubling-reference text that is refused in a project `.env` is refused here.
- * A syntax error is Compose's to report, since it rejects the file too.
- */
-function assertServiceEnvFileBounded(content: string, raw: boolean, env: GuardEnvContext, label: string): void {
-  const limits: ComposeEnvLimits = {
-    maxRawValue: MAX_COMPOSE_ENV_RAW_VALUE,
-    maxStatementReads: MAX_COMPOSE_ENV_STATEMENT_READS,
-    maxTemplateDepth: MAX_COMPOSE_TEMPLATE_DEPTH,
-    shared: env.copyBudget,
-  };
-  try {
-    new ComposeEnvFiles(lookupEnv(env), limits).read(content, { raw });
-  } catch (err) {
-    if (err instanceof ComposeEnvLimitError || err instanceof RangeError) throw envFileTooLargeRefusal(label);
-    if (err instanceof ComposeEnvFileError) return;
-    throw err;
-  }
-}
-
 /** Parse a Go boolean the way Compose checks COMPOSE_DISABLE_ENV_FILE. */
 function parseGoBoolean(raw: string): boolean | null {
   switch (raw) {
@@ -827,6 +820,11 @@ interface ReadFile {
 interface ReadFilesGroup {
   kind: 'readFiles';
   files: ReadFile[];
+  /**
+   * The `environment:` of the service, which Compose interpolates a service's
+   * env files against along with what the earlier files assigned.
+   */
+  environment: Array<[string, string]>;
 }
 
 type DependencyGroup = IncludeGroup | ExtendsGroup | ReadFilesGroup;
@@ -964,6 +962,28 @@ function entriesOf(node: unknown, targets: Map<Node, Node>): Map<string, unknown
   return null;
 }
 
+/** A service's `environment:` as name/value pairs, from a map or a list of `NAME=value`. */
+function environmentOf(node: unknown, targets: Map<Node, Node>): Array<[string, string]> {
+  const resolved = deref(node, targets);
+  const out: Array<[string, string]> = [];
+  if (isSeq(resolved)) {
+    for (const item of resolved.items) {
+      const text = textOf(item, targets);
+      if (text === undefined) continue;
+      const eq = text.indexOf('=');
+      if (eq > 0) out.push([text.slice(0, eq), text.slice(eq + 1)]);
+    }
+    return out;
+  }
+  const fields = entriesOf(resolved, targets);
+  if (fields === null) return out;
+  for (const [name, value] of fields) {
+    const text = textOf(value, targets);
+    if (text !== undefined) out.push([name, text]);
+  }
+  return out;
+}
+
 /** The files of a service's `env_file` or `label_file`: a string, a list, or maps with a `path`. */
 function readFilePaths(node: unknown, targets: Map<Node, Node>): ReadFile[] {
   const resolved = deref(node, targets);
@@ -1031,11 +1051,14 @@ function extractDependencies(measured: MeasuredDocument): DocumentDependencies {
       const size = countExpandedNodes(definition, targets, sizes, new Set());
       const fields = entriesOf(definition, targets);
       if (fields !== null) {
-        const readFiles = [
-          ...readFilePaths(fields.get('env_file'), targets),
-          ...readFilePaths(fields.get('label_file'), targets),
-        ];
-        if (readFiles.length > 0) groups.push({ kind: 'readFiles', files: readFiles });
+        // Each list is read in order by one reader, since Compose interpolates
+        // a later file with what the earlier ones assigned.
+        const envFiles = readFilePaths(fields.get('env_file'), targets);
+        if (envFiles.length > 0) {
+          groups.push({ kind: 'readFiles', files: envFiles, environment: environmentOf(fields.get('environment'), targets) });
+        }
+        const labelFiles = readFilePaths(fields.get('label_file'), targets);
+        if (labelFiles.length > 0) groups.push({ kind: 'readFiles', files: labelFiles, environment: [] });
       }
       const extendsNode = fields?.get('extends');
       let parent: string | null = null;
@@ -1230,7 +1253,24 @@ async function assertInputClosure(args: {
   let references = 0;
   let measuredNodes = 0;
   let parsedBytes = 0;
-  const serviceFilesRead = new Set<string>();
+  let serviceEnvParseChars = 0;
+  // A service file's bytes are read, and counted toward the run, once per path
+  // however many services name it.
+  const serviceFileReads = new Map<string, string | null>();
+  const readServiceFile = async (filePath: string, fileLabel: string): Promise<string | null> => {
+    const known = serviceFileReads.get(filePath);
+    if (known !== undefined) return known;
+    // Compose reads the whole file, so it is read here under the same cap as
+    // every other input: a device or pipe is refused unopened, a file over the
+    // cap is refused, and a `/proc` entry that reports no size but never ends
+    // stops at the cap.
+    const read = await readComposeInputWithinCap(filePath, MAX_COMPOSE_INPUT_BYTES);
+    if (read.tooLarge) throw sizeRefusalForInput(fileLabel, 'Env file');
+    if (read.nonRegular === 'unbounded') throw unboundedInputRefusal(fileLabel);
+    if (read.content !== null) countParsedBytes(read.content.length, fileLabel, 'env');
+    serviceFileReads.set(filePath, read.content);
+    return read.content;
+  };
   const countParsedBytes = (length: number, label: string, kind: 'compose' | 'env' = 'compose'): void => {
     parsedBytes += length;
     if (parsedBytes > MAX_COMPOSE_PARSED_BYTES) {
@@ -1337,6 +1377,21 @@ async function assertInputClosure(args: {
 
   const childInputs = async (input: PendingInput, group: DependencyGroup, label: string): Promise<PendingInput[]> => {
     if (group.kind === 'readFiles') {
+      // One reader per list, in file order, so a value an earlier file or the
+      // service's `environment:` set is what a later file interpolates, and a
+      // file named twice is parsed twice, as Compose does.
+      const reader = new ComposeEnvFiles(lookupEnv(input.env), {
+        maxRawValue: MAX_COMPOSE_ENV_RAW_VALUE,
+        maxStatementReads: MAX_COMPOSE_ENV_STATEMENT_READS,
+        maxTemplateDepth: MAX_COMPOSE_TEMPLATE_DEPTH,
+        shared: input.env.copyBudget,
+      });
+      try {
+        reader.seed(group.environment);
+      } catch (err) {
+        if (err instanceof ComposeEnvLimitError) throw envFileTooLargeRefusal(label);
+        throw err;
+      }
       for (const file of group.files) {
         countReference(label);
         const target = interpolatePath(file.path, input.env, label);
@@ -1347,22 +1402,22 @@ async function assertInputClosure(args: {
         const home = input.env.processEnv('HOME');
         if (home && target.startsWith('~')) candidates.add(path.resolve(expandUserPath(target, home)));
         for (const resolved of candidates) {
-          // A file many services share is read once per environment it is
-          // interpolated in, however many services name it.
-          const readKey = [resolved, file.raw ? 'raw' : 'dotenv', envContextId(input.env)].join('\0');
-          if (serviceFilesRead.has(readKey)) continue;
-          serviceFilesRead.add(readKey);
-          // Compose reads the whole file, so it is read here under the same
-          // cap as every other input: a device or pipe is refused unopened, a
-          // file over the cap is refused, and a `/proc` entry that reports no
-          // size but never ends stops at the cap.
           const fileLabel = inputLabel(args.cwd, resolved);
-          const read = await readComposeInputWithinCap(resolved, MAX_COMPOSE_INPUT_BYTES);
-          if (read.tooLarge) throw sizeRefusalForInput(fileLabel, 'Env file');
-          if (read.nonRegular === 'unbounded') throw unboundedInputRefusal(fileLabel);
-          if (read.content === null) continue;
-          countParsedBytes(read.content.length, fileLabel, 'env');
-          assertServiceEnvFileBounded(read.content, file.raw, input.env, fileLabel);
+          const content = await readServiceFile(resolved, fileLabel);
+          if (content === null) continue;
+          // The parse is repeated for every mention, so its text is counted
+          // for every mention against a bound of its own.
+          serviceEnvParseChars += content.length;
+          if (serviceEnvParseChars > MAX_COMPOSE_SERVICE_ENV_PARSE_CHARS) {
+            throw envBoundRefusal(fileLabel, `${MAX_COMPOSE_SERVICE_ENV_PARSE_CHARS / (1024 * 1024)} MiB of env_file text parsed`);
+          }
+          try {
+            reader.read(content, { raw: file.raw });
+          } catch (err) {
+            if (err instanceof ComposeEnvLimitError || err instanceof RangeError) throw envFileTooLargeRefusal(fileLabel);
+            // A syntax error is Compose's to report, since it rejects the file too.
+            if (!(err instanceof ComposeEnvFileError)) throw err;
+          }
         }
       }
       return [];

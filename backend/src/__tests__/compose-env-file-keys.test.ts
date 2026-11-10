@@ -166,9 +166,25 @@ describe('ComposeEnvFiles limits', () => {
   it('refuses a value nested deeper than the template bound, and counts nesting by braces', () => {
     expect(templateNestingDepth('a${B:-${C:-${D}}}e')).toBe(3);
     expect(templateNestingDepth('${A}${B}${C}')).toBe(1);
-    expect(templateNestingDepth('plain $A and $$ {not}')).toBe(0);
+    expect(templateNestingDepth('plain $A and $$ {not}')).toBe(1);
     expect(() => reader(limits()).read('A=${B:-${C:-${D:-${E:-${F:-${G}}}}}}\n')).toThrow(ComposeEnvLimitError);
     expect(() => reader(limits()).read('A=${B:-${C:-${D}}}\n')).not.toThrow();
+  });
+
+  it('counts every brace the expander counts, and reads nesting from decoded escapes', () => {
+    expect(templateNestingDepth('${a:-{}'.repeat(10))).toBe(11);
+    expect(() => reader(limits()).read(`A=${'${a:-{}'.repeat(6)}\n`)).toThrow(ComposeEnvLimitError);
+    // `\0044` decodes to `$` and `\0173` to `{`, which the raw text does not show.
+    expect(() => reader(limits()).read(`A="${'\\0044\\0173a:-'.repeat(6)}x"\n`)).toThrow(ComposeEnvLimitError);
+  });
+
+  it('seeds values later files interpolate, and counts them against the shared budget', () => {
+    const shared = { remaining: 100 };
+    const env = reader(limits({ shared }));
+    env.seed([['A', 'one']]);
+    env.read('B=${A}-two\n');
+    expect(env.assigned('B')).toBe('one-two');
+    expect(() => env.seed([['C', 'x'.repeat(200)]])).toThrow(ComposeEnvLimitError);
   });
 
   it('is not a syntax error, so a caller cannot read it as a file Compose rejects too', () => {

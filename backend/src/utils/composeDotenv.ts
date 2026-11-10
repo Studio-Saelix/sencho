@@ -58,15 +58,20 @@ export interface ComposeEnvLimits {
   shared: { remaining: number };
 }
 
-/** The deepest `${ ... }` nesting in `text`, counting every `${` against its closing brace. */
+/**
+ * The deepest brace nesting in `text`. Every `{` counts as a level, not only
+ * `${`, because the expander's own walk (`firstBraceClose`) counts any `{` and
+ * skips the byte after it, so a `{` it does not close would otherwise keep a
+ * template open that a `${`-only count had already closed. It over-counts, which
+ * only errs toward refusing a deeper value.
+ */
 export function templateNestingDepth(text: string): number {
   let depth = 0;
   let deepest = 0;
   for (let i = 0; i < text.length; i += 1) {
-    if (text[i] === '$' && text[i + 1] === '{') {
+    if (text[i] === '{') {
       depth += 1;
       if (depth > deepest) deepest = depth;
-      i += 1;
     } else if (text[i] === '}' && depth > 0) {
       depth -= 1;
     }
@@ -354,8 +359,11 @@ function parseEnvFileText(
 ): void {
   const maxRawValue = limits?.maxRawValue ?? Infinity;
   const maxDepth = limits?.maxTemplateDepth ?? Infinity;
-  const checkRaw = (raw: string): void => {
-    if (raw.length > maxRawValue || (maxDepth !== Infinity && templateNestingDepth(raw) > maxDepth)) {
+  const checkRaw = (raw: string, decoded = raw): void => {
+    // The depth is read from the text that is interpolated: an escape such as
+    // `\044` or `\173` decodes to `$` or `{`, so counting the raw text alone
+    // would miss a template the escapes spell.
+    if (raw.length > maxRawValue || (maxDepth !== Infinity && templateNestingDepth(decoded) > maxDepth)) {
       throw new ComposeEnvLimitError('a value is longer or nested deeper than the limit');
     }
   };
@@ -424,10 +432,9 @@ function parseEnvFileText(
     const quote = content[cursor];
     if (quote === DOUBLE_QUOTE || quote === SINGLE_QUOTE) {
       const { raw, next } = readQuotedValue(content, cursor, quote);
-      checkRaw(raw);
-      const value = quote === DOUBLE_QUOTE
-        ? expandComposeEnvTemplate(expandComposeEnvEscapes(raw), lookup)
-        : raw;
+      const decoded = quote === DOUBLE_QUOTE ? expandComposeEnvEscapes(raw) : raw;
+      checkRaw(raw, decoded);
+      const value = quote === DOUBLE_QUOTE ? expandComposeEnvTemplate(decoded, lookup) : raw;
       assign(key, value);
       cursor = next;
       continue;
@@ -514,6 +521,21 @@ export class ComposeEnvFiles {
    *  of the container's environment. */
   assignedNames(): string[] {
     return [...this.values.keys()];
+  }
+
+  /**
+   * Add values the files read after this call can interpolate, as the
+   * environment a service declares for itself. A name the base lookup answers
+   * stays answered by it, the same as for a file's assignment.
+   */
+  seed(entries: Iterable<[string, string]>): void {
+    for (const [name, value] of entries) {
+      if (this.limits) {
+        this.limits.shared.remaining -= value.length;
+        if (this.limits.shared.remaining < 0) throw new ComposeEnvLimitError('the env files copy more text than the limit');
+      }
+      this.values.set(name, value);
+    }
   }
 
   /** Read one file's text, adding its assignments. Throws on unreadable syntax.

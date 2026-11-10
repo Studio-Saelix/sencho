@@ -2024,6 +2024,15 @@ describe('assertComposeInputsWithinExpansionLimits - scalar text, interpolation 
       await expect(run()).rejects.toThrow(/expands to more than 250,000 nodes/);
     });
 
+    it('counts a !!binary value and a very long numeral by their text as well', async () => {
+      const refs = Array.from({ length: 4_000 }, () => '*b').join(', ');
+      const binary = Buffer.alloc(100_000, 7).toString('base64');
+      await write('compose.yaml', `x-big: &b !!binary ${binary}\nx-use: [${refs}]\nservices:\n  web:\n    image: nginx\n`);
+      await expect(run()).rejects.toThrow(/expands to more than 250,000 nodes/);
+      await write('compose.yaml', `x-big: &b ${'1'.repeat(100_000)}\nx-use: [${refs}]\nservices:\n  web:\n    image: nginx\n`);
+      await expect(run()).rejects.toThrow(/expands to more than 250,000 nodes/);
+    });
+
     it('accepts a large scalar used a few times, and ordinary short strings used often', async () => {
       const big = 'x'.repeat(100_000);
       await write('compose.yaml', `x-big: &b "${big}"\nx-use: [*b, *b, *b]\nservices:\n  web:\n    image: nginx\n`);
@@ -2045,6 +2054,43 @@ describe('assertComposeInputsWithinExpansionLimits - scalar text, interpolation 
       await write('compose.yaml', 'services:\n  web:\n    image: nginx\n    label_file: bomb.env\n');
       await expect(run()).rejects.toThrow(/too long, or interpolates into more text/);
       await write('compose.yaml', 'services:\n  web:\n    image: nginx\n    env_file:\n      - path: bomb.env\n        format: raw\n');
+      await expect(run()).resolves.toBeUndefined();
+    });
+
+    it('refuses a doubling chain Compose builds across one service\'s env_file list, however the file is spelled', async () => {
+      await write('a.env', `A=${'x'.repeat(1_000)}\n`);
+      await write('d.env', 'A=${A}${A}\n');
+      const spellings = ['d.env', './d.env', 'd.env', './d.env'];
+      const list = ['a.env', ...Array.from({ length: 24 }, (_, i) => spellings[i % spellings.length])];
+      await write('compose.yaml', `services:\n  web:\n    image: nginx\n    env_file: [${list.join(', ')}]\n`);
+      await expect(run()).rejects.toThrow(/too long, or interpolates into more text/);
+      // The same chain over label_file.
+      await write('compose.yaml', `services:\n  web:\n    image: nginx\n    label_file: [${list.join(', ')}]\n`);
+      await expect(run()).rejects.toThrow(/too long, or interpolates into more text/);
+    });
+
+    it('seeds the chain from the service environment, as a map or a list', async () => {
+      await write('d.env', 'A=${A}${A}\n');
+      const list = Array.from({ length: 24 }, () => 'd.env').join(', ');
+      await write('compose.yaml', `services:\n  web:\n    image: nginx\n    environment:\n      A: "${'x'.repeat(100_000)}"\n    env_file: [${list}]\n`);
+      await expect(run()).rejects.toThrow(/too long, or interpolates into more text/);
+      await write('compose.yaml', `services:\n  web:\n    image: nginx\n    environment:\n      - A=${'x'.repeat(100_000)}\n    env_file: [${list}]\n`);
+      await expect(run()).rejects.toThrow(/too long, or interpolates into more text/);
+    });
+
+    it('accepts a short chain over the same file, and a shared file in an umbrella of includes with their own .env', async () => {
+      await write('a.env', 'A=ab\n');
+      await write('d.env', 'A=${A}${A}\n');
+      await write('compose.yaml', 'services:\n  web:\n    image: nginx\n    env_file: [a.env, d.env, d.env, d.env, d.env]\n');
+      await expect(run()).resolves.toBeUndefined();
+      await write('common.env', `K=${'x'.repeat(112_000)}\n`);
+      const entries: string[] = [];
+      for (let i = 0; i < 80; i += 1) {
+        await write(`app${i}/compose.yaml`, 'services:\n  web:\n    image: nginx\n    env_file: ../common.env\n');
+        await write(`app${i}/.env`, `TAG=v${i}\n`);
+        entries.push(`  - app${i}/compose.yaml`);
+      }
+      await write('compose.yaml', `include:\n${entries.join('\n')}\n`);
       await expect(run()).resolves.toBeUndefined();
     });
 
@@ -2079,6 +2125,27 @@ describe('assertComposeInputsWithinExpansionLimits - scalar text, interpolation 
       await expect(run()).rejects.toThrow(/too long, or interpolates into more text/);
       await write('.env', 'A=\nB=${A:-${A:-${A:-x}}}\n');
       await expect(run()).resolves.toBeUndefined();
+    });
+
+    it('counts a brace the expander counts, so nesting cannot hide behind a stray {', async () => {
+      await write('compose.yaml', SAFE_COMPOSE);
+      await write('.env', `B=${'${a:-{}'.repeat(100)}\n`);
+      await expect(run()).rejects.toThrow(/too long, or interpolates into more text/);
+    });
+
+    it('reads nesting from the text an escape decodes to', async () => {
+      await write('compose.yaml', SAFE_COMPOSE);
+      // `\0044` is `$` and `\0173` is `{` to Compose's double-quoted decoder.
+      await write('.env', `B="${'\\0044\\0173a:-'.repeat(100)}x"\n`);
+      await expect(run()).rejects.toThrow(/too long, or interpolates into more text/);
+    });
+
+    it('refuses a symlink that leads to a process descriptor, and one through /proc/self/root', async () => {
+      await write('compose.yaml', 'services:\n  web:\n    image: nginx\n    env_file: link.env\n');
+      await fsPromises.symlink('/dev/stdin', path.join(dir, 'link.env'));
+      await expect(run()).rejects.toThrow(/not a regular file/);
+      await write('compose.yaml', 'services:\n  web:\n    image: nginx\n    env_file: /proc/self/root/dev/stdin\n');
+      await expect(run()).rejects.toThrow(/not a regular file/);
     });
 
     it('refuses a compose input named by one of the process descriptors, which are not the child\'s', async () => {

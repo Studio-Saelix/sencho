@@ -33,6 +33,7 @@
  */
 import { promises as fsPromises, constants as fsConstants } from 'fs';
 import type { Stats } from 'fs';
+import path from 'path';
 
 /**
  * Decode one Compose YAML input from its bytes. A leading byte-order mark
@@ -103,7 +104,30 @@ const SKIPPABLE_READ_ERRORS = new Set([
 ]);
 
 /** Paths that name a process's own descriptors or memory rather than a file. */
-const PROCESS_DESCRIPTOR_PATH = /^\/(?:dev\/(?:stdin|stdout|stderr|fd\/)|proc\/(?:self|thread-self|\d+)\/(?:fd\/|mem$|task\/\d+\/(?:fd\/|mem$)))/;
+const PROCESS_DESCRIPTOR_PATH = /^(?:\/proc\/(?:self|thread-self|\d+)\/root)?\/(?:dev\/(?:stdin|stdout|stderr|fd\/)|proc\/(?:self|thread-self|\d+)\/(?:fd\/|mem$|task\/\d+\/(?:fd\/|mem$)))/;
+
+/**
+ * True when the path, or a symlink it leads through, names one of those. The
+ * guard's own stdin is not the Compose child's, so a link to `/dev/stdin` has to
+ * be refused where it is found, not after it resolves to whatever this process
+ * has open.
+ */
+async function namesProcessDescriptor(filePath: string): Promise<boolean> {
+  let current = filePath;
+  for (let hop = 0; hop < 40; hop += 1) {
+    if (PROCESS_DESCRIPTOR_PATH.test(current)) return true;
+    let target: string;
+    try {
+      const link = await fsPromises.lstat(current);
+      if (!link.isSymbolicLink()) return false;
+      target = await fsPromises.readlink(current);
+    } catch {
+      return false;
+    }
+    current = path.resolve(path.dirname(current), target);
+  }
+  return false;
+}
 
 function isSkippableReadError(err: unknown): boolean {
   return SKIPPABLE_READ_ERRORS.has((err as NodeJS.ErrnoException).code ?? '');
@@ -125,7 +149,7 @@ export async function readComposeInputWithinCap(
   // `/proc/self/fd/0` named in a compose input is whatever the Compose child
   // has there (often a pipe), not what this process has, and `/proc/*/mem`
   // fails every read. Refuse them by name.
-  if (PROCESS_DESCRIPTOR_PATH.test(filePath)) return { content: null, tooLarge: false, nonRegular: 'unbounded' };
+  if (await namesProcessDescriptor(filePath)) return { content: null, tooLarge: false, nonRegular: 'unbounded' };
   // `stat` before `open`: opening a device can act on it (a watchdog starts, a
   // tape rewinds), so a path that is not a regular file is classified without
   // being opened.
