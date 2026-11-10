@@ -128,8 +128,9 @@ function localNodeId(): number {
 
 /**
  * Waits for a background settlement to finish. The service makes the terminal
- * state durable first and releases the claim only after that write returns, so
- * a test can read the new state while the claim is still held.
+ * state durable first, then releases the claim, then updates the local Fleet
+ * tracker, so a test that waits for the state alone can still see the claim
+ * held, and a settlement still running when a test ends lands in the next one.
  */
 async function waitForSettled(
   service: InstanceType<typeof ImageOperationService>,
@@ -139,6 +140,7 @@ async function waitForSettled(
   await vi.waitFor(async () => {
     expect((await service.getCurrentOperation())?.state).toBe(state);
     expect(service.isEndpointProviderPending()).toBe(false);
+    expect(FleetUpdateTrackerService.getInstance().get(localNodeId())?.status).toBe(state === 'failed' ? 'failed' : 'completed');
   }, timeout === undefined ? undefined : { timeout });
 }
 
@@ -364,7 +366,7 @@ describe('execute (the process that spawns the helper)', () => {
     const service = fastTimings();
     await service.claimComposeReapply({ replace: true });
     await service.executeClaimedComposeReapply();
-    await vi.waitFor(async () => expect((await service.getCurrentOperation())?.state).toBe('failed'), { timeout: 2_000 });
+    await waitForSettled(service, 'failed', 2_000);
     expect(await service.getCurrentOperation()).toMatchObject({
       failureCode: 'endpoint_provider_recovery_required',
       rollback: { attempted: false },
@@ -386,7 +388,7 @@ describe('execute (the process that spawns the helper)', () => {
     });
     vi.spyOn(selfUpdate, 'triggerComposeReapply').mockResolvedValue(undefined);
     await service.executeClaimedComposeReapply();
-    await vi.waitFor(async () => expect((await service.getCurrentOperation())?.state).toBe('failed'));
+    await waitForSettled(service, 'failed');
     const operation = await service.getCurrentOperation();
     expect(operation).toMatchObject({
       failureCode: 'update_failed',
@@ -396,7 +398,7 @@ describe('execute (the process that spawns the helper)', () => {
     expect(operation?.failureDetail).not.toContain('was restored');
     expect(docker.listContainers).not.toHaveBeenCalled();
     expect(selfUpdate.getLastErrorCode()).toBe('update_failed');
-    await vi.waitFor(() => expect(FleetUpdateTrackerService.getInstance().get(localNodeId())).toMatchObject({ status: 'failed' }));
+    expect(FleetUpdateTrackerService.getInstance().get(localNodeId())).toMatchObject({ status: 'failed' });
   });
 
   it('does not claim a stack-scope restore reaches Docker when this process still cannot', async () => {
@@ -408,7 +410,7 @@ describe('execute (the process that spawns the helper)', () => {
     const operationId = (await service.getCurrentOperation())!.operationId;
     await writeOutcome(operationId, { ok: false, phase: 'verify', error: 'Sencho could not use Docker', rollback: { restored: true, error: null } });
     await service.executeClaimedComposeReapply();
-    await vi.waitFor(async () => expect((await service.getCurrentOperation())?.state).toBe('failed'));
+    await waitForSettled(service, 'failed');
     const operation = await service.getCurrentOperation();
     expect(operation).toMatchObject({ failureCode: 'endpoint_provider_recovery_required' });
     expect(operation?.failureDetail).toContain('was restored, but Sencho could not reach Docker through it');
@@ -445,7 +447,7 @@ describe('execute (the process that spawns the helper)', () => {
 
     // The helper's late verdict is consumed and only then is the claim released.
     await writeOutcome(operationId, { ok: true });
-    await vi.waitFor(async () => expect((await service.getCurrentOperation())?.state).toBe('succeeded'), { timeout: 3_000 });
+    await waitForSettled(service, 'succeeded', 3_000);
     await expect(service.claimComposeReapply({ replace: true, only: true })).resolves.toEqual({ ok: true });
     write.mockRestore();
   });
@@ -469,7 +471,7 @@ describe('execute (the process that spawns the helper)', () => {
     });
 
     await writeOutcome(operationId, { ok: true });
-    await vi.waitFor(async () => expect((await service.getCurrentOperation())?.state).toBe('succeeded'));
+    await waitForSettled(service, 'succeeded');
     await expect(service.claimComposeReapply({ replace: true, only: true })).resolves.toEqual({ ok: true });
   });
 
@@ -492,7 +494,7 @@ describe('execute (the process that spawns the helper)', () => {
     });
 
     await writeOutcome(operationId, { ok: true });
-    await vi.waitFor(async () => expect((await service.getCurrentOperation())?.state).toBe('succeeded'));
+    await waitForSettled(service, 'succeeded');
   });
 
   it('terminalizes the operation when the watcher throws after the helper is gone', async () => {
@@ -512,7 +514,7 @@ describe('execute (the process that spawns the helper)', () => {
     expect(operation).toMatchObject({ failureCode: 'endpoint_provider_recovery_required' });
     expect(operation?.failureDetail).toContain('while Sencho was waiting for or applying the helper');
     expect(operation?.failureDetail).toContain('probe: terminal write failed');
-    await vi.waitFor(() => expect(FleetUpdateTrackerService.getInstance().get(localNodeId())).toMatchObject({ status: 'failed' }));
+    expect(FleetUpdateTrackerService.getInstance().get(localNodeId())).toMatchObject({ status: 'failed' });
     await expect(service.claimComposeReapply({ replace: true })).resolves.toEqual({ ok: true });
   });
 
@@ -596,7 +598,7 @@ describe('execute (the process that spawns the helper)', () => {
     expect(operation.endpointProvider).toMatchObject({ scope: 'stack' });
     await writeOutcome(operation.operationId, { ok: false, phase: 'verify', error: 'Sencho could not use Docker', rollback: { restored: true, error: null } });
     await service.executeClaimedCommunityUpdate();
-    await vi.waitFor(async () => expect((await service.getCurrentOperation())?.state).toBe('failed'));
+    await waitForSettled(service, 'failed');
     expect((await service.getCurrentOperation())?.failureCode).toBe('endpoint_provider_recovery_required');
   });
 });
@@ -640,7 +642,7 @@ describe('provider-only reapply (Sencho stays running)', () => {
 
     await writeOutcome(operationId, { ok: true });
     await waitForSettled(service, 'succeeded');
-    await vi.waitFor(() => expect(FleetUpdateTrackerService.getInstance().get(localNodeId())).toMatchObject({ status: 'completed' }));
+    expect(FleetUpdateTrackerService.getInstance().get(localNodeId())).toMatchObject({ status: 'completed' });
   });
 
   it('answers negatively when Docker does not answer through the replacement, and never clears the guard by itself', async () => {
@@ -657,7 +659,7 @@ describe('provider-only reapply (Sencho stays running)', () => {
       expect(ack).toMatchObject({ ok: false });
     });
     await writeOutcome(operationId, { ok: false, phase: 'verify', error: 'Sencho could not use Docker', rollback: { restored: true, error: null } });
-    await vi.waitFor(async () => expect((await service.getCurrentOperation())?.state).toBe('failed'));
+    await waitForSettled(service, 'failed');
     const operation = await service.getCurrentOperation();
     // Docker is unreachable in this fixture, so the restored container cannot be
     // confirmed reachable either: that is a recovery state, not a clean restore.
@@ -675,7 +677,7 @@ describe('provider-only reapply (Sencho stays running)', () => {
     await service.executeClaimedComposeReapply();
     // A stalled recreate (no phase marker) must not be verified against the old,
     // still-healthy provider: that would let the helper accept a false ack.
-    await vi.waitFor(async () => expect((await service.getCurrentOperation())?.state).toBe('failed'), { timeout: 2_000 });
+    await waitForSettled(service, 'failed', 2_000);
     await expect(fs.access(handoff(operationId, 'ack'))).rejects.toThrow();
     expect(docker.resetDockerConnection).not.toHaveBeenCalled();
     expect((await service.getCurrentOperation())?.failureCode).toBe('endpoint_provider_recovery_required');
@@ -693,7 +695,7 @@ describe('provider-only reapply (Sencho stays running)', () => {
     await writeRecreatedMarker(operationId);
     await writeOutcome(operationId, { ok: false, phase: 'provider', error: 'container is unhealthy', rollback: { restored: true, error: null } });
     await service.executeClaimedComposeReapply();
-    await vi.waitFor(async () => expect((await service.getCurrentOperation())?.state).toBe('failed'));
+    await waitForSettled(service, 'failed');
     expect(docker.resetDockerConnection).toHaveBeenCalled();
     expect((await service.getCurrentOperation())?.failureCode).toBe('endpoint_provider_restored');
   });
@@ -707,7 +709,7 @@ describe('provider-only reapply (Sencho stays running)', () => {
     const operationId = (await service.getCurrentOperation())!.operationId;
     await writeOutcome(operationId, { ok: false, phase: 'provider', error: 'container is unhealthy', rollback: { restored: true, error: null } });
     await service.executeClaimedComposeReapply();
-    await vi.waitFor(async () => expect((await service.getCurrentOperation())?.state).toBe('failed'));
+    await waitForSettled(service, 'failed');
     const operation = await service.getCurrentOperation();
     expect(operation?.failureCode).toBe('endpoint_provider_recovery_required');
     expect(operation?.failureDetail).toContain('was restored, but Sencho could not reach Docker through it');
@@ -820,7 +822,7 @@ describe('bounded verification', () => {
       expect(ack).toMatchObject({ operationId, ok: false });
     }, { timeout: 2_000 });
     await writeOutcome(operationId, { ok: false, phase: 'verify', error: 'stalled', rollback: { restored: true, error: null } });
-    await vi.waitFor(async () => expect((await service.getCurrentOperation())?.state).toBe('failed'), { timeout: 3_000 });
+    await waitForSettled(service, 'failed', 3_000);
     expect(aborted).toBe(true);
     expect(docker.resetDockerConnection).toHaveBeenCalled();
   });
@@ -875,7 +877,7 @@ describe('ownership lifetime', () => {
       expect(ack).toEqual({ operationId, ok: true, detail: null });
     });
     await writeOutcome(operationId, { ok: true });
-    await vi.waitFor(async () => expect((await service.getCurrentOperation())?.state).toBe('succeeded'));
+    await waitForSettled(service, 'succeeded');
   });
 
   it('does not grant a restarted process a fresh helper lifetime', async () => {
