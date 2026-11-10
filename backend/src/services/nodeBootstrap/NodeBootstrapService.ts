@@ -64,7 +64,13 @@ export type BootstrapErrorCode =
   | 'HOST_KEY_UNTRUSTED'
   | 'BOOTSTRAP_IN_PROGRESS'
   | 'TARGET_CHANGED'
-  | 'PREFLIGHT_FAILED';
+  | 'PREFLIGHT_FAILED'
+  | 'PLAN_NOT_CURRENT'
+  | 'BOOTSTRAP_OPERATION_ACTIVE'
+  | 'OPERATION_NOT_FOUND'
+  | 'OPERATION_NOT_RUNNING'
+  | 'OPERATION_NOT_RETRYABLE'
+  | 'OPERATION_NOT_RELEASABLE';
 
 export class BootstrapError extends Error {
   public readonly status: number;

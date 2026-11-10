@@ -9,9 +9,12 @@ import { getErrorMessage } from '../utils/errors';
 import { BootstrapError, NodeBootstrapService, validateInstallPaths } from '../services/nodeBootstrap/NodeBootstrapService';
 import { DEFAULT_AGENT_DIR, DEFAULT_COMPOSE_DIR } from '../services/nodeBootstrap/pathPolicy';
 import { SshTransportError } from '../services/nodeBootstrap/sshProbeClient';
+import { NodeBootstrapOperationService } from '../services/nodeBootstrap/NodeBootstrapOperationService';
+import { TargetValidationError, validateTarget } from '../services/nodeBootstrap/targetPolicy';
 
 /**
- * Read-only node bootstrap routes.
+ * Node bootstrap routes: the read-only preflight, and the operations that run
+ * an approved plan.
  *
  * Admin and signed-in-session only: bootstrap reaches a host over SSH, which is
  * deliberately narrower than ordinary node management, and an API token or a
@@ -27,7 +30,7 @@ const hostKeySchema = z.object({
   port: portSchema.optional(),
 });
 
-const preflightSchema = z.object({
+const preflightFields = {
   host: z.string(),
   port: portSchema.optional(),
   username: z.string(),
@@ -39,10 +42,31 @@ const preflightSchema = z.object({
   targetName: z.string(),
   composeDir: z.string().optional(),
   agentDir: z.string().optional(),
+};
+
+const preflightSchema = z.object({
+  ...preflightFields,
+  /** Set when the preflight prepares a retry of this operation. */
+  operationId: z.string().uuid().optional(),
 }).refine(
   (body) => Boolean(body.replacePinnedFingerprint?.trim()) === Boolean(body.reviewedPinnedFingerprint?.trim()),
   { message: 'A host key replacement names both the new key and the pin it replaces.', path: ['reviewedPinnedFingerprint'] },
 );
+
+/**
+ * Executing a plan repeats the preflight inputs (the key is never stored, so
+ * it is sent again) and names the reviewed plan by digest. A host key
+ * replacement is a preflight decision, so it is refused here.
+ */
+const executeSchema = z.object({
+  ...preflightFields,
+  planDigest: z.string().regex(/^[0-9a-f]{64}$/, 'planDigest must be a SHA-256 hex digest.'),
+}).refine(
+  (body) => !body.replacePinnedFingerprint?.trim() && !body.reviewedPinnedFingerprint?.trim(),
+  { message: 'A host key replacement is confirmed in the preflight, not when the plan runs.', path: ['replacePinnedFingerprint'] },
+);
+
+const operationIdSchema = z.string().uuid();
 
 function guard(req: Request, res: Response): boolean {
   if (!requireUserSession(req, res)) return false;
@@ -71,7 +95,11 @@ function abortOnDisconnect(res: Response): AbortSignal {
   return controller.signal;
 }
 
-function sendError(res: Response, error: unknown): void {
+function sendError(res: Response, error: unknown, action: 'preflight' | 'operation' = 'preflight'): void {
+  if (error instanceof TargetValidationError) {
+    res.status(400).json({ error: error.message, code: error.code, field: error.field });
+    return;
+  }
   if (error instanceof BootstrapError) {
     res.status(error.status).json({
       error: error.message,
@@ -85,6 +113,11 @@ function sendError(res: Response, error: unknown): void {
     if (res.destroyed) return;
     console.warn(`[Bootstrap] Transport failure (${error.code}):`, sanitizeForLog(error.message));
     res.status(error.status).json({ error: error.message, code: error.code });
+    return;
+  }
+  if (action === 'operation') {
+    console.error('[Bootstrap] Operation request failed:', getErrorMessage(error, 'unknown'));
+    res.status(500).json({ error: 'The bootstrap request failed unexpectedly. Check the hub logs.', code: 'OPERATION_FAILED' });
     return;
   }
   console.error('[Bootstrap] Preflight failed:', getErrorMessage(error, 'unknown'));
@@ -141,16 +174,119 @@ nodeBootstrapRouter.post('/preflight', bootstrapLimiter, async (req: Request, re
       parsed.data.composeDir ?? DEFAULT_COMPOSE_DIR,
       parsed.data.agentDir ?? DEFAULT_AGENT_DIR,
     );
-    const result = await NodeBootstrapService.getInstance().preflight(parsed.data, {
+    const operations = NodeBootstrapOperationService.getInstance();
+    const { operationId, ...input } = parsed.data;
+    const target = validateTarget({ host: input.host, port: input.port, username: input.username, targetName: input.targetName });
+    operations.assertTargetIdle(target.host, target.port);
+    const ownership = operationId ? operations.retryOwnership(operationId) : null;
+    const audit = auditContext(req);
+    const result = await NodeBootstrapService.getInstance().preflight(input, {
       hubUrl: resolvePrimaryUrl(req),
-      audit: auditContext(req),
+      audit,
       signal: abortOnDisconnect(res),
+      ownership,
     });
+    operations.rememberPlan(result, audit.username, operationId ?? null);
     console.log(
       `[Bootstrap] Preflight for ${sanitizeForLog(parsed.data.host)} complete: blocked=${result.blocked} blockers=${result.inspection.blockers} warnings=${result.inspection.warnings}`,
     );
     res.json(result);
   } catch (error: unknown) {
     sendError(res, error);
+  }
+});
+
+/**
+ * Approve and run a reviewed plan. The response returns as soon as the
+ * operation is recorded; the run continues on the hub whether or not the
+ * browser stays open.
+ */
+nodeBootstrapRouter.post('/operations', bootstrapLimiter, (req: Request, res: Response) => {
+  if (!guard(req, res)) return;
+  const parsed = executeSchema.safeParse(req.body);
+  if (!parsed.success) {
+    invalidBody(res, parsed);
+    return;
+  }
+  try {
+    const operation = NodeBootstrapOperationService.getInstance().start(parsed.data, {
+      hubUrl: resolvePrimaryUrl(req),
+      audit: auditContext(req),
+    });
+    console.log(`[Bootstrap] Operation ${operation.id} started for ${sanitizeForLog(operation.host)}:${operation.port}`);
+    res.status(202).json(operation);
+  } catch (error: unknown) {
+    sendError(res, error, 'operation');
+  }
+});
+
+nodeBootstrapRouter.get('/operations', (req: Request, res: Response) => {
+  if (!guard(req, res)) return;
+  try {
+    res.json({ operations: NodeBootstrapOperationService.getInstance().list() });
+  } catch (error: unknown) {
+    sendError(res, error, 'operation');
+  }
+});
+
+function operationId(req: Request, res: Response): string | null {
+  const parsed = operationIdSchema.safeParse(req.params.id);
+  if (!parsed.success) {
+    res.status(404).json({ error: 'Bootstrap operation not found.', code: 'OPERATION_NOT_FOUND' });
+    return null;
+  }
+  return parsed.data;
+}
+
+nodeBootstrapRouter.get('/operations/:id', (req: Request, res: Response) => {
+  if (!guard(req, res)) return;
+  const id = operationId(req, res);
+  if (!id) return;
+  try {
+    res.json(NodeBootstrapOperationService.getInstance().get(id));
+  } catch (error: unknown) {
+    sendError(res, error, 'operation');
+  }
+});
+
+nodeBootstrapRouter.post('/operations/:id/retry', bootstrapLimiter, (req: Request, res: Response) => {
+  if (!guard(req, res)) return;
+  const id = operationId(req, res);
+  if (!id) return;
+  const parsed = executeSchema.safeParse(req.body);
+  if (!parsed.success) {
+    invalidBody(res, parsed);
+    return;
+  }
+  try {
+    const operation = NodeBootstrapOperationService.getInstance().retry(id, parsed.data, {
+      hubUrl: resolvePrimaryUrl(req),
+      audit: auditContext(req),
+    });
+    res.status(202).json(operation);
+  } catch (error: unknown) {
+    sendError(res, error, 'operation');
+  }
+});
+
+nodeBootstrapRouter.post('/operations/:id/cancel', (req: Request, res: Response) => {
+  if (!guard(req, res)) return;
+  const id = operationId(req, res);
+  if (!id) return;
+  try {
+    res.json(NodeBootstrapOperationService.getInstance().cancel(id, auditContext(req)));
+  } catch (error: unknown) {
+    sendError(res, error, 'operation');
+  }
+});
+
+nodeBootstrapRouter.post('/operations/:id/release', (req: Request, res: Response) => {
+  if (!guard(req, res)) return;
+  const id = operationId(req, res);
+  if (!id) return;
+  try {
+    res.json(NodeBootstrapOperationService.getInstance().release(id, auditContext(req)));
+  } catch (error: unknown) {
+    sendError(res, error, 'operation');
   }
 });

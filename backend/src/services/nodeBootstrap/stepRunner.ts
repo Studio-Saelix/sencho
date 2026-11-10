@@ -72,16 +72,31 @@ export interface StepContext {
   composeWithToken: () => string;
 }
 
-function lastLines(text: string): string {
-  const trimmed = text.trim();
-  return trimmed.length > DETAIL_MAX_CHARS ? trimmed.slice(trimmed.length - DETAIL_MAX_CHARS) : trimmed;
+/**
+ * The last whole lines of `text` within the limit. A cut tail starts at a
+ * line boundary, so it never begins with a fragment of a secret the scrub
+ * could not recognize; every secret this run holds is a single line.
+ */
+function lastLines(text: string, cut: boolean): string {
+  let tail = text.trim();
+  if (tail.length > DETAIL_MAX_CHARS) {
+    tail = tail.slice(tail.length - DETAIL_MAX_CHARS);
+    cut = true;
+  }
+  if (cut) {
+    const newline = tail.indexOf('\n');
+    tail = newline === -1 ? '' : tail.slice(newline + 1);
+  }
+  return tail;
 }
 
-/** The recorded detail for a command: its output tail, with every secret removed. */
+/** The recorded detail for a command: its output tail, with every secret removed before anything is cut. */
 export function commandDetail(result: ExecResult, secrets: string[]): string | null {
-  const parts = [result.stderr, result.stdout].map(lastLines).filter(Boolean);
+  const parts = [result.stderr, result.stdout]
+    .map((text) => lastLines(scrubSecrets(text, secrets), result.truncated))
+    .filter(Boolean);
   if (parts.length === 0) return null;
-  return scrubSecrets(parts.join('\n'), secrets).slice(0, DETAIL_MAX_CHARS);
+  return lastLines(parts.join('\n'), false);
 }
 
 function seconds(ms: number): string {
