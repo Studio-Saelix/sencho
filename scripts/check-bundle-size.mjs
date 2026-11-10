@@ -44,6 +44,7 @@ import { fileURLToPath } from 'node:url'
 // includes `-` and `_`.
 const HASHED = /^(.+)-[A-Za-z0-9_-]{8}\.(js|css)$/
 const CODE_ASSET = /\.(js|mjs|css)$/
+const FLAG_OPTIONS = { '--dist': 'dist', '--budget': 'budget' }
 const RESERVED_GROUPS = [
   'entry-js', 'preload-js', 'first-load-js', 'initial-css', 'workers', 'lazy-js', 'lazy-css', 'total-js',
 ]
@@ -174,7 +175,7 @@ export function parseBudget(text, path) {
 export function parseArgs(args) {
   const options = { dist: 'frontend/dist', budget: 'frontend/bundle-budget.json' }
   for (let i = 0; i < args.length; i += 2) {
-    const key = { '--dist': 'dist', '--budget': 'budget' }[args[i]]
+    const key = FLAG_OPTIONS[args[i]]
     const value = args[i + 1]
     if (!key) throw new Error(`Unknown argument "${args[i]}". Usage: [--dist <dir>] [--budget <file>]`)
     if (value === undefined || value.startsWith('--')) throw new Error(`${args[i]} needs a value`)
