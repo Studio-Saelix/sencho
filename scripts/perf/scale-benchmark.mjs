@@ -12,29 +12,40 @@
  * pays a real HTTP fan-out), then times:
  *
  *   stacks             GET /api/stacks
- *   statuses-hit       GET /api/stacks/statuses while the status cache is warm
- *   statuses-miss      GET /api/stacks/statuses after the cache has expired
+ *   statuses-miss      GET /api/stacks/statuses after the status cache expired
+ *   statuses-hit       GET /api/stacks/statuses right after a miss warmed it
  *   fleet-overview     GET /api/fleet/overview
  *
- * Each series reports min, median, p95, and max over its samples. With
- * `--baseline`, a series fails when its median is over `ratio` times the
- * baseline median and also more than `floorMs` slower, so CI noise on fast
- * endpoints does not fail the run.
+ * Each series reports min, median, p95, and max over its samples. The run
+ * proves it measured real work: before and after timing, every node in the
+ * fleet overview must be online and list every seeded stack, and the stack
+ * statuses must show every seeded stack running. Each miss sample's cache
+ * outcome is read from the backend's own debug timing log and must be a fresh
+ * computation.
+ *
+ * With `--baseline`, the run fails when a series' median is over `--ratio`
+ * times the baseline median and also more than `--floor-ms` slower (so CI
+ * noise on fast endpoints does not fail it), when a baseline series is
+ * missing from the results, or when the baseline was taken at another scale.
  *
  * Requirements: `npm run build` in backend/, Docker with the compose plugin,
  * and port 1852 free (the backend's fixed port).
  *
  * Usage:
  *   node scripts/perf/scale-benchmark.mjs [--stacks 200] [--nodes 10] [--samples 30]
- *     [--miss-samples 5] [--work-dir <dir>] [--out results.json]
- *     [--baseline scripts/perf/scale-benchmark-baseline.json]
+ *     [--miss-samples 5] [--ratio 1.5] [--floor-ms 25] [--work-dir <dir>]
+ *     [--out results.json] [--baseline scripts/perf/scale-benchmark-baseline.json]
  *
  * Writes a table to stdout and, when GITHUB_STEP_SUMMARY is set, to the job
- * summary. Exits 1 on a regression or when the run itself fails.
+ * summary. Exits 1 on a regression or when the run itself fails, including a
+ * failed cleanup. `--work-dir` keeps the scratch directory (with backend.log)
+ * after the run; without it a temporary directory is used and removed.
  */
 
 import { spawn, execFile } from 'node:child_process'
-import { appendFileSync, mkdirSync, mkdtempSync, openSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
+import {
+  appendFileSync, closeSync, mkdirSync, mkdtempSync, openSync, readFileSync, realpathSync, rmSync, statSync, writeFileSync,
+} from 'node:fs'
 import { networkInterfaces, tmpdir } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -55,13 +66,18 @@ const NETWORK = 'senchobench'
 const FALLBACK_SUBNET = '10.254.0.0/22'
 // Must exceed STACK_STATUSES_CACHE_TTL_MS in backend/src/helpers/constants.ts.
 const STATUS_CACHE_EXPIRY_MS = 16_000
+// Cache outcomes (CacheFetchOutcome in backend/src/services/CacheService.ts)
+// that mean the request waited on a real computation.
+const MISS_OUTCOMES = new Set(['computed', 'inflight'])
+export const SERIES = ['stacks', 'statuses-miss', 'statuses-hit', 'fleet-overview']
 const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '../..')
 
 const DEFAULTS = {
   stacks: 200, nodes: 10, samples: 30, 'miss-samples': 5,
   'work-dir': null, out: null, baseline: null, ratio: 1.5, 'floor-ms': 25,
 }
-const NUMERIC = new Set(['stacks', 'nodes', 'samples', 'miss-samples', 'ratio', 'floor-ms'])
+const COUNTS = new Set(['stacks', 'nodes', 'samples', 'miss-samples'])
+const NUMBERS = new Set(['ratio', 'floor-ms'])
 
 export function parseArgs(args) {
   const options = { ...DEFAULTS }
@@ -70,16 +86,48 @@ export function parseArgs(args) {
     const value = args[i + 1]
     if (!key || !(key in DEFAULTS)) throw new Error(`Unknown argument "${args[i]}"`)
     if (value === undefined || value.startsWith('--')) throw new Error(`${args[i]} needs a value`)
-    if (NUMERIC.has(key)) {
-      const n = Number(value)
+    if (COUNTS.has(key) || NUMBERS.has(key)) {
+      const n = value.trim() === '' ? NaN : Number(value)
       if (!Number.isFinite(n) || n < 0) throw new Error(`${args[i]} must be a non-negative number`)
+      if (COUNTS.has(key) && !Number.isInteger(n)) throw new Error(`${args[i]} must be a whole number`)
       options[key] = n
     } else {
       options[key] = value
     }
   }
-  if (options.samples < 1) throw new Error('--samples must be at least 1')
+  if (options.stacks < 1 || options.samples < 1 || options['miss-samples'] < 1) {
+    throw new Error('--stacks, --samples, and --miss-samples must be at least 1')
+  }
+  if (options.ratio < 1) throw new Error('--ratio must be at least 1')
   return options
+}
+
+/** A baseline file's contents, or an error naming what is wrong with it. */
+export function parseBaseline(text) {
+  const baseline = JSON.parse(text)
+  const { meta, series } = baseline ?? {}
+  if (!Number.isInteger(meta?.stacks) || !Number.isInteger(meta?.remoteNodes)) {
+    throw new Error('Baseline meta must record the stacks and remoteNodes it was taken at')
+  }
+  if (series === null || typeof series !== 'object' || Object.keys(series).length === 0) {
+    throw new Error('Baseline has no series')
+  }
+  for (const [name, stats] of Object.entries(series)) {
+    if (typeof stats?.medianMs !== 'number' || !(stats.medianMs > 0)) {
+      throw new Error(`Baseline series "${name}" needs a positive medianMs`)
+    }
+  }
+  return baseline
+}
+
+/** Throws when the baseline was taken at a different scale than this run. */
+export function assertSameScale(baseline, options) {
+  if (baseline.meta.stacks !== options.stacks || baseline.meta.remoteNodes !== options.nodes) {
+    throw new Error(
+      `Baseline was taken at ${baseline.meta.stacks} stacks and ${baseline.meta.remoteNodes} remote nodes; `
+      + `this run uses ${options.stacks} and ${options.nodes}`,
+    )
+  }
 }
 
 /** Nearest-rank percentile of an unsorted list of numbers. */
@@ -104,16 +152,28 @@ function round(ms) {
 }
 
 /**
- * One row per series in the results, with the baseline median and a status:
- * `ok`, `regressed`, or `new` when the baseline has no such series.
+ * One row per series, with the baseline median and a status: `ok`,
+ * `regressed`, `new` (in the results, not the baseline), or `missing` (in the
+ * baseline, not the results). Without a baseline every row is `ok`.
  */
 export function compare(series, baseline, { ratio, floorMs }) {
-  return Object.entries(series).map(([name, stats]) => {
-    const base = baseline?.series?.[name]
+  const rows = Object.entries(series).map(([name, stats]) => {
+    const base = baseline?.series[name]
     if (!base) return { name, ...stats, baselineMs: null, status: baseline ? 'new' : 'ok' }
     const regressed = stats.medianMs > base.medianMs * ratio && stats.medianMs - base.medianMs > floorMs
     return { name, ...stats, baselineMs: base.medianMs, status: regressed ? 'regressed' : 'ok' }
   })
+  for (const [name, base] of Object.entries(baseline?.series ?? {})) {
+    if (!(name in series)) {
+      rows.push({ name, samples: 0, minMs: null, medianMs: null, p95Ms: null, maxMs: null, baselineMs: base.medianMs, status: 'missing' })
+    }
+  }
+  return rows
+}
+
+/** The rows that fail the run. */
+export function failures(rows) {
+  return rows.filter((r) => r.status === 'regressed' || r.status === 'missing')
 }
 
 export function formatTable(rows) {
@@ -121,14 +181,20 @@ export function formatTable(rows) {
     '| Series | Samples | Median ms | p95 ms | Min ms | Max ms | Baseline median ms | Status |',
     '|---|---:|---:|---:|---:|---:|---:|---|',
   ]
+  const cell = (v) => (v === null ? '-' : String(v))
   for (const r of rows) {
-    const base = r.baselineMs === null ? '-' : String(r.baselineMs)
-    lines.push(`| ${r.name} | ${r.samples} | ${r.medianMs} | ${r.p95Ms} | ${r.minMs} | ${r.maxMs} | ${base} | ${r.status} |`)
+    lines.push(`| ${r.name} | ${r.samples} | ${cell(r.medianMs)} | ${cell(r.p95Ms)} | ${cell(r.minMs)} | ${cell(r.maxMs)} | ${cell(r.baselineMs)} | ${r.status} |`)
   }
   return lines.join('\n')
 }
 
-/** The first IPv4 address a proxy-mode node may target: not loopback or link-local. */
+/**
+ * The first non-internal, non-link-local IPv4 address, for the remote nodes
+ * to target (the backend rejects loopback). The backend's outbound blocklist
+ * (backend/src/utils/outboundTarget.ts) also rejects documentation and
+ * benchmark ranges such as 198.18.0.0/15; a host whose only address is in one
+ * of those fails at node creation with "API URL target is not allowed".
+ */
 export function lanAddress(interfaces = networkInterfaces()) {
   for (const addresses of Object.values(interfaces)) {
     for (const a of addresses ?? []) {
@@ -136,6 +202,33 @@ export function lanAddress(interfaces = networkInterfaces()) {
     }
   }
   throw new Error('No non-loopback IPv4 address found for the remote nodes to target')
+}
+
+/** Cache outcomes of `GET /statuses` from the backend's debug timing lines. */
+export function statusOutcomes(logText) {
+  const outcomes = []
+  for (const line of logText.split('\n')) {
+    if (!line.includes('[Stacks:debug]') || !line.includes('route=GET /statuses')) continue
+    outcomes.push(/cacheOutcome=(\w+)/.exec(line)?.[1] ?? 'unknown')
+  }
+  return outcomes
+}
+
+/**
+ * Throws unless the fleet overview has `nodes + 1` online nodes that each list
+ * all `stacks` seeded stacks, and the statuses show every one running.
+ */
+export function assertMeasuredWork({ overview, statuses, stacks, nodes, when }) {
+  const online = overview.filter((n) => n.status === 'online')
+  if (online.length !== nodes + 1) {
+    throw new Error(`${when}: expected ${nodes + 1} online nodes in the fleet overview, got ${online.length}`)
+  }
+  for (const node of overview) {
+    const seen = (node.stacks ?? []).filter((s) => s.startsWith(PROJECT_PREFIX)).length
+    if (seen !== stacks) throw new Error(`${when}: node "${node.name}" lists ${seen} of ${stacks} benchmark stacks`)
+  }
+  const running = Object.entries(statuses).filter(([name, info]) => name.startsWith(PROJECT_PREFIX) && info.status === 'running')
+  if (running.length !== stacks) throw new Error(`${when}: ${running.length} of ${stacks} benchmark stacks report running`)
 }
 
 function composeFile(index) {
@@ -155,9 +248,12 @@ function composeFile(index) {
   ].join('\n')
 }
 
+/** Runs `fn` over `items`, `size` at a time; every call settles before a failure is thrown. */
 async function inBatches(items, size, fn) {
   for (let i = 0; i < items.length; i += size) {
-    await Promise.all(items.slice(i, i + size).map(fn))
+    const results = await Promise.allSettled(items.slice(i, i + size).map(fn))
+    const failed = results.find((r) => r.status === 'rejected')
+    if (failed) throw failed.reason
   }
 }
 
@@ -168,7 +264,7 @@ async function inBatches(items, size, fn) {
 async function removeBenchResources() {
   const { stdout } = await run('docker', ['ps', '-aq', '--filter', `label=${BENCH_LABEL}`])
   const ids = stdout.split('\n').filter(Boolean)
-  await inBatches(ids, 50, async (id) => run('docker', ['rm', '-f', id]))
+  await inBatches(ids, 50, (id) => run('docker', ['rm', '-f', id]))
   const networks = await run('docker', ['network', 'ls', '-q', '--filter', `label=${BENCH_LABEL}`])
   for (const id of networks.stdout.split('\n').filter(Boolean)) await run('docker', ['network', 'rm', id])
 }
@@ -204,9 +300,10 @@ async function portInUse() {
   }
 }
 
+/** Starts the backend; `exited` settles when the process is gone, for any reason. */
 function startServer(workDir, logPath) {
   const log = openSync(logPath, 'a')
-  return spawn(process.execPath, ['dist/index.js'], {
+  const child = spawn(process.execPath, ['dist/index.js'], {
     cwd: join(REPO_ROOT, 'backend'),
     env: {
       ...process.env,
@@ -218,22 +315,54 @@ function startServer(workDir, logPath) {
     },
     stdio: ['ignore', log, log],
   })
+  closeSync(log)
+  const server = { child, spawnError: null }
+  server.exited = new Promise((resolveExit) => {
+    child.on('error', (error) => {
+      server.spawnError = error
+      resolveExit()
+    })
+    child.on('exit', () => resolveExit())
+  })
+  return server
 }
+
+function serverGone(server) {
+  return server.spawnError !== null || server.child.exitCode !== null || server.child.signalCode !== null
+}
+
+/** SIGTERM, then SIGKILL if the backend is still running after its shutdown window. */
+async function stopServer(server) {
+  if (serverGone(server)) return
+  server.child.kill('SIGTERM')
+  const timedOut = await Promise.race([server.exited.then(() => false), sleep(15_000).then(() => true)])
+  if (timedOut) {
+    server.child.kill('SIGKILL')
+    await server.exited
+  }
+}
+
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
 
 // Generous: on a host with slow fsync the schema setup alone can take a minute.
 async function waitForHealth(server, timeoutMs = 180_000) {
   const deadline = Date.now() + timeoutMs
+  let lastError = 'no response'
   while (Date.now() < deadline) {
-    if (server.exitCode !== null) throw new Error(`Backend exited with code ${server.exitCode}`)
+    if (server.spawnError) throw new Error(`Backend could not start: ${server.spawnError.message}`)
+    if (serverGone(server)) {
+      throw new Error(`Backend exited (code ${server.child.exitCode}, signal ${server.child.signalCode})`)
+    }
     try {
       const res = await fetch(`${BASE}/api/health`, { signal: AbortSignal.timeout(2000) })
       if (res.ok) return
-    } catch {
-      // Not listening yet.
+      lastError = `HTTP ${res.status}`
+    } catch (error) {
+      lastError = error.cause?.code ?? error.message
     }
-    await new Promise((r) => setTimeout(r, 500))
+    await sleep(500)
   }
-  throw new Error(`Backend did not report healthy within ${timeoutMs / 1000}s`)
+  throw new Error(`Backend did not report healthy within ${timeoutMs / 1000}s (last: ${lastError})`)
 }
 
 async function api(method, path, { cookie, body } = {}) {
@@ -246,7 +375,10 @@ async function api(method, path, { cookie, body } = {}) {
   return res
 }
 
-/** Creates the admin account and returns its session cookie. */
+/**
+ * Creates the admin account, issues a full-admin API token (what a real remote
+ * node is given), registers the remote nodes, and returns the session cookie.
+ */
 async function setUp(nodes, remoteHost) {
   const password = randomBytes(18).toString('base64url')
   const res = await api('POST', '/api/auth/setup', {
@@ -291,31 +423,47 @@ function timeRequest(path, cookie) {
 async function sampleSeries(path, cookie, count, gapMs = 0) {
   const samples = []
   for (let i = 0; i < count; i++) {
-    if (gapMs > 0) await new Promise((r) => setTimeout(r, gapMs))
+    if (gapMs > 0) await sleep(gapMs)
     samples.push(await timeRequest(path, cookie))
   }
   return summarize(samples)
 }
 
-/** Checks the instance sees what was seeded, so a broken seed cannot pass as a fast run. */
-async function assertSeeded(cookie, stacks, nodes) {
-  const list = await (await api('GET', '/api/stacks', { cookie })).json()
-  const benchStacks = list.filter((name) => name.startsWith(PROJECT_PREFIX))
-  if (benchStacks.length !== stacks) throw new Error(`Expected ${stacks} stacks, the API lists ${benchStacks.length}`)
+async function checkMeasuredWork(cookie, options, when) {
   const overview = await (await api('GET', '/api/fleet/overview', { cookie })).json()
-  const online = overview.filter((n) => n.status === 'online').length
-  if (online !== nodes + 1) throw new Error(`Expected ${nodes + 1} online nodes in the fleet overview, got ${online}`)
+  const statuses = await (await api('GET', '/api/stacks/statuses', { cookie })).json()
+  assertMeasuredWork({ overview, statuses, stacks: options.stacks, nodes: options.nodes, when })
 }
 
-async function measureAll(cookie, options) {
-  // Each miss sample waits out the status cache TTL first, so earlier reads
-  // (including the seed check) cannot turn it into a hit.
-  const missSamples = options['miss-samples']
+const setDeveloperMode = (cookie, on) => api('PATCH', '/api/settings', { cookie, body: { developer_mode: on ? '1' : '0' } })
+
+/**
+ * The miss series, with developer mode on only for its duration so the
+ * backend logs each request's cache outcome. Throws if any sample was served
+ * from the cache.
+ */
+async function sampleMisses(cookie, count, logPath) {
+  await setDeveloperMode(cookie, true)
+  const logStart = statSync(logPath).size
+  let summary
+  try {
+    summary = await sampleSeries('/api/stacks/statuses', cookie, count, STATUS_CACHE_EXPIRY_MS)
+  } finally {
+    await setDeveloperMode(cookie, false)
+  }
+  const outcomes = statusOutcomes(readFileSync(logPath).subarray(logStart).toString('utf8'))
+  if (outcomes.length !== count || !outcomes.every((o) => MISS_OUTCOMES.has(o))) {
+    throw new Error(`statuses-miss samples were not all cache misses (logged outcomes: ${outcomes.join(', ') || 'none'})`)
+  }
+  return summary
+}
+
+async function measureAll(cookie, options, logPath) {
   const series = {}
   series.stacks = await sampleSeries('/api/stacks', cookie, options.samples)
-  if (missSamples > 0) {
-    series['statuses-miss'] = await sampleSeries('/api/stacks/statuses', cookie, missSamples, STATUS_CACHE_EXPIRY_MS)
-  }
+  // The miss series ends with a fresh computation, so the hit series that
+  // follows starts on a warm cache.
+  series['statuses-miss'] = await sampleMisses(cookie, options['miss-samples'], logPath)
   series['statuses-hit'] = await sampleSeries('/api/stacks/statuses', cookie, options.samples)
   series['fleet-overview'] = await sampleSeries('/api/fleet/overview', cookie, options.samples)
   return series
@@ -324,55 +472,105 @@ async function measureAll(cookie, options) {
 async function gitRevision() {
   try {
     return (await run('git', ['rev-parse', 'HEAD'], { cwd: REPO_ROOT })).stdout.trim()
-  } catch {
+  } catch (error) {
+    console.error(`Could not read the git revision: ${error.message}`)
     return null
+  }
+}
+
+function printLogTail(logPath) {
+  try {
+    console.error(`Backend log tail (${logPath}):\n${readFileSync(logPath, 'utf8').split('\n').slice(-40).join('\n')}`)
+  } catch {
+    // The run failed before the backend started; there is no log.
+  }
+}
+
+/**
+ * Stops the backend and removes every benchmark resource. Safe to call more
+ * than once; later calls wait for the first.
+ */
+function makeCleanup(state, options) {
+  let pending = null
+  return () => {
+    pending ??= (async () => {
+      const errors = []
+      if (state.server) await stopServer(state.server).catch((e) => errors.push(e))
+      console.error('Removing benchmark stacks...')
+      await removeBenchResources().catch((e) => errors.push(e))
+      if (!options['work-dir']) {
+        try {
+          rmSync(state.workDir, { recursive: true, force: true })
+        } catch (e) {
+          errors.push(e)
+        }
+      }
+      if (errors.length > 0) {
+        throw new Error(`Cleanup failed (remove containers labelled ${BENCH_LABEL} by hand): ${errors.map((e) => e.message).join('; ')}`)
+      }
+    })()
+    return pending
+  }
+}
+
+/** Ctrl-C or a cancelled job still stops the backend and removes the stacks. */
+function cleanUpOnSignal(cleanup) {
+  const onSignal = (signal) => {
+    console.error(`${signal} received, cleaning up...`)
+    cleanup().catch((error) => console.error(error.message)).finally(() => process.exit(130))
+  }
+  process.once('SIGINT', onSignal)
+  process.once('SIGTERM', onSignal)
+  return () => {
+    process.off('SIGINT', onSignal)
+    process.off('SIGTERM', onSignal)
   }
 }
 
 async function benchmark(options) {
   if (await portInUse()) throw new Error(`Port ${PORT} is already serving; stop that instance first`)
   const remoteHost = lanAddress()
-  const workDir = options['work-dir'] ?? mkdtempSync(join(tmpdir(), 'sencho-scale-'))
-  mkdirSync(join(workDir, 'compose'), { recursive: true })
-  mkdirSync(join(workDir, 'data'), { recursive: true })
-  const logPath = join(workDir, 'backend.log')
-  let server = null
+  const state = { server: null, workDir: options['work-dir'] ?? mkdtempSync(join(tmpdir(), 'sencho-scale-')) }
+  mkdirSync(join(state.workDir, 'compose'), { recursive: true })
+  mkdirSync(join(state.workDir, 'data'), { recursive: true })
+  const logPath = join(state.workDir, 'backend.log')
+  const cleanup = makeCleanup(state, options)
+  const detachSignals = cleanUpOnSignal(cleanup)
+  let results
   try {
     await removeBenchResources()
     console.error(`Deploying ${options.stacks} stacks...`)
-    await deployStacks(join(workDir, 'compose'), options.stacks)
-    server = startServer(workDir, logPath)
-    await waitForHealth(server)
+    await deployStacks(join(state.workDir, 'compose'), options.stacks)
+    state.server = startServer(state.workDir, logPath)
+    await waitForHealth(state.server)
     const cookie = await setUp(options.nodes, remoteHost)
-    await assertSeeded(cookie, options.stacks, options.nodes)
+    await checkMeasuredWork(cookie, options, 'Before timing')
     console.error('Measuring...')
-    const series = await measureAll(cookie, options)
-    return {
+    const series = await measureAll(cookie, options, logPath)
+    await checkMeasuredWork(cookie, options, 'After timing')
+    results = {
       meta: {
         date: new Date().toISOString(), revision: await gitRevision(), node: process.version,
-        runner: process.env.RUNNER_NAME ? 'github-actions' : 'local',
+        runner: process.env.GITHUB_ACTIONS === 'true' ? 'github-actions' : 'local',
         stacks: options.stacks, remoteNodes: options.nodes,
       },
       series,
     }
   } catch (error) {
-    try {
-      console.error(`Backend log tail (${logPath}):\n${readFileSync(logPath, 'utf8').split('\n').slice(-40).join('\n')}`)
-    } catch {
-      // The run failed before the backend started; there is no log.
-    }
+    printLogTail(logPath)
+    await cleanup().catch((cleanupError) => console.error(cleanupError.message))
     throw error
   } finally {
-    server?.kill('SIGTERM')
-    console.error('Removing benchmark stacks...')
-    await removeBenchResources().catch((error) => console.error(`Cleanup failed, remove containers labelled ${BENCH_LABEL} by hand: ${error.message}`))
-    if (!options['work-dir']) rmSync(workDir, { recursive: true, force: true })
+    detachSignals()
   }
+  await cleanup()
+  return results
 }
 
 async function main(args) {
   const options = parseArgs(args)
-  const baseline = options.baseline ? JSON.parse(readFileSync(options.baseline, 'utf8')) : null
+  const baseline = options.baseline ? parseBaseline(readFileSync(options.baseline, 'utf8')) : null
+  if (baseline) assertSameScale(baseline, options)
   const results = await benchmark(options)
   if (options.out) writeFileSync(options.out, `${JSON.stringify(results, null, 2)}\n`)
 
@@ -386,11 +584,13 @@ async function main(args) {
       console.error(`Could not write the job summary: ${error.message}`)
     }
   }
-  const regressed = rows.filter((r) => r.status === 'regressed')
-  for (const r of regressed) {
-    console.error(`${r.name}: median ${r.medianMs} ms against a baseline of ${r.baselineMs} ms (limit ${options.ratio}x and +${options['floor-ms']} ms).`)
+  const failed = failures(rows)
+  for (const r of failed) {
+    console.error(r.status === 'missing'
+      ? `${r.name}: in the baseline but not measured by this run.`
+      : `${r.name}: median ${r.medianMs} ms against a baseline of ${r.baselineMs} ms (limit ${options.ratio}x and +${options['floor-ms']} ms).`)
   }
-  return regressed.length > 0 ? 1 : 0
+  return failed.length > 0 ? 1 : 0
 }
 
 function isMain() {
