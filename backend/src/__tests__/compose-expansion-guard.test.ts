@@ -5,7 +5,7 @@
  */
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { execFile } from 'child_process';
-import { existsSync, promises as fsPromises } from 'fs';
+import { closeSync, existsSync, openSync, promises as fsPromises } from 'fs';
 import os from 'os';
 import path from 'path';
 import {
@@ -2078,6 +2078,19 @@ describe('assertComposeInputsWithinExpansionLimits - scalar text, interpolation 
       await expect(run()).rejects.toThrow(/too long, or interpolates into more text/);
     });
 
+    it('interpolates the service environment against the project environment before it seeds the chain', async () => {
+      await write('.env', `BIG=${'x'.repeat(100_000)}\n`);
+      await write('d.env', 'A=${A}${A}\n');
+      // Fourteen doublings: the literal `${BIG}` (6 characters) stays small, the
+      // interpolated 100 KB value passes 1 GB.
+      const list = Array.from({ length: 14 }, () => 'd.env').join(', ');
+      await write('compose.yaml', `services:\n  web:\n    image: nginx\n    environment:\n      A: "\${BIG}"\n    env_file: [${list}]\n`);
+      await expect(run()).rejects.toThrow(/too long, or interpolates into more text/);
+      // A value that names nothing large keeps the chain small.
+      await write('compose.yaml', `services:\n  web:\n    image: nginx\n    environment:\n      A: "\${MISSING:-ab}"\n    env_file: [d.env, d.env, d.env]\n`);
+      await expect(run()).resolves.toBeUndefined();
+    });
+
     it('accepts a short chain over the same file, and a shared file in an umbrella of includes with their own .env', async () => {
       await write('a.env', 'A=ab\n');
       await write('d.env', 'A=${A}${A}\n');
@@ -2138,6 +2151,20 @@ describe('assertComposeInputsWithinExpansionLimits - scalar text, interpolation 
       // `\0044` is `$` and `\0173` is `{` to Compose's double-quoted decoder.
       await write('.env', `B="${'\\0044\\0173a:-'.repeat(100)}x"\n`);
       await expect(run()).rejects.toThrow(/too long, or interpolates into more text/);
+    });
+
+    it('refuses a path that reaches a process descriptor through a linked directory', async () => {
+      // `/dev/fd` is a link to `/proc/self/fd`; an open regular file's descriptor
+      // read through it is an ordinary file by its content, so only the name shows it.
+      await fsPromises.symlink('/dev', path.join(dir, 'devlink'));
+      await write('plain.env', 'A=1\n');
+      const fd = openSync(path.join(dir, 'plain.env'), 'r');
+      try {
+        await write('compose.yaml', `services:\n  web:\n    image: nginx\n    env_file: devlink/fd/${fd}\n`);
+        await expect(run()).rejects.toThrow(/not a regular file/);
+      } finally {
+        closeSync(fd);
+      }
     });
 
     it('refuses a symlink that leads to a process descriptor, and one through /proc/self/root', async () => {

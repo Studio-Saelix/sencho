@@ -116,15 +116,21 @@ async function namesProcessDescriptor(filePath: string): Promise<boolean> {
   let current = filePath;
   for (let hop = 0; hop < 40; hop += 1) {
     if (PROCESS_DESCRIPTOR_PATH.test(current)) return true;
+    // A directory on the way can be a link too (`/tmp/d -> /dev` makes
+    // `/tmp/d/stdin` the same file), so the name is tested with the parent
+    // resolved as well.
+    const parent = await fsPromises.realpath(path.dirname(current)).catch(() => path.dirname(current));
+    const resolved = path.join(parent, path.basename(current));
+    if (PROCESS_DESCRIPTOR_PATH.test(resolved)) return true;
     let target: string;
     try {
-      const link = await fsPromises.lstat(current);
+      const link = await fsPromises.lstat(resolved);
       if (!link.isSymbolicLink()) return false;
-      target = await fsPromises.readlink(current);
+      target = await fsPromises.readlink(resolved);
     } catch {
       return false;
     }
-    current = path.resolve(path.dirname(current), target);
+    current = path.resolve(parent, target);
   }
   return false;
 }

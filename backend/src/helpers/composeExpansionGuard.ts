@@ -772,21 +772,45 @@ function interpolatePath(raw: string, context: GuardEnvContext, label: string): 
   if (raw.length > MAX_COMPOSE_PATH_TEMPLATE || templateNestingDepth(raw) > MAX_COMPOSE_TEMPLATE_DEPTH) {
     throw pathTooLargeRefusal(label);
   }
-  const lookup = lookupEnv(context);
-  let copied = 0;
   try {
-    return expandComposeEnvTemplate(raw, (name) => {
-      const value = lookup(name);
-      if (value !== undefined) {
-        copied += value.length;
-        context.copyBudget.remaining -= value.length;
-        if (copied > MAX_COMPOSE_PATH_EXPANSION || context.copyBudget.remaining < 0) throw new ComposeEnvLimitError('a path expands past the limit');
-      }
-      return value;
-    });
+    return expandComposeEnvTemplate(raw, chargedLookup(context, MAX_COMPOSE_PATH_EXPANSION));
   } catch (err) {
     if (err instanceof ComposeEnvFileError) return null;
     if (err instanceof ComposeEnvLimitError || err instanceof RangeError) throw pathTooLargeRefusal(label);
+    throw err;
+  }
+}
+
+/** The environment lookup, charging what one expansion copies out of it to a per-expansion cap and the run's budget. */
+function chargedLookup(context: GuardEnvContext, maxCopied: number): ComposeEnvLookup {
+  const lookup = lookupEnv(context);
+  let copied = 0;
+  return (name) => {
+    const value = lookup(name);
+    if (value !== undefined) {
+      copied += value.length;
+      context.copyBudget.remaining -= value.length;
+      if (copied > maxCopied || context.copyBudget.remaining < 0) throw new ComposeEnvLimitError('an expansion copies past the limit');
+    }
+    return value;
+  };
+}
+
+/**
+ * A service's `environment:` value as Compose interpolates it against the
+ * project environment before the service's env files see it. A value Compose
+ * rejects is kept as written: Compose fails on that file too.
+ */
+function interpolateEnvironmentValue(raw: string, context: GuardEnvContext, label: string): string {
+  if (!raw.includes('$')) return raw;
+  if (raw.length > MAX_COMPOSE_ENV_RAW_VALUE || templateNestingDepth(raw) > MAX_COMPOSE_TEMPLATE_DEPTH) {
+    throw envFileTooLargeRefusal(label);
+  }
+  try {
+    return expandComposeEnvTemplate(raw, chargedLookup(context, MAX_COMPOSE_ENV_STATEMENT_READS));
+  } catch (err) {
+    if (err instanceof ComposeEnvFileError) return raw;
+    if (err instanceof ComposeEnvLimitError || err instanceof RangeError) throw envFileTooLargeRefusal(label);
     throw err;
   }
 }
@@ -1387,7 +1411,7 @@ async function assertInputClosure(args: {
         shared: input.env.copyBudget,
       });
       try {
-        reader.seed(group.environment);
+        reader.seed(group.environment.map(([name, value]): [string, string] => [name, interpolateEnvironmentValue(value, input.env, label)]));
       } catch (err) {
         if (err instanceof ComposeEnvLimitError) throw envFileTooLargeRefusal(label);
         throw err;
