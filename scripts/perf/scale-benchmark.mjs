@@ -45,8 +45,7 @@
 
 import { spawn, execFile } from 'node:child_process'
 import {
-  appendFileSync, closeSync, mkdirSync, mkdtempSync, openSync, readFileSync, readdirSync, realpathSync, rmSync, statSync,
-  writeFileSync,
+  appendFileSync, closeSync, mkdirSync, mkdtempSync, openSync, readFileSync, readdirSync, realpathSync, rmSync, writeFileSync,
 } from 'node:fs'
 import { networkInterfaces, tmpdir } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
@@ -326,7 +325,12 @@ function startServer(workDir, logPath) {
     env: {
       ...process.env,
       NODE_ENV: 'production',
+      // Every remote node here is this instance behind one API token, so the
+      // per-token limits would throttle traffic that a real fleet spreads over
+      // one budget per host; the polling limit covers /api/stats and
+      // /api/system/stats, which each overview fetches per node.
       API_RATE_LIMIT: '1000000',
+      API_POLLING_RATE_LIMIT: '1000000',
       COMPOSE_DIR: join(workDir, 'compose'),
       DATA_DIR: join(workDir, 'data'),
       JWT_SECRET: randomBytes(32).toString('hex'),
@@ -471,7 +475,7 @@ async function sampleMisses(cookie, count, logPath) {
   let logStart
   let summary
   try {
-    logStart = statSync(logPath).size
+    logStart = readFileSync(logPath).length
     summary = await sampleSeries('/api/stacks/statuses', cookie, count, STATUS_CACHE_EXPIRY_MS)
   } catch (error) {
     // Report the sampling error, not a failure to turn debug back off.
