@@ -8,7 +8,7 @@ import { execFile } from 'child_process';
 import { promises as fsPromises } from 'fs';
 import os from 'os';
 import path from 'path';
-import { readComposeInputWithinCap, resolvePhysicalDirectory } from '../helpers/composeInputReadSink';
+import { inspectComposeInput, readComposeInputWithinCap, resolvePhysicalDirectory } from '../helpers/composeInputReadSink';
 
 let dir: string;
 
@@ -155,6 +155,23 @@ describe('readComposeInputWithinCap', () => {
     await fsPromises.symlink(real, link);
     expect(await resolvePhysicalDirectory(link)).toBe(await fsPromises.realpath(real));
     expect(await resolvePhysicalDirectory(path.join(dir, 'missing'))).toBe(path.join(dir, 'missing'));
+  });
+
+  it('skips a name that cannot be opened at all, so the guard does not leak a raw error', async () => {
+    await expect(readComposeInputWithinCap(path.join(dir, 'a\0b.yaml'), 1024))
+      .resolves.toEqual({ content: null, tooLarge: false });
+    await expect(readComposeInputWithinCap(path.join(dir, 'x'.repeat(5000)), 1024))
+      .resolves.toEqual({ content: null, tooLarge: false });
+  });
+
+  it('inspects a path without reading it', async () => {
+    const file = path.join(dir, 'a.yaml');
+    await fsPromises.writeFile(file, 'x');
+    await expect(inspectComposeInput(file)).resolves.toBe('regular');
+    await expect(inspectComposeInput(path.join(dir, 'missing'))).resolves.toBe('missing');
+    await expect(inspectComposeInput(dir)).resolves.toBe('directory');
+    await expect(inspectComposeInput('/dev/null')).resolves.toBe('null-device');
+    await expect(inspectComposeInput('/dev/zero')).resolves.toBe('unbounded');
   });
 
   it('skips a broken symlink', async () => {

@@ -2,9 +2,12 @@
  * Live-caller regression for the compose alias-expansion guard.
  *
  * `ComposeService` is the caller behind deploy, update, preflight, image
- * listing and health. Its main suite mocks the guard to prove wiring, so this
- * file runs the real guard through `renderConfig`: a bomb must come back as
- * Sencho's refusal and the Docker child must never be spawned.
+ * listing, health, and recovery. Its main suite mocks the guard to prove
+ * wiring, so this file runs the real guard through `renderConfig`,
+ * `listStackImages`, `renderComposeYaml`, the authored lifecycle invocation
+ * (`validateExactComposeInvocation`), and the captured recovery invocation: a
+ * bomb must come back as Sencho's refusal and the Docker child must never be
+ * spawned.
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { promises as fsPromises } from 'fs';

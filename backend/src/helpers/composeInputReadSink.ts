@@ -94,7 +94,11 @@ async function classifyNonRegular(stat: Stats): Promise<NonRegularKind> {
  * place, which Compose reports on its own. Anything else is unexpected: the
  * guard rethrows it rather than skipping a file it failed to inspect.
  */
-const SKIPPABLE_READ_ERRORS = new Set(['ENOENT', 'ENOTDIR', 'EISDIR', 'EACCES', 'EPERM', 'ELOOP']);
+const SKIPPABLE_READ_ERRORS = new Set([
+  'ENOENT', 'ENOTDIR', 'EISDIR', 'EACCES', 'EPERM', 'ELOOP',
+  // A name Compose cannot open either: too long, a socket, or a NUL byte.
+  'ENAMETOOLONG', 'ENXIO', 'ERR_INVALID_ARG_VALUE',
+]);
 
 function isSkippableReadError(err: unknown): boolean {
   return SKIPPABLE_READ_ERRORS.has((err as NodeJS.ErrnoException).code ?? '');
@@ -155,5 +159,26 @@ export async function resolvePhysicalDirectory(directory: string): Promise<strin
     return await fsPromises.realpath(directory);
   } catch {
     return directory;
+  }
+}
+
+/**
+ * What a path is, without reading it: `missing`, `regular`, or the kind of
+ * non-regular file. A caller that only has to know whether Compose could read
+ * it without limit asks this instead of reading up to the cap.
+ */
+export async function inspectComposeInput(filePath: string): Promise<'missing' | 'regular' | NonRegularKind> {
+  let handle: Awaited<ReturnType<typeof fsPromises.open>>;
+  try {
+    handle = await fsPromises.open(filePath, fsConstants.O_RDONLY | fsConstants.O_NONBLOCK);
+  } catch (err) {
+    if (isSkippableReadError(err)) return 'missing';
+    throw err;
+  }
+  try {
+    const stat = await handle.stat();
+    return stat.isFile() ? 'regular' : await classifyNonRegular(stat);
+  } finally {
+    await handle.close().catch(() => undefined);
   }
 }

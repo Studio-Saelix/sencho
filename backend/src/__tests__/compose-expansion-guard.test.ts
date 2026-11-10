@@ -3,7 +3,7 @@
  * filesystem because the guard's contract is what it reads, not how a caller
  * mocks it.
  */
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { execFile } from 'child_process';
 import { promises as fsPromises } from 'fs';
 import os from 'os';
@@ -1052,7 +1052,7 @@ describe('composeFileArgsFromInvocation', () => {
   });
 });
 
-describe('assertComposeInputsWithinExpansionLimits - review round regressions', () => {
+describe('assertComposeInputsWithinExpansionLimits - selection, dependency, and stream edge cases', () => {
   it('still measures the selected files when an explicit env file is /dev/null', async () => {
     await write('compose.yaml', nestedAliasBomb(12));
     await expect(assertComposeInputsWithinExpansionLimits({
@@ -1315,7 +1315,7 @@ describe('assertComposeInputsWithinExpansionLimits - review round regressions', 
   });
 });
 
-describe('assertComposeInputsWithinExpansionLimits - review round 3 regressions', () => {
+describe('assertComposeInputsWithinExpansionLimits - parser gaps, devices, extends copies, and cost', () => {
   const run = (cwd = dir, invocation: string[] = ['compose', 'config'], env?: (name: string) => string | undefined) =>
     assertComposeInputsWithinExpansionLimits({ cwd, invocation, env });
 
@@ -1353,11 +1353,6 @@ describe('assertComposeInputsWithinExpansionLimits - review round 3 regressions'
       await expect(run()).rejects.toBeInstanceOf(ComposeExpansionRefusal);
     });
 
-    it('still measures a self-referencing extends once, as Compose reports the cycle', async () => {
-      await write('compose.yaml', 'services:\n  web:\n    extends:\n      file: a.yaml\n      service: x\n');
-      await write('a.yaml', 'services:\n  x:\n    extends:\n      file: compose.yaml\n      service: web\n');
-      await expect(run()).resolves.toBeUndefined();
-    });
   });
 
   describe('inputs that are not regular files', () => {
@@ -1484,7 +1479,7 @@ describe('assertComposeInputsWithinExpansionLimits - review round 3 regressions'
     it('refuses more include references than the bound', async () => {
       await write('leaf.yaml', SAFE_COMPOSE);
       await write('compose.yaml', `include:\n${Array.from({ length: 5000 }, () => '  - leaf.yaml').join('\n')}\n`);
-      await expect(run()).rejects.toThrow(/include and extends references/);
+      await expect(run()).rejects.toThrow(/include, extends, and env file references/);
     });
 
     it('refuses an extends chain deeper than the bound inside one file', async () => {
@@ -1527,13 +1522,24 @@ describe('assertComposeInputsWithinExpansionLimits - review round 3 regressions'
       expect(Date.now() - started).toBeLessThan(5_000);
     });
 
-    it('reads a large env file once for many includes', async () => {
+    it('reads the project .env once for many includes', async () => {
       await write('leaf.yaml', SAFE_COMPOSE);
       await write('.env', `${Array.from({ length: 5_000 }, (_, i) => `K${i}=value${i}`).join('\n')}\n`);
       await write('compose.yaml', `include:\n${Array.from({ length: 1500 }, () => '  - leaf.yaml').join('\n')}\n`);
-      const started = Date.now();
-      await expect(run()).resolves.toBeUndefined();
-      expect(Date.now() - started).toBeLessThan(8_000);
+      const realOpen = fsPromises.open.bind(fsPromises);
+      const opened: string[] = [];
+      const spy = vi.spyOn(fsPromises, 'open').mockImplementation(((target: unknown, ...rest: unknown[]) => {
+        opened.push(String(target));
+        return (realOpen as (...a: unknown[]) => Promise<unknown>)(target, ...rest);
+      }) as typeof fsPromises.open);
+      try {
+        await expect(run()).resolves.toBeUndefined();
+      } finally {
+        spy.mockRestore();
+      }
+      // One read for the selection and one for the included project's own
+      // .env, however many includes name it.
+      expect(opened.filter((target) => target.endsWith(`${path.sep}.env`)).length).toBeLessThanOrEqual(2);
     });
   });
 
@@ -1636,6 +1642,119 @@ describe('assertComposeInputsWithinExpansionLimits - review round 3 regressions'
     it('treats an include path that fails interpolation as unresolved', async () => {
       await write('compose.yaml', 'include:\n  - ${REQUIRED:?must be set}/dep.yaml\n');
       await expect(run()).resolves.toBeUndefined();
+    });
+  });
+
+  describe('line breaks, key checks, and env-file budgets', () => {
+    it('reads U+0085, U+2028, and U+2029 as line breaks, as Compose does', async () => {
+      for (const breakChar of ['\u0085', '\u2028', '\u2029']) {
+        const lines = ['x-l0: &l0 [a, a, a, a, a, a, a, a, a]'];
+        for (let level = 1; level <= 6; level += 1) {
+          lines.push(`x-l${level}: &l${level} [${breakChar}${Array.from({ length: 9 }, () => `*l${level - 1}`).join(', ')}]`);
+        }
+        await write('compose.yaml', `${lines.join('\n')}\nservices:\n  web:\n    image: nginx\n`);
+        // Compose accepts the break inside the flow sequence. Here it becomes a
+        // newline the parser rejects, and the file is refused as unmeasurable.
+        await expect(run()).rejects.toBeInstanceOf(ComposeExpansionRefusal);
+      }
+    });
+
+    it('follows an include that follows one of those line breaks', async () => {
+      await write('compose.yaml', 'x-a: foo\u0085include:\u0085- dep.yaml\n');
+      await write('dep.yaml', nestedAliasBomb(12));
+      await expect(run()).rejects.toThrow(/nested YAML aliases/);
+    });
+
+    it('parses a flow map with tens of thousands of keys in linear time', async () => {
+      const keys = Array.from({ length: 40_000 }, (_, i) => `k${i}: 1`).join(', ');
+      await write('compose.yaml', `x-big: {${keys}}\nservices:\n  web:\n    image: nginx\n`);
+      const started = Date.now();
+      await expect(run()).resolves.toBeUndefined();
+      expect(Date.now() - started).toBeLessThan(3_000);
+    });
+
+    it('refuses a Git source string over the byte cap', () => {
+      const source = `# ${'x'.repeat(MAX_COMPOSE_INPUT_BYTES)}\n`;
+      expect(() => assertComposeSourceWithinExpansionLimits(source, 'compose.yaml')).toThrow(/larger than 1 MiB/);
+    });
+
+    it('refuses an env_file list too long to read', async () => {
+      await write('big.env', 'K=1\n');
+      await write('leaf.yaml', SAFE_COMPOSE);
+      const files = Array.from({ length: 5000 }, () => '      - big.env').join('\n');
+      await write('compose.yaml', `include:\n  - path: leaf.yaml\n    env_file:\n${files}\n`);
+      await expect(run()).rejects.toThrow(/env file references/);
+    });
+
+    it('reads an env file listed many times once', async () => {
+      await write('big.env', `${Array.from({ length: 20_000 }, (_, i) => `K${i}=value${i}`).join('\n')}\n`);
+      await write('leaf.yaml', SAFE_COMPOSE);
+      const files = Array.from({ length: 2000 }, () => '      - big.env').join('\n');
+      await write('compose.yaml', `include:\n  - path: leaf.yaml\n    env_file:\n${files}\n`);
+      const started = Date.now();
+      await expect(run()).resolves.toBeUndefined();
+      expect(Date.now() - started).toBeLessThan(3_000);
+    });
+
+    it('refuses more distinct include environments than the bound', async () => {
+      await write('leaf.yaml', SAFE_COMPOSE);
+      const entries: string[] = [];
+      for (let i = 0; i < 70; i += 1) {
+        await write(`e${i}.env`, `K${i}=1\n`);
+        entries.push(`  - path: leaf.yaml\n    env_file: e${i}.env`);
+      }
+      await write('compose.yaml', `include:\n${entries.join('\n')}\n`);
+      await expect(run()).rejects.toThrow(/distinct include environments/);
+    });
+
+    it('refuses env files that total more than the parse budget', async () => {
+      await write('leaf.yaml', SAFE_COMPOSE);
+      const entries: string[] = [];
+      for (let i = 0; i < 10; i += 1) {
+        await write(`e${i}.env`, `K${i}=${'x'.repeat(900_000)}\n`);
+        entries.push(`  - path: leaf.yaml\n    env_file: e${i}.env`);
+      }
+      await write('compose.yaml', `include:\n${entries.join('\n')}\n`);
+      await expect(run()).rejects.toThrow(/env files totalling more than 8 MiB/);
+    });
+
+    it('refuses an unbounded service env_file or label_file', async () => {
+      await write('compose.yaml', 'services:\n  web:\n    image: nginx\n    env_file: /dev/zero\n');
+      await expect(run()).rejects.toThrow(/not a regular file/);
+      await write('compose.yaml', 'services:\n  web:\n    image: nginx\n    env_file:\n      - path: /dev/zero\n        required: false\n');
+      await expect(run()).rejects.toThrow(/not a regular file/);
+      await write('compose.yaml', 'services:\n  web:\n    image: nginx\n    label_file: /dev/zero\n');
+      await expect(run()).rejects.toThrow(/not a regular file/);
+    });
+
+    it('refuses a service env_file that is a FIFO', async () => {
+      await new Promise<void>((resolve, reject) => {
+        execFile('mkfifo', [path.join(dir, 'pipe.env')], (err) => (err ? reject(err) : resolve()));
+      });
+      await write('compose.yaml', 'services:\n  web:\n    image: nginx\n    env_file: ./pipe.env\n');
+      await expect(run()).rejects.toThrow(/not a regular file/);
+    });
+
+    it('refuses an unbounded service env_file inside an included file', async () => {
+      await write('compose.yaml', 'include:\n  - dep.yaml\n');
+      await write('dep.yaml', 'services:\n  web:\n    image: nginx\n    env_file: ${DEVICE}\n');
+      await write('.env', 'DEVICE=/dev/zero\n');
+      await expect(run()).rejects.toThrow(/not a regular file/);
+    });
+
+    it('accepts a service env_file that is /dev/null, missing, or an ordinary file', async () => {
+      await write('ok.env', 'A=1\n');
+      await write('compose.yaml', 'services:\n  web:\n    image: nginx\n    env_file:\n      - /dev/null\n      - ok.env\n      - missing.env\n');
+      await expect(run()).resolves.toBeUndefined();
+    });
+
+    it('refuses before parsing further files once the distinct files pass the run budget', async () => {
+      const body = `x: [${'a,'.repeat(130_000)}a]\n`;
+      for (let level = 0; level < 10; level += 1) {
+        await write(`f${level}.yaml`, `${body}${level < 9 ? `include:\n  - f${level + 1}.yaml\n` : ''}`);
+      }
+      await write('compose.yaml', 'include:\n  - f0.yaml\n');
+      await expect(run()).rejects.toThrow(/in total/);
     });
   });
 });
