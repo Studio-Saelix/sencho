@@ -26,6 +26,7 @@ import { sshExecClient, type BootstrapExecTransport, type ExecSession } from './
 import { SshTransportError } from './sshProbeClient';
 import {
   COMPOSE_STEP_ID,
+  RunCancelled,
   StepFailure,
   TOKEN_PLACEHOLDER,
   lastDockerStage,
@@ -181,8 +182,6 @@ function holdsLock(state: NodeBootstrapOperationState, changesMade: boolean): bo
   if (state === 'outcome_unknown' || state === 'recovery_required' || state === 'partial') return true;
   return changesMade;
 }
-
-class RunCancelled extends Error {}
 
 /** Effects a step can leave behind partly even when it exits with an error. */
 const PARTIAL_EFFECTS: ReadonlySet<string> = new Set(['package-install', 'service-change', 'container-start']);
@@ -535,6 +534,11 @@ export class NodeBootstrapOperationService {
       const ctx: StepContext = {
         session,
         secrets,
+        signal,
+        note: (message) => {
+          const current = this.requireOperation(id);
+          this.event(current, 'info', message, current.stage, current.step);
+        },
         aptLockRetry: this.deps.aptLockRetry,
         composeWithToken: () => {
           if (composeWithToken === null) throw new StepFailure('failed', 'PLAN_INVALID', 'The enrollment was not prepared before the compose file step.');
@@ -561,8 +565,9 @@ export class NodeBootstrapOperationService {
             outcome = await runPlanStep(step, ctx, plan);
           } catch (error: unknown) {
             // A step whose outcome is unknown, or that may have done part of
-            // its work before failing, counts as a change; a clean refusal does not.
-            const refusedCleanly = error instanceof StepFailure && error.changedNothing;
+            // its work before failing, counts as a change; a clean refusal, or a
+            // cancel taken while the step waited between attempts, does not.
+            const refusedCleanly = (error instanceof StepFailure && error.changedNothing) || error instanceof RunCancelled;
             const mayHaveChanged = !refusedCleanly
               && (!(error instanceof StepFailure) || error.kind !== 'failed' || PARTIAL_EFFECTS.has(step.effect));
             if (mayHaveChanged) this.deps.db.updateNodeBootstrapOperation(id, { changes_made: 1 }, this.deps.now());

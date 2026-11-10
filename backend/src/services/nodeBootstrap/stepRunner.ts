@@ -81,6 +81,10 @@ export const APT_LOCK_RETRY = { intervalMs: 10_000, totalMs: 300_000 };
 
 export interface StepContext {
   session: ExecSession;
+  /** Aborted when the operator cancels; a step that waits between attempts stops waiting. */
+  signal: AbortSignal;
+  /** Records a progress note on the current step, such as a wait. */
+  note: (message: string) => void;
   /** Overrides APT_LOCK_RETRY (tests shorten it). */
   aptLockRetry?: { intervalMs: number; totalMs: number };
   /** Every secret the run holds, scrubbed from anything recorded. */
@@ -327,9 +331,9 @@ async function hostCodename(ctx: StepContext): Promise<string> {
 
 /**
  * Before installing, ask apt where each package would come from: every one
- * must have a candidate served by the official Docker repository (for the
- * host release, when the plan wrote the source), and a pinned version must be
- * the candidate. Nothing is installed when one is not.
+ * must have a candidate served by the official Docker repository from the host
+ * release's stable channel, and a pinned version must be the candidate.
+ * Nothing is installed when one is not.
  */
 async function verifyDockerCandidates(ctx: StepContext, step: BootstrapPlanStep): Promise<void> {
   const codename = await hostCodename(ctx);
@@ -356,6 +360,27 @@ async function verifyDockerCandidates(ctx: StepContext, step: BootstrapPlanStep)
 
 const APT_LISTS_LOCK = /Could not get lock \/var\/lib\/apt\/lists\/lock/;
 
+/** A cancel stopped the run: seen at a step boundary, or while a step waited between attempts. */
+export class RunCancelled extends Error {}
+
+function waitOrCancel(ms: number, signal: AbortSignal): Promise<void> {
+  return new Promise((resolve, reject) => {
+    if (signal.aborted) {
+      reject(new RunCancelled());
+      return;
+    }
+    const onAbort = () => {
+      clearTimeout(timer);
+      reject(new RunCancelled());
+    };
+    const timer = setTimeout(() => {
+      signal.removeEventListener('abort', onAbort);
+      resolve();
+    }, ms);
+    signal.addEventListener('abort', onAbort, { once: true });
+  });
+}
+
 /**
  * Run a package metadata refresh, retrying while another apt job (a freshly
  * booted host's daily refresh) holds the lists lock. apt has no wait option for
@@ -364,11 +389,16 @@ const APT_LISTS_LOCK = /Could not get lock \/var\/lib\/apt\/lists\/lock/;
 async function runMetadataRefresh(step: BootstrapPlanStep, ctx: StepContext): Promise<ExecResult> {
   const retry = ctx.aptLockRetry ?? APT_LOCK_RETRY;
   const deadline = Date.now() + retry.totalMs;
+  let waiting = false;
   for (;;) {
     const result = await ctx.session.run(step.command ?? '', { timeoutMs: step.timeoutMs });
     const locked = result.exitCode !== 0 && result.exitCode !== null && APT_LISTS_LOCK.test(result.stderr);
     if (!locked || Date.now() + retry.intervalMs > deadline) return result;
-    await new Promise((resolve) => setTimeout(resolve, retry.intervalMs));
+    if (!waiting) {
+      waiting = true;
+      ctx.note(`Another apt job holds the package lists. Retrying every ${Math.round(retry.intervalMs / 1000)}s for up to ${Math.round(retry.totalMs / 60_000)} minutes; a cancel stops the wait.`);
+    }
+    await waitOrCancel(retry.intervalMs, ctx.signal);
   }
 }
 

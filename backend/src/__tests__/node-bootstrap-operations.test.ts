@@ -10,6 +10,7 @@ import {
 import { buildBootstrapPlan } from '../services/nodeBootstrap/planBuilder';
 import { SshTransportError } from '../services/nodeBootstrap/sshProbeClient';
 import { NodeBootstrapService as RealPreflightService } from '../services/nodeBootstrap/NodeBootstrapService';
+import { EXEC_OUTPUT_TAIL_BYTES } from '../services/nodeBootstrap/sshExecClient';
 import type { BootstrapExecTransport, ExecOptions, ExecResult, ExecSession } from '../services/nodeBootstrap/sshExecClient';
 import type { BootstrapFacts, BootstrapPlan, BootstrapPreflightResult } from '../services/nodeBootstrap/types';
 import type { NodeBootstrapService } from '../services/nodeBootstrap/NodeBootstrapService';
@@ -87,6 +88,20 @@ function resultFor(plan: BootstrapPlan | null, facts: BootstrapFacts, blocked = 
 interface HostFile { content: string; mode: string; owner: string; group: string }
 
 /** A scripted host: a file and directory model plus fixed answers for the checks. */
+/** The output limits the real session applies: the tail by default, the head when asked. */
+function capOutput(result: ExecResult, options: ExecOptions): ExecResult {
+  const keep = options.keep ?? { mode: 'tail' as const, maxBytes: EXEC_OUTPUT_TAIL_BYTES };
+  const cap = (text: string) => {
+    const bytes = Buffer.from(text);
+    if (bytes.length <= keep.maxBytes) return { text, cut: false };
+    const kept = keep.mode === 'head' ? bytes.subarray(0, keep.maxBytes) : bytes.subarray(bytes.length - keep.maxBytes);
+    return { text: kept.toString('utf8'), cut: true };
+  };
+  const stdout = cap(result.stdout);
+  const stderr = cap(result.stderr);
+  return { ...result, stdout: stdout.text, stderr: stderr.text, truncated: result.truncated || stdout.cut || stderr.cut };
+}
+
 class FakeHost {
   public readonly files = new Map<string, HostFile>();
   public readonly dirs = new Map<string, { mode: string; owner: string; group: string }>();
@@ -125,9 +140,8 @@ class FakeHost {
           closed: false,
           run: async (command, options) => {
             this.commands.push({ command, stdin: options.stdin });
-            const custom = this.override?.(command, options);
-            if (custom) return custom;
-            return this.answer(command, options);
+            const custom = await this.override?.(command, options);
+            return capOutput(custom ?? this.answer(command, options), options);
           },
           close: () => undefined,
         };
@@ -228,7 +242,7 @@ interface Harness {
 
 let hostCounter = 0;
 
-function harness(options: { facts?: BootstrapFacts; enrollWaitMs?: number; connectOnStart?: boolean; caPem?: string | null; tokenTtlMs?: number } = {}): Harness {
+function harness(options: { facts?: BootstrapFacts; enrollWaitMs?: number; connectOnStart?: boolean; caPem?: string | null; tokenTtlMs?: number; aptLockRetry?: { intervalMs: number; totalMs: number } } = {}): Harness {
   hostCounter += 1;
   const hostname = `server-${hostCounter}.example.com`;
   const base = options.facts ?? freshFacts();
@@ -258,7 +272,7 @@ function harness(options: { facts?: BootstrapFacts; enrollWaitMs?: number; conne
       return { token: `eyJhbGciOiJIUzI1NiJ9.enroll-${nodeId}-${minted.length}.signature-material`, expiresAt: Date.now() + (options.tokenTtlMs ?? 15 * 60_000) };
     },
     enrollWaitMs: options.enrollWaitMs ?? 2_000,
-    aptLockRetry: { intervalMs: 5, totalMs: 1_000 },
+    aptLockRetry: options.aptLockRetry ?? { intervalMs: 5, totalMs: 1_000 },
   });
   if (options.connectOnStart !== false) {
     host.override = (command) => {
@@ -735,6 +749,28 @@ describe('bootstrap operations: failure paths found in review', () => {
     expect(h.service.get(op.id)).toMatchObject({ state: 'failed', changesMade: false, active: false, error: { code: 'STEP_FAILED' } });
   });
 
+  it('records a clean refusal on the first change as failed and releases the target', async () => {
+    // Docker works and the agent directory exists, so writing the marker file is the first change.
+    const h = harness({ facts: makeFacts({ agentDir: {
+      exists: true, isDirectory: true, owner: 'ubuntu', group: 'ubuntu', mode: '0700',
+      readableByUser: true, writableByUser: true, readableBySudo: true, writableBySudo: true, entries: [],
+    } }) });
+    h.host.dirs.set('/opt/sencho-agent', { mode: '0700', owner: 'ubuntu', group: 'ubuntu' });
+    const { request, plan } = approve(h);
+    expect(plan.stages[0]?.steps[0]?.file).toBeTruthy();
+    h.host.override = (command) => (command.includes('sencho-write')
+      ? { exitCode: 22, stdout: '', stderr: 'content incomplete', truncated: false, timedOut: false, error: null }
+      : undefined);
+    const op = h.service.start(request, context());
+    await h.service.settled();
+    expect(h.service.get(op.id)).toMatchObject({ state: 'failed', changesMade: false, active: false, error: { code: 'WRITE_INCOMPLETE' } });
+    // A new plan for the same server is accepted: nothing holds it.
+    const again = approve(h);
+    const next = h.service.start(again.request, context());
+    await h.service.settled();
+    expect(h.service.get(next.id).state).toBe('failed');
+  });
+
   it('installs nothing when a package candidate does not come from the official repository', async () => {
     const h = harness();
     h.host.policy = officialPolicy('noble', 'https://mirror.example.com/docker');
@@ -1047,7 +1083,6 @@ describe('bootstrap recheck: the address pin', () => {
 });
 
 describe('bootstrap operations: round two review cases', () => {
-  const okResult = (stdout = '') => ({ exitCode: 0, stdout, stderr: '', truncated: false, timedOut: false, error: null });
 
   it('reads a policy far longer than the command output tail and installs from it', async () => {
     const h = harness();
@@ -1125,6 +1160,23 @@ describe('bootstrap operations: round two review cases', () => {
     expect(attempts).toBeGreaterThan(2);
     expect(attempts).toBeLessThanOrEqual(1_000 / 5 + 1);
     never.service.release(op2.id, AUDIT);
+  });
+
+  it('stops waiting for the lists lock when the operator cancels, and says it is waiting', async () => {
+    const locked = { exitCode: 100, stdout: '', stderr: 'E: Could not get lock /var/lib/apt/lists/lock. It is held by process 812 (apt-get)', truncated: false, timedOut: false, error: null };
+    const h = harness({ aptLockRetry: { intervalMs: 60_000, totalMs: 300_000 } });
+    h.host.override = (command) => (/apt-get (-o \S+ )?update/.test(command) ? locked : undefined);
+    const { request } = approve(h);
+    const op = h.service.start(request, context());
+    await vi.waitFor(() => expect(h.service.get(op.id).events.some((event) => /holds the package lists/.test(event.message))).toBe(true), { timeout: 10_000 });
+    const cancelledAt = Date.now();
+    h.service.cancel(op.id, AUDIT);
+    await h.service.settled();
+    // The wait is a minute long; the cancel ends it at once.
+    expect(Date.now() - cancelledAt).toBeLessThan(5_000);
+    expect(h.service.get(op.id)).toMatchObject({ state: 'cancelled', error: { code: 'CANCELLED' } });
+    expect(h.host.commands.filter((entry) => /apt-get (-o \S+ )?update/.test(entry.command))).toHaveLength(1);
+    if (h.service.get(op.id).active) h.service.release(op.id, AUDIT);
   });
 
   it('keeps a step failure that lands after a cancel request instead of calling it cancelled', async () => {
