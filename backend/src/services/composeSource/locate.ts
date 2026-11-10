@@ -8,7 +8,7 @@ import {
   hasLaterUnparsedLayer, hasOutsideComposeLayer, hasProjectCycle, hasUnparsedComposeLayer, hasUnresolvedService,
 } from './correlate';
 import { authoredNodeKey, authoredScalarOf } from './parseComposeDocument';
-import { claimsEnumeratedHostPort, containerPortRange, isDynamicHostPort, isFixedHostPort, splitShortPortSpec } from '../../helpers/composePortSpec';
+import { containerPortRange, enumeratedHostPorts, isDynamicHostPort, isFixedHostPort, splitShortPortSpec } from '../../helpers/composePortSpec';
 import { isActingReason, type AuthoredFileSource, type AuthoredLocation, type AuthoredNode, type AuthoredProject, type CorrelationResult } from './types';
 import type { RuleHit } from '../preflight/types';
 import type { EffectiveModel, EffPortSpec } from '../preflight/effectiveModel';
@@ -45,8 +45,9 @@ const ALL_INTERFACES = 'all';
  * port, and the all-interfaces exposure rule reports one finding for each, so a
  * run can ask for tens of thousands of locations on the synchronous Doctor path
  * and each one reads the model. Past this count no port finding carries a link.
- * The authored file is read once per run (see `memoized`), so the bound only has
- * to cover the effective model.
+ * The authored file, the claims of each port and the authored items behind each
+ * publication are read once per run (see `memoized`), so a finding costs a
+ * lookup and the bound only has to cover the effective model.
  */
 const MAX_LOCATABLE_PUBLICATIONS = 2048;
 
@@ -74,29 +75,9 @@ function sameInterface(a: string, b: string): boolean {
   return left === right;
 }
 
-/** Whether two host interfaces can bind the same port; mirrors the rule's overlap test. */
-function interfacesOverlap(a: string, b: string): boolean {
-  return normalizedInterface(a) === ALL_INTERFACES || normalizedInterface(b) === ALL_INTERFACES || a === b;
-}
-
 /** Compose lowercases a short-syntax protocol; an authored long form keeps its case. */
 function sameProtocol(a: string, b: string): boolean {
   return a.toLowerCase() === b.toLowerCase();
-}
-
-/**
- * Whether one effective publication claims the subject port the way a per-port
- * rule enumerates it: the publication is fixed and its enumeration, which stops
- * at the shared 256-port bound, includes the subject port. A publication the
- * rule did not count at this port cannot be one of the services its finding
- * names.
- */
-function specClaimsConflictPort(spec: EffPortSpec, hostText: string, protocol: string): boolean {
-  // Both sides are effective-model strings the rule keys verbatim, so a
-  // long-form `protocol: UDP` is a different claim from a short-syntax `/udp`.
-  if (spec.protocol !== protocol) return false;
-  const port = Number(hostText);
-  return Number.isInteger(port) && hostText !== '' && claimsEnumeratedHostPort(spec, port);
 }
 
 /** An authored host port in the same text form the rule subject uses. */
@@ -319,17 +300,39 @@ function subjectMatchesSpec(spec: EffPortSpec, hostText: string, protocol: strin
   return Number.isInteger(port) && port >= spec.startPort && port <= spec.endPort;
 }
 
+function collapsedKey(start: number, end: number, hostIp: string, protocol: string): string {
+  return `${start}-${end}|${normalizedInterface(hostIp)}|${protocol.toLowerCase()}`;
+}
+
+/**
+ * The first fixed publication of each exact span, interface and protocol, so
+ * asking whether a renderer kept an authored range collapsed is one lookup, not
+ * a scan of every publication per authored item per finding.
+ */
+function collapsedPublications(effectivePorts: readonly EffPortSpec[]): Map<string, EffPortSpec> {
+  return memoized(effectivePorts, 'collapsed', () => {
+    const index = new Map<string, EffPortSpec>();
+    for (const port of effectivePorts) {
+      if (port.dynamic) continue;
+      const key = collapsedKey(port.startPort, port.endPort, port.hostIp, port.protocol);
+      if (!index.has(key)) index.set(key, port);
+    }
+    return index;
+  });
+}
+
 function authoredHostMatchesEffective(
   author: AuthoredPortSpec,
   spec: EffPortSpec,
   effectivePorts: readonly EffPortSpec[],
+  specText: string,
 ): boolean {
   if (author.dynamic !== (spec.dynamic === true)) return false;
   if (spec.dynamic) {
     if (spec.targetStartPort === undefined || author.targetStartPort === undefined) return true;
     return author.targetStartPort === spec.targetStartPort && author.targetEndPort === spec.targetEndPort;
   }
-  if (author.hostText === effectiveHostText(spec)) return true;
+  if (author.hostText === specText) return true;
   if (!author.hostText.includes('-')) return false;
   const [start, end] = author.hostText.split('-').map(Number);
   if (!Number.isInteger(start) || !Number.isInteger(end)) return false;
@@ -339,10 +342,7 @@ function authoredHostMatchesEffective(
   // the exact span; that publication is this declaration's only source, and a
   // different port (or interface or protocol) inside the span came from
   // another declaration.
-  const collapsed = effectivePorts.find(port => !port.dynamic
-    && port.startPort === start && port.endPort === end
-    && sameInterface(port.hostIp, spec.hostIp)
-    && sameProtocol(port.protocol, spec.protocol));
+  const collapsed = collapsedPublications(effectivePorts).get(collapsedKey(start, end, spec.hostIp, spec.protocol));
   if (collapsed) return collapsed === spec;
   return spec.startPort === spec.endPort && spec.startPort >= start && spec.startPort <= end;
 }
@@ -365,11 +365,40 @@ function authoredPortMatches(
   spec: EffPortSpec,
   broadOnly: boolean,
   effectivePorts: readonly EffPortSpec[],
+  specText: string = effectiveHostText(spec),
 ): boolean {
   if (!sameProtocol(author.protocol, spec.protocol)) return false;
   if (broadOnly && normalizedInterface(author.hostIp) !== ALL_INTERFACES) return false;
   if (!broadOnly && !sameInterface(author.hostIp, spec.hostIp)) return false;
-  return authoredHostMatchesEffective(author, spec, effectivePorts);
+  return authoredHostMatchesEffective(author, spec, effectivePorts, specText);
+}
+
+/**
+ * The authored `ports` items that produced one effective publication, stopping
+ * at the second: two sources make the origin ambiguous whatever else matches.
+ * One publication is asked about once per finding that counts it, and each
+ * answer reads every authored item, so the answer is kept per publication.
+ * A publication belongs to one service's effective ports, which is what its
+ * answer depends on besides the authored scopes it is cached under.
+ */
+function itemsProducing(
+  scopes: ServiceScope[],
+  spec: EffPortSpec,
+  broadOnly: boolean,
+  effectivePorts: readonly EffPortSpec[],
+): AuthoredPortItem[] {
+  const bySpec = memoized(scopes, `spec-items:${broadOnly}`, () => new Map<EffPortSpec, AuthoredPortItem[]>());
+  const known = bySpec.get(spec);
+  if (known) return known;
+  const found: AuthoredPortItem[] = [];
+  const specText = effectiveHostText(spec);
+  for (const item of authoredPortItems(scopes)) {
+    if (!authoredPortMatches(item.author, spec, broadOnly, effectivePorts, specText)) continue;
+    found.push(item);
+    if (found.length > 1) break;
+  }
+  bySpec.set(spec, found);
+  return found;
 }
 
 /** A subject's `host/protocol` split; the host may be a range or `dynamic`. */
@@ -463,10 +492,8 @@ function locatePort(
   // publications it counted at this port can be the finding's source. Matching
   // the authored item to those effective publications, rather than to the bare
   // subject text, also keeps an unrelated range declaration from competing.
-  const bounded = restrictSpecs ?? (PER_PORT_RULES.has(hit.ruleId) && subject !== undefined
-    ? effective?.ports.filter(spec =>
-      (!broadOnly || normalizedInterface(spec.hostIp) === ALL_INTERFACES)
-      && specClaimsConflictPort(spec, subject.hostText, subject.protocol))
+  const bounded = restrictSpecs ?? (PER_PORT_RULES.has(hit.ruleId) && subject !== undefined && model && effective
+    ? portClaimants(model, subject.hostText, subject.protocol).find(claim => claim.service === effective.name)?.specs ?? []
     : undefined);
   const specs = bounded ?? (effective?.ports.filter(spec =>
     (!broadOnly || normalizedInterface(spec.hostIp) === ALL_INTERFACES)
@@ -481,29 +508,38 @@ function locatePort(
     `${normalizedInterface(spec.hostIp)}|${spec.dynamic ? 'dynamic' : 'fixed'}|${spec.targetStartPort ?? ''}-${spec.targetEndPort ?? ''}`));
   if (subject !== undefined && specIdentities.size > 1) return undefined;
 
-  const byLayer = new Map<number, ItemCandidate[]>();
   const scopes = serviceScopes(project, hit.service);
   if (fieldHasTag(scopes, 'ports')) return undefined;
-  for (const { scope, index, author, node } of authoredPortItems(scopes)) {
-    const matched = bounded !== undefined
-      ? specs.some(spec => authoredPortMatches(author, spec, broadOnly, effective?.ports ?? []))
-      : subject !== undefined
-        ? authoredHostMatchesSubject(author, subject.hostText)
-          && sameProtocol(author.protocol, subject.protocol)
-          && (!broadOnly || normalizedInterface(author.hostIp) === ALL_INTERFACES)
-        : specs.some(spec => authoredPortMatches(author, spec, broadOnly, effective?.ports ?? []));
-    if (!matched) continue;
-    const list = byLayer.get(scope.layerIndex) ?? [];
-    list.push({ file: scope.file.file, declaredService: scope.declaredService, node, layerIndex: scope.layerIndex, writability: scope.file.writability, index });
-    byLayer.set(scope.layerIndex, list);
-  }
-
+  const effectivePorts = effective?.ports ?? [];
   // `ports` appends across Compose layers, so every matching authored item is a
   // live declaration of the publication the hit names. Selecting the latest
   // layer would silently discard an earlier identical declaration; the field is
-  // locatable only when exactly one authored item can be its source.
-  const matches = [...byLayer.values()].flat();
-  if (matches.length !== 1) return undefined;
+  // locatable only when exactly one authored item can be its source, so the
+  // search stops at the second.
+  const found = new Set<AuthoredPortItem>();
+  if (bounded !== undefined) {
+    for (const spec of specs) {
+      for (const item of itemsProducing(scopes, spec, broadOnly, effectivePorts)) found.add(item);
+      if (found.size > 1) return undefined;
+    }
+  } else {
+    for (const item of authoredPortItems(scopes)) {
+      const matched = subject !== undefined
+        ? authoredHostMatchesSubject(item.author, subject.hostText)
+          && sameProtocol(item.author.protocol, subject.protocol)
+          && (!broadOnly || normalizedInterface(item.author.hostIp) === ALL_INTERFACES)
+        : specs.some(spec => authoredPortMatches(item.author, spec, broadOnly, effectivePorts));
+      if (!matched) continue;
+      found.add(item);
+      if (found.size > 1) return undefined;
+    }
+  }
+  if (found.size !== 1) return undefined;
+  const [{ scope, index, node }] = [...found];
+  const matches: ItemCandidate[] = [{
+    file: scope.file.file, declaredService: scope.declaredService, node, layerIndex: scope.layerIndex,
+    writability: scope.file.writability, index,
+  }];
   // A later scalar replaces an earlier one, but `ports` appends: an unparsed
   // layer anywhere in the project could contribute another copy of this
   // publication, so no single layer is decisive.
@@ -512,6 +548,38 @@ function locatePort(
   // publication; the literal item is not provably its only source.
   if (hasUnresolvedSequenceItem(scopes, 'ports', 0, true)) return undefined;
   return itemLocation(matches, 'ports');
+}
+
+/**
+ * Every service's publications that the per-port rule counted at one host port,
+ * in effective-model order. The claims of a whole model are indexed once per
+ * run, because a stack with many conflicting ports asks this once per finding.
+ */
+function portClaimants(
+  model: EffectiveModel,
+  hostText: string,
+  protocol: string,
+): { service: string; specs: EffPortSpec[] }[] {
+  const index = memoized(model, 'claims', () => {
+    const claims = new Map<string, { service: string; specs: EffPortSpec[] }[]>();
+    for (const svc of model.services) {
+      for (const spec of svc.ports) {
+        for (const port of enumeratedHostPorts(spec)) {
+          const key = `${port}/${spec.protocol}`;
+          const list = claims.get(key) ?? [];
+          const tail = list[list.length - 1];
+          if (tail && tail.service === svc.name) tail.specs.push(spec);
+          else list.push({ service: svc.name, specs: [spec] });
+          claims.set(key, list);
+        }
+      }
+    }
+    return claims;
+  });
+  // A subject that is not a plain port number claims nothing.
+  const port = Number(hostText);
+  if (hostText === '' || !Number.isInteger(port)) return [];
+  return index.get(`${port}/${protocol}`) ?? [];
 }
 
 /**
@@ -534,20 +602,34 @@ function locatePortConflictInternal(
 ): AuthoredLocation | undefined {
   if (hit.subject?.kind !== 'port' || !model || exceedsLocatingBound(model)) return undefined;
   const subject = splitPortSubject(hit.subject.key);
-  const claimants = model.services
-    .map(svc => ({
-      service: svc.name,
-      specs: svc.ports.filter(spec => specClaimsConflictPort(spec, subject.hostText, subject.protocol)),
-    }))
-    .filter(claim => claim.specs.length > 0);
+  const claimants = portClaimants(model, subject.hostText, subject.protocol);
+  // Which claimants publish on each interface, so asking whether a publication
+  // overlaps another service's interface is a lookup, not a scan of every claim.
+  const publishers = new Map<string, Set<number>>();
+  claimants.forEach((claim, position) => {
+    for (const spec of claim.specs) {
+      const key = normalizedInterface(spec.hostIp);
+      const set = publishers.get(key) ?? new Set<number>();
+      set.add(position);
+      publishers.set(key, set);
+    }
+  });
+  const otherThan = (set: Set<number> | undefined, position: number): boolean =>
+    set !== undefined && (set.size > 1 || !set.has(position));
+  const overlapsAnother = (spec: EffPortSpec, position: number): boolean => {
+    const key = normalizedInterface(spec.hostIp);
+    // An all-interfaces publication overlaps every other claimant's.
+    if (key === ALL_INTERFACES) return claimants.length > 1;
+    return otherThan(publishers.get(key), position) || otherThan(publishers.get(ALL_INTERFACES), position);
+  };
   const participants = claimants
-    .map(claim => ({
+    .map((claim, position) => ({
       service: claim.service,
       // Only this service's publications that overlap another service's
       // interface can be sources of the conflict; its other claims at the same
-      // port are not part of what the finding reports.
-      specs: claim.specs.filter(spec => claimants.some(other =>
-        other !== claim && other.specs.some(otherSpec => interfacesOverlap(spec.hostIp, otherSpec.hostIp)))),
+      // port are not part of what the finding reports. Interfaces overlap the
+      // way the rule's own test does: either one is all-interfaces, or equal.
+      specs: claim.specs.filter(spec => overlapsAnother(spec, position)),
     }))
     .filter(claim => claim.specs.length > 0);
   // The rule only reports a conflict, so a model that names fewer than two

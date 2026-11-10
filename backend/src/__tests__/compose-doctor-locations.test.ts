@@ -1148,6 +1148,103 @@ describe('Compose Doctor authored locations', () => {
     expect(Date.now() - started).toBeLessThan(15000);
   });
 
+  it('locates every port-conflict-internal finding of many authored ranges without rescanning per finding', async () => {
+    // Two services each declare 255 ranges of 256 ports; the rule reports one
+    // finding per port in common, 65,280 of them. Every finding must resolve
+    // from lookups, not from a pass over every authored item and publication.
+    const ranges = () => Array.from({ length: 255 }, (_, k) => (
+      `      - "${k * 256 + 1}-${k * 256 + 256}:80"`));
+    writeStack('doctor-conflict-many-ranges', {
+      'compose.yaml': [
+        'services:', '  s:', '    image: nginx:1.2', '    network_mode: none', '    ports:', ...ranges(),
+        '  t:', '    image: nginx:1.2', '    network_mode: none', '    ports:', ...ranges(), '',
+      ].join('\n'),
+    });
+    const project = await buildAuthoredProject(nodeId, 'doctor-conflict-many-ranges');
+    const collapsed = Array.from({ length: 255 }, (_, k) => (
+      { startPort: k * 256 + 1, endPort: k * 256 + 256, hostIp: '', protocol: 'tcp' }));
+    const model = {
+      services: [{ name: 's', ports: collapsed }, { name: 't', ports: collapsed }],
+    } as unknown as EffectiveModel;
+    const started = Date.now();
+    let located = 0;
+    let first: string | undefined;
+    for (let port = 1; port <= 255 * 256; port += 1) {
+      const found = locateFinding(project, hit('port-conflict-internal', {
+        subject: { kind: 'port', key: `${port}/tcp` },
+      }), model);
+      if (!found) continue;
+      located += 1;
+      if (port === 257) first = found.path;
+    }
+    expect(located).toBe(255 * 256);
+    expect(first).toBe('services.s.ports[1]');
+    // Matching every authored item against every publication for each finding
+    // took 15 s here and grows with the cube of the range count; the limit
+    // catches that with room for a slow runner.
+    expect(Date.now() - started).toBeLessThan(5000);
+  });
+
+  it('refuses nested ranges in time that does not grow with the cube of the line count', async () => {
+    // Every line of s is a range starting at 1000, so each of its publications
+    // claims the same ports and each authored line is a candidate for every one.
+    const nested = Array.from({ length: 512 }, (_, j) => `      - "1000-${1000 + j}:80"`);
+    writeStack('doctor-conflict-nested-ranges', {
+      'compose.yaml': [
+        'services:', '  s:', '    image: nginx:1.2', '    network_mode: none', '    ports:', ...nested,
+        '  t:', '    image: nginx:1.2', '    network_mode: none', '    ports:', '      - "1000-1255:81"', '',
+      ].join('\n'),
+    });
+    const project = await buildAuthoredProject(nodeId, 'doctor-conflict-nested-ranges');
+    const model = {
+      services: [
+        {
+          name: 's',
+          ports: Array.from({ length: 512 }, (_, j) => (
+            { startPort: 1000, endPort: 1000 + j, hostIp: '', protocol: 'tcp' })),
+        },
+        { name: 't', ports: [{ startPort: 1000, endPort: 1255, hostIp: '', protocol: 'tcp' }] },
+      ],
+    } as unknown as EffectiveModel;
+    const started = Date.now();
+    let located = 0;
+    for (let port = 1000; port <= 1255; port += 1) {
+      if (locateFinding(project, hit('port-conflict-internal', {
+        subject: { kind: 'port', key: `${port}/tcp` },
+      }), model)) located += 1;
+    }
+    // s has 512 declarations that can each produce the port, so no single
+    // authored item is the source.
+    expect(located).toBe(0);
+    // This took 24 s here; the limit catches that, not runner variance.
+    expect(Date.now() - started).toBeLessThan(5000);
+  });
+
+  it('locates every port-conflict-node finding of a service at the publication bound, one range each', async () => {
+    // 2,048 ranges of 31 ports, the most the locator attempts. The node binds
+    // the first port of each, so each range yields one finding.
+    const lines = Array.from({ length: 2048 }, (_, k) => `      - "${k * 31 + 1}-${k * 31 + 31}:80"`);
+    writeStack('doctor-node-conflict-many-ranges', {
+      'compose.yaml': ['services:', '  s:', '    image: nginx:1.2', '    network_mode: none', '    ports:', ...lines, ''].join('\n'),
+    });
+    const project = await buildAuthoredProject(nodeId, 'doctor-node-conflict-many-ranges');
+    const model = {
+      services: [{
+        name: 's',
+        ports: Array.from({ length: 2048 }, (_, k) => (
+          { startPort: k * 31 + 1, endPort: k * 31 + 31, hostIp: '', protocol: 'tcp' })),
+      }],
+    } as unknown as EffectiveModel;
+    let located = 0;
+    for (let k = 0; k < 2048; k += 1) {
+      const found = locateFinding(project, hit('port-conflict-node', {
+        service: 's', sourcePath: 's', subject: { kind: 'port', key: `${k * 31 + 1}/tcp` },
+      }), model);
+      if (found?.path === `services.s.ports[${k}]`) located += 1;
+    }
+    expect(located).toBe(2048);
+  });
+
   it('locates every bind finding of a large volumes list without rescanning the file per finding', async () => {
     const binds = Array.from({ length: 1000 }, (_, index) => `      - ./m${index}:/d${index}`);
     writeStack('doctor-large-volumes', {
