@@ -137,7 +137,7 @@ export function BootstrapPlanStep({
         <ul className="rounded-lg border border-muted bg-card/30 px-3 py-1">
           {plan.verification.map((item) => (
             <li key={item.id} className="flex flex-wrap items-baseline gap-2 border-t border-muted py-2 text-xs first:border-t-0">
-              <Badge variant="outline" className="font-mono text-[9px]">{item.slice}</Badge>
+              <Badge variant="outline" className="font-mono text-[9px]">{item.slice === 'S2' ? 'run' : 'readiness'}</Badge>
               <span className="text-foreground/80">{item.title}</span>
               <span className="font-mono text-[10px] text-stat-subtitle">{item.expected}</span>
             </li>

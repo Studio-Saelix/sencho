@@ -655,7 +655,7 @@ export function formatPlanText(plan: BootstrapPlan): string {
   for (const notice of plan.notices) lines.push(`Note: ${notice}`);
   lines.push('');
   lines.push('Expected after execution:');
-  for (const item of plan.verification) lines.push(`- [${item.slice}] ${item.title}: ${item.expected}`);
+  for (const item of plan.verification) lines.push(`- [${item.slice === 'S2' ? 'run' : 'readiness'}] ${item.title}: ${item.expected}`);
   lines.push('');
   lines.push(`Plan digest: sha256:${plan.digest}`);
   return lines.join('\n');

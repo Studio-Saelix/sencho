@@ -161,7 +161,7 @@ describe('BootstrapPlanStep', () => {
     render(<BootstrapPlanStep plan={plan} inspection={inspection} />);
     expect(screen.getByText('Expected after execution')).toBeInTheDocument();
     expect(screen.getByText('The sencho-agent project exists')).toBeInTheDocument();
-    expect(screen.getByText('S2')).toBeInTheDocument();
+    expect(screen.getByText('run')).toBeInTheDocument();
   });
 
   it('copies the plan to the clipboard', async () => {

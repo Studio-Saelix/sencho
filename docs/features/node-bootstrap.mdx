@@ -1,13 +1,16 @@
 ---
-title: Node Bootstrap Preflight
-description: Inspect a Linux server over SSH before you provision it. Sencho verifies the host key, inventories both host directories, and builds a versioned, reviewable plan without changing anything on the server.
+title: Node Bootstrap
+description: Prepare a Linux server over SSH and enroll it as a Pilot node. Sencho verifies the host key, inspects the server without changing it, shows the exact plan, and runs only the plan you approve.
 ---
 
-The node bootstrap preflight is the first half of the guided provisioning workflow for a new Linux server. It connects to the host over SSH, runs a fixed catalog of read-only commands, and reports what it found with the same pass, warning, blocked and unknown language used by the other environment checks.
+Node bootstrap turns an Ubuntu server you can reach over SSH into an enrolled Pilot node. It works in two halves:
 
-**Nothing on the target is changed.** The preflight does not install packages, create directories, write files, start services or enroll an agent. Its output is an ordered plan with exact commands that you can read, copy and download. This release only previews the plan: no action runs it yet, so **Copy plan** and **Download** are for review and for running by hand.
+- **Preflight.** Sencho connects to the host, runs a fixed catalog of read-only commands, and reports what it found with the same pass, warning, blocked and unknown language used by the other environment checks. Its output is an ordered plan with exact commands, which you can read, copy and download. **The preflight changes nothing on the server.**
+- **Run.** When you approve that plan, Sencho inspects the server again, runs the plan's steps in order, installs only the Docker components that are missing, writes the Pilot files, starts the Pilot and waits for it to enroll. The run belongs to Sencho, not to your browser: closing the window does not stop it.
 
-Use it to answer questions a manual enrollment cannot:
+**What a run does not do.** A finished run leaves the node enrolled: its Pilot is connected to this Sencho instance. It does not verify that the node is ready for deployments (Docker, Compose and the stacks directory as seen from inside the Pilot). Treat a freshly enrolled node as unverified until you have checked it.
+
+The preflight answers questions a manual enrollment cannot:
 
 - Is the host running a supported operating system and architecture?
 - Is Docker installed, reachable, and set to survive a reboot?
@@ -24,15 +27,19 @@ Use it to answer questions a manual enrollment cannot:
 - **Node name:** the name you choose is not yet used by another node in this console.
 - **Key format:** an OpenSSH private key (for example `id_ed25519`) or an RSA key in PEM format. A PKCS8 ed25519 key is rejected with a message asking for the OpenSSH format.
 
-The private key is used for the request only. It is never stored, written to a log, included in the plan, or returned in a response. Serve Sencho over HTTPS before using a real key: on a plain HTTP page the dialog warns that the key travels in cleartext.
+The private key is used for the preflight and, when you approve the plan, for the run. Sencho holds it in memory only for that time. It is never stored, written to a log, included in the plan, or returned in a response, which is why a retry asks for it again. Serve Sencho over HTTPS before using a real key: on a plain HTTP page the dialog warns that the key travels in cleartext.
+
+Only an administrator signed in to the Sencho web interface can run the preflight or a plan. API tokens cannot start, retry, cancel or release a run.
 
 ## Open the workflow
 
 Go to **Fleet**, then open **Node management** at the end of the Overview toolbar and choose **Bootstrap new Linux server**.
 
-The same menu holds **Connect existing node**, which opens the manual Add node form for a node that is already running Sencho or a Pilot agent. Manual enrollment and this preflight describe the same agent configuration; the preflight previews it in the plan and does not deploy it.
+The same menu holds **Connect existing node**, which opens the manual Add node form for a node that is already running Sencho or a Pilot agent. Manual enrollment and bootstrap deploy the same agent configuration, from the same compose file.
 
-## The three steps
+When you open the dialog, **Bootstrap runs** lists every run that still holds its server, followed by the latest finished ones. **Follow** or **View** opens a run; **Retry** starts a retry of a stopped one (see [Retry](#retry)).
+
+## The four steps
 
 ### 1. Server and directories
 
@@ -98,14 +105,74 @@ When there are no blockers and every fact the plan depends on was established, S
 - File writes for `compose.yaml` (`0600`), the bootstrap marker (`0600`) and, when the hub uses native TLS, `sencho-hub-ca.pem` (`0644`), all under the chosen Agent directory.
 - The Docker repository, package and service steps, or an explicit no-change row when they already apply.
 - The exact `docker compose` start command, with the project name pinned to `sencho-agent`, an explicit project directory and file, and the environment variables that could otherwise change which project runs cleared.
-- An **Expected after execution** section listing what the later execution step and readiness check will verify. This is a promise, not evidence from this run.
+- An **Expected after execution** section. The items marked S2 are checked by the run itself; the rest describe a readiness check that a run does not perform.
 - A SHA-256 digest over the plan, and a digest over the evidence it was built from.
 
 <Frame>
   <img src="/images/node-bootstrap/03-plan-filesystem.png" alt="Bootstrap dialog on the Plan step: the two directories, then three numbered stages in execution order: creating the Agent directory at mode 0700 with its install command, writing the bootstrap marker and the Pilot compose file at mode 0600, and starting the sencho-agent project with the pinned Docker endpoint. Each step shows its privilege, and the directory and file steps show mode and owner." />
 </Frame>
 
-The plan reads **No changes have been made on this server.** Use **Copy plan** or **Download** to keep it for review. Each generated plan has its own digest, because the marker file carries the generation time. A later approval would bind to that digest, so a plan that changes is a plan that must be approved again.
+The plan step reads **Nothing has changed on this server yet.** Use **Copy plan** or **Download** to keep it for review. Each generated plan has its own digest, because the marker file carries the generation time. Approval binds to that digest, so a plan that changes is a plan that must be approved again.
+
+### 4. Run
+
+Select **Approve and run**. A confirmation names the server, lists the stages and shows the plan digest; confirm with **Approve and run** to start. The approval is accepted only:
+
+- from the administrator who ran the preflight that produced the plan,
+- within 10 minutes of that preflight,
+- once (a second request with the same digest is refused), and
+- for the same server, SSH user, node name, both directories and host key that the plan names.
+
+The run then goes through these phases, shown as one row under its status:
+
+1. **Recheck.** Sencho connects to the address the plan was built for, checks the pinned host key, runs the read-only preflight again and rebuilds the plan from what it finds. If the server no longer passes the preflight, or the rebuilt plan differs from the one you approved in any way (a new stack folder, a Docker change, a different address), the run stops as **Blocked** and nothing is changed. Run the preflight again and review the new plan.
+2. **Docker.** The repository, package and service steps, when the plan has them. The downloaded repository key is read back and must be Docker's release key before the repository is added. After the last Docker step, the Docker service must be active and enabled, and the daemon and the Compose plugin must answer on the local socket.
+3. **Pilot files.** The Agent directory, the bootstrap marker, the compose file and, when the hub uses native TLS, the hub CA. Each file is written to a temporary file in the same directory, given its mode and owner, then renamed into place, and its mode and owner are checked afterwards. The file content travels over the SSH session's input, never in a command line.
+4. **Start.** The pinned `docker compose up -d` command. Afterwards the `sencho-agent` container must be running, as the `sencho-agent` project, from the Agent directory.
+5. **Enroll.** Sencho waits up to five minutes for the Pilot to connect with its enrollment.
+
+**Every command comes from the plan.** The run executes the plan's commands exactly as the plan shows them, plus fixed read-only checks and the fixed file-write script around them. Nothing you typed is placed into a command except through the validated values the plan already shows.
+
+**Enrollment is minted late.** The node record is created and its one-use, 15-minute enrollment token is minted only when the run reaches the compose file, after every Docker step. The token reaches the server inside the compose file and is never logged, shown, or recorded in the run's activity. The node appears in Fleet from that point.
+
+**Activity** under the status lists what was approved (digest, administrator, time, attempt), the server, the host key, the node, and every recorded step with its outcome. A failed step keeps the last lines of its output, with any secret removed.
+
+## Run outcomes
+
+| Status | What it means | What you can do |
+| --- | --- | --- |
+| Re-checking, Running, Enrolling | The run is in progress. | **Cancel run** stops it after the current step. |
+| Enrolled | The Pilot connected. The node is enrolled; its readiness for deployments is not verified. | Nothing further in this workflow. |
+| Blocked | The run stopped before changing anything in this attempt (the server changed, the recheck could not reach it, or the hub restarted first). | Run the preflight again and approve the new plan. |
+| Failed | A step failed before any step could have changed the server. | Fix the cause and start again. |
+| Stopped partway | A step failed after earlier steps ran, or the Pilot started but did not connect in time. | **Retry**, or **Release server**. |
+| Outcome unknown | The SSH connection dropped or a step outlived its time limit, so whether it took effect is not known. | **Retry**: the recheck reads the server's actual state first. |
+| Needs recovery | A step's result did not hold, or a file the plan writes already exists with content this workflow did not write. | Look at the server, then **Retry** or **Release server**. |
+| Cancelled | You cancelled the run. | **Retry**, or **Release server** if steps had run. |
+
+Nothing is ever rolled back. Packages, files and services that a step created stay on the server after a failure or a cancellation, and the status says so. A run never deletes an existing container, volume or stack.
+
+### One run per server
+
+While a run holds a server, no other run can start on it, matched by host and port and by host key, so the same server reached under another name is still one server. A run that finished without changing anything releases the server at once, and so does an enrolled run. Any other stopped run keeps holding it, so that a second attempt cannot register a second node for the same server, until you retry it or release it. A preflight for a server whose run is in progress is refused.
+
+### Retry
+
+**Retry** keeps the run, its node and its approval history, and starts the next attempt:
+
+1. The dialog fills in the server, SSH user, node name and both directories from the run, and asks for the private key again.
+2. Check the host key and run the preflight. The preflight recognizes what this run already put on the server: its node, and, once the run had reached its start step, its own Pilot container and data volume. Anything else is judged as for a new server.
+3. Review the new plan and select **Approve and retry**.
+
+A retry reuses the node the run registered, so the server never gets a second identity. It mints a new enrollment, rewrites the compose file the run wrote (only when it differs from the reviewed one by the token alone), keeps the run's own bootstrap marker, and starts the Pilot again with its data volume kept.
+
+### Release server
+
+**Release server** ends the run's hold on the server without touching the server. Steps already run stay there, and a node the run registered stays in Fleet; delete it from Fleet if you do not want it. Another bootstrap can then run on that server.
+
+### When Sencho restarts
+
+The private key lives only in memory, so a run cannot continue after Sencho restarts. A run that had not changed anything is recorded as **Blocked**; any other is recorded as **Outcome unknown**, and **Retry** picks it up from the server's actual state. If the Pilot had already started, it can still connect on its own afterwards: the run shows **Enrolled** the next time it is opened.
 
 ## Existing content is preserved
 
@@ -114,6 +181,8 @@ The plan reads **No changes have been made on this server.** Use **Copy plan** o
 **An earlier Pilot installation is never missed.** The preflight looks for `/opt/sencho-agent/compose.yaml` whichever Agent directory you choose. A Compose file there blocks the plan when you chose any other directory, whether or not that directory exists yet. When the default directory cannot be inspected (a parent directory is closed to the SSH user and sudo does not answer, or the inspection did not complete), the result is `unknown` and the plan is withheld; it is never read as absent. Choosing the directory that `/opt/sencho-agent` resolves to counts as choosing the default directory, so that directory is judged on its contents instead.
 
 **The Agent directory must be dedicated.** It may be missing, empty, or hold a previous bootstrap attempt for the same project and paths, identified by `sencho-bootstrap.json`. Anything else blocks the plan with a remediation. Nothing is deleted or overwritten. A marker for a different project or different directories, a compose file without a marker, or any unrelated entry always blocks.
+
+**An existing Pilot data volume blocks a new server.** `sencho-agent-data` can hold a Pilot's stored connection credential, and a Pilot uses that credential before its enrollment token, so reusing an unknown volume could connect the server as another node. Remove the volume deliberately after confirming it holds no Pilot you need, or enroll the server manually. A retry of a run that already started its own Pilot keeps that run's volume.
 
 ## Permissions, symlinks, persistence and space
 
@@ -159,8 +228,8 @@ The Agent installation directory has no settings field. It is chosen only here.
 - Ubuntu 22.04 and 24.04 on x86_64 only.
 - A target that is this Sencho instance is refused: an address on the hub's own network interfaces, or the address of the hub URL (`SENCHO_PUBLIC_URL` when it is set and valid, otherwise the host in your request), which is how a Docker or NAT deployment is told apart from the server it runs on. The hub URL check needs that name to resolve from the hub and ignores ports, so a server that shares the hub's public address is refused as well.
 - The host is a DNS name or an IPv4 address in dotted form (`10.0.0.4`). Legacy spellings such as `10.1`, `1.2.3.04` or `0x7f.1` are refused, so one server never holds two pins.
-- IPv6 targets, SSH agent forwarding, password authentication and passworded sudo are not supported in this release.
-- The preflight never changes firewall, SSH server, Docker daemon, user or group configuration.
+- IPv6 targets, SSH agent forwarding, password authentication and passworded sudo are not supported.
+- Neither the preflight nor a run changes firewall, SSH server, user or group configuration, and a run changes Docker only through the plan's own steps. The SSH user is not added to the `docker` group.
 - Only the Docker daemon on the host's own socket (`/var/run/docker.sock`) is inspected, and every Docker command in the preflight and the plan is pinned to it with the default context. Rootless installs, custom sockets and remote Docker contexts are reported as blocked. A host where Docker is installed but stopped is blocked too: containers and volumes cannot be inventoried until the service runs.
 - The preflight asks apt where it reads its sources from (`apt-config`, so `Dir::Etc::sourcelist` and `Dir::Etc::sourceparts` overrides count), then reads that main source list and each `.list` and `.sources` file in that directory that apt accepts, whatever the file is called. The plan writes its own source to `/etc/apt/sources.list.d/docker.list` only. When apt reads its sources from anywhere else, a Docker source in the places it reports is verified as usual, but a host that still needs the repository and has no usable Docker source there is `unknown` and the plan is withheld. The same holds when apt cannot say where it reads (no answer, a warning or error such as a configuration file the SSH user cannot read, or a path holding a quote or backslash): a source seen at the default paths is not trusted then. A host where Docker and Compose already work keeps its installation and the plan in every case. Put the official Docker source where apt reads it, or restore the default locations, and run the preflight again. Every entry for `download.docker.com` in those files counts, and all of them must pass the checks below. The preflight reads a file only when it mentions `download.docker.com` anywhere (a comment included), holds a double quote or a `%` escape (apt reads both inside a word of a one-line entry, and either can hide the host's name), or is `docker.list` or `docker.sources`. apt rejects its whole source list at content it cannot parse, so such a file must parse end to end, beside the Docker entry as well as in it.
 - **One-line entries.** apt rejects its whole source list at content it cannot parse, so a file the preflight reads must parse end to end, beside the Docker entry as well as in it. A one-line entry fails the checks below unless it is `deb` or `deb-src` (the type ends at the first space, tab or vertical tab), an optional `[option=value ...]` group with a name and a value for every option, a URI with a lower-case scheme (apt looks its method up by that exact name, so `HTTPS://` fails), a suite that is not empty, and components (none for a suite that ends in a slash, where they are not allowed). Words are read as apt's own word reader reads them: a double quote anywhere in a word, in an option name too, opens a run that ends at the next double quote and may hold spaces, the quotes are dropped, a `[` runs on to the next `]`, and `%` followed by two hex digits stands for the character it encodes. So `[signed-by="/etc/apt/keyrings/a.gpg /etc/apt/keyrings/b.gpg"]`, `["signed-by"=/etc/apt/keyrings/a.gpg]` and `[%73igned-by=/etc/apt/keyrings/a.gpg]` mean what the plain spelling means, a quoted or escaped `trusted` or `arch` is the option apt applies, and a URI written as `https://download%2edocker.com/...` is Docker's host. A single quote is not a quote to apt (a single-quoted URI has no scheme, a single-quoted option value is read literally). A quote or bracket that is never closed fails the checks unless it opens after the last component or after an exact-path suite, where apt ignores it too; a missing space after the option group, or a second option group after a space, fails them. An option group whose closing bracket is written as an escape is not read, and leaves the file `unknown`. A `#` starts a comment wherever it stands outside an open `[` option group, so a `#` inside a URI cuts the line short and one inside an option value does not. A one-line suite is one word (`noble,jammy` is a single suite with a comma in it), and an architecture list is split at commas only. A no-break space or a byte order mark is not whitespace to apt: it stays part of the word it touches, so an entry with one in its type fails the checks and one in a suite, component or option value matches nothing. A URI that holds a `#`, a `?` or whitespace (a `%23`, `%3f` or `%20` counts) is a different path to apt, not the official repository's. Option names are exact: a one-line option named like a `.sources` field (`architectures`) is ignored, and the signing options (`trusted`, `allow-insecure`, `allow-weak`, `allow-downgrade-to-insecure`) count in any letter case, a weakening value always outweighing a later one that does not.
@@ -183,6 +252,15 @@ The Agent installation directory has no settings field. It is chosen only here.
 | `INVALID_PATH` | The response names the field and the rule. Fix that field; typing is never blocked. |
 | `BOOTSTRAP_IN_PROGRESS` | Another preflight for the same host and port is running. Wait for it to finish. |
 | `PREFLIGHT_TIMEOUT` | The 90-second budget expired. Check the host's load and connectivity, then run it again. |
+| `PLAN_NOT_CURRENT` | The plan was reviewed more than 10 minutes ago, by another administrator, was already approved once, or the request names a different server or directory. Run the preflight again. |
+| `BOOTSTRAP_OPERATION_ACTIVE` | Another run holds this server. Open it from **Bootstrap runs** to follow, retry or release it. |
+| `PLAN_STALE` or `PRECONDITION_CHANGED` | The server changed between your review and the run, so nothing was changed. Run the preflight again and approve the new plan. |
+| `KEY_NOT_VERIFIED` | The downloaded repository key was not Docker's release key, so the repository was not added. Check what the server reaches at `download.docker.com` (a proxy or DNS override), then retry. |
+| `DOCKER_NOT_READY` or `DOCKER_SERVICE_NOT_READY` | Docker was prepared but does not answer, or its service is not active and enabled. Check `systemctl status docker` on the server, then retry. |
+| `FILE_CONFLICT` | A file the plan writes exists with content this workflow did not write. It was left as it is. Move it aside deliberately, then retry. |
+| `ENROLLMENT_NOT_CONNECTED` | The Pilot started but did not connect within the wait. Check that the server reaches the hub URL, then retry; a retry mints a new enrollment. |
+| `STEP_FAILED` | A plan step exited with an error. **Activity** shows the step and the last lines of its output. |
+| `HUB_RESTARTED` | Sencho restarted during the run. Retry it. |
 
 ## Related
 

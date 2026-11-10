@@ -275,4 +275,47 @@ test.describe('Node bootstrap wizard', () => {
     const secondDigest = await page.locator('code', { hasText: /^sha256:/ }).innerText();
     expect(secondDigest).not.toBe(firstDigest);
   });
+
+  test('approves the reviewed plan in two clicks and follows the run to enrolled', async ({ page }) => {
+    await loginAs(page);
+    await mockBootstrap(page);
+    const operationId = '11111111-1111-4111-8111-111111111111';
+    const plan = planFor('/opt/docker/sencho', '/opt/sencho-agent');
+    const operation = (state: string, stage: string | null) => ({
+      id: operationId, targetName: 'media-server', host: 'server.example.com', port: 22, username: 'ubuntu',
+      address: '192.168.1.50', hostKeyFingerprint: 'SHA256:abc', composeDir: '/opt/docker/sencho', agentDir: '/opt/sencho-agent',
+      planDigest: plan.digest, approvedBy: 'admin', approvedAt: 1_762_300_000_000, attempt: 1, state, stage, step: null,
+      nodeId: state === 'enrolled' ? 7 : null, changesMade: state !== 'rechecking', active: state !== 'enrolled', cancelRequested: false,
+      error: null, enrollmentExpiresAt: null, createdAt: 1_762_300_000_000, updatedAt: 1_762_300_000_000, finishedAt: null,
+      actions: { cancel: state !== 'enrolled', retry: false, release: false }, plan, events: [],
+    });
+    let executeBody: Record<string, unknown> | null = null;
+    await page.route('**/api/nodes/bootstrap/operations', (route: Route) => {
+      if (route.request().method() === 'POST') {
+        executeBody = route.request().postDataJSON() as Record<string, unknown>;
+        return route.fulfill({ status: 202, contentType: 'application/json', body: JSON.stringify(operation('rechecking', null)) });
+      }
+      return route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ operations: [] }) });
+    });
+    await page.route(`**/api/nodes/bootstrap/operations/${operationId}`, (route: Route) => route.fulfill({
+      status: 200, contentType: 'application/json', body: JSON.stringify(operation('enrolled', 'enroll')),
+    }));
+
+    await page.goto('/nodes/local/fleet');
+    await openWizard(page);
+    await fillConnection(page);
+    await page.getByRole('button', { name: 'Check host key' }).click();
+    await page.getByRole('checkbox', { name: /I trust this host key/ }).check();
+    await page.getByRole('button', { name: 'Run preflight' }).click();
+
+    await page.getByRole('button', { name: 'Approve and run' }).click();
+    const confirm = page.getByRole('alertdialog');
+    await expect(confirm).toContainText(`Plan sha256:${plan.digest}`);
+    expect(executeBody).toBeNull();
+    await confirm.getByRole('button', { name: 'Approve and run' }).click();
+
+    await expect(page.getByTestId('bootstrap-run-answer')).toContainText('Re-checking');
+    await expect(page.getByTestId('bootstrap-run-answer')).toContainText('readiness for deployments has not been verified', { timeout: 10_000 });
+    expect(executeBody).toMatchObject({ planDigest: plan.digest, host: 'server.example.com', targetName: 'media-server' });
+  });
 });
