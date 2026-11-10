@@ -454,6 +454,7 @@ jobs:
           node --check scripts/check-pr-title.mjs
           node --check scripts/check-bundle-size.mjs
           node --check scripts/perf/scale-benchmark.mjs
+          node --check scripts/perf/idle-footprint.mjs
           node --check scripts/check-version-transition.mjs
 
       - name: Unit tests
@@ -465,5 +466,6 @@ jobs:
           node --test scripts/check-pr-title.test.mjs
           node --test scripts/check-bundle-size.test.mjs
           node --test scripts/perf/scale-benchmark.test.mjs
+          node --test scripts/perf/idle-footprint.test.mjs
           node --test scripts/check-workflow-expressions.test.mjs
           node --test scripts/check-version-transition.test.mjs
