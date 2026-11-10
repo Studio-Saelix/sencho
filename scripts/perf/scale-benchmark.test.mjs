@@ -4,8 +4,9 @@
  * Run:  node --test scripts/perf/scale-benchmark.test.mjs
  *
  * These cover the parts that decide pass or fail (statistics, the regression
- * rule, baseline validation, the checks that the run measured real work,
- * argument parsing, the remote-node address). The benchmark itself needs
+ * rule and its limits, baseline validation and scale check, the checks that
+ * the run measured real work and that miss samples were misses, the debug log
+ * parsing, argument parsing, the remote-node address). The benchmark itself needs
  * Docker and a built backend, and runs in the scale-benchmark workflow.
  */
 
@@ -13,8 +14,8 @@ import { describe, it } from 'node:test'
 import assert from 'node:assert/strict'
 
 import {
-  assertMeasuredWork, assertSameScale, compare, failures, formatTable, lanAddress, parseArgs, parseBaseline,
-  percentile, statusOutcomes, summarize,
+  assertAllMisses, assertMeasuredWork, assertSameScale, compare, failures, formatTable, lanAddress, limitsFrom,
+  parseArgs, parseBaseline, percentile, statusOutcomes, summarize,
 } from './scale-benchmark.mjs'
 
 const LIMITS = { ratio: 1.5, floorMs: 25 }
@@ -92,12 +93,20 @@ describe('parseBaseline and assertSameScale', () => {
       assert.throws(() => parseBaseline(JSON.stringify(baselineOf({ stacks: { medianMs } }))), /needs a positive medianMs/)
     }
     assert.throws(() => parseBaseline(JSON.stringify(baselineOf({ stacks: {} }))), /needs a positive medianMs/)
+    assert.throws(() => parseBaseline('{"meta":{"stacks":200,"remoteNodes":10},"series":{"stacks":{"medianMs":1e999}}}'), /needs a positive medianMs/)
+    assert.throws(() => parseBaseline('null'), /must record the stacks and remoteNodes/)
+    assert.throws(() => parseBaseline('[]'), /must record the stacks and remoteNodes/)
+  })
+
+  it('names the file when it is not JSON', () => {
+    assert.throws(() => parseBaseline('{oops', 'scripts/perf/scale-benchmark-baseline.json'), /scale-benchmark-baseline.json is not valid JSON/)
   })
 
   it('refuses to compare a run at a different scale', () => {
     const baseline = parseBaseline(valid)
     assert.doesNotThrow(() => assertSameScale(baseline, { stacks: 200, nodes: 10 }))
     assert.throws(() => assertSameScale(baseline, { stacks: 60, nodes: 10 }), /taken at 200 stacks and 10 remote nodes; this run uses 60 and 10/)
+    assert.throws(() => assertSameScale(baseline, { stacks: 200, nodes: 5 }), /this run uses 200 and 5/)
   })
 })
 
@@ -111,6 +120,20 @@ describe('statusOutcomes', () => {
       '[Stacks:debug] route=GET /statuses nodeId=1 cacheOutcome=null count=0 outcome=error',
     ].join('\n')
     assert.deepEqual(statusOutcomes(log), ['computed', 'hit', 'null'])
+  })
+})
+
+describe('assertAllMisses', () => {
+  it('accepts one computed or inflight outcome per sample', () => {
+    assert.doesNotThrow(() => assertAllMisses(['computed', 'inflight', 'computed'], 3))
+  })
+
+  it('rejects a hit, a stale fallback, an unreadable outcome, or a count that does not match', () => {
+    assert.throws(() => assertAllMisses(['computed', 'hit', 'computed'], 3), /logged outcomes: computed, hit, computed/)
+    assert.throws(() => assertAllMisses(['stale'], 1), /not all cache misses/)
+    assert.throws(() => assertAllMisses(['unknown'], 1), /not all cache misses/)
+    assert.throws(() => assertAllMisses(['computed', 'computed'], 3), /not all cache misses/)
+    assert.throws(() => assertAllMisses([], 1), /logged outcomes: none/)
   })
 })
 
@@ -160,11 +183,13 @@ describe('parseArgs', () => {
   })
 
   it('feeds --ratio and --floor-ms into the regression rule', () => {
-    const options = parseArgs(['--ratio', '2', '--floor-ms', '40'])
-    const limits = { ratio: options.ratio, floorMs: options['floor-ms'] }
     const baseline = baselineOf({ stacks: { medianMs: 50 } })
-    assert.equal(compare({ stacks: stats(99) }, baseline, limits)[0].status, 'ok')
-    assert.equal(compare({ stacks: stats(101) }, baseline, limits)[0].status, 'regressed')
+    const ratioLimits = limitsFrom(parseArgs(['--ratio', '2']))
+    assert.equal(compare({ stacks: stats(99) }, baseline, ratioLimits)[0].status, 'ok')
+    assert.equal(compare({ stacks: stats(101) }, baseline, ratioLimits)[0].status, 'regressed')
+    // 30 ms slower and over 1.5x: the default 25 ms floor fails it, a 40 ms floor does not.
+    assert.equal(compare({ stacks: stats(80) }, baseline, limitsFrom(parseArgs([])))[0].status, 'regressed')
+    assert.equal(compare({ stacks: stats(80) }, baseline, limitsFrom(parseArgs(['--floor-ms', '40'])))[0].status, 'ok')
   })
 
   it('rejects unknown flags, missing values, bad numbers, and out-of-range counts', () => {
@@ -177,6 +202,14 @@ describe('parseArgs', () => {
     assert.throws(() => parseArgs(['--samples', '0']), /must be at least 1/)
     assert.throws(() => parseArgs(['--miss-samples', '0']), /must be at least 1/)
     assert.throws(() => parseArgs(['--ratio', '0.9']), /--ratio must be at least 1/)
+    assert.throws(() => parseArgs(['--stacks', '0']), /must be at least 1/)
+    assert.throws(() => parseArgs(['--floor-ms', '-1']), /must be a non-negative number/)
+    assert.throws(() => parseArgs(['--stacks', '--nodes', '3']), /--stacks needs a value/)
+  })
+
+  it('accepts zero remote nodes, a ratio of exactly 1, and fractional limits', () => {
+    const options = parseArgs(['--nodes', '0', '--ratio', '1', '--floor-ms', '12.5'])
+    assert.deepEqual([options.nodes, options.ratio, options['floor-ms']], [0, 1, 12.5])
   })
 })
 

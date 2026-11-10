@@ -20,8 +20,8 @@
  * proves it measured real work: before and after timing, every node in the
  * fleet overview must be online and list every seeded stack, and the stack
  * statuses must show every seeded stack running. Each miss sample's cache
- * outcome is read from the backend's own debug timing log and must be a fresh
- * computation.
+ * outcome is read from the backend's own debug timing log and must be a
+ * computation, not a cache hit.
  *
  * With `--baseline`, the run fails when a series' median is over `--ratio`
  * times the baseline median and also more than `--floor-ms` slower (so CI
@@ -38,13 +38,15 @@
  *
  * Writes a table to stdout and, when GITHUB_STEP_SUMMARY is set, to the job
  * summary. Exits 1 on a regression or when the run itself fails, including a
- * failed cleanup. `--work-dir` keeps the scratch directory (with backend.log)
- * after the run; without it a temporary directory is used and removed.
+ * failed cleanup. `--work-dir` (empty or new) keeps the scratch directory, with
+ * backend.log, after the run; without it a temporary directory is used and
+ * removed.
  */
 
 import { spawn, execFile } from 'node:child_process'
 import {
-  appendFileSync, closeSync, mkdirSync, mkdtempSync, openSync, readFileSync, realpathSync, rmSync, statSync, writeFileSync,
+  appendFileSync, closeSync, mkdirSync, mkdtempSync, openSync, readFileSync, readdirSync, realpathSync, rmSync, statSync,
+  writeFileSync,
 } from 'node:fs'
 import { networkInterfaces, tmpdir } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
@@ -103,8 +105,13 @@ export function parseArgs(args) {
 }
 
 /** A baseline file's contents, or an error naming what is wrong with it. */
-export function parseBaseline(text) {
-  const baseline = JSON.parse(text)
+export function parseBaseline(text, path = 'baseline') {
+  let baseline
+  try {
+    baseline = JSON.parse(text)
+  } catch (error) {
+    throw new Error(`${path} is not valid JSON: ${error.message}`)
+  }
   const { meta, series } = baseline ?? {}
   if (!Number.isInteger(meta?.stacks) || !Number.isInteger(meta?.remoteNodes)) {
     throw new Error('Baseline meta must record the stacks and remoteNodes it was taken at')
@@ -113,11 +120,23 @@ export function parseBaseline(text) {
     throw new Error('Baseline has no series')
   }
   for (const [name, stats] of Object.entries(series)) {
-    if (typeof stats?.medianMs !== 'number' || !(stats.medianMs > 0)) {
+    if (typeof stats?.medianMs !== 'number' || !Number.isFinite(stats.medianMs) || stats.medianMs <= 0) {
       throw new Error(`Baseline series "${name}" needs a positive medianMs`)
     }
   }
   return baseline
+}
+
+/** The regression limits `compare` applies, from parsed options. */
+export function limitsFrom(options) {
+  return { ratio: options.ratio, floorMs: options['floor-ms'] }
+}
+
+/** Throws unless there is one logged outcome per sample and each is a computation. */
+export function assertAllMisses(outcomes, count) {
+  if (outcomes.length !== count || !outcomes.every((o) => MISS_OUTCOMES.has(o))) {
+    throw new Error(`statuses-miss samples were not all cache misses (logged outcomes: ${outcomes.join(', ') || 'none'})`)
+  }
 }
 
 /** Throws when the baseline was taken at a different scale than this run. */
@@ -190,10 +209,10 @@ export function formatTable(rows) {
 
 /**
  * The first non-internal, non-link-local IPv4 address, for the remote nodes
- * to target (the backend rejects loopback). The backend's outbound blocklist
- * (backend/src/utils/outboundTarget.ts) also rejects documentation and
- * benchmark ranges such as 198.18.0.0/15; a host whose only address is in one
- * of those fails at node creation with "API URL target is not allowed".
+ * to target (the backend rejects loopback). It is returned even when it is in
+ * another range the backend's outbound blocklist rejects
+ * (backend/src/utils/outboundTarget.ts, for example 198.18.0.0/15); node
+ * creation then fails with "API URL target is not allowed".
  */
 export function lanAddress(interfaces = networkInterfaces()) {
   for (const addresses of Object.values(interfaces)) {
@@ -335,7 +354,12 @@ function serverGone(server) {
 async function stopServer(server) {
   if (serverGone(server)) return
   server.child.kill('SIGTERM')
-  const timedOut = await Promise.race([server.exited.then(() => false), sleep(15_000).then(() => true)])
+  let timer
+  const timedOut = await Promise.race([
+    server.exited.then(() => false),
+    new Promise((r) => { timer = setTimeout(() => r(true), 15_000) }),
+  ])
+  clearTimeout(timer)
   if (timedOut) {
     server.child.kill('SIGKILL')
     await server.exited
@@ -376,8 +400,9 @@ async function api(method, path, { cookie, body } = {}) {
 }
 
 /**
- * Creates the admin account, issues a full-admin API token (what a real remote
- * node is given), registers the remote nodes, and returns the session cookie.
+ * Creates the admin account and, when `nodes` is above zero, issues a
+ * full-admin API token (what a real remote node is given) and registers the
+ * remote nodes. Returns the session cookie.
  */
 async function setUp(nodes, remoteHost) {
   const password = randomBytes(18).toString('base64url')
@@ -439,22 +464,21 @@ const setDeveloperMode = (cookie, on) => api('PATCH', '/api/settings', { cookie,
 
 /**
  * The miss series, with developer mode on only for its duration so the
- * backend logs each request's cache outcome. Throws if any sample was served
- * from the cache.
+ * backend logs each request's cache outcome. Throws unless every sample
+ * logged a computed or inflight outcome.
  */
 async function sampleMisses(cookie, count, logPath) {
   await setDeveloperMode(cookie, true)
-  const logStart = statSync(logPath).size
+  let logStart
   let summary
   try {
+    logStart = statSync(logPath).size
     summary = await sampleSeries('/api/stacks/statuses', cookie, count, STATUS_CACHE_EXPIRY_MS)
   } finally {
-    await setDeveloperMode(cookie, false)
+    // Never let turning debug back off hide the sampling error.
+    await setDeveloperMode(cookie, false).catch((error) => console.error(`Could not turn developer mode off: ${error.message}`))
   }
-  const outcomes = statusOutcomes(readFileSync(logPath).subarray(logStart).toString('utf8'))
-  if (outcomes.length !== count || !outcomes.every((o) => MISS_OUTCOMES.has(o))) {
-    throw new Error(`statuses-miss samples were not all cache misses (logged outcomes: ${outcomes.join(', ') || 'none'})`)
-  }
+  assertAllMisses(statusOutcomes(readFileSync(logPath).subarray(logStart).toString('utf8')), count)
   return summary
 }
 
@@ -513,10 +537,16 @@ function makeCleanup(state, options) {
   }
 }
 
-/** Ctrl-C or a cancelled job still stops the backend and removes the stacks. */
-function cleanUpOnSignal(cleanup) {
+/**
+ * Ctrl-C or a cancelled job still stops the backend and removes the stacks.
+ * `state.aborted` stops the main flow from starting anything new meanwhile;
+ * a `docker compose up` already running can still finish after the sweep,
+ * and the next run's opening sweep removes it.
+ */
+function cleanUpOnSignal(cleanup, state) {
   const onSignal = (signal) => {
     console.error(`${signal} received, cleaning up...`)
+    state.aborted = true
     cleanup().catch((error) => console.error(error.message)).finally(() => process.exit(130))
   }
   process.once('SIGINT', onSignal)
@@ -527,20 +557,32 @@ function cleanUpOnSignal(cleanup) {
   }
 }
 
+/** A scratch directory that is new or empty, so leftovers cannot skew the run. */
+function prepareWorkDir(workDir) {
+  if (workDir === null) return mkdtempSync(join(tmpdir(), 'sencho-scale-'))
+  mkdirSync(workDir, { recursive: true })
+  if (readdirSync(workDir).length > 0) throw new Error(`--work-dir ${workDir} is not empty; use a new or empty directory`)
+  return workDir
+}
+
 async function benchmark(options) {
   if (await portInUse()) throw new Error(`Port ${PORT} is already serving; stop that instance first`)
   const remoteHost = lanAddress()
-  const state = { server: null, workDir: options['work-dir'] ?? mkdtempSync(join(tmpdir(), 'sencho-scale-')) }
-  mkdirSync(join(state.workDir, 'compose'), { recursive: true })
-  mkdirSync(join(state.workDir, 'data'), { recursive: true })
+  const state = { server: null, aborted: false, workDir: prepareWorkDir(options['work-dir']) }
+  mkdirSync(join(state.workDir, 'compose'))
+  mkdirSync(join(state.workDir, 'data'))
   const logPath = join(state.workDir, 'backend.log')
   const cleanup = makeCleanup(state, options)
-  const detachSignals = cleanUpOnSignal(cleanup)
+  const detachSignals = cleanUpOnSignal(cleanup, state)
+  const checkAborted = () => {
+    if (state.aborted) throw new Error('Interrupted')
+  }
   let results
   try {
     await removeBenchResources()
     console.error(`Deploying ${options.stacks} stacks...`)
     await deployStacks(join(state.workDir, 'compose'), options.stacks)
+    checkAborted()
     state.server = startServer(state.workDir, logPath)
     await waitForHealth(state.server)
     const cookie = await setUp(options.nodes, remoteHost)
@@ -559,22 +601,26 @@ async function benchmark(options) {
   } catch (error) {
     printLogTail(logPath)
     await cleanup().catch((cleanupError) => console.error(cleanupError.message))
+    detachSignals()
     throw error
+  }
+  // Signals stay handled until the final cleanup is done.
+  try {
+    await cleanup()
   } finally {
     detachSignals()
   }
-  await cleanup()
   return results
 }
 
 async function main(args) {
   const options = parseArgs(args)
-  const baseline = options.baseline ? parseBaseline(readFileSync(options.baseline, 'utf8')) : null
+  const baseline = options.baseline ? parseBaseline(readFileSync(options.baseline, 'utf8'), options.baseline) : null
   if (baseline) assertSameScale(baseline, options)
   const results = await benchmark(options)
   if (options.out) writeFileSync(options.out, `${JSON.stringify(results, null, 2)}\n`)
 
-  const rows = compare(results.series, baseline, { ratio: options.ratio, floorMs: options['floor-ms'] })
+  const rows = compare(results.series, baseline, limitsFrom(options))
   const table = formatTable(rows)
   console.log(table)
   if (process.env.GITHUB_STEP_SUMMARY) {
