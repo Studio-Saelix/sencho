@@ -118,11 +118,7 @@ function FooterActions({
     return (
       <ModalFooter
         primary={<Button size="sm" onClick={onClose}>{running ? 'Close' : 'Done'}</Button>}
-        hint={running
-          ? 'The run continues on the hub after you close this window.'
-          : operation?.state === 'enrolled'
-            ? 'Readiness for deployments is not verified by this run.'
-            : undefined}
+        hint={running ? 'The run continues on the hub after you close this window.' : undefined}
       />
     );
   }

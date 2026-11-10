@@ -5,11 +5,11 @@ import {
   PILOT_PROJECT_NAME,
 } from './pathPolicy';
 import {
-  DOCKER_SERVICE_STATE_COMMAND,
   READ_EXIT,
   WRITE_EXIT,
   agentContainerCommand,
   composeVersionCommand,
+  dockerServiceStateCommand,
   dockerServerVersionCommand,
   readFileCommand,
   statCommand,
@@ -324,9 +324,10 @@ export async function verifyDockerReady(ctx: StepContext, plan: BootstrapPlan): 
   return `Docker ${server.stdout.trim()} and Compose ${compose.stdout.trim()} answer.`;
 }
 
-/** systemd reports the Docker service active and enabled at boot. */
-export async function verifyDockerService(ctx: StepContext): Promise<string> {
-  const result = await runChecked(ctx, DOCKER_SERVICE_STATE_COMMAND, 'check the Docker service');
+/** systemd reports the Docker service active and enabled at boot, asked with the service step's privilege. */
+export async function verifyDockerService(ctx: StepContext, plan: BootstrapPlan): Promise<string> {
+  const step = plan.stages.find((stage) => stage.id === 'docker_service')?.steps[0];
+  const result = await runChecked(ctx, dockerServiceStateCommand(step?.privilege === 'sudo'), 'check the Docker service');
   const [active, enabled] = result.stdout.trim().split('\n').map((line) => line.trim());
   if (active !== 'active' || enabled !== 'enabled') {
     throw new StepFailure(

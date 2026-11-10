@@ -308,6 +308,9 @@ describe('bootstrap operations: a clean run', () => {
     expect(op.active).toBe(false);
     expect(op.nodeId).not.toBeNull();
 
+    // The service check runs with the service step's privilege: without D-Bus only root reaches systemd.
+    expect(h.host.commands.map((entry) => entry.command)).toContain("sudo -n sh -c 'systemctl is-active docker; systemctl is-enabled docker'");
+
     // Exactly the plan's commands, in the plan's order.
     const expected = plan.stages.flatMap((stage) => stage.steps).map((step) => step.command).filter(Boolean);
     expect(h.host.planCommands(plan)).toEqual(expected);

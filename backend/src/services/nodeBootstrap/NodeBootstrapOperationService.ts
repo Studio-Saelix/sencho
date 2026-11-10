@@ -503,9 +503,9 @@ export class NodeBootstrapOperationService {
           this.event(op, outcome.status, outcome.message, stage.id, step.id);
         }
         const verified = stage.id === dockerVerifyStage
-          ? [...(stage.id === 'docker_service' ? [await verifyDockerService(ctx)] : []), await verifyDockerReady(ctx, plan)]
+          ? [...(stage.id === 'docker_service' ? [await verifyDockerService(ctx, plan)] : []), await verifyDockerReady(ctx, plan)]
           : stage.id === 'docker_service'
-            ? [await verifyDockerService(ctx)]
+            ? [await verifyDockerService(ctx, plan)]
             : stage.id === 'agent_start'
               ? [await verifyAgentContainer(ctx, plan)]
               : [];

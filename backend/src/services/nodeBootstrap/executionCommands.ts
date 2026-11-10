@@ -93,8 +93,14 @@ export function composeVersionCommand(sudo: boolean): string {
   return withSudo(`${DOCKER_LOCAL_ENV} docker compose version --short`, sudo);
 }
 
-/** systemd's view of the Docker service: active state, then enablement. */
-export const DOCKER_SERVICE_STATE_COMMAND = "sh -c 'systemctl is-active docker; systemctl is-enabled docker'";
+/**
+ * systemd's view of the Docker service: active state, then enablement. It runs
+ * with the privilege the service step used: on a host without D-Bus, only root
+ * reaches systemd through its private socket.
+ */
+export function dockerServiceStateCommand(sudo: boolean): string {
+  return withSudo("sh -c 'systemctl is-active docker; systemctl is-enabled docker'", sudo);
+}
 
 /** State and Compose labels of the Pilot container, separated by `|`. */
 export function agentContainerCommand(sudo: boolean): string {

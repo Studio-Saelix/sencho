@@ -44,6 +44,9 @@ function OperationProof({ operation }: { operation: BootstrapOperationDetail }) 
       <ol className="space-y-1.5" aria-label="Activity">
         {operation.events.map((event, index) => (
           <li key={`${event.at}-${index}`} className="text-xs" data-testid="bootstrap-event">
+            {operation.attempt > 1 && (index === 0 || operation.events[index - 1].attempt !== event.attempt) && (
+              <p className="mb-1 mt-2 font-mono text-[10px] uppercase tracking-[0.18em] text-stat-subtitle first:mt-0">Attempt {event.attempt}</p>
+            )}
             <div className="flex items-start gap-2">
               <span aria-hidden className={cn('mt-1.5 h-1.5 w-1.5 shrink-0 rounded-full', STATUS_DOT_CLASS[EVENT_TONE[event.status]])} />
               <span className="shrink-0 font-mono text-[10px] tabular-nums text-stat-subtitle">{time(event.at)}</span>
