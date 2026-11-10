@@ -344,6 +344,11 @@ describe('authorizePointContentRead', () => {
       .toEqual({ kind: 'attached', storageKey: soloKey, dependents: recorded });
   });
 
+  it('fails closed to detached when a resolution names current dependents but no dependents', () => {
+    const now = [{ stackName: 'photos', serviceName: 'app' }];
+    expect(auth.pointContentReadTargetFor(soloKey, { kind: 'resolved', dependents: [], current: now })).toEqual({ kind: 'detached' });
+  });
+
   it('holds a point with no storage record to system:settings', () => {
     expect(read(req({ role: 'viewer', userId: 996 }), { kind: 'detached' })).toBe(false);
     expect(read(req({ role: 'admin', userId: 995 }), { kind: 'detached' })).toBe(true);

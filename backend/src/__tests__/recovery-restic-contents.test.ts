@@ -77,6 +77,11 @@ describe('parseContentLine', () => {
     const longLine = JSON.stringify({ name: long, type: 'file', path: `/data/${long}`, size: 3, message_type: 'node' });
     expect(parseContentNodeLine(longLine)).toMatchObject({ downloadable: false });
   });
+
+  it('lists a name restic printed with U+FFFD, but never as downloadable', () => {
+    const replaced = JSON.stringify({ name: 'bad\ufffdname', type: 'file', path: '/data/bad\ufffdname', size: 3, message_type: 'node' });
+    expect(parseContentNodeLine(replaced)).toMatchObject({ name: 'bad\ufffdname', type: 'file', downloadable: false });
+  });
 });
 
 describe('parseContentNodeLine', () => {

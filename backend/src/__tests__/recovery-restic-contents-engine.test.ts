@@ -426,8 +426,10 @@ describe('the helper runner under a streamed body', () => {
   it('resumes a paused stream as soon as the run is aborted, so the helper can drain and exit', async () => {
     const controller = new AbortController();
     let flowingAfterAbort: boolean | null = null;
+    let pausedBeforeAbort: boolean | null = null;
     const fake = streamingDocker((attach) => {
       attach.write(Buffer.from('a'));
+      pausedBeforeAbort = attach.isPaused();
       controller.abort();
       // Read before the process exits: a stream left paused here would block the
       // helper's writes until SIGKILL instead of letting SIGINT end it.
@@ -442,6 +444,8 @@ describe('the helper runner under a streamed body', () => {
       signal: controller.signal,
       onStdoutChunk: (_chunk, control: ContentChunkControl) => control.pause(),
     });
+    // The sink really had paused the stream, so the resume is what freed it.
+    expect(pausedBeforeAbort).toBe(true);
     expect(flowingAfterAbort).toBe(true);
   });
 

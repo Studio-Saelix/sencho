@@ -144,7 +144,8 @@ export function parseContentLine(line: string): ContentLine {
       // A name a request cannot spell (a control character, a segment over 255
       // bytes, a path over 4096 bytes) is listed, but no download could name it.
       // Neither can one restic recorded with U+FFFD in place of bytes that were
-      // not UTF-8: the name it prints is not the name it stores.
+      // not UTF-8 (the name it prints is not the name it stores); a name that
+      // really holds U+FFFD cannot be told apart, so it is refused too.
       downloadable: type === 'file' && size !== null && isPointPath(pointPath) && !pointPath.includes('\ufffd'),
     },
   };

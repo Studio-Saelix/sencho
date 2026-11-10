@@ -800,6 +800,67 @@ describe('read slots on every ending', () => {
     expect(pauses).toBeGreaterThan(0);
     expect(resumes).toBe(pauses);
   }, 20_000);
+
+  it('pauses again after every drain, and waits on one drain listener at a time', async () => {
+    const pointId = seedPoint();
+    await stubDocker();
+    service().markReadyForTests();
+    const chunk = Buffer.alloc(64 * 1024, 0x62);
+    const total = 512;
+    let pauses = 0;
+    let maxDrainListeners = 0;
+    let response: import('http').ServerResponse | null = null;
+    const original = http.ServerResponse.prototype.write;
+    const spy = vi.spyOn(http.ServerResponse.prototype, 'write').mockImplementation(function (this: import('http').ServerResponse, ...args: Parameters<typeof original>) {
+      response = this;
+      return original.apply(this, args);
+    });
+    contentEngine({
+      dumpFile: async (sink) => {
+        let paused = false;
+        let wake: () => void = () => undefined;
+        // A runner that has exited ignores pauses: chunks keep coming while the
+        // buffer is full, which is where a listener per write would pile up.
+        const control = {
+          pause: () => { if (!paused) { paused = true; pauses += 1; } },
+          resume: () => { if (paused) { paused = false; wake(); } },
+        };
+        for (let i = 0; i < total; i += 1) {
+          sink(chunk, control);
+          if (response) maxDrainListeners = Math.max(maxDrainListeners, response.listenerCount('drain'));
+          if (paused && i % 4 === 3) await new Promise<void>((resolve) => { wake = resolve; });
+        }
+        return { ok: true, evidence: { bytes: total * chunk.length } };
+      },
+    });
+    TREE['/big2.bin'] = { self: entry('/big2.bin', 'file', total * chunk.length), children: [] };
+    const server = http.createServer(app);
+    await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+    const port = (server.address() as import('net').AddressInfo).port;
+    try {
+      const received = await new Promise<number>((resolve, reject) => {
+        const req = http.get({ host: '127.0.0.1', port, path: download(pointId, '/big2.bin'), headers: { Cookie: viewerCookie } }, (res) => {
+          let bytes = 0;
+          // A slow reader: drains in bursts, so the route pauses many times.
+          res.on('data', (c: Buffer) => {
+            bytes += c.length;
+            res.pause();
+            setTimeout(() => res.resume(), 1);
+          });
+          res.on('end', () => resolve(bytes));
+        });
+        req.on('error', reject);
+      });
+      expect(received).toBe(total * chunk.length);
+    } finally {
+      spy.mockRestore();
+      delete TREE['/big2.bin'];
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+    }
+    // Without the reset after a drain, the route would pause once and never again.
+    expect(pauses).toBeGreaterThan(1);
+    expect(maxDrainListeners).toBeLessThanOrEqual(1);
+  }, 30_000);
 });
 
 describe('a point\'s contents over the node proxy and the Pilot tunnel', () => {

@@ -197,7 +197,7 @@ A point that has not finished, that failed, or that was interrupted holds nothin
 - Finding a directory's entries is bounded at 2 minutes on the node. On a remote node the control instance's 30-second wait for a slow read applies first. A download stops after 5 minutes without a byte delivered.
 - Downloads have no ranges and cannot be resumed (`Accept-Ranges: none`).
 - Each read opens the repository and loads its index first, so on a very large repository the first entry or byte can take tens of seconds.
-- A file name that is not valid UTF-8 is listed with `downloadable: false`, because its listed name is not the name stored in the point. A name holding a control character, a path segment longer than 255 bytes or a path longer than 4096 bytes is listed with `downloadable: false` too, and a directory with such a name cannot be opened.
+- A file name that is not valid UTF-8 is listed with `downloadable: false`, because its listed name is not the name stored in the point; so is a name that contains the character U+FFFD, which the listing cannot tell apart. A name holding a control character, a path segment longer than 255 bytes or a path longer than 4096 bytes is listed with `downloadable: false` too. A directory whose name is not valid UTF-8, or that holds one of those characters or lengths, cannot be opened.
 
 ## Restore to a new volume
 
