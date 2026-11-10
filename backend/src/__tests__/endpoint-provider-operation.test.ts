@@ -368,14 +368,31 @@ describe('execute (the process that spawns the helper)', () => {
     const selfUpdate = mockAvailableProvider();
     vi.spyOn(selfUpdate, 'triggerComposeReapply').mockResolvedValue(undefined);
     const service = fastTimings();
+    // The helper stays in Docker's list past the 200 ms watch bound, then
+    // disappears without ever publishing a verdict. Without this fixture the
+    // test reads whatever Docker the machine has, and with none the watcher
+    // never gets termination evidence and waits forever.
+    const dockerOptions: MockDockerOptions = { helperRunning: true };
+    const docker = mockDocker(dockerOptions);
     await service.claimComposeReapply({ replace: true });
     await service.executeClaimedComposeReapply();
+    await new Promise(resolve => setTimeout(resolve, 400));
+    // Past the bound with the helper alive: a deadline is not termination
+    // evidence, so the claim stays and a second operation is refused.
+    expect(await service.getCurrentOperation()).toMatchObject({ state: 'recreating' });
+    expect(service.isEndpointProviderPending()).toBe(true);
+    await expect(service.claimComposeReapply({ replace: true, only: true })).resolves.toEqual({
+      ok: false, failureCode: 'IMAGE_OPERATION_IN_FLIGHT',
+    });
+    dockerOptions.helperRunning = false;
     await waitForSettled(service, 'failed', 2_000);
     expect(await service.getCurrentOperation()).toMatchObject({
       failureCode: 'endpoint_provider_recovery_required',
       rollback: { attempted: false },
       failureDetail: expect.stringContaining('did not report an outcome in time'),
     });
+    expect(docker.listContainers).toHaveBeenCalled();
+    await expect(service.claimComposeReapply({ replace: true, only: true })).resolves.toEqual({ ok: true });
   });
 
   it('does not claim a restore when the helper failed before touching the endpoint', async () => {
