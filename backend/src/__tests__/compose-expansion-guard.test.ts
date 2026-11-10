@@ -1696,15 +1696,68 @@ describe('assertComposeInputsWithinExpansionLimits - parser gaps, devices, exten
       expect(Date.now() - started).toBeLessThan(3_000);
     });
 
-    it('refuses more distinct include environments than the bound', async () => {
-      await write('leaf.yaml', SAFE_COMPOSE);
+    it('accepts an umbrella that includes many projects, each with its own .env', async () => {
       const entries: string[] = [];
-      for (let i = 0; i < 70; i += 1) {
-        await write(`e${i}.env`, `K${i}=1\n`);
-        entries.push(`  - path: leaf.yaml\n    env_file: e${i}.env`);
+      for (let i = 0; i < 100; i += 1) {
+        await write(`app${i}/compose.yaml`, SAFE_COMPOSE);
+        await write(`app${i}/.env`, `TAG=v${i}\n`);
+        entries.push(`  - app${i}/compose.yaml`);
       }
       await write('compose.yaml', `include:\n${entries.join('\n')}\n`);
-      await expect(run()).rejects.toThrow(/distinct include environments/);
+      await expect(run()).resolves.toBeUndefined();
+    });
+
+    it('refuses more distinct env files than the bound', async () => {
+      await write('leaf.yaml', SAFE_COMPOSE);
+      const envFiles: string[] = [];
+      for (let i = 0; i < 520; i += 1) {
+        await write(`e${i}.env`, `K${i}=1\n`);
+        envFiles.push(`      - e${i}.env`);
+      }
+      await write('compose.yaml', `include:\n  - path: leaf.yaml\n    env_file:\n${envFiles.join('\n')}\n`);
+      await expect(run()).rejects.toThrow(/more than 512 env files/);
+    });
+
+    it('refuses the same large file parsed under many project directories', async () => {
+      await write('dep.yaml', `# ${'x'.repeat(500_000)}\n`);
+      const entries = Array.from({ length: 20 }, (_, i) => `  - path: dep.yaml\n    project_directory: p${i}`);
+      await write('compose.yaml', `include:\n${entries.join('\n')}\n`);
+      await expect(run()).rejects.toThrow(/MiB of compose text in total/);
+    });
+
+    it('reads a lone carriage return as a line break, as Compose does', async () => {
+      await write('compose.yaml', 'services:\n  web:\n    image: alpine\n# c\rinclude:\r  - inc.yaml\r');
+      await write('inc.yaml', nestedAliasBomb(12));
+      await expect(run()).rejects.toBeInstanceOf(ComposeExpansionRefusal);
+      const bomb = nestedAliasBomb(12).replace(/\n/g, '\r');
+      await write('compose.yaml', `x-pad: 1 # note\r${bomb}`);
+      await expect(run()).rejects.toBeInstanceOf(ComposeExpansionRefusal);
+    });
+
+    it('accepts a file with lone-CR or CRLF line endings that reuses an anchor', async () => {
+      const source = 'x-a: &a [1, 2]\nservices:\n  web:\n    image: nginx\n    x-list: *a\n';
+      await write('compose.yaml', source.replace(/\n/g, '\r'));
+      await expect(run()).resolves.toBeUndefined();
+      await write('compose.yaml', source.replace(/\n/g, '\r\n'));
+      await expect(run()).resolves.toBeUndefined();
+    });
+
+    it('checks a ~ service env_file against HOME', async () => {
+      await new Promise<void>((resolve, reject) => {
+        execFile('mkfifo', [path.join(dir, 'fifo2')], (err) => (err ? reject(err) : resolve()));
+      });
+      await write('compose.yaml', 'services:\n  web:\n    image: nginx\n    env_file: ~/fifo2\n');
+      await expect(run(dir, ['compose', 'config'], (name) => (name === 'HOME' ? dir : undefined)))
+        .rejects.toThrow(/not a regular file/);
+      // Enough `..` segments to reach the filesystem root from any scratch depth.
+      await write('compose.yaml', `services:\n  web:\n    image: nginx\n    env_file: ~/${'../'.repeat(40)}dev/zero\n`);
+      await expect(run(dir, ['compose', 'config'], (name) => (name === 'HOME' ? dir : undefined)))
+        .rejects.toThrow(/not a regular file/);
+    });
+
+    it('names an input outside the stack by its own path', async () => {
+      await write('compose.yaml', 'include:\n  - /dev/zero\n');
+      await expect(run()).rejects.toThrow(/"\/dev\/zero" is not a regular file/);
     });
 
     it('refuses env files that total more than the parse budget', async () => {

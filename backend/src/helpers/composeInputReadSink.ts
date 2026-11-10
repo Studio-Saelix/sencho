@@ -168,17 +168,14 @@ export async function resolvePhysicalDirectory(directory: string): Promise<strin
  * it without limit asks this instead of reading up to the cap.
  */
 export async function inspectComposeInput(filePath: string): Promise<'missing' | 'regular' | NonRegularKind> {
-  let handle: Awaited<ReturnType<typeof fsPromises.open>>;
+  // `stat`, not `open`: opening a device can act on it (a watchdog starts, a
+  // tape rewinds), and Compose never opens a path the guard refuses.
+  let stat: Stats;
   try {
-    handle = await fsPromises.open(filePath, fsConstants.O_RDONLY | fsConstants.O_NONBLOCK);
+    stat = await fsPromises.stat(filePath);
   } catch (err) {
     if (isSkippableReadError(err)) return 'missing';
     throw err;
   }
-  try {
-    const stat = await handle.stat();
-    return stat.isFile() ? 'regular' : await classifyNonRegular(stat);
-  } finally {
-    await handle.close().catch(() => undefined);
-  }
+  return stat.isFile() ? 'regular' : await classifyNonRegular(stat);
 }

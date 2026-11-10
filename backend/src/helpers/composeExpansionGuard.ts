@@ -83,8 +83,10 @@ export const MAX_COMPOSE_DEPENDENCY_FILES = 512;
  * parse, so the count is bounded rather than left to the file's size.
  */
 export const MAX_COMPOSE_DEPENDENCY_REFERENCES = 4096;
-/** Distinct include environments built per invocation; each copies every value. */
-export const MAX_COMPOSE_ENV_CONTEXTS = 64;
+/** Distinct include environments built per invocation. */
+export const MAX_COMPOSE_ENV_CONTEXTS = 512;
+/** Compose text parsed per invocation, repeats under another context included. */
+export const MAX_COMPOSE_PARSED_BYTES = 8 * 1024 * 1024;
 /** Env-file text parsed to build those environments, across the invocation. */
 export const MAX_COMPOSE_ENV_PARSE_BYTES = 8 * 1024 * 1024;
 
@@ -319,11 +321,12 @@ function usesUnmeasurableConstructs(text: string): boolean {
  * it; a stream with none of those is left to Compose to report.
  */
 function measureDocumentStream(rawSource: string, label: string): MeasuredDocument[] {
-  // Compose's YAML parser reads U+0085, U+2028, and U+2029 as line breaks; the
-  // `yaml` package reads them as text, which would hide an alias that follows
-  // one. Unique keys are not checked: that check is quadratic in the keys of
-  // one map, and a repeated key is Compose's error to report.
-  const source = rawSource.replace(/[\u0085\u2028\u2029]/g, '\n');
+  // Compose's YAML parser reads a lone CR, U+0085, U+2028, and U+2029 as line
+  // breaks; the `yaml` package reads them as text, which would hide an alias or
+  // an include that follows one (CRLF is one break either way). Unique keys are
+  // not checked: that check is quadratic in the keys of one map, and a repeated
+  // key is Compose's error to report.
+  const source = rawSource.replace(/\r\n?|[\u0085\u2028\u2029]/g, '\n');
   const documents = parseAllDocuments(source, { prettyErrors: false, merge: true, uniqueKeys: false });
   const measured: MeasuredDocument[] = [];
   let expanded = 0;
@@ -416,8 +419,14 @@ function lastFlagValue(invocation: readonly string[], long: string): string | un
 interface GuardEnvContext {
   /** Process-level environment, which Compose always puts above file values. */
   processEnv: ComposeEnvLookup;
-  /** Values the env files assigned, in read order (later files win). */
+  /** Values the env files of this layer assigned, in read order (later files win). */
   values: Map<string, string>;
+  /**
+   * The context this one adds to. A layer holds only the names it assigned, so
+   * a deep include chain or many includes do not each copy every inherited
+   * value.
+   */
+  parent?: GuardEnvContext;
 }
 
 interface EnvFileText {
@@ -428,7 +437,12 @@ interface EnvFileText {
 function lookupEnv(context: GuardEnvContext): ComposeEnvLookup {
   return (name) => {
     const fromProcess = context.processEnv(name);
-    return fromProcess !== undefined ? fromProcess : context.values.get(name);
+    if (fromProcess !== undefined) return fromProcess;
+    for (let layer: GuardEnvContext | undefined = context; layer; layer = layer.parent) {
+      const value = layer.values.get(name);
+      if (value !== undefined) return value;
+    }
+    return undefined;
   };
 }
 
@@ -452,7 +466,8 @@ function withAdditionalEnvFiles(context: GuardEnvContext, contents: readonly Env
   }
   const child: GuardEnvContext = {
     processEnv: context.processEnv,
-    values: new Map(context.values),
+    values: new Map(),
+    parent: context,
   };
   const inherited = lookupEnv(context);
   for (const name of reader.assignedNames()) {
@@ -853,7 +868,11 @@ interface PendingInput {
 }
 
 function inputLabel(cwd: string, filePath: string): string {
-  return path.relative(cwd, filePath) || path.basename(filePath);
+  const relative = path.relative(cwd, filePath);
+  // An input outside the stack directory reads better as its own path than as
+  // a run of `..` segments.
+  if (relative.startsWith('..')) return filePath;
+  return relative || path.basename(filePath);
 }
 
 const envContextIds = new WeakMap<GuardEnvContext, string>();
@@ -868,6 +887,10 @@ function envContextId(context: GuardEnvContext): string {
   let id = envContextIds.get(context);
   if (id === undefined) {
     const digest = createHash('sha256');
+    if (context.parent) {
+      digest.update(envContextId(context.parent));
+      digest.update('\0');
+    }
     for (const [name, value] of context.values) {
       digest.update(name);
       digest.update('\0');
@@ -988,6 +1011,7 @@ async function assertInputClosure(args: {
   const active = new Set<string>();
   let references = 0;
   let measuredNodes = 0;
+  let parsedBytes = 0;
   const countReference = (label: string): void => {
     references += 1;
     if (references > MAX_COMPOSE_DEPENDENCY_REFERENCES) {
@@ -1026,6 +1050,10 @@ async function assertInputClosure(args: {
       content = read.content;
     }
 
+    parsedBytes += content.length;
+    if (parsedBytes > MAX_COMPOSE_PARSED_BYTES) {
+      throw dependencyBoundRefusal(label, `more than ${MAX_COMPOSE_PARSED_BYTES / (1024 * 1024)} MiB of compose text in total`);
+    }
     active.add(contextKey);
     try {
       // The parsed documents are dropped before the walk descends: a chain of
@@ -1078,8 +1106,14 @@ async function assertInputClosure(args: {
         countReference(label);
         const target = interpolatePath(raw, input.env);
         if (target === null || target === '') continue;
-        const resolved = resolveDependencyPath(target, input.projectBase);
-        if ((await inspectComposeInput(resolved)) === 'unbounded') throw unboundedInputRefusal(inputLabel(args.cwd, resolved));
+        // Compose expands a leading `~` in these paths and reads a relative one
+        // from the project directory, so both spellings are checked.
+        const candidates = new Set([resolveDependencyPath(target, input.projectBase)]);
+        const home = input.env.processEnv('HOME');
+        if (home && target.startsWith('~')) candidates.add(path.resolve(expandUserPath(target, home)));
+        for (const resolved of candidates) {
+          if ((await inspectComposeInput(resolved)) === 'unbounded') throw unboundedInputRefusal(inputLabel(args.cwd, resolved));
+        }
       }
       return [];
     }
