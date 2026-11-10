@@ -809,10 +809,10 @@ describe('read slots on every ending', () => {
     const total = 512;
     let pauses = 0;
     let maxDrainListeners = 0;
-    let response: import('http').ServerResponse | null = null;
     const original = http.ServerResponse.prototype.write;
+    // Each write samples the response's pending drain listeners.
     const spy = vi.spyOn(http.ServerResponse.prototype, 'write').mockImplementation(function (this: import('http').ServerResponse, ...args: Parameters<typeof original>) {
-      response = this;
+      maxDrainListeners = Math.max(maxDrainListeners, this.listenerCount('drain'));
       return original.apply(this, args);
     });
     contentEngine({
@@ -827,7 +827,6 @@ describe('read slots on every ending', () => {
         };
         for (let i = 0; i < total; i += 1) {
           sink(chunk, control);
-          if (response) maxDrainListeners = Math.max(maxDrainListeners, response.listenerCount('drain'));
           if (paused && i % 4 === 3) await new Promise<void>((resolve) => { wake = resolve; });
         }
         return { ok: true, evidence: { bytes: total * chunk.length } };
