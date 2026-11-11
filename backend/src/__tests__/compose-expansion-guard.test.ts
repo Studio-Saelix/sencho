@@ -2423,9 +2423,13 @@ describe('assertComposeInputsWithinExpansionLimits - scalar text, interpolation 
       await expect(run()).rejects.toThrow(/too long, or interpolates into more text/);
     });
 
-    it('leaves a !!binary environment value that is not UTF-8 to Compose', async () => {
-      await write('chain.env', chain(20));
-      await write('compose.yaml', withSeed(`!!binary ${Buffer.from([0xff, 0xfe]).toString('base64')}`));
+    it('seeds a !!binary environment value that is not UTF-8 at one character per byte', async () => {
+      // Compose interpolates the bytes as they are: three bytes, 2^19 copies pass the bound.
+      const bytes = Buffer.from([0xff, 0xfe, 0xfd]).toString('base64');
+      await write('chain.env', chain(19));
+      await write('compose.yaml', withSeed(`!!binary ${bytes}`));
+      await expect(run()).rejects.toThrow(/too long, or interpolates into more text/);
+      await write('chain.env', chain(16));
       await expect(run()).resolves.toBeUndefined();
     });
 

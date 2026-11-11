@@ -952,9 +952,8 @@ const YAML_STRING_TAG = 'tag:yaml.org,2002:str';
  * value. A plain scalar, or one with an explicit tag other than `!!str`, is
  * whatever Compose's decoder resolves it to (a boolean, a number, a
  * timestamp), written back out as text; an untagged quoted or block scalar is
- * its string as written. A null value has no text: Compose takes
- * that variable from the environment by name, which an env file's own
- * references already read.
+ * its string as written. A null value has no text: Compose takes that variable
+ * from the environment by name, which an env file's own references already read.
  */
 function environmentValueOf(node: unknown, targets: Map<Node, Node>): string | undefined {
   const resolved = scalarOf(node, targets);
@@ -962,17 +961,17 @@ function environmentValueOf(node: unknown, targets: Map<Node, Node>): string | u
   const value: unknown = resolved.value;
   if (value === null) return undefined;
   if (value instanceof Uint8Array) {
-    // Bytes that are not UTF-8 are no text to interpolate into an env file, and
-    // Compose accepts them as a value, so there is nothing to seed.
+    // Compose accepts bytes that are not UTF-8 as a value and interpolates them
+    // as they are, so they seed an env file at one character per byte.
     try {
       return strictUtf8.decode(value);
     } catch {
-      return undefined;
+      return Buffer.from(value).toString('latin1');
     }
   }
-  if (resolved.tag === YAML_STRING_TAG || (resolved.type !== undefined && resolved.type !== 'PLAIN' && typeof value === 'string')) {
-    return typeof value === 'string' ? value : undefined;
-  }
+  const isStringTagged = resolved.tag === YAML_STRING_TAG;
+  const isQuotedOrBlock = resolved.type !== undefined && resolved.type !== 'PLAIN' && typeof value === 'string';
+  if (isStringTagged || isQuotedOrBlock) return typeof value === 'string' ? value : undefined;
   // The scalar as written: a number or timestamp may no longer print as it was spelled.
   const written = typeof value === 'string' ? value : resolved.source;
   if (written === undefined) return typeof value === 'boolean' || typeof value === 'number' ? String(value) : undefined;
