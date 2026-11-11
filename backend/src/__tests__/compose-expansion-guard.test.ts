@@ -2499,13 +2499,11 @@ describe('assertComposeInputsWithinExpansionLimits - scalar text, interpolation 
       });
 
       it('seeds a value Compose rejects as written, and leaves a null one to the environment', async () => {
-        // Compose reports the type error itself; a gap between this reader and Compose can only count more.
-        for (const seed of ['!!float abc', '!!int 1.5', '!!bool yes']) {
-          await refuses(seed, 20, 1);
-          await accepts(seed, 10, 1);
-        }
-        await accepts('!!null ~', 20, 1);
-        await accepts('!!merge 1', 20, 1);
+        // 80 KB under a type it cannot have: Compose reports the type error itself, and a gap between
+        // this reader and Compose can only count more text. Four doublings of it pass the bound only if unseeded.
+        const text = 'x'.repeat(80_000);
+        for (const seed of [`!!int ${text}`, `!!float ${text}`, `!!bool ${text}`]) await refuses(seed, 4, 1);
+        for (const seed of [`!!null ${text}`, `!!merge ${text}`]) await accepts(seed, 4, 1);
       });
 
       // 2^14 copies of one character: a numeral padded with zeros is the value it names.
@@ -2755,6 +2753,147 @@ describe('assertComposeInputsWithinExpansionLimits - scalar text, interpolation 
       });
     });
 
+    describe('what a tag inside an included project replaces stays inside it', () => {
+      const seededA = `services:\n  web:\n    image: nginx\n    environment:\n      A: ${seedText}\n    env_file: [e1.env]\n`;
+      const writeBase = async (): Promise<void> => {
+        await write('a.yaml', seededA);
+        await write('e1.env', `B0=\${A}\n${doublings(1, 3)}\n`);
+        await write('e2.env', continuation);
+      };
+      const run2 = (): Promise<void> => run(dir, ['compose', '-f', 'a.yaml', '-f', 'b.yaml', 'config']);
+
+      it.each([
+        ['a service replaced with !override', 'services:\n  web: !override\n    image: nginx\n    env_file: [e2.env]\n'],
+        ['a list replaced with !override', 'services:\n  web:\n    env_file: !override [e2.env]\n'],
+      ])('keeps the chain of an earlier -f file when an included file has %s', async (_name, included) => {
+        await writeBase();
+        await write('b.yaml', 'include:\n  - c.yaml\n');
+        await write('c.yaml', included);
+        await expect(run2()).rejects.toThrow(/too long, or interpolates into more text/);
+      });
+
+      it('keeps the chain of an earlier -f file when an included file replaces its whole services section', async () => {
+        await writeBase();
+        await write('b.yaml', 'include:\n  - c.yaml\nservices:\n  web:\n    env_file: [e2.env]\n');
+        await write('c.yaml', 'services: !override\n  other:\n    image: nginx\n');
+        await expect(run2()).rejects.toThrow(/too long, or interpolates into more text/);
+      });
+
+      it('still applies a tag between the files of one include, which Compose merges as one project', async () => {
+        await writeBase();
+        await write('b.yaml', 'include:\n  - path: [a.yaml, c.yaml]\n');
+        await write('c.yaml', 'services:\n  web:\n    env_file: !override [e2.env]\n');
+        await expect(run(dir, ['compose', '-f', 'b.yaml', 'config'])).resolves.toBeUndefined();
+        await write('c.yaml', 'services:\n  web:\n    env_file: [e2.env]\n');
+        await expect(run(dir, ['compose', '-f', 'b.yaml', 'config'])).rejects.toThrow(/too long, or interpolates into more text/);
+      });
+
+      it('reads the services of an include and the including file as separate scopes', async () => {
+        // The include reads a benign list; the including file's own service holds the long chain.
+        await write('ok.env', 'Z=1\n');
+        await write('inc.yaml', 'services:\n  other:\n    image: nginx\n    env_file: [ok.env]\n');
+        await write('e1.env', `B0=\${A}\n${doublings(1, 3)}\n`);
+        await write('e2.env', continuation);
+        await write(
+          'a.yaml',
+          `include:\n  - inc.yaml\nservices:\n  web:\n    image: nginx\n    environment:\n      A: ${seedText}\n    env_file: [e1.env, e2.env]\n`,
+        );
+        await expect(run(dir, ['compose', '-f', 'a.yaml', 'config'])).rejects.toThrow(/too long, or interpolates into more text/);
+      });
+
+      it('does not read an included service again where it joins the including file', async () => {
+        // 2,100 mentions are under the limit of 4,096 references read once, and over it read twice.
+        const mentions = Array.from({ length: 2_100 }, () => 'x.env').join(', ');
+        await write('x.env', 'A=1\n');
+        await write('sub/inc.yaml', `services:\n  web:\n    image: nginx\n    label_file: [${mentions.replaceAll('x.env', '../x.env')}]\n`);
+        await write('a.yaml', 'include:\n  - sub/inc.yaml\n');
+        await expect(run(dir, ['compose', '-f', 'a.yaml', 'config'])).resolves.toBeUndefined();
+        await write('mid.yaml', 'include:\n  - sub/inc.yaml\n');
+        await write('a.yaml', 'include:\n  - mid.yaml\n');
+        await expect(run(dir, ['compose', '-f', 'a.yaml', 'config'])).resolves.toBeUndefined();
+      });
+    });
+
+    describe('an extending service keeps its own tags and not its parent', () => {
+      const writeFiles = async (kind: 'env_file' | 'label_file', extending: string, parentList = '[e0.env]'): Promise<void> => {
+        const seed = kind === 'env_file' ? `    environment:\n      A: ${seedText}\n` : '';
+        await write('a.yaml', `services:\n  web:\n    image: nginx\n${seed}    ${kind}: [e1.env]\n`);
+        await write('b.yaml', `services:\n  base:\n    image: nginx\n    ${kind}: ${parentList}\n  web:\n    extends: base\n${extending}`);
+        await write('e0.env', 'Z=1\n');
+        await write('e1.env', kind === 'env_file' ? `B0=\${A}\n${doublings(1, 3)}\n` : `B0=${seedText}\n${doublings(1, 3)}\n`);
+        await write('e2.env', continuation);
+      };
+      const run2 = (): Promise<void> => run(dir, ['compose', '-f', 'a.yaml', '-f', 'b.yaml', 'config']);
+
+      describe.each(['env_file', 'label_file'] as const)('%s', (kind) => {
+        it('accepts an extending service whose own list replaces the earlier file’s chain', async () => {
+          await writeFiles(kind, `    ${kind}: !override [e2.env]\n`);
+          await expect(run2()).resolves.toBeUndefined();
+        });
+
+        it('refuses when only the parent carries the tag: it does not reach the other file', async () => {
+          await writeFiles(kind, `    ${kind}: [e2.env]\n`, '!override [e0.env]');
+          await expect(run2()).rejects.toThrow(/too long, or interpolates into more text/);
+        });
+
+        it('refuses an extending service that adds to the earlier file’s chain', async () => {
+          await writeFiles(kind, `    ${kind}: [e2.env]\n`);
+          await expect(run2()).rejects.toThrow(/too long, or interpolates into more text/);
+        });
+      });
+    });
+
+    it('keeps a file of the same name apart for one service whose parent is in another directory', async () => {
+      // `sub/e.env` and `e.env` are two files, so the service reads the seed and then the continuation.
+      await write('sub/base.yaml', `services:\n  base:\n    image: nginx\n    environment:\n      A: ${seedText}\n    env_file: [e.env]\n`);
+      await write('sub/e.env', `B0=\${A}\n${doublings(1, 3)}\n`);
+      await write('e.env', continuation);
+      await write('a.yaml', 'services:\n  web:\n    extends:\n      file: sub/base.yaml\n      service: base\n    env_file: [e.env]\n');
+      await expect(run(dir, ['compose', '-f', 'a.yaml', 'config'])).rejects.toThrow(/too long, or interpolates into more text/);
+    });
+
+    it('reads the env_file of an included file from the included file’s directory', async () => {
+      await write('sub/b.yaml', `services:\n  web:\n    image: nginx\n    environment:\n      A: ${seedText}\n    env_file: [e.env]\n`);
+      await write('sub/e.env', `B0=\${A}\n${doublings(1, 4)}\n`);
+      await write('a.yaml', 'include:\n  - sub/b.yaml\n');
+      await expect(run(dir, ['compose', '-f', 'a.yaml', 'config'])).rejects.toThrow(/too long, or interpolates into more text/);
+    });
+
+    it('refuses an environment value read differently from Compose when it is in a later definition', async () => {
+      await write('a.yaml', 'services:\n  web:\n    image: nginx\n    env_file: [e1.env]\n');
+      await write('b.yaml', 'services:\n  web:\n    environment:\n      A: "a\u2028          b"\n');
+      await write('e1.env', 'B=${A}\n');
+      await expect(run(dir, ['compose', '-f', 'a.yaml', '-f', 'b.yaml', 'config'])).rejects.toThrow(/U\+2028 or U\+2029/);
+      // The first file's misread value is overridden by the later one, which the files read instead.
+      await write('a.yaml', 'services:\n  web:\n    image: nginx\n    environment:\n      A: "a\u2028          b"\n    env_file: [e1.env]\n');
+      await write('b.yaml', 'services:\n  web:\n    environment: !override\n      A: fine\n');
+      await expect(run(dir, ['compose', '-f', 'a.yaml', '-f', 'b.yaml', 'config'])).resolves.toBeUndefined();
+    });
+
+    it('measures a job that extends a job of another file', async () => {
+      await write('base.yaml', `jobs:\n  base:\n    environment:\n      A: ${seedText}\n    env_file: [e1.env]\n`);
+      await write('a.yaml', 'jobs:\n  nightly:\n    extends:\n      file: base.yaml\n      service: base\n    env_file: [e2.env]\n');
+      await write('e1.env', `B0=\${A}\n${doublings(1, 3)}\n`);
+      await write('e2.env', continuation);
+      await expect(run(dir, ['compose', '-f', 'a.yaml', 'config'])).rejects.toThrow(/too long, or interpolates into more text/);
+    });
+
+    it('does not combine a service and a job of one name', async () => {
+      await write('a.yaml', `services:\n  work:\n    image: nginx\n    environment:\n      A: ${seedText}\n    env_file: [e1.env]\n`);
+      await write('b.yaml', 'jobs:\n  work:\n    env_file: [e2.env]\n');
+      await write('e1.env', `B0=\${A}\n${doublings(1, 3)}\n`);
+      await write('e2.env', continuation);
+      await expect(run(dir, ['compose', '-f', 'a.yaml', '-f', 'b.yaml', 'config'])).resolves.toBeUndefined();
+    });
+
+    it('terminates on an include cycle whose files hold env_file chains', async () => {
+      await write('a.yaml', `include:\n  - b.yaml\nservices:\n  web:\n    image: nginx\n    environment:\n      A: ${seedText}\n    env_file: [e1.env, e2.env]\n`);
+      await write('b.yaml', 'include:\n  - a.yaml\nservices:\n  other:\n    image: nginx\n    env_file: [e2.env]\n');
+      await write('e1.env', `B0=\${A}\n${doublings(1, 3)}\n`);
+      await write('e2.env', continuation);
+      await expect(run(dir, ['compose', '-f', 'a.yaml', 'config'])).rejects.toThrow(/too long, or interpolates into more text/);
+    });
+
     it('does not combine services that have different names', async () => {
       await write('a.yaml', `services:\n  web:\n    image: nginx\n    environment:\n      A: ${seedText}\n    env_file: [e1.env]\n`);
       await write('b.yaml', 'services:\n  worker:\n    image: nginx\n    env_file: [e2.env]\n');
@@ -2780,15 +2919,6 @@ describe('assertComposeInputsWithinExpansionLimits - scalar text, interpolation 
       await write('e1.env', `B0=\${A}\n${doublings(1, 3)}\n`);
       await write('e2.env', continuation);
       await expect(run(dir, ['compose', '-f', 'a.yaml', 'config'])).rejects.toThrow(/too long, or interpolates into more text/);
-    });
-
-    it('keeps a file of the same name in another directory apart', async () => {
-      // `e.env` in an included directory is another file from `e.env` beside the including file.
-      await write('sub/b.yaml', `services:\n  web:\n    image: nginx\n    environment:\n      A: ${seedText}\n    env_file: [e.env]\n`);
-      await write('sub/e.env', `B0=\${A}\n${doublings(1, 3)}\n`);
-      await write('a.yaml', 'include:\n  - sub/b.yaml\nservices:\n  other:\n    image: nginx\n    env_file: [e.env]\n');
-      await write('e.env', continuation);
-      await expect(run(dir, ['compose', '-f', 'a.yaml', 'config'])).resolves.toBeUndefined();
     });
 
     it('refuses an environment value read differently from Compose when env files are read', async () => {

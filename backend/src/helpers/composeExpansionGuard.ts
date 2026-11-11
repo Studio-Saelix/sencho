@@ -878,6 +878,8 @@ interface ServiceReads {
   environment: Map<string, string>;
   /** True when a definition's `environment:` held a scalar the parse read differently from Compose. */
   environmentMisread: boolean;
+  /** Set once this definition's chains were read, so a scope that holds this same object reads nothing again. */
+  read: boolean;
   /**
    * What the definitions combined into this one replace instead of adding to,
    * through a `!override` or `!reset` tag: Compose drops what the earlier
@@ -1354,6 +1356,7 @@ function combineReads(earlier: ServiceReads, later: ServiceReads): ServiceReads 
     labelFiles: later.replaces.labelFiles ? later.labelFiles : [...earlier.labelFiles, ...later.labelFiles],
     environment: later.replaces.environment ? later.environment : new Map([...earlier.environment, ...later.environment]),
     environmentMisread: later.replaces.environment ? later.environmentMisread : earlier.environmentMisread || later.environmentMisread,
+    read: false,
     // A definition combined after the pair must start over wherever either one did.
     replaces: {
       service: earlier.replaces.service,
@@ -1391,6 +1394,17 @@ function applyServices(into: FileServices & { replaced: Set<string> }, next: Fil
   }
 }
 
+/**
+ * An included project as the including file sees it. A tag inside the project
+ * replaces what the project's own files gave, not a definition in another file
+ * of the run, so it replaces nothing out here.
+ */
+function joinIncluded(project: FileServices): FileServices {
+  const services = new Map<string, ServiceReads>();
+  for (const [id, reads] of project.services) services.set(id, { ...reads, replaces: NO_REPLACEMENT });
+  return { services, replaced: new Set() };
+}
+
 /** The services of several files that Compose combines into one project, by name, in file order. */
 function mergeServiceReads(files: readonly FileServices[]): FileServices {
   const merged = { services: new Map<string, ServiceReads>(), replaced: new Set<string>() };
@@ -1423,17 +1437,16 @@ function effectiveReads(
       labelFiles: info.reads.labelFiles.map((file) => ({ ...file, base })),
       environment: new Map(info.reads.environment),
       environmentMisread: info.reads.environmentMisread,
+      read: false,
       replaces: info.reads.replaces,
     };
     const parent = inherited.get(id) ?? (info.parent === null ? undefined : effectiveOf(info.parent));
     active.delete(id);
-    // A `!override` in the extending service replaces what the parent gave it.
-    // What results is one definition of the service: it is not known to
-    // replace anything of another file's, so it adds to those (measuring more).
+    // A `!override` in the extending service replaces what the parent gave it,
+    // and Compose keeps the tags of the extending service when it combines the
+    // result with another file's definition. The parent's own tags do not carry.
     const result =
-      parent === undefined
-        ? own
-        : { ...combineReads(parent, { ...own, replaces: { ...own.replaces, service: false } }), replaces: NO_REPLACEMENT };
+      parent === undefined ? own : { ...combineReads(parent, { ...own, replaces: { ...own.replaces, service: false } }), replaces: own.replaces };
     effective.set(id, result);
     return result;
   };
@@ -1587,6 +1600,9 @@ async function assertInputClosure(args: {
     if (readScopes.has(key)) return;
     readScopes.add(key);
     for (const reads of services.values()) {
+      // The same definition, read where it was first met, holds nothing new.
+      if (reads.read) continue;
+      reads.read = true;
       if (reads.envFiles.length > 0) {
         if (reads.environmentMisread) throw scalarSeparatorRefusal(label);
         await readChain(reads.envFiles, reads.environment, true, env, label);
@@ -1667,7 +1683,11 @@ async function assertInputClosure(args: {
     if (known !== undefined) return known;
     // Compose rejects an include or extends cycle itself, but only once it
     // reaches the back edge, so the file the edge points at is charged again.
-    if (active.has(contextKey)) return { nodes: ownNodes.get(contextKey) ?? 1, key: contextKey, services: new Map(), replaced: new Set() };
+    if (active.has(contextKey)) {
+      // The file in progress holds no services yet, so its key must not name a
+      // scope that will hold them: the scope of the file itself is read later.
+      return { nodes: ownNodes.get(contextKey) ?? 1, key: `${contextKey}\0cycle`, services: new Map(), replaced: new Set() };
+    }
     if (subtotals.size + active.size >= MAX_COMPOSE_DEPENDENCY_FILES) {
       throw dependencyBoundRefusal(label, `more than ${MAX_COMPOSE_DEPENDENCY_FILES} resolved compose inputs`);
     }
@@ -1753,7 +1773,7 @@ async function assertInputClosure(args: {
             await readScope(project, children[0].env, label, results.map((result) => result.key).join('\0'));
             // The project joins the including file: a service it defines is
             // combined with the same service another file of the run defines.
-            parts.push(project);
+            parts.push(joinIncluded(project));
           }
         }
         add(sameFileExtendsCharge(services, crossFileCharge, label));
