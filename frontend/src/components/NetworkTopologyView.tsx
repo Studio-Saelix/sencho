@@ -6,6 +6,9 @@ import {
     MiniMap,
     useNodesState,
     useEdgesState,
+    useNodesInitialized,
+    useReactFlow,
+    useStore,
     type Node,
     type Edge,
     type NodeTypes,
@@ -275,6 +278,50 @@ function layoutGraph(
     return { nodes: flowNodes, edges: flowEdges };
 }
 
+// ── Viewport fitting ─────────────────────────────────────────────────────────
+
+/** Identity of a computed layout: where dagre placed every node plus the edges
+ *  it laid out. Node drags never change it; a reload, filter, or reordered
+ *  response that produces a different layout does. */
+function layoutSignature(layoutNodes: Node[], layoutEdges: Edge[]): string {
+    const nodePart = layoutNodes
+        .map((node) => `${node.id}@${node.position.x.toFixed(2)},${node.position.y.toFixed(2)}`)
+        .join('\u0000');
+    const edgePart = layoutEdges.map((edge) => `${edge.source}>${edge.target}`).join('\u0000');
+    return `${nodePart}\u0001${edgePart}`;
+}
+
+/**
+ * React Flow's `fitView` prop frames only the nodes present at initialization.
+ * The canvas now stays mounted across reloads so the toolbar survives one, so
+ * a response that changes the graph needs its own fit once the new nodes are
+ * measured; otherwise dagre's fresh positions render under the old viewport
+ * transform and land outside the pane.
+ *
+ * `signature` is the identity of the computed layout (dagre positions plus
+ * edges), so it is stable across node drags and a reload of the same graph,
+ * and changes whenever a response or filter produces a new layout.
+ * `nodeIds` guards the one render where `useNodesInitialized` can still report
+ * the previous graph as measured.
+ */
+function FitViewOnGraphChange({ signature, nodeIds }: { signature: string; nodeIds: string }) {
+    const { fitView } = useReactFlow();
+    const nodesInitialized = useNodesInitialized();
+    // Reading the store's node set (rather than a ref) makes the effect run
+    // again after React Flow applies the new `nodes` prop, which happens in a
+    // passive effect after this component's own.
+    const storeNodeIds = useStore((state) => state.nodes.map((node) => node.id).sort().join('\u0000'));
+    const lastFitted = useRef<string | null>(null);
+    useEffect(() => {
+        if (!nodesInitialized) return;
+        if (storeNodeIds !== nodeIds) return;
+        if (lastFitted.current === signature) return;
+        lastFitted.current = signature;
+        void fitView({ padding: 0.3 });
+    }, [fitView, nodeIds, nodesInitialized, signature, storeNodeIds]);
+    return null;
+}
+
 // ── Main Component ────────────────────────────────────────────────────────────
 
 interface NetworkTopologyViewProps {
@@ -316,6 +363,9 @@ export default function NetworkTopologyView({
     // client-side so toggling them never triggers a new request (Workstream J).
     const [rawNetworks, setRawNetworks] = useState<TopologyNetwork[]>([]);
     const [overCap, setOverCap] = useState(false);
+    // The last computed layout's identity. It changes only when the effect
+    // below lays out new data, never when the operator drags a node.
+    const [graphLayout, setGraphLayout] = useState({ signature: '', nodeIds: '' });
 
     const fetchTopology = useCallback(async () => {
         setLoading(true);
@@ -359,6 +409,10 @@ export default function NetworkTopologyView({
         const { nodes: layoutNodes, edges: layoutEdges } = layoutGraph(networksList, onStackClickRef.current);
         setNodes(layoutNodes);
         setEdges(layoutEdges);
+        setGraphLayout({
+            signature: layoutSignature(layoutNodes, layoutEdges),
+            nodeIds: layoutNodes.map((node) => node.id).sort().join('\u0000'),
+        });
     }, [networksList, setNodes, setEdges]);
 
     const handleNodeClick = useCallback((_event: React.MouseEvent, node: Node) => {
@@ -386,7 +440,10 @@ export default function NetworkTopologyView({
         // which raced the drawer for the user's attention).
     }, []);
 
-    if (loading) {
+    // While no graph is on screen, the loading state replaces the whole view.
+    // Once a graph exists, a reload keeps the toolbar and the last graph mounted
+    // so the Refresh control can show its pending state instead of vanishing.
+    if (loading && nodes.length === 0) {
         return (
             <div className="flex items-center justify-center h-[400px] text-muted-foreground gap-2">
                 <Loader2 className="w-4 h-4 animate-spin" strokeWidth={1.5} />
@@ -434,7 +491,9 @@ export default function NetworkTopologyView({
             <div className="flex flex-wrap items-center gap-3 px-3 py-2 border-b border-card-border">
                 {showSystemToggle && (
                   <>
-                    <TogglePill id="show-system" checked={includeSystem} onChange={setInternalIncludeSystem} />
+                    {/* Scope changes start another fetch; lock the toggle so a
+                        reload cannot overlap with one the operator starts. */}
+                    <TogglePill id="show-system" checked={includeSystem} onChange={setInternalIncludeSystem} disabled={loading} />
                     <Label htmlFor="show-system" className="text-xs cursor-pointer">
                         Show system networks
                     </Label>
@@ -471,6 +530,7 @@ export default function NetworkTopologyView({
                     proOptions={{ hideAttribution: true }}
                     className="bg-background"
                 >
+                    <FitViewOnGraphChange signature={graphLayout.signature} nodeIds={graphLayout.nodeIds} />
                     <Background gap={20} size={1} className="opacity-30" />
                     <Controls className="!bg-card !border-card-border !shadow-card-bevel [&>button]:!bg-card [&>button]:!border-card-border [&>button]:!text-foreground [&>button:hover]:!bg-muted" />
                     <MiniMap
