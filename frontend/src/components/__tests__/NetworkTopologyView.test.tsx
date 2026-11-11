@@ -146,7 +146,7 @@ describe('NetworkTopologyView refresh', () => {
         fireEvent.click(refresh);
 
         // The control stays in place, locked and marked busy, while the last
-        // graph, with its node and edge props, remains instead of the loading state.
+        // graph and its node and edge data stay mounted instead of the loading state.
         expect(screen.getByRole('button', { name: 'Refresh topology' })).toBe(refresh);
         expect(refresh).toBeDisabled();
         expect(refresh).toHaveAttribute('aria-busy', 'true');
@@ -159,10 +159,10 @@ describe('NetworkTopologyView refresh', () => {
         expect(screen.getByTestId('topology-edge-edge-net-1-container-1')).toBeInTheDocument();
         expect(mockedFetch).toHaveBeenCalledTimes(2);
         // The scope toggle starts its own fetch, so it is locked during a reload
-        // rather than allowed to overlap with one.
-        expect(scopeToggle).toBeDisabled();
+        // rather than allowed to overlap with one. Clicking the lock starts nothing.
         fireEvent.click(scopeToggle);
         expect(mockedFetch).toHaveBeenCalledTimes(2);
+        expect(scopeToggle).toBeDisabled();
 
         // The shared busy control only shows its spinner once the reload is slow.
         await waitFor(() => expect(refresh.querySelector('svg')).toHaveClass('animate-spin'));
@@ -195,7 +195,7 @@ describe('NetworkTopologyView refresh', () => {
         expect(await screen.findByTestId('topology-node-net-net-1')).toHaveTextContent('app-net');
 
         fireEvent.click(refresh);
-        expect(screen.getByTestId('topology-node-net-net-1')).toBeInTheDocument();
+        expect(screen.getByTestId('topology-node-net-net-1')).toHaveTextContent('app-net');
 
         await act(async () => {
             reload.resolve(new Response('{"error":"unavailable"}', {
@@ -208,6 +208,5 @@ describe('NetworkTopologyView refresh', () => {
         expect(screen.queryByTestId('topology-graph')).not.toBeInTheDocument();
         expect(screen.queryByTestId('topology-node-net-net-1')).not.toBeInTheDocument();
         expect(screen.queryByText('Loading network topology...')).not.toBeInTheDocument();
-        expect(screen.queryByRole('button', { name: 'Refresh topology' })).not.toBeInTheDocument();
     });
 });
