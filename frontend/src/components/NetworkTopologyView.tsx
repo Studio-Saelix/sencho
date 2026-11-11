@@ -6,6 +6,9 @@ import {
     MiniMap,
     useNodesState,
     useEdgesState,
+    useNodesInitialized,
+    useReactFlow,
+    useStore,
     type Node,
     type Edge,
     type NodeTypes,
@@ -275,6 +278,38 @@ function layoutGraph(
     return { nodes: flowNodes, edges: flowEdges };
 }
 
+// ── Viewport fitting ─────────────────────────────────────────────────────────
+
+/**
+ * React Flow's `fitView` prop frames only the nodes present at initialization.
+ * The canvas now stays mounted across reloads so the toolbar survives one, so
+ * a response that changes the graph needs its own fit once the new nodes are
+ * measured; otherwise dagre's fresh positions render under the old viewport
+ * transform and land outside the pane.
+ *
+ * `signature` identifies the rendered graph (node ids plus edges) and is stable
+ * across node drags, so the operator's pan, zoom and manual positions survive
+ * everything except an actual re-layout. `nodeIds` guards the one render where
+ * `useNodesInitialized` can still report the previous graph as measured.
+ */
+function FitViewOnGraphChange({ signature, nodeIds }: { signature: string; nodeIds: string }) {
+    const { fitView } = useReactFlow();
+    const nodesInitialized = useNodesInitialized();
+    // Reading the store's node set (rather than a ref) makes the effect run
+    // again after React Flow applies the new `nodes` prop, which happens in a
+    // passive effect after this component's own.
+    const storeNodeIds = useStore((state) => state.nodes.map((node) => node.id).join('\u0000'));
+    const lastFitted = useRef<string | null>(null);
+    useEffect(() => {
+        if (!nodesInitialized) return;
+        if (storeNodeIds !== nodeIds) return;
+        if (lastFitted.current === signature) return;
+        lastFitted.current = signature;
+        void fitView({ padding: 0.3 });
+    }, [fitView, nodeIds, nodesInitialized, signature, storeNodeIds]);
+    return null;
+}
+
 // ── Main Component ────────────────────────────────────────────────────────────
 
 interface NetworkTopologyViewProps {
@@ -360,6 +395,15 @@ export default function NetworkTopologyView({
         setNodes(layoutNodes);
         setEdges(layoutEdges);
     }, [networksList, setNodes, setEdges]);
+
+    // A stable identity for the rendered graph. Node positions change on drag
+    // without changing the ids or edges, so the fit effect below can tell a
+    // re-layout apart from the operator moving a node.
+    const graphNodeIds = useMemo(() => nodes.map((node) => node.id).join('\u0000'), [nodes]);
+    const graphSignature = useMemo(
+        () => `${graphNodeIds}\u0001${edges.map((edge) => `${edge.source}>${edge.target}`).join('\u0000')}`,
+        [graphNodeIds, edges],
+    );
 
     const handleNodeClick = useCallback((_event: React.MouseEvent, node: Node) => {
         if (node.type === 'network') {
@@ -476,6 +520,7 @@ export default function NetworkTopologyView({
                     proOptions={{ hideAttribution: true }}
                     className="bg-background"
                 >
+                    <FitViewOnGraphChange signature={graphSignature} nodeIds={graphNodeIds} />
                     <Background gap={20} size={1} className="opacity-30" />
                     <Controls className="!bg-card !border-card-border !shadow-card-bevel [&>button]:!bg-card [&>button]:!border-card-border [&>button]:!text-foreground [&>button:hover]:!bg-muted" />
                     <MiniMap
