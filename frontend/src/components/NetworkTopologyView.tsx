@@ -386,8 +386,8 @@ export default function NetworkTopologyView({
         // which raced the drawer for the user's attention).
     }, []);
 
-    // Only the first load, when there is no graph to keep, replaces the view
-    // with the skeleton. A refresh keeps the toolbar and the last graph mounted
+    // While no graph is on screen, the loading state replaces the whole view.
+    // Once a graph exists, a reload keeps the toolbar and the last graph mounted
     // so the Refresh control can show its pending state instead of vanishing.
     if (loading && nodes.length === 0) {
         return (
@@ -437,7 +437,9 @@ export default function NetworkTopologyView({
             <div className="flex flex-wrap items-center gap-3 px-3 py-2 border-b border-card-border">
                 {showSystemToggle && (
                   <>
-                    <TogglePill id="show-system" checked={includeSystem} onChange={setInternalIncludeSystem} />
+                    {/* Scope changes start another fetch; lock the toggle so a
+                        reload cannot overlap with one the operator starts. */}
+                    <TogglePill id="show-system" checked={includeSystem} onChange={setInternalIncludeSystem} disabled={loading} />
                     <Label htmlFor="show-system" className="text-xs cursor-pointer">
                         Show system networks
                     </Label>

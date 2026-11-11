@@ -62,10 +62,10 @@ const network: NetworkingTopologyNetwork = {
 };
 
 function topologyResponse(): Response {
-    return {
-        ok: true,
-        json: async () => ({ schemaVersion: 2, runtimeAvailable: true, networks: [network] }),
-    } as Response;
+    return new Response(
+        JSON.stringify({ schemaVersion: 2, runtimeAvailable: true, networks: [network] }),
+        { status: 200, headers: { 'content-type': 'application/json' } },
+    );
 }
 
 function deferred() {
@@ -79,7 +79,7 @@ describe('NetworkTopologyView refresh', () => {
         mockedFetch.mockReset();
     });
 
-    it('shows the skeleton on the first load, before any topology exists', async () => {
+    it('shows the loading state on the first load, before any topology exists', async () => {
         const firstLoad = deferred();
         mockedFetch.mockReturnValueOnce(firstLoad.promise);
 
@@ -105,18 +105,23 @@ describe('NetworkTopologyView refresh', () => {
         await act(async () => { firstLoad.resolve(topologyResponse()); });
 
         const refresh = await screen.findByRole('button', { name: 'Refresh topology' });
+        const scopeToggle = screen.getByRole('switch', { name: 'Show system networks' });
         expect(screen.getByTestId('topology-graph')).toBeInTheDocument();
+        expect(scopeToggle).toBeEnabled();
 
         fireEvent.click(refresh);
 
         // The control stays in place, locked and marked busy, while the last
-        // graph remains instead of the first-load skeleton.
+        // graph remains instead of the loading state.
         expect(screen.getByRole('button', { name: 'Refresh topology' })).toBe(refresh);
         expect(refresh).toBeDisabled();
         expect(refresh).toHaveAttribute('aria-busy', 'true');
         expect(screen.queryByText('Loading network topology...')).not.toBeInTheDocument();
         expect(screen.getByTestId('topology-graph')).toBeInTheDocument();
         expect(mockedFetch).toHaveBeenCalledTimes(2);
+        // The scope toggle starts its own fetch, so it is locked during a reload
+        // rather than allowed to overlap with one.
+        expect(scopeToggle).toBeDisabled();
 
         // The shared busy control only shows its spinner once the reload is slow.
         await waitFor(() => expect(refresh.querySelector('svg')).toHaveClass('animate-spin'));
@@ -124,5 +129,7 @@ describe('NetworkTopologyView refresh', () => {
         await act(async () => { reload.resolve(topologyResponse()); });
         await waitFor(() => expect(refresh).toBeEnabled());
         expect(refresh).not.toHaveAttribute('aria-busy');
+        expect(refresh.querySelector('svg')).not.toHaveClass('animate-spin');
+        expect(scopeToggle).toBeEnabled();
     });
 });
