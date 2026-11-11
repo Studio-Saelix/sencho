@@ -1693,13 +1693,23 @@ describe('assertComposeInputsWithinExpansionLimits - parser gaps, devices, exten
       await expect(run()).rejects.toThrow(/env file references/);
     });
 
-    it('reads an env file listed many times once', async () => {
+    it('reads a small env file listed many times, once per mention, within the time and bounds', async () => {
+      await write('small.env', 'K=value\nL=${K}\n');
+      await write('leaf.yaml', SAFE_COMPOSE);
+      const files = Array.from({ length: 2000 }, () => '      - small.env').join('\n');
+      await write('compose.yaml', `include:\n  - path: leaf.yaml\n    env_file:\n${files}\n`);
+      const started = Date.now();
+      await expect(run()).resolves.toBeUndefined();
+      expect(Date.now() - started).toBeLessThan(3_000);
+    });
+
+    it('bounds a large env file listed many times by the text parsed for every mention', async () => {
       await write('big.env', `${Array.from({ length: 20_000 }, (_, i) => `K${i}=value${i}`).join('\n')}\n`);
       await write('leaf.yaml', SAFE_COMPOSE);
       const files = Array.from({ length: 2000 }, () => '      - big.env').join('\n');
       await write('compose.yaml', `include:\n  - path: leaf.yaml\n    env_file:\n${files}\n`);
       const started = Date.now();
-      await expect(run()).resolves.toBeUndefined();
+      await expect(run()).rejects.toThrow(/MiB in total/);
       expect(Date.now() - started).toBeLessThan(3_000);
     });
 
@@ -1829,6 +1839,11 @@ describe('assertComposeInputsWithinExpansionLimits - scalar text, interpolation 
   const run = (cwd = dir, invocation: string[] = ['compose', 'config'], env?: (name: string) => string | undefined) =>
     assertComposeInputsWithinExpansionLimits({ cwd, invocation, env });
   const b64 = (text: string): string => Buffer.from(text, 'utf8').toString('base64');
+  /** `count` different spellings of one relative path, which Compose treats as different entries. */
+  const distinctSpellings = (name: string, count: number): string[] =>
+    Array.from({ length: count }, (_, i) => `${'./'.repeat(i)}${name}`);
+  /** A !!binary value whose bytes are a UTF-8 BOM and then `name`. */
+  const bomBinary = (name: string): string => Buffer.concat([Buffer.from([0xef, 0xbb, 0xbf]), Buffer.from(name, 'utf8')]).toString('base64');
 
   describe('a !!binary scalar names what it decodes to, as Compose reads it', () => {
     beforeEach(async () => {
@@ -2060,18 +2075,19 @@ describe('assertComposeInputsWithinExpansionLimits - scalar text, interpolation 
     it('refuses a doubling chain Compose builds across one service\'s env_file list, however the file is spelled', async () => {
       await write('a.env', `A=${'x'.repeat(1_000)}\n`);
       await write('d.env', 'A=${A}${A}\n');
-      const spellings = ['d.env', './d.env', 'd.env', './d.env'];
-      const list = ['a.env', ...Array.from({ length: 24 }, (_, i) => spellings[i % spellings.length])];
+      // Compose keeps one entry per path string, so each spelling is its own read.
+      const list = ['a.env', ...distinctSpellings('d.env', 24)];
       await write('compose.yaml', `services:\n  web:\n    image: nginx\n    env_file: [${list.join(', ')}]\n`);
       await expect(run()).rejects.toThrow(/too long, or interpolates into more text/);
-      // The same chain over label_file.
-      await write('compose.yaml', `services:\n  web:\n    image: nginx\n    label_file: [${list.join(', ')}]\n`);
+      // A label_file list is read mention by mention, so exact repeats count.
+      const repeated = ['a.env', ...Array.from({ length: 24 }, () => 'd.env')];
+      await write('compose.yaml', `services:\n  web:\n    image: nginx\n    label_file: [${repeated.join(', ')}]\n`);
       await expect(run()).rejects.toThrow(/too long, or interpolates into more text/);
     });
 
     it('seeds the chain from the service environment, as a map or a list', async () => {
       await write('d.env', 'A=${A}${A}\n');
-      const list = Array.from({ length: 24 }, () => 'd.env').join(', ');
+      const list = distinctSpellings('d.env', 24).join(', ');
       await write('compose.yaml', `services:\n  web:\n    image: nginx\n    environment:\n      A: "${'x'.repeat(100_000)}"\n    env_file: [${list}]\n`);
       await expect(run()).rejects.toThrow(/too long, or interpolates into more text/);
       await write('compose.yaml', `services:\n  web:\n    image: nginx\n    environment:\n      - A=${'x'.repeat(100_000)}\n    env_file: [${list}]\n`);
@@ -2083,7 +2099,7 @@ describe('assertComposeInputsWithinExpansionLimits - scalar text, interpolation 
       await write('d.env', 'A=${A}${A}\n');
       // Fourteen doublings: the literal `${BIG}` (6 characters) stays small, the
       // interpolated 100 KB value passes 1 GB.
-      const list = Array.from({ length: 14 }, () => 'd.env').join(', ');
+      const list = distinctSpellings('d.env', 14).join(', ');
       await write('compose.yaml', `services:\n  web:\n    image: nginx\n    environment:\n      A: "\${BIG}"\n    env_file: [${list}]\n`);
       await expect(run()).rejects.toThrow(/too long, or interpolates into more text/);
       // A value that names nothing large keeps the chain small.
@@ -2239,6 +2255,204 @@ describe('assertComposeInputsWithinExpansionLimits - scalar text, interpolation 
       await write('mid.yaml', 'include:\n  - path: leaf.yaml\n    env_file: /ABS/b.env\n'.replace('/ABS', dir));
       await write('leaf.yaml', 'include:\n  - ${DEP}\n');
       await expect(run()).rejects.toThrow(/nested YAML aliases/);
+    });
+  });
+  describe('an include env_file listed more than once is read once per mention', () => {
+    // `TARGET=${TARGET}a` appends one letter on every read, so the included file
+    // Compose selects (`${TARGET}.yaml`) depends on how many times it was read.
+    beforeEach(async () => {
+      await write('grow.env', 'TARGET=${TARGET}a\n');
+      await write('a.yaml', SAFE_COMPOSE);
+      await write('aa.yaml', nestedAliasBomb(12));
+      await write('aaa.yaml', SAFE_COMPOSE);
+      // The included file interpolates its own include path with the entry's env files.
+      await write('mid.yaml', 'include:\n  - ${TARGET}.yaml\n');
+    });
+    const includeWith = (envFiles: string): string => `include:\n  - path: mid.yaml\n    env_file: [${envFiles}]\n`;
+
+    it('follows the file the second read selects, for the same spelling and for another one', async () => {
+      await write('compose.yaml', includeWith('grow.env, grow.env'));
+      await expect(run()).rejects.toThrow(/nested YAML aliases/);
+      await write('compose.yaml', includeWith('grow.env, ./grow.env'));
+      await expect(run()).rejects.toThrow(/nested YAML aliases/);
+      await write('compose.yaml', includeWith(`grow.env, ${dir}/grow.env`));
+      await expect(run()).rejects.toThrow(/nested YAML aliases/);
+    });
+
+    it('reads a repeat that has another file between its mentions, and counts a third read', async () => {
+      await write('other.env', 'OTHER=1\n');
+      await write('compose.yaml', includeWith('grow.env, other.env, grow.env'));
+      await expect(run()).rejects.toThrow(/nested YAML aliases/);
+      // One more read moves the selection on to a safe file.
+      await write('compose.yaml', includeWith('grow.env, grow.env, grow.env'));
+      await expect(run()).resolves.toBeUndefined();
+    });
+
+    it('still follows the file one read selects', async () => {
+      await write('compose.yaml', includeWith('grow.env'));
+      await expect(run()).resolves.toBeUndefined();
+      await write('a.yaml', nestedAliasBomb(12));
+      await expect(run()).rejects.toThrow(/nested YAML aliases/);
+    });
+
+    it('reads every mention of a list shared by two includes, and keeps their layers apart', async () => {
+      await write('compose.yaml', 'include:\n  - path: mid.yaml\n    env_file: [grow.env]\n  - path: mid.yaml\n    env_file: [grow.env, grow.env]\n');
+      await expect(run()).rejects.toThrow(/nested YAML aliases/);
+    });
+  });
+
+  describe('a !!binary path that starts with a UTF-8 BOM names the file with U+FEFF in its name', () => {
+    const BOM = '﻿';
+
+    it('follows an include, a mapped include, and an extends.file', async () => {
+      await write('dep.yaml', SAFE_COMPOSE.replace('web', 'other'));
+      await write(`${BOM}dep.yaml`, nestedAliasBomb(12));
+      await write('compose.yaml', `include:\n  - !!binary ${bomBinary('dep.yaml')}\n`);
+      await expect(run()).rejects.toThrow(/nested YAML aliases/);
+      await write('compose.yaml', `include:\n  - path: !!binary ${bomBinary('dep.yaml')}\n`);
+      await expect(run()).rejects.toThrow(/nested YAML aliases/);
+      await write('compose.yaml', `services:\n  web:\n    extends:\n      file: !!binary ${bomBinary('dep.yaml')}\n      service: web\n`);
+      await expect(run()).rejects.toThrow(/nested YAML aliases/);
+    });
+
+    it('opens the BOM-named file for a service env_file and label_file, over the size cap', async () => {
+      await write('big.env', 'K=1\n');
+      await write(`${BOM}big.env`, `K=${'x'.repeat(MAX_COMPOSE_INPUT_BYTES + 10)}\n`);
+      await write('compose.yaml', `services:\n  web:\n    image: nginx\n    env_file: !!binary ${bomBinary('big.env')}\n`);
+      await expect(run()).rejects.toThrow(/larger than 1 MiB/);
+      await write('compose.yaml', `services:\n  web:\n    image: nginx\n    label_file: [!!binary ${bomBinary('big.env')}]\n`);
+      await expect(run()).rejects.toThrow(/larger than 1 MiB/);
+      await write('compose.yaml', `services:\n  web:\n    image: nginx\n    env_file:\n      - path: !!binary ${bomBinary('big.env')}\n`);
+      await expect(run()).rejects.toThrow(/larger than 1 MiB/);
+    });
+
+    it('reads the same path without a BOM as before', async () => {
+      await write('dep.yaml', nestedAliasBomb(12));
+      await write('compose.yaml', `include:\n  - !!binary ${b64('dep.yaml')}\n`);
+      await expect(run()).rejects.toThrow(/nested YAML aliases/);
+    });
+
+    it('does not take a BOM-prefixed key for the key without one', async () => {
+      await write('dep.yaml', nestedAliasBomb(12));
+      await write('compose.yaml', `!!binary ${bomBinary('include')}: [dep.yaml]\n`);
+      await expect(run()).resolves.toBeUndefined();
+    });
+  });
+
+  describe('a service environment seeds its env files with the text Compose gives the value', () => {
+    /** `B0=${A}` and then `levels` doublings, so the last statement copies 2^levels times the seed. */
+    const chain = (levels: number): string => {
+      const lines = ['B0=${A}'];
+      for (let i = 1; i <= levels; i += 1) lines.push(`B${i}="\${B${i - 1}}\${B${i - 1}}"`);
+      return `${lines.join('\n')}\n`;
+    };
+    const withSeed = (seed: string, extra = ''): string =>
+      `services:\n  web:\n    image: nginx\n    environment:\n      A: ${seed}\n${extra}    env_file: [chain.env]\n`;
+
+    it.each(['true', 'True', 'false', 'FALSE'])('seeds the boolean %s as its text', async (seed) => {
+      // 2^20 copies of four or five characters pass the 1 MiB statement bound.
+      await write('chain.env', chain(20));
+      await write('compose.yaml', withSeed(seed));
+      await expect(run()).rejects.toThrow(/too long, or interpolates into more text/);
+    });
+
+    it('seeds a timestamp as the time Compose prints, not as it was written', async () => {
+      // 2^16 copies of ten characters stay under the bound; 29 characters pass it.
+      await write('chain.env', chain(16));
+      await write('compose.yaml', withSeed('2020-01-01'));
+      await expect(run()).rejects.toThrow(/too long, or interpolates into more text/);
+      await write('compose.yaml', withSeed('"2020-01-01"'));
+      await expect(run()).resolves.toBeUndefined();
+      await write('compose.yaml', withSeed('2020-01-01T00:00:00Z'));
+      await expect(run()).rejects.toThrow(/too long, or interpolates into more text/);
+    });
+
+    it('seeds a number as the text Compose prints', async () => {
+      // `1e-7` prints as `1e-07`, five characters, and a binary or octal numeral as its decimal value.
+      await write('chain.env', chain(19));
+      await write('compose.yaml', withSeed('1e-7'));
+      await expect(run()).rejects.toThrow(/too long, or interpolates into more text/);
+      await write('chain.env', chain(20));
+      await write('compose.yaml', withSeed('1234'));
+      await expect(run()).rejects.toThrow(/too long, or interpolates into more text/);
+      await write('compose.yaml', withSeed('0'));
+      await expect(run()).resolves.toBeUndefined();
+    });
+
+    it('keeps a string as written: a quoted or tagged scalar and the words yes and on', async () => {
+      await write('chain.env', chain(16));
+      for (const seed of ['"true"', '!!str true', 'yes', 'on', '"1e-7"', '"010"', "'2020-01-01'"]) {
+        await write('compose.yaml', withSeed(seed));
+        await expect(run()).resolves.toBeUndefined();
+      }
+    });
+
+    it('takes a null value, or a bare name in a list, from the environment by name', async () => {
+      await write('chain.env', chain(10));
+      const big = 'x'.repeat(100_000);
+      // Unset: nothing to seed.
+      await write('compose.yaml', withSeed('~'));
+      await expect(run()).resolves.toBeUndefined();
+      await write('compose.yaml', 'services:\n  web:\n    image: nginx\n    environment:\n      - A\n    env_file: [chain.env]\n');
+      await expect(run()).resolves.toBeUndefined();
+      // Set by the process environment, or by the project .env.
+      const processEnv = (name: string): string | undefined => (name === 'A' ? big : undefined);
+      await write('compose.yaml', withSeed('~'));
+      await expect(run(dir, ['compose', 'config'], processEnv)).rejects.toThrow(/too long, or interpolates into more text/);
+      await write('compose.yaml', 'services:\n  web:\n    image: nginx\n    environment:\n      - A\n    env_file: [chain.env]\n');
+      await expect(run(dir, ['compose', 'config'], processEnv)).rejects.toThrow(/too long, or interpolates into more text/);
+      await write('.env', `A=${big}\n`);
+      await expect(run()).rejects.toThrow(/too long, or interpolates into more text/);
+    });
+
+    it('seeds a value from a merged environment map the same way', async () => {
+      await write('chain.env', chain(20));
+      await write('compose.yaml', `x-env: &env\n  A: true\nservices:\n  web:\n    image: nginx\n    environment:\n      <<: *env\n    env_file: [chain.env]\n`);
+      await expect(run()).rejects.toThrow(/too long, or interpolates into more text/);
+    });
+  });
+
+  describe('a service env_file keeps one entry per path, as Compose does', () => {
+    const big = 'x'.repeat(100_000);
+    const seeded = (list: string): string =>
+      `services:\n  web:\n    image: nginx\n    environment:\n      A: "${big}"\n    env_file: [${list}]\n`;
+
+    beforeEach(async () => {
+      await write('d.env', 'A=${A}${A}\n');
+      await write('.env', 'X=d\n');
+    });
+
+    it('applies a path listed more than once a single time, whatever the other attributes', async () => {
+      // Five applications would build 3.2 MB; one builds 200 KB.
+      await write('compose.yaml', seeded(Array.from({ length: 6 }, () => 'd.env').join(', ')));
+      await expect(run()).resolves.toBeUndefined();
+      await write('compose.yaml', seeded('d.env, "${X}.env", {path: d.env, required: false}, d.env, "${X}.env", {path: d.env}'));
+      await expect(run()).resolves.toBeUndefined();
+    });
+
+    it('applies a path whose spelling differs once for each spelling', async () => {
+      await write('compose.yaml', seeded(distinctSpellings('d.env', 5).join(', ')));
+      await expect(run()).rejects.toThrow(/too long, or interpolates into more text/);
+    });
+
+    it('does not read the later mention of a path before the first one', async () => {
+      // Compose keeps the first position: `q.env` runs after `d.env`, and a later `d.env` adds nothing.
+      await write('q.env', 'A=q\n');
+      await write('compose.yaml', seeded(`d.env, q.env, d.env, ${distinctSpellings('d.env', 3).slice(1).join(', ')}`));
+      await expect(run()).resolves.toBeUndefined();
+    });
+
+    it('reads a label_file list mention by mention', async () => {
+      await write('a.env', `A=${big}\n`);
+      await write('compose.yaml', `services:\n  web:\n    image: nginx\n    label_file: [a.env, ${Array.from({ length: 6 }, () => 'd.env').join(', ')}]\n`);
+      await expect(run()).rejects.toThrow(/too long, or interpolates into more text/);
+    });
+
+    it('applies a later mention\'s format at the first mention\'s place', async () => {
+      // The raw mention replaces the plain one, so nothing doubles.
+      await write('compose.yaml', seeded(`d.env, ${distinctSpellings('d.env', 5).slice(1).map((name) => `{path: ${name}, format: raw}`).join(', ')}`));
+      // Four raw spellings and one plain one: the plain read doubles once, a raw read does not.
+      await expect(run()).resolves.toBeUndefined();
     });
   });
 });

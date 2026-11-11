@@ -109,6 +109,40 @@ describe('persistent bind remap caller uses the real guard', () => {
     expect(mockSpawn).not.toHaveBeenCalled();
   });
 
+  it('does not start Compose when an include env_file listed twice selects a bomb on its second read', async () => {
+    await writeOverlay('compose.yaml', 'include:\n  - path: mid.yaml\n    env_file: [grow.env, ./grow.env]\n');
+    await writeOverlay('mid.yaml', 'include:\n  - ${TARGET}.yaml\n');
+    await writeOverlay('grow.env', 'TARGET=${TARGET}a\n');
+    await writeOverlay('a.yaml', SAFE_COMPOSE);
+    await writeOverlay('aa.yaml', nestedAliasBomb(12));
+
+    await expect(remap(['compose', '-f', 'compose.yaml', 'config', '--format', 'json']))
+      .resolves.toEqual({ action: 'refuse', reason: PERSISTENT_BIND_UNSAFE });
+    expect(mockSpawn).not.toHaveBeenCalled();
+  });
+
+  it('does not start Compose when a !!binary path that starts with a BOM names a bomb', async () => {
+    const bomName = Buffer.concat([Buffer.from([0xef, 0xbb, 0xbf]), Buffer.from('dep.yaml')]).toString('base64');
+    await writeOverlay('compose.yaml', `include:\n  - !!binary ${bomName}\n`);
+    await writeOverlay('dep.yaml', SAFE_COMPOSE);
+    await writeOverlay('\uFEFFdep.yaml', nestedAliasBomb(12));
+
+    await expect(remap(['compose', '-f', 'compose.yaml', 'config', '--format', 'json']))
+      .resolves.toEqual({ action: 'refuse', reason: PERSISTENT_BIND_UNSAFE });
+    expect(mockSpawn).not.toHaveBeenCalled();
+  });
+
+  it('does not start Compose when a boolean environment value seeds an env_file chain past the bound', async () => {
+    const lines = ['B0=${A}'];
+    for (let i = 1; i <= 20; i += 1) lines.push(`B${i}="\${B${i - 1}}\${B${i - 1}}"`);
+    await writeOverlay('chain.env', `${lines.join('\n')}\n`);
+    await writeOverlay('compose.yaml', 'services:\n  web:\n    image: nginx\n    environment:\n      A: true\n    env_file: [chain.env]\n');
+
+    await expect(remap(['compose', '-f', 'compose.yaml', 'config', '--format', 'json']))
+      .resolves.toEqual({ action: 'refuse', reason: PERSISTENT_BIND_UNSAFE });
+    expect(mockSpawn).not.toHaveBeenCalled();
+  });
+
   it('still starts Compose for an ordinary project', async () => {
     await writeOverlay('compose.yaml', SAFE_COMPOSE);
     // The child is mocked, so a spawn here proves only that the guard let the

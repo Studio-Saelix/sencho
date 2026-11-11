@@ -41,8 +41,10 @@
  *
  * Not covered: Sencho's own deployment project (self-update and the endpoint
  * provider helper), which render operator-owned files, not a managed stack's;
- * and text Compose builds by interpolating one very large variable into many
- * places of a compose file, which is not alias expansion.
+ * text Compose builds by interpolating one very large variable into many
+ * places of a compose file, which is not alias expansion; and an `env_file`
+ * list that Compose assembles by merging several compose files or an extended
+ * service, which is measured as each file writes it.
  */
 import { createHash } from 'crypto';
 import path from 'path';
@@ -60,6 +62,7 @@ import {
 } from '../utils/composeDotenv';
 import { COMPOSE_OVERRIDE_FILENAMES, COMPOSE_ROOT_FILENAMES } from '../utils/composeFilenames';
 import { readComposeInputWithinCap, resolvePhysicalDirectory } from './composeInputReadSink';
+import { composePlainScalarText } from './composeScalarText';
 
 /**
  * Expanded-node budget per file. A compose file that reuses an anchor across a
@@ -127,7 +130,7 @@ export const MAX_COMPOSE_ENV_RAW_VALUE = 128 * 1024;
 export const MAX_COMPOSE_TEMPLATE_DEPTH = 64;
 export const MAX_COMPOSE_ENV_STATEMENT_READS = 1024 * 1024;
 export const MAX_COMPOSE_ENV_COPIED = 32 * 1024 * 1024;
-/** Service env_file and label_file text parsed per invocation, every mention counted. */
+/** Service env_file and label_file text parsed per invocation, every read counted. */
 export const MAX_COMPOSE_SERVICE_ENV_PARSE_CHARS = 64 * 1024 * 1024;
 /** Longest include/extends/env_file path as written, and as expanded. */
 export const MAX_COMPOSE_PATH_TEMPLATE = 1024;
@@ -849,6 +852,12 @@ interface ReadFilesGroup {
    * env files against along with what the earlier files assigned.
    */
   environment: Array<[string, string]>;
+  /**
+   * True for `env_file`, where Compose keeps one entry per path, at the place
+   * the path first appeared and with the attributes the last mention gave
+   * it. A `label_file` list is read mention by mention.
+   */
+  oneEntryPerPath: boolean;
 }
 
 type DependencyGroup = IncludeGroup | ExtendsGroup | ReadFilesGroup;
@@ -885,7 +894,10 @@ const scalarSeparators = new WeakMap<Map<Node, Node>, number[]>();
 /** Raised when a key or path is a scalar the parse read differently from Compose. */
 class MisreadScalarError extends Error {}
 
-const strictUtf8 = new TextDecoder('utf-8', { fatal: true });
+// `ignoreBOM` keeps a leading U+FEFF: Go keeps the decoded bytes as they are, so a
+// `!!binary` name that starts with EF BB BF names a file whose name starts with
+// U+FEFF, and a decoder that dropped it would open a different file.
+const strictUtf8 = new TextDecoder('utf-8', { fatal: true, ignoreBOM: true });
 
 function spansSeparator(offsets: readonly number[], start: number, end: number): boolean {
   let low = 0;
@@ -904,24 +916,58 @@ function spansSeparator(offsets: readonly number[], start: number, end: number):
  * `include`, a path, or a key spelled that way names what it decodes to.
  */
 function textOf(node: unknown, targets: Map<Node, Node>): string | undefined {
+  const resolved = scalarOf(node, targets);
+  if (resolved === undefined) return undefined;
+  if (typeof resolved.value === 'string') return resolved.value;
+  if (typeof resolved.value === 'number') return String(resolved.value);
+  if (resolved.value instanceof Uint8Array) return decodeBinary(resolved.value);
+  return undefined;
+}
+
+/** The scalar a node resolves to, refused when the parse read it differently from Compose. */
+function scalarOf(node: unknown, targets: Map<Node, Node>): Scalar | undefined {
   const resolved = deref(node, targets);
   if (!isScalar(resolved)) return undefined;
   const separators = scalarSeparators.get(targets);
   if (separators !== undefined && resolved.range && spansSeparator(separators, resolved.range[0], resolved.range[1])) {
     throw new MisreadScalarError();
   }
-  if (typeof resolved.value === 'string') return resolved.value;
-  if (typeof resolved.value === 'number') return String(resolved.value);
-  if (resolved.value instanceof Uint8Array) {
-    // Go keeps the decoded bytes as they are; a replacement character here would
-    // name a different file than the one Compose opens.
-    try {
-      return strictUtf8.decode(resolved.value);
-    } catch {
-      throw new MisreadScalarError();
-    }
+  return resolved;
+}
+
+function decodeBinary(bytes: Uint8Array): string {
+  // Go keeps the decoded bytes as they are; a replacement character here would
+  // name a different file than the one Compose opens.
+  try {
+    return strictUtf8.decode(bytes);
+  } catch {
+    throw new MisreadScalarError();
   }
-  return undefined;
+}
+
+const YAML_STRING_TAG = 'tag:yaml.org,2002:str';
+
+/**
+ * The text Compose seeds a service's env files with for one `environment:`
+ * value. A plain scalar is whatever Compose's decoder resolves it to (a
+ * boolean, a number, a timestamp), written back out as text; a quoted or block
+ * scalar is its string as written. A null value has no text: Compose takes
+ * that variable from the environment by name, which an env file's own
+ * references already read.
+ */
+function environmentValueOf(node: unknown, targets: Map<Node, Node>): string | undefined {
+  const resolved = scalarOf(node, targets);
+  if (resolved === undefined) return undefined;
+  const value: unknown = resolved.value;
+  if (value === null) return undefined;
+  if (value instanceof Uint8Array) return decodeBinary(value);
+  if (resolved.tag === YAML_STRING_TAG || (resolved.type !== undefined && resolved.type !== 'PLAIN' && typeof value === 'string')) {
+    return typeof value === 'string' ? value : undefined;
+  }
+  // The scalar as written: a number or timestamp may no longer print as it was spelled.
+  const written = typeof value === 'string' ? value : resolved.source;
+  if (written === undefined) return typeof value === 'boolean' || typeof value === 'number' ? String(value) : undefined;
+  return composePlainScalarText(written);
 }
 
 function textListOf(node: unknown, targets: Map<Node, Node>): string[] {
@@ -1002,7 +1048,7 @@ function environmentOf(node: unknown, targets: Map<Node, Node>): Array<[string, 
   const fields = entriesOf(resolved, targets);
   if (fields === null) return out;
   for (const [name, value] of fields) {
-    const text = textOf(value, targets);
+    const text = environmentValueOf(value, targets);
     if (text !== undefined) out.push([name, text]);
   }
   return out;
@@ -1079,10 +1125,15 @@ function extractDependencies(measured: MeasuredDocument): DocumentDependencies {
         // a later file with what the earlier ones assigned.
         const envFiles = readFilePaths(fields.get('env_file'), targets);
         if (envFiles.length > 0) {
-          groups.push({ kind: 'readFiles', files: envFiles, environment: environmentOf(fields.get('environment'), targets) });
+          groups.push({
+            kind: 'readFiles',
+            files: envFiles,
+            environment: environmentOf(fields.get('environment'), targets),
+            oneEntryPerPath: true,
+          });
         }
         const labelFiles = readFilePaths(fields.get('label_file'), targets);
-        if (labelFiles.length > 0) groups.push({ kind: 'readFiles', files: labelFiles, environment: [] });
+        if (labelFiles.length > 0) groups.push({ kind: 'readFiles', files: labelFiles, environment: [], oneEntryPerPath: false });
       }
       const extendsNode = fields?.get('extends');
       let parent: string | null = null;
@@ -1402,8 +1453,7 @@ async function assertInputClosure(args: {
   const childInputs = async (input: PendingInput, group: DependencyGroup, label: string): Promise<PendingInput[]> => {
     if (group.kind === 'readFiles') {
       // One reader per list, in file order, so a value an earlier file or the
-      // service's `environment:` set is what a later file interpolates, and a
-      // file named twice is parsed twice, as Compose does.
+      // service's `environment:` set is what a later file interpolates.
       const reader = new ComposeEnvFiles(lookupEnv(input.env), {
         maxRawValue: MAX_COMPOSE_ENV_RAW_VALUE,
         maxStatementReads: MAX_COMPOSE_ENV_STATEMENT_READS,
@@ -1416,10 +1466,21 @@ async function assertInputClosure(args: {
         if (err instanceof ComposeEnvLimitError) throw envFileTooLargeRefusal(label);
         throw err;
       }
+      const reads: Array<{ target: string; raw: boolean }> = [];
+      const readIndex = new Map<string, number>();
       for (const file of group.files) {
         countReference(label);
         const target = interpolatePath(file.path, input.env, label);
         if (target === null || target === '') continue;
+        const known = group.oneEntryPerPath ? readIndex.get(target) : undefined;
+        if (known === undefined) {
+          readIndex.set(target, reads.length);
+          reads.push({ target, raw: file.raw });
+        } else {
+          reads[known].raw = file.raw;
+        }
+      }
+      for (const { target, raw } of reads) {
         // Compose expands a leading `~` in these paths and reads a relative one
         // from the project directory, so both spellings are checked.
         const candidates = new Set([resolveDependencyPath(target, input.projectBase)]);
@@ -1429,14 +1490,14 @@ async function assertInputClosure(args: {
           const fileLabel = inputLabel(args.cwd, resolved);
           const content = await readServiceFile(resolved, fileLabel);
           if (content === null) continue;
-          // The parse is repeated for every mention, so its text is counted
-          // for every mention against a bound of its own.
+          // The parse is repeated for every read, so its text is counted for
+          // every read against a bound of its own.
           serviceEnvParseChars += content.length;
           if (serviceEnvParseChars > MAX_COMPOSE_SERVICE_ENV_PARSE_CHARS) {
             throw envBoundRefusal(fileLabel, `${MAX_COMPOSE_SERVICE_ENV_PARSE_CHARS / (1024 * 1024)} MiB of env_file text parsed`);
           }
           try {
-            reader.read(content, { raw: file.raw });
+            reader.read(content, { raw });
           } catch (err) {
             if (err instanceof ComposeEnvLimitError || err instanceof RangeError) throw envFileTooLargeRefusal(fileLabel);
             // A syntax error is Compose's to report, since it rejects the file too.
@@ -1498,7 +1559,6 @@ async function assertInputClosure(args: {
 
     const additionalEnv: Array<{ path: string; entry: EnvFileText }> = [];
     if (group.envFiles.length > 0) {
-      const seenEnvFiles = new Set<string>();
       for (const raw of group.envFiles) {
         countReference(label);
         const target = interpolatePath(raw, input.env, label);
@@ -1507,11 +1567,10 @@ async function assertInputClosure(args: {
           throw unresolvedIncludePathRefusal(label, 'has a relative env_file inside an included or extended file.');
         }
         const resolved = resolveDependencyPath(target, input.projectBase);
-        // Compose reads a path listed twice twice and the later assignment
-        // wins, but the values are the same, so one read gives the same
-        // environment.
-        if (seenEnvFiles.has(resolved)) continue;
-        seenEnvFiles.add(resolved);
+        // Compose reads every mention, so a path listed twice (or spelled two
+        // ways) is read twice, and the second read interpolates against what the
+        // first one assigned. Each mention is kept, in order; the text is read
+        // once, and the reader charges every mention against the same bounds.
         const entry = await readEnvEntry(resolved);
         // A missing explicit include env file makes Compose fail before it
         // loads the included project.
