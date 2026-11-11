@@ -31,8 +31,9 @@
  * graph past its limits, a relative path inside an included or extended file,
  * an env file it cannot parse or whose interpolation passes its bounds, a key
  * or path that spans U+2028 or U+2029 (Compose keeps those characters, its
- * parser here folds them), a `!!binary` key or path that is not UTF-8 (in a
- * service's `environment:`, either only when that service has an env file), and a
+ * parser here folds them), a `!!binary` key or path that is not UTF-8, the same
+ * in the name of a service's `environment:` entry, or a value of it that spans
+ * U+2028 or U+2029 (these two only when that service has an env file), and a
  * document its parser rejects that holds both an
  * anchor and an alias, an `include`, an `extends`, a backslash, or an explicit
  * `? ` key, a tag spelling (`!!binary`, a verbatim or handle tag), or a U+2028 or
@@ -50,7 +51,9 @@
  * stream, the files of one `include` path list, a file and the files it
  * includes, and the service it `extends` (in the same file or another), not
  * over each definition alone. A `!override` or `!reset` tag drops what the
- * earlier definitions gave for that key, as it does in Compose.
+ * earlier definitions gave for that key (a list, `environment:`, a service, or
+ * a section), as it does in Compose; inside an included project it drops only
+ * what that project's own files gave.
  */
 import { createHash } from 'crypto';
 import path from 'path';
@@ -878,12 +881,17 @@ interface ServiceReads {
   environment: Map<string, string>;
   /** True when a definition's `environment:` held a scalar the parse read differently from Compose. */
   environmentMisread: boolean;
-  /** Set once this definition's chains were read, so a scope that holds this same object reads nothing again. */
+  /**
+   * Set once this definition's chains were read, so a scope that holds this
+   * same object reads nothing again. A copy made when a project joins its
+   * including file keeps it; combining definitions makes a new object, unread.
+   */
   read: boolean;
   /**
    * What the definitions combined into this one replace instead of adding to,
    * through a `!override` or `!reset` tag: Compose drops what the earlier
-   * definitions gave for it, so a definition combined after it starts over.
+   * definitions gave for it. When this result is itself combined over earlier
+   * definitions (another file), it replaces wherever any definition in it did.
    */
   replaces: Replaces;
 }
@@ -1375,7 +1383,7 @@ interface FileServices {
 
 const NO_REPLACEMENT: Replaces = { service: false, envFiles: false, labelFiles: false, environment: false };
 
-/** The ids of a section's services start with its name. */
+/** The ids of a section's services start with its name and a NUL. */
 const inSection = (id: string, section: string): boolean => id.startsWith(`${section}\0`);
 
 /**
@@ -1416,7 +1424,7 @@ function mergeServiceReads(files: readonly FileServices[]): FileServices {
  * What each service or job of one document ends up reading once the service it
  * extends is applied under it: the same-file parent, or the service another
  * file defined (`inherited`, read from that file's own result). Paths stay
- * relative to the project directory the definition was loaded under, which
+ * relative to the base directory the definition was loaded under, which
  * Compose also resolves them against.
  */
 function effectiveReads(
@@ -1442,9 +1450,11 @@ function effectiveReads(
     };
     const parent = inherited.get(id) ?? (info.parent === null ? undefined : effectiveOf(info.parent));
     active.delete(id);
-    // A `!override` in the extending service replaces what the parent gave it,
-    // and Compose keeps the tags of the extending service when it combines the
-    // result with another file's definition. The parent's own tags do not carry.
+    // A list or `environment:` tagged `!override` in the extending service
+    // replaces what the parent gave it (a tag on the whole service does not
+    // drop the parent's lists). Compose keeps the extending service's tags when
+    // it combines the result with another file's definition; the parent's own
+    // tags do not carry.
     const result =
       parent === undefined ? own : { ...combineReads(parent, { ...own, replaces: { ...own.replaces, service: false } }), replaces: own.replaces };
     effective.set(id, result);
@@ -1455,7 +1465,8 @@ function effectiveReads(
     const reads = effectiveOf(id);
     // A service with only an `environment:` is kept: a service in another
     // file that extends it seeds its own env files from that. One that
-    // replaces what came before it is kept for the same reason.
+    // replaces what came before it is kept too, so that it drops the earlier
+    // definitions when it is combined over them.
     const holdsReads =
       reads !== undefined &&
       (reads.envFiles.length > 0 ||

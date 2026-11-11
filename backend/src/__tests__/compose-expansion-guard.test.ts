@@ -12,6 +12,7 @@ import {
   assertComposeInputsWithinExpansionLimits,
   assertComposeSourceWithinExpansionLimits,
   composeFileArgsFromInvocation,
+  MAX_COMPOSE_DEPENDENCY_REFERENCES,
   MAX_COMPOSE_INPUT_BYTES,
   ComposeExpansionRefusal,
 } from '../helpers/composeExpansionGuard';
@@ -2424,7 +2425,7 @@ describe('assertComposeInputsWithinExpansionLimits - scalar text, interpolation 
     });
 
     it('seeds a !!binary environment value that is not UTF-8 at one character per byte', async () => {
-      // Compose interpolates the bytes as they are: three bytes, 2^19 copies pass the bound.
+      // Compose interpolates the bytes as they are: three bytes, 2^19 copies exceed the bound.
       const bytes = Buffer.from([0xff, 0xfe, 0xfd]).toString('base64');
       await write('chain.env', chain(19));
       await write('compose.yaml', withSeed(`!!binary ${bytes}`));
@@ -2454,7 +2455,7 @@ describe('assertComposeInputsWithinExpansionLimits - scalar text, interpolation 
 
       // 3 * 2^14 copies: a 29-character timestamp builds 1,425,408 characters, past the 1 MiB
       // bound, where the 20 characters the text is written in build 983,040.
-      // Each seed is written in 21 characters or fewer, which pass the bound as written.
+      // Each seed's value is written in 21 characters or fewer, which stay within the bound as written.
       it.each(['2020-01-01  10:20:30', '2020-1-1  1:2:3', '2020-01-01   10:20:30', '!!timestamp 2020-01-01  10:20:30'])(
         'seeds %s as the 29-character time Compose prints for it',
         async (seed) => {
@@ -2483,9 +2484,9 @@ describe('assertComposeInputsWithinExpansionLimits - scalar text, interpolation 
       });
 
       it.each(['!custom 2020-01-01', '!custom 2020-01-01T10:20:30Z', '!!seq 2020-01-01', '!!set 2020-01-01'])(
-        'keeps %s as the string it is: an unknown tag resolves nothing',
+        'keeps %s as the string it is: a tag that is not int, float, bool, or timestamp resolves nothing',
         async (seed) => {
-          // At most 21 characters pass the bound as written; read as a timestamp, 29 would not.
+          // At most 21 characters stay within the bound as written; read as a timestamp, 29 would exceed it.
           await accepts(seed, 14, 3);
         },
       );
@@ -2500,7 +2501,7 @@ describe('assertComposeInputsWithinExpansionLimits - scalar text, interpolation 
 
       it('seeds a value Compose rejects as written, and leaves a null one to the environment', async () => {
         // 80 KB under a type it cannot have: Compose reports the type error itself, and a gap between
-        // this reader and Compose can only count more text. Four doublings of it pass the bound only if unseeded.
+        // this reader and Compose can only count more text. Four doublings of it stay within the bound only if unseeded.
         const text = 'x'.repeat(80_000);
         for (const seed of [`!!int ${text}`, `!!float ${text}`, `!!bool ${text}`]) await refuses(seed, 4, 1);
         for (const seed of [`!!null ${text}`, `!!merge ${text}`]) await accepts(seed, 4, 1);
@@ -2802,8 +2803,8 @@ describe('assertComposeInputsWithinExpansionLimits - scalar text, interpolation 
       });
 
       it('does not read an included service again where it joins the including file', async () => {
-        // 2,100 mentions are under the limit of 4,096 references read once, and over it read twice.
-        const mentions = Array.from({ length: 2_100 }, () => 'x.env').join(', ');
+        // Just over half the reference limit: under it when read once, over it when read twice.
+        const mentions = Array.from({ length: Math.floor(MAX_COMPOSE_DEPENDENCY_REFERENCES / 2) + 52 }, () => 'x.env').join(', ');
         await write('x.env', 'A=1\n');
         await write('sub/inc.yaml', `services:\n  web:\n    image: nginx\n    label_file: [${mentions.replaceAll('x.env', '../x.env')}]\n`);
         await write('a.yaml', 'include:\n  - sub/inc.yaml\n');
@@ -2886,7 +2887,7 @@ describe('assertComposeInputsWithinExpansionLimits - scalar text, interpolation 
       await expect(run(dir, ['compose', '-f', 'a.yaml', '-f', 'b.yaml', 'config'])).resolves.toBeUndefined();
     });
 
-    it('terminates on an include cycle whose files hold env_file chains', async () => {
+    it('still refuses a chain held by a file that is part of an include cycle', async () => {
       await write('a.yaml', `include:\n  - b.yaml\nservices:\n  web:\n    image: nginx\n    environment:\n      A: ${seedText}\n    env_file: [e1.env, e2.env]\n`);
       await write('b.yaml', 'include:\n  - a.yaml\nservices:\n  other:\n    image: nginx\n    env_file: [e2.env]\n');
       await write('e1.env', `B0=\${A}\n${doublings(1, 3)}\n`);
