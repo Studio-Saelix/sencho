@@ -133,7 +133,7 @@ RUN if [ "$TARGETARCH" = "$BUILDARCH" ]; then \
 # intermediate-certificate verification), CVE-2026-78667 (net/http
 # Range-header denial of service) and CVE-2026-97031 (crypto/tls ECH denial
 # of service).
-FROM --platform=$BUILDPLATFORM golang:1.27.3-alpine@sha256:d200d2dd76b03a99b52651fd1325aff7dcd35422c35c01bac56571b0507f3deb AS cli-builder
+FROM --platform=$BUILDPLATFORM golang:1.27.3-alpine@sha256:fa3d596898d9f126af7c01d14ee7597bab3f39cccf392ef36b69fe77cd681f18 AS cli-builder
 
 ARG TARGETARCH
 
@@ -206,7 +206,7 @@ RUN cp vendor.mod go.mod && cp vendor.sum go.sum && \
 # move together.
 # Base image pinned by digest (same image as cli-builder above) so both
 # source builds share an identical, immutable Go toolchain.
-FROM --platform=$BUILDPLATFORM golang:1.27.3-alpine@sha256:d200d2dd76b03a99b52651fd1325aff7dcd35422c35c01bac56571b0507f3deb AS compose-builder
+FROM --platform=$BUILDPLATFORM golang:1.27.3-alpine@sha256:fa3d596898d9f126af7c01d14ee7597bab3f39cccf392ef36b69fe77cd681f18 AS compose-builder
 
 ARG TARGETARCH
 
