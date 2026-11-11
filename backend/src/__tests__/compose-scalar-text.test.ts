@@ -100,7 +100,7 @@ describe('composePlainScalarText', () => {
     expect(composePlainScalarText(written)).toBe(expected);
   });
 
-  it('keeps the text of the non-finite floats Compose cannot print as JSON', () => {
+  it('names the non-finite floats the way Go does (Compose refuses to print them as JSON, so these are not probed rows)', () => {
     expect(composePlainScalarText('.inf')).toBe('+Inf');
     expect(composePlainScalarText('-.Inf')).toBe('-Inf');
     expect(composePlainScalarText('.NaN')).toBe('NaN');

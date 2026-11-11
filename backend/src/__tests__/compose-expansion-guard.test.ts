@@ -2368,8 +2368,9 @@ describe('assertComposeInputsWithinExpansionLimits - scalar text, interpolation 
     });
 
     it('seeds a number as the text Compose prints', async () => {
-      // `1e-7` prints as `1e-07`, five characters, and a binary or octal numeral as its decimal value.
-      await write('chain.env', chain(19));
+      // `1e-7` prints as `1e-07`, five characters, where JavaScript prints four:
+      // 2^18 copies of five pass the 1 MiB bound and of four do not.
+      await write('chain.env', chain(18));
       await write('compose.yaml', withSeed('1e-7'));
       await expect(run()).rejects.toThrow(/too long, or interpolates into more text/);
       await write('chain.env', chain(20));
@@ -2379,9 +2380,9 @@ describe('assertComposeInputsWithinExpansionLimits - scalar text, interpolation 
       await expect(run()).resolves.toBeUndefined();
     });
 
-    it('keeps a string as written: a quoted or tagged scalar and the words yes and on', async () => {
+    it('keeps a string as written: a quoted scalar, a !!str one, and the words yes and on', async () => {
       await write('chain.env', chain(16));
-      for (const seed of ['"true"', '!!str true', 'yes', 'on', '"1e-7"', '"010"', "'2020-01-01'"]) {
+      for (const seed of ['"true"', '!!str true', '!!str 2020-01-01', 'yes', 'on', '"1e-7"', '"010"', "'2020-01-01'"]) {
         await write('compose.yaml', withSeed(seed));
         await expect(run()).resolves.toBeUndefined();
       }
@@ -2403,6 +2404,29 @@ describe('assertComposeInputsWithinExpansionLimits - scalar text, interpolation 
       await expect(run(dir, ['compose', 'config'], processEnv)).rejects.toThrow(/too long, or interpolates into more text/);
       await write('.env', `A=${big}\n`);
       await expect(run()).rejects.toThrow(/too long, or interpolates into more text/);
+    });
+
+    it('reads a quoted value with an explicit non-string tag the way a plain one is read', async () => {
+      await write('chain.env', chain(16));
+      await write('compose.yaml', withSeed("!!timestamp '2020-01-01'"));
+      await expect(run()).rejects.toThrow(/too long, or interpolates into more text/);
+      await write('chain.env', chain(18));
+      await write('compose.yaml', withSeed('!!float "1e-7"'));
+      await expect(run()).rejects.toThrow(/too long, or interpolates into more text/);
+    });
+
+    it('seeds a !!binary value as the text it decodes to, and a value reached through an alias', async () => {
+      await write('chain.env', chain(20));
+      await write('compose.yaml', withSeed(`!!binary ${b64('xxxx')}`));
+      await expect(run()).rejects.toThrow(/too long, or interpolates into more text/);
+      await write('compose.yaml', `x-v: &v true\nservices:\n  web:\n    image: nginx\n    environment:\n      A: *v\n    env_file: [chain.env]\n`);
+      await expect(run()).rejects.toThrow(/too long, or interpolates into more text/);
+    });
+
+    it('leaves a !!binary environment value that is not UTF-8 to Compose', async () => {
+      await write('chain.env', chain(20));
+      await write('compose.yaml', withSeed(`!!binary ${Buffer.from([0xff, 0xfe]).toString('base64')}`));
+      await expect(run()).resolves.toBeUndefined();
     });
 
     it('seeds a value from a merged environment map the same way', async () => {
@@ -2435,11 +2459,15 @@ describe('assertComposeInputsWithinExpansionLimits - scalar text, interpolation 
       await expect(run()).rejects.toThrow(/too long, or interpolates into more text/);
     });
 
-    it('does not read the later mention of a path before the first one', async () => {
-      // Compose keeps the first position: `q.env` runs after `d.env`, and a later `d.env` adds nothing.
-      await write('q.env', 'A=q\n');
-      await write('compose.yaml', seeded(`d.env, q.env, d.env, ${distinctSpellings('d.env', 3).slice(1).join(', ')}`));
-      await expect(run()).resolves.toBeUndefined();
+    it('keeps a repeated path at the place it first appeared', async () => {
+      // `x.env` sets A to a 100 KB value after the five `d.env` spellings have doubled `z`.
+      // Moving the later mentions to the end would double that value five times.
+      await write('x.env', 'A=${BIG}\n');
+      const spellings = distinctSpellings('d.env', 5);
+      const list = [...spellings, 'x.env', ...spellings].join(', ');
+      await write('compose.yaml', `services:\n  web:\n    image: nginx\n    environment:\n      A: z\n    env_file: [${list}]\n`);
+      const env = (name: string): string | undefined => (name === 'BIG' ? big : undefined);
+      await expect(run(dir, ['compose', 'config'], env)).resolves.toBeUndefined();
     });
 
     it('reads a label_file list mention by mention', async () => {
@@ -2448,10 +2476,16 @@ describe('assertComposeInputsWithinExpansionLimits - scalar text, interpolation 
       await expect(run()).rejects.toThrow(/too long, or interpolates into more text/);
     });
 
-    it('applies a later mention\'s format at the first mention\'s place', async () => {
-      // The raw mention replaces the plain one, so nothing doubles.
-      await write('compose.yaml', seeded(`d.env, ${distinctSpellings('d.env', 5).slice(1).map((name) => `{path: ${name}, format: raw}`).join(', ')}`));
-      // Four raw spellings and one plain one: the plain read doubles once, a raw read does not.
+    it('gives a path the format its last mention names', async () => {
+      // Each spelling is first a raw read, which would not interpolate, and then a plain one.
+      // Compose keeps one entry per spelling with the plain format, so all five double the seed.
+      const spellings = distinctSpellings('d.env', 5);
+      const list = [...spellings.map((name) => `{path: ${name}, format: raw}`), ...spellings].join(', ');
+      await write('compose.yaml', seeded(list));
+      await expect(run()).rejects.toThrow(/too long, or interpolates into more text/);
+      // The reverse order keeps the raw format, which reads the text literally.
+      const reversed = [...spellings, ...spellings.map((name) => `{path: ${name}, format: raw}`)].join(', ');
+      await write('compose.yaml', seeded(reversed));
       await expect(run()).resolves.toBeUndefined();
     });
   });

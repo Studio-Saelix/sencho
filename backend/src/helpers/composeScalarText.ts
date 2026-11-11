@@ -7,7 +7,9 @@
  * that kept the characters as written would size a value Compose never builds.
  *
  * The rules below follow what Compose 5.7.0 produced for a table of probes
- * (see the unit tests); a quoted scalar is a string and never comes here.
+ * (see the unit tests). A quoted scalar without an explicit tag is a string and
+ * never comes here; `.inf`, `-.inf`, and `.nan` follow Go's float names, since
+ * Compose refuses to print them as JSON.
  */
 
 const BOOLEAN_TRUE = new Set(['true', 'True', 'TRUE']);

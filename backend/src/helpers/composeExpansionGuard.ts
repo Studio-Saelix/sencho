@@ -949,9 +949,10 @@ const YAML_STRING_TAG = 'tag:yaml.org,2002:str';
 
 /**
  * The text Compose seeds a service's env files with for one `environment:`
- * value. A plain scalar is whatever Compose's decoder resolves it to (a
- * boolean, a number, a timestamp), written back out as text; a quoted or block
- * scalar is its string as written. A null value has no text: Compose takes
+ * value. A plain scalar, or one with an explicit tag other than `!!str`, is
+ * whatever Compose's decoder resolves it to (a boolean, a number, a
+ * timestamp), written back out as text; an untagged quoted or block scalar is
+ * its string as written. A null value has no text: Compose takes
  * that variable from the environment by name, which an env file's own
  * references already read.
  */
@@ -960,7 +961,15 @@ function environmentValueOf(node: unknown, targets: Map<Node, Node>): string | u
   if (resolved === undefined) return undefined;
   const value: unknown = resolved.value;
   if (value === null) return undefined;
-  if (value instanceof Uint8Array) return decodeBinary(value);
+  if (value instanceof Uint8Array) {
+    // Bytes that are not UTF-8 are no text to interpolate into an env file, and
+    // Compose accepts them as a value, so there is nothing to seed.
+    try {
+      return strictUtf8.decode(value);
+    } catch {
+      return undefined;
+    }
+  }
   if (resolved.tag === YAML_STRING_TAG || (resolved.type !== undefined && resolved.type !== 'PLAIN' && typeof value === 'string')) {
     return typeof value === 'string' ? value : undefined;
   }
@@ -1276,7 +1285,8 @@ async function assertInputClosure(args: {
   files: readonly ResolvedInputFile[];
 }): Promise<void> {
   // Env files and the contexts they build are shared by every include that
-  // names them, so a project with many includes reads and parses each once.
+  // names them, so a project with many includes reads each once and builds
+  // each distinct layering once.
   const envEntries = new Map<string, Promise<EnvFileText | null>>();
   let envReadBytes = 0;
   const readEnvEntry = (filePath: string): Promise<EnvFileText | null> => {
