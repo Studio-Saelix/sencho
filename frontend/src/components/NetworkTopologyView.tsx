@@ -280,6 +280,17 @@ function layoutGraph(
 
 // ── Viewport fitting ─────────────────────────────────────────────────────────
 
+/** Identity of a computed layout: where dagre placed every node plus the edges
+ *  it laid out. Node drags never change it; a reload, filter, or reordered
+ *  response that produces a different layout does. */
+function layoutSignature(layoutNodes: Node[], layoutEdges: Edge[]): string {
+    const nodePart = layoutNodes
+        .map((node) => `${node.id}@${node.position.x.toFixed(2)},${node.position.y.toFixed(2)}`)
+        .join('\u0000');
+    const edgePart = layoutEdges.map((edge) => `${edge.source}>${edge.target}`).join('\u0000');
+    return `${nodePart}\u0001${edgePart}`;
+}
+
 /**
  * React Flow's `fitView` prop frames only the nodes present at initialization.
  * The canvas now stays mounted across reloads so the toolbar survives one, so
@@ -287,10 +298,11 @@ function layoutGraph(
  * measured; otherwise dagre's fresh positions render under the old viewport
  * transform and land outside the pane.
  *
- * `signature` identifies the rendered graph (node ids plus edges) and is stable
- * across node drags, so the operator's pan, zoom and manual positions survive
- * everything except an actual re-layout. `nodeIds` guards the one render where
- * `useNodesInitialized` can still report the previous graph as measured.
+ * `signature` is the identity of the computed layout (dagre positions plus
+ * edges), so it is stable across node drags and a reload of the same graph,
+ * and changes whenever a response or filter produces a new layout.
+ * `nodeIds` guards the one render where `useNodesInitialized` can still report
+ * the previous graph as measured.
  */
 function FitViewOnGraphChange({ signature, nodeIds }: { signature: string; nodeIds: string }) {
     const { fitView } = useReactFlow();
@@ -351,6 +363,9 @@ export default function NetworkTopologyView({
     // client-side so toggling them never triggers a new request (Workstream J).
     const [rawNetworks, setRawNetworks] = useState<TopologyNetwork[]>([]);
     const [overCap, setOverCap] = useState(false);
+    // The last computed layout's identity. It changes only when the effect
+    // below lays out new data, never when the operator drags a node.
+    const [graphLayout, setGraphLayout] = useState({ signature: '', nodeIds: '' });
 
     const fetchTopology = useCallback(async () => {
         setLoading(true);
@@ -394,17 +409,11 @@ export default function NetworkTopologyView({
         const { nodes: layoutNodes, edges: layoutEdges } = layoutGraph(networksList, onStackClickRef.current);
         setNodes(layoutNodes);
         setEdges(layoutEdges);
+        setGraphLayout({
+            signature: layoutSignature(layoutNodes, layoutEdges),
+            nodeIds: layoutNodes.map((node) => node.id).sort().join('\u0000'),
+        });
     }, [networksList, setNodes, setEdges]);
-
-    // A stable identity for the rendered graph. Node positions change on drag
-    // without changing the ids or edges, so the fit effect below can tell a
-    // re-layout apart from the operator moving a node. Both lists are sorted so
-    // a response that returns the same set in another order stays the same graph.
-    const graphNodeIds = useMemo(() => nodes.map((node) => node.id).sort().join('\u0000'), [nodes]);
-    const graphSignature = useMemo(
-        () => `${graphNodeIds}\u0001${edges.map((edge) => `${edge.source}>${edge.target}`).sort().join('\u0000')}`,
-        [graphNodeIds, edges],
-    );
 
     const handleNodeClick = useCallback((_event: React.MouseEvent, node: Node) => {
         if (node.type === 'network') {
@@ -521,7 +530,7 @@ export default function NetworkTopologyView({
                     proOptions={{ hideAttribution: true }}
                     className="bg-background"
                 >
-                    <FitViewOnGraphChange signature={graphSignature} nodeIds={graphNodeIds} />
+                    <FitViewOnGraphChange signature={graphLayout.signature} nodeIds={graphLayout.nodeIds} />
                     <Background gap={20} size={1} className="opacity-30" />
                     <Controls className="!bg-card !border-card-border !shadow-card-bevel [&>button]:!bg-card [&>button]:!border-card-border [&>button]:!text-foreground [&>button:hover]:!bg-muted" />
                     <MiniMap

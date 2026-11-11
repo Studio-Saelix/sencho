@@ -185,11 +185,12 @@ test.describe('Networking topology refresh', () => {
     const networkFilter = page.getByPlaceholder(/Filter network/);
     await networkFilter.fill('qa-net-6');
     await expectGraphFitted(page, 2);
-    const narrowed = await measureGraph(page);
     // The narrowed graph is a different layout; leaving the 12-node fit in
     // place would keep the old transform even though every node happens to sit
-    // inside it, so assert the viewport actually moved.
-    expect(narrowed.transform).not.toBe(reloaded.transform);
+    // inside it, so wait for the viewport to actually move.
+    await expect.poll(async () => (await measureGraph(page)).transform).not.toBe(reloaded.transform);
+    const narrowed = await measureGraph(page);
+    expect(narrowed.outside).toEqual([]);
     await networkFilter.fill('');
     await expectGraphFitted(page, 12);
   });

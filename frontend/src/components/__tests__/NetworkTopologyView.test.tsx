@@ -244,6 +244,27 @@ describe('NetworkTopologyView refresh', () => {
         expect(flowState.fitView).toHaveBeenCalledWith({ padding: 0.3 });
     });
 
+    it('re-fits when a reload reorders the same graph into a new layout', async () => {
+        const firstLoad = deferred();
+        const reload = deferred();
+        mockedFetch
+            .mockReturnValueOnce(firstLoad.promise)
+            .mockReturnValueOnce(reload.promise);
+
+        render(<NetworkTopologyView />);
+        await act(async () => { firstLoad.resolve(topologyResponse([network, refreshedNetwork])); });
+        await screen.findByTestId('topology-node-net-net-1');
+        await waitFor(() => expect(flowState.fitView).toHaveBeenCalledTimes(1));
+        flowState.fitView.mockClear();
+
+        fireEvent.click(screen.getByRole('button', { name: 'Refresh topology' }));
+        await act(async () => { reload.resolve(topologyResponse([refreshedNetwork, network])); });
+
+        // The same set in another order is a different dagre layout, so the
+        // viewport follows the nodes instead of keeping the old fit.
+        await waitFor(() => expect(flowState.fitView).toHaveBeenCalledTimes(1));
+    });
+
     it('leaves the viewport alone when a reload returns the same graph', async () => {
         const firstLoad = deferred();
         const reload = deferred();
