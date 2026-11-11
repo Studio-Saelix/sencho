@@ -2,7 +2,7 @@
  * SecretsTab: one create affordance per state. The empty card owns the call to
  * action; the tab action row returns with the bundle list.
  */
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import type { SecretSummary } from '@/lib/secretsApi';
@@ -24,7 +24,7 @@ vi.mock('@/context/NodeContext', () => ({
     useNodes: () => ({ nodes: [] }),
 }));
 
-import { listSecrets } from '@/lib/secretsApi';
+import { deleteSecret, listSecrets } from '@/lib/secretsApi';
 import { SecretsTab } from './SecretsTab';
 
 const bundle: SecretSummary = {
@@ -38,8 +38,14 @@ const bundle: SecretSummary = {
     updatedAt: 0,
 };
 
+const createButtons = () => screen.queryAllByRole('button', { name: /^(New bundle|Create your first bundle)$/ });
+
 beforeEach(() => {
     vi.clearAllMocks();
+});
+
+afterEach(() => {
+    vi.restoreAllMocks();
 });
 
 describe('SecretsTab create affordance', () => {
@@ -50,7 +56,7 @@ describe('SecretsTab create affordance', () => {
         await waitFor(() => expect(screen.getByText('One source of truth for env')).toBeInTheDocument());
         expect(screen.queryByRole('button', { name: 'New bundle' })).toBeNull();
         const create = screen.getByRole('button', { name: /Create your first bundle/i });
-        expect(screen.getAllByRole('button', { name: /bundle/i })).toHaveLength(1);
+        expect(createButtons()).toHaveLength(1);
 
         await userEvent.click(create);
         expect(await screen.findByText('New secret bundle')).toBeInTheDocument();
@@ -62,10 +68,26 @@ describe('SecretsTab create affordance', () => {
 
         await waitFor(() => expect(screen.getByText('app-config')).toBeInTheDocument());
         expect(screen.queryByText('One source of truth for env')).toBeNull();
-        expect(screen.queryByRole('button', { name: /Create your first bundle/i })).toBeNull();
-        expect(screen.getAllByRole('button', { name: /bundle/i })).toHaveLength(1);
+        expect(createButtons()).toHaveLength(1);
+        expect(screen.getByRole('button', { name: 'New bundle' })).toBeInTheDocument();
 
         await userEvent.click(screen.getByRole('button', { name: 'New bundle' }));
         expect(await screen.findByText('New secret bundle')).toBeInTheDocument();
+    });
+
+    it('returns to the empty card when the last bundle is deleted', async () => {
+        vi.spyOn(window, 'confirm').mockReturnValue(true);
+        vi.mocked(listSecrets).mockResolvedValueOnce([bundle]).mockResolvedValueOnce([]);
+        vi.mocked(deleteSecret).mockResolvedValue();
+
+        render(<SecretsTab />);
+        await waitFor(() => expect(screen.getByText('app-config')).toBeInTheDocument());
+        expect(createButtons()).toHaveLength(1);
+
+        await userEvent.click(screen.getByRole('button', { name: 'Delete' }));
+
+        await waitFor(() => expect(screen.getByText('One source of truth for env')).toBeInTheDocument());
+        expect(createButtons()).toHaveLength(1);
+        expect(screen.getByRole('button', { name: 'Create your first bundle' })).toBeInTheDocument();
     });
 });
