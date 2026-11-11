@@ -686,6 +686,7 @@ function ReadinessHero({
   canRefresh,
   unresolvedChecks = false,
   detectionDisabled = false,
+  unanswered,
 }: {
   total: number;
   ready: number;
@@ -695,14 +696,24 @@ function ReadinessHero({
   canRefresh: boolean;
   unresolvedChecks?: boolean;
   detectionDisabled?: boolean;
+  /**
+   * No load has produced a count yet. `checking` while the attempt is in flight,
+   * `unavailable` once it settled without an answer; either way there is nothing
+   * to count, so an all-clear would be false.
+   */
+  unanswered?: 'checking' | 'unavailable';
 }) {
   const headline = detectionDisabled
     ? 'Image update detection disabled'
-    : total === 0
-      ? (unresolvedChecks ? 'No verified updates' : 'Everything is up to date')
-      : total === 1
-        ? '1 update pending'
-        : `${total} updates pending`;
+    : unanswered === 'checking'
+      ? 'Checking for updates'
+      : unanswered === 'unavailable'
+        ? 'Could not check for updates'
+        : total === 0
+          ? (unresolvedChecks ? 'No verified updates' : 'Everything is up to date')
+          : total === 1
+            ? '1 update pending'
+            : `${total} updates pending`;
   const acrossNodes = nodeCount > 1
     ? ` across ${nodeCount} nodes`
     : nodeCount === 1
@@ -1292,6 +1303,49 @@ interface AutoUpdateReadinessProps {
   headerActions?: ReactNode;
 }
 
+/**
+ * The board's empty body once the first load has settled. With no count to show it
+ * names what it knows: detection is off, the status could not be loaded, some
+ * checks are unresolved, or everything is current.
+ */
+function ReadinessEmptyState({
+  detectionDisabled,
+  unavailable,
+  unresolvedChecks,
+  centered = false,
+}: {
+  detectionDisabled: boolean;
+  unavailable: boolean;
+  unresolvedChecks: boolean;
+  centered?: boolean;
+}) {
+  return (
+    <div className={cn('flex flex-col items-center justify-center gap-3 rounded-lg border border-dashed border-card-border bg-card/40 py-16', centered && 'text-center')}>
+      <Shield
+        className={`h-8 w-8 ${unavailable || unresolvedChecks ? 'text-warning/70' : 'text-success/70'}`}
+        strokeWidth={1.5}
+        aria-hidden="true"
+      />
+      <div className="font-display italic text-xl text-stat-value">
+        {detectionDisabled
+          ? 'Detection disabled'
+          : unavailable
+            ? 'Update readiness unavailable'
+            : unresolvedChecks ? 'No verified updates pending' : 'All stacks on current builds'}
+      </div>
+      <div className="font-mono text-[11px] text-stat-subtitle">
+        {detectionDisabled
+          ? 'Turn image update checks back on in Settings when Sencho should monitor registries again.'
+          : unavailable
+            ? 'The fleet update status could not be loaded.'
+            : unresolvedChecks
+              ? 'Review the unresolved checks above, then recheck.'
+              : 'Sencho rechecks registries on the configured interval.'}
+      </div>
+    </div>
+  );
+}
+
 function AutoUpdateReadinessContent({ headerActions }: AutoUpdateReadinessProps) {
   const isMobile = useIsMobile();
   const { runWithLog } = useDeployFeedback();
@@ -1305,6 +1359,9 @@ function AutoUpdateReadinessContent({ headerActions }: AutoUpdateReadinessProps)
   // True once the latest load has settled (data or error). The skeleton belongs to
   // the first load only: a later reload, even over an empty list, keeps what is shown.
   const [hasLoaded, setHasLoaded] = useState(false);
+  // True once a load has produced data. A failed first load leaves it false, so the
+  // view says the status is unavailable instead of reporting a count it does not have.
+  const [hasAnswered, setHasAnswered] = useState(false);
   const [refreshing, setRefreshing] = useState(false);
   const [cadence, setCadence] = useState<ImageUpdateStatus | null>(null);
   // Local-node stacks whose latest check could not determine status. The fleet
@@ -1464,6 +1521,10 @@ function AutoUpdateReadinessContent({ headerActions }: AutoUpdateReadinessProps)
 
       if (token !== loadTokenRef.current) return;
       setGroups(initialGroups);
+      // The fleet answer is in and the count is known; the per-stack previews
+      // only refine how each card reads, so the headline no longer has to wait
+      // for them (and must not call the load unavailable while they are pending).
+      setHasAnswered(true);
       // Resolve service-scoped-update capability for every node in this fleet
       // view (not just the active one) so per-service Apply can gate on each
       // card's own node; skips nodes whose meta is already cached.
@@ -1625,6 +1686,12 @@ function AutoUpdateReadinessContent({ headerActions }: AutoUpdateReadinessProps)
   // It ends when the first load settles or its rows arrive (their previews may still be fetching), so later reloads over an empty list keep the empty state.
   const firstLoad = loading && !hasLoaded && groups.length === 0;
   const { showBusy: showSkeleton } = useVisualBusy(firstLoad);
+  // Nothing has been counted yet: the first attempt is in flight, or it settled
+  // without an answer (a failed load), which is an unknown state, not an empty one.
+  // A reload after that failure keeps the unavailable verdict until one answers.
+  const unanswered: 'checking' | 'unavailable' | undefined = hasAnswered
+    ? undefined
+    : firstLoad ? 'checking' : 'unavailable';
 
   // Nodes that advertise service-scoped updates, resolved per node (not just
   // the active one) since this view spans the whole fleet.
@@ -1819,22 +1886,32 @@ function AutoUpdateReadinessContent({ headerActions }: AutoUpdateReadinessProps)
   if (isMobile) {
     return (
       <div className="flex h-full min-h-0 flex-col">
+        {/* Mobile has no idle tone, so the unknown state stays off success green:
+            brand, pulsed while checking; warning once the attempt has failed. */}
         <Masthead
           kicker="fleet · updates"
           state={cadence?.enabled === false
             ? 'Disabled'
-            : total === 0
-              ? (checkFailures.length > 0 ? 'No verified updates' : 'Up to date')
-              : `${total} pending`}
-          stateTone={cadence?.enabled === false
+            : unanswered === 'checking'
+              ? 'Checking'
+              : unanswered === 'unavailable'
+                ? 'Unavailable'
+                : total === 0
+                  ? (checkFailures.length > 0 ? 'No verified updates' : 'Up to date')
+                  : `${total} pending`}
+          stateTone={cadence?.enabled === false || unanswered === 'checking'
             ? 'brand'
-            : total === 0 && checkFailures.length === 0 ? 'success' : 'warning'}
-          live={total > 0 && cadence?.enabled !== false}
+            : unanswered === 'unavailable'
+              ? 'warning'
+              : total === 0 && checkFailures.length === 0 ? 'success' : 'warning'}
+          live={cadence?.enabled !== false && (unanswered === 'checking' || total > 0)}
           meta={cadence?.enabled === false
             ? 'image update detection off'
-            : total > 0
-              ? `${ready} ready · ${total - ready} in review`
-              : (checkFailures.length > 0 ? 'some checks unresolved' : 'all stacks current')}
+            : unanswered
+              ? undefined
+              : total > 0
+                ? `${ready} ready · ${total - ready} in review`
+                : (checkFailures.length > 0 ? 'some checks unresolved' : 'all stacks current')}
           right={headerActions}
         />
         <div className="flex-1 min-h-0 overflow-y-auto p-4 [&>*+*]:mt-4">
@@ -1856,21 +1933,12 @@ function AutoUpdateReadinessContent({ headerActions }: AutoUpdateReadinessProps)
               {showSkeleton && <ReadinessLoadingSkeleton layout="phone" />}
             </div>
           ) : groups.length === 0 ? (
-            <div className="flex flex-col items-center justify-center gap-3 rounded-lg border border-dashed border-card-border bg-card/40 py-16 text-center">
-              <Shield className={`h-8 w-8 ${checkFailures.length > 0 ? 'text-warning/70' : 'text-success/70'}`} strokeWidth={1.5} aria-hidden="true" />
-              <div className="font-display italic text-xl text-stat-value">
-                {cadence?.enabled === false
-                  ? 'Detection disabled'
-                  : checkFailures.length > 0 ? 'No verified updates pending' : 'All stacks on current builds'}
-              </div>
-              <div className="font-mono text-[11px] text-stat-subtitle">
-                {cadence?.enabled === false
-                  ? 'Turn image update checks back on in Settings when Sencho should monitor registries again.'
-                  : checkFailures.length > 0
-                    ? 'Review the unresolved checks above, then recheck.'
-                    : 'Sencho rechecks registries on the configured interval.'}
-              </div>
-            </div>
+            <ReadinessEmptyState
+              detectionDisabled={cadence?.enabled === false}
+              unavailable={unanswered === 'unavailable'}
+              unresolvedChecks={checkFailures.length > 0}
+              centered
+            />
           ) : (
             groups.map(group => (
               <MobileNodeSection
@@ -1898,6 +1966,7 @@ function AutoUpdateReadinessContent({ headerActions }: AutoUpdateReadinessProps)
         canRefresh={canRefreshFleet}
         unresolvedChecks={checkFailures.length > 0}
         detectionDisabled={cadence?.enabled === false}
+        unanswered={unanswered}
       />
 
       <CadenceStrip cadence={cadence} className="-mt-3 pl-7" />
@@ -1915,21 +1984,11 @@ function AutoUpdateReadinessContent({ headerActions }: AutoUpdateReadinessProps)
           {showSkeleton && <ReadinessLoadingSkeleton layout={viewMode} />}
         </div>
       ) : groups.length === 0 ? (
-        <div className="flex flex-col items-center justify-center gap-3 rounded-lg border border-dashed border-card-border bg-card/40 py-16">
-          <Shield className={`h-8 w-8 ${checkFailures.length > 0 ? 'text-warning/70' : 'text-success/70'}`} strokeWidth={1.5} aria-hidden="true" />
-          <div className="font-display italic text-xl text-stat-value">
-            {cadence?.enabled === false
-              ? 'Detection disabled'
-              : checkFailures.length > 0 ? 'No verified updates pending' : 'All stacks on current builds'}
-          </div>
-          <div className="font-mono text-[11px] text-stat-subtitle">
-            {cadence?.enabled === false
-              ? 'Turn image update checks back on in Settings when Sencho should monitor registries again.'
-              : checkFailures.length > 0
-                ? 'Review the unresolved checks above, then recheck.'
-                : 'Sencho rechecks registries on the configured interval.'}
-          </div>
-        </div>
+        <ReadinessEmptyState
+          detectionDisabled={cadence?.enabled === false}
+          unavailable={unanswered === 'unavailable'}
+          unresolvedChecks={checkFailures.length > 0}
+        />
       ) : (
         <div className="flex flex-col gap-4">
           <div className="flex justify-end">
