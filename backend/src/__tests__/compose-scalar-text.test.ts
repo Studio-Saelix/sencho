@@ -100,6 +100,14 @@ describe('composePlainScalarText', () => {
     expect(composePlainScalarText(written)).toBe(expected);
   });
 
+  it('reads a very long numeral as a float without converting it as an integer', () => {
+    const started = Date.now();
+    expect(composePlainScalarText('9'.repeat(1_000_000))).toBe('9'.repeat(1_000_000));
+    expect(composePlainScalarText(`0x${'f'.repeat(1_000_000)}`)).toBe(`0x${'f'.repeat(1_000_000)}`);
+    expect(composePlainScalarText('1'.repeat(30))).toBe('1.111111111111111e+29');
+    expect(Date.now() - started).toBeLessThan(2_000);
+  });
+
   it('names the non-finite floats the way Go does (Compose refuses to print them as JSON, so these are not probed rows)', () => {
     expect(composePlainScalarText('.inf')).toBe('+Inf');
     expect(composePlainScalarText('-.Inf')).toBe('-Inf');

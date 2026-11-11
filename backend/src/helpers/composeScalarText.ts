@@ -28,7 +28,13 @@ const MAX_INT64 = (1n << 63n) - 1n;
 const MIN_INT64 = -(1n << 63n);
 const MAX_UINT64 = (1n << 64n) - 1n;
 
+/** The longest 64-bit spelling: a sign, `0b`, and 64 binary digits. */
+const MAX_INTEGER_SPELLING = 67;
+
 function integerText(plain: string): string | null {
+  // A longer numeral is past 64 bits whatever its base, and converting a
+  // very long one would cost more than the text it came from.
+  if (plain.length > MAX_INTEGER_SPELLING) return null;
   const match = INTEGER.exec(plain);
   if (match === null) return null;
   const [, sign, hex, binary, octalPrefixed, octalLeading, decimal] = match;
