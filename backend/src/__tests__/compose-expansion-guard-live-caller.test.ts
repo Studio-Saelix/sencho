@@ -174,6 +174,23 @@ describe('ComposeService live caller uses the real guard', () => {
     expect(mockSpawn).not.toHaveBeenCalled();
   });
 
+  it('refuses an env_file chain that continues in a second selected file without spawning Compose', async () => {
+    // The first file builds 640 KB and the second doubles it past the 1 MiB bound.
+    const seed = 'x'.repeat(80_000);
+    await writeStackFile('compose.yaml', SAFE_COMPOSE);
+    await writeStackFile('a.yaml', `services:\n  web:\n    image: nginx\n    environment:\n      A: ${seed}\n    env_file: [e1.env]\n`);
+    await writeStackFile('b.yaml', 'services:\n  web:\n    env_file: [e2.env]\n');
+    await writeStackFile('e1.env', 'B0=${A}\nB1="${B0}${B0}"\nB2="${B1}${B1}"\nB3="${B2}${B2}"\n');
+    await writeStackFile('e2.env', 'B4="${B3}${B3}"\n');
+    await writeStackFile('.env', 'COMPOSE_FILE=a.yaml:b.yaml\n');
+
+    const result = await ComposeService.getInstance(1).renderConfig('stack');
+
+    expect(result.rendered).toBeNull();
+    expect(result.refusal).toContain('interpolates into more text');
+    expect(mockSpawn).not.toHaveBeenCalled();
+  });
+
   it('refuses a BOM-marked UTF-16 bomb without spawning Compose', async () => {
     await writeStackFile('compose.yaml', encodeUtf16(nestedAliasBomb(12), 'le'));
 

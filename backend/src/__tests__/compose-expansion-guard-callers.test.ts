@@ -143,6 +143,51 @@ describe('persistent bind remap caller uses the real guard', () => {
     expect(mockSpawn).not.toHaveBeenCalled();
   });
 
+  /** `B0=${A}`, 14 doublings, and `F` holding three of the last: 49,152 copies of the seed. */
+  const scaledChain = (): string => {
+    const lines = ['B0=${A}'];
+    for (let i = 1; i <= 14; i += 1) lines.push(`B${i}="\${B${i - 1}}\${B${i - 1}}"`);
+    lines.push('F="${B14}${B14}${B14}"');
+    return `${lines.join('\n')}\n`;
+  };
+
+  it('does not start Compose when a timestamp with two spaces seeds an env_file chain past the bound', async () => {
+    // Compose prints it as 29 characters, 1,425,408 in all; the 20 it is written in would pass.
+    await writeOverlay('chain.env', scaledChain());
+    await writeOverlay('compose.yaml', 'services:\n  web:\n    image: nginx\n    environment:\n      A: 2020-01-01  10:20:30\n    env_file: [chain.env]\n');
+
+    await expect(remap(['compose', '-f', 'compose.yaml', 'config', '--format', 'json']))
+      .resolves.toEqual({ action: 'refuse', reason: PERSISTENT_BIND_UNSAFE });
+    expect(mockSpawn).not.toHaveBeenCalled();
+  });
+
+  it('does not start Compose when an explicit !!float seeds an env_file chain past the bound', async () => {
+    const lines = ['B0=${A}'];
+    for (let i = 1; i <= 12; i += 1) lines.push(`B${i}="\${B${i - 1}}\${B${i - 1}}"`);
+    lines.push(`F="${'${B12}'.repeat(13)}"`);
+    await writeOverlay('chain.env', `${lines.join('\n')}\n`);
+    await writeOverlay('compose.yaml', 'services:\n  web:\n    image: nginx\n    environment:\n      A: !!float 9223372036854775807\n    env_file: [chain.env]\n');
+
+    await expect(remap(['compose', '-f', 'compose.yaml', 'config', '--format', 'json']))
+      .resolves.toEqual({ action: 'refuse', reason: PERSISTENT_BIND_UNSAFE });
+    expect(mockSpawn).not.toHaveBeenCalled();
+  });
+
+  it.each(['env_file', 'label_file'])('does not start Compose when a %s chain continues in a second -f file past the bound', async (kind) => {
+    const seed = 'x'.repeat(80_000);
+    const doubled = (from: number, to: number): string =>
+      Array.from({ length: to - from + 1 }, (_, i) => `B${from + i}="\${B${from + i - 1}}\${B${from + i - 1}}"`).join('\n');
+    const environment = kind === 'env_file' ? `    environment:\n      A: ${seed}\n` : '';
+    await writeOverlay('a.yaml', `services:\n  web:\n    image: nginx\n${environment}    ${kind}: [e1.env]\n`);
+    await writeOverlay('b.yaml', `services:\n  web:\n    ${kind}: [e2.env]\n`);
+    await writeOverlay('e1.env', `${kind === 'env_file' ? 'B0=${A}' : `B0=${seed}`}\n${doubled(1, 3)}\n`);
+    await writeOverlay('e2.env', `${doubled(4, 4)}\n`);
+
+    await expect(remap(['compose', '-f', 'a.yaml', '-f', 'b.yaml', 'config', '--format', 'json']))
+      .resolves.toEqual({ action: 'refuse', reason: PERSISTENT_BIND_UNSAFE });
+    expect(mockSpawn).not.toHaveBeenCalled();
+  });
+
   it('still starts Compose for an ordinary project', async () => {
     await writeOverlay('compose.yaml', SAFE_COMPOSE);
     // The child is mocked, so a spawn here proves only that the guard let the

@@ -2433,6 +2433,104 @@ describe('assertComposeInputsWithinExpansionLimits - scalar text, interpolation 
       await expect(run()).resolves.toBeUndefined();
     });
 
+    describe('at the boundary Compose crosses, not the one the written text suggests', () => {
+      /** `B0=${A}`, `levels` doublings, then `F` holding `copies` of the last, so `F` is `copies * 2^levels` seeds long. */
+      const scaled = (levels: number, copies: number): string => {
+        const lines = ['B0=${A}'];
+        for (let i = 1; i <= levels; i += 1) lines.push(`B${i}="\${B${i - 1}}\${B${i - 1}}"`);
+        lines.push(`F="${`\${B${levels}}`.repeat(copies)}"`);
+        return `${lines.join('\n')}\n`;
+      };
+      const refuses = async (seed: string, levels: number, copies: number): Promise<void> => {
+        await write('chain.env', scaled(levels, copies));
+        await write('compose.yaml', withSeed(seed));
+        await expect(run()).rejects.toThrow(/too long, or interpolates into more text/);
+      };
+      const accepts = async (seed: string, levels: number, copies: number): Promise<void> => {
+        await write('chain.env', scaled(levels, copies));
+        await write('compose.yaml', withSeed(seed));
+        await expect(run()).resolves.toBeUndefined();
+      };
+
+      // 3 * 2^14 copies: a 29-character timestamp builds 1,425,408 characters, past the 1 MiB
+      // bound, where the 20 characters the text is written in build 983,040.
+      it.each(['2020-01-01  10:20:30', '2020-01-01     10:20:30', '2020-01-01  10:20:30.5', '!!timestamp 2020-01-01  10:20:30'])(
+        'seeds %s as the 29-character time Compose prints for it',
+        async (seed) => {
+          await refuses(seed, 14, 3);
+        },
+      );
+
+      it('keeps a date and time that Compose does not read as a timestamp as the text it is', async () => {
+        // A tab, or a space before the `T`, is no timestamp: 19 characters build 933,888.
+        await accepts('2020-01-01\t10:20:30', 14, 3);
+        await accepts('2020-01-01 T10:20:30Z', 14, 3);
+      });
+
+      // 13 * 2^12 copies: 21 characters of `9.223372036854776e+18` build 1,118,208 characters,
+      // where the 19 of the integer it was written as build 1,011,712.
+      it.each(['!!float 9223372036854775807', '!!float "9223372036854775807"', '!!float 0x7fffffffffffffff'])(
+        'seeds %s as the float Compose converts it to',
+        async (seed) => {
+          await refuses(seed, 12, 13);
+        },
+      );
+
+      it('seeds the same digits written without a tag as the integer they are', async () => {
+        await accepts('9223372036854775807', 12, 13);
+        await accepts('!!int 9223372036854775807', 12, 13);
+      });
+
+      it.each(['!custom 2020-01-01', '!custom 1e3', '!!seq 2020-01-01', '!!set 2020-01-01'])(
+        'keeps %s as the string it is: an unknown tag resolves nothing',
+        async (seed) => {
+          // 10 characters: 491,520 pass the bound; read as a timestamp they would not.
+          await accepts(seed, 14, 3);
+        },
+      );
+
+      it('reads a quoted scalar under an explicit tag the way Compose resolves it', async () => {
+        await refuses('!!float "9223372036854775807"', 12, 13);
+        await refuses("!!timestamp '2020-01-01  10:20:30'", 14, 3);
+        // `!!str` and an untagged quoted scalar stay strings.
+        await accepts('"2020-01-01  10:20:30"', 14, 3);
+        await accepts('!!str 2020-01-01  10:20:30', 14, 3);
+      });
+
+      it('leaves a value Compose rejects for its own error, and a null one to the environment', async () => {
+        for (const seed of ['!!float abc', '!!int 1.5', '!!bool yes', '!!null ~']) {
+          await accepts(seed, 10, 1);
+        }
+      });
+
+      // 2^14 copies of one character: a numeral padded with zeros is the value it names.
+      it.each([`0x${'0'.repeat(70)}1`, `0b${'0'.repeat(70)}1`, `0o${'0'.repeat(70)}1`, `-0x${'0'.repeat(70)}1`, `0${'0'.repeat(70)}7`])(
+        'seeds the padded numeral %s as the short value it names',
+        async (seed) => {
+          await accepts(seed, 14, 1);
+        },
+      );
+
+      it('still refuses a numeral whose digits count: 2^20 copies of its value pass the bound', async () => {
+        await refuses(`0x${'0'.repeat(70)}ff`, 20, 1);
+        await refuses('0b11111111', 20, 1);
+      });
+
+      it('reads the same scalars through an alias and a merged map', async () => {
+        await write('chain.env', scaled(14, 3));
+        await write(
+          'compose.yaml',
+          `x-v: &v 2020-01-01  10:20:30\nx-env: &env\n  A: *v\nservices:\n  web:\n    image: nginx\n    environment:\n      <<: *env\n    env_file: [chain.env]\n`,
+        );
+        await expect(run()).rejects.toThrow(/too long, or interpolates into more text/);
+        await write(
+          'compose.yaml',
+          `x-v: &v !custom 2020-01-01\nx-env: &env\n  A: *v\nservices:\n  web:\n    image: nginx\n    environment:\n      <<: *env\n    env_file: [chain.env]\n`,
+        );
+        await expect(run()).resolves.toBeUndefined();
+      });
+    });
+
     it('seeds a value from a merged environment map the same way', async () => {
       await write('chain.env', chain(20));
       await write('compose.yaml', `x-env: &env\n  A: true\nservices:\n  web:\n    image: nginx\n    environment:\n      <<: *env\n    env_file: [chain.env]\n`);
@@ -2491,6 +2589,143 @@ describe('assertComposeInputsWithinExpansionLimits - scalar text, interpolation 
       const reversed = [...spellings, ...spellings.map((name) => `{path: ${name}, format: raw}`)].join(', ');
       await write('compose.yaml', seeded(reversed));
       await expect(run()).resolves.toBeUndefined();
+    });
+  });
+
+  describe('an env_file or label_file chain is bounded over what Compose combines, not over each definition', () => {
+    // The first definition builds 640 KB (below the 1 MiB statement bound) and
+    // the continuation doubles it to 1.28 MB, which Compose builds and each
+    // definition alone would never reach.
+    const seedText = 'x'.repeat(80_000);
+    const doublings = (from: number, to: number): string =>
+      Array.from({ length: to - from + 1 }, (_, i) => `B${from + i}="\${B${from + i - 1}}\${B${from + i - 1}}"`).join('\n');
+    const continuation = `${doublings(4, 4)}\n`;
+
+    interface Form {
+      files: Record<string, string>;
+      invocation: string[];
+    }
+    /** One service that Compose assembles from two definitions, the first holding `first` and the second `second`. */
+    const forms = (kind: 'env_file' | 'label_file', second: string): Record<string, Form> => {
+      const seed = kind === 'env_file' ? `    environment:\n      A: ${seedText}\n` : '';
+      const first =
+        kind === 'env_file'
+          ? `B0=\${A}\n${doublings(1, 3)}\n`
+          : `B0=${seedText}\n${doublings(1, 3)}\n`;
+      const head = (list: string): string => `services:\n  web:\n    image: nginx\n${seed}    ${kind}: [${list}]\n`;
+      const more = (list: string): string => `services:\n  web:\n    ${kind}: [${list}]\n`;
+      const env = { 'e1.env': first, 'e2.env': second };
+      return {
+        'two -f files': { files: { 'a.yaml': head('e1.env'), 'b.yaml': more('e2.env'), ...env }, invocation: ['compose', '-f', 'a.yaml', '-f', 'b.yaml', 'config'] },
+        'two documents of one stream': { files: { 'a.yaml': `${head('e1.env')}---\n${more('e2.env')}`, ...env }, invocation: ['compose', '-f', 'a.yaml', 'config'] },
+        'an include with a list of paths': {
+          files: { 'a.yaml': 'include:\n  - path: [b.yaml, c.yaml]\n', 'b.yaml': head('e1.env'), 'c.yaml': more('e2.env'), ...env },
+          invocation: ['compose', '-f', 'a.yaml', 'config'],
+        },
+        'an extends in the same file': {
+          files: {
+            'a.yaml': `services:\n  base:\n    image: nginx\n${seed}    ${kind}: [e1.env]\n  web:\n    extends: base\n    ${kind}: [e2.env]\n`,
+            ...env,
+          },
+          invocation: ['compose', '-f', 'a.yaml', 'config'],
+        },
+        'an extends in another file': {
+          files: {
+            'a.yaml': `services:\n  web:\n    extends:\n      file: base.yaml\n      service: base\n    ${kind}: [e2.env]\n`,
+            'base.yaml': `services:\n  base:\n    image: nginx\n${seed}    ${kind}: [e1.env]\n`,
+            ...env,
+          },
+          invocation: ['compose', '-f', 'a.yaml', 'config'],
+        },
+      };
+    };
+
+    const writeForm = async (form: Form): Promise<void> => {
+      for (const [name, content] of Object.entries(form.files)) await write(name, content);
+    };
+    const names = Object.keys(forms('env_file', continuation));
+
+    describe.each(['env_file', 'label_file'] as const)('%s', (kind) => {
+      it.each(names)('refuses a chain that continues across %s', async (name) => {
+        const form = forms(kind, continuation)[name];
+        await writeForm(form);
+        await expect(run(dir, form.invocation)).rejects.toThrow(/too long, or interpolates into more text/);
+      });
+
+      it.each(names)('accepts the same layout across %s when the continuation does not grow the value', async (name) => {
+        const form = forms(kind, 'C=1\n')[name];
+        await writeForm(form);
+        await expect(run(dir, form.invocation)).resolves.toBeUndefined();
+      });
+    });
+
+    it('applies a path that two definitions both list once, as Compose keeps one entry per path', async () => {
+      // Six applications of `A=${A}${A}` would build 6.4 MB from a 100 KB seed; one builds 200 KB.
+      await write('d.env', 'A=${A}${A}\n');
+      const big = 'x'.repeat(100_000);
+      await write('a.yaml', `services:\n  web:\n    image: nginx\n    environment:\n      A: "${big}"\n    env_file: [d.env, d.env, d.env]\n`);
+      await write('b.yaml', 'services:\n  web:\n    env_file: [d.env, d.env, d.env]\n');
+      await expect(run(dir, ['compose', '-f', 'a.yaml', '-f', 'b.yaml', 'config'])).resolves.toBeUndefined();
+    });
+
+    it('seeds a later definition from an `environment:` another definition supplied', async () => {
+      // The seed is in the file that has no env_file, so only the combined service holds both.
+      await write('a.yaml', `services:\n  web:\n    image: nginx\n    environment:\n      A: ${seedText}\n`);
+      await write('b.yaml', 'services:\n  web:\n    env_file: [e1.env, e2.env]\n');
+      await write('e1.env', `B0=\${A}\n${doublings(1, 3)}\n`);
+      await write('e2.env', continuation);
+      await expect(run(dir, ['compose', '-f', 'a.yaml', '-f', 'b.yaml', 'config'])).rejects.toThrow(/too long, or interpolates into more text/);
+      // A later definition overrides the value, so the earlier seed is not the one the files read.
+      await write('c.yaml', 'services:\n  web:\n    environment:\n      A: small\n');
+      await expect(run(dir, ['compose', '-f', 'a.yaml', '-f', 'b.yaml', '-f', 'c.yaml', 'config'])).resolves.toBeUndefined();
+    });
+
+    it('does not combine services that have different names', async () => {
+      await write('a.yaml', `services:\n  web:\n    image: nginx\n    environment:\n      A: ${seedText}\n    env_file: [e1.env]\n`);
+      await write('b.yaml', 'services:\n  worker:\n    image: nginx\n    env_file: [e2.env]\n');
+      await write('e1.env', `B0=\${A}\n${doublings(1, 3)}\n`);
+      await write('e2.env', continuation);
+      await expect(run(dir, ['compose', '-f', 'a.yaml', '-f', 'b.yaml', 'config'])).resolves.toBeUndefined();
+    });
+
+    it('reads a service of an extended file only through the service that extends it', async () => {
+      // Compose loads one service of the extended file, so its other services read nothing.
+      await write('a.yaml', 'services:\n  web:\n    extends:\n      file: base.yaml\n      service: base\n');
+      await write('base.yaml', `services:\n  base:\n    image: nginx\n  other:\n    image: nginx\n    environment:\n      A: ${seedText}\n    env_file: [e1.env, e2.env]\n`);
+      await write('e1.env', `B0=\${A}\n${doublings(1, 3)}\n`);
+      await write('e2.env', continuation);
+      await expect(run(dir, ['compose', '-f', 'a.yaml', 'config'])).resolves.toBeUndefined();
+    });
+
+    it('applies the chain a job builds through extends the way a service is', async () => {
+      await write(
+        'a.yaml',
+        `jobs:\n  base:\n    environment:\n      A: ${seedText}\n    env_file: [e1.env]\n  nightly:\n    extends: base\n    env_file: [e2.env]\n`,
+      );
+      await write('e1.env', `B0=\${A}\n${doublings(1, 3)}\n`);
+      await write('e2.env', continuation);
+      await expect(run(dir, ['compose', '-f', 'a.yaml', 'config'])).rejects.toThrow(/too long, or interpolates into more text/);
+    });
+
+    it('keeps a file of the same name in another directory apart', async () => {
+      // `e.env` in an included directory is another file from `e.env` beside the including file.
+      await write('sub/b.yaml', `services:\n  web:\n    image: nginx\n    environment:\n      A: ${seedText}\n    env_file: [e.env]\n`);
+      await write('sub/e.env', `B0=\${A}\n${doublings(1, 3)}\n`);
+      await write('a.yaml', 'include:\n  - sub/b.yaml\nservices:\n  other:\n    image: nginx\n    env_file: [e.env]\n');
+      await write('e.env', continuation);
+      await expect(run(dir, ['compose', '-f', 'a.yaml', 'config'])).resolves.toBeUndefined();
+    });
+
+    it('refuses an environment value read differently from Compose when env files are read', async () => {
+      // A U+2028 inside the value splits the scalar differently for Compose, whose env files would
+      // then be seeded with text this reader cannot reproduce, wherever the env_file is declared.
+      await write('a.yaml', 'services:\n  web:\n    image: nginx\n    environment:\n      A: "a\u2028          b"\n');
+      await write('b.yaml', 'services:\n  web:\n    env_file: [e1.env]\n');
+      await write('e1.env', 'B=${A}\n');
+      await expect(run(dir, ['compose', '-f', 'a.yaml', '-f', 'b.yaml', 'config'])).rejects.toThrow(/U\+2028 or U\+2029/);
+      // With no env file anywhere, the value is never interpolated.
+      await write('b.yaml', 'services:\n  web:\n    image: nginx\n');
+      await expect(run(dir, ['compose', '-f', 'a.yaml', '-f', 'b.yaml', 'config'])).resolves.toBeUndefined();
     });
   });
 });

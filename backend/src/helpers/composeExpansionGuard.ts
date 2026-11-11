@@ -30,8 +30,9 @@
  * `/dev/stdin` or `/proc/self/fd/0` is refused by name), an include/extends
  * graph past its limits, a relative path inside an included or extended file,
  * an env file it cannot parse or whose interpolation passes its bounds, a key
- * or path that spans U+2028 or U+2029 (Compose keeps those characters, its
- * parser here folds them), a `!!binary` key or path that is not UTF-8, and a
+ * or path, or the `environment:` value of a service with an env file, that
+ * spans U+2028 or U+2029 (Compose keeps those characters, its parser here folds
+ * them), a `!!binary` key or path that is not UTF-8, and a
  * document its parser rejects that holds both an
  * anchor and an alias, an `include`, an `extends`, a backslash, or an explicit
  * `? ` key, a tag spelling (`!!binary`, a verbatim or handle tag), or a U+2028 or
@@ -42,9 +43,12 @@
  * Not covered: Sencho's own deployment project (self-update and the endpoint
  * provider helper), which render operator-owned files, not a managed stack's;
  * text Compose builds by interpolating one very large variable into many
- * places of a compose file, which is not alias expansion; and an `env_file`
- * list that Compose assembles by merging several compose files or an extended
- * service, which is measured as each file writes it.
+ * places of a compose file, which is not alias expansion.
+ *
+ * A service's `env_file` and `label_file` lists and `environment:` are
+ * measured as Compose assembles them: over the `-f` files, the documents of one
+ * stream, the files of one `include` path list, and the service it `extends`
+ * (in the same file or another), not over each definition alone.
  */
 import { createHash } from 'crypto';
 import path from 'path';
@@ -62,7 +66,7 @@ import {
 } from '../utils/composeDotenv';
 import { COMPOSE_OVERRIDE_FILENAMES, COMPOSE_ROOT_FILENAMES } from '../utils/composeFilenames';
 import { readComposeInputWithinCap, resolvePhysicalDirectory } from './composeInputReadSink';
-import { composePlainScalarText } from './composeScalarText';
+import { composePlainScalarText, composeTaggedScalarText } from './composeScalarText';
 
 /**
  * Expanded-node budget per file. A compose file that reuses an anchor across a
@@ -830,7 +834,11 @@ interface ExtendsGroup {
   paths: string[];
   /** The service or job that declared it, so its copy can be charged. */
   owner: string;
+  /** The service or job it extends in that file, in the same section as the owner; null when none is named. */
+  parent: string | null;
 }
+
+type DependencyGroup = IncludeGroup | ExtendsGroup;
 
 /** A service's `env_file` or `label_file` entry; `raw` is `format: raw`, which has no interpolation. */
 interface ReadFile {
@@ -838,29 +846,37 @@ interface ReadFile {
   raw: boolean;
 }
 
+/** A {@link ReadFile} once its file is known: `base` is the directory a relative path resolves against. */
+interface BoundReadFile extends ReadFile {
+  base: string;
+}
+
 /**
- * Files a service or job names that `docker compose config` reads whole (an
- * `env_file` or `label_file`). They are not YAML to measure, but a device or a
- * pipe there would be read with no limit, and Compose interpolates their
- * values, so each is also read through the bounded env reader.
+ * The `env_file` and `label_file` lists and `environment:` a service or job
+ * ends up with, which Compose reads whole (a device or a pipe there would be
+ * read with no limit) and interpolates, so each is also read through the
+ * bounded env reader. A definition that Compose combines with another one
+ * (another `-f` file, another document of the stream, another path of one
+ * `include`, or the service it `extends`) contributes its lists to the same
+ * ordered list, and its `environment:` to the same map, so the chain is
+ * measured over what the service ends up with, not over each definition alone.
  */
-interface ReadFilesGroup {
-  kind: 'readFiles';
-  files: ReadFile[];
+interface ServiceReads {
+  /**
+   * The `env_file` list, where Compose keeps one entry per path, at the place
+   * the path first appeared and with the attributes the last mention gave it.
+   */
+  envFiles: BoundReadFile[];
+  /** The `label_file` list, read mention by mention. */
+  labelFiles: BoundReadFile[];
   /**
    * The `environment:` of the service, which Compose interpolates a service's
    * env files against along with what the earlier files assigned.
    */
-  environment: Array<[string, string]>;
-  /**
-   * True for `env_file`, where Compose keeps one entry per path, at the place
-   * the path first appeared and with the attributes the last mention gave
-   * it. A `label_file` list is read mention by mention.
-   */
-  oneEntryPerPath: boolean;
+  environment: Map<string, string>;
+  /** True when a definition's `environment:` held a scalar the parse read differently from Compose. */
+  environmentMisread: boolean;
 }
-
-type DependencyGroup = IncludeGroup | ExtendsGroup | ReadFilesGroup;
 
 /** One service or job, with what Compose copies into every service that extends it. */
 interface ServiceInfo {
@@ -868,6 +884,14 @@ interface ServiceInfo {
   size: number;
   /** The same-file service it extends, or null. */
   parent: string | null;
+  /** What its own definition names, before any other definition is combined in. */
+  reads: {
+    envFiles: ReadFile[];
+    labelFiles: ReadFile[];
+    environment: Array<[string, string]>;
+    /** True when a value of its `environment:` is a scalar the parse read differently from Compose. */
+    environmentMisread: boolean;
+  };
 }
 
 interface DocumentDependencies {
@@ -945,15 +969,18 @@ function decodeBinary(bytes: Uint8Array): string {
   }
 }
 
-const YAML_STRING_TAG = 'tag:yaml.org,2002:str';
+const YAML_TAG_PREFIX = 'tag:yaml.org,2002:';
 
 /**
  * The text Compose seeds a service's env files with for one `environment:`
- * value. A plain scalar, or one with an explicit tag other than `!!str`, is
- * whatever Compose's decoder resolves it to (a boolean, a number, a
- * timestamp), written back out as text; an untagged quoted or block scalar is
- * its string as written. A null value has no text: Compose takes that variable
- * from the environment by name, which an env file's own references already read.
+ * value. A plain scalar is whatever Compose's decoder resolves it to (a
+ * boolean, a number, a timestamp), written back out as text. An explicit
+ * `!!int`, `!!float`, `!!bool`, or `!!timestamp` tag resolves a quoted scalar
+ * the same way but only to that kind, and a text of another kind is a file
+ * Compose rejects. Any other tag, `!!str` among them, and an untagged quoted
+ * or block scalar, is the string as written. A null value has no text:
+ * Compose takes that variable from the environment by name, which an env
+ * file's own references already read.
  */
 function environmentValueOf(node: unknown, targets: Map<Node, Node>): string | undefined {
   const resolved = scalarOf(node, targets);
@@ -969,11 +996,17 @@ function environmentValueOf(node: unknown, targets: Map<Node, Node>): string | u
       return Buffer.from(value).toString('latin1');
     }
   }
-  const isStringTagged = resolved.tag === YAML_STRING_TAG;
-  const isQuotedOrBlock = resolved.type !== undefined && resolved.type !== 'PLAIN' && typeof value === 'string';
-  if (isStringTagged || isQuotedOrBlock) return typeof value === 'string' ? value : undefined;
   // The scalar as written: a number or timestamp may no longer print as it was spelled.
   const written = typeof value === 'string' ? value : resolved.source;
+  const tag = resolved.tag?.startsWith(YAML_TAG_PREFIX) ? resolved.tag.slice(YAML_TAG_PREFIX.length) : resolved.tag;
+  if (tag === 'null' || tag === 'merge') return undefined;
+  if (tag === 'int' || tag === 'float' || tag === 'bool' || tag === 'timestamp') {
+    if (written === undefined) return undefined;
+    return composeTaggedScalarText(written, tag) ?? written;
+  }
+  if (tag !== undefined) return written;
+  const isQuotedOrBlock = resolved.type !== undefined && resolved.type !== 'PLAIN' && typeof value === 'string';
+  if (isQuotedOrBlock) return value as string;
   if (written === undefined) return typeof value === 'boolean' || typeof value === 'number' ? String(value) : undefined;
   return composePlainScalarText(written);
 }
@@ -1128,20 +1161,19 @@ function extractDependencies(measured: MeasuredDocument): DocumentDependencies {
       const owner = `${section}\0${name}`;
       const size = countExpandedNodes(definition, targets, sizes, new Set());
       const fields = entriesOf(definition, targets);
+      const reads: ServiceInfo['reads'] = { envFiles: [], labelFiles: [], environment: [], environmentMisread: false };
       if (fields !== null) {
-        // Each list is read in order by one reader, since Compose interpolates
-        // a later file with what the earlier ones assigned.
-        const envFiles = readFilePaths(fields.get('env_file'), targets);
-        if (envFiles.length > 0) {
-          groups.push({
-            kind: 'readFiles',
-            files: envFiles,
-            environment: environmentOf(fields.get('environment'), targets),
-            oneEntryPerPath: true,
-          });
+        reads.envFiles = readFilePaths(fields.get('env_file'), targets);
+        reads.labelFiles = readFilePaths(fields.get('label_file'), targets);
+        // Another definition of the service can supply the env files this
+        // `environment:` seeds, so it is read whether or not this one has any.
+        // A value read differently from Compose only matters once a chain exists.
+        try {
+          reads.environment = environmentOf(fields.get('environment'), targets);
+        } catch (err) {
+          if (!(err instanceof MisreadScalarError)) throw err;
+          reads.environmentMisread = true;
         }
-        const labelFiles = readFilePaths(fields.get('label_file'), targets);
-        if (labelFiles.length > 0) groups.push({ kind: 'readFiles', files: labelFiles, environment: [], oneEntryPerPath: false });
       }
       const extendsNode = fields?.get('extends');
       let parent: string | null = null;
@@ -1150,13 +1182,14 @@ function extractDependencies(measured: MeasuredDocument): DocumentDependencies {
         const extendsFields = shorthand === undefined ? entriesOf(extendsNode, targets) : null;
         const file = extendsFields === null ? undefined : textOf(extendsFields.get('file'), targets);
         const service = shorthand ?? (extendsFields === null ? undefined : textOf(extendsFields.get('service'), targets));
+        const parentId = service !== undefined && service.length > 0 ? `${section}\0${service}` : null;
         if (file !== undefined && file.length > 0) {
-          groups.push({ kind: 'extends', paths: [file], owner });
-        } else if (service !== undefined && service.length > 0) {
-          parent = `${section}\0${service}`;
+          groups.push({ kind: 'extends', paths: [file], owner, parent: parentId });
+        } else {
+          parent = parentId;
         }
       }
-      services.set(owner, { size, parent });
+      services.set(owner, { size, parent, reads });
     }
   }
   return { groups, services };
@@ -1264,6 +1297,75 @@ async function discoverInputFiles(base: string): Promise<ResolvedInputFile[]> {
 }
 
 /**
+ * The lists of two definitions of one service, the later one applied over the
+ * earlier: its files follow the earlier ones, and each of its `environment:`
+ * names replaces the earlier value, the way Compose merges them.
+ */
+function combineReads(earlier: ServiceReads, later: ServiceReads): ServiceReads {
+  return {
+    envFiles: [...earlier.envFiles, ...later.envFiles],
+    labelFiles: [...earlier.labelFiles, ...later.labelFiles],
+    environment: new Map([...earlier.environment, ...later.environment]),
+    environmentMisread: earlier.environmentMisread || later.environmentMisread,
+  };
+}
+
+/** The services of several files that Compose combines into one project, by name, in file order. */
+function mergeServiceReads(files: ReadonlyArray<ReadonlyMap<string, ServiceReads>>): Map<string, ServiceReads> {
+  const merged = new Map<string, ServiceReads>();
+  for (const services of files) {
+    for (const [id, reads] of services) {
+      const earlier = merged.get(id);
+      merged.set(id, earlier === undefined ? reads : combineReads(earlier, reads));
+    }
+  }
+  return merged;
+}
+
+/**
+ * What each service or job of one document ends up reading once the service it
+ * extends is applied under it: the same-file parent, or the service another
+ * file defined (`inherited`, read from that file's own result). Paths stay
+ * relative to the directory of the file that named them, which Compose also
+ * resolves them against.
+ */
+function effectiveReads(
+  services: ReadonlyMap<string, ServiceInfo>,
+  inherited: ReadonlyMap<string, ServiceReads>,
+  base: string,
+): Map<string, ServiceReads> {
+  const effective = new Map<string, ServiceReads>();
+  const active = new Set<string>();
+  const effectiveOf = (id: string): ServiceReads | undefined => {
+    const known = effective.get(id);
+    if (known !== undefined) return known;
+    const info = services.get(id);
+    if (info === undefined || active.has(id)) return undefined;
+    active.add(id);
+    const own: ServiceReads = {
+      envFiles: info.reads.envFiles.map((file) => ({ ...file, base })),
+      labelFiles: info.reads.labelFiles.map((file) => ({ ...file, base })),
+      environment: new Map(info.reads.environment),
+      environmentMisread: info.reads.environmentMisread,
+    };
+    const parent = inherited.get(id) ?? (info.parent === null ? undefined : effectiveOf(info.parent));
+    active.delete(id);
+    const result = parent === undefined ? own : combineReads(parent, own);
+    effective.set(id, result);
+    return result;
+  };
+  const out = new Map<string, ServiceReads>();
+  for (const id of services.keys()) {
+    const reads = effectiveOf(id);
+    // A service with only an `environment:` is kept: a service in another
+    // file that extends it seeds its own env files from that.
+    const holdsReads = reads !== undefined && (reads.envFiles.length > 0 || reads.labelFiles.length > 0 || reads.environment.size > 0 || reads.environmentMisread);
+    if (reads !== undefined && holdsReads) out.set(id, reads);
+  }
+  return out;
+}
+
+/**
  * Walk the selected inputs and every YAML dependency they declare, refusing a
  * file whose expansion passes the budget and a dependency graph that cannot be
  * resolved within the traversal bounds.
@@ -1329,7 +1431,15 @@ async function assertInputClosure(args: {
     return child;
   };
 
-  const subtotals = new Map<string, number>();
+  // What a file measured to, and the services it holds once the services it
+  // extends are applied, which an include or another file of the run combines
+  // with its own.
+  interface Measured {
+    nodes: number;
+    key: string;
+    services: Map<string, ServiceReads>;
+  }
+  const subtotals = new Map<string, Measured>();
   // A file's own nodes, known before its dependencies are walked: a cycle
   // back to a file in progress charges these, not nothing.
   const ownNodes = new Map<string, number>();
@@ -1371,7 +1481,92 @@ async function assertInputClosure(args: {
     }
   };
 
-  const measure = async (input: PendingInput): Promise<number> => {
+  // A scope is read once however many includes name it.
+  const readScopes = new Set<string>();
+  /**
+   * Read the env files and label files of the services one project ends up
+   * with. Each service's list is read in order by one reader, since Compose
+   * interpolates a later file with what the earlier ones assigned, and the
+   * list is the one Compose builds after it combines every definition of the
+   * service.
+   */
+  const readScope = async (services: Map<string, ServiceReads>, env: GuardEnvContext, label: string, scopeKey: string): Promise<void> => {
+    const key = `${envContextId(env)}\0${scopeKey}`;
+    if (readScopes.has(key)) return;
+    readScopes.add(key);
+    for (const reads of services.values()) {
+      if (reads.envFiles.length > 0) {
+        if (reads.environmentMisread) throw scalarSeparatorRefusal(label);
+        await readChain(reads.envFiles, reads.environment, true, env, label);
+      }
+      if (reads.labelFiles.length > 0) await readChain(reads.labelFiles, new Map(), false, env, label);
+    }
+  };
+
+  const readChain = async (
+    files: readonly BoundReadFile[],
+    environment: ReadonlyMap<string, string>,
+    oneEntryPerPath: boolean,
+    env: GuardEnvContext,
+    label: string,
+  ): Promise<void> => {
+    const reader = new ComposeEnvFiles(lookupEnv(env), {
+      maxRawValue: MAX_COMPOSE_ENV_RAW_VALUE,
+      maxStatementReads: MAX_COMPOSE_ENV_STATEMENT_READS,
+      maxTemplateDepth: MAX_COMPOSE_TEMPLATE_DEPTH,
+      shared: env.copyBudget,
+    });
+    try {
+      reader.seed(Array.from(environment, ([name, value]): [string, string] => [name, interpolateEnvironmentValue(value, env, label)]));
+    } catch (err) {
+      if (err instanceof ComposeEnvLimitError) throw envFileTooLargeRefusal(label);
+      throw err;
+    }
+    const reads: Array<{ target: string; raw: boolean; base: string }> = [];
+    const readIndex = new Map<string, number>();
+    for (const file of files) {
+      countReference(label);
+      const target = interpolatePath(file.path, env, label);
+      if (target === null || target === '') continue;
+      // A path names one entry where it resolves from: the same text under
+      // another directory is another file.
+      const identity = `${file.base}\0${target}`;
+      const known = oneEntryPerPath ? readIndex.get(identity) : undefined;
+      if (known === undefined) {
+        readIndex.set(identity, reads.length);
+        reads.push({ target, raw: file.raw, base: file.base });
+      } else {
+        reads[known].raw = file.raw;
+      }
+    }
+    for (const { target, raw, base } of reads) {
+      // Compose expands a leading `~` in these paths and reads a relative one
+      // from the project directory, so both spellings are checked.
+      const candidates = new Set([resolveDependencyPath(target, base)]);
+      const home = env.processEnv('HOME');
+      if (home && target.startsWith('~')) candidates.add(path.resolve(expandUserPath(target, home)));
+      for (const resolved of candidates) {
+        const fileLabel = inputLabel(args.cwd, resolved);
+        const content = await readServiceFile(resolved, fileLabel);
+        if (content === null) continue;
+        // The parse is repeated for every read, so its text is counted for
+        // every read against a bound of its own.
+        serviceEnvParseChars += content.length;
+        if (serviceEnvParseChars > MAX_COMPOSE_SERVICE_ENV_PARSE_CHARS) {
+          throw envBoundRefusal(fileLabel, `${MAX_COMPOSE_SERVICE_ENV_PARSE_CHARS / (1024 * 1024)} MiB of env_file text parsed`);
+        }
+        try {
+          reader.read(content, { raw });
+        } catch (err) {
+          if (err instanceof ComposeEnvLimitError || err instanceof RangeError) throw envFileTooLargeRefusal(fileLabel);
+          // A syntax error is Compose's to report, since it rejects the file too.
+          if (!(err instanceof ComposeEnvFileError)) throw err;
+        }
+      }
+    }
+  };
+
+  const measure = async (input: PendingInput): Promise<Measured> => {
     const filePath = path.resolve(input.path);
     const label = inputLabel(args.cwd, filePath);
     countReference(label);
@@ -1380,7 +1575,7 @@ async function assertInputClosure(args: {
     if (known !== undefined) return known;
     // Compose rejects an include or extends cycle itself, but only once it
     // reaches the back edge, so the file the edge points at is charged again.
-    if (active.has(contextKey)) return ownNodes.get(contextKey) ?? 1;
+    if (active.has(contextKey)) return { nodes: ownNodes.get(contextKey) ?? 1, key: contextKey, services: new Map() };
     if (subtotals.size + active.size >= MAX_COMPOSE_DEPENDENCY_FILES) {
       throw dependencyBoundRefusal(label, `more than ${MAX_COMPOSE_DEPENDENCY_FILES} resolved compose inputs`);
     }
@@ -1396,8 +1591,9 @@ async function assertInputClosure(args: {
       // Missing, unreadable as a file, a directory, or `/dev/null`: Compose
       // reports it next, so there is no expansion to measure here.
       if (read.content === null) {
-        subtotals.set(contextKey, 0);
-        return 0;
+        const empty = { nodes: 0, key: contextKey, services: new Map<string, ServiceReads>() };
+        subtotals.set(contextKey, empty);
+        return empty;
       }
       content = read.content;
     }
@@ -1439,83 +1635,45 @@ async function assertInputClosure(args: {
         if (subtotal > MAX_TOTAL_EXPANDED_NODES) throw totalRefusalForFile(label);
       };
 
+      const fileServices = new Map<string, ServiceReads>();
       for (const { groups, services } of extracted) {
         const crossFileCharge = new Map<string, number>();
+        const crossFileReads = new Map<string, ServiceReads>();
         for (const group of groups) {
-          for (const child of await childInputs(input, group, label)) {
-            const childSubtotal = await measure(child);
-            add(childSubtotal);
+          const children = await childInputs(input, group, label);
+          const results: Measured[] = [];
+          for (const child of children) {
+            const result = await measure(child);
+            results.push(result);
+            add(result.nodes);
             if (group.kind === 'extends') {
-              crossFileCharge.set(group.owner, saturateAt(crossFileCharge.get(group.owner) ?? 0, childSubtotal, MAX_TOTAL_EXPANDED_NODES));
+              crossFileCharge.set(group.owner, saturateAt(crossFileCharge.get(group.owner) ?? 0, result.nodes, MAX_TOTAL_EXPANDED_NODES));
+              const inherited = group.parent === null ? undefined : result.services.get(group.parent);
+              if (inherited !== undefined) crossFileReads.set(group.owner, inherited);
             }
+          }
+          // The files of one include are one project: a service they define
+          // twice is one service, and its env files are read as one chain.
+          if (group.kind === 'include' && children.length > 0) {
+            await readScope(mergeServiceReads(results.map((result) => result.services)), children[0].env, label, results.map((result) => result.key).join('\0'));
           }
         }
         add(sameFileExtendsCharge(services, crossFileCharge, label));
+        // A document of the stream is another definition of the same services.
+        for (const [id, reads] of effectiveReads(services, crossFileReads, input.projectBase)) {
+          const earlier = fileServices.get(id);
+          fileServices.set(id, earlier === undefined ? reads : combineReads(earlier, reads));
+        }
       }
-      subtotals.set(contextKey, subtotal);
-      return subtotal;
+      const measured: Measured = { nodes: subtotal, key: contextKey, services: fileServices };
+      subtotals.set(contextKey, measured);
+      return measured;
     } finally {
       active.delete(contextKey);
     }
   };
 
   const childInputs = async (input: PendingInput, group: DependencyGroup, label: string): Promise<PendingInput[]> => {
-    if (group.kind === 'readFiles') {
-      // One reader per list, in file order, so a value an earlier file or the
-      // service's `environment:` set is what a later file interpolates.
-      const reader = new ComposeEnvFiles(lookupEnv(input.env), {
-        maxRawValue: MAX_COMPOSE_ENV_RAW_VALUE,
-        maxStatementReads: MAX_COMPOSE_ENV_STATEMENT_READS,
-        maxTemplateDepth: MAX_COMPOSE_TEMPLATE_DEPTH,
-        shared: input.env.copyBudget,
-      });
-      try {
-        reader.seed(group.environment.map(([name, value]): [string, string] => [name, interpolateEnvironmentValue(value, input.env, label)]));
-      } catch (err) {
-        if (err instanceof ComposeEnvLimitError) throw envFileTooLargeRefusal(label);
-        throw err;
-      }
-      const reads: Array<{ target: string; raw: boolean }> = [];
-      const readIndex = new Map<string, number>();
-      for (const file of group.files) {
-        countReference(label);
-        const target = interpolatePath(file.path, input.env, label);
-        if (target === null || target === '') continue;
-        const known = group.oneEntryPerPath ? readIndex.get(target) : undefined;
-        if (known === undefined) {
-          readIndex.set(target, reads.length);
-          reads.push({ target, raw: file.raw });
-        } else {
-          reads[known].raw = file.raw;
-        }
-      }
-      for (const { target, raw } of reads) {
-        // Compose expands a leading `~` in these paths and reads a relative one
-        // from the project directory, so both spellings are checked.
-        const candidates = new Set([resolveDependencyPath(target, input.projectBase)]);
-        const home = input.env.processEnv('HOME');
-        if (home && target.startsWith('~')) candidates.add(path.resolve(expandUserPath(target, home)));
-        for (const resolved of candidates) {
-          const fileLabel = inputLabel(args.cwd, resolved);
-          const content = await readServiceFile(resolved, fileLabel);
-          if (content === null) continue;
-          // The parse is repeated for every read, so its text is counted for
-          // every read against a bound of its own.
-          serviceEnvParseChars += content.length;
-          if (serviceEnvParseChars > MAX_COMPOSE_SERVICE_ENV_PARSE_CHARS) {
-            throw envBoundRefusal(fileLabel, `${MAX_COMPOSE_SERVICE_ENV_PARSE_CHARS / (1024 * 1024)} MiB of env_file text parsed`);
-          }
-          try {
-            reader.read(content, { raw });
-          } catch (err) {
-            if (err instanceof ComposeEnvLimitError || err instanceof RangeError) throw envFileTooLargeRefusal(fileLabel);
-            // A syntax error is Compose's to report, since it rejects the file too.
-            if (!(err instanceof ComposeEnvFileError)) throw err;
-          }
-        }
-      }
-      return [];
-    }
     if (group.kind === 'extends') {
       const children: PendingInput[] = [];
       for (const raw of group.paths) {
@@ -1608,8 +1766,9 @@ async function assertInputClosure(args: {
   };
 
   let total = 0;
+  const projectResults: Measured[] = [];
   for (const file of args.files) {
-    const subtotal = await measure({
+    const result = await measure({
       path: file.path,
       projectBase: args.projectDir,
       env: args.rootEnv,
@@ -1617,8 +1776,18 @@ async function assertInputClosure(args: {
       viaExtends: false,
       content: file.content,
     });
-    total = saturateAt(total, subtotal, MAX_TOTAL_EXPANDED_NODES);
+    projectResults.push(result);
+    total = saturateAt(total, result.nodes, MAX_TOTAL_EXPANDED_NODES);
     if (total > MAX_TOTAL_EXPANDED_NODES) throw totalRefusalForFile(inputLabel(args.cwd, path.resolve(file.path)));
+  }
+  // Every file named for the run is one project, as the files of one include are.
+  if (args.files.length > 0) {
+    await readScope(
+      mergeServiceReads(projectResults.map((result) => result.services)),
+      args.rootEnv,
+      inputLabel(args.cwd, path.resolve(args.files[0].path)),
+      projectResults.map((result) => result.key).join('\0'),
+    );
   }
 }
 

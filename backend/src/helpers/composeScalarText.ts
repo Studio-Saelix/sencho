@@ -10,6 +10,11 @@
  * (see the unit tests). A quoted scalar without an explicit tag is a string and
  * never comes here; `.inf`, `-.inf`, and `.nan` follow Go's float names, since
  * Compose refuses to print them as JSON.
+ *
+ * A scalar with an explicit `!!int`, `!!float`, `!!bool`, or `!!timestamp` tag
+ * resolves the same way, quoted or not, but only to that kind: `!!float` turns
+ * an integer into a float, and a text the kind cannot hold is a file Compose
+ * rejects ({@link composeTaggedScalarText}).
  */
 
 const BOOLEAN_TRUE = new Set(['true', 'True', 'TRUE']);
@@ -22,32 +27,40 @@ const NOT_A_NUMBER = new Set(['.nan', '.NaN', '.NAN']);
 const INTEGER = /^([+-]?)(?:0[xX]([0-9a-fA-F]+)|0[bB]([01]+)|0[oO]([0-7]+)|0([0-7]*)|([1-9][0-9]*))$/;
 const FLOAT = /^[-+]?(?:\.[0-9]+|[0-9]+(?:\.[0-9]*)?)(?:[eE][-+]?[0-9]+)?$/;
 const TIMESTAMP =
-  /^(\d{4})-(\d{1,2})-(\d{1,2})(?:(?:[Tt](\d{1,2}):(\d{1,2}):(\d{1,2})(?:[.,](\d+))?(Z|[+-]\d{2}:\d{2}))|(?: (\d{1,2}):(\d{1,2}):(\d{1,2})(?:[.,](\d+))?))?$/;
+  /^(\d{4})-(\d{1,2})-(\d{1,2})(?:(?:[Tt](\d{1,2}):(\d{1,2}):(\d{1,2})(?:[.,](\d+))?(Z|[+-]\d{2}:\d{2}))|(?: +(\d{1,2}):(\d{1,2}):(\d{1,2})(?:[.,](\d+))?))?$/;
 
 const MAX_INT64 = (1n << 63n) - 1n;
 const MIN_INT64 = -(1n << 63n);
 const MAX_UINT64 = (1n << 64n) - 1n;
 
-/** The longest 64-bit spelling: a sign, `0b`, and 64 binary digits. */
-const MAX_INTEGER_SPELLING = 67;
+/** The most digits, once leading zeros are dropped, that a 64-bit value takes in each base. */
+const MAX_SIGNIFICANT_DIGITS = { 16: 16, 10: 20, 8: 22, 2: 64 } as const;
 
-function integerText(plain: string): string | null {
-  // A longer numeral is past 64 bits whatever its base, and converting a
-  // very long one would cost more than the text it came from.
-  if (plain.length > MAX_INTEGER_SPELLING) return null;
+/**
+ * The integer a spelling names, or null when it is not one or does not fit in
+ * 64 bits. Only the digits that count are converted, so a numeral padded with
+ * zeros is the value it names however long it is, and one with too many
+ * significant digits is refused before any conversion.
+ */
+function integerValue(plain: string): bigint | null {
   const match = INTEGER.exec(plain);
   if (match === null) return null;
   const [, sign, hex, binary, octalPrefixed, octalLeading, decimal] = match;
-  let magnitude: bigint;
-  if (hex !== undefined) magnitude = BigInt(`0x${hex}`);
-  else if (binary !== undefined) magnitude = BigInt(`0b${binary}`);
-  else if (octalPrefixed !== undefined) magnitude = BigInt(`0o${octalPrefixed}`);
-  else if (octalLeading !== undefined) magnitude = octalLeading === '' ? 0n : BigInt(`0o${octalLeading}`);
-  else magnitude = BigInt(decimal);
+  let digits: string;
+  let radix: keyof typeof MAX_SIGNIFICANT_DIGITS;
+  let prefix: string;
+  if (hex !== undefined) [digits, radix, prefix] = [hex, 16, '0x'];
+  else if (binary !== undefined) [digits, radix, prefix] = [binary, 2, '0b'];
+  else if (octalPrefixed !== undefined) [digits, radix, prefix] = [octalPrefixed, 8, '0o'];
+  else if (octalLeading !== undefined) [digits, radix, prefix] = [octalLeading, 8, '0o'];
+  else [digits, radix, prefix] = [decimal, 10, ''];
+  const significant = digits.replace(/^0+/, '');
+  if (significant.length > MAX_SIGNIFICANT_DIGITS[radix]) return null;
+  const magnitude = significant === '' ? 0n : BigInt(`${prefix}${significant}`);
   const value = sign === '-' ? -magnitude : magnitude;
-  if (value >= MIN_INT64 && value <= MAX_INT64) return value.toString();
+  if (value >= MIN_INT64 && value <= MAX_INT64) return value;
   // A value past int64 is read as unsigned when it has no sign.
-  if (sign === '' && value <= MAX_UINT64) return value.toString();
+  if (sign === '' && value <= MAX_UINT64) return value;
   return null;
 }
 
@@ -110,26 +123,49 @@ function timestampText(plain: string): string | null {
   return `${date} ${clock} ${zone}`;
 }
 
-/** The text Compose gives a plain scalar written as `text`. */
-export function composePlainScalarText(text: string): string {
-  if (BOOLEAN_TRUE.has(text)) return 'true';
-  if (BOOLEAN_FALSE.has(text)) return 'false';
-  if (POSITIVE_INFINITY.has(text)) return '+Inf';
-  if (NEGATIVE_INFINITY.has(text)) return '-Inf';
-  if (NOT_A_NUMBER.has(text)) return 'NaN';
+/** What a scalar resolves to: its kind, the text Compose gives it, and for a number its float64 value. */
+interface ResolvedScalar {
+  kind: 'bool' | 'int' | 'float' | 'timestamp' | 'string';
+  text: string;
+  number?: number;
+}
+
+function resolveScalar(text: string): ResolvedScalar {
+  if (BOOLEAN_TRUE.has(text)) return { kind: 'bool', text: 'true' };
+  if (BOOLEAN_FALSE.has(text)) return { kind: 'bool', text: 'false' };
+  if (POSITIVE_INFINITY.has(text)) return { kind: 'float', text: '+Inf', number: Infinity };
+  if (NEGATIVE_INFINITY.has(text)) return { kind: 'float', text: '-Inf', number: -Infinity };
+  if (NOT_A_NUMBER.has(text)) return { kind: 'float', text: 'NaN', number: NaN };
   const first = text[0];
-  if (first === undefined || !/[0-9+\-.]/.test(first)) return text;
+  if (first === undefined || !/[0-9+\-.]/.test(first)) return { kind: 'string', text };
   const timestamp = timestampText(text);
-  if (timestamp !== null) return timestamp;
+  if (timestamp !== null) return { kind: 'timestamp', text: timestamp };
   const plain = text.replace(/_/g, '');
   // A lone `-0` is the one integer spelling Compose reads as a float.
-  if (plain === '-0') return '-0';
-  const integer = integerText(plain);
-  if (integer !== null) return integer;
+  if (plain === '-0') return { kind: 'float', text: '-0', number: -0 };
+  const integer = integerValue(plain);
+  if (integer !== null) return { kind: 'int', text: integer.toString(), number: Number(integer) };
   if (FLOAT.test(plain)) {
     const value = Number(plain);
     // Go rejects a float past its range, which leaves the text as it was.
-    if (Number.isFinite(value)) return floatText(value);
+    if (Number.isFinite(value)) return { kind: 'float', text: floatText(value), number: value };
   }
-  return text;
+  return { kind: 'string', text };
+}
+
+/** The text Compose gives a plain scalar written as `text`. */
+export function composePlainScalarText(text: string): string {
+  return resolveScalar(text).text;
+}
+
+/**
+ * The text Compose gives a scalar written as `text` under an explicit
+ * `!!int`, `!!float`, `!!bool`, or `!!timestamp` tag, or null when `text` is
+ * not of that kind. Compose rejects the file then, so nothing is interpolated.
+ * `!!float` takes an integer as well, as the float it converts to.
+ */
+export function composeTaggedScalarText(text: string, tag: 'int' | 'float' | 'bool' | 'timestamp'): string | null {
+  const resolved = resolveScalar(text);
+  if (tag === 'float' && (resolved.kind === 'int' || resolved.kind === 'float')) return floatText(resolved.number ?? 0);
+  return resolved.kind === tag ? resolved.text : null;
 }
