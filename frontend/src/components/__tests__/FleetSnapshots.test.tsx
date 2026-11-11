@@ -553,4 +553,152 @@ describe('FleetSnapshots action row', () => {
       authState.isAdmin = true;
     }
   });
+
+  it('renders no Create Snapshot button for a non-admin in the empty state', async () => {
+    mockedFetch.mockImplementation(async (path: string) => {
+      if (path === '/fleet/snapshots') {
+        return { ok: true, json: async () => ({ snapshots: [], total: 0 }) } as Response;
+      }
+      return { ok: true, json: async () => ({}) } as Response;
+    });
+    authState.isAdmin = false;
+    try {
+      render(<FleetSnapshots />);
+      await screen.findByText('No snapshots yet');
+      expect(screen.queryByRole('button', { name: /Create Snapshot/ })).not.toBeInTheDocument();
+    } finally {
+      authState.isAdmin = true;
+    }
+  });
+
+  it('offers a single Create Snapshot button in the empty state and opens the form', async () => {
+    mockedFetch.mockImplementation(async (path: string) => {
+      if (path === '/fleet/snapshots') {
+        return { ok: true, json: async () => ({ snapshots: [], total: 0 }) } as Response;
+      }
+      return { ok: true, json: async () => ({}) } as Response;
+    });
+
+    render(<FleetSnapshots />);
+    await screen.findByText('No snapshots yet');
+
+    const createButtons = screen.getAllByRole('button', { name: /Create Snapshot/ });
+    expect(createButtons).toHaveLength(1);
+    fireEvent.click(createButtons[0]);
+
+    expect(screen.getByPlaceholderText('Snapshot description (optional)')).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /Create Snapshot/ })).not.toBeInTheDocument();
+  });
+
+  it('keeps the pager and one Create Snapshot button once the list is populated', async () => {
+    mockedFetch.mockImplementation(async (path: string) => {
+      if (path === '/fleet/snapshots') {
+        return {
+          ok: true,
+          json: async () => ({
+            snapshots: Array.from({ length: 11 }, (_, i) => ({
+              id: i + 1, description: `snapshot ${i + 1}`, created_by: 'admin', node_count: 1, stack_count: 1,
+              skipped_nodes: '[]', skipped_stacks: '[]', created_at: Date.now(), has_documentation: 0,
+            })),
+            total: 11,
+          }),
+        } as Response;
+      }
+      return { ok: true, json: async () => ({}) } as Response;
+    });
+
+    render(<FleetSnapshots />);
+    await screen.findByText('snapshot 1');
+
+    expect(screen.getByText('1 / 2')).toBeInTheDocument();
+    expect(screen.getAllByRole('button', { name: /Create Snapshot/ })).toHaveLength(1);
+    expect(screen.queryByText('No snapshots yet')).toBeNull();
+  });
+
+  it('keeps the row action while loading, then hands it to the empty card', async () => {
+    let resolveList: (value: Response) => void = () => {};
+    const pending = new Promise<Response>((resolve) => { resolveList = resolve; });
+    mockedFetch.mockImplementation(async (path: string) => {
+      if (path === '/fleet/snapshots') return pending;
+      return { ok: true, json: async () => ({}) } as Response;
+    });
+
+    render(<FleetSnapshots />);
+    expect(await screen.findByRole('button', { name: /Create Snapshot/ })).toBeInTheDocument();
+    expect(screen.queryByText('No snapshots yet')).toBeNull();
+
+    resolveList({ ok: true, json: async () => ({ snapshots: [], total: 0 }) } as Response);
+    await screen.findByText('No snapshots yet');
+    expect(screen.getAllByRole('button', { name: /Create Snapshot/ })).toHaveLength(1);
+  });
+
+  it('returns to the empty card when the last snapshot is deleted', async () => {
+    mockedFetch.mockImplementation(async (path: string, options?: Parameters<typeof apiFetch>[1]) => {
+      if (path === '/fleet/snapshots' && options?.method !== 'DELETE') {
+        return {
+          ok: true,
+          json: async () => ({
+            snapshots: [{
+              id: 1, description: 'one', created_by: 'admin', node_count: 1, stack_count: 1,
+              skipped_nodes: '[]', skipped_stacks: '[]', created_at: Date.now(), has_documentation: 0,
+            }],
+            total: 1,
+          }),
+        } as Response;
+      }
+      if (path === '/fleet/snapshots/1' && options?.method === 'DELETE') {
+        return { ok: true, json: async () => ({ success: true }) } as Response;
+      }
+      return { ok: true, json: async () => ({}) } as Response;
+    });
+
+    render(<FleetSnapshots />);
+    const row = (await screen.findByText('one')).closest('tr');
+    expect(row).not.toBeNull();
+    const rowButtons = within(row as HTMLElement).getAllByRole('button');
+    fireEvent.click(rowButtons[rowButtons.length - 1]);
+
+    const dialog = await screen.findByRole('alertdialog');
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Delete' }));
+
+    await screen.findByText('No snapshots yet');
+    expect(screen.getAllByRole('button', { name: /Create Snapshot/ })).toHaveLength(1);
+  });
+
+  it('moves from the empty card to the populated row after creating a snapshot', async () => {
+    let created = false;
+    mockedFetch.mockImplementation(async (path: string, options?: Parameters<typeof apiFetch>[1]) => {
+      if (path === '/fleet/snapshots' && options?.method === 'POST') {
+        created = true;
+        return { ok: true, json: async () => ({ id: 1 }) } as Response;
+      }
+      if (path === '/fleet/snapshots') {
+        return {
+          ok: true,
+          json: async () => ({
+            snapshots: created
+              ? [{
+                id: 1, description: 'fresh', created_by: 'admin', node_count: 1, stack_count: 1,
+                skipped_nodes: '[]', skipped_stacks: '[]', created_at: Date.now(), has_documentation: 0,
+              }]
+              : [],
+            total: created ? 1 : 0,
+          }),
+        } as Response;
+      }
+      return { ok: true, json: async () => ({}) } as Response;
+    });
+
+    render(<FleetSnapshots />);
+    await screen.findByText('No snapshots yet');
+    fireEvent.click(screen.getByRole('button', { name: /Create Snapshot/ }));
+    fireEvent.change(screen.getByPlaceholderText('Snapshot description (optional)'), {
+      target: { value: 'fresh' },
+    });
+    fireEvent.click(screen.getByRole('button', { name: /^Create$/ }));
+
+    await screen.findByText('fresh');
+    expect(screen.queryByText('No snapshots yet')).toBeNull();
+    expect(screen.getAllByRole('button', { name: /Create Snapshot/ })).toHaveLength(1);
+  });
 });

@@ -70,11 +70,13 @@ export function SecretsTab() {
 
     return (
         <div className="space-y-4">
-            <FleetTabActions>
-                <Button type="button" onClick={() => setCreating(true)} className="gap-1.5">
-                    <Plus className="w-4 h-4" /> New bundle
-                </Button>
-            </FleetTabActions>
+            {items.length > 0 && (
+                <FleetTabActions>
+                    <Button type="button" onClick={() => setCreating(true)} className="gap-1.5">
+                        <Plus className="w-4 h-4" /> New bundle
+                    </Button>
+                </FleetTabActions>
+            )}
 
             {items.length === 0 ? (
                 <FleetEmptyState>

@@ -165,6 +165,9 @@ export default function FleetSnapshots() {
     const safePage = Math.min(page, totalPages - 1);
     const pagedSnapshots = snapshots.slice(safePage * PAGE_SIZE, (safePage + 1) * PAGE_SIZE);
     const needsPagination = snapshots.length > PAGE_SIZE;
+    // With no rows the empty card carries the admin's create action, so the
+    // action row must not repeat it. While loading, the row keeps the action.
+    const showsEmptyState = !loading && snapshots.length === 0;
 
     // --- Data Fetching ---
 
@@ -926,7 +929,7 @@ export default function FleetSnapshots() {
 
     return (
         <div className="space-y-4">
-            {(needsPagination || (isAdmin && !showCreateForm)) && (
+            {(needsPagination || (isAdmin && !showCreateForm && !showsEmptyState)) && (
                 <FleetTabActions>
                     {needsPagination && (
                         <div className="flex items-center gap-1.5">
@@ -991,7 +994,7 @@ export default function FleetSnapshots() {
                         ))}
                     </div>
                 </div>
-            ) : snapshots.length === 0 ? (
+            ) : showsEmptyState ? (
                 <FleetEmptyState>
                     <FleetEmptyCard
                         icon={Camera}
