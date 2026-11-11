@@ -386,7 +386,10 @@ export default function NetworkTopologyView({
         // which raced the drawer for the user's attention).
     }, []);
 
-    if (loading) {
+    // Only the first load, when there is no graph to keep, replaces the view
+    // with the skeleton. A refresh keeps the toolbar and the last graph mounted
+    // so the Refresh control can show its pending state instead of vanishing.
+    if (loading && nodes.length === 0) {
         return (
             <div className="flex items-center justify-center h-[400px] text-muted-foreground gap-2">
                 <Loader2 className="w-4 h-4 animate-spin" strokeWidth={1.5} />
