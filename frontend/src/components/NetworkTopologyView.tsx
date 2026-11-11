@@ -298,7 +298,7 @@ function FitViewOnGraphChange({ signature, nodeIds }: { signature: string; nodeI
     // Reading the store's node set (rather than a ref) makes the effect run
     // again after React Flow applies the new `nodes` prop, which happens in a
     // passive effect after this component's own.
-    const storeNodeIds = useStore((state) => state.nodes.map((node) => node.id).join('\u0000'));
+    const storeNodeIds = useStore((state) => state.nodes.map((node) => node.id).sort().join('\u0000'));
     const lastFitted = useRef<string | null>(null);
     useEffect(() => {
         if (!nodesInitialized) return;
@@ -398,10 +398,11 @@ export default function NetworkTopologyView({
 
     // A stable identity for the rendered graph. Node positions change on drag
     // without changing the ids or edges, so the fit effect below can tell a
-    // re-layout apart from the operator moving a node.
-    const graphNodeIds = useMemo(() => nodes.map((node) => node.id).join('\u0000'), [nodes]);
+    // re-layout apart from the operator moving a node. Both lists are sorted so
+    // a response that returns the same set in another order stays the same graph.
+    const graphNodeIds = useMemo(() => nodes.map((node) => node.id).sort().join('\u0000'), [nodes]);
     const graphSignature = useMemo(
-        () => `${graphNodeIds}\u0001${edges.map((edge) => `${edge.source}>${edge.target}`).join('\u0000')}`,
+        () => `${graphNodeIds}\u0001${edges.map((edge) => `${edge.source}>${edge.target}`).sort().join('\u0000')}`,
         [graphNodeIds, edges],
     );
 

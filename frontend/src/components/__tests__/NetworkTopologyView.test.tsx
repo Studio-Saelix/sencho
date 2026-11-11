@@ -7,20 +7,30 @@ import type { NetworkingTopologyNetwork } from '@/types/networking';
 // while letting the component own real node/edge state. The stub renders the
 // node labels and edge ids it receives so reload assertions can prove the graph
 // props were retained and then replaced, not just that the wrapper stayed. It
-// also exposes the live store to the mocked viewport helpers so the re-fit
-// effect has something to measure.
+// mirrors the last nodes prop it received to the mocked viewport helpers, and
+// the initialized flag can be toggled the way React Flow re-measures a new
+// node set, so the fit effect's guards are exercised.
 const flowState = vi.hoisted(() => ({
     fitView: vi.fn(),
-    nodes: [] as { id: string }[],
+    nodes: [] as { id: string; position?: { x: number; y: number } }[],
+    nodesInitialized: true,
+    onNodesChange: undefined as ((changes: unknown[]) => void) | undefined,
 }));
 
 vi.mock('@xyflow/react', async () => {
     const React = await import('react');
-    type FlowNode = { id: string; data?: { label?: string } };
+    type FlowNode = { id: string; data?: { label?: string }; position?: { x: number; y: number } };
     type FlowEdge = { id: string };
+    type PositionChange = { type: string; id: string; position?: { x: number; y: number } };
     return {
-        ReactFlow: ({ nodes = [], edges = [], children }: { nodes?: FlowNode[]; edges?: FlowEdge[]; children?: ReactNode }) => {
+        ReactFlow: ({ nodes = [], edges = [], children, onNodesChange }: {
+            nodes?: FlowNode[];
+            edges?: FlowEdge[];
+            children?: ReactNode;
+            onNodesChange?: (changes: PositionChange[]) => void;
+        }) => {
             flowState.nodes = nodes;
+            flowState.onNodesChange = onNodesChange as ((changes: unknown[]) => void) | undefined;
             return (
                 <div data-testid="topology-graph">
                     {nodes.map((node) => (
@@ -38,9 +48,18 @@ vi.mock('@xyflow/react', async () => {
         MiniMap: () => null,
         Handle: () => null,
         Position: { Top: 'top', Bottom: 'bottom' },
-        useNodesState: <T,>(initial: T[]) => React.useState<T[]>(initial),
+        useNodesState: <T extends { id: string; position?: { x: number; y: number } }>(initial: T[]) => {
+            const [state, setState] = React.useState<T[]>(initial);
+            const onNodesChange = React.useCallback((changes: PositionChange[]) => {
+                setState((current) => current.map((node) => {
+                    const change = changes.find((entry) => entry.id === node.id && entry.type === 'position');
+                    return change?.position ? { ...node, position: change.position } : node;
+                }));
+            }, []);
+            return [state, setState, onNodesChange] as const;
+        },
         useEdgesState: <T,>(initial: T[]) => React.useState<T[]>(initial),
-        useNodesInitialized: () => true,
+        useNodesInitialized: () => flowState.nodesInitialized,
         useStore: (selector: (state: { nodes: { id: string }[] }) => unknown) => selector({ nodes: flowState.nodes }),
         useReactFlow: () => ({ fitView: flowState.fitView }),
     };
@@ -120,6 +139,8 @@ describe('NetworkTopologyView refresh', () => {
         mockedFetch.mockReset();
         flowState.fitView.mockReset();
         flowState.nodes = [];
+        flowState.nodesInitialized = true;
+        flowState.onNodesChange = undefined;
     });
 
     it('shows the loading state on the first load, before any topology exists', async () => {
@@ -230,7 +251,7 @@ describe('NetworkTopologyView refresh', () => {
             .mockReturnValueOnce(firstLoad.promise)
             .mockReturnValueOnce(reload.promise);
 
-        render(<NetworkTopologyView />);
+        const { rerender } = render(<NetworkTopologyView />);
         await act(async () => { firstLoad.resolve(topologyResponse()); });
         await screen.findByTestId('topology-node-net-net-1');
         await waitFor(() => expect(flowState.fitView).toHaveBeenCalledTimes(1));
@@ -240,8 +261,39 @@ describe('NetworkTopologyView refresh', () => {
         await act(async () => { reload.resolve(topologyResponse()); });
         await waitFor(() => expect(screen.getByRole('button', { name: 'Refresh topology' })).toBeEnabled());
 
-        // The same node and edge set means the operator's pan and zoom survive
-        // a refresh rather than being reset.
+        // React Flow re-measures every new node object, so the initialized flag
+        // cycles false and back even when the ids are unchanged. The signature
+        // guard is what keeps the operator's pan and zoom across that cycle.
+        flowState.nodesInitialized = false;
+        rerender(<NetworkTopologyView />);
+        flowState.nodesInitialized = true;
+        rerender(<NetworkTopologyView />);
+
+        expect(flowState.fitView).not.toHaveBeenCalled();
+    });
+
+    it('does not re-fit when the operator drags a node', async () => {
+        const firstLoad = deferred();
+        mockedFetch.mockReturnValueOnce(firstLoad.promise);
+
+        const { rerender } = render(<NetworkTopologyView />);
+        await act(async () => { firstLoad.resolve(topologyResponse()); });
+        await screen.findByTestId('topology-node-net-net-1');
+        await waitFor(() => expect(flowState.fitView).toHaveBeenCalledTimes(1));
+        flowState.fitView.mockClear();
+
+        act(() => {
+            flowState.onNodesChange?.([{ type: 'position', id: 'net-net-1', position: { x: 40, y: 40 } }]);
+        });
+        expect(screen.getByTestId('topology-node-net-net-1')).toHaveTextContent('app-net');
+
+        // A drag only moves an existing node, so the graph identity is
+        // unchanged even when measurement cycles again.
+        flowState.nodesInitialized = false;
+        rerender(<NetworkTopologyView />);
+        flowState.nodesInitialized = true;
+        rerender(<NetworkTopologyView />);
+
         expect(flowState.fitView).not.toHaveBeenCalled();
     });
 
