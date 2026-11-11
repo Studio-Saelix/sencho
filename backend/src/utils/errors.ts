@@ -11,15 +11,17 @@ export function getErrorMessage(error: unknown, fallback: string): string {
 /**
  * True when a Docker inspect failure means the resource does not exist.
  *
- * A structured status is authoritative: when the error carries a numeric
- * `statusCode`, only 404 is not-found and every other status is a real
- * failure. Message matching is a fallback for errors that carry no status at
- * all, and it needs a standalone `404` token or Docker's own "no such ..."
- * wording, so a message that merely embeds the digits cannot turn a server
- * error into a missing resource.
+ * A numeric status is authoritative: when the error carries one, only 404 is
+ * not-found and every other status is a real failure. Message matching is a
+ * fallback for errors that carry no numeric status, and it needs a standalone
+ * `404` token or Docker's "no such network/image" wording, so a message that
+ * merely embeds the digits cannot turn a server error into a missing
+ * resource.
  */
 export function isDockerNotFoundError(error: unknown): boolean {
-  const statusCode = (error as { statusCode?: unknown } | null)?.statusCode;
+  const statusCode = typeof error === 'object' && error !== null && 'statusCode' in error
+    ? error.statusCode
+    : undefined;
   if (typeof statusCode === 'number') return statusCode === 404;
   if (!(error instanceof Error)) return false;
   return /\b404\b/.test(error.message) || /no such (?:network|image)\b/i.test(error.message);

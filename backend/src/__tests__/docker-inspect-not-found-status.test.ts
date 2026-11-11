@@ -67,10 +67,21 @@ describe('isDockerNotFoundError', () => {
 
   it('recognizes Docker not-found wording when no status is available', () => {
     expect(isDockerNotFoundError(dockerError('No such network: bridge42'))).toBe(true);
+    expect(isDockerNotFoundError(dockerError('No such image: nginx:latest'))).toBe(true);
+  });
+
+  it('does not treat other resources wording as an inspect not-found', () => {
+    expect(isDockerNotFoundError(dockerError('No such container: abc123'))).toBe(false);
+  });
+
+  it('reads a status from a non-Error object', () => {
+    expect(isDockerNotFoundError({ statusCode: 404 })).toBe(true);
+    expect(isDockerNotFoundError({ statusCode: 500 })).toBe(false);
   });
 
   it('is false for values that are not errors', () => {
     expect(isDockerNotFoundError(undefined)).toBe(false);
+    expect(isDockerNotFoundError(null)).toBe(false);
     expect(isDockerNotFoundError('404')).toBe(false);
   });
 });
