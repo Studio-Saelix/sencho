@@ -553,4 +553,48 @@ describe('FleetSnapshots action row', () => {
       authState.isAdmin = true;
     }
   });
+
+  it('offers a single Create Snapshot button in the empty state and opens the form', async () => {
+    mockedFetch.mockImplementation(async (path: string) => {
+      if (path === '/fleet/snapshots') {
+        return { ok: true, json: async () => ({ snapshots: [], total: 0 }) } as Response;
+      }
+      return { ok: true, json: async () => ({}) } as Response;
+    });
+
+    render(<FleetSnapshots />);
+    await screen.findByText('No snapshots yet');
+
+    const createButtons = screen.getAllByRole('button', { name: /Create Snapshot/ });
+    expect(createButtons).toHaveLength(1);
+    fireEvent.click(createButtons[0]);
+
+    expect(screen.getByPlaceholderText('Snapshot description (optional)')).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /Create Snapshot/ })).not.toBeInTheDocument();
+  });
+
+  it('keeps the pager and one Create Snapshot button once the list is populated', async () => {
+    mockedFetch.mockImplementation(async (path: string) => {
+      if (path === '/fleet/snapshots') {
+        return {
+          ok: true,
+          json: async () => ({
+            snapshots: Array.from({ length: 11 }, (_, i) => ({
+              id: i + 1, description: `snapshot ${i + 1}`, created_by: 'admin', node_count: 1, stack_count: 1,
+              skipped_nodes: '[]', skipped_stacks: '[]', created_at: Date.now(), has_documentation: 0,
+            })),
+            total: 11,
+          }),
+        } as Response;
+      }
+      return { ok: true, json: async () => ({}) } as Response;
+    });
+
+    render(<FleetSnapshots />);
+    await screen.findByText('snapshot 1');
+
+    expect(screen.getByText('1 / 2')).toBeInTheDocument();
+    expect(screen.getAllByRole('button', { name: /Create Snapshot/ })).toHaveLength(1);
+    expect(screen.queryByText('No snapshots yet')).toBeNull();
+  });
 });
