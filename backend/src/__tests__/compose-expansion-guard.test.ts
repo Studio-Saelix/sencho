@@ -2454,7 +2454,8 @@ describe('assertComposeInputsWithinExpansionLimits - scalar text, interpolation 
 
       // 3 * 2^14 copies: a 29-character timestamp builds 1,425,408 characters, past the 1 MiB
       // bound, where the 20 characters the text is written in build 983,040.
-      it.each(['2020-01-01  10:20:30', '2020-01-01     10:20:30', '2020-01-01  10:20:30.5', '!!timestamp 2020-01-01  10:20:30'])(
+      // Each seed is written in 21 characters or fewer, which pass the bound as written.
+      it.each(['2020-01-01  10:20:30', '2020-1-1  1:2:3', '2020-01-01   10:20:30', '!!timestamp 2020-01-01  10:20:30'])(
         'seeds %s as the 29-character time Compose prints for it',
         async (seed) => {
           await refuses(seed, 14, 3);
@@ -2462,7 +2463,7 @@ describe('assertComposeInputsWithinExpansionLimits - scalar text, interpolation 
       );
 
       it('keeps a date and time that Compose does not read as a timestamp as the text it is', async () => {
-        // A tab, or a space before the `T`, is no timestamp: 19 characters build 933,888.
+        // A tab, or a space before the `T`, is no timestamp: at most 21 characters build at most 1,032,192.
         await accepts('2020-01-01\t10:20:30', 14, 3);
         await accepts('2020-01-01 T10:20:30Z', 14, 3);
       });
@@ -2481,10 +2482,10 @@ describe('assertComposeInputsWithinExpansionLimits - scalar text, interpolation 
         await accepts('!!int 9223372036854775807', 12, 13);
       });
 
-      it.each(['!custom 2020-01-01', '!custom 1e3', '!!seq 2020-01-01', '!!set 2020-01-01'])(
+      it.each(['!custom 2020-01-01', '!custom 2020-01-01T10:20:30Z', '!!seq 2020-01-01', '!!set 2020-01-01'])(
         'keeps %s as the string it is: an unknown tag resolves nothing',
         async (seed) => {
-          // 10 characters: 491,520 pass the bound; read as a timestamp they would not.
+          // At most 21 characters pass the bound as written; read as a timestamp, 29 would not.
           await accepts(seed, 14, 3);
         },
       );
@@ -2497,10 +2498,14 @@ describe('assertComposeInputsWithinExpansionLimits - scalar text, interpolation 
         await accepts('!!str 2020-01-01  10:20:30', 14, 3);
       });
 
-      it('leaves a value Compose rejects for its own error, and a null one to the environment', async () => {
-        for (const seed of ['!!float abc', '!!int 1.5', '!!bool yes', '!!null ~']) {
+      it('seeds a value Compose rejects as written, and leaves a null one to the environment', async () => {
+        // Compose reports the type error itself; a gap between this reader and Compose can only count more.
+        for (const seed of ['!!float abc', '!!int 1.5', '!!bool yes']) {
+          await refuses(seed, 20, 1);
           await accepts(seed, 10, 1);
         }
+        await accepts('!!null ~', 20, 1);
+        await accepts('!!merge 1', 20, 1);
       });
 
       // 2^14 copies of one character: a numeral padded with zeros is the value it names.
@@ -2511,7 +2516,7 @@ describe('assertComposeInputsWithinExpansionLimits - scalar text, interpolation 
         },
       );
 
-      it('still refuses a numeral whose digits count: 2^20 copies of its value pass the bound', async () => {
+      it('still refuses a numeral whose digits count: 2^20 copies of its value exceed the bound', async () => {
         await refuses(`0x${'0'.repeat(70)}ff`, 20, 1);
         await refuses('0b11111111', 20, 1);
       });
@@ -2629,6 +2634,22 @@ describe('assertComposeInputsWithinExpansionLimits - scalar text, interpolation 
           },
           invocation: ['compose', '-f', 'a.yaml', 'config'],
         },
+        'a -f file and an include of another': {
+          files: { 'a.yaml': head('e1.env'), 'b.yaml': 'include:\n  - c.yaml\n', 'c.yaml': more('e2.env'), ...env },
+          invocation: ['compose', '-f', 'a.yaml', '-f', 'b.yaml', 'config'],
+        },
+        'an include and a -f file': {
+          files: { 'a.yaml': 'include:\n  - b.yaml\n', 'b.yaml': head('e1.env'), 'c.yaml': more('e2.env'), ...env },
+          invocation: ['compose', '-f', 'a.yaml', '-f', 'c.yaml', 'config'],
+        },
+        'an include and the file that includes it': {
+          files: { 'a.yaml': `include:\n  - b.yaml\n${more('e2.env')}`, 'b.yaml': head('e1.env'), ...env },
+          invocation: ['compose', '-f', 'a.yaml', 'config'],
+        },
+        'an include two levels down and a -f file': {
+          files: { 'a.yaml': 'include:\n  - b.yaml\n', 'b.yaml': 'include:\n  - c.yaml\n', 'c.yaml': head('e1.env'), 'd.yaml': more('e2.env'), ...env },
+          invocation: ['compose', '-f', 'a.yaml', '-f', 'd.yaml', 'config'],
+        },
         'an extends in another file': {
           files: {
             'a.yaml': `services:\n  web:\n    extends:\n      file: base.yaml\n      service: base\n    ${kind}: [e2.env]\n`,
@@ -2678,6 +2699,60 @@ describe('assertComposeInputsWithinExpansionLimits - scalar text, interpolation 
       // A later definition overrides the value, so the earlier seed is not the one the files read.
       await write('c.yaml', 'services:\n  web:\n    environment:\n      A: small\n');
       await expect(run(dir, ['compose', '-f', 'a.yaml', '-f', 'b.yaml', '-f', 'c.yaml', 'config'])).resolves.toBeUndefined();
+    });
+
+    describe('a !override or !reset tag drops what an earlier definition gave', () => {
+      const seeded = (kind: 'env_file' | 'label_file'): Record<string, string> => ({
+        'a.yaml':
+          kind === 'env_file'
+            ? `services:\n  web:\n    image: nginx\n    environment:\n      A: ${seedText}\n    env_file: [e1.env]\n`
+            : 'services:\n  web:\n    image: nginx\n    label_file: [e1.env]\n',
+        'e1.env': kind === 'env_file' ? `B0=\${A}\n${doublings(1, 3)}\n` : `B0=${seedText}\n${doublings(1, 3)}\n`,
+        'e2.env': continuation,
+      });
+      const second = (kind: 'env_file' | 'label_file'): Record<string, string> => ({
+        'list replaced with !override': `services:\n  web:\n    ${kind}: !override [e2.env]\n`,
+        'list reset with !reset': `services:\n  web:\n    ${kind}: !reset []\n`,
+        'service replaced with !override': `services:\n  web: !override\n    image: nginx\n    ${kind}: [e2.env]\n`,
+        'service removed with !reset': 'services:\n  web: !reset null\n  other:\n    image: nginx\n',
+        'services section replaced with !override': `services: !override\n  web:\n    image: nginx\n    ${kind}: [e2.env]\n`,
+      });
+
+      describe.each(['env_file', 'label_file'] as const)('%s', (kind) => {
+        it.each(Object.keys(second(kind)))('accepts a second -f file with the %s: nothing continues the first chain', async (name) => {
+          await write('b.yaml', second(kind)[name]);
+          for (const [file, content] of Object.entries(seeded(kind))) await write(file, content);
+          await expect(run(dir, ['compose', '-f', 'a.yaml', '-f', 'b.yaml', 'config'])).resolves.toBeUndefined();
+        });
+
+        it('accepts a later document of the stream that resets the list', async () => {
+          for (const [file, content] of Object.entries(seeded(kind))) await write(file, content);
+          await write('a.yaml', `${seeded(kind)['a.yaml']}---\nservices:\n  web:\n    ${kind}: !reset [e2.env]\n`);
+          await expect(run(dir, ['compose', '-f', 'a.yaml', 'config'])).resolves.toBeUndefined();
+        });
+
+        it('accepts an extending service that replaces the list it would inherit', async () => {
+          const base = seeded(kind)['a.yaml'].replace('web:', 'base:');
+          await write('a.yaml', `${base}  web:\n    extends: base\n    ${kind}: !override [e2.env]\n`);
+          await write('e1.env', seeded(kind)['e1.env']);
+          await write('e2.env', continuation);
+          await expect(run(dir, ['compose', '-f', 'a.yaml', 'config'])).resolves.toBeUndefined();
+        });
+
+        it('still refuses when the replacing list names the whole chain', async () => {
+          for (const [file, content] of Object.entries(seeded(kind))) await write(file, content);
+          await write('b.yaml', `services:\n  web:\n    ${kind}: !override [e1.env, e2.env]\n`);
+          await expect(run(dir, ['compose', '-f', 'a.yaml', '-f', 'b.yaml', 'config'])).rejects.toThrow(/too long, or interpolates into more text/);
+        });
+      });
+
+      it('applies an environment that a later file replaces: the files read the new one', async () => {
+        for (const [file, content] of Object.entries(seeded('env_file'))) await write(file, content);
+        await write('b.yaml', 'services:\n  web:\n    environment: !override\n      Z: "1"\n    env_file: [e2.env]\n');
+        await expect(run(dir, ['compose', '-f', 'a.yaml', '-f', 'b.yaml', 'config'])).resolves.toBeUndefined();
+        await write('b.yaml', `services:\n  web:\n    environment: !override\n      A: ${seedText}\n    env_file: [e2.env]\n`);
+        await expect(run(dir, ['compose', '-f', 'a.yaml', '-f', 'b.yaml', 'config'])).rejects.toThrow(/too long, or interpolates into more text/);
+      });
     });
 
     it('does not combine services that have different names', async () => {

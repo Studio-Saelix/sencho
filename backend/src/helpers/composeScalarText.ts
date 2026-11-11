@@ -161,7 +161,7 @@ export function composePlainScalarText(text: string): string {
 /**
  * The text Compose gives a scalar written as `text` under an explicit
  * `!!int`, `!!float`, `!!bool`, or `!!timestamp` tag, or null when `text` is
- * not of that kind. Compose rejects the file then, so nothing is interpolated.
+ * not of that kind, which is a file Compose rejects.
  * `!!float` takes an integer as well, as the float it converts to.
  */
 export function composeTaggedScalarText(text: string, tag: 'int' | 'float' | 'bool' | 'timestamp'): string | null {
