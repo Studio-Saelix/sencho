@@ -287,6 +287,7 @@ describe('collectServiceHealthcheckEvidence', () => {
     expect(evidence.web.state).toBe('unverifiable');
     const logged = warn.mock.calls.map(args => args.join(' ')).join('\n');
     expect(logged).not.toContain('Ab/cD+eF9xyz=');
+    expect(logged).not.toContain('eF9xyz');
     expect(logged).toContain('[redacted]@registry.example.com/app:latest');
   });
 
@@ -302,6 +303,7 @@ describe('collectServiceHealthcheckEvidence', () => {
     await collectServiceHealthcheckEvidence(1, 'proj', m, true);
     const logged = warn.mock.calls.map(args => args.join(' ')).join('\n');
     expect(logged).not.toContain('p4ssw0rdXYZ');
+    expect(logged).toContain('[redacted]@registry.example.com/app');
   });
 
   it('never logs credentials carried by a replica inspect error', async () => {
