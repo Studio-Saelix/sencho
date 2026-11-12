@@ -278,11 +278,12 @@ describe('collectServiceHealthcheckEvidence', () => {
   });
 
   it('never logs registry credentials from an image that cannot be inspected', async () => {
-    const image = 'user:Ab/cD+eF9xyz=@registry.example.com/app:latest';
-    // The body Docker 29.9.3 returns for this reference: it quotes only the
-    // repository name after the credential's first `/`, not the full reference.
+    const image = 'user:Ab/cD+eF9xyz=:x@registry.example.com/app:latest';
+    // The message docker-modem builds from Docker 29.9.3's HTTP 400 body for
+    // this reference: it quotes only the repository name after the credential's
+    // first `/`, and a colon in the password cuts that quote at the prefix.
     const dockerError = new Error(
-      '(HTTP code 400) unexpected - invalid reference format: repository name (cD+eF9xyz=@registry.example.com/app) must be lowercase ',
+      '(HTTP code 400) unexpected - invalid reference format: repository name (cD+eF9xyz=) must be lowercase ',
     );
     mockDocker({ list: [], image: 'error', imageError: dockerError });
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});

@@ -152,9 +152,10 @@ const MAX_CAUSE_DEPTH = 3;
  * may quote it. Docker echoes the reference in its errors, and a password can
  * hold a `/`, a space, or a quote that the text-shape rules deliberately do not
  * treat as one, so the reference's own grammar has to run first. Docker may
- * also quote only the parsed repository name, which starts after the
- * credential's first `/`; removing the userinfo and that tail covers the
- * rewrite. A digest pin carries no userinfo, so it is left intact.
+ * also quote only the parsed repository name, either after the credential's
+ * first `/` or from the start of the reference, cut at the first `:`; removing
+ * the userinfo, its tail, and that quoted prefix covers the rewrite. A digest
+ * pin carries no userinfo, so it is left intact.
  */
 export function errorMessageForLog(error: unknown, options?: { imageRef?: string }): string {
   const message = messageWithCause(error);
@@ -168,15 +169,16 @@ function redactImageInText(text: string, imageRef: string): string {
   if (reference === null) return text;
   let out = text.split(imageRef).join(`[redacted]@${reference.rest}`);
   const { userinfo } = reference;
-  // Docker splits the reference into a domain and a remainder; when the
+  // Docker splits the reference into a domain and a remainder when the
   // component before the first `/` looks like a domain (it has a `.` or `:`,
-  // as `user:password` does), the remainder starts right after that slash. The
-  // invalid-reference error quotes that remainder, so the userinfo reaches the
-  // message as its tail, still followed by the host's `@`. Anchoring each
-  // fragment to that `@` keeps a short password piece from rewriting unrelated
-  // words, and removing the tail takes every `/`-separated segment with it in
-  // one pass rather than one split per segment, which a long slash-heavy
-  // reference would turn quadratic.
+  // as `user:password` does); otherwise it keeps the whole name. The
+  // invalid-reference error quotes the parsed repository name, cut at the
+  // first `:`, so when the password has no colon the userinfo tail reaches the
+  // message still followed by the host's `@`. Anchoring each fragment to that
+  // `@` keeps a short password piece from rewriting unrelated words, and
+  // removing the tail takes every `/`-separated segment with it in one pass
+  // rather than one split per segment, which a long slash-heavy reference
+  // would turn quadratic.
   //
   // A `user:password` userinfo is credential-shaped even when short, and a
   // long token is distinctive, so an echo of either is removed even without
@@ -188,6 +190,21 @@ function redactImageInText(text: string, imageRef: string): string {
   }
   const slash = userinfo.indexOf('/');
   const tail = slash === -1 ? '' : userinfo.slice(slash + 1);
+  // The invalid-reference error quotes the repository name it parsed, cut at
+  // the first `:` in it (Docker reads the suffix as the tag). When the
+  // password holds a colon, that quoted name is only the password's prefix
+  // and carries no `@`, so the anchored fragment below does not match it. The
+  // quote starts after the credential's first `/` when Docker reads that
+  // component as a domain, and at the start of the reference otherwise, so try
+  // both. Replace only inside the quoted-name phrase, so a short prefix such
+  // as `Pass` does not rewrite the same word elsewhere.
+  const firstSegment = slash === -1 ? '' : userinfo.slice(0, slash);
+  const quotedTail = tail.split(':')[0];
+  const quotedNames = firstSegment ? [`${firstSegment}/${quotedTail}`, quotedTail] : [quotedTail];
+  for (const quotedName of quotedNames) {
+    if (!/[A-Za-z0-9]/.test(quotedName)) continue;
+    out = out.split(`repository name (${quotedName})`).join('repository name ([redacted])');
+  }
   for (const fragment of [userinfo, tail]) {
     // Punctuation-only pieces carry no credential value, and replacing them
     // would mangle the rest of the message.

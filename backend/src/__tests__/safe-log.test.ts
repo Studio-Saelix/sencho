@@ -424,6 +424,94 @@ describe('errorMessageForLog', () => {
     expect(text).toContain('[redacted]@registry.example.com/app');
   });
 
+  // Docker 29.9.3 parses the reference before it validates case and quotes the
+  // parsed repository name, cut at the first `:`. The quote starts after the
+  // credential's first `/` when Docker reads that component as a domain, and
+  // at the start of the reference otherwise. A colon inside the password
+  // therefore makes the quoted name a password prefix with no `@`, which the
+  // anchored fragment above does not match.
+  it.each([
+    [
+      'a long prefix',
+      'user:Ab/cD+eF9xyz=:x@registry.example.com/app:latest',
+      'cD+eF9xyz=',
+      '(HTTP code 400) unexpected - invalid reference format: repository name (cD+eF9xyz=) must be lowercase ',
+    ],
+    [
+      'a mixed-case word',
+      'user:deploy/SuperSecret:x@registry.example.com/app:latest',
+      'SuperSecret',
+      'invalid reference format: repository name (SuperSecret) must be lowercase',
+    ],
+    [
+      'a short prefix',
+      'user:deploy/Pass:x@registry.example.com/app:latest',
+      'Pass',
+      'invalid reference format: repository name (Pass) must be lowercase',
+    ],
+    [
+      'a multi-segment tail',
+      'user:Ab/cD/ef:gh@registry.example.com/app:latest',
+      'cD/ef',
+      'invalid reference format: repository name (cD/ef) must be lowercase',
+    ],
+    [
+      'a literal @ in the prefix',
+      'user:p/ss@Word:x@registry.example.com/app:latest',
+      'ss@Word',
+      'invalid reference format: repository name (ss@Word) must be lowercase',
+    ],
+    [
+      'a token-only first segment',
+      'tokenonly/SuperSecret:x@registry.example.com/app:latest',
+      'SuperSecret',
+      'invalid reference format: repository name (tokenonly/SuperSecret) must be lowercase',
+    ],
+    [
+      'a token-only first segment with a multi-segment tail',
+      'tokenonly/foo/Pass:x@registry.example.com/app:latest',
+      'Pass',
+      'invalid reference format: repository name (tokenonly/foo/Pass) must be lowercase',
+    ],
+  ])('redacts the colon-cut repository name Docker quotes for %s', (_name, image, secret, body) => {
+    const text = errorMessageForLog(new Error(body), { imageRef: image });
+
+    expect(text).not.toContain(secret);
+    expect(text).toContain('repository name ([redacted])');
+    expect(text).toContain('must be lowercase');
+  });
+
+  it('does not rewrite a short colon-cut prefix outside the quoted repository name', () => {
+    const image = 'user:deploy/Pass:x@registry.example.com/app:latest';
+    const body =
+      'invalid reference format: repository name (Pass) must be lowercase; retry Pass later';
+    const text = errorMessageForLog(new Error(body), { imageRef: image });
+
+    expect(text).toContain('repository name ([redacted])');
+    expect(text).toContain('retry Pass later');
+  });
+
+  it('is idempotent on a colon-cut repository name', () => {
+    const image = 'user:Ab/cD+eF9xyz=:x@registry.example.com/app:latest';
+    const body =
+      '(HTTP code 400) unexpected - invalid reference format: repository name (cD+eF9xyz=) must be lowercase ';
+    const once = errorMessageForLog(new Error(body), { imageRef: image });
+
+    expect(errorMessageForLog(new Error(once), { imageRef: image })).toBe(once);
+  });
+
+  it('removes a long colon-cut repository name in bounded time', () => {
+    const quotedTail = `cD${'/cD'.repeat(20_000)}=`;
+    const image = `user:Ab/${quotedTail}:x@registry.example.com/app:latest`;
+    const body = `invalid reference format: repository name (${quotedTail}) must be lowercase`;
+    const started = Date.now();
+    const text = errorMessageForLog(new Error(body), { imageRef: image });
+
+    expect(Date.now() - started).toBeLessThan(1000);
+    expect(text).not.toContain(quotedTail);
+    expect(text).toContain('repository name ([redacted])');
+  });
+
   it('redacts every slash-separated credential piece in a rewritten userinfo tail', () => {
     const image = 'user:Ab/cD/ef+GH=@registry.example.com/app:latest';
     const body =
