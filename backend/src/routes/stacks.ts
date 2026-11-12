@@ -96,6 +96,7 @@ import { filterContainersByComposeService } from '../helpers/composeServiceMatch
 import { invalidateNodeCaches } from '../helpers/cacheInvalidation';
 import { invalidateNodeNetworkingAggregate } from '../services/network/networkingAggregateCache';
 import { auditActorUsername } from '../helpers/auditActor';
+import { inArrivalOrder, ArrivalQueueFullError } from '../helpers/arrivalOrder';
 import { invalidateFleetUpdateCache } from '../helpers/fleetUpdateCache';
 import {
   ImageUpdateService,
@@ -2276,31 +2277,55 @@ stacksRouter.get('/:stackName/exposure', async (req: Request, res: Response) => 
   }
 });
 
+// Saves to one stack are applied in the order they reach this handler, per node and stack.
+// Validating the stack is asynchronous, so without the queue a save that stalls there
+// (and whose client has since given up on it) would be applied after a later save that
+// already replied, and undo it. A client that abandoned a save cannot know the node has
+// stopped working on it; the order here is what keeps the later save final. The queue
+// admits a bounded number of saves that have not finished, per stack and across the node,
+// so saves that never finish answer further saves with 429 instead of holding every one
+// of them. Saves already admitted keep their order.
 stacksRouter.put('/:stackName/exposure', async (req: Request, res: Response) => {
   const stackName = req.params.stackName as string;
   if (!requirePermission(req, res, 'stack:edit', 'stack', stackName)) return;
-  if (!(await requireStackExists(req.nodeId, stackName, res))) return;
-  const parsed = ExposurePutSchema.safeParse(req.body);
-  if (!parsed.success) {
-    res.status(400).json({ error: 'Invalid exposure intent' });
-    return;
-  }
-  const { service, intent } = parsed.data;
+  const nodeId = req.nodeId;
   try {
-    if (intent === null) {
-      DatabaseService.getInstance().deleteStackExposureIntent(req.nodeId, stackName, service);
-    } else {
-      DatabaseService.getInstance().setStackExposureIntent(req.nodeId, stackName, service, intent, req.user?.username ?? null);
-    }
-    // Networking findings depend on intent; drop its memo so the finding is re-checked at once.
-    invalidateNodeNetworkingAggregate(req.nodeId);
-    res.json(exposurePayload(req.nodeId, stackName));
+    await saveInArrivalOrder(req, res, nodeId, stackName);
   } catch (error) {
-    console.error('[Stacks] Failed to save exposure intent for %s:', sanitizeForLog(stackName),
-      sanitizeForLog(getErrorMessage(error, 'unknown')));
-    res.status(500).json({ error: 'Failed to save exposure intent' });
+    if (!(error instanceof ArrivalQueueFullError)) throw error;
+    console.error('[Stacks] Exposure save for %s refused, too many saves are waiting:', sanitizeForLog(stackName));
+    res.status(429).json({
+      error: 'Too many exposure saves are waiting on this node, so this one was not applied. Try again shortly; if it keeps happening, the node is not finishing earlier saves and may need a restart.',
+      code: 'exposure_save_queue_full',
+    });
   }
 });
+
+function saveInArrivalOrder(req: Request, res: Response, nodeId: number, stackName: string): Promise<void> {
+  return inArrivalOrder(`${nodeId}\0${stackName}`, async () => {
+    if (!(await requireStackExists(nodeId, stackName, res))) return;
+    const parsed = ExposurePutSchema.safeParse(req.body);
+    if (!parsed.success) {
+      res.status(400).json({ error: 'Invalid exposure intent' });
+      return;
+    }
+    const { service, intent } = parsed.data;
+    try {
+      if (intent === null) {
+        DatabaseService.getInstance().deleteStackExposureIntent(nodeId, stackName, service);
+      } else {
+        DatabaseService.getInstance().setStackExposureIntent(nodeId, stackName, service, intent, req.user?.username ?? null);
+      }
+      // Networking findings depend on intent; drop its memo so the finding is re-checked at once.
+      invalidateNodeNetworkingAggregate(nodeId);
+      res.json(exposurePayload(nodeId, stackName));
+    } catch (error) {
+      console.error('[Stacks] Failed to save exposure intent for %s:', sanitizeForLog(stackName),
+        sanitizeForLog(getErrorMessage(error, 'unknown')));
+      res.status(500).json({ error: 'Failed to save exposure intent' });
+    }
+  });
+}
 
 // Update guard: readiness reports computed on demand from existing stores
 // (preflight runs, drift findings, backup slot, update preview, live Docker

@@ -8,7 +8,11 @@ import { render, screen } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { SecurityMobileTabs, ImageScanRow, SecuritySevStrip, type SecurityMobileTab } from '../SecurityMobile';
 import { ImagesTab } from '../ImagesTab';
-import type { ScanSummary, SecurityOverview } from '@/types/security';
+import { applySavedIntents } from '../imagesTargeting';
+import type { ImageExposureContext, ScanSummary, SecurityOverview } from '@/types/security';
+
+// These cases cover the named Networking navigation, which a session that may not edit the stack keeps.
+vi.mock('@/context/AuthContext', () => ({ useAuth: () => ({ can: () => false }) }));
 
 function overview(o: Partial<SecurityOverview> = {}): SecurityOverview {
   return {
@@ -92,27 +96,27 @@ describe('SecurityMobileTabs', () => {
 
 describe('ImageScanRow', () => {
   it('shows critical and high count tags', () => {
-    render(<ImageScanRow summary={summary({ image_ref: 'nginx:1', scan_id: 1, critical: 5, high: 2 })} onInspect={vi.fn()} />);
+    render(<ImageScanRow summary={summary({ image_ref: 'nginx:1', scan_id: 1, critical: 5, high: 2 })} onInspect={vi.fn()} onIntentSaved={vi.fn()} />);
     expect(screen.getByText('nginx:1')).toBeInTheDocument();
     expect(screen.getByText('5C')).toBeInTheDocument();
     expect(screen.getByText('2H')).toBeInTheDocument();
   });
 
   it('shows a clean tag when there are no findings', () => {
-    render(<ImageScanRow summary={summary({ image_ref: 'caddy:2', scan_id: 2 })} onInspect={vi.fn()} />);
+    render(<ImageScanRow summary={summary({ image_ref: 'caddy:2', scan_id: 2 })} onInspect={vi.fn()} onIntentSaved={vi.fn()} />);
     expect(screen.getByText('clean')).toBeInTheDocument();
   });
 
   it('does not call a medium/low-only image clean', () => {
     // A medium-only image has no critical/high/secret/misconfig findings but is
     // not clean; the dot and tags must follow getSeverityKey, not an all-zero check.
-    render(<ImageScanRow summary={summary({ image_ref: 'pg:16', scan_id: 3, highest_severity: 'MEDIUM', total: 4, medium: 4 })} onInspect={vi.fn()} />);
+    render(<ImageScanRow summary={summary({ image_ref: 'pg:16', scan_id: 3, highest_severity: 'MEDIUM', total: 4, medium: 4 })} onInspect={vi.fn()} onIntentSaved={vi.fn()} />);
     expect(screen.queryByText('clean')).not.toBeInTheDocument();
   });
 
   it('opens the scan on the vulns tab when tapped', async () => {
     const onInspect = vi.fn();
-    render(<ImageScanRow summary={summary({ image_ref: 'redis:7', scan_id: 9 })} onInspect={onInspect} />);
+    render(<ImageScanRow summary={summary({ image_ref: 'redis:7', scan_id: 9 })} onInspect={onInspect} onIntentSaved={vi.fn()} />);
     await userEvent.click(screen.getByText('redis:7'));
     expect(onInspect).toHaveBeenCalledWith(9, 'vulns', undefined);
   });
@@ -151,6 +155,7 @@ describe('ImagesTab (mobile)', () => {
     canScan: false,
     scanningRef: null as string | null,
     onScan: vi.fn(),
+    onIntentSaved: vi.fn(),
   };
 
   it('renders the severity chips and a row list below the breakpoint', () => {
@@ -266,5 +271,88 @@ describe('ImagesTab (mobile)', () => {
     );
     expect(screen.getByText('Network exposed')).toBeInTheDocument();
     expect(screen.queryByText(/Intent:/)).not.toBeInTheDocument();
+  });
+
+  it('stops showing exposure on the phone row when an unverified tunnel save settles it', () => {
+    installMatchMedia(true);
+    const before = asMap(summary({
+      image_ref: 'exp:1',
+      scan_id: 1,
+      publicly_exposed: true,
+      exposure_contexts: [{
+        stackName: 'web',
+        serviceName: 'api',
+        exposureReason: 'tunnel',
+        tunnel: {
+          connector: 'edge',
+          provider: 'cloudflared',
+          scope: 'public-edge',
+          path: 'shared-network',
+        },
+        intentStatus: 'unset',
+      }],
+      exposure_context_count: 1,
+      exposure_context_summary: {
+        hasConflict: false,
+        hasUnclassified: true,
+        hasUnavailable: false,
+        allKnownIntentional: false,
+      },
+    }));
+    const after = applySavedIntents(before, 'web', [{ service: 'api', intent: 'internal' }], {
+      imageRef: 'exp:1',
+      context: {
+        stackName: 'web',
+        serviceName: 'api',
+        exposureReason: 'tunnel',
+        tunnel: {
+          connector: 'edge',
+          provider: 'cloudflared',
+          scope: 'public-edge',
+          path: 'shared-network',
+        },
+        intentStatus: 'unset',
+      },
+    });
+
+    render(<ImagesTab {...base} summaries={after} />);
+
+    expect(screen.getByText('exp:1')).toBeInTheDocument();
+    expect(screen.queryByText('Network exposed')).not.toBeInTheDocument();
+    expect(screen.queryByText(/Intent mismatch/)).not.toBeInTheDocument();
+  });
+
+  it('keeps a hidden capped warning on the phone row after repeated saves', () => {
+    installMatchMedia(true);
+    const visible: ImageExposureContext[] = Array.from({ length: 20 }, (_, index) => ({
+      stackName: 'web',
+      serviceName: `svc${index}`,
+      exposureReason: 'published-port',
+      intentStatus: 'unset',
+    }));
+    let summaries = asMap(summary({
+      image_ref: 'exp:1',
+      scan_id: 1,
+      publicly_exposed: true,
+      exposure_contexts: visible,
+      exposure_context_count: 21,
+      exposure_contexts_truncated: true,
+      exposure_context_summary: {
+        hasConflict: false,
+        hasUnclassified: true,
+        hasUnavailable: false,
+        allKnownIntentional: false,
+      },
+    }));
+
+    const saved: Array<{ service: string; intent: 'public' }> = [];
+    for (let index = 0; index < visible.length; index += 1) {
+      saved.push({ service: `svc${index}`, intent: 'public' });
+      summaries = applySavedIntents(summaries, 'web', saved);
+    }
+
+    render(<ImagesTab {...base} summaries={summaries} />);
+
+    expect(screen.getByText('Intent: not classified (+20)')).toBeInTheDocument();
   });
 });

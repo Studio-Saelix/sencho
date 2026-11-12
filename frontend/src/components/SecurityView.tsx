@@ -34,9 +34,13 @@ import { SuppressionsPanel } from './settings/SuppressionsPanel';
 import { MisconfigAckPanel } from './settings/MisconfigAckPanel';
 import { OverviewTab, type ChartLoadState, type OverviewLoadError } from './security/OverviewTab';
 import { useSecurityReasons } from './security/useSecurityReasons';
+import type { IntentEntry } from '@/hooks/useExposureIntent';
 import {
+  afterIntentSaved,
+  applySavedIntents,
   type ImagesTargetingInput,
   type ImagesTargetingState,
+  type SavedIntentTarget,
 } from './security/imagesTargeting';
 import { ImagesTab } from './security/ImagesTab';
 import { FindingsTab } from './security/FindingsTab';
@@ -299,6 +303,32 @@ export function SecurityView({ activeTab, onTabChange, headerActions }: Security
 
   const nodeOverview = overview;
   const reloadOverview = useCallback(() => setReloadToken((t) => t + 1), []);
+
+  // Targeting carries a snapshot of the exposure contexts taken when the
+  // operator arrived; an intent saved from the list makes it stale (the conflict
+  // banner, the mismatch hint, the verb), so the snapshot goes and the rows read
+  // the reloaded summaries instead. The listed images stay for the rest of a batch.
+  // The confirmed save is adopted into those summaries first, so a save whose
+  // reread fails still shows the saved intent and action for the contexts the
+  // backend keeps exposed, instead of the evidence it replaced.
+  const updateSummaries = summariesRegion.update;
+  const activeNodeId = activeNode?.id;
+  const activeNodeIdRef = useRef(activeNodeId);
+  useEffect(() => {
+    activeNodeIdRef.current = activeNodeId;
+  }, [activeNodeId]);
+  const onIntentSaved = useCallback((stackName: string, intents: IntentEntry[], saved: SavedIntentTarget) => {
+    // A save confirmed for a node the operator has since left says nothing about
+    // the node on screen.
+    if (activeNodeIdRef.current !== activeNodeId) return;
+    // Saves made here to a stack are sent one at a time, so they reach this in
+    // the order they were made, each reply holding every earlier one: the
+    // newest reply is the stack's rows and replaces what an earlier one adopted.
+    updateSummaries((summaries) => applySavedIntents(summaries, stackName, intents, saved));
+    setImagesTargeting(afterIntentSaved);
+    reloadOverview();
+  }, [activeNodeId, updateSummaries, reloadOverview]);
+
   const reasons = useSecurityReasons({
     overview: nodeOverview,
     isReplica,
@@ -446,6 +476,7 @@ export function SecurityView({ activeTab, onTabChange, headerActions }: Security
               onClearTargeting={clearImagesTargeting}
               posturePartial={overview?.posturePartial === true}
               nodeId={activeNode?.id}
+              onIntentSaved={onIntentSaved}
             />
           </CapabilityGate>
         </TabsContent>

@@ -59,7 +59,9 @@ jobs:
   backend:
     name: Backend unit tests (Build, Test, Lint)
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    # Install, build, tests, and lint took 8 to 10 minutes on recent runs, which
+    # leaves too little room for the dependency audit step.
+    timeout-minutes: 15
     needs: changes
     # Runs unless detection positively found no code: a failed detection job
     # runs every gate instead of skipping them.

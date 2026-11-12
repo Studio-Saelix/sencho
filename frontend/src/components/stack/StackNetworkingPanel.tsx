@@ -208,7 +208,7 @@ export default function StackNetworkingPanel({ stackName, canEdit, doctorEnabled
 
   const saveIntent = useCallback(async (service: string, intent: ExposureIntent | null) => {
     const requestedKey = `${nodeId ?? ''}::${stackName}`;
-    const next = await saveExposureIntent(stackName, service, intent);
+    const next = await saveExposureIntent(stackName, service, intent, nodeId);
     if (next !== null && viewKeyRef.current === requestedKey) {
       setIntents(next);
       setIntentsUnavailable(false);
