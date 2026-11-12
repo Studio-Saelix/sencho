@@ -373,12 +373,34 @@ describe('errorMessageForLog', () => {
     expect(text).toContain('[redacted]@registry.example.com/app:latest');
   });
 
-  it('redacts the whole userinfo when the error echoes it without the host', () => {
+  it('redacts the userinfo when the error quotes it before the host', () => {
     const image = 'user:Ab/cD+eF9xyz=@registry.example.com/app:latest';
-    const text = errorMessageForLog(new Error('invalid userinfo user:Ab/cD+eF9xyz= for image'), { imageRef: image });
+    const text = errorMessageForLog(
+      new Error('invalid userinfo user:Ab/cD+eF9xyz=@registry.example.com/app for image'),
+      { imageRef: image },
+    );
 
     expect(text).not.toContain('Ab/cD+eF9xyz=');
-    expect(text).toContain('invalid userinfo [redacted] for image');
+    expect(text).toContain('invalid userinfo [redacted]@registry.example.com/app for image');
+  });
+
+  it.each([
+    ['a space', 'user:Ab cD+eF9xyz=@registry.example.com/app:latest', 'Ab cD+eF9xyz='],
+    ['a quote', 'user:p"ss/cD+eF9xyz=@registry.example.com/app:latest', 'p"ss'],
+    ['a literal @', 'user:p@ss/word@registry.example.com/app:latest', 'p@ss/word'],
+  ])('redacts an image credential with %s when the error echoes the whole reference', (_name, image, secret) => {
+    const text = errorMessageForLog(new Error(`No such image: ${image}`), { imageRef: image });
+
+    expect(text).not.toContain(secret);
+    expect(text).toContain('[redacted]@registry.example.com/app:latest');
+  });
+
+  it('redacts a token-only userinfo the error quotes', () => {
+    const image = 'ghp_SECRETD8@ghcr.io/x/app:latest';
+    const text = errorMessageForLog(new Error(`No such image: ${image}`), { imageRef: image });
+
+    expect(text).not.toContain('SECRETD8');
+    expect(text).toContain('[redacted]@ghcr.io/x/app:latest');
   });
 
   // Docker parses the reference before it reports it, so the HTTP 400 body for
@@ -409,15 +431,38 @@ describe('errorMessageForLog', () => {
     expect(text).toContain('must be lowercase');
   });
 
+  // A short password piece must only be replaced where it is echoed as part of
+  // the reference, not inside every word that happens to contain it.
+  it('does not rewrite unrelated words when a short password piece repeats', () => {
+    const image = 'user:Ab/c@registry.example.com/app:latest';
+    const body = 'invalid reference format: repository name (c@registry.example.com/app) must be lowercase';
+    const text = errorMessageForLog(new Error(body), { imageRef: image });
+
+    expect(text).toContain('reference format');
+    expect(text).toContain('lowercase');
+    expect(text).not.toContain('c@registry');
+    expect(text).toContain('[redacted]@registry.example.com/app');
+  });
+
   it('removes a long rewritten userinfo tail in bounded time', () => {
     const image = `user:Ab${'/cD'.repeat(20_000)}=@registry.example.com/app:latest`;
-    const body = `invalid reference format: repository name (${image.slice(image.indexOf('/') + 1)}@registry.example.com/app) must be lowercase`;
+    const tail = image.slice(image.indexOf('/') + 1, image.lastIndexOf('@'));
+    const body = `invalid reference format: repository name (${tail}@registry.example.com/app) must be lowercase`;
     const started = Date.now();
     const text = errorMessageForLog(new Error(body), { imageRef: image });
 
     expect(Date.now() - started).toBeLessThan(1000);
     expect(text).not.toContain('cD/cD');
     expect(text).toContain('[redacted]@registry.example.com/app');
+  });
+
+  it('is idempotent on a rewritten userinfo tail', () => {
+    const image = 'user:Ab/cD+eF9xyz=@registry.example.com/app:latest';
+    const body =
+      'invalid reference format: repository name (cD+eF9xyz=@registry.example.com/app) must be lowercase';
+    const once = errorMessageForLog(new Error(body), { imageRef: image });
+
+    expect(errorMessageForLog(new Error(once), { imageRef: image })).toBe(once);
   });
 
   it('keeps a digest-pinned image reference the error quotes intact', () => {

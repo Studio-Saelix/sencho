@@ -167,18 +167,22 @@ function redactImageInText(text: string, imageRef: string): string {
   const reference = splitImageReference(imageRef);
   if (reference === null) return text;
   let out = text.split(imageRef).join(`[redacted]@${reference.rest}`);
-  // Docker's domain split takes everything before the reference's first `/` as
-  // the domain and reports the rest of the name, so the userinfo reaches the
-  // message as its tail after that slash. Removing the tail takes every
-  // `/`-separated segment with it, in one pass rather than one split per
-  // segment, which a long slash-heavy reference would turn quadratic.
+  // Docker splits the reference into a domain and a remainder; when the
+  // component before the first `/` looks like a domain (it has a `.` or `:`,
+  // as a userinfo password does), the remainder starts right after that slash.
+  // The invalid-reference error quotes that remainder, so the userinfo reaches
+  // the message as its tail, still followed by the host's `@`. Anchoring each
+  // fragment to that `@` keeps a short password piece from rewriting unrelated
+  // words, and removing the tail takes every `/`-separated segment with it in
+  // one pass rather than one split per segment, which a long slash-heavy
+  // reference would turn quadratic.
   const slash = reference.userinfo.indexOf('/');
   const tail = slash === -1 ? '' : reference.userinfo.slice(slash + 1);
   for (const fragment of [reference.userinfo, tail]) {
     // Punctuation-only pieces carry no credential value, and replacing them
     // would mangle the rest of the message.
     if (!/[A-Za-z0-9]/.test(fragment)) continue;
-    out = out.split(fragment).join('[redacted]');
+    out = out.split(`${fragment}@`).join('[redacted]@');
   }
   return out;
 }

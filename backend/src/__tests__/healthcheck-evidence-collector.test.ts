@@ -296,6 +296,11 @@ describe('collectServiceHealthcheckEvidence', () => {
     expect(logged).not.toContain('eF9xyz');
     expect(logged).toContain('must be lowercase');
     expect(logged).toContain('[redacted]@registry.example.com/app:latest');
+    const imageWarn = warn.mock.calls.find(args => String(args[0]).includes('image inspect failed'));
+    expect(imageWarn).toBeDefined();
+    expect(imageWarn?.[1]).toBe('[redacted]@registry.example.com/app:latest');
+    expect(String(imageWarn?.[2])).not.toContain('eF9xyz');
+    expect(String(imageWarn?.[2])).toContain('must be lowercase');
   });
 
   it('never logs registry credentials from the compose project label', async () => {
