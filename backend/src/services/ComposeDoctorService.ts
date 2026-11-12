@@ -33,7 +33,7 @@ import {
 
 import { isPathWithinBase } from '../utils/validation';
 import { getErrorMessage } from '../utils/errors';
-import { redactSensitiveText, sanitizeForLog } from '../utils/safeLog';
+import { errorMessageForLog, redactSensitiveText, sanitizeForLog } from '../utils/safeLog';
 import { parseUnsetEnvVars, parseMissingRequiredVars, readEnvFileKeys } from '../helpers/envVarParse';
 import { resolveStackEnvSources, type StackEnvSources } from '../helpers/envFileResolution';
 import { isSelfStack } from '../helpers/selfStackGuard';
@@ -220,7 +220,7 @@ export class ComposeDoctorService {
       // An unreadable source is logged here (not silently swallowed) so a later
       // skipped hash or source comparison is traceable.
       console.warn('[ComposeDoctor] Source unreadable for %s; source-derived checks skipped:',
-        sanitizeForLog(stackName), sanitizeForLog(getErrorMessage(err, 'unknown')));
+        sanitizeForLog(stackName), errorMessageForLog(err));
     }
     // renderedHash is the parsed-SOURCE-model hash (the same `rendered_hash`
     // meaning the drift ledger uses), deliberately not a hash of docker's
@@ -353,7 +353,7 @@ export class ComposeDoctorService {
       return await buildAuthoredProject(nodeId, stackName);
     } catch (error) {
       console.warn('[ComposeDoctor] Authored source model unavailable for %s:',
-        sanitizeForLog(stackName), sanitizeForLog(getErrorMessage(error, 'unknown')));
+        sanitizeForLog(stackName), errorMessageForLog(error));
       return null;
     }
   }
@@ -411,7 +411,7 @@ export class ComposeDoctorService {
       }
     } catch (err) {
       console.warn('[ComposeDoctor] env-file resolution failed for %s:',
-        sanitizeForLog(stackName), sanitizeForLog(getErrorMessage(err, 'unknown')));
+        sanitizeForLog(stackName), errorMessageForLog(err));
     }
     const envContextAvailable = envContext !== null;
 
@@ -438,7 +438,7 @@ export class ComposeDoctorService {
         } catch (parseErr) {
           // JSON.parse errors carry no file content, so the message is safe to log.
           console.warn('[ComposeDoctor] Effective model parse failed for %s:',
-            sanitizeForLog(stackName), sanitizeForLog(getErrorMessage(parseErr, 'unknown')));
+            sanitizeForLog(stackName), errorMessageForLog(parseErr));
           renderError = 'Sencho could not parse the rendered Compose model.';
         }
       } else {
@@ -543,7 +543,7 @@ export class ComposeDoctorService {
       return findComposeVersionSkew(listed.stack.map(container => composeVersionContainerFromLabels(container.Labels)), running);
     } catch (error) {
       console.warn('[ComposeDoctor] Compose version check unavailable for %s:',
-        sanitizeForLog(stackName), sanitizeForLog(getErrorMessage(error, 'unknown')));
+        sanitizeForLog(stackName), errorMessageForLog(error));
       return null;
     }
   }
@@ -598,7 +598,7 @@ export class ComposeDoctorService {
       };
     } catch (error) {
       console.warn('[ComposeDoctor] Node snapshot unavailable for %s; node-state checks skipped:',
-        sanitizeForLog(stackName), sanitizeForLog(getErrorMessage(error, 'unknown')));
+        sanitizeForLog(stackName), errorMessageForLog(error));
       return { nodePorts: [], existingNetworkNames: new Set(), existingVolumeNames: new Set(), existingContainers: [], nodeStateAvailable: false };
     }
   }
@@ -674,7 +674,7 @@ export class ComposeDoctorService {
       );
     } catch (error) {
       console.error('[ComposeDoctor] Failed to persist preflight run for %s:',
-        sanitizeForLog(report.stack), sanitizeForLog(getErrorMessage(error, 'unknown')));
+        sanitizeForLog(report.stack), errorMessageForLog(error));
     }
   }
 }

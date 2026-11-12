@@ -8,8 +8,7 @@ import { isDockerHealthcheckActive } from '../../helpers/healthcheckPresence';
 import type { EffectiveModel } from '../preflight/effectiveModel';
 import type { ServiceHealthcheckEvidence } from '../preflight/types';
 import { mapWithConcurrency } from '../../utils/mapWithConcurrency';
-import { getErrorMessage } from '../../utils/errors';
-import { sanitizeForLog } from '../../utils/safeLog';
+import { errorMessageForLog, redactImageReference, redactSensitiveText, sanitizeForLog } from '../../utils/safeLog';
 
 const INSPECT_CONCURRENCY = 8;
 
@@ -68,8 +67,8 @@ export async function collectServiceHealthcheckEvidence(
       listFailed = true;
       console.warn(
         '[ComposeDoctor] Healthcheck container list failed for %s:',
-        sanitizeForLog(projectLabel),
-        sanitizeForLog(getErrorMessage(err, 'unknown')),
+        sanitizeForLog(redactSensitiveText(projectLabel)),
+        errorMessageForLog(err),
       );
     }
   }
@@ -185,7 +184,7 @@ async function probeReplica(
     }
     console.warn(
       '[ComposeDoctor] Healthcheck container inspect failed:',
-      sanitizeForLog(getErrorMessage(err, 'unknown')),
+      errorMessageForLog(err),
     );
     return { hasHealthcheck: false, imageMatches: false, inspectFailed: true };
   }
@@ -202,8 +201,8 @@ async function inspectLocalImage(
   } catch (err) {
     console.warn(
       '[ComposeDoctor] Healthcheck image inspect failed for %s:',
-      sanitizeForLog(imageRef),
-      sanitizeForLog(getErrorMessage(err, 'unknown')),
+      sanitizeForLog(redactImageReference(imageRef)),
+      errorMessageForLog(err, { imageRef }),
     );
     return 'unverifiable';
   }

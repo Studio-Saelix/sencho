@@ -29,11 +29,15 @@ function model(services: EffService[]): EffectiveModel {
 
 function mockDocker(opts: {
   list?: unknown[];
+  listError?: Error;
   inspectById?: Record<string, { Config?: { Image?: string; Healthcheck?: { Test?: unknown } } }>;
+  inspectError?: Error;
   image?: { Config?: { Healthcheck?: { Test?: unknown } } } | 'missing' | 'error';
+  imageError?: Error;
 }) {
   const getContainer = vi.fn((id: string) => ({
     inspect: vi.fn(async () => {
+      if (opts.inspectError) throw opts.inspectError;
       const hit = opts.inspectById?.[id];
       if (!hit) {
         const err = Object.assign(new Error('not found'), { statusCode: 404 });
@@ -42,9 +46,13 @@ function mockDocker(opts: {
       return hit;
     }),
   }));
-  const listContainers = vi.fn(async () => opts.list ?? []);
+  const listContainers = vi.fn(async () => {
+    if (opts.listError) throw opts.listError;
+    return opts.list ?? [];
+  });
   const getDocker = vi.fn(() => ({ listContainers, getContainer }));
   const inspectImage = vi.fn(async () => {
+    if (opts.imageError) throw opts.imageError;
     if (opts.image === 'missing' || opts.image === 'error') {
       throw Object.assign(new Error('No such image'), { statusCode: 404 });
     }
@@ -267,6 +275,49 @@ describe('collectServiceHealthcheckEvidence', () => {
       1, 'proj', model([svc({ composeHealthcheck: 'absent', image: 'nginx:1.27' })]), true,
     );
     expect(evidence.web.state).toBe('local-image-inherited');
+  });
+
+  it('never logs registry credentials from an image that cannot be inspected', async () => {
+    const image = 'user:Ab/cD+eF9xyz=@registry.example.com/app:latest';
+    mockDocker({ list: [], image: 'error', imageError: new Error(`No such image: ${image}`) });
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const evidence = await collectServiceHealthcheckEvidence(
+      1, 'proj', model([svc({ composeHealthcheck: 'absent', image })]), true,
+    );
+    expect(evidence.web.state).toBe('unverifiable');
+    const logged = warn.mock.calls.map(args => args.join(' ')).join('\n');
+    expect(logged).not.toContain('Ab/cD+eF9xyz=');
+    expect(logged).toContain('[redacted]@registry.example.com/app:latest');
+  });
+
+  it('never logs registry credentials from the compose project label', async () => {
+    mockDocker({ listError: new Error('daemon down'), image: { Config: {} } });
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const m: EffectiveModel = {
+      projectName: 'user:p4ssw0rdXYZ@registry.example.com/app',
+      services: [svc({ composeHealthcheck: 'absent', image: 'nginx:1.27' })],
+      networks: {},
+      volumes: {},
+    };
+    await collectServiceHealthcheckEvidence(1, 'proj', m, true);
+    const logged = warn.mock.calls.map(args => args.join(' ')).join('\n');
+    expect(logged).not.toContain('p4ssw0rdXYZ');
+  });
+
+  it('never logs credentials carried by a replica inspect error', async () => {
+    mockDocker({
+      list: [{ Id: 'c1', Labels: { 'com.docker.compose.service': 'web' }, Image: 'nginx:1.27' }],
+      inspectError: new Error('inspect failed for token:tok3nvalue@registry.example.com/app:1.0'),
+      image: { Config: {} },
+    });
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const evidence = await collectServiceHealthcheckEvidence(
+      1, 'proj', model([svc({ composeHealthcheck: 'absent', image: 'nginx:1.27' })]), true,
+    );
+    expect(evidence.web.state).toBe('absent');
+    const logged = warn.mock.calls.map(args => args.join(' ')).join('\n');
+    expect(logged).not.toContain('tok3nvalue');
+    expect(logged).toContain('[ComposeDoctor] Healthcheck container inspect failed');
   });
 });
 

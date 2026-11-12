@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { redactImageReference, redactSensitiveText } from '../utils/safeLog';
+import { errorMessageForLog, redactImageReference, redactSensitiveText } from '../utils/safeLog';
 
 describe('redactSensitiveText', () => {
   it('redacts credentials from durable log text', () => {
@@ -361,5 +361,22 @@ describe('redactSensitiveText', () => {
 
     expect(text).not.toContain('abcd1234efgh');
     expect(text).toContain('[redacted]');
+  });
+});
+
+describe('errorMessageForLog', () => {
+  it('redacts a credential-bearing image reference the error quotes', () => {
+    const image = 'user:Ab/cD+eF9xyz=@registry.example.com/app:latest';
+    const text = errorMessageForLog(new Error(`No such image: ${image}`), { imageRef: image });
+
+    expect(text).not.toContain('Ab/cD+eF9xyz=');
+    expect(text).toContain('[redacted]@registry.example.com/app:latest');
+  });
+
+  it('keeps a digest-pinned image reference the error quotes intact', () => {
+    const image = 'ghcr.io/team/app:1.0@sha256:1a2b3c4d5e6f708192a3b4c5d6e7f8091a2b3c4d5e6f708192a3b4c5d6e7f809';
+    const text = errorMessageForLog(new Error(`No such image: ${image}`), { imageRef: image });
+
+    expect(text).toBe(`No such image: ${image}`);
   });
 });

@@ -133,9 +133,23 @@ const MAX_CAUSE_DEPTH = 3;
  * failed`, and the reason an operator can act on (`ECONNREFUSED`,
  * `getaddrinfo ENOTFOUND`) is on its `cause`, which `getErrorMessage` does not
  * reach on its own.
+ *
+ * Pass the image a failure is about in `options.imageRef` when the caught error
+ * may quote it. Docker echoes the reference in its errors, and a password can
+ * hold a `/`, a space, or a quote that the text-shape rules deliberately do not
+ * treat as one, so the reference's own grammar has to run first.
  */
-export function errorMessageForLog(error: unknown): string {
-  return sanitizeForLog(redactSensitiveText(messageWithCause(error)));
+export function errorMessageForLog(error: unknown, options?: { imageRef?: string }): string {
+  const message = messageWithCause(error);
+  const text = options?.imageRef ? redactImageInText(message, options.imageRef) : message;
+  return sanitizeForLog(redactSensitiveText(text));
+}
+
+/** Replace a known image reference inside free text with its redacted form. */
+function redactImageInText(text: string, imageRef: string): string {
+  const redacted = redactImageReference(imageRef);
+  if (redacted === imageRef) return text;
+  return text.split(imageRef).join(redacted);
 }
 
 function messageWithCause(error: unknown): string {
