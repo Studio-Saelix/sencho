@@ -59,8 +59,8 @@ jobs:
   backend:
     name: Backend unit tests (Build, Test, Lint)
     runs-on: ubuntu-latest
-    # Install, build, tests, and lint come to about 10 minutes on pull request
-    # branches, which leaves too little room for the network-bound audit.
+    # Install, build, tests, and lint took 8 to 10 minutes on recent runs, which
+    # leaves too little room for the dependency audit step.
     timeout-minutes: 15
     needs: changes
     # Runs unless detection positively found no code: a failed detection job

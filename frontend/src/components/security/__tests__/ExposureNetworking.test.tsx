@@ -123,7 +123,7 @@ describe('exposure intent in place', () => {
   });
 });
 
-describe('accessible name of a badge that opens the picker or the list', () => {
+describe('accessible name of a badge that opens the picker or the list (the navigation-only names keep their wording)', () => {
   const tunnelUnset = contexts[0]!;
   const tunnelSet: ImageExposureContextRef = { ...contexts[0]!, intentStatus: 'set', exposureIntent: 'lan', intentConflict: true };
   const portSet: ImageExposureContextRef = { ...contexts[2]!, intentConflict: false };

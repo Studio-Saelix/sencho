@@ -364,19 +364,23 @@ describe('execute (the process that spawns the helper)', () => {
     });
   });
 
-  it('marks recovery required when the helper never reports within the bound', async () => {
+  it('keeps the claim past the bound while the helper lives, then marks recovery required once it is gone', async () => {
     const selfUpdate = mockAvailableProvider();
     vi.spyOn(selfUpdate, 'triggerComposeReapply').mockResolvedValue(undefined);
     const service = fastTimings();
     // The helper stays in Docker's list past the 200 ms watch bound, then
     // disappears without ever publishing a verdict. Without this fixture the
     // test reads whatever Docker the machine has, and with none the watcher
-    // never gets termination evidence and waits forever.
+    // never gets termination evidence and never releases the claim.
     const dockerOptions: MockDockerOptions = { helperRunning: true };
     const docker = mockDocker(dockerOptions);
     await service.claimComposeReapply({ replace: true });
     await service.executeClaimedComposeReapply();
     await new Promise(resolve => setTimeout(resolve, 400));
+    // Wait for a helper check made after the bound, so the assertions below
+    // cannot pass on a watcher that has not reached its deadline yet.
+    const checksAtBound = docker.listContainers.mock.calls.length;
+    await vi.waitFor(() => expect(docker.listContainers.mock.calls.length).toBeGreaterThan(checksAtBound));
     // Past the bound with the helper alive: a deadline is not termination
     // evidence, so the claim stays and a second operation is refused.
     expect(await service.getCurrentOperation()).toMatchObject({ state: 'recreating' });
