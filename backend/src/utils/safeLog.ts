@@ -108,11 +108,25 @@ const IMAGE_DIGEST_TAIL = /@[A-Za-z][A-Za-z0-9]*(?:[+._-][A-Za-z][A-Za-z0-9]*)*:
  * image still goes through `redactSensitiveText`.
  */
 export function redactImageReference(image: string): string {
+  const reference = splitImageReference(image);
+  if (reference === null) return image;
+  return `[redacted]@${reference.rest}`;
+}
+
+/**
+ * Split an image reference into its credential and the rest, or return null
+ * when it has no credential. The digest tail is removed before the last `@` is
+ * read, so a digest pin is never mistaken for userinfo.
+ */
+function splitImageReference(image: string): { userinfo: string; rest: string } | null {
   const digest = IMAGE_DIGEST_TAIL.exec(image);
   const head = digest === null ? image : image.slice(0, digest.index);
   const at = head.lastIndexOf('@');
-  if (at === -1) return image;
-  return `[redacted]@${head.slice(at + 1)}${digest === null ? '' : digest[0]}`;
+  if (at === -1) return null;
+  return {
+    userinfo: head.slice(0, at),
+    rest: `${head.slice(at + 1)}${digest === null ? '' : digest[0]}`,
+  };
 }
 
 /** How many `cause` links to fold into a log message before giving up on it. */
@@ -137,9 +151,10 @@ const MAX_CAUSE_DEPTH = 3;
  * Pass the image a failure is about in `options.imageRef` when the caught error
  * may quote it. Docker echoes the reference in its errors, and a password can
  * hold a `/`, a space, or a quote that the text-shape rules deliberately do not
- * treat as one, so the reference's own grammar has to run first. The replacement
- * is literal: an echo whose text differs from `imageRef` (a normalized
- * reference, for example) falls back to the text pass.
+ * treat as one, so the reference's own grammar has to run first. Docker may
+ * also quote only the parsed repository name, which starts after the
+ * credential's first `/`; removing the userinfo and that tail covers the
+ * rewrite. A digest pin carries no userinfo, so it is left intact.
  */
 export function errorMessageForLog(error: unknown, options?: { imageRef?: string }): string {
   const message = messageWithCause(error);
@@ -147,11 +162,25 @@ export function errorMessageForLog(error: unknown, options?: { imageRef?: string
   return sanitizeForLog(redactSensitiveText(text));
 }
 
-/** Replace a known image reference inside free text with its redacted form. */
+/** Replace a known image reference and any credential fragment Docker echoes after rewriting it. */
 function redactImageInText(text: string, imageRef: string): string {
-  const redacted = redactImageReference(imageRef);
-  if (redacted === imageRef) return text;
-  return text.split(imageRef).join(redacted);
+  const reference = splitImageReference(imageRef);
+  if (reference === null) return text;
+  let out = text.split(imageRef).join(`[redacted]@${reference.rest}`);
+  // Docker's domain split takes everything before the reference's first `/` as
+  // the domain and reports the rest of the name, so the userinfo reaches the
+  // message as its tail after that slash. Removing the tail takes every
+  // `/`-separated segment with it, in one pass rather than one split per
+  // segment, which a long slash-heavy reference would turn quadratic.
+  const slash = reference.userinfo.indexOf('/');
+  const tail = slash === -1 ? '' : reference.userinfo.slice(slash + 1);
+  for (const fragment of [reference.userinfo, tail]) {
+    // Punctuation-only pieces carry no credential value, and replacing them
+    // would mangle the rest of the message.
+    if (!/[A-Za-z0-9]/.test(fragment)) continue;
+    out = out.split(fragment).join('[redacted]');
+  }
+  return out;
 }
 
 function messageWithCause(error: unknown): string {

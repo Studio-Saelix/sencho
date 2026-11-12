@@ -279,7 +279,12 @@ describe('collectServiceHealthcheckEvidence', () => {
 
   it('never logs registry credentials from an image that cannot be inspected', async () => {
     const image = 'user:Ab/cD+eF9xyz=@registry.example.com/app:latest';
-    mockDocker({ list: [], image: 'error', imageError: new Error(`No such image: ${image}`) });
+    // The body Docker 29.9.3 returns for this reference: it quotes only the
+    // repository name after the credential's first `/`, not the full reference.
+    const dockerError = new Error(
+      '(HTTP code 400) unexpected - invalid reference format: repository name (cD+eF9xyz=@registry.example.com/app) must be lowercase ',
+    );
+    mockDocker({ list: [], image: 'error', imageError: dockerError });
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
     const evidence = await collectServiceHealthcheckEvidence(
       1, 'proj', model([svc({ composeHealthcheck: 'absent', image })]), true,
@@ -287,7 +292,9 @@ describe('collectServiceHealthcheckEvidence', () => {
     expect(evidence.web.state).toBe('unverifiable');
     const logged = warn.mock.calls.map(args => args.join(' ')).join('\n');
     expect(logged).not.toContain('Ab/cD+eF9xyz=');
+    expect(logged).not.toContain('cD+eF9xyz=');
     expect(logged).not.toContain('eF9xyz');
+    expect(logged).toContain('must be lowercase');
     expect(logged).toContain('[redacted]@registry.example.com/app:latest');
   });
 

@@ -373,6 +373,53 @@ describe('errorMessageForLog', () => {
     expect(text).toContain('[redacted]@registry.example.com/app:latest');
   });
 
+  it('redacts the whole userinfo when the error echoes it without the host', () => {
+    const image = 'user:Ab/cD+eF9xyz=@registry.example.com/app:latest';
+    const text = errorMessageForLog(new Error('invalid userinfo user:Ab/cD+eF9xyz= for image'), { imageRef: image });
+
+    expect(text).not.toContain('Ab/cD+eF9xyz=');
+    expect(text).toContain('invalid userinfo [redacted] for image');
+  });
+
+  // Docker parses the reference before it reports it, so the HTTP 400 body for
+  // this credential quotes only the repository name that starts after the first
+  // `/`. The exact reference is absent and the text rule treats the `=` before
+  // the `@` as a token boundary, which is why the helper has to remove the
+  // userinfo tail on its own.
+  it('redacts the rewritten userinfo fragment Docker quotes for an invalid reference', () => {
+    const image = 'user:Ab/cD+eF9xyz=@registry.example.com/app:latest';
+    const body =
+      '(HTTP code 400) unexpected - invalid reference format: repository name (cD+eF9xyz=@registry.example.com/app) must be lowercase ';
+    const text = errorMessageForLog(new Error(body), { imageRef: image });
+
+    expect(text).not.toContain('eF9xyz');
+    expect(text).not.toContain('cD+eF9xyz=');
+    expect(text).toContain('must be lowercase');
+    expect(text).toContain('[redacted]@registry.example.com/app');
+  });
+
+  it('redacts every slash-separated credential piece in a rewritten userinfo tail', () => {
+    const image = 'user:Ab/cD/ef+GH=@registry.example.com/app:latest';
+    const body =
+      'invalid reference format: repository name (cD/ef+GH=@registry.example.com/app) must be lowercase';
+    const text = errorMessageForLog(new Error(body), { imageRef: image });
+
+    expect(text).not.toContain('ef+GH=');
+    expect(text).not.toContain('cD');
+    expect(text).toContain('must be lowercase');
+  });
+
+  it('removes a long rewritten userinfo tail in bounded time', () => {
+    const image = `user:Ab${'/cD'.repeat(20_000)}=@registry.example.com/app:latest`;
+    const body = `invalid reference format: repository name (${image.slice(image.indexOf('/') + 1)}@registry.example.com/app) must be lowercase`;
+    const started = Date.now();
+    const text = errorMessageForLog(new Error(body), { imageRef: image });
+
+    expect(Date.now() - started).toBeLessThan(1000);
+    expect(text).not.toContain('cD/cD');
+    expect(text).toContain('[redacted]@registry.example.com/app');
+  });
+
   it('keeps a digest-pinned image reference the error quotes intact', () => {
     const image = 'ghcr.io/team/app:1.0@sha256:1a2b3c4d5e6f708192a3b4c5d6e7f8091a2b3c4d5e6f708192a3b4c5d6e7f809';
     const text = errorMessageForLog(new Error(`No such image: ${image}`), { imageRef: image });
