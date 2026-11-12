@@ -123,6 +123,35 @@ describe('exposure intent in place', () => {
   });
 });
 
+describe('accessible name of a badge that opens the picker or the list', () => {
+  const tunnelUnset = contexts[0]!;
+  const tunnelSet: ImageExposureContextRef = { ...contexts[0]!, intentStatus: 'set', exposureIntent: 'lan', intentConflict: true };
+  const portSet: ImageExposureContextRef = { ...contexts[2]!, intentConflict: false };
+  const portUnset: ImageExposureContextRef = { imageRef: 'exp:1', stackName: 'web', serviceName: 'app', exposureReason: 'published-port', intentStatus: 'unset' };
+
+  // The name must contain the visible text so that a voice-control user can say what they read.
+  it.each([
+    ['a published port with no intent', [portUnset]],
+    ['a published port with an intent', [portSet]],
+    ['a tunnel with no intent', [tunnelUnset]],
+    ['a tunnel with a conflicting intent', [tunnelSet]],
+    ['several contexts', [portUnset, tunnelSet]],
+  ])('contains the visible text for %s', (_name, ctxs) => {
+    auth.can.mockReturnValue(true);
+    render(<NetworkExposedControl contexts={ctxs} imageRef="exp:1" nodeId={3} onIntentSaved={vi.fn()} />);
+    const button = screen.getByRole('button');
+    expect(button.getAttribute('aria-label')).toContain(button.textContent);
+  });
+
+  it('keeps the tunnel marker and the path in the name of a tunnel badge', () => {
+    auth.can.mockReturnValue(true);
+    render(<NetworkExposedControl contexts={[tunnelUnset]} imageRef="exp:1" nodeId={3} onIntentSaved={vi.fn()} />);
+    expect(screen.getByRole('button', {
+      name: 'Network exposed · tunnel: set intent for web/app, via Cloudflare Tunnel (cloudflared), routing unverified',
+    })).toHaveTextContent('Network exposed · tunnel');
+  });
+});
+
 describe('multi-context trigger names', () => {
   const a: ImageExposureContextRef = { imageRef: 'exp:1', stackName: 'web', serviceName: 'app', exposureReason: 'published-port', intentStatus: 'unset' };
   const b: ImageExposureContextRef = { imageRef: 'exp:1', stackName: 'jobs', serviceName: 'worker', exposureReason: 'published-port', intentStatus: 'unset' };

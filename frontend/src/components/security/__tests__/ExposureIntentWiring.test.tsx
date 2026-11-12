@@ -106,7 +106,7 @@ describe('onIntentSaved wiring', () => {
     };
     renderTargeted(tunnel, 'Network exposed images', onIntentSaved);
 
-    await userEvent.click(await screen.findByRole('button', { name: /Network exposed: set intent for web\/api/ }));
+    await userEvent.click(await screen.findByRole('button', { name: /Network exposed · tunnel: set intent for web\/api/ }));
     await pickLan();
 
     await waitFor(() => expect(onIntentSaved).toHaveBeenCalledWith(

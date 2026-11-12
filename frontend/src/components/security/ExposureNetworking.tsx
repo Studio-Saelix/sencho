@@ -165,9 +165,10 @@ export function NetworkExposedControl({
   const refs = contexts.map((ctx) => ({ ...ctx, imageRef }));
   // With one context there is no list to open, so a tunnel says so on the badge itself.
   const singleTunnel = refs.length === 1 ? refs[0]!.tunnel : undefined;
+  const badgeText = singleTunnel ? 'Network exposed · tunnel' : 'Network exposed';
   const badge = (
     <span className={cn('font-mono text-[10px] uppercase tracking-[0.14em] text-warning whitespace-nowrap', className)}>
-      {singleTunnel ? 'Network exposed · tunnel' : 'Network exposed'}
+      {badgeText}
     </span>
   );
 
@@ -180,7 +181,8 @@ export function NetworkExposedControl({
     const verb = intentVerb(only);
     const tunnelLabel = only.tunnel ? tunnelPathLabel(only.tunnel) : undefined;
     const via = tunnelLabel ? `, ${tunnelLabel}` : '';
-    const action = verb === null ? networkingActionLabel(only) : `Network exposed: ${verb.toLowerCase()}`;
+    // A name that opens the picker starts with the badge's visible text, tunnel marker included, so a voice-control user can say what they read.
+    const action = verb === null ? networkingActionLabel(only) : `${badgeText}: ${verb.toLowerCase()}`;
     const badgeButton = (
       <button
         type="button"

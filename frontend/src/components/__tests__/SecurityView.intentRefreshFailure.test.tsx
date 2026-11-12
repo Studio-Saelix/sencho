@@ -342,7 +342,7 @@ describe('SecurityView after a save whose summary reread fails', () => {
 
     expect(await screen.findByText('Intent: not classified')).toBeInTheDocument();
 
-    await userEvent.click(screen.getByRole('button', { name: /Network exposed: set intent for web\/api/ }));
+    await userEvent.click(screen.getByRole('button', { name: /Network exposed · tunnel: set intent for web\/api/ }));
     await userEvent.click(await screen.findByRole('button', { name: 'internal' }));
 
     await waitFor(() => expect(toasts.error).toHaveBeenCalledWith('Could not refresh security data'));
@@ -366,7 +366,7 @@ describe('SecurityView after a save whose summary reread fails', () => {
     rerender(<SecurityView activeTab="images" onTabChange={vi.fn()} />);
 
     expect(await screen.findByText('Intent: not classified')).toBeInTheDocument();
-    await userEvent.click(screen.getByRole('button', { name: /Network exposed: set intent for web\/api/ }));
+    await userEvent.click(screen.getByRole('button', { name: /Network exposed · tunnel: set intent for web\/api/ }));
     await userEvent.click(await screen.findByRole('button', { name: 'internal' }));
 
     await waitFor(() => expect(toasts.error).toHaveBeenCalledWith('Could not refresh security data'));
@@ -446,12 +446,12 @@ describe('SecurityView after a save whose summary reread fails', () => {
 
     expect(await screen.findByText('Intent: not classified')).toBeInTheDocument();
 
-    await userEvent.click(screen.getByRole('button', { name: /Network exposed: set intent for web\/api/ }));
+    await userEvent.click(screen.getByRole('button', { name: /Network exposed · tunnel: set intent for web\/api/ }));
     await userEvent.click(await screen.findByRole('button', { name: 'internal' }));
 
     await waitFor(() => expect(toasts.error).toHaveBeenCalledWith('Could not refresh security data'));
     expect(screen.getByText('Intent mismatch: internal')).toBeInTheDocument();
-    expect(screen.getByRole('button', { name: /Network exposed: change intent for web\/api/ })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /Network exposed · tunnel: change intent for web\/api/ })).toBeInTheDocument();
   });
 
   it('keeps the conflict a hidden save proved when the reread fails', async () => {
