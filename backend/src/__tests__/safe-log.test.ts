@@ -373,17 +373,6 @@ describe('errorMessageForLog', () => {
     expect(text).toContain('[redacted]@registry.example.com/app:latest');
   });
 
-  it('redacts the userinfo when the error quotes it before the host', () => {
-    const image = 'user:Ab/cD+eF9xyz=@registry.example.com/app:latest';
-    const text = errorMessageForLog(
-      new Error('invalid userinfo user:Ab/cD+eF9xyz=@registry.example.com/app for image'),
-      { imageRef: image },
-    );
-
-    expect(text).not.toContain('Ab/cD+eF9xyz=');
-    expect(text).toContain('invalid userinfo [redacted]@registry.example.com/app for image');
-  });
-
   it.each([
     ['a space', 'user:Ab cD+eF9xyz=@registry.example.com/app:latest', 'Ab cD+eF9xyz='],
     ['a quote', 'user:p"ss/cD+eF9xyz=@registry.example.com/app:latest', 'p"ss'],
@@ -403,11 +392,26 @@ describe('errorMessageForLog', () => {
     expect(text).toContain('[redacted]@ghcr.io/x/app:latest');
   });
 
-  // Docker parses the reference before it reports it, so the HTTP 400 body for
-  // this credential quotes only the repository name that starts after the first
-  // `/`. The exact reference is absent and the text rule treats the `=` before
-  // the `@` as a token boundary, which is why the helper has to remove the
-  // userinfo tail on its own.
+  it('redacts the whole credential-shaped userinfo when the error quotes it without the host', () => {
+    const image = 'user:Ab/cD+eF9xyz=@registry.example.com/app:latest';
+    const text = errorMessageForLog(new Error('invalid userinfo user:Ab/cD+eF9xyz= for image'), { imageRef: image });
+
+    expect(text).not.toContain('Ab/cD+eF9xyz=');
+    expect(text).toContain('invalid userinfo [redacted] for image');
+  });
+
+  it('redacts a long token-only userinfo when the error quotes it without the host', () => {
+    const image = 'ghp_SECRETD8@ghcr.io/x/app:latest';
+    const text = errorMessageForLog(new Error('invalid userinfo ghp_SECRETD8 for image'), { imageRef: image });
+
+    expect(text).not.toContain('SECRETD8');
+    expect(text).toContain('invalid userinfo [redacted] for image');
+  });
+
+  // The HTTP 400 body Docker 29.9.3 returns for this credential quotes only the
+  // repository name that starts after the first `/`. The exact reference is
+  // absent and the text rule treats the `=` before the `@` as a token boundary,
+  // which is why the helper has to remove the userinfo tail on its own.
   it('redacts the rewritten userinfo fragment Docker quotes for an invalid reference', () => {
     const image = 'user:Ab/cD+eF9xyz=@registry.example.com/app:latest';
     const body =
@@ -442,6 +446,18 @@ describe('errorMessageForLog', () => {
     expect(text).toContain('lowercase');
     expect(text).not.toContain('c@registry');
     expect(text).toContain('[redacted]@registry.example.com/app');
+  });
+
+  it('does not rewrite a short token-only userinfo elsewhere in the message', () => {
+    const image = 'bot@ghcr.io/x/app:latest';
+    const body =
+      'unauthorized: bot access denied; retry bot later; No such image: bot@ghcr.io/x/app:latest';
+    const text = errorMessageForLog(new Error(body), { imageRef: image });
+
+    expect(text).toContain('bot access denied');
+    expect(text).toContain('retry bot later');
+    expect(text).not.toContain('bot@ghcr.io');
+    expect(text).toContain('[redacted]@ghcr.io/x/app:latest');
   });
 
   it('removes a long rewritten userinfo tail in bounded time', () => {
