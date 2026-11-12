@@ -263,7 +263,9 @@ describe('AutoUpdateReadinessView loading and recheck feedback', () => {
     render(<AutoUpdateReadinessView />);
     await settle();
     expect(toast.error).toHaveBeenCalledWith('Failed to load fleet update status');
-    expect(screen.getByText(EMPTY_STATE)).toBeInTheDocument();
+    // A failed first load has no count, so it says the status is unavailable
+    // instead of reading as an empty (all-clear) list.
+    expect(screen.getByText('Update readiness unavailable')).toBeInTheDocument();
 
     await act(async () => { fireEvent.click(screen.getByRole('button', { name: 'Recheck registries' })); });
     await act(async () => {
@@ -272,7 +274,8 @@ describe('AutoUpdateReadinessView loading and recheck feedback', () => {
     await settle(RELOAD_AFTER_RECHECK_MS + DURATION_BASE_MS * 3);
     expect(fleetCalls()).toBe(2);
     expect(screen.queryByTestId('readiness-skeleton')).toBeNull();
-    expect(screen.getByText(EMPTY_STATE)).toBeInTheDocument();
+    // The retry keeps the unavailable verdict steady until an answer lands.
+    expect(screen.getByText('Update readiness unavailable')).toBeInTheDocument();
   });
 
   it('keeps the skeleton off while rows wait for their previews on the first load', async () => {
