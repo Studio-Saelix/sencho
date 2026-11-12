@@ -436,7 +436,8 @@ export class ComposeDoctorService {
           model = parseEffectiveModel(JSON.parse(result.rendered), stackName);
           renderable = true;
         } catch (parseErr) {
-          // JSON.parse errors carry no file content, so the message is safe to log.
+          // A V8 parse error can quote a short source excerpt of the rendered
+          // model, so the message is redacted before it is logged.
           console.warn('[ComposeDoctor] Effective model parse failed for %s:',
             sanitizeForLog(stackName), errorMessageForLog(parseErr));
           renderError = 'Sencho could not parse the rendered Compose model.';

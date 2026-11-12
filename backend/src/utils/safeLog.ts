@@ -137,7 +137,9 @@ const MAX_CAUSE_DEPTH = 3;
  * Pass the image a failure is about in `options.imageRef` when the caught error
  * may quote it. Docker echoes the reference in its errors, and a password can
  * hold a `/`, a space, or a quote that the text-shape rules deliberately do not
- * treat as one, so the reference's own grammar has to run first.
+ * treat as one, so the reference's own grammar has to run first. The replacement
+ * is literal: an echo whose text differs from `imageRef` (a normalized
+ * reference, for example) falls back to the text pass.
  */
 export function errorMessageForLog(error: unknown, options?: { imageRef?: string }): string {
   const message = messageWithCause(error);
