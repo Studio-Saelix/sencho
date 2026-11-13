@@ -1065,7 +1065,7 @@ export class RecoveryEngineService {
       // would say volume protection is unavailable, so this refusal says to retry.
       throw new RecoveryError('capability_unavailable', {
         reason: 'read_capacity',
-        detail: 'This node is already reading as many saved points as it allows. Try again in a few seconds.',
+        detail: 'This node is already reading as many saved points as it allows. Try again shortly.',
       });
     }
     try {

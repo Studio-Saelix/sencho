@@ -193,7 +193,7 @@ A point that has not finished, that failed, or that was interrupted holds nothin
 ### Read limits
 
 - A directory is listed 500 entries per page, in the order restic records them (sorted by name). `nextOffset` names the next page, and an offset always names the same entry, because a point never changes.
-- A node runs at most 4 reads at once. Another read answers `503 capability_unavailable` with `reason: "read_capacity"`, a `Retry-After` header, and an `error` that says the node is busy and to try again in a few seconds.
+- A node runs at most 4 reads at once. Another read answers `503 capability_unavailable` with `reason: "read_capacity"`, a `Retry-After` header, and an `error` that says the node is busy and to try again shortly.
 - Finding a directory's entries is bounded at 2 minutes on the node. On a remote node the control instance's 30-second wait for a slow read applies first. A download stops after 5 minutes without a byte delivered.
 - Downloads have no ranges and cannot be resumed (`Accept-Ranges: none`).
 - Each read opens the repository and loads its index first, so on a very large repository the first entry or byte can take tens of seconds.

@@ -173,7 +173,7 @@ function sendThrown(req: Request, res: Response, err: unknown): void {
   }
   const extra: Record<string, unknown> = {};
   if (err instanceof RecoveryError && err.reason !== undefined) extra.reason = err.reason;
-  // A read refused for capacity frees up within seconds, and says when to ask again.
+  // A read refused for capacity usually frees a slot soon, so the caller is told when to ask again.
   if (err instanceof RecoveryError && err.reason === 'read_capacity') {
     res.setHeader('Retry-After', String(POINT_READ_RETRY_AFTER_S));
   }

@@ -2409,6 +2409,8 @@ components:
         Volume protection is not available on this node, the repository is not reachable
         or its key is unavailable, the schema is unsupported, or the node could not be
         reached. A node that is still starting answers with `"reason": "engine_starting"`.
+        A node that already runs its bound of point reads answers with `"reason": "read_capacity"`
+        and a `Retry-After` header, and its `error` says the node is busy and to try again shortly.
       content:
         application/json:
           schema:
