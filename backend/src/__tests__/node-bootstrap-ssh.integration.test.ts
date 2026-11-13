@@ -316,7 +316,7 @@ describe('bootstrap SSH transport', () => {
           'P_EXISTS=1',
           'P_ISDIR=1',
           'P_FINAL_LINK=0',
-          `P_REAL=${path}`,
+          `P_REAL=${path}`, 'P_IDENT=2049:1001', 'P_NEAREST_IDENT=2049:2002',
           'P_ANCESTOR_LINK=0',
           'P_OWNER=ubuntu',
           'P_GROUP=ubuntu',

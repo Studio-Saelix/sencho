@@ -205,6 +205,23 @@ function blockOnResolvedPath(
   };
 }
 
+/**
+ * Execution writes only into the directory the preflight identified (device and
+ * inode), or into one it creates inside the identified nearest existing ancestor.
+ * A host that does not report those cannot be bound, so no plan is offered.
+ */
+function unidentifiedDirectory(path: PathObservation, base: { id: 'compose_dir' | 'agent_dir'; category: 'paths'; label: string }): BootstrapCheck | null {
+  const identity = path.exists ? path.identity : path.nearestExistingAncestorIdentity;
+  if (path.probeError || identity) return null;
+  const what = path.exists ? path.input : `${path.nearestExistingAncestor ?? 'the nearest existing parent of'} ${path.input}`.trim();
+  return {
+    ...base,
+    status: 'unknown',
+    summary: `${what} could not be identified on the host (its device and inode), so a plan cannot be tied to it.`,
+    remediation: 'Confirm that stat works for the SSH user on this path, then run the preflight again.',
+  };
+}
+
 function composeDirCheck(
   path: ComposeDirObservation,
   facts: BootstrapFacts,
@@ -240,6 +257,8 @@ function composeDirCheck(
       remediation: `Use the directory the link points to (${path.realPath ?? 'resolve it on the host'}) as the Compose directory.`,
     };
   }
+  const unidentified = unidentifiedDirectory(path, base);
+  if (unidentified) return unidentified;
   const keepAndDescribe = path.exists
     ? path.stackCount === null
       ? 'The existing stack count is unknown.'
@@ -400,6 +419,8 @@ function agentDirCheck(
     };
   }
 
+  const unidentified = unidentifiedDirectory(path, base);
+  if (unidentified) return unidentified;
   if (!path.exists) {
     const sudo = facts.user?.sudoNonInteractive === true || facts.user?.isRoot === true;
     if (!path.parentWritableByUser && !sudo) {

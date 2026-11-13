@@ -34,7 +34,7 @@ const PATH_COMPOSE_OUTPUT = [
   'P_EXISTS=1',
   'P_ISDIR=1',
   'P_FINAL_LINK=0',
-  'P_REAL=/opt/docker/sencho',
+  'P_REAL=/opt/docker/sencho', 'P_IDENT=2049:1001', 'P_NEAREST_IDENT=2049:2002',
   'P_ANCESTOR_LINK=0',
   'P_OWNER=ubuntu',
   'P_GROUP=ubuntu',
@@ -56,7 +56,7 @@ const PATH_AGENT_OUTPUT = [
   'P_EXISTS=0',
   'P_ISDIR=0',
   'P_FINAL_LINK=0',
-  'P_REAL=/opt/sencho-agent',
+  'P_REAL=/opt/sencho-agent', 'P_IDENT=2049:1001', 'P_NEAREST_IDENT=2049:2002',
   'P_ANCESTOR_LINK=0',
   'P_NEAREST=/opt',
   'P_PARENT_W=1',
@@ -671,7 +671,7 @@ describe('bootstrap service orchestration', () => {
       'P_EXISTS=1',
       'P_ISDIR=1',
       'P_FINAL_LINK=0',
-      'P_REAL=/opt/sencho-agent',
+      'P_REAL=/opt/sencho-agent', 'P_IDENT=2049:1001', 'P_NEAREST_IDENT=2049:2002',
       'P_ANCESTOR_LINK=0',
       'P_OWNER=ubuntu',
       'P_GROUP=ubuntu',
@@ -1277,7 +1277,7 @@ describe('bootstrap service failure handling', () => {
 
     it('for an earlier installation found through sudo beside an existing empty chosen directory', async () => {
       const emptyAlternate = [
-        'P_INPUT=/srv/agent', 'P_EXISTS=1', 'P_ISDIR=1', 'P_FINAL_LINK=0', 'P_REAL=/srv/agent', 'P_ANCESTOR_LINK=0',
+        'P_INPUT=/srv/agent', 'P_EXISTS=1', 'P_ISDIR=1', 'P_FINAL_LINK=0', 'P_REAL=/srv/agent', 'P_IDENT=2049:1001', 'P_NEAREST_IDENT=2049:2002', 'P_ANCESTOR_LINK=0',
         'P_OWNER=ubuntu', 'P_GROUP=ubuntu', 'P_MODE=700', 'P_USER_R=1', 'P_USER_W=1', 'P_NEAREST=/srv/agent',
         'P_PARENT_W=1', 'P_FSTYPE=ext4', 'P_FSSOURCE=/dev/sda1', 'P_FSTARGET=/', 'P_DF=/dev/sda1 1 1 104857600 1% /',
       ].join('\n');

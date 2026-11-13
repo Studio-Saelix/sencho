@@ -75,6 +75,15 @@ export interface PathObservation {
   writableBySudo: boolean;
   parentWritableByUser: boolean | null;
   nearestExistingAncestor: string | null;
+  /**
+   * Device and inode (`<device>:<inode>`) of the directory this path resolves
+   * to, as the preflight saw it; null when the path is not an existing
+   * directory. Execution refuses any directory that is not this one, so a
+   * directory swapped in under the same name after the approval is not written.
+   */
+  identity: string | null;
+  /** The same for `nearestExistingAncestor`, the directory a missing path is created in. */
+  nearestExistingAncestorIdentity: string | null;
   filesystem: { type: string; source: string; mountPoint: string } | null;
   freeBytes: number | null;
   mountInFstab: boolean | null;
@@ -286,6 +295,8 @@ export interface BootstrapPlanStep {
 export interface BootstrapPlanPath {
   input: string;
   realPath: string | null;
+  /** Device and inode of the directory as the preflight saw it; null when the plan creates it. */
+  identity: string | null;
   exists: boolean;
   created: boolean;
   stackCount?: number | null;

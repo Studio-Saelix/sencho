@@ -11,6 +11,15 @@ import type {
  * overrides only the fact it is about.
  */
 
+/** The identity the preflight would record: the directory's own when it exists, else its nearest existing ancestor's. */
+function identities(exists: boolean, overrides: { identity?: string | null; nearestExistingAncestorIdentity?: string | null }): { identity: string | null; nearestExistingAncestorIdentity: string | null } {
+  return {
+    identity: exists ? '2049:1001' : null,
+    nearestExistingAncestorIdentity: exists ? null : '2049:2002',
+    ...overrides,
+  };
+}
+
 export function makeComposeDir(overrides: Partial<ComposeDirObservation> = {}): ComposeDirObservation {
   return {
     input: '/opt/docker/sencho',
@@ -39,6 +48,7 @@ export function makeComposeDir(overrides: Partial<ComposeDirObservation> = {}): 
     inventoryError: null,
     rootComposeFile: false,
     ...overrides,
+    ...identities(overrides.exists ?? true, overrides),
   };
 }
 
@@ -74,6 +84,7 @@ export function makeAgentDir(overrides: Partial<AgentDirObservation> = {}): Agen
     markerComposeDir: null,
     markerAgentDir: null,
     ...overrides,
+    ...identities(overrides.exists ?? false, overrides),
   };
 }
 

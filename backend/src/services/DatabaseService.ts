@@ -1784,9 +1784,12 @@ export class DatabaseService {
         ON node_bootstrap_operations(target_key) WHERE active = 1;
       CREATE UNIQUE INDEX IF NOT EXISTS idx_node_bootstrap_ops_active_key
         ON node_bootstrap_operations(host_key_fingerprint) WHERE active = 1;
-      -- A page of held runs reads in the order it is returned, so its cost follows the page, not the number of holds.
+      -- A page of held runs seeks to its cursor in this index and reads on in the order it is returned,
+      -- and the finished history reads the newest rows of the second one, so neither reads rows it does not return.
       CREATE INDEX IF NOT EXISTS idx_node_bootstrap_ops_active_page
         ON node_bootstrap_operations(created_at DESC, id DESC) WHERE active = 1;
+      CREATE INDEX IF NOT EXISTS idx_node_bootstrap_ops_finished_page
+        ON node_bootstrap_operations(created_at DESC, id DESC) WHERE active = 0;
 
       CREATE TABLE IF NOT EXISTS node_bootstrap_events (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -6760,7 +6763,7 @@ stmt.run('gitops_schema_version', '1');
                 insert.run(...columns.map((column) => op[column]));
                 this.db.prepare(
                     `DELETE FROM node_bootstrap_operations WHERE active = 0 AND id NOT IN (
-                        SELECT id FROM node_bootstrap_operations ORDER BY created_at DESC LIMIT ?
+                        SELECT id FROM node_bootstrap_operations WHERE active = 0 ORDER BY created_at DESC, id DESC LIMIT ?
                     )`
                 ).run(DatabaseService.BOOTSTRAP_OPERATION_HISTORY);
                 // The foreign key is declarative only, so pruned operations drop their events here.
@@ -6801,17 +6804,18 @@ stmt.run('gitops_schema_version', '1');
                 'SELECT * FROM node_bootstrap_operations WHERE active = 1 ORDER BY created_at DESC, id DESC LIMIT ?'
             ).all(limit) as NodeBootstrapOperation[];
         }
+        // A row-value comparison, so the index is searched for the cursor instead of read from its newest end up to it.
         return this.db.prepare(
             `SELECT * FROM node_bootstrap_operations
-             WHERE active = 1 AND (created_at < ? OR (created_at = ? AND id < ?))
+             WHERE active = 1 AND (created_at, id) < (?, ?)
              ORDER BY created_at DESC, id DESC LIMIT ?`
-        ).all(after.createdAt, after.createdAt, after.id, limit) as NodeBootstrapOperation[];
+        ).all(after.createdAt, after.id, limit) as NodeBootstrapOperation[];
     }
 
     /** The latest operations that no longer hold their server. */
     public listFinishedNodeBootstrapOperations(limit: number): NodeBootstrapOperation[] {
         return this.db.prepare(
-            'SELECT * FROM node_bootstrap_operations WHERE active = 0 ORDER BY created_at DESC LIMIT ?'
+            'SELECT * FROM node_bootstrap_operations WHERE active = 0 ORDER BY created_at DESC, id DESC LIMIT ?'
         ).all(limit) as NodeBootstrapOperation[];
     }
 

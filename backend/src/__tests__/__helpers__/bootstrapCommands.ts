@@ -26,8 +26,20 @@ function isLink(target: string): boolean {
   }
 }
 
-type WriteOptions = { sudo: boolean; replaces: string | null; directory?: string };
-type DirectoryOptions = { sudo: boolean; allowExisting: boolean; approved?: string };
+/**
+ * The identity the preflight would record for the directory `target` resolves
+ * to now: its device and inode, taken through any link, or those of the nearest
+ * existing ancestor when it does not exist yet.
+ */
+export function approvedIdentity(target: string): string {
+  let existing = path.resolve(target);
+  while (!fs.existsSync(existing) && !isLink(existing)) existing = path.dirname(existing);
+  const stat = fs.statSync(existing, { bigint: true });
+  return `${stat.dev}:${stat.ino}`;
+}
+
+type WriteOptions = { sudo: boolean; replaces: string | null; directory?: string; binding?: string };
+type DirectoryOptions = { sudo: boolean; allowExisting: boolean; approved?: string; binding?: string };
 
 /** `writeFileCommand` for a directory approved as it is on this machine now, unless a test names another. */
 export function writeCommand(
@@ -35,7 +47,8 @@ export function writeCommand(
   file: Parameters<typeof writeFileCommand>[1],
   options: WriteOptions,
 ): string {
-  return writeFileCommand(filePath, file, { ...options, directory: options.directory ?? approvedPath(path.dirname(filePath)) });
+  const directory = options.directory ?? approvedPath(path.dirname(filePath));
+  return writeFileCommand(filePath, file, { ...options, directory, binding: options.binding ?? approvedIdentity(path.dirname(filePath)) });
 }
 
 /** `createDirectoryCommand` for a path approved as it resolves on this machine now, unless a test names another. */
@@ -44,5 +57,5 @@ export function directoryCommand(
   dir: Parameters<typeof createDirectoryCommand>[1],
   options: DirectoryOptions,
 ): string {
-  return createDirectoryCommand(dirPath, dir, { ...options, approved: options.approved ?? approvedPath(dirPath) });
+  return createDirectoryCommand(dirPath, dir, { ...options, approved: options.approved ?? approvedPath(dirPath), binding: options.binding ?? approvedIdentity(dirPath) });
 }

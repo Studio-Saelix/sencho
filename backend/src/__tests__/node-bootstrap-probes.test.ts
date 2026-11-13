@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import { execFileSync } from 'child_process';
-import { chmodSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'fs';
+import { chmodSync, mkdirSync, mkdtempSync, rmSync, statSync, symlinkSync, writeFileSync } from 'fs';
 import os from 'os';
 import path from 'path';
 import {
@@ -32,7 +32,7 @@ const PATH_SCRIPT_OUTPUT = [
   'P_EXISTS=1',
   'P_ISDIR=1',
   'P_FINAL_LINK=0',
-  'P_REAL=/opt/docker/sencho',
+  'P_REAL=/opt/docker/sencho', 'P_IDENT=2049:1001', 'P_NEAREST_IDENT=2049:2002',
   'P_ANCESTOR_LINK=0',
   'P_OWNER=ubuntu',
   'P_GROUP=ubuntu',
@@ -112,8 +112,20 @@ describe('bootstrap probe parsers', () => {
     expect(facts.probeError).toBeNull();
   });
 
+  it('parses the identity of an existing directory, and of the ancestor a missing one is created in', () => {
+    const existing = parsePathFacts(PATH_SCRIPT_OUTPUT, '/opt/docker/sencho');
+    expect(existing.identity).toBe('2049:1001');
+    expect(existing.nearestExistingAncestorIdentity).toBeNull();
+    const missing = parsePathFacts('P_EXISTS=0\nP_ISDIR=0\nP_REAL=/opt/sencho-agent\nP_NEAREST_IDENT=2049:2002\nP_NEAREST=/opt\nP_PARENT_W=1', '/opt/sencho-agent');
+    expect(missing.identity).toBeNull();
+    expect(missing.nearestExistingAncestorIdentity).toBe('2049:2002');
+    // Anything that is not a device and an inode is no identity, and a file has none.
+    expect(parsePathFacts('P_EXISTS=1\nP_ISDIR=1\nP_REAL=/a\nP_IDENT=garbage', '/a').identity).toBeNull();
+    expect(parsePathFacts('P_EXISTS=1\nP_ISDIR=0\nP_REAL=/a\nP_IDENT=1:2', '/a').identity).toBeNull();
+  });
+
   it('distinguishes a missing path from a failed probe', () => {
-    const missing = parsePathFacts('P_EXISTS=0\nP_ISDIR=0\nP_REAL=/opt/sencho-agent\nP_NEAREST=/opt\nP_PARENT_W=1', '/opt/sencho-agent');
+    const missing = parsePathFacts('P_EXISTS=0\nP_ISDIR=0\nP_REAL=/opt/sencho-agent\nP_IDENT=2049:1001\nP_NEAREST_IDENT=2049:2002\nP_NEAREST=/opt\nP_PARENT_W=1', '/opt/sencho-agent');
     expect(missing.exists).toBe(false);
     expect(missing.probeError).toBeNull();
     expect(missing.nearestExistingAncestor).toBe('/opt');
@@ -260,7 +272,7 @@ describe('bootstrap fact assembly', () => {
         result('clock', String(Math.floor(Date.now() / 1000))),
         result('hub_health', '200'),
         result('path_compose', PATH_SCRIPT_OUTPUT),
-        result('path_agent', 'P_EXISTS=0\nP_ISDIR=0\nP_REAL=/opt/sencho-agent\nP_NEAREST=/opt\nP_PARENT_W=1\nP_FSTYPE=ext4\nP_FSTARGET=/'),
+        result('path_agent', 'P_EXISTS=0\nP_ISDIR=0\nP_REAL=/opt/sencho-agent\nP_IDENT=2049:1001\nP_NEAREST_IDENT=2049:2002\nP_NEAREST=/opt\nP_PARENT_W=1\nP_FSTYPE=ext4\nP_FSTARGET=/'),
         result('compose_inventory', '/opt/docker/sencho/media/compose.yaml\0'),
         result('agent_inventory', ''),
         result('agent_marker', '', 1),
@@ -344,7 +356,7 @@ describe('bootstrap inventory completeness', () => {
 
   it('does not turn a failed Compose inventory into an empty stacks root', () => {
     const pathFacts = [
-      'P_EXISTS=1', 'P_ISDIR=1', 'P_REAL=/opt/docker/sencho', 'P_FSTYPE=ext4', 'P_FSTARGET=/',
+      'P_EXISTS=1', 'P_ISDIR=1', 'P_REAL=/opt/docker/sencho', 'P_IDENT=2049:1001', 'P_NEAREST_IDENT=2049:2002', 'P_FSTYPE=ext4', 'P_FSTARGET=/',
       'P_USER_R=1', 'P_USER_W=1', 'P_PARENT_W=1', 'P_DF=/dev/sda1 1 1 104857600 1% /',
     ].join('\n');
     const facts = minimalAssembly([
@@ -358,7 +370,7 @@ describe('bootstrap inventory completeness', () => {
 
   it('uses a successful sudo inventory when the direct one is denied', () => {
     const pathFacts = [
-      'P_EXISTS=1', 'P_ISDIR=1', 'P_REAL=/opt/docker/sencho', 'P_FSTYPE=ext4', 'P_FSTARGET=/',
+      'P_EXISTS=1', 'P_ISDIR=1', 'P_REAL=/opt/docker/sencho', 'P_IDENT=2049:1001', 'P_NEAREST_IDENT=2049:2002', 'P_FSTYPE=ext4', 'P_FSTARGET=/',
       'P_USER_R=1', 'P_USER_W=1', 'P_PARENT_W=1', 'P_SUDO_R=1', 'P_SUDO_W=1',
     ].join('\n');
     const facts = minimalAssembly([
@@ -372,7 +384,7 @@ describe('bootstrap inventory completeness', () => {
 
   it('treats partial and timed-out inventories as incomplete', () => {
     const pathFacts = [
-      'P_EXISTS=1', 'P_ISDIR=1', 'P_REAL=/opt/docker/sencho', 'P_FSTYPE=ext4', 'P_FSTARGET=/',
+      'P_EXISTS=1', 'P_ISDIR=1', 'P_REAL=/opt/docker/sencho', 'P_IDENT=2049:1001', 'P_NEAREST_IDENT=2049:2002', 'P_FSTYPE=ext4', 'P_FSTARGET=/',
       'P_USER_R=1', 'P_USER_W=1', 'P_PARENT_W=1',
     ].join('\n');
     for (const failure of [{ truncated: true }, { timedOut: true }]) {
@@ -387,7 +399,7 @@ describe('bootstrap inventory completeness', () => {
 
   it('does not turn an unreadable Agent directory into an empty one', () => {
     const pathFacts = [
-      'P_EXISTS=1', 'P_ISDIR=1', 'P_REAL=/opt/sencho-agent', 'P_MODE=300', 'P_USER_W=1',
+      'P_EXISTS=1', 'P_ISDIR=1', 'P_REAL=/opt/sencho-agent', 'P_IDENT=2049:1001', 'P_NEAREST_IDENT=2049:2002', 'P_MODE=300', 'P_USER_W=1',
       'P_FSTYPE=ext4', 'P_FSTARGET=/', 'P_PARENT_W=1',
     ].join('\n');
     const facts = minimalAssembly([
@@ -462,6 +474,22 @@ describe('bootstrap Docker endpoint pinning', () => {
     }
   });
 
+  it('reports the device and inode of an existing directory, taken through a link', () => {
+    const dir = mkdtempSync(path.join(os.tmpdir(), 'sencho-bootstrap-path-'));
+    try {
+      const real = path.join(dir, 'real');
+      mkdirSync(real);
+      symlinkSync(real, path.join(dir, 'link'));
+      const stat = statSync(real, { bigint: true });
+      for (const input of [real, path.join(dir, 'link')]) {
+        const output = execFileSync('sh', ['-c', PATH_FACTS_SCRIPT, 'sencho-probe', input], { encoding: 'utf8' });
+        expect(parsePathFacts(output, input).identity).toBe(`${stat.dev}:${stat.ino}`);
+      }
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   it('reads filesystem facts from the nearest existing ancestor for a missing path', () => {
     const dir = mkdtempSync(path.join(os.tmpdir(), 'sencho-bootstrap-path-'));
     try {
@@ -470,6 +498,9 @@ describe('bootstrap Docker endpoint pinning', () => {
       expect(output).toContain('P_EXISTS=0');
       expect(output).toContain(`P_NEAREST=${dir}`);
       expect(parsePathFacts(output, missing).probeError).toBeNull();
+      // The identity the execution scripts compare against is the nearest ancestor's own device and inode, not the missing path's.
+      const ancestor = statSync(dir, { bigint: true });
+      expect(parsePathFacts(output, missing)).toMatchObject({ identity: null, nearestExistingAncestorIdentity: `${ancestor.dev}:${ancestor.ino}` });
       expect(output).toMatch(/P_FSTYPE=\S+/);
       expect(output).toMatch(/P_FSTARGET=\S+/);
       expect(output).toMatch(/P_DF=\S+\s+\d+\s+\d+\s+\d+/);
@@ -511,7 +542,7 @@ describe('bootstrap volume and no-Docker facts', () => {
 
   it('marks an absent inventory probe as not run', () => {
     const pathFacts = [
-      'P_EXISTS=1', 'P_ISDIR=1', 'P_REAL=/opt/docker/sencho', 'P_FSTYPE=ext4', 'P_FSTARGET=/',
+      'P_EXISTS=1', 'P_ISDIR=1', 'P_REAL=/opt/docker/sencho', 'P_IDENT=2049:1001', 'P_NEAREST_IDENT=2049:2002', 'P_FSTYPE=ext4', 'P_FSTARGET=/',
       'P_USER_R=1', 'P_USER_W=1', 'P_PARENT_W=1',
     ].join('\n');
     const facts = minimalAssembly([probe('path_compose', pathFacts)]);

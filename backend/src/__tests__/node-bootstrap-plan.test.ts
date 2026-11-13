@@ -58,9 +58,9 @@ describe('bootstrap plan builder', () => {
     expect(step.privilege).toBe('user');
     expect(step.target).toMatchObject({ path: '/opt/docker/sencho', mode: '0755', owner: 'ubuntu', group: 'ubuntu' });
     // The directory is created, never entered by name twice: a name that exists is refused, and a symlink is never followed.
-    expect(step.command).toBe(createDirectoryCommand('/opt/docker/sencho', { mode: '0755', owner: 'ubuntu', group: 'ubuntu' }, { sudo: false, allowExisting: false, approved: '/opt/docker/sencho' }));
+    expect(step.command).toBe(createDirectoryCommand('/opt/docker/sencho', { mode: '0755', owner: 'ubuntu', group: 'ubuntu' }, { sudo: false, allowExisting: false, approved: '/opt/docker/sencho', binding: '2049:2002' }));
     // ... and only the directory the preflight resolved: a path that leads elsewhere by then is refused.
-    expect(step.command).toMatch(/sencho-mkdir '\/opt\/docker\/sencho' '0755' 'ubuntu' 'ubuntu' '0' '\/opt\/docker\/sencho'$/);
+    expect(step.command).toMatch(/sencho-mkdir '\/opt\/docker\/sencho' '0755' 'ubuntu' 'ubuntu' '0' '\/opt\/docker\/sencho' '2049:2002'$/);
     expect(step.command).not.toContain('install -d');
   });
 
@@ -74,10 +74,10 @@ describe('bootstrap plan builder', () => {
     const steps = allSteps(planFor(facts));
     const compose = steps.find((entry) => entry.id === 'create-compose-dir');
     const agent = steps.find((entry) => entry.id === 'create-agent-dir');
-    expect(compose?.command).toMatch(/sencho-mkdir '\/opt\/docker\/sencho' '0755' 'ubuntu' 'ubuntu' '0' '\/mnt\/volume\/sencho'$/);
-    expect(agent?.command).toMatch(/sencho-mkdir '\/opt\/sencho-agent' '0700' 'ubuntu' 'ubuntu' '0' '\/data\/agent'$/);
+    expect(compose?.command).toMatch(/sencho-mkdir '\/opt\/docker\/sencho' '0755' 'ubuntu' 'ubuntu' '0' '\/mnt\/volume\/sencho' '2049:2002'$/);
+    expect(agent?.command).toMatch(/sencho-mkdir '\/opt\/sencho-agent' '0700' 'ubuntu' 'ubuntu' '0' '\/data\/agent' '2049:2002'$/);
     // The keyring directory is approved by its literal path.
-    expect(steps.find((entry) => entry.id === 'docker-keyring-dir')?.command).toMatch(/sencho-mkdir '\/etc\/apt\/keyrings' '0755' 'root' 'root' '1' '\/etc\/apt\/keyrings'$/);
+    expect(steps.find((entry) => entry.id === 'docker-keyring-dir')?.command).toMatch(/sencho-mkdir '\/etc\/apt\/keyrings' '0755' 'root' 'root' '1' '\/etc\/apt\/keyrings' 'system'$/);
   });
 
   it('lets only the apt keyring directory exist already: the Compose and Agent directories must be new', () => {
@@ -88,7 +88,7 @@ describe('bootstrap plan builder', () => {
       repo: { probeComplete: true, dockerSourceConfigured: false, keyringPresent: false, sourceVerified: false, keyringVerified: false, candidateSourceVerified: null, problem: null },
     });
     const steps = allSteps(planFor(facts));
-    const flag = (id: string) => /' '([01])' '[^']*'$/.exec(steps.find((entry) => entry.id === id)?.command ?? '')?.[1];
+    const flag = (id: string) => /' '([01])' '[^']*' '[^']*'$/.exec(steps.find((entry) => entry.id === id)?.command ?? '')?.[1];
     expect(flag('docker-keyring-dir')).toBe('1');
     expect(flag('create-compose-dir')).toBe('0');
     expect(flag('create-agent-dir')).toBe('0');
@@ -190,8 +190,9 @@ describe('bootstrap plan builder', () => {
     const plan = planFor(makeFacts());
     const start = allSteps(plan).find((entry) => entry.id === 'start-agent');
     expect(start?.command).toContain('--project-name sencho-agent');
-    expect(start?.command).toContain("--project-directory '/opt/sencho-agent'");
-    expect(start?.command).toContain("-f '/opt/sencho-agent/compose.yaml'");
+    // Compose runs against the directory the script holds, never the name it was approved under.
+    expect(start?.command).toContain('--project-directory . -f ./compose.yaml');
+    expect(start?.command).toMatch(/sencho-start '\/opt\/sencho-agent' '\/opt\/sencho-agent' '\/opt\/docker\/sencho' '\/opt\/docker\/sencho'$/);
     expect(start?.command).toContain('-u COMPOSE_FILE');
     expect(start?.command).toContain('-u COMPOSE_PROJECT_NAME');
     expect(start?.command).toContain('-u DOCKER_HOST');
@@ -306,7 +307,7 @@ describe('bootstrap plan privileges and working installations', () => {
     const plan = planFor(freshFacts());
     const start = allSteps(plan).find((entry) => entry.id === 'start-agent');
     expect(start?.privilege).toBe('sudo');
-    expect(start?.command).toMatch(/^sudo -n env /);
+    expect(start?.command).toMatch(/^sudo -n sh -c [\s\S]* sencho-start '/);
     expect(start?.command).toContain('DOCKER_CONTEXT=default');
     expect(start?.command).toContain('DOCKER_HOST=unix:///var/run/docker.sock');
   });
@@ -395,13 +396,13 @@ describe('bootstrap plan privileges and working installations', () => {
   it('builds a start command whose env options all precede its assignments', () => {
     const start = allSteps(planFor(makeFacts())).find((entry) => entry.id === 'start-agent');
     const command = start?.command ?? '';
-    expect(command).toMatch(/^env /);
-    const lastUnset = command.lastIndexOf(' -u ');
-    const firstAssignment = command.indexOf('DOCKER_CONTEXT=default');
+    const envPrefix = /exec (env .*?) docker compose/.exec(command)?.[1] ?? '';
+    expect(envPrefix).toMatch(/^env /);
+    const lastUnset = envPrefix.lastIndexOf(' -u ');
+    const firstAssignment = envPrefix.indexOf('DOCKER_CONTEXT=default');
     expect(lastUnset).toBeGreaterThan(0);
     expect(lastUnset).toBeLessThan(firstAssignment);
     // Prove the emitted env prefix is accepted by the real env binary.
-    const envPrefix = command.replace(/ docker compose.*$/, '');
     expect(() => execFileSync('sh', ['-c', `${envPrefix} true`])).not.toThrow();
   });
 
@@ -514,5 +515,35 @@ describe('bootstrap plan privilege consistency and canonical names', () => {
     expect(compose.services.agent.container_name).toBe('sencho-agent');
     const [volume] = Object.keys(compose.volumes);
     expect(`${compose.name}_${volume}`).toBe(PILOT_DATA_VOLUME_CANONICAL);
+  });
+});
+
+describe('bootstrap plan binds directories to what the preflight identified', () => {
+  it('binds a new directory to the nearest existing ancestor the preflight identified', () => {
+    const facts = makeFacts({
+      composeDir: { exists: false, isDirectory: false, nearestExistingAncestorIdentity: '64768:11', parentWritableByUser: true },
+      agentDir: { exists: false, isDirectory: false, nearestExistingAncestorIdentity: '64768:22', parentWritableByUser: true },
+    });
+    const steps = allSteps(planFor(facts));
+    expect(steps.find((entry) => entry.id === 'create-compose-dir')?.command).toMatch(/ '64768:11'$/);
+    expect(steps.find((entry) => entry.id === 'create-agent-dir')?.command).toMatch(/ '64768:22'$/);
+  });
+
+  it('records the identity of an existing directory in the plan, and none for one it creates', () => {
+    const existing = planFor(makeFacts({ composeDir: { identity: '64768:33' }, agentDir: { exists: true, isDirectory: true, identity: '64768:44', entries: [], writableByUser: true } }));
+    expect(existing.paths.composeDir.identity).toBe('64768:33');
+    expect(existing.paths.agentDir.identity).toBe('64768:44');
+    const created = planFor(makeFacts({ composeDir: { exists: false, isDirectory: false, parentWritableByUser: true } }));
+    expect(created.paths.composeDir.identity).toBeNull();
+  });
+
+  it('changes the plan digest when a directory is replaced by another one of the same name', () => {
+    const before = planFor(makeFacts({ agentDir: { exists: true, isDirectory: true, identity: '64768:44', entries: [], writableByUser: true } }));
+    const after = planFor(makeFacts({ agentDir: { exists: true, isDirectory: true, identity: '64768:45', entries: [], writableByUser: true } }));
+    expect(after.evidenceDigest).not.toBe(before.evidenceDigest);
+  });
+
+  it('does not build a plan for a directory it cannot identify', () => {
+    expect(() => planFor(makeFacts({ agentDir: { exists: false, isDirectory: false, nearestExistingAncestorIdentity: null, parentWritableByUser: true } }))).toThrow(/identity/);
   });
 });

@@ -105,7 +105,8 @@ function capOutput(result: ExecResult, options: ExecOptions): ExecResult {
 /** A scripted host: a file and directory model plus fixed answers for the checks. */
 class FakeHost {
   public readonly files = new Map<string, HostFile>();
-  public readonly dirs = new Map<string, { mode: string; owner: string; group: string }>();
+  public readonly dirs = new Map<string, { mode: string; owner: string; group: string; identity?: string }>();
+  private madeDirectories = 0;
   public readonly commands: Array<{ command: string; stdin?: string }> = [];
   public override: ((command: string, options: ExecOptions) => ExecResult | Promise<ExecResult> | undefined) | null = null;
   public agentRunning = true;
@@ -121,7 +122,7 @@ class FakeHost {
     this.dirs.set('/etc/apt', { mode: '0755', owner: 'root', group: 'root' });
     this.dirs.set('/opt', { mode: '0755', owner: 'root', group: 'root' });
     this.dirs.set('/etc/apt/sources.list.d', { mode: '0755', owner: 'root', group: 'root' });
-    this.dirs.set('/opt/docker/sencho', { mode: '0755', owner: 'ubuntu', group: 'ubuntu' });
+    this.dirs.set('/opt/docker/sencho', { mode: '0755', owner: 'ubuntu', group: 'ubuntu', identity: '2049:1001' });
   }
 
   public transport(): BootstrapExecTransport {
@@ -156,11 +157,14 @@ class FakeHost {
   private answer(command: string, options: ExecOptions): ExecResult {
     const ok = (stdout = ''): ExecResult => ({ exitCode: 0, stdout, stderr: '', truncated: false, timedOut: false, error: null });
     const exit = (code: number, stderr = ''): ExecResult => ({ exitCode: code, stdout: '', stderr, truncated: false, timedOut: false, error: null });
-    const write = /sencho-write '([^']*)' '([^']*)' '([^']*)' '([^']*)' '([^']*)' '([0-9a-f]*)' '([0-9a-f]{64})' '([^']*)'$/.exec(command);
+    const write = /sencho-write '([^']*)' '([^']*)' '([^']*)' '([^']*)' '([^']*)' '([0-9a-f]*)' '([0-9a-f]{64})' '([^']*)' '([^']*)'$/.exec(command);
     if (write) {
-      const [, dir, name, mode, owner, group, replaces, sha256] = write;
+      const [, dir, name, mode, owner, group, replaces, sha256, , binding] = write;
       const target = `${dir}/${name}`;
       if (!this.dirs.has(dir)) return exit(20, `not a directory: ${dir}`);
+      // The script enters only the directory it was bound to: the identity the plan or the run recorded, or a system directory.
+      const held = this.dirs.get(dir);
+      if (binding !== 'system' && held?.identity !== binding) return exit(20, `not the approved directory, or it changed: ${dir}`);
       const present = this.files.get(target);
       if (replaces === '' && present) return exit(17, `already exists: ${target}`);
       if (replaces !== '' && present && crypto.createHash('sha256').update(present.content).digest('hex') !== replaces) return exit(17, `changed since it was inspected: ${target}`);
@@ -181,7 +185,7 @@ class FakeHost {
       if (dir) return ok(`${Number.parseInt(dir.mode, 8).toString(8)} ${dir.owner} ${dir.group} directory`);
       return exit(1, 'No such file or directory');
     }
-    const makeDir = /sencho-mkdir '([^']*)' '([^']*)' '([^']*)' '([^']*)' '([01])' '([^']*)'$/.exec(command);
+    const makeDir = /sencho-mkdir '([^']*)' '([^']*)' '([^']*)' '([^']*)' '([01])' '([^']*)' '([^']*)'$/.exec(command);
     if (makeDir) {
       const [, dir, mode, owner, group, allowExisting] = makeDir;
       if (this.dirs.has(dir) && allowExisting !== '1') return exit(17, `already exists: ${dir}`);
@@ -189,8 +193,11 @@ class FakeHost {
       for (let parent = dir.slice(0, dir.lastIndexOf('/')); parent && !this.dirs.has(parent); parent = parent.slice(0, parent.lastIndexOf('/'))) {
         this.dirs.set(parent, { mode: '0755', owner: 'root', group: 'root' });
       }
-      this.dirs.set(dir, { mode, owner, group });
-      return ok();
+      this.madeDirectories += 1;
+      // The Agent directory is the one the facts of a retry describe (see makeAgentDir), so it keeps that identity across attempts.
+      const identity = dir === '/opt/sencho-agent' ? '2049:1001' : `2049:${9000 + this.madeDirectories}`;
+      this.dirs.set(dir, { mode, owner, group, identity });
+      return ok(`SENCHO_DIR_IDENTITY=${identity}\n`);
     }
     if (/(^| )curl -fsSL https:\/\/download.docker.com\/linux\/ubuntu\/gpg$/.test(command)) return ok(DOCKER_KEY_ASC);
     if (command === APT_POLICY_COMMAND) return ok(this.policy);
@@ -796,7 +803,7 @@ describe('bootstrap operations: failure paths found in review', () => {
     if (!install) throw new Error('The plan has no install step.');
     const session = await h.host.transport().open({ ...request, address: '192.0.2.10', port: 22 }, { expectedFingerprint: 'unused' });
     const ctx: StepContext = {
-      session, secrets: [], signal: new AbortController().signal, note: () => undefined,
+      session, secrets: [], signal: new AbortController().signal, note: () => undefined, directories: new Map(),
       composeWithToken: () => { throw new Error('not used'); },
     };
     await expect(runPlanStep(install, ctx, plan)).rejects.toMatchObject({ code: 'CANDIDATE_NOT_VERIFIED', changedNothing: true });
@@ -1675,15 +1682,71 @@ describe('bootstrap operations: S2 every held run stays discoverable', () => {
     for (const id of ids) h.service.release(id, AUDIT);
   });
 
-  it('reads each page of holds from an index in the order it returns them, so the cost follows the page', () => {
-    const raw = (db as unknown as { db: { prepare: (sql: string) => { all: (...args: unknown[]) => Array<{ detail: string }> } } }).db;
-    const plan = (sql: string, ...args: unknown[]) => raw.prepare(`EXPLAIN QUERY PLAN ${sql}`).all(...args).map((row) => row.detail).join(' | ');
-    const first = plan('SELECT * FROM node_bootstrap_operations WHERE active = 1 ORDER BY created_at DESC, id DESC LIMIT ?', 21);
-    const later = plan(`SELECT * FROM node_bootstrap_operations WHERE active = 1 AND (created_at < ? OR (created_at = ? AND id < ?)) ORDER BY created_at DESC, id DESC LIMIT ?`, 1, 1, 'x', 21);
-    for (const detail of [first, later]) {
-      expect(detail).toContain('idx_node_bootstrap_ops_active_page');
-      expect(detail).not.toContain('TEMP B-TREE');
+  /**
+   * The statements one call really runs, with the plan and the opcodes SQLite
+   * chose for each, read from the production SQL (not from a copy of it).
+   */
+  function queriesRun(run: () => void): Array<{ sql: string; plan: string; opcodes: string[] }> {
+    const raw = (db as unknown as { db: { prepare: (sql: string) => { all: (...args: unknown[]) => Array<Record<string, string>>; run: (...args: unknown[]) => unknown } } }).db;
+    const prepare = raw.prepare.bind(raw);
+    const seen: Array<{ sql: string; args: unknown[] }> = [];
+    const spy = vi.spyOn(raw, 'prepare').mockImplementation((sql: string) => {
+      const statement = prepare(sql);
+      const all = statement.all.bind(statement);
+      statement.all = (...args: unknown[]) => { seen.push({ sql, args }); return all(...args); };
+      const runStatement = statement.run.bind(statement);
+      statement.run = (...args: unknown[]) => { seen.push({ sql, args }); return runStatement(...args); };
+      return statement;
+    });
+    try {
+      run();
+    } finally {
+      spy.mockRestore();
     }
+    return seen.map(({ sql, args }) => ({
+      sql,
+      plan: prepare(`EXPLAIN QUERY PLAN ${sql}`).all(...args).map((row) => row.detail).join(' | '),
+      opcodes: prepare(`EXPLAIN ${sql}`).all(...args).map((row) => row.opcode),
+    }));
+  }
+
+  it('seeks to a deep cursor and reads the finished history from its own index, so no page reads rows it does not return', () => {
+    const h = harness();
+    const ids = Array.from({ length: 45 }, (_, index) => insertHeld(index));
+    for (const id of ids.slice(0, 5)) h.service.release(id, AUDIT);
+    const firstPage = queriesRun(() => { h.service.list(); });
+    expect(firstPage).toHaveLength(2);
+    const [held, history] = firstPage;
+    // The newest holds are read from the front of the index, and stop at the limit.
+    expect(held.plan).toContain('idx_node_bootstrap_ops_active_page');
+    expect(held.sql).toContain('LIMIT ?');
+    // The finished history has an index of its own, in the order it is returned: no scan of the table, no sort.
+    expect(history.plan).toContain('idx_node_bootstrap_ops_finished_page');
+    expect(history.sql).toContain('LIMIT ?');
+    for (const query of firstPage) expect(query.plan).not.toContain('TEMP B-TREE');
+
+    // A later page is a search for the cursor, not a read from the newest hold down to it.
+    const cursor = h.service.list().nextCursor;
+    expect(cursor).not.toBeNull();
+    const later = queriesRun(() => { h.service.list(cursor); });
+    expect(later).toHaveLength(1);
+    expect(later[0].plan).toContain('SEARCH');
+    expect(later[0].plan).toContain('idx_node_bootstrap_ops_active_page');
+    expect(later[0].plan).not.toContain('TEMP B-TREE');
+    expect(later[0].opcodes.some((opcode) => /^Seek(GE|GT|LE|LT)$/.test(opcode))).toBe(true);
+    expect(later[0].opcodes).not.toContain('Rewind');
+    for (const id of ids.slice(5)) h.service.release(id, AUDIT);
+  });
+
+  it('trims the finished history through its own index, so starting a run never reads the holds', () => {
+    const h = harness();
+    const ids = Array.from({ length: 30 }, (_, index) => insertHeld(index));
+    const trim = queriesRun(() => { insertHeld(500); }).find((query) => query.sql.includes('DELETE FROM node_bootstrap_operations'));
+    expect(trim).toBeDefined();
+    expect(trim?.plan).toContain('idx_node_bootstrap_ops_finished_page');
+    expect(trim?.plan).not.toContain('idx_node_bootstrap_ops_active_page');
+    expect(trim?.plan).not.toContain('TEMP B-TREE');
+    for (const id of ids) h.service.release(id, AUDIT);
   });
 
   it('does not bring a released run back when a retry races the release', () => {

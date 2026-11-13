@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import { buildBootstrapEvidence, DENIED_FILESYSTEMS } from '../services/nodeBootstrap/evidence';
-import { makeFacts } from './__helpers__/bootstrapFacts';
+import { makeFacts, type FactsOverrides } from './__helpers__/bootstrapFacts';
 import type { BootstrapCheck, BootstrapFacts } from '../services/nodeBootstrap/types';
 
 function evidence(facts: BootstrapFacts, nodeNameTaken = false) {
@@ -531,5 +531,22 @@ describe('bootstrap evidence: fresh hosts and repository probe completeness', ()
     const row = result.checks.find((entry) => entry.id === 'apt_source');
     expect(row?.status).toBe('pass');
     expect(row?.summary).not.toMatch(/candidate provenance/i);
+  });
+});
+
+describe('bootstrap evidence: a directory the host cannot identify cannot be bound to a plan', () => {
+  const cases: Array<[string, FactsOverrides, BootstrapCheck['id']]> = [
+    ['an existing Compose directory', { composeDir: { identity: null } }, 'compose_dir'],
+    ['an existing Agent directory', { agentDir: { exists: true, isDirectory: true, identity: null, entries: [], writableByUser: true } }, 'agent_dir'],
+    ['the ancestor a new Compose directory is created in', { composeDir: { exists: false, isDirectory: false, nearestExistingAncestorIdentity: null, parentWritableByUser: true } }, 'compose_dir'],
+    ['the ancestor a new Agent directory is created in', { agentDir: { exists: false, isDirectory: false, nearestExistingAncestorIdentity: null, parentWritableByUser: true } }, 'agent_dir'],
+  ];
+  it.each(cases)('is unknown, and offers no plan, for %s with no device and inode', (_label, overrides, id) => {
+    const facts = makeFacts(overrides);
+    const row = check(facts, id);
+    expect(row.status).toBe('unknown');
+    expect(row.summary).toMatch(/identified/);
+    expect('remediation' in row && row.remediation).toBeTruthy();
+    expect(evidence(facts).planSuppressed).toBe(true);
   });
 });

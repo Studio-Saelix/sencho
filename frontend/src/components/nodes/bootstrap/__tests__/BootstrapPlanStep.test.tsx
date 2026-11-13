@@ -59,7 +59,7 @@ const plan: BootstrapPlan = {
         rationale: 'The agent keeps its compose file in a dedicated directory.',
         effect: 'directory-create',
         privilege: 'user',
-        command: "sh -c 'set -eu ...' sencho-mkdir '/srv/sencho-agent' '0700' 'ubuntu' 'ubuntu' '0'",
+        command: "sh -c 'set -eu ...' sencho-mkdir '/srv/sencho-agent' '0700' 'ubuntu' 'ubuntu' '0' '/srv/sencho-agent' '64768:2'",
         target: { path: '/srv/sencho-agent', mode: '0700', owner: 'ubuntu', group: 'ubuntu', preserveExisting: false },
         disruptive: false,
         reversible: 'yes',

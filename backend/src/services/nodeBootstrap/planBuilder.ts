@@ -8,8 +8,8 @@ import {
   repoVerified,
   unsupportedComposeAddition,
 } from './evidence';
-import { DOCKER_LOCAL_ASSIGNMENTS, DOCKER_LOCAL_UNSET_ARGS, debianArchitecture } from './probes';
-import { createDirectoryCommand } from './executionCommands';
+import { debianArchitecture } from './probes';
+import { SYSTEM_DIRECTORY, createDirectoryCommand, startProjectCommand } from './executionCommands';
 import {
   BOOTSTRAP_MARKER_FILENAME,
   BOOTSTRAP_MARKER_SCHEMA_VERSION,
@@ -17,7 +17,6 @@ import {
   PILOT_DATA_VOLUME,
   PILOT_IMAGE_REF,
   PILOT_PROJECT_NAME,
-  shellQuote,
 } from './pathPolicy';
 import type {
   BootstrapFacts,
@@ -82,20 +81,10 @@ function sudoCommand(command: string, sudo: boolean): string {
   return sudo ? `sudo -n ${command}` : command;
 }
 
-function startCommand(agentDir: string, sudo: boolean): string {
-  const compose = `${agentDir}/compose.yaml`;
-  // Pin both the Docker endpoint and the Compose project: a configured remote
-  // context or ambient Compose variable must not change which daemon or project
-  // this command starts.
-  const base = [
-    `env ${DOCKER_LOCAL_UNSET_ARGS} -u COMPOSE_FILE -u COMPOSE_PROJECT_NAME -u COMPOSE_PROFILES ${DOCKER_LOCAL_ASSIGNMENTS}`,
-    'docker compose',
-    `--project-name ${PILOT_PROJECT_NAME}`,
-    `--project-directory ${shellQuote(agentDir)}`,
-    `-f ${shellQuote(compose)}`,
-    'up -d',
-  ].join(' ');
-  return sudoCommand(base, sudo);
+/** The identity a directory step is bound to; a plan is never built without it (the preflight blocks first). */
+function requiredIdentity(identity: string | null, directory: string): string {
+  if (!identity) throw new Error(`The plan requires the identity of the directory ${directory} is created in.`);
+  return identity;
 }
 
 function packageInstallCommand(packages: DockerPackage[], resolved: boolean): string {
@@ -133,7 +122,7 @@ function repoSteps(facts: BootstrapFacts, sudo: boolean): BootstrapPlanStep[] {
       rationale: 'The Docker repository key must be readable by apt from a stable location.',
       effect: 'directory-create',
       privilege: sudo ? 'sudo' : 'user',
-      command: createDirectoryCommand('/etc/apt/keyrings', { mode: '0755', owner: 'root', group: 'root' }, { sudo, allowExisting: true, approved: '/etc/apt/keyrings' }),
+      command: createDirectoryCommand('/etc/apt/keyrings', { mode: '0755', owner: 'root', group: 'root' }, { sudo, allowExisting: true, approved: '/etc/apt/keyrings', binding: SYSTEM_DIRECTORY }),
       target: { path: '/etc/apt/keyrings', mode: '0755', owner: 'root', group: 'root', preserveExisting: true },
       disruptive: false,
       reversible: 'yes',
@@ -430,7 +419,7 @@ export function buildBootstrapPlan(input: PlanBuildInput): BootstrapPlan {
         rationale: 'Sencho manages the Compose project folders in this directory.',
         effect: 'directory-create',
         privilege: composeDir.parentWritableByUser ? 'user' : 'sudo',
-        command: createDirectoryCommand(composeDir.input, { mode: '0755', owner, group }, { sudo: !composeDir.parentWritableByUser && !root, allowExisting: false, approved: composeDir.realPath ?? composeDir.input }),
+        command: createDirectoryCommand(composeDir.input, { mode: '0755', owner, group }, { sudo: !composeDir.parentWritableByUser && !root, allowExisting: false, approved: composeDir.realPath ?? composeDir.input, binding: requiredIdentity(composeDir.nearestExistingAncestorIdentity, composeDir.input) }),
         target: { path: composeDir.input, mode: '0755', owner, group, preserveExisting: false },
         disruptive: false,
         reversible: 'yes',
@@ -459,7 +448,7 @@ export function buildBootstrapPlan(input: PlanBuildInput): BootstrapPlan {
         rationale: 'The agent keeps its compose file and hub CA in a dedicated directory.',
         effect: 'directory-create',
         privilege: agentDir.parentWritableByUser ? 'user' : 'sudo',
-        command: createDirectoryCommand(agentDir.input, { mode: '0700', owner, group }, { sudo: !agentDir.parentWritableByUser && !root, allowExisting: false, approved: agentDir.realPath ?? agentDir.input }),
+        command: createDirectoryCommand(agentDir.input, { mode: '0700', owner, group }, { sudo: !agentDir.parentWritableByUser && !root, allowExisting: false, approved: agentDir.realPath ?? agentDir.input, binding: requiredIdentity(agentDir.nearestExistingAncestorIdentity, agentDir.input) }),
         target: { path: agentDir.input, mode: '0700', owner, group, preserveExisting: false },
         disruptive: false,
         reversible: 'yes',
@@ -485,10 +474,14 @@ export function buildBootstrapPlan(input: PlanBuildInput): BootstrapPlan {
     steps: [{
       id: 'start-agent',
       title: `Start the ${PILOT_PROJECT_NAME} project`,
-      rationale: 'The project name, directory and local Docker endpoint are pinned so ambient variables and contexts cannot change which project or daemon runs.',
+      rationale: 'The project name, directory and local Docker endpoint are pinned so ambient variables and contexts cannot change which project or daemon runs. The agent directory is entered by identity, and the compose file and hub CA are checked against what this run wrote, so a directory swapped in after the approval is not started.',
       effect: 'container-start',
       privilege: startSudo ? 'sudo' : 'user',
-      command: startCommand(agentDir.input, startSudo),
+      command: startProjectCommand(
+        { path: agentDir.input, approved: agentDir.realPath ?? agentDir.input },
+        { path: composeDir.input, approved: composeDir.realPath ?? composeDir.input },
+        startSudo,
+      ),
       disruptive: true,
       reversible: 'yes',
       pointOfNoReturn: true,
@@ -526,6 +519,7 @@ export function buildBootstrapPlan(input: PlanBuildInput): BootstrapPlan {
       composeDir: {
         input: composeDir.input,
         realPath: composeDir.realPath,
+        identity: composeDir.exists ? composeDir.identity : null,
         exists: composeDir.exists,
         created: !composeDir.exists,
         stackCount: composeDir.stackCount,
@@ -533,6 +527,7 @@ export function buildBootstrapPlan(input: PlanBuildInput): BootstrapPlan {
       agentDir: {
         input: agentDir.input,
         realPath: agentDir.realPath,
+        identity: agentDir.exists ? agentDir.identity : null,
         exists: agentDir.exists,
         created: !agentDir.exists,
       },

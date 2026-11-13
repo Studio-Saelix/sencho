@@ -7,13 +7,17 @@ import {
   PILOT_PROJECT_NAME,
 } from './pathPolicy';
 import {
+  DIRECTORY_IDENTITY_PREFIX,
   READ_EXIT,
+  START_EXIT,
+  SYSTEM_DIRECTORY,
   WRITE_EXIT,
   agentContainerCommand,
   composeVersionCommand,
   dockerServiceStateCommand,
   dockerServerVersionCommand,
   readFileCommand,
+  startInput,
   statCommand,
   writeFileCommand,
 } from './executionCommands';
@@ -92,6 +96,13 @@ export interface StepContext {
   secrets: string[];
   /** The Pilot compose file with the real token; called only for the compose step. */
   composeWithToken: () => string;
+  /**
+   * The identity (`<device>:<inode>`) of each directory this run made, by the
+   * physical path the plan approved for it. A directory that did not exist when
+   * the plan was approved has no identity in the plan; the step that makes it
+   * records it here, and every later step that enters it is bound to that one.
+   */
+  directories: Map<string, string>;
 }
 
 /**
@@ -281,6 +292,25 @@ export function approvedDirectory(plan: BootstrapPlan, directory: string): strin
 }
 
 /**
+ * The identity a directory must have when a step enters it: the one the run
+ * recorded when it made the directory, else the one the preflight saw, and for
+ * a system directory (not a Compose or Agent directory) the system rule. A
+ * Compose or Agent directory without either identity cannot be told from a
+ * substitute, so the step refuses rather than write into it.
+ */
+export function approvedBinding(plan: BootstrapPlan, ctx: Pick<StepContext, 'directories'>, directory: string): string {
+  for (const known of [plan.paths.agentDir, plan.paths.composeDir]) {
+    if (withoutTrailingSlashes(known.input) !== withoutTrailingSlashes(directory)) continue;
+    const identity = ctx.directories.get(known.realPath ?? known.input) ?? known.identity;
+    if (!identity) {
+      throw new StepFailure('failed', 'PLAN_INVALID', `The plan has no recorded identity for ${directory}, so it cannot be told from a directory that replaced it. Nothing was changed.`, null, { changedNothing: true });
+    }
+    return identity;
+  }
+  return SYSTEM_DIRECTORY;
+}
+
+/**
  * Put `desired` at `filePath` through the write script and check the result.
  * `replaces` is the sha256 of the file the run inspected and means to replace;
  * without it the name must be free when the file is published. A refusal means
@@ -297,7 +327,8 @@ async function publishFile(
 ): Promise<StepOutcome> {
   const sudo = step.privilege === 'sudo';
   const directory = approvedDirectory(plan, path.posix.dirname(file.path));
-  const command = writeFileCommand(file.path, { mode: file.mode, owner: facts.owner, group: facts.group, sha256: sha256Of(desired) }, { sudo, replaces, directory });
+  const binding = approvedBinding(plan, ctx, path.posix.dirname(file.path));
+  const command = writeFileCommand(file.path, { mode: file.mode, owner: facts.owner, group: facts.group, sha256: sha256Of(desired) }, { sudo, replaces, directory, binding });
   const result = await ctx.session.run(command, { timeoutMs: step.timeoutMs, stdin: desired });
   const failure = transportFailure(result, step.title, step.timeoutMs, ctx.secrets);
   if (failure) throw failure;
@@ -486,7 +517,7 @@ async function runMetadataRefresh(step: BootstrapPlanStep, ctx: StepContext): Pr
   }
 }
 
-async function runCommandStep(step: BootstrapPlanStep, ctx: StepContext): Promise<StepOutcome> {
+async function runCommandStep(step: BootstrapPlanStep, ctx: StepContext, plan: BootstrapPlan): Promise<StepOutcome> {
   if (!step.command) {
     throw new StepFailure('failed', 'PLAN_INVALID', `The plan step "${step.title}" has no command. Nothing was run.`);
   }
@@ -516,6 +547,7 @@ async function runCommandStep(step: BootstrapPlanStep, ctx: StepContext): Promis
     throw new StepFailure('failed', 'STEP_FAILED', `"${step.title}" failed (exit ${result.exitCode}).`, commandDetail(result, ctx.secrets));
   }
   if (step.effect === 'directory-create' && step.target) {
+    recordMadeDirectory(ctx, plan, step.target.path, result.stdout);
     expectStat(step.target.path, await statRemote(ctx, step.target.path, step.privilege === 'sudo'), {
       mode: step.target.mode, owner: step.target.owner, group: step.target.group, type: 'directory',
     });
@@ -523,9 +555,62 @@ async function runCommandStep(step: BootstrapPlanStep, ctx: StepContext): Promis
   return { status: 'done', message: `${step.title}: done.` };
 }
 
+/**
+ * Remember which directory a directory step made, so the steps that write into
+ * it are bound to that one. Only the Compose and Agent directories are tracked
+ * (a system directory is bound by ownership). A made directory whose identity
+ * the script did not report cannot be bound, which is a state to look at.
+ */
+function recordMadeDirectory(ctx: StepContext, plan: BootstrapPlan, directory: string, stdout: string): void {
+  const tracked = [plan.paths.agentDir, plan.paths.composeDir].find((known) => withoutTrailingSlashes(known.input) === withoutTrailingSlashes(directory));
+  if (!tracked) return;
+  const line = stdout.split('\n').map((text) => text.trim()).find((text) => text.startsWith(DIRECTORY_IDENTITY_PREFIX));
+  const identity = line?.slice(DIRECTORY_IDENTITY_PREFIX.length) ?? '';
+  if (!/^\d+:\d+$/.test(identity)) {
+    throw new StepFailure('recovery', 'DIRECTORY_NOT_FINISHED', `${directory} was made, but the host did not say which directory it is, so nothing can be written into it safely. Look at it on the host before retrying.`);
+  }
+  ctx.directories.set(tracked.realPath ?? tracked.input, identity);
+}
+
+/**
+ * Start the Pilot project through the start script, which holds the approved
+ * directory by identity and refuses when the directory, the Compose directory
+ * the compose file mounts, or the files it reads are not the ones the run wrote
+ * or approved. What the script has to compare against is not in the plan (the
+ * token is in the compose file; a directory may have been made by this run), so
+ * it goes in on standard input.
+ */
+async function runStartStep(step: BootstrapPlanStep, ctx: StepContext, plan: BootstrapPlan): Promise<StepOutcome> {
+  if (!step.command) {
+    throw new StepFailure('failed', 'PLAN_INVALID', `The plan step "${step.title}" has no command. Nothing was run.`, null, { changedNothing: true });
+  }
+  const stages = plan.stages.flatMap((stage) => stage.steps);
+  const caContent = stages.find((candidate) => candidate.id === 'agent-hub-ca')?.file?.content ?? null;
+  const stdin = startInput({
+    agentIdentity: approvedBinding(plan, ctx, plan.paths.agentDir.input),
+    composeIdentity: approvedBinding(plan, ctx, plan.paths.composeDir.input),
+    composeSha256: sha256Of(ctx.composeWithToken()),
+    caSha256: caContent === null ? null : sha256Of(caContent),
+  });
+  const result = await ctx.session.run(step.command, { timeoutMs: step.timeoutMs, stdin });
+  const failure = transportFailure(result, step.title, step.timeoutMs, ctx.secrets);
+  if (failure) throw failure;
+  if (result.exitCode === START_EXIT.notDirectory) {
+    throw new StepFailure('failed', 'DIRECTORY_CHANGED', `The directory the Pilot starts from, or the Compose directory it mounts, is not the one the plan approved (it is not a directory any more, or it, or one of its parents, was replaced or redirected). Nothing was started.`, commandDetail(result, ctx.secrets), { changedNothing: true });
+  }
+  if (result.exitCode === START_EXIT.inputChanged) {
+    throw new StepFailure('failed', 'FILE_CONFLICT', `A file the Pilot starts from is not the one this run wrote. Nothing was started.`, commandDetail(result, ctx.secrets), { changedNothing: true });
+  }
+  if (result.exitCode !== 0) {
+    throw new StepFailure('failed', 'STEP_FAILED', `"${step.title}" failed (exit ${result.exitCode}).`, commandDetail(result, ctx.secrets));
+  }
+  return { status: 'done', message: `${step.title}: done.` };
+}
+
 export async function runPlanStep(step: BootstrapPlanStep, ctx: StepContext, plan: BootstrapPlan): Promise<StepOutcome> {
   if (step.file) return runFileStep(step, ctx, plan);
-  return step.id === KEY_STEP_ID ? runKeyStep(step, ctx, plan) : runCommandStep(step, ctx);
+  if (step.id === KEY_STEP_ID) return runKeyStep(step, ctx, plan);
+  return step.effect === 'container-start' ? runStartStep(step, ctx, plan) : runCommandStep(step, ctx, plan);
 }
 
 /** The start step's privilege decides how Docker is reached after installation. */
