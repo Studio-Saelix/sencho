@@ -36,16 +36,34 @@ export const WRITE_EXIT = {
 
 /**
  * The directory a script may enter is bound to the directory that was
- * approved, not to its name. `$identity` is either the device and inode the
- * preflight (or the step that made the directory) recorded, or the word
- * `system` for a system directory the preflight does not inspect (the apt
- * keyring and source directories): those must be owned by the user the script
- * runs as, which is root under sudo, so an unprivileged process cannot put a
- * directory of its own there.
+ * approved, not to its name. `$identity` is either what the preflight (or the
+ * step that made the directory) recorded for it, or the word `system` for a
+ * system directory the preflight does not inspect (the apt keyring and source
+ * directories): those must be owned by the user the script runs as, which is
+ * root under sudo, so an unprivileged process cannot put a directory of its own
+ * there.
+ *
+ * An identity is `<device>:<inode>:<owner uid>:<birth time>` (see
+ * `ident`). The device and inode alone are not enough: a directory that was
+ * removed and made again often gets the same inode number back, so a
+ * substitute with an unrelated owner, mode and content could carry the
+ * approved identity. The birth time of the new directory differs, and so does
+ * its owner when another user made it. A filesystem that does not record birth
+ * times reports `-` there, and the identity then rests on the first three
+ * parts. `$made` (the directory script only) lists directories earlier steps
+ * of the same run made, one `<identity><tab><physical path>` per line: a
+ * directory the plan could not name, because it did not exist when the plan was
+ * approved, is accepted when it is one of those at the path it was made.
  */
 const BIND_DIRECTORY = [
+  'ident() { stat -c "%d:%i:%u:%w" -- "$1" 2>/dev/null | tr -d " "; }',
   'bound() {',
-  '  if [ "$1" = system ]; then [ -O . ]; else [ "$(stat -c "%d:%i" -- . 2>/dev/null)" = "$1" ]; fi',
+  '  if [ "$1" = system ]; then [ -O . ]; return; fi',
+  '  now=$(ident .)',
+  '  [ -n "$now" ] || return 1',
+  '  [ "$now" = "$1" ] && return 0',
+  '  [ -n "${made-}" ] || return 1',
+  '  printf "%s\\n" "$made" | grep -qxF -- "$now$(printf "\\t")$2"',
   '}',
 ].join('\n');
 
@@ -53,7 +71,7 @@ const BIND_DIRECTORY = [
  * Enter a directory without trusting its name twice, and only if it is the
  * directory that was approved. The name is inspected without following a final
  * symlink (it must be a directory), the shell changes into it, the directory it
- * is in must be the one inspected (same device and inode), its physical path
+ * is in must be the one inspected (same identity), its physical path
  * (`pwd -P`) must be the one the plan approved ($2), and it must be the
  * directory the approval recorded ($3, see BIND_DIRECTORY): a name or an
  * ancestor swapped for a symlink or another directory, before this script
@@ -69,7 +87,7 @@ const ENTER_DIRECTORY = [
   '  cd -P -- "$1" 2>/dev/null || return 1',
   '  [ "$(stat -c "%F:%d:%i" -- . 2>/dev/null)" = "$before" ] || return 1',
   '  [ "$(pwd -P)" = "$2" ] || return 1',
-  '  bound "$3"',
+  '  bound "$3" "$2"',
   '}',
 ].join('\n');
 
@@ -81,7 +99,7 @@ const ENTER_VIA_LINKS = [
   '  cd -P -- "$1" 2>/dev/null || return 1',
   '  [ "$(stat -c "%F:%d:%i" -- . 2>/dev/null)" = "$before" ] || return 1',
   '  [ "$(pwd -P)" = "$2" ] || return 1',
-  '  bound "$3"',
+  '  bound "$3" "$2"',
   '}',
 ].join('\n');
 
@@ -207,20 +225,27 @@ export function writeFileCommand(
 }
 
 /**
- * The directory a script is bound to: the device and inode (`<device>:<inode>`)
- * the approval recorded for it, or `system` for a system directory the
- * preflight does not inspect (see BIND_DIRECTORY).
+ * The directory a script is bound to: the identity the approval recorded for
+ * it, or `system` for a system directory the preflight does not inspect (see
+ * BIND_DIRECTORY).
  */
 export type DirectoryBinding = string;
 export const SYSTEM_DIRECTORY: DirectoryBinding = 'system';
 
-/** Standard output line the directory script ends with: the identity of the directory it made. */
-export const DIRECTORY_IDENTITY_PREFIX = 'SENCHO_DIR_IDENTITY=';
+/** A line of the directory script's standard output for each directory it made: `<identity><tab><physical path>`. */
+export const DIRECTORY_MADE_PREFIX = 'SENCHO_DIR_MADE=';
+
+/** The standard input of the directory script: the directories earlier steps of the run made (see BIND_DIRECTORY). */
+export function madeDirectoriesInput(made: ReadonlyMap<string, string>): string {
+  return [...made].map(([directory, identity]) => `${identity}\t${directory}\n`).join('');
+}
 
 const DIRECTORY_SCRIPT = [
   'set -eu',
   'umask 077',
   'p=$1; m=$2; o=$3; g=$4; keep=$5; e=$6; i=$7',
+  // The directories earlier steps of this run made (the caller always sends standard input).
+  'made=$(cat)',
   ENTER_DIRECTORY,
   ENTER_VIA_LINKS,
   `case $p in /*) ;; *) echo "not an absolute path: $p" >&2; exit ${WRITE_EXIT.notDirectory} ;; esac`,
@@ -238,7 +263,6 @@ const DIRECTORY_SCRIPT = [
   `  enter "$p" "$e" "$i" || { echo "not the approved directory, or it changed: $p" >&2; exit ${WRITE_EXIT.notDirectory}; }`,
   `  chown "$o:$g" . || { echo "could not set the owner of $p" >&2; exit ${WRITE_EXIT.unfinished}; }`,
   `  chmod "$m" . || { echo "could not set the mode of $p" >&2; exit ${WRITE_EXIT.unfinished}; }`,
-  `  printf '${DIRECTORY_IDENTITY_PREFIX}%s\\n' "$(stat -c "%d:%i" -- .)"`,
   '  exit 0',
   'fi',
   // The approved path is the physical path of the whole directory; what exists
@@ -246,27 +270,38 @@ const DIRECTORY_SCRIPT = [
   `case $e in *"$below") want=\${e%"$below"} ;; *) echo "not the approved directory: $p" >&2; exit ${WRITE_EXIT.notDirectory} ;; esac`,
   '[ -n "$want" ] || want=/',
   `enter_via "$anc" "$want" "$i" || { echo "not the approved directory, or it changed: $anc" >&2; exit ${WRITE_EXIT.notDirectory}; }`,
-  'aid=$(stat -c "%d:%i" -- .)',
+  'aid=$(ident .)',
   // Nothing is made at the final name until it is complete. The new directories
   // are built inside a private staging directory (an unpredictable name in the
   // directory held above), so nothing another process puts at the final name
   // can be mistaken for what this script made and changed; the topmost new name
   // is then moved into place in one rename that refuses an occupied name.
-  'stage=; d_stage=; sid=; inside=0; published=0; top=; rel=',
+  'first=${below#/}; first=${first%%/*}',
+  'stage=; d_stage=; sid=; inside=0; published=0; top=; rel=; acc=$want; mnew=',
+  "nl=$(printf '\\n_'); nl=${nl%_}",
   'cleanup() {',
   "  trap '' HUP INT TERM PIPE",
   '  [ -n "$stage" ] || return 0',
   '  left=0',
   '  if [ "$inside" = 1 ]; then',
-  '    if [ "$published" = 0 ] && [ -n "$rel" ]; then rmdir -p -- "./$rel" 2>/dev/null || true; fi',
-  '    if [ "$published" = 0 ] && [ -n "$top" ] && { [ -e "./$top" ] || [ -L "./$top" ]; }; then left=1; fi',
+  // Removed by the names the script would have made, deepest first (not by the
+  // last name it recorded: a stop can land between the mkdir and the record),
+  // and only while empty: rmdir never removes anything with something in it.
+  '    if [ "$published" = 0 ]; then',
+  '      pr=${below#/}',
+  '      while [ -n "$pr" ]; do',
+  '        rmdir -- "./$pr" 2>/dev/null || true',
+  '        case $pr in */*) pr=${pr%/*} ;; *) pr= ;; esac',
+  '      done',
+  '      if [ -e "./$first" ] || [ -L "./$first" ]; then left=1; fi',
+  '    fi',
   '    cd .. 2>/dev/null || left=1',
-  '    [ "$(stat -c "%d:%i" -- . 2>/dev/null)" = "$aid" ] || left=1',
+  '    [ "$(ident .)" = "$aid" ] || left=1',
   '  else',
   '    left=1',
   '  fi',
   '  if [ "$left" = 0 ]; then',
-  '    if [ "$(stat -c "%d:%i" -- "$stage" 2>/dev/null)" = "$sid" ]; then rmdir -- "$stage" 2>/dev/null || left=1; else left=1; fi',
+  '    if [ "$(ident "$stage")" = "$sid" ]; then rmdir -- "$stage" 2>/dev/null || left=1; else left=1; fi',
   '  fi',
   `  if [ "$left" = 1 ]; then echo "set-up of $p left a staging directory behind: $d_stage" >&2; exit ${WRITE_EXIT.unfinished}; fi`,
   '}',
@@ -274,23 +309,29 @@ const DIRECTORY_SCRIPT = [
   'trap \'exit 1\' HUP INT TERM PIPE',
   `stage=$(mktemp -d "./.sencho-new.XXXXXX" 2>/dev/null) || { stage=; echo "could not create: $p" >&2; exit ${WRITE_EXIT.notCreated}; }`,
   'd_stage="$anc/${stage#./}"',
-  'sid=$(stat -c "%d:%i" -- "$stage" 2>/dev/null) || sid=',
-  `cd -P -- "$stage" 2>/dev/null && [ "$(stat -c "%d:%i" -- . 2>/dev/null)" = "$sid" ] && [ "$(stat -c "%d:%i" -- .. 2>/dev/null)" = "$aid" ] || { echo "changed while it was set up: $p" >&2; exit ${WRITE_EXIT.unfinished}; }`,
+  'sid=$(ident "$stage") || sid=',
+  `cd -P -- "$stage" 2>/dev/null && [ "$(ident .)" = "$sid" ] && [ "$(ident ..)" = "$aid" ] || { echo "changed while it was set up: $p" >&2; exit ${WRITE_EXIT.unfinished}; }`,
   'inside=1',
   'rest=${below#/}',
   'while [ -n "$rest" ]; do',
   '  c=${rest%%/*}',
   '  case $rest in */*) rest=${rest#*/}; more=1 ;; *) rest=; more=0 ;; esac',
-  '  rel=${rel:+$rel/}$c',
+  '  next=${rel:+$rel/}$c',
+  `  mkdir -- "./$next" 2>/dev/null || { echo "could not create: $p" >&2; exit ${WRITE_EXIT.notCreated}; }`,
+  // What was made so far is what a stop or a failure removes, deepest first.
+  '  rel=$next; acc=${acc%/}/$c',
   '  [ -n "$top" ] || top=$c',
-  `  mkdir -- "./$rel" 2>/dev/null || { echo "could not create: $p" >&2; exit ${WRITE_EXIT.notCreated}; }`,
-  // Parents get the usual 0755 (install -d did the same); the mode and owner below are for the directory itself.
+  // A parent keeps the owner it was made with; the directory itself is recorded below, once it has its planned owner.
+  '  if [ "$more" = 1 ]; then mnew="$mnew$(ident "./$rel")$(printf "\\t")$acc$nl"; fi',
+  // A parent gets mode 0755; the planned mode and owner below are for the directory itself.
   `  if [ "$more" = 1 ]; then chmod 0755 -- "./$rel" 2>/dev/null || { echo "could not set the mode of a parent of $p" >&2; exit ${WRITE_EXIT.notCreated}; }; fi`,
   'done',
   `chown "$o:$g" -- "./$rel" 2>/dev/null || { echo "could not set the owner of $p" >&2; exit ${WRITE_EXIT.notCreated}; }`,
   `chmod "$m" -- "./$rel" 2>/dev/null || { echo "could not set the mode of $p" >&2; exit ${WRITE_EXIT.notCreated}; }`,
-  'topid=$(stat -c "%d:%i" -- "./$top"); leafid=$(stat -c "%d:%i" -- "./$rel")',
-  `[ "$(stat -c "%d:%i" -- ..)" = "$aid" ] || { echo "changed while it was set up: $p" >&2; exit ${WRITE_EXIT.notCreated}; }`,
+  // The identity includes the owner, which the chown above may have changed (a directory made as root and handed over).
+  'topid=$(ident "./$top"); leafid=$(ident "./$rel")',
+  'mnew="$mnew$leafid$(printf "\\t")$acc$nl"',
+  `[ "$(ident ..)" = "$aid" ] || { echo "changed while it was set up: $p" >&2; exit ${WRITE_EXIT.notCreated}; }`,
   // The rename is told not to replace; where mv checks first instead, whatever
   // is at the name is seen in the check, and a name taken in between can only be
   // an empty directory, which is the one thing a rename may replace.
@@ -299,27 +340,34 @@ const DIRECTORY_SCRIPT = [
   `if [ -e "./$top" ] || [ -L "./$top" ]; then echo "already exists: $p" >&2; exit ${WRITE_EXIT.exists}; fi`,
   'published=1',
   // From here the directory is in place; what it is must be what was made.
-  `[ "$(stat -c "%d:%i" -- "../$top" 2>/dev/null)" = "$topid" ] && [ "$(stat -c "%d:%i" -- "../$rel" 2>/dev/null)" = "$leafid" ] || { echo "changed while it was set up: $p" >&2; exit ${WRITE_EXIT.unfinished}; }`,
-  `printf '${DIRECTORY_IDENTITY_PREFIX}%s\\n' "$leafid"`,
+  `[ "$(ident "../$top")" = "$topid" ] && [ "$(ident "../$rel")" = "$leafid" ] || { echo "changed while it was set up: $p" >&2; exit ${WRITE_EXIT.unfinished}; }`,
+  `printf '%s' "$mnew" | sed 's/^/${DIRECTORY_MADE_PREFIX}/'`,
 ].join('\n');
 
 /**
- * Create the directory `dirPath` and any missing parents (as `install -d`
- * did) with the mode and owner, changing only directories it created (and the
- * one existing directory `allowExisting` accepts). A name that exists is
+ * Create the directory `dirPath` and any missing parents with the mode and
+ * owner (parents get 0755), changing only directories it built itself, plus
+ * the one existing directory `allowExisting` accepts. A name that exists is
  * refused, a symlink never followed; `allowExisting` accepts an existing real
  * directory (the apt keyring directory) and applies the mode and owner to that
- * directory itself, never through a symlink. The nearest existing
- * ancestor may itself be a symlink, which the plan discloses; it is entered
- * once and the new directories are made inside the directory it led to.
+ * directory itself, never through a symlink. The nearest existing ancestor may
+ * itself be a symlink, which the plan discloses; it is entered once and the new
+ * directories are made inside the directory it led to.
+ *
  * `approved` is the physical path the plan approved for `dirPath` and
- * `binding` the identity of the directory the script starts from (the nearest
- * existing ancestor, or the existing directory itself): every directory the
- * script enters must be on the way to exactly that path and be that very
- * directory, so an ancestor swapped before the script started is refused.
- * Directories are built privately and moved into place whole, so no directory
- * at the final name is ever changed in place; a successful run ends by printing
- * the identity of the directory it made (`SENCHO_DIR_IDENTITY=`).
+ * `binding` the identity (see BIND_DIRECTORY) of the directory the script
+ * starts from: the nearest existing ancestor, or the existing directory itself
+ * under `allowExisting`. Every directory the script enters must be on the way
+ * to exactly that path and be that very directory, so an ancestor swapped
+ * before the script started is refused. The script reads the directories earlier
+ * steps of the run made from standard input (`madeDirectoriesInput`; the caller
+ * always sends it), because a second directory made below a parent the first
+ * one created starts from a directory the plan could not name.
+ *
+ * A new directory is built in a private staging directory and moved into place
+ * whole, so no directory at the final name is ever changed in place. A run that
+ * built one ends by printing a `SENCHO_DIR_MADE=` line (identity, a tab, the
+ * physical path) for each directory it made, the parents included.
  */
 export function createDirectoryCommand(
   dirPath: string,
@@ -330,8 +378,14 @@ export function createDirectoryCommand(
   return withSudo(`sh -c ${shellQuote(DIRECTORY_SCRIPT)} sencho-mkdir ${args}`, options.sudo);
 }
 
-/** Exit codes of the start script: a directory that is not the approved one, then an input file that is not the one that was written. */
-export const START_EXIT = { notDirectory: WRITE_EXIT.notDirectory, inputChanged: WRITE_EXIT.notRegular } as const;
+/**
+ * Exit codes of the start script: a directory that is not the approved one, an
+ * input file that is not the file the plan names, and standard input that
+ * ended before the script had everything it compares against. They are kept
+ * apart from the codes Docker and Compose exit with, so a refusal is never
+ * mistaken for the start having begun (or the reverse).
+ */
+export const START_EXIT = { notDirectory: 70, inputChanged: 71, inputIncomplete: 72 } as const;
 
 const START_SCRIPT = [
   'set -eu',
@@ -343,6 +397,9 @@ const START_SCRIPT = [
   'IFS= read -r cid || cid=',
   'IFS= read -r csha || csha=',
   'IFS= read -r casha || casha=',
+  // A session that dropped inside the last value would otherwise read as "no hub CA", which skips its check.
+  'IFS= read -r end || end=',
+  `[ "$end" = end ] || { echo "the start input is incomplete" >&2; exit ${START_EXIT.inputIncomplete}; }`,
   ENTER_DIRECTORY,
   `enter "$d" "$e" "$id" || { echo "not the approved directory, or it changed: $d" >&2; exit ${START_EXIT.notDirectory}; }`,
   // The Compose directory is bind-mounted by the name the compose file gives it,
@@ -354,8 +411,8 @@ const START_SCRIPT = [
   '}',
   `inputs_ok compose.yaml "$csha" || { echo "compose.yaml is not the file that was written" >&2; exit ${START_EXIT.inputChanged}; }`,
   `if [ -n "$casha" ]; then inputs_ok sencho-hub-ca.pem "$casha" || { echo "sencho-hub-ca.pem is not the file that was written" >&2; exit ${START_EXIT.inputChanged}; }; fi`,
-  // Compose reads everything relative to the directory the shell holds, never
-  // through the name that was approved. Both the Docker endpoint and the Compose
+  // Compose reads its own files relative to the directory the shell holds, never
+  // through the name that was approved (the daemon still resolves the bind-mounted paths itself). Both the Docker endpoint and the Compose
   // project are pinned: a configured remote context or ambient Compose variable
   // must not change which daemon or project this starts.
   `exec env ${DOCKER_LOCAL_UNSET_ARGS} -u COMPOSE_FILE -u COMPOSE_PROJECT_NAME -u COMPOSE_PROFILES ${DOCKER_LOCAL_ASSIGNMENTS} docker compose --project-name ${PILOT_PROJECT_NAME} --project-directory . -f ./compose.yaml up -d`,
@@ -365,11 +422,12 @@ const START_SCRIPT = [
  * Start the Pilot project from the directory the plan approved, without opening
  * its name again: the script enters the directory by identity, checks that the
  * Compose directory the compose file mounts is still the approved one and that
- * `compose.yaml` and the hub CA are the files that were written, then runs
+ * `compose.yaml` and the hub CA are the files the plan names (by SHA-256), then runs
  * Compose against the directory it holds. Standard input carries, one per line,
  * the identity of the agent directory, the identity of the Compose directory,
- * the sha256 of the compose file and the sha256 of the hub CA (empty when the
- * plan has none); see `startInput`.
+ * the sha256 of the compose file, the sha256 of the hub CA (empty when the
+ * plan has none) and the word `end`, without which the input is refused as cut
+ * short; see `startInput`.
  */
 export function startProjectCommand(
   agentDir: { path: string; approved: string },
@@ -382,7 +440,7 @@ export function startProjectCommand(
 
 /** The standard input `startProjectCommand` reads. */
 export function startInput(input: { agentIdentity: string; composeIdentity: string; composeSha256: string; caSha256: string | null }): string {
-  return `${input.agentIdentity}\n${input.composeIdentity}\n${input.composeSha256}\n${input.caSha256 ?? ''}\n`;
+  return `${input.agentIdentity}\n${input.composeIdentity}\n${input.composeSha256}\n${input.caSha256 ?? ''}\nend\n`;
 }
 
 export const READ_EXIT = { missing: 3, notRegular: 4 } as const;

@@ -14,8 +14,8 @@ import type {
 /** The identity the preflight would record: the directory's own when it exists, else its nearest existing ancestor's. */
 function identities(exists: boolean, overrides: { identity?: string | null; nearestExistingAncestorIdentity?: string | null }): { identity: string | null; nearestExistingAncestorIdentity: string | null } {
   return {
-    identity: exists ? '2049:1001' : null,
-    nearestExistingAncestorIdentity: exists ? null : '2049:2002',
+    identity: exists ? '2049:1001:1000:-' : null,
+    nearestExistingAncestorIdentity: exists ? null : '2049:2002:1000:-',
     ...overrides,
   };
 }

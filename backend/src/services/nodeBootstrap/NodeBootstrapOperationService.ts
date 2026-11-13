@@ -478,10 +478,11 @@ export class NodeBootstrapOperationService {
    * The runs that still hold their server, a page at a time (newest first),
    * and with the first page the latest finished ones. A hold is the way back
    * to a run that needs recovery, so every one is reachable: each page names
-   * where the next begins, and a page reads only the rows it returns: the
-   * database seeks to the cursor in an index and reads on from there (the
-   * finished history reads the newest rows of its own index), and the page is
-   * then reconciled and answered, however many holds have piled up. The cursor is a position, not
+   * where the next begins, and a page reads one row more than it returns (to
+   * know whether another follows) and no others: the database seeks to the
+   * cursor in an index and reads on from there (the finished history reads the
+   * newest rows of its own index), and the page is then reconciled and answered,
+   * however many holds have piled up. The cursor is a position, not
    * an offset, so a run that settles or is released while an operator pages
    * never makes another one slip past.
    */

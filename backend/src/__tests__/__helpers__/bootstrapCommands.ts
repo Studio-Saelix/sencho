@@ -1,4 +1,5 @@
 import fs from 'fs';
+import { execFileSync } from 'child_process';
 import path from 'path';
 import { createDirectoryCommand, writeFileCommand } from '../../services/nodeBootstrap/executionCommands';
 
@@ -34,8 +35,12 @@ function isLink(target: string): boolean {
 export function approvedIdentity(target: string): string {
   let existing = path.resolve(target);
   while (!fs.existsSync(existing) && !isLink(existing)) existing = path.dirname(existing);
-  const stat = fs.statSync(existing, { bigint: true });
-  return `${stat.dev}:${stat.ino}`;
+  return identityOf(existing);
+}
+
+/** The identity the scripts compute for an existing directory: device, inode, owner uid and birth time (`stat -c %d:%i:%u:%w`, blanks removed). */
+export function identityOf(directory: string): string {
+  return execFileSync('stat', ['-L', '-c', '%d:%i:%u:%w', '--', directory], { encoding: 'utf8' }).trim().replace(/\s+/g, '');
 }
 
 type WriteOptions = { sudo: boolean; replaces: string | null; directory?: string; binding?: string };

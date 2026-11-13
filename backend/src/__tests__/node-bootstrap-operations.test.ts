@@ -122,7 +122,7 @@ class FakeHost {
     this.dirs.set('/etc/apt', { mode: '0755', owner: 'root', group: 'root' });
     this.dirs.set('/opt', { mode: '0755', owner: 'root', group: 'root' });
     this.dirs.set('/etc/apt/sources.list.d', { mode: '0755', owner: 'root', group: 'root' });
-    this.dirs.set('/opt/docker/sencho', { mode: '0755', owner: 'ubuntu', group: 'ubuntu', identity: '2049:1001' });
+    this.dirs.set('/opt/docker/sencho', { mode: '0755', owner: 'ubuntu', group: 'ubuntu', identity: '2049:1001:1000:-' });
   }
 
   public transport(): BootstrapExecTransport {
@@ -189,15 +189,19 @@ class FakeHost {
     if (makeDir) {
       const [, dir, mode, owner, group, allowExisting] = makeDir;
       if (this.dirs.has(dir) && allowExisting !== '1') return exit(17, `already exists: ${dir}`);
-      // Missing parents are created like install -d did, owned by whoever creates them.
+      // Missing parents are made too, and every directory made is reported with its identity, as the script does.
+      const made: string[] = [];
       for (let parent = dir.slice(0, dir.lastIndexOf('/')); parent && !this.dirs.has(parent); parent = parent.slice(0, parent.lastIndexOf('/'))) {
-        this.dirs.set(parent, { mode: '0755', owner: 'root', group: 'root' });
+        this.madeDirectories += 1;
+        const parentIdentity = `2049:${9000 + this.madeDirectories}:0:-`;
+        this.dirs.set(parent, { mode: '0755', owner: 'root', group: 'root', identity: parentIdentity });
+        made.unshift(`SENCHO_DIR_MADE=${parentIdentity}\t${parent}\n`);
       }
       this.madeDirectories += 1;
       // The Agent directory is the one the facts of a retry describe (see makeAgentDir), so it keeps that identity across attempts.
-      const identity = dir === '/opt/sencho-agent' ? '2049:1001' : `2049:${9000 + this.madeDirectories}`;
+      const identity = dir === '/opt/sencho-agent' ? '2049:1001:1000:-' : `2049:${9000 + this.madeDirectories}:1000:-`;
       this.dirs.set(dir, { mode, owner, group, identity });
-      return ok(`SENCHO_DIR_IDENTITY=${identity}\n`);
+      return ok(`${made.join('')}SENCHO_DIR_MADE=${identity}\t${dir}\n`);
     }
     if (/(^| )curl -fsSL https:\/\/download.docker.com\/linux\/ubuntu\/gpg$/.test(command)) return ok(DOCKER_KEY_ASC);
     if (command === APT_POLICY_COMMAND) return ok(this.policy);
@@ -1696,6 +1700,8 @@ describe('bootstrap operations: S2 every held run stays discoverable', () => {
       statement.all = (...args: unknown[]) => { seen.push({ sql, args }); return all(...args); };
       const runStatement = statement.run.bind(statement);
       statement.run = (...args: unknown[]) => { seen.push({ sql, args }); return runStatement(...args); };
+      const getStatement = (statement as unknown as { get: (...args: unknown[]) => unknown }).get.bind(statement);
+      (statement as unknown as { get: (...args: unknown[]) => unknown }).get = (...args: unknown[]) => { seen.push({ sql, args }); return getStatement(...args); };
       return statement;
     });
     try {
@@ -1710,7 +1716,7 @@ describe('bootstrap operations: S2 every held run stays discoverable', () => {
     }));
   }
 
-  it('seeks to a deep cursor and reads the finished history from its own index, so no page reads rows it does not return', () => {
+  it('seeks to a deep cursor and reads the finished history from its own index, so no page reads more than it returns and one more', () => {
     const h = harness();
     const ids = Array.from({ length: 45 }, (_, index) => insertHeld(index));
     for (const id of ids.slice(0, 5)) h.service.release(id, AUDIT);
@@ -1739,14 +1745,44 @@ describe('bootstrap operations: S2 every held run stays discoverable', () => {
   });
 
   it('trims the finished history through its own index, so starting a run never reads the holds', () => {
-    const h = harness();
-    const ids = Array.from({ length: 30 }, (_, index) => insertHeld(index));
-    const trim = queriesRun(() => { insertHeld(500); }).find((query) => query.sql.includes('DELETE FROM node_bootstrap_operations'));
+    // One transaction for the fixture rows: each commit is a disk sync, and the shape under test does not depend on them.
+    const ids = db.getDb().transaction(() => Array.from({ length: 30 }, (_, index) => insertHeld(index)))();
+    const queries = queriesRun(() => { ids.push(insertHeld(500)); });
+    const trim = queries.find((query) => query.sql.includes('DELETE FROM node_bootstrap_operations'));
     expect(trim).toBeDefined();
     expect(trim?.plan).toContain('idx_node_bootstrap_ops_finished_page');
     expect(trim?.plan).not.toContain('idx_node_bootstrap_ops_active_page');
     expect(trim?.plan).not.toContain('TEMP B-TREE');
-    for (const id of ids) h.service.release(id, AUDIT);
+    // Events go with the runs that were pruned, one by the operation index; there is no scan over every event.
+    expect(queries.filter((query) => query.sql.includes('node_bootstrap_events') && query.sql.includes('NOT IN'))).toEqual([]);
+    db.getDb().transaction(() => { for (const id of ids) db.transitionNodeBootstrapOperation(id, ['partial'], { active: 0 }, Date.now()); })();
+  });
+
+  it('keeps every hold and the newest finished runs when the history is trimmed, and drops only the pruned runs\' events', () => {
+    // The count of kept runs is exact, so the finished runs earlier tests left behind must not compete for the newest places.
+    db.getDb().prepare('DELETE FROM node_bootstrap_events').run();
+    db.getDb().prepare('DELETE FROM node_bootstrap_operations WHERE active = 0').run();
+    const { holds, finished } = db.getDb().transaction(() => ({
+      holds: Array.from({ length: 5 }, (_, index) => insertHeld(index)),
+      finished: Array.from({ length: 53 }, (_, index) => {
+        const id = insertHeld(1000 + index);
+        db.transitionNodeBootstrapOperation(id, ['partial'], { active: 0 }, Date.now());
+        db.appendNodeBootstrapEvent({ operation_id: id, attempt: 1, at: Date.now(), stage: null, step: null, status: 'info', message: `event for ${index}`, detail: null });
+        return id;
+      }),
+    }))();
+    // The next run to start trims the history to the newest 50 finished runs, however many holds there are.
+    const next = insertHeld(2000);
+    const kept = db.listFinishedNodeBootstrapOperations(500).map((op) => op.id);
+    expect(kept).toHaveLength(50);
+    expect(new Set(kept)).toEqual(new Set(finished.slice(3)));
+    for (const id of holds) expect(db.getNodeBootstrapOperation(id)).toMatchObject({ active: 1 });
+    for (const id of finished.slice(0, 3)) {
+      expect(db.getNodeBootstrapOperation(id)).toBeUndefined();
+      expect(db.listNodeBootstrapEvents(id)).toEqual([]);
+    }
+    for (const id of finished.slice(3)) expect(db.listNodeBootstrapEvents(id)).toHaveLength(1);
+    for (const id of [...holds, next]) db.transitionNodeBootstrapOperation(id, ['partial'], { active: 0 }, Date.now());
   });
 
   it('does not bring a released run back when a retry races the release', () => {

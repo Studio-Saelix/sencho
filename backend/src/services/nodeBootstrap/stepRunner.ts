@@ -7,7 +7,7 @@ import {
   PILOT_PROJECT_NAME,
 } from './pathPolicy';
 import {
-  DIRECTORY_IDENTITY_PREFIX,
+  DIRECTORY_MADE_PREFIX,
   READ_EXIT,
   START_EXIT,
   SYSTEM_DIRECTORY,
@@ -16,6 +16,7 @@ import {
   composeVersionCommand,
   dockerServiceStateCommand,
   dockerServerVersionCommand,
+  madeDirectoriesInput,
   readFileCommand,
   startInput,
   statCommand,
@@ -97,10 +98,10 @@ export interface StepContext {
   /** The Pilot compose file with the real token; called only for the compose step. */
   composeWithToken: () => string;
   /**
-   * The identity (`<device>:<inode>`) of each directory this run made, by the
-   * physical path the plan approved for it. A directory that did not exist when
-   * the plan was approved has no identity in the plan; the step that makes it
-   * records it here, and every later step that enters it is bound to that one.
+   * The identity of each directory this run made, by its physical path (the
+   * parents a directory step built are in it too). A directory that did not exist
+   * when the plan was approved has no identity in the plan; the step that makes
+   * it records it here, and every later step that enters it is bound to that one.
    */
   directories: Map<string, string>;
 }
@@ -298,9 +299,14 @@ export function approvedDirectory(plan: BootstrapPlan, directory: string): strin
  * Compose or Agent directory without either identity cannot be told from a
  * substitute, so the step refuses rather than write into it.
  */
+function isKnownDirectory(known: { input: string; realPath: string | null }, directory: string): boolean {
+  const wanted = withoutTrailingSlashes(directory);
+  return withoutTrailingSlashes(known.input) === wanted || (Boolean(known.realPath) && withoutTrailingSlashes(known.realPath as string) === wanted);
+}
+
 export function approvedBinding(plan: BootstrapPlan, ctx: Pick<StepContext, 'directories'>, directory: string): string {
   for (const known of [plan.paths.agentDir, plan.paths.composeDir]) {
-    if (withoutTrailingSlashes(known.input) !== withoutTrailingSlashes(directory)) continue;
+    if (!isKnownDirectory(known, directory)) continue;
     const identity = ctx.directories.get(known.realPath ?? known.input) ?? known.identity;
     if (!identity) {
       throw new StepFailure('failed', 'PLAN_INVALID', `The plan has no recorded identity for ${directory}, so it cannot be told from a directory that replaced it. Nothing was changed.`, null, { changedNothing: true });
@@ -524,7 +530,7 @@ async function runCommandStep(step: BootstrapPlanStep, ctx: StepContext, plan: B
   if (step.effect === 'package-install') await verifyDockerCandidates(ctx, step);
   const result = step.effect === 'package-metadata'
     ? await runMetadataRefresh(step, ctx)
-    : await ctx.session.run(step.command, { timeoutMs: step.timeoutMs });
+    : await ctx.session.run(step.command, { timeoutMs: step.timeoutMs, stdin: step.effect === 'directory-create' ? madeDirectoriesInput(ctx.directories) : undefined });
   const failure = transportFailure(result, step.title, step.timeoutMs, ctx.secrets);
   if (failure) throw failure;
   if (step.effect === 'directory-create' && step.target) {
@@ -534,13 +540,13 @@ async function runCommandStep(step: BootstrapPlanStep, ctx: StepContext, plan: B
       throw new StepFailure('recovery', 'FILE_CONFLICT', `${step.target.path} appeared on the host after the plan was approved. It was left as it is.`, detail, { changedNothing: true });
     }
     if (result.exitCode === WRITE_EXIT.notDirectory) {
-      throw new StepFailure('failed', 'DIRECTORY_CHANGED', `${step.target.path} is not where the plan approved it: a parent (the nearest one that exists, or one that appeared while the directory was made) is not a directory, or it, or one above it, was replaced or redirected. Nothing was created.`, detail, { changedNothing: true });
+      throw new StepFailure('failed', 'DIRECTORY_CHANGED', `${step.target.path} is not where the plan approved it: the directory it is made in (or the existing directory itself) is not the directory the plan was bound to, because it is not a directory any more or it, or one above it, was replaced or redirected. Nothing was created.`, detail, { changedNothing: true });
     }
     if (result.exitCode === WRITE_EXIT.notCreated) {
       throw new StepFailure('failed', 'STEP_FAILED', `"${step.title}" failed (exit ${result.exitCode}); nothing was created.`, detail, { changedNothing: true });
     }
     if (result.exitCode === WRITE_EXIT.unfinished) {
-      throw new StepFailure('recovery', 'DIRECTORY_NOT_FINISHED', `Setting up ${step.target.path} could not be finished: a directory on the way to it was created or adjusted and its owner or mode could not be set, what was found where it was made was not the directory just made, or a directory on the way is not owned by this user. Look at it on the host before retrying.`, detail);
+      throw new StepFailure('recovery', 'DIRECTORY_NOT_FINISHED', `Setting up ${step.target.path} could not be finished: the directory that was put in place could not be confirmed to be the one that was built, the owner or mode of an existing directory could not be set, or a hidden staging directory (.sencho-new.*) was left beside it. Look at it on the host before retrying.`, detail);
     }
   }
   if (result.exitCode !== 0) {
@@ -562,23 +568,26 @@ async function runCommandStep(step: BootstrapPlanStep, ctx: StepContext, plan: B
  * the script did not report cannot be bound, which is a state to look at.
  */
 function recordMadeDirectory(ctx: StepContext, plan: BootstrapPlan, directory: string, stdout: string): void {
-  const tracked = [plan.paths.agentDir, plan.paths.composeDir].find((known) => withoutTrailingSlashes(known.input) === withoutTrailingSlashes(directory));
-  if (!tracked) return;
-  const line = stdout.split('\n').map((text) => text.trim()).find((text) => text.startsWith(DIRECTORY_IDENTITY_PREFIX));
-  const identity = line?.slice(DIRECTORY_IDENTITY_PREFIX.length) ?? '';
-  if (!/^\d+:\d+$/.test(identity)) {
+  const made = new Map<string, string>();
+  for (const line of stdout.split('\n')) {
+    if (!line.startsWith(DIRECTORY_MADE_PREFIX)) continue;
+    const [identity, madePath] = line.slice(DIRECTORY_MADE_PREFIX.length).split('\t');
+    if (/^\d+:\d+:\d+:\S+$/.test(identity ?? '') && madePath?.startsWith('/')) made.set(madePath, identity);
+  }
+  for (const [madePath, identity] of made) ctx.directories.set(madePath, identity);
+  const tracked = [plan.paths.agentDir, plan.paths.composeDir].find((known) => isKnownDirectory(known, directory));
+  if (tracked && !made.has(tracked.realPath ?? tracked.input)) {
     throw new StepFailure('recovery', 'DIRECTORY_NOT_FINISHED', `${directory} was made, but the host did not say which directory it is, so nothing can be written into it safely. Look at it on the host before retrying.`);
   }
-  ctx.directories.set(tracked.realPath ?? tracked.input, identity);
 }
 
 /**
  * Start the Pilot project through the start script, which holds the approved
  * directory by identity and refuses when the directory, the Compose directory
- * the compose file mounts, or the files it reads are not the ones the run wrote
- * or approved. What the script has to compare against is not in the plan (the
- * token is in the compose file; a directory may have been made by this run), so
- * it goes in on standard input.
+ * the compose file mounts, or the files it reads are not the directories and
+ * files the plan names. What the script has to compare against is not all in the
+ * plan (the token is in the compose file; a directory may have been made by this
+ * run), so it goes in on standard input.
  */
 async function runStartStep(step: BootstrapPlanStep, ctx: StepContext, plan: BootstrapPlan): Promise<StepOutcome> {
   if (!step.command) {
@@ -598,8 +607,11 @@ async function runStartStep(step: BootstrapPlanStep, ctx: StepContext, plan: Boo
   if (result.exitCode === START_EXIT.notDirectory) {
     throw new StepFailure('failed', 'DIRECTORY_CHANGED', `The directory the Pilot starts from, or the Compose directory it mounts, is not the one the plan approved (it is not a directory any more, or it, or one of its parents, was replaced or redirected). Nothing was started.`, commandDetail(result, ctx.secrets), { changedNothing: true });
   }
+  if (result.exitCode === START_EXIT.inputIncomplete) {
+    throw new StepFailure('failed', 'START_INPUT_INCOMPLETE', 'The start input did not arrive in full, so nothing was started. The connection may have dropped.', commandDetail(result, ctx.secrets), { changedNothing: true });
+  }
   if (result.exitCode === START_EXIT.inputChanged) {
-    throw new StepFailure('failed', 'FILE_CONFLICT', `A file the Pilot starts from is not the one this run wrote. Nothing was started.`, commandDetail(result, ctx.secrets), { changedNothing: true });
+    throw new StepFailure('failed', 'FILE_CONFLICT', `A file the Pilot starts from is not the file the plan names (its SHA-256 differs, or it is a link or is missing). Nothing was started.`, commandDetail(result, ctx.secrets), { changedNothing: true });
   }
   if (result.exitCode !== 0) {
     throw new StepFailure('failed', 'STEP_FAILED', `"${step.title}" failed (exit ${result.exitCode}).`, commandDetail(result, ctx.secrets));

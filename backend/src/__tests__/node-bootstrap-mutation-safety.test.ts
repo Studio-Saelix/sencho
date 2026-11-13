@@ -4,9 +4,9 @@ import fs from 'fs';
 import os from 'os';
 import path from 'path';
 import { execFileSync, spawn, spawnSync } from 'child_process';
-import { READ_EXIT, WRITE_EXIT, startProjectCommand } from '../services/nodeBootstrap/executionCommands';
-import { approvedIdentity, approvedPath, directoryCommand, writeCommand } from './__helpers__/bootstrapCommands';
-import { StepFailure, TOKEN_PLACEHOLDER, approvedDirectory, runPlanStep, type StepContext } from '../services/nodeBootstrap/stepRunner';
+import { READ_EXIT, START_EXIT, WRITE_EXIT, madeDirectoriesInput, startInput, startProjectCommand } from '../services/nodeBootstrap/executionCommands';
+import { approvedIdentity, approvedPath, directoryCommand, identityOf, writeCommand } from './__helpers__/bootstrapCommands';
+import { StepFailure, TOKEN_PLACEHOLDER, approvedBinding, approvedDirectory, runPlanStep, type StepContext } from '../services/nodeBootstrap/stepRunner';
 import { buildPilotEnrollmentCompose } from '../helpers/pilotEnrollmentCompose';
 import { DOCKER_KEY_ASC } from './__helpers__/dockerRepoFixtures';
 import type { ExecOptions, ExecResult, ExecSession } from '../services/nodeBootstrap/sshExecClient';
@@ -334,7 +334,7 @@ function context(session: ExecSession, secrets: string[] = []): StepContext {
   return { session, signal: new AbortController().signal, note: () => undefined, secrets, directories: new Map(), composeWithToken: () => { throw new Error('not a compose step'); } };
 }
 
-const PLAN = { paths: { composeDir: { input: '/opt/docker/sencho', identity: '64768:300' }, agentDir: { input: '/opt/sencho-agent', identity: '64768:200' } } } as unknown as BootstrapPlan;
+const PLAN = { paths: { composeDir: { input: '/opt/docker/sencho', identity: '64768:300:1000:-' }, agentDir: { input: '/opt/sencho-agent', identity: '64768:200:1000:-' } } } as unknown as BootstrapPlan;
 
 function keyStep(dest: string, mode = '0644'): BootstrapPlanStep {
   return {
@@ -679,7 +679,7 @@ describe('B1: a stop in the middle of a replacement never loses or strands the c
   });
 });
 
-describe('B1: directory creation makes missing parents the way install -d did', () => {
+describe('B1: directory creation makes the missing parents too', () => {
   const dirSpec = { mode: '0700', owner, group };
 
   it('creates every missing parent with 0755 and gives only the directory itself the planned mode', () => {
@@ -923,7 +923,7 @@ describe('B1: execution is bound to the directory the plan approved', () => {
   it('refuses, through a step, a file written into an agent directory whose ancestor was replaced after the preflight', async () => {
     const { dir, decoyDir, approved } = arrangeSwappedAncestor();
     const identityBefore = approvedIdentity(dir);
-    const plan = { paths: { composeDir: { input: '/opt/docker/sencho', realPath: '/opt/docker/sencho', identity: '64768:300' }, agentDir: { input: dir, realPath: approved, identity: identityBefore } } } as unknown as BootstrapPlan;
+    const plan = { paths: { composeDir: { input: '/opt/docker/sencho', realPath: '/opt/docker/sencho', identity: '64768:300:1000:-' }, agentDir: { input: dir, realPath: approved, identity: identityBefore } } } as unknown as BootstrapPlan;
     const step = composeStep(path.join(dir, 'compose.yaml'));
     const racing = localSession({ beforeWrite: swapAncestor });
     const failure = await failureOf(() => runPlanStep(step, { ...context(racing, [NEW_TOKEN]), composeWithToken: () => composeWith(NEW_TOKEN) }, plan));
@@ -937,7 +937,7 @@ describe('B1: execution is bound to the directory the plan approved', () => {
     const link = path.join(root, 'link');
     fs.symlinkSync(path.join(root, 'data'), link);
     const dir = path.join(link, 'agent');
-    const plan = { paths: { composeDir: { input: '/opt/docker/sencho', realPath: '/opt/docker/sencho', identity: '64768:300' }, agentDir: { input: dir, realPath: approvedPath(dir), identity: approvedIdentity(dir) } } } as unknown as BootstrapPlan;
+    const plan = { paths: { composeDir: { input: '/opt/docker/sencho', realPath: '/opt/docker/sencho', identity: '64768:300:1000:-' }, agentDir: { input: dir, realPath: approvedPath(dir), identity: approvedIdentity(dir) } } } as unknown as BootstrapPlan;
     expect(approvedPath(dir)).toBe(fs.realpathSync(real));
     const outcome = await runPlanStep(composeStep(path.join(dir, 'compose.yaml')), { ...context(localSession(), [NEW_TOKEN]), composeWithToken: () => composeWith(NEW_TOKEN) }, plan);
     expect(outcome.status).toBe('done');
@@ -1039,6 +1039,7 @@ describe('B1: execution is bound to the directory the plan approved', () => {
       expect(result.status).toBe(WRITE_EXIT.exists);
       expect(modeOf(path.join(parent, 'agent'))).toBe(mode);
       expect(fs.readdirSync(path.join(parent, 'agent'))).toEqual(entries);
+      if (entries.includes('keep')) expect(fs.readFileSync(path.join(parent, 'agent', 'keep'), 'utf8')).toBe('operator');
       expect(stagingLeft(parent)).toEqual([]);
     });
 
@@ -1114,6 +1115,19 @@ describe('B1: execution is bound to the directory the plan approved', () => {
       const target = path.join(parent, 'agent');
       expect(runShell(directoryCommand(target, dirSpec, { sudo: false, allowExisting: false }), '', aclParent()).status).toBe(0);
       expect(modeOf(target)).toBe('700');
+    });
+
+    it('removes its staging directory, and makes nothing at the final name, when a stop lands while it builds', () => {
+      const parent = path.join(root, 'srv');
+      fs.mkdirSync(parent, { mode: 0o755 });
+      const dir = path.join(root, 'shim-stop');
+      fs.mkdirSync(dir);
+      const realMkdir = execFileSync('sh', ['-c', 'command -v mkdir'], { encoding: 'utf8' }).trim();
+      // The shell that called mkdir is stopped right after the first directory inside the staging directory was made.
+      fs.writeFileSync(path.join(dir, 'mkdir'), ['#!/bin/sh', `"${realMkdir}" "$@"; rc=$?`, 'case "$*" in "-- ./a") kill -TERM $PPID ;; esac', 'exit $rc'].join('\n'), { mode: 0o755 });
+      const result = runShell(directoryCommand(path.join(parent, 'a', 'agent'), dirSpec, { sudo: false, allowExisting: false }), '', { PATH: `${dir}:${process.env.PATH ?? ''}` });
+      expect(result.status).not.toBe(0);
+      expect(fs.readdirSync(parent)).toEqual([]);
     });
 
     it('still finishes a directory it made itself', () => {
@@ -1334,13 +1348,54 @@ describe('B1: a real directory put at the approved name is neither written, chan
     expectUntouched(dir);
   });
 
-  it('accepts the approved existing directory and reports its identity', () => {
+  it('accepts the approved existing directory and changes its mode', () => {
     const dir = path.join(root, 'keyrings');
     fs.mkdirSync(dir, { mode: 0o700 });
     const result = runShell(directoryCommand(dir, { mode: '0755', owner, group }, { sudo: false, allowExisting: true }));
     expect(result.status).toBe(0);
-    expect(result.stdout.trim()).toBe(`SENCHO_DIR_IDENTITY=${approvedIdentity(dir)}`);
     expect(modeOf(dir)).toBe('755');
+  });
+
+  it('reports the identity and path of every directory it made, the parents included', () => {
+    const parent = path.join(root, 'srv');
+    fs.mkdirSync(parent, { mode: 0o755 });
+    const target = path.join(parent, 'a', 'b', 'agent');
+    const result = runShell(directoryCommand(target, dirSpec, { sudo: false, allowExisting: false }));
+    expect(result.status).toBe(0);
+    const lines = result.stdout.trim().split('\n');
+    const real = fs.realpathSync(parent);
+    expect(lines).toEqual([
+      `SENCHO_DIR_MADE=${identityOf(path.join(parent, 'a'))}\t${path.join(real, 'a')}`,
+      `SENCHO_DIR_MADE=${identityOf(path.join(parent, 'a', 'b'))}\t${path.join(real, 'a', 'b')}`,
+      `SENCHO_DIR_MADE=${identityOf(target)}\t${path.join(real, 'a', 'b', 'agent')}`,
+    ]);
+  });
+
+  it('reports the owner the directory has once it was handed over, so a later write into it is bound to what it is', () => {
+    // Under sudo the script makes the directory as root and chowns it to the planned owner, which changes the
+    // owner field of its identity. `chown` and `stat` shims stand in for that: after a chown, `stat` reports another owner.
+    const shims = path.join(root, 'owner-shims');
+    fs.mkdirSync(shims);
+    const handed = path.join(shims, 'handed-over');
+    fs.writeFileSync(path.join(shims, 'chown'), ['#!/bin/sh', 'for a; do :; done', `"${REAL_STAT}" -c %i -- "$a" >> "${handed}"`, 'exit 0'].join('\n'), { mode: 0o755 });
+    fs.writeFileSync(path.join(shims, 'stat'), [
+      '#!/bin/sh',
+      `out=$("${REAL_STAT}" "$@") || exit $?`,
+      `if [ "$2" = "%d:%i:%u:%w" ] && grep -qx "$("${REAL_STAT}" -c %i -- "$4")" "${handed}" 2>/dev/null; then`,
+      `  printf '%s\\n' "$out" | awk -F: 'BEGIN { OFS = ":" } { $3 = "4242"; print }'`,
+      'else printf \'%s\\n\' "$out"; fi',
+    ].join('\n'), { mode: 0o755 });
+    const env = { PATH: `${shims}:${process.env.PATH ?? ''}` };
+    const parent = path.join(root, 'srv');
+    fs.mkdirSync(parent, { mode: 0o755 });
+    const target = path.join(parent, 'agent');
+    const made = runShell(directoryCommand(target, dirSpec, { sudo: false, allowExisting: false }), madeDirectoriesInput(new Map()), env);
+    expect(made.status).toBe(0);
+    const [identity, madePath] = made.stdout.trim().split('\n').pop()!.slice('SENCHO_DIR_MADE='.length).split('\t');
+    expect(identity.split(':')[2]).toBe('4242');
+    const written = runShell(writeCommand(path.join(target, 'compose.yaml'), { mode: '0600', owner, group, sha256: sha256('ours') }, { sudo: false, replaces: null, directory: madePath, binding: identity }), 'ours', env);
+    expect(written.status).toBe(0);
+    expect(fs.readFileSync(path.join(target, 'compose.yaml'), 'utf8')).toBe('ours');
   });
 
   it.each([
@@ -1366,7 +1421,7 @@ describe('B1: a real directory put at the approved name is neither written, chan
   });
 
   describe('through the steps', () => {
-    const composeDirIdentity = '64768:300';
+    const composeDirIdentity = '64768:300:1000:-';
     function planFor(dir: string, identity: string | null): BootstrapPlan {
       return { paths: { composeDir: { input: '/opt/docker/sencho', realPath: '/opt/docker/sencho', identity: composeDirIdentity }, agentDir: { input: dir, realPath: approvedPath(dir), identity } } } as unknown as BootstrapPlan;
     }
@@ -1594,6 +1649,38 @@ describe('B4: Compose starts only the approved project', () => {
     expect(dockerRuns()).toBe(0);
   });
 
+
+  it('hands nothing to Docker when its input stops inside the last value (a dropped session must not read as "no hub CA")', async () => {
+    const step = startStep(false);
+    const full = startInput({ agentIdentity: identity(agent), composeIdentity: identity(stacks), composeSha256: sha256(COMPOSE_TEXT), caSha256: sha256('a different CA') });
+    for (const cut of [full.length - 'end\n'.length, full.length - 'end\n'.length - 3, full.length - 1]) {
+      const result = runShell(step.command as string, full.slice(0, cut), env);
+      expect(result.status).toBe(START_EXIT.inputIncomplete);
+    }
+    expect(dockerRuns()).toBe(0);
+  });
+
+  it('hands nothing to Docker when the agent directory itself became a link to another project', async () => {
+    const step = startStep(false);
+    const plan = planOf();
+    const decoy = path.join(root, 'decoy-agent');
+    fs.mkdirSync(decoy, { mode: 0o700 });
+    fs.writeFileSync(path.join(decoy, 'compose.yaml'), COMPOSE_TEXT);
+    fs.writeFileSync(path.join(decoy, 'sencho-hub-ca.pem'), CA_TEXT);
+    fs.renameSync(agent, `${agent}.approved`);
+    fs.symlinkSync(decoy, agent);
+    const failure = await failureOf(() => runPlanStep(step, startContext(), plan));
+    expect(failure).toMatchObject({ kind: 'failed', code: 'DIRECTORY_CHANGED', changedNothing: true });
+    expect(dockerRuns()).toBe(0);
+  });
+
+  it('starts a plan that has no hub CA, without looking for one', async () => {
+    const step = startStep(false);
+    fs.unlinkSync(path.join(agent, 'sencho-hub-ca.pem'));
+    expect((await runPlanStep(step, startContext(), planOf(undefined, false))).status).toBe('done');
+    expect(dockerRuns()).toBe(1);
+  });
+
   it('refuses to start a project whose directories the plan holds no identity for', async () => {
     const step = startStep(false);
     const session = localSession({ env });
@@ -1655,5 +1742,150 @@ describe('B1: the apt directories are approved by their literal path and their o
     // /proc is a real directory owned by root, which this test user is not.
     const result = runShell(directoryCommand('/proc', spec, { sudo: false, allowExisting: true, binding: 'system', approved: '/proc' }));
     expect(result.status).toBe(WRITE_EXIT.notDirectory);
+  });
+});
+
+
+describe('B1: the apt writers are bound by the owner of the directory they enter', () => {
+  it.each([['docker.list', '0644'], ['docker.asc', '0644']])('writes %s into a directory owned by the user', (name, mode) => {
+    const dir = path.join(root, 'apt');
+    fs.mkdirSync(dir, { mode: 0o755 });
+    expect(runShell(writeCommand(path.join(dir, name), { mode, owner, group, sha256: sha256('ours') }, { sudo: false, replaces: null, binding: 'system' }), 'ours').status).toBe(0);
+    expect(fs.readFileSync(path.join(dir, name), 'utf8')).toBe('ours');
+  });
+
+  it.skipIf(IS_ROOT)('refuses to write docker.list or docker.asc into a directory another user owns, and replaces nothing there', () => {
+    // /proc is a real directory owned by root, which this test user is not; the script stops before it makes anything.
+    for (const name of ['docker.list', 'docker.asc']) {
+      const command = writeCommand(path.join('/proc', name), { mode: '0644', owner, group, sha256: sha256('ours') }, { sudo: false, replaces: sha256('old'), directory: '/proc', binding: 'system' });
+      expect(runShell(command, 'ours').status).toBe(WRITE_EXIT.notDirectory);
+    }
+  });
+});
+
+describe('B1: which identity a step enters a directory with', () => {
+  const plan = (agent: string | null, compose: string | null) => ({
+    paths: {
+      agentDir: { input: '/srv/agent', realPath: '/data/agent', identity: agent },
+      composeDir: { input: '/srv/stacks', realPath: null, identity: compose },
+    },
+  }) as unknown as BootstrapPlan;
+
+  it('takes the identity the plan recorded for the Agent and Compose directories, by the path typed or the one it resolves to', () => {
+    const ctx = { directories: new Map<string, string>() };
+    expect(approvedBinding(plan('1:2:3:a', '1:4:3:c'), ctx, '/srv/agent')).toBe('1:2:3:a');
+    expect(approvedBinding(plan('1:2:3:a', '1:4:3:c'), ctx, '/data/agent')).toBe('1:2:3:a');
+    expect(approvedBinding(plan('1:2:3:a', '1:4:3:c'), ctx, '/srv/stacks/')).toBe('1:4:3:c');
+  });
+
+  it('prefers the identity the run recorded when it made the directory', () => {
+    const ctx = { directories: new Map([['/data/agent', '9:9:9:made']]) };
+    expect(approvedBinding(plan('1:2:3:a', null), ctx, '/srv/agent')).toBe('9:9:9:made');
+  });
+
+  it('refuses a Compose or Agent directory it holds no identity for, rather than falling back to an owner check', () => {
+    expect(() => approvedBinding(plan(null, '1:4:3:c'), { directories: new Map() }, '/srv/agent')).toThrow(expect.objectContaining({ code: 'PLAN_INVALID', changedNothing: true }));
+  });
+
+  it('binds any other directory (the apt directories) by its owner', () => {
+    expect(approvedBinding(plan('1:2:3:a', '1:4:3:c'), { directories: new Map() }, '/etc/apt/keyrings')).toBe('system');
+  });
+});
+
+describe('B1: an identity is more than a device and an inode', () => {
+  const dirSpec = { mode: '0700', owner, group };
+
+  it('refuses a directory whose owner or birth time differs from the approved one, though its device and inode are the same', () => {
+    const dir = path.join(root, 'agent');
+    fs.mkdirSync(dir, { mode: 0o755 });
+    const [device, inode, uid, ...birthParts] = identityOf(dir).split(':');
+    const birth = birthParts.join(':');
+    const write = (binding: string) => runShell(writeCommand(path.join(dir, 'compose.yaml'), { ...file, sha256: sha256('ours') }, { sudo: false, replaces: null, binding }), 'ours');
+    expect(write(`${device}:${inode}:${Number(uid) + 1}:${birth}`).status).toBe(WRITE_EXIT.notDirectory);
+    expect(write(`${device}:${inode}:${uid}:${birth}x`).status).toBe(WRITE_EXIT.notDirectory);
+    expect(fs.readdirSync(dir)).toEqual([]);
+    expect(write(`${device}:${inode}:${uid}:${birth}`).status).toBe(0);
+  });
+
+  it('refuses a substitute that was given the approved directory\'s inode number back', () => {
+    if (identityOf(root).endsWith(':-')) return;
+    const dir = path.join(root, 'agent');
+    let reused = false;
+    for (let attempt = 0; attempt < 300 && !reused; attempt += 1) {
+      fs.mkdirSync(dir, { mode: 0o755 });
+      const approved = identityOf(dir);
+      const command = writeCommand(path.join(dir, 'compose.yaml'), { ...file, sha256: sha256('ours') }, { sudo: false, replaces: null, binding: approved });
+      fs.rmdirSync(dir);
+      fs.mkdirSync(dir, { mode: 0o700 });
+      fs.writeFileSync(path.join(dir, 'operator-data'), 'keep me');
+      const [device, inode] = approved.split(':');
+      if (identityOf(dir).startsWith(`${device}:${inode}:`)) {
+        reused = true;
+        expect(runShell(command, 'ours').status).toBe(WRITE_EXIT.notDirectory);
+        expect(fs.readdirSync(dir)).toEqual(['operator-data']);
+        expect(modeOf(dir)).toBe('700');
+      }
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+    // Where the filesystem never hands an inode back the loop proves nothing; the test above pins the comparison itself.
+    expect(typeof reused).toBe('boolean');
+  });
+
+  describe('two directories below a parent that does not exist yet', () => {
+    const spec = { mode: '0755', owner, group };
+    function arrange() {
+      const srv = path.join(root, 'srv');
+      fs.mkdirSync(srv, { mode: 0o755 });
+      const compose = path.join(srv, 'sencho', 'stacks');
+      const agent = path.join(srv, 'sencho', 'agent');
+      // Both are approved before either exists: each is bound to /srv, the nearest directory that exists.
+      return { srv, compose, agent, composeCommand: directoryCommand(compose, spec, { sudo: false, allowExisting: false }), agentCommand: directoryCommand(agent, dirSpec, { sudo: false, allowExisting: false }) };
+    }
+    const madeBy = (stdout: string) => new Map(stdout.trim().split('\n').map((line) => {
+      const [identity, madePath] = line.slice('SENCHO_DIR_MADE='.length).split('\t');
+      return [madePath, identity] as [string, string];
+    }));
+
+    it('makes the second one inside the parent the first one made, which only the run knows', () => {
+      const { compose, agent, composeCommand, agentCommand } = arrange();
+      const first = runShell(composeCommand);
+      expect(first.status).toBe(0);
+      expect(runShell(agentCommand, madeDirectoriesInput(madeBy(first.stdout))).status).toBe(0);
+      expect(modeOf(compose)).toBe('755');
+      expect(modeOf(agent)).toBe('700');
+    });
+
+    it('refuses the second one when the parent the first one made is not what it made', () => {
+      const { srv, composeCommand, agentCommand } = arrange();
+      const made = madeBy(runShell(composeCommand).stdout);
+      const parent = path.join(srv, 'sencho');
+      fs.renameSync(parent, `${parent}.made`);
+      fs.mkdirSync(parent, { mode: 0o700 });
+      fs.writeFileSync(path.join(parent, 'operator-data'), 'keep me');
+      expect(runShell(agentCommand, madeDirectoriesInput(made)).status).toBe(WRITE_EXIT.notDirectory);
+      expect(fs.readdirSync(parent)).toEqual(['operator-data']);
+      expect(modeOf(parent)).toBe('700');
+    });
+
+    it('refuses the second one without the list of what the run made, because the parent is not the one the plan was bound to', () => {
+      const { agent, composeCommand, agentCommand } = arrange();
+      expect(runShell(composeCommand).status).toBe(0);
+      expect(runShell(agentCommand, '').status).toBe(WRITE_EXIT.notDirectory);
+      expect(fs.existsSync(agent)).toBe(false);
+    });
+
+    it('works through the steps: the registry the first step fills is what the second step is run with', async () => {
+      const { compose, agent, composeCommand, agentCommand } = arrange();
+      const step = (command: string, dest: string, mode: string): BootstrapPlanStep => ({
+        id: 'create-dir', title: 'Create the directory', rationale: 'test', effect: 'directory-create', privilege: 'user', command,
+        target: { path: dest, mode, owner, group, preserveExisting: false }, disruptive: false, reversible: 'yes', pointOfNoReturn: false, timeoutMs: 10_000,
+      });
+      const plan = { paths: { composeDir: { input: compose, realPath: approvedPath(compose), identity: null }, agentDir: { input: agent, realPath: approvedPath(agent), identity: null } } } as unknown as BootstrapPlan;
+      const ctx = context(localSession());
+      expect((await runPlanStep(step(composeCommand, compose, '0755'), ctx, plan)).status).toBe('done');
+      expect((await runPlanStep(step(agentCommand, agent, '0700'), ctx, plan)).status).toBe('done');
+      expect(ctx.directories.get(approvedPath(agent))).toBe(identityOf(agent));
+      expect(ctx.directories.get(approvedPath(path.dirname(agent)))).toBe(identityOf(path.dirname(agent)));
+    });
   });
 });

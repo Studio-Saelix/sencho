@@ -474,7 +474,7 @@ export function buildBootstrapPlan(input: PlanBuildInput): BootstrapPlan {
     steps: [{
       id: 'start-agent',
       title: `Start the ${PILOT_PROJECT_NAME} project`,
-      rationale: 'The project name, directory and local Docker endpoint are pinned so ambient variables and contexts cannot change which project or daemon runs. The agent directory is entered by identity, and the compose file and hub CA are checked against what this run wrote, so a directory swapped in after the approval is not started.',
+      rationale: 'The project name, directory and local Docker endpoint are pinned so ambient variables and contexts cannot change which project or daemon runs. The agent directory is entered by identity, and the compose file and hub CA are checked against the plan, so a directory swapped in after the approval is not started.',
       effect: 'container-start',
       privilege: startSudo ? 'sudo' : 'user',
       command: startProjectCommand(

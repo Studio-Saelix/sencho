@@ -58,9 +58,9 @@ describe('bootstrap plan builder', () => {
     expect(step.privilege).toBe('user');
     expect(step.target).toMatchObject({ path: '/opt/docker/sencho', mode: '0755', owner: 'ubuntu', group: 'ubuntu' });
     // The directory is created, never entered by name twice: a name that exists is refused, and a symlink is never followed.
-    expect(step.command).toBe(createDirectoryCommand('/opt/docker/sencho', { mode: '0755', owner: 'ubuntu', group: 'ubuntu' }, { sudo: false, allowExisting: false, approved: '/opt/docker/sencho', binding: '2049:2002' }));
+    expect(step.command).toBe(createDirectoryCommand('/opt/docker/sencho', { mode: '0755', owner: 'ubuntu', group: 'ubuntu' }, { sudo: false, allowExisting: false, approved: '/opt/docker/sencho', binding: '2049:2002:1000:-' }));
     // ... and only the directory the preflight resolved: a path that leads elsewhere by then is refused.
-    expect(step.command).toMatch(/sencho-mkdir '\/opt\/docker\/sencho' '0755' 'ubuntu' 'ubuntu' '0' '\/opt\/docker\/sencho' '2049:2002'$/);
+    expect(step.command).toMatch(/sencho-mkdir '\/opt\/docker\/sencho' '0755' 'ubuntu' 'ubuntu' '0' '\/opt\/docker\/sencho' '2049:2002:1000:-'$/);
     expect(step.command).not.toContain('install -d');
   });
 
@@ -74,8 +74,8 @@ describe('bootstrap plan builder', () => {
     const steps = allSteps(planFor(facts));
     const compose = steps.find((entry) => entry.id === 'create-compose-dir');
     const agent = steps.find((entry) => entry.id === 'create-agent-dir');
-    expect(compose?.command).toMatch(/sencho-mkdir '\/opt\/docker\/sencho' '0755' 'ubuntu' 'ubuntu' '0' '\/mnt\/volume\/sencho' '2049:2002'$/);
-    expect(agent?.command).toMatch(/sencho-mkdir '\/opt\/sencho-agent' '0700' 'ubuntu' 'ubuntu' '0' '\/data\/agent' '2049:2002'$/);
+    expect(compose?.command).toMatch(/sencho-mkdir '\/opt\/docker\/sencho' '0755' 'ubuntu' 'ubuntu' '0' '\/mnt\/volume\/sencho' '2049:2002:1000:-'$/);
+    expect(agent?.command).toMatch(/sencho-mkdir '\/opt\/sencho-agent' '0700' 'ubuntu' 'ubuntu' '0' '\/data\/agent' '2049:2002:1000:-'$/);
     // The keyring directory is approved by its literal path.
     expect(steps.find((entry) => entry.id === 'docker-keyring-dir')?.command).toMatch(/sencho-mkdir '\/etc\/apt\/keyrings' '0755' 'root' 'root' '1' '\/etc\/apt\/keyrings' 'system'$/);
   });
@@ -521,25 +521,25 @@ describe('bootstrap plan privilege consistency and canonical names', () => {
 describe('bootstrap plan binds directories to what the preflight identified', () => {
   it('binds a new directory to the nearest existing ancestor the preflight identified', () => {
     const facts = makeFacts({
-      composeDir: { exists: false, isDirectory: false, nearestExistingAncestorIdentity: '64768:11', parentWritableByUser: true },
-      agentDir: { exists: false, isDirectory: false, nearestExistingAncestorIdentity: '64768:22', parentWritableByUser: true },
+      composeDir: { exists: false, isDirectory: false, nearestExistingAncestorIdentity: '64768:11:1000:-', parentWritableByUser: true },
+      agentDir: { exists: false, isDirectory: false, nearestExistingAncestorIdentity: '64768:22:1000:-', parentWritableByUser: true },
     });
     const steps = allSteps(planFor(facts));
-    expect(steps.find((entry) => entry.id === 'create-compose-dir')?.command).toMatch(/ '64768:11'$/);
-    expect(steps.find((entry) => entry.id === 'create-agent-dir')?.command).toMatch(/ '64768:22'$/);
+    expect(steps.find((entry) => entry.id === 'create-compose-dir')?.command).toMatch(/ '64768:11:1000:-'$/);
+    expect(steps.find((entry) => entry.id === 'create-agent-dir')?.command).toMatch(/ '64768:22:1000:-'$/);
   });
 
   it('records the identity of an existing directory in the plan, and none for one it creates', () => {
-    const existing = planFor(makeFacts({ composeDir: { identity: '64768:33' }, agentDir: { exists: true, isDirectory: true, identity: '64768:44', entries: [], writableByUser: true } }));
-    expect(existing.paths.composeDir.identity).toBe('64768:33');
-    expect(existing.paths.agentDir.identity).toBe('64768:44');
+    const existing = planFor(makeFacts({ composeDir: { identity: '64768:33:1000:-' }, agentDir: { exists: true, isDirectory: true, identity: '64768:44:1000:-', entries: [], writableByUser: true } }));
+    expect(existing.paths.composeDir.identity).toBe('64768:33:1000:-');
+    expect(existing.paths.agentDir.identity).toBe('64768:44:1000:-');
     const created = planFor(makeFacts({ composeDir: { exists: false, isDirectory: false, parentWritableByUser: true } }));
     expect(created.paths.composeDir.identity).toBeNull();
   });
 
   it('changes the plan digest when a directory is replaced by another one of the same name', () => {
-    const before = planFor(makeFacts({ agentDir: { exists: true, isDirectory: true, identity: '64768:44', entries: [], writableByUser: true } }));
-    const after = planFor(makeFacts({ agentDir: { exists: true, isDirectory: true, identity: '64768:45', entries: [], writableByUser: true } }));
+    const before = planFor(makeFacts({ agentDir: { exists: true, isDirectory: true, identity: '64768:44:1000:-', entries: [], writableByUser: true } }));
+    const after = planFor(makeFacts({ agentDir: { exists: true, isDirectory: true, identity: '64768:45:1000:-', entries: [], writableByUser: true } }));
     expect(after.evidenceDigest).not.toBe(before.evidenceDigest);
   });
 

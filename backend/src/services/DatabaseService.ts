@@ -6761,15 +6761,15 @@ stmt.run('gitops_schema_version', '1');
         try {
             this.db.transaction(() => {
                 insert.run(...columns.map((column) => op[column]));
-                this.db.prepare(
+                // Only finished runs are trimmed, newest kept, read through the finished index: the holds are never read.
+                const pruned = this.db.prepare(
                     `DELETE FROM node_bootstrap_operations WHERE active = 0 AND id NOT IN (
                         SELECT id FROM node_bootstrap_operations WHERE active = 0 ORDER BY created_at DESC, id DESC LIMIT ?
-                    )`
-                ).run(DatabaseService.BOOTSTRAP_OPERATION_HISTORY);
-                // The foreign key is declarative only, so pruned operations drop their events here.
-                this.db.prepare(
-                    'DELETE FROM node_bootstrap_events WHERE operation_id NOT IN (SELECT id FROM node_bootstrap_operations)'
-                ).run();
+                    ) RETURNING id`
+                ).all(DatabaseService.BOOTSTRAP_OPERATION_HISTORY) as Array<{ id: string }>;
+                // The foreign key is declarative only, so the events of the runs just pruned go here, by the operation index.
+                const dropEvents = this.db.prepare('DELETE FROM node_bootstrap_events WHERE operation_id = ?');
+                for (const { id } of pruned) dropEvents.run(id);
             })();
         } catch (error: unknown) {
             const message = error instanceof Error ? error.message : '';

@@ -126,9 +126,9 @@ export const PATH_FACTS_SCRIPT = [
   `d="$p"`,
   `while [ ! -e "$d" ] && [ "$d" != "/" ]; do d=$(dirname -- "$d"); done`,
   `printf 'P_NEAREST=%s\\n' "$d"`,
-  // Device and inode of the directory a path resolves to: execution writes only into this very directory.
-  `if [ -d "$p" ]; then printf 'P_IDENT=%s\\n' "$(stat -L -c '%d:%i' -- "$p" 2>/dev/null)"; fi`,
-  `if [ -d "$d" ]; then printf 'P_NEAREST_IDENT=%s\\n' "$(stat -L -c '%d:%i' -- "$d" 2>/dev/null)"; fi`,
+  // The identity of the directory a path resolves to (device, inode, owner and birth time, as the execution scripts take it): execution writes only into this very directory.
+  `if [ -d "$p" ]; then printf 'P_IDENT=%s\\n' "$(stat -L -c '%d:%i:%u:%w' -- "$p" 2>/dev/null | tr -d ' ')"; fi`,
+  `if [ -d "$d" ]; then printf 'P_NEAREST_IDENT=%s\\n' "$(stat -L -c '%d:%i:%u:%w' -- "$d" 2>/dev/null | tr -d ' ')"; fi`,
   `if [ -w "$d" ]; then printf 'P_PARENT_W=1\\n'; else printf 'P_PARENT_W=0\\n'; fi`,
   `if sudo -n true 2>/dev/null; then`,
   `  if [ -e "$p" ] && sudo -n test -r "$p" 2>/dev/null && sudo -n test -x "$p" 2>/dev/null; then printf 'P_SUDO_R=1\\n'; else printf 'P_SUDO_R=0\\n'; fi`,
@@ -1380,10 +1380,10 @@ export interface ParsedPathFacts extends PathObservation {
   raw: Map<string, string>;
 }
 
-/** A `<device>:<inode>` pair, or null for anything else. */
+/** A `<device>:<inode>:<owner uid>:<birth time>` identity (the birth time is `-` where the filesystem keeps none), or null for anything else. */
 function parseIdentity(value: string | undefined): string | null {
   const trimmed = value?.trim() ?? '';
-  return /^\d+:\d+$/.test(trimmed) ? trimmed : null;
+  return /^\d+:\d+:\d+:\S+$/.test(trimmed) ? trimmed : null;
 }
 
 export function parsePathFacts(text: string, input: string, kindLabel = 'path'): ParsedPathFacts {
