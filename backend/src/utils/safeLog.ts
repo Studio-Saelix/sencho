@@ -279,8 +279,13 @@ function redactImageInText(text: string, imageRef: string): string {
   // it, and a previous call's output contains it too. The quoted-name passes
   // have to tell text these passes reduced from text the daemon quoted, so
   // every replacement writes this per-call sentinel and the result turns it
-  // back into the marker. The random suffix keeps the input from forging it.
+  // back into the marker. The suffix pass writes a second sentinel around the
+  // fields it settled, so the no-suffix pass can tell a quote that already
+  // ended at the daemon's own closing parenthesis from one that may continue
+  // past a `)` inside the credential. Random suffixes keep the input from
+  // forging either.
   const sentinel = `\u0000${randomUUID()}\u0000`;
+  const settled = `\u0000${randomUUID()}\u0000`;
   const spellings = imageRef.includes('%')
     ? [...new Set([imageRef, decoded])]
     : [imageRef];
@@ -289,21 +294,38 @@ function redactImageInText(text: string, imageRef: string): string {
     out = out.split(spelling).join(`${sentinel}@${reference.rest}`);
   }
 
-  const { userinfo, rest } = reference;
   const bareFragments = new Set<string>();
   const anchoredFragments = new Set<string>();
-  if (userinfo.includes(':') || userinfo.length >= 8) bareFragments.add(userinfo);
-  const slash = userinfo.indexOf('/');
-  const tail = slash === -1 ? '' : userinfo.slice(slash + 1);
-  // Anchoring each fragment to the host's `@` keeps a short password piece
-  // from rewriting unrelated words. A `user:password` userinfo is
-  // credential-shaped even when short, and a long token is distinctive, so
-  // an echo of either is removed even without the host's `@`. A short
-  // token-only userinfo is removed only before the `@`: replacing a bare
-  // two- or three-letter token would rewrite ordinary words, and Docker's
-  // echo keeps the `@`.
-  anchoredFragments.add(userinfo);
-  if (tail) anchoredFragments.add(tail);
+  // The authored spelling is useful for a partial echo the daemon took before
+  // decoding, but only when its literal `@` is the same separator the decoded
+  // spelling ends at. A `%40` after the last literal `@` moves the separator
+  // into the encoded part, and the authored split would then treat the password
+  // tail as a repository.
+  const authored = authoredImageReference(imageRef);
+  const encodedSeparator = authoredSeparatorPrefix(imageRef);
+  for (const candidate of authored === null || authored.userinfo === reference.userinfo
+    ? [reference]
+    : [reference, authored]) {
+    const { userinfo } = candidate;
+    if (userinfo.includes(':') || userinfo.length >= 8) bareFragments.add(userinfo);
+    const slash = userinfo.indexOf('/');
+    const tail = slash === -1 ? '' : userinfo.slice(slash + 1);
+    // Anchoring each fragment to the host's `@` keeps a short password piece
+    // from rewriting unrelated words. A `user:password` userinfo is
+    // credential-shaped even when short, and a long token is distinctive, so
+    // an echo of either is removed even without the host's `@`. A short
+    // token-only userinfo is removed only before the `@`: replacing a bare
+    // two- or three-letter token would rewrite ordinary words, and Docker's
+    // echo keeps the `@`.
+    anchoredFragments.add(userinfo);
+    if (tail) anchoredFragments.add(tail);
+  }
+  if (encodedSeparator !== null) {
+    if (encodedSeparator.includes(':') || encodedSeparator.length >= 8) {
+      bareFragments.add(encodedSeparator);
+    }
+    anchoredFragments.add(encodedSeparator);
+  }
 
   for (const fragment of bareFragments) {
     if (!/[A-Za-z0-9]/.test(fragment)) continue;
@@ -313,9 +335,11 @@ function redactImageInText(text: string, imageRef: string): string {
   // so a quote that still holds the host keeps its redacted host/path context
   // instead of collapsing to a bare marker. Punctuation-only pieces carry no
   // credential value, and replacing them would mangle the rest of the message.
+  // The authored spelling can hide that anchor behind `%40`, so cover it too.
   for (const fragment of anchoredFragments) {
     if (!/[A-Za-z0-9]/.test(fragment)) continue;
     out = out.split(`${fragment}@`).join(`${sentinel}@`);
+    out = out.split(`${fragment}%40`).join(`${sentinel}%40`);
   }
   // The invalid-reference error quotes the repository name the daemon parsed,
   // which can come from a path it decoded, a Docker Hub name it normalized, or
@@ -325,12 +349,56 @@ function redactImageInText(text: string, imageRef: string): string {
   // redacted reference stay, and only the name is lost. A field an earlier pass
   // already reduced keeps the host context it still holds, but only when that
   // context is validated against the credential-free part of the reference.
-  out = redactQuotedRepositoryNames(out, rest, sentinel);
+  out = redactQuotedRepositoryNames(out, reference.rest, sentinel, settled);
   // A different daemon error shape may quote a name without either known
-  // suffix. Without a suffix its closing parenthesis is ambiguous, so redact
-  // the rest of the message rather than stop at one the name may hold.
-  out = redactNoSuffixQuotedNames(out, rest, sentinel);
-  return out.split(sentinel).join(REDACTION_MARKER);
+  // suffix. Its closing parenthesis is ambiguous, so every field the suffix
+  // pass did not settle takes the rest of the message with it.
+  out = redactNoSuffixQuotedNames(out, sentinel, settled);
+  return out.split(settled).join('').split(sentinel).join(REDACTION_MARKER);
+}
+
+/**
+ * Split the authored spelling only when its literal `@` is the separator the
+ * decoded spelling ends at. An encoded `@` after the last literal one is the
+ * real separator, and splitting the authored form there would call the
+ * password tail a repository.
+ */
+function authoredImageReference(image: string): { userinfo: string; rest: string } | null {
+  if (!image.includes('%')) return splitImageReference(image);
+  if (encodedSeparatorIndex(image) > headWithoutDigest(image).lastIndexOf('@')) return null;
+  return splitImageReference(image);
+}
+
+/** The reference without its `@algorithm:hex` digest tail. */
+function headWithoutDigest(image: string): string {
+  const digest = IMAGE_DIGEST_TAIL.exec(image);
+  return digest === null ? image : image.slice(0, digest.index);
+}
+
+/**
+ * The position of an encoded `@` that can be the credential separator: it must
+ * sit in the authority, before the first `/`. A `%40` in the repository path is
+ * ordinary text, not a separator, so search the authority alone rather than
+ * letting a later path escape hide an earlier separator.
+ */
+function encodedSeparatorIndex(image: string): number {
+  if (!image.includes('%')) return -1;
+  const slash = image.indexOf('/');
+  const authority = slash === -1 ? image : image.slice(0, slash);
+  return authority.toLowerCase().lastIndexOf('%40');
+}
+
+/**
+ * The authored credential text when `%40` is the separator and the authored
+ * split above is therefore unusable. A partial echo of that spelling still
+ * has to lose the password before the encoded `@`. A digest's literal `@` is
+ * not the credential separator, so read the last literal `@` from the
+ * digest-free head.
+ */
+function authoredSeparatorPrefix(image: string): string | null {
+  const encodedAt = encodedSeparatorIndex(image);
+  if (encodedAt === -1 || encodedAt <= headWithoutDigest(image).lastIndexOf('@')) return null;
+  return image.slice(0, encodedAt);
 }
 
 const REDACTION_MARKER = '[redacted]';
@@ -345,23 +413,18 @@ const QUOTED_REPOSITORY_NAME_SUFFIXES = [
  * Normalize a quoted repository name that an earlier pass reduced, or return
  * null when the name may still carry a credential. A bare `[redacted]` proves
  * nothing: a credential can contain the literal, and the daemon can quote it
- * inside a longer name. Only the per-call sentinel proves that a redaction pass
- * produced the text. The one exception is a field followed by a known suffix,
- * whose matched end is the daemon's own closing parenthesis, so a previous
- * call's marker shape can be kept for idempotence. A kept field is returned in
- * sentinel form: a bare marker stays bare, and `sentinel@` (or marker@) keeps
- * only a prefix of the credential-free rest of the reference, which by
- * construction contains no credential.
+ * inside a longer name. The per-call sentinel proves this call produced the
+ * text, and the caller only uses this helper where a known suffix gives the
+ * daemon's own closing parenthesis, so a previous call's marker shape can be
+ * kept there for idempotence. A kept field is returned in sentinel form: a
+ * bare marker stays bare, and `sentinel@` (or marker@) keeps only a prefix of
+ * the credential-free rest of the reference, which by construction contains no
+ * credential.
  */
-function keptRedactedContext(
-  quotedName: string,
-  safeRest: string,
-  sentinel: string,
-  allowPreviousOutput: boolean,
-): string | null {
+function keptRedactedContext(quotedName: string, safeRest: string, sentinel: string): string | null {
   const marker = quotedName.startsWith(sentinel)
     ? sentinel
-    : allowPreviousOutput && quotedName.startsWith(REDACTION_MARKER)
+    : quotedName.startsWith(REDACTION_MARKER)
       ? REDACTION_MARKER
       : null;
   if (marker === null) return null;
@@ -380,7 +443,7 @@ function keptRedactedContext(
  * scan is linear: a regular expression over the same text backtracks
  * quadratically on a message built from many `repository name (` runs.
  */
-function redactQuotedRepositoryNames(text: string, safeRest: string, sentinel: string): string {
+function redactQuotedRepositoryNames(text: string, safeRest: string, sentinel: string, settled: string): string {
   const phrase = 'repository name (';
   let out = '';
   let copied = 0;
@@ -405,8 +468,8 @@ function redactQuotedRepositoryNames(text: string, safeRest: string, sentinel: s
     }
     if (closeAt === -1) break;
     const quotedName = text.slice(openAt + phrase.length, closeAt);
-    const kept = keptRedactedContext(quotedName, safeRest, sentinel, true);
-    out += `${text.slice(copied, openAt)}repository name (${kept ?? sentinel})`;
+    const kept = keptRedactedContext(quotedName, safeRest, sentinel);
+    out += `${text.slice(copied, openAt)}repository name (${settled}${kept ?? sentinel})`;
     copied = closeAt + 1;
     searchFrom = closeAt + 1;
   }
@@ -421,12 +484,14 @@ function redactQuotedRepositoryNames(text: string, safeRest: string, sentinel: s
  * length.
  *
  * Without a recognised suffix there is no trusted end to the name: a `)` in a
- * credential would make the first one too early and leave the tail behind. Only
- * a field this call already reduced keeps its text; any other field takes the
- * rest of the message with it. A previous call's bare marker is not proof for
- * this pass: the daemon can quote that literal inside a longer credential.
+ * credential would make the first one too early and leave the tail behind.
+ * Even a field this call reduced can be followed by more of the credential, so
+ * only a field the suffix pass settled keeps its text; any other field takes
+ * the rest of the message with it. That drops the failure reason after an
+ * unrecognised shape, which is the safe direction: keeping it would keep the
+ * credential tail the same ambiguity hides.
  */
-function redactNoSuffixQuotedNames(text: string, safeRest: string, sentinel: string): string {
+function redactNoSuffixQuotedNames(text: string, sentinel: string, settled: string): string {
   const phrase = 'repository name (';
   let out = '';
   let copied = 0;
@@ -436,10 +501,7 @@ function redactNoSuffixQuotedNames(text: string, safeRest: string, sentinel: str
     if (openAt === -1) break;
     const closeAt = text.indexOf(')', openAt + phrase.length);
     const quotedName = closeAt === -1 ? '' : text.slice(openAt + phrase.length, closeAt);
-    const kept = closeAt === -1 ? null : keptRedactedContext(quotedName, safeRest, sentinel, false);
-    if (kept !== null) {
-      out += `${text.slice(copied, openAt)}repository name (${kept})`;
-      copied = closeAt + 1;
+    if (closeAt !== -1 && quotedName.startsWith(settled)) {
       searchFrom = closeAt + 1;
       continue;
     }

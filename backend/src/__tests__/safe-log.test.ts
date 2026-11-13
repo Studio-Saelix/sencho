@@ -792,6 +792,8 @@ describe('errorMessageForLog', () => {
     ['a marker before the credential', 'repository name ([redacted]x)SuperSecret)', 'SuperSecret', 'user:Ab/[redacted]SuperSecret:x@registry.example.com/app:latest'],
     ['a marker immediately before the ambiguous close', 'repository name ([redacted])SuperSecret)', 'SuperSecret', 'user:Ab/[redacted])SuperSecret:x@registry.example.com/app:latest'],
     ['a redacted context immediately before the ambiguous close', 'repository name ([redacted]@reg)SuperSecret)', 'SuperSecret', 'user:Ab/[redacted]@reg)SuperSecret:x@registry.example.com/app:latest'],
+    ['a reduced userinfo before the ambiguous close', 'repository name (user:Ab/SuperSecret:x)SuperSecret)', 'SuperSecret', 'user:Ab/SuperSecret:x@registry.example.com/app:latest'],
+    ['a reduced reference before the ambiguous close', 'repository name (user:Ab/SuperSecret:x@registry.example.com/app:latest)SuperSecret)', 'SuperSecret', 'user:Ab/SuperSecret:x@registry.example.com/app:latest'],
     ['a marker between the credential pieces', 'repository name (Super[redacted]Secret)', 'Secret', 'user:Ab/[redacted]SuperSecret:x@registry.example.com/app:latest'],
     ['a marker after the credential', 'repository name (SuperSecret[redacted])', 'SuperSecret', 'user:Ab/[redacted]SuperSecret:x@registry.example.com/app:latest'],
     ['an encoded marker', 'repository name ([redacted]SuperSecret)', 'SuperSecret', 'user:Ab/%5Bredacted%5DSuperSecret:x@registry.example.com/app:latest'],
@@ -817,6 +819,50 @@ describe('errorMessageForLog', () => {
 
     expect(text).not.toContain('pw');
     expect(text).toContain('[redacted]@host/app:latest');
+  });
+
+  it('redacts a partial authored echo of an encoded token', () => {
+    const image = 'ghp_ab%2fSuperSecret@registry.example.com/app:latest';
+    const text = errorMessageForLog(
+      new Error('failed to parse ghp_ab%2fSuperSecret for image'),
+      { imageRef: image },
+    );
+
+    expect(text).not.toContain('SuperSecret');
+    expect(text).toContain('failed to parse [redacted] for image');
+  });
+
+  it('redacts a partial authored echo whose @ is percent-encoded', () => {
+    const image = 'user@pw%40host/app:latest';
+    const text = errorMessageForLog(
+      new Error('connect failed for user@pw%40host/app TAILWORD'),
+      { imageRef: image },
+    );
+
+    expect(text).not.toContain('pw');
+    expect(text).toContain('[redacted]%40host/app TAILWORD');
+  });
+
+  it('redacts a partial authored echo when a path escape follows the authority', () => {
+    const image = 'user:pw%40host/app%40tail';
+    const text = errorMessageForLog(
+      new Error('failed for user:pw%40host/app: connect refused'),
+      { imageRef: image },
+    );
+
+    expect(text).not.toContain('pw');
+    expect(text).toContain('failed for [redacted]%40host/app: connect refused');
+  });
+
+  it('redacts a partial authored echo on a digest-pinned reference', () => {
+    const image = `user:pw%40host/app:latest@sha256:${'a'.repeat(64)}`;
+    const text = errorMessageForLog(
+      new Error('failed for user:pw%40host/app TAILWORD'),
+      { imageRef: image },
+    );
+
+    expect(text).not.toContain('pw');
+    expect(text).toContain('[redacted]%40host/app TAILWORD');
   });
 
   it('redacts past a marker-bearing field with no suffix to a later field', () => {
@@ -878,6 +924,25 @@ describe('errorMessageForLog', () => {
     const once = errorMessageForLog(new Error(body), { imageRef: image });
 
     expect(once).not.toContain('SuperSecret');
+    expect(errorMessageForLog(new Error(once), { imageRef: image })).toBe(once);
+  });
+
+  it('is idempotent after redacting a no-suffix quoted name', () => {
+    const image = 'user:Ab/SuperSecret:x@registry.example.com/app:latest';
+    const body =
+      'invalid reference format: repository name (user:Ab/SuperSecret:x@registry.example.com/app:latest)SuperSecret)';
+    const once = errorMessageForLog(new Error(body), { imageRef: image });
+
+    expect(once).not.toContain('SuperSecret');
+    expect(errorMessageForLog(new Error(once), { imageRef: image })).toBe(once);
+  });
+
+  it('is idempotent after redacting a partial authored echo', () => {
+    const image = 'user@pw%40host/app:latest';
+    const body = 'connect failed for user@pw%40host/app TAILWORD';
+    const once = errorMessageForLog(new Error(body), { imageRef: image });
+
+    expect(once).not.toContain('pw');
     expect(errorMessageForLog(new Error(once), { imageRef: image })).toBe(once);
   });
 
