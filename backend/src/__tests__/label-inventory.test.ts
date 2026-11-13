@@ -44,6 +44,37 @@ function stubRender(serviceLabels: Record<string, Record<string, string> | strin
   } as unknown as ComposeService);
 }
 
+/** Seed a git-source row whose applied deploy spec names a file outside the stack. */
+function seedEscapingDeploySpec(stackName: string): void {
+  const db = DatabaseService.getInstance();
+  db.upsertGitSource({
+    stack_name: stackName,
+    repo_url: 'https://github.com/example/repo.git',
+    branch: 'main',
+    compose_path: 'compose.yaml',
+    compose_paths: ['compose.yaml'],
+    context_dir: null,
+    sync_env: false,
+    env_path: null,
+    auth_type: 'none',
+    encrypted_token: null,
+    encrypted_deploy_key: null,
+    ssh_known_hosts_entry: null,
+    ssh_host_key_fingerprint: null,
+    encrypted_ca_bundle: null,
+    auto_apply_on_webhook: false,
+    auto_deploy_on_apply: false,
+    last_applied_commit_sha: null,
+    last_applied_content_hash: null,
+    pending_commit_sha: null,
+    pending_compose_content: null,
+    pending_env_content: null,
+    pending_fetched_at: null,
+    last_debounce_at: null,
+  });
+  db.setGitSourceAppliedSpec(stackName, { files: ['../qasrc/compose.yaml'], contextDir: null });
+}
+
 interface StubRow {
   id: string;
   name: string;
@@ -392,6 +423,27 @@ describe('buildStackLabelInventory', () => {
     expect(inv.renderable).toBe(false);
   });
 
+  it('degrades instead of throwing when the applied deploy spec names a file outside the stack', async () => {
+    writeStack('esc1', { 'compose.yaml': 'services:\n  web:\n    image: nginx\n' });
+    seedEscapingDeploySpec('esc1');
+    stubDockerList([
+      {
+        id: 'c1', name: 'esc1-web-1', state: 'running', stack: 'esc1', service: 'web', imageId: 'img1',
+        labels: { 'traefik.enable': 'true', 'com.docker.compose.service': 'web' },
+      },
+    ]);
+    const inv = await buildStackLabelInventory(nodeId, 'esc1');
+    // A refused spec is a failed render, not a server fault: the same degraded payload as
+    // any other render failure, so runtime data still renders.
+    expect(inv.renderable).toBe(false);
+    expect(inv.partial).toBe(false);
+    const rep = inv.services.find(s => s.service === 'web')?.replicas[0];
+    expect(rep?.runtimeLabels.find(l => l.key === 'traefik.enable')?.source).toBe('unknown');
+    expect(rep?.onlyInCompose).toEqual([]);
+    expect(rep?.onlyOnContainer).toEqual([]);
+    expect(rep?.changed).toEqual([]);
+  });
+
   it('resolves non-system labels to unknown and skips reconciliation when render fails', async () => {
     writeStack('rf1', { 'compose.yaml': 'services:\n  web:\n    image: nginx\n' });
     stubRender(null);
@@ -674,6 +726,15 @@ describe('GET /api/stacks/:stackName/label-inventory', () => {
     const res = await request(app).get('/api/stacks/route1/label-inventory').set('Cookie', authCookie);
     expect(res.status).toBe(200);
     expect(res.body.stackName).toBe('route1');
+  });
+
+  it('returns the degraded inventory instead of a 500 when the applied deploy spec escapes the stack', async () => {
+    writeStack('route2', { 'compose.yaml': 'services:\n  web:\n    image: nginx\n' });
+    seedEscapingDeploySpec('route2');
+    stubDockerList([]);
+    const res = await request(app).get('/api/stacks/route2/label-inventory').set('Cookie', authCookie);
+    expect(res.status).toBe(200);
+    expect(res.body.renderable).toBe(false);
   });
 });
 
