@@ -7,6 +7,8 @@ import { ComposeService } from './ComposeService';
 import DockerController from './DockerController';
 import { buildAuthoredProject, correlateLabel, isActingReason, type AuthoredProject } from './composeSource';
 import { redactLabelValue } from '../helpers/labelValueRedaction';
+import { DeploySpecRefusedError } from '../utils/authoredComposeArgs';
+import { getErrorMessage } from '../utils/errors';
 import { sanitizeForLog } from '../utils/safeLog';
 import {
   declaredLabelBehavior,
@@ -405,7 +407,6 @@ export async function buildStackLabelInventory(
   options: LabelInventoryOptions = {},
 ): Promise<StackLabelInventory> {
   const revealSecrets = options.revealSecrets === true;
-  const result = await ComposeService.getInstance(nodeId).renderConfig(stackName);
   let renderable = false;
   // A failed render leaves the declared map empty. Without the declared model we cannot
   // tell a Compose-declared label from a runtime one, so non-system runtime labels are
@@ -415,6 +416,23 @@ export async function buildStackLabelInventory(
   let renderFailed = false;
   const declaredByService = new Map<string, Record<string, string>>();
   let sencho: SenchoLabelResolution = unrenderableSenchoLabels();
+
+  const compose = ComposeService.getInstance(nodeId);
+  let result: Awaited<ReturnType<typeof compose.renderConfig>>;
+  try {
+    result = await compose.renderConfig(stackName);
+  } catch (error) {
+    // A stored deploy spec that is invalid or names a file or context directory outside
+    // the stack is refused before `docker compose` runs. That refusal is a property of
+    // the stack, not a server fault, so degrade the inventory exactly like a failed
+    // render instead of letting the throw reach the route as a 500. Every other render
+    // error still does.
+    if (!(error instanceof DeploySpecRefusedError)) throw error;
+    console.warn('[LabelInventory] Compose render refused for stack %s: %s',
+      sanitizeForLog(stackName), sanitizeForLog(getErrorMessage(error, 'unknown')));
+    result = { rendered: null, stderr: '', code: null, timedOut: false };
+    renderFailed = true;
+  }
 
   if (result.rendered !== null) {
     try {
@@ -428,7 +446,7 @@ export async function buildStackLabelInventory(
       console.error('[LabelInventory] Failed to parse rendered compose for stack %s:', sanitizeForLog(stackName), err);
       renderFailed = true;
     }
-  } else {
+  } else if (!renderFailed) {
     console.error('[LabelInventory] Compose render failed for stack %s (code %s): %s',
       sanitizeForLog(stackName), result.code, sanitizeForLog(result.stderr));
     renderFailed = true;
