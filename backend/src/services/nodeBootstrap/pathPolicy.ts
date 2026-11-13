@@ -178,61 +178,89 @@ export function shellQuote(value: string): string {
 }
 
 /**
- * The walk both the preflight and the start script use to tell whether a
- * directory can be changed only by root and by the account that runs the
- * bootstrap. Docker reads the compose file by name and the daemon resolves the
- * bind-mounted paths (the Compose directory, the hub CA) by name too, after
- * anything a script checked, and no script can hold those names through Docker's
- * own opening of them. What a script can do is refuse a place where anyone else
- * can put something at those names: every directory from the one given up to
- * `/` must be owned by root or by that account and must not be writable by
- * anyone else. Write permission for others, or for a group with a member other
- * than root and that account (a user's own private group, which most hosts give
- * every account, has none), is somebody else. A writable directory with the
- * sticky bit is the one exception, and only for a child owned by root or by that
- * account: such a directory lets nobody remove or rename another user's entry,
- * the way `/tmp` does. Access control lists are not read.
+ * The walk both the preflight and the start script use to tell whether the
+ * places Docker looks a path up in can be changed only by root and by the
+ * account that runs the bootstrap. Docker reads the compose file by name and the
+ * daemon resolves the bind-mounted paths (the Compose directory, the hub CA) by
+ * name too, after anything a script checked, and no script can hold those names
+ * through Docker's own opening of them. What a script can do is refuse a place
+ * where anyone else can put something at those names. A directory passes when
+ * it is owned by root or by that account and nobody else can write to it:
  *
- * `sealed DIR [above]` returns 0 when sealed, 1 for a directory that someone
- * else can change (named in `$bad`), 2 for one it could not inspect (also
- * `$bad`). With `above`, DIR's own owner and mode are left out (only its
- * ancestors and, for the sticky rule, its owner count): the Compose directory is
- * whatever the operator chose, and only the places that could replace it matter.
- * The account is the SSH user: the user itself, or under sudo the user that ran
- * it (`SUDO_UID`), never an arbitrary uid from the environment of a root session.
+ * - Write permission for others, or for a group, is somebody else, unless the
+ *   group is root's or the account's own (primary) group and has no member but
+ *   root and that account (the private group most hosts give every account has
+ *   none). A directory with an access control list that grants write through
+ *   the group bits is somebody else too.
+ * - A writable directory with the sticky bit is the one exception, and only for
+ *   an entry owned by root or by that account: such a directory lets nobody
+ *   remove or rename another user's entry, the way `/tmp` does.
+ *
+ * `sealed DIR [KIDOWNER]` walks DIR (a physical path) and every directory above
+ * it, `KIDOWNER` being the owner of the entry below DIR that the sticky rule may
+ * rely on. It returns 0 when sealed, 1 for a directory someone else can change
+ * (named in `$bad`), 2 for one it could not inspect (also `$bad`).
+ *
+ * `sealed_under NAME KIDOWNER` takes a directory as it is written, links
+ * included, and checks the place each of its components is looked up in: NAME
+ * resolved, then the directory NAME is in, and so on up, each one resolved and
+ * walked. A link in the name lives in a directory somebody could rewrite, and
+ * Docker follows the name as written, so the physical path alone is not enough.
+ * `KIDOWNER` is the owner of whatever is (or will be) in NAME.
+ *
+ * The account is the SSH user: the user itself, or, for root, the user sudo
+ * reports (`SUDO_UID`) when it is a number.
  */
 export const SEALED_DIRECTORY_SHELL = [
   'me=$(id -u); trusted=$me',
   'if [ "$me" = 0 ] && [ -n "${SUDO_UID-}" ]; then trusted=$SUDO_UID; fi',
   'case $trusted in ""|*[!0-9]*) trusted=0 ;; esac',
-  // Whether every member of a group, those listed and those who have it as their primary group, is root or the account.
+  // Whether a group may be written to: root's or the account's own, with no other member (listed or by primary group). A lookup that fails is never "yes".
   'group_ok() {',
+  '  if [ "$1" != 0 ]; then',
+  '    pg=$(getent passwd "$trusted" 2>/dev/null) || return 1',
+  '    pg=${pg#*:*:*:}; pg=${pg%%:*}',
+  '    [ "$1" = "$pg" ] || return 1',
+  '  fi',
   '  gl=$(getent group "$1" 2>/dev/null) || return 1',
   '  gl=${gl#*:*:*:}',
   '  for gn in $(printf "%s" "$gl" | tr "," " "); do',
   '    gu=$(id -u -- "$gn" 2>/dev/null) || return 1',
   '    if [ "$gu" != 0 ] && [ "$gu" != "$trusted" ]; then return 1; fi',
   '  done',
-  '  getent passwd 2>/dev/null | awk -F: -v g="$1" -v t="$trusted" \'$4 == g && $3 != 0 && $3 != t { bad = 1 } END { exit bad }\'',
+  '  pw=$(getent passwd 2>/dev/null) || return 1',
+  '  [ -n "$pw" ] || return 1',
+  '  printf "%s\\n" "$pw" | awk -F: -v g="$1" -v t="$trusted" \'$4 == g && $3 != 0 && $3 != t { bad = 1 } END { exit bad }\'',
   '}',
+  // Whether ls shows an access control list on the path (a `+` after the mode).
+  'has_acl() { al=$(ls -ld -- "$1" 2>/dev/null) || return 0; al=${al%% *}; case $al in *+) return 0 ;; esac; return 1; }',
   'sealed() {',
-  '  s=$1; kid=; skip=${2-}; bad=',
+  '  s=$1; kid=${2-}; prev=; bad=',
   '  while :; do',
   '    st=$(stat -c "%u %g %a" -- "$s" 2>/dev/null) || { bad=$s; return 2; }',
   '    o=${st%% *}; rest=${st#* }; g=${rest%% *}; m=${rest#* }',
-  '    if [ -n "$skip" ]; then skip=',
-  '    else',
-  '      if [ "$o" != 0 ] && [ "$o" != "$trusted" ]; then bad=$s; return 1; fi',
-  '      writable=0',
-  '      if [ $((0$m & 002)) -ne 0 ]; then writable=1; fi',
-  '      if [ $((0$m & 020)) -ne 0 ] && ! group_ok "$g"; then writable=1; fi',
-  '      if [ "$writable" = 1 ]; then',
-  '        if [ $((0$m & 01000)) -ne 0 ] && { [ "$kid" = 0 ] || [ "$kid" = "$trusted" ]; }; then :; else bad=$s; return 1; fi',
-  '      fi',
+  '    if [ "$o" != 0 ] && [ "$o" != "$trusted" ]; then bad=$s; return 1; fi',
+  '    writable=0',
+  '    if [ $((0$m & 002)) -ne 0 ]; then writable=1; fi',
+  '    if [ $((0$m & 020)) -ne 0 ] && { has_acl "$s" || ! group_ok "$g"; }; then writable=1; fi',
+  '    if [ "$writable" = 1 ]; then',
+  // Sticky and the entry below is ours: nobody else can remove or rename it. Otherwise the entry (when known) or the directory is what somebody else could replace.
+  '      if [ $((0$m & 01000)) -eq 0 ]; then bad=$s; return 1; fi',
+  '      if [ "$kid" != 0 ] && [ "$kid" != "$trusted" ]; then bad=${prev:-$s}; return 1; fi',
   '    fi',
-  '    kid=$o',
+  '    kid=$o; prev=$s',
   '    if [ "$s" = / ]; then return 0; fi',
   '    s=$(dirname -- "$s")',
+  '  done',
+  '}',
+  'sealed_under() {',
+  '  sn=$1; ko=$2',
+  '  while :; do',
+  '    pa=$(cd -P -- "$sn" 2>/dev/null && pwd -P) || { bad=$sn; return 2; }',
+  '    sealed "$pa" "$ko" || return $?',
+  '    if [ "$sn" = / ]; then return 0; fi',
+  '    ko=$(stat -c %u -- "$sn" 2>/dev/null) || { bad=$sn; return 2; }',
+  '    sn=$(dirname -- "$sn")',
   '  done',
   '}',
 ].join('\n');

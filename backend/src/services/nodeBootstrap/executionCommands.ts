@@ -49,11 +49,13 @@ export const WRITE_EXIT = {
  * substitute with an unrelated owner, mode and content could carry the
  * approved identity. The birth time of the new directory differs, and so does
  * its owner when another user made it. A filesystem that does not record birth
- * times reports `-` there, and such an identity is refused everywhere: without
- * a birth time nothing tells the generations of a directory apart, so the
+ * times reports `-` there, and such an identity is refused everywhere: without a
+ * birth time nothing tells the generations of a directory apart, so the
  * preflight offers no plan for a directory on one, and a script that meets one
- * (a directory it made, or one it is asked to enter) stops. `$made` (the directory script only) lists directories earlier steps
- * of the same run made, one `<identity><tab><physical path>` per line: a
+ * (a directory it made, or one it is asked to enter) stops; the `system` binding
+ * carries no identity and is unaffected. `$made` (the directory script only)
+ * lists directories earlier steps of the same run made, one
+ * `<identity><tab><physical path>` per line: a
  * directory the plan could not name, because it did not exist when the plan was
  * approved, is accepted when it is one of those at the path it was made.
  */
@@ -389,8 +391,10 @@ export function createDirectoryCommand(
 
 /**
  * Exit codes of the start script: a directory that is not the approved one, an
- * input file that is not the file the plan names, and standard input that
- * ended before the script had everything it compares against. They are chosen
+ * input file that is not the file the plan names, standard input that ended
+ * before the script had everything it compares against, and a place that
+ * someone but root and the SSH user could change (or that could not be
+ * inspected), which Docker would open by name after the checks. They are chosen
  * apart from the codes Docker and Compose normally exit with (1, 125 to 127,
  * and signals), so a refusal is not mistaken for the start having begun.
  */
@@ -417,14 +421,21 @@ const START_SCRIPT = [
   // Docker opens compose.yaml, and the daemon the bind sources, by name after
   // this script has looked at them, and nothing here can hold those names
   // through Docker's own opening. What is checked instead is who could change
-  // them: the Agent directory and every directory above it, and every directory
-  // above the Compose directory, must be changeable only by root and by the
-  // account that runs the bootstrap (SEALED_DIRECTORY_SHELL), and so must the
-  // two files, which must also be the files that were written (by SHA-256).
-  // Anyone else cannot put anything at those names between here and Docker.
+  // them (SEALED_DIRECTORY_SHELL): the Agent directory and every directory
+  // above it, the places the Compose directory is looked up in (by the name
+  // the compose file gives it, links included), and the two files must be
+  // changeable only by root and the account that runs the bootstrap; the files
+  // are also checked to be the files that were written (by SHA-256). Anyone
+  // else cannot put anything at those names between here and Docker.
   SEALED_DIRECTORY_SHELL,
-  `sealed "$e" || { echo "the Agent directory or a directory above it can be changed by another user: $bad" >&2; exit ${START_EXIT.notSealed}; }`,
-  `sealed "$ce" above || { echo "a directory above the Compose directory can be changed by another user: $bad" >&2; exit ${START_EXIT.notSealed}; }`,
+  'unsealed() {',
+  '  if [ "$1" = 2 ]; then echo "could not inspect $bad, so it is not known who can change $2" >&2',
+  '  else echo "$bad can be changed by another user, and Docker opens $2 by name after it was checked" >&2; fi',
+  `  exit ${START_EXIT.notSealed}`,
+  '}',
+  // The Agent directory is held: Compose runs from it, so what Docker looks up is under its physical path, which the entry above verified.
+  'sealed "$e" || unsealed $? "the Agent directory and the files in it"',
+  'sealed_under "$(dirname -- "$c")" "$(stat -c %u -- "$c")" || unsealed $? "the Compose directory"',
   'hash_of() { sha256sum -- "$1" | cut -d" " -f1; }',
   'inputs_ok() {',
   '  [ ! -L "./$1" ] && [ -f "./$1" ] && [ "$(hash_of "./$1")" = "$2" ]',
@@ -451,12 +462,13 @@ const START_SCRIPT = [
  * Start the Pilot project from the directory the plan approved, without opening
  * its name again: the script enters the directory by identity, checks that the
  * Compose directory the compose file mounts is still the approved one and that
- * `compose.yaml` and the hub CA are the files the plan names (by SHA-256), then runs
- * Compose against the directory it holds. Standard input carries, one per line,
- * the identity of the agent directory, the identity of the Compose directory,
- * the sha256 of the compose file, the sha256 of the hub CA (empty when the
- * plan has none) and the word `end`, without which the input is refused as cut
- * short; see `startInput`.
+ * `compose.yaml` and the hub CA are the files the plan names (by SHA-256), checks
+ * that nobody but root and the SSH user can change them or the places Docker
+ * looks them up in (see SEALED_DIRECTORY_SHELL), then runs Compose against the
+ * directory it holds. Standard input carries, one per line, the identity of the
+ * agent directory, the identity of the Compose directory, the sha256 of the
+ * compose file, the sha256 of the hub CA (empty when the plan has none) and the
+ * word `end`, without which the input is refused as cut short; see `startInput`.
  */
 export function startProjectCommand(
   agentDir: { path: string; approved: string },

@@ -131,10 +131,16 @@ export const PATH_FACTS_SCRIPT = [
   `if [ -d "$p" ]; then printf 'P_IDENT=%s\\n' "$(TZ=UTC0 stat -L -c '%d:%i:%u:%w' -- "$p" 2>/dev/null | tr -d ' ')"; fi`,
   `if [ -d "$d" ]; then printf 'P_NEAREST_IDENT=%s\\n' "$(TZ=UTC0 stat -L -c '%d:%i:%u:%w' -- "$d" 2>/dev/null | tr -d ' ')"; fi`,
   `if [ -w "$d" ]; then printf 'P_PARENT_W=1\\n'; else printf 'P_PARENT_W=0\\n'; fi`,
-  // Who could change the directories the start step relies on (see SEALED_DIRECTORY_SHELL): the chain from the path itself (its files), and the chain above it (the place it is mounted from).
+  // Who could change the directories the start step relies on (see SEALED_DIRECTORY_SHELL): the Agent directory and everything above it, and the places the Compose directory is looked up in, as the path is written (a link in it counts). A path that does not exist yet is judged by the nearest directory that does, which will hold an entry the SSH user owns.
   SEALED_DIRECTORY_SHELL,
-  `trust_line() { n=$1; shift; sealed "$@" && r=0 || r=$?; case $r in 0) printf 'P_%s=ok\\n' "$n" ;; 1) printf 'P_%s=open:%s\\n' "$n" "$bad" ;; *) printf 'P_%s=unreadable:%s\\n' "$n" "$bad" ;; esac; }`,
-  `if [ -d "$real" ]; then trust_line TRUST_SELF "$real"; trust_line TRUST_ABOVE "$real" above; elif [ -d "$d" ]; then trust_line TRUST_SELF "$d"; trust_line TRUST_ABOVE "$d"; fi`,
+  `trust_line() { n=$1; shift; "$@" && r=0 || r=$?; case $r in 0) printf 'P_%s=ok\\n' "$n" ;; 1) printf 'P_%s=open:%s\\n' "$n" "$bad" ;; *) printf 'P_%s=unreadable:%s\\n' "$n" "$bad" ;; esac; }`,
+  `if [ -d "$p" ] && [ ! -L "$p" ]; then`,
+  `  trust_line TRUST_SELF sealed_under "$p" ""`,
+  `  trust_line TRUST_ABOVE sealed_under "$(dirname -- "$p")" "$(stat -c %u -- "$p" 2>/dev/null)"`,
+  `elif [ -d "$d" ]; then`,
+  `  trust_line TRUST_SELF sealed_under "$d" "$trusted"`,
+  `  trust_line TRUST_ABOVE sealed_under "$d" "$trusted"`,
+  `fi`,
   `if sudo -n true 2>/dev/null; then`,
   `  if [ -e "$p" ] && sudo -n test -r "$p" 2>/dev/null && sudo -n test -x "$p" 2>/dev/null; then printf 'P_SUDO_R=1\\n'; else printf 'P_SUDO_R=0\\n'; fi`,
   `  if [ -e "$p" ] && sudo -n test -w "$p" 2>/dev/null; then printf 'P_SUDO_W=1\\n'; else printf 'P_SUDO_W=0\\n'; fi`,
@@ -1385,7 +1391,7 @@ export interface ParsedPathFacts extends PathObservation {
   raw: Map<string, string>;
 }
 
-/** A `<device>:<inode>:<owner uid>:<birth time>` identity (the birth time is `-` where the filesystem keeps none), or null for anything else. */
+/** A `<device>:<inode>:<owner uid>:<birth time>` identity, or null for anything else, including a `-` birth time (a filesystem that keeps none). */
 function parseIdentity(value: string | undefined): string | null {
   const trimmed = value?.trim() ?? '';
   // A directory whose creation time the host cannot give (`-`) cannot be told from another one that reused its inode, so it has no identity.

@@ -235,20 +235,19 @@ function unidentifiedDirectory(path: PathObservation, base: { id: 'compose_dir' 
 function unsealedDirectory(path: PathObservation, kind: 'compose' | 'agent', base: { id: 'compose_dir' | 'agent_dir'; category: 'paths'; label: string }): BootstrapCheck | null {
   const chain = kind === 'agent' ? path.trustSelf : path.trustAbove;
   if (!chain || chain.state === 'sealed') return null;
-  const what = kind === 'agent' ? 'The Agent directory, or a directory above it,' : 'A directory above the Compose directory';
   if (chain.state === 'unreadable') {
     return {
       ...base,
       status: 'unknown',
       summary: `${chain.at} could not be inspected, so it cannot be told who can change ${kind === 'agent' ? `${path.input} and the files the Pilot starts from` : `the place ${path.input} is mounted from`}.`,
-      remediation: 'Grant the SSH user search access to that directory, or choose a path whose parent directories it can inspect, then run the preflight again.',
+      remediation: 'Grant the SSH user search access to the directory above it, or choose a path whose parent directories it can inspect, then run the preflight again.',
     };
   }
   return {
     ...base,
     status: 'blocked',
-    summary: `${what} (${chain.at}) can be changed by a user other than root and the SSH user. Docker opens the compose file, the hub CA and the mounted directories by name after Sencho has checked them, so the Pilot would not be started from them.`,
-    remediation: `Make ${chain.at} owned by root or the SSH user and remove group and other write permission (for example chmod go-w), or choose a directory under one that is, then run the preflight again.`,
+    summary: `${chain.at} can be changed by a user other than root and the SSH user. Docker opens ${kind === 'agent' ? 'the compose file, the hub CA and the directories above them' : 'the Compose directory'} by name after Sencho has checked it, so the Pilot would not be started from ${path.input}.`,
+    remediation: `Make ${chain.at} owned by root or the SSH user and remove group and other write permission (for example chmod go-w), or choose a directory in a place that is already closed, then run the preflight again.`,
   };
 }
 

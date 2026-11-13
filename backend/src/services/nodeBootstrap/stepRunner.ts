@@ -588,9 +588,11 @@ function recordMadeDirectory(ctx: StepContext, plan: BootstrapPlan, directory: s
  * Start the Pilot project through the start script, which holds the approved
  * directory by identity and refuses when the directory, the Compose directory
  * the compose file mounts, or the files it reads are not the directories and
- * files the plan names. What the script has to compare against is not all in the
- * plan (the token is in the compose file; a directory may have been made by this
- * run), so it goes in on standard input.
+ * files the plan names, or when anyone but root and the SSH user could change
+ * what Docker opens by name after those checks (the Agent directory, the places
+ * the Compose directory is looked up in, the two files). What the script has to
+ * compare against is not all in the plan (the token is in the compose file; a
+ * directory may have been made by this run), so it goes in on standard input.
  */
 async function runStartStep(step: BootstrapPlanStep, ctx: StepContext, plan: BootstrapPlan): Promise<StepOutcome> {
   if (!step.command) {
@@ -611,7 +613,7 @@ async function runStartStep(step: BootstrapPlanStep, ctx: StepContext, plan: Boo
     throw new StepFailure('failed', 'DIRECTORY_CHANGED', `The directory the Pilot starts from, or the Compose directory it mounts, is not the one the plan approved (it is not a directory any more, or it, or one of its parents, was replaced or redirected). Nothing was started.`, commandDetail(result, ctx.secrets), { changedNothing: true });
   }
   if (result.exitCode === START_EXIT.notSealed) {
-    throw new StepFailure('failed', 'CONTEXT_NOT_SEALED', `The Pilot starts only from files and directories that nobody but root and the SSH user can change, because Docker opens them by name after Sencho has checked them. The Agent directory or a directory above it, a directory above the Compose directory, or one of the two files can be changed by another user. Nothing was started.`, commandDetail(result, ctx.secrets), { changedNothing: true });
+    throw new StepFailure('failed', 'CONTEXT_NOT_SEALED', `The Pilot starts only where nobody but root and the SSH user can change what Docker opens by name after Sencho has checked it, and that could not be shown: the Agent directory or a directory above it, a directory above the Compose directory, compose.yaml or the hub CA can be changed by another user, or could not be inspected (the detail names it). Nothing was started.`, commandDetail(result, ctx.secrets), { changedNothing: true });
   }
   if (result.exitCode === START_EXIT.inputIncomplete) {
     throw new StepFailure('failed', 'START_INPUT_INCOMPLETE', 'The start input did not arrive in full, so nothing was started. The connection may have dropped.', commandDetail(result, ctx.secrets), { changedNothing: true });

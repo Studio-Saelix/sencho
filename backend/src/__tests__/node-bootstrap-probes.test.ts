@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { execFileSync } from 'child_process';
-import { chmodSync, mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from 'fs';
+import { chmodSync, chownSync, mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from 'fs';
 import os from 'os';
 import path from 'path';
 import {
@@ -536,15 +536,17 @@ describe('bootstrap Docker endpoint pinning', () => {
     });
 
     describe('a group-writable directory above the path', () => {
-      // `getent` answers from a shim, so a group can have any members: its answer is what the walk goes by.
-      const withGroup = (members: string) => {
+      // `getent` answers from a shim, so a group can have any members: its answer is what the walk goes by. A lookup of one account goes to the real one.
+      const REAL_GETENT = execFileSync('sh', ['-c', 'command -v getent'], { encoding: 'utf8' }).trim();
+      const gid = process.getgid?.() ?? 0;
+      const withGroup = (members: string, options: { passwd?: string; passwdFails?: boolean; groupFails?: boolean } = {}) => {
         const shims = path.join(base, 'shims');
         mkdirSync(shims, { recursive: true });
-        const gid = String(process.getgid?.() ?? 0);
         writeFileSync(path.join(shims, 'getent'), [
           '#!/bin/sh',
-          `[ "$1" = group ] && echo "shared:x:${gid}:${members}"`,
-          `[ "$1" = passwd ] && echo "someone:x:99999:99999::/nonexistent:/bin/false"`,
+          options.groupFails ? '[ "$1" = group ] && exit 2' : `[ "$1" = group ] && { echo "shared:x:${gid}:${members}"; exit 0; }`,
+          `if [ "$1" = passwd ] && [ -n "$2" ]; then exec "${REAL_GETENT}" passwd "$2"; fi`,
+          options.passwdFails ? '[ "$1" = passwd ] && exit 2' : `[ "$1" = passwd ] && { ${options.passwd ? `echo "${options.passwd}"` : 'true'}; echo "me:x:${process.getuid?.() ?? 0}:${gid}::/home/me:/bin/sh"; exit 0; }`,
           'exit 0',
         ].join('\n'), { mode: 0o755 });
         return { PATH: `${shims}:${process.env.PATH ?? ''}` };
@@ -558,32 +560,86 @@ describe('bootstrap Docker endpoint pinning', () => {
         return { shared, dir };
       };
 
-      it('is sealed when its group has no member but root and this user (a private group)', () => {
+      it('is sealed when it is this user\'s own group and has no member but root and this user (a private group)', () => {
         const { dir } = arrange();
         expect(factsOf(dir, withGroup(os.userInfo().username)).trustSelf).toEqual({ state: 'sealed' });
         expect(factsOf(dir, withGroup('')).trustSelf).toEqual({ state: 'sealed' });
       });
 
-      it('is open when its group has another member, listed or by primary group', () => {
+      it('is open when its group has another member, by name or by primary group', () => {
         const { dir, shared } = arrange();
-        expect(factsOf(dir, withGroup('nobody-here-but-us')).trustSelf).toEqual({ state: 'open', at: shared });
-        const byPrimary = withGroup('');
-        writeFileSync(path.join(base, 'shims', 'getent'), [
-          '#!/bin/sh',
-          `[ "$1" = group ] && echo "shared:x:${process.getgid?.() ?? 0}:"`,
-          `[ "$1" = passwd ] && echo "someone:x:99999:${process.getgid?.() ?? 0}::/nonexistent:/bin/false"`,
-          'exit 0',
-        ].join('\n'), { mode: 0o755 });
-        expect(factsOf(dir, byPrimary).trustSelf).toEqual({ state: 'open', at: shared });
+        // `daemon` exists on every Ubuntu host: it is a real account other than root and this user, so the uid comparison is what refuses.
+        expect(factsOf(dir, withGroup('daemon')).trustSelf).toEqual({ state: 'open', at: shared });
+        expect(factsOf(dir, withGroup('', { passwd: `someone:x:99999:${gid}::/nonexistent:/bin/false` })).trustSelf).toEqual({ state: 'open', at: shared });
       });
 
-      it('is open when the group cannot be looked up', () => {
+      it('is open when it is not this user\'s own group, whatever its members', () => {
         const { dir, shared } = arrange();
-        const shims = path.join(base, 'shims');
-        mkdirSync(shims, { recursive: true });
-        writeFileSync(path.join(shims, 'getent'), '#!/bin/sh\nexit 2\n', { mode: 0o755 });
-        expect(factsOf(dir, { PATH: `${shims}:${process.env.PATH ?? ''}` }).trustSelf).toEqual({ state: 'open', at: shared });
+        const other = (process.getgroups?.() ?? []).find((candidate) => candidate !== gid);
+        if (other === undefined) return;
+        chmodSync(dir, 0o700);
+        chownSync(shared, process.getuid?.() ?? 0, other);
+        expect(factsOf(dir, withGroup('')).trustSelf).toEqual({ state: 'open', at: shared });
       });
+
+      it('is open when the group or the account list cannot be read, never sealed', () => {
+        const { dir, shared } = arrange();
+        expect(factsOf(dir, withGroup('', { groupFails: true })).trustSelf).toEqual({ state: 'open', at: shared });
+        expect(factsOf(dir, withGroup('', { passwdFails: true })).trustSelf).toEqual({ state: 'open', at: shared });
+      });
+    });
+
+    it('judges a path that does not exist yet by the directory it will be made in, which holds an entry this user owns', () => {
+      const sticky = path.join(base, 'sticky');
+      mkdirSync(sticky);
+      chmodSync(sticky, 0o1777);
+      expect(factsOf(path.join(sticky, 'new'))).toMatchObject({ trustSelf: { state: 'sealed' }, trustAbove: { state: 'sealed' } });
+      const open = path.join(base, 'open');
+      mkdirSync(open);
+      chmodSync(open, 0o777);
+      expect(factsOf(path.join(open, 'new'))).toMatchObject({ trustSelf: { state: 'open', at: open }, trustAbove: { state: 'open', at: open } });
+    });
+
+    it('follows a link in the nearest existing ancestor to the directory it leads to, instead of reading the link\'s own mode', () => {
+      const real = path.join(base, 'real');
+      mkdirSync(path.join(real, 'data'), { recursive: true });
+      symlinkSync(path.join(real, 'data'), path.join(base, 'link'));
+      expect(factsOf(path.join(base, 'link', 'new'))).toMatchObject({ trustSelf: { state: 'sealed' }, trustAbove: { state: 'sealed' } });
+      // The same path once it exists, as the preflight reads it.
+      mkdirSync(path.join(real, 'data', 'new'), { mode: 0o700 });
+      expect(factsOf(path.join(base, 'link', 'new'))).toMatchObject({ trustSelf: { state: 'sealed' }, trustAbove: { state: 'sealed' } });
+    });
+
+    it('also checks the directory a link in the path is kept in, because Docker follows the name as written', () => {
+      // /<base>/holder/link -> /<base>/real/data: the target chain is closed, but anyone who can write in "holder" can repoint the link.
+      const holder = path.join(base, 'holder');
+      const real = path.join(base, 'real');
+      mkdirSync(path.join(real, 'data', 'stacks'), { recursive: true, mode: 0o755 });
+      mkdirSync(holder);
+      symlinkSync(path.join(real, 'data'), path.join(holder, 'link'));
+      const name = path.join(holder, 'link', 'stacks');
+      expect(factsOf(name).trustAbove).toEqual({ state: 'sealed' });
+      chmodSync(holder, 0o777);
+      expect(factsOf(name).trustAbove).toEqual({ state: 'open', at: holder });
+    });
+
+    it('treats a directory with an access control list that grants write through its group bits as writable by others', () => {
+      // `ls -ld` marks a directory that has an ACL with a `+`; with the group bits writable the mask lets a named user write, whatever the group is.
+      const shared = path.join(base, 'acl');
+      mkdirSync(path.join(shared, 'agent'), { recursive: true, mode: 0o700 });
+      chmodSync(shared, 0o775);
+      expect(factsOf(path.join(shared, 'agent')).trustSelf).toEqual({ state: 'sealed' });
+      const shims = path.join(base, 'ls-shim');
+      mkdirSync(shims);
+      writeFileSync(path.join(shims, 'ls'), [
+        '#!/bin/sh',
+        `if [ "$1" = -ld ] && [ "$3" = "${shared}" ]; then echo "drwxrwxr-x+ 3 me me 4096 Jan  1 00:00 ${shared}"; exit 0; fi`,
+        `exec "${execFileSync('sh', ['-c', 'command -v ls'], { encoding: 'utf8' }).trim()}" "$@"`,
+      ].join('\n'), { mode: 0o755 });
+      expect(factsOf(path.join(shared, 'agent'), { PATH: `${shims}:${process.env.PATH ?? ''}` }).trustSelf).toEqual({ state: 'open', at: shared });
+      // An ACL under group bits that cannot write grants nothing: the mask caps it.
+      chmodSync(shared, 0o755);
+      expect(factsOf(path.join(shared, 'agent'), { PATH: `${shims}:${process.env.PATH ?? ''}` }).trustSelf).toEqual({ state: 'sealed' });
     });
 
     it('leaves the directory\'s own mode out of the chain above it, and counts it in its own chain', () => {
