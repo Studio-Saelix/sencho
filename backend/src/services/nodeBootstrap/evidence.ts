@@ -230,17 +230,27 @@ function unidentifiedDirectory(path: PathObservation, base: { id: 'compose_dir' 
  * change the compose file, the hub CA or the places Docker mounts: Docker opens
  * those by name after the step has checked them. For the Agent directory that
  * is the directory and everything above it; for the Compose directory, the
- * directories above it. A host where that cannot be told withholds the plan.
+ * directories above it. A host that reports the chain open or unreadable, or
+ * does not report it at all, gets no plan.
  */
 function unsealedDirectory(path: PathObservation, kind: 'compose' | 'agent', base: { id: 'compose_dir' | 'agent_dir'; category: 'paths'; label: string }): BootstrapCheck | null {
   const chain = kind === 'agent' ? path.trustSelf : path.trustAbove;
-  if (!chain || chain.state === 'sealed') return null;
+  if (chain?.state === 'sealed') return null;
+  const whose = kind === 'agent' ? `${path.input} and the files the Pilot starts from` : `the place ${path.input} is mounted from`;
+  if (!chain) {
+    return {
+      ...base,
+      status: 'unknown',
+      summary: `The host did not say who can change ${whose}, so a plan cannot be offered for it.`,
+      remediation: 'Run the preflight again; if the host keeps answering without it, check that the SSH user can inspect the directory and its parents.',
+    };
+  }
   if (chain.state === 'unreadable') {
     return {
       ...base,
       status: 'unknown',
-      summary: `${chain.at} could not be inspected, so it cannot be told who can change ${kind === 'agent' ? `${path.input} and the files the Pilot starts from` : `the place ${path.input} is mounted from`}.`,
-      remediation: 'Grant the SSH user search access to the directory above it, or choose a path whose parent directories it can inspect, then run the preflight again.',
+      summary: `${chain.at} could not be inspected, so it cannot be told who can change ${whose}.`,
+      remediation: 'Grant the SSH user search access to that directory and the directories above it, and check that the host can look up its users and groups (`getent passwd`, `getent group`), or choose a path whose parent directories it can inspect, then run the preflight again.',
     };
   }
   return {

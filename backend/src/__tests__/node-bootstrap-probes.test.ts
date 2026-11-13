@@ -539,16 +539,19 @@ describe('bootstrap Docker endpoint pinning', () => {
       // `getent` answers from a shim, so a group can have any members: its answer is what the walk goes by. A lookup of one account goes to the real one.
       const REAL_GETENT = execFileSync('sh', ['-c', 'command -v getent'], { encoding: 'utf8' }).trim();
       const gid = process.getgid?.() ?? 0;
-      const withGroup = (members: string, options: { passwd?: string; passwdFails?: boolean; groupFails?: boolean } = {}) => {
+      const REAL_ID = execFileSync('sh', ['-c', 'command -v id'], { encoding: 'utf8' }).trim();
+      const withGroup = (members: string, options: { passwd?: string; passwdFails?: boolean; groupFails?: number } = {}) => {
         const shims = path.join(base, 'shims');
         mkdirSync(shims, { recursive: true });
         writeFileSync(path.join(shims, 'getent'), [
           '#!/bin/sh',
-          options.groupFails ? '[ "$1" = group ] && exit 2' : `[ "$1" = group ] && { echo "shared:x:${gid}:${members}"; exit 0; }`,
+          options.groupFails ? `[ "$1" = group ] && exit ${options.groupFails}` : `[ "$1" = group ] && { echo "shared:x:${gid}:${members}"; exit 0; }`,
           `if [ "$1" = passwd ] && [ -n "$2" ]; then exec "${REAL_GETENT}" passwd "$2"; fi`,
           options.passwdFails ? '[ "$1" = passwd ] && exit 2' : `[ "$1" = passwd ] && { ${options.passwd ? `echo "${options.passwd}"` : 'true'}; echo "me:x:${process.getuid?.() ?? 0}:${gid}::/home/me:/bin/sh"; exit 0; }`,
           'exit 0',
         ].join('\n'), { mode: 0o755 });
+        // `stranger` is an account that is neither root nor this user, wherever the test runs; `ghost` is none at all.
+        writeFileSync(path.join(shims, 'id'), ['#!/bin/sh', '[ "$1 $2 $3" = "-u -- stranger" ] && { echo 54321; exit 0; }', '[ "$1 $2 $3" = "-u -- ghost" ] && exit 1', `exec "${REAL_ID}" "$@"`].join('\n'), { mode: 0o755 });
         return { PATH: `${shims}:${process.env.PATH ?? ''}` };
       };
       const arrange = () => {
@@ -568,8 +571,7 @@ describe('bootstrap Docker endpoint pinning', () => {
 
       it('is open when its group has another member, by name or by primary group', () => {
         const { dir, shared } = arrange();
-        // `daemon` exists on every Ubuntu host: it is a real account other than root and this user, so the uid comparison is what refuses.
-        expect(factsOf(dir, withGroup('daemon')).trustSelf).toEqual({ state: 'open', at: shared });
+        expect(factsOf(dir, withGroup('stranger')).trustSelf).toEqual({ state: 'open', at: shared });
         expect(factsOf(dir, withGroup('', { passwd: `someone:x:99999:${gid}::/nonexistent:/bin/false` })).trustSelf).toEqual({ state: 'open', at: shared });
       });
 
@@ -582,10 +584,14 @@ describe('bootstrap Docker endpoint pinning', () => {
         expect(factsOf(dir, withGroup('')).trustSelf).toEqual({ state: 'open', at: shared });
       });
 
-      it('is open when the group or the account list cannot be read, never sealed', () => {
+      it('is open for a group nobody has a record of, and unreadable, never sealed, when a lookup fails', () => {
         const { dir, shared } = arrange();
-        expect(factsOf(dir, withGroup('', { groupFails: true })).trustSelf).toEqual({ state: 'open', at: shared });
-        expect(factsOf(dir, withGroup('', { passwdFails: true })).trustSelf).toEqual({ state: 'open', at: shared });
+        // getent exits 2 for a key it has no record of: nothing vouches for that group.
+        expect(factsOf(dir, withGroup('', { groupFails: 2 })).trustSelf).toEqual({ state: 'open', at: shared });
+        // Any other failure, a member the host cannot resolve, or the account's own record: the host did not say.
+        expect(factsOf(dir, withGroup('', { groupFails: 1 })).trustSelf).toEqual({ state: 'unreadable', at: shared });
+        expect(factsOf(dir, withGroup('ghost')).trustSelf).toEqual({ state: 'unreadable', at: shared });
+        expect(factsOf(dir, withGroup('', { passwdFails: true })).trustSelf).toEqual({ state: 'unreadable', at: shared });
       });
     });
 
@@ -640,6 +646,13 @@ describe('bootstrap Docker endpoint pinning', () => {
       // An ACL under group bits that cannot write grants nothing: the mask caps it.
       chmodSync(shared, 0o755);
       expect(factsOf(path.join(shared, 'agent'), { PATH: `${shims}:${process.env.PATH ?? ''}` }).trustSelf).toEqual({ state: 'sealed' });
+    });
+
+    it('still reports a chain for a final name that is a link, judged by the directory it leads to (an absent report would withhold the plan)', () => {
+      const real = path.join(base, 'real-agent');
+      mkdirSync(real, { mode: 0o700 });
+      symlinkSync(real, path.join(base, 'agent-link'));
+      expect(factsOf(path.join(base, 'agent-link'))).toMatchObject({ trustSelf: { state: 'sealed' }, trustAbove: { state: 'sealed' } });
     });
 
     it('leaves the directory\'s own mode out of the chain above it, and counts it in its own chain', () => {

@@ -543,6 +543,11 @@ describe('bootstrap plan binds directories to what the preflight identified', ()
     expect(after.evidenceDigest).not.toBe(before.evidenceDigest);
   });
 
+  it.each([['agentDir'], ['composeDir']] as const)('does not build a plan that binds %s\'s ancestor by an identity with no creation time', (key) => {
+    const facts = makeFacts({ [key]: { exists: false, isDirectory: false, nearestExistingAncestorIdentity: '64768:22:1000:-', parentWritableByUser: true } });
+    expect(() => planFor(facts)).toThrow(/creation time/);
+  });
+
   it('does not build a plan for a directory it cannot identify', () => {
     expect(() => planFor(makeFacts({ agentDir: { exists: false, isDirectory: false, nearestExistingAncestorIdentity: null, parentWritableByUser: true } }))).toThrow(/identity/);
   });

@@ -344,7 +344,7 @@ async function publishFile(
     throw new StepFailure('failed', 'WRITE_INCOMPLETE', `${file.path} did not arrive in full, so it was not put in place. The connection may have dropped.`, commandDetail(result, ctx.secrets), { changedNothing: true });
   }
   if (result.exitCode === WRITE_EXIT.notDirectory) {
-    throw new StepFailure('failed', 'DIRECTORY_CHANGED', `The directory for ${file.path} is not the directory the plan approved (it is not a directory any more, or it, or one of its parents, was replaced or redirected; an apt directory that is itself reached through a link on this host ends here too). Nothing was written.`, commandDetail(result, ctx.secrets), { changedNothing: true });
+    throw new StepFailure('failed', 'DIRECTORY_CHANGED', `The directory for ${file.path} is not the directory the plan approved (it is not a directory any more, or it, or one of its parents, was replaced or redirected, or the filesystem keeps no creation time for it, so it cannot be told from a successor; an apt directory that is itself reached through a link on this host ends here too). Nothing was written.`, commandDetail(result, ctx.secrets), { changedNothing: true });
   }
   if (result.exitCode === WRITE_EXIT.exists || result.exitCode === WRITE_EXIT.notRegular) {
     // A replacement moves the inspected file aside first, so only a plain write is known to have changed nothing.
@@ -542,7 +542,7 @@ async function runCommandStep(step: BootstrapPlanStep, ctx: StepContext, plan: B
       throw new StepFailure('recovery', 'FILE_CONFLICT', `${step.target.path} appeared on the host after the plan was approved. It was left as it is.`, detail, { changedNothing: true });
     }
     if (result.exitCode === WRITE_EXIT.notDirectory) {
-      throw new StepFailure('failed', 'DIRECTORY_CHANGED', `${step.target.path} is not where the plan approved it: the directory it is made in (or the existing directory itself) is not the directory the plan was bound to, because it is not a directory any more or it, or one above it, was replaced or redirected. Nothing was created.`, detail, { changedNothing: true });
+      throw new StepFailure('failed', 'DIRECTORY_CHANGED', `${step.target.path} is not where the plan approved it: the directory it is made in (or the existing directory itself) is not the directory the plan was bound to, because it is not a directory any more or it, or one above it, was replaced or redirected, or because its filesystem keeps no creation time. Nothing was created.`, detail, { changedNothing: true });
     }
     if (result.exitCode === WRITE_EXIT.notCreated) {
       throw new StepFailure('failed', 'STEP_FAILED', `"${step.title}" failed (exit ${result.exitCode}); nothing was created.`, detail, { changedNothing: true });
@@ -610,7 +610,7 @@ async function runStartStep(step: BootstrapPlanStep, ctx: StepContext, plan: Boo
   const failure = transportFailure(result, step.title, step.timeoutMs, ctx.secrets);
   if (failure) throw failure;
   if (result.exitCode === START_EXIT.notDirectory) {
-    throw new StepFailure('failed', 'DIRECTORY_CHANGED', `The directory the Pilot starts from, or the Compose directory it mounts, is not the one the plan approved (it is not a directory any more, or it, or one of its parents, was replaced or redirected). Nothing was started.`, commandDetail(result, ctx.secrets), { changedNothing: true });
+    throw new StepFailure('failed', 'DIRECTORY_CHANGED', `The directory the Pilot starts from, or the Compose directory it mounts, is not the one the plan approved (it is not a directory any more, or it, or one of its parents, was replaced or redirected, or the filesystem keeps no creation time for it). Nothing was started.`, commandDetail(result, ctx.secrets), { changedNothing: true });
   }
   if (result.exitCode === START_EXIT.notSealed) {
     throw new StepFailure('failed', 'CONTEXT_NOT_SEALED', `The Pilot starts only where nobody but root and the SSH user can change what Docker opens by name after Sencho has checked it, and that could not be shown: the Agent directory or a directory above it, a directory above the Compose directory, compose.yaml or the hub CA can be changed by another user, or could not be inspected (the detail names it). Nothing was started.`, commandDetail(result, ctx.secrets), { changedNothing: true });

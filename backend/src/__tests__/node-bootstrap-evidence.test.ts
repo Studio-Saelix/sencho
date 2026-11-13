@@ -1,6 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import { buildBootstrapEvidence, DENIED_FILESYSTEMS } from '../services/nodeBootstrap/evidence';
 import { makeFacts, type FactsOverrides } from './__helpers__/bootstrapFacts';
+import { parsePathFacts } from '../services/nodeBootstrap/probes';
 import type { BootstrapCheck, BootstrapFacts } from '../services/nodeBootstrap/types';
 
 function evidence(facts: BootstrapFacts, nodeNameTaken = false) {
@@ -551,6 +552,29 @@ describe('bootstrap evidence: a directory the host cannot identify cannot be bou
   });
 });
 
+describe('bootstrap evidence: a directory whose creation time the host cannot give', () => {
+  it.each([
+    ['an existing Agent directory', 'agentDir', 'agent_dir', true],
+    ['an existing Compose directory', 'composeDir', 'compose_dir', true],
+    ['the ancestor a new Agent directory is created in', 'agentDir', 'agent_dir', false],
+    ['the ancestor a new Compose directory is created in', 'composeDir', 'compose_dir', false],
+  ] as const)('is read from the host as no identity, and withholds the plan: %s', (_label, key, id, exists) => {
+    const output = exists
+      ? 'P_EXISTS=1\nP_ISDIR=1\nP_REAL=/srv/x\nP_IDENT=2049:1001:1000:-'
+      : 'P_EXISTS=0\nP_ISDIR=0\nP_REAL=/srv/x\nP_NEAREST=/srv\nP_NEAREST_IDENT=2049:2002:1000:-';
+    const parsed = parsePathFacts(output, '/srv/x');
+    const facts = makeFacts({
+      [key]: exists
+        ? { exists: true, isDirectory: true, entries: [], writableByUser: true, identity: parsed.identity }
+        : { exists: false, isDirectory: false, parentWritableByUser: true, nearestExistingAncestorIdentity: parsed.nearestExistingAncestorIdentity },
+    } as FactsOverrides);
+    const row = check(facts, id);
+    expect(row.status).toBe('unknown');
+    expect(row.summary).toMatch(/identified/);
+    expect(evidence(facts).planSuppressed).toBe(true);
+  });
+});
+
 describe('bootstrap evidence: Docker opens the compose file and the mounts by name, so a place anyone else can change is refused', () => {
   const open = { state: 'open', at: '/srv/shared' } as const;
   const unreadable = { state: 'unreadable', at: '/srv/closed' } as const;
@@ -573,21 +597,29 @@ describe('bootstrap evidence: Docker opens the compose file and the mounts by na
     else expect(evidence(facts).planSuppressed).toBe(true);
   });
 
-  it('does not ask for more where the chain is sealed, or where the host did not report it', () => {
-    for (const overrides of [
-      { agentDir: { exists: true, isDirectory: true, entries: [], writableByUser: true, trustSelf: { state: 'sealed' } }, composeDir: { trustAbove: { state: 'sealed' } } },
-      {},
-    ] as FactsOverrides[]) {
-      const facts = makeFacts(overrides);
-      expect(check(facts, 'agent_dir').summary).not.toMatch(/changed by a user other than/);
-      expect(check(facts, 'compose_dir').summary).not.toMatch(/changed by a user other than/);
-    }
+  it('does not ask for more where the chain is sealed', () => {
+    const facts = makeFacts({ agentDir: { trustSelf: { state: 'sealed' } }, composeDir: { trustAbove: { state: 'sealed' } } });
+    expect(check(facts, 'agent_dir').status).toBe('pass');
+    expect(check(facts, 'compose_dir').status).toBe('pass');
+    expect(evidence(facts).planSuppressed).toBe(false);
+  });
+
+  it.each([
+    ['the Agent directory', { agentDir: { exists: true, isDirectory: true, entries: [], writableByUser: true, trustSelf: undefined } }, 'agent_dir'],
+    ['the Compose directory', { composeDir: { trustAbove: undefined } }, 'compose_dir'],
+  ] as Array<[string, FactsOverrides, BootstrapCheck['id']]>)('withholds the plan where the host did not say who can change %s, instead of leaving it to the start step', (_label, overrides, id) => {
+    const facts = makeFacts(overrides);
+    const row = check(facts, id);
+    expect(row.status).toBe('unknown');
+    expect(row.summary).toMatch(/did not say who can change/);
+    expect(evidence(facts).planSuppressed).toBe(true);
   });
 
   it('takes the Agent directory from its own chain and the Compose directory from the chain above it', () => {
     // A directory a stranger can change matters for the files in the Agent directory, never for the Compose directory's own mode.
-    const facts = makeFacts({ agentDir: { exists: true, isDirectory: true, entries: [], writableByUser: true, trustAbove: open }, composeDir: { trustSelf: open } });
-    expect(check(facts, 'agent_dir').summary).not.toMatch(/changed by a user other than/);
-    expect(check(facts, 'compose_dir').summary).not.toMatch(/changed by a user other than/);
+    const facts = makeFacts({ agentDir: { trustAbove: open }, composeDir: { trustSelf: open } });
+    expect(check(facts, 'agent_dir').status).toBe('pass');
+    expect(check(facts, 'compose_dir').status).toBe('pass');
+    expect(evidence(facts).blockers).toBe(0);
   });
 });

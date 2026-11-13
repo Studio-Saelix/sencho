@@ -194,7 +194,7 @@ class FakeHost {
       const made: string[] = [];
       for (let parent = dir.slice(0, dir.lastIndexOf('/')); parent && !this.dirs.has(parent); parent = parent.slice(0, parent.lastIndexOf('/'))) {
         this.madeDirectories += 1;
-        const parentIdentity = `2049:${9000 + this.madeDirectories}:0:-`;
+        const parentIdentity = `2049:${9000 + this.madeDirectories}:0:2026-01-01`;
         this.dirs.set(parent, { mode: '0755', owner: 'root', group: 'root', identity: parentIdentity });
         made.unshift(`SENCHO_DIR_MADE=${parentIdentity}\t${parent}\n`);
       }

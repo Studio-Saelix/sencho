@@ -1770,7 +1770,11 @@ describe('B4: Compose starts only the approved project', () => {
    * everything above the Compose directory, and the two files.
    */
   describe('a place that anyone else could change is refused, because Docker opens it by name after the checks', () => {
+    // The sudo shim only runs what it is given as the same user, so the root code path (`id -u` is 0, the SSH user is SUDO_UID) is entered through asRootFor.
+    let elevated = false;
+    beforeEach(() => { elevated = false; });
     const refusal = async (sudo: boolean, plan: BootstrapPlan = planOf()) => {
+      if (sudo && !elevated) asRootFor(String(process.getuid?.() ?? 0));
       const before = dockerRuns();
       const failure = await failureOf(() => runPlanStep(startStep(sudo), startContext(), plan));
       expect(failure).toMatchObject({ kind: 'failed', code: 'CONTEXT_NOT_SEALED', changedNothing: true });
@@ -1778,8 +1782,11 @@ describe('B4: Compose starts only the approved project', () => {
     };
     /** `getent` answers for a group of this user's gid, with the members and the primary-group user the test names; a lookup of one account goes to the real one. */
     const REAL_GETENT = execFileSync('sh', ['-c', 'command -v getent'], { encoding: 'utf8' }).trim();
+    const REAL_ID_FOR_GROUPS = execFileSync('sh', ['-c', 'command -v id'], { encoding: 'utf8' }).trim();
     const groupOf = (members: string, options: { primaryUid?: number; passwdFails?: boolean } = {}) => {
       const gid = process.getgid?.() ?? 0;
+      // `stranger` is an account that is neither root nor this user, wherever the test runs; `ghost` is none at all.
+      fs.writeFileSync(path.join(root, 'bin', 'id'), ['#!/bin/sh', '[ "$1 $2 $3" = "-u -- stranger" ] && { echo 54321; exit 0; }', '[ "$1 $2 $3" = "-u -- ghost" ] && exit 1', `exec "${REAL_ID_FOR_GROUPS}" "$@"`].join('\n'), { mode: 0o755 });
       fs.writeFileSync(path.join(root, 'bin', 'getent'), [
         '#!/bin/sh',
         `[ "$1" = group ] && { echo "shared:x:${gid}:${members}"; exit 0; }`,
@@ -1823,6 +1830,33 @@ describe('B4: Compose starts only the approved project', () => {
       expect((await runPlanStep(startStep(sudo), startContext(), planOf(undefined, false))).status).toBe('done');
     });
 
+    // Every place the start step relies on, on a retry that follows a start that succeeded, as the user and as root.
+    const places: Array<[string, () => void]> = [
+      ['the Agent directory', () => fs.chmodSync(agent, 0o777)],
+      ['a directory above the Agent directory', () => fs.chmodSync(path.join(root, 'srv'), 0o777)],
+      ['a directory above the Compose directory', () => { stacksBelow('shared', 0o777); }],
+      ['compose.yaml', () => fs.chmodSync(path.join(agent, 'compose.yaml'), 0o666)],
+      ['the hub CA', () => fs.chmodSync(path.join(agent, 'sencho-hub-ca.pem'), 0o666)],
+    ];
+    it.each(places.flatMap(([label, change]) => [[label, change, false], [label, change, true]] as const))('a retried start refuses %s once another user can change it (sudo: %s)', async (_label, change, sudo) => {
+      if (sudo) asRootFor(String(process.getuid?.() ?? 0));
+      expect((await runPlanStep(startStep(sudo), startContext(), planOf())).status).toBe('done');
+      expect(dockerRuns()).toBe(1);
+      change();
+      const failure = await failureOf(() => runPlanStep(startStep(sudo), startContext(), planOf()));
+      expect(failure).toMatchObject({ code: 'CONTEXT_NOT_SEALED', changedNothing: true });
+      expect(dockerRuns()).toBe(1);
+    });
+
+    it.each([[false], [true]])('refuses a place others can write on a plan with no hub CA, for the Agent directory chain and the Compose directory chain (sudo: %s)', async (sudo) => {
+      fs.unlinkSync(path.join(agent, 'sencho-hub-ca.pem'));
+      fs.chmodSync(path.join(root, 'srv'), 0o777);
+      await refusal(sudo, planOf(undefined, false));
+      fs.chmodSync(path.join(root, 'srv'), 0o755);
+      stacksBelow('shared', 0o777);
+      await refusal(sudo, planOf(undefined, false));
+    });
+
     it('names the directory it refused, on standard error', () => {
       const shared = stacksBelow('shared', 0o777);
       const result = runShell(startStep(false).command as string, startInput({ agentIdentity: identity(agent), composeIdentity: identity(stacks), composeSha256: sha256(COMPOSE_TEXT), caSha256: sha256(CA_TEXT) }), env);
@@ -1850,8 +1884,7 @@ describe('B4: Compose starts only the approved project', () => {
 
     it('refuses a group-writable directory whose group has another member (listed, or by primary group) or whose lookup fails', async () => {
       fs.chmodSync(agent, 0o770);
-      // `daemon` is a real account other than root and this user: the uid comparison, not a failed lookup, is what refuses it.
-      groupOf('daemon');
+      groupOf('stranger');
       await refusal(false);
       groupOf('', { primaryUid: 54321 });
       await refusal(false);
@@ -1881,6 +1914,7 @@ describe('B4: Compose starts only the approved project', () => {
       const REAL_ID = execFileSync('sh', ['-c', 'command -v id'], { encoding: 'utf8' }).trim();
       fs.writeFileSync(path.join(root, 'bin', 'id'), ['#!/bin/sh', '[ "$*" = "-u" ] && { echo 0; exit 0; }', `exec "${REAL_ID}" "$@"`].join('\n'), { mode: 0o755 });
       if (sudoUid !== undefined) env = { ...env, SUDO_UID: sudoUid };
+      elevated = true;
     };
 
     it('takes the user sudo ran for as the trusted account when the script runs as root (SUDO_UID), so the SSH user\'s own directories are accepted', async () => {
@@ -1938,6 +1972,53 @@ describe('B4: Compose starts only the approved project', () => {
       fs.chmodSync(agent, 0o770);
       fs.writeFileSync(path.join(root, 'bin', 'getent'), '#!/bin/sh\nexit 2\n', { mode: 0o755 });
       await refusal(false);
+    });
+
+    describe('what the message says', () => {
+      const run = () => runShell(startStep(false).command as string, startInput({ agentIdentity: identity(agent), composeIdentity: identity(stacks), composeSha256: sha256(COMPOSE_TEXT), caSha256: sha256(CA_TEXT) }), env);
+      it('says another user can change it, when one can', () => {
+        fs.chmodSync(agent, 0o770);
+        groupOf('stranger');
+        const result = run();
+        expect(result.status).toBe(START_EXIT.notSealed);
+        expect(result.stderr).toMatch(/can be changed by another user/);
+      });
+      it.each([['a member the host cannot resolve', () => groupOf('ghost')], ['an account list that cannot be read', () => groupOf('', { passwdFails: true })]])('says it could not inspect it, not that it can be changed, when the host cannot say who is in the group: %s', (_label, arrange) => {
+        fs.chmodSync(agent, 0o770);
+        arrange();
+        const result = run();
+        expect(result.status).toBe(START_EXIT.notSealed);
+        expect(result.stderr).toMatch(/could not inspect/);
+        expect(result.stderr).not.toMatch(/can be changed by another user/);
+      });
+    });
+
+    // Branches the file modes alone do not reach, driven by a shim for the one answer that differs.
+    describe('what a shim for one answer changes', () => {
+      const shim = (name: string, body: string) => fs.writeFileSync(path.join(root, 'bin', name), `#!/bin/sh\n${body}\n`, { mode: 0o755 });
+      const realStat = REAL_STAT;
+
+      it('accepts a group-writable directory whose group is root\'s, which needs no look at its members\' account', async () => {
+        fs.chmodSync(agent, 0o770);
+        shim('stat', `if [ "$2" = "%u %g %a" ] && [ "$4" = "${approvedPath(agent)}" ]; then set -- $("${realStat}" "$@"); echo "$1 0 $3"; exit 0; fi\nexec "${realStat}" "$@"`);
+        expect((await runPlanStep(startStep(false), startContext(), planOf())).status).toBe('done');
+      });
+
+      it.each([['compose.yaml', 'compose.yaml'], ['the hub CA', 'sencho-hub-ca.pem']])('refuses %s owned by a user other than root and the SSH user, whatever its mode', async (_label, file) => {
+        shim('stat', `if [ "$2" = "%u %a" ] && [ "$4" = "./${file}" ]; then echo "54321 600"; exit 0; fi\nexec "${realStat}" "$@"`);
+        await refusal(false);
+        // The hub CA is looked at only when the plan has one; compose.yaml always is.
+        if (file === 'compose.yaml') await refusal(false, planOf(undefined, false));
+        else expect((await runPlanStep(startStep(false), startContext(), planOf(undefined, false))).status).toBe('done');
+      });
+
+      it('refuses a group-writable directory that has an access control list, even in this user\'s private group', async () => {
+        fs.chmodSync(agent, 0o770);
+        groupOf('');
+        expect((await runPlanStep(startStep(false), startContext(), planOf())).status).toBe('done');
+        shim('ls', `if [ "$1" = -ld ] && [ "$3" = "${approvedPath(agent)}" ]; then echo "drwxrwx---+ 2 me me 4096 Jan  1 00:00 ${approvedPath(agent)}"; exit 0; fi\nexec "${execFileSync('sh', ['-c', 'command -v ls'], { encoding: 'utf8' }).trim()}" "$@"`);
+        await refusal(false);
+      });
     });
   });
 
@@ -2205,6 +2286,8 @@ describe('B1: a directory whose creation time the host cannot give is bound by n
     const dir = path.join(root, 'agent');
     fs.mkdirSync(dir, { mode: 0o755 });
     const binding = withoutBirth(dir);
+    // The shim answers with exactly the identity the script is bound by, so only the missing creation time can refuse it.
+    expect(runShell(`stat -c "%d:%i:%u:%w" -- ${dir}`, '', env).stdout.trim()).toBe(binding);
     const fresh = writeCommand(path.join(dir, 'compose.yaml'), { ...spec, sha256: sha256('ours') }, { sudo: false, replaces: null, binding });
     expect(runShell(fresh, 'ours', env).status).toBe(WRITE_EXIT.notDirectory);
     expect(fs.readdirSync(dir)).toEqual([]);
@@ -2222,9 +2305,62 @@ describe('B1: a directory whose creation time the host cannot give is bound by n
   ])('creates nothing below an ancestor bound by such an identity (%s)', (_label, below) => {
     const parent = path.join(root, 'srv');
     fs.mkdirSync(parent, { mode: 0o755 });
+    expect(runShell(`stat -c "%d:%i:%u:%w" -- ${parent}`, '', env).stdout.trim()).toBe(withoutBirth(parent));
     const command = directoryCommand(path.join(parent, ...below), dirSpec, { sudo: false, allowExisting: false, binding: withoutBirth(parent) });
     expect(runShell(command, madeDirectoriesInput(new Map()), env).status).toBe(WRITE_EXIT.notDirectory);
     expect(fs.readdirSync(parent)).toEqual([]);
+    // The same command with the real identity, on the real filesystem, creates the directory: the identity's missing creation time is what refused it.
+    expect(runShell(directoryCommand(path.join(parent, ...below), dirSpec, { sudo: false, allowExisting: false }), madeDirectoriesInput(new Map())).status).toBe(0);
+  });
+
+  // A directory an earlier step of the run made is accepted by the identity the run recorded for it. With no creation time that record cannot tell it from a successor either, so it is refused, for a new directory and for a retry that meets an existing one.
+  it.each([[false], [true]])('refuses a directory the run recorded as made, when the host gives it no creation time (retry of the create step: %s)', (allowExisting) => {
+    const parent = path.join(root, 'srv');
+    fs.mkdirSync(parent, { mode: 0o755 });
+    const unrelated = path.join(root, 'unrelated');
+    fs.mkdirSync(unrelated, { mode: 0o755 });
+    // The plan's binding does not match the parent (it was made by an earlier step, so the plan could not name it): only the made list can accept it.
+    const binding = identityOf(unrelated);
+    const entry = (identity: string) => madeDirectoriesInput(new Map([[approvedPath(parent), identity]]));
+    const command = directoryCommand(path.join(parent, 'agent'), dirSpec, { sudo: false, allowExisting, binding });
+    const recorded = withoutBirth(parent);
+    expect(runShell(command, entry(recorded), env).status).toBe(WRITE_EXIT.notDirectory);
+    expect(fs.readdirSync(parent)).toEqual([]);
+    // With the identity the run recorded on a filesystem that keeps creation times, the same list is what lets it through.
+    expect(runShell(command, entry(identityOf(parent))).status).toBe(0);
+  });
+
+  describe.each([[false], [true]])('a directory made on a filesystem that gives no creation time for the top or the leaf (sudo: %s)', (sudo) => {
+    // The identity read of one name inside the staging directory loses its creation time; `which` is that relative name.
+    const arrange = (which: string) => {
+      const parent = path.join(root, 'srv');
+      fs.mkdirSync(parent, { mode: 0o755 });
+      const bin = path.join(root, 'bin3');
+      fs.mkdirSync(bin);
+      fs.writeFileSync(path.join(bin, 'stat'), [
+        '#!/bin/sh',
+        'last=; for a in "$@"; do last=$a; done',
+        `case "$(pwd -P)" in *"/.sencho-new."*) if [ "$last" = "${which}" ]; then for a in "$@"; do shift; case $a in "%d:%i:%u:%w") a="%d:%i:%u:-" ;; esac; set -- "$@" "$a"; done; fi ;; esac`,
+        `exec "${REAL_STAT}" "$@"`,
+      ].join('\n'), { mode: 0o755 });
+      const sudoOnly = path.join(root, 'bin-sudo');
+      fs.mkdirSync(sudoOnly);
+      for (const dir of [bin, sudoOnly]) fs.writeFileSync(path.join(dir, 'sudo'), ['#!/bin/sh', '[ "$1" = -n ] && shift', 'exec "$@"'].join('\n'), { mode: 0o755 });
+      return { parent, env: { PATH: `${bin}:${process.env.PATH ?? ''}` }, control: { PATH: `${sudoOnly}:${process.env.PATH ?? ''}` } };
+    };
+    it.each([
+      ['a single new directory (the top is the leaf)', ['agent'], './agent'],
+      ['only the top of a new tree', ['a', 'agent'], './a'],
+      ['only the leaf of a new tree', ['a', 'agent'], './a/agent'],
+    ])('puts nothing in place: %s', (_label, below, which) => {
+      const { parent, env: shimmed, control } = arrange(which);
+      const command = directoryCommand(path.join(parent, ...below), dirSpec, { sudo, allowExisting: false });
+      const result = runShell(command, madeDirectoriesInput(new Map()), shimmed);
+      expect(result.status).toBe(WRITE_EXIT.notCreated);
+      expect(result.stderr).toMatch(/creation time/);
+      expect(fs.readdirSync(parent)).toEqual([]);
+      expect(runShell(command, madeDirectoriesInput(new Map()), control).status).toBe(0);
+    });
   });
 
   it('refuses to adjust an existing directory bound by such an identity', () => {
@@ -2282,9 +2418,12 @@ describe('B1: a directory whose creation time the host cannot give is bound by n
     const composeResult = runShell(command, input(identityOf(agent), withoutBirth(stacks)), shimFor('stacks'));
     expect(composeResult.status).toBe(START_EXIT.notDirectory);
     expect(composeResult.stderr).toMatch(/not the approved Compose directory/);
-    // Not a fixture artefact: with real birth times the same input is past the directory checks (and fails only for the missing Docker the shell has none of).
-    const fine = runShell(command, input(identityOf(agent), identityOf(stacks)), { PATH: '/usr/bin:/bin' });
-    expect(fine.status).not.toBe(START_EXIT.notDirectory);
+    // Not a fixture artefact: with real birth times the same input goes all the way to Docker (a stub that exits 0).
+    const stub = path.join(root, 'bin-docker');
+    fs.mkdirSync(stub);
+    fs.writeFileSync(path.join(stub, 'docker'), '#!/bin/sh\nexit 0\n', { mode: 0o755 });
+    const fine = runShell(command, input(identityOf(agent), identityOf(stacks)), { PATH: `${stub}:/usr/bin:/bin` });
+    expect(fine.status).toBe(0);
   });
 
   describe('on the host side', () => {
@@ -2307,10 +2446,47 @@ describe('B1: a directory whose creation time the host cannot give is bound by n
       expect(ctx.directories.size).toBe(0);
     });
 
-    it('refuses a recorded or planned identity without a creation time', () => {
+    it.each([['/srv/agent'], ['/c']])('refuses a recorded or planned identity without a creation time (%s)', (directory) => {
       const plan = { paths: { composeDir: { input: '/c', identity: '1:2:3:-' }, agentDir: { input: '/srv/agent', identity: '1:4:3:-' } } } as unknown as BootstrapPlan;
-      expect(() => approvedBinding(plan, { directories: new Map() }, '/srv/agent')).toThrow(expect.objectContaining({ code: 'PLAN_INVALID', changedNothing: true }));
-      expect(() => approvedBinding(plan, { directories: new Map([['/srv/agent', '1:4:3:-']]) }, '/srv/agent')).toThrow(expect.objectContaining({ code: 'PLAN_INVALID' }));
+      expect(() => approvedBinding(plan, { directories: new Map() }, directory)).toThrow(expect.objectContaining({ code: 'PLAN_INVALID', changedNothing: true }));
+      expect(() => approvedBinding(plan, { directories: new Map([[directory, '1:4:3:-']]) }, directory)).toThrow(expect.objectContaining({ code: 'PLAN_INVALID' }));
+    });
+
+    it('does not run the start step for a plan whose directories carry no creation time, and sends nothing to the host', async () => {
+      const step: BootstrapPlanStep = {
+        id: 'start-agent', title: 'Start', rationale: 'test', effect: 'container-start', privilege: 'user',
+        command: startProjectCommand({ path: '/srv/agent', approved: '/srv/agent' }, { path: '/c', approved: '/c' }, false),
+        disruptive: true, reversible: 'yes', pointOfNoReturn: true, timeoutMs: 10_000,
+      };
+      const session = scriptedSession(() => ({ exitCode: 0, stdout: '', stderr: '' }));
+      for (const identities of [{ agent: '1:4:3:-', compose: '1:2:3:2026-01-01' }, { agent: '1:4:3:2026-01-01', compose: '1:2:3:-' }]) {
+        const plan = { paths: { composeDir: { input: '/c', realPath: '/c', identity: identities.compose }, agentDir: { input: '/srv/agent', realPath: '/srv/agent', identity: identities.agent } }, stages: [] } as unknown as BootstrapPlan;
+        const failure = await failureOf(() => runPlanStep(step, context(session), plan));
+        expect(failure).toMatchObject({ code: 'PLAN_INVALID', changedNothing: true });
+      }
+      expect(session.commands).toEqual([]);
+    });
+
+    it.each([['the parent has none and the leaf has one', /\/a$/], ['the leaf has none and the parent has one', /\/agent$/]])('records only the made directories that have a creation time, when %s', async (_label, blanked) => {
+      const dest = path.join(root, 'a', 'agent');
+      fs.mkdirSync(root, { recursive: true });
+      const step: BootstrapPlanStep = {
+        id: 'create-agent-dir', title: 'Create the Agent installation directory', rationale: 'test', effect: 'directory-create', privilege: 'user',
+        command: directoryCommand(dest, dirSpec, { sudo: false, allowExisting: false }),
+        target: { path: dest, mode: '0700', owner, group, preserveExisting: false }, disruptive: false, reversible: 'yes', pointOfNoReturn: false, timeoutMs: 10_000,
+      };
+      const plan = { paths: { composeDir: { input: '/opt/docker/sencho', realPath: '/opt/docker/sencho', identity: '64768:300:1000:2026-01-01' }, agentDir: { input: dest, realPath: approvedPath(dest), identity: null } } } as unknown as BootstrapPlan;
+      const session = scriptedSession((command) => {
+        const real = spawnSync('sh', ['-c', `LC_ALL=C ${command}`], { input: madeDirectoriesInput(new Map()), encoding: 'utf8' });
+        const stdout = real.stdout.split('\n').map((line) => (line.startsWith('SENCHO_DIR_MADE=') && blanked.test(line.split('\t')[1] ?? '') ? line.replace(/^(SENCHO_DIR_MADE=\d+:\d+:\d+:)\S+/, '$1-') : line)).join('\n');
+        return { exitCode: real.status, stdout, stderr: '' };
+      });
+      const ctx = context(session);
+      await failureOf(() => runPlanStep(step, ctx, plan)).catch(() => null);
+      for (const [madePath, identity] of ctx.directories) {
+        expect(identity.endsWith(':-')).toBe(false);
+        expect(blanked.test(madePath)).toBe(false);
+      }
     });
   });
 });

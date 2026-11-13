@@ -47,6 +47,9 @@ export function makeComposeDir(overrides: Partial<ComposeDirObservation> = {}): 
     inventoryTruncated: false,
     inventoryError: null,
     rootComposeFile: false,
+    // A host that reports who can change the places around the directory: nobody but root and the SSH user.
+    trustSelf: { state: 'sealed' },
+    trustAbove: { state: 'sealed' },
     ...overrides,
     ...identities(overrides.exists ?? true, overrides),
   };
@@ -83,6 +86,8 @@ export function makeAgentDir(overrides: Partial<AgentDirObservation> = {}): Agen
     markerProject: null,
     markerComposeDir: null,
     markerAgentDir: null,
+    trustSelf: { state: 'sealed' },
+    trustAbove: { state: 'sealed' },
     ...overrides,
     ...identities(overrides.exists ?? false, overrides),
   };

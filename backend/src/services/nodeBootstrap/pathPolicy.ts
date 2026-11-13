@@ -199,14 +199,18 @@ export function shellQuote(value: string): string {
  * `sealed DIR [KIDOWNER]` walks DIR (a physical path) and every directory above
  * it, `KIDOWNER` being the owner of the entry below DIR that the sticky rule may
  * rely on. It returns 0 when sealed, 1 for a directory someone else can change
- * (named in `$bad`), 2 for one it could not inspect (also `$bad`).
+ * (`$bad` names it, or, under a sticky directory, the entry below it that is not
+ * root's or the account's), and 2 for one it could not inspect (`$bad` names it),
+ * a failed owner, group or member lookup included.
  *
  * `sealed_under NAME KIDOWNER` takes a directory as it is written, links
  * included, and checks the place each of its components is looked up in: NAME
  * resolved, then the directory NAME is in, and so on up, each one resolved and
  * walked. A link in the name lives in a directory somebody could rewrite, and
  * Docker follows the name as written, so the physical path alone is not enough.
- * `KIDOWNER` is the owner of whatever is (or will be) in NAME.
+ * `KIDOWNER` is the owner of whatever is (or will be) in NAME. A link as the last
+ * component of the Compose directory's own path is not looked at here: the entry
+ * check refuses one before this runs.
  *
  * The account is the SSH user: the user itself, or, for root, the user sudo
  * reports (`SUDO_UID`) when it is a number.
@@ -215,21 +219,22 @@ export const SEALED_DIRECTORY_SHELL = [
   'me=$(id -u); trusted=$me',
   'if [ "$me" = 0 ] && [ -n "${SUDO_UID-}" ]; then trusted=$SUDO_UID; fi',
   'case $trusted in ""|*[!0-9]*) trusted=0 ;; esac',
-  // Whether a group may be written to: root's or the account's own, with no other member (listed or by primary group). A lookup that fails is never "yes".
+  // Whether a group may be written to: root's or the account's own, with no other member (listed or by primary group). Returns 0 for yes, 1 for no, 2 when the host could not say: a failed lookup is never "yes", and sealed reports it as not inspected.
   'group_ok() {',
   '  if [ "$1" != 0 ]; then',
-  '    pg=$(getent passwd "$trusted" 2>/dev/null) || return 1',
+  '    pg=$(getent passwd "$trusted" 2>/dev/null) || return 2',
   '    pg=${pg#*:*:*:}; pg=${pg%%:*}',
   '    [ "$1" = "$pg" ] || return 1',
   '  fi',
-  '  gl=$(getent group "$1" 2>/dev/null) || return 1',
+  // getent exits 2 for a group nobody has a record of: nothing vouches for it.
+  '  gl=$(getent group "$1" 2>/dev/null) || { [ $? = 2 ] && return 1; return 2; }',
   '  gl=${gl#*:*:*:}',
   '  for gn in $(printf "%s" "$gl" | tr "," " "); do',
-  '    gu=$(id -u -- "$gn" 2>/dev/null) || return 1',
+  '    gu=$(id -u -- "$gn" 2>/dev/null) || return 2',
   '    if [ "$gu" != 0 ] && [ "$gu" != "$trusted" ]; then return 1; fi',
   '  done',
-  '  pw=$(getent passwd 2>/dev/null) || return 1',
-  '  [ -n "$pw" ] || return 1',
+  '  pw=$(getent passwd 2>/dev/null) || return 2',
+  '  [ -n "$pw" ] || return 2',
   '  printf "%s\\n" "$pw" | awk -F: -v g="$1" -v t="$trusted" \'$4 == g && $3 != 0 && $3 != t { bad = 1 } END { exit bad }\'',
   '}',
   // Whether ls shows an access control list on the path (a `+` after the mode).
@@ -242,7 +247,12 @@ export const SEALED_DIRECTORY_SHELL = [
   '    if [ "$o" != 0 ] && [ "$o" != "$trusted" ]; then bad=$s; return 1; fi',
   '    writable=0',
   '    if [ $((0$m & 002)) -ne 0 ]; then writable=1; fi',
-  '    if [ $((0$m & 020)) -ne 0 ] && { has_acl "$s" || ! group_ok "$g"; }; then writable=1; fi',
+  '    if [ $((0$m & 020)) -ne 0 ]; then',
+  '      if has_acl "$s"; then writable=1',
+  '      else gr=0; group_ok "$g" || gr=$?',
+  '        case $gr in 0) ;; 1) writable=1 ;; *) bad=$s; return 2 ;; esac',
+  '      fi',
+  '    fi',
   '    if [ "$writable" = 1 ]; then',
   // Sticky and the entry below is ours: nobody else can remove or rename it. Otherwise the entry (when known) or the directory is what somebody else could replace.
   '      if [ $((0$m & 01000)) -eq 0 ]; then bad=$s; return 1; fi',

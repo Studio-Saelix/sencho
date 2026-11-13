@@ -81,12 +81,13 @@ export interface PathObservation {
   /**
    * Identity (`<device>:<inode>:<owner uid>:<birth time>`) of the directory this
    * path resolves to, as the preflight saw it; null when the path is not an
-   * existing directory. Execution refuses any directory that is not this one,
+   * existing directory, or when the host reports no creation time for it (such
+   * an identity cannot tell the directory from a successor that reuses its inode). Execution refuses any directory that is not this one,
    * so a directory swapped in under the same name after the approval is not
    * written, even one that took over the inode number of the approved one.
    */
   identity: string | null;
-  /** The same for `nearestExistingAncestor`, the directory a missing path is created in. */
+  /** The same for `nearestExistingAncestor`, the directory a missing path is created in (null on the same terms). */
   nearestExistingAncestorIdentity: string | null;
   /**
    * Whether anyone but root and the SSH user can change this directory or a
@@ -95,7 +96,7 @@ export interface PathObservation {
    * for it. Docker opens the compose file and the daemon the bind sources by
    * name after the start step has looked at them, so the start step runs only
    * where nobody else could have put anything at those names. Absent when the
-   * host did not report it.
+   * host did not report it, which withholds the plan like an unreadable chain.
    */
   trustSelf?: TrustChain;
   trustAbove?: TrustChain;
