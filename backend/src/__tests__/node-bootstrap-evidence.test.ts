@@ -575,6 +575,17 @@ describe('bootstrap evidence: a directory whose creation time the host cannot gi
   });
 });
 
+describe('bootstrap evidence: an identity that carries no creation time is refused even when it reaches evidence unparsed', () => {
+  it.each([
+    ['agent_dir', { agentDir: { exists: true, isDirectory: true, entries: [], writableByUser: true, identity: '2049:1001:1000:-' } }],
+    ['compose_dir', { composeDir: { identity: '2049:1001:1000:-' } }],
+  ] as Array<[BootstrapCheck['id'], FactsOverrides]>)('for %s', (id, overrides) => {
+    const facts = makeFacts(overrides);
+    expect(check(facts, id).status).toBe('unknown');
+    expect(evidence(facts).planSuppressed).toBe(true);
+  });
+});
+
 describe('bootstrap evidence: Docker opens the compose file and the mounts by name, so a place anyone else can change is refused', () => {
   const open = { state: 'open', at: '/srv/shared' } as const;
   const unreadable = { state: 'unreadable', at: '/srv/closed' } as const;

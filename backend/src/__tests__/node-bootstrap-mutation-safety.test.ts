@@ -1998,9 +1998,13 @@ describe('B4: Compose starts only the approved project', () => {
       const shim = (name: string, body: string) => fs.writeFileSync(path.join(root, 'bin', name), `#!/bin/sh\n${body}\n`, { mode: 0o755 });
       const realStat = REAL_STAT;
 
-      it('accepts a group-writable directory whose group is root\'s, which needs no look at its members\' account', async () => {
+      it('accepts a group-writable directory whose group is root\'s, which is not the SSH user\'s own group, and refuses the same directory in any other group', async () => {
         fs.chmodSync(agent, 0o770);
-        shim('stat', `if [ "$2" = "%u %g %a" ] && [ "$4" = "${approvedPath(agent)}" ]; then set -- $("${realStat}" "$@"); echo "$1 0 $3"; exit 0; fi\nexec "${realStat}" "$@"`);
+        const asGroup = (gid: number) => shim('stat', `if [ "$2" = "%u %g %a" ] && [ "$4" = "${approvedPath(agent)}" ]; then set -- $("${realStat}" "$@"); echo "$1 ${gid} $3"; exit 0; fi\nexec "${realStat}" "$@"`);
+        // A group nobody has a record of vouches for nothing; root's group needs no primary-group match.
+        asGroup(54321);
+        await refusal(false);
+        asGroup(0);
         expect((await runPlanStep(startStep(false), startContext(), planOf())).status).toBe('done');
       });
 
@@ -2467,7 +2471,10 @@ describe('B1: a directory whose creation time the host cannot give is bound by n
       expect(session.commands).toEqual([]);
     });
 
-    it.each([['the parent has none and the leaf has one', /\/a$/], ['the leaf has none and the parent has one', /\/agent$/]])('records only the made directories that have a creation time, when %s', async (_label, blanked) => {
+    it.each([
+      ['the parent has none and the leaf has one', /\/a$/, 'agent', false],
+      ['the leaf has none and the parent has one', /\/agent$/, 'a', true],
+    ] as const)('records only the made directories that have a creation time, when %s', async (_label, blanked, survivor, stops) => {
       const dest = path.join(root, 'a', 'agent');
       fs.mkdirSync(root, { recursive: true });
       const step: BootstrapPlanStep = {
@@ -2482,11 +2489,11 @@ describe('B1: a directory whose creation time the host cannot give is bound by n
         return { exitCode: real.status, stdout, stderr: '' };
       });
       const ctx = context(session);
-      await failureOf(() => runPlanStep(step, ctx, plan)).catch(() => null);
-      for (const [madePath, identity] of ctx.directories) {
-        expect(identity.endsWith(':-')).toBe(false);
-        expect(blanked.test(madePath)).toBe(false);
-      }
+      if (stops) expect(await failureOf(() => runPlanStep(step, ctx, plan))).toMatchObject({ kind: 'recovery', code: 'DIRECTORY_NOT_FINISHED' });
+      else expect((await runPlanStep(step, ctx, plan)).status).toBe('done');
+      // Exactly the directory that has a creation time is recorded: the other one is not, and nothing is recorded with a `-`.
+      expect([...ctx.directories.keys()]).toEqual([approvedPath(survivor === 'a' ? path.dirname(dest) : dest)]);
+      for (const identity of ctx.directories.values()) expect(identity.endsWith(':-')).toBe(false);
     });
   });
 });

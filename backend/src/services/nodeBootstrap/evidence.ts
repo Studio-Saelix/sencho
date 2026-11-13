@@ -213,7 +213,8 @@ function blockOnResolvedPath(
  */
 function unidentifiedDirectory(path: PathObservation, base: { id: 'compose_dir' | 'agent_dir'; category: 'paths'; label: string }): BootstrapCheck | null {
   const identity = path.exists ? path.identity : path.nearestExistingAncestorIdentity;
-  if (path.probeError || identity) return null;
+  // `:-` is a birth time the host does not keep: the parser gives it no identity, and an identity that reached here with one is refused the same way.
+  if (path.probeError || (identity && !identity.endsWith(':-'))) return null;
   const what = path.exists
     ? path.input
     : `${path.nearestExistingAncestor ?? 'The nearest existing parent'} (the directory ${path.input} is created in)`;
