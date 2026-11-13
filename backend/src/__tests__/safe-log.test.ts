@@ -595,6 +595,128 @@ describe('errorMessageForLog', () => {
     expect(errorMessageForLog(new Error(once), { imageRef: image })).toBe(once);
   });
 
+  // Docker decodes the image request path once before its reference parser
+  // runs, and the parser normalizes a familiar Docker Hub name. The daemon can
+  // therefore quote a spelling the Compose file never held.
+  it.each([
+    [
+      'an encoded slash',
+      'user:Ab%2fSuperSecret:x@registry.example.com/app:latest',
+      'SuperSecret',
+      'invalid reference format: repository name (SuperSecret) must be lowercase',
+    ],
+    [
+      'an encoded letter',
+      'user:Ab/Super%53ecret:x@registry.example.com/app:latest',
+      'SuperSecret',
+      'invalid reference format: repository name (SuperSecret) must be lowercase',
+    ],
+    [
+      'an encoded colon',
+      'user:Ab/SuperSecret%3ax@registry.example.com/app:latest',
+      'SuperSecret',
+      'invalid reference format: repository name (SuperSecret) must be lowercase',
+    ],
+    [
+      'an encoded token-only multi-segment prefix',
+      't%6fkenonly/foo%2fSuperSecret:x@registry.example.com/app:latest',
+      'tokenonly/foo/SuperSecret',
+      'invalid reference format: repository name (tokenonly/foo/SuperSecret) must be lowercase',
+    ],
+    [
+      'an encoded digest pin',
+      `user:Ab%2fSuperSecret:x@registry.example.com/app:latest@sha256:${'a'.repeat(64)}`,
+      'SuperSecret',
+      'invalid reference format: repository name (SuperSecret) must be lowercase',
+    ],
+  ])('redacts the Docker-decoded repository name for %s', (_name, image, secret, body) => {
+    const text = errorMessageForLog(new Error(body), { imageRef: image });
+
+    expect(text).not.toContain(secret);
+    expect(text).not.toContain('%2f');
+    expect(text).not.toContain('%53');
+    expect(text).toContain('repository name ([redacted])');
+    expect(text).toContain('must be lowercase');
+  });
+
+  it.each([
+    ['a canonical Docker Hub name', 'docker.io/Pass:x@registry.example.com'],
+    ['the legacy Docker Hub index domain', 'index.docker.io/Pass:x@registry.example.com'],
+  ])('redacts the normalized repository name for %s', (_name, image) => {
+    const body = 'invalid reference format: repository name (library/Pass) must be lowercase';
+    const text = errorMessageForLog(new Error(body), { imageRef: image });
+
+    expect(text).not.toContain('Pass');
+    expect(text).toContain('repository name ([redacted])');
+    expect(text).toContain('must be lowercase');
+  });
+
+  // A percent escape can decode to a byte that is not valid UTF-8. Docker's
+  // JSON error body rewrites that byte as U+FFFD, so the quoted name no longer
+  // equals any spelling the helper can reconstruct. The structured field must
+  // still lose the credential.
+  it('redacts a quoted repository name the decoder cannot reproduce', () => {
+    const image = 'user:Ab%2f%FFSuperSecret:x@registry.example.com/app:latest';
+    const body = 'invalid reference format: repository name (\uFFFDSuperSecret) must be lowercase';
+    const text = errorMessageForLog(new Error(body), { imageRef: image });
+
+    expect(text).not.toContain('SuperSecret');
+    expect(text).toContain('repository name ([redacted])');
+    expect(text).toContain('must be lowercase');
+  });
+
+  it('leaves a quoted repository name intact when the reference carries no credential', () => {
+    const image = 'registry.example.com/App:latest';
+    const body = 'invalid reference format: repository name (App) must be lowercase';
+    const text = errorMessageForLog(new Error(body), { imageRef: image });
+
+    expect(text).toContain('repository name (App)');
+  });
+
+  it('redacts a percent-decoded reference the error echoes', () => {
+    const image = 'user:Ab%2fSuperSecret:x@registry.example.com/app:latest';
+    const text = errorMessageForLog(
+      new Error('No such image: user:Ab/SuperSecret:x@registry.example.com/app:latest'),
+      { imageRef: image },
+    );
+
+    expect(text).not.toContain('SuperSecret');
+    expect(text).toContain('[redacted]@registry.example.com/app:latest');
+  });
+
+  it('redacts a decoded userinfo the error quotes without the host', () => {
+    const image = 'user:Ab%2fSuperSecret:x@registry.example.com/app:latest';
+    const text = errorMessageForLog(
+      new Error('invalid userinfo user:Ab/SuperSecret:x for image'),
+      { imageRef: image },
+    );
+
+    expect(text).not.toContain('SuperSecret');
+    expect(text).toContain('invalid userinfo [redacted] for image');
+  });
+
+  it('is idempotent on a Docker-decoded repository name', () => {
+    const image = 'user:Ab%2fSuperSecret:x@registry.example.com/app:latest';
+    const body = 'invalid reference format: repository name (SuperSecret) must be lowercase';
+    const once = errorMessageForLog(new Error(body), { imageRef: image });
+
+    expect(once).toContain('repository name ([redacted])');
+    expect(errorMessageForLog(new Error(once), { imageRef: image })).toBe(once);
+  });
+
+  it('removes a long percent-encoded repository name in bounded time', () => {
+    const encodedTail = `cD${'%2fcD'.repeat(20_000)}=`;
+    const decodedTail = encodedTail.replace(/%2f/g, '/');
+    const image = `user:Ab/${encodedTail}:x@registry.example.com/app:latest`;
+    const body = `invalid reference format: repository name (${decodedTail}) must be lowercase`;
+    const started = Date.now();
+    const text = errorMessageForLog(new Error(body), { imageRef: image });
+
+    expect(Date.now() - started).toBeLessThan(1000);
+    expect(text).not.toContain(decodedTail);
+    expect(text).toContain('repository name ([redacted])');
+  });
+
   it('keeps a digest-pinned image reference the error quotes intact', () => {
     const image = 'ghcr.io/team/app:1.0@sha256:1a2b3c4d5e6f708192a3b4c5d6e7f8091a2b3c4d5e6f708192a3b4c5d6e7f809';
     const text = errorMessageForLog(new Error(`No such image: ${image}`), { imageRef: image });

@@ -59,6 +59,7 @@ vi.mock('util', () => ({
   promisify: () => mockExecFileAsync,
 }));
 
+import Docker from 'dockerode';
 import DockerController, { selectMainWebPort, parseExitCode, isContainerFailed } from '../services/DockerController';
 import { CacheService } from '../services/CacheService';
 import { StackUpdateRecoveryService } from '../services/StackUpdateRecoveryService';
@@ -1927,6 +1928,28 @@ describe('DockerController - inspectImage', () => {
     expect(result.inspect).toEqual(inspectData);
     expect(result.history).toEqual(historyData);
     expect(mockDocker.getImage).toHaveBeenCalledWith('sha256:abc12345');
+  });
+
+  // Docker's router decodes the path before parsing the reference, so the
+  // client must not pre-encode it. Pin both requests the controller issues.
+  it('sends a percent-encoded image reference unchanged on both request paths', async () => {
+    const image = 'user:Ab%2fSuperSecret:x@registry.example.com/app:latest';
+    const client = new Docker({ socketPath: '/nonexistent/docker.sock' });
+    const paths: string[] = [];
+    const dial = vi.spyOn(client.modem, 'dial').mockImplementation(((
+      opts: { path: string },
+      callback: (err: Error | null, data?: unknown) => void,
+    ) => {
+      paths.push(opts.path);
+      callback(null, opts.path.endsWith('/history') ? [] : { Id: 'sha256:abc' });
+    }) as unknown as typeof client.modem.dial);
+    mockDocker.getImage.mockReturnValueOnce(client.getImage(image));
+
+    const dc = DockerController.getInstance(1);
+    await dc.inspectImage(image);
+
+    expect(paths).toEqual([`/images/${image}/json`, `/images/${image}/history`]);
+    dial.mockRestore();
   });
 
   it('propagates 404 from Dockerode when image is missing', async () => {

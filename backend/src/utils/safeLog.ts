@@ -129,6 +129,23 @@ function splitImageReference(image: string): { userinfo: string; rest: string } 
   };
 }
 
+/**
+ * Decode the percent escapes Docker's router resolves before it parses an
+ * image request path. Go's `URL.Path` is decoded once, so `%2f` reaches the
+ * reference parser as `/` and `%3a` as `:`. A malformed escape is rejected
+ * before routing, but decode the valid escapes anyway so the rest of a
+ * credential cannot hide behind a broken one.
+ */
+function decodeDockerImagePath(image: string): string {
+  if (!image.includes('%')) return image;
+  try {
+    return decodeURIComponent(image);
+  } catch {
+    return image.replace(/%([0-9A-Fa-f]{2})/g, (_match, hex: string) =>
+      String.fromCharCode(Number.parseInt(hex, 16)));
+  }
+}
+
 /** How many `cause` links to fold into a log message before giving up on it. */
 const MAX_CAUSE_DEPTH = 3;
 
@@ -152,10 +169,10 @@ const MAX_CAUSE_DEPTH = 3;
  * may quote it. Docker echoes the reference in its errors, and a password can
  * hold a `/`, a space, or a quote that the text-shape rules deliberately do not
  * treat as one, so the reference's own grammar has to run first. Docker may
- * also quote only the parsed repository name, either after the credential's
- * first `/` or from the start of the reference, cut at the first `:`; removing
- * the userinfo, its tail, and that quoted prefix covers the rewrite. A digest
- * pin with no userinfo is left intact.
+ * also quote only the repository name it parsed from the request path, which it
+ * decodes once and may normalize into a Docker Hub form, so a credential-bearing
+ * image has that whole structured field redacted rather than reconstructed. A
+ * digest pin with no userinfo is left intact.
  */
 export function errorMessageForLog(error: unknown, options?: { imageRef?: string }): string {
   const message = messageWithCause(error);
@@ -165,51 +182,66 @@ export function errorMessageForLog(error: unknown, options?: { imageRef?: string
 
 /** Replace a known image reference and any credential fragment Docker echoes after rewriting it. */
 function redactImageInText(text: string, imageRef: string): string {
-  const reference = splitImageReference(imageRef);
-  if (reference === null) return text;
-  let out = text.split(imageRef).join(`[redacted]@${reference.rest}`);
-  const { userinfo } = reference;
-  // Docker splits the reference into a domain and a remainder when the
-  // component before the first `/` looks like a domain (it has a `.` or `:`,
-  // is `localhost`, or is not all lowercase); otherwise it keeps the whole
-  // name. The invalid-reference error quotes the parsed repository name, cut
-  // at the first `:`, so when the password has no colon the userinfo tail
-  // reaches the message still followed by the host's `@`. Anchoring each
-  // fragment to that `@` keeps a short password piece from rewriting unrelated
-  // words, and removing the tail takes every `/`-separated segment with it in
-  // one pass rather than one split per segment, which a long slash-heavy
-  // reference would turn quadratic.
-  //
-  // A `user:password` userinfo is credential-shaped even when short, and a
-  // long token is distinctive, so an echo of either is removed even without
-  // the host's `@`. A short token-only userinfo is removed only before the
-  // `@`: replacing a bare two- or three-letter token would rewrite ordinary
-  // words, and Docker's echo keeps the `@`.
-  if (userinfo.includes(':') || userinfo.length >= 8) {
-    out = out.split(userinfo).join('[redacted]');
+  // Docker receives the reference inside a URL path and its router decodes that
+  // path once before the reference parser sees it, so the daemon can echo a
+  // spelling the Compose file never held. Check both spellings.
+  const spellings = imageRef.includes('%')
+    ? [...new Set([imageRef, decodeDockerImagePath(imageRef)])]
+    : [imageRef];
+  const references = new Map<string, { userinfo: string; rest: string }>();
+  let out = text;
+  for (const spelling of spellings) {
+    const reference = splitImageReference(spelling);
+    if (reference === null) continue;
+    references.set(spelling, reference);
+    out = out.split(spelling).join(`[redacted]@${reference.rest}`);
   }
-  const slash = userinfo.indexOf('/');
-  const tail = slash === -1 ? '' : userinfo.slice(slash + 1);
-  // The invalid-reference error quotes the repository name it parsed, cut at
-  // the first `:`. A colon in the password truncates that quote before the
-  // host's `@`, so the anchored fragment below cannot match it. The quote
-  // starts after the credential's first `/` when Docker reads that component
-  // as a domain, and at the start of the reference otherwise, so try both.
-  // Replace only inside the quoted-name phrase, so a short prefix such as
-  // `Pass` does not rewrite the same word elsewhere.
-  const firstSegment = slash === -1 ? '' : userinfo.slice(0, slash);
-  const quotedTail = tail.split(':')[0];
-  const quotedNames = firstSegment ? [`${firstSegment}/${quotedTail}`, quotedTail] : [quotedTail];
-  for (const quotedName of quotedNames) {
-    if (!/[A-Za-z0-9]/.test(quotedName)) continue;
-    out = out.split(`repository name (${quotedName})`).join('repository name ([redacted])');
+  if (references.size === 0) return out;
+
+  const bareFragments = new Set<string>();
+  const anchoredFragments = new Set<string>();
+
+  for (const reference of references.values()) {
+    const { userinfo } = reference;
+    if (userinfo.includes(':') || userinfo.length >= 8) bareFragments.add(userinfo);
+    const slash = userinfo.indexOf('/');
+    const tail = slash === -1 ? '' : userinfo.slice(slash + 1);
+    // Anchoring each fragment to the host's `@` keeps a short password piece
+    // from rewriting unrelated words. A `user:password` userinfo is
+    // credential-shaped even when short, and a long token is distinctive, so
+    // an echo of either is removed even without the host's `@`. A short
+    // token-only userinfo is removed only before the `@`: replacing a bare
+    // two- or three-letter token would rewrite ordinary words, and Docker's
+    // echo keeps the `@`.
+    anchoredFragments.add(userinfo);
+    if (tail) anchoredFragments.add(tail);
   }
-  for (const fragment of [userinfo, tail]) {
-    // Punctuation-only pieces carry no credential value, and replacing them
-    // would mangle the rest of the message.
+
+  for (const fragment of bareFragments) {
+    if (!/[A-Za-z0-9]/.test(fragment)) continue;
+    out = out.split(fragment).join('[redacted]');
+  }
+  // Remove a fragment anchored to the host's `@` before the quoted-name pass,
+  // so a quote that still holds the host keeps its `[redacted]@host/path`
+  // context instead of collapsing to a bare marker. Punctuation-only pieces
+  // carry no credential value, and replacing them would mangle the rest of the
+  // message.
+  for (const fragment of anchoredFragments) {
     if (!/[A-Za-z0-9]/.test(fragment)) continue;
     out = out.split(`${fragment}@`).join('[redacted]@');
   }
+  // The invalid-reference error quotes the repository name the daemon parsed,
+  // which can come from a path it decoded, a Docker Hub name it normalized, or
+  // a parser version that rewrites a byte the client never held (an invalid
+  // UTF-8 escape reaches the JSON body as U+FFFD, for example). Reconstructing
+  // every form is not exhaustive, so redact the structured field as a whole
+  // whenever the image carries a credential: the failure reason and the
+  // redacted reference stay, and only the name is lost. A field an earlier pass
+  // already reduced keeps its `[redacted]@host/path` context. Replacing only
+  // inside the phrase also keeps a short prefix such as `Pass` from rewriting
+  // the same word elsewhere in the message.
+  out = out.replace(/repository name \(([^)]*)\)/g, (match, quotedName: string) =>
+    quotedName.includes('[redacted]') ? match : 'repository name ([redacted])');
   return out;
 }
 

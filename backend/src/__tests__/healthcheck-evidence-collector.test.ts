@@ -304,6 +304,88 @@ describe('collectServiceHealthcheckEvidence', () => {
     expect(String(imageWarn?.[2])).toContain('must be lowercase');
   });
 
+  // Docker decodes the request path before its reference parser runs, and the
+  // parser normalizes a familiar Docker Hub name. The warning must not carry
+  // the credential in either the authored or the daemon's spelling.
+  it.each([
+    {
+      name: 'an encoded slash',
+      image: 'user:Ab%2fSuperSecret:x@registry.example.com/app:latest',
+      quoted: 'SuperSecret',
+      forbidden: ['SuperSecret', '%2f'],
+      rest: 'registry.example.com/app:latest',
+    },
+    {
+      name: 'an encoded letter',
+      image: 'user:Ab/Super%53ecret:x@registry.example.com/app:latest',
+      quoted: 'SuperSecret',
+      forbidden: ['SuperSecret', '%53'],
+      rest: 'registry.example.com/app:latest',
+    },
+    {
+      name: 'an encoded colon',
+      image: 'user:Ab/SuperSecret%3ax@registry.example.com/app:latest',
+      quoted: 'SuperSecret',
+      forbidden: ['SuperSecret', '%3a'],
+      rest: 'registry.example.com/app:latest',
+    },
+    {
+      name: 'an encoded token-only multi-segment prefix',
+      image: 't%6fkenonly/foo%2fSuperSecret:x@registry.example.com/app:latest',
+      quoted: 'tokenonly/foo/SuperSecret',
+      forbidden: ['SuperSecret', 'tokenonly/foo', '%2f', '%6f'],
+      rest: 'registry.example.com/app:latest',
+    },
+    {
+      name: 'a decoded byte Docker replaces before it quotes the name',
+      image: 'user:Ab%2f%FFSuperSecret:x@registry.example.com/app:latest',
+      quoted: '\uFFFDSuperSecret',
+      forbidden: ['SuperSecret', '%FF'],
+      rest: 'registry.example.com/app:latest',
+    },
+    {
+      name: 'an encoded credential on a digest pin',
+      image: `user:Ab%2fSuperSecret:x@registry.example.com/app:latest@sha256:${'a'.repeat(64)}`,
+      quoted: 'SuperSecret',
+      forbidden: ['SuperSecret', '%2f'],
+      rest: `registry.example.com/app:latest@sha256:${'a'.repeat(64)}`,
+    },
+    {
+      name: 'a canonical Docker Hub name',
+      image: 'docker.io/Pass:x@registry.example.com',
+      quoted: 'library/Pass',
+      forbidden: ['Pass', 'library/Pass'],
+      rest: 'registry.example.com',
+    },
+    {
+      name: 'the legacy Docker Hub index domain',
+      image: 'index.docker.io/Pass:x@registry.example.com',
+      quoted: 'library/Pass',
+      forbidden: ['Pass', 'library/Pass'],
+      rest: 'registry.example.com',
+    },
+  ])('never logs a credential Docker decodes or normalizes for $name', async ({ image, quoted, forbidden, rest }) => {
+    const dockerError = new Error(
+      `(HTTP code 400) unexpected - invalid reference format: repository name (${quoted}) must be lowercase `,
+    );
+    const { inspectImage } = mockDocker({ list: [], image: 'error', imageError: dockerError });
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const evidence = await collectServiceHealthcheckEvidence(
+      1, 'proj', model([svc({ composeHealthcheck: 'absent', image })]), true,
+    );
+    expect(evidence.web.state).toBe('unverifiable');
+    expect(inspectImage).toHaveBeenCalledWith(image);
+    const logged = warn.mock.calls.map(args => args.join(' ')).join('\n');
+    for (const fragment of forbidden) expect(logged).not.toContain(fragment);
+    expect(logged).toContain('must be lowercase');
+    expect(logged).toContain(`[redacted]@${rest}`);
+    const imageWarn = warn.mock.calls.find(args => String(args[0]).includes('image inspect failed'));
+    expect(imageWarn).toBeDefined();
+    expect(imageWarn?.[1]).toBe(`[redacted]@${rest}`);
+    expect(String(imageWarn?.[2])).not.toContain(quoted);
+    expect(String(imageWarn?.[2])).toContain('must be lowercase');
+  });
+
   it('never logs registry credentials from the compose project label', async () => {
     mockDocker({ listError: new Error('daemon down'), image: { Config: {} } });
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
