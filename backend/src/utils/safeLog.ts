@@ -320,11 +320,8 @@ function redactImageInText(text: string, imageRef: string): string {
   // already reduced keeps the host context it still holds.
   out = redactQuotedRepositoryNames(out);
   // A different daemon error shape may quote a name without either known
-  // suffix; the first `)` still ends the common no-paren form. Replacing only
-  // inside the phrase also keeps a short prefix such as `Pass` from rewriting
-  // the same word elsewhere in the message.
-  out = out.replace(/repository name \(([^)]*)\)/g, (match, quotedName: string) =>
-    quotedName.includes('[redacted]') ? match : 'repository name ([redacted])');
+  // suffix; the first `)` still ends the common no-paren form.
+  out = redactNoSuffixQuotedNames(out);
   return out;
 }
 
@@ -344,25 +341,63 @@ const QUOTED_REPOSITORY_NAME_SUFFIXES = [
  */
 function redactQuotedRepositoryNames(text: string): string {
   const phrase = 'repository name (';
-  const openAt = text.indexOf(phrase);
-  if (openAt === -1) return text;
-  let closeAt = -1;
-  for (let i = openAt + phrase.length; i < text.length; i += 1) {
-    if (text[i] !== ')') continue;
-    for (const suffix of QUOTED_REPOSITORY_NAME_SUFFIXES) {
-      if (text.startsWith(suffix, i + 1)) {
-        closeAt = i;
-        break;
+  let out = '';
+  let copied = 0;
+  let searchFrom = 0;
+  while (true) {
+    const openAt = text.indexOf(phrase, searchFrom);
+    if (openAt === -1) break;
+    // Greedy on purpose: a name can contain a suffix phrase, so the last match
+    // is the daemon's closing parenthesis. Over-redacting a message with two
+    // quoted names is the safe direction. The scan consumes to the last close,
+    // so the loop stays linear over the message.
+    let closeAt = -1;
+    for (let i = openAt + phrase.length; i < text.length; i += 1) {
+      if (text[i] !== ')') continue;
+      for (const suffix of QUOTED_REPOSITORY_NAME_SUFFIXES) {
+        if (text.startsWith(suffix, i + 1)) {
+          closeAt = i;
+          break;
+        }
       }
     }
+    if (closeAt === -1) break;
+    const quotedName = text.slice(openAt + phrase.length, closeAt);
+    if (!quotedName.includes('[redacted]')) {
+      out += `${text.slice(copied, openAt)}repository name ([redacted])`;
+      copied = closeAt + 1;
+    }
+    searchFrom = closeAt + 1;
   }
-  if (closeAt === -1) return text;
-  // Greedy on purpose: a name can contain a suffix phrase, so the last match
-  // is the daemon's closing parenthesis. Over-redacting a message with two
-  // quoted names is the safe direction.
-  const quotedName = text.slice(openAt + phrase.length, closeAt);
-  if (quotedName.includes('[redacted]')) return text;
-  return `${text.slice(0, openAt)}repository name ([redacted])${text.slice(closeAt + 1)}`;
+  out += text.slice(copied);
+  return out;
+}
+
+/**
+ * Redact a quoted repository name that has no known daemon suffix, ending it at
+ * the first `)`. Replacing only inside the phrase keeps a short prefix such as
+ * `Pass` from rewriting the same word elsewhere in the message, and the scan is
+ * linear in the message length.
+ */
+function redactNoSuffixQuotedNames(text: string): string {
+  const phrase = 'repository name (';
+  let out = '';
+  let copied = 0;
+  let searchFrom = 0;
+  while (true) {
+    const openAt = text.indexOf(phrase, searchFrom);
+    if (openAt === -1) break;
+    const closeAt = text.indexOf(')', openAt + phrase.length);
+    if (closeAt === -1) break;
+    const quotedName = text.slice(openAt + phrase.length, closeAt);
+    if (!quotedName.includes('[redacted]')) {
+      out += `${text.slice(copied, openAt)}repository name ([redacted])`;
+      copied = closeAt + 1;
+    }
+    searchFrom = closeAt + 1;
+  }
+  out += text.slice(copied);
+  return out;
 }
 
 function messageWithCause(error: unknown): string {
