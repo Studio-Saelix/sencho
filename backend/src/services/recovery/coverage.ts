@@ -63,14 +63,18 @@ export interface CoverageVerdict {
   roots: RootCoverage[];
 }
 
-/** The most recent verification; on a tie, the one that did not verify wins. */
-function latestVerification(
+/**
+ * The most recent verification of one point in a list; on a tie, the one that
+ * did not verify wins. A verification filed under another point is ignored even
+ * when it sits in this point's list, so a row that disagrees cannot verify
+ * anything.
+ */
+export function latestVerificationFor(
   pointId: string,
-  verifications: ReadonlyMap<string, readonly IntegrityVerification[]>,
+  verifications: readonly IntegrityVerification[],
 ): IntegrityVerification | null {
-  const list = verifications.get(pointId) ?? [];
   let latest: IntegrityVerification | null = null;
-  for (const v of list) {
+  for (const v of verifications) {
     if (v.pointId !== pointId) continue;
     if (!latest || v.verifiedAt > latest.verifiedAt
       || (v.verifiedAt === latest.verifiedAt && latest.result === 'verified' && v.result !== 'verified')) {
@@ -80,7 +84,13 @@ function latestVerification(
   return latest;
 }
 
-const isComplete = (p: RecoveryPoint): boolean =>
+/**
+ * A point that counted everything it recorded and left nothing out but policy
+ * exclusions. Verification is a separate fact: this predicate says the capture
+ * itself is complete, and a surface reports `latestVerificationFor` beside it
+ * rather than folding the two together (see `pointContents.ts`).
+ */
+export const isCompletePoint = (p: RecoveryPoint): boolean =>
   p.status === 'succeeded' && p.capture.skippedCount === 0
   && p.exclusions.every((e) => e.reason === 'policy_excluded');
 
@@ -117,7 +127,7 @@ export function evaluateRootCoverage(root: RootCoverageInput, now: number, fresh
   }
 
   const complete = currentGen
-    .filter(isComplete)
+    .filter(isCompletePoint)
     .sort((a, b) => (b.completedAt ?? 0) - (a.completedAt ?? 0));
   if (complete.length === 0) {
     if (currentGen.some((p) => p.status === 'pending')) return result('in_progress');
@@ -126,9 +136,9 @@ export function evaluateRootCoverage(root: RootCoverageInput, now: number, fresh
     return result('failed_only');
   }
 
-  const verified = complete.filter((p) => latestVerification(p.id, root.verifications)?.result === 'verified');
+  const verified = complete.filter((p) => latestVerificationFor(p.id, root.verifications.get(p.id) ?? [])?.result === 'verified');
   if (verified.length === 0) {
-    const newest = latestVerification(complete[0].id, root.verifications);
+    const newest = latestVerificationFor(complete[0].id, root.verifications.get(complete[0].id) ?? []);
     return result(newest?.result === 'mismatch' ? 'integrity_mismatch' : 'unverified');
   }
 

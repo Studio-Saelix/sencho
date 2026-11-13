@@ -7,6 +7,7 @@ import {
 } from './types';
 import type {
   BackupEngine,
+  PointReadKind,
   RecoveryNodeDescriptor,
   RestoreMode,
   VolumeProtectionStatus,
@@ -89,6 +90,7 @@ export function buildLocalRecoveryNodeDescriptor(): RecoveryNodeDescriptor {
     // now: a node whose recovery gate is closed still speaks these shapes, and
     // its own routes answer `503` with the reason.
     restoreModes: ['new_volume', 'staged_overwrite'],
+    pointReads: ['list', 'download'],
   };
 }
 
@@ -133,11 +135,12 @@ const RESTORE_MODES: readonly RestoreMode[] = ['new_volume', 'staged_overwrite']
  * as `['new_volume']`, which is what a node that never heard of the field can
  * do. A list that names anything else is refused rather than narrowed silently,
  * because a hub that guessed would send a destructive request to a node that
- * cannot carry it out.
+ * cannot carry it out. `pointReads` is read as `[]` when it is missing, and a
+ * value that is not a list is refused the same way (see `parsePointReads`).
  */
 export function parseRecoveryNodeDescriptor(data: unknown): RecoveryNodeDescriptor | null {
   if (!data || typeof data !== 'object' || Array.isArray(data)) return null;
-  const { contractVersion, volumeProtection, restoreModes } = data as Record<string, unknown>;
+  const { contractVersion, volumeProtection, restoreModes, pointReads } = data as Record<string, unknown>;
   if (typeof contractVersion !== 'number' || !Number.isInteger(contractVersion) || contractVersion < 1) return null;
   if (!volumeProtection || typeof volumeProtection !== 'object') return null;
   const vp = volumeProtection as Record<string, unknown>;
@@ -147,7 +150,28 @@ export function parseRecoveryNodeDescriptor(data: unknown): RecoveryNodeDescript
   if (!reported) return null;
   const modes = parseRestoreModes(restoreModes);
   if (modes === null) return null;
-  return { contractVersion, volumeProtection: reported, restoreModes: modes };
+  const reads = parsePointReads(pointReads);
+  if (reads === null) return null;
+  return { contractVersion, volumeProtection: reported, restoreModes: modes, pointReads: reads };
+}
+
+const POINT_READS: readonly PointReadKind[] = ['list', 'download'];
+
+/**
+ * The point reads a descriptor names, or null when the field is not a list. A
+ * missing field reads as `[]`: the node predates point reads. A name this build
+ * does not know is dropped: unlike a restore mode, a read changes nothing, so a
+ * hub that cannot use a newer node's read simply does not offer it.
+ */
+function parsePointReads(value: unknown): PointReadKind[] | null {
+  if (value === undefined) return [];
+  if (!Array.isArray(value)) return null;
+  const reads: PointReadKind[] = [];
+  for (const item of value) {
+    const known = POINT_READS.find((read) => read === item);
+    if (known && !reads.includes(known)) reads.push(known);
+  }
+  return reads;
 }
 
 /** The modes a descriptor names, or null when the list is not one this build reads. */
@@ -169,34 +193,37 @@ function parseRestoreModes(value: unknown): RestoreMode[] | null {
  * refusal or an error is unknown too, but says so, so a revoked token does not
  * read as a network fault.
  *
- * `restoreModes` is null whenever the status is not the node's own answer: a hub
- * that cannot read the descriptor must not assume what the node can execute.
+ * `restoreModes` and `pointReads` are null whenever the status is not the node's
+ * own answer: a hub that cannot read the descriptor must not assume what the
+ * node can execute.
  */
 export interface RemoteRecoveryRead {
   status: VolumeProtectionStatus;
   restoreModes: RestoreMode[] | null;
+  pointReads: PointReadKind[] | null;
 }
 
 export function resolveRemoteRecoveryRead(read: NodeProxyJsonRead): RemoteRecoveryRead {
   switch (read.kind) {
     case 'route_missing':
-      return { status: { ...KEY, state: 'update_required', reason: 'node_contract_older' }, restoreModes: null };
+      return { status: { ...KEY, state: 'update_required', reason: 'node_contract_older' }, restoreModes: null, pointReads: null };
     case 'no_target':
     case 'transport':
-      return { status: { ...KEY, state: 'unknown', reason: 'node_unreachable' }, restoreModes: null };
+      return { status: { ...KEY, state: 'unknown', reason: 'node_unreachable' }, restoreModes: null, pointReads: null };
     case 'http':
       return {
         status: read.status === 401 || read.status === 403
           ? { ...KEY, state: 'unknown', reason: 'node_refused' }
           : { ...KEY, state: 'unknown', reason: 'node_error' },
         restoreModes: null,
+        pointReads: null,
       };
     case 'ok':
       break;
   }
   const descriptor = parseRecoveryNodeDescriptor(read.data);
   if (!descriptor) {
-    return { status: { ...KEY, state: 'unknown', reason: 'descriptor_invalid' }, restoreModes: null };
+    return { status: { ...KEY, state: 'unknown', reason: 'descriptor_invalid' }, restoreModes: null, pointReads: null };
   }
   if (descriptor.contractVersion !== RECOVERY_CONTRACT_VERSION) {
     return {
@@ -206,6 +233,7 @@ export function resolveRemoteRecoveryRead(read: NodeProxyJsonRead): RemoteRecove
         reason: descriptor.contractVersion < RECOVERY_CONTRACT_VERSION ? 'node_contract_older' : 'hub_contract_older',
       },
       restoreModes: null,
+      pointReads: null,
     };
   }
   const vp = descriptor.volumeProtection;
@@ -217,9 +245,10 @@ export function resolveRemoteRecoveryRead(read: NodeProxyJsonRead): RemoteRecove
         reason: vp.version < VOLUME_PROTECTION_CAPABILITY_VERSION ? 'node_contract_older' : 'hub_contract_older',
       },
       restoreModes: null,
+      pointReads: null,
     };
   }
-  return { status: vp, restoreModes: descriptor.restoreModes };
+  return { status: vp, restoreModes: descriptor.restoreModes, pointReads: descriptor.pointReads };
 }
 
 /** The status alone, for callers that only describe the node. */

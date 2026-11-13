@@ -346,6 +346,12 @@ export type DependentResolution =
   | {
       kind: 'resolved';
       dependents: StorageDependent[];
+      /**
+       * The dependents found now: containers mounting the volume, the volume's
+       * own Compose project label, rendered models. The recorded rows are left
+       * out, so an empty list means no stack depends on the volume today.
+       */
+      current: StorageDependent[];
       /** True when a container currently mounts the volume, whatever its state. */
       mountedByContainer: boolean;
     }
@@ -355,6 +361,8 @@ export type DependentResolution =
       stackName: string;
       /** What is known: recorded dependents, containers and the volume's own label. */
       dependents: StorageDependent[];
+      /** The dependents found now, as in the resolved kind, up to the model that failed. */
+      current: StorageDependent[];
       mountedByContainer: boolean;
     };
 
@@ -394,16 +402,21 @@ export async function resolveVolumeDependents(input: {
   docker: Pick<Docker, 'listContainers'>;
 }): Promise<DependentResolution> {
   const found = new Map<string, StorageDependent>();
-  const add = (stackName: string, serviceName: string | null): void => {
+  const current = new Map<string, StorageDependent>();
+  const record = (stackName: string, serviceName: string | null, into: Map<string, StorageDependent>): void => {
     if (!stackName) return;
-    found.set(`${stackName}\u0000${serviceName ?? ''}`, { stackName, serviceName });
+    into.set(`${stackName}\u0000${serviceName ?? ''}`, { stackName, serviceName });
+  };
+  const add = (stackName: string, serviceName: string | null): void => {
+    record(stackName, serviceName, found);
+    record(stackName, serviceName, current);
   };
 
   // Recorded dependents: the last observation's view, so a stack that dropped the
   // volume recently still appears once more.
   const storageKey = deriveStorageKey(getRecoveryAuthorityId(), input.ownerNodeKey, 'named_volume', input.volumeName);
   for (const dependent of StorageIdentityStore.getInstance().listDependents(storageKey)) {
-    add(dependent.stackName, dependent.serviceName);
+    record(dependent.stackName, dependent.serviceName, found);
   }
 
   // Containers that mount it now.
@@ -439,6 +452,7 @@ export async function resolveVolumeDependents(input: {
           kind: 'unrenderable',
           stackName: entry.stackName,
           dependents: [...found.values()],
+          current: [...current.values()],
           mountedByContainer,
         };
       }
@@ -449,7 +463,7 @@ export async function resolveVolumeDependents(input: {
     }
   }
 
-  return { kind: 'resolved', dependents: [...found.values()], mountedByContainer };
+  return { kind: 'resolved', dependents: [...found.values()], current: [...current.values()], mountedByContainer };
 }
 
 type RenderResult = ReturnType<typeof parseEffectiveModel> | 'unrenderable' | null;

@@ -3,6 +3,7 @@ import {
   RecoveryHelperRunner,
   resticCommand,
   type HelperProfile,
+  type HelperRunResult,
   type HelperRunSpec,
 } from './helperRunner';
 import {
@@ -18,14 +19,27 @@ import { sanitizeForLog } from '../../../utils/safeLog';
 import { consistencyFromObservations, type InUseObservation } from '../volumeSources';
 import { RECOVERY_CONTRACT_VERSION } from '../types';
 import { RECOVERY_WORK_DIR_GLOB } from '../restoreIntents';
+import {
+  classifyContentRun,
+  contentSnapshotPath,
+  parentPointPath,
+  parseContentLine,
+} from './resticContents';
 import type {
   BackupEngine,
+  ContentChunkSink,
+  ContentDump,
+  ContentReadContext,
+  ContentReadRequest,
   CreatePointRequest,
   EngineExecutionContext,
   EngineProbe,
   EngineResult,
   IntegrityMethod,
   PointCaptureEvidence,
+  PointContentReader,
+  PointDirectoryRead,
+  PointEntry,
   RecoveryPoint,
   RestoreEvidence,
   RestoreIntent,
@@ -48,7 +62,15 @@ import type {
 /** The engine id stamped on every point this adapter captures. */
 export const RESTIC_ENGINE_ID = 'restic';
 
-export class ResticEngine implements BackupEngine {
+/**
+ * How long one listing may take. A directory read loads the repository index
+ * before the first entry, and a repository on a stalled mount would otherwise
+ * hold a helper and a response forever. A file body has no total deadline: it
+ * moves at the client's pace, and the download route stops one that stops moving.
+ */
+export const CONTENT_LISTING_TIMEOUT_MS = 120 * 1000;
+
+export class ResticEngine implements BackupEngine, PointContentReader {
   readonly engineId = RESTIC_ENGINE_ID;
   readonly contractVersion = RECOVERY_CONTRACT_VERSION;
   readonly storageKinds: readonly StorageKind[] = ['named_volume'];
@@ -265,6 +287,188 @@ export class ResticEngine implements BackupEngine {
         xattrWarnings: outcome.status === 'partial' ? outcome.xattrWarnings : 0,
       },
     };
+  }
+
+  // --- Point contents -------------------------------------------------------
+
+  /**
+   * One directory read of a saved point: the path's own record and one page of
+   * its immediate children.
+   *
+   * `restic ls --json` walks to the requested path and prints the path's own
+   * node followed by its immediate children in tree order (sorted by name), so
+   * an offset names the same entry on every read of an immutable snapshot. The
+   * run skips the first `offset` children without keeping them and stops itself
+   * once it has seen one entry past the page, which is how it knows there is a
+   * next page. That stop is a SIGINT the classifier reads as success.
+   */
+  async readDirectory(
+    request: ContentReadRequest,
+    page: { offset: number; pageSize: number },
+    ctx: ContentReadContext,
+  ): Promise<EngineResult<PointDirectoryRead>> {
+    const repository = this.deps.repositoryFor(request.repositoryId);
+    if (!repository) return { ok: false, errorClass: 'repository_unavailable' };
+    if (!request.snapshotId) return { ok: false, errorClass: 'invalid_request' };
+    const snapshotPath = contentSnapshotPath(request.path);
+
+    const entries: PointEntry[] = [];
+    let self: PointEntry | null = null;
+    let seen = 0;
+    let hasMore = false;
+    // Set when the run stops itself: the page is full, the record is all a
+    // file, a link or a record-only read needs, or a line could not be trusted.
+    let stopped = false;
+    let malformed = false;
+    const stop = (): void => {
+      stopped = true;
+      controller.abort();
+    };
+    const controller = new AbortController();
+    const onExternalAbort = (): void => controller.abort();
+    if (ctx.signal.aborted) controller.abort();
+    else ctx.signal.addEventListener('abort', onExternalAbort, { once: true });
+
+    let result: HelperRunResult;
+    try {
+      result = await this.deps.runner.run({
+        profile: 'read',
+        operationId: ctx.operationId,
+        cmd: resticCommand('/repo', ['ls', request.snapshotId, snapshotPath, '--json', '--no-lock', '--quiet']),
+        mounts: { repository: repository.locator },
+        stdinSecret: this.deps.secret,
+        signal: controller.signal,
+        timeoutMs: CONTENT_LISTING_TIMEOUT_MS,
+        onStdoutLine: (line) => {
+          if (stopped) return;
+          const parsed = parseContentLine(line);
+          if (parsed.kind === 'skip') return;
+          if (parsed.kind === 'malformed') {
+            malformed = true;
+            stop();
+            return;
+          }
+          const entry = parsed.entry;
+          if (entry.path === request.path) {
+            self = entry;
+            if (entry.type !== 'directory' || page.pageSize === 0) stop();
+            return;
+          }
+          if (parentPointPath(entry.path) !== request.path) return;
+          seen += 1;
+          if (seen <= page.offset) return;
+          if (entries.length >= page.pageSize) {
+            hasMore = true;
+            stop();
+            return;
+          }
+          entries.push(entry);
+        },
+      });
+    } finally {
+      ctx.signal.removeEventListener('abort', onExternalAbort);
+    }
+
+    const failure = this.contentFailure('list', request, result, ctx.signal, stopped && !ctx.signal.aborted);
+    if (failure) return failure;
+    if (malformed) {
+      // restic printed a record this build cannot read. A page that skipped it
+      // would shift every offset after it, so the read fails instead.
+      console.warn('[Recovery] Listing of snapshot %s returned a record this build cannot read', sanitizeForLog(request.snapshotId));
+      return { ok: false, errorClass: 'node_error' };
+    }
+    if (!self) return { ok: true, evidence: { found: false } };
+    return {
+      ok: true,
+      evidence: {
+        found: true,
+        self,
+        entries,
+        nextOffset: hasMore ? page.offset + page.pageSize : null,
+      },
+    };
+  }
+
+  /**
+   * Stream one regular file out of a saved point.
+   *
+   * The caller sends the headers from the metadata read and then hands the body
+   * to its sink. The byte count is checked against what the metadata promised, so
+   * a body that stopped early (a missing chunk, a helper killed mid-file) is an
+   * integrity failure rather than a short success.
+   */
+  async dumpFile(
+    request: ContentReadRequest,
+    expectedBytes: number,
+    sink: ContentChunkSink,
+    ctx: ContentReadContext,
+  ): Promise<EngineResult<ContentDump>> {
+    const repository = this.deps.repositoryFor(request.repositoryId);
+    if (!repository) return { ok: false, errorClass: 'repository_unavailable' };
+    if (!request.snapshotId) return { ok: false, errorClass: 'invalid_request' };
+    const snapshotPath = contentSnapshotPath(request.path);
+
+    let bytes = 0;
+    const result = await this.deps.runner.run({
+      profile: 'read',
+      operationId: ctx.operationId,
+      cmd: resticCommand('/repo', ['dump', request.snapshotId, snapshotPath, '--no-lock', '--quiet']),
+      mounts: { repository: repository.locator },
+      stdinSecret: this.deps.secret,
+      signal: ctx.signal,
+      onStdoutChunk: (chunk, control) => {
+        bytes += chunk.length;
+        sink(chunk, control);
+      },
+    });
+    const failure = this.contentFailure('dump', request, result, ctx.signal, false);
+    if (failure) return failure;
+    if (bytes !== expectedBytes) {
+      console.warn(
+        '[Recovery] Dump of snapshot %s returned %d of %d bytes: %s',
+        sanitizeForLog(request.snapshotId),
+        bytes,
+        expectedBytes,
+        helperFailureNote(result.stderrTail, [], [this.deps.secret]),
+      );
+      return { ok: false, errorClass: 'integrity_mismatch' };
+    }
+    return { ok: true, evidence: { bytes } };
+  }
+
+  /**
+   * A read run's exit in Sencho's terms: null when it produced its output.
+   *
+   * The one place a read failure's cause survives: the helper container is
+   * removed when it exits and the API answers a sanitized class, so the
+   * node-local log is the only record that tells a missing snapshot from an
+   * unreadable repository. It is written here rather than at each call site.
+   */
+  private contentFailure(
+    what: 'list' | 'dump',
+    request: ContentReadRequest,
+    result: HelperRunResult,
+    signal: AbortSignal,
+    stoppedEarly: boolean,
+  ): EngineResult<never> | null {
+    const outcome = classifyContentRun({
+      exitCode: result.exitCode,
+      aborted: result.aborted,
+      killed: result.killed,
+      externalAborted: signal.aborted,
+      stoppedEarly,
+    });
+    if (outcome.status === 'ok') return null;
+    if (outcome.status === 'cancelled') return { ok: false, errorClass: 'interrupted' };
+    console.warn(
+      '[Recovery] Content %s for snapshot %s failed with %s, exit %s: %s',
+      what,
+      sanitizeForLog(request.snapshotId),
+      outcome.errorClass,
+      result.exitCode ?? 'none',
+      helperFailureNote(result.stderrTail, [], [this.deps.secret]),
+    );
+    return { ok: false, errorClass: outcome.errorClass };
   }
 
   private async observeInUse(volumeName: string): Promise<InUseObservation | null> {

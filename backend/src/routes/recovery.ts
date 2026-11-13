@@ -10,12 +10,15 @@ import {
   RECOVERY_FAILURE_DOMAIN,
   SAME_FAILURE_DOMAIN_WARNING,
   sha256Digest,
+  type PointContentDownload,
 } from '../services/recovery/operationRunner';
 import {
   authorizeNodeWide,
+  authorizePointContentRead,
   authorizeStorageAccess,
   mayLearnIdIsUnknown,
   RECOVERY_ACCESS_ACTION,
+  type PointContentReadTarget,
   type RecoveryAccess,
 } from '../services/recovery/authorization';
 import { RECOVERY_RESERVED_PREFIX } from '../services/recovery/reservedNames';
@@ -46,6 +49,12 @@ import {
   RecoveryError,
 } from '../services/recovery/redaction';
 import { ROOT_COVERAGE_FRESHNESS_MS } from '../services/recovery/types';
+import {
+  POINT_DOWNLOAD_IDLE_MS,
+  POINT_READ_RETRY_AFTER_S,
+  parsePageOffset,
+  parsePointPath,
+} from '../services/recovery/pointContents';
 import type {
   RecoveryErrorClass,
   RecoveryOperation,
@@ -149,19 +158,35 @@ export function logInternalFailure(method: string, path: string, err: unknown): 
   console.error('Recovery: %s %s failed:', sanitizeForLog(method), sanitizeForLog(path), errorMessageForLog(err));
 }
 
+/** Answer a thrown recovery error with its documented status and body. */
+function sendThrown(req: Request, res: Response, err: unknown): void {
+  const errorClass = classifyRecoveryError(err);
+  if (errorClass === 'internal') {
+    logInternalFailure(req.method, req.path, err);
+  }
+  // A response whose headers are already on the wire cannot carry a JSON error.
+  // The body is partial by definition, so the only honest end is to break the
+  // connection rather than let a client read a truncated body as a whole one.
+  if (res.headersSent) {
+    res.destroy();
+    return;
+  }
+  const extra: Record<string, unknown> = {};
+  if (err instanceof RecoveryError && err.reason !== undefined) extra.reason = err.reason;
+  // A read refused for capacity usually frees a slot soon, so the caller is told when to ask again.
+  if (err instanceof RecoveryError && err.reason === 'read_capacity') {
+    res.setHeader('Retry-After', String(POINT_READ_RETRY_AFTER_S));
+  }
+  sendRecoveryError(res, errorClass, extra, err instanceof RecoveryError ? err.detail : undefined);
+}
+
 /** Run a handler and turn every thrown recovery error into its documented answer. */
 function handle(fn: (req: Request, res: Response) => Promise<void> | void) {
   return async (req: Request, res: Response): Promise<void> => {
     try {
       await fn(req, res);
     } catch (err) {
-      const errorClass = classifyRecoveryError(err);
-      if (errorClass === 'internal') {
-        logInternalFailure(req.method, req.path, err);
-      }
-      const extra: Record<string, unknown> = {};
-      if (err instanceof RecoveryError && err.reason !== undefined) extra.reason = err.reason;
-      sendRecoveryError(res, errorClass, extra, err instanceof RecoveryError ? err.detail : undefined);
+      sendThrown(req, res, err);
     }
   };
 }
@@ -620,6 +645,168 @@ recoveryRouter.post('/points/:pointId/restore', handle(async (req, res) => {
     },
   });
   res.status(result.replayed ? 200 : 202).json({ operation: result.operation });
+}));
+
+// --- Browsing a saved point -------------------------------------------------
+
+/**
+ * Test seam: how long a download body may stall before it is stopped. Production
+ * never sets this; the fixed bound is the documented one.
+ */
+let downloadIdleMsOverride: number | null = null;
+export function setDownloadIdleMsForTests(ms: number | null): void {
+  downloadIdleMsOverride = ms;
+}
+
+/**
+ * A download's file name: an ASCII-only quoted fallback for old clients and the
+ * RFC 5987 form for every other one. Node refuses a header value with a
+ * character above Latin-1, so the fallback replaces anything outside printable
+ * ASCII rather than throwing the whole answer away.
+ */
+function contentDisposition(name: string): string {
+  const safe = name.replace(/[^\x20-\x7e]/g, '_').replace(/[\\"]/g, '');
+  // `encodeURIComponent` leaves `'()*` alone; RFC 5987 does not allow them.
+  const encoded = encodeURIComponent(name).replace(/['()*]/g, (c) => `%${c.charCodeAt(0).toString(16).toUpperCase()}`);
+  return `attachment; filename="${safe}"; filename*=UTF-8''${encoded}`;
+}
+
+/** The read input both routes give the engine, with the content-read rule. */
+function pointReadInput(req: Request, path: string, signal: AbortSignal) {
+  return {
+    pointId: paramOf(req, 'pointId'),
+    path,
+    authorize: (target: PointContentReadTarget) => authorizePointContentRead(req, target),
+    // An unknown id could have needed either access: the stack read of a live
+    // volume or the floor of a detached one.
+    mayLearnIdIsUnknown: () => mayLearnIdIsUnknown(req, 'read', 'configure'),
+    signal,
+  };
+}
+
+/** An abort controller tied to the client: closing the response stops the read. */
+function abortOnClose(res: Response): { controller: AbortController; detach: () => void } {
+  const controller = new AbortController();
+  const onClose = (): void => {
+    if (!res.writableFinished) controller.abort();
+  };
+  res.once('close', onClose);
+  return { controller, detach: () => res.off('close', onClose) };
+}
+
+/**
+ * One page of one directory of a saved point.
+ *
+ * Read-only and node-local: the node that owns the storage answers, so a hub
+ * proxying the request authorizes nothing itself. `?path=` is absolute within
+ * the point (`/` is the root) and `?offset=` pages through a large directory.
+ * The answer carries the point's own evidence beside the entries, so a point
+ * that skipped data, or whose check did not verify, is never shown as a clean
+ * copy.
+ */
+recoveryRouter.get('/points/:pointId/browse', handle(async (req, res) => {
+  const path = parsePointPath(req.query.path ?? '/');
+  const offset = parsePageOffset(req.query.offset);
+  const { controller, detach } = abortOnClose(res);
+  try {
+    res.json(await engineService(req).browsePoint({ ...pointReadInput(req, path, controller.signal), offset }));
+  } finally {
+    detach();
+  }
+}));
+
+/**
+ * Download one regular file out of a saved point.
+ *
+ * The bytes stream from the helper through this node to the caller, at the
+ * caller's pace: memory stays flat however large the file is. A symlink, a
+ * directory and a special file are refused before any byte moves. Headers are
+ * sent with the first byte, so a dump that fails before it answers its own JSON
+ * error. A client that disconnects cancels the helper, and a body that stops
+ * moving for the idle bound is stopped. A run that ends after the headers for
+ * any other reason breaks the connection, so a partial body is never read as a
+ * whole one.
+ */
+recoveryRouter.get('/points/:pointId/download', handle(async (req, res) => {
+  if (req.query.path === undefined) throw new RecoveryError('invalid_request');
+  const path = parsePointPath(req.query.path);
+  const { controller, detach } = abortOnClose(res);
+  let abandoned = false;
+  const abandon = (): void => {
+    abandoned = true;
+    controller.abort();
+  };
+  let idleTimer: NodeJS.Timeout | undefined;
+  const stopIdleWatch = (): void => {
+    if (idleTimer) clearTimeout(idleTimer);
+    idleTimer = undefined;
+  };
+  const watchIdle = (): void => {
+    stopIdleWatch();
+    idleTimer = setTimeout(() => {
+      console.warn('[Recovery] Download from point %s stopped: no byte moved within the idle bound', sanitizeForLog(paramOf(req, 'pointId')));
+      abandon();
+      if (!res.destroyed && !res.writableEnded) res.destroy();
+    }, downloadIdleMsOverride ?? POINT_DOWNLOAD_IDLE_MS);
+    idleTimer.unref?.();
+  };
+  let download: PointContentDownload | null = null;
+  try {
+    download = await engineService(req).prepareDownload(pointReadInput(req, path, controller.signal));
+    const fileHeaders: Record<string, string> = {
+      'Content-Type': 'application/octet-stream',
+      'Content-Length': String(download.entry.size),
+      'Content-Disposition': contentDisposition(download.entry.name),
+      'Cache-Control': 'no-store',
+      'X-Content-Type-Options': 'nosniff',
+      'Accept-Ranges': 'none',
+    };
+    // A HEAD answers the same headers and reads nothing: Node discards a body
+    // for HEAD, so running the dump would read the whole file for no output.
+    if (req.method === 'HEAD') {
+      res.set(fileHeaders).end();
+      return;
+    }
+    const commitHeaders = (): void => {
+      if (!res.headersSent) res.set(fileHeaders);
+    };
+
+    watchIdle();
+    let waitingForDrain = false;
+    const result = await download.stream((chunk, control) => {
+      // Nobody reads this response any more. The chunk is dropped rather than
+      // the stream paused: a pause nobody resumes would keep the helper's
+      // stream from ending, and the run, its container and its slot with it.
+      if (abandoned || res.writableEnded || res.destroyed) return;
+      commitHeaders();
+      watchIdle();
+      // One drain listener at a time: after the helper exits the runner ignores
+      // pauses, so the tail can meet a full buffer several times in a row.
+      if (!res.write(chunk) && !waitingForDrain) {
+        waitingForDrain = true;
+        control.pause();
+        res.once('drain', () => {
+          waitingForDrain = false;
+          if (abandoned) return;
+          watchIdle();
+          control.resume();
+        });
+      }
+    });
+    if (abandoned) return;
+    if (!result.ok) {
+      // Nothing of the body was written, so the failure is answered as itself
+      // (409 integrity_mismatch, 503 repository_unavailable). Once a byte is on
+      // the wire, the handler breaks the connection instead.
+      throw new RecoveryError(result.errorClass);
+    }
+    commitHeaders();
+    res.end();
+  } finally {
+    stopIdleWatch();
+    download?.release();
+    detach();
+  }
 }));
 
 // --- Restore over the existing volume ---------------------------------------

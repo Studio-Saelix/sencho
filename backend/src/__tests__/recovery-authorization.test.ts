@@ -262,3 +262,102 @@ describe('requireStorageAccess', () => {
     }
   });
 });
+
+describe('authorizePointContentRead', () => {
+  const contentTarget = (
+    storageKey: string,
+    options: { resolved?: boolean; current?: Array<{ stackName: string; serviceName: string | null }> } = {},
+  ) => {
+    const current = options.current ?? [];
+    return auth.pointContentReadTargetFor(storageKey, {
+      kind: options.resolved === false ? 'unrenderable' : 'resolved',
+      dependents: current,
+      current,
+    });
+  };
+  const read = (request: Request, t: Parameters<typeof auth.authorizePointContentRead>[1]) =>
+    auth.authorizePointContentRead(request, t);
+  // Every built-in role reads stacks globally, so the per-stack rule is shown
+  // with a relayed hop whose only read is its evidence for `photos`: a request
+  // whose role carries no global action at all.
+  const photosHop = () => ({
+    ...req({
+      role: 'viewer',
+      machine: 'node_proxy',
+      evidence: { stackName: 'photos', actions: new Set<PermissionAction>(['stack:read']) },
+    }),
+    user: { username: 'hop', role: 'no-global-role', userId: 0 },
+  }) as unknown as Request;
+
+  it('reads storage a stack uses now under stack:read on every recorded and current dependent', () => {
+    const photosNow = contentTarget(soloKey, { current: [{ stackName: 'photos', serviceName: 'app' }] });
+    expect(read(req({ role: 'viewer', userId: 996 }), photosNow)).toBe(true);
+    expect(read(photosHop(), photosNow)).toBe(true);
+  });
+
+  it('refuses shared storage to a caller who reads only one of its stacks', () => {
+    const sharedNow = contentTarget(sharedKey, { current: [{ stackName: 'photos', serviceName: 'app' }] });
+    // `tools` is only a recorded dependent here, and it still counts.
+    expect(read(photosHop(), sharedNow)).toBe(false);
+  });
+
+  it('refuses a stack found now that the caller cannot read, even when the recorded rows allow', () => {
+    const grown = contentTarget(soloKey, { current: [{ stackName: 'photos', serviceName: 'app' }, { stackName: 'billing', serviceName: null }] });
+    expect(read(photosHop(), grown)).toBe(false);
+  });
+
+  it('holds detached storage to system:settings, whatever the recorded rows say', () => {
+    // `soloKey` still records `photos`, but nothing depends on it now.
+    const detached = contentTarget(soloKey);
+    expect(read(req({ role: 'viewer', userId: 996 }), detached)).toBe(false);
+    expect(read(req({ role: 'viewer', userId: scopedUserId }), detached)).toBe(false);
+    expect(read(req({ role: 'viewer', userId: nodeOperatorId }), detached)).toBe(false);
+    expect(read(req({ role: 'viewer', userId: nodeAdminId }), detached)).toBe(false);
+    expect(read(req({ role: 'admin', userId: 995 }), detached)).toBe(true);
+  });
+
+  it('holds storage no stack ever owned to system:settings', () => {
+    expect(read(req({ role: 'viewer', userId: 996 }), contentTarget(orphanKey))).toBe(false);
+    expect(read(req({ role: 'admin', userId: 995 }), contentTarget(orphanKey))).toBe(true);
+  });
+
+  it('falls back to node-wide stack:read when a model cannot be rendered but a stack uses the storage now', () => {
+    const unrenderable = contentTarget(soloKey, { resolved: false, current: [{ stackName: 'photos', serviceName: 'app' }] });
+    expect(read(req({ role: 'viewer', userId: 996 }), unrenderable)).toBe(true);
+    expect(read(req({ role: 'viewer', userId: nodeOperatorId }), unrenderable)).toBe(true);
+    // Evidence for one stack cannot vouch for a set nobody could finish resolving.
+    expect(read(photosHop(), unrenderable)).toBe(false);
+  });
+
+  it('fails closed to system:settings when a model cannot be rendered and nothing uses the storage', () => {
+    const unproven = contentTarget(soloKey, { resolved: false });
+    expect(read(req({ role: 'viewer', userId: 996 }), unproven)).toBe(false);
+    expect(read(req({ role: 'admin', userId: 995 }), unproven)).toBe(true);
+  });
+
+  it('classifies storage by what depends on it now, never by its recorded rows', () => {
+    const recorded = [{ stackName: 'photos', serviceName: 'app' }];
+    expect(auth.pointContentReadTargetFor(soloKey, { kind: 'resolved', dependents: recorded, current: [] })).toEqual({ kind: 'detached' });
+    expect(auth.pointContentReadTargetFor(soloKey, { kind: 'unrenderable', dependents: recorded, current: [] })).toEqual({ kind: 'detached' });
+    expect(auth.pointContentReadTargetFor(soloKey, { kind: 'unrenderable', dependents: recorded, current: recorded })).toEqual({ kind: 'unrenderable' });
+    expect(auth.pointContentReadTargetFor(soloKey, { kind: 'resolved', dependents: recorded, current: recorded }))
+      .toEqual({ kind: 'attached', storageKey: soloKey, dependents: recorded });
+  });
+
+  it('fails closed to detached when a resolution names current dependents but no dependents', () => {
+    const now = [{ stackName: 'photos', serviceName: 'app' }];
+    expect(auth.pointContentReadTargetFor(soloKey, { kind: 'resolved', dependents: [], current: now })).toEqual({ kind: 'detached' });
+  });
+
+  it('holds a point with no storage record to system:settings', () => {
+    expect(read(req({ role: 'viewer', userId: 996 }), { kind: 'detached' })).toBe(false);
+    expect(read(req({ role: 'admin', userId: 995 }), { kind: 'detached' })).toBe(true);
+  });
+
+  for (const machine of ['node_proxy', 'pilot_tunnel'] as const) {
+    it(`over ${machine}: stack evidence cannot open detached storage`, () => {
+      const evidence = { stackName: 'photos', actions: new Set<PermissionAction>(['stack:read']) };
+      expect(read(req({ role: 'viewer', machine, evidence }), contentTarget(soloKey))).toBe(false);
+    });
+  }
+});

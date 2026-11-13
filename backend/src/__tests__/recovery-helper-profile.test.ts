@@ -58,6 +58,8 @@ describe('recovery helper profiles', () => {
       expect(hostConfig.Privileged, profile).toBe(false);
       expect(hostConfig.SecurityOpt, profile).toEqual(['no-new-privileges:true']);
       expect(hostConfig.CapDrop, profile).toEqual(['ALL']);
+      // A logging driver would keep a copy of the output (the file itself, for a read).
+      expect(hostConfig.LogConfig, profile).toEqual({ Type: 'none', Config: {} });
       expect(hostConfig.PidsLimit, profile).toBe(256);
       // Only a capture stages restic's temporary packs, so only it gets the larger
       // scratch and the memory a tmpfs is charged to.
@@ -95,6 +97,10 @@ describe('recovery helper profiles', () => {
     expect(HELPER_PROFILES.config.capAdd).toEqual([]);
     expect(HELPER_PROFILES.init.capAdd).toEqual([]);
     expect(HELPER_PROFILES.check.capAdd).toEqual([]);
+    // Reading a point's contents mounts the repository read-only and nothing
+    // else: the bytes come out of the repository, so no application volume is
+    // attached and no capability is needed.
+    expect(HELPER_PROFILES.read.capAdd).toEqual([]);
     expect(HELPER_PROFILES.unlock.capAdd).toEqual([]);
     expect(HELPER_PROFILES.backup.capAdd).toEqual(['DAC_READ_SEARCH']);
     // --verify reads restored files back after their ownership is applied.
@@ -143,6 +149,26 @@ describe('recovery helper profiles', () => {
     expect(hostConfig.CapAdd).toEqual(capAdd);
   });
 
+  it('gives the read profile the repository alone, read-only and without a deadline', () => {
+    expect(HELPER_PROFILES.read).toEqual({
+      user: '0:0',
+      capAdd: [],
+      repositoryReadOnly: true,
+      needsRepository: true,
+      source: null,
+      target: null,
+      tmpfs: { '/tmp': 'size=64m,mode=1777' },
+      pidsLimit: 256,
+      memoryBytes: 1024 * 1024 * 1024,
+      timeoutMs: null,
+    });
+    const { hostConfig } = specFor('read');
+    // No application volume is attached: the bytes come out of the repository.
+    expect(hostConfig.Mounts).toEqual([
+      { Type: 'volume', Source: 'repo-vol', Target: HELPER_REPOSITORY_MOUNT, ReadOnly: true, VolumeOptions: { NoCopy: true } },
+    ]);
+  });
+
   it('gives the swap profile exactly one writable mount and no repository', () => {
     expect(HELPER_PROFILES.swap).toEqual({
       user: '0:0',
@@ -180,7 +206,7 @@ describe('recovery helper profiles', () => {
   });
 
   it('keeps the repository read-only wherever restic only reads it', () => {
-    for (const profile of ['probe', 'config', 'check', 'restore'] as const) {
+    for (const profile of ['probe', 'config', 'check', 'read', 'restore'] as const) {
       const mounts = specFor(profile).hostConfig.Mounts as Array<Record<string, unknown>>;
       const repository = mounts.find((m) => m.Target === HELPER_REPOSITORY_MOUNT);
       if (repository) expect(repository.ReadOnly, profile).toBe(true);

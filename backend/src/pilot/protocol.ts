@@ -79,6 +79,8 @@ export type JsonFrame =
     | HttpResFrame
     | HttpResEndFrame
     | HttpCancelFrame
+    | HttpResPauseFrame
+    | HttpResResumeFrame
     | HttpErrorFrame
     | WsOpenFrame
     | WsAcceptFrame
@@ -126,6 +128,25 @@ export interface HttpResEndFrame {
 /** Primary -> agent: cancel an in-flight loopback HTTP request (client disconnect). */
 export interface HttpCancelFrame {
     t: 'http_cancel';
+    s: number;
+}
+
+/**
+ * Primary -> agent: the client reading this response has stopped draining
+ * (its socket write buffer is full), so the agent should stop reading the
+ * loopback response until `http_res_resume`. Without this, a large download
+ * to a slow client accumulates in the primary's memory. Peers that predate
+ * these frames ignore them as unknown types, which only loses the
+ * backpressure, so PROTOCOL_VERSION is unchanged.
+ */
+export interface HttpResPauseFrame {
+    t: 'http_res_pause';
+    s: number;
+}
+
+/** Primary -> agent: the client response drained; resume reading the loopback response. */
+export interface HttpResResumeFrame {
+    t: 'http_res_resume';
     s: number;
 }
 

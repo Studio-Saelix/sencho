@@ -1851,7 +1851,9 @@ components:
       properties:
         error:
           type: string
-          description: Fixed, sanitized sentence for this class. Never raw engine output.
+          description: |
+            Fixed, sanitized sentence for this class, sometimes narrowed to the exact
+            case (an unknown point id says so). Never raw engine output.
         errorClass:
           type: string
           enum: [invalid_request, permission_denied, capability_unavailable, update_required, schema_unsupported, identity_unknown, lock_held, lock_stale, repository_unavailable, repository_key_unavailable, source_unreadable, integrity_mismatch, attributes_not_restored, interrupted, transport_unreachable, node_refused, node_error, internal, precondition_failed, dependents_changed, fence_unavailable, pre_restore_failed, insufficient_space, cleanup_failed, not_cancellable]
@@ -1873,6 +1875,12 @@ components:
             now: it came from another preview, or the containers or the repository changed
             since the preview), `no_fence` (`release_fence` on a restore that never stopped a workload),
             and `fence_released` (`release_fence` on a restore whose fence is already released).
+            The point-content reads add `point_not_readable` (the point is still capturing, failed,
+            or was interrupted, so it holds nothing to read), `path_not_found` (the path is not in
+            the point), `not_a_directory` (a browse named a file, link or special file),
+            `unsupported_entry_type` (a download named a directory, link or special file, or the
+            point kind has no read), and `read_capacity` (the node already runs its bound of reads;
+            the answer carries `Retry-After`).
 
     RecoveryOperation:
       type: object
@@ -2111,6 +2119,126 @@ components:
         verifiedAt: { type: integer }
         operationId: { type: ["string", "null"] }
 
+    RecoveryPointEntry:
+      type: object
+      description: One entry inside a saved point. `path` is absolute within the point; `/` is its root.
+      required: [name, path, type, size, mode, mtime, uid, gid, downloadable]
+      properties:
+        name: { type: string }
+        path:
+          type: string
+          example: /etc/app/config.txt
+        type:
+          type: string
+          enum: [file, directory, symlink, other]
+          description: |
+            `other` covers a device, a socket, a FIFO and anything else that is
+            neither a file, a directory nor a symlink. It is listed, never downloaded.
+        size:
+          type: ["integer", "null"]
+          description: Bytes for a regular file; null for every other type.
+        mode:
+          type: ["string", "null"]
+          description: Permission bits as four octal digits.
+          example: "0644"
+        mtime:
+          type: ["string", "null"]
+          format: date-time
+          description: Modification time as the point recorded it.
+        uid: { type: ["integer", "null"] }
+        gid: { type: ["integer", "null"] }
+        downloadable:
+          type: boolean
+          description: True only for a regular file with a known size.
+
+    RecoveryPointListing:
+      type: object
+      description: One page of one directory of a saved point, with the point's own evidence.
+      required: [point, path, entries, skipped, offset, nextOffset, limits]
+      properties:
+        point:
+          type: object
+          required: [id, status, snapshotId, storage, consistency, capture, complete, integrity, completedAt]
+          properties:
+            id: { type: string }
+            status:
+              type: string
+              enum: [succeeded, partial]
+              description: Only a point with a snapshot can be read; any other status answers `point_not_readable`.
+            snapshotId: { type: string }
+            storage:
+              type: object
+              required: [id, locator, generation, state]
+              properties:
+                id: { type: string }
+                locator: { type: string }
+                generation: { type: integer }
+                state:
+                  type: string
+                  enum: [current, superseded]
+            consistency:
+              type: string
+              enum: [crash_consistent_live, crash_consistent_stopped, unknown]
+            capture:
+              type: object
+              required: [fileCount, byteCount, skippedCount]
+              properties:
+                fileCount: { type: integer }
+                byteCount: { type: integer }
+                skippedCount: { type: integer }
+            complete:
+              type: boolean
+              description: |
+                The capture left nothing out but policy exclusions. Never true for a
+                `partial` point. Reported apart from `integrity`.
+            integrity:
+              type: object
+              required: [state, method, verifiedAt]
+              description: The point's latest check. A read never changes it.
+              properties:
+                state:
+                  type: string
+                  enum: [verified, unverified, mismatch]
+                method:
+                  type: ["string", "null"]
+                  enum: [engine_check_metadata, engine_check_read_data, null]
+                verifiedAt: { type: ["integer", "null"] }
+            completedAt: { type: integer }
+        path:
+          type: string
+          example: /etc
+        entries:
+          type: array
+          maxItems: 500
+          description: One page of the directory's entries, in the order the point records them (by name).
+          items:
+            $ref: "#/components/schemas/RecoveryPointEntry"
+        skipped:
+          type: array
+          description: What the capture left out directly inside this directory.
+          items:
+            type: object
+            required: [name, reason]
+            properties:
+              name: { type: string }
+              reason:
+                type: string
+                enum: [policy_excluded, permission_denied, unreadable, vanished, unsupported_type]
+        offset: { type: integer }
+        nextOffset:
+          type: ["integer", "null"]
+          description: The offset of the next page, or null on the last page.
+        limits:
+          type: object
+          required: [pageSize, concurrentReads]
+          properties:
+            pageSize:
+              type: integer
+              example: 500
+            concurrentReads:
+              type: integer
+              example: 4
+
     RecoveryRootCoverage:
       type: object
       required: [storageKey, reason, coveringPointId]
@@ -2281,6 +2409,8 @@ components:
         Volume protection is not available on this node, the repository is not reachable
         or its key is unavailable, the schema is unsupported, or the node could not be
         reached. A node that is still starting answers with `"reason": "engine_starting"`.
+        A node that already runs its bound of point reads answers with `"reason": "read_capacity"`
+        and a `Retry-After` header, and its `error` says the node is busy and to try again shortly.
       content:
         application/json:
           schema:
@@ -6341,6 +6471,15 @@ paths:
                     example: 1
                   volumeProtection:
                     $ref: "#/components/schemas/RecoveryVolumeProtection"
+                  pointReads:
+                    type: array
+                    description: |
+                      The point reads this node serves. A node that omits the field serves
+                      none, and a control instance answers a browse or a download for it
+                      with `409 update_required`.
+                    items:
+                      type: string
+                      enum: [list, download]
                   operationId:
                     type: ["string", "null"]
                     description: The dispatch id a control instance sent, echoed back, or null for a direct call.
@@ -6563,6 +6702,128 @@ paths:
           $ref: "#/components/responses/RecoveryConflict"
         "500":
           $ref: "#/components/responses/RecoveryInternalError"
+
+  /api/recovery/points/{pointId}/browse:
+    get:
+      operationId: browseRecoveryPoint
+      tags: [Recovery]
+      summary: List one directory of a saved point
+      description: |
+        Lists one page of one directory of a saved recovery point, without restoring
+        anything, together with the point's evidence. The read runs on the node that
+        owns the storage, through a helper that mounts only the repository read-only.
+        It creates no operation, takes no lock and writes no audit entry.
+
+        It needs `stack:read` on every stack that uses the volume, recorded or found
+        now, or `stack:read` across the node when a Compose model does not render.
+        A point whose volume no stack uses now is readable only with
+        `system:settings`. A denial names no stack.
+      parameters:
+        - name: pointId
+          in: path
+          required: true
+          schema:
+            type: string
+        - name: path
+          in: query
+          required: false
+          description: |
+            Absolute path within the point; `/` (the default) is its root. 1 to 4096
+            bytes, segments of 1 to 255 bytes, no `.`, `..` or empty segment and no
+            control character.
+          schema:
+            type: string
+            example: /etc
+        - name: offset
+          in: query
+          required: false
+          description: The page offset, from a previous answer's `nextOffset`.
+          schema:
+            type: integer
+            minimum: 0
+            default: 0
+        - $ref: "#/components/parameters/nodeId"
+      responses:
+        "200":
+          description: The point's evidence and one page of the directory.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RecoveryPointListing"
+        "400":
+          $ref: "#/components/responses/RecoveryBadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/RecoveryForbidden"
+        "409":
+          $ref: "#/components/responses/RecoveryConflict"
+        "500":
+          $ref: "#/components/responses/RecoveryInternalError"
+        "503":
+          $ref: "#/components/responses/RecoveryUnavailable"
+
+  /api/recovery/points/{pointId}/download:
+    get:
+      operationId: downloadRecoveryPointFile
+      tags: [Recovery]
+      summary: Download one file from a saved point
+      description: |
+        Streams one regular file out of a saved recovery point, at the caller's pace.
+        Headers are sent with the first byte, so a failure before it answers a JSON
+        error; a failure after it, or a body whose length differs from
+        `Content-Length`, closes the connection instead of completing it. A client
+        that disconnects stops the read, and a body that delivers nothing for five
+        minutes is stopped. A `HEAD` answers the headers and reads no file bytes. A
+        directory, symlink or special file answers `unsupported_entry_type`.
+        Authorization is the same as for browsing.
+      parameters:
+        - name: pointId
+          in: path
+          required: true
+          schema:
+            type: string
+        - name: path
+          in: query
+          required: true
+          description: Absolute path of one regular file within the point.
+          schema:
+            type: string
+            example: /etc/app/config.txt
+        - $ref: "#/components/parameters/nodeId"
+      responses:
+        "200":
+          description: The file body.
+          headers:
+            Content-Disposition:
+              description: An attachment naming the file.
+              schema:
+                type: string
+            Content-Length:
+              description: The size the point recorded for the file.
+              schema:
+                type: integer
+            Accept-Ranges:
+              description: Always `none`.
+              schema:
+                type: string
+          content:
+            application/octet-stream:
+              schema:
+                type: string
+                format: binary
+        "400":
+          $ref: "#/components/responses/RecoveryBadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/RecoveryForbidden"
+        "409":
+          $ref: "#/components/responses/RecoveryConflict"
+        "500":
+          $ref: "#/components/responses/RecoveryInternalError"
+        "503":
+          $ref: "#/components/responses/RecoveryUnavailable"
 
   /api/recovery/storage/points:
     post:
