@@ -1187,6 +1187,8 @@ function readFilePaths(node: unknown, targets: Map<Node, Node>): ReadFile[] {
   const resolved = deref(node, targets);
   const out: ReadFile[] = [];
   for (const item of isSeq(resolved) ? resolved.items : [resolved]) {
+    // Compose removes a list entry tagged `!reset`, so it names no file.
+    if (isSeq(resolved) && hasTag(item, targets, '!reset')) continue;
     const text = textOf(item, targets);
     if (text !== undefined) {
       out.push({ path: text, format: undefined });

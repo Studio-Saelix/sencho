@@ -3234,6 +3234,17 @@ describe('assertComposeInputsWithinExpansionLimits - scalar text, interpolation 
       });
     });
 
+    describe.each(['env_file', 'label_file'] as const)('a %s entry tagged !reset names no file, as in Compose', (kind) => {
+      it('reads the other entries and not the removed one', async () => {
+        await write('ok.env', 'Z=1\n');
+        await write('bomb.env', 'A0=seed\n' + Array.from({ length: 24 }, (_, i) => `A${i + 1}="\${A${i}}\${A${i}}"`).join('\n') + '\n');
+        await write('compose.yaml', `services:\n  web:\n    image: nginx\n    ${kind}: [ok.env, !reset bomb.env]\n`);
+        await expect(run()).resolves.toBeUndefined();
+        await write('compose.yaml', `services:\n  web:\n    image: nginx\n    ${kind}: [ok.env, bomb.env]\n`);
+        await expect(run()).rejects.toThrow(TOO_LONG);
+      });
+    });
+
     describe('a format is interpolated before it is compared with raw', () => {
       const lines = 'A=1\n' + Array.from({ length: 21 }, () => 'A=${A}${A}').join('\n') + '\n';
       const asFormat = (kind: 'env_file' | 'label_file', format: string): string =>
