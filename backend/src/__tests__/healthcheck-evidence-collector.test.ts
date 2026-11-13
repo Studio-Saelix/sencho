@@ -337,6 +337,27 @@ describe('collectServiceHealthcheckEvidence', () => {
       rest: 'registry.example.com/app:latest',
     },
     {
+      name: 'a colon-free token split by an encoded slash',
+      image: 'ghp_ab%2fSuperSecret@registry.example.com/app:latest',
+      quoted: 'ghp_ab/SuperSecret@registry.example.com/app',
+      forbidden: ['SuperSecret', 'ghp_ab/'],
+      rest: 'registry.example.com/app:latest',
+    },
+    {
+      name: 'a closing parenthesis in the quoted name',
+      image: 'user:Ab%2fx)SuperSecret:y@registry.example.com/app:latest',
+      quoted: 'x)SuperSecret',
+      forbidden: ['SuperSecret', 'x)'],
+      rest: 'registry.example.com/app:latest',
+    },
+    {
+      name: 'normalization plus an encoded slash',
+      image: 'docker.io/Ab%2fPass:x@registry.example.com/app:latest',
+      quoted: 'Ab/Pass',
+      forbidden: ['Pass', 'Ab/'],
+      rest: 'registry.example.com/app:latest',
+    },
+    {
       name: 'a decoded byte Docker replaces before it quotes the name',
       image: 'user:Ab%2f%FFSuperSecret:x@registry.example.com/app:latest',
       quoted: '\uFFFDSuperSecret',
@@ -384,6 +405,26 @@ describe('collectServiceHealthcheckEvidence', () => {
     expect(imageWarn?.[1]).toBe(`[redacted]@${rest}`);
     expect(String(imageWarn?.[2])).not.toContain(quoted);
     expect(String(imageWarn?.[2])).toContain('must be lowercase');
+  });
+
+  it('redacts an image credential whose @ is percent-encoded', async () => {
+    const image = 'user:pw%40registry.example.com/app:latest';
+    mockDocker({
+      list: [],
+      image: 'error',
+      imageError: new Error('(HTTP code 400) unexpected - invalid reference format '),
+    });
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const evidence = await collectServiceHealthcheckEvidence(
+      1, 'proj', model([svc({ composeHealthcheck: 'absent', image })]), true,
+    );
+    expect(evidence.web.state).toBe('unverifiable');
+    const logged = warn.mock.calls.map(args => args.join(' ')).join('\n');
+    expect(logged).not.toContain('user:pw');
+    expect(logged).not.toContain('pw%40');
+    const imageWarn = warn.mock.calls.find(args => String(args[0]).includes('image inspect failed'));
+    expect(imageWarn?.[1]).toBe('[redacted]@registry.example.com/app:latest');
+    expect(String(imageWarn?.[2])).toContain('invalid reference format');
   });
 
   it('never logs registry credentials from the compose project label', async () => {

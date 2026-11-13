@@ -241,6 +241,8 @@ describe('redactSensitiveText', () => {
     ['a host with no path', 'u:SECRETA3@host', '[redacted]@host'],
     ['a literal @ in the password', 'u:p@SECRETQ7@host/app', '[redacted]@host/app'],
     ['a digest pin after the credential', 'u:SECRETA4@host/app:1@sha256:' + 'c'.repeat(64), '[redacted]@host/app:1@sha256:' + 'c'.repeat(64)],
+    ['an encoded @ before the host', 'user:pw%40registry.example.com/app:latest', '[redacted]@registry.example.com/app:latest'],
+    ['an encoded @ after a literal @', 'user@pw%40host/app', '[redacted]@host/app'],
   ])('redactImageReference drops %s and keeps the reference', (_name, image, expected) => {
     const out = redactImageReference(image);
     expect(out).toBe(expected);
@@ -618,6 +620,18 @@ describe('errorMessageForLog', () => {
       'invalid reference format: repository name (SuperSecret) must be lowercase',
     ],
     [
+      'a closing parenthesis in the quoted name',
+      'user:Ab%2fx)SuperSecret:y@registry.example.com/app:latest',
+      'SuperSecret',
+      'invalid reference format: repository name (x)SuperSecret) must be lowercase',
+    ],
+    [
+      'normalization plus an encoded slash',
+      'docker.io/Ab%2fPass:x@registry.example.com/app:latest',
+      'Pass',
+      'invalid reference format: repository name (Ab/Pass) must be lowercase',
+    ],
+    [
       'an encoded token-only multi-segment prefix',
       't%6fkenonly/foo%2fSuperSecret:x@registry.example.com/app:latest',
       'tokenonly/foo/SuperSecret',
@@ -673,6 +687,17 @@ describe('errorMessageForLog', () => {
     expect(text).toContain('repository name (App)');
   });
 
+  it('redacts a colon-free token the daemon splits with a decoded slash', () => {
+    const image = 'ghp_ab%2fSuperSecret@registry.example.com/app:latest';
+    const body =
+      'invalid reference format: repository name (ghp_ab/SuperSecret@registry.example.com/app) must be lowercase';
+    const text = errorMessageForLog(new Error(body), { imageRef: image });
+
+    expect(text).not.toContain('SuperSecret');
+    expect(text).toContain('[redacted]@registry.example.com/app');
+    expect(text).toContain('must be lowercase');
+  });
+
   it('redacts a percent-decoded reference the error echoes', () => {
     const image = 'user:Ab%2fSuperSecret:x@registry.example.com/app:latest';
     const text = errorMessageForLog(
@@ -682,6 +707,40 @@ describe('errorMessageForLog', () => {
 
     expect(text).not.toContain('SuperSecret');
     expect(text).toContain('[redacted]@registry.example.com/app:latest');
+  });
+
+  it('redacts an echoed reference whose invalid byte became U+FFFD', () => {
+    const image = 'user:Ab%2f%FFSuperSecret:x@registry.example.com/app:latest';
+    const text = errorMessageForLog(
+      new Error('No such image: user:Ab/\uFFFDSuperSecret:x@registry.example.com/app:latest'),
+      { imageRef: image },
+    );
+
+    expect(text).not.toContain('SuperSecret');
+    expect(text).toContain('[redacted]@registry.example.com/app:latest');
+  });
+
+  it('redacts an echoed reference whose truncated multi-byte sequence became U+FFFD', () => {
+    const image = 'user:Ab%2f%E2%82SuperSecret:x@registry.example.com/app:latest';
+    const text = errorMessageForLog(
+      new Error('No such image: user:Ab/\uFFFD\uFFFDSuperSecret:x@registry.example.com/app:latest'),
+      { imageRef: image },
+    );
+
+    expect(text).not.toContain('SuperSecret');
+    expect(text).not.toContain('user:Ab/');
+    expect(text).toContain('No such image: [redacted]@registry.example.com/app:latest');
+  });
+
+  it('decodes the valid escapes of an image with a malformed one', () => {
+    const image = 'user:Ab%2fSuperSecret:x@registry.example.com/app%zz:latest';
+    const text = errorMessageForLog(
+      new Error('invalid userinfo user:Ab/SuperSecret:x for image'),
+      { imageRef: image },
+    );
+
+    expect(text).not.toContain('SuperSecret');
+    expect(text).toContain('invalid userinfo [redacted] for image');
   });
 
   it('redacts a decoded userinfo the error quotes without the host', () => {

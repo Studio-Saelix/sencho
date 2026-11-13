@@ -1943,12 +1943,30 @@ describe('DockerController - inspectImage', () => {
       paths.push(opts.path);
       callback(null, opts.path.endsWith('/history') ? [] : { Id: 'sha256:abc' });
     }) as unknown as typeof client.modem.dial);
-    mockDocker.getImage.mockReturnValueOnce(client.getImage(image));
+    mockDocker.getImage.mockImplementationOnce((id: string) => client.getImage(id));
 
     const dc = DockerController.getInstance(1);
     await dc.inspectImage(image);
 
+    expect(mockDocker.getImage).toHaveBeenCalledWith(image);
     expect(paths).toEqual([`/images/${image}/json`, `/images/${image}/history`]);
+    dial.mockRestore();
+  });
+
+  it('propagates a history failure to the same caller as an inspect failure', async () => {
+    const image = 'user:Ab%2fSuperSecret:x@registry.example.com/app:latest';
+    const client = new Docker({ socketPath: '/nonexistent/docker.sock' });
+    const dial = vi.spyOn(client.modem, 'dial').mockImplementation(((
+      opts: { path: string },
+      callback: (err: Error | null, data?: unknown) => void,
+    ) => {
+      if (opts.path.endsWith('/history')) callback(new Error('history failed'));
+      else callback(null, { Id: 'sha256:abc' });
+    }) as unknown as typeof client.modem.dial);
+    mockDocker.getImage.mockImplementationOnce((id: string) => client.getImage(id));
+
+    const dc = DockerController.getInstance(1);
+    await expect(dc.inspectImage(image)).rejects.toThrow('history failed');
     dial.mockRestore();
   });
 

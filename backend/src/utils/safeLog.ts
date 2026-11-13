@@ -103,14 +103,19 @@ const IMAGE_DIGEST_TAIL = /@[A-Za-z][A-Za-z0-9]*(?:[+._-][A-Za-z][A-Za-z0-9]*)*:
  * credential, and everything before the last one is dropped. This follows the
  * reference's own grammar instead of the text-shape heuristics of
  * `redactSensitiveText`, so it holds for a password with a space, a `/`, a
- * quote, or any length, and for a host with no path. Use it wherever an `image`
- * value is quoted or stored for display; free text that merely contains an
- * image still goes through `redactSensitiveText`.
+ * quote, or any length, and for a host with no path. Docker decodes the request
+ * path once, so an authored `%40` can open a credential the written spelling
+ * hides; decode once more before deciding there is none. Use it wherever an
+ * `image` value is quoted or stored for display; free text that merely contains
+ * an image still goes through `redactSensitiveText`.
  */
 export function redactImageReference(image: string): string {
-  const reference = splitImageReference(image);
-  if (reference === null) return image;
-  return `[redacted]@${reference.rest}`;
+  // The decoded spelling is what Docker parses, and a literal `@` can sit
+  // before an encoded one (`user@pw%40host/app`), so read the last `@` from the
+  // decoded form rather than the authored one.
+  const decoded = decodeDockerImagePath(image);
+  const reference = splitImageReference(decoded);
+  return reference === null ? image : `[redacted]@${reference.rest}`;
 }
 
 /**
@@ -132,18 +137,93 @@ function splitImageReference(image: string): { userinfo: string; rest: string } 
 /**
  * Decode the percent escapes Docker's router resolves before it parses an
  * image request path. Go's `URL.Path` is decoded once, so `%2f` reaches the
- * reference parser as `/` and `%3a` as `:`. A malformed escape is rejected
- * before routing, but decode the valid escapes anyway so the rest of a
- * credential cannot hide behind a broken one.
+ * reference parser as `/` and `%3a` as `:`. A syntactically malformed escape
+ * is rejected before routing, but an escape that decodes to an invalid UTF-8
+ * byte is not: Go keeps the byte in the path, and the JSON error body rewrites
+ * it as U+FFFD. Decode the escape bytes as UTF-8 with replacement so the
+ * spelling matches that echo, and keep the valid escapes even beside a broken
+ * one.
  */
 function decodeDockerImagePath(image: string): string {
   if (!image.includes('%')) return image;
   try {
     return decodeURIComponent(image);
   } catch {
-    return image.replace(/%([0-9A-Fa-f]{2})/g, (_match, hex: string) =>
-      String.fromCharCode(Number.parseInt(hex, 16)));
+    const encoder = new TextEncoder();
+    const bytes: number[] = [];
+    let literalStart = 0;
+    for (let i = 0; i < image.length; i += 1) {
+      if (image[i] !== '%') continue;
+      const hex = image.slice(i + 1, i + 3);
+      if (!/^[0-9A-Fa-f]{2}$/.test(hex)) continue;
+      for (const byte of encoder.encode(image.slice(literalStart, i))) bytes.push(byte);
+      bytes.push(Number.parseInt(hex, 16));
+      i += 2;
+      literalStart = i + 1;
+    }
+    for (const byte of encoder.encode(image.slice(literalStart))) bytes.push(byte);
+    return decodeUtf8WithReplacement(bytes);
   }
+}
+
+/**
+ * Decode UTF-8 bytes, replacing each invalid byte with U+FFFD the way Go's JSON
+ * encoder does. `TextDecoder` collapses a truncated multi-byte sequence into
+ * one replacement character, which would leave the bytes after it looking like
+ * a different spelling; Go advances one byte at a time, so a credential cannot
+ * hide its tail behind a broken sequence.
+ */
+function decodeUtf8WithReplacement(bytes: readonly number[]): string {
+  let out = '';
+  for (let i = 0; i < bytes.length;) {
+    const first = bytes[i];
+    if (first < 0x80) {
+      out += String.fromCharCode(first);
+      i += 1;
+      continue;
+    }
+    let size: number;
+    let codePoint: number;
+    if (first >= 0xC2 && first <= 0xDF) {
+      size = 2;
+      codePoint = first & 0x1F;
+    } else if (first >= 0xE0 && first <= 0xEF) {
+      size = 3;
+      codePoint = first & 0x0F;
+    } else if (first >= 0xF0 && first <= 0xF4) {
+      size = 4;
+      codePoint = first & 0x07;
+    } else {
+      out += '\uFFFD';
+      i += 1;
+      continue;
+    }
+    if (i + size > bytes.length) {
+      out += '\uFFFD';
+      i += 1;
+      continue;
+    }
+    let valid = true;
+    for (let j = 1; j < size; j += 1) {
+      const next = bytes[i + j];
+      if ((next & 0xC0) !== 0x80) {
+        valid = false;
+        break;
+      }
+      codePoint = (codePoint << 6) | (next & 0x3F);
+    }
+    const overlong = size === 3 && codePoint < 0x800;
+    const surrogate = codePoint >= 0xD800 && codePoint <= 0xDFFF;
+    const outOfRange = size === 4 && (codePoint < 0x10000 || codePoint > 0x10FFFF);
+    if (!valid || overlong || surrogate || outOfRange) {
+      out += '\uFFFD';
+      i += 1;
+      continue;
+    }
+    out += String.fromCodePoint(codePoint);
+    i += size;
+  }
+  return out;
 }
 
 /** How many `cause` links to fold into a log message before giving up on it. */
@@ -170,9 +250,10 @@ const MAX_CAUSE_DEPTH = 3;
  * hold a `/`, a space, or a quote that the text-shape rules deliberately do not
  * treat as one, so the reference's own grammar has to run first. Docker may
  * also quote only the repository name it parsed from the request path, which it
- * decodes once and may normalize into a Docker Hub form, so a credential-bearing
- * image has that whole structured field redacted rather than reconstructed. A
- * digest pin with no userinfo is left intact.
+ * decodes once and may normalize into a Docker Hub form, so an image whose
+ * authored or decoded spelling carries a credential has that whole structured
+ * field redacted rather than reconstructed. A digest pin with no userinfo is
+ * left intact.
  */
 export function errorMessageForLog(error: unknown, options?: { imageRef?: string }): string {
   const message = messageWithCause(error);
@@ -232,16 +313,24 @@ function redactImageInText(text: string, imageRef: string): string {
   }
   // The invalid-reference error quotes the repository name the daemon parsed,
   // which can come from a path it decoded, a Docker Hub name it normalized, or
-  // a parser version that rewrites a byte the client never held (an invalid
-  // UTF-8 escape reaches the JSON body as U+FFFD, for example). Reconstructing
-  // every form is not exhaustive, so redact the structured field as a whole
-  // whenever the image carries a credential: the failure reason and the
-  // redacted reference stay, and only the name is lost. A field an earlier pass
-  // already reduced keeps its `[redacted]@host/path` context. Replacing only
-  // inside the phrase also keeps a short prefix such as `Pass` from rewriting
-  // the same word elsewhere in the message.
-  out = out.replace(/repository name \(([^)]*)\)/g, (match, quotedName: string) =>
-    quotedName.includes('[redacted]') ? match : 'repository name ([redacted])');
+  // a byte the JSON body rewrote as U+FFFD. Reconstructing every form is not
+  // exhaustive, so redact the structured field as a whole whenever the authored
+  // or decoded spelling carries a credential: the failure reason and the
+  // redacted reference stay, and only the name is lost. A credential can hold a
+  // `)` and even the phrase after one, so match to the last `)` that precedes
+  // one of the daemon's two quoted-name suffixes rather than the first `)`. A
+  // field an earlier pass already reduced keeps the host context it still
+  // holds. Replacing only inside the phrase also keeps a short prefix such as
+  // `Pass` from rewriting the same word elsewhere in the message.
+  const redactQuotedName = (match: string, quotedName: string): string =>
+    quotedName.includes('[redacted]') ? match : 'repository name ([redacted])';
+  out = out.replace(
+    /repository name \(([\s\S]*)\)(?= must be lowercase|, cannot specify 64-byte hexadecimal strings)/g,
+    redactQuotedName,
+  );
+  // A different daemon error shape may quote a name without either suffix; the
+  // first `)` still ends the common no-paren form.
+  out = out.replace(/repository name \(([^)]*)\)/g, redactQuotedName);
   return out;
 }
 

@@ -34,7 +34,7 @@ Compose Doctor reads the structure of the effective model (service names, images
 
 One caveat: a secret interpolated into a structural field (such as a port, an image tag, or a volume path built from `${VAR}`) is resolved before the model is read, so its value does show in the rendered model. Render errors are redacted before storage; Sencho never writes the raw `docker compose config` error to the database. See [Environment and Secrets Guardrails](/features/environment-guardrails).
 
-When Doctor cannot inspect an image, it writes the failure to the server log. The image reference is redacted by reading the reference's own grammar, so a credential embedded in it is removed even when the password holds a character a text pattern would miss. The Docker error that echoes the reference is redacted the same way, including the repository name Docker quotes after decoding the request or normalizing a Docker Hub image name, and container inspect failures are redacted before they are written.
+When Doctor cannot inspect an image, it writes the failure to the server log. The image reference is redacted by reading the reference's own grammar, so a credential embedded in it is removed even when the password holds a character a text pattern would miss; a percent-encoded `@` is decoded before that decision, so a credential Docker would see behind `%40` is removed as well. The Docker error that echoes the reference is redacted too: when Docker quotes the repository name it parsed after decoding the request path or normalizing a Docker Hub image name, the credential part of that quoted name is removed whenever the image carries a credential, and container inspect failures are redacted before they are written.
 
 ## Severity levels
 
