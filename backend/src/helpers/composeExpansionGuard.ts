@@ -852,8 +852,8 @@ type DependencyGroup = IncludeGroup | ExtendsGroup;
 
 /**
  * A service's `env_file` or `label_file` entry, as written. A `format` of `raw`
- * means the file has no interpolation; the text is kept uninterpolated because
- * Compose interpolates it, and the path, when it loads the definition.
+ * means the file has no interpolation. Both `path` and `format` are kept as
+ * written, because Compose interpolates them when it loads the definition.
  */
 interface ReadFile {
   path: string;
@@ -972,9 +972,14 @@ function deref(node: unknown, targets: Map<Node, Node>): unknown {
  * added to them.
  */
 function replacesEarlier(node: unknown, targets: Map<Node, Node>): boolean {
+  return hasTag(node, targets, '!override') || hasTag(node, targets, '!reset');
+}
+
+/** True when a node (or the node an alias names) carries the given tag. */
+function hasTag(node: unknown, targets: Map<Node, Node>, tag: string): boolean {
   const resolved = deref(node, targets);
   if (!isScalar(resolved) && !isCollection(resolved)) return false;
-  return resolved.tag === '!override' || resolved.tag === '!reset';
+  return resolved.tag === tag;
 }
 
 /**
@@ -1057,7 +1062,7 @@ const YAML_TAG_PREFIX = 'tag:yaml.org,2002:';
  * `!!binary` value is the bytes it decodes to.
  */
 function environmentValueOf(node: unknown, targets: Map<Node, Node>): string | null | undefined {
-  // An empty value is no node at all.
+  // A key written with no value node (`{A}`, `? A`) is a null value too.
   if (node === null || node === undefined) return null;
   const resolved = scalarOf(node, targets);
   if (resolved === undefined) return undefined;
@@ -1160,6 +1165,8 @@ function environmentOf(node: unknown, targets: Map<Node, Node>): EnvironmentItem
   const out: EnvironmentItem[] = [];
   if (isSeq(resolved)) {
     for (const item of resolved.items) {
+      // Compose removes a list entry tagged `!reset`, so it neither sets nor takes out a name.
+      if (hasTag(item, targets, '!reset')) continue;
       const text = textOf(item, targets);
       if (text !== undefined) out.push({ kind: 'entry', text });
     }
@@ -1391,9 +1398,9 @@ async function discoverInputFiles(base: string): Promise<ResolvedInputFile[]> {
  * The lists of two definitions of one service, the later one applied over the
  * earlier: its files follow the earlier ones, and each of its `environment:`
  * entries follows the earlier ones, to replace (or take out) the earlier value
- * of its name, the way Compose merges them. A part the
- * later one replaces with `!override` or `!reset` starts over, and a whole
- * service it replaces drops the earlier definitions.
+ * of its name, the way Compose merges them. A part the later one replaces with
+ * `!override` or `!reset` starts over, and a whole service it replaces drops
+ * the earlier definitions.
  */
 function combineReads(earlier: ServiceReads, later: ServiceReads): ServiceReads {
   if (later.replaces.service) return later;

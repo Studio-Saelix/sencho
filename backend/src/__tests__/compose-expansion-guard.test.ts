@@ -2789,7 +2789,7 @@ describe('assertComposeInputsWithinExpansionLimits - scalar text, interpolation 
         await expect(run(dir, ['compose', '-f', 'b.yaml', 'config'])).rejects.toThrow(/too long, or interpolates into more text/);
       });
 
-      it('reads the services of an include and the including file as separate scopes', async () => {
+      it('still refuses the including file’s chain when an included service holds only a short one', async () => {
         // The include reads a benign list; the including file's own service holds the long chain.
         await write('ok.env', 'Z=1\n');
         await write('inc.yaml', 'services:\n  other:\n    image: nginx\n    env_file: [ok.env]\n');
@@ -2802,7 +2802,7 @@ describe('assertComposeInputsWithinExpansionLimits - scalar text, interpolation 
         await expect(run(dir, ['compose', '-f', 'a.yaml', 'config'])).rejects.toThrow(/too long, or interpolates into more text/);
       });
 
-      it('does not read an included service again where it joins the including file', async () => {
+      it('reads an included service once, however many files it passes through', async () => {
         // Just over half the reference limit: under it when read once, over it when read twice.
         const mentions = Array.from({ length: Math.floor(MAX_COMPOSE_DEPENDENCY_REFERENCES / 2) + 52 }, () => 'x.env').join(', ');
         await write('x.env', 'A=1\n');
@@ -2934,9 +2934,11 @@ describe('assertComposeInputsWithinExpansionLimits - scalar text, interpolation 
       await expect(run(dir, ['compose', '-f', 'a.yaml', '-f', 'b.yaml', 'config'])).resolves.toBeUndefined();
     });
 
-    // Each shape below was rendered with Compose 5.7.0: the first file builds 640 KB
-    // and the continuation doubles it to 1.28 MB, where the guard had accepted it or
-    // refused a project Compose accepts.
+    // Each shape in the groups below that seed a chain was rendered with Compose
+    // 5.7.0 (the format groups use 21 doublings of a short line instead; the job
+    // test pins a conservative refusal, since Compose 5.7.0 rejects `jobs:`): the
+    // first file builds 640 KB and the continuation doubles it to 1.28 MB, where the
+    // guard had accepted it or refused a project Compose accepts.
     const TOO_LONG = /too long, or interpolates into more text/;
     const A_B = ['compose', '-f', 'a.yaml', '-f', 'b.yaml', 'config'];
     /** The seed's first chain file: `SEED` is what `B0` copies, then three doublings. */
@@ -3049,6 +3051,16 @@ describe('assertComposeInputsWithinExpansionLimits - scalar text, interpolation 
         await expect(run(dir, ['compose', '-f', 'a.yaml', 'config'])).rejects.toThrow(TOO_LONG);
       });
 
+      it('reads the format of an included label_file with its own environment', async () => {
+        const lines = 'A=1\n' + Array.from({ length: 21 }, () => 'A=${A}${A}').join('\n') + '\n';
+        await write('sub/e.env', lines);
+        await write('sub/inc.yaml', 'services:\n  web:\n    image: nginx\n    label_file:\n      - path: e.env\n        format: ${FMT}\n');
+        await write('sub/.env', 'FMT=raw\n');
+        await expect(run(dir, ['compose', '-f', 'a.yaml', 'config'])).resolves.toBeUndefined();
+        await write('sub/.env', 'FMT=other\n');
+        await expect(run(dir, ['compose', '-f', 'a.yaml', 'config'])).rejects.toThrow(TOO_LONG);
+      });
+
       it('reads the text of an env file with the run’s environment, not the included project’s', async () => {
         // `SEED=${FROM}` is empty for Compose, which does not hand the included .env to env file text.
         await write('sub/.env', `FROM=${seedText}\n`);
@@ -3100,6 +3112,13 @@ describe('assertComposeInputsWithinExpansionLimits - scalar text, interpolation 
           await expect(run(dir, ['compose', '-f', 'a.yaml', 'config'])).resolves.toBeUndefined();
         });
 
+        it('still refuses it when the file that resets comes before the file that includes it', async () => {
+          await write('b.yaml', later(kind)['list reset with !reset']);
+          await expect(run(dir, ['compose', '-f', 'b.yaml', '-f', 'a.yaml', 'config'])).rejects.toThrow(TOO_LONG);
+          await write('b.yaml', later(kind)['service replaced with !override']);
+          await expect(run(dir, ['compose', '-f', 'b.yaml', '-f', 'a.yaml', 'config'])).rejects.toThrow(TOO_LONG);
+        });
+
         it('accepts it through an include of an include, dropped by the outermost run', async () => {
           await write('mid.yaml', 'include:\n  - inc.yaml\n');
           await write('a.yaml', 'include:\n  - mid.yaml\n');
@@ -3109,6 +3128,28 @@ describe('assertComposeInputsWithinExpansionLimits - scalar text, interpolation 
           await expect(run(dir, A_B)).rejects.toThrow(TOO_LONG);
         });
       });
+    });
+
+    it('accepts an included seed that a later file replaces with an !override of the whole environment', async () => {
+      await write('inc.yaml', webWith(`      A: ${seedText}\n`, 'e1.env, e2.env'));
+      await write('e1.env', `B0=\${A}\n${doublings(1, 3)}\n`);
+      await write('e2.env', continuation);
+      await write('a.yaml', 'include:\n  - inc.yaml\n');
+      await write('b.yaml', 'services:\n  web:\n    environment: !override\n      Z: "1"\n');
+      await expect(run(dir, A_B)).resolves.toBeUndefined();
+      await write('b.yaml', 'services:\n  web:\n    environment:\n      Z: "1"\n');
+      await expect(run(dir, A_B)).rejects.toThrow(TOO_LONG);
+    });
+
+    it('interpolates the environment of a service another file extends with the environment that file was loaded under', async () => {
+      await write('sub/.env', `FROM=${seedText}\n`);
+      await write('a.yaml', 'include:\n  - sub/inc.yaml\n');
+      await write('sub/inc.yaml', 'services:\n  web:\n    extends:\n      file: base.yaml\n      service: base\n');
+      await write('sub/base.yaml', webWith('      SEED: ${FROM}\n', 'e1.env').replace('  web:', '  base:'));
+      await write('sub/e1.env', `${seedChain}${continuation}`);
+      await expect(run(dir, ['compose', '-f', 'a.yaml', 'config'])).rejects.toThrow(TOO_LONG);
+      await write('sub/.env', 'FROM=ab\n');
+      await expect(run(dir, ['compose', '-f', 'a.yaml', 'config'])).resolves.toBeUndefined();
     });
 
     describe('a later null or bare name takes the earlier seed out, as Compose does', () => {
@@ -3129,6 +3170,7 @@ describe('assertComposeInputsWithinExpansionLimits - scalar text, interpolation 
         ['a ~ value', '\n      A: ~'],
         ['an empty value', '\n      A:'],
         ['a !!null value', '\n      A: !!null ""'],
+        ['a key with no value node', ' {A}'],
         ['a bare name', ' [A]'],
         ['a bare name in a block list', '\n      - A'],
         ['a bare name an interpolation spells', ' ["${MISSING:-A}"]'],
@@ -3157,6 +3199,34 @@ describe('assertComposeInputsWithinExpansionLimits - scalar text, interpolation 
         await expect(run(dir, A_B)).rejects.toThrow(TOO_LONG);
       });
 
+      it.each([
+        ['a bare name', '      - !reset A'],
+        ['a bare name in a flow list', null],
+        ['a bare name an interpolation spells', '      - !reset ${K}'],
+        ['an assignment', '      - !reset A=small'],
+      ])('refuses it when a later list entry is tagged !reset, which Compose removes: %s', async (_name, entry) => {
+        await write('.env', 'K=A\n');
+        await write('b.yaml', entry === null ? second(' [!reset A]') : second(`\n${entry}`));
+        await expect(run(dir, A_B)).rejects.toThrow(TOO_LONG);
+      });
+
+      it.each([
+        ['a list entry tagged !override', '\n      - !override A'],
+        ['a list entry tagged !!str', '\n      - !!str A'],
+        ['a map entry tagged !reset', '\n      A: !reset null'],
+      ])('accepts it when a later file gives %s, which Compose applies as written', async (_name, environment) => {
+        await write('b.yaml', second(environment));
+        await expect(run(dir, A_B)).resolves.toBeUndefined();
+      });
+
+      it.each([
+        ['a map entry', '\n      A: ""'],
+        ['a list entry', '\n      - A='],
+      ])('accepts it when a later file gives %s an empty value, which replaces the seed', async (_name, environment) => {
+        await write('b.yaml', second(environment));
+        await expect(run(dir, A_B)).resolves.toBeUndefined();
+      });
+
       it('refuses it again when a later file gives the seed back after it was taken out', async () => {
         await write('b.yaml', second(' [A]'));
         await write('c.yaml', second(`\n      A: ${seedText}`));
@@ -3174,9 +3244,15 @@ describe('assertComposeInputsWithinExpansionLimits - scalar text, interpolation 
           await write('e.env', lines);
         });
 
-        it.each(['${FMT}', '"${FMT}"', '${FMT:-other}'])('reads a file raw when %s names raw', async (format) => {
+        it.each(['${FMT}', '"${FMT}"'])('reads a file raw when %s names raw', async (format) => {
           await write('.env', 'FMT=raw\n');
-          await write('compose.yaml', asFormat(kind, format.replace('other', 'raw')));
+          await write('compose.yaml', asFormat(kind, format));
+          await expect(run()).resolves.toBeUndefined();
+        });
+
+        it('reads a file raw when the default of the format names raw', async () => {
+          await write('.env', 'X=1\n');
+          await write('compose.yaml', asFormat(kind, '${FMT:-raw}'));
           await expect(run()).resolves.toBeUndefined();
         });
 

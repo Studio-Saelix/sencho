@@ -112,11 +112,10 @@ const COMPOSE_TEXT: Array<[string, string]> = [
 
 const ZEROS = '0'.repeat(70);
 /**
- * Leading zeros that leave an integer spelling change no value, so those rows
- * are read by the digits that count. A row marked as a float is the fallback: the
- * digits name more than 64 bits (`1_` and seventy zeros) or are no integer once
- * the zero leads (`000018446744073709551615` holds an 8, which is not octal),
- * so the numeral is read as the float it spells.
+ * Zeros that lead an integer spelling change no value, so each of these is read
+ * by the digits that count. A numeral that is no 64-bit integer (more than 64
+ * bits, or a `0` followed by an `8` or `9`, which is not octal) is read as the
+ * float it spells, or stays as written when it is no number.
  */
 const PADDED_INTEGERS: Array<[string, string]> = [
   [`0x${ZEROS}1`, '1'],
@@ -178,7 +177,8 @@ const TAGGED_TEXT: Array<['int' | 'float' | 'bool' | 'timestamp', string, string
   ['float', `0b${'1'.repeat(64)}`, null],
   ['float', `0o1${'7'.repeat(21)}`, null],
   ['float', `0x${ZEROS}8000000000000000`, null],
-  // Past 64 bits, a decimal is the float it spells; below uint64's top, a negative one too.
+  // These convert: a decimal past 64 bits or below the int64 bottom is the float it spells,
+  // and the int64 bounds are integers that convert.
   ['float', '18446744073709551616', '1.8446744073709552e+19'],
   ['float', '-9223372036854775808', '-9.223372036854776e+18'],
   ['float', '-9223372036854775809', '-9.223372036854776e+18'],
