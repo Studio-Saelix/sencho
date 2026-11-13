@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { errorMessageForLog, redactImageReference, redactSensitiveText } from '../utils/safeLog';
+import { errorMessageForLog, redactImageForDisplay, redactImageReference, redactSensitiveText } from '../utils/safeLog';
 
 describe('redactSensitiveText', () => {
   it('redacts credentials from durable log text', () => {
@@ -266,6 +266,19 @@ describe('redactSensitiveText', () => {
     redactImageReference(`a${'@b'.repeat(100_000)}`);
     redactImageReference(`${'a'.repeat(100_000)}@sha256:`);
     expect(Date.now() - started).toBeLessThan(1000);
+  });
+
+  // The wire field and the Doctor log line name the same image for the same
+  // failure, so a value one of them writes must not show a secret in the other.
+  it.each([
+    ['a token query beside a URL credential', 'https://user:pw@registry.example.com/app?token=abc123', '[redacted]@registry.example.com/app?token=[redacted]'],
+    ['a password keyword', 'password=hunter2', 'password=[redacted]'],
+    ['a token keyword', 'token=abc123', 'token=[redacted]'],
+    ['an api_key keyword', 'registry.example.com/app?api_key=abc123', 'registry.example.com/app?api_key=[redacted]'],
+    ['a Bearer credential', 'Bearer abc123', 'Bearer [redacted]'],
+    ['an image with no secret', 'nginx:1.27', 'nginx:1.27'],
+  ])('redactImageForDisplay hides %s', (_name, image, expected) => {
+    expect(redactImageForDisplay(image)).toBe(expected);
   });
 
   it('keeps the image tail when a literal @ password is redacted', () => {

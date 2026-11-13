@@ -8,7 +8,7 @@ import { isDockerHealthcheckActive } from '../../helpers/healthcheckPresence';
 import type { EffectiveModel } from '../preflight/effectiveModel';
 import type { ServiceHealthcheckEvidence } from '../preflight/types';
 import { mapWithConcurrency } from '../../utils/mapWithConcurrency';
-import { errorMessageForLog, redactImageReference, redactSensitiveText, sanitizeForLog } from '../../utils/safeLog';
+import { errorMessageForLog, redactImageForDisplay, redactSensitiveText, sanitizeForLog } from '../../utils/safeLog';
 
 const INSPECT_CONCURRENCY = 8;
 
@@ -201,7 +201,7 @@ async function inspectLocalImage(
   } catch (err) {
     console.warn(
       '[ComposeDoctor] Healthcheck image inspect failed for %s:',
-      sanitizeForLog(redactImageReference(imageRef)),
+      sanitizeForLog(redactImageForDisplay(imageRef)),
       errorMessageForLog(err, { imageRef }),
     );
     return 'unverifiable';

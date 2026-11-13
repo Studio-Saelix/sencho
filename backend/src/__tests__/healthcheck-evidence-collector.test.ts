@@ -539,6 +539,64 @@ describe('collectServiceHealthcheckEvidence', () => {
     expect(String(imageWarn?.[2])).toContain('invalid reference format');
   });
 
+  // The Doctor wire field does not stop at the URL userinfo: a token query
+  // value, a password=, token=, or api_key= pair, and a Bearer credential all
+  // reach the finding as [redacted]. The server log line carries the same
+  // image value, so it has to match the wire, including a value Compose
+  // resolved from a .env variable before Doctor read it.
+  it.each([
+    {
+      name: 'a URL credential with a token query value',
+      image: 'https://SECRETUSR:SECRETPW1@registry.example.com/app?token=SECRETTOK1',
+      expected: '[redacted]@registry.example.com/app?token=[redacted]',
+      forbidden: ['SECRETUSR', 'SECRETPW1', 'SECRETTOK1'],
+    },
+    {
+      name: 'a password keyword',
+      image: 'password=SECRETPW2',
+      expected: 'password=[redacted]',
+      forbidden: ['SECRETPW2'],
+    },
+    {
+      name: 'a token keyword',
+      image: 'token=SECRETTOK3',
+      expected: 'token=[redacted]',
+      forbidden: ['SECRETTOK3'],
+    },
+    {
+      name: 'an api_key keyword',
+      image: 'registry.example.com/app?api_key=SECRETKEY4',
+      expected: 'registry.example.com/app?api_key=[redacted]',
+      forbidden: ['SECRETKEY4'],
+    },
+    {
+      name: 'a Bearer credential',
+      image: 'Bearer SECRETBEARER5',
+      expected: 'Bearer [redacted]',
+      forbidden: ['SECRETBEARER5'],
+    },
+  ])('never logs the $name the Doctor wire field redacts', async ({ image, expected, forbidden }) => {
+    mockDocker({
+      list: [],
+      image: 'error',
+      imageError: new Error(`failed for ${image}: connect refused`),
+    });
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const evidence = await collectServiceHealthcheckEvidence(
+      1, 'proj', model([svc({ composeHealthcheck: 'absent', image })]), true,
+    );
+    expect(evidence.web.state).toBe('unverifiable');
+
+    const logged = warn.mock.calls.map(args => args.join(' ')).join('\n');
+    for (const fragment of forbidden) expect(logged).not.toContain(fragment);
+    const imageWarn = warn.mock.calls.find(args => String(args[0]).includes('image inspect failed'));
+    expect(imageWarn).toBeDefined();
+    expect(imageWarn?.[1]).toBe(expected);
+    // Docker echoes the reference in its error, so the second argument has to
+    // lose the same secrets.
+    for (const fragment of forbidden) expect(String(imageWarn?.[2])).not.toContain(fragment);
+  });
+
   it('never logs registry credentials from the compose project label', async () => {
     mockDocker({ listError: new Error('daemon down'), image: { Config: {} } });
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});

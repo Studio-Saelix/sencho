@@ -120,6 +120,19 @@ export function redactImageReference(image: string): string {
 }
 
 /**
+ * An image value as both a Doctor wire field and the Doctor server log write
+ * it: the reference grammar removes a credential whatever characters it holds,
+ * then the text pass removes the secret forms a complete value can carry beside
+ * it (a `token=` query pair, a `password=`, `api_key=`, or `Bearer` credential,
+ * a JWT), including one Compose resolved from an environment variable. The wire
+ * and the log name the same image for the same failure, so they must hide the
+ * same secret; both call this.
+ */
+export function redactImageForDisplay(image: string): string {
+  return redactSensitiveText(redactImageReference(image));
+}
+
+/**
  * Split an image reference into its credential and the rest, or return null
  * when it has no credential. The digest tail is removed before the last `@` is
  * read, so a digest pin is never mistaken for userinfo.

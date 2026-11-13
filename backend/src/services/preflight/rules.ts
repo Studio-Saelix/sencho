@@ -13,7 +13,7 @@ import {
   tunnelExposureByService,
   type TunnelConnector,
 } from '../network/tunnelDetection';
-import { redactImageReference } from '../../utils/safeLog';
+import { redactImageForDisplay } from '../../utils/safeLog';
 import { describeComposeVersionSkew } from '../../helpers/composeVersionSkew';
 import { enumeratedHostPorts } from '../../helpers/composePortSpec';
 import {
@@ -600,7 +600,7 @@ const imageLatest: PreflightRule = {
         ruleId: 'image-latest',
         severity: 'warning',
         title: 'Image uses a moving tag',
-        message: `Service "${s.name}" uses "${redactImageReference(s.image)}", which resolves to a moving latest tag. Deploys are not reproducible and can change under you.`,
+        message: `Service "${s.name}" uses "${redactImageForDisplay(s.image)}", which resolves to a moving latest tag. Deploys are not reproducible and can change under you.`,
         sourcePath: s.name,
         service: s.name,
         remediation: 'Pin a specific version tag.',
@@ -1237,7 +1237,7 @@ const sensitiveServiceBroadExposure: PreflightRule = {
         ruleId: 'sensitive-service-broad-exposure',
         severity: 'high',
         title: `Sensitive service "${svc.name}" is exposed on all interfaces`,
-        message: `Service "${svc.name}" looks like a database or admin service (${redactImageReference(svc.image)}) and publishes ${specLabels(broad)} on all interfaces. Broadly exposing it is a common source of compromise.`,
+        message: `Service "${svc.name}" looks like a database or admin service (${redactImageForDisplay(svc.image)}) and publishes ${specLabels(broad)} on all interfaces. Broadly exposing it is a common source of compromise.`,
         sourcePath: svc.name,
         service: svc.name,
         remediation: 'Bind it to a specific interface such as 127.0.0.1, or keep it on an internal network only.',
