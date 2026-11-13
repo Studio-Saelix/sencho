@@ -728,13 +728,24 @@ describe('GET /api/stacks/:stackName/label-inventory', () => {
     expect(res.body.stackName).toBe('route1');
   });
 
-  it('returns the degraded inventory instead of a 500 when the applied deploy spec escapes the stack', async () => {
+  it('returns the degraded inventory instead of a 500 when the applied deploy spec names a file outside the stack', async () => {
     writeStack('route2', { 'compose.yaml': 'services:\n  web:\n    image: nginx\n' });
     seedEscapingDeploySpec('route2');
     stubDockerList([]);
     const res = await request(app).get('/api/stacks/route2/label-inventory').set('Cookie', authCookie);
     expect(res.status).toBe(200);
     expect(res.body.renderable).toBe(false);
+  });
+
+  it('still returns 500 when the render fails for a reason other than a refused deploy spec', async () => {
+    writeStack('route3', { 'compose.yaml': 'services:\n  web:\n    image: nginx\n' });
+    vi.spyOn(ComposeService, 'getInstance').mockReturnValue({
+      renderConfig: vi.fn().mockRejectedValue(new Error('docker compose could not be started')),
+    } as unknown as ComposeService);
+    stubDockerList([]);
+    const res = await request(app).get('/api/stacks/route3/label-inventory').set('Cookie', authCookie);
+    expect(res.status).toBe(500);
+    expect(res.body.error).toBe('Failed to build label inventory');
   });
 });
 

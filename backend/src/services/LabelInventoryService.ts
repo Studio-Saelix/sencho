@@ -7,6 +7,7 @@ import { ComposeService } from './ComposeService';
 import DockerController from './DockerController';
 import { buildAuthoredProject, correlateLabel, isActingReason, type AuthoredProject } from './composeSource';
 import { redactLabelValue } from '../helpers/labelValueRedaction';
+import { DeploySpecRefusedError } from '../utils/authoredComposeArgs';
 import { getErrorMessage } from '../utils/errors';
 import { sanitizeForLog } from '../utils/safeLog';
 import {
@@ -424,7 +425,8 @@ export async function buildStackLabelInventory(
     // A stored deploy spec that names a file or context directory outside the stack is
     // refused before `docker compose` runs. That refusal is a property of the stack, not
     // a server fault, so degrade the inventory exactly like a failed render instead of
-    // letting the throw reach the route as a 500.
+    // letting the throw reach the route as a 500. Every other render error still does.
+    if (!(error instanceof DeploySpecRefusedError)) throw error;
     console.warn('[LabelInventory] Compose render refused for stack %s: %s',
       sanitizeForLog(stackName), sanitizeForLog(getErrorMessage(error, 'unknown')));
     result = { rendered: null, stderr: '', code: null, timedOut: false };
