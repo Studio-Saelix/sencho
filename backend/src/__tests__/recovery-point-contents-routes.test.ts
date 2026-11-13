@@ -433,10 +433,24 @@ describe('GET /api/recovery/points/:pointId/browse', () => {
     const calls = contentEngine();
     const held = Array.from({ length: 4 }, () => slots.acquirePointReadSlot('elsewhere'));
     try {
-      const res = await request(app).get(browse(pointId)).set('Cookie', viewerCookie);
-      expect(res.status).toBe(503);
-      expect(res.headers['retry-after']).toBe('5');
-      expect(res.body).toMatchObject({ errorClass: 'capability_unavailable', reason: 'read_capacity' });
+      const refusals = [
+        await request(app).get(browse(pointId)).set('Cookie', viewerCookie),
+        await request(app).get(download(pointId, '/notes.md')).set('Cookie', viewerCookie),
+        await request(app).get(browse(pointId)).set(hop('node_proxy')),
+        await request(app).get(browse(pointId)).set(hop('pilot_tunnel')),
+        await request(app).get(download(pointId, '/notes.md')).set(hop('pilot_tunnel')),
+      ];
+      for (const res of refusals) {
+        expect(res.status).toBe(503);
+        expect(res.headers['retry-after']).toBe('5');
+        expect(res.body).toMatchObject({ errorClass: 'capability_unavailable', reason: 'read_capacity' });
+        // Busy, not missing: the message must not claim the feature is unavailable.
+        expect(res.body.error).toMatch(/try again/i);
+        expect(res.body.error).not.toMatch(/not available/i);
+      }
+      const head = await request(app).head(download(pointId, '/notes.md')).set('Cookie', viewerCookie);
+      expect(head.status).toBe(503);
+      expect(head.headers['retry-after']).toBe('5');
       expect(calls.reads).toEqual([]);
     } finally {
       for (const release of held) release?.();

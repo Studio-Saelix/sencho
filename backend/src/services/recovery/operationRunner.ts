@@ -1060,7 +1060,14 @@ export class RecoveryEngineService {
     if (!repository) throw new RecoveryError('repository_unavailable');
 
     const release = acquirePointReadSlot(repository.id);
-    if (!release) throw new RecoveryError('capability_unavailable', { reason: 'read_capacity' });
+    if (!release) {
+      // The node is busy, not lacking the feature: the shared capability sentence
+      // would say volume protection is unavailable, so this refusal says to retry.
+      throw new RecoveryError('capability_unavailable', {
+        reason: 'read_capacity',
+        detail: 'This node is already reading as many saved points as it allows. Try again in a few seconds.',
+      });
+    }
     try {
       const operationId = `read-${randomUUID()}`;
       const engine = this.buildEngine(repository, operationId, input.signal) as BackupEngine & Partial<PointContentReader>;
