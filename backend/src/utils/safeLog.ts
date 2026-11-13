@@ -317,19 +317,41 @@ function redactImageInText(text: string, imageRef: string): string {
   // exhaustive, so redact the structured field as a whole whenever the authored
   // or decoded spelling carries a credential: the failure reason and the
   // redacted reference stay, and only the name is lost. A field an earlier pass
-  // already reduced keeps the host context it still holds.
-  out = redactQuotedRepositoryNames(out);
+  // already reduced keeps the host context it still holds, but only when that
+  // context is validated against the credential-free part of the reference.
+  const safeRests = [...references.values()].map((reference) => reference.rest);
+  out = redactQuotedRepositoryNames(out, safeRests);
   // A different daemon error shape may quote a name without either known
-  // suffix; the first `)` still ends the common no-paren form.
-  out = redactNoSuffixQuotedNames(out);
+  // suffix. Without a suffix its closing parenthesis is ambiguous, so redact
+  // the rest of the message rather than stop at one the name may hold.
+  out = redactNoSuffixQuotedNames(out, safeRests);
   return out;
 }
+
+const REDACTION_MARKER = '[redacted]';
 
 /** The suffixes Docker's reference parser follows a quoted repository name with. */
 const QUOTED_REPOSITORY_NAME_SUFFIXES = [
   ' must be lowercase',
   ', cannot specify 64-byte hexadecimal strings',
 ];
+
+/**
+ * Whether a quoted repository name already reduced by an earlier pass may keep
+ * its text. The marker alone proves nothing: a credential can contain that
+ * literal, so an attacker could otherwise make a field look redacted and leave
+ * the rest of it in the log. Only the two shapes the earlier passes produce are
+ * kept: a bare marker, or the marker followed by `@` and part of the
+ * credential-free rest of the reference. The rest is the text the log already
+ * prints in the redacted image argument, so keeping a prefix of it reveals no
+ * credential; anything else is redacted as a whole.
+ */
+function keepsRedactedContext(quotedName: string, safeRests: readonly string[]): boolean {
+  if (quotedName === REDACTION_MARKER) return true;
+  if (!quotedName.startsWith(`${REDACTION_MARKER}@`)) return false;
+  const context = quotedName.slice(REDACTION_MARKER.length + 1);
+  return safeRests.some((rest) => rest.startsWith(context));
+}
 
 /**
  * Redact the repository name Docker quotes in an invalid-reference error.
@@ -339,7 +361,7 @@ const QUOTED_REPOSITORY_NAME_SUFFIXES = [
  * scan is linear: a regular expression over the same text backtracks
  * quadratically on a message built from many `repository name (` runs.
  */
-function redactQuotedRepositoryNames(text: string): string {
+function redactQuotedRepositoryNames(text: string, safeRests: readonly string[]): string {
   const phrase = 'repository name (';
   let out = '';
   let copied = 0;
@@ -348,9 +370,10 @@ function redactQuotedRepositoryNames(text: string): string {
     const openAt = text.indexOf(phrase, searchFrom);
     if (openAt === -1) break;
     // Greedy on purpose: a name can contain a suffix phrase, so the last match
-    // is the daemon's closing parenthesis. Over-redacting a message with two
-    // quoted names is the safe direction. The scan consumes to the last close,
-    // so the loop stays linear over the message.
+    // is the daemon's closing parenthesis. A span that crosses several quoted
+    // fields does not keep its context, so over-redacting two names stays the
+    // safe direction. The scan consumes to the last close, so the loop stays
+    // linear over the message.
     let closeAt = -1;
     for (let i = openAt + phrase.length; i < text.length; i += 1) {
       if (text[i] !== ')') continue;
@@ -363,8 +386,8 @@ function redactQuotedRepositoryNames(text: string): string {
     }
     if (closeAt === -1) break;
     const quotedName = text.slice(openAt + phrase.length, closeAt);
-    if (!quotedName.includes('[redacted]')) {
-      out += `${text.slice(copied, openAt)}repository name ([redacted])`;
+    if (!keepsRedactedContext(quotedName, safeRests)) {
+      out += `${text.slice(copied, openAt)}repository name (${REDACTION_MARKER})`;
       copied = closeAt + 1;
     }
     searchFrom = closeAt + 1;
@@ -374,12 +397,17 @@ function redactQuotedRepositoryNames(text: string): string {
 }
 
 /**
- * Redact a quoted repository name that has no known daemon suffix, ending it at
- * the first `)`. Replacing only inside the phrase keeps a short prefix such as
- * `Pass` from rewriting the same word elsewhere in the message, and the scan is
- * linear in the message length.
+ * Redact a quoted repository name that has no known daemon suffix. Replacing
+ * only inside the phrase keeps a short prefix such as `Pass` from rewriting the
+ * same word elsewhere in the message, and the scan is linear in the message
+ * length.
+ *
+ * Without a recognised suffix there is no trusted end to the name: a `)` in a
+ * credential would make the first one too early and leave the tail behind. Only
+ * a field an earlier pass already reduced keeps its text; any other field takes
+ * the rest of the message with it.
  */
-function redactNoSuffixQuotedNames(text: string): string {
+function redactNoSuffixQuotedNames(text: string, safeRests: readonly string[]): string {
   const phrase = 'repository name (';
   let out = '';
   let copied = 0;
@@ -388,13 +416,14 @@ function redactNoSuffixQuotedNames(text: string): string {
     const openAt = text.indexOf(phrase, searchFrom);
     if (openAt === -1) break;
     const closeAt = text.indexOf(')', openAt + phrase.length);
-    if (closeAt === -1) break;
-    const quotedName = text.slice(openAt + phrase.length, closeAt);
-    if (!quotedName.includes('[redacted]')) {
-      out += `${text.slice(copied, openAt)}repository name ([redacted])`;
-      copied = closeAt + 1;
+    const quotedName = closeAt === -1 ? '' : text.slice(openAt + phrase.length, closeAt);
+    if (closeAt !== -1 && keepsRedactedContext(quotedName, safeRests)) {
+      searchFrom = closeAt + 1;
+      continue;
     }
-    searchFrom = closeAt + 1;
+    out += `${text.slice(copied, openAt)}repository name (${REDACTION_MARKER})`;
+    copied = text.length;
+    break;
   }
   out += text.slice(copied);
   return out;

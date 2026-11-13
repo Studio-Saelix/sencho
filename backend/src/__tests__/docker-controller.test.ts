@@ -61,6 +61,7 @@ vi.mock('util', () => ({
 
 import Docker from 'dockerode';
 import DockerController, { selectMainWebPort, parseExitCode, isContainerFailed } from '../services/DockerController';
+import { errorMessageForLog } from '../utils/safeLog';
 import { CacheService } from '../services/CacheService';
 import { StackUpdateRecoveryService } from '../services/StackUpdateRecoveryService';
 import { ServiceUpdateRecoveryService } from '../services/ServiceUpdateRecoveryService';
@@ -1967,6 +1968,40 @@ describe('DockerController - inspectImage', () => {
 
     const dc = DockerController.getInstance(1);
     await expect(dc.inspectImage(image)).rejects.toThrow('history failed');
+    dial.mockRestore();
+  });
+
+  // Docker's daemon can echo a credential that contains the redaction marker.
+  // Both requests in the shared Promise.all reach the collector's warning, so
+  // either rejection has to format to a credential-free message.
+  it.each([
+    ['inspect', '/json'],
+    ['history', '/history'],
+  ])('propagates a marker-bearing %s failure for the formatter to redact', async (_name, failSuffix) => {
+    const image = 'user:Ab/[redacted]SuperSecret:x@registry.example.com/app:latest';
+    const client = new Docker({ socketPath: '/nonexistent/docker.sock' });
+    const dial = vi.spyOn(client.modem, 'dial').mockImplementation(((
+      opts: { path: string },
+      callback: (err: Error | null, data?: unknown) => void,
+    ) => {
+      if (opts.path.endsWith(failSuffix)) {
+        callback(new Error(
+          '(HTTP code 400) unexpected - invalid reference format: repository name ([redacted]SuperSecret) must be lowercase ',
+        ));
+      } else {
+        callback(null, opts.path.endsWith('/history') ? [] : { Id: 'sha256:abc' });
+      }
+    }) as unknown as typeof client.modem.dial);
+    mockDocker.getImage.mockImplementationOnce((id: string) => client.getImage(id));
+
+    const dc = DockerController.getInstance(1);
+    const failure = await dc.inspectImage(image).then(() => null, (error: unknown) => error);
+    expect(failure).toBeInstanceOf(Error);
+    const logged = errorMessageForLog(failure, { imageRef: image });
+
+    expect(logged).not.toContain('SuperSecret');
+    expect(logged).toContain('repository name ([redacted])');
+    expect(logged).toContain('must be lowercase');
     dial.mockRestore();
   });
 

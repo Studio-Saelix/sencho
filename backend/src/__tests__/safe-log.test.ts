@@ -687,6 +687,156 @@ describe('errorMessageForLog', () => {
     expect(text).toContain('repository name (App)');
   });
 
+  // A credential can contain the literal redaction marker. Treating that text
+  // as proof the field was already redacted left the credential tail in the
+  // log, so only the marker followed by a validated part of the
+  // credential-free reference may keep its context.
+  it.each([
+    [
+      'before the credential',
+      'user:Ab/[redacted]SuperSecret:x@registry.example.com/app:latest',
+      '[redacted]SuperSecret',
+      'SuperSecret',
+    ],
+    [
+      'between the credential pieces',
+      'user:Ab/Super[redacted]Secret:x@registry.example.com/app:latest',
+      'Super[redacted]Secret',
+      'Secret',
+    ],
+    [
+      'after the credential',
+      'user:Ab/SuperSecret[redacted]:x@registry.example.com/app:latest',
+      'SuperSecret[redacted]',
+      'SuperSecret',
+    ],
+    [
+      'in a token-only userinfo',
+      '[redacted]SuperSecret@ghcr.io/x/app:latest',
+      '[redacted]SuperSecret',
+      'SuperSecret',
+    ],
+    [
+      'behind an encoded slash',
+      'user:Ab%2f[redacted]SuperSecret:x@registry.example.com/app:latest',
+      '[redacted]SuperSecret',
+      'SuperSecret',
+    ],
+    [
+      'as an encoded marker',
+      'user:Ab/%5Bredacted%5DSuperSecret:x@registry.example.com/app:latest',
+      '[redacted]SuperSecret',
+      'SuperSecret',
+    ],
+    [
+      'as an encoded marker between the credential pieces',
+      'user:Ab/Super%5Bredacted%5DSecret:x@registry.example.com/app:latest',
+      'Super[redacted]Secret',
+      'Secret',
+    ],
+    [
+      'as an encoded marker after the credential',
+      'user:Ab/SuperSecret%5Bredacted%5D:x@registry.example.com/app:latest',
+      'SuperSecret[redacted]',
+      'SuperSecret',
+    ],
+    [
+      'on a digest-pinned credential',
+      `user:Ab/[redacted]SuperSecret:x@registry.example.com/app:latest@sha256:${'a'.repeat(64)}`,
+      '[redacted]SuperSecret',
+      'SuperSecret',
+    ],
+    [
+      'beside an embedded close parenthesis',
+      'user:Ab/[redacted]x)SuperSecret:y@registry.example.com/app:latest',
+      '[redacted]x)SuperSecret',
+      'SuperSecret',
+    ],
+    [
+      'in a normalized Docker Hub name',
+      'docker.io/[redacted]Pass:x@registry.example.com',
+      'library/[redacted]Pass',
+      'Pass',
+    ],
+    [
+      'after an invalid byte Docker rewrites',
+      'user:Ab%2f%FF[redacted]SuperSecret:x@registry.example.com/app:latest',
+      '\uFFFD[redacted]SuperSecret',
+      'SuperSecret',
+    ],
+  ])('redacts a quoted name whose credential contains the marker for %s', (_name, image, quoted, secret) => {
+    const body = `invalid reference format: repository name (${quoted}) must be lowercase`;
+    const text = errorMessageForLog(new Error(body), { imageRef: image });
+
+    expect(text).not.toContain(secret);
+    expect(text).toContain('repository name ([redacted])');
+    expect(text).toContain('must be lowercase');
+  });
+
+  // Without a known suffix the closing parenthesis is ambiguous: the name can
+  // hold one, and a marker inside it must not make the scan stop at the wrong
+  // one and leave the tail behind.
+  it.each([
+    ['a marker before the credential', 'repository name ([redacted]x)SuperSecret)', 'SuperSecret'],
+    ['a marker between the credential pieces', 'repository name (Super[redacted]Secret)', 'Secret'],
+    ['a marker after the credential', 'repository name (SuperSecret[redacted])', 'SuperSecret'],
+  ])('redacts a marker-bearing quoted name with no known suffix for %s', (_name, quoted, secret) => {
+    const image = 'user:Ab/[redacted]SuperSecret:x@registry.example.com/app:latest';
+    const text = errorMessageForLog(new Error(`invalid reference format: ${quoted}`), { imageRef: image });
+
+    expect(text).not.toContain(secret);
+    expect(text).toContain('repository name ([redacted])');
+  });
+
+  it('redacts past a marker-bearing field with no suffix to a later field', () => {
+    const image = 'user:Ab/[redacted]Foo:x@registry.example.com/app:latest';
+    const body =
+      'invalid reference format: repository name ([redacted]Foo) retry: repository name (x)SuperSecret)';
+    const text = errorMessageForLog(new Error(body), { imageRef: image });
+
+    expect(text).not.toContain('SuperSecret');
+    expect(text).not.toContain('[redacted]Foo');
+    expect(text).toContain('repository name ([redacted])');
+  });
+
+  it('redacts every field when a marker-bearing field makes the suffix scan span them', () => {
+    const image = 'user:Ab/[redacted]Foo:x@registry.example.com/app:latest';
+    const body =
+      'invalid reference format: repository name ([redacted]Foo) must be lowercase: repository name (x)SuperSecret) must be lowercase';
+    const text = errorMessageForLog(new Error(body), { imageRef: image });
+
+    expect(text).not.toContain('SuperSecret');
+    expect(text).not.toContain('[redacted]Foo');
+    expect(text).toContain('repository name ([redacted])');
+    expect(text).toContain('must be lowercase');
+  });
+
+  it('redacts a cause message whose field follows an already-redacted field', () => {
+    const image = 'user:Ab/cD+eF9xyz=@registry.example.com/app:latest';
+    const error = new Error(
+      'invalid reference format: repository name (cD+eF9xyz=@registry.example.com/app) must be lowercase',
+      {
+        cause: new Error(
+          'invalid reference format: repository name ([redacted]x)SuperSecret) must be lowercase',
+        ),
+      },
+    );
+    const text = errorMessageForLog(error, { imageRef: image });
+
+    expect(text).not.toContain('eF9xyz');
+    expect(text).not.toContain('SuperSecret');
+    expect(text).toContain('must be lowercase');
+  });
+
+  it('is idempotent after redacting a marker-bearing quoted name', () => {
+    const image = 'user:Ab/[redacted]SuperSecret:x@registry.example.com/app:latest';
+    const body = 'invalid reference format: repository name ([redacted]SuperSecret) must be lowercase';
+    const once = errorMessageForLog(new Error(body), { imageRef: image });
+
+    expect(once).not.toContain('SuperSecret');
+    expect(errorMessageForLog(new Error(once), { imageRef: image })).toBe(once);
+  });
+
   it('redacts a colon-free token the daemon splits with a decoded slash', () => {
     const image = 'ghp_ab%2fSuperSecret@registry.example.com/app:latest';
     const body =

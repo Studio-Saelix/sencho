@@ -407,6 +407,80 @@ describe('collectServiceHealthcheckEvidence', () => {
     expect(String(imageWarn?.[2])).toContain('must be lowercase');
   });
 
+  // A credential can spell the redaction marker itself. The warning must not
+  // let that text exempt the quoted name from redaction, including when the
+  // name holds a closing parenthesis or Docker has decoded or normalized it.
+  it.each([
+    {
+      name: 'a literal marker before the credential',
+      image: 'user:Ab/[redacted]SuperSecret:x@registry.example.com/app:latest',
+      quoted: '[redacted]SuperSecret',
+      forbidden: ['SuperSecret'],
+      rest: 'registry.example.com/app:latest',
+    },
+    {
+      name: 'an encoded marker',
+      image: 'user:Ab/%5Bredacted%5DSuperSecret:x@registry.example.com/app:latest',
+      quoted: '[redacted]SuperSecret',
+      forbidden: ['SuperSecret', '%5B'],
+      rest: 'registry.example.com/app:latest',
+    },
+    {
+      name: 'a marker with a closing parenthesis',
+      image: 'user:Ab/[redacted]x)SuperSecret:y@registry.example.com/app:latest',
+      quoted: '[redacted]x)SuperSecret',
+      forbidden: ['SuperSecret'],
+      rest: 'registry.example.com/app:latest',
+    },
+    {
+      name: 'a token-only marker credential',
+      image: '[redacted]SuperSecret@ghcr.io/x/app:latest',
+      quoted: '[redacted]SuperSecret',
+      forbidden: ['SuperSecret'],
+      rest: 'ghcr.io/x/app:latest',
+    },
+    {
+      name: 'a marker on a digest pin',
+      image: `user:Ab/[redacted]SuperSecret:x@registry.example.com/app:latest@sha256:${'a'.repeat(64)}`,
+      quoted: '[redacted]SuperSecret',
+      forbidden: ['SuperSecret'],
+      rest: `registry.example.com/app:latest@sha256:${'a'.repeat(64)}`,
+    },
+    {
+      name: 'a normalized marker credential',
+      image: 'docker.io/[redacted]Pass:x@registry.example.com',
+      quoted: 'library/[redacted]Pass',
+      forbidden: ['Pass', 'library/'],
+      rest: 'registry.example.com',
+    },
+    {
+      name: 'a marker beside an invalid byte',
+      image: 'user:Ab%2f%FF[redacted]SuperSecret:x@registry.example.com/app:latest',
+      quoted: '\uFFFD[redacted]SuperSecret',
+      forbidden: ['SuperSecret', '%FF'],
+      rest: 'registry.example.com/app:latest',
+    },
+  ])('never logs a credential containing the redaction marker for $name', async ({ image, quoted, forbidden, rest }) => {
+    const dockerError = new Error(
+      `(HTTP code 400) unexpected - invalid reference format: repository name (${quoted}) must be lowercase `,
+    );
+    mockDocker({ list: [], image: 'error', imageError: dockerError });
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const evidence = await collectServiceHealthcheckEvidence(
+      1, 'proj', model([svc({ composeHealthcheck: 'absent', image })]), true,
+    );
+    expect(evidence.web.state).toBe('unverifiable');
+    const logged = warn.mock.calls.map(args => args.join(' ')).join('\n');
+    for (const fragment of forbidden) expect(logged).not.toContain(fragment);
+    expect(logged).toContain('must be lowercase');
+    expect(logged).toContain(`[redacted]@${rest}`);
+    const imageWarn = warn.mock.calls.find(args => String(args[0]).includes('image inspect failed'));
+    expect(imageWarn).toBeDefined();
+    expect(imageWarn?.[1]).toBe(`[redacted]@${rest}`);
+    expect(String(imageWarn?.[2])).not.toContain(quoted);
+    expect(String(imageWarn?.[2])).toContain('must be lowercase');
+  });
+
   it('redacts an image credential whose @ is percent-encoded', async () => {
     const image = 'user:pw%40registry.example.com/app:latest';
     mockDocker({
