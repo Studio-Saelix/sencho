@@ -285,8 +285,7 @@ const DIRECTORY_SCRIPT = [
   '  [ -n "$stage" ] || return 0',
   '  left=0',
   // Where the shell is tells which stage the stop landed in: inside the staging
-  // directory (it was entered; a stop can land before the flag says so) or in
-  // the directory held above it.
+  // directory, or still in the directory held above it (a stop before the cd).
   '  if [ -n "$sid" ] && [ "$(ident .)" = "$sid" ]; then',
   // Removed by the names the script would have made, deepest first (not by the
   // last name it recorded: a stop can land between the mkdir and the record),
