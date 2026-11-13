@@ -426,10 +426,10 @@ describe('errorMessageForLog', () => {
 
   // Docker 29.9.3 parses the reference before it validates case and quotes the
   // parsed repository name, cut at the first `:`. The quote starts after the
-  // credential's first `/` when Docker reads that component as a domain, and
-  // at the start of the reference otherwise. A colon inside the password
-  // therefore makes the quoted name a password prefix with no `@`, which the
-  // anchored fragment above does not match.
+  // credential's first `/` when Docker reads that component as a domain and at
+  // the start of the reference otherwise. A colon inside the password truncates
+  // the quote before the host's `@`, so the anchored fragment above can no
+  // longer match it.
   it.each([
     [
       'a long prefix',
@@ -462,6 +462,18 @@ describe('errorMessageForLog', () => {
       'invalid reference format: repository name (ss@Word) must be lowercase',
     ],
     [
+      'a space in the prefix',
+      'user:Ab/Super Secret:x@registry.example.com/app:latest',
+      'Super Secret',
+      'invalid reference format: repository name (Super Secret) must be lowercase',
+    ],
+    [
+      'a second colon after the prefix',
+      'user:Ab/cD+eF9xyz=:x:y@registry.example.com/app:latest',
+      'cD+eF9xyz=',
+      'invalid reference format: repository name (cD+eF9xyz=) must be lowercase',
+    ],
+    [
       'a token-only first segment',
       'tokenonly/SuperSecret:x@registry.example.com/app:latest',
       'SuperSecret',
@@ -472,6 +484,18 @@ describe('errorMessageForLog', () => {
       'tokenonly/foo/Pass:x@registry.example.com/app:latest',
       'Pass',
       'invalid reference format: repository name (tokenonly/foo/Pass) must be lowercase',
+    ],
+    [
+      'an uppercase first segment',
+      'TokenOnly/Pass:x@registry.example.com/app:latest',
+      'Pass',
+      'invalid reference format: repository name (Pass) must be lowercase',
+    ],
+    [
+      'a digest pin',
+      'user:Ab/cD+eF9xyz=:x@registry.example.com/app:latest@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef',
+      'cD+eF9xyz=',
+      'invalid reference format: repository name (cD+eF9xyz=) must be lowercase',
     ],
   ])('redacts the colon-cut repository name Docker quotes for %s', (_name, image, secret, body) => {
     const text = errorMessageForLog(new Error(body), { imageRef: image });
@@ -497,6 +521,8 @@ describe('errorMessageForLog', () => {
       '(HTTP code 400) unexpected - invalid reference format: repository name (cD+eF9xyz=) must be lowercase ';
     const once = errorMessageForLog(new Error(body), { imageRef: image });
 
+    expect(once).not.toContain('cD+eF9xyz=');
+    expect(once).toContain('repository name ([redacted])');
     expect(errorMessageForLog(new Error(once), { imageRef: image })).toBe(once);
   });
 
@@ -574,5 +600,14 @@ describe('errorMessageForLog', () => {
     const text = errorMessageForLog(new Error(`No such image: ${image}`), { imageRef: image });
 
     expect(text).toBe(`No such image: ${image}`);
+  });
+
+  it('keeps a digest pin on a credential-bearing reference it redacts', () => {
+    const digest = 'sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef';
+    const image = `user:Ab/cD+eF9xyz=:x@registry.example.com/app:latest@${digest}`;
+    const text = errorMessageForLog(new Error(`No such image: ${image}`), { imageRef: image });
+
+    expect(text).not.toContain('cD+eF9xyz=');
+    expect(text).toContain(`[redacted]@registry.example.com/app:latest@${digest}`);
   });
 });
