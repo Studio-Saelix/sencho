@@ -106,9 +106,13 @@ const IMAGE_DIGEST_TAIL = /@[A-Za-z][A-Za-z0-9]*(?:[+._-][A-Za-z][A-Za-z0-9]*)*:
  * `redactSensitiveText`, so it holds for a password with a space, a `/`, a
  * quote, or any length, and for a host with no path. Docker decodes the request
  * path once, so an authored `%40` can open a credential the written spelling
- * hides; decode once more before deciding there is none. Use it wherever an
- * `image` value is quoted or stored for display; free text that merely contains
- * an image still goes through `redactSensitiveText`.
+ * hides; decode once more before deciding there is none.
+ *
+ * This step removes only the reference's userinfo. A value written as-is to a
+ * wire field or a log line also needs the text pass for the secret forms a
+ * complete image can carry beside it, so use `redactImageForDisplay` there; a
+ * caller that runs `redactSensitiveText` itself may use this step alone. Free
+ * text that merely contains an image still goes through `redactSensitiveText`.
  */
 export function redactImageReference(image: string): string {
   // The decoded spelling is what Docker parses, and a literal `@` can sit

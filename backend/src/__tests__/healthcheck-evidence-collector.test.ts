@@ -541,9 +541,9 @@ describe('collectServiceHealthcheckEvidence', () => {
 
   // The Doctor wire field does not stop at the URL userinfo: a token query
   // value, a password=, token=, or api_key= pair, and a Bearer credential all
-  // reach the finding as [redacted]. The server log line carries the same
-  // image value, so it has to match the wire, including a value Compose
-  // resolved from a .env variable before Doctor read it.
+  // reach the finding as [redacted]. The same value reaches the log line whether
+  // it was written literally or resolved from a .env variable before Doctor
+  // read it, so the log has to hide the same secret.
   it.each([
     {
       name: 'a URL credential with a token query value',

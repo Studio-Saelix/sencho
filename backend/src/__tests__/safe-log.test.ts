@@ -275,10 +275,25 @@ describe('redactSensitiveText', () => {
     ['a password keyword', 'password=hunter2', 'password=[redacted]'],
     ['a token keyword', 'token=abc123', 'token=[redacted]'],
     ['an api_key keyword', 'registry.example.com/app?api_key=abc123', 'registry.example.com/app?api_key=[redacted]'],
+    ['a hyphenated api-key keyword', 'app?api-key=abc123', 'app?api-key=[redacted]'],
+    ['a secret keyword', 'app?secret=abc123', 'app?secret=[redacted]'],
     ['a Bearer credential', 'Bearer abc123', 'Bearer [redacted]'],
     ['an image with no secret', 'nginx:1.27', 'nginx:1.27'],
   ])('redactImageForDisplay hides %s', (_name, image, expected) => {
     expect(redactImageForDisplay(image)).toBe(expected);
+  });
+
+  // A stored row is read through this composition after it was written through
+  // it, so the helper has to leave its own output unchanged.
+  it.each([
+    'https://user:pw@registry.example.com/app?token=abc123',
+    'password=hunter2',
+    'token=abc123',
+    'Bearer abc123',
+    'nginx:1.27',
+  ])('redactImageForDisplay is idempotent on %s', image => {
+    const once = redactImageForDisplay(image);
+    expect(redactImageForDisplay(once)).toBe(once);
   });
 
   it('keeps the image tail when a literal @ password is redacted', () => {
