@@ -21,7 +21,7 @@ import {
   type BootstrapPreflightRequest,
 } from './NodeBootstrapService';
 import { canonicalJson, sha256Hex } from './planBuilder';
-import { DEFAULT_AGENT_DIR, DEFAULT_COMPOSE_DIR } from './pathPolicy';
+import { DEFAULT_AGENT_DIR, DEFAULT_COMPOSE_DIR, HUB_CA_STEP_ID } from './pathPolicy';
 import { sshExecClient, type BootstrapExecTransport, type ExecSession } from './sshExecClient';
 import { SshTransportError } from './sshProbeClient';
 import {
@@ -648,7 +648,9 @@ export class NodeBootstrapOperationService {
           }
           op = this.requireOperation(id);
           // The start step is recorded before it runs: from then on the Pilot
-          // container may exist, which a retry has to recognize as its own.
+          // container may exist, which a retry has to recognize as its own. A
+          // refusal that started nothing puts the earlier value back below.
+          const startedBefore = op.agent_started;
           if (step.effect === 'container-start') this.deps.db.updateNodeBootstrapOperation(id, { agent_started: 1 }, this.deps.now());
           this.event(op, 'started', step.title, stage.id, step.id);
           let outcome: Awaited<ReturnType<typeof runPlanStep>>;
@@ -662,6 +664,9 @@ export class NodeBootstrapOperationService {
             const mayHaveChanged = !refusedCleanly
               && (!(error instanceof StepFailure) || error.kind !== 'failed' || PARTIAL_EFFECTS.has(step.effect));
             if (mayHaveChanged) this.deps.db.updateNodeBootstrapOperation(id, { changes_made: 1 }, this.deps.now());
+            if (step.effect === 'container-start' && error instanceof StepFailure && error.changedNothing && startedBefore !== 1) {
+              this.deps.db.updateNodeBootstrapOperation(id, { agent_started: 0 }, this.deps.now());
+            }
             throw error;
           }
           if (outcome.status === 'done') this.deps.db.updateNodeBootstrapOperation(id, { changes_made: 1 }, this.deps.now());
@@ -736,7 +741,7 @@ export class NodeBootstrapOperationService {
    * agent's start and first connection.
    */
   private prepareEnrollment(id: string, plan: BootstrapPlan, context: RunContext): { token: string; compose: string } {
-    const caPem = plan.stages.flatMap((stage) => stage.steps).find((step) => step.id === 'agent-hub-ca')?.file?.content;
+    const caPem = plan.stages.flatMap((stage) => stage.steps).find((step) => step.id === HUB_CA_STEP_ID)?.file?.content;
     const composeFor = (token: string) => buildPilotEnrollmentCompose({
       primaryUrl: plan.hubUrl,
       token,

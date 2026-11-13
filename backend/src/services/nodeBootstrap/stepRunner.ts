@@ -4,6 +4,7 @@ import { isDockerReleaseKeyFile } from './openpgpKey';
 import { APT_POLICY_COMMAND, OFFICIAL_DOCKER_URI, parseAptPolicy } from './probes';
 import {
   BOOTSTRAP_MARKER_FILENAME,
+  HUB_CA_STEP_ID,
   PILOT_PROJECT_NAME,
 } from './pathPolicy';
 import {
@@ -292,6 +293,12 @@ export function approvedDirectory(plan: BootstrapPlan, directory: string): strin
   return directory;
 }
 
+/** Whether `directory` is the Compose or Agent directory `known`, by the path typed or the one it resolves to (trailing slashes ignored). */
+function isKnownDirectory(known: { input: string; realPath: string | null }, directory: string): boolean {
+  const wanted = withoutTrailingSlashes(directory);
+  return withoutTrailingSlashes(known.input) === wanted || (Boolean(known.realPath) && withoutTrailingSlashes(known.realPath as string) === wanted);
+}
+
 /**
  * The identity a directory must have when a step enters it: the one the run
  * recorded when it made the directory, else the one the preflight saw, and for
@@ -299,11 +306,6 @@ export function approvedDirectory(plan: BootstrapPlan, directory: string): strin
  * Compose or Agent directory without either identity cannot be told from a
  * substitute, so the step refuses rather than write into it.
  */
-function isKnownDirectory(known: { input: string; realPath: string | null }, directory: string): boolean {
-  const wanted = withoutTrailingSlashes(directory);
-  return withoutTrailingSlashes(known.input) === wanted || (Boolean(known.realPath) && withoutTrailingSlashes(known.realPath as string) === wanted);
-}
-
 export function approvedBinding(plan: BootstrapPlan, ctx: Pick<StepContext, 'directories'>, directory: string): string {
   for (const known of [plan.paths.agentDir, plan.paths.composeDir]) {
     if (!isKnownDirectory(known, directory)) continue;
@@ -562,10 +564,11 @@ async function runCommandStep(step: BootstrapPlanStep, ctx: StepContext, plan: B
 }
 
 /**
- * Remember which directory a directory step made, so the steps that write into
- * it are bound to that one. Only the Compose and Agent directories are tracked
- * (a system directory is bound by ownership). A made directory whose identity
- * the script did not report cannot be bound, which is a state to look at.
+ * Remember every directory a directory step made (the parents too), so the
+ * steps that write into one are bound to that one. A system directory is bound
+ * by ownership and never looked up here. When the step's own directory is the
+ * Compose or Agent directory, the script must have reported its identity: one
+ * it did not report cannot be bound, which is a state to look at.
  */
 function recordMadeDirectory(ctx: StepContext, plan: BootstrapPlan, directory: string, stdout: string): void {
   const made = new Map<string, string>();
@@ -594,7 +597,7 @@ async function runStartStep(step: BootstrapPlanStep, ctx: StepContext, plan: Boo
     throw new StepFailure('failed', 'PLAN_INVALID', `The plan step "${step.title}" has no command. Nothing was run.`, null, { changedNothing: true });
   }
   const stages = plan.stages.flatMap((stage) => stage.steps);
-  const caContent = stages.find((candidate) => candidate.id === 'agent-hub-ca')?.file?.content ?? null;
+  const caContent = stages.find((candidate) => candidate.id === HUB_CA_STEP_ID)?.file?.content ?? null;
   const stdin = startInput({
     agentIdentity: approvedBinding(plan, ctx, plan.paths.agentDir.input),
     composeIdentity: approvedBinding(plan, ctx, plan.paths.composeDir.input),

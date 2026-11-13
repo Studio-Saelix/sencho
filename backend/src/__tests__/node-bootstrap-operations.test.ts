@@ -19,6 +19,7 @@ import crypto from 'crypto';
 import { DOCKER_KEY_ASC } from './__helpers__/dockerRepoFixtures';
 import { APT_POLICY_COMMAND } from '../services/nodeBootstrap/probes';
 import { runPlanStep, type StepContext } from '../services/nodeBootstrap/stepRunner';
+import { HUB_CA_STEP_ID } from '../services/nodeBootstrap/pathPolicy';
 
 /** apt-cache policy output naming the official repository as each package's source. */
 function officialPolicy(codename = 'noble', origin = 'https://download.docker.com/linux/ubuntu'): string {
@@ -858,12 +859,20 @@ describe('bootstrap operations: failure paths found in review', () => {
   it('writes the hub CA with its planned mode and mounts it in the compose file', async () => {
     const h = harness({ facts: makeFacts(), caPem: HUB_CA });
     const { request, plan } = approve(h);
-    expect(plan.stages.flatMap((stage) => stage.steps).some((step) => step.id === 'agent-hub-ca')).toBe(true);
+    expect(plan.stages.flatMap((stage) => stage.steps).some((step) => step.id === HUB_CA_STEP_ID)).toBe(true);
     const op = h.service.start(request, context());
     await h.service.settled();
     expect(h.service.get(op.id).state).toBe('enrolled');
     expect(h.host.files.get('/opt/sencho-agent/sencho-hub-ca.pem')).toMatchObject({ content: HUB_CA, mode: '0644' });
     expect(h.host.files.get('/opt/sencho-agent/compose.yaml')?.content).toContain('SENCHO_PILOT_CA_FILE');
+    // The start script compares what it finds with the plan this run built: both directories' identities, the compose file with its token, and the hub CA.
+    const input = (h.host.commands.find((entry) => entry.command.includes('up -d'))?.stdin ?? '').split('\n');
+    const sha = (text: string) => crypto.createHash('sha256').update(text).digest('hex');
+    expect(input[0]).toMatch(/^\d+:\d+:\d+:\S+$/);
+    expect(input[1]).toMatch(/^\d+:\d+:\d+:\S+$/);
+    expect(input[2]).toBe(sha(h.host.files.get('/opt/sencho-agent/compose.yaml')?.content ?? ''));
+    expect(input[3]).toBe(sha(HUB_CA));
+    expect(input[4]).toBe('end');
     db.deleteNode(h.service.get(op.id).nodeId as number);
   });
 
@@ -1284,6 +1293,37 @@ describe('bootstrap operations: round two review cases', () => {
     release();
     await h.service.settled();
     expect(h.service.get(op.id)).toMatchObject({ state: 'outcome_unknown', error: { code: 'SSH_CONNECTION_LOST' }, active: true });
+    h.service.release(op.id, AUDIT);
+    const nodeId = h.service.get(op.id).nodeId;
+    if (nodeId) db.deleteNode(nodeId);
+  });
+
+  it('stops with a plain code, having started nothing, when the start input did not arrive in full', async () => {
+    const h = harness({ facts: makeFacts(), connectOnStart: false });
+    h.host.override = (command) => (command.includes('up -d')
+      ? { exitCode: 72, stdout: '', stderr: 'the start input is incomplete', truncated: false, timedOut: false, error: null }
+      : undefined);
+    const { request } = approve(h);
+    const op = h.service.start(request, context());
+    await h.service.settled();
+    expect(h.service.get(op.id)).toMatchObject({ state: 'partial', error: { code: 'START_INPUT_INCOMPLETE' } });
+    expect(h.service.retryOwnership(op.id, h.facts.current.target.host, 22).agentStarted).toBe(false);
+    h.service.release(op.id, AUDIT);
+    const nodeId = h.service.get(op.id).nodeId;
+    if (nodeId) db.deleteNode(nodeId);
+  });
+
+  it('does not call the Pilot started when the start step refused before it began', async () => {
+    const h = harness({ facts: makeFacts(), connectOnStart: false });
+    // Exit 70 is the start script's refusal of a directory that is not the approved one: nothing was started.
+    h.host.override = (command) => (command.includes('up -d')
+      ? { exitCode: 70, stdout: '', stderr: 'not the approved directory, or it changed', truncated: false, timedOut: false, error: null }
+      : undefined);
+    const { request } = approve(h);
+    const op = h.service.start(request, context());
+    await h.service.settled();
+    expect(h.service.get(op.id)).toMatchObject({ state: 'partial', error: { code: 'DIRECTORY_CHANGED' } });
+    expect(h.service.retryOwnership(op.id, h.facts.current.target.host, 22).agentStarted).toBe(false);
     h.service.release(op.id, AUDIT);
     const nodeId = h.service.get(op.id).nodeId;
     if (nodeId) db.deleteNode(nodeId);
@@ -1755,7 +1795,19 @@ describe('bootstrap operations: S2 every held run stays discoverable', () => {
     expect(trim?.plan).not.toContain('TEMP B-TREE');
     // Events go with the runs that were pruned, one by the operation index; there is no scan over every event.
     expect(queries.filter((query) => query.sql.includes('node_bootstrap_events') && query.sql.includes('NOT IN'))).toEqual([]);
+    const eventDeletes = queries.filter((query) => query.sql.includes('DELETE FROM node_bootstrap_events'));
+    for (const query of eventDeletes) expect(query.plan).toContain('idx_node_bootstrap_events_op');
     db.getDb().transaction(() => { for (const id of ids) db.transitionNodeBootstrapOperation(id, ['partial'], { active: 0 }, Date.now()); })();
+  });
+
+  it('lists finished runs that share a creation time by id, newest id first, so the trim and the history agree on the order', () => {
+    // The same millisecond for all three, with no finished run from an earlier test to compete.
+    db.getDb().prepare('DELETE FROM node_bootstrap_events').run();
+    db.getDb().prepare('DELETE FROM node_bootstrap_operations WHERE active = 0').run();
+    const at = Date.now();
+    const ids = [0, 1, 2].map((index) => insertHeld(index, 'partial', at));
+    db.getDb().transaction(() => { for (const id of ids) db.transitionNodeBootstrapOperation(id, ['partial'], { active: 0 }, Date.now()); })();
+    expect(db.listFinishedNodeBootstrapOperations(3).map((op) => op.id)).toEqual([...ids].reverse());
   });
 
   it('keeps every hold and the newest finished runs when the history is trimmed, and drops only the pruned runs\' events', () => {

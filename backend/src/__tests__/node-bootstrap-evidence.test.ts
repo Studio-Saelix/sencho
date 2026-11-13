@@ -541,7 +541,7 @@ describe('bootstrap evidence: a directory the host cannot identify cannot be bou
     ['the ancestor a new Compose directory is created in', { composeDir: { exists: false, isDirectory: false, nearestExistingAncestorIdentity: null, parentWritableByUser: true } }, 'compose_dir'],
     ['the ancestor a new Agent directory is created in', { agentDir: { exists: false, isDirectory: false, nearestExistingAncestorIdentity: null, parentWritableByUser: true } }, 'agent_dir'],
   ];
-  it.each(cases)('is unknown, and offers no plan, for %s with no device and inode', (_label, overrides, id) => {
+  it.each(cases)('is unknown, and offers no plan, for %s with no identity', (_label, overrides, id) => {
     const facts = makeFacts(overrides);
     const row = check(facts, id);
     expect(row.status).toBe('unknown');

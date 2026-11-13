@@ -1130,6 +1130,92 @@ describe('B1: execution is bound to the directory the plan approved', () => {
       expect(fs.readdirSync(parent)).toEqual([]);
     });
 
+    /** Shims for the commands the directory script runs, each running the real one and then `action` (a shell snippet), on the first call whose arguments match. */
+    function shimmed(name: string, match: string, action: string, order: 'after' | 'before' = 'after'): NodeJS.ProcessEnv {
+      const dir = path.join(root, `shim-${name}`);
+      fs.mkdirSync(dir, { recursive: true });
+      const real = execFileSync('sh', ['-c', `command -v ${name}`], { encoding: 'utf8' }).trim();
+      // The shim may run under a command substitution or a pipeline (a forked copy of the shell): the shell to stop is the topmost one that is running the script.
+      const killMain = 'killmain() { m=; p=$PPID; while [ -n "$p" ] && [ "$p" -gt 1 ]; do if tr "\\0" "\\n" < /proc/$p/cmdline | grep -qx "set -eu"; then m=$p; fi; p=$(awk \'/^PPid/ { print $2 }\' /proc/$p/status); done; kill -TERM "$m"; }';
+      fs.writeFileSync(path.join(dir, name), [
+        '#!/bin/sh',
+        killMain,
+        `hit() { case "$*" in ${match}) [ ! -e "${dir}/hit" ] && : > "${dir}/hit" ;; *) return 1 ;; esac; }`,
+        `if hit "$@" && [ "${order}" = before ]; then ${action}; fi`,
+        `"${real}" "$@"; rc=$?`,
+        `if [ -e "${dir}/hit" ] && [ ! -e "${dir}/done" ] && [ "${order}" = after ]; then : > "${dir}/done"; ${action}; fi`,
+        'exit $rc',
+      ].join('\n'), { mode: 0o755 });
+      return { PATH: `${dir}:${process.env.PATH ?? ''}` };
+    }
+
+    it('removes its staging directory when a stop lands right after mktemp made it, before its identity was read', () => {
+      const parent = path.join(root, 'srv');
+      fs.mkdirSync(parent, { mode: 0o755 });
+      const env = shimmed('mktemp', '*sencho-new*', 'killmain');
+      const result = runShell(directoryCommand(path.join(parent, 'agent'), dirSpec, { sudo: false, allowExisting: false }), '', env);
+      expect(result.status).toBe(1);
+      expect(fs.readdirSync(parent)).toEqual([]);
+    });
+
+    it('removes its staging directory when a stop lands after the shell entered it, before it was recorded as entered', () => {
+      const parent = path.join(root, 'srv');
+      fs.mkdirSync(parent, { mode: 0o755 });
+      // `stat -- ..` is the check that the staging directory sits in the directory held above it, right after the entry.
+      const env = shimmed('stat', '*"-- .."*', 'killmain');
+      const result = runShell(directoryCommand(path.join(parent, 'agent'), dirSpec, { sudo: false, allowExisting: false }), '', env);
+      expect(result.status).toBe(1);
+      expect(fs.readdirSync(parent)).toEqual([]);
+    });
+
+    it('still removes its staging directory when a second stop lands during the cleanup', () => {
+      const parent = path.join(root, 'srv');
+      fs.mkdirSync(parent, { mode: 0o755 });
+      const first = shimmed('mkdir', '"-- ./agent"', 'killmain');
+      // The cleanup's first rmdir is stopped again: the signals are ignored while it runs.
+      const second = shimmed('rmdir', '*agent*', 'killmain');
+      const result = runShell(directoryCommand(path.join(parent, 'agent'), dirSpec, { sudo: false, allowExisting: false }), '', { PATH: `${first.PATH?.split(':')[0]}:${second.PATH}` });
+      expect(result.status).toBe(1);
+      expect(fs.readdirSync(parent)).toEqual([]);
+    });
+
+    it('says the directory could not be put in place, and creates nothing, when the rename itself is refused', () => {
+      const parent = path.join(root, 'srv');
+      fs.mkdirSync(parent, { mode: 0o755 });
+      const dir = path.join(root, 'shim-refuse');
+      fs.mkdirSync(dir);
+      fs.writeFileSync(path.join(dir, 'mv'), ['#!/bin/sh', 'echo "mv: Permission denied" >&2', 'exit 1'].join('\n'), { mode: 0o755 });
+      const result = runShell(directoryCommand(path.join(parent, 'agent'), dirSpec, { sudo: false, allowExisting: false }), '', { PATH: `${dir}:${process.env.PATH ?? ''}` });
+      expect(result.status).toBe(WRITE_EXIT.notCreated);
+      expect(result.stderr).toContain('could not put it in place');
+      expect(result.stderr).not.toContain('already exists');
+      expect(fs.readdirSync(parent)).toEqual([]);
+    });
+
+    it('refuses, and reports nothing as made, when the directory it moved into place is swapped at once', () => {
+      const parent = path.join(root, 'srv');
+      fs.mkdirSync(parent, { mode: 0o755 });
+      // Right after the real move, another directory (with operator data) takes the name.
+      const env = shimmed('mv', '*-nT*', `mv ../agent ../agent.gone && mkdir ../agent && printf keep > ../agent/operator-data`);
+      const result = runShell(directoryCommand(path.join(parent, 'agent'), dirSpec, { sudo: false, allowExisting: false }), '', env);
+      expect(result.status).toBe(WRITE_EXIT.unfinished);
+      expect(result.stdout).not.toContain('SENCHO_DIR_MADE');
+      expect(fs.readFileSync(path.join(parent, 'agent', 'operator-data'), 'utf8')).toBe('keep');
+    });
+
+    it('refuses, and creates nothing at the final name, when the staging directory was moved out of the held directory', () => {
+      const parent = path.join(root, 'srv');
+      const elsewhere = path.join(root, 'elsewhere');
+      fs.mkdirSync(parent, { mode: 0o755 });
+      fs.mkdirSync(elsewhere, { mode: 0o755 });
+      // The staging directory is renamed into another directory before the move; its `..` is no longer the held one.
+      const env = shimmed('chmod', '"0700 -- ./agent"', `mv "$(pwd -P)" "${elsewhere}/stage"`);
+      const result = runShell(directoryCommand(path.join(parent, 'agent'), dirSpec, { sudo: false, allowExisting: false }), '', env);
+      expect(result.status).toBe(WRITE_EXIT.unfinished);
+      expect(fs.existsSync(path.join(parent, 'agent'))).toBe(false);
+      expect(fs.existsSync(path.join(elsewhere, 'agent'))).toBe(false);
+    });
+
     it('still finishes a directory it made itself', () => {
       const target = path.join(root, 'srv', 'agent');
       expect(runShell(directoryCommand(target, dirSpec, { sudo: false, allowExisting: false })).status).toBe(0);
@@ -1287,7 +1373,7 @@ describe('B3: a stop before the rename, and a second stop during the cleanup', (
 /**
  * A real directory put at an approved name is not a symlink and has the same
  * physical path, owner and mode as the approved one, so only the identity the
- * approval recorded (device and inode) can tell it apart.
+ * approval recorded (device, inode, owner and creation time) can tell it apart.
  */
 describe('B1: a real directory put at the approved name is neither written, changed nor entered', () => {
   const dirSpec = { mode: '0700', owner, group };
@@ -1807,8 +1893,20 @@ describe('B1: an identity is more than a device and an inode', () => {
     expect(write(`${device}:${inode}:${uid}:${birth}`).status).toBe(0);
   });
 
-  it('refuses a substitute that was given the approved directory\'s inode number back', () => {
-    if (identityOf(root).endsWith(':-')) return;
+  it('reads the same identity whatever time zone the session runs in', () => {
+    const dir = path.join(root, 'agent');
+    fs.mkdirSync(dir, { mode: 0o755 });
+    // The approval took the identity in one zone (the helper pins UTC); the script may run in another.
+    const command = writeCommand(path.join(dir, 'compose.yaml'), { ...file, sha256: sha256('ours') }, { sudo: false, replaces: null });
+    for (const zone of ['JST-9', 'EST5EDT']) {
+      expect(runShell(command, 'ours', { TZ: zone }).status).toBe(0);
+      fs.rmSync(path.join(dir, 'compose.yaml'));
+    }
+  });
+
+  it('refuses a substitute that was given the approved directory\'s inode number back', (task) => {
+    // Without birth times there is nothing to tell the two apart by; the filesystem decides whether it ever hands an inode back.
+    if (identityOf(root).endsWith(':-')) task.skip();
     const dir = path.join(root, 'agent');
     let reused = false;
     for (let attempt = 0; attempt < 300 && !reused; attempt += 1) {
@@ -1827,8 +1925,8 @@ describe('B1: an identity is more than a device and an inode', () => {
       }
       fs.rmSync(dir, { recursive: true, force: true });
     }
-    // Where the filesystem never hands an inode back the loop proves nothing; the test above pins the comparison itself.
-    expect(typeof reused).toBe('boolean');
+    // Where the filesystem never hands an inode back this proved nothing: it is reported as skipped, not as passed.
+    if (!reused) task.skip();
   });
 
   describe('two directories below a parent that does not exist yet', () => {

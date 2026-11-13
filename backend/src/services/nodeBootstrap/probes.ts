@@ -126,9 +126,9 @@ export const PATH_FACTS_SCRIPT = [
   `d="$p"`,
   `while [ ! -e "$d" ] && [ "$d" != "/" ]; do d=$(dirname -- "$d"); done`,
   `printf 'P_NEAREST=%s\\n' "$d"`,
-  // The identity of the directory a path resolves to (device, inode, owner and birth time, as the execution scripts take it): execution writes only into this very directory.
-  `if [ -d "$p" ]; then printf 'P_IDENT=%s\\n' "$(stat -L -c '%d:%i:%u:%w' -- "$p" 2>/dev/null | tr -d ' ')"; fi`,
-  `if [ -d "$d" ]; then printf 'P_NEAREST_IDENT=%s\\n' "$(stat -L -c '%d:%i:%u:%w' -- "$d" 2>/dev/null | tr -d ' ')"; fi`,
+  // The identity of the directory a path resolves to (device, inode, owner and birth time, as the execution scripts take it, with the time zone pinned so it reads the same in any session): execution writes only into this very directory.
+  `if [ -d "$p" ]; then printf 'P_IDENT=%s\\n' "$(TZ=UTC0 stat -L -c '%d:%i:%u:%w' -- "$p" 2>/dev/null | tr -d ' ')"; fi`,
+  `if [ -d "$d" ]; then printf 'P_NEAREST_IDENT=%s\\n' "$(TZ=UTC0 stat -L -c '%d:%i:%u:%w' -- "$d" 2>/dev/null | tr -d ' ')"; fi`,
   `if [ -w "$d" ]; then printf 'P_PARENT_W=1\\n'; else printf 'P_PARENT_W=0\\n'; fi`,
   `if sudo -n true 2>/dev/null; then`,
   `  if [ -e "$p" ] && sudo -n test -r "$p" 2>/dev/null && sudo -n test -x "$p" 2>/dev/null; then printf 'P_SUDO_R=1\\n'; else printf 'P_SUDO_R=0\\n'; fi`,

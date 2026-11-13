@@ -120,7 +120,7 @@ describe('bootstrap probe parsers', () => {
     const missing = parsePathFacts('P_EXISTS=0\nP_ISDIR=0\nP_REAL=/opt/sencho-agent\nP_NEAREST_IDENT=2049:2002:1000:-\nP_NEAREST=/opt\nP_PARENT_W=1', '/opt/sencho-agent');
     expect(missing.identity).toBeNull();
     expect(missing.nearestExistingAncestorIdentity).toBe('2049:2002:1000:-');
-    // Anything that is not a device and an inode is no identity, and a file has none.
+    // Anything that is not a device, an inode, an owner and a creation time is no identity, and a file has none.
     expect(parsePathFacts('P_EXISTS=1\nP_ISDIR=1\nP_REAL=/a\nP_IDENT=garbage', '/a').identity).toBeNull();
     expect(parsePathFacts('P_EXISTS=1\nP_ISDIR=0\nP_REAL=/a\nP_IDENT=1:2', '/a').identity).toBeNull();
   });
@@ -475,15 +475,18 @@ describe('bootstrap Docker endpoint pinning', () => {
     }
   });
 
-  it('reports the device and inode of an existing directory, taken through a link', () => {
+  it('reports the identity (device, inode, owner and creation time) of an existing directory, taken through a link', () => {
     const dir = mkdtempSync(path.join(os.tmpdir(), 'sencho-bootstrap-path-'));
     try {
       const real = path.join(dir, 'real');
       mkdirSync(real);
       symlinkSync(real, path.join(dir, 'link'));
+      // The birth time is printed in the session's time zone unless the script pins it: the identity must not depend on it.
       for (const input of [real, path.join(dir, 'link')]) {
-        const output = execFileSync('sh', ['-c', PATH_FACTS_SCRIPT, 'sencho-probe', input], { encoding: 'utf8' });
-        expect(parsePathFacts(output, input).identity).toBe(identityOf(real));
+        for (const zone of ['JST-9', 'EST5EDT']) {
+          const output = execFileSync('sh', ['-c', PATH_FACTS_SCRIPT, 'sencho-probe', input], { encoding: 'utf8', env: { ...process.env, TZ: zone } });
+          expect(parsePathFacts(output, input).identity).toBe(identityOf(real));
+        }
       }
     } finally {
       rmSync(dir, { recursive: true, force: true });

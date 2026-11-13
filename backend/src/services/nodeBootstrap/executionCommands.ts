@@ -28,9 +28,9 @@ export const WRITE_EXIT = {
   incomplete: 22,
   /** The destination could not be published for a reason other than something already being there. */
   notPublished: 23,
-  /** The directory could not be created, and nothing was. */
+  /** A new directory could not be built or put in place (including its owner or mode before the move), and nothing was left at the final name. */
   notCreated: 24,
-  /** A directory was created, but could not be finished (its owner or mode, or it was swapped meanwhile). */
+  /** A directory was put in place but could not be confirmed to be the one that was built, an existing directory's owner or mode could not be set, or a staging directory was left behind. */
   unfinished: 25,
 } as const;
 
@@ -56,7 +56,8 @@ export const WRITE_EXIT = {
  * approved, is accepted when it is one of those at the path it was made.
  */
 const BIND_DIRECTORY = [
-  'ident() { stat -c "%d:%i:%u:%w" -- "$1" 2>/dev/null | tr -d " "; }',
+  // The birth time is printed in the local time zone: pinned, so the identity does not depend on the session's TZ.
+  'ident() { TZ=UTC0 stat -c "%d:%i:%u:%w" -- "$1" 2>/dev/null | tr -d " "; }',
   'bound() {',
   '  if [ "$1" = system ]; then [ -O . ]; return; fi',
   '  now=$(ident .)',
@@ -71,7 +72,7 @@ const BIND_DIRECTORY = [
  * Enter a directory without trusting its name twice, and only if it is the
  * directory that was approved. The name is inspected without following a final
  * symlink (it must be a directory), the shell changes into it, the directory it
- * is in must be the one inspected (same identity), its physical path
+ * is in must be the one inspected (same device and inode), its physical path
  * (`pwd -P`) must be the one the plan approved ($2), and it must be the
  * directory the approval recorded ($3, see BIND_DIRECTORY): a name or an
  * ancestor swapped for a symlink or another directory, before this script
@@ -277,13 +278,16 @@ const DIRECTORY_SCRIPT = [
   // can be mistaken for what this script made and changed; the topmost new name
   // is then moved into place in one rename that refuses an occupied name.
   'first=${below#/}; first=${first%%/*}',
-  'stage=; d_stage=; sid=; inside=0; published=0; top=; rel=; acc=$want; mnew=',
+  'stage=; sid=; published=0; top=; rel=; acc=$want; mnew=',
   "nl=$(printf '\\n_'); nl=${nl%_}",
   'cleanup() {',
   "  trap '' HUP INT TERM PIPE",
   '  [ -n "$stage" ] || return 0',
   '  left=0',
-  '  if [ "$inside" = 1 ]; then',
+  // Where the shell is tells which stage the stop landed in: inside the staging
+  // directory (it was entered; a stop can land before the flag says so) or in
+  // the directory held above it.
+  '  if [ -n "$sid" ] && [ "$(ident .)" = "$sid" ]; then',
   // Removed by the names the script would have made, deepest first (not by the
   // last name it recorded: a stop can land between the mkdir and the record),
   // and only while empty: rmdir never removes anything with something in it.
@@ -296,22 +300,19 @@ const DIRECTORY_SCRIPT = [
   '      if [ -e "./$first" ] || [ -L "./$first" ]; then left=1; fi',
   '    fi',
   '    cd .. 2>/dev/null || left=1',
-  '    [ "$(ident .)" = "$aid" ] || left=1',
-  '  else',
-  '    left=1',
   '  fi',
+  '  [ "$(ident .)" = "$aid" ] || left=1',
   '  if [ "$left" = 0 ]; then',
-  '    if [ "$(ident "$stage")" = "$sid" ]; then rmdir -- "$stage" 2>/dev/null || left=1; else left=1; fi',
+  // A stop right after mktemp, before the staging identity was read, has no identity to compare with: the name is the one mktemp just made.
+  '    if [ -z "$sid" ] || [ "$(ident "$stage")" = "$sid" ]; then rmdir -- "$stage" 2>/dev/null || left=1; else left=1; fi',
   '  fi',
-  `  if [ "$left" = 1 ]; then echo "set-up of $p left a staging directory behind: $d_stage" >&2; exit ${WRITE_EXIT.unfinished}; fi`,
+  `  if [ "$left" = 1 ]; then echo "set-up of $p left a staging directory behind: $anc/\${stage#./}" >&2; exit ${WRITE_EXIT.unfinished}; fi`,
   '}',
   'trap cleanup EXIT',
   'trap \'exit 1\' HUP INT TERM PIPE',
   `stage=$(mktemp -d "./.sencho-new.XXXXXX" 2>/dev/null) || { stage=; echo "could not create: $p" >&2; exit ${WRITE_EXIT.notCreated}; }`,
-  'd_stage="$anc/${stage#./}"',
   'sid=$(ident "$stage") || sid=',
   `cd -P -- "$stage" 2>/dev/null && [ "$(ident .)" = "$sid" ] && [ "$(ident ..)" = "$aid" ] || { echo "changed while it was set up: $p" >&2; exit ${WRITE_EXIT.unfinished}; }`,
-  'inside=1',
   'rest=${below#/}',
   'while [ -n "$rest" ]; do',
   '  c=${rest%%/*}',
@@ -337,7 +338,10 @@ const DIRECTORY_SCRIPT = [
   // an empty directory, which is the one thing a rename may replace.
   `if [ -e "../$top" ] || [ -L "../$top" ]; then echo "already exists: $p" >&2; exit ${WRITE_EXIT.exists}; fi`,
   'mv -nT -- "./$top" "../$top" 2>/dev/null || true',
-  `if [ -e "./$top" ] || [ -L "./$top" ]; then echo "already exists: $p" >&2; exit ${WRITE_EXIT.exists}; fi`,
+  'if [ -e "./$top" ] || [ -L "./$top" ]; then',
+  `  if [ -e "../$top" ] || [ -L "../$top" ]; then echo "already exists: $p" >&2; exit ${WRITE_EXIT.exists}; fi`,
+  `  echo "could not put it in place: $p" >&2; exit ${WRITE_EXIT.notCreated}`,
+  'fi',
   'published=1',
   // From here the directory is in place; what it is must be what was made.
   `[ "$(ident "../$top")" = "$topid" ] && [ "$(ident "../$rel")" = "$leafid" ] || { echo "changed while it was set up: $p" >&2; exit ${WRITE_EXIT.unfinished}; }`,
@@ -381,9 +385,9 @@ export function createDirectoryCommand(
 /**
  * Exit codes of the start script: a directory that is not the approved one, an
  * input file that is not the file the plan names, and standard input that
- * ended before the script had everything it compares against. They are kept
- * apart from the codes Docker and Compose exit with, so a refusal is never
- * mistaken for the start having begun (or the reverse).
+ * ended before the script had everything it compares against. They are chosen
+ * apart from the codes Docker and Compose normally exit with (1, 125 to 127,
+ * and signals), so a refusal is not mistaken for the start having begun.
  */
 export const START_EXIT = { notDirectory: 70, inputChanged: 71, inputIncomplete: 72 } as const;
 

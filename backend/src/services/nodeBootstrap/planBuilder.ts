@@ -13,6 +13,7 @@ import { SYSTEM_DIRECTORY, createDirectoryCommand, startProjectCommand } from '.
 import {
   BOOTSTRAP_MARKER_FILENAME,
   BOOTSTRAP_MARKER_SCHEMA_VERSION,
+  HUB_CA_STEP_ID,
   PILOT_CONTAINER_NAME,
   PILOT_DATA_VOLUME,
   PILOT_IMAGE_REF,
@@ -236,7 +237,7 @@ function agentProjectSteps(
   ];
   if (input.caPem) {
     steps.push({
-      id: 'agent-hub-ca',
+      id: HUB_CA_STEP_ID,
       title: 'Write the hub CA certificate',
       rationale: 'The Pilot trusts the hub certificate chain from this file.',
       effect: 'file-write',

@@ -206,8 +206,8 @@ function blockOnResolvedPath(
 }
 
 /**
- * Execution writes only into the directory the preflight identified (device and
- * inode), or into one it creates inside the identified nearest existing ancestor.
+ * Execution writes only into the directory the preflight identified (its
+ * device, inode, owner and creation time), or into one it creates inside the identified nearest existing ancestor.
  * A host that does not report those cannot be bound, so no plan is offered.
  */
 function unidentifiedDirectory(path: PathObservation, base: { id: 'compose_dir' | 'agent_dir'; category: 'paths'; label: string }): BootstrapCheck | null {

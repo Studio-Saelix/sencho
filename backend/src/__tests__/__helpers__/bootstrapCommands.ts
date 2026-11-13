@@ -29,8 +29,8 @@ function isLink(target: string): boolean {
 
 /**
  * The identity the preflight would record for the directory `target` resolves
- * to now: its device and inode, taken through any link, or those of the nearest
- * existing ancestor when it does not exist yet.
+ * to now (device, inode, owner and creation time), taken through any link, or
+ * those of the nearest existing ancestor when it does not exist yet.
  */
 export function approvedIdentity(target: string): string {
   let existing = path.resolve(target);
@@ -38,9 +38,9 @@ export function approvedIdentity(target: string): string {
   return identityOf(existing);
 }
 
-/** The identity the scripts compute for an existing directory: device, inode, owner uid and birth time (`stat -c %d:%i:%u:%w`, blanks removed). */
+/** The identity the scripts compute for an existing directory: device, inode, owner uid and birth time (`stat -c %d:%i:%u:%w` with the time zone pinned, blanks removed). */
 export function identityOf(directory: string): string {
-  return execFileSync('stat', ['-L', '-c', '%d:%i:%u:%w', '--', directory], { encoding: 'utf8' }).trim().replace(/\s+/g, '');
+  return execFileSync('stat', ['-L', '-c', '%d:%i:%u:%w', '--', directory], { encoding: 'utf8', env: { ...process.env, TZ: 'UTC0' } }).trim().replace(/\s+/g, '');
 }
 
 type WriteOptions = { sudo: boolean; replaces: string | null; directory?: string; binding?: string };

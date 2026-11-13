@@ -14,6 +14,8 @@ export const DEFAULT_COMPOSE_DIR = '/opt/docker/sencho';
 export const DEFAULT_AGENT_DIR = '/opt/sencho-agent';
 
 export const PILOT_PROJECT_NAME = 'sencho-agent';
+/** The plan step that writes the hub CA beside the compose file: the compose file, the enrollment and the start step all look it up by this id. */
+export const HUB_CA_STEP_ID = 'agent-hub-ca';
 export const PILOT_CONTAINER_NAME = 'sencho-agent';
 export const PILOT_DATA_VOLUME = 'sencho-agent-data';
 export const PILOT_DATA_MOUNT = '/app/data';
