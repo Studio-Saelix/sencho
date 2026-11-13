@@ -111,7 +111,13 @@ const COMPOSE_TEXT: Array<[string, string]> = [
 ];
 
 const ZEROS = '0'.repeat(70);
-/** Padding with zeros changes no value, so each of these is read by the digits that count. */
+/**
+ * Leading zeros that leave an integer spelling change no value, so those rows
+ * are read by the digits that count. A row marked as a float is the fallback: the
+ * digits name more than 64 bits (`1_` and seventy zeros) or are no integer once
+ * the zero leads (`000018446744073709551615` holds an 8, which is not octal),
+ * so the numeral is read as the float it spells.
+ */
 const PADDED_INTEGERS: Array<[string, string]> = [
   [`0x${ZEROS}1`, '1'],
   [`0b${ZEROS}1`, '1'],
@@ -162,7 +168,22 @@ const TAGGED_TEXT: Array<['int' | 'float' | 'bool' | 'timestamp', string, string
   ['float', '0x10', '16'],
   ['float', '1e3', '1000'],
   ['float', '1.5', '1.5'],
-  ['float', '18446744073709551615', '1.8446744073709552e+19'],
+  // An integer above the largest int64 is read as unsigned, which has no
+  // conversion to a float: Compose rejects the file for each spelling.
+  ['float', '9223372036854775808', null],
+  ['float', '0x8000000000000000', null],
+  ['float', '0xFFFFFFFFFFFFFFFF', null],
+  ['float', '18446744073709551615', null],
+  ['float', '1_8446744073709551615', null],
+  ['float', `0b${'1'.repeat(64)}`, null],
+  ['float', `0o1${'7'.repeat(21)}`, null],
+  ['float', `0x${ZEROS}8000000000000000`, null],
+  // Past 64 bits, a decimal is the float it spells; below uint64's top, a negative one too.
+  ['float', '18446744073709551616', '1.8446744073709552e+19'],
+  ['float', '-9223372036854775808', '-9.223372036854776e+18'],
+  ['float', '-9223372036854775809', '-9.223372036854776e+18'],
+  ['float', '0x7FFFFFFFFFFFFFFF', '9.223372036854776e+18'],
+  ['int', '18446744073709551615', '18446744073709551615'],
   ['float', 'true', null],
   ['float', 'abc', null],
   ['float', '2020-01-01', null],

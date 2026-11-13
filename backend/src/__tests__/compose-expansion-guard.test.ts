@@ -2933,5 +2933,266 @@ describe('assertComposeInputsWithinExpansionLimits - scalar text, interpolation 
       await write('b.yaml', 'services:\n  web:\n    image: nginx\n');
       await expect(run(dir, ['compose', '-f', 'a.yaml', '-f', 'b.yaml', 'config'])).resolves.toBeUndefined();
     });
+
+    // Each shape below was rendered with Compose 5.7.0: the first file builds 640 KB
+    // and the continuation doubles it to 1.28 MB, where the guard had accepted it or
+    // refused a project Compose accepts.
+    const TOO_LONG = /too long, or interpolates into more text/;
+    const A_B = ['compose', '-f', 'a.yaml', '-f', 'b.yaml', 'config'];
+    /** The seed's first chain file: `SEED` is what `B0` copies, then three doublings. */
+    const seedChain = `B0=\${SEED}\n${doublings(1, 3)}\n`;
+    const webWith = (environment: string, files = 'e1.env'): string =>
+      `services:\n  web:\n    image: nginx\n    environment:\n${environment}    env_file: [${files}]\n`;
+    const more = (list = 'e2.env'): string => `services:\n  web:\n    env_file: [${list}]\n`;
+
+    describe('a list-form environment entry is interpolated as a whole, then split at its first =', () => {
+      beforeEach(async () => {
+        await write('.env', 'KEY=SEED\n');
+        await write('e1.env', seedChain);
+        await write('e2.env', continuation);
+      });
+
+      it.each([
+        ['a name from a variable', `      - "\${KEY}=${seedText}"\n`],
+        ['a name from a variable, quoted with single quotes', `      - '\${KEY}=${seedText}'\n`],
+        ['a name from a default', `      - "\${MISSING:-SEED}=${seedText}"\n`],
+      ])('refuses a chain seeded through %s, continued by a later file', async (_name, entry) => {
+        await write('a.yaml', webWith(entry));
+        await write('b.yaml', more());
+        await expect(run(dir, A_B)).rejects.toThrow(TOO_LONG);
+      });
+
+      it('refuses a chain seeded by a variable that holds the whole entry', async () => {
+        await write('.env', `ENTRY=SEED=${seedText}\n`);
+        await write('a.yaml', webWith('      - ${ENTRY}\n', 'e1.env, e2.env'));
+        await expect(run(dir, ['compose', '-f', 'a.yaml', 'config'])).rejects.toThrow(TOO_LONG);
+      });
+
+      it('refuses the same seed through a service that extends the one holding it', async () => {
+        await write(
+          'a.yaml',
+          `services:\n  base:\n    image: nginx\n    environment:\n      - "\${KEY}=${seedText}"\n  web:\n    extends: base\n    env_file: [e1.env, e2.env]\n`,
+        );
+        await expect(run(dir, ['compose', '-f', 'a.yaml', 'config'])).rejects.toThrow(TOO_LONG);
+      });
+
+      it('refuses the same seed on a job, which shares the reader', async () => {
+        await write('a.yaml', `jobs:\n  nightly:\n    environment:\n      - "\${KEY}=${seedText}"\n    env_file: [e1.env, e2.env]\n`);
+        await expect(run(dir, ['compose', '-f', 'a.yaml', 'config'])).rejects.toThrow(TOO_LONG);
+      });
+
+      it('accepts the same entries when the value they build is short', async () => {
+        await write('a.yaml', webWith('      - "${KEY}=ab"\n', 'e1.env, e2.env'));
+        await expect(run(dir, ['compose', '-f', 'a.yaml', 'config'])).resolves.toBeUndefined();
+        await write('.env', 'ENTRY=SEED=ab\n');
+        await write('a.yaml', webWith('      - ${ENTRY}\n', 'e1.env, e2.env'));
+        await expect(run(dir, ['compose', '-f', 'a.yaml', 'config'])).resolves.toBeUndefined();
+      });
+
+      it('applies a later list entry whose interpolated name replaces the earlier seed', async () => {
+        await write('a.yaml', webWith(`      SEED: ${seedText}\n`, 'e1.env, e2.env'));
+        await write('b.yaml', 'services:\n  web:\n    environment:\n      - "${KEY}=small"\n');
+        await expect(run(dir, A_B)).resolves.toBeUndefined();
+      });
+    });
+
+    describe('what a definition interpolates when Compose loads it uses the environment it was loaded under', () => {
+      const included = (environment: string, files: string): string => `services:\n  web:\n    image: nginx\n${environment}    env_file: [${files}]\n`;
+
+      beforeEach(async () => {
+        await write('a.yaml', 'include:\n  - sub/inc.yaml\n');
+        await write('b.yaml', more());
+        await write('e2.env', continuation);
+      });
+
+      it('refuses an environment value an included project interpolates from its own .env, when a later file continues the chain', async () => {
+        await write('sub/.env', `FROM=${seedText}\n`);
+        await write('sub/inc.yaml', included('    environment:\n      SEED: ${FROM}\n', 'ok.env'));
+        await write('sub/ok.env', 'Z=1\n');
+        await write('b.yaml', more('e1.env, e2.env'));
+        await write('e1.env', seedChain);
+        await expect(run(dir, A_B)).rejects.toThrow(TOO_LONG);
+        // The same shape with a value that stays small is accepted.
+        await write('sub/.env', 'FROM=ab\n');
+        await expect(run(dir, A_B)).resolves.toBeUndefined();
+      });
+
+      it('refuses a list entry an included project interpolates from its own .env', async () => {
+        await write('sub/.env', `KEY=SEED\nVALUE=${seedText}\n`);
+        await write('sub/inc.yaml', included('    environment:\n      - "${KEY}=${VALUE}"\n', 'ok.env'));
+        await write('sub/ok.env', 'Z=1\n');
+        await write('b.yaml', more('e1.env, e2.env'));
+        await write('e1.env', seedChain);
+        await expect(run(dir, A_B)).rejects.toThrow(TOO_LONG);
+      });
+
+      it('reads the env_file and label_file paths of an included project with its own environment', async () => {
+        await write('sub/.env', 'DIRN=real\n');
+        await write('sub/real/e1.env', `B0=${seedText}\n${doublings(1, 3)}\n`);
+        await write('sub/inc.yaml', 'services:\n  web:\n    image: nginx\n    label_file: ["${DIRN}/e1.env"]\n');
+        await write('b.yaml', 'services:\n  web:\n    label_file: [e2.env]\n');
+        await expect(run(dir, A_B)).rejects.toThrow(TOO_LONG);
+        await write('sub/.env', `FROM=${seedText}\nDIRN=real\n`);
+        await write('sub/real/e1.env', seedChain);
+        await write('sub/inc.yaml', included('    environment:\n      SEED: ${FROM}\n', '"${DIRN}/e1.env"'));
+        await write('b.yaml', more());
+        await expect(run(dir, A_B)).rejects.toThrow(TOO_LONG);
+      });
+
+      it('reads the format of an included project with its own environment', async () => {
+        const lines = 'A=1\n' + Array.from({ length: 21 }, () => 'A=${A}${A}').join('\n') + '\n';
+        await write('sub/e.env', lines);
+        await write('sub/inc.yaml', 'services:\n  web:\n    image: nginx\n    env_file:\n      - path: e.env\n        format: ${FMT}\n');
+        await write('sub/.env', 'FMT=raw\n');
+        await expect(run(dir, ['compose', '-f', 'a.yaml', 'config'])).resolves.toBeUndefined();
+        await write('sub/.env', 'FMT=other\n');
+        await expect(run(dir, ['compose', '-f', 'a.yaml', 'config'])).rejects.toThrow(TOO_LONG);
+      });
+
+      it('reads the text of an env file with the run’s environment, not the included project’s', async () => {
+        // `SEED=${FROM}` is empty for Compose, which does not hand the included .env to env file text.
+        await write('sub/.env', `FROM=${seedText}\n`);
+        await write('sub/e1.env', `SEED=\${FROM}\nB0=\${SEED}\n${doublings(1, 4)}\n`);
+        await write('sub/inc.yaml', included('', 'e1.env'));
+        await expect(run(dir, ['compose', '-f', 'a.yaml', 'config'])).resolves.toBeUndefined();
+        await expect(run(dir, A_B)).resolves.toBeUndefined();
+        // The run’s own environment does reach it.
+        await write('.env', `FROM=${seedText}\n`);
+        await expect(run(dir, A_B)).rejects.toThrow(TOO_LONG);
+      });
+    });
+
+    describe('a later file can drop the chain an included project holds', () => {
+      const seeded = (kind: 'env_file' | 'label_file'): Record<string, string> =>
+        kind === 'env_file'
+          ? { 'inc.yaml': webWith(`      A: ${seedText}\n`, 'e1.env, e2.env'), 'e1.env': `B0=\${A}\n${doublings(1, 3)}\n`, 'e2.env': continuation }
+          : {
+              'inc.yaml': 'services:\n  web:\n    image: nginx\n    label_file: [e1.env, e2.env]\n',
+              'e1.env': `B0=${seedText}\n${doublings(1, 3)}\n`,
+              'e2.env': continuation,
+            };
+      const later = (kind: 'env_file' | 'label_file'): Record<string, string> => ({
+        'list reset with !reset': `services:\n  web:\n    ${kind}: !reset []\n`,
+        'list replaced with !override': `services:\n  web:\n    ${kind}: !override [ok.env]\n`,
+        'service replaced with !override': `services:\n  web: !override\n    image: nginx\n`,
+        'service removed with !reset': 'services:\n  web: !reset null\n  other:\n    image: nginx\n',
+        'services section replaced with !override': 'services: !override\n  other:\n    image: nginx\n',
+      });
+
+      describe.each(['env_file', 'label_file'] as const)('%s', (kind) => {
+        beforeEach(async () => {
+          for (const [file, content] of Object.entries(seeded(kind))) await write(file, content);
+          await write('ok.env', 'Z=1\n');
+          await write('a.yaml', 'include:\n  - inc.yaml\n');
+        });
+
+        it('still refuses the chain when nothing drops it', async () => {
+          await expect(run(dir, ['compose', '-f', 'a.yaml', 'config'])).rejects.toThrow(TOO_LONG);
+        });
+
+        it.each(Object.keys(later('env_file')))('accepts it when a later -f file has the %s', async (name) => {
+          await write('b.yaml', later(kind)[name]);
+          await expect(run(dir, A_B)).resolves.toBeUndefined();
+        });
+
+        it('accepts it when a later document of the including file resets the list', async () => {
+          await write('a.yaml', `include:\n  - inc.yaml\n---\nservices:\n  web:\n    ${kind}: !reset []\n`);
+          await expect(run(dir, ['compose', '-f', 'a.yaml', 'config'])).resolves.toBeUndefined();
+        });
+
+        it('accepts it through an include of an include, dropped by the outermost run', async () => {
+          await write('mid.yaml', 'include:\n  - inc.yaml\n');
+          await write('a.yaml', 'include:\n  - mid.yaml\n');
+          await write('b.yaml', later(kind)['list reset with !reset']);
+          await expect(run(dir, A_B)).resolves.toBeUndefined();
+          await write('b.yaml', more('ok.env'));
+          await expect(run(dir, A_B)).rejects.toThrow(TOO_LONG);
+        });
+      });
+    });
+
+    describe('a later null or bare name takes the earlier seed out, as Compose does', () => {
+      const seeded = webWith(`      A: ${seedText}\n`, 'e1.env, e2.env');
+      beforeEach(async () => {
+        await write('e1.env', `B0=\${A}\n${doublings(1, 3)}\n`);
+        await write('e2.env', continuation);
+        await write('a.yaml', seeded);
+      });
+      const second = (environment: string): string => `services:\n  web:\n    environment:${environment}\n`;
+
+      it('refuses the chain when nothing takes the seed out', async () => {
+        await expect(run(dir, ['compose', '-f', 'a.yaml', 'config'])).rejects.toThrow(TOO_LONG);
+      });
+
+      it.each([
+        ['a null value', '\n      A: null'],
+        ['a ~ value', '\n      A: ~'],
+        ['an empty value', '\n      A:'],
+        ['a !!null value', '\n      A: !!null ""'],
+        ['a bare name', ' [A]'],
+        ['a bare name in a block list', '\n      - A'],
+        ['a bare name an interpolation spells', ' ["${MISSING:-A}"]'],
+      ])('accepts it when a later -f file gives %s', async (_name, environment) => {
+        await write('b.yaml', second(environment));
+        await expect(run(dir, A_B)).resolves.toBeUndefined();
+      });
+
+      it('accepts it when a later document of the same file, or an extending service, takes the seed out', async () => {
+        await write('a.yaml', `${seeded}---\n${second(' [A]')}`);
+        await expect(run(dir, ['compose', '-f', 'a.yaml', 'config'])).resolves.toBeUndefined();
+        await write(
+          'a.yaml',
+          `services:\n  base:\n    image: nginx\n    environment:\n      A: ${seedText}\n  web:\n    extends: base\n    environment:\n      A: null\n    env_file: [e1.env, e2.env]\n`,
+        );
+        await expect(run(dir, ['compose', '-f', 'a.yaml', 'config'])).resolves.toBeUndefined();
+      });
+
+      it.each([
+        ['null', ' null'],
+        ['~', ' ~'],
+        ['an empty value', ''],
+        ['a !!merge value', '\n      A: !!merge ""'],
+      ])('still refuses it when a later file gives only %s, which Compose keeps the seed for', async (_name, environment) => {
+        await write('b.yaml', second(environment));
+        await expect(run(dir, A_B)).rejects.toThrow(TOO_LONG);
+      });
+
+      it('refuses it again when a later file gives the seed back after it was taken out', async () => {
+        await write('b.yaml', second(' [A]'));
+        await write('c.yaml', second(`\n      A: ${seedText}`));
+        await expect(run(dir, [...A_B.slice(0, 5), '-f', 'c.yaml', 'config'])).rejects.toThrow(TOO_LONG);
+      });
+    });
+
+    describe('a format is interpolated before it is compared with raw', () => {
+      const lines = 'A=1\n' + Array.from({ length: 21 }, () => 'A=${A}${A}').join('\n') + '\n';
+      const asFormat = (kind: 'env_file' | 'label_file', format: string): string =>
+        `services:\n  web:\n    image: nginx\n    ${kind}:\n      - path: e.env\n        format: ${format}\n`;
+
+      describe.each(['env_file', 'label_file'] as const)('%s', (kind) => {
+        beforeEach(async () => {
+          await write('e.env', lines);
+        });
+
+        it.each(['${FMT}', '"${FMT}"', '${FMT:-other}'])('reads a file raw when %s names raw', async (format) => {
+          await write('.env', 'FMT=raw\n');
+          await write('compose.yaml', asFormat(kind, format.replace('other', 'raw')));
+          await expect(run()).resolves.toBeUndefined();
+        });
+
+        it('still refuses when the interpolated format is not raw, or names nothing', async () => {
+          await write('.env', 'FMT=other\n');
+          await write('compose.yaml', asFormat(kind, '${FMT}'));
+          await expect(run()).rejects.toThrow(TOO_LONG);
+          await write('.env', 'X=1\n');
+          await expect(run()).rejects.toThrow(TOO_LONG);
+        });
+
+        it('still reads a literal raw format literally', async () => {
+          await write('compose.yaml', asFormat(kind, 'raw'));
+          await expect(run()).resolves.toBeUndefined();
+        });
+      });
+    });
   });
 });

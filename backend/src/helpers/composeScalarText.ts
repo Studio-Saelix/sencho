@@ -13,8 +13,8 @@
  *
  * A scalar with an explicit `!!int`, `!!float`, `!!bool`, or `!!timestamp` tag
  * resolves the same way, quoted or not, but only to that kind: `!!float` turns
- * an integer into a float, and a text the kind cannot hold is a file Compose
- * rejects ({@link composeTaggedScalarText}).
+ * an integer into a float (not one above the largest int64), and a text the
+ * kind cannot hold is a file Compose rejects ({@link composeTaggedScalarText}).
  */
 
 const BOOLEAN_TRUE = new Set(['true', 'True', 'TRUE']);
@@ -128,6 +128,8 @@ interface ResolvedScalar {
   kind: 'bool' | 'int' | 'float' | 'timestamp' | 'string';
   text: string;
   number?: number;
+  /** The exact value of an integer, which `number` loses past 2^53. */
+  integer?: bigint;
 }
 
 function resolveScalar(text: string): ResolvedScalar {
@@ -144,7 +146,7 @@ function resolveScalar(text: string): ResolvedScalar {
   // A lone `-0` is the one integer spelling Compose reads as a float.
   if (plain === '-0') return { kind: 'float', text: '-0', number: -0 };
   const integer = integerValue(plain);
-  if (integer !== null) return { kind: 'int', text: integer.toString(), number: Number(integer) };
+  if (integer !== null) return { kind: 'int', text: integer.toString(), number: Number(integer), integer };
   if (FLOAT.test(plain)) {
     const value = Number(plain);
     // Go rejects a float past its range, which leaves the text as it was.
@@ -162,10 +164,15 @@ export function composePlainScalarText(text: string): string {
  * The text Compose gives a scalar written as `text` under an explicit
  * `!!int`, `!!float`, `!!bool`, or `!!timestamp` tag, or null when `text` is
  * not of that kind, which is a file Compose rejects.
- * `!!float` takes an integer as well, as the float it converts to.
+ * `!!float` takes an integer as well, as the float it converts to, except one
+ * above the largest signed 64-bit value: the decoder reads that as an unsigned
+ * integer and has no conversion for it, so the file is rejected.
  */
 export function composeTaggedScalarText(text: string, tag: 'int' | 'float' | 'bool' | 'timestamp'): string | null {
   const resolved = resolveScalar(text);
-  if (tag === 'float' && (resolved.kind === 'int' || resolved.kind === 'float')) return floatText(resolved.number ?? 0);
+  if (tag === 'float' && resolved.kind === 'int') {
+    return resolved.integer !== undefined && resolved.integer > MAX_INT64 ? null : floatText(resolved.number ?? 0);
+  }
+  if (tag === 'float' && resolved.kind === 'float') return floatText(resolved.number ?? 0);
   return resolved.kind === tag ? resolved.text : null;
 }
