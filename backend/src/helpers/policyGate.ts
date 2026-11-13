@@ -361,9 +361,9 @@ export function evaluatedCandidateVerifier(
 export interface DeployCandidateVerification {
   pullServices: string[];
   /**
-   * Candidate refs no Compose service declares, such as an image a pre-start
-   * hook references. They are pulled by ref so the boundary never refreshes an
-   * unrelated service.
+   * Candidate refs no Compose service declares: references from Compose's own
+   * image list that the rendered model does not attribute to a service. They
+   * are pulled by ref so the boundary never refreshes an unrelated service.
    */
   pullRefs: string[];
   /** Absent when the boundary exists only to keep `up` from fetching. */
