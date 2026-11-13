@@ -96,7 +96,7 @@ function planFor(composeDir: string, agentDir: string) {
           rationale: 'The agent keeps its compose file in a dedicated directory.',
           effect: 'directory-create',
           privilege: 'user',
-          command: `sh -c 'set -eu ...' sencho-mkdir '${agentDir}' '0700' 'ubuntu' 'ubuntu' '0' '${agentDir}' '64768:2:1000:-'`,
+          command: `sh -c 'set -eu ...' sencho-mkdir '${agentDir}' '0700' 'ubuntu' 'ubuntu' '0' '${agentDir}' '64768:2:1000:2026-01-01'`,
           target: { path: agentDir, mode: '0700', owner: 'ubuntu', group: 'ubuntu', preserveExisting: false },
           disruptive: false,
           reversible: 'yes',

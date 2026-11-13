@@ -1,4 +1,4 @@
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { execFileSync } from 'child_process';
 import { chmodSync, mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from 'fs';
 import os from 'os';
@@ -33,7 +33,7 @@ const PATH_SCRIPT_OUTPUT = [
   'P_EXISTS=1',
   'P_ISDIR=1',
   'P_FINAL_LINK=0',
-  'P_REAL=/opt/docker/sencho', 'P_IDENT=2049:1001:1000:-', 'P_NEAREST_IDENT=2049:2002:1000:-',
+  'P_REAL=/opt/docker/sencho', 'P_IDENT=2049:1001:1000:2026-01-01', 'P_NEAREST_IDENT=2049:2002:1000:2026-01-01',
   'P_ANCESTOR_LINK=0',
   'P_OWNER=ubuntu',
   'P_GROUP=ubuntu',
@@ -115,18 +115,32 @@ describe('bootstrap probe parsers', () => {
 
   it('parses the identity of an existing directory, and of the ancestor a missing one is created in', () => {
     const existing = parsePathFacts(PATH_SCRIPT_OUTPUT, '/opt/docker/sencho');
-    expect(existing.identity).toBe('2049:1001:1000:-');
+    expect(existing.identity).toBe('2049:1001:1000:2026-01-01');
     expect(existing.nearestExistingAncestorIdentity).toBeNull();
-    const missing = parsePathFacts('P_EXISTS=0\nP_ISDIR=0\nP_REAL=/opt/sencho-agent\nP_NEAREST_IDENT=2049:2002:1000:-\nP_NEAREST=/opt\nP_PARENT_W=1', '/opt/sencho-agent');
+    const missing = parsePathFacts('P_EXISTS=0\nP_ISDIR=0\nP_REAL=/opt/sencho-agent\nP_NEAREST_IDENT=2049:2002:1000:2026-01-01\nP_NEAREST=/opt\nP_PARENT_W=1', '/opt/sencho-agent');
     expect(missing.identity).toBeNull();
-    expect(missing.nearestExistingAncestorIdentity).toBe('2049:2002:1000:-');
+    expect(missing.nearestExistingAncestorIdentity).toBe('2049:2002:1000:2026-01-01');
     // Anything that is not a device, an inode, an owner and a creation time is no identity, and a file has none.
     expect(parsePathFacts('P_EXISTS=1\nP_ISDIR=1\nP_REAL=/a\nP_IDENT=garbage', '/a').identity).toBeNull();
     expect(parsePathFacts('P_EXISTS=1\nP_ISDIR=0\nP_REAL=/a\nP_IDENT=1:2', '/a').identity).toBeNull();
   });
 
+  it('gives no identity to a directory whose creation time the host cannot give (a successor that reuses the inode would look the same)', () => {
+    const existing = parsePathFacts('P_EXISTS=1\nP_ISDIR=1\nP_REAL=/a\nP_IDENT=2049:1001:1000:-', '/a');
+    expect(existing.identity).toBeNull();
+    const missing = parsePathFacts('P_EXISTS=0\nP_ISDIR=0\nP_REAL=/a/b\nP_NEAREST_IDENT=2049:2002:1000:-\nP_NEAREST=/a', '/a/b');
+    expect(missing.nearestExistingAncestorIdentity).toBeNull();
+  });
+
+  it('parses who can change the directories above a path', () => {
+    const base = 'P_EXISTS=1\nP_ISDIR=1\nP_REAL=/a';
+    expect(parsePathFacts(`${base}\nP_TRUST_SELF=ok\nP_TRUST_ABOVE=open:/srv/shared`, '/a')).toMatchObject({ trustSelf: { state: 'sealed' }, trustAbove: { state: 'open', at: '/srv/shared' } });
+    expect(parsePathFacts(`${base}\nP_TRUST_SELF=unreadable:/srv/closed`, '/a').trustSelf).toEqual({ state: 'unreadable', at: '/srv/closed' });
+    expect(parsePathFacts(base, '/a').trustSelf).toBeUndefined();
+  });
+
   it('distinguishes a missing path from a failed probe', () => {
-    const missing = parsePathFacts('P_EXISTS=0\nP_ISDIR=0\nP_REAL=/opt/sencho-agent\nP_IDENT=2049:1001:1000:-\nP_NEAREST_IDENT=2049:2002:1000:-\nP_NEAREST=/opt\nP_PARENT_W=1', '/opt/sencho-agent');
+    const missing = parsePathFacts('P_EXISTS=0\nP_ISDIR=0\nP_REAL=/opt/sencho-agent\nP_IDENT=2049:1001:1000:2026-01-01\nP_NEAREST_IDENT=2049:2002:1000:2026-01-01\nP_NEAREST=/opt\nP_PARENT_W=1', '/opt/sencho-agent');
     expect(missing.exists).toBe(false);
     expect(missing.probeError).toBeNull();
     expect(missing.nearestExistingAncestor).toBe('/opt');
@@ -273,7 +287,7 @@ describe('bootstrap fact assembly', () => {
         result('clock', String(Math.floor(Date.now() / 1000))),
         result('hub_health', '200'),
         result('path_compose', PATH_SCRIPT_OUTPUT),
-        result('path_agent', 'P_EXISTS=0\nP_ISDIR=0\nP_REAL=/opt/sencho-agent\nP_IDENT=2049:1001:1000:-\nP_NEAREST_IDENT=2049:2002:1000:-\nP_NEAREST=/opt\nP_PARENT_W=1\nP_FSTYPE=ext4\nP_FSTARGET=/'),
+        result('path_agent', 'P_EXISTS=0\nP_ISDIR=0\nP_REAL=/opt/sencho-agent\nP_IDENT=2049:1001:1000:2026-01-01\nP_NEAREST_IDENT=2049:2002:1000:2026-01-01\nP_NEAREST=/opt\nP_PARENT_W=1\nP_FSTYPE=ext4\nP_FSTARGET=/'),
         result('compose_inventory', '/opt/docker/sencho/media/compose.yaml\0'),
         result('agent_inventory', ''),
         result('agent_marker', '', 1),
@@ -357,7 +371,7 @@ describe('bootstrap inventory completeness', () => {
 
   it('does not turn a failed Compose inventory into an empty stacks root', () => {
     const pathFacts = [
-      'P_EXISTS=1', 'P_ISDIR=1', 'P_REAL=/opt/docker/sencho', 'P_IDENT=2049:1001:1000:-', 'P_NEAREST_IDENT=2049:2002:1000:-', 'P_FSTYPE=ext4', 'P_FSTARGET=/',
+      'P_EXISTS=1', 'P_ISDIR=1', 'P_REAL=/opt/docker/sencho', 'P_IDENT=2049:1001:1000:2026-01-01', 'P_NEAREST_IDENT=2049:2002:1000:2026-01-01', 'P_FSTYPE=ext4', 'P_FSTARGET=/',
       'P_USER_R=1', 'P_USER_W=1', 'P_PARENT_W=1', 'P_DF=/dev/sda1 1 1 104857600 1% /',
     ].join('\n');
     const facts = minimalAssembly([
@@ -371,7 +385,7 @@ describe('bootstrap inventory completeness', () => {
 
   it('uses a successful sudo inventory when the direct one is denied', () => {
     const pathFacts = [
-      'P_EXISTS=1', 'P_ISDIR=1', 'P_REAL=/opt/docker/sencho', 'P_IDENT=2049:1001:1000:-', 'P_NEAREST_IDENT=2049:2002:1000:-', 'P_FSTYPE=ext4', 'P_FSTARGET=/',
+      'P_EXISTS=1', 'P_ISDIR=1', 'P_REAL=/opt/docker/sencho', 'P_IDENT=2049:1001:1000:2026-01-01', 'P_NEAREST_IDENT=2049:2002:1000:2026-01-01', 'P_FSTYPE=ext4', 'P_FSTARGET=/',
       'P_USER_R=1', 'P_USER_W=1', 'P_PARENT_W=1', 'P_SUDO_R=1', 'P_SUDO_W=1',
     ].join('\n');
     const facts = minimalAssembly([
@@ -385,7 +399,7 @@ describe('bootstrap inventory completeness', () => {
 
   it('treats partial and timed-out inventories as incomplete', () => {
     const pathFacts = [
-      'P_EXISTS=1', 'P_ISDIR=1', 'P_REAL=/opt/docker/sencho', 'P_IDENT=2049:1001:1000:-', 'P_NEAREST_IDENT=2049:2002:1000:-', 'P_FSTYPE=ext4', 'P_FSTARGET=/',
+      'P_EXISTS=1', 'P_ISDIR=1', 'P_REAL=/opt/docker/sencho', 'P_IDENT=2049:1001:1000:2026-01-01', 'P_NEAREST_IDENT=2049:2002:1000:2026-01-01', 'P_FSTYPE=ext4', 'P_FSTARGET=/',
       'P_USER_R=1', 'P_USER_W=1', 'P_PARENT_W=1',
     ].join('\n');
     for (const failure of [{ truncated: true }, { timedOut: true }]) {
@@ -400,7 +414,7 @@ describe('bootstrap inventory completeness', () => {
 
   it('does not turn an unreadable Agent directory into an empty one', () => {
     const pathFacts = [
-      'P_EXISTS=1', 'P_ISDIR=1', 'P_REAL=/opt/sencho-agent', 'P_IDENT=2049:1001:1000:-', 'P_NEAREST_IDENT=2049:2002:1000:-', 'P_MODE=300', 'P_USER_W=1',
+      'P_EXISTS=1', 'P_ISDIR=1', 'P_REAL=/opt/sencho-agent', 'P_IDENT=2049:1001:1000:2026-01-01', 'P_NEAREST_IDENT=2049:2002:1000:2026-01-01', 'P_MODE=300', 'P_USER_W=1',
       'P_FSTYPE=ext4', 'P_FSTARGET=/', 'P_PARENT_W=1',
     ].join('\n');
     const facts = minimalAssembly([
@@ -493,6 +507,105 @@ describe('bootstrap Docker endpoint pinning', () => {
     }
   });
 
+  describe('who can change the directories above a path (run on a real shell and filesystem)', () => {
+    const factsOf = (input: string, env: NodeJS.ProcessEnv = {}) => {
+      const output = execFileSync('sh', ['-c', PATH_FACTS_SCRIPT, 'sencho-probe', input], { encoding: 'utf8', env: { ...process.env, ...env } });
+      return parsePathFacts(output, input);
+    };
+    let base: string;
+    beforeEach(() => { base = mkdtempSync(path.join(os.tmpdir(), 'sencho-bootstrap-trust-')); chmodSync(base, 0o755); });
+    afterEach(() => { rmSync(base, { recursive: true, force: true }); });
+
+    it('reports a chain only this user can change as sealed, for an existing and for a missing directory', () => {
+      const dir = path.join(base, 'agent');
+      mkdirSync(dir, { mode: 0o700 });
+      expect(factsOf(dir)).toMatchObject({ trustSelf: { state: 'sealed' }, trustAbove: { state: 'sealed' } });
+      const missing = factsOf(path.join(base, 'missing', 'child'));
+      expect(missing).toMatchObject({ trustSelf: { state: 'sealed' }, trustAbove: { state: 'sealed' } });
+    });
+
+    it('reports a world-writable directory above the path as open, and names it', () => {
+      const shared = path.join(base, 'shared');
+      mkdirSync(shared);
+      const dir = path.join(shared, 'agent');
+      mkdirSync(dir, { mode: 0o700 });
+      chmodSync(shared, 0o777);
+      expect(factsOf(dir)).toMatchObject({ trustSelf: { state: 'open', at: shared }, trustAbove: { state: 'open', at: shared } });
+      // A path that does not exist yet is judged by the directory it will be created in.
+      expect(factsOf(path.join(shared, 'new')).trustSelf).toEqual({ state: 'open', at: shared });
+    });
+
+    describe('a group-writable directory above the path', () => {
+      // `getent` answers from a shim, so a group can have any members: its answer is what the walk goes by.
+      const withGroup = (members: string) => {
+        const shims = path.join(base, 'shims');
+        mkdirSync(shims, { recursive: true });
+        const gid = String(process.getgid?.() ?? 0);
+        writeFileSync(path.join(shims, 'getent'), [
+          '#!/bin/sh',
+          `[ "$1" = group ] && echo "shared:x:${gid}:${members}"`,
+          `[ "$1" = passwd ] && echo "someone:x:99999:99999::/nonexistent:/bin/false"`,
+          'exit 0',
+        ].join('\n'), { mode: 0o755 });
+        return { PATH: `${shims}:${process.env.PATH ?? ''}` };
+      };
+      const arrange = () => {
+        const shared = path.join(base, 'shared');
+        mkdirSync(shared);
+        const dir = path.join(shared, 'agent');
+        mkdirSync(dir, { mode: 0o700 });
+        chmodSync(shared, 0o775);
+        return { shared, dir };
+      };
+
+      it('is sealed when its group has no member but root and this user (a private group)', () => {
+        const { dir } = arrange();
+        expect(factsOf(dir, withGroup(os.userInfo().username)).trustSelf).toEqual({ state: 'sealed' });
+        expect(factsOf(dir, withGroup('')).trustSelf).toEqual({ state: 'sealed' });
+      });
+
+      it('is open when its group has another member, listed or by primary group', () => {
+        const { dir, shared } = arrange();
+        expect(factsOf(dir, withGroup('nobody-here-but-us')).trustSelf).toEqual({ state: 'open', at: shared });
+        const byPrimary = withGroup('');
+        writeFileSync(path.join(base, 'shims', 'getent'), [
+          '#!/bin/sh',
+          `[ "$1" = group ] && echo "shared:x:${process.getgid?.() ?? 0}:"`,
+          `[ "$1" = passwd ] && echo "someone:x:99999:${process.getgid?.() ?? 0}::/nonexistent:/bin/false"`,
+          'exit 0',
+        ].join('\n'), { mode: 0o755 });
+        expect(factsOf(dir, byPrimary).trustSelf).toEqual({ state: 'open', at: shared });
+      });
+
+      it('is open when the group cannot be looked up', () => {
+        const { dir, shared } = arrange();
+        const shims = path.join(base, 'shims');
+        mkdirSync(shims, { recursive: true });
+        writeFileSync(path.join(shims, 'getent'), '#!/bin/sh\nexit 2\n', { mode: 0o755 });
+        expect(factsOf(dir, { PATH: `${shims}:${process.env.PATH ?? ''}` }).trustSelf).toEqual({ state: 'open', at: shared });
+      });
+    });
+
+    it('leaves the directory\'s own mode out of the chain above it, and counts it in its own chain', () => {
+      const dir = path.join(base, 'stacks');
+      mkdirSync(dir);
+      chmodSync(dir, 0o777);
+      expect(factsOf(dir)).toMatchObject({ trustSelf: { state: 'open', at: dir }, trustAbove: { state: 'sealed' } });
+    });
+
+    it('accepts a sticky world-writable parent only for a child this user owns', () => {
+      const sticky = path.join(base, 'sticky');
+      mkdirSync(sticky);
+      chmodSync(sticky, 0o1777);
+      const dir = path.join(sticky, 'agent');
+      mkdirSync(dir, { mode: 0o700 });
+      expect(factsOf(dir).trustSelf).toEqual({ state: 'sealed' });
+      // The directory itself is judged without the exemption: nothing sticky protects what it holds.
+      chmodSync(dir, 0o1777);
+      expect(factsOf(dir).trustSelf).toEqual({ state: 'open', at: dir });
+    });
+  });
+
   it('reads filesystem facts from the nearest existing ancestor for a missing path', () => {
     const dir = mkdtempSync(path.join(os.tmpdir(), 'sencho-bootstrap-path-'));
     try {
@@ -544,7 +657,7 @@ describe('bootstrap volume and no-Docker facts', () => {
 
   it('marks an absent inventory probe as not run', () => {
     const pathFacts = [
-      'P_EXISTS=1', 'P_ISDIR=1', 'P_REAL=/opt/docker/sencho', 'P_IDENT=2049:1001:1000:-', 'P_NEAREST_IDENT=2049:2002:1000:-', 'P_FSTYPE=ext4', 'P_FSTARGET=/',
+      'P_EXISTS=1', 'P_ISDIR=1', 'P_REAL=/opt/docker/sencho', 'P_IDENT=2049:1001:1000:2026-01-01', 'P_NEAREST_IDENT=2049:2002:1000:2026-01-01', 'P_FSTYPE=ext4', 'P_FSTARGET=/',
       'P_USER_R=1', 'P_USER_W=1', 'P_PARENT_W=1',
     ].join('\n');
     const facts = minimalAssembly([probe('path_compose', pathFacts)]);

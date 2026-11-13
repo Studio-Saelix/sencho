@@ -546,7 +546,48 @@ describe('bootstrap evidence: a directory the host cannot identify cannot be bou
     const row = check(facts, id);
     expect(row.status).toBe('unknown');
     expect(row.summary).toMatch(/identified/);
-    expect('remediation' in row && row.remediation).toBeTruthy();
+    expect('remediation' in row && row.remediation).toMatch(/keeps creation times/);
     expect(evidence(facts).planSuppressed).toBe(true);
+  });
+});
+
+describe('bootstrap evidence: Docker opens the compose file and the mounts by name, so a place anyone else can change is refused', () => {
+  const open = { state: 'open', at: '/srv/shared' } as const;
+  const unreadable = { state: 'unreadable', at: '/srv/closed' } as const;
+  const cases: Array<[string, FactsOverrides, BootstrapCheck['id'], 'blocked' | 'unknown']> = [
+    ['an Agent directory with an open ancestor', { agentDir: { exists: true, isDirectory: true, entries: [], writableByUser: true, trustSelf: open } }, 'agent_dir', 'blocked'],
+    ['a new Agent directory below an open ancestor', { agentDir: { exists: false, isDirectory: false, parentWritableByUser: true, trustSelf: open } }, 'agent_dir', 'blocked'],
+    ['a Compose directory with an open ancestor', { composeDir: { trustAbove: open } }, 'compose_dir', 'blocked'],
+    ['a new Compose directory below an open ancestor', { composeDir: { exists: false, isDirectory: false, parentWritableByUser: true, trustAbove: open } }, 'compose_dir', 'blocked'],
+    ['an Agent directory whose ancestors cannot be inspected', { agentDir: { exists: true, isDirectory: true, entries: [], writableByUser: true, trustSelf: unreadable } }, 'agent_dir', 'unknown'],
+    ['a Compose directory whose ancestors cannot be inspected', { composeDir: { trustAbove: unreadable } }, 'compose_dir', 'unknown'],
+  ];
+  it.each(cases)('%s', (_label, overrides, id, status) => {
+    const facts = makeFacts(overrides);
+    const row = check(facts, id);
+    expect(row.status).toBe(status);
+    expect(row.summary).toMatch(/\/srv\/(shared|closed)/);
+    expect('remediation' in row && row.remediation).toBeTruthy();
+    // A blocked check stops the plan as a blocker, an unknown one withholds it.
+    if (status === 'blocked') expect(evidence(facts).blockers).toBeGreaterThan(0);
+    else expect(evidence(facts).planSuppressed).toBe(true);
+  });
+
+  it('does not ask for more where the chain is sealed, or where the host did not report it', () => {
+    for (const overrides of [
+      { agentDir: { exists: true, isDirectory: true, entries: [], writableByUser: true, trustSelf: { state: 'sealed' } }, composeDir: { trustAbove: { state: 'sealed' } } },
+      {},
+    ] as FactsOverrides[]) {
+      const facts = makeFacts(overrides);
+      expect(check(facts, 'agent_dir').summary).not.toMatch(/changed by a user other than/);
+      expect(check(facts, 'compose_dir').summary).not.toMatch(/changed by a user other than/);
+    }
+  });
+
+  it('takes the Agent directory from its own chain and the Compose directory from the chain above it', () => {
+    // A directory a stranger can change matters for the files in the Agent directory, never for the Compose directory's own mode.
+    const facts = makeFacts({ agentDir: { exists: true, isDirectory: true, entries: [], writableByUser: true, trustAbove: open }, composeDir: { trustSelf: open } });
+    expect(check(facts, 'agent_dir').summary).not.toMatch(/changed by a user other than/);
+    expect(check(facts, 'compose_dir').summary).not.toMatch(/changed by a user other than/);
   });
 });

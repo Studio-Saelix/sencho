@@ -84,7 +84,7 @@ function sudoCommand(command: string, sudo: boolean): string {
 
 /** The identity a directory step is bound to; a plan is never built without it (the preflight blocks first). */
 function requiredIdentity(identity: string | null, directory: string): string {
-  if (!identity) throw new Error(`The plan requires the identity of the directory ${directory} is created in.`);
+  if (!identity || identity.endsWith(':-')) throw new Error(`The plan requires the identity of the directory ${directory} is created in, with its creation time.`);
   return identity;
 }
 
@@ -475,7 +475,7 @@ export function buildBootstrapPlan(input: PlanBuildInput): BootstrapPlan {
     steps: [{
       id: 'start-agent',
       title: `Start the ${PILOT_PROJECT_NAME} project`,
-      rationale: 'The project name, directory and local Docker endpoint are pinned so ambient variables and contexts cannot change which project or daemon runs. The agent directory is entered by identity, and the compose file and hub CA are checked against the plan, so a directory swapped in after the approval is not started.',
+      rationale: 'The project name, directory and local Docker endpoint are pinned so ambient variables and contexts cannot change which project or daemon runs. The agent directory is entered by identity, the compose file and hub CA are checked against the plan, and nothing starts unless only root and the SSH user can change those files and the directories they and the Compose directory sit in, because Docker opens them by name after the check; a directory swapped in after the approval is not started.',
       effect: 'container-start',
       privilege: startSudo ? 'sudo' : 'user',
       command: startProjectCommand(

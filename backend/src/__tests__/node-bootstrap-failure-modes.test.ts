@@ -200,7 +200,7 @@ describe('compose, package and default-directory probes that did not complete', 
 
 describe('fstab and architecture facts that could not be read', () => {
   const pathFacts = [
-    'P_EXISTS=1', 'P_ISDIR=1', 'P_REAL=/mnt/data/stacks', 'P_IDENT=2049:1001:1000:-', 'P_NEAREST_IDENT=2049:2002:1000:-', 'P_FSTYPE=ext4', 'P_FSTARGET=/mnt/data',
+    'P_EXISTS=1', 'P_ISDIR=1', 'P_REAL=/mnt/data/stacks', 'P_IDENT=2049:1001:1000:2026-01-01', 'P_NEAREST_IDENT=2049:2002:1000:2026-01-01', 'P_FSTYPE=ext4', 'P_FSTARGET=/mnt/data',
     'P_USER_R=1', 'P_USER_W=1', 'P_PARENT_W=1',
   ].join('\n');
 
@@ -412,8 +412,8 @@ describe('container and agent inventory completeness across direct and sudo', ()
     expect(facts.containers.agentContainer).toBe('sencho-agent');
   });
 
-  const pathAgent = ['P_EXISTS=1', 'P_ISDIR=1', 'P_REAL=/opt/sencho-agent', 'P_IDENT=2049:1001:1000:-', 'P_NEAREST_IDENT=2049:2002:1000:-', 'P_FSTYPE=ext4', 'P_FSTARGET=/', 'P_USER_R=0', 'P_USER_W=1', 'P_PARENT_W=1'].join('\n');
-  const pathCompose = ['P_EXISTS=1', 'P_ISDIR=1', 'P_REAL=/opt/docker/sencho', 'P_IDENT=2049:1001:1000:-', 'P_NEAREST_IDENT=2049:2002:1000:-', 'P_FSTYPE=ext4', 'P_FSTARGET=/', 'P_USER_R=0', 'P_USER_W=1', 'P_PARENT_W=1'].join('\n');
+  const pathAgent = ['P_EXISTS=1', 'P_ISDIR=1', 'P_REAL=/opt/sencho-agent', 'P_IDENT=2049:1001:1000:2026-01-01', 'P_NEAREST_IDENT=2049:2002:1000:2026-01-01', 'P_FSTYPE=ext4', 'P_FSTARGET=/', 'P_USER_R=0', 'P_USER_W=1', 'P_PARENT_W=1'].join('\n');
+  const pathCompose = ['P_EXISTS=1', 'P_ISDIR=1', 'P_REAL=/opt/docker/sencho', 'P_IDENT=2049:1001:1000:2026-01-01', 'P_NEAREST_IDENT=2049:2002:1000:2026-01-01', 'P_FSTYPE=ext4', 'P_FSTARGET=/', 'P_USER_R=0', 'P_USER_W=1', 'P_PARENT_W=1'].join('\n');
 
   it('reads the Agent and Compose inventories through sudo when the direct attempt is denied', () => {
     const facts = assemble([
@@ -519,7 +519,7 @@ describe('path facts and partial listings that are incomplete', () => {
 });
 
 describe('sudo, marker, fstab and transport gaps that must not read as clean', () => {
-  const agentPath = ['P_EXISTS=1', 'P_ISDIR=1', 'P_REAL=/opt/sencho-agent', 'P_IDENT=2049:1001:1000:-', 'P_NEAREST_IDENT=2049:2002:1000:-', 'P_FSTYPE=ext4', 'P_FSTARGET=/', 'P_USER_R=1', 'P_USER_W=1', 'P_PARENT_W=1'].join('\n');
+  const agentPath = ['P_EXISTS=1', 'P_ISDIR=1', 'P_REAL=/opt/sencho-agent', 'P_IDENT=2049:1001:1000:2026-01-01', 'P_NEAREST_IDENT=2049:2002:1000:2026-01-01', 'P_FSTYPE=ext4', 'P_FSTARGET=/', 'P_USER_R=1', 'P_USER_W=1', 'P_PARENT_W=1'].join('\n');
 
   it('reports a sudo check that timed out as unknown, and only when the plan needs sudo', () => {
     const timedOut = assemble([

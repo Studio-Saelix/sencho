@@ -221,7 +221,34 @@ function unidentifiedDirectory(path: PathObservation, base: { id: 'compose_dir' 
     ...base,
     status: 'unknown',
     summary: `${what} could not be identified on the host (its device, inode, owner and creation time), so a plan cannot be tied to it.`,
-    remediation: 'Confirm that stat works for the SSH user on this path, then run the preflight again.',
+    remediation: 'Confirm that stat works for the SSH user on this path and that its filesystem keeps creation times (some network and FUSE filesystems keep none: a directory on one cannot be told from another that reuses its inode), or choose a path on a filesystem that does, then run the preflight again.',
+  };
+}
+
+/**
+ * The start step runs Compose only where nobody but root and the SSH user can
+ * change the compose file, the hub CA or the places Docker mounts: Docker opens
+ * those by name after the step has checked them. For the Agent directory that
+ * is the directory and everything above it; for the Compose directory, the
+ * directories above it. A host where that cannot be told withholds the plan.
+ */
+function unsealedDirectory(path: PathObservation, kind: 'compose' | 'agent', base: { id: 'compose_dir' | 'agent_dir'; category: 'paths'; label: string }): BootstrapCheck | null {
+  const chain = kind === 'agent' ? path.trustSelf : path.trustAbove;
+  if (!chain || chain.state === 'sealed') return null;
+  const what = kind === 'agent' ? 'The Agent directory, or a directory above it,' : 'A directory above the Compose directory';
+  if (chain.state === 'unreadable') {
+    return {
+      ...base,
+      status: 'unknown',
+      summary: `${chain.at} could not be inspected, so it cannot be told who can change ${kind === 'agent' ? `${path.input} and the files the Pilot starts from` : `the place ${path.input} is mounted from`}.`,
+      remediation: 'Grant the SSH user search access to that directory, or choose a path whose parent directories it can inspect, then run the preflight again.',
+    };
+  }
+  return {
+    ...base,
+    status: 'blocked',
+    summary: `${what} (${chain.at}) can be changed by a user other than root and the SSH user. Docker opens the compose file, the hub CA and the mounted directories by name after Sencho has checked them, so the Pilot would not be started from them.`,
+    remediation: `Make ${chain.at} owned by root or the SSH user and remove group and other write permission (for example chmod go-w), or choose a directory under one that is, then run the preflight again.`,
   };
 }
 
@@ -262,6 +289,8 @@ function composeDirCheck(
   }
   const unidentified = unidentifiedDirectory(path, base);
   if (unidentified) return unidentified;
+  const unsealed = unsealedDirectory(path, 'compose', base);
+  if (unsealed) return unsealed;
   const keepAndDescribe = path.exists
     ? path.stackCount === null
       ? 'The existing stack count is unknown.'
@@ -424,6 +453,8 @@ function agentDirCheck(
 
   const unidentified = unidentifiedDirectory(path, base);
   if (unidentified) return unidentified;
+  const unsealed = unsealedDirectory(path, 'agent', base);
+  if (unsealed) return unsealed;
   if (!path.exists) {
     const sudo = facts.user?.sudoNonInteractive === true || facts.user?.isRoot === true;
     if (!path.parentWritableByUser && !sudo) {

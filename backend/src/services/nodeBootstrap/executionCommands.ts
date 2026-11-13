@@ -1,6 +1,6 @@
 import path from 'path';
 import { DOCKER_LOCAL_ASSIGNMENTS, DOCKER_LOCAL_ENV, DOCKER_LOCAL_UNSET_ARGS } from './probes';
-import { PILOT_CONTAINER_NAME, PILOT_PROJECT_NAME, shellQuote } from './pathPolicy';
+import { PILOT_CONTAINER_NAME, PILOT_PROJECT_NAME, SEALED_DIRECTORY_SHELL, shellQuote } from './pathPolicy';
 
 /**
  * The fixed commands execution adds around the plan's own steps: writing a
@@ -49,8 +49,10 @@ export const WRITE_EXIT = {
  * substitute with an unrelated owner, mode and content could carry the
  * approved identity. The birth time of the new directory differs, and so does
  * its owner when another user made it. A filesystem that does not record birth
- * times reports `-` there, and the identity then rests on the first three
- * parts. `$made` (the directory script only) lists directories earlier steps
+ * times reports `-` there, and such an identity is refused everywhere: without
+ * a birth time nothing tells the generations of a directory apart, so the
+ * preflight offers no plan for a directory on one, and a script that meets one
+ * (a directory it made, or one it is asked to enter) stops. `$made` (the directory script only) lists directories earlier steps
  * of the same run made, one `<identity><tab><physical path>` per line: a
  * directory the plan could not name, because it did not exist when the plan was
  * approved, is accepted when it is one of those at the path it was made.
@@ -62,6 +64,8 @@ const BIND_DIRECTORY = [
   '  if [ "$1" = system ]; then [ -O . ]; return; fi',
   '  now=$(ident .)',
   '  [ -n "$now" ] || return 1',
+  // A directory generation that has no birth time cannot be told from another one that reuses its inode: refuse it.
+  '  case $now in *:-) return 1 ;; esac',
   '  [ "$now" = "$1" ] && return 0',
   '  [ -n "${made-}" ] || return 1',
   '  printf "%s\\n" "$made" | grep -qxF -- "$now$(printf "\\t")$2"',
@@ -331,6 +335,8 @@ const DIRECTORY_SCRIPT = [
   // The identity includes the owner, which the chown above may have changed (a directory made as root and handed over).
   'topid=$(ident "./$top"); leafid=$(ident "./$rel")',
   'mnew="$mnew$leafid$(printf "\\t")$acc$nl"',
+  // A directory made on a filesystem that keeps no creation times cannot be told from another one that reuses its inode: nothing is put in place.
+  `case $topid$leafid in *:-*) echo "the filesystem keeps no creation time for $p, so it cannot be told from another directory later" >&2; exit ${WRITE_EXIT.notCreated} ;; esac`,
   `[ "$(ident ..)" = "$aid" ] || { echo "changed while it was set up: $p" >&2; exit ${WRITE_EXIT.notCreated}; }`,
   // The rename is told not to replace; where mv checks first instead, whatever
   // is at the name is seen in the check, and a name taken in between can only be
@@ -388,7 +394,7 @@ export function createDirectoryCommand(
  * apart from the codes Docker and Compose normally exit with (1, 125 to 127,
  * and signals), so a refusal is not mistaken for the start having begun.
  */
-export const START_EXIT = { notDirectory: 70, inputChanged: 71, inputIncomplete: 72 } as const;
+export const START_EXIT = { notDirectory: 70, inputChanged: 71, inputIncomplete: 72, notSealed: 73 } as const;
 
 const START_SCRIPT = [
   'set -eu',
@@ -408,12 +414,32 @@ const START_SCRIPT = [
   // The Compose directory is bind-mounted by the name the compose file gives it,
   // which the daemon resolves on its own: it must still be the approved one now.
   `( enter "$c" "$ce" "$cid" ) || { echo "not the approved Compose directory, or it changed: $c" >&2; exit ${START_EXIT.notDirectory}; }`,
+  // Docker opens compose.yaml, and the daemon the bind sources, by name after
+  // this script has looked at them, and nothing here can hold those names
+  // through Docker's own opening. What is checked instead is who could change
+  // them: the Agent directory and every directory above it, and every directory
+  // above the Compose directory, must be changeable only by root and by the
+  // account that runs the bootstrap (SEALED_DIRECTORY_SHELL), and so must the
+  // two files, which must also be the files that were written (by SHA-256).
+  // Anyone else cannot put anything at those names between here and Docker.
+  SEALED_DIRECTORY_SHELL,
+  `sealed "$e" || { echo "the Agent directory or a directory above it can be changed by another user: $bad" >&2; exit ${START_EXIT.notSealed}; }`,
+  `sealed "$ce" above || { echo "a directory above the Compose directory can be changed by another user: $bad" >&2; exit ${START_EXIT.notSealed}; }`,
   'hash_of() { sha256sum -- "$1" | cut -d" " -f1; }',
   'inputs_ok() {',
   '  [ ! -L "./$1" ] && [ -f "./$1" ] && [ "$(hash_of "./$1")" = "$2" ]',
   '}',
+  // A file only root and the account that runs the bootstrap can write: owned by one of them, with no group or other write bit.
+  'file_sealed() {',
+  '  fst=$(stat -c "%u %a" -- "./$1" 2>/dev/null) || return 1',
+  '  fo=${fst% *}; fm=${fst#* }',
+  '  if [ "$fo" != 0 ] && [ "$fo" != "$trusted" ]; then return 1; fi',
+  '  [ $((0$fm & 022)) -eq 0 ]',
+  '}',
   `inputs_ok compose.yaml "$csha" || { echo "compose.yaml is not the file that was written" >&2; exit ${START_EXIT.inputChanged}; }`,
   `if [ -n "$casha" ]; then inputs_ok sencho-hub-ca.pem "$casha" || { echo "sencho-hub-ca.pem is not the file that was written" >&2; exit ${START_EXIT.inputChanged}; }; fi`,
+  `file_sealed compose.yaml || { echo "compose.yaml can be changed by another user" >&2; exit ${START_EXIT.notSealed}; }`,
+  `if [ -n "$casha" ]; then file_sealed sencho-hub-ca.pem || { echo "sencho-hub-ca.pem can be changed by another user" >&2; exit ${START_EXIT.notSealed}; }; fi`,
   // Compose reads its own files relative to the directory the shell holds, never
   // through the name that was approved (the daemon still resolves the bind-mounted paths itself). Both the Docker endpoint and the Compose
   // project are pinned: a configured remote context or ambient Compose variable

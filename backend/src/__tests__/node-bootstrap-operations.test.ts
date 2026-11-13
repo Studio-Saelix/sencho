@@ -123,7 +123,7 @@ class FakeHost {
     this.dirs.set('/etc/apt', { mode: '0755', owner: 'root', group: 'root' });
     this.dirs.set('/opt', { mode: '0755', owner: 'root', group: 'root' });
     this.dirs.set('/etc/apt/sources.list.d', { mode: '0755', owner: 'root', group: 'root' });
-    this.dirs.set('/opt/docker/sencho', { mode: '0755', owner: 'ubuntu', group: 'ubuntu', identity: '2049:1001:1000:-' });
+    this.dirs.set('/opt/docker/sencho', { mode: '0755', owner: 'ubuntu', group: 'ubuntu', identity: '2049:1001:1000:2026-01-01' });
   }
 
   public transport(): BootstrapExecTransport {
@@ -200,7 +200,7 @@ class FakeHost {
       }
       this.madeDirectories += 1;
       // The Agent directory is the one the facts of a retry describe (see makeAgentDir), so it keeps that identity across attempts.
-      const identity = dir === '/opt/sencho-agent' ? '2049:1001:1000:-' : `2049:${9000 + this.madeDirectories}:1000:-`;
+      const identity = dir === '/opt/sencho-agent' ? '2049:1001:1000:2026-01-01' : `2049:${9000 + this.madeDirectories}:1000:2026-01-01`;
       this.dirs.set(dir, { mode, owner, group, identity });
       return ok(`${made.join('')}SENCHO_DIR_MADE=${identity}\t${dir}\n`);
     }

@@ -310,8 +310,8 @@ export function approvedBinding(plan: BootstrapPlan, ctx: Pick<StepContext, 'dir
   for (const known of [plan.paths.agentDir, plan.paths.composeDir]) {
     if (!isKnownDirectory(known, directory)) continue;
     const identity = ctx.directories.get(known.realPath ?? known.input) ?? known.identity;
-    if (!identity) {
-      throw new StepFailure('failed', 'PLAN_INVALID', `The plan has no recorded identity for ${directory}, so it cannot be told from a directory that replaced it. Nothing was changed.`, null, { changedNothing: true });
+    if (!identity || identity.endsWith(':-')) {
+      throw new StepFailure('failed', 'PLAN_INVALID', `The plan has no usable recorded identity for ${directory} (one with a creation time), so it cannot be told from a directory that replaced it. Nothing was changed.`, null, { changedNothing: true });
     }
     return identity;
   }
@@ -575,7 +575,7 @@ function recordMadeDirectory(ctx: StepContext, plan: BootstrapPlan, directory: s
   for (const line of stdout.split('\n')) {
     if (!line.startsWith(DIRECTORY_MADE_PREFIX)) continue;
     const [identity, madePath] = line.slice(DIRECTORY_MADE_PREFIX.length).split('\t');
-    if (/^\d+:\d+:\d+:\S+$/.test(identity ?? '') && madePath?.startsWith('/')) made.set(madePath, identity);
+    if (/^\d+:\d+:\d+:\S+$/.test(identity ?? '') && !identity!.endsWith(':-') && madePath?.startsWith('/')) made.set(madePath, identity);
   }
   for (const [madePath, identity] of made) ctx.directories.set(madePath, identity);
   const tracked = [plan.paths.agentDir, plan.paths.composeDir].find((known) => isKnownDirectory(known, directory));
@@ -609,6 +609,9 @@ async function runStartStep(step: BootstrapPlanStep, ctx: StepContext, plan: Boo
   if (failure) throw failure;
   if (result.exitCode === START_EXIT.notDirectory) {
     throw new StepFailure('failed', 'DIRECTORY_CHANGED', `The directory the Pilot starts from, or the Compose directory it mounts, is not the one the plan approved (it is not a directory any more, or it, or one of its parents, was replaced or redirected). Nothing was started.`, commandDetail(result, ctx.secrets), { changedNothing: true });
+  }
+  if (result.exitCode === START_EXIT.notSealed) {
+    throw new StepFailure('failed', 'CONTEXT_NOT_SEALED', `The Pilot starts only from files and directories that nobody but root and the SSH user can change, because Docker opens them by name after Sencho has checked them. The Agent directory or a directory above it, a directory above the Compose directory, or one of the two files can be changed by another user. Nothing was started.`, commandDetail(result, ctx.secrets), { changedNothing: true });
   }
   if (result.exitCode === START_EXIT.inputIncomplete) {
     throw new StepFailure('failed', 'START_INPUT_INCOMPLETE', 'The start input did not arrive in full, so nothing was started. The connection may have dropped.', commandDetail(result, ctx.secrets), { changedNothing: true });

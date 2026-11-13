@@ -1,5 +1,5 @@
 import net from 'net';
-import { DEFAULT_AGENT_DIR, RESERVED_PATH_PREFIXES, shellQuote } from './pathPolicy';
+import { DEFAULT_AGENT_DIR, RESERVED_PATH_PREFIXES, SEALED_DIRECTORY_SHELL, shellQuote } from './pathPolicy';
 import type {
   AgentDirObservation,
   AgentInstallObservation,
@@ -11,6 +11,7 @@ import type {
   HostKeyObservation,
   PathObservation,
   RepositoryObservation,
+  TrustChain,
 } from './types';
 import { isDockerReleaseKeyFile } from './openpgpKey';
 import type { SshCommand, SshCommandResult } from './sshProbeClient';
@@ -130,6 +131,10 @@ export const PATH_FACTS_SCRIPT = [
   `if [ -d "$p" ]; then printf 'P_IDENT=%s\\n' "$(TZ=UTC0 stat -L -c '%d:%i:%u:%w' -- "$p" 2>/dev/null | tr -d ' ')"; fi`,
   `if [ -d "$d" ]; then printf 'P_NEAREST_IDENT=%s\\n' "$(TZ=UTC0 stat -L -c '%d:%i:%u:%w' -- "$d" 2>/dev/null | tr -d ' ')"; fi`,
   `if [ -w "$d" ]; then printf 'P_PARENT_W=1\\n'; else printf 'P_PARENT_W=0\\n'; fi`,
+  // Who could change the directories the start step relies on (see SEALED_DIRECTORY_SHELL): the chain from the path itself (its files), and the chain above it (the place it is mounted from).
+  SEALED_DIRECTORY_SHELL,
+  `trust_line() { n=$1; shift; sealed "$@" && r=0 || r=$?; case $r in 0) printf 'P_%s=ok\\n' "$n" ;; 1) printf 'P_%s=open:%s\\n' "$n" "$bad" ;; *) printf 'P_%s=unreadable:%s\\n' "$n" "$bad" ;; esac; }`,
+  `if [ -d "$real" ]; then trust_line TRUST_SELF "$real"; trust_line TRUST_ABOVE "$real" above; elif [ -d "$d" ]; then trust_line TRUST_SELF "$d"; trust_line TRUST_ABOVE "$d"; fi`,
   `if sudo -n true 2>/dev/null; then`,
   `  if [ -e "$p" ] && sudo -n test -r "$p" 2>/dev/null && sudo -n test -x "$p" 2>/dev/null; then printf 'P_SUDO_R=1\\n'; else printf 'P_SUDO_R=0\\n'; fi`,
   `  if [ -e "$p" ] && sudo -n test -w "$p" 2>/dev/null; then printf 'P_SUDO_W=1\\n'; else printf 'P_SUDO_W=0\\n'; fi`,
@@ -1383,7 +1388,18 @@ export interface ParsedPathFacts extends PathObservation {
 /** A `<device>:<inode>:<owner uid>:<birth time>` identity (the birth time is `-` where the filesystem keeps none), or null for anything else. */
 function parseIdentity(value: string | undefined): string | null {
   const trimmed = value?.trim() ?? '';
-  return /^\d+:\d+:\d+:\S+$/.test(trimmed) ? trimmed : null;
+  // A directory whose creation time the host cannot give (`-`) cannot be told from another one that reused its inode, so it has no identity.
+  return /^\d+:\d+:\d+:\S+$/.test(trimmed) && !trimmed.endsWith(':-') ? trimmed : null;
+}
+
+function parseTrust(value: string | undefined): TrustChain | undefined {
+  const trimmed = value?.trim();
+  if (!trimmed) return undefined;
+  if (trimmed === 'ok') return { state: 'sealed' };
+  const open = /^open:(\/.*)$/.exec(trimmed);
+  if (open) return { state: 'open', at: open[1] };
+  const unreadable = /^unreadable:(\/.*)$/.exec(trimmed);
+  return unreadable ? { state: 'unreadable', at: unreadable[1] } : { state: 'unreadable', at: trimmed };
 }
 
 export function parsePathFacts(text: string, input: string, kindLabel = 'path'): ParsedPathFacts {
@@ -1425,6 +1441,8 @@ export function parsePathFacts(text: string, input: string, kindLabel = 'path'):
     nearestExistingAncestor: exists ? null : nearest,
     identity: parseIdentity(isDirectory ? raw.get('IDENT') : undefined),
     nearestExistingAncestorIdentity: exists ? null : parseIdentity(raw.get('NEAREST_IDENT')),
+    trustSelf: parseTrust(raw.get('TRUST_SELF')),
+    trustAbove: parseTrust(raw.get('TRUST_ABOVE')),
     filesystem: fstype ? { type: fstype, source: fsSource, mountPoint: fsTarget } : null,
     freeBytes,
     mountInFstab: null,

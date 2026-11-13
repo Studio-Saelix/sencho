@@ -58,6 +58,9 @@ export interface HostKeyObservation {
   knownHostsLine: string;
 }
 
+/** The result of walking a directory and everything above it for a writer other than root and the SSH user. */
+export type TrustChain = { state: 'sealed' } | { state: 'open' | 'unreadable'; at: string };
+
 export interface PathObservation {
   input: string;
   normalized: string;
@@ -85,6 +88,17 @@ export interface PathObservation {
   identity: string | null;
   /** The same for `nearestExistingAncestor`, the directory a missing path is created in. */
   nearestExistingAncestorIdentity: string | null;
+  /**
+   * Whether anyone but root and the SSH user can change this directory or a
+   * directory above it (`trustSelf`), or a directory above it only
+   * (`trustAbove`); for a missing path, the nearest existing ancestor stands
+   * for it. Docker opens the compose file and the daemon the bind sources by
+   * name after the start step has looked at them, so the start step runs only
+   * where nobody else could have put anything at those names. Absent when the
+   * host did not report it.
+   */
+  trustSelf?: TrustChain;
+  trustAbove?: TrustChain;
   filesystem: { type: string; source: string; mountPoint: string } | null;
   freeBytes: number | null;
   mountInFstab: boolean | null;
