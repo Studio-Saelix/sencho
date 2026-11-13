@@ -763,6 +763,17 @@ describe('errorMessageForLog', () => {
     expect(errorMessageForLog(new Error(once), { imageRef: image })).toBe(once);
   });
 
+  it('redacts a hostile run of repository-name phrases in bounded time', () => {
+    const image = 'user:Ab%2fSuperSecret:x@registry.example.com/app:latest';
+    const body = `${'repository name (a'.repeat(50_000)}repository name (SuperSecret) must be lowercase`;
+    const started = Date.now();
+    const text = errorMessageForLog(new Error(body), { imageRef: image });
+
+    expect(Date.now() - started).toBeLessThan(1000);
+    expect(text).not.toContain('SuperSecret');
+    expect(text).toContain('repository name ([redacted]) must be lowercase');
+  });
+
   it('removes a long percent-encoded repository name in bounded time', () => {
     const encodedTail = `cD${'%2fcD'.repeat(20_000)}=`;
     const decodedTail = encodedTail.replace(/%2f/g, '/');

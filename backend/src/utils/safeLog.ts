@@ -316,22 +316,53 @@ function redactImageInText(text: string, imageRef: string): string {
   // a byte the JSON body rewrote as U+FFFD. Reconstructing every form is not
   // exhaustive, so redact the structured field as a whole whenever the authored
   // or decoded spelling carries a credential: the failure reason and the
-  // redacted reference stay, and only the name is lost. A credential can hold a
-  // `)` and even the phrase after one, so match to the last `)` that precedes
-  // one of the daemon's two quoted-name suffixes rather than the first `)`. A
-  // field an earlier pass already reduced keeps the host context it still
-  // holds. Replacing only inside the phrase also keeps a short prefix such as
-  // `Pass` from rewriting the same word elsewhere in the message.
-  const redactQuotedName = (match: string, quotedName: string): string =>
-    quotedName.includes('[redacted]') ? match : 'repository name ([redacted])';
-  out = out.replace(
-    /repository name \(([\s\S]*)\)(?= must be lowercase|, cannot specify 64-byte hexadecimal strings)/g,
-    redactQuotedName,
-  );
-  // A different daemon error shape may quote a name without either suffix; the
-  // first `)` still ends the common no-paren form.
-  out = out.replace(/repository name \(([^)]*)\)/g, redactQuotedName);
+  // redacted reference stay, and only the name is lost. A field an earlier pass
+  // already reduced keeps the host context it still holds.
+  out = redactQuotedRepositoryNames(out);
+  // A different daemon error shape may quote a name without either known
+  // suffix; the first `)` still ends the common no-paren form. Replacing only
+  // inside the phrase also keeps a short prefix such as `Pass` from rewriting
+  // the same word elsewhere in the message.
+  out = out.replace(/repository name \(([^)]*)\)/g, (match, quotedName: string) =>
+    quotedName.includes('[redacted]') ? match : 'repository name ([redacted])');
   return out;
+}
+
+/** The suffixes Docker's reference parser follows a quoted repository name with. */
+const QUOTED_REPOSITORY_NAME_SUFFIXES = [
+  ' must be lowercase',
+  ', cannot specify 64-byte hexadecimal strings',
+];
+
+/**
+ * Redact the repository name Docker quotes in an invalid-reference error.
+ *
+ * A credential can hold a `)` and even one of the suffixes, so the name ends at
+ * the last `)` that one of those suffixes follows rather than at the first. The
+ * scan is linear: a regular expression over the same text backtracks
+ * quadratically on a message built from many `repository name (` runs.
+ */
+function redactQuotedRepositoryNames(text: string): string {
+  const phrase = 'repository name (';
+  const openAt = text.indexOf(phrase);
+  if (openAt === -1) return text;
+  let closeAt = -1;
+  for (let i = openAt + phrase.length; i < text.length; i += 1) {
+    if (text[i] !== ')') continue;
+    for (const suffix of QUOTED_REPOSITORY_NAME_SUFFIXES) {
+      if (text.startsWith(suffix, i + 1)) {
+        closeAt = i;
+        break;
+      }
+    }
+  }
+  if (closeAt === -1) return text;
+  // Greedy on purpose: a name can contain a suffix phrase, so the last match
+  // is the daemon's closing parenthesis. Over-redacting a message with two
+  // quoted names is the safe direction.
+  const quotedName = text.slice(openAt + phrase.length, closeAt);
+  if (quotedName.includes('[redacted]')) return text;
+  return `${text.slice(0, openAt)}repository name ([redacted])${text.slice(closeAt + 1)}`;
 }
 
 function messageWithCause(error: unknown): string {
