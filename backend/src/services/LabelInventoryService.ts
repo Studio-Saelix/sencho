@@ -422,10 +422,11 @@ export async function buildStackLabelInventory(
   try {
     result = await compose.renderConfig(stackName);
   } catch (error) {
-    // A stored deploy spec that names a file or context directory outside the stack is
-    // refused before `docker compose` runs. That refusal is a property of the stack, not
-    // a server fault, so degrade the inventory exactly like a failed render instead of
-    // letting the throw reach the route as a 500. Every other render error still does.
+    // A stored deploy spec that is invalid or names a file or context directory outside
+    // the stack is refused before `docker compose` runs. That refusal is a property of
+    // the stack, not a server fault, so degrade the inventory exactly like a failed
+    // render instead of letting the throw reach the route as a 500. Every other render
+    // error still does.
     if (!(error instanceof DeploySpecRefusedError)) throw error;
     console.warn('[LabelInventory] Compose render refused for stack %s: %s',
       sanitizeForLog(stackName), sanitizeForLog(getErrorMessage(error, 'unknown')));
